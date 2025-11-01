@@ -1,0 +1,21 @@
+name: crystal_v2
+version: 0.1.0
+
+authors:
+  - Sergey Kuznetsov <crystal@rigelstar.com>
+
+contributors:
+  - Claude (Anthropic AI Assistant via Claude Code)
+  - GPT-5 (OpenAI AI Assistant via Codex CLI)
+
+description: |
+  Experimental next-generation Crystal compiler bootstrap.
+
+targets:
+  crystal_v2:
+    main: src/crystal_v2.cr
+
+dependencies:
+  # Dependencies will be added iteratively as subsystems come online.
+
+license: MIT

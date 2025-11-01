@@ -1,0 +1,21 @@
+# Crystal cache
+.crystal-cache/
+
+# Build artifacts
+bin/crystal
+
+# IDE
+.vscode/
+.idea/
+*.swp
+*.swo
+
+# MCP/Agent data
+.agents/
+
+# OS
+.DS_Store
+
+# Debug/test files
+test_*.cr
+*.db

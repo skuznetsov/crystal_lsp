@@ -1,0 +1,493 @@
+require "../../frontend/ast"
+require "../symbol"
+require "../context"
+require "../symbol_table"
+require "../diagnostic"
+require "../macro_expander"
+
+module CrystalV2
+  module Compiler
+    module Semantic
+      class SymbolCollector
+        alias Program = Frontend::Program
+        alias TypedNode = Frontend::TypedNode
+
+        getter diagnostics : Array(Diagnostic)
+
+        def initialize(@program : Program, context : Context)
+          @arena = @program.arena
+          @table_stack = [context.symbol_table]
+          @diagnostics = [] of Diagnostic
+          @macro_expander = MacroExpander.new(@program, @arena)
+        end
+
+        def collect
+          @program.roots.each do |root_id|
+            visit(root_id)
+          end
+          self
+        end
+
+        private def current_table
+          @table_stack.last
+        end
+
+        private def push_table(table : SymbolTable)
+          @table_stack << table
+        end
+
+        private def pop_table
+          @table_stack.pop
+        end
+
+        private def visit(node_id : Frontend::ExprId)
+          return if node_id.invalid?
+
+          node = @arena[node_id]
+
+          case node
+          when Frontend::MacroDefNode
+            handle_macro_def(node_id, node)
+          when Frontend::DefNode
+            handle_def(node_id, node)
+          when Frontend::ClassNode
+            handle_class(node_id, node)
+          when Frontend::GetterNode, Frontend::SetterNode, Frontend::PropertyNode
+            # Phase 87B-1: Expand accessor macros to method definitions
+            expand_accessor_macro(node_id, node)
+          when Frontend::CallNode
+            # Phase 87B-2: Check if call is actually a macro invocation
+            handle_potential_macro_call(node_id, node)
+          end
+        end
+
+        private def handle_macro_def(node_id : Frontend::ExprId, node : Frontend::MacroDefNode)
+          name_slice = node.name
+          return unless name_slice
+
+          name = String.new(name_slice)
+          body_id = node.body
+          return unless body_id
+
+          body_node = @arena[body_id]
+          unless body_node.is_a?(Frontend::MacroLiteralNode)
+            return
+          end
+
+          symbol = MacroSymbol.new(name, node_id, body_id)
+
+          table = current_table
+          if existing = table.lookup_local(name)
+            handle_macro_redefinition(name, symbol, existing, table)
+          else
+            table.define(name, symbol)
+          end
+        end
+
+        private def handle_def(node_id : Frontend::ExprId, node : Frontend::DefNode)
+          name_slice = node.name
+          return unless name_slice
+
+          name = String.new(name_slice)
+          params = node.params || [] of Frontend::Parameter
+          return_annotation = node.return_type.try { |slice| String.new(slice) }
+
+          method_scope = SymbolTable.new(current_table)
+          method_symbol = MethodSymbol.new(name, node_id, params: params, return_annotation: return_annotation, scope: method_scope)
+
+          table = current_table
+          if existing = table.lookup_local(name)
+            handle_method_redefinition(name, method_symbol, existing, table)
+          else
+            table.define(name, method_symbol)
+          end
+
+          push_table(method_scope)
+
+          params.each do |param|
+            # TIER 2.1: Convert Slice(UInt8) to String for symbol table
+            param_name_str = String.new(param.name)
+            param_type_str = if type_ann = param.type_annotation
+              String.new(type_ann)
+            else
+              nil
+            end
+
+            param_symbol = VariableSymbol.new(param_name_str, node_id, declared_type: param_type_str)
+
+            if existing_param = method_scope.lookup_local(param_name_str)
+              emit_duplicate_variable(param_name_str, param_symbol, existing_param)
+            else
+              if shadowed = lookup_variable_in_ancestors(method_scope.parent, param_name_str)
+                emit_shadowing_warning(param_name_str, param_symbol, shadowed)
+              end
+              method_scope.define(param_name_str, param_symbol)
+            end
+          end
+
+          (node.body || [] of Frontend::ExprId).each do |expr_id|
+            visit(expr_id)
+          end
+
+          pop_table
+        end
+
+        private def handle_class(node_id : Frontend::ExprId, node : Frontend::ClassNode)
+          name_slice = node.name
+          return unless name_slice
+
+          name = String.new(name_slice)
+          super_name = node.super_name.try { |slice| String.new(slice) }
+
+          table = current_table
+          existing = table.lookup_local(name)
+          class_scope = existing.is_a?(ClassSymbol) ? existing.scope : SymbolTable.new(table)
+
+          class_symbol = ClassSymbol.new(name, node_id, scope: class_scope, superclass_name: super_name)
+
+          if existing
+            handle_class_redefinition(name, class_symbol, existing, table)
+          else
+            table.define(name, class_symbol)
+          end
+
+          push_table(class_scope)
+
+          # Phase 5A: Collect instance variable declarations
+          # Get the final class symbol from table (may have been redefined)
+          final_class_symbol = table.lookup_local(name)
+          if final_class_symbol.is_a?(ClassSymbol)
+            collect_instance_vars(final_class_symbol, node.body || [] of Frontend::ExprId)
+          end
+
+          (node.body || [] of Frontend::ExprId).each do |expr_id|
+            visit(expr_id)
+          end
+          pop_table
+        end
+
+        # Phase 87B-1: Expand accessor macros to method definitions
+        #
+        # Transforms:
+        #   getter name : String    → def name : String; @name; end
+        #   setter name : String    → def name=(value : String); @name = value; end
+        #   property name : String  → both getter and setter
+        #
+        # Uses immediate visit() pattern - generates AST node and immediately
+        # processes it to register as MethodSymbol. No AST mutation needed.
+        private def expand_accessor_macro(node_id : Frontend::ExprId, node : Frontend::TypedNode)
+          specs = Frontend.node_accessor_specs(node)
+          return unless specs
+
+          specs.each do |spec|
+            case node
+            when Frontend::GetterNode
+              # Generate: def name : Type; @name; end
+              def_node = build_getter_def(spec, node.span)
+              def_id = @arena.add_typed(def_node)
+              visit(def_id)  # Immediately register as MethodSymbol
+
+            when Frontend::SetterNode
+              # Generate: def name=(value : Type); @name = value; end
+              def_node = build_setter_def(spec, node.span)
+              def_id = @arena.add_typed(def_node)
+              visit(def_id)
+
+            when Frontend::PropertyNode
+              # Generate both getter and setter
+              getter_node = build_getter_def(spec, node.span)
+              setter_node = build_setter_def(spec, node.span)
+              visit(@arena.add_typed(getter_node))
+              visit(@arena.add_typed(setter_node))
+            end
+          end
+        end
+
+        # Build getter method AST node
+        #
+        # Input:  getter name : String
+        # Output: def name : String
+        #           @name
+        #         end
+        private def build_getter_def(spec : Frontend::AccessorSpec, base_span : Frontend::Span) : Frontend::DefNode
+          # TIER 2.2: spec.name is already Slice(UInt8), spec.type_annotation is Slice(UInt8)?
+          # Create instance variable access node: @name
+          spec_name_str = String.new(spec.name)  # Convert for interpolation
+          ivar_name = "@#{spec_name_str}"
+          ivar_bytes = ivar_name.to_slice
+          ivar_node = Frontend::InstanceVarNode.new(
+            spec.name_span,
+            ivar_bytes
+          )
+          ivar_id = @arena.add_typed(ivar_node)
+
+          # Create def node with instance variable as body
+          method_name_bytes = spec.name  # Already Slice(UInt8)
+          return_type_bytes = spec.type_annotation  # Already Slice(UInt8)?
+
+          Frontend::DefNode.new(
+            base_span,
+            method_name_bytes,
+            nil,
+            return_type_bytes,
+            [ivar_id]
+          )
+        end
+
+        # Build setter method AST node
+        #
+        # Input:  setter name : String
+        # Output: def name=(value : String)
+        #           @name = value
+        #         end
+        private def build_setter_def(spec : Frontend::AccessorSpec, base_span : Frontend::Span) : Frontend::DefNode
+          # Create parameter: value : Type
+          # TIER 2.2: spec.name and spec.type_annotation are already Slice(UInt8)
+          param_name_slice = "value".to_slice
+          param_type_slice = spec.type_annotation  # Already Slice(UInt8)?
+
+          param = Frontend::Parameter.new(
+            param_name_slice,
+            param_type_slice,
+            nil,  # No default value for setter parameter
+            spec.name_span,
+            spec.name_span
+          )
+
+          # Create instance variable node: @name
+          spec_name_str = String.new(spec.name)  # Convert for interpolation
+          ivar_name = "@#{spec_name_str}"
+          ivar_bytes = ivar_name.to_slice
+          ivar_node = Frontend::InstanceVarNode.new(
+            spec.name_span,
+            ivar_bytes
+          )
+          ivar_id = @arena.add_typed(ivar_node)
+
+          # Create identifier node: value
+          value_bytes = "value".to_slice
+          value_node = Frontend::IdentifierNode.new(
+            spec.name_span,
+            value_bytes
+          )
+          value_id = @arena.add_typed(value_node)
+
+          # Create assignment: @name = value
+          assign_node = Frontend::AssignNode.new(
+            base_span,
+            ivar_id,
+            value_id
+          )
+          assign_id = @arena.add_typed(assign_node)
+
+          # Create def node with assignment as body
+          spec_name_str2 = String.new(spec.name)  # Convert for interpolation
+          setter_name = "#{spec_name_str2}="
+          setter_name_bytes = setter_name.to_slice
+
+          Frontend::DefNode.new(
+            base_span,
+            setter_name_bytes,
+            [param],
+            param_type_slice,  # FIXED: Was param_type_bytes
+            [assign_id]
+          )
+        end
+
+        # Phase 87B-2: Handle potential macro calls
+        #
+        # Checks if a method call is actually a macro invocation.
+        # If yes: expands the macro and visits the result.
+        # If no: ignores (will be handled during type inference).
+        private def handle_potential_macro_call(node_id : Frontend::ExprId, node : Frontend::TypedNode)
+          # Extract method name from call
+          callee_slice = Frontend.node_member(node)
+          return unless callee_slice
+
+          callee_name = String.new(callee_slice)
+
+          # Look up in current scope
+          table = current_table
+          symbol = table.lookup(callee_name)
+
+          # Check if it's a macro
+          if symbol.is_a?(MacroSymbol)
+            # Get arguments
+            args = Frontend.node_args(node) || [] of Frontend::ExprId
+
+            # Expand macro
+            expanded_id = @macro_expander.expand(symbol, args)
+
+            # Collect diagnostics from expander
+            @diagnostics.concat(@macro_expander.diagnostics)
+
+            # Visit expanded result (if valid)
+            visit(expanded_id) unless expanded_id.invalid?
+          end
+
+          # If not a macro, ignore - will be handled during type inference
+        end
+
+        # Phase 5A: Scan class body for instance variable assignments
+        private def collect_instance_vars(class_symbol : ClassSymbol, body : Array(Frontend::ExprId))
+          body.each do |expr_id|
+            scan_for_instance_vars(class_symbol, expr_id)
+          end
+        end
+
+        private def scan_for_instance_vars(class_symbol : ClassSymbol, expr_id : Frontend::ExprId)
+          return if expr_id.invalid?
+          node = @arena[expr_id]
+
+          case node
+          when Frontend::InstanceVarDeclNode
+            # Phase 5C: Handle explicit type annotations (@var : Type)
+            var_name = String.new(node.name)
+            var_name = var_name[1..-1] if var_name.starts_with?("@")
+            type_annotation = node.type.try { |slice| String.new(slice) }
+            class_symbol.add_instance_var(var_name, type_annotation)
+          when Frontend::AssignNode
+            # Check if assignment target is instance variable
+            target_id = node.target
+            target_node = @arena[target_id]
+            if target_node.is_a?(Frontend::InstanceVarNode)
+              var_name = String.new(target_node.name)
+              var_name = var_name[1..-1] if var_name.starts_with?("@")
+              unless class_symbol.get_instance_var_type(var_name)
+                class_symbol.add_instance_var(var_name)
+              end
+            end
+          when Frontend::DefNode
+            # Scan method body for instance variable assignments
+            (node.body || [] of Frontend::ExprId).each do |body_expr_id|
+              scan_for_instance_vars(class_symbol, body_expr_id)
+            end
+          when Frontend::IfNode
+            (node.then_body || [] of Frontend::ExprId).each { |e| scan_for_instance_vars(class_symbol, e) }
+
+            (node.elsifs || [] of Frontend::ElsifBranch).each do |elsif_branch|
+              elsif_branch.body.each { |e| scan_for_instance_vars(class_symbol, e) }
+            end
+
+            (node.else_body || [] of Frontend::ExprId).each { |e| scan_for_instance_vars(class_symbol, e) }
+          when Frontend::WhileNode
+            node.body.each { |e| scan_for_instance_vars(class_symbol, e) }
+          end
+        end
+
+        private def handle_macro_redefinition(name : String, new_symbol : MacroSymbol, existing : Symbol, table : SymbolTable)
+          case existing
+          when MacroSymbol
+            table.redefine(name, new_symbol)
+          else
+            emit_incompatible_redefinition(name, new_symbol, existing)
+          end
+        end
+
+        private def handle_method_redefinition(name : String, new_symbol : MethodSymbol, existing : Symbol, table : SymbolTable)
+          case existing
+          when MethodSymbol
+            # Phase 4B: Create OverloadSet for multiple methods with same name
+            overload_set = OverloadSetSymbol.new(name, existing.node_id, [existing, new_symbol])
+            table.redefine(name, overload_set)
+          when OverloadSetSymbol
+            # Phase 4B: Add to existing overload set
+            existing.add_overload(new_symbol)
+          when ClassSymbol, MacroSymbol, VariableSymbol
+            emit_incompatible_redefinition(name, new_symbol, existing)
+          else
+            emit_incompatible_redefinition(name, new_symbol, existing)
+          end
+        end
+
+        private def handle_class_redefinition(name : String, new_symbol : ClassSymbol, existing : Symbol, table : SymbolTable)
+          case existing
+          when ClassSymbol
+            verify_superclass_consistency(name, new_symbol, existing)
+            new_symbol = ClassSymbol.new(name, new_symbol.node_id, scope: existing.scope, superclass_name: new_symbol.superclass_name || existing.superclass_name)
+            table.redefine(name, new_symbol)
+          when MethodSymbol, MacroSymbol, VariableSymbol
+            emit_incompatible_redefinition(name, new_symbol, existing)
+          else
+            emit_incompatible_redefinition(name, new_symbol, existing)
+          end
+        end
+
+        private def verify_superclass_consistency(name : String, new_symbol : ClassSymbol, existing : ClassSymbol)
+          previous_super = existing.superclass_name
+          current_super = new_symbol.superclass_name
+
+          if previous_super && current_super && previous_super != current_super
+            @diagnostics << Diagnostic.new(
+              DiagnosticLevel::Error,
+              "E2003",
+              "class '#{name}' already defined with superclass '#{previous_super}'",
+              span_for(new_symbol.node_id),
+              [SecondarySpan.new(span_for(existing.node_id), "previous superclass declared here")]
+            )
+          end
+        end
+
+        private def emit_incompatible_redefinition(name : String, new_symbol : Symbol, existing : Symbol)
+          @diagnostics << Diagnostic.new(
+            DiagnosticLevel::Error,
+            "E2001",
+            "cannot redefine #{symbol_kind(existing)} '#{name}' as #{symbol_kind(new_symbol)}",
+            span_for(new_symbol.node_id),
+            [SecondarySpan.new(span_for(existing.node_id), "previous #{symbol_kind(existing)} defined here")]
+          )
+        end
+
+        private def emit_duplicate_variable(name : String, new_symbol : VariableSymbol, existing : Symbol)
+          @diagnostics << Diagnostic.new(
+            DiagnosticLevel::Error,
+            "E2002",
+            "variable '#{name}' is already defined in this scope",
+            span_for(new_symbol.node_id),
+            [SecondarySpan.new(span_for(existing.node_id), "previous definition here")]
+          )
+        end
+
+        private def emit_shadowing_warning(name : String, new_symbol : VariableSymbol, outer_symbol : VariableSymbol)
+          @diagnostics << Diagnostic.new(
+            DiagnosticLevel::Warning,
+            "W2001",
+            "variable '#{name}' shadows outer scope variable",
+            span_for(new_symbol.node_id),
+            [SecondarySpan.new(span_for(outer_symbol.node_id), "outer scope definition here")]
+          )
+        end
+
+        private def lookup_variable_in_ancestors(table : SymbolTable?, name : String) : VariableSymbol?
+          current = table
+          while current
+            if symbol = current.lookup_local(name)
+              return symbol if symbol.is_a?(VariableSymbol)
+            end
+            current = current.parent
+          end
+          nil
+        end
+
+        private def span_for(node_id : Frontend::ExprId) : Frontend::Span
+          @arena[node_id].span
+        end
+
+        private def symbol_kind(symbol : Symbol) : String
+          case symbol
+          when MacroSymbol
+            "macro"
+          when MethodSymbol
+            "method"
+          when ClassSymbol
+            "class"
+          when VariableSymbol
+            "variable"
+          else
+            "symbol"
+          end
+        end
+      end
+    end
+  end
+end
