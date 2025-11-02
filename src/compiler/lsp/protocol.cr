@@ -326,6 +326,143 @@ module CrystalV2
         )
         end
       end
+
+      # Document symbol structures
+
+      # SymbolKind enum (LSP 3.17)
+      enum SymbolKind
+        File          =  1
+        Module        =  2
+        Namespace     =  3
+        Package       =  4
+        Class         =  5
+        Method        =  6
+        Property      =  7
+        Field         =  8
+        Constructor   =  9
+        Enum          = 10
+        Interface     = 11
+        Function      = 12
+        Variable      = 13
+        Constant      = 14
+        String        = 15
+        Number        = 16
+        Boolean       = 17
+        Array         = 18
+        Object        = 19
+        Key           = 20
+        Null          = 21
+        EnumMember    = 22
+        Struct        = 23
+        Event         = 24
+        Operator      = 25
+        TypeParameter = 26
+      end
+
+      # Represents programming constructs like classes, methods, variables
+      struct DocumentSymbol
+        include JSON::Serializable
+
+        property name : String
+        property kind : Int32  # SymbolKind value
+        property range : Range
+        @[JSON::Field(key: "selectionRange")]
+        property selection_range : Range
+        property detail : String?
+        property children : Array(DocumentSymbol)?
+
+        def initialize(
+          @name : String,
+          @kind : Int32,
+          @range : Range,
+          @selection_range : Range,
+          @detail : String? = nil,
+          @children : Array(DocumentSymbol)? = nil
+        )
+        end
+
+        # Create DocumentSymbol from semantic symbol
+        def self.from_symbol(symbol : Semantic::Symbol, program : Frontend::Program) : DocumentSymbol?
+          return nil if symbol.node_id.invalid?
+
+          node = program.arena[symbol.node_id]
+          range = Range.from_span(node.span)
+          selection_range = range  # MVP: same as range
+
+          kind = case symbol
+                 when Semantic::ClassSymbol
+                   SymbolKind::Class.value
+                 when Semantic::MethodSymbol
+                   SymbolKind::Method.value
+                 when Semantic::VariableSymbol
+                   SymbolKind::Variable.value
+                 when Semantic::MacroSymbol
+                   SymbolKind::Function.value
+                 else
+                   return nil  # Skip unsupported types
+                 end
+
+          # Generate detail string
+          detail = case symbol
+                   when Semantic::MethodSymbol
+                     # Show method signature
+                     params_str = symbol.params.map do |p|
+                       name = String.new(p.name)
+                       type = p.type_annotation ? String.new(p.type_annotation.not_nil!) : "?"
+                       "#{name} : #{type}"
+                     end.join(", ")
+                     ret = symbol.return_annotation || "?"
+                     "(#{params_str}) : #{ret}"
+                   when Semantic::VariableSymbol
+                     symbol.declared_type
+                   else
+                     nil
+                   end
+
+          # Collect children for symbols with scope
+          children = case symbol
+                     when Semantic::ClassSymbol
+                       collect_children(symbol.scope, program)
+                     when Semantic::MethodSymbol
+                       # Methods can have local variables, but skip for now (too noisy)
+                       nil
+                     else
+                       nil
+                     end
+
+          new(
+            name: symbol.name,
+            kind: kind,
+            range: range,
+            selection_range: selection_range,
+            detail: detail,
+            children: children
+          )
+        end
+
+        # Collect children symbols from scope
+        private def self.collect_children(table : Semantic::SymbolTable, program : Frontend::Program) : Array(DocumentSymbol)?
+          children = [] of DocumentSymbol
+
+          table.each_local_symbol do |name, symbol|
+            case symbol
+            when Semantic::OverloadSetSymbol
+              # Expand overload set to individual methods
+              symbol.overloads.each do |overload|
+                if doc_sym = from_symbol(overload, program)
+                  children << doc_sym
+                end
+              end
+            else
+              if doc_sym = from_symbol(symbol, program)
+                children << doc_sym
+              end
+            end
+          end
+
+          children.empty? ? nil : children
+        end
+      end
     end
   end
 end

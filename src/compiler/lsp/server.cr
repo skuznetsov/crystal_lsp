@@ -115,6 +115,8 @@ module CrystalV2
             handle_completion(id, params)
           when "textDocument/signatureHelp"
             handle_signature_help(id, params)
+          when "textDocument/documentSymbol"
+            handle_document_symbol(id, params)
           else
             send_error(id, -32601, "Method not found: #{method}")
           end
@@ -539,6 +541,44 @@ module CrystalV2
 
           debug("Returning signature help")
           send_response(id, sig_help.to_json)
+        end
+
+        # Handle textDocument/documentSymbol request
+        private def handle_document_symbol(id : JSON::Any, params : JSON::Any?)
+          return send_error(id, -32602, "Missing params") unless params
+
+          uri = params["textDocument"]["uri"].as_s
+
+          debug("DocumentSymbol request: uri=#{uri}")
+
+          doc_state = @documents[uri]?
+          return send_response(id, "[]") unless doc_state
+
+          # Get symbol table
+          symbol_table = doc_state.symbol_table
+          return send_response(id, "[]") unless symbol_table
+
+          # Collect top-level symbols
+          symbols = [] of DocumentSymbol
+
+          symbol_table.each_local_symbol do |name, symbol|
+            case symbol
+            when Semantic::OverloadSetSymbol
+              # Expand overload set to individual methods
+              symbol.overloads.each do |overload|
+                if doc_sym = DocumentSymbol.from_symbol(overload, doc_state.program)
+                  symbols << doc_sym
+                end
+              end
+            else
+              if doc_sym = DocumentSymbol.from_symbol(symbol, doc_state.program)
+                symbols << doc_sym
+              end
+            end
+          end
+
+          debug("Returning #{symbols.size} document symbols")
+          send_response(id, symbols.to_json)
         end
 
         # Collect all symbols from symbol table (including parent tables)

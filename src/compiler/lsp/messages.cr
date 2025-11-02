@@ -156,6 +156,14 @@ module CrystalV2
         property text_document : TextDocumentIdentifier
         property position : Position
       end
+
+      # Document symbol request params
+      struct DocumentSymbolParams
+        include JSON::Serializable
+
+        @[JSON::Field(key: "textDocument")]
+        property text_document : TextDocumentIdentifier
+      end
     end
   end
 end
