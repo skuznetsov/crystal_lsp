@@ -287,7 +287,7 @@ module CrystalV2
         end
 
         # Recursively search for expression at position in AST
-        private def find_expr_in_tree(arena : Frontend::AstArena | Frontend::VirtualArena, expr_id : Frontend::ExprId, line : Int32, column : Int32) : Frontend::ExprId?
+        private def find_expr_in_tree(arena : Frontend::ArenaLike, expr_id : Frontend::ExprId, line : Int32, column : Int32) : Frontend::ExprId?
           node = arena[expr_id]
           return nil unless node.span.contains?(line, column)
 
@@ -915,7 +915,7 @@ module CrystalV2
         end
 
         # Search for member access node and return its receiver
-        private def search_member_access(arena : Frontend::AstArena | Frontend::VirtualArena, expr_id : Frontend::ExprId, line : Int32, column : Int32) : Frontend::ExprId?
+        private def search_member_access(arena : Frontend::ArenaLike, expr_id : Frontend::ExprId, line : Int32, column : Int32) : Frontend::ExprId?
           node = arena[expr_id]
 
           # Check if this is a member access at the target position
@@ -1217,7 +1217,7 @@ module CrystalV2
         # Recursively collect parameter hints from AST tree
         private def collect_call_parameter_hints(
           expr_id : Frontend::ExprId,
-          arena : Frontend::AstArena | Frontend::VirtualArena,
+          arena : Frontend::ArenaLike,
           identifier_symbols : Hash(Frontend::ExprId, Semantic::Symbol),
           range : Range,
           hints : Array(InlayHint)
@@ -1405,7 +1405,7 @@ module CrystalV2
 
         # Recursively collect folding ranges from AST node
         private def collect_folding_ranges_recursive(
-          arena : Frontend::AstArena,
+          arena : Frontend::ArenaLike,
           node_id : Frontend::ExprId,
           ranges : Array(FoldingRange)
         )
@@ -1621,12 +1621,9 @@ module CrystalV2
           SemanticTokens.new(data: data)
         end
 
-        # Type alias for arena union (used in multiple places)
-        alias Arena = Frontend::AstArena | Frontend::VirtualArena
-
         # Recursively collect tokens from AST nodes
         private def collect_tokens_recursive(
-          arena : Arena,
+          arena : Frontend::ArenaLike,
           node_id : Frontend::ExprId,
           tokens : Array(RawToken)
         )
