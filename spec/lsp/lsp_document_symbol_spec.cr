@@ -264,5 +264,45 @@ describe "LSP DocumentSymbol" do
       inner_method = inner_children.find { |c| c.name == "inner_method" }
       inner_method.should_not be_nil
     end
+
+    # Control flow coverage test
+
+    it "handles methods with control flow and local variables" do
+      source = <<-CRYSTAL
+      def process_loop
+        counter = 0
+        while counter < 5
+          result = counter * 2
+          counter = counter + 1
+        end
+      end
+      CRYSTAL
+
+      lexer = CrystalV2::Compiler::Frontend::Lexer.new(source)
+      parser = CrystalV2::Compiler::Frontend::Parser.new(lexer)
+      program = parser.parse_program
+
+      analyzer = CrystalV2::Compiler::Semantic::Analyzer.new(program)
+      analyzer.collect_symbols
+      result = analyzer.resolve_names
+      identifier_symbols = result.identifier_symbols
+
+      # Method should be in symbol table
+      method_symbol = analyzer.global_context.symbol_table.lookup("process_loop")
+      method_symbol.should_not be_nil
+      method_symbol.should be_a(CrystalV2::Compiler::Semantic::MethodSymbol)
+
+      # Variables inside method (with control flow) should be resolvable
+      method_sym = method_symbol.as(CrystalV2::Compiler::Semantic::MethodSymbol)
+      counter_symbol = method_sym.scope.lookup("counter")
+      counter_symbol.should_not be_nil
+
+      result_symbol = method_sym.scope.lookup("result")
+      result_symbol.should_not be_nil
+
+      # identifier_symbols should contain usages from inside while loop
+      counter_count = identifier_symbols.count { |_, sym| sym == counter_symbol }
+      counter_count.should be > 2  # Should have multiple usages from loop
+    end
   end
 end

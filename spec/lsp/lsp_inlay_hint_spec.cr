@@ -498,5 +498,70 @@ describe "LSP InlayHint" do
       result_symbol = analyzer.global_context.symbol_table.lookup("result")
       result_symbol.should_not be_nil
     end
+
+    # Control flow coverage tests
+
+    it "resolves variables inside while loop" do
+      source = <<-CRYSTAL
+      counter = 0
+      while counter < 10
+        temp = counter * 2
+        counter = counter + 1
+      end
+      CRYSTAL
+
+      lexer = CrystalV2::Compiler::Frontend::Lexer.new(source)
+      parser = CrystalV2::Compiler::Frontend::Parser.new(lexer)
+      program = parser.parse_program
+
+      analyzer = CrystalV2::Compiler::Semantic::Analyzer.new(program)
+      analyzer.collect_symbols
+      result = analyzer.resolve_names
+      identifier_symbols = result.identifier_symbols
+
+      # Both counter and temp should be in symbol table
+      counter_symbol = analyzer.global_context.symbol_table.lookup("counter")
+      counter_symbol.should_not be_nil
+
+      # temp is declared inside while loop - should be in global scope (no block scope yet)
+      temp_symbol = analyzer.global_context.symbol_table.lookup("temp")
+      temp_symbol.should_not be_nil
+
+      # identifier_symbols should have all usages
+      counter_count = identifier_symbols.count { |_, sym| sym == counter_symbol }
+      counter_count.should be > 3  # declaration + multiple uses
+    end
+
+    it "resolves variables inside if/else branches" do
+      source = <<-CRYSTAL
+      flag = true
+      if flag
+        x = 10
+      else
+        x = 20
+      end
+      CRYSTAL
+
+      lexer = CrystalV2::Compiler::Frontend::Lexer.new(source)
+      parser = CrystalV2::Compiler::Frontend::Parser.new(lexer)
+      program = parser.parse_program
+
+      analyzer = CrystalV2::Compiler::Semantic::Analyzer.new(program)
+      analyzer.collect_symbols
+      result = analyzer.resolve_names
+      identifier_symbols = result.identifier_symbols
+
+      # flag should be resolved
+      flag_symbol = analyzer.global_context.symbol_table.lookup("flag")
+      flag_symbol.should_not be_nil
+
+      # x should be in symbol table (first assignment wins)
+      x_symbol = analyzer.global_context.symbol_table.lookup("x")
+      x_symbol.should_not be_nil
+
+      # flag should appear in identifier_symbols (declaration + condition)
+      flag_count = identifier_symbols.count { |_, sym| sym == flag_symbol }
+      flag_count.should eq(2)
+    end
   end
 end

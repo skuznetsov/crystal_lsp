@@ -318,5 +318,87 @@ describe "LSP References" do
       # Second location (usage) should be at line 1
       locations[1].range.start.line.should eq(1)
     end
+
+    # Control flow coverage tests
+
+    it "finds references in while loop" do
+      source = <<-CRYSTAL
+      counter = 0
+      while counter < 5
+        puts counter
+        counter = counter + 1
+      end
+      CRYSTAL
+
+      lexer = CrystalV2::Compiler::Frontend::Lexer.new(source)
+      parser = CrystalV2::Compiler::Frontend::Parser.new(lexer)
+      program = parser.parse_program
+
+      analyzer = CrystalV2::Compiler::Semantic::Analyzer.new(program)
+      analyzer.collect_symbols
+      result = analyzer.resolve_names
+      identifier_symbols = result.identifier_symbols
+
+      counter_symbol = analyzer.global_context.symbol_table.lookup("counter")
+      counter_symbol.should_not be_nil
+
+      # Count: declaration + condition + puts arg + left assignment + right addition
+      reference_count = identifier_symbols.count { |_, symbol| symbol == counter_symbol }
+      reference_count.should eq(5)
+    end
+
+    it "finds references in if/else branches" do
+      source = <<-CRYSTAL
+      value = 10
+      if value > 5
+        puts value
+      else
+        value = 0
+      end
+      CRYSTAL
+
+      lexer = CrystalV2::Compiler::Frontend::Lexer.new(source)
+      parser = CrystalV2::Compiler::Frontend::Parser.new(lexer)
+      program = parser.parse_program
+
+      analyzer = CrystalV2::Compiler::Semantic::Analyzer.new(program)
+      analyzer.collect_symbols
+      result = analyzer.resolve_names
+      identifier_symbols = result.identifier_symbols
+
+      value_symbol = analyzer.global_context.symbol_table.lookup("value")
+      value_symbol.should_not be_nil
+
+      # Count: declaration + condition + then body + else branch assignment
+      reference_count = identifier_symbols.count { |_, symbol| symbol == value_symbol }
+      reference_count.should eq(4)
+    end
+
+    it "finds references in nested control flow" do
+      source = <<-CRYSTAL
+      total = 0
+      if total == 0
+        while total < 3
+          total = total + 1
+        end
+      end
+      CRYSTAL
+
+      lexer = CrystalV2::Compiler::Frontend::Lexer.new(source)
+      parser = CrystalV2::Compiler::Frontend::Parser.new(lexer)
+      program = parser.parse_program
+
+      analyzer = CrystalV2::Compiler::Semantic::Analyzer.new(program)
+      analyzer.collect_symbols
+      result = analyzer.resolve_names
+      identifier_symbols = result.identifier_symbols
+
+      total_symbol = analyzer.global_context.symbol_table.lookup("total")
+      total_symbol.should_not be_nil
+
+      # Count: declaration + if condition + while condition + left assignment + right addition
+      reference_count = identifier_symbols.count { |_, symbol| symbol == total_symbol }
+      reference_count.should eq(5)
+    end
   end
 end

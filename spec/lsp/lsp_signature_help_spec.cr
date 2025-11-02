@@ -205,5 +205,46 @@ describe CrystalV2::Compiler::LSP::Server do
       json.should contain("\"activeParameter\"")
       json.should contain("compute(x : Int32) : Int32")
     end
+
+    # Control flow coverage test
+
+    it "resolves method calls inside control flow" do
+      source = <<-CRYSTAL
+      def helper(value : Int32) : Int32
+        value * 2
+      end
+
+      counter = 0
+      while counter < 5
+        result = helper(counter)
+        counter = counter + 1
+      end
+      CRYSTAL
+
+      lexer = CrystalV2::Compiler::Frontend::Lexer.new(source)
+      parser = CrystalV2::Compiler::Frontend::Parser.new(lexer)
+      program = parser.parse_program
+
+      analyzer = CrystalV2::Compiler::Semantic::Analyzer.new(program)
+      analyzer.collect_symbols
+      result = analyzer.resolve_names
+      identifier_symbols = result.identifier_symbols
+
+      # Method should be in symbol table
+      helper_symbol = analyzer.global_context.symbol_table.lookup("helper")
+      helper_symbol.should_not be_nil
+      helper_symbol.should be_a(CrystalV2::Compiler::Semantic::MethodSymbol)
+
+      # Call to helper inside while loop should be in identifier_symbols
+      helper_call_count = identifier_symbols.count { |_, sym| sym == helper_symbol }
+      helper_call_count.should eq(1)  # One call inside while loop
+
+      # counter should be resolved both outside and inside while
+      counter_symbol = analyzer.global_context.symbol_table.lookup("counter")
+      counter_symbol.should_not be_nil
+
+      counter_count = identifier_symbols.count { |_, sym| sym == counter_symbol }
+      counter_count.should be > 3  # declaration + condition + call arg + assignment
+    end
   end
 end
