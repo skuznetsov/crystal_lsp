@@ -158,7 +158,15 @@ module CrystalV2
              Frontend::Token::Kind::Until, Frontend::Token::Kind::Return,
              Frontend::Token::Kind::Class, Frontend::Token::Kind::Module,
              Frontend::Token::Kind::Struct, Frontend::Token::Kind::Elsif,
-             Frontend::Token::Kind::Else
+             Frontend::Token::Kind::Else, Frontend::Token::Kind::Require,
+             Frontend::Token::Kind::Enum, Frontend::Token::Kind::Property,
+             Frontend::Token::Kind::Getter, Frontend::Token::Kind::Setter,
+             Frontend::Token::Kind::Include, Frontend::Token::Kind::Extend,
+             Frontend::Token::Kind::Private, Frontend::Token::Kind::Protected,
+             Frontend::Token::Kind::Alias, Frontend::Token::Kind::Case,
+             Frontend::Token::Kind::When,
+             Frontend::Token::Kind::Begin, Frontend::Token::Kind::Rescue,
+             Frontend::Token::Kind::Ensure
           true
         else
           false
@@ -225,6 +233,10 @@ module CrystalV2
         when {Frontend::Token::Kind::RParen, Frontend::Token::Kind::Identifier}
           @output << ' '
 
+        # No space before dot (method call)
+        when {_, Frontend::Token::Kind::Operator}
+          # ex.message - no space before dot
+
         # Default: after keywords/identifier-calls add space (catch-all)
         else
           if (need_space_after || is_identifier_call) &&
@@ -246,7 +258,10 @@ module CrystalV2
              Frontend::Token::Kind::Unless, Frontend::Token::Kind::While,
              Frontend::Token::Kind::Until, Frontend::Token::Kind::Class,
              Frontend::Token::Kind::Module, Frontend::Token::Kind::Struct,
-             Frontend::Token::Kind::Elsif, Frontend::Token::Kind::Else
+             Frontend::Token::Kind::Elsif, Frontend::Token::Kind::Else,
+             Frontend::Token::Kind::Enum, Frontend::Token::Kind::Case,
+             Frontend::Token::Kind::Begin, Frontend::Token::Kind::When,
+             Frontend::Token::Kind::Rescue, Frontend::Token::Kind::Ensure
           true
         else
           false
@@ -257,9 +272,12 @@ module CrystalV2
         # 'end' closes block
         return true if current.kind == Frontend::Token::Kind::End
 
-        # 'elsif' and 'else' decrease then re-increase
+        # 'elsif', 'else', 'when', 'rescue', 'ensure' decrease then re-increase
         return true if current.kind == Frontend::Token::Kind::Elsif ||
-                       current.kind == Frontend::Token::Kind::Else
+                       current.kind == Frontend::Token::Kind::Else ||
+                       current.kind == Frontend::Token::Kind::When ||
+                       current.kind == Frontend::Token::Kind::Rescue ||
+                       current.kind == Frontend::Token::Kind::Ensure
 
         false
       end
