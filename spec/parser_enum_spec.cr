@@ -47,13 +47,13 @@ describe "CrystalV2::Compiler::Frontend::Parser" do
       members = CrystalV2::Compiler::Frontend.node_enum_members(enum_node).not_nil!
       members.size.should eq(3)
 
-      members[0].name.should eq("Red")
+      String.new(members[0].name).should eq("Red")
       members[0].value.should be_nil
 
-      members[1].name.should eq("Green")
+      String.new(members[1].name).should eq("Green")
       members[1].value.should be_nil
 
-      members[2].name.should eq("Blue")
+      String.new(members[2].name).should eq("Blue")
       members[2].value.should be_nil
     end
 
@@ -77,17 +77,17 @@ describe "CrystalV2::Compiler::Frontend::Parser" do
       members.size.should eq(3)
 
       # Low = 1
-      members[0].name.should eq("Low")
+      String.new(members[0].name).should eq("Low")
       members[0].value.should_not be_nil
       value_node = arena[members[0].value.not_nil!]
       CrystalV2::Compiler::Frontend.node_kind(value_node).should eq(CrystalV2::Compiler::Frontend::NodeKind::Number)
 
       # Medium = 5
-      members[1].name.should eq("Medium")
+      String.new(members[1].name).should eq("Medium")
       members[1].value.should_not be_nil
 
       # High = 10
-      members[2].name.should eq("High")
+      String.new(members[2].name).should eq("High")
       members[2].value.should_not be_nil
     end
 
@@ -136,19 +136,19 @@ describe "CrystalV2::Compiler::Frontend::Parser" do
       members.size.should eq(4)
 
       # Low = 1 (has value)
-      members[0].name.should eq("Low")
+      String.new(members[0].name).should eq("Low")
       members[0].value.should_not be_nil
 
       # Medium (no value)
-      members[1].name.should eq("Medium")
+      String.new(members[1].name).should eq("Medium")
       members[1].value.should be_nil
 
       # High = 10 (has value)
-      members[2].name.should eq("High")
+      String.new(members[2].name).should eq("High")
       members[2].value.should_not be_nil
 
       # Critical (no value)
-      members[3].name.should eq("Critical")
+      String.new(members[3].name).should eq("Critical")
       members[3].value.should be_nil
     end
 
