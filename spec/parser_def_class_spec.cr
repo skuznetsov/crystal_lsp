@@ -16,7 +16,7 @@ describe CrystalV2::Compiler::Frontend::Parser do
     program.roots.size.should eq(1)
     def_node = program.arena[program.roots.first].as(CrystalV2::Compiler::Frontend::DefNode)
     String.new(def_node.name).should eq("greet")
-    def_node.params.not_nil!.map(&.name).should eq(["name"])
+    def_node.params.not_nil!.map { |p| String.new(p.name) }.should eq(["name"])
     def_node.body.not_nil!.size.should eq(1)
   end
 
