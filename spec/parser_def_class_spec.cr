@@ -52,8 +52,8 @@ describe CrystalV2::Compiler::Frontend::Parser do
 
     params = def_node.params.not_nil!
     params.size.should eq(1)
-    params[0].name.should eq("x")
-    params[0].type_annotation.should eq("Int32")
+    String.new(params[0].name).should eq("x")
+    String.new(params[0].type_annotation.not_nil!).should eq("Int32")
   end
 
   it "parses def with multiple typed parameters" do
@@ -71,10 +71,10 @@ describe CrystalV2::Compiler::Frontend::Parser do
 
     params = def_node.params.not_nil!
     params.size.should eq(2)
-    params[0].name.should eq("x")
-    params[0].type_annotation.should eq("String")
-    params[1].name.should eq("y")
-    params[1].type_annotation.should eq("String")
+    String.new(params[0].name).should eq("x")
+    String.new(params[0].type_annotation.not_nil!).should eq("String")
+    String.new(params[1].name).should eq("y")
+    String.new(params[1].type_annotation.not_nil!).should eq("String")
   end
 
   it "parses def with mixed typed and untyped parameters" do
@@ -92,11 +92,11 @@ describe CrystalV2::Compiler::Frontend::Parser do
 
     params = def_node.params.not_nil!
     params.size.should eq(3)
-    params[0].name.should eq("x")
+    String.new(params[0].name).should eq("x")
     params[0].type_annotation.should be_nil
-    params[1].name.should eq("y")
-    params[1].type_annotation.should eq("Int32")
-    params[2].name.should eq("z")
+    String.new(params[1].name).should eq("y")
+    String.new(params[1].type_annotation.not_nil!).should eq("Int32")
+    String.new(params[2].name).should eq("z")
     params[2].type_annotation.should be_nil
   end
 
@@ -152,8 +152,8 @@ describe CrystalV2::Compiler::Frontend::Parser do
     # Check params
     params = def_node.params.not_nil!
     params.size.should eq(2)
-    params[0].name.should eq("x")
-    params[0].type_annotation.should eq("Int32")
+    String.new(params[0].name).should eq("x")
+    String.new(params[0].type_annotation.not_nil!).should eq("Int32")
 
     # Check return type
     return_type = def_node.return_type

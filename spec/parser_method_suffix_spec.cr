@@ -139,8 +139,8 @@ describe "CrystalV2::Compiler::Frontend::Parser" do
 
       params = CrystalV2::Compiler::Frontend.node_def_params(method_node).not_nil!
       params.size.should eq(2)
-      params[0].name.should eq("name")
-      params[1].name.should eq("age")
+      String.new(params[0].name).should eq("name")
+      String.new(params[1].name).should eq("age")
     end
 
     it "parses member access with ? suffix" do

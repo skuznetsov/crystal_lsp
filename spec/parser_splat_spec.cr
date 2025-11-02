@@ -22,7 +22,7 @@ describe "CrystalV2::Compiler::Frontend::Parser" do
 
       params = CrystalV2::Compiler::Frontend.node_def_params(method_node).not_nil!
       params.size.should eq(1)
-      params[0].name.should eq("args")
+      String.new(params[0].name).should eq("args")
       params[0].is_splat.should be_true
       params[0].is_double_splat.should be_false
     end
@@ -45,7 +45,7 @@ describe "CrystalV2::Compiler::Frontend::Parser" do
 
       params = CrystalV2::Compiler::Frontend.node_def_params(method_node).not_nil!
       params.size.should eq(1)
-      params[0].name.should eq("options")
+      String.new(params[0].name).should eq("options")
       params[0].is_splat.should be_false
       params[0].is_double_splat.should be_true
     end
@@ -67,15 +67,15 @@ describe "CrystalV2::Compiler::Frontend::Parser" do
       params = CrystalV2::Compiler::Frontend.node_def_params(method_node).not_nil!
       params.size.should eq(3)
 
-      params[0].name.should eq("x")
+      String.new(params[0].name).should eq("x")
       params[0].is_splat.should be_false
       params[0].is_double_splat.should be_false
 
-      params[1].name.should eq("y")
+      String.new(params[1].name).should eq("y")
       params[1].is_splat.should be_false
       params[1].is_double_splat.should be_false
 
-      params[2].name.should eq("rest")
+      String.new(params[2].name).should eq("rest")
       params[2].is_splat.should be_true
       params[2].is_double_splat.should be_false
     end
@@ -97,14 +97,14 @@ describe "CrystalV2::Compiler::Frontend::Parser" do
       params = CrystalV2::Compiler::Frontend.node_def_params(method_node).not_nil!
       params.size.should eq(3)
 
-      params[0].name.should eq("x")
+      String.new(params[0].name).should eq("x")
       params[0].is_splat.should be_false
 
-      params[1].name.should eq("args")
+      String.new(params[1].name).should eq("args")
       params[1].is_splat.should be_true
       params[1].is_double_splat.should be_false
 
-      params[2].name.should eq("options")
+      String.new(params[2].name).should eq("options")
       params[2].is_splat.should be_false
       params[2].is_double_splat.should be_true
     end
@@ -126,9 +126,9 @@ describe "CrystalV2::Compiler::Frontend::Parser" do
       params = CrystalV2::Compiler::Frontend.node_def_params(method_node).not_nil!
       params.size.should eq(1)
 
-      params[0].name.should eq("args")
+      String.new(params[0].name).should eq("args")
       params[0].is_splat.should be_true
-      params[0].type_annotation.should eq("Int32")
+      String.new(params[0].type_annotation.not_nil!).should eq("Int32")
     end
 
     it "parses double splat parameter with type annotation" do
@@ -148,9 +148,9 @@ describe "CrystalV2::Compiler::Frontend::Parser" do
       params = CrystalV2::Compiler::Frontend.node_def_params(method_node).not_nil!
       params.size.should eq(1)
 
-      params[0].name.should eq("options")
+      String.new(params[0].name).should eq("options")
       params[0].is_double_splat.should be_true
-      params[0].type_annotation.should eq("String")
+      String.new(params[0].type_annotation.not_nil!).should eq("String")
     end
 
     it "parses method with only splat (no regular params)" do
@@ -206,18 +206,18 @@ describe "CrystalV2::Compiler::Frontend::Parser" do
       params = CrystalV2::Compiler::Frontend.node_def_params(method_node).not_nil!
       params.size.should eq(4)
 
-      params[0].name.should eq("a")
+      String.new(params[0].name).should eq("a")
       params[0].is_splat.should be_false
       params[0].type_annotation.should be_nil
 
-      params[1].name.should eq("b")
+      String.new(params[1].name).should eq("b")
       params[1].is_splat.should be_false
-      params[1].type_annotation.should eq("Int32")
+      String.new(params[1].type_annotation.not_nil!).should eq("Int32")
 
-      params[2].name.should eq("rest")
+      String.new(params[2].name).should eq("rest")
       params[2].is_splat.should be_true
 
-      params[3].name.should eq("options")
+      String.new(params[3].name).should eq("options")
       params[3].is_double_splat.should be_true
     end
 

@@ -22,7 +22,7 @@ describe "CrystalV2::Compiler::Frontend::Parser" do
 
       params = CrystalV2::Compiler::Frontend.node_def_params(method_node).not_nil!
       params.size.should eq(1)
-      params[0].name.should eq("x")
+      String.new(params[0].name).should eq("x")
       params[0].default_value.should_not be_nil
     end
 
@@ -42,8 +42,8 @@ describe "CrystalV2::Compiler::Frontend::Parser" do
       method_node = arena[program.roots[0]]
       params = CrystalV2::Compiler::Frontend.node_def_params(method_node).not_nil!
       params.size.should eq(1)
-      params[0].name.should eq("x")
-      params[0].type_annotation.should eq("Int32")
+      String.new(params[0].name).should eq("x")
+      String.new(params[0].type_annotation.not_nil!).should eq("Int32")
       params[0].default_value.should_not be_nil
     end
 
@@ -63,11 +63,11 @@ describe "CrystalV2::Compiler::Frontend::Parser" do
       method_node = arena[program.roots[0]]
       params = CrystalV2::Compiler::Frontend.node_def_params(method_node).not_nil!
       params.size.should eq(3)
-      params[0].name.should eq("x")
+      String.new(params[0].name).should eq("x")
       params[0].default_value.should_not be_nil
-      params[1].name.should eq("y")
+      String.new(params[1].name).should eq("y")
       params[1].default_value.should_not be_nil
-      params[2].name.should eq("z")
+      String.new(params[2].name).should eq("z")
       params[2].default_value.should_not be_nil
     end
 
@@ -87,11 +87,11 @@ describe "CrystalV2::Compiler::Frontend::Parser" do
       method_node = arena[program.roots[0]]
       params = CrystalV2::Compiler::Frontend.node_def_params(method_node).not_nil!
       params.size.should eq(3)
-      params[0].name.should eq("a")
+      String.new(params[0].name).should eq("a")
       params[0].default_value.should be_nil
-      params[1].name.should eq("b")
+      String.new(params[1].name).should eq("b")
       params[1].default_value.should_not be_nil
-      params[2].name.should eq("c")
+      String.new(params[2].name).should eq("c")
       params[2].default_value.should_not be_nil
     end
 
@@ -199,11 +199,11 @@ describe "CrystalV2::Compiler::Frontend::Parser" do
       method_node = arena[program.roots[0]]
       params = CrystalV2::Compiler::Frontend.node_def_params(method_node).not_nil!
       params.size.should eq(3)
-      params[0].name.should eq("x")
+      String.new(params[0].name).should eq("x")
       params[0].default_value.should be_nil
-      params[1].name.should eq("args")
+      String.new(params[1].name).should eq("args")
       params[1].is_splat.should be_true
-      params[2].name.should eq("y")
+      String.new(params[2].name).should eq("y")
       params[2].default_value.should_not be_nil
     end
 
@@ -224,16 +224,16 @@ describe "CrystalV2::Compiler::Frontend::Parser" do
       params = CrystalV2::Compiler::Frontend.node_def_params(method_node).not_nil!
       params.size.should eq(3)
 
-      params[0].name.should eq("a")
-      params[0].type_annotation.should eq("Int32")
+      String.new(params[0].name).should eq("a")
+      String.new(params[0].type_annotation.not_nil!).should eq("Int32")
       params[0].default_value.should be_nil
 
-      params[1].name.should eq("b")
+      String.new(params[1].name).should eq("b")
       params[1].type_annotation.should be_nil
       params[1].default_value.should_not be_nil
 
-      params[2].name.should eq("c")
-      params[2].type_annotation.should eq("String")
+      String.new(params[2].name).should eq("c")
+      String.new(params[2].type_annotation.not_nil!).should eq("String")
       params[2].default_value.should_not be_nil
     end
 
