@@ -1,37 +1,37 @@
-# Быстрый старт - Тестирование Crystal V2 LSP
+# Quick Start - Testing Crystal V2 LSP
 
-## 1. Скомпилировать LSP сервер
+## 1. Build LSP Server
 
 ```bash
-cd /Users/sergey/Projects/Crystal/crystal/crystal_v2
+cd /path/to/crystal_v2
 ./build_lsp.sh
 ```
 
-## 2. Установить зависимости расширения
+## 2. Install Extension Dependencies
 
 ```bash
 cd vscode-extension
 npm install
 ```
 
-## 3. Запустить в режиме отладки
+## 3. Launch in Debug Mode
 
-1. Откройте папку `vscode-extension` в VS Code:
+1. Open `vscode-extension` folder in VS Code:
    ```bash
-   code /Users/sergey/Projects/Crystal/crystal/crystal_v2/vscode-extension
+   code /path/to/crystal_v2/vscode-extension
    ```
 
-2. Нажмите **F5** (или Run → Start Debugging)
+2. Press **F5** (or Run → Start Debugging)
 
-3. Откроется новое окно VS Code с заголовком **"[Extension Development Host]"**
+3. A new VS Code window opens with title **"[Extension Development Host]"**
 
-4. В этом окне откройте любой `.cr` файл или создайте новый:
-   - File → Open Folder → выберите проект с `.cr` файлами
-   - ИЛИ создайте новый файл: File → New File → выберите язык "Crystal"
+4. In this window, open any `.cr` file or create a new one:
+   - File → Open Folder → select project with `.cr` files
+   - OR create new file: File → New File → select language "Crystal"
 
-## 4. Быстрый тест
+## 4. Quick Test
 
-Создайте файл `test.cr`:
+Create `test.cr`:
 
 ```crystal
 class Calculator
@@ -44,43 +44,43 @@ calc = Calculator.new
 result = calc.add(5, 3)
 ```
 
-**Попробуйте:**
-- Наведите на `calc` → должен показать тип `Calculator`
-- `F12` на `add` → переход к определению
-- `Ctrl+Space` после `calc.` → автодополнение
-- `Shift+Alt+F` → форматирование документа
-- `F2` на `calc` → переименование
+**Try these features:**
+- Hover over `calc` → should show type `Calculator`
+- `F12` on `add` → jumps to definition
+- `Ctrl+Space` after `calc.` → autocompletion
+- `Shift+Alt+F` → format document
+- `F2` on `calc` → rename
 
-## 5. Проверка что LSP работает
+## 5. Verify LSP is Working
 
-В окне Extension Development Host:
-- View → Output → выберите "Crystal V2 Language Server"
-- Должны видеть логи взаимодействия с сервером
+In the Extension Development Host window:
+- View → Output → select "Crystal V2 Language Server"
+- Should see LSP communication logs
 
 ## Troubleshooting
 
-**Если расширение не активировалось:**
-1. Убедитесь что файл имеет расширение `.cr`
-2. Проверьте что язык файла установлен как "Crystal" (в нижнем правом углу VS Code)
+**If extension doesn't activate:**
+1. Make sure file has `.cr` extension
+2. Check file language is set to "Crystal" (bottom right corner of VS Code)
 
-**Если LSP не запускается:**
-1. Проверьте что `bin/crystal_v2_lsp` существует и исполняемый:
+**If LSP doesn't start:**
+1. Verify `bin/crystal_v2_lsp` exists and is executable:
    ```bash
    ls -lh ../bin/crystal_v2_lsp
-   ./bin/crystal_v2_lsp --version  # Должен запуститься (Ctrl+C для выхода)
+   ./bin/crystal_v2_lsp --version  # Should start (Ctrl+C to exit)
    ```
 
-2. Проверьте логи в VS Code:
+2. Check VS Code logs:
    - Help → Toggle Developer Tools → Console
    - View → Output → "Crystal V2 Language Server"
 
-**Если нужно перезапустить LSP:**
-1. Закройте Extension Development Host
-2. Нажмите F5 снова
+**To restart LSP:**
+1. Close Extension Development Host
+2. Press F5 again
 
-## Следующие шаги
+## Next Steps
 
-После успешного тестирования можно:
-1. Установить расширение постоянно (см. README.md)
-2. Вернуться к плану реализации оставшихся LSP методов
-3. Добавить поддержку отладки (Debug Adapter Protocol)
+After successful testing:
+1. Install extension permanently (see README.md)
+2. Return to implementation plan
+3. Add Debug Adapter Protocol support

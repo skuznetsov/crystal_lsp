@@ -1,133 +1,133 @@
 # LSP Feature Coverage
 
-## ✅ Реализованные возможности
+## ✅ Implemented Features
 
-### Базовые (Lifecycle)
-- ✅ `initialize` - Инициализация сервера
-- ✅ `initialized` - Подтверждение инициализации
-- ✅ `shutdown` - Завершение работы
-- ✅ `exit` - Выход
+### Basic (Lifecycle)
+- ✅ `initialize` - Server initialization
+- ✅ `initialized` - Initialization confirmation
+- ✅ `shutdown` - Shutdown request
+- ✅ `exit` - Exit notification
 
-### Документы (Text Synchronization)
-- ✅ `textDocument/didOpen` - Открытие документа
-- ✅ `textDocument/didChange` - Изменение документа (TODO: не полностью)
-- ✅ `textDocument/didClose` - Закрытие документа
+### Documents (Text Synchronization)
+- ✅ `textDocument/didOpen` - Document opened
+- ✅ `textDocument/didChange` - Document changed (TODO: not fully implemented)
+- ✅ `textDocument/didClose` - Document closed
 
-### Навигация (Language Features)
+### Navigation (Language Features)
 - ✅ `textDocument/definition` - Go to Definition
 - ✅ `textDocument/references` - Find All References
-- ✅ `textDocument/hover` - Hover информация (типы, документация)
-- ✅ `textDocument/documentSymbol` - Outline/Структура документа
+- ✅ `textDocument/hover` - Hover information (types, documentation)
+- ✅ `textDocument/documentSymbol` - Document outline/structure
 
-### Редактирование (Code Intelligence)
-- ✅ `textDocument/completion` - Автодополнение
-- ✅ `textDocument/signatureHelp` - Подсказки сигнатур функций
-- ✅ `textDocument/rename` - Переименование символов
-- ✅ `textDocument/prepareRename` - Проверка возможности переименования
+### Editing (Code Intelligence)
+- ✅ `textDocument/completion` - Autocompletion
+- ✅ `textDocument/signatureHelp` - Function signature hints
+- ✅ `textDocument/rename` - Rename symbols
+- ✅ `textDocument/prepareRename` - Check if rename is possible
 
-### Форматирование
-- ✅ `textDocument/formatting` - Форматирование всего документа
-- ✅ `textDocument/rangeFormatting` - Форматирование диапазона (MVP: форматирует весь файл)
+### Formatting
+- ✅ `textDocument/formatting` - Format entire document
+- ✅ `textDocument/rangeFormatting` - Format range (MVP: formats entire file)
 
-### Визуальные улучшения
-- ✅ `textDocument/semanticTokens/full` - Семантическая подсветка
-- ✅ `textDocument/inlayHint` - Inline подсказки (типы параметров, возвращаемые значения)
-- ✅ `textDocument/foldingRange` - Сворачивание блоков кода
+### Visual Enhancements
+- ✅ `textDocument/semanticTokens/full` - Semantic highlighting
+- ✅ `textDocument/inlayHint` - Inline hints (parameter types, return values)
+- ✅ `textDocument/foldingRange` - Code folding
 
 ### Call Hierarchy
-- ✅ `textDocument/prepareCallHierarchy` - Подготовка иерархии вызовов
-- ✅ `callHierarchy/incomingCalls` - Кто вызывает эту функцию
-- ✅ `callHierarchy/outgoingCalls` - Что вызывает эта функция
+- ✅ `textDocument/prepareCallHierarchy` - Prepare call hierarchy
+- ✅ `callHierarchy/incomingCalls` - Who calls this function
+- ✅ `callHierarchy/outgoingCalls` - What this function calls
 
 ### Code Actions
-- ✅ `textDocument/codeAction` - Быстрые исправления и рефакторинги
+- ✅ `textDocument/codeAction` - Quick fixes and refactorings
 
 ---
 
-## 🔴 НЕ реализовано (стандартные LSP методы)
+## 🔴 NOT Implemented (standard LSP methods)
 
-### Навигация
-- ❌ `textDocument/declaration` - Go to Declaration (отличается от definition)
+### Navigation
+- ❌ `textDocument/declaration` - Go to Declaration (differs from definition)
 - ❌ `textDocument/typeDefinition` - Go to Type Definition
-- ❌ `textDocument/implementation` - Go to Implementation (для интерфейсов)
-- ❌ `textDocument/documentHighlight` - Подсветка всех вхождений символа
+- ❌ `textDocument/implementation` - Go to Implementation (for interfaces)
+- ❌ `textDocument/documentHighlight` - Highlight all occurrences of symbol
 
 ### Code Lens
-- ❌ `textDocument/codeLens` - Показывает информацию над кодом (счетчик ссылок, "Run", "Debug")
-- ❌ `codeLens/resolve` - Резолв code lens
+- ❌ `textDocument/codeLens` - Show information above code (reference counts, "Run", "Debug")
+- ❌ `codeLens/resolve` - Resolve code lens
 
-### Форматирование
-- ❌ `textDocument/onTypeFormatting` - Форматирование при вводе (после `;`, `}`, etc)
+### Formatting
+- ❌ `textDocument/onTypeFormatting` - Format on typing (after `;`, `}`, etc)
 
-### Диагностика
-- ❌ `textDocument/diagnostic` - Pull diagnostics (новый протокол 3.17)
+### Diagnostics
+- ❌ `textDocument/diagnostic` - Pull diagnostics (protocol 3.17)
 - ❌ `workspace/diagnostic` - Workspace-wide diagnostics
 
 ### Workspace
-- ❌ `workspace/symbol` - Поиск символов по всему workspace
-- ❌ `workspace/didChangeConfiguration` - Изменение конфигурации
-- ❌ `workspace/didChangeWatchedFiles` - Изменения файлов
+- ❌ `workspace/symbol` - Search symbols across entire workspace
+- ❌ `workspace/didChangeConfiguration` - Configuration changed
+- ❌ `workspace/didChangeWatchedFiles` - Watched files changed
 
 ### Selection & Linking
 - ❌ `textDocument/selectionRange` - Smart selection (expand/shrink selection)
-- ❌ `textDocument/linkedEditingRange` - Одновременное редактирование связанных элементов
-- ❌ `textDocument/documentLink` - Ссылки в документе (кликабельные пути)
-- ❌ `documentLink/resolve` - Резолв ссылок
+- ❌ `textDocument/linkedEditingRange` - Simultaneous editing of related elements
+- ❌ `textDocument/documentLink` - Links in document (clickable paths)
+- ❌ `documentLink/resolve` - Resolve links
 
 ### Color
-- ❌ `textDocument/documentColor` - Цветовые литералы
+- ❌ `textDocument/documentColor` - Color literals
 - ❌ `textDocument/colorPresentation` - Color picker
 
 ### Type Hierarchy (LSP 3.17)
-- ❌ `textDocument/prepareTypeHierarchy` - Подготовка иерархии типов
-- ❌ `typeHierarchy/supertypes` - Супертипы
-- ❌ `typeHierarchy/subtypes` - Подтипы
+- ❌ `textDocument/prepareTypeHierarchy` - Prepare type hierarchy
+- ❌ `typeHierarchy/supertypes` - Supertypes
+- ❌ `typeHierarchy/subtypes` - Subtypes
 
 ### Inline Values (LSP 3.17)
-- ❌ `textDocument/inlineValue` - Показывает значения переменных во время отладки
+- ❌ `textDocument/inlineValue` - Show variable values during debugging
 
 ### Monikers (LSP 3.16)
-- ❌ `textDocument/moniker` - Уникальные идентификаторы для кросс-репозиторной навигации
+- ❌ `textDocument/moniker` - Unique identifiers for cross-repository navigation
 
 ---
 
-## 💡 Приоритетные для реализации
+## 💡 Priority for Implementation
 
-### Высокий приоритет
-1. **`textDocument/documentHighlight`** - Очень полезно для подсветки использований
-2. **`textDocument/onTypeFormatting`** - Автоформатирование при вводе
-3. **`workspace/symbol`** - Глобальный поиск символов
-4. **`textDocument/codeLens`** - Показывать количество ссылок, run tests, etc
+### High Priority
+1. **`textDocument/documentHighlight`** - Very useful for highlighting usages
+2. **`textDocument/onTypeFormatting`** - Auto-format on typing
+3. **`workspace/symbol`** - Global symbol search
+4. **`textDocument/codeLens`** - Show reference counts, run tests, etc
 
-### Средний приоритет
+### Medium Priority
 5. **`textDocument/typeDefinition`** - Go to type definition
 6. **`textDocument/implementation`** - Go to implementation
 7. **`textDocument/selectionRange`** - Smart selection
-8. **`textDocument/documentLink`** - Кликабельные пути/URLs
+8. **`textDocument/documentLink`** - Clickable paths/URLs
 
-### Низкий приоритет
+### Low Priority
 9. **`textDocument/linkedEditingRange`** - Linked editing
-10. **Type Hierarchy** - Иерархия типов (если нужна поддержка наследования)
+10. **Type Hierarchy** - Type hierarchy (if inheritance support needed)
 
 ---
 
-## 📊 Статистика
+## 📊 Statistics
 
-- **Реализовано**: 21 метод
-- **Стандартных LSP методов**: ~40-50
-- **Покрытие**: ~50-60% основных возможностей
-- **Качество**: Высокое (token-based formatter быстрее оригинала на 54%)
+- **Implemented**: 21 methods
+- **Standard LSP methods**: ~40-50
+- **Coverage**: ~50-60% of core features
+- **Quality**: High (token-based formatter 54% faster than original)
 
 ---
 
-## 🎯 Следующие шаги
+## 🎯 Next Steps
 
-Рекомендуемый порядок реализации:
+Recommended implementation order:
 
-1. **Улучшить `textDocument/didChange`** - Сейчас TODO
-2. **`textDocument/documentHighlight`** - Быстро реализуется, очень полезно
-3. **`textDocument/onTypeFormatting`** - Можно использовать уже готовый formatter
-4. **`workspace/symbol`** - Глобальный поиск по всем файлам
-5. **`textDocument/codeLens`** - Показывать счетчики ссылок
+1. **Improve `textDocument/didChange`** - Currently TODO
+2. **`textDocument/documentHighlight`** - Quick to implement, very useful
+3. **`textDocument/onTypeFormatting`** - Can reuse existing formatter
+4. **`workspace/symbol`** - Global search across all files
+5. **`textDocument/codeLens`** - Show reference counters
 
-Остальные методы можно добавлять по мере необходимости.
+Other methods can be added as needed.

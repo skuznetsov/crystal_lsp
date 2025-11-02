@@ -1,81 +1,83 @@
-# Crystal V2 Language Server для VS Code
+# Crystal V2 Language Server for VS Code
 
-Расширение VS Code для работы с CrystalV2 Language Server.
+VS Code extension for CrystalV2 Language Server Protocol support.
 
-## Что реализовано (21 метод LSP)
+## Implemented Features (21 LSP methods)
 
-### ✅ Навигация
-- **Go to Definition** (`F12`) - переход к определению
-- **Find All References** (`Shift+F12`) - поиск всех использований
-- **Hover** - информация о типах при наведении
-- **Document Symbols** (`Cmd+Shift+O`) - структура документа
-- **Call Hierarchy** - иерархия вызовов функций
+### ✅ Navigation
+- **Go to Definition** (`F12`) - Jump to symbol definition
+- **Find All References** (`Shift+F12`) - Find all symbol usages
+- **Hover** - Show type information on hover
+- **Document Symbols** (`Cmd+Shift+O`) - Document outline
+- **Call Hierarchy** - Function call hierarchy (incoming/outgoing)
 
-### ✅ Автодополнение
-- **Completion** (`Ctrl+Space`) - автодополнение кода
-- **Signature Help** (`Cmd+Shift+Space`) - подсказки параметров функций
+### ✅ Code Intelligence
+- **Completion** (`Ctrl+Space`) - Code autocompletion
+- **Signature Help** (`Cmd+Shift+Space`) - Function parameter hints
 
-### ✅ Редактирование
-- **Rename** (`F2`) - переименование символов
-- **Format Document** (`Shift+Alt+F`) - форматирование кода (54% быстрее оригинала!)
+### ✅ Editing
+- **Rename** (`F2`) - Rename symbols across files
+- **Format Document** (`Shift+Alt+F`) - Code formatting (54% faster than original!)
 
-### ✅ Визуальные улучшения
-- **Semantic Highlighting** - семантическая подсветка
-- **Inlay Hints** - inline подсказки типов
-- **Folding Ranges** - сворачивание блоков кода
+### ✅ Visual Enhancements
+- **Semantic Highlighting** - Semantic token coloring
+- **Inlay Hints** - Inline type hints
+- **Folding Ranges** - Code block folding
 
 ### ✅ Code Actions
-- **Quick Fixes** (`Cmd+.`) - быстрые исправления
+- **Quick Fixes** (`Cmd+.`) - Quick fixes and refactorings
 
-## Установка
+## Installation
 
-### Шаг 1: Скомпилировать LSP сервер
+### Step 1: Build LSP Server
 
 ```bash
-cd /Users/sergey/Projects/Crystal/crystal/crystal_v2
+cd /path/to/crystal_v2
 ./build_lsp.sh
 ```
 
-Это создаст исполняемый файл `bin/crystal_v2_lsp`.
+This creates the executable `bin/crystal_v2_lsp`.
 
-### Шаг 2: Установить зависимости расширения
+### Step 2: Install Extension Dependencies
 
 ```bash
 cd vscode-extension
 npm install
 ```
 
-### Шаг 3: Установить расширение в VS Code
+### Step 3: Install Extension in VS Code
 
-**Вариант A: Отладка (для разработки)**
+**Option A: Debug Mode (for development)**
 
-1. Откройте папку `vscode-extension` в VS Code:
+1. Open the `vscode-extension` folder in VS Code:
    ```bash
    code vscode-extension
    ```
 
-2. Нажмите `F5` для запуска Extension Development Host
+2. Press **F5** (or Run → Start Debugging)
 
-3. В новом окне VS Code откройте любой `.cr` файл
+3. A new VS Code window opens with "[Extension Development Host]" title
 
-**Вариант B: Установка в VS Code (для постоянного использования)**
+4. In this window, open any `.cr` file
 
-1. Создайте .vsix пакет:
+**Option B: Install in VS Code (for permanent use)**
+
+1. Create .vsix package:
    ```bash
    cd vscode-extension
    npm install -g @vscode/vsce
    vsce package
    ```
 
-2. Установите созданный .vsix файл:
-   - VS Code → Extensions → `...` (три точки) → Install from VSIX
-   - Выберите `crystalv2-lsp-0.1.0.vsix`
+2. Install the created .vsix file:
+   - VS Code → Extensions → `...` (three dots) → Install from VSIX
+   - Select `crystalv2-lsp-0.1.0.vsix`
 
-3. Перезапустите VS Code
+3. Restart VS Code
 
-## Тестирование
+## Testing
 
-### Создайте тестовый файл
+### Create Test File
 
 ```bash
 cat > test.cr << 'EOF'
@@ -95,60 +97,61 @@ puts result
 EOF
 ```
 
-### Проверьте функциональность
+### Try Features
 
-1. **Hover** - наведите на `calc` → должен показать тип `Calculator`
-2. **Go to Definition** (`F12`) - кликните на `add` → переход к определению метода
-3. **Completion** (`Ctrl+Space`) - начните печатать `calc.` → автодополнение методов
-4. **Format** (`Shift+Alt+F`) - отформатируйте код
-5. **Rename** (`F2`) - переименуйте `calc` → изменится везде
-6. **Outline** (`Cmd+Shift+O`) - посмотрите структуру документа
+1. **Hover** - Hover over `calc` → shows type `Calculator`
+2. **Go to Definition** (`F12`) - Click on `add` → jumps to method definition
+3. **Completion** (`Ctrl+Space`) - Start typing `calc.` → method suggestions
+4. **Format** (`Shift+Alt+F`) - Format the code
+5. **Rename** (`F2`) - Rename `calc` → updates everywhere
+6. **Outline** (`Cmd+Shift+O`) - View document structure
 
-## Отладка
+## Debugging
 
-Если что-то не работает:
+If something doesn't work:
 
-1. **Проверьте, что LSP сервер скомпилирован:**
+1. **Check LSP server is built:**
    ```bash
    ls -lh crystal_v2/bin/crystal_v2_lsp
    ```
 
-2. **Запустите LSP сервер вручную для проверки:**
+2. **Run LSP server manually to verify:**
    ```bash
    cd crystal_v2
    ./bin/crystal_v2_lsp
    ```
 
-   Введите:
+   Send test input:
    ```json
    Content-Length: 95
 
    {"jsonrpc":"2.0","id":1,"method":"initialize","params":{"capabilities":{},"rootUri":null}}
    ```
 
-   Должен ответить с capabilities.
+   Should respond with capabilities.
 
-3. **Включите LSP трассировку в VS Code:**
+3. **Enable LSP tracing in VS Code:**
    - Settings → `crystalv2.lsp.trace.server` → `verbose`
-   - View → Output → выберите "Crystal V2 Language Server"
+   - View → Output → select "Crystal V2 Language Server"
 
-4. **Проверьте логи расширения:**
-   - View → Output → выберите "Crystal V2 Language Server"
+4. **Check extension logs:**
+   - View → Output → "Crystal V2 Language Server"
    - Help → Toggle Developer Tools → Console
 
-## Производительность
+## Performance
 
-Форматер CrystalV2:
-- **35ms** в среднем для файла в 6479 строк
-- **54% быстрее** оригинального Crystal форматера
-- **18.8x меньше кода** (280 vs 5260 строк)
+CrystalV2 Formatter:
+- **35ms** average for 6479-line file
+- **54% faster** than original Crystal formatter
+- **18.8x less code** (280 vs 5260 lines)
 
-## Следующие шаги
+## Future Plans
 
-Планируется добавить:
-- `textDocument/documentHighlight` - подсветка вхождений символа
-- `textDocument/onTypeFormatting` - форматирование при вводе
-- `workspace/symbol` - глобальный поиск символов
-- `textDocument/codeLens` - счетчики ссылок
+Planned additions:
+- `textDocument/documentHighlight` - Highlight symbol occurrences
+- `textDocument/onTypeFormatting` - Format on typing
+- `workspace/symbol` - Global symbol search
+- `textDocument/codeLens` - Reference counts
+- **Debug Adapter Protocol** - Debugging support
 
-См. `../LSP_COVERAGE.md` для полного плана.
+See `../LSP_COVERAGE.md` for complete roadmap.
