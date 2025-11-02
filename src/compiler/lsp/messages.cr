@@ -200,6 +200,32 @@ module CrystalV2
         def initialize(@text_document : TextDocumentIdentifier, @range : Range)
         end
       end
+
+      # Prepare rename request params
+      struct PrepareRenameParams
+        include JSON::Serializable
+
+        @[JSON::Field(key: "textDocument")]
+        property text_document : TextDocumentIdentifier
+        property position : Position
+
+        def initialize(@text_document : TextDocumentIdentifier, @position : Position)
+        end
+      end
+
+      # Rename request params
+      struct RenameParams
+        include JSON::Serializable
+
+        @[JSON::Field(key: "textDocument")]
+        property text_document : TextDocumentIdentifier
+        property position : Position
+        @[JSON::Field(key: "newName")]
+        property new_name : String
+
+        def initialize(@text_document : TextDocumentIdentifier, @position : Position, @new_name : String)
+        end
+      end
     end
   end
 end

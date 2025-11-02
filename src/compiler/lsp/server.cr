@@ -29,6 +29,12 @@ module CrystalV2
       # Minimal LSP Server implementation
       # Handles initialize, didOpen, publishDiagnostics, and hover
       class Server
+        # Security constants - prevent DoS attacks and resource exhaustion
+        # These limits balance security with practical usability for large projects
+        MAX_RENAME_OCCURRENCES = 10000   # Maximum number of edits in single rename operation
+                                          # Common variables (i, x, data, result) can have thousands of uses
+        MAX_IDENTIFIER_LENGTH  = 255     # Maximum length of identifier name (Crystal compiler limit)
+
         @input : IO
         @output : IO
         @documents : Hash(String, DocumentState)
@@ -121,6 +127,10 @@ module CrystalV2
             handle_references(id, params)
           when "textDocument/inlayHint"
             handle_inlay_hint(id, params)
+          when "textDocument/prepareRename"
+            handle_prepare_rename(id, params)
+          when "textDocument/rename"
+            handle_rename(id, params)
           else
             send_error(id, -32601, "Method not found: #{method}")
           end
@@ -676,6 +686,110 @@ module CrystalV2
           send_response(id, hints.to_json)
         end
 
+        # Handle textDocument/prepareRename request
+        # Validates that rename is possible and returns range to rename
+        private def handle_prepare_rename(id : JSON::Any, params : JSON::Any?)
+          return send_error(id, -32602, "Missing params") unless params
+
+          uri = params["textDocument"]["uri"].as_s
+          position = params["position"]
+          line = position["line"].as_i
+          character = position["character"].as_i
+
+          debug("PrepareRename request: line=#{line}, char=#{character}")
+
+          doc_state = @documents[uri]?
+          return send_response(id, "null") unless doc_state
+
+          # Find expression at position
+          expr_id = find_expr_at_position(doc_state.program, line, character)
+          return send_response(id, "null") unless expr_id
+
+          # Get symbol for this expression
+          identifier_symbols = doc_state.identifier_symbols
+          return send_response(id, "null") unless identifier_symbols
+
+          symbol = identifier_symbols[expr_id]?
+          return send_response(id, "null") unless symbol
+
+          # Validate symbol can be renamed
+          unless can_rename_symbol?(symbol)
+            debug("  Symbol cannot be renamed (built-in or invalid)")
+            return send_response(id, "null")  # Silently fail per LSP spec
+          end
+
+          # Get range from symbol node
+          node = doc_state.program.arena[symbol.node_id]
+          range = Range.from_span(node.span)
+
+          # Return range with placeholder (current symbol name)
+          result = PrepareRenameResult.new(
+            range: range,
+            placeholder: symbol.name
+          )
+
+          debug("  Returning range for symbol: #{symbol.name}")
+          send_response(id, result.to_json)
+        end
+
+        # Handle textDocument/rename request
+        # Performs the actual rename operation and returns WorkspaceEdit
+        private def handle_rename(id : JSON::Any, params : JSON::Any?)
+          return send_error(id, -32602, "Missing params") unless params
+
+          uri = params["textDocument"]["uri"].as_s
+          position = params["position"]
+          line = position["line"].as_i
+          character = position["character"].as_i
+          new_name = params["newName"].as_s
+
+          debug("Rename request: line=#{line}, char=#{character}, newName=#{new_name}")
+
+          # Validate new name - SECURITY: prevent injection and DoS
+          unless validate_identifier(new_name)
+            return send_error(id, -32602, "Invalid identifier: #{new_name}")
+          end
+
+          if is_keyword?(new_name)
+            return send_error(id, -32602, "Cannot use keyword as identifier: #{new_name}")
+          end
+
+          doc_state = @documents[uri]?
+          return send_response(id, "null") unless doc_state
+
+          # Find expression at position
+          expr_id = find_expr_at_position(doc_state.program, line, character)
+          return send_response(id, "null") unless expr_id
+
+          # Get symbol for this expression
+          identifier_symbols = doc_state.identifier_symbols
+          return send_response(id, "null") unless identifier_symbols
+
+          symbol = identifier_symbols[expr_id]?
+          return send_response(id, "null") unless symbol
+
+          # Validate symbol can be renamed
+          unless can_rename_symbol?(symbol)
+            return send_error(id, -32600, "Cannot rename this symbol")
+          end
+
+          # Find all occurrences and create edits
+          # SECURITY: This returns nil if too many occurrences (DoS protection)
+          edits = find_rename_edits(symbol, doc_state.program, identifier_symbols, new_name)
+
+          unless edits
+            return send_error(id, -32600, "Too many occurrences to rename (limit: #{MAX_RENAME_OCCURRENCES})")
+          end
+
+          # Create WorkspaceEdit
+          workspace_edit = WorkspaceEdit.new(
+            changes: {uri => edits}
+          )
+
+          debug("Returning WorkspaceEdit with #{edits.size} edits")
+          send_response(id, workspace_edit.to_json)
+        end
+
         # Collect all symbols from symbol table (including parent tables)
         private def collect_symbols_from_table(table : Semantic::SymbolTable, items : Array(CompletionItem))
           table.each_local_symbol do |name, symbol|
@@ -1140,6 +1254,101 @@ module CrystalV2
         # Log error to stderr
         private def log_error(message : String)
           STDERR.puts("[LSP Error] #{message}")
+        end
+
+        # Rename helper methods
+
+        # Check if symbol can be safely renamed
+        # Returns false for built-in types, keywords, or invalid symbols
+        private def can_rename_symbol?(symbol : Semantic::Symbol) : Bool
+          # Cannot rename symbol without valid node
+          return false if symbol.node_id.invalid?
+
+          # Check if it's a built-in primitive type
+          case symbol
+          when Semantic::ClassSymbol
+            return false if is_primitive_type?(symbol.name)
+          end
+
+          true
+        end
+
+        # Check if name is a Crystal primitive type
+        private def is_primitive_type?(name : String) : Bool
+          ["Int32", "Int64", "Float64", "String", "Bool", "Nil", "Char", "Symbol"].includes?(name)
+        end
+
+        # Validate identifier syntax and security constraints
+        # SECURITY: Prevents injection attacks and resource exhaustion
+        private def validate_identifier(name : String) : Bool
+          # Empty name
+          return false if name.empty?
+
+          # Length check - prevent DoS via huge identifiers
+          return false if name.size > MAX_IDENTIFIER_LENGTH
+
+          # Must start with letter or underscore
+          first_char = name[0]
+          return false unless first_char.ascii_letter? || first_char == '_'
+
+          # Rest must be alphanumeric or underscore
+          name.each_char do |char|
+            return false unless char.ascii_alphanumeric? || char == '_'
+          end
+
+          true
+        end
+
+        # Check if name is a Crystal keyword
+        private def is_keyword?(name : String) : Bool
+          keywords = [
+            "abstract", "alias", "annotation", "as", "asm", "begin", "break",
+            "case", "class", "def", "do", "else", "elsif", "end", "ensure",
+            "enum", "extend", "false", "for", "fun", "if", "in", "include",
+            "instance_sizeof", "is_a?", "lib", "macro", "module", "next",
+            "nil", "nil?", "of", "out", "pointerof", "private", "protected",
+            "require", "rescue", "responds_to?", "return", "select", "self",
+            "sizeof", "struct", "super", "then", "true", "type", "typeof",
+            "uninitialized", "union", "unless", "until", "when", "while",
+            "with", "yield"
+          ]
+          keywords.includes?(name)
+        end
+
+        # Find all locations where symbol should be renamed
+        # Returns array of TextEdit operations
+        # SECURITY: Limits number of edits to prevent DoS
+        private def find_rename_edits(
+          target_symbol : Semantic::Symbol,
+          program : Frontend::Program,
+          identifier_symbols : Hash(Frontend::ExprId, Semantic::Symbol),
+          new_name : String
+        ) : Array(TextEdit)?
+          edits = [] of TextEdit
+
+          debug("Finding rename locations for symbol: #{target_symbol.name}")
+
+          # Iterate through all identifier->symbol mappings
+          identifier_symbols.each do |expr_id, symbol|
+            # Check if this identifier refers to our target symbol
+            next unless symbol == target_symbol
+
+            # SECURITY: Limit number of edits to prevent DoS attack
+            if edits.size >= MAX_RENAME_OCCURRENCES
+              debug("  Too many occurrences (>#{MAX_RENAME_OCCURRENCES}), aborting")
+              return nil  # Signal caller to return error
+            end
+
+            # Create edit for this occurrence
+            node = program.arena[expr_id]
+            range = Range.from_span(node.span)
+            edits << TextEdit.new(range: range, new_text: new_name)
+
+            debug("  Found occurrence at line=#{range.start.line}, char=#{range.start.character}")
+          end
+
+          debug("Found #{edits.size} total rename locations")
+          edits
         end
       end
     end

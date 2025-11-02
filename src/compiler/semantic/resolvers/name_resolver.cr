@@ -78,6 +78,16 @@ module CrystalV2
             visit_def(node)
           when Frontend::ClassNode
             visit_class(node)
+          when Frontend::IfNode
+            visit_if(node)
+          when Frontend::UnlessNode
+            visit_unless(node)
+          when Frontend::WhileNode
+            visit_while(node)
+          when Frontend::UntilNode
+            visit_until(node)
+          when Frontend::LoopNode
+            visit_loop(node)
           else
             # Other kinds currently unsupported; ignore
           end
@@ -181,6 +191,50 @@ module CrystalV2
           end
 
           @current_table = prev_table
+        end
+
+        # Control flow node visitors
+
+        private def visit_if(node : Frontend::IfNode)
+          # Visit condition
+          visit(node.condition)
+          # Visit then body
+          node.then_body.each { |expr_id| visit(expr_id) }
+          # Visit elsif branches
+          node.elsifs.try &.each do |elsif_branch|
+            visit(elsif_branch.condition)
+            elsif_branch.body.each { |expr_id| visit(expr_id) }
+          end
+          # Visit else body
+          node.else_body.try &.each { |expr_id| visit(expr_id) }
+        end
+
+        private def visit_unless(node : Frontend::UnlessNode)
+          # Visit condition
+          visit(node.condition)
+          # Visit then branch
+          node.then_branch.each { |expr_id| visit(expr_id) }
+          # Visit else branch
+          node.else_branch.try &.each { |expr_id| visit(expr_id) }
+        end
+
+        private def visit_while(node : Frontend::WhileNode)
+          # Visit condition
+          visit(node.condition)
+          # Visit body
+          node.body.each { |expr_id| visit(expr_id) }
+        end
+
+        private def visit_until(node : Frontend::UntilNode)
+          # Visit condition
+          visit(node.condition)
+          # Visit body
+          node.body.each { |expr_id| visit(expr_id) }
+        end
+
+        private def visit_loop(node : Frontend::LoopNode)
+          # Visit body
+          node.body.each { |expr_id| visit(expr_id) }
         end
       end
     end

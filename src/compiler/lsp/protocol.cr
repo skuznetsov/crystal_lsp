@@ -494,6 +494,42 @@ module CrystalV2
         )
         end
       end
+
+      # Rename structures (LSP 3.17)
+
+      # Text edit - represents a textual edit applicable to a text document
+      struct TextEdit
+        include JSON::Serializable
+
+        property range : Range
+        @[JSON::Field(key: "newText")]
+        property new_text : String
+
+        def initialize(@range : Range, @new_text : String)
+        end
+      end
+
+      # Workspace edit - represents changes to many resources managed in the workspace
+      struct WorkspaceEdit
+        include JSON::Serializable
+
+        property changes : Hash(String, Array(TextEdit))  # URI => edits
+
+        def initialize(@changes : Hash(String, Array(TextEdit)))
+        end
+      end
+
+      # Prepare rename result - describes the range and placeholder for rename
+      # Response for textDocument/prepareRename
+      struct PrepareRenameResult
+        include JSON::Serializable
+
+        property range : Range
+        property placeholder : String
+
+        def initialize(@range : Range, @placeholder : String)
+        end
+      end
     end
   end
 end
