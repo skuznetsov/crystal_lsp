@@ -237,6 +237,17 @@ module CrystalV2
         def initialize(@text_document : TextDocumentIdentifier)
         end
       end
+
+      # Semantic tokens request params
+      struct SemanticTokensParams
+        include JSON::Serializable
+
+        @[JSON::Field(key: "textDocument")]
+        property text_document : TextDocumentIdentifier
+
+        def initialize(@text_document : TextDocumentIdentifier)
+        end
+      end
     end
   end
 end

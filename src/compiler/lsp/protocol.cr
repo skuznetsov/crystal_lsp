@@ -565,6 +565,22 @@ module CrystalV2
         )
         end
       end
+
+      # Semantic tokens structures (LSP 3.16)
+
+      # Semantic tokens - enhanced syntax highlighting with semantic information
+      # Response for textDocument/semanticTokens/full
+      struct SemanticTokens
+        include JSON::Serializable
+
+        @[JSON::Field(key: "resultId")]
+        property result_id : String?  # Optional: cache identifier
+
+        property data : Array(Int32)  # Delta-encoded token data
+
+        def initialize(@data : Array(Int32), @result_id : String? = nil)
+        end
+      end
     end
   end
 end

@@ -133,6 +133,8 @@ module CrystalV2
             handle_rename(id, params)
           when "textDocument/foldingRange"
             handle_folding_range(id, params)
+          when "textDocument/semanticTokens/full"
+            handle_semantic_tokens(id, params)
           else
             send_error(id, -32601, "Method not found: #{method}")
           end
@@ -808,6 +810,24 @@ module CrystalV2
 
           debug("Found #{ranges.size} folding ranges")
           send_response(id, ranges.to_json)
+        end
+
+        # Handle textDocument/semanticTokens/full request
+        # Returns semantic tokens for enhanced syntax highlighting
+        private def handle_semantic_tokens(id : JSON::Any, params : JSON::Any?)
+          return send_error(id, -32602, "Missing params") unless params
+
+          uri = params["textDocument"]["uri"].as_s
+          debug("Semantic tokens request for: #{uri}")
+
+          doc_state = @documents[uri]?
+          return send_response(id, SemanticTokens.new(data: [] of Int32).to_json) unless doc_state
+
+          # Collect semantic tokens from AST
+          tokens = collect_semantic_tokens(doc_state.program, doc_state.source)
+
+          debug("Generated #{tokens.size} semantic tokens")
+          send_response(id, tokens.to_json)
         end
 
         # Collect all symbols from symbol table (including parent tables)
@@ -1542,6 +1562,235 @@ module CrystalV2
           else
             # Other node types don't create folding ranges
           end
+        end
+
+        # Semantic token types (LSP 3.16 standard)
+        enum SemanticTokenType
+          Namespace      = 0
+          Type           = 1
+          Class          = 2
+          Enum           = 3
+          Interface      = 4
+          Struct         = 5
+          TypeParameter  = 6
+          Parameter      = 7
+          Variable       = 8
+          Property       = 9
+          EnumMember     = 10
+          Event          = 11
+          Function       = 12
+          Method         = 13
+          Macro          = 14
+          Keyword        = 15
+          Modifier       = 16
+          Comment        = 17
+          String         = 18
+          Number         = 19
+          Regexp         = 20
+          Operator       = 21
+        end
+
+        # Represents a single semantic token before delta encoding
+        private struct RawToken
+          property line : Int32
+          property start_char : Int32
+          property length : Int32
+          property token_type : Int32
+          property modifiers : Int32
+
+          def initialize(@line : Int32, @start_char : Int32, @length : Int32, @token_type : Int32, @modifiers : Int32 = 0)
+          end
+        end
+
+        # Collect semantic tokens from AST and delta-encode them
+        # Public for testing
+        def collect_semantic_tokens(program : Frontend::Program, source : String) : SemanticTokens
+          raw_tokens = [] of RawToken
+
+          # Collect tokens from all root nodes
+          program.roots.each do |root_id|
+            collect_tokens_recursive(program.arena, root_id, raw_tokens)
+          end
+
+          # Sort tokens by line, then by start_char
+          raw_tokens.sort_by! { |t| {t.line, t.start_char} }
+
+          # Delta-encode tokens
+          data = delta_encode_tokens(raw_tokens)
+
+          SemanticTokens.new(data: data)
+        end
+
+        # Type alias for arena union (used in multiple places)
+        alias Arena = Frontend::AstArena | Frontend::VirtualArena
+
+        # Recursively collect tokens from AST nodes
+        private def collect_tokens_recursive(
+          arena : Arena,
+          node_id : Frontend::ExprId,
+          tokens : Array(RawToken)
+        )
+          return if node_id.invalid?
+          node = arena[node_id]
+
+          case node
+          when Frontend::ClassNode
+            # Token for class name
+            # Convert from 1-indexed to 0-indexed
+            line = node.span.start_line - 1
+            col = node.span.start_column - 1
+            length = node.name.bytesize
+            tokens << RawToken.new(line, col, length, SemanticTokenType::Class.value)
+
+            # Process body
+            if body = node.body
+              body.each { |expr_id| collect_tokens_recursive(arena, expr_id, tokens) }
+            end
+
+          when Frontend::DefNode
+            # Token for method name
+            line = node.span.start_line - 1
+            col = node.span.start_column - 1
+            length = node.name.bytesize
+            tokens << RawToken.new(line, col, length, SemanticTokenType::Method.value)
+
+            # Process parameters (mark them as parameters)
+            if params = node.params
+              params.each do |param|
+                param_line = param.span.start_line - 1
+                param_col = param.span.start_column - 1
+                param_length = param.name.bytesize
+                tokens << RawToken.new(param_line, param_col, param_length, SemanticTokenType::Parameter.value)
+              end
+            end
+
+            # Process body
+            if body = node.body
+              body.each { |expr_id| collect_tokens_recursive(arena, expr_id, tokens) }
+            end
+
+          when Frontend::IdentifierNode
+            # Token for identifier (variable or other)
+            line = node.span.start_line - 1
+            col = node.span.start_column - 1
+            length = node.name.bytesize
+            tokens << RawToken.new(line, col, length, SemanticTokenType::Variable.value)
+
+          when Frontend::StringNode
+            # Token for string literal
+            line = node.span.start_line - 1
+            col = node.span.start_column - 1
+            length = node.span.end_column - node.span.start_column
+            tokens << RawToken.new(line, col, length, SemanticTokenType::String.value)
+
+          when Frontend::NumberNode
+            # Token for number literal
+            line = node.span.start_line - 1
+            col = node.span.start_column - 1
+            length = node.span.end_column - node.span.start_column
+            tokens << RawToken.new(line, col, length, SemanticTokenType::Number.value)
+
+          when Frontend::BoolNode
+            # Token for boolean literal (true/false)
+            line = node.span.start_line - 1
+            col = node.span.start_column - 1
+            length = node.span.end_column - node.span.start_column
+            tokens << RawToken.new(line, col, length, SemanticTokenType::Keyword.value)
+
+          when Frontend::CallNode
+            # Process callee, arguments, block
+            collect_tokens_recursive(arena, node.callee, tokens) unless node.callee.invalid?
+            node.args.each { |arg_id| collect_tokens_recursive(arena, arg_id, tokens) }
+            if block = node.block
+              collect_tokens_recursive(arena, block, tokens) unless block.invalid?
+            end
+
+          when Frontend::BinaryNode
+            collect_tokens_recursive(arena, node.left, tokens)
+            collect_tokens_recursive(arena, node.right, tokens)
+
+          when Frontend::UnaryNode
+            collect_tokens_recursive(arena, node.operand, tokens)
+
+          when Frontend::AssignNode
+            collect_tokens_recursive(arena, node.target, tokens)
+            collect_tokens_recursive(arena, node.value, tokens)
+
+          when Frontend::IfNode
+            # Process condition
+            collect_tokens_recursive(arena, node.condition, tokens)
+
+            # Process then body
+            node.then_body.each { |expr_id| collect_tokens_recursive(arena, expr_id, tokens) }
+
+            # Process elsif clauses
+            if elsifs = node.elsifs
+              elsifs.each do |elsif_branch|
+                collect_tokens_recursive(arena, elsif_branch.condition, tokens)
+                elsif_branch.body.each { |expr_id| collect_tokens_recursive(arena, expr_id, tokens) }
+              end
+            end
+
+            # Process else body
+            if else_body = node.else_body
+              else_body.each { |expr_id| collect_tokens_recursive(arena, expr_id, tokens) }
+            end
+
+          when Frontend::UnlessNode
+            collect_tokens_recursive(arena, node.condition, tokens)
+            node.then_branch.each { |expr_id| collect_tokens_recursive(arena, expr_id, tokens) }
+            if else_branch = node.else_branch
+              else_branch.each { |expr_id| collect_tokens_recursive(arena, expr_id, tokens) }
+            end
+
+          when Frontend::WhileNode
+            collect_tokens_recursive(arena, node.condition, tokens)
+            node.body.each { |expr_id| collect_tokens_recursive(arena, expr_id, tokens) }
+
+          when Frontend::UntilNode
+            collect_tokens_recursive(arena, node.condition, tokens)
+            node.body.each { |expr_id| collect_tokens_recursive(arena, expr_id, tokens) }
+
+          when Frontend::LoopNode
+            node.body.each { |expr_id| collect_tokens_recursive(arena, expr_id, tokens) }
+
+          when Frontend::GroupingNode
+            collect_tokens_recursive(arena, node.expression, tokens)
+
+          else
+            # Other node types don't generate semantic tokens
+          end
+        end
+
+        # Delta-encode tokens according to LSP specification
+        # Format: [deltaLine, deltaStart, length, tokenType, tokenModifiers]
+        private def delta_encode_tokens(tokens : Array(RawToken)) : Array(Int32)
+          data = [] of Int32
+          prev_line = 0
+          prev_start = 0
+
+          tokens.each do |token|
+            # Calculate deltas
+            delta_line = token.line - prev_line
+            delta_start = if delta_line == 0
+                            token.start_char - prev_start
+                          else
+                            token.start_char
+                          end
+
+            # Append 5 integers: deltaLine, deltaStart, length, tokenType, tokenModifiers
+            data << delta_line
+            data << delta_start
+            data << token.length
+            data << token.token_type
+            data << token.modifiers
+
+            # Update previous position
+            prev_line = token.line
+            prev_start = token.start_char
+          end
+
+          data
         end
       end
     end
