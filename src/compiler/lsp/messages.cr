@@ -280,6 +280,30 @@ module CrystalV2
         def initialize(@item : CallHierarchyItem)
         end
       end
+
+      # Code action context - additional information about code action request
+      struct CodeActionContext
+        include JSON::Serializable
+
+        property diagnostics : Array(Diagnostic)
+        property only : Array(String)?
+
+        def initialize(@diagnostics : Array(Diagnostic), @only : Array(String)? = nil)
+        end
+      end
+
+      # Code action request params
+      struct CodeActionParams
+        include JSON::Serializable
+
+        @[JSON::Field(key: "textDocument")]
+        property text_document : TextDocumentIdentifier
+        property range : Range
+        property context : CodeActionContext
+
+        def initialize(@text_document : TextDocumentIdentifier, @range : Range, @context : CodeActionContext)
+        end
+      end
     end
   end
 end

@@ -141,6 +141,8 @@ module CrystalV2
             handle_incoming_calls(id, params)
           when "callHierarchy/outgoingCalls"
             handle_outgoing_calls(id, params)
+          when "textDocument/codeAction"
+            handle_code_action(id, params)
           else
             send_error(id, -32601, "Method not found: #{method}")
           end
@@ -899,6 +901,50 @@ module CrystalV2
 
           debug("Found #{outgoing.size} outgoing calls")
           send_response(id, outgoing.to_json)
+        end
+
+        # Handle textDocument/codeAction request
+        # Returns available code actions for the given range
+        private def handle_code_action(id : JSON::Any, params : JSON::Any?)
+          return send_error(id, -32602, "Missing params") unless params
+
+          uri = params["textDocument"]["uri"].as_s
+          range_json = params["range"]
+          context_json = params["context"]
+
+          debug("Code action request for: #{uri}")
+
+          doc_state = @documents[uri]?
+          return send_response(id, "[]") unless doc_state
+
+          # Parse range
+          start_line = range_json["start"]["line"].as_i
+          start_char = range_json["start"]["character"].as_i
+          end_line = range_json["end"]["line"].as_i
+          end_char = range_json["end"]["character"].as_i
+
+          start_pos = Position.new(line: start_line, character: start_char)
+          end_pos = Position.new(line: end_line, character: end_char)
+          range = Range.new(start: start_pos, end: end_pos)
+
+          # Parse diagnostics from context
+          diagnostics = [] of Diagnostic
+          if context_json["diagnostics"]?
+            context_json["diagnostics"].as_a.each do |diag_json|
+              begin
+                diag = Diagnostic.from_json(diag_json.to_json)
+                diagnostics << diag
+              rescue
+                # Skip invalid diagnostic
+              end
+            end
+          end
+
+          # Collect available actions
+          actions = collect_code_actions(doc_state, uri, range, diagnostics)
+
+          debug("Found #{actions.size} code actions")
+          send_response(id, actions.to_json)
         end
 
         # Collect all symbols from symbol table (including parent tables)
@@ -2013,6 +2059,87 @@ module CrystalV2
           when Frontend::AssignNode
             collect_calls_recursive(arena, node.value, identifier_symbols, calls)
           end
+        end
+
+        # Collect available code actions for the given range
+        private def collect_code_actions(
+          doc_state : DocumentState,
+          uri : String,
+          range : Range,
+          diagnostics : Array(Diagnostic)
+        ) : Array(CodeAction)
+          actions = [] of CodeAction
+
+          # QuickFix actions based on diagnostics
+          diagnostics.each do |diagnostic|
+            if quick_fix = create_quick_fix_action(doc_state, uri, diagnostic)
+              actions << quick_fix
+            end
+          end
+
+          # Refactor actions (context-based)
+          if refactor_actions = create_refactor_actions(doc_state, uri, range)
+            actions.concat(refactor_actions)
+          end
+
+          actions
+        end
+
+        # Create QuickFix action for a diagnostic
+        private def create_quick_fix_action(
+          doc_state : DocumentState,
+          uri : String,
+          diagnostic : Diagnostic
+        ) : CodeAction?
+          # MVP: Simple quick fix example - add type annotation
+          # This is a placeholder for demonstration
+          # Real implementation would analyze the diagnostic and provide appropriate fixes
+
+          return nil  # No quick fixes available yet (MVP)
+        end
+
+        # Create Refactor actions for the given range
+        private def create_refactor_actions(
+          doc_state : DocumentState,
+          uri : String,
+          range : Range
+        ) : Array(CodeAction)
+          actions = [] of CodeAction
+
+          # MVP: Simple refactor action - Extract variable
+          # For demonstration, we'll add a placeholder action
+          # Real implementation would analyze the AST and provide actual refactorings
+
+          # Example: Extract variable (if selection is an expression)
+          if can_extract_variable?(doc_state, range)
+            action = CodeAction.new(
+              title: "Extract to local variable",
+              kind: CodeActionKind::RefactorExtract
+              # edit would be added here in full implementation
+            )
+            actions << action
+          end
+
+          actions
+        end
+
+        # Check if the range can be extracted to a variable
+        private def can_extract_variable?(doc_state : DocumentState, range : Range) : Bool
+          # MVP: Simple heuristic - if range is not empty, suggest extraction
+          # Real implementation would check if selection is a valid expression
+
+          start_line = range.start.line
+          end_line = range.end.line
+          start_char = range.start.character
+          end_char = range.end.character
+
+          # Range must be non-empty
+          return false if start_line == end_line && start_char == end_char
+
+          # Must be single line for MVP
+          return false if start_line != end_line
+
+          true
         end
       end
     end

@@ -664,6 +664,46 @@ module CrystalV2
         def initialize(@to : CallHierarchyItem, @from_ranges : Array(Range))
         end
       end
+
+      # Code Action structures (LSP 3.16)
+
+      # Code action kinds - predefined types of actions
+      module CodeActionKind
+        Empty                = ""
+        QuickFix             = "quickfix"
+        Refactor             = "refactor"
+        RefactorExtract      = "refactor.extract"
+        RefactorInline       = "refactor.inline"
+        RefactorRewrite      = "refactor.rewrite"
+        Source               = "source"
+        SourceOrganizeImports = "source.organizeImports"
+      end
+
+      # Code action - represents a change that can be applied to code
+      # Response for textDocument/codeAction
+      struct CodeAction
+        include JSON::Serializable
+
+        property title : String
+        property kind : String?
+        property diagnostics : Array(Diagnostic)?
+        property edit : WorkspaceEdit?
+        @[JSON::Field(key: "isPreferred")]
+        property is_preferred : Bool?
+        property disabled : Hash(String, String)?
+        property data : JSON::Any?
+
+        def initialize(
+          @title : String,
+          @kind : String? = nil,
+          @diagnostics : Array(Diagnostic)? = nil,
+          @edit : WorkspaceEdit? = nil,
+          @is_preferred : Bool? = nil,
+          @disabled : Hash(String, String)? = nil,
+          @data : JSON::Any? = nil
+        )
+        end
+      end
     end
   end
 end
