@@ -117,6 +117,8 @@ module CrystalV2
             handle_signature_help(id, params)
           when "textDocument/documentSymbol"
             handle_document_symbol(id, params)
+          when "textDocument/references"
+            handle_references(id, params)
           else
             send_error(id, -32601, "Method not found: #{method}")
           end
@@ -581,6 +583,48 @@ module CrystalV2
           send_response(id, symbols.to_json)
         end
 
+        # Handle textDocument/references request
+        private def handle_references(id : JSON::Any, params : JSON::Any?)
+          return send_error(id, -32602, "Missing params") unless params
+
+          uri = params["textDocument"]["uri"].as_s
+          position = params["position"]
+          line = position["line"].as_i
+          character = position["character"].as_i
+          context = params["context"]
+          include_declaration = context["includeDeclaration"].as_bool
+
+          debug("References request: line=#{line}, char=#{character}, includeDeclaration=#{include_declaration}")
+
+          doc_state = @documents[uri]?
+          return send_response(id, "null") unless doc_state
+
+          # Find expression at position
+          expr_id = find_expr_at_position(doc_state.program, line, character)
+          debug("Found expr_id=#{expr_id.inspect}")
+          return send_response(id, "null") unless expr_id
+
+          # Get symbol for this expression
+          identifier_symbols = doc_state.identifier_symbols
+          return send_response(id, "null") unless identifier_symbols
+
+          symbol = identifier_symbols[expr_id]?
+          debug("Symbol: #{symbol ? symbol.class : "nil"}")
+          return send_response(id, "null") unless symbol
+
+          # Find all references to this symbol
+          locations = find_all_references(
+            symbol,
+            doc_state.program,
+            identifier_symbols,
+            uri,
+            include_declaration
+          )
+
+          debug("Returning #{locations.size} reference locations")
+          send_response(id, locations.to_json)
+        end
+
         # Collect all symbols from symbol table (including parent tables)
         private def collect_symbols_from_table(table : Semantic::SymbolTable, items : Array(CompletionItem))
           table.each_local_symbol do |name, symbol|
@@ -832,6 +876,45 @@ module CrystalV2
             debug("  Searching parent scope for '#{method_name}'...")
             collect_method_signatures(parent, method_name, signatures)
           end
+        end
+
+        # Find all references to a symbol
+        # Uses identifier_symbols hash for efficient lookup (O(n) where n=number of identifiers)
+        private def find_all_references(
+          target_symbol : Semantic::Symbol,
+          program : Frontend::Program,
+          identifier_symbols : Hash(Frontend::ExprId, Semantic::Symbol),
+          uri : String,
+          include_declaration : Bool
+        ) : Array(Location)
+          locations = [] of Location
+
+          debug("Finding references to symbol: #{target_symbol.name}")
+          debug("  target_symbol.node_id: #{target_symbol.node_id}")
+          debug("  include_declaration: #{include_declaration}")
+
+          # Iterate through all identifier->symbol mappings
+          identifier_symbols.each do |expr_id, symbol|
+            # Check if this identifier points to our target symbol
+            next unless symbol == target_symbol
+
+            # Filter out declaration if requested
+            if !include_declaration && expr_id == target_symbol.node_id
+              debug("  Skipping declaration at expr_id=#{expr_id}")
+              next
+            end
+
+            # Create location for this reference
+            node = program.arena[expr_id]
+            range = Range.from_span(node.span)
+            location = Location.new(uri: uri, range: range)
+            locations << location
+
+            debug("  Found reference at line=#{range.start.line}, char=#{range.start.character}")
+          end
+
+          debug("Found #{locations.size} total references")
+          locations
         end
 
         # Log debug message to stderr if LSP_DEBUG is set

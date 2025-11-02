@@ -164,6 +164,30 @@ module CrystalV2
         @[JSON::Field(key: "textDocument")]
         property text_document : TextDocumentIdentifier
       end
+
+      # Reference context - controls what references to include
+      struct ReferenceContext
+        include JSON::Serializable
+
+        @[JSON::Field(key: "includeDeclaration")]
+        property include_declaration : Bool
+
+        def initialize(@include_declaration : Bool)
+        end
+      end
+
+      # References request params
+      struct ReferenceParams
+        include JSON::Serializable
+
+        @[JSON::Field(key: "textDocument")]
+        property text_document : TextDocumentIdentifier
+        property position : Position
+        property context : ReferenceContext
+
+        def initialize(@text_document : TextDocumentIdentifier, @position : Position, @context : ReferenceContext)
+        end
+      end
     end
   end
 end
