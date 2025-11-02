@@ -181,6 +181,7 @@ module CrystalV2
 
         # Analyze document and return diagnostics, program, type context, identifier symbols, and symbol table
         private def analyze_document(source : String) : {Array(Diagnostic), Frontend::Program, Semantic::TypeContext?, Hash(Frontend::ExprId, Semantic::Symbol)?, Semantic::SymbolTable?}
+          debug("Analyzing document: #{source.lines.size} lines, #{source.size} bytes")
           diagnostics = [] of Diagnostic
           type_context = nil
           identifier_symbols = nil
@@ -195,16 +196,19 @@ module CrystalV2
           parser.diagnostics.each do |diag|
             diagnostics << Diagnostic.from_parser(diag)
           end
+          debug("Parsing complete: #{parser.diagnostics.size} parser diagnostics, #{program.roots.size} root expressions")
 
           # If parsing succeeded, run semantic analysis
           if parser.diagnostics.empty?
             analyzer = Semantic::Analyzer.new(program)
             analyzer.collect_symbols
+            debug("Symbol collection complete")
 
             # Run name resolution
             result = analyzer.resolve_names
             identifier_symbols = result.identifier_symbols
             symbol_table = analyzer.global_context.symbol_table
+            debug("Name resolution complete: #{result.diagnostics.size} diagnostics, #{identifier_symbols.size} identifiers resolved")
 
             # Convert semantic diagnostics
             analyzer.semantic_diagnostics.each do |diag|
@@ -218,16 +222,21 @@ module CrystalV2
 
             # Run type inference if no errors so far
             if !analyzer.semantic_errors? && result.diagnostics.empty?
+              debug("Starting type inference")
               engine = analyzer.infer_types(result.identifier_symbols)
               type_context = engine.context
+              debug("Type inference complete: #{analyzer.type_inference_diagnostics.size} diagnostics")
 
               # Convert type inference diagnostics
               analyzer.type_inference_diagnostics.each do |diag|
                 diagnostics << Diagnostic.from_semantic(diag, source)
               end
+            else
+              debug("Skipping type inference due to errors")
             end
           end
 
+          debug("Analysis complete: #{diagnostics.size} total diagnostics")
           {diagnostics, program, type_context, identifier_symbols, symbol_table}
         end
 
@@ -352,11 +361,14 @@ module CrystalV2
           line = position["line"].as_i
           character = position["character"].as_i
 
+          debug("Hover request: line=#{line}, char=#{character}")
+
           doc_state = @documents[uri]?
           return send_response(id, "null") unless doc_state
 
           # Find expression at position
           expr_id = find_expr_at_position(doc_state.program, line, character)
+          debug("Found expr_id=#{expr_id.inspect}")
           return send_response(id, "null") unless expr_id
 
           # Get type information
@@ -364,6 +376,7 @@ module CrystalV2
           return send_response(id, "null") unless type_context
 
           type = type_context.get_type(expr_id)
+          debug("Type: #{type ? type.class : "nil"}")
           return send_response(id, "null") unless type
 
           # Create hover response
@@ -371,6 +384,7 @@ module CrystalV2
           contents = MarkupContent.new("```crystal\n#{type_str}\n```", markdown: true)
           hover = Hover.new(contents: contents)
 
+          debug("Returning hover with type: #{type_str}")
           send_response(id, hover.to_json)
         end
 
@@ -383,27 +397,34 @@ module CrystalV2
           line = position["line"].as_i
           character = position["character"].as_i
 
+          debug("Definition request: line=#{line}, char=#{character}")
+
           doc_state = @documents[uri]?
           return send_response(id, "null") unless doc_state
 
           # Find expression at position
           expr_id = find_expr_at_position(doc_state.program, line, character)
+          debug("Found expr_id=#{expr_id.inspect}")
           return send_response(id, "null") unless expr_id
 
           # Check if this is an identifier
           node = doc_state.program.arena[expr_id]
-          return send_response(id, "null") unless Frontend.node_kind(node).identifier?
+          node_kind = Frontend.node_kind(node)
+          debug("Node kind: #{node_kind}")
+          return send_response(id, "null") unless node_kind.identifier?
 
           # Get symbol from identifier_symbols mapping
           identifier_symbols = doc_state.identifier_symbols
           return send_response(id, "null") unless identifier_symbols
 
           symbol = identifier_symbols[expr_id]?
+          debug("Symbol: #{symbol ? symbol.class : "nil"}")
           return send_response(id, "null") unless symbol
 
           # Create location from symbol
           location = Location.from_symbol(symbol, doc_state.program, uri)
 
+          debug("Returning definition location")
           send_response(id, location.to_json)
         end
 
@@ -419,19 +440,46 @@ module CrystalV2
           doc_state = @documents[uri]?
           return send_response(id, "[]") unless doc_state
 
+          # Check if we're completing after a dot (member access)
+          dot_context = check_dot_context(doc_state.text_document.text, line, character)
+
           # Extract prefix at cursor position
           prefix = extract_prefix_at_position(doc_state.text_document.text, line, character)
+
+          debug("Completion: line=#{line}, char=#{character}, dot_context=#{dot_context}, prefix='#{prefix}'")
 
           # Collect completion items
           items = [] of CompletionItem
 
-          # Add symbols from symbol table (classes, methods, etc.)
-          if symbol_table = doc_state.symbol_table
-            collect_symbols_from_table(symbol_table, items)
+          if dot_context
+            debug("Member completion branch")
+            # Member completion - find receiver type and suggest methods
+            receiver_expr_id = find_receiver_expression(doc_state.program, line, character)
+            debug("receiver_expr_id=#{receiver_expr_id.inspect}")
+            if receiver_expr_id
+              if type_context = doc_state.type_context
+                receiver_type = type_context.get_type(receiver_expr_id)
+                debug("receiver_type=#{receiver_type ? receiver_type.class : "nil"}")
+                if receiver_type
+                  collect_methods_for_type(receiver_type, items)
+                  debug("Collected #{items.size} methods")
+                end
+              else
+                debug("type_context is nil")
+              end
+            end
+          else
+            debug("Global completion branch")
+            # Global completion - suggest all symbols
+            if symbol_table = doc_state.symbol_table
+              collect_symbols_from_table(symbol_table, items)
+              debug("Collected #{items.size} global symbols")
+            end
           end
 
           # Filter by prefix if present (smart case: lowercase prefix = case-insensitive, mixed case = case-sensitive)
           unless prefix.empty?
+            before_count = items.size
             if prefix == prefix.downcase
               # All lowercase - use case-insensitive matching
               prefix_lower = prefix.downcase
@@ -440,9 +488,11 @@ module CrystalV2
               # Has uppercase - use case-sensitive matching
               items.select! { |item| item.label.starts_with?(prefix) }
             end
+            debug("Filtered #{before_count} items to #{items.size} by prefix '#{prefix}'")
           end
 
           # Return array of completion items
+          debug("Returning #{items.size} completion items")
           send_response(id, items.to_json)
         end
 
@@ -480,6 +530,101 @@ module CrystalV2
           prefix_chars.join
         end
 
+        # Check if completion is in dot context (e.g., "obj.|" or "obj.me|")
+        private def check_dot_context(text : String, line : Int32, character : Int32) : Bool
+          lines = text.split('\n')
+          return false if line < 0 || line >= lines.size
+
+          current_line = lines[line]
+          return false if character < 0
+
+          # Look backwards from cursor, skipping identifier chars, to find a dot
+          idx = character - 1
+          while idx >= 0
+            char = current_line[idx]
+            if char.alphanumeric? || char == '_'
+              # Skip identifier characters
+              idx -= 1
+            elsif char == '.'
+              # Found dot - this is member completion
+              return true
+            else
+              # Found other character - not member completion
+              return false
+            end
+          end
+
+          false
+        end
+
+        # Find receiver expression before dot (simplified - uses find_expr_at_position)
+        private def find_receiver_expression(program : Frontend::Program, line : Int32, character : Int32) : Frontend::ExprId?
+          # Look for expression just before the dot
+          # The dot is at 'character' position, so we look at character-1
+          dot_pos = character - 1
+          return nil if dot_pos < 0
+
+          # Find expression at position just before dot
+          # First, skip back over any prefix we extracted
+          # Then look for the identifier/expression before the dot
+          span_line = line + 1
+          span_column = dot_pos  # Position of dot
+
+          # Simple approach: look for member access node at this position
+          program.roots.each do |root_id|
+            if result = search_member_access(program.arena, root_id, span_line, span_column)
+              return result
+            end
+          end
+
+          nil
+        end
+
+        # Search for member access node and return its receiver
+        private def search_member_access(arena : Frontend::AstArena | Frontend::VirtualArena, expr_id : Frontend::ExprId, line : Int32, column : Int32) : Frontend::ExprId?
+          node = arena[expr_id]
+
+          # Check if this is a member access at the target position
+          if Frontend.node_kind(node).member_access?
+            member = node.as(Frontend::MemberAccessNode)
+            # Check if the dot position matches
+            if member.span.contains?(line, column)
+              return member.object
+            end
+          end
+
+          # Recursively search children
+          case Frontend.node_kind(node)
+          when .call?
+            call = node.as(Frontend::CallNode)
+            if result = search_member_access(arena, call.callee, line, column)
+              return result
+            end
+          when .assign?
+            assign = node.as(Frontend::AssignNode)
+            if result = search_member_access(arena, assign.value, line, column)
+              return result
+            end
+          end
+
+          nil
+        end
+
+        # Collect methods for a given type
+        private def collect_methods_for_type(type : Semantic::Type, items : Array(CompletionItem))
+          case type
+          when Semantic::InstanceType
+            # Get methods from class scope
+            class_symbol = type.class_symbol
+            class_symbol.scope.each_local_symbol do |name, symbol|
+              # Only add methods, not classes or other symbols
+              if symbol.is_a?(Semantic::MethodSymbol)
+                items << CompletionItem.from_symbol(symbol)
+              end
+            end
+          end
+        end
+
         # Publish diagnostics to client
         private def publish_diagnostics(uri : String, diagnostics : Array(Diagnostic), version : Int32?)
           params = PublishDiagnosticsParams.new(uri: uri, diagnostics: diagnostics, version: version)
@@ -510,6 +655,12 @@ module CrystalV2
           content = "Content-Length: #{json.bytesize}\r\n\r\n#{json}"
           @output << content
           @output.flush
+        end
+
+        # Log debug message to stderr if LSP_DEBUG is set
+        private def debug(message : String)
+          return unless ENV["LSP_DEBUG"]?
+          STDERR.puts("[LSP DEBUG] #{message}")
         end
 
         # Log error to stderr
