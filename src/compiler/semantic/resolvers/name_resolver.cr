@@ -45,6 +45,13 @@ module CrystalV2
           case node
           when Frontend::IdentifierNode
             resolve_identifier(node_id, node)
+          when Frontend::AssignNode
+            # Visit the value first (it may reference existing variables)
+            visit(node.value)
+            # Then handle the target (which declares a new variable if it's an identifier)
+            handle_assign_target(node.target)
+          when Frontend::MemberAccessNode
+            visit(node.object)
           when Frontend::CallNode
             if callee_id = node.callee
               visit(callee_id)
@@ -85,6 +92,27 @@ module CrystalV2
             @identifier_symbols[node_id] = symbol
           else
             @diagnostics << Diagnostic.new("undefined local variable or method '#{name}'", node.span)
+          end
+        end
+
+        # Handle assignment target - creates a new local variable if it's an identifier
+        private def handle_assign_target(target_id : ExprId)
+          return if target_id.invalid?
+          target_node = @arena[target_id]
+
+          # Only handle simple identifier targets (not instance vars, etc.)
+          if target_node.is_a?(Frontend::IdentifierNode)
+            slice = target_node.name
+            return unless slice
+            name = String.new(slice)
+
+            # Create a new local variable symbol
+            symbol = VariableSymbol.new(name, target_id)
+            @current_table.define(name, symbol)
+            @identifier_symbols[target_id] = symbol
+          else
+            # For other assignment targets (instance vars, indexed access, etc.), just visit them
+            visit(target_id)
           end
         end
 

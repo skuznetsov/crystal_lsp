@@ -144,6 +144,27 @@ module CrystalV2
           @kind = markdown ? "markdown" : "plaintext"
         end
       end
+
+      # Location represents a location inside a resource (file)
+      struct Location
+        include JSON::Serializable
+
+        property uri : String
+        property range : Range
+
+        def initialize(@uri : String, @range : Range)
+        end
+
+        # Create Location from Symbol's node span
+        def self.from_symbol(symbol : Semantic::Symbol, program : Frontend::Program, uri : String) : Location
+          node_id = symbol.node_id
+          return Location.new(uri: uri, range: Range.new(start: Position.new(0, 0), end: Position.new(0, 1))) if node_id.invalid?
+
+          node = program.arena[node_id]
+          range = Range.from_span(node.span)
+          new(uri: uri, range: range)
+        end
+      end
     end
   end
 end

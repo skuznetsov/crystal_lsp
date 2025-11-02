@@ -13,8 +13,14 @@ module CrystalV2
         getter text_document : TextDocumentItem
         getter program : Frontend::Program
         getter type_context : Semantic::TypeContext?
+        getter identifier_symbols : Hash(Frontend::ExprId, Semantic::Symbol)?
 
-        def initialize(@text_document : TextDocumentItem, @program : Frontend::Program, @type_context : Semantic::TypeContext? = nil)
+        def initialize(
+          @text_document : TextDocumentItem,
+          @program : Frontend::Program,
+          @type_context : Semantic::TypeContext? = nil,
+          @identifier_symbols : Hash(Frontend::ExprId, Semantic::Symbol)? = nil
+        )
         end
       end
 
@@ -101,6 +107,8 @@ module CrystalV2
             handle_shutdown(id)
           when "textDocument/hover"
             handle_hover(id, params)
+          when "textDocument/definition"
+            handle_definition(id, params)
           else
             send_error(id, -32601, "Method not found: #{method}")
           end
@@ -151,10 +159,10 @@ module CrystalV2
 
           # Analyze and store document
           doc = TextDocumentItem.new(uri: uri, language_id: language_id, version: version, text: text)
-          diagnostics, program, type_context = analyze_document(text)
+          diagnostics, program, type_context, identifier_symbols = analyze_document(text)
 
           # Store document state
-          @documents[uri] = DocumentState.new(doc, program, type_context)
+          @documents[uri] = DocumentState.new(doc, program, type_context, identifier_symbols)
 
           # Publish diagnostics
           publish_diagnostics(uri, diagnostics, version)
@@ -167,10 +175,11 @@ module CrystalV2
           @documents.delete(uri)
         end
 
-        # Analyze document and return diagnostics, program, and type context
-        private def analyze_document(source : String) : {Array(Diagnostic), Frontend::Program, Semantic::TypeContext?}
+        # Analyze document and return diagnostics, program, type context, and identifier symbols
+        private def analyze_document(source : String) : {Array(Diagnostic), Frontend::Program, Semantic::TypeContext?, Hash(Frontend::ExprId, Semantic::Symbol)?}
           diagnostics = [] of Diagnostic
           type_context = nil
+          identifier_symbols = nil
 
           # Parse
           lexer = Frontend::Lexer.new(source)
@@ -189,6 +198,7 @@ module CrystalV2
 
             # Run name resolution
             result = analyzer.resolve_names
+            identifier_symbols = result.identifier_symbols
 
             # Convert semantic diagnostics
             analyzer.semantic_diagnostics.each do |diag|
@@ -212,7 +222,7 @@ module CrystalV2
             end
           end
 
-          {diagnostics, program, type_context}
+          {diagnostics, program, type_context, identifier_symbols}
         end
 
         # Find expression at the given position (LSP 0-indexed -> Span 1-indexed)
@@ -250,6 +260,24 @@ module CrystalV2
 
           # Check children based on node type (simplified - only check common cases)
           case Frontend.node_kind(node)
+          when .assign?
+            assign = node.as(Frontend::AssignNode)
+            if target_match = find_expr_in_tree(arena, assign.target, line, column)
+              target_node = arena[target_match]
+              target_size = target_node.span.end_offset - target_node.span.start_offset
+              if target_size < best_match_size
+                best_match = target_match
+                best_match_size = target_size
+              end
+            end
+            if value_match = find_expr_in_tree(arena, assign.value, line, column)
+              value_node = arena[value_match]
+              value_size = value_node.span.end_offset - value_node.span.start_offset
+              if value_size < best_match_size
+                best_match = value_match
+                best_match_size = value_size
+              end
+            end
           when .binary?
             binary = node.as(Frontend::BinaryNode)
             if left_match = find_expr_in_tree(arena, binary.left, line, column)
@@ -268,8 +296,29 @@ module CrystalV2
                 best_match_size = right_size
               end
             end
+          when .member_access?
+            member_access = node.as(Frontend::MemberAccessNode)
+            # Check the object (receiver)
+            if object_match = find_expr_in_tree(arena, member_access.object, line, column)
+              object_node = arena[object_match]
+              object_size = object_node.span.end_offset - object_node.span.start_offset
+              if object_size < best_match_size
+                best_match = object_match
+                best_match_size = object_size
+              end
+            end
           when .call?
             call = node.as(Frontend::CallNode)
+            # Check callee (receiver/method name)
+            if callee_match = find_expr_in_tree(arena, call.callee, line, column)
+              callee_node = arena[callee_match]
+              callee_size = callee_node.span.end_offset - callee_node.span.start_offset
+              if callee_size < best_match_size
+                best_match = callee_match
+                best_match_size = callee_size
+              end
+            end
+            # Check args
             if args = Frontend.node_args(node)
               args.each do |arg_id|
                 if arg_match = find_expr_in_tree(arena, arg_id, line, column)
@@ -317,6 +366,39 @@ module CrystalV2
           hover = Hover.new(contents: contents)
 
           send_response(id, hover.to_json)
+        end
+
+        # Handle textDocument/definition request
+        private def handle_definition(id : JSON::Any, params : JSON::Any?)
+          return send_error(id, -32602, "Missing params") unless params
+
+          uri = params["textDocument"]["uri"].as_s
+          position = params["position"]
+          line = position["line"].as_i
+          character = position["character"].as_i
+
+          doc_state = @documents[uri]?
+          return send_response(id, "null") unless doc_state
+
+          # Find expression at position
+          expr_id = find_expr_at_position(doc_state.program, line, character)
+          return send_response(id, "null") unless expr_id
+
+          # Check if this is an identifier
+          node = doc_state.program.arena[expr_id]
+          return send_response(id, "null") unless Frontend.node_kind(node).identifier?
+
+          # Get symbol from identifier_symbols mapping
+          identifier_symbols = doc_state.identifier_symbols
+          return send_response(id, "null") unless identifier_symbols
+
+          symbol = identifier_symbols[expr_id]?
+          return send_response(id, "null") unless symbol
+
+          # Create location from symbol
+          location = Location.from_symbol(symbol, doc_state.program, uri)
+
+          send_response(id, location.to_json)
         end
 
         # Publish diagnostics to client

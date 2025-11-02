@@ -129,6 +129,15 @@ module CrystalV2
         def initialize(@contents : MarkupContent, @range : Range? = nil)
         end
       end
+
+      # Definition request params (same as HoverParams)
+      struct DefinitionParams
+        include JSON::Serializable
+
+        @[JSON::Field(key: "textDocument")]
+        property text_document : TextDocumentIdentifier
+        property position : Position
+      end
     end
   end
 end
