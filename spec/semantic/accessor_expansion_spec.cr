@@ -127,7 +127,7 @@ describe "Phase 87B-1: Accessor Macro Expansion" do
       method = setter_method.as(Semantic::MethodSymbol)
       method.return_annotation.should eq("String")
       method.params.size.should eq(1)
-      method.params[0].name.should eq("value")
+      method.params[0].name.should eq("value".to_slice)
     end
   end
 

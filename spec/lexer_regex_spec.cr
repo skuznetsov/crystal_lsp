@@ -19,7 +19,7 @@ describe "CrystalV2::Compiler::Frontend::Parser" do
       # Value is regex literal
       regex = arena[CrystalV2::Compiler::Frontend.node_assign_value(assign).not_nil!]
       CrystalV2::Compiler::Frontend.node_kind(regex).should eq(CrystalV2::Compiler::Frontend::NodeKind::Regex)
-      String.new(CrystalV2::Compiler::Frontend.node_literal(regex).not_nil!).should eq("abc")
+      CrystalV2::Compiler::Frontend.node_literal(regex).not_nil!.should eq("abc".to_slice)
     end
 
     it "parses regex with digits /\\d+/" do
@@ -34,7 +34,7 @@ describe "CrystalV2::Compiler::Frontend::Parser" do
       assign = arena[program.roots[0]]
       regex = arena[CrystalV2::Compiler::Frontend.node_assign_value(assign).not_nil!]
       CrystalV2::Compiler::Frontend.node_kind(regex).should eq(CrystalV2::Compiler::Frontend::NodeKind::Regex)
-      String.new(CrystalV2::Compiler::Frontend.node_literal(regex).not_nil!).should eq("\\d+")
+      CrystalV2::Compiler::Frontend.node_literal(regex).not_nil!.should eq("\\d+".to_slice)
     end
 
     it "parses regex with word boundary /\\btest\\b/" do
@@ -48,7 +48,7 @@ describe "CrystalV2::Compiler::Frontend::Parser" do
 
       assign = arena[program.roots[0]]
       regex = arena[CrystalV2::Compiler::Frontend.node_assign_value(assign).not_nil!]
-      String.new(CrystalV2::Compiler::Frontend.node_literal(regex).not_nil!).should eq("\\btest\\b")
+      CrystalV2::Compiler::Frontend.node_literal(regex).not_nil!.should eq("\\btest\\b".to_slice)
     end
 
     it "parses regex with escaped slash /a\\/b/" do
@@ -62,7 +62,7 @@ describe "CrystalV2::Compiler::Frontend::Parser" do
 
       assign = arena[program.roots[0]]
       regex = arena[CrystalV2::Compiler::Frontend.node_assign_value(assign).not_nil!]
-      String.new(CrystalV2::Compiler::Frontend.node_literal(regex).not_nil!).should eq("a\\/b")
+      CrystalV2::Compiler::Frontend.node_literal(regex).not_nil!.should eq("a\\/b".to_slice)
     end
 
     it "parses regex with i flag /test/i" do
@@ -76,7 +76,7 @@ describe "CrystalV2::Compiler::Frontend::Parser" do
 
       assign = arena[program.roots[0]]
       regex = arena[CrystalV2::Compiler::Frontend.node_assign_value(assign).not_nil!]
-      String.new(CrystalV2::Compiler::Frontend.node_literal(regex).not_nil!).should eq("test/i")
+      CrystalV2::Compiler::Frontend.node_literal(regex).not_nil!.should eq("test/i".to_slice)
     end
 
     it "parses regex with multiple flags /abc/im" do
@@ -90,7 +90,7 @@ describe "CrystalV2::Compiler::Frontend::Parser" do
 
       assign = arena[program.roots[0]]
       regex = arena[CrystalV2::Compiler::Frontend.node_assign_value(assign).not_nil!]
-      String.new(CrystalV2::Compiler::Frontend.node_literal(regex).not_nil!).should eq("abc/im")
+      CrystalV2::Compiler::Frontend.node_literal(regex).not_nil!.should eq("abc/im".to_slice)
     end
 
     it "parses regex with m and x flags /pattern/mx" do
@@ -104,7 +104,7 @@ describe "CrystalV2::Compiler::Frontend::Parser" do
 
       assign = arena[program.roots[0]]
       regex = arena[CrystalV2::Compiler::Frontend.node_assign_value(assign).not_nil!]
-      String.new(CrystalV2::Compiler::Frontend.node_literal(regex).not_nil!).should eq("pattern/mx")
+      CrystalV2::Compiler::Frontend.node_literal(regex).not_nil!.should eq("pattern/mx".to_slice)
     end
 
     it "parses regex in array" do
@@ -124,11 +124,11 @@ describe "CrystalV2::Compiler::Frontend::Parser" do
 
       regex1 = arena[elements[0]]
       CrystalV2::Compiler::Frontend.node_kind(regex1).should eq(CrystalV2::Compiler::Frontend::NodeKind::Regex)
-      String.new(CrystalV2::Compiler::Frontend.node_literal(regex1).not_nil!).should eq("abc")
+      CrystalV2::Compiler::Frontend.node_literal(regex1).not_nil!.should eq("abc".to_slice)
 
       regex2 = arena[elements[1]]
       CrystalV2::Compiler::Frontend.node_kind(regex2).should eq(CrystalV2::Compiler::Frontend::NodeKind::Regex)
-      String.new(CrystalV2::Compiler::Frontend.node_literal(regex2).not_nil!).should eq("def")
+      CrystalV2::Compiler::Frontend.node_literal(regex2).not_nil!.should eq("def".to_slice)
     end
 
     it "parses regex in method call" do
@@ -148,7 +148,7 @@ describe "CrystalV2::Compiler::Frontend::Parser" do
 
       regex = arena[args[0]]
       CrystalV2::Compiler::Frontend.node_kind(regex).should eq(CrystalV2::Compiler::Frontend::NodeKind::Regex)
-      String.new(CrystalV2::Compiler::Frontend.node_literal(regex).not_nil!).should eq("pattern")
+      CrystalV2::Compiler::Frontend.node_literal(regex).not_nil!.should eq("pattern".to_slice)
     end
 
     it "parses regex with character classes /[a-z]+/" do
@@ -162,7 +162,7 @@ describe "CrystalV2::Compiler::Frontend::Parser" do
 
       assign = arena[program.roots[0]]
       regex = arena[CrystalV2::Compiler::Frontend.node_assign_value(assign).not_nil!]
-      String.new(CrystalV2::Compiler::Frontend.node_literal(regex).not_nil!).should eq("[a-z]+")
+      CrystalV2::Compiler::Frontend.node_literal(regex).not_nil!.should eq("[a-z]+".to_slice)
     end
 
     it "parses regex with groups /(foo|bar)/" do
@@ -176,7 +176,7 @@ describe "CrystalV2::Compiler::Frontend::Parser" do
 
       assign = arena[program.roots[0]]
       regex = arena[CrystalV2::Compiler::Frontend.node_assign_value(assign).not_nil!]
-      String.new(CrystalV2::Compiler::Frontend.node_literal(regex).not_nil!).should eq("(foo|bar)")
+      CrystalV2::Compiler::Frontend.node_literal(regex).not_nil!.should eq("(foo|bar)".to_slice)
     end
 
     it "parses multiple regex with different patterns" do
@@ -199,7 +199,7 @@ describe "CrystalV2::Compiler::Frontend::Parser" do
         assign = arena[program.roots[i]]
         regex = arena[CrystalV2::Compiler::Frontend.node_assign_value(assign).not_nil!]
         CrystalV2::Compiler::Frontend.node_kind(regex).should eq(CrystalV2::Compiler::Frontend::NodeKind::Regex)
-        String.new(CrystalV2::Compiler::Frontend.node_literal(regex).not_nil!).should eq(literals[i])
+        CrystalV2::Compiler::Frontend.node_literal(regex).not_nil!.should eq(literals[i].to_slice)
       end
     end
 
@@ -215,7 +215,7 @@ describe "CrystalV2::Compiler::Frontend::Parser" do
       assign = arena[program.roots[0]]
       binary = arena[CrystalV2::Compiler::Frontend.node_assign_value(assign).not_nil!]
       CrystalV2::Compiler::Frontend.node_kind(binary).should eq(CrystalV2::Compiler::Frontend::NodeKind::Binary)
-      String.new(CrystalV2::Compiler::Frontend.node_operator(binary).not_nil!).should eq("/")
+      CrystalV2::Compiler::Frontend.node_operator(binary).not_nil!.should eq("/".to_slice)
     end
 
     it "distinguishes division from regex after identifier" do
@@ -230,7 +230,7 @@ describe "CrystalV2::Compiler::Frontend::Parser" do
       assign = arena[program.roots[0]]
       binary = arena[CrystalV2::Compiler::Frontend.node_assign_value(assign).not_nil!]
       CrystalV2::Compiler::Frontend.node_kind(binary).should eq(CrystalV2::Compiler::Frontend::NodeKind::Binary)
-      String.new(CrystalV2::Compiler::Frontend.node_operator(binary).not_nil!).should eq("/")
+      CrystalV2::Compiler::Frontend.node_operator(binary).not_nil!.should eq("/".to_slice)
     end
 
     it "parses regex after comma in array" do
@@ -267,7 +267,7 @@ describe "CrystalV2::Compiler::Frontend::Parser" do
       assign = arena[program.roots[0]]
       regex = arena[CrystalV2::Compiler::Frontend.node_assign_value(assign).not_nil!]
       # Escapes are preserved for regex engine
-      String.new(CrystalV2::Compiler::Frontend.node_literal(regex).not_nil!).should eq("\\n\\t")
+      CrystalV2::Compiler::Frontend.node_literal(regex).not_nil!.should eq("\\n\\t".to_slice)
     end
 
     it "parses empty regex //" do
@@ -282,7 +282,7 @@ describe "CrystalV2::Compiler::Frontend::Parser" do
       assign = arena[program.roots[0]]
       regex = arena[CrystalV2::Compiler::Frontend.node_assign_value(assign).not_nil!]
       CrystalV2::Compiler::Frontend.node_kind(regex).should eq(CrystalV2::Compiler::Frontend::NodeKind::Regex)
-      String.new(CrystalV2::Compiler::Frontend.node_literal(regex).not_nil!).should eq("")
+      CrystalV2::Compiler::Frontend.node_literal(regex).not_nil!.should eq("".to_slice)
     end
   end
 end

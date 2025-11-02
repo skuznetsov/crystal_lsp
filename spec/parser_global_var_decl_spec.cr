@@ -18,8 +18,8 @@ describe "CrystalV2::Compiler::Frontend::Parser" do
       decl.should be_a(CrystalV2::Compiler::Frontend::GlobalVarDeclNode)
 
       global_decl = decl.as(CrystalV2::Compiler::Frontend::GlobalVarDeclNode)
-      String.new(global_decl.name).should eq("$count")
-      String.new(global_decl.type).should eq("Int32")
+      global_decl.name.should eq("$count".to_slice)
+      global_decl.type.should eq("Int32".to_slice)
     end
 
     it "parses global variable declaration with String type" do
@@ -35,8 +35,8 @@ describe "CrystalV2::Compiler::Frontend::Parser" do
       decl.should be_a(CrystalV2::Compiler::Frontend::GlobalVarDeclNode)
       global_decl = decl.as(CrystalV2::Compiler::Frontend::GlobalVarDeclNode)
 
-      String.new(global_decl.name).should eq("$name")
-      String.new(global_decl.type).should eq("String")
+      global_decl.name.should eq("$name".to_slice)
+      global_decl.type.should eq("String".to_slice)
     end
 
     it "parses multiple global variable declarations" do
@@ -53,16 +53,16 @@ describe "CrystalV2::Compiler::Frontend::Parser" do
       arena = program.arena
 
       decl1 = arena[program.roots[0]].as(CrystalV2::Compiler::Frontend::GlobalVarDeclNode)
-      String.new(decl1.name).should eq("$count")
-      String.new(decl1.type).should eq("Int32")
+      decl1.name.should eq("$count".to_slice)
+      decl1.type.should eq("Int32".to_slice)
 
       decl2 = arena[program.roots[1]].as(CrystalV2::Compiler::Frontend::GlobalVarDeclNode)
-      String.new(decl2.name).should eq("$name")
-      String.new(decl2.type).should eq("String")
+      decl2.name.should eq("$name".to_slice)
+      decl2.type.should eq("String".to_slice)
 
       decl3 = arena[program.roots[2]].as(CrystalV2::Compiler::Frontend::GlobalVarDeclNode)
-      String.new(decl3.name).should eq("$flag")
-      String.new(decl3.type).should eq("Bool")
+      decl3.name.should eq("$flag".to_slice)
+      decl3.type.should eq("Bool".to_slice)
     end
 
     it "parses global variable with underscores" do
@@ -74,8 +74,8 @@ describe "CrystalV2::Compiler::Frontend::Parser" do
       arena = program.arena
       decl = arena[program.roots[0]].as(CrystalV2::Compiler::Frontend::GlobalVarDeclNode)
 
-      String.new(decl.name).should eq("$my_global_var")
-      String.new(decl.type).should eq("Int32")
+      decl.name.should eq("$my_global_var".to_slice)
+      decl.type.should eq("Int32".to_slice)
     end
 
     it "parses global variable with custom type" do
@@ -87,8 +87,8 @@ describe "CrystalV2::Compiler::Frontend::Parser" do
       arena = program.arena
       decl = arena[program.roots[0]].as(CrystalV2::Compiler::Frontend::GlobalVarDeclNode)
 
-      String.new(decl.name).should eq("$manager")
-      String.new(decl.type).should eq("Manager")
+      decl.name.should eq("$manager".to_slice)
+      decl.type.should eq("Manager".to_slice)
     end
 
     it "parses global variable alongside other statements" do
@@ -123,8 +123,8 @@ describe "CrystalV2::Compiler::Frontend::Parser" do
       arena = program.arena
       decl = arena[program.roots[0]].as(CrystalV2::Compiler::Frontend::GlobalVarDeclNode)
 
-      String.new(decl.name).should eq("$debug?")
-      String.new(decl.type).should eq("Bool")
+      decl.name.should eq("$debug?".to_slice)
+      decl.type.should eq("Bool".to_slice)
     end
   end
 end

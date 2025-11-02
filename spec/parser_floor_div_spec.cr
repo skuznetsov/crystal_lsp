@@ -16,7 +16,7 @@ describe "CrystalV2::Compiler::Frontend::Parser" do
       binary = arena[program.roots[0]]
       CrystalV2::Compiler::Frontend.node_kind(binary).should eq(CrystalV2::Compiler::Frontend::NodeKind::Binary)
 
-      String.new(CrystalV2::Compiler::Frontend.node_operator(binary).not_nil!).should eq("//")
+      CrystalV2::Compiler::Frontend.node_operator(binary).not_nil!.should eq("//".to_slice)
     end
 
     it "parses floor division with negative numbers" do
@@ -31,7 +31,7 @@ describe "CrystalV2::Compiler::Frontend::Parser" do
       binary = arena[program.roots[0]]
       CrystalV2::Compiler::Frontend.node_kind(binary).should eq(CrystalV2::Compiler::Frontend::NodeKind::Binary)
 
-      String.new(CrystalV2::Compiler::Frontend.node_operator(binary).not_nil!).should eq("//")
+      CrystalV2::Compiler::Frontend.node_operator(binary).not_nil!.should eq("//".to_slice)
     end
 
     it "parses floor division in expression" do
@@ -48,7 +48,7 @@ describe "CrystalV2::Compiler::Frontend::Parser" do
 
       value = arena[CrystalV2::Compiler::Frontend.node_assign_value(assign).not_nil!]
       CrystalV2::Compiler::Frontend.node_kind(value).should eq(CrystalV2::Compiler::Frontend::NodeKind::Binary)
-      String.new(CrystalV2::Compiler::Frontend.node_operator(value).not_nil!).should eq("//")
+      CrystalV2::Compiler::Frontend.node_operator(value).not_nil!.should eq("//".to_slice)
     end
 
     it "parses floor division compound assignment" do
@@ -66,7 +66,7 @@ describe "CrystalV2::Compiler::Frontend::Parser" do
       # Should desugar to: x = x // 3
       value = arena[CrystalV2::Compiler::Frontend.node_assign_value(assign).not_nil!]
       CrystalV2::Compiler::Frontend.node_kind(value).should eq(CrystalV2::Compiler::Frontend::NodeKind::Binary)
-      String.new(CrystalV2::Compiler::Frontend.node_operator(value).not_nil!).should eq("//")
+      CrystalV2::Compiler::Frontend.node_operator(value).not_nil!.should eq("//".to_slice)
     end
 
     it "distinguishes floor division from regular division" do
@@ -81,11 +81,11 @@ describe "CrystalV2::Compiler::Frontend::Parser" do
       # Left-associative: (a / b) // c
       binary1 = arena[program.roots[0]]
       CrystalV2::Compiler::Frontend.node_kind(binary1).should eq(CrystalV2::Compiler::Frontend::NodeKind::Binary)
-      String.new(CrystalV2::Compiler::Frontend.node_operator(binary1).not_nil!).should eq("//")
+      CrystalV2::Compiler::Frontend.node_operator(binary1).not_nil!.should eq("//".to_slice)
 
       left = arena[CrystalV2::Compiler::Frontend.node_left(binary1).not_nil!]
       CrystalV2::Compiler::Frontend.node_kind(left).should eq(CrystalV2::Compiler::Frontend::NodeKind::Binary)
-      String.new(CrystalV2::Compiler::Frontend.node_operator(left).not_nil!).should eq("/")
+      CrystalV2::Compiler::Frontend.node_operator(left).not_nil!.should eq("/".to_slice)
     end
 
     it "parses floor division with precedence" do
@@ -100,11 +100,11 @@ describe "CrystalV2::Compiler::Frontend::Parser" do
       # Should parse as: 2 + (10 // 3) due to precedence
       binary = arena[program.roots[0]]
       CrystalV2::Compiler::Frontend.node_kind(binary).should eq(CrystalV2::Compiler::Frontend::NodeKind::Binary)
-      String.new(CrystalV2::Compiler::Frontend.node_operator(binary).not_nil!).should eq("+")
+      CrystalV2::Compiler::Frontend.node_operator(binary).not_nil!.should eq("+".to_slice)
 
       right = arena[CrystalV2::Compiler::Frontend.node_right(binary).not_nil!]
       CrystalV2::Compiler::Frontend.node_kind(right).should eq(CrystalV2::Compiler::Frontend::NodeKind::Binary)
-      String.new(CrystalV2::Compiler::Frontend.node_operator(right).not_nil!).should eq("//")
+      CrystalV2::Compiler::Frontend.node_operator(right).not_nil!.should eq("//".to_slice)
     end
 
     it "parses floor division as method argument" do
@@ -124,7 +124,7 @@ describe "CrystalV2::Compiler::Frontend::Parser" do
 
       arg = arena[args[0]]
       CrystalV2::Compiler::Frontend.node_kind(arg).should eq(CrystalV2::Compiler::Frontend::NodeKind::Binary)
-      String.new(CrystalV2::Compiler::Frontend.node_operator(arg).not_nil!).should eq("//")
+      CrystalV2::Compiler::Frontend.node_operator(arg).not_nil!.should eq("//".to_slice)
     end
 
     it "parses floor division in array" do
@@ -144,7 +144,7 @@ describe "CrystalV2::Compiler::Frontend::Parser" do
 
       elem1 = arena[elements[0]]
       CrystalV2::Compiler::Frontend.node_kind(elem1).should eq(CrystalV2::Compiler::Frontend::NodeKind::Binary)
-      String.new(CrystalV2::Compiler::Frontend.node_operator(elem1).not_nil!).should eq("//")
+      CrystalV2::Compiler::Frontend.node_operator(elem1).not_nil!.should eq("//".to_slice)
     end
 
     it "parses chained floor division" do
@@ -159,11 +159,11 @@ describe "CrystalV2::Compiler::Frontend::Parser" do
       # Left-associative: (100 // 10) // 2
       binary1 = arena[program.roots[0]]
       CrystalV2::Compiler::Frontend.node_kind(binary1).should eq(CrystalV2::Compiler::Frontend::NodeKind::Binary)
-      String.new(CrystalV2::Compiler::Frontend.node_operator(binary1).not_nil!).should eq("//")
+      CrystalV2::Compiler::Frontend.node_operator(binary1).not_nil!.should eq("//".to_slice)
 
       left = arena[CrystalV2::Compiler::Frontend.node_left(binary1).not_nil!]
       CrystalV2::Compiler::Frontend.node_kind(left).should eq(CrystalV2::Compiler::Frontend::NodeKind::Binary)
-      String.new(CrystalV2::Compiler::Frontend.node_operator(left).not_nil!).should eq("//")
+      CrystalV2::Compiler::Frontend.node_operator(left).not_nil!.should eq("//".to_slice)
     end
 
     it "parses floor division with parentheses" do
@@ -177,7 +177,7 @@ describe "CrystalV2::Compiler::Frontend::Parser" do
 
       binary = arena[program.roots[0]]
       CrystalV2::Compiler::Frontend.node_kind(binary).should eq(CrystalV2::Compiler::Frontend::NodeKind::Binary)
-      String.new(CrystalV2::Compiler::Frontend.node_operator(binary).not_nil!).should eq("//")
+      CrystalV2::Compiler::Frontend.node_operator(binary).not_nil!.should eq("//".to_slice)
 
       left = arena[CrystalV2::Compiler::Frontend.node_left(binary).not_nil!]
       CrystalV2::Compiler::Frontend.node_kind(left).should eq(CrystalV2::Compiler::Frontend::NodeKind::Grouping)

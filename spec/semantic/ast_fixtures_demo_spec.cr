@@ -17,7 +17,7 @@ describe "AstFixtures" do
     node = arena[def_id]
     CrystalV2::Compiler::Frontend.node_kind(node).should eq(CrystalV2::Compiler::Frontend::NodeKind::Def)
     String.new(CrystalV2::Compiler::Frontend.node_def_name(node).not_nil!).should eq("greet")
-    CrystalV2::Compiler::Frontend.node_def_params(node).not_nil!.map(&.name).should eq(["name"])
+    CrystalV2::Compiler::Frontend.node_def_params(node).not_nil!.map(&.name).should eq(["name".to_slice])
     CrystalV2::Compiler::Frontend.node_def_body(node).not_nil!.size.should eq(1)
   end
 

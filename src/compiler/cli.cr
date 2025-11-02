@@ -125,7 +125,7 @@ module CrystalV2
             {"macro", nil}
           when Semantic::MethodSymbol
             params = symbol.params
-            extra = params.empty? ? nil : "(params: #{params.map(&.name).join(", ")})"
+            extra = params.empty? ? nil : "(params: #{params.map { |p| String.new(p.name) }.join(", ")})"
             {"method", extra}
           when Semantic::ClassSymbol
             super_name = symbol.superclass_name

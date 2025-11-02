@@ -22,17 +22,17 @@ describe "CrystalV2::Compiler::Frontend::Parser" do
       # Value is binary expression: flags & mask
       binary_node = arena[CrystalV2::Compiler::Frontend.node_assign_value(assign_node).not_nil!]
       CrystalV2::Compiler::Frontend.node_kind(binary_node).should eq(CrystalV2::Compiler::Frontend::NodeKind::Binary)
-      String.new(CrystalV2::Compiler::Frontend.node_operator(binary_node).not_nil!).should eq("&")
+      CrystalV2::Compiler::Frontend.node_operator(binary_node).not_nil!.should eq("&".to_slice)
 
       # Left side is 'flags'
       left = arena[CrystalV2::Compiler::Frontend.node_left(binary_node).not_nil!]
       CrystalV2::Compiler::Frontend.node_kind(left).should eq(CrystalV2::Compiler::Frontend::NodeKind::Identifier)
-      String.new(CrystalV2::Compiler::Frontend.node_literal(left).not_nil!).should eq("flags")
+      CrystalV2::Compiler::Frontend.node_literal(left).not_nil!.should eq("flags".to_slice)
 
       # Right side is 'mask'
       right = arena[CrystalV2::Compiler::Frontend.node_right(binary_node).not_nil!]
       CrystalV2::Compiler::Frontend.node_kind(right).should eq(CrystalV2::Compiler::Frontend::NodeKind::Identifier)
-      String.new(CrystalV2::Compiler::Frontend.node_literal(right).not_nil!).should eq("mask")
+      CrystalV2::Compiler::Frontend.node_literal(right).not_nil!.should eq("mask".to_slice)
     end
 
     it "parses simple |= assignment" do
@@ -48,7 +48,7 @@ describe "CrystalV2::Compiler::Frontend::Parser" do
 
       assign_node = arena[program.roots[0]]
       binary_node = arena[CrystalV2::Compiler::Frontend.node_assign_value(assign_node).not_nil!]
-      String.new(CrystalV2::Compiler::Frontend.node_operator(binary_node).not_nil!).should eq("|")
+      CrystalV2::Compiler::Frontend.node_operator(binary_node).not_nil!.should eq("|".to_slice)
     end
 
     it "parses simple ^= assignment" do
@@ -64,7 +64,7 @@ describe "CrystalV2::Compiler::Frontend::Parser" do
 
       assign_node = arena[program.roots[0]]
       binary_node = arena[CrystalV2::Compiler::Frontend.node_assign_value(assign_node).not_nil!]
-      String.new(CrystalV2::Compiler::Frontend.node_operator(binary_node).not_nil!).should eq("^")
+      CrystalV2::Compiler::Frontend.node_operator(binary_node).not_nil!.should eq("^".to_slice)
     end
 
     it "parses simple <<= assignment" do
@@ -80,7 +80,7 @@ describe "CrystalV2::Compiler::Frontend::Parser" do
 
       assign_node = arena[program.roots[0]]
       binary_node = arena[CrystalV2::Compiler::Frontend.node_assign_value(assign_node).not_nil!]
-      String.new(CrystalV2::Compiler::Frontend.node_operator(binary_node).not_nil!).should eq("<<")
+      CrystalV2::Compiler::Frontend.node_operator(binary_node).not_nil!.should eq("<<".to_slice)
     end
 
     it "parses simple >>= assignment" do
@@ -96,7 +96,7 @@ describe "CrystalV2::Compiler::Frontend::Parser" do
 
       assign_node = arena[program.roots[0]]
       binary_node = arena[CrystalV2::Compiler::Frontend.node_assign_value(assign_node).not_nil!]
-      String.new(CrystalV2::Compiler::Frontend.node_operator(binary_node).not_nil!).should eq(">>")
+      CrystalV2::Compiler::Frontend.node_operator(binary_node).not_nil!.should eq(">>".to_slice)
     end
 
     it "parses &= with number literal" do
@@ -112,7 +112,7 @@ describe "CrystalV2::Compiler::Frontend::Parser" do
 
       assign_node = arena[program.roots[0]]
       binary_node = arena[CrystalV2::Compiler::Frontend.node_assign_value(assign_node).not_nil!]
-      String.new(CrystalV2::Compiler::Frontend.node_operator(binary_node).not_nil!).should eq("&")
+      CrystalV2::Compiler::Frontend.node_operator(binary_node).not_nil!.should eq("&".to_slice)
 
       # Right side is number
       right = arena[CrystalV2::Compiler::Frontend.node_right(binary_node).not_nil!]
@@ -132,7 +132,7 @@ describe "CrystalV2::Compiler::Frontend::Parser" do
 
       assign_node = arena[program.roots[0]]
       binary_node = arena[CrystalV2::Compiler::Frontend.node_assign_value(assign_node).not_nil!]
-      String.new(CrystalV2::Compiler::Frontend.node_operator(binary_node).not_nil!).should eq("<<")
+      CrystalV2::Compiler::Frontend.node_operator(binary_node).not_nil!.should eq("<<".to_slice)
 
       # Right side is identifier (constant)
       right = arena[CrystalV2::Compiler::Frontend.node_right(binary_node).not_nil!]
@@ -155,13 +155,13 @@ describe "CrystalV2::Compiler::Frontend::Parser" do
       arena = program.arena
 
       # Check operators in order
-      operators = ["&", "|", "^", "<<", ">>"]
+      operators = ["&".to_slice, "|".to_slice, "^".to_slice, "<<".to_slice, ">>".to_slice]
       (0..4).each do |i|
         assign = arena[program.roots[i]]
         CrystalV2::Compiler::Frontend.node_kind(assign).should eq(CrystalV2::Compiler::Frontend::NodeKind::Assign)
 
         binary = arena[CrystalV2::Compiler::Frontend.node_assign_value(assign).not_nil!]
-        String.new(CrystalV2::Compiler::Frontend.node_operator(binary).not_nil!).should eq(operators[i])
+        CrystalV2::Compiler::Frontend.node_operator(binary).not_nil!.should eq(operators[i])
       end
     end
 
@@ -187,7 +187,7 @@ describe "CrystalV2::Compiler::Frontend::Parser" do
       CrystalV2::Compiler::Frontend.node_kind(assign).should eq(CrystalV2::Compiler::Frontend::NodeKind::Assign)
 
       binary = arena[CrystalV2::Compiler::Frontend.node_assign_value(assign).not_nil!]
-      String.new(CrystalV2::Compiler::Frontend.node_operator(binary).not_nil!).should eq("&")
+      CrystalV2::Compiler::Frontend.node_operator(binary).not_nil!.should eq("&".to_slice)
     end
 
     it "parses bitwise compound in class" do
@@ -218,7 +218,7 @@ describe "CrystalV2::Compiler::Frontend::Parser" do
       assign = arena[method_def_body[0]]
 
       binary = arena[CrystalV2::Compiler::Frontend.node_assign_value(assign).not_nil!]
-      String.new(CrystalV2::Compiler::Frontend.node_operator(binary).not_nil!).should eq("<<")
+      CrystalV2::Compiler::Frontend.node_operator(binary).not_nil!.should eq("<<".to_slice)
     end
 
     it "correctly distinguishes &= from &&= and &" do
@@ -238,22 +238,22 @@ describe "CrystalV2::Compiler::Frontend::Parser" do
       # First: x && y (logical and)
       assign1 = arena[program.roots[0]]
       binary1 = arena[CrystalV2::Compiler::Frontend.node_assign_value(assign1).not_nil!]
-      String.new(CrystalV2::Compiler::Frontend.node_operator(binary1).not_nil!).should eq("&&")
+      CrystalV2::Compiler::Frontend.node_operator(binary1).not_nil!.should eq("&&".to_slice)
 
       # Second: b &&= z (logical and assign)
       assign2 = arena[program.roots[1]]
       binary2 = arena[CrystalV2::Compiler::Frontend.node_assign_value(assign2).not_nil!]
-      String.new(CrystalV2::Compiler::Frontend.node_operator(binary2).not_nil!).should eq("&&")
+      CrystalV2::Compiler::Frontend.node_operator(binary2).not_nil!.should eq("&&".to_slice)
 
       # Third: c &= mask (bitwise and assign)
       assign3 = arena[program.roots[2]]
       binary3 = arena[CrystalV2::Compiler::Frontend.node_assign_value(assign3).not_nil!]
-      String.new(CrystalV2::Compiler::Frontend.node_operator(binary3).not_nil!).should eq("&")
+      CrystalV2::Compiler::Frontend.node_operator(binary3).not_nil!.should eq("&".to_slice)
 
       # Fourth: e & f (bitwise and)
       assign4 = arena[program.roots[3]]
       binary4 = arena[CrystalV2::Compiler::Frontend.node_assign_value(assign4).not_nil!]
-      String.new(CrystalV2::Compiler::Frontend.node_operator(binary4).not_nil!).should eq("&")
+      CrystalV2::Compiler::Frontend.node_operator(binary4).not_nil!.should eq("&".to_slice)
     end
 
     it "correctly distinguishes |= from ||= and |" do
@@ -271,11 +271,11 @@ describe "CrystalV2::Compiler::Frontend::Parser" do
       arena = program.arena
 
       # Operators in order: ||, ||, |, |
-      operators = ["||", "||", "|", "|"]
+      operators = ["||".to_slice, "||".to_slice, "|".to_slice, "|".to_slice]
       (0..3).each do |i|
         assign = arena[program.roots[i]]
         binary = arena[CrystalV2::Compiler::Frontend.node_assign_value(assign).not_nil!]
-        String.new(CrystalV2::Compiler::Frontend.node_operator(binary).not_nil!).should eq(operators[i])
+        CrystalV2::Compiler::Frontend.node_operator(binary).not_nil!.should eq(operators[i])
       end
     end
 
@@ -295,17 +295,17 @@ describe "CrystalV2::Compiler::Frontend::Parser" do
       # First: x << y (left shift)
       assign1 = arena[program.roots[0]]
       binary1 = arena[CrystalV2::Compiler::Frontend.node_assign_value(assign1).not_nil!]
-      String.new(CrystalV2::Compiler::Frontend.node_operator(binary1).not_nil!).should eq("<<")
+      CrystalV2::Compiler::Frontend.node_operator(binary1).not_nil!.should eq("<<".to_slice)
 
       # Second: b <<= shift (left shift assign)
       assign2 = arena[program.roots[1]]
       binary2 = arena[CrystalV2::Compiler::Frontend.node_assign_value(assign2).not_nil!]
-      String.new(CrystalV2::Compiler::Frontend.node_operator(binary2).not_nil!).should eq("<<")
+      CrystalV2::Compiler::Frontend.node_operator(binary2).not_nil!.should eq("<<".to_slice)
 
       # Third: d < e (less than)
       assign3 = arena[program.roots[2]]
       binary3 = arena[CrystalV2::Compiler::Frontend.node_assign_value(assign3).not_nil!]
-      String.new(CrystalV2::Compiler::Frontend.node_operator(binary3).not_nil!).should eq("<")
+      CrystalV2::Compiler::Frontend.node_operator(binary3).not_nil!.should eq("<".to_slice)
     end
 
     it "correctly distinguishes >>= from >> and >" do
@@ -324,17 +324,17 @@ describe "CrystalV2::Compiler::Frontend::Parser" do
       # First: x >> y (right shift)
       assign1 = arena[program.roots[0]]
       binary1 = arena[CrystalV2::Compiler::Frontend.node_assign_value(assign1).not_nil!]
-      String.new(CrystalV2::Compiler::Frontend.node_operator(binary1).not_nil!).should eq(">>")
+      CrystalV2::Compiler::Frontend.node_operator(binary1).not_nil!.should eq(">>".to_slice)
 
       # Second: b >>= count (right shift assign)
       assign2 = arena[program.roots[1]]
       binary2 = arena[CrystalV2::Compiler::Frontend.node_assign_value(assign2).not_nil!]
-      String.new(CrystalV2::Compiler::Frontend.node_operator(binary2).not_nil!).should eq(">>")
+      CrystalV2::Compiler::Frontend.node_operator(binary2).not_nil!.should eq(">>".to_slice)
 
       # Third: d > e (greater than)
       assign3 = arena[program.roots[2]]
       binary3 = arena[CrystalV2::Compiler::Frontend.node_assign_value(assign3).not_nil!]
-      String.new(CrystalV2::Compiler::Frontend.node_operator(binary3).not_nil!).should eq(">")
+      CrystalV2::Compiler::Frontend.node_operator(binary3).not_nil!.should eq(">".to_slice)
     end
 
     it "parses all compound operators together" do
@@ -360,7 +360,7 @@ describe "CrystalV2::Compiler::Frontend::Parser" do
         CrystalV2::Compiler::Frontend.node_kind(assign).should eq(CrystalV2::Compiler::Frontend::NodeKind::Assign)
 
         binary = arena[CrystalV2::Compiler::Frontend.node_assign_value(assign).not_nil!]
-        String.new(CrystalV2::Compiler::Frontend.node_operator(binary).not_nil!).should eq(operators[i])
+        CrystalV2::Compiler::Frontend.node_operator(binary).not_nil!.should eq(operators[i].to_slice)
       end
     end
   end

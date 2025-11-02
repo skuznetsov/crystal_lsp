@@ -16,7 +16,7 @@ describe "CrystalV2::Compiler::Frontend::Parser" do
       binary = arena[program.roots[0]]
       CrystalV2::Compiler::Frontend.node_kind(binary).should eq(CrystalV2::Compiler::Frontend::NodeKind::Binary)
 
-      String.new(CrystalV2::Compiler::Frontend.node_operator(binary).not_nil!).should eq("in")
+      CrystalV2::Compiler::Frontend.node_operator(binary).not_nil!.should eq("in".to_slice)
     end
 
     it "parses in with array literal" do
@@ -30,7 +30,7 @@ describe "CrystalV2::Compiler::Frontend::Parser" do
 
       binary = arena[program.roots[0]]
       CrystalV2::Compiler::Frontend.node_kind(binary).should eq(CrystalV2::Compiler::Frontend::NodeKind::Binary)
-      String.new(CrystalV2::Compiler::Frontend.node_operator(binary).not_nil!).should eq("in")
+      CrystalV2::Compiler::Frontend.node_operator(binary).not_nil!.should eq("in".to_slice)
 
       # Right side should be array literal
       right = arena[CrystalV2::Compiler::Frontend.node_right(binary).not_nil!]
@@ -48,7 +48,7 @@ describe "CrystalV2::Compiler::Frontend::Parser" do
 
       binary = arena[program.roots[0]]
       CrystalV2::Compiler::Frontend.node_kind(binary).should eq(CrystalV2::Compiler::Frontend::NodeKind::Binary)
-      String.new(CrystalV2::Compiler::Frontend.node_operator(binary).not_nil!).should eq("in")
+      CrystalV2::Compiler::Frontend.node_operator(binary).not_nil!.should eq("in".to_slice)
 
       # Right side should be grouping containing range
       right_grouping = arena[CrystalV2::Compiler::Frontend.node_right(binary).not_nil!]
@@ -76,7 +76,7 @@ describe "CrystalV2::Compiler::Frontend::Parser" do
 
       condition = arena[CrystalV2::Compiler::Frontend.node_condition(if_node).not_nil!]
       CrystalV2::Compiler::Frontend.node_kind(condition).should eq(CrystalV2::Compiler::Frontend::NodeKind::Binary)
-      String.new(CrystalV2::Compiler::Frontend.node_operator(condition).not_nil!).should eq("in")
+      CrystalV2::Compiler::Frontend.node_operator(condition).not_nil!.should eq("in".to_slice)
     end
 
     it "parses negated in with not" do
@@ -98,7 +98,7 @@ describe "CrystalV2::Compiler::Frontend::Parser" do
 
       operand = arena[CrystalV2::Compiler::Frontend.node_left(operand_grouping).not_nil!]
       CrystalV2::Compiler::Frontend.node_kind(operand).should eq(CrystalV2::Compiler::Frontend::NodeKind::Binary)
-      String.new(CrystalV2::Compiler::Frontend.node_operator(operand).not_nil!).should eq("in")
+      CrystalV2::Compiler::Frontend.node_operator(operand).not_nil!.should eq("in".to_slice)
     end
 
     it "parses in in assignment" do
@@ -115,7 +115,7 @@ describe "CrystalV2::Compiler::Frontend::Parser" do
 
       value = arena[CrystalV2::Compiler::Frontend.node_assign_value(assign).not_nil!]
       CrystalV2::Compiler::Frontend.node_kind(value).should eq(CrystalV2::Compiler::Frontend::NodeKind::Binary)
-      String.new(CrystalV2::Compiler::Frontend.node_operator(value).not_nil!).should eq("in")
+      CrystalV2::Compiler::Frontend.node_operator(value).not_nil!.should eq("in".to_slice)
     end
 
     it "parses in as method argument" do
@@ -135,7 +135,7 @@ describe "CrystalV2::Compiler::Frontend::Parser" do
 
       arg = arena[args[0]]
       CrystalV2::Compiler::Frontend.node_kind(arg).should eq(CrystalV2::Compiler::Frontend::NodeKind::Binary)
-      String.new(CrystalV2::Compiler::Frontend.node_operator(arg).not_nil!).should eq("in")
+      CrystalV2::Compiler::Frontend.node_operator(arg).not_nil!.should eq("in".to_slice)
     end
 
     it "parses in with complex left expression" do
@@ -149,7 +149,7 @@ describe "CrystalV2::Compiler::Frontend::Parser" do
 
       binary = arena[program.roots[0]]
       CrystalV2::Compiler::Frontend.node_kind(binary).should eq(CrystalV2::Compiler::Frontend::NodeKind::Binary)
-      String.new(CrystalV2::Compiler::Frontend.node_operator(binary).not_nil!).should eq("in")
+      CrystalV2::Compiler::Frontend.node_operator(binary).not_nil!.should eq("in".to_slice)
 
       # Left side should be member access
       left = arena[CrystalV2::Compiler::Frontend.node_left(binary).not_nil!]
@@ -170,11 +170,11 @@ describe "CrystalV2::Compiler::Frontend::Parser" do
 
       binary1 = arena[program.roots[0]]
       CrystalV2::Compiler::Frontend.node_kind(binary1).should eq(CrystalV2::Compiler::Frontend::NodeKind::Binary)
-      String.new(CrystalV2::Compiler::Frontend.node_operator(binary1).not_nil!).should eq("in")
+      CrystalV2::Compiler::Frontend.node_operator(binary1).not_nil!.should eq("in".to_slice)
 
       binary2 = arena[program.roots[1]]
       CrystalV2::Compiler::Frontend.node_kind(binary2).should eq(CrystalV2::Compiler::Frontend::NodeKind::Binary)
-      String.new(CrystalV2::Compiler::Frontend.node_operator(binary2).not_nil!).should eq("in")
+      CrystalV2::Compiler::Frontend.node_operator(binary2).not_nil!.should eq("in".to_slice)
     end
 
     it "parses in with parentheses" do
@@ -188,7 +188,7 @@ describe "CrystalV2::Compiler::Frontend::Parser" do
 
       binary = arena[program.roots[0]]
       CrystalV2::Compiler::Frontend.node_kind(binary).should eq(CrystalV2::Compiler::Frontend::NodeKind::Binary)
-      String.new(CrystalV2::Compiler::Frontend.node_operator(binary).not_nil!).should eq("in")
+      CrystalV2::Compiler::Frontend.node_operator(binary).not_nil!.should eq("in".to_slice)
 
       # Left side should be grouping
       left = arena[CrystalV2::Compiler::Frontend.node_left(binary).not_nil!]

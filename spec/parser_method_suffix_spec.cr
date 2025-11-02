@@ -20,7 +20,7 @@ describe "CrystalV2::Compiler::Frontend::Parser" do
 
       method_node = arena[program.roots[0]]
       CrystalV2::Compiler::Frontend.node_kind(method_node).should eq(CrystalV2::Compiler::Frontend::NodeKind::Def)
-      String.new(CrystalV2::Compiler::Frontend.node_def_name(method_node).not_nil!).should eq("empty?")
+      CrystalV2::Compiler::Frontend.node_def_name(method_node).not_nil!.should eq("empty?".to_slice)
     end
 
     it "parses method definition with ! suffix" do
@@ -38,7 +38,7 @@ describe "CrystalV2::Compiler::Frontend::Parser" do
 
       method_node = arena[program.roots[0]]
       CrystalV2::Compiler::Frontend.node_kind(method_node).should eq(CrystalV2::Compiler::Frontend::NodeKind::Def)
-      String.new(CrystalV2::Compiler::Frontend.node_def_name(method_node).not_nil!).should eq("save!")
+      CrystalV2::Compiler::Frontend.node_def_name(method_node).not_nil!.should eq("save!".to_slice)
     end
 
     it "parses bare method call with ? suffix as identifier" do
@@ -55,7 +55,7 @@ describe "CrystalV2::Compiler::Frontend::Parser" do
       # Bare call parses as Identifier (semantic analysis determines it's a call)
       id_node = arena[program.roots[0]]
       CrystalV2::Compiler::Frontend.node_kind(id_node).should eq(CrystalV2::Compiler::Frontend::NodeKind::Identifier)
-      String.new(CrystalV2::Compiler::Frontend.node_literal(id_node).not_nil!).should eq("empty?")
+      CrystalV2::Compiler::Frontend.node_literal(id_node).not_nil!.should eq("empty?".to_slice)
     end
 
     it "parses bare method call with ! suffix as identifier" do
@@ -72,7 +72,7 @@ describe "CrystalV2::Compiler::Frontend::Parser" do
       # Bare call parses as Identifier (semantic analysis determines it's a call)
       id_node = arena[program.roots[0]]
       CrystalV2::Compiler::Frontend.node_kind(id_node).should eq(CrystalV2::Compiler::Frontend::NodeKind::Identifier)
-      String.new(CrystalV2::Compiler::Frontend.node_literal(id_node).not_nil!).should eq("save!")
+      CrystalV2::Compiler::Frontend.node_literal(id_node).not_nil!.should eq("save!".to_slice)
     end
 
     it "parses method call with ! suffix and parentheses" do
@@ -93,7 +93,7 @@ describe "CrystalV2::Compiler::Frontend::Parser" do
       callee_id = CrystalV2::Compiler::Frontend.node_callee(call_node).not_nil!
       callee = arena[callee_id]
       CrystalV2::Compiler::Frontend.node_kind(callee).should eq(CrystalV2::Compiler::Frontend::NodeKind::Identifier)
-      String.new(CrystalV2::Compiler::Frontend.node_literal(callee).not_nil!).should eq("save!")
+      CrystalV2::Compiler::Frontend.node_literal(callee).not_nil!.should eq("save!".to_slice)
     end
 
     it "parses method with ? suffix in class" do
@@ -116,7 +116,7 @@ describe "CrystalV2::Compiler::Frontend::Parser" do
       method_node = arena[class_body[0]]
 
       CrystalV2::Compiler::Frontend.node_kind(method_node).should eq(CrystalV2::Compiler::Frontend::NodeKind::Def)
-      String.new(CrystalV2::Compiler::Frontend.node_def_name(method_node).not_nil!).should eq("empty?")
+      CrystalV2::Compiler::Frontend.node_def_name(method_node).not_nil!.should eq("empty?".to_slice)
     end
 
     it "parses method with ! suffix and parameters" do
@@ -135,12 +135,12 @@ describe "CrystalV2::Compiler::Frontend::Parser" do
 
       method_node = arena[program.roots[0]]
       CrystalV2::Compiler::Frontend.node_kind(method_node).should eq(CrystalV2::Compiler::Frontend::NodeKind::Def)
-      String.new(CrystalV2::Compiler::Frontend.node_def_name(method_node).not_nil!).should eq("update!")
+      CrystalV2::Compiler::Frontend.node_def_name(method_node).not_nil!.should eq("update!".to_slice)
 
       params = CrystalV2::Compiler::Frontend.node_def_params(method_node).not_nil!
       params.size.should eq(2)
-      String.new(params[0].name).should eq("name")
-      String.new(params[1].name).should eq("age")
+      params[0].name.should eq("name".to_slice)
+      params[1].name.should eq("age".to_slice)
     end
 
     it "parses member access with ? suffix" do
@@ -160,7 +160,7 @@ describe "CrystalV2::Compiler::Frontend::Parser" do
       callee_id = CrystalV2::Compiler::Frontend.node_callee(call_node).not_nil!
       callee = arena[callee_id]
       CrystalV2::Compiler::Frontend.node_kind(callee).should eq(CrystalV2::Compiler::Frontend::NodeKind::MemberAccess)
-      String.new(CrystalV2::Compiler::Frontend.node_member(callee).not_nil!).should eq("nil?")
+      CrystalV2::Compiler::Frontend.node_member(callee).not_nil!.should eq("nil?".to_slice)
     end
 
     it "parses member access with ! suffix" do
@@ -180,7 +180,7 @@ describe "CrystalV2::Compiler::Frontend::Parser" do
       callee_id = CrystalV2::Compiler::Frontend.node_callee(call_node).not_nil!
       callee = arena[callee_id]
       CrystalV2::Compiler::Frontend.node_kind(callee).should eq(CrystalV2::Compiler::Frontend::NodeKind::MemberAccess)
-      String.new(CrystalV2::Compiler::Frontend.node_member(callee).not_nil!).should eq("save!")
+      CrystalV2::Compiler::Frontend.node_member(callee).not_nil!.should eq("save!".to_slice)
     end
 
     it "parses chained method calls with suffixes" do
@@ -201,7 +201,7 @@ describe "CrystalV2::Compiler::Frontend::Parser" do
       to_s_member_id = CrystalV2::Compiler::Frontend.node_callee(to_s_call).not_nil!
       to_s_member = arena[to_s_member_id]
       CrystalV2::Compiler::Frontend.node_kind(to_s_member).should eq(CrystalV2::Compiler::Frontend::NodeKind::MemberAccess)
-      String.new(CrystalV2::Compiler::Frontend.node_member(to_s_member).not_nil!).should eq("to_s")
+      CrystalV2::Compiler::Frontend.node_member(to_s_member).not_nil!.should eq("to_s".to_slice)
 
       # Left of to_s member access is call to valid?
       valid_call = arena[CrystalV2::Compiler::Frontend.node_left(to_s_member).not_nil!]
@@ -210,7 +210,7 @@ describe "CrystalV2::Compiler::Frontend::Parser" do
       valid_member_id = CrystalV2::Compiler::Frontend.node_callee(valid_call).not_nil!
       valid_member = arena[valid_member_id]
       CrystalV2::Compiler::Frontend.node_kind(valid_member).should eq(CrystalV2::Compiler::Frontend::NodeKind::MemberAccess)
-      String.new(CrystalV2::Compiler::Frontend.node_member(valid_member).not_nil!).should eq("valid?")
+      CrystalV2::Compiler::Frontend.node_member(valid_member).not_nil!.should eq("valid?".to_slice)
     end
 
     it "parses method with ? suffix and type annotation" do
@@ -228,11 +228,11 @@ describe "CrystalV2::Compiler::Frontend::Parser" do
 
       method_node = arena[program.roots[0]]
       CrystalV2::Compiler::Frontend.node_kind(method_node).should eq(CrystalV2::Compiler::Frontend::NodeKind::Def)
-      String.new(CrystalV2::Compiler::Frontend.node_def_name(method_node).not_nil!).should eq("empty?")
+      CrystalV2::Compiler::Frontend.node_def_name(method_node).not_nil!.should eq("empty?".to_slice)
 
       return_type = CrystalV2::Compiler::Frontend.node_def_return_type(method_node)
       return_type.should_not be_nil
-      String.new(return_type.not_nil!).should eq("Bool")
+      return_type.not_nil!.should eq("Bool".to_slice)
     end
 
     it "parses multiple methods with different suffixes" do
@@ -259,17 +259,17 @@ describe "CrystalV2::Compiler::Frontend::Parser" do
       # First method: valid?
       method1 = arena[program.roots[0]]
       CrystalV2::Compiler::Frontend.node_kind(method1).should eq(CrystalV2::Compiler::Frontend::NodeKind::Def)
-      String.new(CrystalV2::Compiler::Frontend.node_def_name(method1).not_nil!).should eq("valid?")
+      CrystalV2::Compiler::Frontend.node_def_name(method1).not_nil!.should eq("valid?".to_slice)
 
       # Second method: save!
       method2 = arena[program.roots[1]]
       CrystalV2::Compiler::Frontend.node_kind(method2).should eq(CrystalV2::Compiler::Frontend::NodeKind::Def)
-      String.new(CrystalV2::Compiler::Frontend.node_def_name(method2).not_nil!).should eq("save!")
+      CrystalV2::Compiler::Frontend.node_def_name(method2).not_nil!.should eq("save!".to_slice)
 
       # Third method: process (no suffix)
       method3 = arena[program.roots[2]]
       CrystalV2::Compiler::Frontend.node_kind(method3).should eq(CrystalV2::Compiler::Frontend::NodeKind::Def)
-      String.new(CrystalV2::Compiler::Frontend.node_def_name(method3).not_nil!).should eq("process")
+      CrystalV2::Compiler::Frontend.node_def_name(method3).not_nil!.should eq("process".to_slice)
     end
 
     it "parses method call with ! suffix and arguments" do
@@ -289,7 +289,7 @@ describe "CrystalV2::Compiler::Frontend::Parser" do
       callee_id = CrystalV2::Compiler::Frontend.node_callee(call_node).not_nil!
       callee = arena[callee_id]
       CrystalV2::Compiler::Frontend.node_kind(callee).should eq(CrystalV2::Compiler::Frontend::NodeKind::Identifier)
-      String.new(CrystalV2::Compiler::Frontend.node_literal(callee).not_nil!).should eq("delete!")
+      CrystalV2::Compiler::Frontend.node_literal(callee).not_nil!.should eq("delete!".to_slice)
 
       args = CrystalV2::Compiler::Frontend.node_args(call_node).not_nil!
       args.size.should eq(2)

@@ -18,7 +18,7 @@ describe "CrystalV2::Compiler::Frontend::Parser" do
 
       entries = CrystalV2::Compiler::Frontend.node_named_tuple_entries(named_tuple).not_nil!
       entries.size.should eq(1)
-      entries[0].key.should eq("name")
+      entries[0].key.should eq("name".to_slice)
     end
 
     it "parses named tuple with multiple entries" do
@@ -35,8 +35,8 @@ describe "CrystalV2::Compiler::Frontend::Parser" do
 
       entries = CrystalV2::Compiler::Frontend.node_named_tuple_entries(named_tuple).not_nil!
       entries.size.should eq(2)
-      entries[0].key.should eq("name")
-      entries[1].key.should eq("age")
+      entries[0].key.should eq("name".to_slice)
+      entries[1].key.should eq("age".to_slice)
     end
 
     it "parses named tuple with trailing comma" do
@@ -109,7 +109,7 @@ describe "CrystalV2::Compiler::Frontend::Parser" do
 
       entries = CrystalV2::Compiler::Frontend.node_named_tuple_entries(outer).not_nil!
       entries.size.should eq(1)
-      entries[0].key.should eq("person")
+      entries[0].key.should eq("person".to_slice)
 
       # Inner is also named tuple
       inner = arena[entries[0].value]
@@ -241,8 +241,8 @@ describe "CrystalV2::Compiler::Frontend::Parser" do
 
       entries = CrystalV2::Compiler::Frontend.node_named_tuple_entries(named_tuple).not_nil!
       entries.size.should eq(5)
-      entries[0].key.should eq("a")
-      entries[4].key.should eq("e")
+      entries[0].key.should eq("a".to_slice)
+      entries[4].key.should eq("e".to_slice)
     end
   end
 end

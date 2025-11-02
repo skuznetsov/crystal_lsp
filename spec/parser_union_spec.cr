@@ -22,7 +22,7 @@ describe "CrystalV2::Compiler::Frontend::Parser" do
       union_node = arena[program.roots.first]
       Frontend.node_kind(union_node).should eq(Frontend::NodeKind::Union)
       Frontend.node_class_is_union(union_node).should eq(true)
-      String.new(Frontend.node_class_name(union_node).not_nil!).should eq("IntOrFloat")
+      Frontend.node_class_name(union_node).not_nil!.should eq("IntOrFloat".to_slice)
 
       body = Frontend.node_class_body(union_node)
       if body

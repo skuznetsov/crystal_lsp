@@ -2436,7 +2436,10 @@ module CrystalV2
 
             # Parse arguments
             loop do
+              # Disable type declarations to allow identifier: syntax for named args
+              @no_type_declaration += 1
               arg = parse_expression(0)
+              @no_type_declaration -= 1
               return PREFIX_ERROR if arg.invalid?
               args << arg
 
@@ -2502,7 +2505,10 @@ module CrystalV2
 
             # Parse arguments
             loop do
+              # Disable type declarations to allow identifier: syntax for named args
+              @no_type_declaration += 1
               arg = parse_expression(0)
+              @no_type_declaration -= 1
               return PREFIX_ERROR if arg.invalid?
               args << arg
 
@@ -4284,7 +4290,14 @@ module CrystalV2
             break if current_precedence < precedence
 
             advance
-            right = parse_expression(current_precedence + 1)
+            # Disable type declarations for ternary true_branch (identifier: would conflict)
+            if token.kind == Token::Kind::Question
+              @no_type_declaration += 1
+              right = parse_expression(current_precedence + 1)
+              @no_type_declaration -= 1
+            else
+              right = parse_expression(current_precedence + 1)
+            end
             if right.invalid?
               left = PREFIX_ERROR
               break
@@ -4315,7 +4328,10 @@ module CrystalV2
               advance  # consume ':'
 
               # Parse false branch with same precedence (right-associative)
+              # Disable type declarations (identifier: would conflict)
+              @no_type_declaration += 1
               false_branch = parse_expression(current_precedence)
+              @no_type_declaration -= 1
               if false_branch.invalid?
                 left = PREFIX_ERROR
                 break
@@ -4770,7 +4786,10 @@ module CrystalV2
           end
 
           # Parse first element (key for hash/named tuple, value for tuple)
+          # Disable type declarations inside {} to allow identifier: syntax for named tuples
+          @no_type_declaration += 1
           first_elem = parse_expression(0)
+          @no_type_declaration -= 1
           return PREFIX_ERROR if first_elem.invalid?
           skip_trivia
 
@@ -5187,7 +5206,10 @@ module CrystalV2
                   # Not block shorthand, rewind and parse normally
                   # This handles cases like: foo(& other_expr)
                   @index -= 1  # Go back to Amp token
+                  # Disable type declarations to allow identifier: syntax for named args
+                  @no_type_declaration += 1
                   arg_expr = parse_expression(0)
+                  @no_type_declaration -= 1
                   return PREFIX_ERROR if arg_expr.invalid?
                 end
               elsif current_token.kind == Token::Kind::AmpDot
@@ -5200,7 +5222,10 @@ module CrystalV2
                 return PREFIX_ERROR if arg_expr.invalid?
               else
                 # Parse first expression/identifier
+                # Disable type declarations to allow identifier: syntax for named args
+                @no_type_declaration += 1
                 arg_expr = parse_expression(0)
+                @no_type_declaration -= 1
                 return PREFIX_ERROR if arg_expr.invalid?
               end
               skip_whitespace_and_optional_newlines
@@ -5217,7 +5242,10 @@ module CrystalV2
                   skip_whitespace_and_optional_newlines
 
                   # Parse value expression
+                  # Disable type declarations in value (may contain nested named tuples/args)
+                  @no_type_declaration += 1
                   value_expr = parse_expression(0)
+                  @no_type_declaration -= 1
                   return PREFIX_ERROR if value_expr.invalid?
                   value_span = @arena[value_expr].span
 

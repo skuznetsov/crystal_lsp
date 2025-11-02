@@ -32,7 +32,7 @@ describe "CrystalV2::Compiler::Frontend::Parser" do
       # Argument is identifier x
       arg_node = arena[args[0]]
       CrystalV2::Compiler::Frontend.node_kind(arg_node).should eq(CrystalV2::Compiler::Frontend::NodeKind::Identifier)
-      String.new(CrystalV2::Compiler::Frontend.node_literal(arg_node).not_nil!).should eq("x")
+      CrystalV2::Compiler::Frontend.node_literal(arg_node).not_nil!.should eq("x".to_slice)
     end
 
     it "parses typeof with multiple arguments (union type)" do
