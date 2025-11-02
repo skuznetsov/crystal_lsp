@@ -1,4 +1,5 @@
 require "json"
+require "uri"
 require "./protocol"
 require "./messages"
 require "../frontend/lexer"
@@ -837,9 +838,9 @@ module CrystalV2
           return send_response(id, SemanticTokens.new(data: [] of Int32).to_json) unless doc_state
 
           # Collect semantic tokens from AST
-          tokens = collect_semantic_tokens(doc_state.program, doc_state.source)
+          tokens = collect_semantic_tokens(doc_state.program, doc_state.text_document.text)
 
-          debug("Generated #{tokens.size} semantic tokens")
+          debug("Generated semantic tokens")
           send_response(id, tokens.to_json)
         end
 
@@ -858,7 +859,10 @@ module CrystalV2
           return send_response(id, "null") unless doc_state
 
           # Find symbol at position
-          symbol = find_symbol_at_position(doc_state, line, character)
+          expr_id = find_expr_at_position(doc_state.program, line, character)
+          return send_response(id, "null") unless expr_id
+
+          symbol = doc_state.identifier_symbols.try(&.[expr_id]?)
           return send_response(id, "null") unless symbol
 
           # Only methods support call hierarchy
