@@ -62,7 +62,7 @@ describe "CrystalV2::Compiler::Frontend::Parser" do
       String.new(params[0].name).should eq("x")
 
       type_annotation = params[0].type_annotation.not_nil!
-      type_annotation.should eq("Int32")
+      String.new(type_annotation).should eq("Int32")
     end
 
     it "parses two parameters with type annotations" do
@@ -79,10 +79,10 @@ describe "CrystalV2::Compiler::Frontend::Parser" do
       params.size.should eq(2)
 
       String.new(params[0].name).should eq("x")
-      params[0].type_annotation.not_nil!.should eq("Int32")
+      String.new(params[0].type_annotation.not_nil!).should eq("Int32")
 
       String.new(params[1].name).should eq("y")
-      params[1].type_annotation.not_nil!.should eq("Int32")
+      String.new(params[1].type_annotation.not_nil!).should eq("Int32")
     end
 
     it "parses two parameters without type annotations" do

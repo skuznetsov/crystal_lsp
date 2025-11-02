@@ -28,7 +28,7 @@ describe "CrystalV2::Compiler::Frontend::Parser" do
 
       specs = CrystalV2::Compiler::Frontend.node_accessor_specs(getter_node).not_nil!
       specs.size.should eq(1)
-      specs[0].name.should eq("name")
+      String.new(specs[0].name).should eq("name")
       specs[0].type_annotation.should be_nil
       specs[0].default_value.should be_nil
     end
@@ -50,8 +50,8 @@ describe "CrystalV2::Compiler::Frontend::Parser" do
       getter_node = arena[class_body[0]]
       specs = CrystalV2::Compiler::Frontend.node_accessor_specs(getter_node).not_nil!
 
-      specs[0].name.should eq("name")
-      specs[0].type_annotation.should eq("String")
+      String.new(specs[0].name).should eq("name")
+      String.new(specs[0].type_annotation.not_nil!).should eq("String")
       specs[0].default_value.should be_nil
     end
 
@@ -72,7 +72,7 @@ describe "CrystalV2::Compiler::Frontend::Parser" do
       getter_node = arena[class_body[0]]
       specs = CrystalV2::Compiler::Frontend.node_accessor_specs(getter_node).not_nil!
 
-      specs[0].name.should eq("name")
+      String.new(specs[0].name).should eq("name")
       specs[0].type_annotation.should be_nil
 
       default_value = specs[0].default_value.not_nil!
@@ -97,8 +97,8 @@ describe "CrystalV2::Compiler::Frontend::Parser" do
       getter_node = arena[class_body[0]]
       specs = CrystalV2::Compiler::Frontend.node_accessor_specs(getter_node).not_nil!
 
-      specs[0].name.should eq("name")
-      specs[0].type_annotation.should eq("String")
+      String.new(specs[0].name).should eq("name")
+      String.new(specs[0].type_annotation.not_nil!).should eq("String")
 
       default_value = specs[0].default_value.not_nil!
       default_node = arena[default_value]
@@ -122,9 +122,9 @@ describe "CrystalV2::Compiler::Frontend::Parser" do
       getter_node = arena[class_body[0]]
       specs = CrystalV2::Compiler::Frontend.node_accessor_specs(getter_node).not_nil!
       specs.size.should eq(3)
-      specs[0].name.should eq("name")
-      specs[1].name.should eq("age")
-      specs[2].name.should eq("email")
+      String.new(specs[0].name).should eq("name")
+      String.new(specs[1].name).should eq("age")
+      String.new(specs[2].name).should eq("email")
     end
 
     it "parses getter with mixed specifications" do
@@ -146,17 +146,17 @@ describe "CrystalV2::Compiler::Frontend::Parser" do
       specs.size.should eq(3)
 
       # name : String
-      specs[0].name.should eq("name")
-      specs[0].type_annotation.should eq("String")
+      String.new(specs[0].name).should eq("name")
+      String.new(specs[0].type_annotation.not_nil!).should eq("String")
       specs[0].default_value.should be_nil
 
       # age = 0
-      specs[1].name.should eq("age")
+      String.new(specs[1].name).should eq("age")
       specs[1].type_annotation.should be_nil
       specs[1].default_value.should_not be_nil
 
       # email
-      specs[2].name.should eq("email")
+      String.new(specs[2].name).should eq("email")
       specs[2].type_annotation.should be_nil
       specs[2].default_value.should be_nil
     end
@@ -179,8 +179,8 @@ describe "CrystalV2::Compiler::Frontend::Parser" do
       CrystalV2::Compiler::Frontend.node_kind(setter_node).should eq(CrystalV2::Compiler::Frontend::NodeKind::Setter)
 
       specs = CrystalV2::Compiler::Frontend.node_accessor_specs(setter_node).not_nil!
-      specs[0].name.should eq("name")
-      specs[0].type_annotation.should eq("String")
+      String.new(specs[0].name).should eq("name")
+      String.new(specs[0].type_annotation.not_nil!).should eq("String")
     end
 
     it "parses property with type annotation and default" do
@@ -201,8 +201,8 @@ describe "CrystalV2::Compiler::Frontend::Parser" do
       CrystalV2::Compiler::Frontend.node_kind(property_node).should eq(CrystalV2::Compiler::Frontend::NodeKind::Property)
 
       specs = CrystalV2::Compiler::Frontend.node_accessor_specs(property_node).not_nil!
-      specs[0].name.should eq("name")
-      specs[0].type_annotation.should eq("String")
+      String.new(specs[0].name).should eq("name")
+      String.new(specs[0].type_annotation.not_nil!).should eq("String")
       specs[0].default_value.should_not be_nil
     end
 
