@@ -419,12 +419,27 @@ module CrystalV2
           doc_state = @documents[uri]?
           return send_response(id, "[]") unless doc_state
 
+          # Extract prefix at cursor position
+          prefix = extract_prefix_at_position(doc_state.text_document.text, line, character)
+
           # Collect completion items
           items = [] of CompletionItem
 
           # Add symbols from symbol table (classes, methods, etc.)
           if symbol_table = doc_state.symbol_table
             collect_symbols_from_table(symbol_table, items)
+          end
+
+          # Filter by prefix if present (smart case: lowercase prefix = case-insensitive, mixed case = case-sensitive)
+          unless prefix.empty?
+            if prefix == prefix.downcase
+              # All lowercase - use case-insensitive matching
+              prefix_lower = prefix.downcase
+              items.select! { |item| item.label.downcase.starts_with?(prefix_lower) }
+            else
+              # Has uppercase - use case-sensitive matching
+              items.select! { |item| item.label.starts_with?(prefix) }
+            end
           end
 
           # Return array of completion items
@@ -441,6 +456,28 @@ module CrystalV2
           if parent = table.parent
             collect_symbols_from_table(parent, items)
           end
+        end
+
+        # Extract identifier prefix at the given position (0-indexed line and character)
+        private def extract_prefix_at_position(text : String, line : Int32, character : Int32) : String
+          lines = text.split('\n')
+          return "" if line < 0 || line >= lines.size
+
+          current_line = lines[line]
+          return "" if character < 0 || character > current_line.size
+
+          # Extract characters backwards from position while they're identifier chars
+          prefix_chars = [] of Char
+          idx = character - 1
+
+          while idx >= 0
+            char = current_line[idx]
+            break unless char.alphanumeric? || char == '_'
+            prefix_chars.unshift(char)
+            idx -= 1
+          end
+
+          prefix_chars.join
         end
 
         # Publish diagnostics to client
