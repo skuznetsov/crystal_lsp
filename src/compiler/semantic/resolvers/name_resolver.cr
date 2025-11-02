@@ -106,10 +106,16 @@ module CrystalV2
             return unless slice
             name = String.new(slice)
 
-            # Create a new local variable symbol
-            symbol = VariableSymbol.new(name, target_id)
-            @current_table.define(name, symbol)
-            @identifier_symbols[target_id] = symbol
+            # Check if variable already exists (reassignment vs first assignment)
+            if existing = @current_table.lookup_local(name)
+              # Reassignment: reuse existing symbol, update identifier mapping
+              @identifier_symbols[target_id] = existing
+            else
+              # First assignment: create new symbol
+              symbol = VariableSymbol.new(name, target_id)
+              @current_table.define(name, symbol)
+              @identifier_symbols[target_id] = symbol
+            end
           else
             # For other assignment targets (instance vars, indexed access, etc.), just visit them
             visit(target_id)
