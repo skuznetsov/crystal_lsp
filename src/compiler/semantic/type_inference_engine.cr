@@ -36,6 +36,7 @@ module CrystalV2
         getter diagnostics : Array(Diagnostic)
 
         @current_class : ClassSymbol?  # Phase 5C: Track current class for instance var types
+        @receiver_type_context : InstanceType?  # Week 1: Track receiver's instance type for generic method body inference
 
         # Debug flag - set via environment variable TYPE_INFERENCE_DEBUG=1
         @@debug : Bool = ENV["TYPE_INFERENCE_DEBUG"]? == "1"
@@ -50,6 +51,7 @@ module CrystalV2
           @assignments = {} of String => Type  # Track variable assignments: name → type
           @instance_var_types = {} of String => Type  # Phase 5A: Track instance variable types
           @current_class = nil
+          @receiver_type_context = nil
         end
 
         # Debug helper
@@ -351,6 +353,19 @@ module CrystalV2
 
         private def infer_identifier(node : Frontend::IdentifierNode, expr_id : ExprId) : Type
           identifier_name = String.new(node.name)
+
+          # Week 1: Check for built-in type names used as type arguments
+          # In Box(Int32), Int32 is an identifier that should map to PrimitiveType
+          case identifier_name
+          when "Int32"   then return @context.int32_type
+          when "Int64"   then return @context.int64_type
+          when "Float64" then return @context.float64_type
+          when "String"  then return @context.string_type
+          when "Bool"    then return @context.bool_type
+          when "Nil"     then return @context.nil_type
+          when "Char"    then return @context.char_type
+          end
+
           # First, check if this identifier has a tracked assignment
           if assigned_type = @assignments[identifier_name]?
             return assigned_type
@@ -564,10 +579,38 @@ module CrystalV2
           # Remove @ prefix
           clean_name = var_name.starts_with?("@") ? var_name[1..-1] : var_name
 
+          if ENV["DEBUG"]?
+            puts "DEBUG infer_instance_var:"
+            puts "  var_name: #{clean_name}"
+            puts "  @current_class: #{@current_class.try(&.name)}"
+            puts "  @receiver_type_context: #{@receiver_type_context.inspect}"
+          end
+
           # Phase 5C: Check explicit type annotation from ClassSymbol first
           if current_class = @current_class
             if type_annotation = current_class.get_instance_var_type(clean_name)
+              if ENV["DEBUG"]?
+                puts "  type_annotation: #{type_annotation}"
+              end
+              # Week 1: If we have receiver type context (generic instance), substitute type parameters
+              if receiver = @receiver_type_context
+                if ENV["DEBUG"]?
+                  puts "  receiver.type_args: #{receiver.type_args.inspect}"
+                  puts "  receiver.class_symbol.type_parameters: #{receiver.class_symbol.type_parameters.inspect}"
+                end
+                if (type_args = receiver.type_args) && (type_params = receiver.class_symbol.type_parameters)
+                  result = substitute_type_parameters(type_annotation, type_args, type_params)
+                  if ENV["DEBUG"]?
+                    puts "  substituted result: #{result.class} = #{result.inspect}"
+                  end
+                  return result
+                end
+              end
               return parse_type_name(type_annotation)
+            else
+              if ENV["DEBUG"]?
+                puts "  type_annotation: nil (not found in class)"
+              end
             end
           end
 
@@ -577,6 +620,9 @@ module CrystalV2
           end
 
           # Not found - return Nil
+          if ENV["DEBUG"]?
+            puts "  returning Nil (not found)"
+          end
           @context.nil_type
         end
 
@@ -1438,23 +1484,71 @@ module CrystalV2
           @context.bool_type
         end
 
-        # Phase 60: Generic type instantiation
+        # Phase 60 + Week 1: Generic type instantiation
+        # Box(Int32) → ClassType(Box, [Int32])
         private def infer_generic(node : Frontend::GenericNode, expr_id : ExprId) : Type
-          # Generic instantiation: Box(Int32), Hash(String, Int32)
-          # Returns the specialized generic type
-          # In a full implementation:
-          # - Infer base type (Box, Array, Hash)
-          # - Infer each type argument
-          # - Create specialized generic instance type
-          # - Track type parameters for validation
+          # Infer base type (should be ClassType for user-defined generics)
+          base_type = infer_expression(node.base_type)
 
-          # For now, infer base name and type arguments, return placeholder
-          infer_expression(node.base_type)
-          node.type_args.each { |arg| infer_expression(arg) }
+          if ENV["DEBUG"]?
+            puts "DEBUG infer_generic:"
+            puts "  base_type: #{base_type.class} = #{base_type.inspect}"
+            puts "  type_args count: #{node.type_args.size}"
+          end
 
-          # Return placeholder type (nil_type for now)
-          # Future: return specialized generic type like Box<Int32>
-          @context.nil_type
+          # Infer type arguments and normalize them
+          # ClassType(Int32) → PrimitiveType("Int32")
+          type_args = node.type_args.map_with_index do |arg, i|
+            if ENV["DEBUG"]?
+              arg_node = @program.arena[arg]
+              puts "  arg #{i}: node=#{arg_node.class}"
+            end
+            inferred = infer_expression(arg)
+            if ENV["DEBUG"]?
+              puts "    inferred: #{inferred.class} = #{inferred.inspect}"
+            end
+            normalize_type_argument(inferred)
+          end
+
+          # If base is a class (Box), create ClassType with type args
+          if base_type.is_a?(ClassType)
+            return ClassType.new(base_type.symbol, type_args)
+          end
+
+          # Otherwise return base type (for built-in types like Array, Hash)
+          # Future: handle Array(Int32), Hash(String, Int32)
+          base_type
+        end
+
+        # Normalize type argument: ClassType(Int32) → PrimitiveType("Int32")
+        # Week 1: Convert ClassType references to actual types
+        private def normalize_type_argument(type : Type) : Type
+          if ENV["DEBUG"]?
+            puts "DEBUG normalize_type_argument: #{type.class} = #{type.inspect}"
+          end
+
+          if type.is_a?(ClassType)
+            # If it's a reference to a primitive class, convert to PrimitiveType
+            result = case type.symbol.name
+            when "Int32"   then @context.int32_type
+            when "Int64"   then @context.int64_type
+            when "Float64" then @context.float64_type
+            when "String"  then @context.string_type
+            when "Bool"    then @context.bool_type
+            when "Nil"     then @context.nil_type
+            when "Char"    then @context.char_type
+            else
+              # User-defined class - keep as ClassType
+              type
+            end
+
+            if ENV["DEBUG"]?
+              puts "  → normalized to: #{result.class} = #{result.inspect}"
+            end
+            result
+          else
+            type
+          end
         end
 
         # Phase 63: Type inference for path expressions (Foo::Bar)
@@ -1619,9 +1713,12 @@ module CrystalV2
           receiver_type = infer_expression(node.object)
           method_name = String.new(node.member)
 
-          # Phase 4B.5: Special case for constructor - ClassName.new → InstanceType
+          # Phase 4B.5 + Week 1: Special case for constructor - ClassName.new → InstanceType
+          # Week 1: Zero-argument constructor
+          # Box(Int32).new or Box.new (no args)
           if method_name == "new" && receiver_type.is_a?(ClassType)
-            return InstanceType.new(receiver_type.symbol)
+            # If ClassType has type_args (e.g., Box(Int32)), copy them to InstanceType
+            return InstanceType.new(receiver_type.symbol, receiver_type.type_args)
           end
 
           # Phase 4B: Zero-argument method call
@@ -1640,9 +1737,17 @@ module CrystalV2
           # Lookup method with overload resolution
           result_type = if method = lookup_method(receiver_type, method_name, arg_types)
             if ann = method.return_annotation
-              parse_type_name(ann)
+              # Week 1: Substitute type parameters in return type
+              # If receiver is InstanceType with type_args, substitute T → Int32
+              if receiver_type.is_a?(InstanceType) && (type_args = receiver_type.type_args) && (type_params = receiver_type.class_symbol.type_parameters)
+                substitute_type_parameters(ann, type_args, type_params)
+              else
+                parse_type_name(ann)
+              end
             else
-              @context.nil_type
+              # Week 1: No return annotation - infer from method body
+              # For generic methods, set receiver context for type parameter substitution
+              infer_method_body_type(method, receiver_type)
             end
           else
             emit_error("Method '#{method_name}' not found on #{receiver_type}", expr_id)
@@ -1676,8 +1781,34 @@ module CrystalV2
 
           return @context.nil_type unless receiver_type && method_name
 
+          # Week 1: Generic class instantiation with type inference
+          # Box.new(42) → infer T=Int32 from argument
+          # Box(Int32).new(42) → use explicit type args
           if method_name == "new" && receiver_type.is_a?(ClassType)
-            return InstanceType.new(receiver_type.symbol)
+            # Infer argument types first
+            arg_types = node.args.map { |arg_id| infer_expression(arg_id) }
+
+            # DEBUG: Print receiver_type info
+            if ENV["DEBUG"]?
+              puts "DEBUG infer_call:"
+              puts "  receiver: #{receiver_type.symbol.name}"
+              puts "  receiver.type_args: #{receiver_type.type_args.inspect}"
+              if ta = receiver_type.type_args
+                ta.each_with_index do |t, i|
+                  puts "    arg #{i}: #{t.class} = #{t.inspect}"
+                end
+              end
+            end
+
+            # If ClassType already has type_args (explicit Box(Int32)), use them
+            if receiver_type.type_args
+              return InstanceType.new(receiver_type.symbol, receiver_type.type_args)
+            # Otherwise try to infer type arguments from constructor arguments
+            elsif type_args = infer_type_arguments(receiver_type.symbol, arg_types)
+              return InstanceType.new(receiver_type.symbol, type_args)
+            else
+              return InstanceType.new(receiver_type.symbol)
+            end
           end
 
           arg_types = node.args.map { |arg_id| infer_expression(arg_id) }
@@ -1697,7 +1828,12 @@ module CrystalV2
 
           if method = lookup_method(receiver_type, method_name, arg_types)
             if ann = method.return_annotation
-              parse_type_name(ann)
+              # Week 1: Substitute type parameters in return type
+              if receiver_type.is_a?(InstanceType) && (type_args = receiver_type.type_args) && (type_params = receiver_type.class_symbol.type_parameters)
+                substitute_type_parameters(ann, type_args, type_params)
+              else
+                parse_type_name(ann)
+              end
             else
               @context.nil_type
             end
@@ -1932,7 +2068,7 @@ module CrystalV2
             when "+", "-", "*", "/", "//"
               # Binary arithmetic: Int32#+(Int32) : Int32
               # Phase 78: // floor division
-              param = Frontend::Parameter.new(name: "other", type_annotation: type_name)
+              param = Frontend::Parameter.new(name: "other".to_slice, type_annotation: type_name.to_slice)
               methods << MethodSymbol.new(
                 method_name,
                 dummy_node_id,
@@ -1942,7 +2078,7 @@ module CrystalV2
               )
             when "<", ">", "<=", ">=", "==", "!="
               # Comparison operators: Int32#<(Int32) : Bool
-              param = Frontend::Parameter.new(name: "other", type_annotation: type_name)
+              param = Frontend::Parameter.new(name: "other".to_slice, type_annotation: type_name.to_slice)
               methods << MethodSymbol.new(
                 method_name,
                 dummy_node_id,
@@ -1965,7 +2101,7 @@ module CrystalV2
               )
             when "+"
               # String#+(String) : String
-              param = Frontend::Parameter.new(name: "other", type_annotation: "String")
+              param = Frontend::Parameter.new(name: "other".to_slice, type_annotation: "String".to_slice)
               methods << MethodSymbol.new(
                 method_name,
                 dummy_node_id,
@@ -1975,7 +2111,7 @@ module CrystalV2
               )
             when "==", "!="
               # String#==(String) : Bool
-              param = Frontend::Parameter.new(name: "other", type_annotation: "String")
+              param = Frontend::Parameter.new(name: "other".to_slice, type_annotation: "String".to_slice)
               methods << MethodSymbol.new(
                 method_name,
                 dummy_node_id,
@@ -1989,7 +2125,7 @@ module CrystalV2
             case method_name
             when "==", "!="
               # Bool#==(Bool) : Bool
-              param = Frontend::Parameter.new(name: "other", type_annotation: "Bool")
+              param = Frontend::Parameter.new(name: "other".to_slice, type_annotation: "Bool".to_slice)
               methods << MethodSymbol.new(
                 method_name,
                 dummy_node_id,
@@ -2046,7 +2182,7 @@ module CrystalV2
           when "<<"
             # Array(T)#<<(T) : Array(T)
             # Push returns the array itself
-            param = Frontend::Parameter.new(name: "value", type_annotation: element_type_name)
+            param = Frontend::Parameter.new(name: "value".to_slice, type_annotation: element_type_name.to_slice)
             methods << MethodSymbol.new(
               method_name,
               dummy_node_id,
@@ -2093,6 +2229,118 @@ module CrystalV2
           # Return a generic Proc type
           # In a full implementation, this would be Proc(T1, T2 -> R)
           @context.proc_type
+        end
+
+        # ============================================================
+        # WEEK 1: Generic Type Instantiation Helpers
+        # ============================================================
+
+        # Infer type arguments for generic class from constructor call arguments
+        #
+        # Example: Box.new(42) where Box(T) has initialize(@value : T)
+        #   → Infers T = Int32 from argument type
+        #   → Returns [Int32]
+        #
+        # Week 1: Simple unification - T appears directly in parameter type
+        # Future: Complex constraints (T < Number, etc.)
+        private def infer_type_arguments(class_symbol : ClassSymbol, arg_types : Array(Type)) : Array(Type)?
+          type_params = class_symbol.type_parameters
+          return nil unless type_params && !type_params.empty?
+
+          # Find constructor (initialize method)
+          init_symbol = class_symbol.scope.lookup_local("initialize")
+          return nil unless init_symbol.is_a?(MethodSymbol)
+
+          # Simple binding: parameter count must match
+          params = init_symbol.params
+          return nil if params.size != arg_types.size
+
+          # Build type parameter binding map
+          # For now: simple case where parameter type == type parameter name
+          # Example: @value : T  → T gets bound to arg_types[0]
+          binding = {} of String => Type
+
+          params.zip(arg_types).each do |param, arg_type|
+            if type_ann = param.type_annotation
+              type_name = String.new(type_ann)
+              # If parameter type is a type parameter (e.g., "T"), bind it
+              if type_params.includes?(type_name)
+                binding[type_name] = arg_type
+              end
+            end
+          end
+
+          # Return type arguments in the same order as type_parameters
+          type_params.map { |param_name| binding[param_name]? || @context.nil_type }
+        end
+
+        # Substitute type parameters in a type annotation
+        #
+        # Example: "T" with binding {"T" => Int32} → Int32
+        # Example: "Array(T)" with binding → needs parsing (future)
+        #
+        # Week 1: Simple substitution for direct type parameter references
+        private def substitute_type_parameters(type_name : String, type_args : Array(Type), type_params : Array(String)) : Type
+          # Check if type_name is a type parameter
+          if idx = type_params.index(type_name)
+            return type_args[idx] if idx < type_args.size
+          end
+
+          # Otherwise parse as regular type
+          parse_type_name(type_name)
+        end
+
+        # Week 1: Infer method body type when there's no return annotation
+        # Used for generic methods like: def direct_value; @value; end
+        private def infer_method_body_type(method : MethodSymbol, receiver_type : Type) : Type
+          if ENV["DEBUG"]?
+            puts "DEBUG infer_method_body_type:"
+            puts "  method: #{method.name}"
+            puts "  receiver_type: #{receiver_type.class} = #{receiver_type.inspect}"
+          end
+
+          # Get the method's DefNode to access its body
+          def_node = @program.arena[method.node_id]
+          unless def_node.is_a?(Frontend::DefNode)
+            puts "  ERROR: def_node is not DefNode!" if ENV["DEBUG"]?
+            return @context.nil_type
+          end
+
+          # Get the method body
+          body = def_node.body
+          unless body && !body.empty?
+            puts "  ERROR: body is empty!" if ENV["DEBUG"]?
+            return @context.nil_type
+          end
+
+          # Save current receiver context
+          previous_receiver_context = @receiver_type_context
+          previous_class = @current_class
+
+          # Set receiver context for type parameter substitution
+          if receiver_type.is_a?(InstanceType)
+            @receiver_type_context = receiver_type
+            @current_class = receiver_type.class_symbol
+            if ENV["DEBUG"]?
+              puts "  Set receiver_type_context: Box(#{receiver_type.type_args.inspect})"
+            end
+          elsif receiver_type.is_a?(ClassType)
+            @current_class = receiver_type.symbol
+          end
+
+          # Infer the last expression in the body (implicit return)
+          last_expr_id = body.last
+          result_type = infer_expression(last_expr_id)
+
+          if ENV["DEBUG"]?
+            puts "  result_type: #{result_type.class} = #{result_type.inspect}"
+          end
+
+          # Restore context
+          @receiver_type_context = previous_receiver_context
+          @current_class = previous_class
+
+          result_type
         end
 
         # ============================================================

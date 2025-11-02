@@ -139,11 +139,16 @@ module CrystalV2
           name = String.new(name_slice)
           super_name = node.super_name.try { |slice| String.new(slice) }
 
+          # Week 1: Parse generic type parameters (e.g., class Box(T))
+          type_params = node.type_params.try do |params|
+            params.map { |param_slice| String.new(param_slice) }
+          end
+
           table = current_table
           existing = table.lookup_local(name)
           class_scope = existing.is_a?(ClassSymbol) ? existing.scope : SymbolTable.new(table)
 
-          class_symbol = ClassSymbol.new(name, node_id, scope: class_scope, superclass_name: super_name)
+          class_symbol = ClassSymbol.new(name, node_id, scope: class_scope, superclass_name: super_name, type_parameters: type_params)
 
           if existing
             handle_class_redefinition(name, class_symbol, existing, table)
@@ -335,7 +340,7 @@ module CrystalV2
           end
         end
 
-        private def scan_for_instance_vars(class_symbol : ClassSymbol, expr_id : Frontend::ExprId)
+        private def scan_for_instance_vars(class_symbol : ClassSymbol, expr_id : Frontend::ExprId, current_method : Frontend::DefNode? = nil)
           return if expr_id.invalid?
           node = @arena[expr_id]
 
@@ -354,25 +359,48 @@ module CrystalV2
               var_name = String.new(target_node.name)
               var_name = var_name[1..-1] if var_name.starts_with?("@")
               unless class_symbol.get_instance_var_type(var_name)
-                class_symbol.add_instance_var(var_name)
+                # Week 1: Try to infer type from RHS if it's a parameter reference
+                type_annotation = infer_ivar_type_from_assignment(node.value, current_method)
+                class_symbol.add_instance_var(var_name, type_annotation)
               end
             end
           when Frontend::DefNode
-            # Scan method body for instance variable assignments
+            # Scan method body for instance variable assignments, passing method context
             (node.body || [] of Frontend::ExprId).each do |body_expr_id|
-              scan_for_instance_vars(class_symbol, body_expr_id)
+              scan_for_instance_vars(class_symbol, body_expr_id, node)
             end
           when Frontend::IfNode
-            (node.then_body || [] of Frontend::ExprId).each { |e| scan_for_instance_vars(class_symbol, e) }
+            (node.then_body || [] of Frontend::ExprId).each { |e| scan_for_instance_vars(class_symbol, e, current_method) }
 
             (node.elsifs || [] of Frontend::ElsifBranch).each do |elsif_branch|
-              elsif_branch.body.each { |e| scan_for_instance_vars(class_symbol, e) }
+              elsif_branch.body.each { |e| scan_for_instance_vars(class_symbol, e, current_method) }
             end
 
-            (node.else_body || [] of Frontend::ExprId).each { |e| scan_for_instance_vars(class_symbol, e) }
+            (node.else_body || [] of Frontend::ExprId).each { |e| scan_for_instance_vars(class_symbol, e, current_method) }
           when Frontend::WhileNode
-            node.body.each { |e| scan_for_instance_vars(class_symbol, e) }
+            node.body.each { |e| scan_for_instance_vars(class_symbol, e, current_method) }
           end
+        end
+
+        # Week 1: Infer instance variable type from assignment RHS
+        # For @value = param where param has type annotation, return that type
+        private def infer_ivar_type_from_assignment(value_expr_id : Frontend::ExprId, current_method : Frontend::DefNode?) : String?
+          return nil unless current_method
+
+          value_node = @arena[value_expr_id]
+          # If RHS is an identifier (e.g., parameter name)
+          if value_node.is_a?(Frontend::IdentifierNode)
+            param_name = String.new(value_node.name)
+            # Look for matching parameter
+            current_method.params.try do |params|
+              params.each do |param|
+                if String.new(param.name) == param_name
+                  return param.type_annotation.try { |slice| String.new(slice) }
+                end
+              end
+            end
+          end
+          nil
         end
 
         private def handle_macro_redefinition(name : String, new_symbol : MacroSymbol, existing : Symbol, table : SymbolTable)
@@ -404,7 +432,7 @@ module CrystalV2
           case existing
           when ClassSymbol
             verify_superclass_consistency(name, new_symbol, existing)
-            new_symbol = ClassSymbol.new(name, new_symbol.node_id, scope: existing.scope, superclass_name: new_symbol.superclass_name || existing.superclass_name)
+            new_symbol = ClassSymbol.new(name, new_symbol.node_id, scope: existing.scope, superclass_name: new_symbol.superclass_name || existing.superclass_name, type_parameters: new_symbol.type_parameters || existing.type_parameters)
             table.redefine(name, new_symbol)
           when MethodSymbol, MacroSymbol, VariableSymbol
             emit_incompatible_redefinition(name, new_symbol, existing)

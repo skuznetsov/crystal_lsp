@@ -39,12 +39,14 @@ module CrystalV2
         getter scope : SymbolTable
         getter superclass_name : String?
         getter instance_vars : Hash(String, String?)  # name → type annotation
+        getter type_parameters : Array(String)?  # Week 1: Generic type params ["T", "U"]
 
-        def initialize(name : String, node_id : ExprId, *, scope : SymbolTable, superclass_name : String? = nil)
+        def initialize(name : String, node_id : ExprId, *, scope : SymbolTable, superclass_name : String? = nil, type_parameters : Array(String)? = nil)
           super(name, node_id)
           @scope = scope
           @superclass_name = superclass_name
           @instance_vars = {} of String => String?
+          @type_parameters = type_parameters
         end
 
         # Phase 5A: Track instance variable declarations

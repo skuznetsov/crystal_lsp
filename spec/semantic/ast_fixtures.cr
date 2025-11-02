@@ -15,7 +15,7 @@ module AstFixtures
   # Helper: Create a def node
   # Example: make_def(arena, "greet", params: ["name"], body: [body_id])
   def make_def(arena : AstArena, name : String, params : Array(String) = [] of String, body : Array(ExprId) = [] of ExprId) : ExprId
-    param_objects = params.map { |param_name| Frontend::Parameter.new(param_name, span: span, name_span: span) }
+    param_objects = params.map { |param_name| Frontend::Parameter.new(param_name.to_slice, span: span, name_span: span) }
     param_list = param_objects.empty? ? nil : param_objects
     body_list = body.empty? ? nil : body
 
