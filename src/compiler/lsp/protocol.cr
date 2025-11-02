@@ -463,6 +463,37 @@ module CrystalV2
           children.empty? ? nil : children
         end
       end
+
+      # Inlay hint structures (LSP 3.17)
+
+      # InlayHint kind enum
+      enum InlayHintKind
+        Type = 1       # Type annotations (e.g., ": Int32")
+        Parameter = 2  # Parameter names (e.g., "value:")
+      end
+
+      # Inlay hint - inline type/parameter annotations
+      struct InlayHint
+        include JSON::Serializable
+
+        property position : Position
+        property label : String
+        property kind : Int32?  # InlayHintKind value
+
+        @[JSON::Field(key: "paddingLeft")]
+        property padding_left : Bool?
+        @[JSON::Field(key: "paddingRight")]
+        property padding_right : Bool?
+
+        def initialize(
+          @position : Position,
+          @label : String,
+          @kind : Int32? = nil,
+          @padding_left : Bool? = nil,
+          @padding_right : Bool? = nil
+        )
+        end
+      end
     end
   end
 end

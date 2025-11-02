@@ -119,6 +119,8 @@ module CrystalV2
             handle_document_symbol(id, params)
           when "textDocument/references"
             handle_references(id, params)
+          when "textDocument/inlayHint"
+            handle_inlay_hint(id, params)
           else
             send_error(id, -32601, "Method not found: #{method}")
           end
@@ -625,6 +627,55 @@ module CrystalV2
           send_response(id, locations.to_json)
         end
 
+        # Handle textDocument/inlayHint request
+        private def handle_inlay_hint(id : JSON::Any, params : JSON::Any?)
+          return send_error(id, -32602, "Missing params") unless params
+
+          uri = params["textDocument"]["uri"].as_s
+          range_json = params["range"]
+
+          # Parse range
+          start_line = range_json["start"]["line"].as_i
+          start_char = range_json["start"]["character"].as_i
+          end_line = range_json["end"]["line"].as_i
+          end_char = range_json["end"]["character"].as_i
+
+          range = Range.new(
+            start: Position.new(start_line, start_char),
+            end: Position.new(end_line, end_char)
+          )
+
+          debug("InlayHint request: uri=#{uri}, range=#{start_line}:#{start_char}-#{end_line}:#{end_char}")
+
+          doc_state = @documents[uri]?
+          return send_response(id, "[]") unless doc_state
+
+          type_context = doc_state.type_context
+          identifier_symbols = doc_state.identifier_symbols
+
+          return send_response(id, "[]") unless type_context && identifier_symbols
+
+          hints = [] of InlayHint
+
+          # Collect type hints
+          hints.concat(collect_type_hints(
+            doc_state.program,
+            type_context,
+            identifier_symbols,
+            range
+          ))
+
+          # Collect parameter hints
+          hints.concat(collect_parameter_hints(
+            doc_state.program,
+            identifier_symbols,
+            range
+          ))
+
+          debug("Returning #{hints.size} inlay hints")
+          send_response(id, hints.to_json)
+        end
+
         # Collect all symbols from symbol table (including parent tables)
         private def collect_symbols_from_table(table : Semantic::SymbolTable, items : Array(CompletionItem))
           table.each_local_symbol do |name, symbol|
@@ -915,6 +966,169 @@ module CrystalV2
 
           debug("Found #{locations.size} total references")
           locations
+        end
+
+        # Check if span overlaps with LSP range
+        # Span is 1-indexed, Range is 0-indexed
+        private def in_range?(span : Frontend::Span, range : Range) : Bool
+          # Convert Span (1-indexed) to LSP Range (0-indexed)
+          span_start_line = span.start_line - 1
+          span_end_line = span.end_line - 1
+
+          # Check if span overlaps with range
+          # Span is in range if it starts before range ends AND ends after range starts
+          span_start_line <= range.end.line && span_end_line >= range.start.line
+        end
+
+        # Collect type hints for variable declarations
+        # Shows inferred types for variables (e.g., "x = 10" -> "x: Int32")
+        private def collect_type_hints(
+          program : Frontend::Program,
+          type_context : Semantic::TypeContext,
+          identifier_symbols : Hash(Frontend::ExprId, Semantic::Symbol),
+          range : Range
+        ) : Array(InlayHint)
+          hints = [] of InlayHint
+
+          debug("Collecting type hints...")
+
+          # Iterate through all identifier->symbol mappings
+          identifier_symbols.each do |expr_id, symbol|
+            # Only process variable symbols
+            next unless symbol.is_a?(Semantic::VariableSymbol)
+
+            # Only show hints for variable declarations (not usages)
+            # Declaration is where expr_id == symbol.node_id
+            next unless expr_id == symbol.node_id
+
+            node = program.arena[expr_id]
+
+            # Filter by visible range
+            next unless in_range?(node.span, range)
+
+            # Get inferred type
+            type = type_context.get_type(expr_id)
+            next unless type
+
+            # Create hint at end of variable name
+            # Position after identifier (Span is 1-indexed, Position is 0-indexed)
+            position = Position.new(
+              line: node.span.end_line - 1,
+              character: node.span.end_column - 1
+            )
+
+            label = ": #{type}"
+
+            hints << InlayHint.new(
+              position: position,
+              label: label,
+              kind: InlayHintKind::Type.value,
+              padding_left: false,
+              padding_right: false
+            )
+
+            debug("  Added type hint: #{symbol.name}#{label} at line #{position.line}")
+          end
+
+          debug("Collected #{hints.size} type hints")
+          hints
+        end
+
+        # Collect parameter hints for method calls
+        # Shows parameter names for arguments (e.g., "calculate(10, 20)" -> "calculate(x: 10, y: 20)")
+        private def collect_parameter_hints(
+          program : Frontend::Program,
+          identifier_symbols : Hash(Frontend::ExprId, Semantic::Symbol),
+          range : Range
+        ) : Array(InlayHint)
+          hints = [] of InlayHint
+
+          debug("Collecting parameter hints...")
+
+          # Search for Call nodes in all root expressions
+          program.roots.each do |root_id|
+            collect_call_parameter_hints(
+              root_id,
+              program.arena,
+              identifier_symbols,
+              range,
+              hints
+            )
+          end
+
+          debug("Collected #{hints.size} parameter hints")
+          hints
+        end
+
+        # Recursively collect parameter hints from AST tree
+        private def collect_call_parameter_hints(
+          expr_id : Frontend::ExprId,
+          arena : Frontend::AstArena | Frontend::VirtualArena,
+          identifier_symbols : Hash(Frontend::ExprId, Semantic::Symbol),
+          range : Range,
+          hints : Array(InlayHint)
+        )
+          node = arena[expr_id]
+
+          # Early exit if outside visible range
+          return unless in_range?(node.span, range)
+
+          # Check if this is a Call node
+          if Frontend.node_kind(node).call?
+            call_node = node.as(Frontend::CallNode)
+
+            # Get callee symbol (method being called)
+            callee_symbol = identifier_symbols[call_node.callee]?
+
+            if callee_symbol.is_a?(Semantic::MethodSymbol)
+              # Get call arguments
+              if args = Frontend.node_args(node)
+                # Match args to parameters
+                callee_symbol.params.each_with_index do |param, idx|
+                  break if idx >= args.size
+
+                  arg_id = args[idx]
+                  arg_node = arena[arg_id]
+
+                  # Create hint before argument
+                  # Position at start of argument (Span is 1-indexed, Position is 0-indexed)
+                  position = Position.new(
+                    line: arg_node.span.start_line - 1,
+                    character: arg_node.span.start_column - 1
+                  )
+
+                  param_name = String.new(param.name)
+                  label = "#{param_name}: "
+
+                  hints << InlayHint.new(
+                    position: position,
+                    label: label,
+                    kind: InlayHintKind::Parameter.value,
+                    padding_left: false,
+                    padding_right: false
+                  )
+
+                  debug("  Added parameter hint: #{label} at line #{position.line}")
+                end
+
+                # Recursively process arguments (for nested calls)
+                args.each do |arg_id|
+                  collect_call_parameter_hints(arg_id, arena, identifier_symbols, range, hints)
+                end
+              end
+            end
+          end
+
+          # Recursively check common node types for nested calls
+          case Frontend.node_kind(node)
+          when .assign?
+            assign = node.as(Frontend::AssignNode)
+            collect_call_parameter_hints(assign.value, arena, identifier_symbols, range, hints)
+          when .binary?
+            binary = node.as(Frontend::BinaryNode)
+            collect_call_parameter_hints(binary.left, arena, identifier_symbols, range, hints)
+            collect_call_parameter_hints(binary.right, arena, identifier_symbols, range, hints)
+          end
         end
 
         # Log debug message to stderr if LSP_DEBUG is set

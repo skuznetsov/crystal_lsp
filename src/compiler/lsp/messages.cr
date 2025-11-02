@@ -188,6 +188,18 @@ module CrystalV2
         def initialize(@text_document : TextDocumentIdentifier, @position : Position, @context : ReferenceContext)
         end
       end
+
+      # Inlay hint request params
+      struct InlayHintParams
+        include JSON::Serializable
+
+        @[JSON::Field(key: "textDocument")]
+        property text_document : TextDocumentIdentifier
+        property range : Range  # Visible viewport range
+
+        def initialize(@text_document : TextDocumentIdentifier, @range : Range)
+        end
+      end
     end
   end
 end
