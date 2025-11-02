@@ -128,6 +128,7 @@ module CrystalV2
         getter is_splat : Bool          # Phase 68: *args (single splat)
         getter is_double_splat : Bool   # Phase 68: **kwargs (double splat)
         getter is_block : Bool          # Phase 103: &block (block parameter)
+        getter is_instance_var : Bool   # Instance variable parameter shorthand: @value : T
 
         def initialize(
           @name : Slice(UInt8),
@@ -139,7 +140,8 @@ module CrystalV2
           @default_span : Span? = nil,
           @is_splat : Bool = false,
           @is_double_splat : Bool = false,
-          @is_block : Bool = false
+          @is_block : Bool = false,
+          @is_instance_var : Bool = false
         )
         end
       end

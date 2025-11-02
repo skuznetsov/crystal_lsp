@@ -880,6 +880,7 @@ module CrystalV2
               is_splat = false
               is_double_splat = false
               is_block = false
+              is_instance_var = false
               prefix_token = nil
 
               if current_token.kind == Token::Kind::Amp
@@ -900,13 +901,16 @@ module CrystalV2
                 skip_trivia
               end
 
-              # Parse parameter name
+              # Parse parameter name (Identifier or InstanceVar for shorthand syntax)
               name_token = current_token
-              unless name_token.kind == Token::Kind::Identifier
+              unless name_token.kind == Token::Kind::Identifier || name_token.kind == Token::Kind::InstanceVar
                 emit_unexpected(name_token)
                 break
               end
-              param_name = name_token.slice  # TIER 2.1: Zero-copy slice
+
+              # Track if this is instance variable shorthand: @value : T
+              is_instance_var = (name_token.kind == Token::Kind::InstanceVar)
+              param_name = name_token.slice  # TIER 2.1: Zero-copy slice (includes '@' for instance vars)
               param_name_span = name_token.span
               param_start_span = prefix_token ? prefix_token.span : name_token.span
               advance
@@ -1089,7 +1093,8 @@ module CrystalV2
                 default_value_span,
                 is_splat,
                 is_double_splat,
-                is_block  # Phase 103: block parameter flag
+                is_block,  # Phase 103: block parameter flag
+                is_instance_var  # Instance variable parameter shorthand: @value : T
               )
 
               break unless operator_token?(current_token, Token::Kind::Comma)

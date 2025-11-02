@@ -94,6 +94,16 @@ module CrystalV2
               err_io.puts "\nerror: compilation failed due to name resolution errors"
               return 1
             end
+
+            # Run type inference if name resolution succeeded
+            analyzer.infer_types(result.identifier_symbols)
+            report_type_inference_diagnostics(analyzer.type_inference_diagnostics, source, err_io)
+
+            # Check for type inference errors
+            if analyzer.type_inference_errors?
+              err_io.puts "\nerror: compilation failed due to type errors"
+              return 1
+            end
           end
 
           out_io.puts "Parsed #{program.roots.size} top-level expressions"
@@ -174,6 +184,13 @@ module CrystalV2
         return if diagnostics.empty?
         diagnostics.each do |diag|
           err_io.puts Frontend::DiagnosticFormatter.format(source, diag)
+        end
+      end
+
+      private def report_type_inference_diagnostics(diagnostics, source, err_io)
+        return if diagnostics.empty?
+        diagnostics.each do |diag|
+          err_io.puts Semantic::DiagnosticFormatter.format(source, diag)
         end
       end
     end

@@ -3,6 +3,7 @@ require "./symbol_table"
 require "./context"
 require "./collectors/symbol_collector"
 require "./resolvers/name_resolver"
+require "./type_inference_engine"
 require "./diagnostic"
 
 module CrystalV2
@@ -15,11 +16,13 @@ module CrystalV2
         getter global_context : Context
         getter semantic_diagnostics : Array(Diagnostic)
         getter name_resolver_diagnostics : Array(Frontend::Diagnostic)
+        getter type_inference_diagnostics : Array(Diagnostic)
 
         def initialize(@program : Program)
           @global_context = Context.new(SymbolTable.new)
           @semantic_diagnostics = [] of Diagnostic
           @name_resolver_diagnostics = [] of Frontend::Diagnostic
+          @type_inference_diagnostics = [] of Diagnostic
         end
 
         def collect_symbols
@@ -35,8 +38,19 @@ module CrystalV2
           result
         end
 
+        def infer_types(identifier_symbols : Hash(ExprId, Symbol))
+          engine = TypeInferenceEngine.new(@program, identifier_symbols, @global_context.symbol_table)
+          engine.infer_types
+          @type_inference_diagnostics = engine.diagnostics
+          engine
+        end
+
         def semantic_errors?
           @semantic_diagnostics.any? { |diag| diag.level == DiagnosticLevel::Error }
+        end
+
+        def type_inference_errors?
+          @type_inference_diagnostics.any? { |diag| diag.level == DiagnosticLevel::Error }
         end
       end
     end
