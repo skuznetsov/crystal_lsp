@@ -14,12 +14,14 @@ module CrystalV2
         getter program : Frontend::Program
         getter type_context : Semantic::TypeContext?
         getter identifier_symbols : Hash(Frontend::ExprId, Semantic::Symbol)?
+        getter symbol_table : Semantic::SymbolTable?
 
         def initialize(
           @text_document : TextDocumentItem,
           @program : Frontend::Program,
           @type_context : Semantic::TypeContext? = nil,
-          @identifier_symbols : Hash(Frontend::ExprId, Semantic::Symbol)? = nil
+          @identifier_symbols : Hash(Frontend::ExprId, Semantic::Symbol)? = nil,
+          @symbol_table : Semantic::SymbolTable? = nil
         )
         end
       end
@@ -109,6 +111,8 @@ module CrystalV2
             handle_hover(id, params)
           when "textDocument/definition"
             handle_definition(id, params)
+          when "textDocument/completion"
+            handle_completion(id, params)
           else
             send_error(id, -32601, "Method not found: #{method}")
           end
@@ -159,10 +163,10 @@ module CrystalV2
 
           # Analyze and store document
           doc = TextDocumentItem.new(uri: uri, language_id: language_id, version: version, text: text)
-          diagnostics, program, type_context, identifier_symbols = analyze_document(text)
+          diagnostics, program, type_context, identifier_symbols, symbol_table = analyze_document(text)
 
           # Store document state
-          @documents[uri] = DocumentState.new(doc, program, type_context, identifier_symbols)
+          @documents[uri] = DocumentState.new(doc, program, type_context, identifier_symbols, symbol_table)
 
           # Publish diagnostics
           publish_diagnostics(uri, diagnostics, version)
@@ -175,11 +179,12 @@ module CrystalV2
           @documents.delete(uri)
         end
 
-        # Analyze document and return diagnostics, program, type context, and identifier symbols
-        private def analyze_document(source : String) : {Array(Diagnostic), Frontend::Program, Semantic::TypeContext?, Hash(Frontend::ExprId, Semantic::Symbol)?}
+        # Analyze document and return diagnostics, program, type context, identifier symbols, and symbol table
+        private def analyze_document(source : String) : {Array(Diagnostic), Frontend::Program, Semantic::TypeContext?, Hash(Frontend::ExprId, Semantic::Symbol)?, Semantic::SymbolTable?}
           diagnostics = [] of Diagnostic
           type_context = nil
           identifier_symbols = nil
+          symbol_table = nil
 
           # Parse
           lexer = Frontend::Lexer.new(source)
@@ -199,6 +204,7 @@ module CrystalV2
             # Run name resolution
             result = analyzer.resolve_names
             identifier_symbols = result.identifier_symbols
+            symbol_table = analyzer.global_context.symbol_table
 
             # Convert semantic diagnostics
             analyzer.semantic_diagnostics.each do |diag|
@@ -222,7 +228,7 @@ module CrystalV2
             end
           end
 
-          {diagnostics, program, type_context, identifier_symbols}
+          {diagnostics, program, type_context, identifier_symbols, symbol_table}
         end
 
         # Find expression at the given position (LSP 0-indexed -> Span 1-indexed)
@@ -399,6 +405,42 @@ module CrystalV2
           location = Location.from_symbol(symbol, doc_state.program, uri)
 
           send_response(id, location.to_json)
+        end
+
+        # Handle textDocument/completion request
+        private def handle_completion(id : JSON::Any, params : JSON::Any?)
+          return send_error(id, -32602, "Missing params") unless params
+
+          uri = params["textDocument"]["uri"].as_s
+          position = params["position"]
+          line = position["line"].as_i
+          character = position["character"].as_i
+
+          doc_state = @documents[uri]?
+          return send_response(id, "[]") unless doc_state
+
+          # Collect completion items
+          items = [] of CompletionItem
+
+          # Add symbols from symbol table (classes, methods, etc.)
+          if symbol_table = doc_state.symbol_table
+            collect_symbols_from_table(symbol_table, items)
+          end
+
+          # Return array of completion items
+          send_response(id, items.to_json)
+        end
+
+        # Collect all symbols from symbol table (including parent tables)
+        private def collect_symbols_from_table(table : Semantic::SymbolTable, items : Array(CompletionItem))
+          table.each_local_symbol do |name, symbol|
+            items << CompletionItem.from_symbol(symbol)
+          end
+
+          # Also collect from parent table
+          if parent = table.parent
+            collect_symbols_from_table(parent, items)
+          end
         end
 
         # Publish diagnostics to client

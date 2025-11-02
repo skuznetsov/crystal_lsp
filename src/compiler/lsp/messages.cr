@@ -138,6 +138,15 @@ module CrystalV2
         property text_document : TextDocumentIdentifier
         property position : Position
       end
+
+      # Completion request params
+      struct CompletionParams
+        include JSON::Serializable
+
+        @[JSON::Field(key: "textDocument")]
+        property text_document : TextDocumentIdentifier
+        property position : Position
+      end
     end
   end
 end

@@ -165,6 +165,90 @@ module CrystalV2
           new(uri: uri, range: range)
         end
       end
+
+      # Completion item kinds (LSP 3.17 subset)
+      enum CompletionItemKind
+        Text          =  1
+        Method        =  2
+        Function      =  3
+        Constructor   =  4
+        Field         =  5
+        Variable      =  6
+        Class         =  7
+        Interface     =  8
+        Module        =  9
+        Property      = 10
+        Unit          = 11
+        Value         = 12
+        Enum          = 13
+        Keyword       = 14
+        Snippet       = 15
+        Color         = 16
+        File          = 17
+        Reference     = 18
+        Folder        = 19
+        EnumMember    = 20
+        Constant      = 21
+        Struct        = 22
+        Event         = 23
+        Operator      = 24
+        TypeParameter = 25
+      end
+
+      # Completion item - represents a single completion suggestion
+      struct CompletionItem
+        include JSON::Serializable
+
+        property label : String
+        property kind : Int32?
+        property detail : String?
+        @[JSON::Field(key: "insertText")]
+        property insert_text : String?
+        property documentation : String?
+
+        def initialize(@label : String, @kind : Int32? = nil, @detail : String? = nil, @insert_text : String? = nil, @documentation : String? = nil)
+        end
+
+        # Create CompletionItem from Symbol
+        def self.from_symbol(symbol : Semantic::Symbol) : CompletionItem
+          kind = case symbol
+                 when Semantic::ClassSymbol
+                   CompletionItemKind::Class.value
+                 when Semantic::MethodSymbol
+                   CompletionItemKind::Method.value
+                 when Semantic::VariableSymbol
+                   CompletionItemKind::Variable.value
+                 when Semantic::MacroSymbol
+                   CompletionItemKind::Function.value
+                 else
+                   CompletionItemKind::Text.value
+                 end
+
+          detail = case symbol
+                   when Semantic::VariableSymbol
+                     symbol.declared_type
+                   when Semantic::MethodSymbol
+                     # Show return type if available
+                     symbol.return_annotation
+                   else
+                     nil
+                   end
+
+          new(label: symbol.name, kind: kind, detail: detail)
+        end
+      end
+
+      # Completion list (can return array or this struct)
+      struct CompletionList
+        include JSON::Serializable
+
+        @[JSON::Field(key: "isIncomplete")]
+        property is_incomplete : Bool
+        property items : Array(CompletionItem)
+
+        def initialize(@is_incomplete : Bool, @items : Array(CompletionItem))
+        end
+      end
     end
   end
 end
