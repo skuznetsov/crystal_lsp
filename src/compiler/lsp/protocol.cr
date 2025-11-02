@@ -530,6 +530,41 @@ module CrystalV2
         def initialize(@range : Range, @placeholder : String)
         end
       end
+
+      # Folding range structures (LSP 3.17)
+
+      # Folding range - represents a foldable region in the document
+      # Response for textDocument/foldingRange
+      struct FoldingRange
+        include JSON::Serializable
+
+        @[JSON::Field(key: "startLine")]
+        property start_line : Int32  # Zero-based line number
+
+        @[JSON::Field(key: "startCharacter")]
+        property start_character : Int32?  # Optional: zero-based character offset
+
+        @[JSON::Field(key: "endLine")]
+        property end_line : Int32  # Zero-based line number
+
+        @[JSON::Field(key: "endCharacter")]
+        property end_character : Int32?  # Optional: zero-based character offset
+
+        property kind : String?  # Optional: "comment", "imports", "region"
+
+        @[JSON::Field(key: "collapsedText")]
+        property collapsed_text : String?  # LSP 3.17+: preview text when folded
+
+        def initialize(
+          @start_line : Int32,
+          @end_line : Int32,
+          @start_character : Int32? = nil,
+          @end_character : Int32? = nil,
+          @kind : String? = nil,
+          @collapsed_text : String? = nil
+        )
+        end
+      end
     end
   end
 end

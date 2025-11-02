@@ -226,6 +226,17 @@ module CrystalV2
         def initialize(@text_document : TextDocumentIdentifier, @position : Position, @new_name : String)
         end
       end
+
+      # Folding range request params
+      struct FoldingRangeParams
+        include JSON::Serializable
+
+        @[JSON::Field(key: "textDocument")]
+        property text_document : TextDocumentIdentifier
+
+        def initialize(@text_document : TextDocumentIdentifier)
+        end
+      end
     end
   end
 end

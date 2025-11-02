@@ -131,6 +131,8 @@ module CrystalV2
             handle_prepare_rename(id, params)
           when "textDocument/rename"
             handle_rename(id, params)
+          when "textDocument/foldingRange"
+            handle_folding_range(id, params)
           else
             send_error(id, -32601, "Method not found: #{method}")
           end
@@ -790,6 +792,24 @@ module CrystalV2
           send_response(id, workspace_edit.to_json)
         end
 
+        # Handle textDocument/foldingRange request
+        # Returns folding ranges for collapsible regions (classes, methods, control flow)
+        private def handle_folding_range(id : JSON::Any, params : JSON::Any?)
+          return send_error(id, -32602, "Missing params") unless params
+
+          uri = params["textDocument"]["uri"].as_s
+          debug("Folding range request for: #{uri}")
+
+          doc_state = @documents[uri]?
+          return send_response(id, "[]") unless doc_state
+
+          # Collect folding ranges from AST
+          ranges = collect_folding_ranges(doc_state.program)
+
+          debug("Found #{ranges.size} folding ranges")
+          send_response(id, ranges.to_json)
+        end
+
         # Collect all symbols from symbol table (including parent tables)
         private def collect_symbols_from_table(table : Semantic::SymbolTable, items : Array(CompletionItem))
           table.each_local_symbol do |name, symbol|
@@ -1349,6 +1369,179 @@ module CrystalV2
 
           debug("Found #{edits.size} total rename locations")
           edits
+        end
+
+        # Collect folding ranges from AST
+        # Traverses program roots and collects foldable regions
+        private def collect_folding_ranges(program : Frontend::Program) : Array(FoldingRange)
+          ranges = [] of FoldingRange
+
+          program.roots.each do |root_id|
+            collect_folding_ranges_recursive(program.arena, root_id, ranges)
+          end
+
+          ranges
+        end
+
+        # Recursively collect folding ranges from AST node
+        private def collect_folding_ranges_recursive(
+          arena : Frontend::AstArena,
+          node_id : Frontend::ExprId,
+          ranges : Array(FoldingRange)
+        )
+          return if node_id.invalid?
+          node = arena[node_id]
+
+          case node
+          when Frontend::DefNode
+            # Fold methods (from def to end)
+            # Only fold if method has a body
+            if body = node.body
+              unless body.empty?
+                # Convert from 1-indexed to 0-indexed
+                start_line = node.span.start_line - 1
+                end_line = node.span.end_line - 1
+
+                # Only create range if multi-line
+                if end_line > start_line
+                  ranges << FoldingRange.new(
+                    start_line: start_line,
+                    end_line: end_line
+                  )
+                end
+              end
+
+              # Process body
+              body.each { |expr_id| collect_folding_ranges_recursive(arena, expr_id, ranges) }
+            end
+
+          when Frontend::ClassNode
+            # Fold classes (from class to end)
+            if body = node.body
+              unless body.empty?
+                start_line = node.span.start_line - 1
+                end_line = node.span.end_line - 1
+
+                if end_line > start_line
+                  ranges << FoldingRange.new(
+                    start_line: start_line,
+                    end_line: end_line
+                  )
+                end
+              end
+
+              # Process body
+              body.each { |expr_id| collect_folding_ranges_recursive(arena, expr_id, ranges) }
+            end
+
+          when Frontend::IfNode
+            # Fold if blocks (from if to end)
+            start_line = node.span.start_line - 1
+            end_line = node.span.end_line - 1
+
+            if end_line > start_line
+              ranges << FoldingRange.new(
+                start_line: start_line,
+                end_line: end_line
+              )
+            end
+
+            # Process condition and bodies
+            collect_folding_ranges_recursive(arena, node.condition, ranges)
+            node.then_body.each { |expr_id| collect_folding_ranges_recursive(arena, expr_id, ranges) }
+
+            # Process elsif branches
+            node.elsifs.try &.each do |elsif_branch|
+              collect_folding_ranges_recursive(arena, elsif_branch.condition, ranges)
+              elsif_branch.body.each { |expr_id| collect_folding_ranges_recursive(arena, expr_id, ranges) }
+            end
+
+            # Process else body
+            node.else_body.try &.each { |expr_id| collect_folding_ranges_recursive(arena, expr_id, ranges) }
+
+          when Frontend::UnlessNode
+            # Fold unless blocks
+            start_line = node.span.start_line - 1
+            end_line = node.span.end_line - 1
+
+            if end_line > start_line
+              ranges << FoldingRange.new(
+                start_line: start_line,
+                end_line: end_line
+              )
+            end
+
+            collect_folding_ranges_recursive(arena, node.condition, ranges)
+            node.then_branch.each { |expr_id| collect_folding_ranges_recursive(arena, expr_id, ranges) }
+            node.else_branch.try &.each { |expr_id| collect_folding_ranges_recursive(arena, expr_id, ranges) }
+
+          when Frontend::WhileNode
+            # Fold while loops
+            start_line = node.span.start_line - 1
+            end_line = node.span.end_line - 1
+
+            if end_line > start_line
+              ranges << FoldingRange.new(
+                start_line: start_line,
+                end_line: end_line
+              )
+            end
+
+            collect_folding_ranges_recursive(arena, node.condition, ranges)
+            node.body.each { |expr_id| collect_folding_ranges_recursive(arena, expr_id, ranges) }
+
+          when Frontend::UntilNode
+            # Fold until loops
+            start_line = node.span.start_line - 1
+            end_line = node.span.end_line - 1
+
+            if end_line > start_line
+              ranges << FoldingRange.new(
+                start_line: start_line,
+                end_line: end_line
+              )
+            end
+
+            collect_folding_ranges_recursive(arena, node.condition, ranges)
+            node.body.each { |expr_id| collect_folding_ranges_recursive(arena, expr_id, ranges) }
+
+          when Frontend::LoopNode
+            # Fold loop blocks
+            start_line = node.span.start_line - 1
+            end_line = node.span.end_line - 1
+
+            if end_line > start_line
+              ranges << FoldingRange.new(
+                start_line: start_line,
+                end_line: end_line
+              )
+            end
+
+            node.body.each { |expr_id| collect_folding_ranges_recursive(arena, expr_id, ranges) }
+
+          when Frontend::CallNode
+            # Process call arguments
+            node.args.each { |arg| collect_folding_ranges_recursive(arena, arg, ranges) }
+            if block_id = node.block
+              collect_folding_ranges_recursive(arena, block_id, ranges)
+            end
+
+          when Frontend::BinaryNode
+            collect_folding_ranges_recursive(arena, node.left, ranges)
+            collect_folding_ranges_recursive(arena, node.right, ranges)
+
+          when Frontend::UnaryNode
+            collect_folding_ranges_recursive(arena, node.operand, ranges)
+
+          when Frontend::AssignNode
+            collect_folding_ranges_recursive(arena, node.value, ranges)
+
+          when Frontend::GroupingNode
+            collect_folding_ranges_recursive(arena, node.expression, ranges)
+
+          else
+            # Other node types don't create folding ranges
+          end
         end
       end
     end
