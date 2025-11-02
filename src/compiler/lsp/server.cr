@@ -113,6 +113,8 @@ module CrystalV2
             handle_definition(id, params)
           when "textDocument/completion"
             handle_completion(id, params)
+          when "textDocument/signatureHelp"
+            handle_signature_help(id, params)
           else
             send_error(id, -32601, "Method not found: #{method}")
           end
@@ -496,6 +498,49 @@ module CrystalV2
           send_response(id, items.to_json)
         end
 
+        # Handle textDocument/signatureHelp request
+        private def handle_signature_help(id : JSON::Any, params : JSON::Any?)
+          return send_error(id, -32602, "Missing params") unless params
+
+          uri = params["textDocument"]["uri"].as_s
+          position = params["position"]
+          line = position["line"].as_i
+          character = position["character"].as_i
+
+          debug("SignatureHelp: line=#{line}, char=#{character}")
+
+          doc_state = @documents[uri]?
+          return send_response(id, "null") unless doc_state
+
+          # Find call context: look backwards for opening paren
+          call_info = find_call_context(doc_state.text_document.text, line, character)
+          return send_response(id, "null") unless call_info
+
+          paren_pos, method_name, active_param = call_info
+          debug("Call context: method=#{method_name}, active_param=#{active_param}")
+
+          # Find all method symbols with this name (handle overloads)
+          signatures = [] of SignatureInformation
+
+          if symbol_table = doc_state.symbol_table
+            collect_method_signatures(symbol_table, method_name, signatures)
+          end
+
+          debug("Found #{signatures.size} signatures for #{method_name}")
+
+          return send_response(id, "null") if signatures.empty?
+
+          # Return signature help
+          sig_help = SignatureHelp.new(
+            signatures: signatures,
+            active_signature: 0,
+            active_parameter: active_param
+          )
+
+          debug("Returning signature help")
+          send_response(id, sig_help.to_json)
+        end
+
         # Collect all symbols from symbol table (including parent tables)
         private def collect_symbols_from_table(table : Semantic::SymbolTable, items : Array(CompletionItem))
           table.each_local_symbol do |name, symbol|
@@ -655,6 +700,98 @@ module CrystalV2
           content = "Content-Length: #{json.bytesize}\r\n\r\n#{json}"
           @output << content
           @output.flush
+        end
+
+        # Find call context: returns {paren_position, method_name, active_parameter} or nil
+        # Note: Public for testing, but considered internal implementation
+        def find_call_context(text : String, line : Int32, character : Int32) : {Int32, String, Int32}?
+          lines = text.split('\n')
+          return nil if line < 0 || line >= lines.size
+
+          current_line = lines[line]
+          return nil if character < 0 || character > current_line.size
+
+          # Look backwards from cursor to find opening '('
+          idx = character - 1
+          paren_count = 0
+          active_param = 0
+
+          while idx >= 0
+            char = current_line[idx]
+
+            if char == ')'
+              paren_count += 1
+            elsif char == '('
+              if paren_count == 0
+                # Found opening paren! Now find method name before it
+                method_name = extract_method_name_before(current_line, idx)
+                return {idx, method_name, active_param} if method_name
+                return nil
+              else
+                paren_count -= 1
+              end
+            elsif char == ',' && paren_count == 0
+              # Count commas to determine active parameter
+              active_param += 1
+            end
+
+            idx -= 1
+          end
+
+          nil
+        end
+
+        # Extract method name before position (skipping whitespace)
+        # Note: Public for testing, but considered internal implementation
+        def extract_method_name_before(line : String, pos : Int32) : String?
+          idx = pos - 1
+
+          # Skip whitespace
+          while idx >= 0 && line[idx].whitespace?
+            idx -= 1
+          end
+
+          return nil if idx < 0
+
+          # Collect identifier characters
+          name_chars = [] of Char
+          while idx >= 0
+            char = line[idx]
+            break unless char.alphanumeric? || char == '_'
+            name_chars.unshift(char)
+            idx -= 1
+          end
+
+          return nil if name_chars.empty?
+          name_chars.join
+        end
+
+        # Collect all method signatures with given name from symbol table
+        private def collect_method_signatures(table : Semantic::SymbolTable, method_name : String, signatures : Array(SignatureInformation))
+          # Search in current scope
+          table.each_local_symbol do |name, symbol|
+            if name == method_name
+              debug("  Found symbol '#{name}': #{symbol.class}")
+              case symbol
+              when Semantic::MethodSymbol
+                # Single method
+                debug("    -> Adding single method signature")
+                signatures << SignatureInformation.from_method(symbol)
+              when Semantic::OverloadSetSymbol
+                # Multiple overloads - add all overloads
+                debug("    -> Found overload set with #{symbol.overloads.size} overloads")
+                symbol.overloads.each do |overload|
+                  signatures << SignatureInformation.from_method(overload)
+                end
+              end
+            end
+          end
+
+          # Also search in parent scopes
+          if parent = table.parent
+            debug("  Searching parent scope for '#{method_name}'...")
+            collect_method_signatures(parent, method_name, signatures)
+          end
         end
 
         # Log debug message to stderr if LSP_DEBUG is set

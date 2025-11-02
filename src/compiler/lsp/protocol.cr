@@ -249,6 +249,83 @@ module CrystalV2
         def initialize(@is_incomplete : Bool, @items : Array(CompletionItem))
         end
       end
+
+      # Signature help structures
+
+      # Represents information about a parameter
+      struct ParameterInformation
+        include JSON::Serializable
+
+        property label : String
+        property documentation : String?
+
+        def initialize(@label : String, @documentation : String? = nil)
+        end
+      end
+
+      # Represents the signature of a callable (method/function)
+      struct SignatureInformation
+        include JSON::Serializable
+
+        property label : String
+        property documentation : String?
+        property parameters : Array(ParameterInformation)?
+        @[JSON::Field(key: "activeParameter")]
+        property active_parameter : Int32?
+
+        def initialize(
+          @label : String,
+          @documentation : String? = nil,
+          @parameters : Array(ParameterInformation)? = nil,
+          @active_parameter : Int32? = nil
+        )
+        end
+
+        # Create SignatureInformation from MethodSymbol
+        def self.from_method(method : Semantic::MethodSymbol) : SignatureInformation
+          # Format parameters (zero-copy: build strings directly from slices)
+          params = method.params.map do |param|
+            label = String.build do |io|
+              io.write(param.name)  # Write slice directly without copy
+              io << " : "
+              if type_ann = param.type_annotation
+                io.write(type_ann)  # Write slice directly without copy
+              else
+                io << "?"
+              end
+            end
+            ParameterInformation.new(label: label)
+          end
+
+          # Format full signature
+          params_str = params.map(&.label).join(", ")
+          return_type = method.return_annotation || "?"
+          label = "#{method.name}(#{params_str}) : #{return_type}"
+
+          new(
+            label: label,
+            parameters: params.empty? ? nil : params
+          )
+        end
+      end
+
+      # Signature help response
+      struct SignatureHelp
+        include JSON::Serializable
+
+        property signatures : Array(SignatureInformation)
+        @[JSON::Field(key: "activeSignature")]
+        property active_signature : Int32?
+        @[JSON::Field(key: "activeParameter")]
+        property active_parameter : Int32?
+
+        def initialize(
+          @signatures : Array(SignatureInformation),
+          @active_signature : Int32? = 0,
+          @active_parameter : Int32? = 0
+        )
+        end
+      end
     end
   end
 end

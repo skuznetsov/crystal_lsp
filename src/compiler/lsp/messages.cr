@@ -147,6 +147,15 @@ module CrystalV2
         property text_document : TextDocumentIdentifier
         property position : Position
       end
+
+      # Signature help request params
+      struct SignatureHelpParams
+        include JSON::Serializable
+
+        @[JSON::Field(key: "textDocument")]
+        property text_document : TextDocumentIdentifier
+        property position : Position
+      end
     end
   end
 end
