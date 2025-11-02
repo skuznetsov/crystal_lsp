@@ -8,16 +8,26 @@ require "../semantic/analyzer"
 module CrystalV2
   module Compiler
     module LSP
+      # Document analysis state
+      struct DocumentState
+        getter text_document : TextDocumentItem
+        getter program : Frontend::Program
+        getter type_context : Semantic::TypeContext?
+
+        def initialize(@text_document : TextDocumentItem, @program : Frontend::Program, @type_context : Semantic::TypeContext? = nil)
+        end
+      end
+
       # Minimal LSP Server implementation
-      # Handles initialize, didOpen, and publishDiagnostics
+      # Handles initialize, didOpen, publishDiagnostics, and hover
       class Server
         @input : IO
         @output : IO
-        @documents : Hash(String, TextDocumentItem)
+        @documents : Hash(String, DocumentState)
         @initialized : Bool = false
 
         def initialize(@input = STDIN, @output = STDOUT)
-          @documents = {} of String => TextDocumentItem
+          @documents = {} of String => DocumentState
         end
 
         # Main server loop
@@ -89,6 +99,8 @@ module CrystalV2
             handle_initialize(id, params)
           when "shutdown"
             handle_shutdown(id)
+          when "textDocument/hover"
+            handle_hover(id, params)
           else
             send_error(id, -32601, "Method not found: #{method}")
           end
@@ -137,12 +149,14 @@ module CrystalV2
           version = text_document["version"].as_i
           language_id = text_document["languageId"].as_s
 
-          # Store document
+          # Analyze and store document
           doc = TextDocumentItem.new(uri: uri, language_id: language_id, version: version, text: text)
-          @documents[uri] = doc
+          diagnostics, program, type_context = analyze_document(text)
 
-          # Run diagnostics
-          diagnostics = analyze_document(text)
+          # Store document state
+          @documents[uri] = DocumentState.new(doc, program, type_context)
+
+          # Publish diagnostics
           publish_diagnostics(uri, diagnostics, version)
         end
 
@@ -153,9 +167,10 @@ module CrystalV2
           @documents.delete(uri)
         end
 
-        # Analyze document and return diagnostics
-        private def analyze_document(source : String) : Array(Diagnostic)
+        # Analyze document and return diagnostics, program, and type context
+        private def analyze_document(source : String) : {Array(Diagnostic), Frontend::Program, Semantic::TypeContext?}
           diagnostics = [] of Diagnostic
+          type_context = nil
 
           # Parse
           lexer = Frontend::Lexer.new(source)
@@ -187,7 +202,8 @@ module CrystalV2
 
             # Run type inference if no errors so far
             if !analyzer.semantic_errors? && result.diagnostics.empty?
-              analyzer.infer_types(result.identifier_symbols)
+              engine = analyzer.infer_types(result.identifier_symbols)
+              type_context = engine.context
 
               # Convert type inference diagnostics
               analyzer.type_inference_diagnostics.each do |diag|
@@ -196,7 +212,111 @@ module CrystalV2
             end
           end
 
-          diagnostics
+          {diagnostics, program, type_context}
+        end
+
+        # Find expression at the given position (LSP 0-indexed -> Span 1-indexed)
+        private def find_expr_at_position(program : Frontend::Program, line : Int32, character : Int32) : Frontend::ExprId?
+          # Convert LSP position (0-indexed) to Span position (1-indexed)
+          span_line = line + 1
+          span_column = character + 1
+
+          # Find the smallest (most specific) node that contains this position
+          best_match : Frontend::ExprId? = nil
+          best_match_size = Int32::MAX
+
+          program.roots.each do |root_id|
+            if match = find_expr_in_tree(program.arena, root_id, span_line, span_column)
+              match_node = program.arena[match]
+              match_size = match_node.span.end_offset - match_node.span.start_offset
+              if match_size < best_match_size
+                best_match = match
+                best_match_size = match_size
+              end
+            end
+          end
+
+          best_match
+        end
+
+        # Recursively search for expression at position in AST
+        private def find_expr_in_tree(arena : Frontend::AstArena | Frontend::VirtualArena, expr_id : Frontend::ExprId, line : Int32, column : Int32) : Frontend::ExprId?
+          node = arena[expr_id]
+          return nil unless node.span.contains?(line, column)
+
+          # This node contains the position, but check if a child is more specific
+          best_match = expr_id
+          best_match_size = node.span.end_offset - node.span.start_offset
+
+          # Check children based on node type (simplified - only check common cases)
+          case Frontend.node_kind(node)
+          when .binary?
+            binary = node.as(Frontend::BinaryNode)
+            if left_match = find_expr_in_tree(arena, binary.left, line, column)
+              left_node = arena[left_match]
+              left_size = left_node.span.end_offset - left_node.span.start_offset
+              if left_size < best_match_size
+                best_match = left_match
+                best_match_size = left_size
+              end
+            end
+            if right_match = find_expr_in_tree(arena, binary.right, line, column)
+              right_node = arena[right_match]
+              right_size = right_node.span.end_offset - right_node.span.start_offset
+              if right_size < best_match_size
+                best_match = right_match
+                best_match_size = right_size
+              end
+            end
+          when .call?
+            call = node.as(Frontend::CallNode)
+            if args = Frontend.node_args(node)
+              args.each do |arg_id|
+                if arg_match = find_expr_in_tree(arena, arg_id, line, column)
+                  arg_node = arena[arg_match]
+                  arg_size = arg_node.span.end_offset - arg_node.span.start_offset
+                  if arg_size < best_match_size
+                    best_match = arg_match
+                    best_match_size = arg_size
+                  end
+                end
+              end
+            end
+          # Add more node types as needed
+          end
+
+          best_match
+        end
+
+        # Handle textDocument/hover request
+        private def handle_hover(id : JSON::Any, params : JSON::Any?)
+          return send_error(id, -32602, "Missing params") unless params
+
+          uri = params["textDocument"]["uri"].as_s
+          position = params["position"]
+          line = position["line"].as_i
+          character = position["character"].as_i
+
+          doc_state = @documents[uri]?
+          return send_response(id, "null") unless doc_state
+
+          # Find expression at position
+          expr_id = find_expr_at_position(doc_state.program, line, character)
+          return send_response(id, "null") unless expr_id
+
+          # Get type information
+          type_context = doc_state.type_context
+          return send_response(id, "null") unless type_context
+
+          type = type_context.get_type(expr_id)
+          return send_response(id, "null") unless type
+
+          # Create hover response
+          type_str = type.to_s
+          contents = MarkupContent.new("```crystal\n#{type_str}\n```", markdown: true)
+          hover = Hover.new(contents: contents)
+
+          send_response(id, hover.to_json)
         end
 
         # Publish diagnostics to client

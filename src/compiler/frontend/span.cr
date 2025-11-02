@@ -37,6 +37,19 @@ module CrystalV2
           raise ArgumentError.new("Span.cover_all requires at least one span") if values.empty?
           values.reduce { |acc, span| acc.cover(span) }
         end
+
+        # Check if this span contains the given position (1-indexed line and column)
+        def contains?(line : Int32, column : Int32) : Bool
+          # Position before span start
+          return false if line < start_line
+          return false if line == start_line && column < start_column
+
+          # Position after span end
+          return false if line > end_line
+          return false if line == end_line && column > end_column
+
+          true
+        end
       end
     end
   end

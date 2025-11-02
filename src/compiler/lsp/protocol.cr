@@ -122,6 +122,28 @@ module CrystalV2
         def initialize(@uri : String, @language_id : String, @version : Int32, @text : String)
         end
       end
+
+      # Markup content kind (plaintext or markdown)
+      enum MarkupKind
+        PlainText
+        Markdown
+
+        def to_json(builder : JSON::Builder)
+          builder.string(self == PlainText ? "plaintext" : "markdown")
+        end
+      end
+
+      # Markup content for rich text responses
+      struct MarkupContent
+        include JSON::Serializable
+
+        property kind : String  # "plaintext" or "markdown"
+        property value : String
+
+        def initialize(@value : String, markdown : Bool = true)
+          @kind = markdown ? "markdown" : "plaintext"
+        end
+      end
     end
   end
 end

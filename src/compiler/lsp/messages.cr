@@ -109,6 +109,26 @@ module CrystalV2
         def initialize(@uri : String, @diagnostics : Array(Diagnostic), @version : Int32? = nil)
         end
       end
+
+      # Hover request params
+      struct HoverParams
+        include JSON::Serializable
+
+        @[JSON::Field(key: "textDocument")]
+        property text_document : TextDocumentIdentifier
+        property position : Position
+      end
+
+      # Hover response
+      struct Hover
+        include JSON::Serializable
+
+        property contents : MarkupContent
+        property range : Range?
+
+        def initialize(@contents : MarkupContent, @range : Range? = nil)
+        end
+      end
     end
   end
 end
