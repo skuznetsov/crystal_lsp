@@ -135,6 +135,12 @@ module CrystalV2
             handle_folding_range(id, params)
           when "textDocument/semanticTokens/full"
             handle_semantic_tokens(id, params)
+          when "textDocument/prepareCallHierarchy"
+            handle_prepare_call_hierarchy(id, params)
+          when "callHierarchy/incomingCalls"
+            handle_incoming_calls(id, params)
+          when "callHierarchy/outgoingCalls"
+            handle_outgoing_calls(id, params)
           else
             send_error(id, -32601, "Method not found: #{method}")
           end
@@ -828,6 +834,71 @@ module CrystalV2
 
           debug("Generated #{tokens.size} semantic tokens")
           send_response(id, tokens.to_json)
+        end
+
+        # Handle textDocument/prepareCallHierarchy request
+        # Returns call hierarchy item for symbol at position
+        private def handle_prepare_call_hierarchy(id : JSON::Any, params : JSON::Any?)
+          return send_error(id, -32602, "Missing params") unless params
+
+          uri = params["textDocument"]["uri"].as_s
+          line = params["position"]["line"].as_i
+          character = params["position"]["character"].as_i
+
+          debug("Prepare call hierarchy request for: #{uri} at #{line}:#{character}")
+
+          doc_state = @documents[uri]?
+          return send_response(id, "null") unless doc_state
+
+          # Find symbol at position
+          symbol = find_symbol_at_position(doc_state, line, character)
+          return send_response(id, "null") unless symbol
+
+          # Only methods support call hierarchy
+          return send_response(id, "null") unless symbol.is_a?(Semantic::MethodSymbol)
+
+          # Create CallHierarchyItem
+          item = CallHierarchyItem.from_method(symbol, doc_state.program, uri)
+          return send_response(id, "null") unless item
+
+          debug("Found call hierarchy item: #{symbol.name}")
+          send_response(id, "[#{item.to_json}]")
+        end
+
+        # Handle callHierarchy/incomingCalls request
+        # Returns callers of the given method
+        private def handle_incoming_calls(id : JSON::Any, params : JSON::Any?)
+          return send_error(id, -32602, "Missing params") unless params
+
+          # Parse CallHierarchyItem from params
+          item_json = params["item"]
+          item = CallHierarchyItem.from_json(item_json.to_json)
+
+          debug("Incoming calls request for: #{item.name}")
+
+          # Find all callers of this method
+          incoming = find_incoming_calls(item)
+
+          debug("Found #{incoming.size} incoming calls")
+          send_response(id, incoming.to_json)
+        end
+
+        # Handle callHierarchy/outgoingCalls request
+        # Returns callees from the given method
+        private def handle_outgoing_calls(id : JSON::Any, params : JSON::Any?)
+          return send_error(id, -32602, "Missing params") unless params
+
+          # Parse CallHierarchyItem from params
+          item_json = params["item"]
+          item = CallHierarchyItem.from_json(item_json.to_json)
+
+          debug("Outgoing calls request for: #{item.name}")
+
+          # Find all callees from this method
+          outgoing = find_outgoing_calls(item)
+
+          debug("Found #{outgoing.size} outgoing calls")
+          send_response(id, outgoing.to_json)
         end
 
         # Collect all symbols from symbol table (including parent tables)
@@ -1788,6 +1859,160 @@ module CrystalV2
           end
 
           data
+        end
+
+        # Find incoming calls to a method (who calls this method)
+        private def find_incoming_calls(item : CallHierarchyItem) : Array(CallHierarchyIncomingCall)
+          incoming = [] of CallHierarchyIncomingCall
+
+          # Search all documents for calls to this method
+          @documents.each do |uri, doc_state|
+            next unless doc_state.identifier_symbols
+
+            # Find all call expressions that reference this method
+            call_sites = [] of Range
+
+            doc_state.identifier_symbols.not_nil!.each do |expr_id, symbol|
+              # Skip if symbol doesn't match the target method name
+              next unless symbol.name == item.name
+              next unless symbol.is_a?(Semantic::MethodSymbol)
+
+              # Get the call node
+              node = doc_state.program.arena[expr_id]
+
+              # Check if this is in a call context (parent is CallNode)
+              # For MVP, collect all references to the method
+              call_sites << Range.from_span(node.span)
+            end
+
+            # Create incoming call item if we found calls
+            unless call_sites.empty?
+              # Find the containing method for this call
+              # For MVP, create a simple caller item
+              caller_item = CallHierarchyItem.new(
+                name: File.basename(URI.parse(uri).path || "unknown"),
+                kind: SymbolKind::File.value,
+                uri: uri,
+                range: call_sites.first,
+                selection_range: call_sites.first
+              )
+
+              incoming << CallHierarchyIncomingCall.new(
+                from: caller_item,
+                from_ranges: call_sites
+              )
+            end
+          end
+
+          incoming
+        end
+
+        # Find outgoing calls from a method (what this method calls)
+        private def find_outgoing_calls(item : CallHierarchyItem) : Array(CallHierarchyOutgoingCall)
+          outgoing = [] of CallHierarchyOutgoingCall
+
+          # Find the document containing this method
+          doc_state = @documents[item.uri]?
+          return outgoing unless doc_state
+
+          # Find the method symbol by name
+          method_symbol = doc_state.symbol_table.not_nil!.lookup(item.name)
+          return outgoing unless method_symbol
+          return outgoing unless method_symbol.is_a?(Semantic::MethodSymbol)
+          return outgoing if method_symbol.node_id.invalid?
+
+          # Get method AST node
+          method_node = doc_state.program.arena[method_symbol.node_id]
+          return outgoing unless method_node.is_a?(Frontend::DefNode)
+
+          # Collect all call nodes from method body
+          called_methods = Hash(String, Array(Range)).new { |h, k| h[k] = [] of Range }
+
+          if body = method_node.body
+            body.each do |expr_id|
+              collect_calls_recursive(doc_state.program.arena, expr_id, doc_state.identifier_symbols, called_methods)
+            end
+          end
+
+          # Create outgoing call items
+          called_methods.each do |method_name, call_ranges|
+            # Lookup the called method
+            called_symbol = doc_state.symbol_table.not_nil!.lookup(method_name)
+            next unless called_symbol
+            next unless called_symbol.is_a?(Semantic::MethodSymbol)
+
+            # Create CallHierarchyItem for callee
+            callee_item = CallHierarchyItem.from_method(called_symbol, doc_state.program, item.uri)
+            next unless callee_item
+
+            outgoing << CallHierarchyOutgoingCall.new(
+              to: callee_item,
+              from_ranges: call_ranges
+            )
+          end
+
+          outgoing
+        end
+
+        # Recursively collect call nodes from AST
+        private def collect_calls_recursive(
+          arena : Frontend::ArenaLike,
+          expr_id : Frontend::ExprId,
+          identifier_symbols : Hash(Frontend::ExprId, Semantic::Symbol)?,
+          calls : Hash(String, Array(Range))
+        )
+          return if expr_id.invalid?
+          node = arena[expr_id]
+
+          case node
+          when Frontend::CallNode
+            # Check if callee is an identifier
+            unless node.callee.invalid?
+              callee_node = arena[node.callee]
+              if callee_node.is_a?(Frontend::IdentifierNode)
+                # Record this call
+                method_name = String.new(callee_node.name)
+                calls[method_name] << Range.from_span(callee_node.span)
+              end
+            end
+
+            # Recursively process arguments
+            node.args.each { |arg_id| collect_calls_recursive(arena, arg_id, identifier_symbols, calls) }
+
+          when Frontend::IfNode
+            collect_calls_recursive(arena, node.condition, identifier_symbols, calls)
+            node.then_body.each { |id| collect_calls_recursive(arena, id, identifier_symbols, calls) }
+            if elsifs = node.elsifs
+              elsifs.each do |elsif_branch|
+                collect_calls_recursive(arena, elsif_branch.condition, identifier_symbols, calls)
+                elsif_branch.body.each { |id| collect_calls_recursive(arena, id, identifier_symbols, calls) }
+              end
+            end
+            if else_body = node.else_body
+              else_body.each { |id| collect_calls_recursive(arena, id, identifier_symbols, calls) }
+            end
+
+          when Frontend::WhileNode, Frontend::UntilNode
+            collect_calls_recursive(arena, node.condition, identifier_symbols, calls)
+            node.body.each { |id| collect_calls_recursive(arena, id, identifier_symbols, calls) }
+
+          when Frontend::UnlessNode
+            collect_calls_recursive(arena, node.condition, identifier_symbols, calls)
+            node.then_branch.each { |id| collect_calls_recursive(arena, id, identifier_symbols, calls) }
+            if else_branch = node.else_branch
+              else_branch.each { |id| collect_calls_recursive(arena, id, identifier_symbols, calls) }
+            end
+
+          when Frontend::LoopNode
+            node.body.each { |id| collect_calls_recursive(arena, id, identifier_symbols, calls) }
+
+          when Frontend::BinaryNode
+            collect_calls_recursive(arena, node.left, identifier_symbols, calls)
+            collect_calls_recursive(arena, node.right, identifier_symbols, calls)
+
+          when Frontend::AssignNode
+            collect_calls_recursive(arena, node.value, identifier_symbols, calls)
+          end
         end
       end
     end

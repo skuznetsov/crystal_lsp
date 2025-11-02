@@ -248,6 +248,38 @@ module CrystalV2
         def initialize(@text_document : TextDocumentIdentifier)
         end
       end
+
+      # Call hierarchy prepare request params
+      struct CallHierarchyPrepareParams
+        include JSON::Serializable
+
+        @[JSON::Field(key: "textDocument")]
+        property text_document : TextDocumentIdentifier
+        property position : Position
+
+        def initialize(@text_document : TextDocumentIdentifier, @position : Position)
+        end
+      end
+
+      # Call hierarchy incoming calls request params
+      struct CallHierarchyIncomingCallsParams
+        include JSON::Serializable
+
+        property item : CallHierarchyItem
+
+        def initialize(@item : CallHierarchyItem)
+        end
+      end
+
+      # Call hierarchy outgoing calls request params
+      struct CallHierarchyOutgoingCallsParams
+        include JSON::Serializable
+
+        property item : CallHierarchyItem
+
+        def initialize(@item : CallHierarchyItem)
+        end
+      end
     end
   end
 end

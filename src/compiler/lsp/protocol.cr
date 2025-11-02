@@ -581,6 +581,89 @@ module CrystalV2
         def initialize(@data : Array(Int32), @result_id : String? = nil)
         end
       end
+
+      # Call Hierarchy structures (LSP 3.16)
+
+      # Call hierarchy item - represents a function/method in call hierarchy
+      # Response for textDocument/prepareCallHierarchy
+      struct CallHierarchyItem
+        include JSON::Serializable
+
+        property name : String
+        property kind : Int32  # SymbolKind value
+        property tags : Array(Int32)?  # SymbolTag values
+        property detail : String?
+        property uri : String
+        property range : Range
+        @[JSON::Field(key: "selectionRange")]
+        property selection_range : Range
+        property data : JSON::Any?
+
+        def initialize(
+          @name : String,
+          @kind : Int32,
+          @uri : String,
+          @range : Range,
+          @selection_range : Range,
+          @tags : Array(Int32)? = nil,
+          @detail : String? = nil,
+          @data : JSON::Any? = nil
+        )
+        end
+
+        # Create CallHierarchyItem from MethodSymbol
+        def self.from_method(method : Semantic::MethodSymbol, program : Frontend::Program, uri : String) : CallHierarchyItem?
+          return nil if method.node_id.invalid?
+
+          node = program.arena[method.node_id]
+          range = Range.from_span(node.span)
+          selection_range = range  # MVP: same as range
+
+          # Generate detail (method signature)
+          params_str = method.params.map do |p|
+            name = String.new(p.name)
+            type = p.type_annotation ? String.new(p.type_annotation.not_nil!) : "?"
+            "#{name} : #{type}"
+          end.join(", ")
+          ret = method.return_annotation || "?"
+          detail = "(#{params_str}) : #{ret}"
+
+          new(
+            name: method.name,
+            kind: SymbolKind::Method.value,
+            uri: uri,
+            range: range,
+            selection_range: selection_range,
+            detail: detail
+          )
+        end
+      end
+
+      # Incoming call - represents a caller of a method
+      # Part of response for callHierarchy/incomingCalls
+      struct CallHierarchyIncomingCall
+        include JSON::Serializable
+
+        property from : CallHierarchyItem
+        @[JSON::Field(key: "fromRanges")]
+        property from_ranges : Array(Range)
+
+        def initialize(@from : CallHierarchyItem, @from_ranges : Array(Range))
+        end
+      end
+
+      # Outgoing call - represents a callee from a method
+      # Part of response for callHierarchy/outgoingCalls
+      struct CallHierarchyOutgoingCall
+        include JSON::Serializable
+
+        property to : CallHierarchyItem
+        @[JSON::Field(key: "fromRanges")]
+        property from_ranges : Array(Range)
+
+        def initialize(@to : CallHierarchyItem, @from_ranges : Array(Range))
+        end
+      end
     end
   end
 end
