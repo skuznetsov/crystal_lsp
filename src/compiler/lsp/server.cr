@@ -4,6 +4,7 @@ require "./messages"
 require "../frontend/lexer"
 require "../frontend/parser"
 require "../semantic/analyzer"
+require "../formatter"
 
 module CrystalV2
   module Compiler
@@ -143,6 +144,10 @@ module CrystalV2
             handle_outgoing_calls(id, params)
           when "textDocument/codeAction"
             handle_code_action(id, params)
+          when "textDocument/formatting"
+            handle_formatting(id, params)
+          when "textDocument/rangeFormatting"
+            handle_range_formatting(id, params)
           else
             send_error(id, -32601, "Method not found: #{method}")
           end
@@ -2140,6 +2145,73 @@ module CrystalV2
           return false if start_line != end_line
 
           true
+        end
+
+        # === FORMATTING ===
+
+        # Handle textDocument/formatting request
+        private def handle_formatting(id : JSON::Any, params : JSON::Any?)
+          return send_error(id, -32602, "Missing params") unless params
+
+          uri = params["textDocument"]["uri"].as_s
+          debug("Formatting request for: #{uri}")
+
+          doc_state = @documents[uri]?
+          unless doc_state
+            debug("Document not found: #{uri}")
+            return send_response(id, "null")
+          end
+
+          # Get original source
+          original_source = doc_state.text_document.text
+
+          # Format using CrystalV2 token-based formatter
+          begin
+            formatted_source = Formatter.format(original_source)
+
+            # If source is already formatted, return null (no changes)
+            if formatted_source == original_source
+              debug("Document already formatted")
+              return send_response(id, "null")
+            end
+
+            # Create TextEdit replacing entire document
+            start_pos = Position.new(line: 0, character: 0)
+
+            # Calculate end position (last line, last character)
+            lines = original_source.split('\n')
+            end_line = lines.size - 1
+            end_char = lines.last?.try(&.size) || 0
+            end_pos = Position.new(line: end_line, character: end_char)
+
+            range = Range.new(start: start_pos, end: end_pos)
+            edit = TextEdit.new(range: range, new_text: formatted_source)
+
+            debug("Formatted: #{original_source.lines.size} lines → #{formatted_source.lines.size} lines")
+            send_response(id, [edit].to_json)
+          rescue ex
+            debug("Formatting error: #{ex.message}")
+            send_error(id, -32603, "Formatting failed: #{ex.message}")
+          end
+        end
+
+        # Handle textDocument/rangeFormatting request
+        private def handle_range_formatting(id : JSON::Any, params : JSON::Any?)
+          return send_error(id, -32602, "Missing params") unless params
+
+          uri = params["textDocument"]["uri"].as_s
+          debug("Range formatting request for: #{uri}")
+
+          doc_state = @documents[uri]?
+          unless doc_state
+            debug("Document not found: #{uri}")
+            return send_response(id, "null")
+          end
+
+          # MVP: Range formatting not supported yet - format entire document instead
+          # In future, could extract range, format it, and replace
+          debug("Range formatting not yet supported, formatting entire document")
+          handle_formatting(id, params)
         end
       end
     end

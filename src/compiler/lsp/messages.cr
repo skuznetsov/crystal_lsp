@@ -304,6 +304,53 @@ module CrystalV2
         def initialize(@text_document : TextDocumentIdentifier, @range : Range, @context : CodeActionContext)
         end
       end
+
+      # Formatting options - style preferences for formatting
+      struct FormattingOptions
+        include JSON::Serializable
+
+        @[JSON::Field(key: "tabSize")]
+        property tab_size : Int32
+        @[JSON::Field(key: "insertSpaces")]
+        property insert_spaces : Bool
+        @[JSON::Field(key: "trimTrailingWhitespace")]
+        property trim_trailing_whitespace : Bool?
+        @[JSON::Field(key: "insertFinalNewline")]
+        property insert_final_newline : Bool?
+        @[JSON::Field(key: "trimFinalNewlines")]
+        property trim_final_newlines : Bool?
+
+        def initialize(@tab_size : Int32, @insert_spaces : Bool,
+                       @trim_trailing_whitespace : Bool? = nil,
+                       @insert_final_newline : Bool? = nil,
+                       @trim_final_newlines : Bool? = nil)
+        end
+      end
+
+      # Document formatting request params
+      struct DocumentFormattingParams
+        include JSON::Serializable
+
+        @[JSON::Field(key: "textDocument")]
+        property text_document : TextDocumentIdentifier
+        property options : FormattingOptions
+
+        def initialize(@text_document : TextDocumentIdentifier, @options : FormattingOptions)
+        end
+      end
+
+      # Document range formatting request params
+      struct DocumentRangeFormattingParams
+        include JSON::Serializable
+
+        @[JSON::Field(key: "textDocument")]
+        property text_document : TextDocumentIdentifier
+        property range : Range
+        property options : FormattingOptions
+
+        def initialize(@text_document : TextDocumentIdentifier, @range : Range, @options : FormattingOptions)
+        end
+      end
     end
   end
 end
