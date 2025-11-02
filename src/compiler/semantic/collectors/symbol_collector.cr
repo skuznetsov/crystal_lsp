@@ -92,8 +92,11 @@ module CrystalV2
           params = node.params || [] of Frontend::Parameter
           return_annotation = node.return_type.try { |slice| String.new(slice) }
 
+          # Week 1 Day 2: Detect generic type parameters from method signature
+          type_params = detect_generic_type_parameters(params, return_annotation)
+
           method_scope = SymbolTable.new(current_table)
-          method_symbol = MethodSymbol.new(name, node_id, params: params, return_annotation: return_annotation, scope: method_scope)
+          method_symbol = MethodSymbol.new(name, node_id, params: params, return_annotation: return_annotation, scope: method_scope, type_parameters: type_params)
 
           table = current_table
           if existing = table.lookup_local(name)
@@ -499,6 +502,96 @@ module CrystalV2
 
         private def span_for(node_id : Frontend::ExprId) : Frontend::Span
           @arena[node_id].span
+        end
+
+        # Week 1 Day 2: Detect generic type parameters from method signature
+        # Returns nil if no generic params, or Array(String) of param names like ["T", "U"]
+        private def detect_generic_type_parameters(params : Array(Frontend::Parameter), return_annotation : String?) : Array(String)?
+          type_param_names = Set(String).new
+
+          # Check parameter types
+          params.each do |param|
+            if type_ann = param.type_annotation
+              # Extract generic type parameters from type annotation
+              # Examples: "T" → ["T"], "Box(T)" → ["T"], "Pair(K,V)" → ["K", "V"]
+              extract_type_parameters(type_ann, type_param_names)
+            end
+          end
+
+          # Check return type annotation
+          if ret_ann = return_annotation
+            extract_type_parameters(ret_ann.to_slice, type_param_names)
+          end
+
+          type_param_names.empty? ? nil : type_param_names.to_a.sort
+        end
+
+        # Extract type parameters from type annotation (zero-copy)
+        # Examples: "T" → add "T", "Box(T)" → add "T", "Pair(K,V)" → add "K","V"
+        private def extract_type_parameters(type_ann : Slice(UInt8), result : Set(String)) : Nil
+          type_name = String.new(type_ann)
+
+          # Check for generic syntax: Box(T), Pair(K,V)
+          if paren_start = type_ann.index('('.ord.to_u8)
+            if paren_end = type_ann.rindex(')'.ord.to_u8)
+              if paren_end > paren_start
+                # Extract inner type parameters using zero-copy pointer arithmetic
+                start_ptr = type_ann.to_unsafe + paren_start + 1
+                length = paren_end - paren_start - 1
+                inner_slice = Slice.new(start_ptr, length)
+
+                # Split by comma for multiple type params: "K,V" → ["K", "V"]
+                current_start = 0
+                inner_slice.each_with_index do |byte, i|
+                  if byte == ','.ord.to_u8
+                    # Extract parameter (zero-copy)
+                    param_slice = Slice.new(inner_slice.to_unsafe + current_start, i - current_start)
+                    param_name = String.new(param_slice).strip
+                    if is_generic_type_parameter?(param_name)
+                      result << param_name
+                    end
+                    current_start = i + 1
+                  end
+                end
+
+                # Last parameter (or only parameter)
+                if current_start < inner_slice.size
+                  param_slice = Slice.new(inner_slice.to_unsafe + current_start, inner_slice.size - current_start)
+                  param_name = String.new(param_slice).strip
+                  if is_generic_type_parameter?(param_name)
+                    result << param_name
+                  end
+                end
+
+                return
+              end
+            end
+          end
+
+          # Simple type without parens - check if it's a type parameter
+          if is_generic_type_parameter?(type_name)
+            result << type_name
+          end
+        end
+
+        # Check if a type name represents a generic type parameter
+        # Returns true if it's NOT a builtin type and NOT a defined class
+        private def is_generic_type_parameter?(type_name : String) : Bool
+          # Builtin types
+          return false if ["Int32", "Int64", "Float64", "String", "Bool", "Nil", "Char"].includes?(type_name)
+
+          # Check if it's a defined class in current scope
+          table = current_table
+          while table
+            if symbol = table.lookup_local(type_name)
+              # If it's a ClassSymbol, it's not a generic parameter
+              return false if symbol.is_a?(ClassSymbol)
+            end
+            table = table.parent
+          end
+
+          # Not a builtin, not a defined class → generic type parameter
+          true
         end
 
         private def symbol_kind(symbol : Symbol) : String

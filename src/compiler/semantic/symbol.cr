@@ -26,12 +26,14 @@ module CrystalV2
         getter params : Array(Frontend::Parameter)
         getter return_annotation : String?
         getter scope : SymbolTable
+        getter type_parameters : Array(String)?  # Week 1 Day 2: Generic method type params ["T", "U"]
 
-        def initialize(name : String, node_id : ExprId, *, params : Array(Frontend::Parameter) = [] of Frontend::Parameter, return_annotation : String? = nil, scope : SymbolTable)
+        def initialize(name : String, node_id : ExprId, *, params : Array(Frontend::Parameter) = [] of Frontend::Parameter, return_annotation : String? = nil, scope : SymbolTable, type_parameters : Array(String)? = nil)
           super(name, node_id)
           @params = params
           @return_annotation = return_annotation
           @scope = scope
+          @type_parameters = type_parameters
         end
       end
 

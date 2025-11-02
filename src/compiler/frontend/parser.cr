@@ -20,6 +20,7 @@ module CrystalV2
         # Phase 103: Type declaration control flag (like original Crystal parser)
         # When > 0, disables type annotation parsing (e.g., in ternary operator ? :)
         @no_type_declaration : Int32
+        @string_pool : StringPool  # Week 1 Day 2: for interning generic type annotations
 
         def initialize(lexer : Lexer)
           @tokens = [] of Token
@@ -34,6 +35,7 @@ module CrystalV2
           @bracket_depth = 0
           @brace_depth = 0
           @no_type_declaration = 0  # Phase 103: Type annotations enabled by default
+          @string_pool = lexer.string_pool  # Week 1 Day 2: share string pool for deduplication
         end
 
         # Phase 87B-2: Constructor for reparsing with existing arena
@@ -50,6 +52,7 @@ module CrystalV2
           @bracket_depth = 0
           @brace_depth = 0
           @no_type_declaration = 0  # Phase 103: Type annotations enabled by default
+          @string_pool = lexer.string_pool  # Week 1 Day 2: share string pool for deduplication
         end
 
         def parse_program : Program
@@ -683,13 +686,51 @@ module CrystalV2
             advance  # consume ':'
             skip_trivia
 
-            # Parse return type (simple identifier for Phase 4A)
-            type_token = current_token
-            if type_token.kind == Token::Kind::Identifier
-              return_type = type_token.slice
+            # Parse return type - supports generic types like Box(T)
+            type_start_token = current_token
+            type_end_token = current_token
+
+            if type_start_token.kind == Token::Kind::Identifier
+              type_end_token = type_start_token
               advance
+
+              # Week 1 Day 2: Check for generic type parameters: Box(T)
+              if operator_token?(current_token, Token::Kind::LParen)
+                type_end_token = current_token  # '('
+                advance  # consume '('
+                paren_depth = 1
+
+                # Parse until matching ')' - collect all non-whitespace tokens
+                while paren_depth > 0 && current_token.kind != Token::Kind::EOF
+                  # STOP at newline - type annotations are single-line
+                  break if current_token.kind == Token::Kind::Newline
+
+                  if operator_token?(current_token, Token::Kind::RParen)
+                    type_end_token = current_token  # Include ')'
+                    paren_depth -= 1
+                    advance  # consume ')'
+                    break if paren_depth == 0  # Found matching ')'
+                  elsif operator_token?(current_token, Token::Kind::LParen)
+                    type_end_token = current_token
+                    paren_depth += 1
+                    advance
+                  elsif current_token.kind != Token::Kind::Whitespace
+                    # Non-whitespace token inside parens
+                    type_end_token = current_token
+                    advance
+                  else
+                    # Skip whitespace without updating type_end_token
+                    advance
+                  end
+                end
+              end
+
+              # Zero-copy return type annotation using pointer arithmetic
+              start_ptr = type_start_token.slice.to_unsafe
+              end_ptr = type_end_token.slice.to_unsafe + type_end_token.slice.size
+              return_type = Slice.new(start_ptr, end_ptr - start_ptr)
             else
-              emit_unexpected(type_token)
+              emit_unexpected(type_start_token)
             end
           end
 
@@ -765,13 +806,51 @@ module CrystalV2
             advance  # consume ':'
             skip_trivia
 
-            # Parse return type (identifier or path)
-            type_token = current_token
-            if type_token.kind == Token::Kind::Identifier
-              return_type = type_token.slice
+            # Parse return type - supports generic types like Box(T)
+            type_start_token = current_token
+            type_end_token = current_token
+
+            if type_start_token.kind == Token::Kind::Identifier
+              type_end_token = type_start_token
               advance
+
+              # Week 1 Day 2: Check for generic type parameters: Box(T)
+              if operator_token?(current_token, Token::Kind::LParen)
+                type_end_token = current_token  # '('
+                advance  # consume '('
+                paren_depth = 1
+
+                # Parse until matching ')' - collect all non-whitespace tokens
+                while paren_depth > 0 && current_token.kind != Token::Kind::EOF
+                  # STOP at newline - type annotations are single-line
+                  break if current_token.kind == Token::Kind::Newline
+
+                  if operator_token?(current_token, Token::Kind::RParen)
+                    type_end_token = current_token  # Include ')'
+                    paren_depth -= 1
+                    advance  # consume ')'
+                    break if paren_depth == 0  # Found matching ')'
+                  elsif operator_token?(current_token, Token::Kind::LParen)
+                    type_end_token = current_token
+                    paren_depth += 1
+                    advance
+                  elsif current_token.kind != Token::Kind::Whitespace
+                    # Non-whitespace token inside parens
+                    type_end_token = current_token
+                    advance
+                  else
+                    # Skip whitespace without updating type_end_token
+                    advance
+                  end
+                end
+              end
+
+              # Zero-copy return type annotation using pointer arithmetic
+              start_ptr = type_start_token.slice.to_unsafe
+              end_ptr = type_end_token.slice.to_unsafe + type_end_token.slice.size
+              return_type = Slice.new(start_ptr, end_ptr - start_ptr)
             else
-              emit_unexpected(type_token)
+              emit_unexpected(type_start_token)
             end
           end
 
@@ -898,15 +977,81 @@ module CrystalV2
                   end
                   param_type_span = type_start.span.cover(previous_token.not_nil!.span) if previous_token
                 else
-                  # Regular parameter - parse simple identifier type
-                  type_token = current_token
-                  if type_token.kind == Token::Kind::Identifier
-                    type_annotation = type_token.slice  # TIER 2.1: Zero-copy slice
-                    param_type_span = type_token.span
+                  # Regular parameter - parse type annotation
+                  # Supports: Int32, Box(T), Array(Int32), etc.
+                  type_start_token = current_token
+                  type_end_token = current_token
+
+                  if type_start_token.kind == Token::Kind::Identifier
+                    # Week 1 Day 2: Build string from tokens for generic types
+                    # Can't use pointer arithmetic because tokens may not be contiguous
+                    type_tokens = [] of Slice(UInt8)
+                    type_tokens << type_start_token.slice
+                    type_end_token = type_start_token
                     advance
                     skip_trivia
+
+                    # Week 1 Day 2: Check for generic type parameters: Box(T)
+                    if operator_token?(current_token, Token::Kind::LParen)
+                      paren_depth = 1
+                      type_tokens << current_token.slice  # '('
+                      advance  # consume '('
+
+                      # Parse until matching ')' - collect only significant tokens
+                      while paren_depth > 0 && current_token.kind != Token::Kind::EOF
+                        # Stop at newlines - type annotations are single-line
+                        break if current_token.kind == Token::Kind::Newline
+
+                        # Skip whitespace inside parens
+                        if current_token.kind == Token::Kind::Whitespace
+                          advance
+                          next
+                        end
+
+                        if operator_token?(current_token, Token::Kind::RParen)
+                          type_tokens << current_token.slice  # ')'
+                          type_end_token = current_token
+                          paren_depth -= 1
+                          advance
+                          break if paren_depth == 0
+                        elsif operator_token?(current_token, Token::Kind::LParen)
+                          type_tokens << current_token.slice  # '('
+                          paren_depth += 1
+                          type_end_token = current_token
+                          advance
+                        elsif current_token.kind == Token::Kind::Identifier
+                          type_tokens << current_token.slice
+                          type_end_token = current_token
+                          advance
+                        elsif current_token.kind == Token::Kind::Comma
+                          type_tokens << current_token.slice  # ','
+                          type_end_token = current_token
+                          advance
+                        else
+                          # Unknown token inside generic - stop
+                          break
+                        end
+                      end
+
+                      skip_trivia
+                    end
+
+                    # Build type annotation string from collected tokens
+                    if type_tokens.size == 1
+                      # Simple type - use zero-copy
+                      type_annotation = type_tokens[0]
+                    else
+                      # Generic type - build string and intern for deduplication
+                      # Week 1 Day 2: Use string pool to avoid memory waste for repeated generic types
+                      type_str = String.build do |io|
+                        type_tokens.each { |slice| io.write(slice) }
+                      end
+                      type_annotation = @string_pool.intern(type_str.to_slice)
+                    end
+
+                    param_type_span = type_start_token.span.cover(type_end_token.span)
                   else
-                    emit_unexpected(type_token)
+                    emit_unexpected(type_start_token)
                   end
                 end
               end

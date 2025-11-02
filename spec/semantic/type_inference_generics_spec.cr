@@ -316,4 +316,147 @@ describe Semantic::TypeInferenceEngine do
       end
     end
   end
+
+  describe "Week 1 Day 2: Generic Methods" do
+
+    # ========================================
+    # MILESTONE 1: Basic Generic Method
+    # ========================================
+
+    describe "Generic method with single type parameter" do
+      it "infers type parameter from argument" do
+        source = <<-CRYSTAL
+          def identity(x : T) : T
+            x
+          end
+
+          identity(42)
+        CRYSTAL
+
+        program, analyzer, engine = infer_types(source)
+
+        # identity(42) should return Int32
+        call_id = program.roots.last
+        type = engine.context.get_type(call_id)
+
+        type.should be_a(PrimitiveType)
+        type.as(PrimitiveType).name.should eq("Int32")
+      end
+
+      it "works with different argument types" do
+        source = <<-CRYSTAL
+          def identity(x : T) : T
+            x
+          end
+
+          identity(42)
+          identity("hello")
+        CRYSTAL
+
+        program, analyzer, engine = infer_types(source)
+
+        # First call: identity(42) → Int32
+        first_call_id = program.roots[-2]
+        first_type = engine.context.get_type(first_call_id)
+        first_type.should be_a(PrimitiveType)
+        first_type.as(PrimitiveType).name.should eq("Int32")
+
+        # Second call: identity("hello") → String
+        second_call_id = program.roots[-1]
+        second_type = engine.context.get_type(second_call_id)
+        second_type.should be_a(PrimitiveType)
+        second_type.as(PrimitiveType).name.should eq("String")
+      end
+    end
+
+    # ========================================
+    # MILESTONE 2: Multiple Type Parameters
+    # ========================================
+
+    describe "Generic method with multiple type parameters" do
+      it "infers multiple type parameters from arguments" do
+        source = <<-CRYSTAL
+          def pair(first : T, second : U) : T
+            first
+          end
+
+          pair(42, "hello")
+        CRYSTAL
+
+        program, analyzer, engine = infer_types(source)
+
+        # pair(42, "hello") should return Int32 (type of first)
+        call_id = program.roots.last
+        type = engine.context.get_type(call_id)
+
+        type.should be_a(PrimitiveType)
+        type.as(PrimitiveType).name.should eq("Int32")
+      end
+    end
+
+    # ========================================
+    # MILESTONE 3: Generic Method with Generic Types
+    # ========================================
+
+    describe "Generic method with generic class arguments" do
+      it "infers type parameters from generic class instances" do
+        source = <<-CRYSTAL
+          class Box(T)
+            def initialize(value : T)
+              @value = value
+            end
+
+            def get : T
+              @value
+            end
+          end
+
+          def unwrap(box : Box(T)) : T
+            box.get
+          end
+
+          box = Box.new(42)
+          unwrap(box)
+        CRYSTAL
+
+        program, analyzer, engine = infer_types(source)
+
+        # unwrap(box) should return Int32
+        call_id = program.roots.last
+        type = engine.context.get_type(call_id)
+
+        type.should be_a(PrimitiveType)
+        type.as(PrimitiveType).name.should eq("Int32")
+      end
+    end
+
+    # ========================================
+    # MILESTONE 4: Chained Generic Method Calls
+    # ========================================
+
+    describe "Chained generic method calls" do
+      it "propagates type parameters through chain" do
+        source = <<-CRYSTAL
+          def identity(x : T) : T
+            x
+          end
+
+          def wrap(x : T) : T
+            identity(x)
+          end
+
+          wrap(42)
+        CRYSTAL
+
+        program, analyzer, engine = infer_types(source)
+
+        # wrap(42) should return Int32
+        call_id = program.roots.last
+        type = engine.context.get_type(call_id)
+
+        type.should be_a(PrimitiveType)
+        type.as(PrimitiveType).name.should eq("Int32")
+      end
+    end
+  end
 end

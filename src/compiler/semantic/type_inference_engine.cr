@@ -1773,8 +1773,12 @@ module CrystalV2
             receiver_type = infer_expression(callee_node.object)
             method_name = String.new(callee_node.member)
           when Frontend::IdentifierNode
-            # bar(x) → implicit self (not yet supported)
-            return @context.nil_type
+            # Week 1 Day 2: Top-level function call (e.g., identity(42))
+            method_name = String.new(callee_node.name)
+            # Infer argument types
+            arg_types = node.args.map { |arg_id| infer_expression(arg_id) }
+            # Lookup method in global scope
+            return infer_top_level_function_call(method_name, arg_types, expr_id)
           else
             return @context.nil_type
           end
@@ -1841,6 +1845,89 @@ module CrystalV2
             emit_error("Method '#{method_name}' not found on #{receiver_type}", expr_id)
             @context.nil_type
           end
+        end
+
+        # Week 1 Day 2: Infer type for top-level function call
+        # Handles calls like: identity(42), pair(1, "hi")
+        private def infer_top_level_function_call(method_name : String, arg_types : Array(Type), expr_id : ExprId) : Type
+          # Lookup method in global symbol table
+          method = @global_table.try(&.lookup(method_name))
+          unless method.is_a?(MethodSymbol)
+            emit_error("Function '#{method_name}' not found", expr_id)
+            return @context.nil_type
+          end
+
+          # Check parameter count
+          expected_count = method.params.size
+          actual_count = arg_types.size
+          unless expected_count == actual_count
+            emit_error("Wrong number of arguments for '#{method_name}' (given #{actual_count}, expected #{expected_count})", expr_id)
+            return @context.nil_type
+          end
+
+          # If method has generic type parameters, infer them from arguments
+          if type_params = method.type_parameters
+            type_args = infer_method_type_arguments(method, arg_types)
+
+            # Substitute type parameters in return type
+            if ret_ann = method.return_annotation
+              return substitute_type_parameters(ret_ann, type_args, type_params)
+            else
+              # No return annotation - would need to infer from body (future)
+              return @context.nil_type
+            end
+          else
+            # Non-generic method - just return the annotated type
+            if ret_ann = method.return_annotation
+              return parse_type_name(ret_ann)
+            else
+              return @context.nil_type
+            end
+          end
+        end
+
+        # Week 1 Day 2: Infer type arguments for generic method from call arguments
+        # Similar to infer_type_arguments but for methods instead of classes
+        private def infer_method_type_arguments(method : MethodSymbol, arg_types : Array(Type)) : Array(Type)
+          type_params = method.type_parameters
+          return [] of Type unless type_params && !type_params.empty?
+
+          params = method.params
+          return [] of Type if params.size != arg_types.size
+
+          # Build binding map: type parameter name → inferred type
+          binding = {} of String => Type
+          params.zip(arg_types).each do |param, arg_type|
+            if type_ann = param.type_annotation
+              type_name = String.new(type_ann)
+
+              # Case 1: Simple type parameter (e.g., x : T)
+              if type_params.includes?(type_name)
+                binding[type_name] = arg_type
+              # Case 2: Generic type with type parameter (e.g., box : Box(T))
+              elsif type_name.includes?('(') && type_name.includes?(')')
+                # Parse generic type: "Box(T)" → base="Box", param="T"
+                paren_start = type_name.index('(').not_nil!
+                paren_end = type_name.rindex(')').not_nil!
+                base_type = type_name[0...paren_start]
+                inner_type = type_name[(paren_start + 1)...paren_end]
+
+                # If inner type is a type parameter and arg is InstanceType
+                if type_params.includes?(inner_type) && arg_type.is_a?(InstanceType)
+                  # Match: Box(T) with Box(Int32) → T = Int32
+                  if arg_type.class_symbol.name == base_type && arg_type.type_args
+                    type_args = arg_type.type_args.not_nil!
+                    if type_args.size > 0
+                      binding[inner_type] = type_args[0]
+                    end
+                  end
+                end
+              end
+            end
+          end
+
+          # Return type arguments in the same order as type_params
+          type_params.map { |param_name| binding[param_name]? || @context.nil_type }
         end
 
         # Phase 4B: Method lookup with overload resolution

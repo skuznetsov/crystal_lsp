@@ -8,6 +8,7 @@ module CrystalV2
       class Lexer
         @last_token_kind : Token::Kind?  # Phase 57: for regex vs division disambiguation
         @string_pool : StringPool  # String interning for memory optimization
+        getter string_pool : StringPool  # Week 1 Day 2: expose for parser generic type interning
 
         def initialize(source : String)
           @rope = Rope.new(source)
