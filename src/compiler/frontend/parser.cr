@@ -641,7 +641,8 @@ module CrystalV2
             is_type_token = case token.kind
             when Token::Kind::Identifier, Token::Kind::Number,
                  Token::Kind::ColonColon, Token::Kind::Operator,
-                 Token::Kind::ThinArrow, Token::Kind::Self  # Phase 103C: self as type
+                 Token::Kind::ThinArrow, Token::Kind::Self,  # Phase 103C: self as type
+                 Token::Kind::Pipe  # Phase 103I: union types (String | Nil)
               true
             when Token::Kind::Whitespace
               # Skip whitespace but continue parsing
@@ -1536,6 +1537,82 @@ module CrystalV2
                         skip_trivia
                       else
                         break
+                      end
+                    end
+
+                    # Phase 103I: Handle union types (Type1 | Type2)
+                    while current_token.kind == Token::Kind::Pipe
+                      type_tokens << current_token.slice  # '|'
+                      type_end_token = current_token
+                      advance
+                      skip_trivia
+
+                      # Parse next type in union (simplified - identifier with optional :: and generics)
+                      if current_token.kind == Token::Kind::Identifier || current_token.kind == Token::Kind::Self
+                        type_tokens << current_token.slice
+                        type_end_token = current_token
+                        advance
+                        skip_trivia
+
+                        # Handle :: scope resolution
+                        while current_token.kind == Token::Kind::ColonColon
+                          type_tokens << current_token.slice
+                          type_end_token = current_token
+                          advance
+                          skip_trivia
+                          if current_token.kind == Token::Kind::Identifier
+                            type_tokens << current_token.slice
+                            type_end_token = current_token
+                            advance
+                            skip_trivia
+                          end
+                        end
+
+                        # Handle generics: Array(T)
+                        if operator_token?(current_token, Token::Kind::LParen)
+                          paren_depth_union = 1
+                          type_tokens << current_token.slice
+                          advance
+                          while paren_depth_union > 0 && current_token.kind != Token::Kind::EOF
+                            break if current_token.kind == Token::Kind::Newline
+                            if current_token.kind == Token::Kind::Whitespace
+                              advance
+                              next
+                            end
+                            if operator_token?(current_token, Token::Kind::RParen)
+                              type_tokens << current_token.slice
+                              type_end_token = current_token
+                              paren_depth_union -= 1
+                              advance
+                              break if paren_depth_union == 0
+                            elsif operator_token?(current_token, Token::Kind::LParen)
+                              type_tokens << current_token.slice
+                              paren_depth_union += 1
+                              type_end_token = current_token
+                              advance
+                            elsif current_token.kind == Token::Kind::Identifier || current_token.kind == Token::Kind::ColonColon || current_token.kind == Token::Kind::Comma
+                              type_tokens << current_token.slice
+                              type_end_token = current_token
+                              advance
+                            else
+                              break
+                            end
+                          end
+                          skip_trivia
+                        end
+
+                        # Handle type suffixes for union member
+                        loop do
+                          case current_token.kind
+                          when Token::Kind::Question, Token::Kind::Star, Token::Kind::StarStar
+                            type_tokens << current_token.slice
+                            type_end_token = current_token
+                            advance
+                            skip_trivia
+                          else
+                            break
+                          end
+                        end
                       end
                     end
 
@@ -4109,21 +4186,18 @@ module CrystalV2
           advance
           skip_trivia
 
-          # Parse type (for now, just identifier - can be expanded later for generic types)
-          type_token = current_token
-          unless type_token.kind == Token::Kind::Identifier
-            emit_unexpected(type_token)
-            return PREFIX_ERROR
-          end
-          advance
+          # Phase 103I: Parse full type annotation (supports union types, generics, etc.)
+          type_start_token = current_token
+          type_slice = parse_type_annotation
+          type_end_token = previous_token.not_nil!
 
-          alias_span = alias_token.span.cover(type_token.span)
+          alias_span = alias_token.span.cover(type_end_token.span)
 
           @arena.add_typed(
             AliasNode.new(
               alias_span,
               name_token.slice,
-              type_token.slice
+              type_slice
             )
           )
         end
