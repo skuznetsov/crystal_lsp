@@ -20,6 +20,12 @@ module CrystalV2
           @string_pool = StringPool.new  # String interning for memory optimization
         end
 
+        private def debug(message : String)
+          if ENV["LEXER_DEBUG"]?
+            STDERR.puts message
+          end
+        end
+
         def each_token(&block : Token ->)
           while token = next_token
             block.call token
@@ -27,7 +33,7 @@ module CrystalV2
           end
         end
 
-        private def next_token : Token
+        def next_token : Token
           return eof_token if @offset >= @rope.size
 
           byte = current_byte
@@ -1041,8 +1047,19 @@ module CrystalV2
               next_byte = current_byte
               if next_byte == '<'.ord.to_u8
                 advance  # consume second '<'
+                # Check for <<- (heredoc)
+                if @offset < @rope.size && current_byte == '-'.ord.to_u8
+                  advance  # consume '-'
+                  # Try to scan heredoc
+                  heredoc_token = scan_heredoc(start_offset, start_line, start_column)
+                  if heredoc_token
+                    return heredoc_token
+                  else
+                    # Not a valid heredoc, backtrack (TODO: proper error handling)
+                    Token::Kind::LShift  # fallback
+                  end
                 # Check for <<= (Phase 52)
-                if @offset < @rope.size && current_byte == '='.ord.to_u8
+                elsif @offset < @rope.size && current_byte == '='.ord.to_u8
                   advance  # consume '='
                   Token::Kind::LShiftEq
                 else
@@ -1551,6 +1568,136 @@ module CrystalV2
             @line,
             @column
           )
+        end
+
+        # Scan heredoc: <<-DELIMITER ... DELIMITER
+        # Returns String token or nil if not valid heredoc
+        private def scan_heredoc(start_offset : Int32, start_line : Int32, start_column : Int32) : Token?
+          # At this point we've consumed <<-
+          # Next should be identifier (delimiter)
+          debug "[HEREDOC] scan_heredoc called, offset=#{@offset}, size=#{@rope.size}"
+          if @offset >= @rope.size
+            debug "[HEREDOC] returning nil: offset >= size"
+            return nil
+          end
+          debug "[HEREDOC] current_byte=#{current_byte} (#{current_byte.chr})"
+          unless is_identifier_start?(current_byte)
+            debug "[HEREDOC] returning nil: not identifier start"
+            return nil
+          end
+
+          # Read delimiter
+          delimiter_start = @offset
+          while @offset < @rope.size && is_identifier_part?(current_byte)
+            advance
+          end
+          delimiter_end = @offset
+          delimiter = String.new(@rope.slice(delimiter_start...delimiter_end))
+          debug "[HEREDOC] delimiter='#{delimiter}' (#{delimiter_start}...#{delimiter_end})"
+
+          # Skip to end of line (heredoc content starts on NEXT line)
+          while @offset < @rope.size && current_byte != '\n'.ord.to_u8
+            advance
+          end
+          if @offset >= @rope.size
+            debug "[HEREDOC] returning nil: EOF before newline after delimiter"
+            return nil
+          end
+          advance  # consume newline
+          debug "[HEREDOC] starting content scan at offset #{@offset}"
+
+          # Accumulate content until we find delimiter on its own line
+          content = IO::Memory.new
+
+          loop do
+            debug "[HEREDOC] loop iteration, offset=#{@offset}"
+            line_start = @offset
+
+            # Skip leading whitespace (for <<- syntax)
+            while @offset < @rope.size && (current_byte == ' '.ord.to_u8 || current_byte == '\t'.ord.to_u8)
+              advance
+            end
+
+            # Check if this line starts with delimiter (after whitespace)
+            matches_delimiter = true
+            debug "[HEREDOC] checking delimiter match starting at offset #{@offset}"
+            delimiter.each_byte do |byte|
+              if @offset >= @rope.size || current_byte != byte
+                matches_delimiter = false
+                debug "[HEREDOC] delimiter mismatch at offset #{@offset}, expected #{byte}, got #{@offset >= @rope.size ? "EOF" : current_byte}"
+                break
+              end
+              advance
+            end
+
+            if matches_delimiter
+              debug "[HEREDOC] found matching delimiter at #{@offset}, checking termination"
+              # Check that delimiter is followed by newline or EOF
+              if @offset >= @rope.size || current_byte == '\n'.ord.to_u8 || current_byte == '\r'.ord.to_u8
+                debug "[HEREDOC] delimiter properly terminated, breaking"
+                # Found end delimiter, consume newline if present
+                if @offset < @rope.size && (current_byte == '\n'.ord.to_u8 || current_byte == '\r'.ord.to_u8)
+                  advance
+                  if @offset < @rope.size && current_byte == '\n'.ord.to_u8  # handle \r\n
+                    advance
+                  end
+                end
+                break  # Done with heredoc
+              end
+              debug "[HEREDOC] delimiter not terminated (followed by #{current_byte.chr})"
+            end
+
+            # Not end delimiter, rewind to line start and consume the line
+            debug "[HEREDOC] rewinding to line_start=#{line_start}"
+            @offset = line_start
+            while @offset < @rope.size && current_byte != '\n'.ord.to_u8
+              content.write_byte(current_byte)
+              advance
+            end
+
+            if @offset >= @rope.size
+              debug "[HEREDOC] returning nil: unterminated heredoc (EOF before delimiter)"
+              return nil  # Unterminated heredoc
+            end
+
+            # Consume newline
+            debug "[HEREDOC] consumed line, adding newline"
+            content.write_byte('\n'.ord.to_u8)
+            advance
+            @line += 1
+            @column = 0
+          end
+
+          # Create string token
+          # Token expects (kind, slice, span)
+          debug "[HEREDOC] creating token, content.size=#{content.size}"
+          content_slice = Slice(UInt8).new(content.size)
+          content.to_slice.copy_to(content_slice)
+
+          debug "[HEREDOC] returning String token"
+          Token.new(
+            Token::Kind::String,
+            content_slice,
+            Span.new(
+              start_offset,
+              @offset,
+              start_line,
+              start_column,
+              @line,
+              @column
+            )
+          )
+        end
+
+        private def is_identifier_start?(byte : UInt8) : Bool
+          (byte >= 'a'.ord.to_u8 && byte <= 'z'.ord.to_u8) ||
+            (byte >= 'A'.ord.to_u8 && byte <= 'Z'.ord.to_u8) ||
+            byte == '_'.ord.to_u8
+        end
+
+        private def is_identifier_part?(byte : UInt8) : Bool
+          is_identifier_start?(byte) ||
+            (byte >= '0'.ord.to_u8 && byte <= '9'.ord.to_u8)
         end
       end
     end

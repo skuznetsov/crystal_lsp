@@ -542,6 +542,9 @@ module CrystalV2
         private def next_comes_colon_space? : Bool
           saved_pos = @index
 
+          # Start from NEXT token
+          @index += 1
+
           # Skip whitespace (but NOT newlines - type restrictions must be on same line)
           while @index < @tokens.size && @tokens[@index].kind == Token::Kind::Whitespace
             @index += 1
@@ -4506,11 +4509,19 @@ module CrystalV2
           debug("try_parse_call_args_without_parens: callee=#{String.new(callee_token.slice)}, current_token=#{current_token.kind}")
           # Check if current token can start an argument
           # Return error for keywords that can't be arguments
+          # Phase 103D: Keywords can be identifiers if followed by " : " (type annotation)
+          # Example: property else : String, property when : Int32
           case current_token.kind
-          when Token::Kind::End, Token::Kind::Else, Token::Kind::Elsif,
-               Token::Kind::When, Token::Kind::In, Token::Kind::Then,
+          when Token::Kind::End
+            # 'end' always ends a block/structure, never an argument
+            return PREFIX_ERROR unless next_comes_colon_space?
+          when Token::Kind::If, Token::Kind::Unless,
+               Token::Kind::Else, Token::Kind::Elsif,
+               Token::Kind::When, Token::Kind::Then,
                Token::Kind::Rescue, Token::Kind::Ensure
-            return PREFIX_ERROR
+            # These keywords can be identifiers if followed by " : " (type annotation)
+            # Note: 'in' is already allowed as identifier (see Identifier case in parse_prefix)
+            return PREFIX_ERROR unless next_comes_colon_space?
           when Token::Kind::Newline, Token::Kind::EOF
             return PREFIX_ERROR
           # Don't parse as call if followed by binary/logical operators that can't start an argument
@@ -4876,10 +4887,38 @@ module CrystalV2
             # Phase 98: out keyword (C bindings output parameter)
             parse_out
           when Token::Kind::If
-            parse_if
+            # Phase 103D: Check if this is identifier usage (if : Type)
+            if next_comes_colon_space?
+              # Treat as identifier
+              identifier_token = token
+              advance
+              space_consumed = current_token.kind == Token::Kind::Whitespace
+              skip_trivia
+              if space_consumed && current_token.kind == Token::Kind::Colon && @no_type_declaration == 0
+                parse_type_declaration_from_identifier(identifier_token)
+              else
+                @arena.add_typed(IdentifierNode.new(identifier_token.span, identifier_token.slice))
+              end
+            else
+              parse_if
+            end
           when Token::Kind::Unless
-            # Phase 24: unless condition
-            parse_unless
+            # Phase 103D: Check if this is identifier usage (unless : Type)
+            if next_comes_colon_space?
+              # Treat as identifier
+              identifier_token = token
+              advance
+              space_consumed = current_token.kind == Token::Kind::Whitespace
+              skip_trivia
+              if space_consumed && current_token.kind == Token::Kind::Colon && @no_type_declaration == 0
+                parse_type_declaration_from_identifier(identifier_token)
+              else
+                @arena.add_typed(IdentifierNode.new(identifier_token.span, identifier_token.slice))
+              end
+            else
+              # Phase 24: unless condition
+              parse_unless
+            end
           when Token::Kind::Case
             # Phase 11: case/when pattern matching
             parse_case
@@ -5042,6 +5081,34 @@ module CrystalV2
             elsif slice_eq?(token.slice, "(")
               parse_grouping
             else
+              emit_unexpected(token)
+              advance
+              PREFIX_ERROR
+            end
+          when Token::Kind::Else, Token::Kind::When, Token::Kind::Then,
+               Token::Kind::Rescue, Token::Kind::Ensure
+            # Phase 103D: These keywords can be identifiers if followed by " : " (type annotation)
+            # Example: property else : String, property when : Int32
+            # Note: if/unless are handled separately above (they have existing statement parsing)
+            # Note: in/of/as are already allowed as identifiers in the Identifier case
+            if next_comes_colon_space?
+              # Treat as identifier
+              identifier_token = token
+              advance
+              space_consumed = current_token.kind == Token::Kind::Whitespace
+              skip_trivia
+
+              # Check for type annotation: keyword : Type
+              # After skip_trivia, we should be at the colon
+              if space_consumed && current_token.kind == Token::Kind::Colon && @no_type_declaration == 0
+                # This is type declaration: else : Type = value
+                parse_type_declaration_from_identifier(identifier_token)
+              else
+                # Just an identifier reference
+                @arena.add_typed(IdentifierNode.new(identifier_token.span, identifier_token.slice))
+              end
+            else
+              # Not followed by " : ", so keyword used incorrectly
               emit_unexpected(token)
               advance
               PREFIX_ERROR
