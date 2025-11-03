@@ -774,6 +774,18 @@ module CrystalV2
         # Phase 100: Added Macro to definition_start?
         private def definition_start?
           token = current_token
+
+          # Phase 103F: Distinguish 'def method' from 'def : Type' (identifier usage)
+          # Method definition: def name, def self.name, def []
+          # Identifier usage: def : Type (no name between def and :)
+          if token.kind == Token::Kind::Def
+            # Check what comes after 'def' keyword
+            next_tok = peek_next_non_trivia
+            # If directly followed by : (no identifier), it's identifier usage: getter def : Type
+            # Otherwise it's method definition: def foo : Type
+            return false if next_tok.kind == Token::Kind::Colon
+          end
+
           token.kind == Token::Kind::Def || token.kind == Token::Kind::Macro || token.kind == Token::Kind::Class || token.kind == Token::Kind::Module || token.kind == Token::Kind::Struct || token.kind == Token::Kind::Union || token.kind == Token::Kind::Enum || token.kind == Token::Kind::Alias || token.kind == Token::Kind::Annotation || token.kind == Token::Kind::Abstract || token.kind == Token::Kind::Private || token.kind == Token::Kind::Protected || token.kind == Token::Kind::Lib || token.kind == Token::Kind::Fun
         end
 
@@ -5077,6 +5089,21 @@ module CrystalV2
               # Phase 24: unless condition
               parse_unless
             end
+          when Token::Kind::Def
+            # Phase 103F: 'def' as identifier in expression context
+            # Examples: getter def : Type, foo(def: value), x = def
+            # Method definitions are handled in parse_op_assign via definition_start?
+            identifier_token = token
+            advance
+            space_consumed = current_token.kind == Token::Kind::Whitespace
+            skip_trivia
+            if space_consumed && current_token.kind == Token::Kind::Colon && @no_type_declaration == 0
+              # Type declaration: def : Type = value
+              parse_type_declaration_from_identifier(identifier_token)
+            else
+              # Just an identifier reference or named arg
+              @arena.add_typed(IdentifierNode.new(identifier_token.span, identifier_token.slice))
+            end
           when Token::Kind::Case
             # Phase 11: case/when pattern matching
             parse_case
@@ -6779,8 +6806,10 @@ module CrystalV2
           when Token::Kind::Identifier
             true
           when Token::Kind::Of, Token::Kind::As, Token::Kind::In, Token::Kind::Out,
-               Token::Kind::Do, Token::Kind::End, Token::Kind::If, Token::Kind::Unless
-            # Common keywords that can be used as parameter/argument names
+               Token::Kind::Do, Token::Kind::End, Token::Kind::If, Token::Kind::Unless,
+               Token::Kind::Def
+            # Phase 103F: Keywords that can be used as parameter/argument names
+            # Includes 'def' for cases like: getter def : Def, initialize(def: value)
             true
           else
             false
