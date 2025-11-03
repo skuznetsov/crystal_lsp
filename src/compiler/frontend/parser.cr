@@ -321,12 +321,16 @@ module CrystalV2
               )
             end
 
-            # Verify left side is an identifier, instance variable, class variable, global variable, or index (Phase 14B: hash/array assignment)
-            unless Frontend.node_kind(left_node) == Frontend::NodeKind::Identifier ||
-                   Frontend.node_kind(left_node) == Frontend::NodeKind::InstanceVar ||
-                   Frontend.node_kind(left_node) == Frontend::NodeKind::ClassVar ||
-                   Frontend.node_kind(left_node) == Frontend::NodeKind::Global ||
-                   Frontend.node_kind(left_node) == Frontend::NodeKind::Index
+            # Verify left side is valid assignment target
+            # Phase 14B: hash/array assignment (Index)
+            # Phase PERCENT_LITERALS: property assignment (MemberAccess)
+            left_kind = Frontend.node_kind(left_node)
+            unless left_kind == Frontend::NodeKind::Identifier ||
+                   left_kind == Frontend::NodeKind::InstanceVar ||
+                   left_kind == Frontend::NodeKind::ClassVar ||
+                   left_kind == Frontend::NodeKind::Global ||
+                   left_kind == Frontend::NodeKind::Index ||
+                   left_kind == Frontend::NodeKind::MemberAccess  # Phase PERCENT_LITERALS: property assignment (obj.prop = value)
               @diagnostics << Diagnostic.new("Assignment target must be an identifier, instance variable, class variable, global variable, or index expression", token.span)
               return PREFIX_ERROR
             end
@@ -390,15 +394,48 @@ module CrystalV2
               rhs
             end
 
-            # Create Assign node
-            value_span = node_span(value)
-            assign_span = left_node.span.cover(value_span)
+            # Phase PERCENT_LITERALS: Handle property assignment (obj.prop = value → obj.prop=(value))
+            if left_kind == Frontend::NodeKind::MemberAccess
+              # Property assignment: transform to setter call
+              # obj.prop = value → obj.prop=(value)
+              member_node = left_node.as(MemberAccessNode)
 
-            stmt = @arena.add_typed(AssignNode.new(
-              assign_span,
-              left,
-              value
-            ))
+              # Create setter method name by appending "="
+              setter_name = String.build do |io|
+                io.write(member_node.member)
+                io << "="
+              end
+              setter_slice = @string_pool.intern(setter_name.to_slice)
+
+              # Create setter member access node: obj.prop=
+              setter_member = @arena.add_typed(MemberAccessNode.new(
+                member_node.span,
+                member_node.object,  # same receiver
+                setter_slice          # property + "="
+              ))
+
+              # Create call node with setter as callee and value as argument
+              value_span = node_span(value)
+              assign_span = left_node.span.cover(value_span)
+
+              stmt = @arena.add_typed(CallNode.new(
+                assign_span,
+                setter_member,  # callee: obj.prop=
+                [value],        # args: value
+                nil,            # no block
+                nil             # no named args
+              ))
+            else
+              # Regular assignment
+              value_span = node_span(value)
+              assign_span = left_node.span.cover(value_span)
+
+              stmt = @arena.add_typed(AssignNode.new(
+                assign_span,
+                left,
+                value
+              ))
+            end
             return parse_postfix_if_modifier(stmt)
           end
 
@@ -662,6 +699,52 @@ module CrystalV2
           )
         end
 
+        # Phase PERCENT_LITERALS: Parse optional receiver for class/singleton methods
+        # Returns (receiver_token, dot_token) or (nil, nil)
+        # Handles: def self.foo, def obj.foo
+        private def parse_def_receiver : {Token?, Token?}
+          case current_token.kind
+          when Token::Kind::Self
+            receiver = current_token
+            advance
+            skip_trivia
+
+            if current_token.kind == Token::Kind::Operator && slice_eq?(current_token.slice, ".")
+              dot = current_token
+              advance
+              skip_trivia
+              {receiver, dot}
+            else
+              # self without dot - not a receiver, rewind
+              @index -= 1
+              {nil, nil}
+            end
+
+          when Token::Kind::Identifier
+            # Lookahead for .
+            saved_index = @index
+            name_token = current_token
+            advance
+            skip_trivia
+
+            if current_token.kind == Token::Kind::Operator && slice_eq?(current_token.slice, ".")
+              # It's receiver.method (singleton method)
+              dot = current_token
+              advance
+              skip_trivia
+              {name_token, dot}
+            else
+              # Just method name, rewind
+              @index = saved_index
+              {nil, nil}
+            end
+
+          else
+            # No receiver (operator methods or error)
+            {nil, nil}
+          end
+        end
+
         # Phase 36: Modified to support abstract modifier
         # Phase 37: Modified to support visibility modifier
         private def parse_def(is_abstract : Bool = false, visibility : Visibility? = nil) : ExprId
@@ -669,12 +752,77 @@ module CrystalV2
           advance
           skip_trivia
 
+          # Phase PERCENT_LITERALS: Parse optional receiver (self.method or obj.method)
+          receiver_token, dot_token = parse_def_receiver
+
+          # Phase OPERATOR_METHODS: Parse method name (identifier or operator)
           name_token = current_token
-          unless name_token.kind == Token::Kind::Identifier
+          method_name_slice : Slice(UInt8)
+
+          case name_token.kind
+          when Token::Kind::Identifier
+            # Regular method name OR setter method (foo=)
+            method_name_slice = name_token.slice
+            advance
+
+            # Phase SETTER_METHODS: Check if this is setter (identifier immediately followed by =)
+            # Pattern: def foo=(value)
+            # Important: NO whitespace allowed between identifier and =
+            # Valid: def foo=(x)
+            # Invalid: def foo =(x)  (space before = is syntax error)
+            if current_token.kind == Token::Kind::Eq
+              advance  # consume '='
+              # Combine "foo" + "=" into "foo=" via string pool
+              setter_name = String.build do |io|
+                io.write(method_name_slice)
+                io.write_byte('='.ord.to_u8)
+              end
+              method_name_slice = @string_pool.intern(setter_name.to_slice)
+            end
+
+          when Token::Kind::LBracket
+            # [] or []= operator
+            bracket_start = name_token
+            advance
+            skip_trivia
+
+            # Expect ]
+            unless current_token.kind == Token::Kind::RBracket
+              emit_unexpected(current_token)
+              return PREFIX_ERROR
+            end
+            bracket_end = current_token
+            advance
+            skip_trivia
+
+            # Check for = ([]= assignment operator)
+            if current_token.kind == Token::Kind::Eq
+              eq_token = current_token
+              advance
+              # Combine []= into single slice via string pool
+              method_name_slice = @string_pool.intern("[]=".to_slice)
+            else
+              # Just [] indexer
+              method_name_slice = @string_pool.intern("[]".to_slice)
+            end
+
+          when Token::Kind::Plus, Token::Kind::Minus, Token::Kind::Star, Token::Kind::Slash,
+               Token::Kind::FloorDiv, Token::Kind::Percent, Token::Kind::StarStar,
+               Token::Kind::Less, Token::Kind::Greater, Token::Kind::LessEq, Token::Kind::GreaterEq,
+               Token::Kind::EqEq, Token::Kind::EqEqEq, Token::Kind::NotEq, Token::Kind::Spaceship,
+               Token::Kind::Match, Token::Kind::NotMatch,
+               Token::Kind::Amp, Token::Kind::Pipe, Token::Kind::Caret, Token::Kind::Tilde,
+               Token::Kind::LShift, Token::Kind::RShift,
+               Token::Kind::DotDot, Token::Kind::DotDotDot,
+               Token::Kind::AmpPlus, Token::Kind::AmpMinus, Token::Kind::AmpStar, Token::Kind::AmpStarStar
+            # Single-token operator method (e.g., +, -, *, ==, <<, etc.)
+            method_name_slice = name_token.slice
+            advance
+
+          else
             emit_unexpected(name_token)
             return PREFIX_ERROR
           end
-          advance
 
           params = parse_method_params
           return PREFIX_ERROR if params.is_a?(ExprId)  # Phase 71: Handle error from default value parsing
@@ -766,15 +914,20 @@ module CrystalV2
           else
             def_token.span
           end
+
+          # Phase PERCENT_LITERALS: Extract receiver slice if present
+          receiver_slice = receiver_token ? receiver_token.slice : nil
+
           @arena.add_typed(
             DefNode.new(
               def_span,
-              name_token.slice,
+              method_name_slice,  # Phase OPERATOR_METHODS: use parsed name (identifier or operator)
               params,
               return_type,
               body_ids,
               is_abstract,
-              visibility
+              visibility,
+              receiver_slice
             )
           )
         end
@@ -902,19 +1055,40 @@ module CrystalV2
               end
 
               # Parse parameter name (Identifier or InstanceVar for shorthand syntax)
+              # Phase BLOCK_CAPTURE: For capture block (&), name is optional
               name_token = current_token
-              unless name_token.kind == Token::Kind::Identifier || name_token.kind == Token::Kind::InstanceVar
-                emit_unexpected(name_token)
-                break
-              end
+              param_name : Slice(UInt8)?
+              param_name_span : Span?
+              is_instance_var = false
 
-              # Track if this is instance variable shorthand: @value : T
-              is_instance_var = (name_token.kind == Token::Kind::InstanceVar)
-              param_name = name_token.slice  # TIER 2.1: Zero-copy slice (includes '@' for instance vars)
-              param_name_span = name_token.span
-              param_start_span = prefix_token ? prefix_token.span : name_token.span
-              advance
-              skip_trivia
+              # Phase BLOCK_CAPTURE: Check if this is anonymous block capture (&)
+              if is_block && (current_token.kind == Token::Kind::Comma || operator_token?(current_token, Token::Kind::RParen))
+                # Anonymous block capture: just '&' without name
+                param_name = nil
+                param_name_span = nil
+                param_start_span = prefix_token.not_nil!.span
+                # Don't advance - comma/rparen will be handled below
+              else
+                # Regular parameter or named block parameter
+                # Phase DEFAULT_VALUES: Allow some keywords as parameter names (e.g., 'of')
+                case name_token.kind
+                when Token::Kind::Identifier, Token::Kind::InstanceVar
+                  # Standard parameter names
+                when Token::Kind::Of
+                  # Phase DEFAULT_VALUES: 'of' can be parameter name
+                else
+                  emit_unexpected(name_token)
+                  break
+                end
+
+                # Track if this is instance variable shorthand: @value : T
+                is_instance_var = (name_token.kind == Token::Kind::InstanceVar)
+                param_name = name_token.slice  # TIER 2.1: Zero-copy slice (includes '@' for instance vars)
+                param_name_span = name_token.span
+                param_start_span = prefix_token ? prefix_token.span : name_token.span
+                advance
+                skip_trivia
+              end
 
               # Parse optional type annotation: : Type
               # Phase 103: For block parameters, parse proc type (Token ->)
@@ -995,6 +1169,25 @@ module CrystalV2
                     advance
                     skip_trivia
 
+                    # Phase PERCENT_LITERALS: Handle :: scope resolution in types (JSON::Any, Process::Redirect)
+                    while current_token.kind == Token::Kind::ColonColon
+                      type_tokens << current_token.slice  # '::'
+                      type_end_token = current_token
+                      advance
+                      skip_trivia
+
+                      # Expect identifier after ::
+                      if current_token.kind == Token::Kind::Identifier
+                        type_tokens << current_token.slice
+                        type_end_token = current_token
+                        advance
+                        skip_trivia
+                      else
+                        # Invalid token after ::, but we'll let it error later
+                        break
+                      end
+                    end
+
                     # Week 1 Day 2: Check for generic type parameters: Box(T)
                     if operator_token?(current_token, Token::Kind::LParen)
                       paren_depth = 1
@@ -1025,6 +1218,11 @@ module CrystalV2
                           advance
                         elsif current_token.kind == Token::Kind::Identifier
                           type_tokens << current_token.slice
+                          type_end_token = current_token
+                          advance
+                        elsif current_token.kind == Token::Kind::ColonColon
+                          # Phase PERCENT_LITERALS: Handle :: inside generics (Array(JSON::Any))
+                          type_tokens << current_token.slice  # '::'
                           type_end_token = current_token
                           advance
                         elsif current_token.kind == Token::Kind::Comma
@@ -1339,10 +1537,14 @@ module CrystalV2
             consume_newlines
           end
 
-          # Parse when branches
+          # Phase PERCENT_LITERALS: Parse when/in branches
+          # `when` for traditional case, `in` for pattern matching
           when_branches = [] of WhenBranch
+          in_branches = nil
+
+          # Parse when branches
           loop do
-            skip_trivia
+            consume_newlines
             token = current_token
             break unless token.kind == Token::Kind::When
 
@@ -1396,6 +1598,68 @@ module CrystalV2
             when_branches << WhenBranch.new(conditions, when_body, when_span)
           end
 
+          # Phase PERCENT_LITERALS: Parse `in` branches (pattern matching)
+          # Same structure as `when`, but keyword is `in`
+          # Check if we have any `in` branches after when branches
+            in_branches_array = [] of WhenBranch
+
+            loop do
+              consume_newlines  # skip newlines before in
+              token = current_token
+              break unless token.kind == Token::Kind::In
+
+              in_token = token
+              advance
+              skip_trivia
+
+              # Parse in pattern (same as when condition for parser)
+              # Type checker will handle pattern matching semantics
+              patterns = [] of ExprId
+              loop do
+                pattern = parse_expression(0)
+                return PREFIX_ERROR if pattern.invalid?
+                patterns << pattern
+
+                skip_trivia
+                break unless current_token.kind == Token::Kind::Comma
+                advance  # consume comma
+                consume_newlines
+              end
+
+              skip_trivia
+
+              # Optional "then" keyword
+              if current_token.kind == Token::Kind::Then
+                advance
+              end
+
+              consume_newlines
+
+              # Parse in body
+              in_body = [] of ExprId
+              loop do
+                skip_trivia
+                token = current_token
+                break if token.kind.in?(Token::Kind::In, Token::Kind::Else, Token::Kind::End, Token::Kind::EOF)
+
+                stmt = parse_statement
+                in_body << stmt unless stmt.invalid?
+                consume_newlines
+              end
+
+              # Capture in span
+              in_span = if in_body.size > 0
+                last_expr = @arena[in_body.last]
+                in_token.span.cover(last_expr.span)
+              else
+                in_token.span
+              end
+
+              in_branches_array << WhenBranch.new(patterns, in_body, in_span)
+            end
+
+            in_branches = in_branches_array unless in_branches_array.empty?
+
           # Parse optional else body
           else_body = nil
           token = current_token
@@ -1431,7 +1695,8 @@ module CrystalV2
               case_span,
               value,
               when_branches,
-              else_body
+              else_body,
+              in_branches  # Phase PERCENT_LITERALS: pattern matching branches
             )
           )
         end
@@ -4204,6 +4469,98 @@ module CrystalV2
           buffer.clear
         end
 
+        # Phase IMPLICIT_RECEIVER: Parse implicit receiver method call
+        # Example: .method → ImplicitObj.method
+        # Grammar: .identifier or .identifier?
+        private def parse_implicit_receiver_call(dot_token : Token) : ExprId
+          # Consume the '.' token
+          advance
+          skip_trivia
+
+          # Expect identifier (method name)
+          method_token = current_token
+          unless method_token.kind == Token::Kind::Identifier
+            emit_unexpected(method_token)
+            return PREFIX_ERROR
+          end
+          advance
+
+          # Create ImplicitObjNode as receiver
+          implicit_obj = @arena.add_typed(ImplicitObjNode.new(dot_token.span))
+
+          # Create MemberAccessNode: ImplicitObj.method
+          call_span = dot_token.span.cover(method_token.span)
+          @arena.add_typed(MemberAccessNode.new(
+            call_span,
+            implicit_obj,
+            method_token.slice
+          ))
+        end
+
+        # Phase CALLS_WITHOUT_PARENS: Parse call arguments without parentheses
+        # Example: def_equals value, kind
+        # Returns CallNode or PREFIX_ERROR if can't parse as call
+        private def try_parse_call_args_without_parens(callee_token : Token) : ExprId
+          # Check if current token can start an argument
+          # Return error for keywords that can't be arguments
+          case current_token.kind
+          when Token::Kind::End, Token::Kind::Else, Token::Kind::Elsif,
+               Token::Kind::When, Token::Kind::In, Token::Kind::Then,
+               Token::Kind::Rescue, Token::Kind::Ensure
+            return PREFIX_ERROR
+          when Token::Kind::Newline, Token::Kind::EOF
+            return PREFIX_ERROR
+          # Don't parse as call if followed by infix operators (assignment, binary ops, etc.)
+          when Token::Kind::Eq, Token::Kind::PlusEq, Token::Kind::MinusEq, Token::Kind::StarEq,
+               Token::Kind::SlashEq, Token::Kind::PercentEq, Token::Kind::StarStarEq,
+               Token::Kind::OrOrEq, Token::Kind::AndAndEq, Token::Kind::AmpEq, Token::Kind::PipeEq,
+               Token::Kind::CaretEq, Token::Kind::LShiftEq, Token::Kind::RShiftEq,
+               Token::Kind::FloorDivEq, Token::Kind::NilCoalesceEq,
+               Token::Kind::OrOr, Token::Kind::AndAnd,
+               Token::Kind::Question,  # ternary operator
+               Token::Kind::Arrow      # hash arrow =>
+            return PREFIX_ERROR
+          end
+
+          # Parse arguments separated by commas
+          args = [] of ExprId
+
+          loop do
+            # Parse one argument
+            arg = parse_expression(0)
+            return PREFIX_ERROR if arg.invalid?
+            args << arg
+
+            skip_trivia
+
+            # Check for comma (more arguments)
+            if current_token.kind == Token::Kind::Comma
+              advance  # consume comma
+              skip_trivia
+            else
+              # No more arguments
+              break
+            end
+          end
+
+          # Create CallNode
+          callee = @arena.add_typed(IdentifierNode.new(callee_token.span, callee_token.slice))
+          call_span = if args.size > 0
+            last_arg = @arena[args.last]
+            callee_token.span.cover(last_arg.span)
+          else
+            callee_token.span
+          end
+
+          @arena.add_typed(CallNode.new(
+            call_span,
+            callee,
+            args,
+            nil,  # no block
+            nil   # no named args
+          ))
+        end
+
         protected def parse_expression(precedence : Int32) : ExprId
           skip_trivia
           left = parse_prefix
@@ -4451,8 +4808,13 @@ module CrystalV2
             # Phase 60: Check if this is a generic type instantiation
             # Pattern: UppercaseIdentifier(Type1, Type2)
             # Phase 103: Check for type annotation: identifier : Type = value
+            # Phase CALLS_WITHOUT_PARENS: Track whitespace for method calls without parentheses
             identifier_token = token
             advance  # Move past identifier
+
+            # Phase CALLS_WITHOUT_PARENS: Check for whitespace before skip_trivia
+            # This allows us to parse calls like: foo arg1, arg2
+            space_consumed = current_token.kind == Token::Kind::Whitespace
             skip_trivia
 
             # Check if uppercase identifier followed by (
@@ -4465,6 +4827,17 @@ module CrystalV2
             elsif @no_type_declaration == 0 && current_token.kind == Token::Kind::Colon
               # This is type declaration: x : Type = value
               parse_type_declaration_from_identifier(identifier_token)
+            # Phase CALLS_WITHOUT_PARENS: Try to parse call arguments if space was consumed
+            elsif space_consumed
+              # Attempt to parse call arguments without parentheses
+              # Example: def_equals value, kind
+              maybe_call = try_parse_call_args_without_parens(identifier_token)
+              if maybe_call.invalid?
+                # Not a call, just an identifier
+                @arena.add_typed(IdentifierNode.new(identifier_token.span, identifier_token.slice))
+              else
+                maybe_call
+              end
             else
               # Regular identifier
               @arena.add_typed(IdentifierNode.new(identifier_token.span, identifier_token.slice))
@@ -4535,8 +4908,12 @@ module CrystalV2
             # Phase 74: Proc literal (->(x) { ... })
             parse_proc_literal
           when Token::Kind::Operator
+            # Phase IMPLICIT_RECEIVER: Handle implicit receiver (.method)
             # Generic fallback for unhandled operators (e.g., macro operators)
-            if slice_eq?(token.slice, "(")
+            if slice_eq?(token.slice, ".")
+              # Implicit receiver: .method → ImplicitObj.method
+              parse_implicit_receiver_call(token)
+            elsif slice_eq?(token.slice, "(")
               parse_grouping
             else
               emit_unexpected(token)

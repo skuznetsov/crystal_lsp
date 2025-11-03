@@ -118,11 +118,11 @@ module CrystalV2
       #   def foo(x)           → Parameter("x", nil, span, name_span, nil)
       #   def foo(x : Int32)   → Parameter("x", "Int32", span, name_span, type_span)
       struct Parameter
-        getter name : Slice(UInt8)
+        getter name : Slice(UInt8)?          # Phase BLOCK_CAPTURE: nil for anonymous block (&)
         getter type_annotation : Slice(UInt8)?
         getter default_value : ExprId?  # Phase 71: default parameter value
         getter span : Span              # Full "x : Int32 = 5" span
-        getter name_span : Span         # Just "x" for rename
+        getter name_span : Span?        # Phase BLOCK_CAPTURE: nil for anonymous block
         getter type_span : Span?        # Just "Int32" for hover (optional)
         getter default_span : Span?     # Phase 71: Just default value span
         getter is_splat : Bool          # Phase 68: *args (single splat)
@@ -131,11 +131,11 @@ module CrystalV2
         getter is_instance_var : Bool   # Instance variable parameter shorthand: @value : T
 
         def initialize(
-          @name : Slice(UInt8),
+          @name : Slice(UInt8)?,       # Phase BLOCK_CAPTURE: optional for anonymous block
           @type_annotation : Slice(UInt8)? = nil,
           @default_value : ExprId? = nil,
           @span : Span = Span.new(0, 0, 0, 0, 0, 0),
-          @name_span : Span = Span.new(0, 0, 0, 0, 0, 0),
+          @name_span : Span? = nil,    # Phase BLOCK_CAPTURE: optional
           @type_span : Span? = nil,
           @default_span : Span? = nil,
           @is_splat : Bool = false,
@@ -310,6 +310,7 @@ module CrystalV2
         Class
         Return  # Phase 6: return statements
         Self    # Phase 7: self keyword
+        ImplicitObj  # Phase IMPLICIT_RECEIVER: implicit receiver for .method calls
         Super   # Phase 39: super keyword (call parent method)
         PreviousDef  # Phase 96: previous_def keyword (call previous definition before reopening/redefining)
         Typeof  # Phase 40: typeof (type introspection)
@@ -716,6 +717,15 @@ module CrystalV2
         end
       end
 
+      # Phase IMPLICIT_RECEIVER: Implicit object for method calls without explicit receiver
+      # Example: in .i8? (equivalent to self.i8?)
+      struct ImplicitObjNode
+        getter span : Span
+
+        def initialize(@span : Span)
+        end
+      end
+
       # Week 1 Batch 4: Control Flow Group (completing with IfNode from Phase B)
 
       struct UnlessNode
@@ -768,9 +778,11 @@ module CrystalV2
         getter span : Span
         getter value : ExprId?
         getter when_branches : Array(WhenBranch)
+        getter in_branches : Array(WhenBranch)?  # Phase PERCENT_LITERALS: pattern matching (case...in)
         getter else_branch : Array(ExprId)?
 
-        def initialize(@span : Span, @value : ExprId?, @when_branches : Array(WhenBranch), @else_branch : Array(ExprId)? = nil)
+        def initialize(@span : Span, @value : ExprId?, @when_branches : Array(WhenBranch),
+                       @else_branch : Array(ExprId)? = nil, @in_branches : Array(WhenBranch)? = nil)
         end
       end
 
@@ -910,10 +922,12 @@ module CrystalV2
         getter body : Array(ExprId)?
         getter is_abstract : Bool?
         getter visibility : Visibility?
+        getter receiver : Slice(UInt8)?  # Phase PERCENT_LITERALS: self or object name for class/singleton methods
 
         def initialize(@span : Span, @name : Slice(UInt8), @params : Array(Parameter)?,
                        @return_type : Slice(UInt8)?, @body : Array(ExprId)?,
-                       @is_abstract : Bool? = nil, @visibility : Visibility? = nil)
+                       @is_abstract : Bool? = nil, @visibility : Visibility? = nil,
+                       @receiver : Slice(UInt8)? = nil)
         end
       end
 
@@ -1356,7 +1370,7 @@ module CrystalV2
                         StringNode | CharNode | RegexNode | BoolNode | NilNode | SymbolNode |
                         ArrayLiteralNode | HashLiteralNode | TupleLiteralNode | NamedTupleLiteralNode | RangeNode |
                         UnaryNode | TernaryNode |
-                        InstanceVarNode | ClassVarNode | GlobalNode | SelfNode |
+                        InstanceVarNode | ClassVarNode | GlobalNode | SelfNode | ImplicitObjNode |
                         UnlessNode | WhileNode | UntilNode | ForNode | LoopNode | CaseNode |
                         BreakNode | NextNode | ReturnNode | YieldNode | SpawnNode |
                         IndexNode | MemberAccessNode | SafeNavigationNode |
@@ -1467,6 +1481,10 @@ module CrystalV2
 
       def self.node_kind(node : SelfNode) : NodeKind
         NodeKind::Self
+      end
+
+      def self.node_kind(node : ImplicitObjNode) : NodeKind
+        NodeKind::ImplicitObj
       end
 
       def self.node_kind(node : UnlessNode) : NodeKind
