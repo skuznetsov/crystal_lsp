@@ -535,6 +535,27 @@ module CrystalV2
           end
         end
 
+        # Lookahead: check if pattern " : " (space + colon) follows
+        # Used to distinguish "x : Type" (type restriction) from "x: value" (named arg)
+        # Returns true if whitespace followed by colon, false otherwise
+        # Does NOT consume any tokens
+        private def next_comes_colon_space? : Bool
+          saved_pos = @index
+
+          # Skip whitespace (but NOT newlines - type restrictions must be on same line)
+          while @index < @tokens.size && @tokens[@index].kind == Token::Kind::Whitespace
+            @index += 1
+          end
+
+          # Check if we hit a colon
+          result = @index < @tokens.size && @tokens[@index].kind == Token::Kind::Colon
+
+          # Restore position
+          @index = saved_pos
+
+          result
+        end
+
         private def consume_newlines
           loop do
             case current_token.kind
@@ -642,46 +663,104 @@ module CrystalV2
         end
 
         # Phase 103: Parse type declaration from identifier: x : Type = value
-        # Called from parse_prefix when identifier followed by colon
+        # Called from parse_prefix when identifier followed by " : " (space + colon)
         private def parse_type_declaration_from_identifier(identifier_token : Token) : ExprId
-          # Current token is ':'
+          var_span = identifier_token.span
+
+          # Create var node (Identifier)
+          var = @arena.add_typed(IdentifierNode.new(var_span, identifier_token.slice))
+
+          # Skip whitespace and consume ':'
+          skip_trivia
+          unless current_token.kind == Token::Kind::Colon
+            @diagnostics << Diagnostic.new("Expected ':' in type declaration", current_token.span)
+            return PREFIX_ERROR
+          end
           advance  # consume ':'
           skip_trivia
 
-          # Parse type annotation (supports complex types: Token::Kind, Array(Int32), etc.)
-          type_annotation = parse_type_annotation
-          if type_annotation.empty?
-            emit_unexpected(current_token)
-            return PREFIX_ERROR
-          end
+          # Parse type expression (can be complex like Hash(Int32, String)?)
+          # Use precedence 3 to avoid parsing '?' as ternary operator (ternary has precedence 2)
+          # This allows '?' to be parsed as postfix nilable type operator instead
+          declared_type = parse_expression(3)
+          return PREFIX_ERROR if declared_type.invalid?
 
-          # Check for optional value: = expression
-          value_expr : ExprId? = nil
+          # Phase 103: Parse type suffixes (?, *, **, [])
+          # After parse_expression stops at precedence boundary, manually parse type suffixes
+          # This prevents outer parse_expression from capturing these tokens
+          declared_type = parse_type_suffix(declared_type)
+          return PREFIX_ERROR if declared_type.invalid?
+
+          skip_trivia
+
+          # Check for optional '= value'
+          value = nil
           if current_token.kind == Token::Kind::Eq
             advance  # consume '='
             skip_trivia
-
-            # Parse value expression
-            val = parse_expression(0)
-            return PREFIX_ERROR if val.invalid?
-            value_expr = val
+            value = parse_expression(0)
+            return PREFIX_ERROR if value.invalid?
           end
 
-          # Create type declaration node
-          type_decl_span = if value_expr
-            identifier_token.span.cover(@arena[value_expr].span)
-          else
-            identifier_token.span.cover(previous_token.not_nil!.span)
+          # Create TypeDeclarationNode
+          type_span = @arena[declared_type].span
+          value_span = value ? @arena[value].span : type_span
+          full_span = var_span.cover(value_span)
+
+          @arena.add_typed(TypeDeclarationNode.new(
+            full_span,
+            var,
+            declared_type,
+            value
+          ))
+        end
+
+        # Parse type suffixes: ?, *, **, []
+        # These are postfix operators in type context (not infix like ternary)
+        # Returns the modified type expression with suffixes applied
+        private def parse_type_suffix(type : ExprId) : ExprId
+          loop do
+            case current_token.kind
+            when Token::Kind::Question
+              # Nilable type: Type?
+              # Represented as UnaryNode with operator "?"
+              start_span = @arena[type].span
+              advance  # consume '?'
+              end_span = @tokens[@index - 1].span
+              full_span = start_span.cover(end_span)
+
+              operator = "?".to_slice
+              type = @arena.add_typed(UnaryNode.new(full_span, operator, type))
+            when Token::Kind::Star
+              # Pointer type: Type*
+              start_span = @arena[type].span
+              advance  # consume '*'
+              end_span = @tokens[@index - 1].span
+              full_span = start_span.cover(end_span)
+
+              operator = "*".to_slice
+              type = @arena.add_typed(UnaryNode.new(full_span, operator, type))
+            when Token::Kind::StarStar
+              # Double pointer: Type**
+              start_span = @arena[type].span
+              advance  # consume '**'
+              end_span = @tokens[@index - 1].span
+              full_span = start_span.cover(end_span)
+
+              operator = "**".to_slice
+              type = @arena.add_typed(UnaryNode.new(full_span, operator, type))
+            when Token::Kind::LBracket
+              # Static array: Type[N]
+              # For now, skip implementation - would need to parse size expression
+              # and create appropriate node
+              break
+            else
+              # No more suffixes
+              break
+            end
           end
 
-          @arena.add_typed(
-            TypeDeclarationNode.new(
-              type_decl_span,
-              identifier_token.slice,
-              type_annotation,  # Already Slice(UInt8)
-              value_expr
-            )
-          )
+          type
         end
 
         # Phase 100: macro upgraded from identifier to keyword
@@ -4478,6 +4557,13 @@ module CrystalV2
           named_args = [] of NamedArgument
 
           loop do
+            # Check if we're at a block instead of arguments
+            # Example: .tap { } or .each do |x|
+            # In this case, stop parsing arguments and let block parser handle it
+            if current_token.kind == Token::Kind::LBrace || current_token.kind == Token::Kind::Do
+              break
+            end
+
             # Parse one argument
             # Could be: positional arg, assignment as arg, or named arg
             arg = parse_op_assign
@@ -4674,6 +4760,7 @@ module CrystalV2
             end
             debug("parse_expression(#{precedence}): token #{token.kind} is infix")
             current_precedence = precedence_for(token)
+            debug("parse_expression(#{precedence}): current_precedence=#{current_precedence}, check: #{current_precedence} < #{precedence} = #{current_precedence < precedence}")
             break if current_precedence < precedence
 
             advance
@@ -4845,7 +4932,9 @@ module CrystalV2
               # This is generic instantiation: Box(Int32)
               parse_generic_instantiation(identifier_token)
             # Phase 103: Check for type annotation (if enabled)
-            elsif @no_type_declaration == 0 && current_token.kind == Token::Kind::Colon
+            # Must check for space before colon: "x : Type" not "x: value" (named arg)
+            # After skip_trivia, we're at the colon; space_consumed tells us if there was space before
+            elsif @no_type_declaration == 0 && space_consumed && current_token.kind == Token::Kind::Colon
               # This is type declaration: x : Type = value
               parse_type_declaration_from_identifier(identifier_token)
             # Phase CALLS_WITHOUT_PARENS: Try to parse call arguments if space was consumed
@@ -5828,6 +5917,10 @@ module CrystalV2
                    Token::Kind::Amp  # Block parameter (&.method)
                 # These tokens indicate end of expression, not start of arguments
                 node
+              when Token::Kind::LBrace, Token::Kind::Do
+                # Block, not arguments - return and let postfix loop handle it
+                # Example: .tap { } or .each do |x|
+                node
               when Token::Kind::Eq
                 # Assignment, not argument
                 node
@@ -5861,13 +5954,14 @@ module CrystalV2
                     return PREFIX_ERROR
                   end
 
-                  skip_trivia
-
-                  # Check if this is a named argument
+                  # Check if this is a named argument BEFORE skipping trivia
+                  # Named arguments require NO space before colon: "name: value"
+                  # Type restrictions require space: "name : Type"
+                  # By checking current token before skip_trivia, we can distinguish them
                   arg_node = @arena[arg]
                   if Frontend.node_kind(arg_node) == Frontend::NodeKind::Identifier &&
                      current_token.kind == Token::Kind::Colon
-                    # Named argument!
+                    # Named argument! (no whitespace before colon)
                     name_span = arg_node.span
                     name = String.new(Frontend.node_literal(arg_node).not_nil!)
 
@@ -5886,7 +5980,8 @@ module CrystalV2
                     named_args << NamedArgument.new(name, value_expr, arg_span, name_span, value_span)
                     skip_trivia
                   else
-                    # Positional argument
+                    # Positional argument (including type-restricted assignments like "x : Type = value")
+                    skip_trivia
                     args << arg
                   end
 

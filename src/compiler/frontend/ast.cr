@@ -1216,11 +1216,11 @@ module CrystalV2
 
       struct TypeDeclarationNode
         getter span : Span
-        getter name : Slice(UInt8)
-        getter type : Slice(UInt8)
+        getter var : ExprId  # Variable (Identifier, InstanceVar, ClassVar, Global)
+        getter declared_type : ExprId  # Type expression (can be complex: Hash(Int32, String))
         getter value : ExprId?  # Phase 103: Optional initial value for x : Type = value
 
-        def initialize(@span : Span, @name : Slice(UInt8), @type : Slice(UInt8), @value : ExprId? = nil)
+        def initialize(@span : Span, @var : ExprId, @declared_type : ExprId, @value : ExprId? = nil)
         end
       end
 
@@ -2795,21 +2795,33 @@ def self.node_ternary_true_branch(node : TypedNode)
   nil
 end
 
-# type_decl_name
+# type_decl_var (for TypeDeclarationNode only)
 
-def self.node_type_decl_name(node : TypeDeclarationNode)
-  node.name
+def self.node_type_decl_var(node : TypeDeclarationNode)
+  node.var
 end
+
+def self.node_type_decl_var(node : TypedNode)
+  ExprId::INVALID
+end
+
+# type_decl_declared_type (for TypeDeclarationNode only)
+
+def self.node_type_decl_declared_type(node : TypeDeclarationNode)
+  node.declared_type
+end
+
+def self.node_type_decl_declared_type(node : TypedNode)
+  ExprId::INVALID
+end
+
+# type_decl_name (legacy for InstanceVarDeclNode etc)
 
 def self.node_type_decl_name(node : TypedNode)
   nil
 end
 
-# type_decl_type
-
-def self.node_type_decl_type(node : TypeDeclarationNode)
-  node.type
-end
+# type_decl_type (legacy for InstanceVarDeclNode etc)
 
 def self.node_type_decl_type(node : InstanceVarDeclNode)
   node.type
