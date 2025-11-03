@@ -4498,7 +4498,7 @@ module CrystalV2
               name = String.new(Frontend.node_literal(arg_node).not_nil!)
 
               advance  # consume ':'
-              skip_trivia
+              consume_newlines  # Allow newlines after colon in named arguments
 
               # Parse value (using parse_op_assign like original Crystal)
               value_expr = parse_op_assign
@@ -4520,7 +4520,7 @@ module CrystalV2
             # Check for comma (more arguments)
             if current_token.kind == Token::Kind::Comma
               advance  # consume comma
-              skip_trivia
+              consume_newlines  # Allow newlines after comma in argument lists
             else
               # No more arguments
               break
@@ -4529,7 +4529,7 @@ module CrystalV2
 
           # Parse optional block: do...end or {...}
           # Example: record Point, x : Int32 do ... end
-          skip_trivia
+          consume_newlines  # Allow newlines before block
           block_expr : ExprId? = nil
           if current_token.kind == Token::Kind::Do || current_token.kind == Token::Kind::LBrace
             block_expr = parse_block
@@ -4677,6 +4677,7 @@ module CrystalV2
             break if current_precedence < precedence
 
             advance
+            consume_newlines  # Allow newlines after binary operators (for multi-line expressions)
             # Disable type declarations for ternary true_branch (identifier: would conflict)
             if token.kind == Token::Kind::Question
               @no_type_declaration += 1
