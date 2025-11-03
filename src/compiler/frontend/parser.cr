@@ -5540,7 +5540,8 @@ module CrystalV2
         private def parse_hash_literal : ExprId
           lbrace = current_token
           advance  # consume {
-          skip_trivia
+          @brace_depth += 1  # Phase 103J: Track brace depth for newline handling
+          skip_whitespace_and_optional_newlines
 
           entries = [] of HashEntry
           of_key_type : Slice(UInt8)? = nil
@@ -5548,6 +5549,7 @@ module CrystalV2
 
           # Check for closing brace (empty hash)
           if current_token.kind == Token::Kind::RBrace
+            @brace_depth -= 1  # Phase 103J
             advance  # consume }
             skip_trivia
 
@@ -5601,24 +5603,27 @@ module CrystalV2
             # Parse key
             key = parse_expression(0)
             if key.invalid?
+              @brace_depth -= 1  # Phase 103J
               return PREFIX_ERROR
             end
             key_span = node_span(key)
 
-            skip_trivia
+            skip_whitespace_and_optional_newlines  # Phase 103J
 
             # Expect =>
             unless current_token.kind == Token::Kind::Arrow
               emit_unexpected(current_token)
+              @brace_depth -= 1  # Phase 103J
               return PREFIX_ERROR
             end
             arrow_token = current_token
             advance  # consume =>
-            skip_trivia
+            skip_whitespace_and_optional_newlines  # Phase 103J
 
             # Parse value
             value = parse_expression(0)
             if value.invalid?
+              @brace_depth -= 1  # Phase 103J
               return PREFIX_ERROR
             end
             value_span = node_span(value)
@@ -5627,11 +5632,11 @@ module CrystalV2
             entry_span = key_span.cover(value_span)
             entries << HashEntry.new(key, value, entry_span, arrow_token.span)
 
-            skip_trivia
+            skip_whitespace_and_optional_newlines  # Phase 103J
             break if !(current_token.kind == Token::Kind::Comma)
 
             advance  # consume comma
-            skip_trivia
+            skip_whitespace_and_optional_newlines  # Phase 103J
 
             # Allow trailing comma
             if current_token.kind == Token::Kind::RBrace
@@ -5642,9 +5647,11 @@ module CrystalV2
           # Expect closing brace
           unless current_token.kind == Token::Kind::RBrace
             emit_unexpected(current_token)
+            @brace_depth -= 1  # Phase 103J
             return PREFIX_ERROR
           end
 
+          @brace_depth -= 1  # Phase 103J
           closing_brace = current_token
           advance
 
@@ -5670,7 +5677,8 @@ module CrystalV2
         private def parse_hash_or_tuple : ExprId
           lbrace = current_token
           advance  # consume {
-          skip_trivia
+          @brace_depth += 1  # Phase 103J: Track brace depth for newline handling
+          skip_whitespace_and_optional_newlines
 
           # Empty {} → hash
           if current_token.kind == Token::Kind::RBrace
@@ -5683,8 +5691,11 @@ module CrystalV2
           @no_type_declaration += 1
           first_elem = parse_expression(0)
           @no_type_declaration -= 1
-          return PREFIX_ERROR if first_elem.invalid?
-          skip_trivia
+          if first_elem.invalid?
+            @brace_depth -= 1  # Phase 103J
+            return PREFIX_ERROR
+          end
+          skip_whitespace_and_optional_newlines
 
           # Check what follows
           case current_token.kind
@@ -5918,24 +5929,29 @@ module CrystalV2
         end
 
         # Phase 14: Continue parsing hash literal after first key
+        # NOTE: @brace_depth already incremented by parse_hash_or_tuple
         private def parse_hash_literal_continued(lbrace : Token, first_key : ExprId) : ExprId
           # Current token should be Arrow
           unless current_token.kind == Token::Kind::Arrow
             emit_unexpected(current_token)
+            @brace_depth -= 1  # Phase 103J
             return PREFIX_ERROR
           end
           arrow_token = current_token
           advance  # consume =>
-          skip_trivia
+          skip_whitespace_and_optional_newlines  # Phase 103J
 
           # Parse first value
           first_value = parse_expression(0)
-          return PREFIX_ERROR if first_value.invalid?
+          if first_value.invalid?
+            @brace_depth -= 1  # Phase 103J
+            return PREFIX_ERROR
+          end
 
           key_span = node_span(first_key)
           value_span = node_span(first_value)
           entry_span = key_span.cover(value_span)
-          skip_trivia
+          skip_whitespace_and_optional_newlines  # Phase 103J
 
           entries = [HashEntry.new(first_key, first_value, entry_span, arrow_token.span)]
 
@@ -5946,7 +5962,7 @@ module CrystalV2
             end
 
             advance  # consume comma
-            skip_trivia
+            skip_whitespace_and_optional_newlines  # Phase 103J
 
             # Allow trailing comma
             if current_token.kind == Token::Kind::RBrace
@@ -5955,25 +5971,32 @@ module CrystalV2
 
             # Parse key
             key = parse_expression(0)
-            return PREFIX_ERROR if key.invalid?
+            if key.invalid?
+              @brace_depth -= 1  # Phase 103J
+              return PREFIX_ERROR
+            end
             key_span = node_span(key)
-            skip_trivia
+            skip_whitespace_and_optional_newlines  # Phase 103J
 
             # Expect =>
             unless current_token.kind == Token::Kind::Arrow
               emit_unexpected(current_token)
+              @brace_depth -= 1  # Phase 103J
               return PREFIX_ERROR
             end
             arrow_token = current_token
             advance  # consume =>
-            skip_trivia
+            skip_whitespace_and_optional_newlines  # Phase 103J
 
             # Parse value
             value = parse_expression(0)
-            return PREFIX_ERROR if value.invalid?
+            if value.invalid?
+              @brace_depth -= 1  # Phase 103J
+              return PREFIX_ERROR
+            end
             value_span = node_span(value)
             entry_span = key_span.cover(value_span)
-            skip_trivia
+            skip_whitespace_and_optional_newlines  # Phase 103J
 
             entries << HashEntry.new(key, value, entry_span, arrow_token.span)
           end
@@ -5981,9 +6004,11 @@ module CrystalV2
           # Expect closing brace
           unless current_token.kind == Token::Kind::RBrace
             emit_unexpected(current_token)
+            @brace_depth -= 1  # Phase 103J
             return PREFIX_ERROR
           end
 
+          @brace_depth -= 1  # Phase 103J
           closing_brace = current_token
           advance
 
