@@ -4446,6 +4446,17 @@ module CrystalV2
                Token::Kind::DotDot, Token::Kind::DotDotDot,
                Token::Kind::Match, Token::Kind::NotMatch  # =~, !~
             return PREFIX_ERROR
+          # Compound assignment operators - these mean assignment, not call
+          when Token::Kind::PlusEq, Token::Kind::MinusEq, Token::Kind::StarEq,
+               Token::Kind::SlashEq, Token::Kind::FloorDivEq, Token::Kind::PercentEq,
+               Token::Kind::StarStarEq,
+               Token::Kind::OrOrEq, Token::Kind::AndAndEq,
+               Token::Kind::AmpEq, Token::Kind::PipeEq, Token::Kind::CaretEq,
+               Token::Kind::LShiftEq, Token::Kind::RShiftEq,
+               Token::Kind::AmpPlusEq, Token::Kind::AmpMinusEq,
+               Token::Kind::AmpStarEq, Token::Kind::AmpStarStarEq,
+               Token::Kind::NilCoalesceEq
+            return PREFIX_ERROR
           # Colon in ternary operator context (not named argument)
           when Token::Kind::Colon
             # If @no_type_declaration > 0, we're inside ternary operator
