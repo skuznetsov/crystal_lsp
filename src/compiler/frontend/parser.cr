@@ -3996,13 +3996,38 @@ module CrystalV2
 
           consume_newlines
 
-          # Parse enum members
+          # Phase 103G: Parse enum members and methods
           members = [] of EnumMember
+          method_bodies = [] of ExprId  # Store method definitions
+
           loop do
             skip_trivia
             token = current_token
             break if token.kind == Token::Kind::End
             break if token.kind == Token::Kind::EOF
+
+            # Phase 103G: Check if this is a method/macro definition
+            if definition_start?
+              # Parse method or other definition inside enum
+              definition_expr = case current_token.kind
+              when Token::Kind::Def
+                parse_def
+              when Token::Kind::Macro
+                parse_macro_definition
+              else
+                # Other definitions (class, module, etc.) - skip for now
+                emit_unexpected(current_token)
+                advance
+                PREFIX_ERROR
+              end
+
+              unless definition_expr.invalid?
+                method_bodies << definition_expr
+              end
+
+              consume_newlines
+              next
+            end
 
             # Enum members must be CONSTANT identifiers (start with uppercase)
             unless token.kind == Token::Kind::Identifier
