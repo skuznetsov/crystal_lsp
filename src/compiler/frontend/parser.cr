@@ -4408,6 +4408,11 @@ module CrystalV2
                Token::Kind::DotDot, Token::Kind::DotDotDot,
                Token::Kind::Match, Token::Kind::NotMatch  # =~, !~
             return PREFIX_ERROR
+          # Colon in ternary operator context (not named argument)
+          when Token::Kind::Colon
+            # If @no_type_declaration > 0, we're inside ternary operator
+            # In this case, Colon is part of ternary syntax, not a named argument
+            return PREFIX_ERROR if @no_type_declaration > 0
           # Special case: Eq at top level (not inside nested call args) means this is assignment
           # Example: "clone = 42" should be assignment, not call
           # But "property expansion = false" (inside call args) should parse assignment as argument
