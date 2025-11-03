@@ -4793,6 +4793,9 @@ module CrystalV2
           when Token::Kind::Raise
             # Phase 29: raise exception
             parse_raise
+          when Token::Kind::Yield
+            # Phase 10: yield (call block)
+            parse_yield
           when Token::Kind::Require
             # Phase 65: require statement
             parse_require
