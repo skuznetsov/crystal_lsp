@@ -1001,10 +1001,67 @@ module CrystalV2
                 end
               end
 
-              # Zero-copy return type annotation using pointer arithmetic
-              start_ptr = type_start_token.slice.to_unsafe
-              end_ptr = type_end_token.slice.to_unsafe + type_end_token.slice.size
-              return_type = Slice.new(start_ptr, end_ptr - start_ptr)
+              # Phase 103E: Parse type suffixes (?, *, **, [])
+              # Save base type end position before collecting suffixes
+              base_type_end_token = type_end_token
+              suffix_tokens = [] of Slice(UInt8)
+
+              loop do
+                case current_token.kind
+                when Token::Kind::Question
+                  # Nilable type: Type?
+                  suffix_tokens << current_token.slice
+                  type_end_token = current_token
+                  advance
+                when Token::Kind::Star
+                  # Pointer type: Type*
+                  suffix_tokens << current_token.slice
+                  type_end_token = current_token
+                  advance
+                when Token::Kind::StarStar
+                  # Double pointer type: Type**
+                  suffix_tokens << current_token.slice
+                  type_end_token = current_token
+                  advance
+                when Token::Kind::LBracket
+                  # Static array: Type[N]
+                  suffix_tokens << current_token.slice
+                  advance
+                  # Collect tokens until matching ]
+                  bracket_depth = 1
+                  while bracket_depth > 0 && current_token.kind != Token::Kind::EOF
+                    if current_token.kind == Token::Kind::LBracket
+                      bracket_depth += 1
+                    elsif current_token.kind == Token::Kind::RBracket
+                      bracket_depth -= 1
+                    end
+                    suffix_tokens << current_token.slice
+                    type_end_token = current_token if bracket_depth == 0
+                    advance
+                  end
+                else
+                  break
+                end
+              end
+
+              # Build return type - with or without suffixes
+              if suffix_tokens.size > 0
+                # Has suffixes - build full type string
+                type_str = String.build do |io|
+                  # Write base type (from type_start_token to base_type_end_token)
+                  base_start = type_start_token.slice.to_unsafe
+                  base_end = base_type_end_token.slice.to_unsafe + base_type_end_token.slice.size
+                  io.write(Slice.new(base_start, base_end - base_start))
+                  # Write suffixes
+                  suffix_tokens.each { |s| io.write(s) }
+                end
+                return_type = @string_pool.intern(type_str.to_slice)
+              else
+                # No suffixes - zero-copy return type annotation using pointer arithmetic
+                start_ptr = type_start_token.slice.to_unsafe
+                end_ptr = type_end_token.slice.to_unsafe + type_end_token.slice.size
+                return_type = Slice.new(start_ptr, end_ptr - start_ptr)
+              end
             else
               emit_unexpected(type_start_token)
             end
@@ -1127,10 +1184,67 @@ module CrystalV2
                 end
               end
 
-              # Zero-copy return type annotation using pointer arithmetic
-              start_ptr = type_start_token.slice.to_unsafe
-              end_ptr = type_end_token.slice.to_unsafe + type_end_token.slice.size
-              return_type = Slice.new(start_ptr, end_ptr - start_ptr)
+              # Phase 103E: Parse type suffixes (?, *, **, [])
+              # Save base type end position before collecting suffixes
+              base_type_end_token = type_end_token
+              suffix_tokens = [] of Slice(UInt8)
+
+              loop do
+                case current_token.kind
+                when Token::Kind::Question
+                  # Nilable type: Type?
+                  suffix_tokens << current_token.slice
+                  type_end_token = current_token
+                  advance
+                when Token::Kind::Star
+                  # Pointer type: Type*
+                  suffix_tokens << current_token.slice
+                  type_end_token = current_token
+                  advance
+                when Token::Kind::StarStar
+                  # Double pointer type: Type**
+                  suffix_tokens << current_token.slice
+                  type_end_token = current_token
+                  advance
+                when Token::Kind::LBracket
+                  # Static array: Type[N]
+                  suffix_tokens << current_token.slice
+                  advance
+                  # Collect tokens until matching ]
+                  bracket_depth = 1
+                  while bracket_depth > 0 && current_token.kind != Token::Kind::EOF
+                    if current_token.kind == Token::Kind::LBracket
+                      bracket_depth += 1
+                    elsif current_token.kind == Token::Kind::RBracket
+                      bracket_depth -= 1
+                    end
+                    suffix_tokens << current_token.slice
+                    type_end_token = current_token if bracket_depth == 0
+                    advance
+                  end
+                else
+                  break
+                end
+              end
+
+              # Build return type - with or without suffixes
+              if suffix_tokens.size > 0
+                # Has suffixes - build full type string
+                type_str = String.build do |io|
+                  # Write base type (from type_start_token to base_type_end_token)
+                  base_start = type_start_token.slice.to_unsafe
+                  base_end = base_type_end_token.slice.to_unsafe + base_type_end_token.slice.size
+                  io.write(Slice.new(base_start, base_end - base_start))
+                  # Write suffixes
+                  suffix_tokens.each { |s| io.write(s) }
+                end
+                return_type = @string_pool.intern(type_str.to_slice)
+              else
+                # No suffixes - zero-copy return type annotation using pointer arithmetic
+                start_ptr = type_start_token.slice.to_unsafe
+                end_ptr = type_end_token.slice.to_unsafe + type_end_token.slice.size
+                return_type = Slice.new(start_ptr, end_ptr - start_ptr)
+              end
             else
               emit_unexpected(type_start_token)
             end
@@ -1369,12 +1483,56 @@ module CrystalV2
                       skip_trivia
                     end
 
+                    # Phase 103E: Parse type suffixes (?, *, **, [])
+                    # These are postfix operators in type context
+                    loop do
+                      case current_token.kind
+                      when Token::Kind::Question
+                        # Nilable type: Type?
+                        type_tokens << current_token.slice
+                        type_end_token = current_token
+                        advance
+                        skip_trivia
+                      when Token::Kind::Star
+                        # Pointer type: Type*
+                        type_tokens << current_token.slice
+                        type_end_token = current_token
+                        advance
+                        skip_trivia
+                      when Token::Kind::StarStar
+                        # Double pointer type: Type**
+                        type_tokens << current_token.slice
+                        type_end_token = current_token
+                        advance
+                        skip_trivia
+                      when Token::Kind::LBracket
+                        # Static array: Type[N]
+                        type_tokens << current_token.slice
+                        advance
+                        # Collect tokens until matching ]
+                        bracket_depth = 1
+                        while bracket_depth > 0 && current_token.kind != Token::Kind::EOF
+                          if current_token.kind == Token::Kind::LBracket
+                            bracket_depth += 1
+                          elsif current_token.kind == Token::Kind::RBracket
+                            bracket_depth -= 1
+                          end
+                          type_tokens << current_token.slice
+                          type_end_token = current_token if bracket_depth == 0
+                          advance
+                        end
+                        skip_trivia
+                      else
+                        break
+                      end
+                    end
+
                     # Build type annotation string from collected tokens
                     if type_tokens.size == 1
                       # Simple type - use zero-copy
                       type_annotation = type_tokens[0]
                     else
-                      # Generic type - build string and intern for deduplication
+                      # Generic type or type with suffixes - build string and intern for deduplication
                       # Week 1 Day 2: Use string pool to avoid memory waste for repeated generic types
                       type_str = String.build do |io|
                         type_tokens.each { |slice| io.write(slice) }
