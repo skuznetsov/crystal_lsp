@@ -7311,9 +7311,20 @@ module CrystalV2
             parse_macro_if_control(start_span, keyword)
           when "for"
             parse_macro_for_control(start_span)
-          else
-            @diagnostics << Diagnostic.new("Unexpected macro control keyword '#{keyword}'", keyword_token.span)
+          when "begin"
+            parse_macro_begin_control(start_span)
+          when "verbatim"
+            parse_macro_verbatim_control(start_span)
+          when "else", "elsif", "end"
+            # Phase 103J: These keywords are handled by the caller (parse_macro_if_control, etc.)
+            # Return PREFIX_ERROR as a marker - not actually an error
+            debug("parse_percent_macro_control: keyword '#{keyword}' should be handled by caller")
             PREFIX_ERROR
+          else
+            # Phase 103J: Unknown keywords → parse as macro expression (method call)
+            # Example: {% skip_file %}, {% raise "error" %}, etc.
+            debug("parse_percent_macro_control: parsing '#{keyword}' as macro expression")
+            parse_macro_expression_control(start_span, keyword_token)
           end
         end
 
@@ -7488,6 +7499,168 @@ module CrystalV2
           @arena.add_typed(MacroForNode.new(full_span, vars, iterable, body))
         end
 
+        # Phase 103J: Parse {% expression %} - macro method calls
+        # Example: {% skip_file %}, {% raise "error" %}, {% @type %}
+        private def parse_macro_expression_control(start_span : Span, keyword_token : Token) : ExprId
+          # We've already consumed {% keyword
+          # Now parse the rest as an expression until %}
+          @index -= 1  # Go back to keyword token
+          expr = parse_expression(0)
+          return PREFIX_ERROR if expr.invalid?
+
+          skip_trivia
+
+          # Expect %}
+          unless current_token.kind == Token::Kind::Percent
+            @diagnostics << Diagnostic.new("Expected '%}' after macro expression", current_token.span)
+            return PREFIX_ERROR
+          end
+          advance  # consume %
+
+          unless current_token.kind == Token::Kind::RBrace
+            @diagnostics << Diagnostic.new("Expected '}' after '%'", current_token.span)
+            return PREFIX_ERROR
+          end
+          end_span = current_token.span
+          advance  # consume }
+
+          full_span = start_span.cover(end_span)
+          @arena.add_typed(MacroExpressionNode.new(full_span, expr))
+        end
+
+        # Phase 103J: Parse {% begin %}...{% end %}
+        private def parse_macro_begin_control(start_span : Span) : ExprId
+          # Expect %}
+          unless current_token.kind == Token::Kind::Percent
+            @diagnostics << Diagnostic.new("Expected '%}' after begin", current_token.span)
+            return PREFIX_ERROR
+          end
+          advance  # consume %
+
+          unless current_token.kind == Token::Kind::RBrace
+            @diagnostics << Diagnostic.new("Expected '}' after '%'", current_token.span)
+            return PREFIX_ERROR
+          end
+          advance  # consume }
+
+          # Parse body until {% end %}
+          body = parse_macro_body_until_branch
+          return PREFIX_ERROR if body.invalid?
+
+          # Expect {% end %}
+          unless current_token.kind == Token::Kind::LBrace
+            @diagnostics << Diagnostic.new("Expected '{% end %}'", current_token.span)
+            return PREFIX_ERROR
+          end
+          advance  # {
+
+          unless current_token.kind == Token::Kind::Percent
+            @diagnostics << Diagnostic.new("Expected '%' after '{'", current_token.span)
+            return PREFIX_ERROR
+          end
+          advance  # %
+
+          skip_trivia
+
+          unless token_text(current_token) == "end"
+            @diagnostics << Diagnostic.new("Expected 'end'", current_token.span)
+            return PREFIX_ERROR
+          end
+          advance  # end
+
+          skip_trivia
+
+          # Expect %}
+          unless current_token.kind == Token::Kind::Percent
+            @diagnostics << Diagnostic.new("Expected '%}' after end", current_token.span)
+            return PREFIX_ERROR
+          end
+          advance
+
+          unless current_token.kind == Token::Kind::RBrace
+            @diagnostics << Diagnostic.new("Expected '}' after '%'", current_token.span)
+            return PREFIX_ERROR
+          end
+          end_span = current_token.span
+          advance
+
+          # {% begin %} is like {% if true %} - always executes
+          full_span = start_span.cover(end_span)
+          true_node = @arena.add_typed(BoolNode.new(start_span, true))
+          @arena.add_typed(MacroIfNode.new(full_span, true_node, body, nil))
+        end
+
+        # Phase 103J: Parse {% verbatim do %}...{% end %}
+        private def parse_macro_verbatim_control(start_span : Span) : ExprId
+          # Expect 'do' keyword
+          unless token_text(current_token) == "do"
+            @diagnostics << Diagnostic.new("Expected 'do' after verbatim", current_token.span)
+            return PREFIX_ERROR
+          end
+          advance  # consume do
+
+          skip_trivia
+
+          # Expect %}
+          unless current_token.kind == Token::Kind::Percent
+            @diagnostics << Diagnostic.new("Expected '%}' after do", current_token.span)
+            return PREFIX_ERROR
+          end
+          advance  # consume %
+
+          unless current_token.kind == Token::Kind::RBrace
+            @diagnostics << Diagnostic.new("Expected '}' after '%'", current_token.span)
+            return PREFIX_ERROR
+          end
+          advance  # consume }
+
+          # Parse body until {% end %} - verbatim content
+          body = parse_macro_body_until_branch
+          return PREFIX_ERROR if body.invalid?
+
+          # Expect {% end %}
+          unless current_token.kind == Token::Kind::LBrace
+            @diagnostics << Diagnostic.new("Expected '{% end %}'", current_token.span)
+            return PREFIX_ERROR
+          end
+          advance  # {
+
+          unless current_token.kind == Token::Kind::Percent
+            @diagnostics << Diagnostic.new("Expected '%' after '{'", current_token.span)
+            return PREFIX_ERROR
+          end
+          advance  # %
+
+          skip_trivia
+
+          unless token_text(current_token) == "end"
+            @diagnostics << Diagnostic.new("Expected 'end'", current_token.span)
+            return PREFIX_ERROR
+          end
+          advance  # end
+
+          skip_trivia
+
+          # Expect %}
+          unless current_token.kind == Token::Kind::Percent
+            @diagnostics << Diagnostic.new("Expected '%}' after end", current_token.span)
+            return PREFIX_ERROR
+          end
+          advance
+
+          unless current_token.kind == Token::Kind::RBrace
+            @diagnostics << Diagnostic.new("Expected '}' after '%'", current_token.span)
+            return PREFIX_ERROR
+          end
+          end_span = current_token.span
+          advance
+
+          # Verbatim returns the literal body
+          full_span = start_span.cover(end_span)
+          # TODO: Mark verbatim flag on MacroLiteralNode when we support it
+          body
+        end
+
         # Parse macro body content until we hit {% elsif/else/end %}
         # Returns MacroLiteralNode with the body content
         # STUB VERSION: Just skip all tokens until target keyword
@@ -7520,7 +7693,8 @@ module CrystalV2
                 if depth == 0 && (keyword == "elsif" || keyword == "else" || keyword == "end")
                   # Stop - found our target
                   break
-                elsif keyword == "if" || keyword == "for" || keyword == "unless" || keyword == "while"
+                elsif keyword == "if" || keyword == "for" || keyword == "unless" || keyword == "while" || keyword == "begin" || keyword == "verbatim"
+                  # Phase 103J: Added begin and verbatim to nested controls
                   # Nested control - skip it entirely
                   skip_nested_macro_control
                   next
@@ -7558,7 +7732,8 @@ module CrystalV2
                 skip_trivia
                 keyword = token_text(current_token)
 
-                if keyword == "if" || keyword == "for" || keyword == "unless" || keyword == "while"
+                if keyword == "if" || keyword == "for" || keyword == "unless" || keyword == "while" || keyword == "begin" || keyword == "verbatim"
+                  # Phase 103J: Added begin and verbatim
                   depth += 1
                 elsif keyword == "end"
                   depth -= 1
