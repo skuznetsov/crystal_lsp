@@ -1070,12 +1070,13 @@ module CrystalV2
                 # Don't advance - comma/rparen will be handled below
               else
                 # Regular parameter or named block parameter
-                # Phase DEFAULT_VALUES: Allow some keywords as parameter names (e.g., 'of')
+                # Phase KEYWORD_PARAMS: Allow keywords as parameter names (e.g., 'of', 'as', 'in')
                 case name_token.kind
                 when Token::Kind::Identifier, Token::Kind::InstanceVar
                   # Standard parameter names
-                when Token::Kind::Of
-                  # Phase DEFAULT_VALUES: 'of' can be parameter name
+                when Token::Kind::Of, Token::Kind::As, Token::Kind::In, Token::Kind::Out,
+                     Token::Kind::Do, Token::Kind::End, Token::Kind::If, Token::Kind::Unless
+                  # Phase KEYWORD_PARAMS: Common keywords that can be parameter names
                 else
                   emit_unexpected(name_token)
                   break
@@ -4804,11 +4805,13 @@ module CrystalV2
           when Token::Kind::Property
             # Phase 30: property macro
             parse_property
-          when Token::Kind::Identifier
+          when Token::Kind::Identifier,
+               Token::Kind::Of, Token::Kind::As, Token::Kind::In
             # Phase 60: Check if this is a generic type instantiation
             # Pattern: UppercaseIdentifier(Type1, Type2)
             # Phase 103: Check for type annotation: identifier : Type = value
             # Phase CALLS_WITHOUT_PARENS: Track whitespace for method calls without parentheses
+            # Phase KEYWORD_AS_IDENT: Keywords 'of', 'as', 'in' can be identifiers in expression position
             identifier_token = token
             advance  # Move past identifier
 
@@ -5603,20 +5606,52 @@ module CrystalV2
                 arg_expr = parse_block_shorthand(amp_token)
                 return PREFIX_ERROR if arg_expr.invalid?
               else
-                # Parse first expression/identifier
-                # Disable type declarations to allow identifier: syntax for named args
-                @no_type_declaration += 1
-                arg_expr = parse_expression(0)
-                @no_type_declaration -= 1
-                return PREFIX_ERROR if arg_expr.invalid?
-              end
-              skip_whitespace_and_optional_newlines
+                # Phase NAMED_ARGUMENTS: Check if this is named argument BEFORE parsing expression
+                # Pattern: identifier/keyword : value
+                # This handles keywords like 'of:' which wouldn't create Identifier nodes
+                if named_arg_start?
+                  # Named argument detected
+                  name_token = current_token
+                  name_slice = name_token.slice
+                  name_span = name_token.span
+                  advance  # consume name (identifier/keyword)
+                  skip_whitespace_and_optional_newlines
 
-              # Check if this is named argument (identifier followed by colon)
-              if current_token.kind == Token::Kind::Colon
-                arg_node = @arena[arg_expr]
-                if Frontend.node_kind(arg_node) == Frontend::NodeKind::Identifier
-                  # Named argument: name: value
+                  # Expect colon
+                  unless current_token.kind == Token::Kind::Colon
+                    emit_unexpected(current_token)
+                    return PREFIX_ERROR
+                  end
+                  advance  # consume ':'
+                  skip_whitespace_and_optional_newlines
+
+                  # Parse value expression
+                  @no_type_declaration += 1
+                  value_expr = parse_expression(0)
+                  @no_type_declaration -= 1
+                  return PREFIX_ERROR if value_expr.invalid?
+                  value_span = @arena[value_expr].span
+
+                  # Create NamedArgument
+                  name = String.new(name_slice)
+                  arg_span = name_span.cover(value_span)
+                  named_args << NamedArgument.new(name, value_expr, arg_span, name_span, value_span)
+                  skip_whitespace_and_optional_newlines
+                else
+                  # Parse first expression/identifier
+                  # Disable type declarations to allow identifier: syntax for named args
+                  @no_type_declaration += 1
+                  arg_expr = parse_expression(0)
+                  @no_type_declaration -= 1
+                  return PREFIX_ERROR if arg_expr.invalid?
+                  skip_whitespace_and_optional_newlines
+
+                  # Check if this is named argument (identifier followed by colon)
+                  # This handles case where identifier was already parsed
+                  if current_token.kind == Token::Kind::Colon
+                    arg_node = @arena[arg_expr]
+                    if Frontend.node_kind(arg_node) == Frontend::NodeKind::Identifier
+                      # Named argument: name: value
                   name = String.new(Frontend.node_literal(arg_node).not_nil!)
                   name_span = arg_node.span
 
@@ -5644,6 +5679,8 @@ module CrystalV2
                 # Positional argument
                 args << arg_expr
               end
+            end  # close if named_arg_start?
+          end  # close else from Amp/AmpDot check
 
               break unless current_token.kind == Token::Kind::Comma
               advance  # consume comma
@@ -6262,6 +6299,50 @@ module CrystalV2
                                token.kind == Token::Kind::Newline ||
                                token.kind == Token::Kind::Comment
             offset += 1
+          end
+        end
+
+        # Phase NAMED_ARGUMENTS: Check if token can be used as named argument name
+        # In call argument context, keywords like 'of' are treated as identifiers
+        private def token_can_be_arg_name?(token : Token) : Bool
+          case token.kind
+          when Token::Kind::Identifier
+            true
+          when Token::Kind::Of, Token::Kind::As, Token::Kind::In, Token::Kind::Out,
+               Token::Kind::Do, Token::Kind::End, Token::Kind::If, Token::Kind::Unless
+            # Common keywords that can be used as parameter/argument names
+            true
+          else
+            false
+          end
+        end
+
+        # Phase NAMED_ARGUMENTS: Check if current position is start of named argument
+        # Pattern: (identifier or keyword) followed by ':' but not '::'
+        private def named_arg_start? : Bool
+          return false unless token_can_be_arg_name?(current_token)
+
+          next_token = peek_next_non_trivia
+          return false unless next_token.kind == Token::Kind::Colon
+
+          # Make sure it's not :: (scope resolution)
+          offset = 1
+          loop do
+            token = peek_token(offset)
+            if token.kind == Token::Kind::Whitespace ||
+               token.kind == Token::Kind::Newline ||
+               token.kind == Token::Kind::Comment
+              offset += 1
+              next
+            elsif token.kind == Token::Kind::Colon
+              # Found colon
+              # Check if next token is also colon (::)
+              offset += 1
+              next_next = peek_token(offset)
+              return next_next.kind != Token::Kind::Colon
+            else
+              return false
+            end
           end
         end
 
