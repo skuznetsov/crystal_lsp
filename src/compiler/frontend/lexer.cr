@@ -1011,7 +1011,14 @@ module CrystalV2
               advance
               Token::Kind::PercentEq  # Phase 20: Compound assignment
             else
-              Token::Kind::Percent  # Phase 18: Modulo operator
+              # Try to parse as percent literal (%(), %w(), %i(), etc)
+              # Note: we already advanced past '%', so we're at next char
+              if token = scan_percent_literal(start_offset, start_line, start_column)
+                return token
+              else
+                # Not a percent literal, treat as modulo operator
+                Token::Kind::Percent  # Phase 18: Modulo operator
+              end
             end
           when '('.ord.to_u8
             Token::Kind::LParen
@@ -1298,6 +1305,104 @@ module CrystalV2
 
         private def ascii_number?(byte : UInt8) : Bool
           byte >= '0'.ord && byte <= '9'.ord
+        end
+
+        # Phase PERCENT_LITERALS: Get closing delimiter for opening delimiter
+        private def closing_delimiter(open : UInt8) : UInt8
+          case open
+          when '('.ord.to_u8 then ')'.ord.to_u8
+          when '['.ord.to_u8 then ']'.ord.to_u8
+          when '{'.ord.to_u8 then '}'.ord.to_u8
+          when '<'.ord.to_u8 then '>'.ord.to_u8
+          else open  # For | and other non-paired delimiters
+          end
+        end
+
+        # Phase PERCENT_LITERALS: Scan percent literal (%(), %w(), %i(), etc)
+        # Returns Token or nil (if not a percent literal)
+        private def scan_percent_literal(start_offset : Int32, start_line : Int32, start_column : Int32) : Token?
+          # Already consumed '%', peek next char
+          return nil if @offset >= @rope.size
+
+          next_byte = current_byte
+          literal_type = Token::Kind::String  # default for %()
+          array_type : Symbol? = nil  # :word_array for %w(), :symbol_array for %i()
+
+          # Determine literal type
+          case next_byte.chr
+          when '(', '[', '{', '<', '|'
+            # Plain percent literal: %(...) - creates string
+            open_delim = next_byte
+            close_delim = closing_delimiter(open_delim)
+            advance  # consume opening delimiter
+          when 'w'
+            # %w(...) - word array
+            advance  # consume 'w'
+            return nil if @offset >= @rope.size
+            open_delim = current_byte
+            return nil unless open_delim.chr.in?('(', '[', '{', '<', '|')
+            close_delim = closing_delimiter(open_delim)
+            array_type = :word_array
+            literal_type = Token::Kind::LBracket  # Will generate array tokens
+            advance  # consume opening delimiter
+          when 'i'
+            # %i(...) - symbol array
+            advance  # consume 'i'
+            return nil if @offset >= @rope.size
+            open_delim = current_byte
+            return nil unless open_delim.chr.in?('(', '[', '{', '<', '|')
+            close_delim = closing_delimiter(open_delim)
+            array_type = :symbol_array
+            literal_type = Token::Kind::LBracket  # Will generate array tokens
+            advance  # consume opening delimiter
+          else
+            # Not a percent literal, treat as modulo operator
+            return nil
+          end
+
+          # Scan content with nesting support
+          buffer = IO::Memory.new
+          nesting_level = 0
+
+          while @offset < @rope.size
+            byte = current_byte
+
+            # Check for closing delimiter
+            if byte == close_delim
+              if nesting_level == 0
+                advance  # consume closing delimiter
+                break
+              else
+                nesting_level -= 1
+                buffer.write_byte byte
+                advance
+              end
+            # Check for opening delimiter (for nesting)
+            elsif byte == open_delim && open_delim != close_delim  # Don't nest | |
+              nesting_level += 1
+              buffer.write_byte byte
+              advance
+            # Handle newlines
+            elsif byte == NEWLINE
+              buffer.write_byte byte
+              advance
+              @line += 1
+              @column = 1
+            # Regular character
+            else
+              buffer.write_byte byte
+              advance
+            end
+          end
+
+          # Get the slice from rope for the entire literal (including delimiters)
+          slice = @rope.bytes[start_offset...@offset]
+          span = build_span(start_offset, start_line, start_column)
+
+          # For arrays, we need to return special token or handle differently
+          # For now, return as String token with slice
+          # Parser will need to handle array splitting and use buffer content
+          Token.new(literal_type, slice, span)
         end
 
         # Phase 53: Hexadecimal digit check (0-9, a-f, A-F)

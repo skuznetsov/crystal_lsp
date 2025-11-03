@@ -108,8 +108,11 @@ module CrystalV2
           push_table(method_scope)
 
           params.each do |param|
+            # Phase BLOCK_CAPTURE: Skip anonymous block parameter (has no name)
+            next unless param_name = param.name
+
             # TIER 2.1: Convert Slice(UInt8) to String for symbol table
-            param_name_str = String.new(param.name)
+            param_name_str = String.new(param_name)
             param_type_str = if type_ann = param.type_annotation
               String.new(type_ann)
             else
@@ -397,7 +400,9 @@ module CrystalV2
             # Look for matching parameter
             current_method.params.try do |params|
               params.each do |param|
-                if String.new(param.name) == param_name
+                # Phase BLOCK_CAPTURE: Skip anonymous block parameter
+                next unless p_name = param.name
+                if String.new(p_name) == param_name
                   return param.type_annotation.try { |slice| String.new(slice) }
                 end
               end

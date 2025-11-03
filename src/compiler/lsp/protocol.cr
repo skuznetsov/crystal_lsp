@@ -286,12 +286,18 @@ module CrystalV2
           # Format parameters (zero-copy: build strings directly from slices)
           params = method.params.map do |param|
             label = String.build do |io|
-              io.write(param.name)  # Write slice directly without copy
-              io << " : "
-              if type_ann = param.type_annotation
-                io.write(type_ann)  # Write slice directly without copy
+              # Phase BLOCK_CAPTURE: Anonymous block has no name
+              if param_name = param.name
+                io.write(param_name)  # Write slice directly without copy
+                io << " : "
+                if type_ann = param.type_annotation
+                  io.write(type_ann)  # Write slice directly without copy
+                else
+                  io << "?"
+                end
               else
-                io << "?"
+                # Anonymous block capture: just show '&'
+                io << "&"
               end
             end
             ParameterInformation.new(label: label)
@@ -407,9 +413,14 @@ module CrystalV2
                    when Semantic::MethodSymbol
                      # Show method signature
                      params_str = symbol.params.map do |p|
-                       name = String.new(p.name)
-                       type = p.type_annotation ? String.new(p.type_annotation.not_nil!) : "?"
-                       "#{name} : #{type}"
+                       # Phase BLOCK_CAPTURE: Handle anonymous block parameter
+                       if p_name = p.name
+                         name = String.new(p_name)
+                         type = p.type_annotation ? String.new(p.type_annotation.not_nil!) : "?"
+                         "#{name} : #{type}"
+                       else
+                         "&"
+                       end
                      end.join(", ")
                      ret = symbol.return_annotation || "?"
                      "(#{params_str}) : #{ret}"
@@ -621,9 +632,14 @@ module CrystalV2
 
           # Generate detail (method signature)
           params_str = method.params.map do |p|
-            name = String.new(p.name)
-            type = p.type_annotation ? String.new(p.type_annotation.not_nil!) : "?"
-            "#{name} : #{type}"
+            # Phase BLOCK_CAPTURE: Handle anonymous block parameter
+            if p_name = p.name
+              name = String.new(p_name)
+              type = p.type_annotation ? String.new(p.type_annotation.not_nil!) : "?"
+              "#{name} : #{type}"
+            else
+              "&"
+            end
           end.join(", ")
           ret = method.return_annotation || "?"
           detail = "(#{params_str}) : #{ret}"

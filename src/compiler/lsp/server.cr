@@ -178,7 +178,7 @@ module CrystalV2
 
         # Handle initialize request
         private def handle_initialize(id : JSON::Any, params : JSON::Any?)
-          capabilities = ServerCapabilities.new(text_document_sync: 1)  # Full sync
+          capabilities = ServerCapabilities.new  # Use default capabilities with all features enabled
           result = InitializeResult.new(capabilities: capabilities)
 
           send_response(id, result.to_json)
@@ -1370,6 +1370,9 @@ module CrystalV2
                   arg_id = args[idx]
                   arg_node = arena[arg_id]
 
+                  # Phase BLOCK_CAPTURE: Skip inlay hint for anonymous block parameter
+                  next unless param_name_slice = param.name
+
                   # Create hint before argument
                   # Position at start of argument (Span is 1-indexed, Position is 0-indexed)
                   position = Position.new(
@@ -1377,7 +1380,7 @@ module CrystalV2
                     character: arg_node.span.start_column - 1
                   )
 
-                  param_name = String.new(param.name)
+                  param_name = String.new(param_name_slice)
                   label = "#{param_name}: "
 
                   hints << InlayHint.new(
@@ -1780,9 +1783,12 @@ module CrystalV2
             # Process parameters (mark them as parameters)
             if params = node.params
               params.each do |param|
+                # Phase BLOCK_CAPTURE: Skip anonymous block parameter (has no name)
+                next unless param_name = param.name
+
                 param_line = param.span.start_line - 1
                 param_col = param.span.start_column - 1
-                param_length = param.name.bytesize
+                param_length = param_name.bytesize
                 tokens << RawToken.new(param_line, param_col, param_length, SemanticTokenType::Parameter.value)
               end
             end

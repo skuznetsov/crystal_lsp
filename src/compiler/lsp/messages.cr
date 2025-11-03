@@ -76,7 +76,73 @@ module CrystalV2
         @[JSON::Field(key: "textDocumentSync")]
         property text_document_sync : Int32? = 1  # Full sync
 
-        def initialize(@text_document_sync = 1)
+        @[JSON::Field(key: "hoverProvider")]
+        property hover_provider : Bool? = true
+
+        @[JSON::Field(key: "completionProvider")]
+        property completion_provider : JSON::Any? = JSON.parse(%{{"triggerCharacters":[".","@"]}})
+
+        @[JSON::Field(key: "signatureHelpProvider")]
+        property signature_help_provider : JSON::Any? = JSON.parse(%{{"triggerCharacters":["(", ","]}})
+
+        @[JSON::Field(key: "definitionProvider")]
+        property definition_provider : Bool? = true
+
+        @[JSON::Field(key: "referencesProvider")]
+        property references_provider : Bool? = true
+
+        @[JSON::Field(key: "documentHighlightProvider")]
+        property document_highlight_provider : Bool? = false
+
+        @[JSON::Field(key: "documentSymbolProvider")]
+        property document_symbol_provider : Bool? = true
+
+        @[JSON::Field(key: "workspaceSymbolProvider")]
+        property workspace_symbol_provider : Bool? = false
+
+        @[JSON::Field(key: "codeActionProvider")]
+        property code_action_provider : Bool? = true
+
+        @[JSON::Field(key: "documentFormattingProvider")]
+        property document_formatting_provider : Bool? = true
+
+        @[JSON::Field(key: "documentRangeFormattingProvider")]
+        property document_range_formatting_provider : Bool? = true
+
+        @[JSON::Field(key: "renameProvider")]
+        property rename_provider : JSON::Any? = JSON.parse(%{{"prepareProvider":true}})
+
+        @[JSON::Field(key: "foldingRangeProvider")]
+        property folding_range_provider : Bool? = true
+
+        @[JSON::Field(key: "semanticTokensProvider")]
+        property semantic_tokens_provider : JSON::Any? = JSON.parse(%{{"legend":{"tokenTypes":["class","function","variable","parameter","property","keyword","comment","string","number","operator"],"tokenModifiers":["declaration","definition","readonly","static","deprecated","abstract","async","modification","documentation","defaultLibrary"]},"range":false,"full":true}})
+
+        @[JSON::Field(key: "inlayHintProvider")]
+        property inlay_hint_provider : Bool? = true
+
+        @[JSON::Field(key: "callHierarchyProvider")]
+        property call_hierarchy_provider : Bool? = true
+
+        def initialize(
+          @text_document_sync = 1,
+          @hover_provider = true,
+          @definition_provider = true,
+          @references_provider = true,
+          @document_symbol_provider = true,
+          @code_action_provider = true,
+          @document_formatting_provider = true,
+          @document_range_formatting_provider = true,
+          @folding_range_provider = true,
+          @inlay_hint_provider = true,
+          @call_hierarchy_provider = true
+        )
+          @completion_provider = JSON.parse(%{{"triggerCharacters":[".","@"]}})
+          @signature_help_provider = JSON.parse(%{{"triggerCharacters":["(", ","]}})
+          @rename_provider = JSON.parse(%{{"prepareProvider":true}})
+          @semantic_tokens_provider = JSON.parse(%{{"legend":{"tokenTypes":["class","function","variable","parameter","property","keyword","comment","string","number","operator"],"tokenModifiers":["declaration","definition","readonly","static","deprecated","abstract","async","modification","documentation","defaultLibrary"]},"range":false,"full":true}})
+          @document_highlight_provider = false
+          @workspace_symbol_provider = false
         end
       end
 
