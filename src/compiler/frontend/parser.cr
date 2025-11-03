@@ -638,7 +638,7 @@ module CrystalV2
             is_type_token = case token.kind
             when Token::Kind::Identifier, Token::Kind::Number,
                  Token::Kind::ColonColon, Token::Kind::Operator,
-                 Token::Kind::ThinArrow
+                 Token::Kind::ThinArrow, Token::Kind::Self  # Phase 103C: self as type
               true
             when Token::Kind::Whitespace
               # Skip whitespace but continue parsing
@@ -958,11 +958,12 @@ module CrystalV2
             advance  # consume ':'
             skip_trivia
 
-            # Parse return type - supports generic types like Box(T)
+            # Parse return type - supports generic types like Box(T) and self
             type_start_token = current_token
             type_end_token = current_token
 
-            if type_start_token.kind == Token::Kind::Identifier
+            # Phase 103C: Allow 'self' as return type (pseudo-type for "this class")
+            if type_start_token.kind == Token::Kind::Identifier || type_start_token.kind == Token::Kind::Self
               type_end_token = type_start_token
               advance
 
@@ -1083,11 +1084,12 @@ module CrystalV2
             advance  # consume ':'
             skip_trivia
 
-            # Parse return type - supports generic types like Box(T)
+            # Parse return type - supports generic types like Box(T) and self
             type_start_token = current_token
             type_end_token = current_token
 
-            if type_start_token.kind == Token::Kind::Identifier
+            # Phase 103C: Allow 'self' as return type (pseudo-type for "this class")
+            if type_start_token.kind == Token::Kind::Identifier || type_start_token.kind == Token::Kind::Self
               type_end_token = type_start_token
               advance
 
@@ -1281,11 +1283,12 @@ module CrystalV2
                   param_type_span = type_start.span.cover(previous_token.not_nil!.span) if previous_token
                 else
                   # Regular parameter - parse type annotation
-                  # Supports: Int32, Box(T), Array(Int32), etc.
+                  # Supports: Int32, Box(T), Array(Int32), self, etc.
                   type_start_token = current_token
                   type_end_token = current_token
 
-                  if type_start_token.kind == Token::Kind::Identifier
+                  # Phase 103C: Allow 'self' as parameter type
+                  if type_start_token.kind == Token::Kind::Identifier || type_start_token.kind == Token::Kind::Self
                     # Week 1 Day 2: Build string from tokens for generic types
                     # Can't use pointer arithmetic because tokens may not be contiguous
                     type_tokens = [] of Slice(UInt8)
