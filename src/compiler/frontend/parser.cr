@@ -21,6 +21,8 @@ module CrystalV2
         # When > 0, disables type annotation parsing (e.g., in ternary operator ? :)
         @no_type_declaration : Int32
         @string_pool : StringPool  # Week 1 Day 2: for interning generic type annotations
+        @debug_enabled : Bool  # Debug output control
+        @parsing_call_args : Int32  # Prevent nested calls without parens during argument parsing
 
         def initialize(lexer : Lexer)
           @tokens = [] of Token
@@ -36,6 +38,8 @@ module CrystalV2
           @brace_depth = 0
           @no_type_declaration = 0  # Phase 103: Type annotations enabled by default
           @string_pool = lexer.string_pool  # Week 1 Day 2: share string pool for deduplication
+          @debug_enabled = ENV["PARSER_DEBUG"]? == "1"  # Enable debug via PARSER_DEBUG=1
+          @parsing_call_args = 0  # Not parsing call args initially
         end
 
         # Phase 87B-2: Constructor for reparsing with existing arena
@@ -53,6 +57,8 @@ module CrystalV2
           @brace_depth = 0
           @no_type_declaration = 0  # Phase 103: Type annotations enabled by default
           @string_pool = lexer.string_pool  # Week 1 Day 2: share string pool for deduplication
+          @debug_enabled = ENV["PARSER_DEBUG"]? == "1"  # Enable debug via PARSER_DEBUG=1
+          @parsing_call_args = 0  # Not parsing call args initially
         end
 
         def parse_program : Program
@@ -164,8 +170,9 @@ module CrystalV2
             return parse_extend
           end
 
-          # Parse left side (could be identifier or expression)
-          left = parse_expression(0)
+          # Parse expression or assignment (like original Crystal's parse_op_assign)
+          # This handles: assignments, multiple assignments, type declarations
+          left = parse_op_assign
           return PREFIX_ERROR if left.invalid?
 
           skip_trivia
@@ -1531,8 +1538,8 @@ module CrystalV2
           # If next token is 'when', it's bare case (no value)
           value : ExprId? = nil
           if current_token.kind != Token::Kind::When
-            # Has value: case EXPR
-            val = parse_expression(0)
+            # Has value: case EXPR (can be assignment like: case x = foo())
+            val = parse_op_assign
             return PREFIX_ERROR if val.invalid?
             value = val
             consume_newlines
@@ -2200,17 +2207,28 @@ module CrystalV2
         end
 
         # Phase 29: Parse raise statement
-        # Grammar: raise <expression>
+        # Grammar: raise <expression> | raise(args...) | raise
         # Note: bare 'raise' (re-raise) is only valid in rescue blocks
+        # In Crystal, 'raise' is actually a method, not a keyword, so it supports:
+        #   raise(...)              - call with parentheses
+        #   raise "msg", arg1, arg2 - call without parentheses
+        #   raise expr              - single argument call
         private def parse_raise : ExprId
           raise_token = current_token
           advance
           skip_trivia
 
-          # Check if there's a raise value
-          # raise without value is rare (re-raise in rescue), but we'll allow it
           token = current_token
-          if token.kind.in?(Token::Kind::Newline, Token::Kind::EOF, Token::Kind::End, Token::Kind::Else, Token::Kind::Elsif, Token::Kind::Rescue, Token::Kind::Ensure)
+          if token.kind == Token::Kind::LParen
+            # Method call with parentheses: raise(...)
+            raise_id = @arena.add_typed(
+              IdentifierNode.new(
+                raise_token.span,
+                Bytes.new("raise".to_unsafe, 5)
+              )
+            )
+            parse_parenthesized_call(raise_id)
+          elsif token.kind.in?(Token::Kind::Newline, Token::Kind::EOF, Token::Kind::End, Token::Kind::Else, Token::Kind::Elsif, Token::Kind::Rescue, Token::Kind::Ensure)
             # Bare raise (re-raise current exception)
             @arena.add_typed(
               RaiseNode.new(
@@ -2219,19 +2237,36 @@ module CrystalV2
               )
             )
           else
-            # Raise with expression
-            value = parse_expression(0)
-            return PREFIX_ERROR if value.invalid?
-
-            value_span = node_span(value)
-            raise_span = raise_token.span.cover(value_span)
-
-            @arena.add_typed(
-              RaiseNode.new(
-                raise_span,
-                value
+            # Method call without parentheses: raise "msg", arg1, arg2
+            # Create identifier node for "raise"
+            raise_id = @arena.add_typed(
+              IdentifierNode.new(
+                raise_token.span,
+                Bytes.new("raise".to_unsafe, 5)
               )
             )
+
+            # Try to parse as call without parentheses
+            call_result = try_parse_call_args_without_parens(raise_id)
+
+            if call_result == PREFIX_ERROR
+              # Failed to parse as call, maybe it's raise + expression
+              value = parse_expression(0)
+              return PREFIX_ERROR if value.invalid?
+
+              value_span = node_span(value)
+              raise_span = raise_token.span.cover(value_span)
+
+              @arena.add_typed(
+                RaiseNode.new(
+                  raise_span,
+                  value
+                )
+              )
+            else
+              # Successfully parsed as call
+              call_result
+            end
           end
         end
 
@@ -2308,276 +2343,6 @@ module CrystalV2
             RequireNode.new(
               require_span,
               path
-            )
-          )
-        end
-
-        # Phase 30: Parse getter macro (PRODUCTION-READY)
-        # Grammar: getter name [: Type] [= value] [, name2 [: Type2] [= value2], ...]
-        # Examples:
-        #   getter name
-        #   getter name : String
-        #   getter name = "default"
-        #   getter name : String = "default"
-        #   getter name, age : Int32, email : String
-        private def parse_getter : ExprId
-          getter_token = current_token
-          advance
-          skip_trivia
-
-          # Parse accessor specifications (comma-separated)
-          specs = [] of AccessorSpec
-          loop do
-            # Must have at least one accessor
-            break if current_token.kind != Token::Kind::Identifier
-
-            # Parse accessor name
-            name_token = current_token
-            accessor_name = name_token.slice  # TIER 2.2: Zero-copy slice
-            name_span = name_token.span
-            spec_start_span = name_token.span
-            advance
-            skip_trivia
-
-            # Parse optional type annotation: : Type
-            type_annotation : Slice(UInt8)? = nil  # TIER 2.2: Zero-copy slice
-            type_span = nil
-            if operator_token?(current_token, Token::Kind::Colon)
-              advance  # consume ':'
-              skip_trivia
-
-              # Parse type (simple identifier)
-              type_token = current_token
-              if type_token.kind == Token::Kind::Identifier
-                type_annotation = type_token.slice  # TIER 2.2: Zero-copy slice
-                type_span = type_token.span
-                advance
-                skip_trivia
-              else
-                emit_unexpected(type_token)
-              end
-            end
-
-            # Parse optional default value: = expression
-            default_value = nil
-            if operator_token?(current_token, Token::Kind::Eq)
-              advance  # consume '='
-              skip_trivia
-
-              # Parse default value expression
-              default_expr = parse_expression(0)
-              return PREFIX_ERROR if default_expr.invalid?
-              default_value = default_expr
-              skip_trivia
-            end
-
-            # Calculate full span
-            full_span = if default_value
-              spec_start_span.cover(node_span(default_value))
-            elsif type_span
-              spec_start_span.cover(type_span)
-            else
-              name_span
-            end
-
-            specs << AccessorSpec.new(
-              accessor_name,
-              type_annotation,
-              default_value,
-              full_span,
-              name_span,
-              type_span
-            )
-
-            # Check for comma (more accessors)
-            if current_token.kind == Token::Kind::Comma
-              advance
-              skip_trivia
-            else
-              break
-            end
-          end
-
-          getter_span = getter_token.span
-
-          @arena.add_typed(
-            GetterNode.new(
-              getter_span,
-              specs
-            )
-          )
-        end
-
-        # Phase 30: Parse setter macro (PRODUCTION-READY)
-        # Grammar: setter name [: Type] [= value] [, name2 [: Type2] [= value2], ...]
-        private def parse_setter : ExprId
-          setter_token = current_token
-          advance
-          skip_trivia
-
-          # Parse accessor specifications (comma-separated)
-          specs = [] of AccessorSpec
-          loop do
-            break if current_token.kind != Token::Kind::Identifier
-
-            # Parse accessor name
-            name_token = current_token
-            accessor_name = name_token.slice  # TIER 2.2: Zero-copy slice
-            name_span = name_token.span
-            spec_start_span = name_token.span
-            advance
-            skip_trivia
-
-            # Parse optional type annotation: : Type
-            type_annotation : Slice(UInt8)? = nil  # TIER 2.2: Zero-copy slice
-            type_span = nil
-            if operator_token?(current_token, Token::Kind::Colon)
-              advance  # consume ':'
-              skip_trivia
-
-              type_token = current_token
-              if type_token.kind == Token::Kind::Identifier
-                type_annotation = type_token.slice  # TIER 2.2: Zero-copy slice
-                type_span = type_token.span
-                advance
-                skip_trivia
-              else
-                emit_unexpected(type_token)
-              end
-            end
-
-            # Parse optional default value: = expression
-            default_value = nil
-            if operator_token?(current_token, Token::Kind::Eq)
-              advance  # consume '='
-              skip_trivia
-
-              default_expr = parse_expression(0)
-              return PREFIX_ERROR if default_expr.invalid?
-              default_value = default_expr
-              skip_trivia
-            end
-
-            # Calculate full span
-            full_span = if default_value
-              spec_start_span.cover(node_span(default_value))
-            elsif type_span
-              spec_start_span.cover(type_span)
-            else
-              name_span
-            end
-
-            specs << AccessorSpec.new(
-              accessor_name,
-              type_annotation,
-              default_value,
-              full_span,
-              name_span,
-              type_span
-            )
-
-            # Check for comma (more accessors)
-            if current_token.kind == Token::Kind::Comma
-              advance
-              skip_trivia
-            else
-              break
-            end
-          end
-
-          setter_span = setter_token.span
-
-          @arena.add_typed(
-            SetterNode.new(
-              setter_span,
-              specs
-            )
-          )
-        end
-
-        # Phase 30: Parse property macro (PRODUCTION-READY)
-        # Grammar: property name [: Type] [= value] [, name2 [: Type2] [= value2], ...]
-        private def parse_property : ExprId
-          property_token = current_token
-          advance
-          skip_trivia
-
-          # Parse accessor specifications (comma-separated)
-          specs = [] of AccessorSpec
-          loop do
-            break if current_token.kind != Token::Kind::Identifier
-
-            # Parse accessor name
-            name_token = current_token
-            accessor_name = name_token.slice  # TIER 2.2: Zero-copy slice
-            name_span = name_token.span
-            spec_start_span = name_token.span
-            advance
-            skip_trivia
-
-            # Parse optional type annotation: : Type
-            type_annotation : Slice(UInt8)? = nil  # TIER 2.2: Zero-copy slice
-            type_span = nil
-            if operator_token?(current_token, Token::Kind::Colon)
-              advance  # consume ':'
-              skip_trivia
-
-              type_token = current_token
-              if type_token.kind == Token::Kind::Identifier
-                type_annotation = type_token.slice  # TIER 2.2: Zero-copy slice
-                type_span = type_token.span
-                advance
-                skip_trivia
-              else
-                emit_unexpected(type_token)
-              end
-            end
-
-            # Parse optional default value: = expression
-            default_value = nil
-            if operator_token?(current_token, Token::Kind::Eq)
-              advance  # consume '='
-              skip_trivia
-
-              default_expr = parse_expression(0)
-              return PREFIX_ERROR if default_expr.invalid?
-              default_value = default_expr
-              skip_trivia
-            end
-
-            # Calculate full span
-            full_span = if default_value
-              spec_start_span.cover(node_span(default_value))
-            elsif type_span
-              spec_start_span.cover(type_span)
-            else
-              name_span
-            end
-
-            specs << AccessorSpec.new(
-              accessor_name,
-              type_annotation,
-              default_value,
-              full_span,
-              name_span,
-              type_span
-            )
-
-            # Check for comma (more accessors)
-            if current_token.kind == Token::Kind::Comma
-              advance
-              skip_trivia
-            else
-              break
-            end
-          end
-
-          property_span = property_token.span
-
-          @arena.add_typed(
-            PropertyNode.new(
-              property_span,
-              specs
             )
           )
         end
@@ -3512,8 +3277,17 @@ module CrystalV2
         # Phase 27: Parse postfix while/until modifiers
         # Supports: stmt if condition, stmt unless condition, stmt while condition, stmt until condition
         private def parse_postfix_if_modifier(stmt : ExprId) : ExprId
+          # Postfix modifiers must be on the SAME line as the statement
+          # If there's a newline between them, the modifier is a separate statement
+          stmt_end_line = node_span(stmt).end_line
+
           skip_trivia
           token = current_token
+
+          # If modifier is on a different line, it's NOT a postfix modifier
+          if token.span.start_line > stmt_end_line
+            return stmt
+          end
 
           # Check for postfix if
           if token.kind == Token::Kind::If
@@ -4498,10 +4272,118 @@ module CrystalV2
           ))
         end
 
+        # Parse expression or assignment
+        # Used for statements and call arguments
+        # Example: clone = 42 (in method body)
+        # Example: property expansion = false (assignment as macro argument)
+        private def parse_op_assign : ExprId
+          debug("parse_op_assign: ENTERING")
+          left = parse_expression(0)
+          return PREFIX_ERROR if left.invalid?
+
+          skip_trivia
+          token = current_token
+          debug("parse_op_assign: after parse_expression, current token = #{token.kind}")
+
+          # Check for assignment operators
+          if token.kind == Token::Kind::Eq ||
+             token.kind == Token::Kind::PlusEq ||
+             token.kind == Token::Kind::MinusEq ||
+             token.kind == Token::Kind::StarEq ||
+             token.kind == Token::Kind::SlashEq ||
+             token.kind == Token::Kind::FloorDivEq ||
+             token.kind == Token::Kind::PercentEq ||
+             token.kind == Token::Kind::StarStarEq ||
+             token.kind == Token::Kind::OrOrEq ||
+             token.kind == Token::Kind::AndAndEq ||
+             token.kind == Token::Kind::AmpEq ||
+             token.kind == Token::Kind::PipeEq ||
+             token.kind == Token::Kind::CaretEq ||
+             token.kind == Token::Kind::LShiftEq ||
+             token.kind == Token::Kind::RShiftEq ||
+             token.kind == Token::Kind::NilCoalesceEq
+            # Parse assignment
+            left_node = @arena[left]
+            left_kind = Frontend.node_kind(left_node)
+
+            # Verify left side is valid assignment target
+            unless left_kind == Frontend::NodeKind::Identifier ||
+                   left_kind == Frontend::NodeKind::InstanceVar ||
+                   left_kind == Frontend::NodeKind::ClassVar ||
+                   left_kind == Frontend::NodeKind::Global ||
+                   left_kind == Frontend::NodeKind::Index ||
+                   left_kind == Frontend::NodeKind::MemberAccess
+              @diagnostics << Diagnostic.new("Assignment target must be an identifier, instance variable, class variable, global variable, or index expression", token.span)
+              return PREFIX_ERROR
+            end
+
+            # Consume assignment token
+            assign_token = token
+            is_compound = assign_token.kind != Token::Kind::Eq
+            advance
+            skip_trivia
+
+            # Parse right-hand side
+            rhs = parse_op_assign  # Recursive for chained assignments
+            return PREFIX_ERROR if rhs.invalid?
+
+            # Handle compound assignment (expand to: x = x op y)
+            value = if is_compound
+              operator = case assign_token.kind
+              when Token::Kind::PlusEq     then "+"
+              when Token::Kind::MinusEq    then "-"
+              when Token::Kind::StarEq     then "*"
+              when Token::Kind::SlashEq    then "/"
+              when Token::Kind::FloorDivEq then "//"
+              when Token::Kind::PercentEq  then "%"
+              when Token::Kind::StarStarEq then "**"
+              when Token::Kind::OrOrEq     then "||"
+              when Token::Kind::AndAndEq   then "&&"
+              when Token::Kind::AmpEq      then "&"
+              when Token::Kind::PipeEq     then "|"
+              when Token::Kind::CaretEq    then "^"
+              when Token::Kind::LShiftEq   then "<<"
+              when Token::Kind::RShiftEq   then ">>"
+              when Token::Kind::NilCoalesceEq then "||"  # Special case
+              else
+                @diagnostics << Diagnostic.new("Unknown compound assignment operator", assign_token.span)
+                return PREFIX_ERROR
+              end
+
+              # Create binary operation: left op rhs
+              op_slice = operator.to_slice
+              pooled_op = @string_pool.intern(op_slice)
+              @arena.add_typed(BinaryNode.new(
+                left_node.span.cover(@arena[rhs].span),
+                pooled_op,
+                left,
+                rhs
+              ))
+            else
+              rhs
+            end
+
+            # Create assignment node
+            assign_span = left_node.span.cover(@arena[value].span)
+            result = @arena.add_typed(AssignNode.new(
+              assign_span,
+              left,
+              value
+            ))
+            debug("parse_op_assign: created AssignNode, returning")
+            return result
+          end
+
+          # No assignment, just return the expression
+          debug("parse_op_assign: no assignment, returning expression")
+          left
+        end
+
         # Phase CALLS_WITHOUT_PARENS: Parse call arguments without parentheses
         # Example: def_equals value, kind
         # Returns CallNode or PREFIX_ERROR if can't parse as call
         private def try_parse_call_args_without_parens(callee_token : Token) : ExprId
+          debug("try_parse_call_args_without_parens: callee=#{String.new(callee_token.slice)}, current_token=#{current_token.kind}")
           # Check if current token can start an argument
           # Return error for keywords that can't be arguments
           case current_token.kind
@@ -4511,28 +4393,75 @@ module CrystalV2
             return PREFIX_ERROR
           when Token::Kind::Newline, Token::Kind::EOF
             return PREFIX_ERROR
-          # Don't parse as call if followed by infix operators (assignment, binary ops, etc.)
-          when Token::Kind::Eq, Token::Kind::PlusEq, Token::Kind::MinusEq, Token::Kind::StarEq,
-               Token::Kind::SlashEq, Token::Kind::PercentEq, Token::Kind::StarStarEq,
-               Token::Kind::OrOrEq, Token::Kind::AndAndEq, Token::Kind::AmpEq, Token::Kind::PipeEq,
-               Token::Kind::CaretEq, Token::Kind::LShiftEq, Token::Kind::RShiftEq,
-               Token::Kind::FloorDivEq, Token::Kind::NilCoalesceEq,
-               Token::Kind::OrOr, Token::Kind::AndAnd,
+          # Don't parse as call if followed by binary/logical operators that can't start an argument
+          when Token::Kind::OrOr, Token::Kind::AndAnd,
                Token::Kind::Question,  # ternary operator
-               Token::Kind::Arrow      # hash arrow =>
+               Token::Kind::Arrow,     # hash arrow =>
+               # Comparison operators
+               Token::Kind::EqEq, Token::Kind::NotEq,
+               Token::Kind::Less, Token::Kind::Greater,
+               Token::Kind::LessEq, Token::Kind::GreaterEq,
+               Token::Kind::Spaceship,  # <=>
+               # Other binary operators that can't be prefix
+               Token::Kind::Pipe, Token::Kind::Caret, Token::Kind::Amp,
+               Token::Kind::LShift, Token::Kind::RShift,
+               Token::Kind::DotDot, Token::Kind::DotDotDot,
+               Token::Kind::Match, Token::Kind::NotMatch  # =~, !~
             return PREFIX_ERROR
+          # Special case: Eq at top level (not inside nested call args) means this is assignment
+          # Example: "clone = 42" should be assignment, not call
+          # But "property expansion = false" (inside call args) should parse assignment as argument
+          when Token::Kind::Eq
+            # If we're NOT inside call args (@parsing_call_args == 0), this is likely assignment
+            return PREFIX_ERROR if @parsing_call_args == 0
           end
+
+          # Set flag to prevent nested calls without parens during argument parsing
+          @parsing_call_args += 1
 
           # Parse arguments separated by commas
           args = [] of ExprId
+          named_args = [] of NamedArgument
 
           loop do
             # Parse one argument
-            arg = parse_expression(0)
-            return PREFIX_ERROR if arg.invalid?
-            args << arg
+            # Could be: positional arg, assignment as arg, or named arg
+            arg = parse_op_assign
+            if arg.invalid?
+              @parsing_call_args -= 1
+              return PREFIX_ERROR
+            end
 
             skip_trivia
+
+            # Check if this is a named argument: identifier followed by colon
+            # Pattern: name: value
+            arg_node = @arena[arg]
+            if Frontend.node_kind(arg_node) == Frontend::NodeKind::Identifier &&
+               current_token.kind == Token::Kind::Colon
+              # This is named argument!
+              name_span = arg_node.span
+              name = String.new(Frontend.node_literal(arg_node).not_nil!)
+
+              advance  # consume ':'
+              skip_trivia
+
+              # Parse value (using parse_op_assign like original Crystal)
+              value_expr = parse_op_assign
+              if value_expr.invalid?
+                @parsing_call_args -= 1
+                return PREFIX_ERROR
+              end
+
+              value_span = @arena[value_expr].span
+              arg_span = name_span.cover(value_span)
+
+              named_args << NamedArgument.new(name, value_expr, arg_span, name_span, value_span)
+              skip_trivia
+            else
+              # Positional argument
+              args << arg
+            end
 
             # Check for comma (more arguments)
             if current_token.kind == Token::Kind::Comma
@@ -4546,31 +4475,44 @@ module CrystalV2
 
           # Create CallNode
           callee = @arena.add_typed(IdentifierNode.new(callee_token.span, callee_token.slice))
-          call_span = if args.size > 0
+
+          # Calculate span including last argument (positional or named)
+          call_span = if named_args.size > 0
+            # Last named arg
+            callee_token.span.cover(named_args.last.span)
+          elsif args.size > 0
+            # Last positional arg
             last_arg = @arena[args.last]
             callee_token.span.cover(last_arg.span)
           else
             callee_token.span
           end
 
-          @arena.add_typed(CallNode.new(
+          result = @arena.add_typed(CallNode.new(
             call_span,
             callee,
             args,
             nil,  # no block
-            nil   # no named args
+            named_args.empty? ? nil : named_args
           ))
+
+          # Restore flag
+          @parsing_call_args -= 1
+          result
         end
 
         protected def parse_expression(precedence : Int32) : ExprId
           skip_trivia
           left = parse_prefix
+          debug("parse_expression(#{precedence}): after parse_prefix, left=#{left.invalid? ? "invalid" : "valid"}")
           return PREFIX_ERROR if left.invalid?
 
           loop do
             skip_trivia
             token = current_token
+            debug("parse_expression(#{precedence}): postfix loop, token=#{token.kind}")
             if macro_terminator_reached?(token)
+              debug("parse_expression(#{precedence}): macro terminator reached")
               break
             end
 
@@ -4648,7 +4590,11 @@ module CrystalV2
               end
             end
 
-            break unless infix?(token)
+            unless infix?(token)
+              debug("parse_expression(#{precedence}): token #{token.kind} is not infix, breaking")
+              break
+            end
+            debug("parse_expression(#{precedence}): token #{token.kind} is infix")
             current_precedence = precedence_for(token)
             break if current_precedence < precedence
 
@@ -4718,6 +4664,7 @@ module CrystalV2
 
         private def parse_prefix : ExprId
           token = current_token
+          debug("parse_prefix: token=#{token.kind}")
           case token.kind
           when Token::Kind::True, Token::Kind::False
             id = @arena.add_typed(BoolNode.new(token.span, token.kind == Token::Kind::True))
@@ -4790,24 +4737,13 @@ module CrystalV2
           when Token::Kind::With
             # Phase 67: with (context block)
             parse_with
-          when Token::Kind::Raise
-            # Phase 29: raise exception
-            parse_raise
+          # Raise removed - it's a regular method, not a keyword
           when Token::Kind::Yield
             # Phase 10: yield (call block)
             parse_yield
           when Token::Kind::Require
             # Phase 65: require statement
             parse_require
-          when Token::Kind::Getter
-            # Phase 30: getter macro
-            parse_getter
-          when Token::Kind::Setter
-            # Phase 30: setter macro
-            parse_setter
-          when Token::Kind::Property
-            # Phase 30: property macro
-            parse_property
           when Token::Kind::Identifier,
                Token::Kind::Of, Token::Kind::As, Token::Kind::In
             # Phase 60: Check if this is a generic type instantiation
@@ -4834,7 +4770,8 @@ module CrystalV2
               # This is type declaration: x : Type = value
               parse_type_declaration_from_identifier(identifier_token)
             # Phase CALLS_WITHOUT_PARENS: Try to parse call arguments if space was consumed
-            elsif space_consumed
+            # Don't try to parse nested calls when already parsing call arguments
+            elsif space_consumed && @parsing_call_args == 0
               # Attempt to parse call arguments without parentheses
               # Example: def_equals value, kind
               maybe_call = try_parse_call_args_without_parens(identifier_token)
@@ -5788,7 +5725,118 @@ module CrystalV2
               )
             )
             advance
-            node
+
+            # Check if this member access is followed by arguments without parentheses
+            # Example: Foo.bar 1, b: 2 → CallNode with MemberAccessNode as callee
+            # Must check for space (not newline!) like original Crystal parser
+            space_consumed = false
+            if current_token.kind == Token::Kind::Whitespace
+              advance  # Consume space
+              space_consumed = true
+            end
+
+            if space_consumed && @parsing_call_args == 0
+              # After consuming space, check if next token could start an argument
+              # If it's a newline, don't try to parse arguments (new statement on next line)
+              token = current_token
+              case token.kind
+              when Token::Kind::Newline, Token::Kind::EOF,
+                   Token::Kind::Semicolon, Token::Kind::Then,
+                   Token::Kind::End, Token::Kind::Elsif, Token::Kind::Else,
+                   Token::Kind::When, Token::Kind::Rescue, Token::Kind::Ensure,
+                   Token::Kind::RParen, Token::Kind::RBracket, Token::Kind::RBrace,
+                   Token::Kind::Comma,
+                   Token::Kind::Amp  # Block parameter (&.method)
+                # These tokens indicate end of expression, not start of arguments
+                node
+              when Token::Kind::Eq
+                # Assignment, not argument
+                node
+              when Token::Kind::OrOr, Token::Kind::AndAnd,
+                   Token::Kind::Question,  # ternary operator
+                   Token::Kind::Arrow,     # hash arrow =>
+                   # Comparison operators
+                   Token::Kind::EqEq, Token::Kind::NotEq,
+                   Token::Kind::Less, Token::Kind::Greater,
+                   Token::Kind::LessEq, Token::Kind::GreaterEq,
+                   Token::Kind::Spaceship,  # <=>
+                   # Other binary operators that can't be prefix
+                   Token::Kind::Pipe, Token::Kind::Caret,
+                   Token::Kind::LShift, Token::Kind::RShift,
+                   Token::Kind::DotDot, Token::Kind::DotDotDot,
+                   Token::Kind::Match, Token::Kind::NotMatch  # =~, !~
+                # Binary/logical operators that can't start arguments
+                node
+              else
+                # Try to parse arguments
+                @parsing_call_args += 1
+
+                args = [] of ExprId
+                named_args = [] of NamedArgument
+
+                loop do
+                  # Parse one argument
+                  arg = parse_op_assign
+                  if arg.invalid?
+                    @parsing_call_args -= 1
+                    return PREFIX_ERROR
+                  end
+
+                  skip_trivia
+
+                  # Check if this is a named argument
+                  arg_node = @arena[arg]
+                  if Frontend.node_kind(arg_node) == Frontend::NodeKind::Identifier &&
+                     current_token.kind == Token::Kind::Colon
+                    # Named argument!
+                    name_span = arg_node.span
+                    name = String.new(Frontend.node_literal(arg_node).not_nil!)
+
+                    advance  # consume ':'
+                    skip_trivia
+
+                    value_expr = parse_op_assign
+                    if value_expr.invalid?
+                      @parsing_call_args -= 1
+                      return PREFIX_ERROR
+                    end
+
+                    value_span = @arena[value_expr].span
+                    arg_span = name_span.cover(value_span)
+
+                    named_args << NamedArgument.new(name, value_expr, arg_span, name_span, value_span)
+                    skip_trivia
+                  else
+                    # Positional argument
+                    args << arg
+                  end
+
+                  # Check for comma
+                  if current_token.kind == Token::Kind::Comma
+                    advance
+                    skip_trivia
+                  else
+                    break
+                  end
+                end
+
+                # Create CallNode with MemberAccessNode as callee
+                last_arg_id = args.last? || named_args.last?.try(&.value) || node
+                call_span = member_span.cover(@arena[last_arg_id].span)
+                result = @arena.add_typed(CallNode.new(
+                  call_span,
+                  node,  # MemberAccessNode as callee
+                  args,
+                  nil,   # no block
+                  named_args.empty? ? nil : named_args
+                ))
+
+                @parsing_call_args -= 1
+                result
+              end
+            else
+              node
+            end
           elsif !member_token.slice.empty?
             # Phase 101: Keywords can be method names after dot (e.g., .class, .select, .begin)
             spans = [] of Span
@@ -6266,6 +6314,11 @@ module CrystalV2
 
         private def emit_unexpected(token : Token)
           @diagnostics << Diagnostic.new("unexpected #{token.kind}", token.span)
+        end
+
+        # Debug helper for deep debugging (enable via PARSER_DEBUG=1)
+        private def debug(message : String)
+          STDERR.puts "[PARSER_DEBUG] #{message}" if @debug_enabled
         end
 
         # Phase 103: Optimization - compare slice with string without allocation
