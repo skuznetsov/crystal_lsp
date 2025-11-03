@@ -74,6 +74,17 @@ module CrystalV2
               next
             end
 
+            # Phase 103J: Check for macro control ({% if %}, {% for %}, etc.)
+            debug("parse_program: current=#{current_token.kind}, checking macro_control_start?")
+            if macro_control_start?
+              debug("parse_program: macro_control_start? returned true, calling parse_percent_macro_control")
+              macro_ctrl = parse_percent_macro_control
+              roots << macro_ctrl unless macro_ctrl.invalid?
+              consume_newlines
+              next
+            end
+            debug("parse_program: macro_control_start? returned false, proceeding normally")
+
             if definition_start?
               node = case current_token.kind
                 when Token::Kind::Def
@@ -124,6 +135,14 @@ module CrystalV2
 
         # Parse a statement (assignment or expression)
         private def parse_statement : ExprId
+          # Phase 103J: Check for macro control ({% if %}, {% for %}, etc.)
+          debug("parse_statement: current=#{current_token.kind}, checking macro_control_start?")
+          if macro_control_start?
+            debug("parse_statement: macro_control_start? returned true, calling parse_percent_macro_control")
+            return parse_percent_macro_control
+          end
+          debug("parse_statement: macro_control_start? returned false, proceeding normally")
+
           # Check for definition keywords (def, class, etc.)
           # These can appear in blocks that get yielded to macros (like record)
           if definition_start?
@@ -6871,6 +6890,11 @@ module CrystalV2
         end
 
         private def infix?(token : Token)
+          # Phase 103J: Don't treat %} as infix (macro control terminator)
+          if token.kind == Token::Kind::Percent
+            next_tok = peek_token(1)
+            return false if next_tok.kind == Token::Kind::RBrace
+          end
           BINARY_PRECEDENCE.has_key?(token.kind)
         end
 
