@@ -4746,9 +4746,40 @@ module CrystalV2
             advance
             skip_trivia
 
-            # Parse right-hand side
-            rhs = parse_op_assign  # Recursive for chained assignments
-            return PREFIX_ERROR if rhs.invalid?
+            # Phase 103J: Check for `x = uninitialized Type` syntax
+            # Only for simple assignment (not compound like +=)
+            if !is_compound && current_token.kind == Token::Kind::Uninitialized
+              # Verify left side is a valid variable
+              if left_kind == Frontend::NodeKind::Identifier ||
+                 left_kind == Frontend::NodeKind::InstanceVar ||
+                 left_kind == Frontend::NodeKind::ClassVar ||
+                 left_kind == Frontend::NodeKind::Global
+
+                uninitialized_token = current_token
+                advance  # skip 'uninitialized'
+                skip_trivia
+
+                # Parse type as expression (following original parser pattern)
+                # This handles: Int32, String, Foo::Bar, Array(Int32), etc.
+                type_expr = parse_expression(0)
+                return PREFIX_ERROR if type_expr.invalid?
+
+                # Create UninitializedNode
+                uninitialized_span = uninitialized_token.span.cover(@arena[type_expr].span)
+                rhs = @arena.add_typed(UninitializedNode.new(
+                  uninitialized_span,
+                  type_expr
+                ))
+              else
+                # Invalid: uninitialized can only be used with variables
+                @diagnostics << Diagnostic.new("'uninitialized' can only be used with variables", current_token.span)
+                return PREFIX_ERROR
+              end
+            else
+              # Parse right-hand side normally
+              rhs = parse_op_assign  # Recursive for chained assignments
+              return PREFIX_ERROR if rhs.invalid?
+            end
 
             # Handle compound assignment (expand to: x = x op y)
             value = if is_compound
