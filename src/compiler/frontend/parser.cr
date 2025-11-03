@@ -3945,38 +3945,50 @@ module CrystalV2
           end
         end
 
-        # Phase 37: Parse private visibility modifier
-        # Grammar: private def method_name
+        # Phase 37/103J: Parse private visibility modifier
+        # Supports: private def, private CONST = ..., private @@var = ...
+        # Following original parser design (parser.cr:6196-6219, 5498-5509)
         private def parse_private : ExprId
-          private_token = current_token
-          advance
+          visibility_token = current_token
+          start_span = visibility_token.span
+          advance  # Skip 'private'
           skip_trivia
 
-          # Currently only support private methods
-          case current_token.kind
-          when Token::Kind::Def
-            parse_def(visibility: Visibility::Private)
-          else
-            emit_unexpected(current_token)
-            PREFIX_ERROR
+          # Special case: private def (definition needs separate handling)
+          if current_token.kind == Token::Kind::Def
+            return parse_def(visibility: Visibility::Private)
           end
+
+          # Parse other expressions (constants, class vars, etc.)
+          expr = parse_op_assign
+          return PREFIX_ERROR if expr.invalid?
+
+          # Wrap in VisibilityModifierNode
+          full_span = start_span.cover(node_span(expr))
+          @arena.add_typed(VisibilityModifierNode.new(full_span, Visibility::Private, expr))
         end
 
-        # Phase 37: Parse protected visibility modifier
-        # Grammar: protected def method_name
+        # Phase 37/103J: Parse protected visibility modifier
+        # Supports: protected def, protected CONST = ..., protected @@var = ...
+        # Following original parser design (parser.cr:6196-6219, 5498-5509)
         private def parse_protected : ExprId
-          protected_token = current_token
-          advance
+          visibility_token = current_token
+          start_span = visibility_token.span
+          advance  # Skip 'protected'
           skip_trivia
 
-          # Currently only support protected methods
-          case current_token.kind
-          when Token::Kind::Def
-            parse_def(visibility: Visibility::Protected)
-          else
-            emit_unexpected(current_token)
-            PREFIX_ERROR
+          # Special case: protected def (definition needs separate handling)
+          if current_token.kind == Token::Kind::Def
+            return parse_def(visibility: Visibility::Protected)
           end
+
+          # Parse other expressions (constants, class vars, etc.)
+          expr = parse_op_assign
+          return PREFIX_ERROR if expr.invalid?
+
+          # Wrap in VisibilityModifierNode
+          full_span = start_span.cover(node_span(expr))
+          @arena.add_typed(VisibilityModifierNode.new(full_span, Visibility::Protected, expr))
         end
 
         # Phase 38: Parse lib definition (C bindings)

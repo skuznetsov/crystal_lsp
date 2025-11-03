@@ -41,6 +41,18 @@ module CrystalV2
         Protected
       end
 
+      # Phase 103J: Visibility modifier wrapper
+      # Wraps an expression with visibility (private/protected)
+      # Example: private CONST = 42 → VisibilityModifierNode(Private, Assign)
+      struct VisibilityModifierNode
+        getter span : Span
+        getter visibility : Visibility
+        getter expression : ExprId
+
+        def initialize(@span : Span, @visibility : Visibility, @expression : ExprId)
+        end
+      end
+
       # Represents an elsif branch in an if expression
       #
       # For production compiler with IDE support, we track:
@@ -363,6 +375,7 @@ module CrystalV2
         RespondsTo  # Phase 94: method check (value.responds_to?(:method))
         Generic  # Phase 60: generic type instantiation (Box(Int32))
         Path  # Phase 63: path expression (Foo::Bar)
+        VisibilityModifier  # Phase 103J: private/protected wrapper
       end
 
 
@@ -1409,6 +1422,7 @@ module CrystalV2
                         BeginNode | RaiseNode | RequireNode | TypeDeclarationNode |
                         InstanceVarDeclNode | ClassVarDeclNode | GlobalVarDeclNode |
                         WithNode | LibNode | FunNode | GenericNode | PathNode |
+                        VisibilityModifierNode |
                         MacroExpressionNode | MacroLiteralNode | MacroDefNode | MacroIfNode | MacroForNode |
                         SelectNode | AsmNode
 
@@ -1754,6 +1768,10 @@ module CrystalV2
 
       def self.node_kind(node : PathNode) : NodeKind
         NodeKind::Path
+      end
+
+      def self.node_kind(node : VisibilityModifierNode) : NodeKind
+        NodeKind::VisibilityModifier
       end
 
       def self.node_kind(node : MacroExpressionNode) : NodeKind
