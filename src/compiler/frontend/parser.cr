@@ -5332,10 +5332,13 @@ module CrystalV2
           end
         end
 
+        # Phase 103H: Grouping (parentheses) - supports assignments like (x = y)
         private def parse_grouping : ExprId
           lparen = current_token
           advance
-          expr = parse_expression(0)
+          # Phase 103H: Call parse_op_assign to support assignments in parentheses
+          # Example: (x = y) or if (queue = @queue) && !queue.empty?
+          expr = parse_op_assign
           return PREFIX_ERROR if expr.invalid?
           expect_operator(Token::Kind::RParen)
           closing_span = previous_token.try(&.span)
