@@ -5013,8 +5013,20 @@ module CrystalV2
             # Phase 9: Array literal
             parse_array_literal
           when Token::Kind::LBrace
-            # Phase 14/15: Hash or Tuple literal (disambiguated by presence of =>)
-            parse_hash_or_tuple
+            # Phase 103B: Check for macro control {% or macro expression {{
+            # Use lookahead to distinguish {hash}, {% control %}, {{ expr }}
+            next_tok = peek_token
+            case next_tok.kind
+            when Token::Kind::Percent
+              # {% if/for/... %}...{% end %}
+              parse_percent_macro_control
+            when Token::Kind::LBrace
+              # {{ expression }}
+              parse_percent_macro_expression
+            else
+              # Phase 14/15: Hash or Tuple literal (disambiguated by presence of =>)
+              parse_hash_or_tuple
+            end
           when Token::Kind::ThinArrow
             # Phase 74: Proc literal (->(x) { ... })
             parse_proc_literal
@@ -6858,6 +6870,359 @@ module CrystalV2
               emit_unexpected(token)
             end
           end
+        end
+
+        # Phase 103B: Parse {% control %} in expression context
+        # Called from parse_prefix when seeing {% token sequence
+        # Returns MacroIfNode or MacroForNode wrapped in ExprId
+        private def parse_percent_macro_control : ExprId
+          start_span = current_token.span
+
+          # Expect {% sequence
+          unless current_token.kind == Token::Kind::LBrace
+            emit_unexpected(current_token)
+            return PREFIX_ERROR
+          end
+          advance  # consume {
+
+          unless current_token.kind == Token::Kind::Percent
+            emit_unexpected(current_token)
+            return PREFIX_ERROR
+          end
+          advance  # consume %
+
+          skip_trivia
+
+          # Get keyword (if, for, unless, etc.)
+          keyword_token = current_token
+          keyword = token_text(keyword_token)
+          advance
+
+          skip_trivia
+
+          case keyword
+          when "if", "unless"
+            parse_macro_if_control(start_span, keyword)
+          when "for"
+            parse_macro_for_control(start_span)
+          else
+            @diagnostics << Diagnostic.new("Unexpected macro control keyword '#{keyword}'", keyword_token.span)
+            PREFIX_ERROR
+          end
+        end
+
+        # Parse {% if condition %}...{% end %} or {% unless %}
+        private def parse_macro_if_control(start_span : Span, keyword : String) : ExprId
+          # Parse condition
+          condition = parse_expression(0)
+          return PREFIX_ERROR if condition.invalid?
+
+          skip_trivia
+
+          # Expect %}
+          unless current_token.kind == Token::Kind::Percent
+            @diagnostics << Diagnostic.new("Expected '%}' after if condition", current_token.span)
+            return PREFIX_ERROR
+          end
+          advance  # consume %
+
+          unless current_token.kind == Token::Kind::RBrace
+            @diagnostics << Diagnostic.new("Expected '}' after '%'", current_token.span)
+            return PREFIX_ERROR
+          end
+          advance  # consume }
+
+          # Parse body until {% elsif %}, {% else %}, or {% end %}
+          then_body = parse_macro_body_until_branch
+          return PREFIX_ERROR if then_body.invalid?
+
+          # Check for elsif/else branches
+          else_body : ExprId? = nil
+
+          # After parsing then_body, we should be at {% elsif/else/end %}
+          # Consume {% end %} or handle elsif/else
+          unless current_token.kind == Token::Kind::LBrace
+            @diagnostics << Diagnostic.new("Expected '{% end %}', '{% elsif %}', or '{% else %}'", current_token.span)
+            return PREFIX_ERROR
+          end
+          advance  # {
+
+          unless current_token.kind == Token::Kind::Percent
+            @diagnostics << Diagnostic.new("Expected '%' after '{'", current_token.span)
+            return PREFIX_ERROR
+          end
+          advance  # %
+
+          skip_trivia
+
+          branch_keyword = token_text(current_token)
+          advance  # consume keyword
+
+          skip_trivia
+
+          # Handle end - simplest case
+          if branch_keyword == "end"
+            # Expect %}
+            unless current_token.kind == Token::Kind::Percent
+              @diagnostics << Diagnostic.new("Expected '%}' after end", current_token.span)
+              return PREFIX_ERROR
+            end
+            advance
+
+            unless current_token.kind == Token::Kind::RBrace
+              @diagnostics << Diagnostic.new("Expected '}' after '%'", current_token.span)
+              return PREFIX_ERROR
+            end
+            end_span = current_token.span
+            advance
+
+            full_span = start_span.cover(end_span)
+            return @arena.add_typed(MacroIfNode.new(full_span, condition, then_body, else_body))
+          end
+
+          # TODO: Handle elsif and else branches
+          # For now, just consume {% end %} assuming no branches
+          @diagnostics << Diagnostic.new("elsif/else branches not yet fully implemented", current_token.span)
+          PREFIX_ERROR
+        end
+
+        # Parse {% for vars in iterable %}...{% end %}
+        private def parse_macro_for_control(start_span : Span) : ExprId
+          # Parse iteration variables
+          vars = [] of Slice(UInt8)
+
+          loop do
+            unless current_token.kind == Token::Kind::Identifier
+              @diagnostics << Diagnostic.new("Expected variable name in for loop", current_token.span)
+              return PREFIX_ERROR
+            end
+
+            vars << current_token.slice
+            advance
+
+            skip_trivia
+
+            if current_token.kind == Token::Kind::Comma
+              advance
+              skip_trivia
+            else
+              break
+            end
+          end
+
+          # Expect 'in' keyword
+          unless current_token.kind == Token::Kind::In
+            @diagnostics << Diagnostic.new("Expected 'in' keyword in for loop", current_token.span)
+            return PREFIX_ERROR
+          end
+          advance
+
+          skip_trivia
+
+          # Parse iterable expression
+          iterable = parse_expression(0)
+          return PREFIX_ERROR if iterable.invalid?
+
+          skip_trivia
+
+          # Expect %}
+          unless current_token.kind == Token::Kind::Percent
+            @diagnostics << Diagnostic.new("Expected '%}' after for header", current_token.span)
+            return PREFIX_ERROR
+          end
+          advance
+
+          unless current_token.kind == Token::Kind::RBrace
+            @diagnostics << Diagnostic.new("Expected '}' after '%'", current_token.span)
+            return PREFIX_ERROR
+          end
+          advance
+
+          # Parse body until {% end %}
+          body = parse_macro_body_until_end
+          return PREFIX_ERROR if body.invalid?
+
+          # Expect {% end %}
+          unless current_token.kind == Token::Kind::LBrace
+            @diagnostics << Diagnostic.new("Expected '{% end %}' to close for loop", current_token.span)
+            return PREFIX_ERROR
+          end
+          advance
+
+          unless current_token.kind == Token::Kind::Percent
+            @diagnostics << Diagnostic.new("Expected '%' in {% end %}", current_token.span)
+            return PREFIX_ERROR
+          end
+          advance
+
+          skip_trivia
+
+          unless current_token.kind == Token::Kind::End
+            @diagnostics << Diagnostic.new("Expected 'end' keyword", current_token.span)
+            return PREFIX_ERROR
+          end
+          advance
+
+          skip_trivia
+
+          unless current_token.kind == Token::Kind::Percent
+            @diagnostics << Diagnostic.new("Expected '%}' after end", current_token.span)
+            return PREFIX_ERROR
+          end
+          advance
+
+          unless current_token.kind == Token::Kind::RBrace
+            @diagnostics << Diagnostic.new("Expected '}' after '%'", current_token.span)
+            return PREFIX_ERROR
+          end
+          end_span = current_token.span
+          advance
+
+          full_span = start_span.cover(end_span)
+          @arena.add_typed(MacroForNode.new(full_span, vars, iterable, body))
+        end
+
+        # Parse macro body content until we hit {% elsif/else/end %}
+        # Returns MacroLiteralNode with the body content
+        # STUB VERSION: Just skip all tokens until target keyword
+        # Full implementation would properly parse expressions and text
+        private def parse_macro_body_until_branch : ExprId
+          start_span = current_token.span
+          pieces = [] of MacroPiece
+          depth = 0
+
+          # Skip tokens until we hit {% keyword at depth 0
+          loop do
+            if current_token.kind == Token::Kind::EOF
+              break
+            end
+
+            # Check for {% sequence
+            if current_token.kind == Token::Kind::LBrace
+              next_tok = peek_token
+              if next_tok.kind == Token::Kind::Percent
+                # Peek at keyword
+                saved = @index
+                advance  # {
+                advance  # %
+                skip_trivia
+                keyword_tok = current_token
+                keyword = token_text(keyword_tok)
+                @index = saved  # restore
+
+                # Check keyword type
+                if depth == 0 && (keyword == "elsif" || keyword == "else" || keyword == "end")
+                  # Stop - found our target
+                  break
+                elsif keyword == "if" || keyword == "for" || keyword == "unless" || keyword == "while"
+                  # Nested control - skip it entirely
+                  skip_nested_macro_control
+                  next
+                end
+              end
+            end
+
+            # Just skip this token
+            advance
+          end
+
+          # Return stub MacroLiteralNode
+          @arena.add_typed(MacroLiteralNode.new(start_span, pieces, false, false))
+        end
+
+        # Skip an entire nested macro control structure {% ... %}...{% end %}
+        private def skip_nested_macro_control
+          depth = 1
+          advance  # {
+          advance  # %
+
+          loop do
+            if current_token.kind == Token::Kind::EOF
+              break
+            end
+
+            # Check for {% sequence
+            if current_token.kind == Token::Kind::LBrace
+              next_tok = peek_token
+              if next_tok.kind == Token::Kind::Percent
+                # Peek at keyword
+                saved = @index
+                advance  # {
+                advance  # %
+                skip_trivia
+                keyword = token_text(current_token)
+
+                if keyword == "if" || keyword == "for" || keyword == "unless" || keyword == "while"
+                  depth += 1
+                elsif keyword == "end"
+                  depth -= 1
+                  if depth == 0
+                    # Consume entire {% end %}
+                    # current position: after 'end' keyword (from peek above)
+                    skip_trivia
+                    advance if current_token.kind == Token::Kind::Percent
+                    advance if current_token.kind == Token::Kind::RBrace
+                    return
+                  end
+                end
+
+                # Continue from saved position
+                @index = saved
+              end
+            end
+
+            advance
+          end
+        end
+
+        # Parse macro body content until we hit {% end %}
+        private def parse_macro_body_until_end : ExprId
+          parse_macro_body_until_branch
+        end
+
+        # Phase 103B: Parse {{ expr }} in expression context
+        # Called from parse_prefix when seeing {{ token sequence
+        # Returns MacroExpressionNode wrapped in ExprId
+        private def parse_percent_macro_expression : ExprId
+          start_span = current_token.span
+
+          # Expect {{ sequence
+          unless current_token.kind == Token::Kind::LBrace
+            emit_unexpected(current_token)
+            return PREFIX_ERROR
+          end
+          advance  # consume first {
+
+          unless current_token.kind == Token::Kind::LBrace
+            emit_unexpected(current_token)
+            return PREFIX_ERROR
+          end
+          advance  # consume second {
+
+          skip_trivia
+
+          # Parse expression inside {{ }}
+          expr = parse_expression(0)
+          return PREFIX_ERROR if expr.invalid?
+
+          skip_trivia
+
+          # Expect }} sequence
+          unless current_token.kind == Token::Kind::RBrace
+            @diagnostics << Diagnostic.new("Expected '}' to close macro expression", current_token.span)
+            return PREFIX_ERROR
+          end
+          advance  # consume first }
+
+          unless current_token.kind == Token::Kind::RBrace
+            @diagnostics << Diagnostic.new("Expected '}' to close macro expression", current_token.span)
+            return PREFIX_ERROR
+          end
+          end_span = current_token.span
+          advance  # consume second }
+
+          full_span = start_span.cover(end_span)
+          @arena.add_typed(MacroExpressionNode.new(full_span, expr))
         end
 
         private def parse_macro_expression_piece

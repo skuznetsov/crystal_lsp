@@ -306,6 +306,8 @@ module CrystalV2
         MacroExpression
         MacroLiteral
         MacroDef
+        MacroIf   # Phase 103B: {% if %}...{% end %} in expression context
+        MacroFor  # Phase 103B: {% for %}...{% end %} in expression context
         Def
         Class
         Return  # Phase 6: return statements
@@ -1343,6 +1345,27 @@ module CrystalV2
         end
       end
 
+      # Phase 103B: Macro control flow in expression context
+      struct MacroIfNode
+        getter span : Span
+        getter condition : ExprId
+        getter then_body : ExprId  # MacroLiteralNode
+        getter else_body : ExprId? # MacroIfNode (elsif) or MacroLiteralNode (else) or nil
+
+        def initialize(@span : Span, @condition : ExprId, @then_body : ExprId, @else_body : ExprId? = nil)
+        end
+      end
+
+      struct MacroForNode
+        getter span : Span
+        getter iter_vars : Array(Slice(UInt8))  # Variable names
+        getter iterable : ExprId   # Expression to iterate over
+        getter body : ExprId       # MacroLiteralNode
+
+        def initialize(@span : Span, @iter_vars : Array(Slice(UInt8)), @iterable : ExprId, @body : ExprId)
+        end
+      end
+
       struct SelectNode
         getter span : Span
         getter branches : Array(SelectBranch)
@@ -1386,7 +1409,7 @@ module CrystalV2
                         BeginNode | RaiseNode | RequireNode | TypeDeclarationNode |
                         InstanceVarDeclNode | ClassVarDeclNode | GlobalVarDeclNode |
                         WithNode | LibNode | FunNode | GenericNode | PathNode |
-                        MacroExpressionNode | MacroLiteralNode | MacroDefNode |
+                        MacroExpressionNode | MacroLiteralNode | MacroDefNode | MacroIfNode | MacroForNode |
                         SelectNode | AsmNode
 
       # ============================================================================
@@ -1743,6 +1766,14 @@ module CrystalV2
 
       def self.node_kind(node : MacroDefNode) : NodeKind
         NodeKind::MacroDef
+      end
+
+      def self.node_kind(node : MacroIfNode) : NodeKind
+        NodeKind::MacroIf
+      end
+
+      def self.node_kind(node : MacroForNode) : NodeKind
+        NodeKind::MacroFor
       end
 
       def self.node_kind(node : SelectNode) : NodeKind
