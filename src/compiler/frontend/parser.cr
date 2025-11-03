@@ -6063,8 +6063,8 @@ module CrystalV2
           # Empty call: foo()
           unless current_token.kind == Token::Kind::RParen
             loop do
-              # Phase 101: Check for block shorthand (&.method)
-              # This creates: { |__arg0| __arg0.method }
+              # Phase 101: Check for block shorthand (&.method) or block capture (&block)
+              # This creates: { |__arg0| __arg0.method } or passes block argument
               if current_token.kind == Token::Kind::Amp
                 # Save position in case this is not block shorthand
                 amp_token = current_token
@@ -6076,8 +6076,19 @@ module CrystalV2
                   # This is block shorthand: try &.method (with space: Amp + Operator)
                   arg_expr = parse_block_shorthand(amp_token)
                   return PREFIX_ERROR if arg_expr.invalid?
+                elsif current_token.kind == Token::Kind::Identifier || current_token.kind == Token::Kind::InstanceVar
+                  # Phase 103I: Block capture argument: foo(&block) or foo(&@block)
+                  # This passes a block as an argument (not block shorthand)
+                  identifier_token = current_token
+                  advance
+                  identifier_span = identifier_token.span
+                  identifier_node = @arena.add_typed(IdentifierNode.new(identifier_span, identifier_token.slice))
+
+                  # Create block argument node (UnaryNode with & operator)
+                  arg_span = amp_token.span.cover(identifier_span)
+                  arg_expr = @arena.add_typed(UnaryNode.new(arg_span, amp_token.slice, identifier_node))
                 else
-                  # Not block shorthand, rewind and parse normally
+                  # Not block shorthand or capture, rewind and parse normally
                   # This handles cases like: foo(& other_expr)
                   @index -= 1  # Go back to Amp token
                   # Disable type declarations to allow identifier: syntax for named args
