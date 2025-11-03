@@ -124,6 +124,44 @@ module CrystalV2
 
         # Parse a statement (assignment or expression)
         private def parse_statement : ExprId
+          # Check for definition keywords (def, class, etc.)
+          # These can appear in blocks that get yielded to macros (like record)
+          if definition_start?
+            node = case current_token.kind
+              when Token::Kind::Def
+                parse_def
+              when Token::Kind::Macro
+                parse_macro_definition
+              when Token::Kind::Class
+                parse_class
+              when Token::Kind::Module
+                parse_module
+              when Token::Kind::Struct
+                parse_struct
+              when Token::Kind::Union
+                parse_union
+              when Token::Kind::Enum
+                parse_enum
+              when Token::Kind::Alias
+                parse_alias
+              when Token::Kind::Annotation
+                parse_annotation
+              when Token::Kind::Abstract
+                parse_abstract
+              when Token::Kind::Private
+                parse_private
+              when Token::Kind::Protected
+                parse_protected
+              when Token::Kind::Lib
+                parse_lib
+              when Token::Kind::Fun
+                parse_fun
+              else
+                PREFIX_ERROR
+              end
+            return node
+          end
+
           # Phase 6: Check for return statement
           if current_token.kind == Token::Kind::Return
             stmt = parse_return
@@ -4478,11 +4516,27 @@ module CrystalV2
             end
           end
 
+          # Parse optional block: do...end or {...}
+          # Example: record Point, x : Int32 do ... end
+          skip_trivia
+          block_expr : ExprId? = nil
+          if current_token.kind == Token::Kind::Do || current_token.kind == Token::Kind::LBrace
+            block_expr = parse_block
+            if block_expr.invalid?
+              @parsing_call_args -= 1
+              return PREFIX_ERROR
+            end
+          end
+
           # Create CallNode
           callee = @arena.add_typed(IdentifierNode.new(callee_token.span, callee_token.slice))
 
-          # Calculate span including last argument (positional or named)
-          call_span = if named_args.size > 0
+          # Calculate span including last argument (positional or named) or block
+          call_span = if !block_expr.nil?
+            # Include block in span
+            block_node = @arena[block_expr]
+            callee_token.span.cover(block_node.span)
+          elsif named_args.size > 0
             # Last named arg
             callee_token.span.cover(named_args.last.span)
           elsif args.size > 0
@@ -4497,7 +4551,7 @@ module CrystalV2
             call_span,
             callee,
             args,
-            nil,  # no block
+            block_expr,  # attach block if present
             named_args.empty? ? nil : named_args
           ))
 
@@ -4530,10 +4584,18 @@ module CrystalV2
               next
             when Token::Kind::LBrace
               # Phase 10: Block with {} syntax
+              # Don't attach blocks when parsing call arguments - let the call parser handle it
+              if @parsing_call_args > 0
+                break
+              end
               left = attach_block_to_call(left)
               next
             when Token::Kind::Do
               # Phase 10: Block with do/end syntax
+              # Don't attach blocks when parsing call arguments - let the call parser handle it
+              if @parsing_call_args > 0
+                break
+              end
               left = attach_block_to_call(left)
               next
             when Token::Kind::AmpDot
