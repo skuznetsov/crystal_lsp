@@ -410,7 +410,7 @@ module CrystalV2
             end
           end
 
-          # Check for suffix (_i32, _i64, _f64)
+          # Phase 103J: Check for suffix (_i8, _i16, _i32, _i64, _i128, _u8, _u16, _u32, _u64, _u128, _f32, _f64)
           number_kind : NumberKind? = nil
           if @offset < @rope.size && current_byte == '_'.ord.to_u8
             suffix_start = @offset
@@ -424,9 +424,21 @@ module CrystalV2
 
             suffix = String.new(@rope.bytes[suffix_from...@offset])
             number_kind = case suffix
-            when "i32" then NumberKind::I32
-            when "i64" then NumberKind::I64
-            when "f64" then NumberKind::F64
+            # Signed integers
+            when "i8"   then NumberKind::I8
+            when "i16"  then NumberKind::I16
+            when "i32"  then NumberKind::I32
+            when "i64"  then NumberKind::I64
+            when "i128" then NumberKind::I128
+            # Unsigned integers
+            when "u8"   then NumberKind::U8
+            when "u16"  then NumberKind::U16
+            when "u32"  then NumberKind::U32
+            when "u64"  then NumberKind::U64
+            when "u128" then NumberKind::U128
+            # Floats
+            when "f32"  then NumberKind::F32
+            when "f64"  then NumberKind::F64
             else
               # Unknown suffix - ignore and treat as separate token
               # Reset to before underscore

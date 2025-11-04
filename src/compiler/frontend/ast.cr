@@ -17,19 +17,41 @@ module CrystalV2
       # Numeric literal kind for precise type inference
       #
       # Simplified version covering main use cases:
-      # - I32: Default for integer literals (42)
-      # - I64: Explicit _i64 suffix or large integers
-      # - F64: Decimal point (3.14) or _f64 suffix
+      # Phase 103J: Extended number kinds to match Crystal language spec
+      # Signed: i8, i16, i32, i64, i128
+      # Unsigned: u8, u16, u32, u64, u128
+      # Float: f32, f64
       enum NumberKind
+        # Signed integers
+        I8
+        I16
         I32
         I64
+        I128
+        # Unsigned integers
+        U8
+        U16
+        U32
+        U64
+        U128
+        # Floats
+        F32
         F64
 
         def to_s : String
           case self
-          when I32 then "Int32"
-          when I64 then "Int64"
-          when F64 then "Float64"
+          when I8   then "Int8"
+          when I16  then "Int16"
+          when I32  then "Int32"
+          when I64  then "Int64"
+          when I128 then "Int128"
+          when U8   then "UInt8"
+          when U16  then "UInt16"
+          when U32  then "UInt32"
+          when U64  then "UInt64"
+          when U128 then "UInt128"
+          when F32  then "Float32"
+          when F64  then "Float64"
           end
         end
       end
