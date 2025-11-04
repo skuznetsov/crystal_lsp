@@ -7445,7 +7445,7 @@ module CrystalV2
 
           skip_trivia
 
-          # Handle end - simplest case
+          # Handle end - simplest case (no else/elsif)
           if branch_keyword == "end"
             # Expect %}
             unless current_token.kind == Token::Kind::Percent
@@ -7465,10 +7465,368 @@ module CrystalV2
             return @arena.add_typed(MacroIfNode.new(full_span, condition, then_body, else_body))
           end
 
-          # TODO: Handle elsif and else branches
-          # For now, just consume {% end %} assuming no branches
-          @diagnostics << Diagnostic.new("elsif/else branches not yet fully implemented", current_token.span)
+          # Handle else branch
+          if branch_keyword == "else"
+            # Expect %}
+            unless current_token.kind == Token::Kind::Percent
+              @diagnostics << Diagnostic.new("Expected '%}' after else", current_token.span)
+              return PREFIX_ERROR
+            end
+            advance
+
+            unless current_token.kind == Token::Kind::RBrace
+              @diagnostics << Diagnostic.new("Expected '}' after '%'", current_token.span)
+              return PREFIX_ERROR
+            end
+            advance
+
+            # Parse else body
+            else_body = parse_macro_body_until_branch
+            return PREFIX_ERROR if else_body.invalid?
+
+            # Now expect {% end %}
+            unless current_token.kind == Token::Kind::LBrace
+              @diagnostics << Diagnostic.new("Expected '{% end %}'", current_token.span)
+              return PREFIX_ERROR
+            end
+            advance  # {
+
+            unless current_token.kind == Token::Kind::Percent
+              @diagnostics << Diagnostic.new("Expected '%' after '{'", current_token.span)
+              return PREFIX_ERROR
+            end
+            advance  # %
+
+            skip_trivia
+
+            end_keyword = token_text(current_token)
+            unless end_keyword == "end"
+              @diagnostics << Diagnostic.new("Expected 'end', got '#{end_keyword}'", current_token.span)
+              return PREFIX_ERROR
+            end
+            advance  # end
+
+            skip_trivia
+
+            unless current_token.kind == Token::Kind::Percent
+              @diagnostics << Diagnostic.new("Expected '%}' after end", current_token.span)
+              return PREFIX_ERROR
+            end
+            advance  # %
+
+            unless current_token.kind == Token::Kind::RBrace
+              @diagnostics << Diagnostic.new("Expected '}' after '%'", current_token.span)
+              return PREFIX_ERROR
+            end
+            end_span = current_token.span
+            advance  # }
+
+            full_span = start_span.cover(end_span)
+            return @arena.add_typed(MacroIfNode.new(full_span, condition, then_body, else_body))
+          end
+
+          # Handle elsif branch (recursive)
+          if branch_keyword == "elsif"
+            # Save start position for the elsif node
+            elsif_start = previous_token.not_nil!.span
+
+            # We're positioned after {% elsif, now parse the condition
+            elsif_condition = parse_expression(0)
+            return PREFIX_ERROR if elsif_condition.invalid?
+
+            skip_trivia
+
+            # Now expect %}
+            unless current_token.kind == Token::Kind::Percent
+              @diagnostics << Diagnostic.new("Expected '%}' after elsif condition", current_token.span)
+              return PREFIX_ERROR
+            end
+            advance
+
+            unless current_token.kind == Token::Kind::RBrace
+              @diagnostics << Diagnostic.new("Expected '}' after '%'", current_token.span)
+              return PREFIX_ERROR
+            end
+            advance
+
+            # Parse elsif body
+            elsif_body = parse_macro_body_until_branch
+            return PREFIX_ERROR if elsif_body.invalid?
+
+            # Check what's next (could be another elsif, else, or end)
+            unless current_token.kind == Token::Kind::LBrace
+              @diagnostics << Diagnostic.new("Expected '{% end %}', '{% elsif %}', or '{% else %}'", current_token.span)
+              return PREFIX_ERROR
+            end
+            advance  # {
+
+            unless current_token.kind == Token::Kind::Percent
+              @diagnostics << Diagnostic.new("Expected '%' after '{'", current_token.span)
+              return PREFIX_ERROR
+            end
+            advance  # %
+
+            skip_trivia
+
+            next_keyword = token_text(current_token)
+            advance  # consume keyword
+
+            skip_trivia
+
+            # Recursively handle remaining branches
+            elsif_else_body : ExprId? = nil
+
+            if next_keyword == "end"
+              # End of elsif chain
+              unless current_token.kind == Token::Kind::Percent
+                @diagnostics << Diagnostic.new("Expected '%}' after end", current_token.span)
+                return PREFIX_ERROR
+              end
+              advance
+
+              unless current_token.kind == Token::Kind::RBrace
+                @diagnostics << Diagnostic.new("Expected '}' after '%'", current_token.span)
+                return PREFIX_ERROR
+              end
+              end_span = current_token.span
+              advance
+            elsif next_keyword == "elsif"
+              # Another elsif - need to handle recursively
+              # Backtrack to handle it properly
+              @index -= 1  # back to keyword
+              skip_trivia
+              @index -= 1  # back to %
+              @index -= 1  # back to {
+
+              # Now recursively parse remaining elsif/else/end
+              saved_span = elsif_start
+              @index += 1  # forward to {
+
+              # Build nested elsif as else branch
+              elsif_else_body = parse_macro_if_control_branch_recursively(saved_span)
+              return PREFIX_ERROR if elsif_else_body.invalid?
+              end_span = previous_token.not_nil!.span
+            elsif next_keyword == "else"
+              # Else after elsif
+              unless current_token.kind == Token::Kind::Percent
+                @diagnostics << Diagnostic.new("Expected '%}' after else", current_token.span)
+                return PREFIX_ERROR
+              end
+              advance
+
+              unless current_token.kind == Token::Kind::RBrace
+                @diagnostics << Diagnostic.new("Expected '}' after '%'", current_token.span)
+                return PREFIX_ERROR
+              end
+              advance
+
+              # Parse else body
+              elsif_else_body = parse_macro_body_until_branch
+              return PREFIX_ERROR if elsif_else_body.invalid?
+
+              # Expect {% end %}
+              unless current_token.kind == Token::Kind::LBrace
+                @diagnostics << Diagnostic.new("Expected '{% end %}'", current_token.span)
+                return PREFIX_ERROR
+              end
+              advance
+
+              unless current_token.kind == Token::Kind::Percent
+                @diagnostics << Diagnostic.new("Expected '%' after '{'", current_token.span)
+                return PREFIX_ERROR
+              end
+              advance
+
+              skip_trivia
+
+              unless token_text(current_token) == "end"
+                @diagnostics << Diagnostic.new("Expected 'end'", current_token.span)
+                return PREFIX_ERROR
+              end
+              advance
+
+              skip_trivia
+
+              unless current_token.kind == Token::Kind::Percent
+                @diagnostics << Diagnostic.new("Expected '%}' after end", current_token.span)
+                return PREFIX_ERROR
+              end
+              advance
+
+              unless current_token.kind == Token::Kind::RBrace
+                @diagnostics << Diagnostic.new("Expected '}' after '%'", current_token.span)
+                return PREFIX_ERROR
+              end
+              end_span = current_token.span
+              advance
+            else
+              @diagnostics << Diagnostic.new("Expected 'end', 'elsif', or 'else', got '#{next_keyword}'", current_token.span)
+              return PREFIX_ERROR
+            end
+
+            # Create nested if for elsif
+            elsif_if = @arena.add_typed(MacroIfNode.new(elsif_start, elsif_condition, elsif_body, elsif_else_body))
+
+            full_span = start_span.cover(end_span)
+            return @arena.add_typed(MacroIfNode.new(full_span, condition, then_body, elsif_if))
+          end
+
+          # Unknown keyword
+          @diagnostics << Diagnostic.new("Expected 'end', 'elsif', or 'else', got '#{branch_keyword}'", current_token.span)
           PREFIX_ERROR
+        end
+
+        # Helper for recursive elsif handling
+        private def parse_macro_if_control_branch_recursively(start_span : Span) : ExprId
+          # We're at {% - parse the control block
+          unless current_token.kind == Token::Kind::LBrace
+            @diagnostics << Diagnostic.new("Expected '{'", current_token.span)
+            return PREFIX_ERROR
+          end
+          advance
+
+          unless current_token.kind == Token::Kind::Percent
+            @diagnostics << Diagnostic.new("Expected '%'", current_token.span)
+            return PREFIX_ERROR
+          end
+          advance
+
+          skip_trivia
+
+          keyword = token_text(current_token)
+          advance
+
+          skip_trivia
+
+          if keyword != "elsif"
+            @diagnostics << Diagnostic.new("Expected 'elsif', got '#{keyword}'", current_token.span)
+            return PREFIX_ERROR
+          end
+
+          # Parse elsif condition
+          condition = parse_expression(0)
+          return PREFIX_ERROR if condition.invalid?
+
+          skip_trivia
+
+          unless current_token.kind == Token::Kind::Percent
+            @diagnostics << Diagnostic.new("Expected '%}' after condition", current_token.span)
+            return PREFIX_ERROR
+          end
+          advance
+
+          unless current_token.kind == Token::Kind::RBrace
+            @diagnostics << Diagnostic.new("Expected '}'", current_token.span)
+            return PREFIX_ERROR
+          end
+          advance
+
+          # Parse body
+          body = parse_macro_body_until_branch
+          return PREFIX_ERROR if body.invalid?
+
+          # Check for next branch
+          unless current_token.kind == Token::Kind::LBrace
+            @diagnostics << Diagnostic.new("Expected control block", current_token.span)
+            return PREFIX_ERROR
+          end
+          advance
+
+          unless current_token.kind == Token::Kind::Percent
+            @diagnostics << Diagnostic.new("Expected '%'", current_token.span)
+            return PREFIX_ERROR
+          end
+          advance
+
+          skip_trivia
+
+          next_keyword = token_text(current_token)
+          advance
+
+          skip_trivia
+
+          else_body : ExprId? = nil
+
+          if next_keyword == "end"
+            # End of chain
+            unless current_token.kind == Token::Kind::Percent
+              @diagnostics << Diagnostic.new("Expected '%}'", current_token.span)
+              return PREFIX_ERROR
+            end
+            advance
+
+            unless current_token.kind == Token::Kind::RBrace
+              @diagnostics << Diagnostic.new("Expected '}'", current_token.span)
+              return PREFIX_ERROR
+            end
+            advance
+          elsif next_keyword == "elsif"
+            # Another elsif
+            @index -= 1
+            skip_trivia
+            @index -= 1
+            @index -= 1
+            @index += 1
+
+            else_body = parse_macro_if_control_branch_recursively(start_span)
+            return PREFIX_ERROR if else_body.invalid?
+          elsif next_keyword == "else"
+            # Else branch
+            unless current_token.kind == Token::Kind::Percent
+              @diagnostics << Diagnostic.new("Expected '%}'", current_token.span)
+              return PREFIX_ERROR
+            end
+            advance
+
+            unless current_token.kind == Token::Kind::RBrace
+              @diagnostics << Diagnostic.new("Expected '}'", current_token.span)
+              return PREFIX_ERROR
+            end
+            advance
+
+            else_body = parse_macro_body_until_branch
+            return PREFIX_ERROR if else_body.invalid?
+
+            # Expect end
+            unless current_token.kind == Token::Kind::LBrace
+              @diagnostics << Diagnostic.new("Expected '{% end %}'", current_token.span)
+              return PREFIX_ERROR
+            end
+            advance
+
+            unless current_token.kind == Token::Kind::Percent
+              @diagnostics << Diagnostic.new("Expected '%'", current_token.span)
+              return PREFIX_ERROR
+            end
+            advance
+
+            skip_trivia
+
+            unless token_text(current_token) == "end"
+              @diagnostics << Diagnostic.new("Expected 'end'", current_token.span)
+              return PREFIX_ERROR
+            end
+            advance
+
+            skip_trivia
+
+            unless current_token.kind == Token::Kind::Percent
+              @diagnostics << Diagnostic.new("Expected '%}'", current_token.span)
+              return PREFIX_ERROR
+            end
+            advance
+
+            unless current_token.kind == Token::Kind::RBrace
+              @diagnostics << Diagnostic.new("Expected '}'", current_token.span)
+              return PREFIX_ERROR
+            end
+            advance
+          else
+            @diagnostics << Diagnostic.new("Expected 'end', 'elsif', or 'else'", current_token.span)
+            return PREFIX_ERROR
+          end
+
+          @arena.add_typed(MacroIfNode.new(start_span, condition, body, else_body))
         end
 
         # Parse {% for vars in iterable %}...{% end %}
