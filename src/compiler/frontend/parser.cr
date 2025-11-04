@@ -1302,29 +1302,28 @@ module CrystalV2
                 end
 
                 # Phase 103K: External parameter name detection
-                # Pattern: "external internal" where external is identifier/keyword, internal is identifier
-                # Instance vars cannot have external names
-                if name_token.kind != Token::Kind::InstanceVar &&
-                   (name_token.kind == Token::Kind::Identifier ||
-                    name_token.kind == Token::Kind::Of || name_token.kind == Token::Kind::As ||
-                    name_token.kind == Token::Kind::In || name_token.kind == Token::Kind::Out ||
-                    name_token.kind == Token::Kind::Do || name_token.kind == Token::Kind::End ||
-                    name_token.kind == Token::Kind::If || name_token.kind == Token::Kind::Unless)
+                # Pattern: "external internal" where external is identifier/keyword, internal is identifier/instance_var
+                # Examples: "to limit", "calculation @time"
+                if name_token.kind == Token::Kind::Identifier ||
+                   name_token.kind == Token::Kind::Of || name_token.kind == Token::Kind::As ||
+                   name_token.kind == Token::Kind::In || name_token.kind == Token::Kind::Out ||
+                   name_token.kind == Token::Kind::Do || name_token.kind == Token::Kind::End ||
+                   name_token.kind == Token::Kind::If || name_token.kind == Token::Kind::Unless
 
                   # Save potential external name
                   potential_external_name = name_token.slice
                   potential_external_span = name_token.span
                   advance
 
-                  # Check if there's space/newline followed by another identifier
-                  # Space indicates: "to limit" pattern
+                  # Check if there's space/newline followed by another identifier or instance var
+                  # Space indicates: "to limit" or "calculation @time" pattern
                   # No space indicates: single name or type annotation coming
                   if (current_token.kind == Token::Kind::Whitespace || current_token.kind == Token::Kind::Newline)
                     # Skip whitespace
                     saved_index = @index
                     skip_trivia
 
-                    # Check if next token is identifier (internal name)
+                    # Check if next token is identifier or instance var (internal name)
                     if current_token.kind == Token::Kind::Identifier
                       # External name pattern confirmed: "to limit"
                       external_name = potential_external_name
@@ -1333,6 +1332,16 @@ module CrystalV2
                       param_name_span = current_token.span
                       param_start_span = prefix_token ? prefix_token.span : potential_external_span
                       is_instance_var = false
+                      advance
+                      skip_trivia
+                    elsif current_token.kind == Token::Kind::InstanceVar
+                      # External name + instance var: "calculation @time"
+                      external_name = potential_external_name
+                      external_name_span = potential_external_span
+                      param_name = current_token.slice
+                      param_name_span = current_token.span
+                      param_start_span = prefix_token ? prefix_token.span : potential_external_span
+                      is_instance_var = true
                       advance
                       skip_trivia
                     else
@@ -1352,7 +1361,7 @@ module CrystalV2
                     skip_trivia
                   end
                 else
-                  # Instance variable shorthand: @value : T (no external name possible)
+                  # Instance variable shorthand without external name: @value : T
                   is_instance_var = (name_token.kind == Token::Kind::InstanceVar)
                   param_name = name_token.slice  # TIER 2.1: Zero-copy slice (includes '@' for instance vars)
                   param_name_span = name_token.span
