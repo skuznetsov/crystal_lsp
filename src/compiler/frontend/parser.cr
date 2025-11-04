@@ -1230,7 +1230,8 @@ module CrystalV2
           return params unless operator_token?(current_token, Token::Kind::LParen)
 
           advance
-          skip_trivia
+          @paren_depth += 1  # Track that we're inside parameter list delimiters
+          skip_whitespace_and_optional_newlines  # Allow newlines after opening paren
           unless operator_token?(current_token, Token::Kind::RParen)
             loop do
               # Phase 68: Check for splat operators (* or **)
@@ -1660,6 +1661,10 @@ module CrystalV2
                 end
               end
 
+              # Skip whitespace and newlines after type annotation
+              # This allows multiline parameter lists: def initialize(\n  @x : Int32,\n  @y : String\n)
+              skip_whitespace_and_optional_newlines
+
               # Phase 71: Parse optional default value: = expression
               default_value = nil
               default_value_span = nil
@@ -1671,7 +1676,7 @@ module CrystalV2
                 default_value = parse_expression(0)
                 return PREFIX_ERROR if default_value.invalid?
                 default_value_span = @arena[default_value].span
-                skip_trivia
+                skip_whitespace_and_optional_newlines  # Allow newlines after default value
               end
 
               # Calculate full parameter span
@@ -1701,11 +1706,12 @@ module CrystalV2
 
               break unless operator_token?(current_token, Token::Kind::Comma)
               advance
-              skip_trivia
+              skip_whitespace_and_optional_newlines  # Allow newlines after comma in parameter lists
             end
           end
 
           expect_operator(Token::Kind::RParen)
+          @paren_depth -= 1  # Exiting parameter list delimiters
           params
         end
 
