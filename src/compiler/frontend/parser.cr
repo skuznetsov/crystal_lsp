@@ -4927,11 +4927,10 @@ module CrystalV2
             return PREFIX_ERROR unless next_comes_colon_space?
           when Token::Kind::Newline, Token::Kind::EOF
             return PREFIX_ERROR
-          # Phase 103H: Arithmetic operators (Plus, Minus, Star, Slash) need special handling
+          # Phase 103H: Arithmetic operators (Plus, Minus, Star) need special handling
           # They can be unary (no space after) or binary (space after)
           # Example: "foo +1" is call, "foo + 1" is binary operation
-          when Token::Kind::Plus, Token::Kind::Minus, Token::Kind::Star, Token::Kind::Slash,
-               Token::Kind::Percent, Token::Kind::StarStar
+          when Token::Kind::Plus, Token::Kind::Minus, Token::Kind::Star, Token::Kind::StarStar
             # Check if next token is whitespace (binary) or not (unary)
             next_tok = peek_token(1)
             if next_tok.kind == Token::Kind::Whitespace || next_tok.kind == Token::Kind::Newline
@@ -4940,7 +4939,10 @@ module CrystalV2
             end
             # Otherwise, allow as unary prefix in argument (foo +1)
           # Don't parse as call if followed by binary/logical operators that can't start an argument
-          when Token::Kind::OrOr, Token::Kind::AndAnd,
+          # Phase 103K: Slash and FloorDiv can't be unary, always return error
+          when Token::Kind::Slash, Token::Kind::FloorDiv,
+               Token::Kind::Percent,  # Percent literal uses different token
+               Token::Kind::OrOr, Token::Kind::AndAnd,
                Token::Kind::Question,  # ternary operator
                Token::Kind::Arrow,     # hash arrow =>
                # Comparison operators
