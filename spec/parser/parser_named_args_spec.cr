@@ -18,7 +18,7 @@ describe "CrystalV2::Compiler::Frontend::Parser" do
 
       named_args = call.as(CrystalV2::Compiler::Frontend::CallNode).named_args.not_nil!
       named_args.size.should eq(1)
-      named_args[0].name.should eq("x")
+      String.new(named_args[0].name).should eq("x")
     end
 
     it "parses method call with multiple named arguments" do
@@ -33,8 +33,8 @@ describe "CrystalV2::Compiler::Frontend::Parser" do
       call = arena[program.roots[0]]
       named_args = call.as(CrystalV2::Compiler::Frontend::CallNode).named_args.not_nil!
       named_args.size.should eq(2)
-      named_args[0].name.should eq("x")
-      named_args[1].name.should eq("y")
+      String.new(named_args[0].name).should eq("x")
+      String.new(named_args[1].name).should eq("y")
     end
 
     it "parses method call with named arguments and expressions" do
@@ -85,7 +85,7 @@ describe "CrystalV2::Compiler::Frontend::Parser" do
 
       named_args = call.as(CrystalV2::Compiler::Frontend::CallNode).named_args.not_nil!
       named_args.size.should eq(1)
-      named_args[0].name.should eq("y")
+      String.new(named_args[0].name).should eq("y")
     end
 
     it "parses method call with multiple positional then named" do
@@ -103,8 +103,8 @@ describe "CrystalV2::Compiler::Frontend::Parser" do
 
       named_args = call.as(CrystalV2::Compiler::Frontend::CallNode).named_args.not_nil!
       named_args.size.should eq(2)
-      named_args[0].name.should eq("x")
-      named_args[1].name.should eq("y")
+      String.new(named_args[0].name).should eq("x")
+      String.new(named_args[1].name).should eq("y")
     end
 
     it "parses empty method call" do
@@ -190,7 +190,7 @@ describe "CrystalV2::Compiler::Frontend::Parser" do
 
       named_args = call.as(CrystalV2::Compiler::Frontend::CallNode).named_args.not_nil!
       named_args.size.should eq(1)
-      named_args[0].name.should eq("x")
+      String.new(named_args[0].name).should eq("x")
     end
 
     it "parses named arguments with nil and boolean values" do
@@ -234,11 +234,11 @@ describe "CrystalV2::Compiler::Frontend::Parser" do
 
       inner_named_args = inner_call.as(CrystalV2::Compiler::Frontend::CallNode).named_args.not_nil!
       inner_named_args.size.should eq(1)
-      inner_named_args[0].name.should eq("x")
+      String.new(inner_named_args[0].name).should eq("x")
 
       outer_named_args = outer_call.as(CrystalV2::Compiler::Frontend::CallNode).named_args.not_nil!
       outer_named_args.size.should eq(1)
-      outer_named_args[0].name.should eq("y")
+      String.new(outer_named_args[0].name).should eq("y")
     end
 
     it "parses named arguments with trailing comma" do

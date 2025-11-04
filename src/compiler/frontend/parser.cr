@@ -187,6 +187,12 @@ module CrystalV2
             return parse_postfix_if_modifier(stmt)
           end
 
+          # Phase 29: Check for raise statement
+          if current_token.kind == Token::Kind::Raise
+            stmt = parse_raise
+            return parse_postfix_if_modifier(stmt)
+          end
+
           # Phase 10: yield statements
           if current_token.kind == Token::Kind::Yield
             stmt = parse_yield
@@ -554,6 +560,19 @@ module CrystalV2
           end
         end
 
+        # Skip statement end: whitespace, comments, newlines, and semicolons
+        # Following original parser's skip_statement_end pattern
+        private def skip_statement_end
+          loop do
+            case current_token.kind
+            when Token::Kind::Whitespace, Token::Kind::Comment, Token::Kind::Newline, Token::Kind::Semicolon
+              advance
+            else
+              break
+            end
+          end
+        end
+
         # Lookahead: check if pattern " : " (space + colon) follows
         # Used to distinguish "x : Type" (type restriction) from "x: value" (named arg)
         # Returns true if whitespace followed by colon, false otherwise
@@ -868,14 +887,30 @@ module CrystalV2
           end
 
           # Create TypeDeclarationNode
-          type_span = @arena[declared_type].span
+          # Extract name from var node (should be Identifier)
+          var_node = @arena[var]
+          var_literal = Frontend.node_literal(var_node)
+          unless var_literal
+            @diagnostics << Diagnostic.new("Type declaration variable must be a simple identifier", var_span)
+            return PREFIX_ERROR
+          end
+
+          # Extract type from declared_type node (should be Identifier for simple types)
+          type_node = @arena[declared_type]
+          type_literal = Frontend.node_literal(type_node)
+          unless type_literal
+            @diagnostics << Diagnostic.new("Type declaration type must be a simple identifier", @arena[declared_type].span)
+            return PREFIX_ERROR
+          end
+
+          type_span = type_node.span
           value_span = value ? @arena[value].span : type_span
           full_span = var_span.cover(value_span)
 
           @arena.add_typed(TypeDeclarationNode.new(
             full_span,
-            var,
-            declared_type,
+            var_literal,
+            type_literal,
             value
           ))
         end
@@ -2916,6 +2951,31 @@ module CrystalV2
           end
         end
 
+        # Phase 29: Parse raise expression
+        # Grammar: raise [expression]
+        private def parse_raise : ExprId
+          raise_token = current_token
+          advance
+          skip_trivia
+
+          # Check if there's a raise value
+          # raise without value if: newline, EOF, end, else, elsif, rescue, ensure
+          token = current_token
+          if token.kind.in?(Token::Kind::Newline, Token::Kind::EOF, Token::Kind::End, Token::Kind::Else, Token::Kind::Elsif, Token::Kind::Rescue, Token::Kind::Ensure)
+            # Raise without value (re-raise)
+            @arena.add_typed(RaiseNode.new(raise_token.span, nil))
+          else
+            # Raise with value
+            value = parse_expression(0)
+            return PREFIX_ERROR if value.invalid?
+
+            value_span = node_span(value)
+            raise_span = raise_token.span.cover(value_span)
+
+            @arena.add_typed(RaiseNode.new(raise_span, value))
+          end
+        end
+
         # Phase 12: Parse break expression
         # Grammar: break [value]
         private def parse_break : ExprId
@@ -3650,15 +3710,13 @@ module CrystalV2
                   advance  # consume :
                   skip_trivia
 
-                  type_token = current_token
-                  if type_token.kind == Token::Kind::Identifier
-                    type_annotation = type_token.slice  # TIER 2.1: Zero-copy slice
-                    type_span = type_token.span
+                  type_start_span = current_token.span
+                  type_annotation = parse_type_annotation
+                  if type_annotation
+                    type_span = type_start_span.cover(previous_token.not_nil!.span)
                     param_span = param_span.cover(type_span)
-                    advance
-                    skip_trivia
                   else
-                    emit_unexpected(type_token)
+                    emit_unexpected(current_token)
                     return PREFIX_ERROR
                   end
                 end
@@ -3697,16 +3755,15 @@ module CrystalV2
             advance  # consume :
             skip_trivia
 
-            return_type_token = current_token
-            if return_type_token.kind == Token::Kind::Identifier
-              return_type = return_type_token.slice
-              advance
-              skip_trivia
-            else
-              emit_unexpected(return_type_token)
+            return_type = parse_type_annotation
+            unless return_type
+              emit_unexpected(current_token)
               return PREFIX_ERROR
             end
           end
+
+          # Skip any trivia/newlines before body
+          skip_statement_end
 
           # Parse body: { } or do...end
           is_brace_form = current_token.kind == Token::Kind::LBrace
@@ -3716,35 +3773,54 @@ module CrystalV2
             emit_unexpected(current_token)
             return PREFIX_ERROR
           end
-
           start_token = current_token
           advance  # consume { or do
-          skip_trivia
+          skip_statement_end  # Skip newlines after { or do
 
-          # Parse proc body
+          # Parse proc body - following original parser's parse_expressions pattern
+          # Use parse_statement (equivalent to parse_multi_assign) to handle assignments
           body = [] of ExprId
-          loop do
-            skip_trivia
 
-            # Skip newlines in proc body
-            while current_token.kind == Token::Kind::Newline
-              advance
-              skip_trivia
-            end
-
-            # Check for proc terminator
-            if is_brace_form
-              break if current_token.kind == Token::Kind::RBrace
-            else
-              break if current_token.kind == Token::Kind::End
-            end
-
-            break if current_token.kind == Token::Kind::EOF
-
+          # Check for empty body
+          if (is_brace_form && current_token.kind == Token::Kind::RBrace) ||
+             (!is_brace_form && current_token.kind == Token::Kind::End)
+            # Empty body is allowed
+          else
+            # Parse first statement (handles assignments)
             stmt = parse_statement
-            return PREFIX_ERROR if stmt.invalid?
+            if stmt.invalid?
+              return PREFIX_ERROR
+            end
             body << stmt
+
+            # Skip statement end (newlines + semicolons)
+            skip_statement_end
+
+            # Check if we have more statements
+            unless (is_brace_form && current_token.kind == Token::Kind::RBrace) ||
+                   (!is_brace_form && current_token.kind == Token::Kind::End) ||
+                   current_token.kind == Token::Kind::EOF
+              # Parse remaining statements in loop
+              loop do
+                stmt = parse_statement
+                if stmt.invalid?
+                  return PREFIX_ERROR
+                end
+                body << stmt
+
+                # Skip statement end
+                skip_statement_end
+
+                # Break if we hit terminator
+                break if (is_brace_form && current_token.kind == Token::Kind::RBrace) ||
+                         (!is_brace_form && current_token.kind == Token::Kind::End) ||
+                         current_token.kind == Token::Kind::EOF
+              end
+            end
           end
+
+          # Skip statement end before closing delimiter (handles newlines)
+          skip_statement_end
 
           # Consume closing delimiter
           end_token = current_token
@@ -4001,6 +4077,9 @@ module CrystalV2
                 # It's an assignment or expression: @@var = value
                 expr = parse_statement
               end
+            # Phase 92: Annotation definition
+            elsif token.kind == Token::Kind::Annotation
+              expr = parse_annotation_def
             # Phase 30: Accessor macros (getter/setter/property)
             elsif token.kind == Token::Kind::Identifier
               # Check if it's getter, setter, or property
@@ -5054,14 +5133,21 @@ module CrystalV2
             advance
             skip_trivia
 
-            # Phase 103J: Check for `x = uninitialized Type` syntax
+            # Phase 103J: Check for `x = uninitialized Type` syntax (without parens)
             # Only for simple assignment (not compound like +=)
+            # Note: uninitialized(Type) with parens is handled by parse_uninitialized in parse_prefix
             if !is_compound && current_token.kind == Token::Kind::Uninitialized
+              # Peek ahead to see if there's a parenthesis - if so, use normal expression parsing
+              # This prevents treating uninitialized(Type) as uninitialized Type
+              peek_next = peek_token
+              has_paren = peek_next.kind == Token::Kind::LParen || (peek_next.kind == Token::Kind::Whitespace && peek_token(1).kind == Token::Kind::LParen)
+
               # Verify left side is a valid variable
-              if left_kind == Frontend::NodeKind::Identifier ||
-                 left_kind == Frontend::NodeKind::InstanceVar ||
-                 left_kind == Frontend::NodeKind::ClassVar ||
-                 left_kind == Frontend::NodeKind::Global
+              if !has_paren &&
+                 (left_kind == Frontend::NodeKind::Identifier ||
+                  left_kind == Frontend::NodeKind::InstanceVar ||
+                  left_kind == Frontend::NodeKind::ClassVar ||
+                  left_kind == Frontend::NodeKind::Global)
 
                 uninitialized_token = current_token
                 advance  # skip 'uninitialized'
@@ -5078,6 +5164,10 @@ module CrystalV2
                   uninitialized_span,
                   type_expr
                 ))
+              elsif has_paren
+                # Has parenthesis - parse as normal expression (will call parse_uninitialized)
+                rhs = parse_op_assign
+                return PREFIX_ERROR if rhs.invalid?
               else
                 # Invalid: uninitialized can only be used with variables
                 @diagnostics << Diagnostic.new("'uninitialized' can only be used with variables", current_token.span)
@@ -5106,7 +5196,7 @@ module CrystalV2
               when Token::Kind::CaretEq    then "^"
               when Token::Kind::LShiftEq   then "<<"
               when Token::Kind::RShiftEq   then ">>"
-              when Token::Kind::NilCoalesceEq then "||"  # Special case
+              when Token::Kind::NilCoalesceEq then "??"  # Phase 82
               else
                 @diagnostics << Diagnostic.new("Unknown compound assignment operator", assign_token.span)
                 return PREFIX_ERROR
@@ -5123,6 +5213,23 @@ module CrystalV2
               ))
             else
               rhs
+            end
+
+            # Phase 35: Check if this is a constant declaration (uppercase identifier)
+            # Constants are only created for simple assignments (not compound) to identifiers
+            if !is_compound && left_kind == Frontend::NodeKind::Identifier
+              left_literal = Frontend.node_literal(left_node)
+              if left_literal && is_constant_name?(left_literal)
+                # Create constant node
+                assign_span = left_node.span.cover(@arena[value].span)
+                result = @arena.add_typed(ConstantNode.new(
+                  assign_span,
+                  left_literal,
+                  value
+                ))
+                debug("parse_op_assign: created ConstantNode, returning")
+                return result
+              end
             end
 
             # Create assignment node
@@ -5151,6 +5258,9 @@ module CrystalV2
           # Phase 103D: Keywords can be identifiers if followed by " : " (type annotation)
           # Example: property else : String, property when : Int32
           case current_token.kind
+          when Token::Kind::RBrace, Token::Kind::RParen, Token::Kind::RBracket
+            # Closing delimiters are never arguments
+            return PREFIX_ERROR
           when Token::Kind::End
             # 'end' always ends a block/structure, never an argument
             return PREFIX_ERROR unless next_comes_colon_space?
@@ -5182,7 +5292,7 @@ module CrystalV2
                Token::Kind::Question,  # ternary operator
                Token::Kind::Arrow,     # hash arrow =>
                # Comparison operators
-               Token::Kind::EqEq, Token::Kind::NotEq,
+               Token::Kind::EqEq, Token::Kind::EqEqEq, Token::Kind::NotEq,  # Phase 50: === case equality
                Token::Kind::Less, Token::Kind::Greater,
                Token::Kind::LessEq, Token::Kind::GreaterEq,
                Token::Kind::Spaceship,  # <=>
@@ -5190,7 +5300,12 @@ module CrystalV2
                Token::Kind::Pipe, Token::Kind::Caret, Token::Kind::Amp,
                Token::Kind::LShift, Token::Kind::RShift,
                Token::Kind::DotDot, Token::Kind::DotDotDot,
-               Token::Kind::Match, Token::Kind::NotMatch  # =~, !~
+               Token::Kind::Match, Token::Kind::NotMatch,  # =~, !~
+               Token::Kind::In,  # Phase 79: in operator
+               Token::Kind::NilCoalesce,  # Phase 81: ?? operator
+               # Phase 89: Wrapping arithmetic operators
+               Token::Kind::AmpPlus, Token::Kind::AmpMinus,
+               Token::Kind::AmpStar, Token::Kind::AmpStarStar
             return PREFIX_ERROR
           # Compound assignment operators - these mean assignment, not call
           when Token::Kind::PlusEq, Token::Kind::MinusEq, Token::Kind::StarEq,
@@ -5419,6 +5534,12 @@ module CrystalV2
                 left = parse_member_access(left)
                 next
               end
+            end
+
+            # Check for end tokens (following original parser logic)
+            if end_token?(token)
+              debug("parse_expression(#{precedence}): end token reached, breaking")
+              break
             end
 
             unless infix?(token)
@@ -7262,6 +7383,18 @@ module CrystalV2
           BINARY_PRECEDENCE.has_key?(token.kind)
         end
 
+        # Check if token is an end token (following original parser logic)
+        private def end_token?(token : Token) : Bool
+          case token.kind
+          when Token::Kind::RBrace, Token::Kind::RBracket, Token::Kind::RParen, Token::Kind::EOF
+            return true
+          when Token::Kind::End, Token::Kind::Else, Token::Kind::Elsif,
+               Token::Kind::When, Token::Kind::Rescue, Token::Kind::Ensure
+            return true
+          end
+          false
+        end
+
         private def precedence_for(token : Token) : Int32
           BINARY_PRECEDENCE[token.kind]? || 0
         end
@@ -7355,30 +7488,6 @@ module CrystalV2
             else
               return false
             end
-          end
-        end
-
-        private def consume_trim_marker?(marker : Char = '-')
-          token = current_token
-          # Check for trim marker
-          # "-" can be Minus token (Phase 18)
-          # "~" can be Tilde token (Phase 21)
-          is_trim = case marker
-          when '-'
-            token.kind == Token::Kind::Minus ||
-              (token.kind == Token::Kind::Operator && slice_eq?(token.slice, "-"))
-          when '~'
-            token.kind == Token::Kind::Tilde ||
-              (token.kind == Token::Kind::Operator && slice_eq?(token.slice, "~"))
-          else
-            token.kind == Token::Kind::Operator && slice_eq?(token.slice, marker.to_s)
-          end
-
-          if is_trim
-            advance
-            true
-          else
-            false
           end
         end
 
@@ -7535,7 +7644,6 @@ module CrystalV2
           # Phase 15/18: { is LBrace, % is Percent token
           expect_operator(Token::Kind::LBrace)
           expect_operator(Token::Kind::Percent)
-          trim_left = consume_trim_marker?
           skip_macro_whitespace
 
           keyword_token = current_token
@@ -7560,11 +7668,6 @@ module CrystalV2
           end
 
           skip_macro_whitespace
-          trim_right = false
-          if (operator_token?(current_token, "-") || operator_token?(current_token, "~")) && operator_token?(peek_token(1), "%")
-            advance
-            trim_right = true
-          end
 
           # Phase 15/18: % is Percent, } is RBrace
           expect_operator(Token::Kind::Percent)
@@ -7572,7 +7675,7 @@ module CrystalV2
           end_token = previous_token
 
           newline_escape = consume_macro_newline_escape?
-          skip_whitespace = trim_right || newline_escape
+          skip_whitespace = newline_escape
 
           kind = case keyword
             when "else"
@@ -7592,8 +7695,7 @@ module CrystalV2
             start_token.span
           end
 
-          piece = MacroPiece.control(kind, keyword, expr, trim_left, trim_right, iter_vars, iterable, control_span)
-          # store trim flags later if needed
+          piece = MacroPiece.control(kind, keyword, expr, false, false, iter_vars, iterable, control_span)
 
           effect = case keyword
             when "if", "unless", "for", "while", "comment"
@@ -8533,17 +8635,9 @@ module CrystalV2
           # Phase 15: { is LBrace token
           expect_operator(Token::Kind::LBrace)
           expect_operator(Token::Kind::LBrace)
-          left_trim = consume_trim_marker?('-') || consume_trim_marker?('~')
           skip_macro_whitespace
           expr = with_macro_terminator(:expression) { parse_expression(0) }
           skip_macro_whitespace
-
-          right_trim = false
-          if (operator_token?(current_token, "-") || operator_token?(current_token, "~")) && operator_token?(peek_token(1), "}")
-            advance
-            right_trim = true
-          end
-          advance if right_trim
 
           # Phase 15: } is RBrace token
           expect_operator(Token::Kind::RBrace)
@@ -8551,11 +8645,11 @@ module CrystalV2
           closing_span = previous_token.try(&.span)
 
           newline_escape = consume_macro_newline_escape?
-          skip_whitespace = right_trim || newline_escape
+          skip_whitespace = newline_escape
 
           macro_span = closing_span ? start_token.span.cover(closing_span) : start_token.span
           macro_expr_id = @arena.add_typed(MacroExpressionNode.new(macro_span, expr))
-          piece = MacroPiece.expression(macro_expr_id, left_trim, right_trim, macro_span)
+          piece = MacroPiece.expression(macro_expr_id, false, false, macro_span)
           {piece, skip_whitespace}
         end
 
