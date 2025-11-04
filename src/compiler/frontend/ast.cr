@@ -1318,10 +1318,12 @@ module CrystalV2
       struct FunNode
         getter span : Span
         getter name : Slice(UInt8)
+        getter real_name : Slice(UInt8)?  # Actual C function name (if different from name)
         getter params : Array(Parameter)?
         getter return_type : Slice(UInt8)?
+        getter varargs : Bool  # Whether function has ... for variadic args
 
-        def initialize(@span : Span, @name : Slice(UInt8), @params : Array(Parameter)?, @return_type : Slice(UInt8)?)
+        def initialize(@span : Span, @name : Slice(UInt8), @real_name : Slice(UInt8)?, @params : Array(Parameter)?, @return_type : Slice(UInt8)?, @varargs : Bool)
         end
       end
 

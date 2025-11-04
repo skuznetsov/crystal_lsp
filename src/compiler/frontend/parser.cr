@@ -1164,121 +1164,49 @@ module CrystalV2
             return PREFIX_ERROR
           end
           advance
+          skip_trivia
 
-          # Parse parameters (same as def)
-          params = parse_method_params
-          return PREFIX_ERROR if params.is_a?(ExprId)  # Phase 71: Handle error from default value parsing
+          # Check for alias: fun name = real_name
+          real_name_token : Token? = nil
+          if operator_token?(current_token, Token::Kind::Eq)
+            advance  # consume =
+            skip_trivia
+
+            # Parse real name (can be identifier or string literal)
+            real_name_token = current_token
+            case real_name_token.kind
+            when Token::Kind::Identifier
+              advance
+              skip_trivia
+            when Token::Kind::String
+              # String literal for real name (e.g., fun foo = "actual_name")
+              advance
+              skip_trivia
+            else
+              emit_unexpected(current_token)
+              return PREFIX_ERROR
+            end
+          end
+
+          # Phase 103K: Parse parameters with proc type support
+          params_result = parse_fun_params
+          return PREFIX_ERROR if params_result.is_a?(ExprId)
+          params, varargs = params_result
 
           # Parse optional return type annotation: : ReturnType
-          return_type = nil
+          # Phase 103K: Use parse_bare_proc_type for full type support
+          return_type : Slice(UInt8)? = nil
           skip_trivia
           if operator_token?(current_token, Token::Kind::Colon)
             advance  # consume ':'
             skip_trivia
 
-            # Parse return type - supports generic types like Box(T) and self
-            type_start_token = current_token
-            type_end_token = current_token
-
-            # Phase 103C: Allow 'self' as return type (pseudo-type for "this class")
-            if type_start_token.kind == Token::Kind::Identifier || type_start_token.kind == Token::Kind::Self
-              type_end_token = type_start_token
-              advance
-
-              # Week 1 Day 2: Check for generic type parameters: Box(T)
-              if operator_token?(current_token, Token::Kind::LParen)
-                type_end_token = current_token  # '('
-                advance  # consume '('
-                paren_depth = 1
-
-                # Parse until matching ')' - collect all non-whitespace tokens
-                while paren_depth > 0 && current_token.kind != Token::Kind::EOF
-                  # STOP at newline - type annotations are single-line
-                  break if current_token.kind == Token::Kind::Newline
-
-                  if operator_token?(current_token, Token::Kind::RParen)
-                    type_end_token = current_token  # Include ')'
-                    paren_depth -= 1
-                    advance  # consume ')'
-                    break if paren_depth == 0  # Found matching ')'
-                  elsif operator_token?(current_token, Token::Kind::LParen)
-                    type_end_token = current_token
-                    paren_depth += 1
-                    advance
-                  elsif current_token.kind != Token::Kind::Whitespace
-                    # Non-whitespace token inside parens
-                    type_end_token = current_token
-                    advance
-                  else
-                    # Skip whitespace without updating type_end_token
-                    advance
-                  end
-                end
-              end
-
-              # Phase 103E: Parse type suffixes (?, *, **, [])
-              # Save base type end position before collecting suffixes
-              base_type_end_token = type_end_token
-              suffix_tokens = [] of Slice(UInt8)
-
-              loop do
-                case current_token.kind
-                when Token::Kind::Question
-                  # Nilable type: Type?
-                  suffix_tokens << current_token.slice
-                  type_end_token = current_token
-                  advance
-                when Token::Kind::Star
-                  # Pointer type: Type*
-                  suffix_tokens << current_token.slice
-                  type_end_token = current_token
-                  advance
-                when Token::Kind::StarStar
-                  # Double pointer type: Type**
-                  suffix_tokens << current_token.slice
-                  type_end_token = current_token
-                  advance
-                when Token::Kind::LBracket
-                  # Static array: Type[N]
-                  suffix_tokens << current_token.slice
-                  advance
-                  # Collect tokens until matching ]
-                  bracket_depth = 1
-                  while bracket_depth > 0 && current_token.kind != Token::Kind::EOF
-                    if current_token.kind == Token::Kind::LBracket
-                      bracket_depth += 1
-                    elsif current_token.kind == Token::Kind::RBracket
-                      bracket_depth -= 1
-                    end
-                    suffix_tokens << current_token.slice
-                    type_end_token = current_token if bracket_depth == 0
-                    advance
-                  end
-                else
-                  break
-                end
-              end
-
-              # Build return type - with or without suffixes
-              if suffix_tokens.size > 0
-                # Has suffixes - build full type string
-                type_str = String.build do |io|
-                  # Write base type (from type_start_token to base_type_end_token)
-                  base_start = type_start_token.slice.to_unsafe
-                  base_end = base_type_end_token.slice.to_unsafe + base_type_end_token.slice.size
-                  io.write(Slice.new(base_start, base_end - base_start))
-                  # Write suffixes
-                  suffix_tokens.each { |s| io.write(s) }
-                end
-                return_type = @string_pool.intern(type_str.to_slice)
-              else
-                # No suffixes - zero-copy return type annotation using pointer arithmetic
-                start_ptr = type_start_token.slice.to_unsafe
-                end_ptr = type_end_token.slice.to_unsafe + type_end_token.slice.size
-                return_type = Slice.new(start_ptr, end_ptr - start_ptr)
-              end
-            else
-              emit_unexpected(type_start_token)
+            # Parse return type using parse_bare_proc_type
+            # This handles: Int32, Int -> Void, (Int, String) -> Bool, etc.
+            return_type = parse_bare_proc_type
+            if return_type.nil?
+              emit_unexpected(current_token)
+              return PREFIX_ERROR
             end
           end
 
@@ -1288,8 +1216,10 @@ module CrystalV2
             FunNode.new(
               fun_span,
               name_token.slice,
+              real_name_token.try(&.slice),  # real_name (nil if same as name)
               params,
-              return_type
+              return_type,
+              varargs
             )
           )
         end
@@ -8183,6 +8113,507 @@ module CrystalV2
           ))
 
           block_id
+        end
+
+        # Phase 103K: Parse fun parameters (supports proc types and varargs)
+        # Example: fun foo(x : Int, callback : Int -> Void, ...) : Bool
+        # Returns: {params, varargs_flag} or ExprId on error
+        private def parse_fun_params : {Array(Parameter), Bool} | ExprId
+          params = [] of Parameter
+          varargs = false
+          skip_trivia
+          return {params, varargs} unless operator_token?(current_token, Token::Kind::LParen)
+
+          advance  # consume (
+          @paren_depth += 1  # Track delimiter depth for multi-line support
+          skip_whitespace_and_optional_newlines  # Skip newlines inside parentheses
+
+          unless operator_token?(current_token, Token::Kind::RParen)
+            loop do
+              # Check for varargs: ...
+              if current_token.kind == Token::Kind::DotDotDot
+                varargs = true
+                advance
+                skip_whitespace_and_optional_newlines
+                # Varargs must be last parameter
+                break
+              end
+
+              param_start = current_token
+
+              # Parse parameter name (optional for top-level fun)
+              # Check if this is a named parameter (identifier : type) or unnamed (just type)
+              param_name : Slice(UInt8)?
+              param_name_span : Span?
+
+              if current_token.kind == Token::Kind::Identifier
+                # Lookahead to check if this identifier is followed by ':'
+                # If yes: named parameter (name : type)
+                # If no: unnamed parameter (just type - identifier is the type name)
+                saved_index = @index
+                advance
+                skip_whitespace_and_optional_newlines
+                has_colon = operator_token?(current_token, Token::Kind::Colon)
+                @index = saved_index  # Restore position
+
+                if has_colon
+                  # Named parameter: name : type
+                  param_name = current_token.slice
+                  param_name_span = current_token.span
+                  advance
+                  skip_whitespace_and_optional_newlines
+                  advance  # consume :
+                  skip_whitespace_and_optional_newlines
+                end
+                # If no colon, fall through to parse_bare_proc_type (unnamed parameter)
+              end
+
+              # Parse parameter type using parse_bare_proc_type
+              # This handles: Int32, Void* -> Void*, (Int, String) -> Bool, etc.
+              param_type = parse_bare_proc_type
+              if param_type.nil?
+                emit_unexpected(current_token)
+                @paren_depth -= 1
+                return PREFIX_ERROR
+              end
+
+              param_span = param_start.span.cover(previous_token.not_nil!.span)
+
+              params << Parameter.new(
+                param_name,
+                nil,           # no external name
+                param_type,    # type from parse_bare_proc_type
+                nil,           # no default value
+                param_span,
+                param_name_span,
+                nil,           # no external name span
+                nil,           # type span same as param_span for now
+                nil            # no default span
+              )
+
+              skip_whitespace_and_optional_newlines
+
+              if current_token.kind == Token::Kind::Comma
+                advance
+                skip_whitespace_and_optional_newlines
+              else
+                break
+              end
+            end
+          end
+
+          @paren_depth -= 1  # Exiting parentheses
+          expect_operator(Token::Kind::RParen)
+          {params, varargs}
+        end
+
+        # Phase 103K: Type parsing methods for fun declarations and type annotations
+        # These methods implement full type parsing including proc types, union types, generics, etc.
+
+        # Parse "bare" proc type (no wrapping parens required)
+        # Examples: Int32, Int32 -> Void, Int32, String -> Bool
+        # Returns type as zero-copy slice covering the full type expression
+        private def parse_bare_proc_type : Slice(UInt8)?
+          start_token = current_token
+
+          # Parse first type
+          first_type_start = current_token
+          type = parse_union_type_for_annotation
+          return nil if type.nil?
+
+          skip_trivia
+
+          # Check if this is a proc type (has -> or comma before ->)
+          unless current_token.kind == Token::Kind::ThinArrow ||
+                 (current_token.kind == Token::Kind::Comma && lookahead_for_arrow?)
+            # Simple type, not proc
+            return type
+          end
+
+          # This is a proc type - collect all input types
+          if current_token.kind == Token::Kind::Comma
+            # Multiple input types: Type1, Type2, ... -> ReturnType
+            loop do
+              advance  # consume comma
+              skip_trivia
+
+              next_type = parse_union_type_for_annotation
+              return nil if next_type.nil?
+
+              skip_trivia
+              break unless current_token.kind == Token::Kind::Comma
+            end
+          end
+
+          # Now parse -> ReturnType
+          unless current_token.kind == Token::Kind::ThinArrow
+            return nil
+          end
+
+          advance  # consume ->
+          skip_trivia
+
+          # Parse return type (optional - can be void)
+          # Check if there's a type after the arrow
+          has_return_type = case current_token.kind
+                            when Token::Kind::Identifier, Token::Kind::Self,
+                                 Token::Kind::Typeof, Token::Kind::LParen
+                              true
+                            else
+                              false
+                            end
+
+          if has_return_type
+            return_type = parse_union_type_for_annotation
+            # If we expected a type but couldn't parse it, error
+            return nil if return_type.nil?
+          end
+
+          # Build full proc type as zero-copy slice
+          start_ptr = start_token.slice.to_unsafe
+          end_token = previous_token.not_nil!
+          end_ptr = end_token.slice.to_unsafe + end_token.slice.size
+          Slice.new(start_ptr, end_ptr - start_ptr)
+        end
+
+        # Helper: lookahead to check if there's an arrow after commas
+        private def lookahead_for_arrow? : Bool
+          saved_index = @index
+
+          # Skip commas and types
+          loop do
+            break unless current_token.kind == Token::Kind::Comma
+            advance
+            skip_trivia
+
+            # Try to skip over a type
+            case current_token.kind
+            when Token::Kind::Identifier, Token::Kind::Self
+              advance
+              skip_trivia
+
+              # Skip type suffixes
+              while current_token.kind == Token::Kind::Star ||
+                    current_token.kind == Token::Kind::StarStar ||
+                    current_token.kind == Token::Kind::Question
+                advance
+                skip_trivia
+              end
+            else
+              @index = saved_index
+              return false
+            end
+          end
+
+          result = current_token.kind == Token::Kind::ThinArrow
+          @index = saved_index
+          result
+        end
+
+        # Parse union type: Type1 | Type2 | Type3
+        # Returns zero-copy slice covering the full union type
+        private def parse_union_type_for_annotation : Slice(UInt8)?
+          start_token = current_token
+
+          # Parse first type
+          type = parse_atomic_type_with_suffix_for_annotation
+          return nil if type.nil?
+
+          skip_trivia
+
+          # Check for union operator |
+          unless current_token.kind == Token::Kind::Pipe
+            return type
+          end
+
+          # Parse additional types in union
+          loop do
+            advance  # consume |
+            skip_trivia
+
+            next_type = parse_atomic_type_with_suffix_for_annotation
+            return nil if next_type.nil?
+
+            skip_trivia
+            break unless current_token.kind == Token::Kind::Pipe
+          end
+
+          # Build full union type as zero-copy slice
+          end_token = previous_token.not_nil!
+          start_ptr = start_token.slice.to_unsafe
+          end_ptr = end_token.slice.to_unsafe + end_token.slice.size
+          Slice.new(start_ptr, end_ptr - start_ptr)
+        end
+
+        # Parse atomic type with suffixes (?, *, **, [])
+        # Returns zero-copy slice
+        private def parse_atomic_type_with_suffix_for_annotation : Slice(UInt8)?
+          start_token = current_token
+
+          # Parse base atomic type
+          base_type = parse_atomic_type_for_annotation
+          return nil if base_type.nil?
+
+          # Parse type suffixes
+          loop do
+            case current_token.kind
+            when Token::Kind::Question
+              # Nilable: Type?
+              advance
+            when Token::Kind::Star
+              # Pointer: Type*
+              advance
+            when Token::Kind::StarStar
+              # Double pointer: Type**
+              advance
+            when Token::Kind::LBracket
+              # Static array: Type[N]
+              advance
+              # Skip contents until ]
+              bracket_depth = 1
+              while bracket_depth > 0 && current_token.kind != Token::Kind::EOF
+                if current_token.kind == Token::Kind::LBracket
+                  bracket_depth += 1
+                elsif current_token.kind == Token::Kind::RBracket
+                  bracket_depth -= 1
+                end
+                advance
+              end
+            else
+              break
+            end
+            skip_trivia
+          end
+
+          # Build full type with suffixes as zero-copy slice
+          end_token = previous_token.not_nil!
+          start_ptr = start_token.slice.to_unsafe
+          end_ptr = end_token.slice.to_unsafe + end_token.slice.size
+          Slice.new(start_ptr, end_ptr - start_ptr)
+        end
+
+        # Parse atomic (base) type
+        # Handles: identifiers, paths (A::B), generics (Box(T)), tuples, self, typeof, proc types with parens
+        # Returns zero-copy slice
+        private def parse_atomic_type_for_annotation : Slice(UInt8)?
+          start_token = current_token
+
+          case current_token.kind
+          when Token::Kind::Self
+            # self type
+            advance
+            skip_trivia
+            return start_token.slice
+
+          when Token::Kind::Typeof
+            # typeof(expr)
+            advance
+            skip_trivia
+            return nil unless current_token.kind == Token::Kind::LParen
+
+            advance  # consume (
+            paren_depth = 1
+            while paren_depth > 0 && current_token.kind != Token::Kind::EOF
+              if current_token.kind == Token::Kind::LParen
+                paren_depth += 1
+              elsif current_token.kind == Token::Kind::RParen
+                paren_depth -= 1
+              end
+              advance
+            end
+            skip_trivia
+
+            end_token = previous_token.not_nil!
+            start_ptr = start_token.slice.to_unsafe
+            end_ptr = end_token.slice.to_unsafe + end_token.slice.size
+            return Slice.new(start_ptr, end_ptr - start_ptr)
+
+          when Token::Kind::Identifier
+            # Type name, possibly with :: path and generics
+            advance
+            skip_trivia
+
+            # Handle :: scope resolution
+            while current_token.kind == Token::Kind::ColonColon
+              advance  # consume ::
+              skip_trivia
+              return nil unless current_token.kind == Token::Kind::Identifier
+              advance
+              skip_trivia
+            end
+
+            # Handle generic parameters: Type(A, B, C)
+            if current_token.kind == Token::Kind::LParen
+              advance  # consume (
+              paren_depth = 1
+
+              while paren_depth > 0 && current_token.kind != Token::Kind::EOF
+                if current_token.kind == Token::Kind::LParen
+                  paren_depth += 1
+                elsif current_token.kind == Token::Kind::RParen
+                  paren_depth -= 1
+                end
+                advance
+              end
+              skip_trivia
+            end
+
+            end_token = previous_token.not_nil!
+            start_ptr = start_token.slice.to_unsafe
+            end_ptr = end_token.slice.to_unsafe + end_token.slice.size
+            return Slice.new(start_ptr, end_ptr - start_ptr)
+
+          when Token::Kind::ColonColon
+            # Global path: ::Type
+            advance  # consume ::
+            skip_trivia
+            return nil unless current_token.kind == Token::Kind::Identifier
+
+            # Now parse as identifier with potential :: and generics
+            advance
+            skip_trivia
+
+            while current_token.kind == Token::Kind::ColonColon
+              advance
+              skip_trivia
+              return nil unless current_token.kind == Token::Kind::Identifier
+              advance
+              skip_trivia
+            end
+
+            if current_token.kind == Token::Kind::LParen
+              advance
+              paren_depth = 1
+              while paren_depth > 0 && current_token.kind != Token::Kind::EOF
+                if current_token.kind == Token::Kind::LParen
+                  paren_depth += 1
+                elsif current_token.kind == Token::Kind::RParen
+                  paren_depth -= 1
+                end
+                advance
+              end
+              skip_trivia
+            end
+
+            end_token = previous_token.not_nil!
+            start_ptr = start_token.slice.to_unsafe
+            end_ptr = end_token.slice.to_unsafe + end_token.slice.size
+            return Slice.new(start_ptr, end_ptr - start_ptr)
+
+          when Token::Kind::LBrace
+            # Tuple or named tuple: {A, B} or {name: A, age: B}
+            advance  # consume {
+            brace_depth = 1
+
+            while brace_depth > 0 && current_token.kind != Token::Kind::EOF
+              if current_token.kind == Token::Kind::LBrace
+                brace_depth += 1
+              elsif current_token.kind == Token::Kind::RBrace
+                brace_depth -= 1
+              end
+              advance
+            end
+            skip_trivia
+
+            end_token = previous_token.not_nil!
+            start_ptr = start_token.slice.to_unsafe
+            end_ptr = end_token.slice.to_unsafe + end_token.slice.size
+            return Slice.new(start_ptr, end_ptr - start_ptr)
+
+          when Token::Kind::ThinArrow
+            # Proc with no input types: -> ReturnType
+            advance  # consume ->
+            skip_trivia
+
+            # Parse return type
+            return_type = parse_union_type_for_annotation
+            return nil if return_type.nil?
+
+            end_token = previous_token.not_nil!
+            start_ptr = start_token.slice.to_unsafe
+            end_ptr = end_token.slice.to_unsafe + end_token.slice.size
+            return Slice.new(start_ptr, end_ptr - start_ptr)
+
+          when Token::Kind::LParen
+            # Parenthesized proc type: (A, B) -> C or (A) -> B or just (Type)
+            advance  # consume (
+            skip_trivia
+
+            # Parse first type
+            first_type = parse_union_type_for_annotation
+            return nil if first_type.nil?
+
+            skip_trivia
+
+            if current_token.kind == Token::Kind::RParen
+              # Single type in parens: (Type)
+              advance  # consume )
+              skip_trivia
+
+              # Check if this is proc type: (Type) -> ReturnType
+              if current_token.kind == Token::Kind::ThinArrow
+                advance  # consume ->
+                skip_trivia
+
+                return_type = parse_union_type_for_annotation
+                return nil if return_type.nil?
+              end
+
+              end_token = previous_token.not_nil!
+              start_ptr = start_token.slice.to_unsafe
+              end_ptr = end_token.slice.to_unsafe + end_token.slice.size
+              return Slice.new(start_ptr, end_ptr - start_ptr)
+
+            elsif current_token.kind == Token::Kind::Comma
+              # Multiple types: (A, B, ...) or (A, B, ... -> C)
+              loop do
+                advance  # consume comma
+                skip_trivia
+                break if current_token.kind == Token::Kind::RParen
+
+                next_type = parse_union_type_for_annotation
+                return nil if next_type.nil?
+
+                skip_trivia
+                break unless current_token.kind == Token::Kind::Comma
+              end
+
+              # Check for -> inside parens: (A, B, C -> D)
+              if current_token.kind == Token::Kind::ThinArrow
+                advance  # consume ->
+                skip_trivia
+
+                return_type = parse_union_type_for_annotation
+                return nil if return_type.nil?
+
+                skip_trivia
+              end
+
+              return nil unless current_token.kind == Token::Kind::RParen
+              advance  # consume )
+              skip_trivia
+
+              # Check for -> after parens: (A, B, C) -> D
+              if current_token.kind == Token::Kind::ThinArrow
+                advance  # consume ->
+                skip_trivia
+
+                return_type = parse_union_type_for_annotation
+                return nil if return_type.nil?
+              end
+
+              end_token = previous_token.not_nil!
+              start_ptr = start_token.slice.to_unsafe
+              end_ptr = end_token.slice.to_unsafe + end_token.slice.size
+              return Slice.new(start_ptr, end_ptr - start_ptr)
+            else
+              return nil
+            end
+
+          else
+            # Unknown type start
+            return nil
+          end
         end
 
         UNARY_OPERATORS = [Token::Kind::Plus, Token::Kind::Minus, Token::Kind::AmpPlus, Token::Kind::AmpMinus, Token::Kind::Not, Token::Kind::Tilde]
