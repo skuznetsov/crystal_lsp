@@ -259,10 +259,11 @@ module CrystalV2
 
           param = Frontend::Parameter.new(
             param_name_slice,
-            param_type_slice,
-            nil,  # No default value for setter parameter
-            spec.name_span,
-            spec.name_span
+            nil,              # external_name
+            param_type_slice, # type_annotation
+            nil,              # default_value
+            spec.name_span,   # span
+            spec.name_span    # name_span
           )
 
           # Create instance variable node: @name
