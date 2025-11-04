@@ -1331,13 +1331,22 @@ module CrystalV2
 
               # Parse parameter name (Identifier or InstanceVar for shorthand syntax)
               # Phase BLOCK_CAPTURE: For capture block (&), name is optional
+              # Phase 103J: For splat (*), name is optional (named-only separator)
               name_token = current_token
               param_name : Slice(UInt8)?
               param_name_span : Span?
               is_instance_var = false
 
+              # Phase 103J: Check for anonymous splat (named-only separator)
+              # Example: def foo(*, a : Int) - the * separates positional from named-only params
+              if is_splat && (current_token.kind == Token::Kind::Comma || operator_token?(current_token, Token::Kind::RParen))
+                # Anonymous splat separator: just '*' without name
+                param_name = nil
+                param_name_span = nil
+                param_start_span = prefix_token.not_nil!.span
+                # Don't advance - comma/rparen will be handled below
               # Phase BLOCK_CAPTURE: Check if this is anonymous block capture (&)
-              if is_block && (current_token.kind == Token::Kind::Comma || operator_token?(current_token, Token::Kind::RParen))
+              elsif is_block && (current_token.kind == Token::Kind::Comma || operator_token?(current_token, Token::Kind::RParen))
                 # Anonymous block capture: just '&' without name
                 param_name = nil
                 param_name_span = nil
