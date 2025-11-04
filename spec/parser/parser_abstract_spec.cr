@@ -211,8 +211,8 @@ describe "CrystalV2::Compiler::Frontend::Parser" do
       CrystalV2::Compiler::Frontend.node_def_is_abstract(method_node).should be_truthy
       params = CrystalV2::Compiler::Frontend.node_def_params(method_node).not_nil!
       params.size.should eq(2)
-      String.new(params[0].name).should eq("x")
-      String.new(params[1].name).should eq("y")
+      params[0].name.should eq("x".to_slice)
+      params[1].name.should eq("y".to_slice)
     end
   end
 end

@@ -17,12 +17,12 @@ describe "CrystalV2::Compiler::Frontend::Parser" do
       arena = program.arena
 
       annotation_node = arena[program.roots[0]]
-      CrystalV2::Compiler::Frontend.node_kind(annotation_node).should eq(CrystalV2::Compiler::Frontend::NodeKind::Annotation)
+      CrystalV2::Compiler::Frontend.node_kind(annotation_node).should eq(CrystalV2::Compiler::Frontend::NodeKind::AnnotationDef)
 
       # Check name
       name = CrystalV2::Compiler::Frontend.node_annotation_name(annotation_node)
       name.should_not be_nil
-      String.new(name.not_nil!).should eq("MyAnnotation")
+      name.not_nil!.should eq("MyAnnotation".to_slice)
     end
 
     it "parses annotation inside class" do
@@ -46,8 +46,8 @@ describe "CrystalV2::Compiler::Frontend::Parser" do
       class_body.size.should eq(1)
 
       annotation_node = arena[class_body[0]]
-      CrystalV2::Compiler::Frontend.node_kind(annotation_node).should eq(CrystalV2::Compiler::Frontend::NodeKind::Annotation)
-      String.new(CrystalV2::Compiler::Frontend.node_annotation_name(annotation_node).not_nil!).should eq("Internal")
+      CrystalV2::Compiler::Frontend.node_kind(annotation_node).should eq(CrystalV2::Compiler::Frontend::NodeKind::AnnotationDef)
+      CrystalV2::Compiler::Frontend.node_annotation_name(annotation_node).not_nil!.should eq("Internal".to_slice)
     end
 
     it "parses annotation inside module" do
@@ -71,8 +71,8 @@ describe "CrystalV2::Compiler::Frontend::Parser" do
       module_body.size.should eq(1)
 
       annotation_node = arena[module_body[0]]
-      CrystalV2::Compiler::Frontend.node_kind(annotation_node).should eq(CrystalV2::Compiler::Frontend::NodeKind::Annotation)
-      String.new(CrystalV2::Compiler::Frontend.node_annotation_name(annotation_node).not_nil!).should eq("Helper")
+      CrystalV2::Compiler::Frontend.node_kind(annotation_node).should eq(CrystalV2::Compiler::Frontend::NodeKind::AnnotationDef)
+      CrystalV2::Compiler::Frontend.node_annotation_name(annotation_node).not_nil!.should eq("Helper".to_slice)
     end
 
     it "parses multiple annotations" do
@@ -95,18 +95,18 @@ describe "CrystalV2::Compiler::Frontend::Parser" do
 
       # First annotation
       ann1 = arena[program.roots[0]]
-      CrystalV2::Compiler::Frontend.node_kind(ann1).should eq(CrystalV2::Compiler::Frontend::NodeKind::Annotation)
-      String.new(CrystalV2::Compiler::Frontend.node_annotation_name(ann1).not_nil!).should eq("First")
+      CrystalV2::Compiler::Frontend.node_kind(ann1).should eq(CrystalV2::Compiler::Frontend::NodeKind::AnnotationDef)
+      CrystalV2::Compiler::Frontend.node_annotation_name(ann1).not_nil!.should eq("First".to_slice)
 
       # Second annotation
       ann2 = arena[program.roots[1]]
-      CrystalV2::Compiler::Frontend.node_kind(ann2).should eq(CrystalV2::Compiler::Frontend::NodeKind::Annotation)
-      String.new(CrystalV2::Compiler::Frontend.node_annotation_name(ann2).not_nil!).should eq("Second")
+      CrystalV2::Compiler::Frontend.node_kind(ann2).should eq(CrystalV2::Compiler::Frontend::NodeKind::AnnotationDef)
+      CrystalV2::Compiler::Frontend.node_annotation_name(ann2).not_nil!.should eq("Second".to_slice)
 
       # Third annotation
       ann3 = arena[program.roots[2]]
-      CrystalV2::Compiler::Frontend.node_kind(ann3).should eq(CrystalV2::Compiler::Frontend::NodeKind::Annotation)
-      String.new(CrystalV2::Compiler::Frontend.node_annotation_name(ann3).not_nil!).should eq("Third")
+      CrystalV2::Compiler::Frontend.node_kind(ann3).should eq(CrystalV2::Compiler::Frontend::NodeKind::AnnotationDef)
+      CrystalV2::Compiler::Frontend.node_annotation_name(ann3).not_nil!.should eq("Third".to_slice)
     end
 
     it "parses annotation with body (Phase 92A: body skipped)" do
@@ -124,8 +124,8 @@ describe "CrystalV2::Compiler::Frontend::Parser" do
       arena = program.arena
 
       annotation_node = arena[program.roots[0]]
-      CrystalV2::Compiler::Frontend.node_kind(annotation_node).should eq(CrystalV2::Compiler::Frontend::NodeKind::Annotation)
-      String.new(CrystalV2::Compiler::Frontend.node_annotation_name(annotation_node).not_nil!).should eq("MyAnnotation")
+      CrystalV2::Compiler::Frontend.node_kind(annotation_node).should eq(CrystalV2::Compiler::Frontend::NodeKind::AnnotationDef)
+      CrystalV2::Compiler::Frontend.node_annotation_name(annotation_node).not_nil!.should eq("MyAnnotation".to_slice)
 
       # Phase 92A: Body is skipped/ignored for now
       # Body parsing will be Phase 92B if needed
@@ -148,7 +148,7 @@ describe "CrystalV2::Compiler::Frontend::Parser" do
 
       # First root is annotation
       ann = arena[program.roots[0]]
-      CrystalV2::Compiler::Frontend.node_kind(ann).should eq(CrystalV2::Compiler::Frontend::NodeKind::Annotation)
+      CrystalV2::Compiler::Frontend.node_kind(ann).should eq(CrystalV2::Compiler::Frontend::NodeKind::AnnotationDef)
 
       # Second root is class
       cls = arena[program.roots[1]]

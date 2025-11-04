@@ -220,14 +220,14 @@ module CrystalV2
       # - value_span: Just value for hover
       # - span: Full "name: value" span
       struct NamedArgument
-        getter name : String
+        getter name : Slice(UInt8)      # Zero-copy slice from source
         getter value : ExprId
         getter span : Span              # Full "name: value" span
         getter name_span : Span         # Just "name"
         getter value_span : Span        # Just value expression
 
         def initialize(
-          @name : String,
+          @name : Slice(UInt8),
           @value : ExprId,
           @span : Span,
           @name_span : Span,
@@ -391,7 +391,8 @@ module CrystalV2
         Union  # Phase 97: union definition (C bindings)
         Enum  # Phase 33: enum definition (enumerated type)
         Alias  # Phase 34: type alias
-        Annotation  # Phase 92: annotation definition
+        AnnotationDef  # Phase 92: annotation definition (annotation MyAnnotation ... end)
+        Annotation  # Phase 92: annotation use (@[Link], @[JSON::Field(...)])
         Constant  # Phase 35: constant declaration
         Lib  # Phase 38: lib (C bindings)
         Fun  # Phase 64: fun (C function declaration)
@@ -1101,11 +1102,33 @@ module CrystalV2
         end
       end
 
-      struct AnnotationNode
+      # AnnotationDefNode: Annotation definitions
+      # Example: annotation MyAnnotation ... end
+      # This is like a class definition for annotations
+      struct AnnotationDefNode
         getter span : Span
-        getter name : Slice(UInt8)
+        getter name : Slice(UInt8)    # Simple identifier (like ClassNode, StructNode)
 
         def initialize(@span : Span, @name : Slice(UInt8))
+        end
+      end
+
+      # AnnotationNode: Annotation expressions (uses)
+      # Examples: @[Link], @[JSON::Field(key: "test")]
+      # Annotations are standalone expressions that are linked to following declarations
+      # during semantic analysis
+      struct AnnotationNode
+        getter span : Span
+        getter name : ExprId          # Path or identifier (e.g., Link, JSON::Field)
+        getter args : Array(ExprId)   # Positional arguments
+        getter named_args : Array(NamedArgument)?  # Named arguments (e.g., key: "test")
+
+        def initialize(
+          @span : Span,
+          @name : ExprId,
+          @args : Array(ExprId) = [] of ExprId,
+          @named_args : Array(NamedArgument)? = nil
+        )
         end
       end
 
@@ -1442,7 +1465,7 @@ module CrystalV2
                         BlockNode | ProcLiteralNode | StringInterpolationNode | GroupingNode |
                         DefNode | ClassNode | ModuleNode | StructNode | UnionNode | EnumNode |
                         AliasNode | ConstantNode | IncludeNode | ExtendNode |
-                        GetterNode | SetterNode | PropertyNode | AnnotationNode |
+                        GetterNode | SetterNode | PropertyNode | AnnotationDefNode | AnnotationNode |
                         AsNode | AsQuestionNode | IsANode | RespondsToNode |
                         TypeofNode | SizeofNode | PointerofNode | UninitializedNode |
                         OffsetofNode | AlignofNode | InstanceAlignofNode |
@@ -1688,6 +1711,10 @@ module CrystalV2
 
       def self.node_kind(node : PropertyNode) : NodeKind
         NodeKind::Property
+      end
+
+      def self.node_kind(node : AnnotationDefNode) : NodeKind
+        NodeKind::AnnotationDef
       end
 
       def self.node_kind(node : AnnotationNode) : NodeKind
@@ -2283,6 +2310,10 @@ def self.node_alignof_args(node : TypedNode)
 end
 
 # annotation_name
+
+def self.node_annotation_name(node : AnnotationDefNode)
+  node.name
+end
 
 def self.node_annotation_name(node : AnnotationNode)
   node.name

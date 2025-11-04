@@ -105,7 +105,7 @@ module CrystalV2
                   parse_alias
                 when Token::Kind::Annotation
                   # Phase 92: annotation definition
-                  parse_annotation
+                  parse_annotation_def
                 when Token::Kind::Abstract
                   # Phase 36: abstract class/def
                   parse_abstract
@@ -620,6 +620,144 @@ module CrystalV2
           end
         end
 
+        # Parse annotation: @[Name] or @[Name(args)] or @[Name(key: value)]
+        # Examples: @[Link], @[JSON::Field(key: "test")]
+        # Returns: ExprId for AnnotationNode
+        #
+        # Note: Unlike original Crystal parser which has .op_at_lsquare? token,
+        # we have separate @ (Operator) and [ (LBracket) tokens
+        private def parse_annotation : ExprId
+          start_token = current_token
+
+          # Consume @ operator
+          unless current_token.kind == Token::Kind::Operator && slice_eq?(current_token.slice, "@")
+            emit_unexpected(current_token)
+            return PREFIX_ERROR
+          end
+          advance  # consume @
+
+          skip_trivia  # Skip whitespace between @ and [
+
+          # Expect [
+          unless current_token.kind == Token::Kind::LBracket
+            emit_unexpected(current_token)
+            return PREFIX_ERROR
+          end
+          advance  # consume [
+          @bracket_depth += 1
+
+          skip_whitespace_and_optional_newlines  # Allow newlines after [
+
+          # Parse annotation name (identifier or path like JSON::Field)
+          name_expr = parse_path_or_identifier
+
+          skip_whitespace_and_optional_newlines
+
+          # Parse optional arguments
+          args = [] of ExprId
+          named_args = nil
+
+          if current_token.kind == Token::Kind::LParen
+            advance  # consume (
+            @paren_depth += 1
+            skip_whitespace_and_optional_newlines
+
+            # Parse arguments until )
+            until current_token.kind == Token::Kind::RParen || current_token.kind == Token::Kind::EOF
+              # Check if this is a named argument (identifier followed by colon)
+              if current_token.kind == Token::Kind::Identifier
+                # Peek ahead to see if there's a colon
+                next_idx = @index + 1
+                if next_idx < @tokens.size && @tokens[next_idx].kind == Token::Kind::Colon
+                  # This is a named argument
+                  named_args ||= [] of NamedArgument
+
+                  # Get identifier name (zero-copy slice)
+                  name_token = current_token
+                  name_slice = name_token.slice
+                  name_span = name_token.span
+                  advance  # consume identifier
+
+                  # Consume colon
+                  advance  # consume ':'
+                  skip_whitespace_and_optional_newlines
+
+                  # Parse value expression
+                  value_expr = parse_expression(0)
+                  if value_expr.invalid?
+                    return PREFIX_ERROR
+                  end
+
+                  value_span = @arena[value_expr].span
+                  arg_span = name_span.cover(value_span)
+
+                  named_args << NamedArgument.new(name_slice, value_expr, arg_span, name_span, value_span)
+                else
+                  # Regular positional argument
+                  args << parse_expression(0)
+                end
+              else
+                # Regular positional argument
+                args << parse_expression(0)
+              end
+
+              skip_whitespace_and_optional_newlines
+
+              if current_token.kind == Token::Kind::Comma
+                advance  # consume comma
+                skip_whitespace_and_optional_newlines
+              elsif current_token.kind != Token::Kind::RParen
+                break  # Stop if not comma and not closing paren
+              end
+            end
+
+            unless current_token.kind == Token::Kind::RParen
+              emit_unexpected(current_token)
+              return PREFIX_ERROR
+            end
+            advance  # consume )
+            @paren_depth -= 1
+
+            skip_trivia  # Skip whitespace between ) and ]
+          end
+
+          # Expect ]
+          unless current_token.kind == Token::Kind::RBracket
+            emit_unexpected(current_token)
+            return PREFIX_ERROR
+          end
+          end_token = current_token
+          advance  # consume ]
+          @bracket_depth -= 1
+
+          # Create AnnotationNode
+          span = start_token.span.cover(end_token.span)
+          node = AnnotationNode.new(span, name_expr, args, named_args)
+          @arena.add(node)
+        end
+
+        # Helper: parse identifier or path (e.g., Link or JSON::Field)
+        private def parse_path_or_identifier : ExprId
+          unless current_token.kind == Token::Kind::Identifier
+            emit_unexpected(current_token)
+            return PREFIX_ERROR
+          end
+
+          start_token = current_token
+          name_slice = start_token.slice
+          span = start_token.span
+          node = IdentifierNode.new(span, name_slice)
+          left = @arena.add(node)
+          advance
+
+          # Handle :: for paths like JSON::Field or A::B::C
+          while current_token.kind == Token::Kind::ColonColon
+            left = parse_path(left)
+          end
+
+          left
+        end
+
         # Phase 103: Parse type annotation (supports namespaces, generics, unions, suffixes)
         # Examples: Int32, Token::Kind, Array(Int32), Int32 | String, Int32?
         # Returns: Slice from source covering the entire type (zero-copy!)
@@ -661,7 +799,11 @@ module CrystalV2
             when Token::Kind::Identifier, Token::Kind::Number,
                  Token::Kind::ColonColon, Token::Kind::Operator,
                  Token::Kind::ThinArrow, Token::Kind::Self,  # Phase 103C: self as type
-                 Token::Kind::Pipe  # Phase 103I: union types (String | Nil)
+                 Token::Kind::Pipe,  # Phase 103I: union types (String | Nil)
+                 Token::Kind::LParen, Token::Kind::RParen,  # Phase 30: generics like Array(Int32)
+                 Token::Kind::Comma,  # Phase 30: multiple generic params Hash(K, V)
+                 Token::Kind::LBracket, Token::Kind::RBracket,  # Static arrays Type[N]
+                 Token::Kind::Question  # Nullable types Type?
               true
             when Token::Kind::Whitespace
               # Skip whitespace but continue parsing
@@ -3859,39 +4001,56 @@ module CrystalV2
                 # It's an assignment or expression: @@var = value
                 expr = parse_statement
               end
-            elsif definition_start?
-              expr = case current_token.kind
-                when Token::Kind::Def
-                  parse_def
-                when Token::Kind::Fun
-                  parse_fun
-                when Token::Kind::Class
-                  parse_class
-                when Token::Kind::Module
-                  parse_module
-                when Token::Kind::Struct
-                  parse_struct
-                when Token::Kind::Union
-                  parse_union
-                when Token::Kind::Enum
-                  parse_enum
-                when Token::Kind::Alias
-                  parse_alias
-                when Token::Kind::Annotation
-                  # Phase 92: annotation definition
-                  parse_annotation
-                when Token::Kind::Abstract
-                  parse_abstract
-                when Token::Kind::Private
-                  parse_private
-                when Token::Kind::Protected
-                  parse_protected
-                when Token::Kind::Lib
-                  parse_lib
-                else
-                  # Phase 5B: Use parse_statement for assignments
-                  parse_statement
-                end
+            # Phase 30: Accessor macros (getter/setter/property)
+            elsif token.kind == Token::Kind::Identifier
+              # Check if it's getter, setter, or property
+              # Peek ahead to confirm - next token should be identifier or keyword identifier
+              next_token = peek_next_non_trivia
+              is_accessor = (next_token.kind == Token::Kind::Identifier || is_keyword_identifier?(next_token))
+
+              if is_accessor && slice_eq?(token.slice, "getter")
+                expr = parse_accessor_macro(:getter)
+              elsif is_accessor && slice_eq?(token.slice, "setter")
+                expr = parse_accessor_macro(:setter)
+              elsif is_accessor && slice_eq?(token.slice, "property")
+                expr = parse_accessor_macro(:property)
+              elsif definition_start?
+                expr = case current_token.kind
+                  when Token::Kind::Def
+                    parse_def
+                  when Token::Kind::Fun
+                    parse_fun
+                  when Token::Kind::Class
+                    parse_class
+                  when Token::Kind::Module
+                    parse_module
+                  when Token::Kind::Struct
+                    parse_struct
+                  when Token::Kind::Union
+                    parse_union
+                  when Token::Kind::Enum
+                    parse_enum
+                  when Token::Kind::Alias
+                    parse_alias
+                  when Token::Kind::Annotation
+                    # Phase 92: annotation definition
+                    parse_annotation_def
+                  when Token::Kind::Abstract
+                    parse_abstract
+                  when Token::Kind::Private
+                    parse_private
+                  when Token::Kind::Protected
+                    parse_protected
+                  when Token::Kind::Lib
+                    parse_lib
+                  else
+                    # Phase 5B: Use parse_statement for assignments
+                    parse_statement
+                  end
+              else
+                # Phase 5B: Regular statement
+                expr = parse_statement
+              end
             else
               # Phase 5B: Use parse_statement for assignments
               expr = parse_statement
@@ -4051,7 +4210,7 @@ module CrystalV2
                   parse_alias
                 when Token::Kind::Annotation
                   # Phase 92: annotation definition
-                  parse_annotation
+                  parse_annotation_def
                 when Token::Kind::Abstract
                   parse_abstract
                 when Token::Kind::Private
@@ -4257,7 +4416,8 @@ module CrystalV2
         # Phase 92: Parse annotation definition
         # Grammar: annotation Name [; body...] end
         # Phase 92A: Parser only - body ignored/empty
-        private def parse_annotation : ExprId
+        # Note: This is different from parse_annotation which parses annotation expressions like @[Link]
+        private def parse_annotation_def : ExprId
           annotation_token = current_token
           advance
           skip_trivia
@@ -4268,6 +4428,7 @@ module CrystalV2
             emit_unexpected(name_token)
             return PREFIX_ERROR
           end
+          name_slice = name_token.slice
           advance
           skip_trivia
           consume_newlines
@@ -4294,12 +4455,138 @@ module CrystalV2
 
           annotation_span = annotation_token.span.cover(end_token.span)
 
+          # For annotation definitions, we create AnnotationDefNode
+          # The body is not yet parsed (Phase 92B will handle that)
           @arena.add_typed(
-            AnnotationNode.new(
+            AnnotationDefNode.new(
               annotation_span,
-              name_token.slice
+              name_slice
             )
           )
+        end
+
+        # Phase 30: Parse accessor macro (getter/setter/property)
+        # Grammar: getter name [: Type] [= value] [, name2 [: Type2] [= value2]]
+        # Returns GetterNode/SetterNode/PropertyNode
+        private def parse_accessor_macro(kind : Symbol) : ExprId
+          start_token = current_token
+          advance  # consume getter/setter/property keyword
+          skip_trivia
+
+          specs = [] of AccessorSpec
+
+          # Parse comma-separated list of accessor specs
+          loop do
+            # Parse name (can be any identifier, including keywords!)
+            name_token = current_token
+            unless name_token.kind == Token::Kind::Identifier || is_keyword_identifier?(name_token)
+              emit_unexpected(name_token)
+              return PREFIX_ERROR
+            end
+
+            name_slice = name_token.slice
+            name_span = name_token.span
+            spec_start = name_span
+            advance
+            skip_trivia
+
+            # Parse optional type annotation
+            type_annotation : Slice(UInt8)? = nil
+            type_span : Span? = nil
+            if current_token.kind == Token::Kind::Colon
+              advance  # consume ':'
+              skip_trivia
+              type_start = current_token
+              type_annotation = parse_type_annotation
+              type_end = previous_token.not_nil!
+
+              # Phase 103E: parse_type_annotation now handles suffixes (?, *, **, [])
+              # automatically since Phase 30 added them to is_type_token list
+
+              type_span = type_start.span.cover(type_end.span)
+              skip_trivia
+            end
+
+            # Parse optional default value
+            default_value : ExprId? = nil
+            if current_token.kind == Token::Kind::Eq
+              advance  # consume '='
+              skip_whitespace_and_optional_newlines
+              default_value = parse_expression(0)
+            end
+
+            # Calculate span for this spec
+            spec_end = if default_value
+                         node_span(default_value)
+                       elsif type_span
+                         type_span.not_nil!
+                       else
+                         name_span
+                       end
+            spec_span = name_span.cover(spec_end)
+
+            specs << AccessorSpec.new(
+              name: name_slice,
+              type_annotation: type_annotation,
+              default_value: default_value,
+              span: spec_span,
+              name_span: name_span,
+              type_span: type_span
+            )
+
+            skip_trivia
+
+            # Check for comma to continue
+            if current_token.kind == Token::Kind::Comma
+              advance  # consume ','
+              skip_whitespace_and_optional_newlines
+            else
+              break
+            end
+          end
+
+          # Calculate overall span
+          last_spec_span = specs.last.span
+          overall_span = start_token.span.cover(last_spec_span)
+
+          # Create appropriate node based on kind
+          node = case kind
+                 when :getter
+                   GetterNode.new(overall_span, specs)
+                 when :setter
+                   SetterNode.new(overall_span, specs)
+                 when :property
+                   PropertyNode.new(overall_span, specs)
+                 else
+                   raise "Unknown accessor kind: #{kind}"
+                 end
+
+          @arena.add_typed(node)
+        end
+
+        # Helper: Check if token is a keyword that can be used as identifier in some contexts
+        private def is_keyword_identifier?(token : Token) : Bool
+          case token.kind
+          when Token::Kind::End, Token::Kind::Begin, Token::Kind::If, Token::Kind::Unless,
+               Token::Kind::While, Token::Kind::Until, Token::Kind::Case, Token::Kind::When,
+               Token::Kind::Select, Token::Kind::Else, Token::Kind::Elsif, Token::Kind::Rescue,
+               Token::Kind::Ensure, Token::Kind::Return, Token::Kind::Next, Token::Kind::Break,
+               Token::Kind::Yield, Token::Kind::With, Token::Kind::Abstract, Token::Kind::Private,
+               Token::Kind::Protected, Token::Kind::Include, Token::Kind::Extend,
+               Token::Kind::Macro, Token::Kind::Struct, Token::Kind::Enum, Token::Kind::Alias,
+               Token::Kind::Typeof, Token::Kind::As,
+               Token::Kind::Nil, Token::Kind::True, Token::Kind::False, Token::Kind::Class,
+               Token::Kind::Module, Token::Kind::Def, Token::Kind::Union, Token::Kind::Annotation,
+               Token::Kind::Lib, Token::Kind::Fun, Token::Kind::Out, Token::Kind::Require,
+               Token::Kind::Sizeof, Token::Kind::Pointerof, Token::Kind::Uninitialized,
+               Token::Kind::Offsetof, Token::Kind::Alignof, Token::Kind::InstanceAlignof,
+               Token::Kind::Loop, Token::Kind::Do, Token::Kind::For, Token::Kind::In,
+               Token::Kind::Of, Token::Kind::Self, Token::Kind::Super, Token::Kind::PreviousDef,
+               Token::Kind::Spawn
+            true
+          else
+            false
+          end
         end
 
         # Phase 31: Parse module definition
@@ -4349,7 +4636,7 @@ module CrystalV2
                   parse_alias
                 when Token::Kind::Annotation
                   # Phase 92: annotation definition
-                  parse_annotation
+                  parse_annotation_def
                 when Token::Kind::Abstract
                   parse_abstract
                 when Token::Kind::Private
@@ -4961,7 +5248,7 @@ module CrystalV2
                current_token.kind == Token::Kind::Colon
               # This is named argument!
               name_span = arg_node.span
-              name = String.new(Frontend.node_literal(arg_node).not_nil!)
+              name_slice = Frontend.node_literal(arg_node).not_nil!  # Zero-copy slice
 
               advance  # consume ':'
               consume_newlines  # Allow newlines after colon in named arguments
@@ -4976,7 +5263,7 @@ module CrystalV2
               value_span = @arena[value_expr].span
               arg_span = name_span.cover(value_span)
 
-              named_args << NamedArgument.new(name, value_expr, arg_span, name_span, value_span)
+              named_args << NamedArgument.new(name_slice, value_expr, arg_span, name_span, value_span)
               skip_trivia
             else
               # Positional argument
@@ -5455,12 +5742,16 @@ module CrystalV2
             parse_proc_literal
           when Token::Kind::Operator
             # Phase IMPLICIT_RECEIVER: Handle implicit receiver (.method)
+            # Phase ANNOTATIONS: Handle annotations (@[...])
             # Generic fallback for unhandled operators (e.g., macro operators)
             if slice_eq?(token.slice, ".")
               # Implicit receiver: .method → ImplicitObj.method
               parse_implicit_receiver_call(token)
             elsif slice_eq?(token.slice, "(")
               parse_grouping
+            elsif slice_eq?(token.slice, "@")
+              # Annotation: @[Name] or @[Name(args)]
+              parse_annotation
             else
               emit_unexpected(token)
               advance
@@ -6242,10 +6533,9 @@ module CrystalV2
                   return PREFIX_ERROR if value_expr.invalid?
                   value_span = @arena[value_expr].span
 
-                  # Create NamedArgument
-                  name = String.new(name_slice)
+                  # Create NamedArgument (zero-copy)
                   arg_span = name_span.cover(value_span)
-                  named_args << NamedArgument.new(name, value_expr, arg_span, name_span, value_span)
+                  named_args << NamedArgument.new(name_slice, value_expr, arg_span, name_span, value_span)
                   skip_whitespace_and_optional_newlines
                 else
                   # Parse first expression/identifier
@@ -6261,24 +6551,24 @@ module CrystalV2
                   if current_token.kind == Token::Kind::Colon
                     arg_node = @arena[arg_expr]
                     if Frontend.node_kind(arg_node) == Frontend::NodeKind::Identifier
-                      # Named argument: name: value
-                  name = String.new(Frontend.node_literal(arg_node).not_nil!)
-                  name_span = arg_node.span
+                      # Named argument: name: value (zero-copy)
+                      name_slice = Frontend.node_literal(arg_node).not_nil!
+                      name_span = arg_node.span
 
-                  advance  # consume ':'
-                  skip_whitespace_and_optional_newlines
+                      advance  # consume ':'
+                      skip_whitespace_and_optional_newlines
 
-                  # Parse value expression
-                  # Disable type declarations in value (may contain nested named tuples/args)
-                  @no_type_declaration += 1
-                  value_expr = parse_expression(0)
-                  @no_type_declaration -= 1
-                  return PREFIX_ERROR if value_expr.invalid?
-                  value_span = @arena[value_expr].span
+                      # Parse value expression
+                      # Disable type declarations in value (may contain nested named tuples/args)
+                      @no_type_declaration += 1
+                      value_expr = parse_expression(0)
+                      @no_type_declaration -= 1
+                      return PREFIX_ERROR if value_expr.invalid?
+                      value_span = @arena[value_expr].span
 
-                  # Create NamedArgument
-                  arg_span = name_span.cover(value_span)
-                  named_args << NamedArgument.new(name, value_expr, arg_span, name_span, value_span)
+                      # Create NamedArgument
+                      arg_span = name_span.cover(value_span)
+                      named_args << NamedArgument.new(name_slice, value_expr, arg_span, name_span, value_span)
                   skip_whitespace_and_optional_newlines
                 else
                   # Expression followed by colon is invalid
@@ -6463,9 +6753,9 @@ module CrystalV2
                   arg_node = @arena[arg]
                   if Frontend.node_kind(arg_node) == Frontend::NodeKind::Identifier &&
                      current_token.kind == Token::Kind::Colon
-                    # Named argument! (no whitespace before colon)
+                    # Named argument! (no whitespace before colon, zero-copy)
                     name_span = arg_node.span
-                    name = String.new(Frontend.node_literal(arg_node).not_nil!)
+                    name_slice = Frontend.node_literal(arg_node).not_nil!
 
                     advance  # consume ':'
                     skip_trivia
@@ -6479,7 +6769,7 @@ module CrystalV2
                     value_span = @arena[value_expr].span
                     arg_span = name_span.cover(value_span)
 
-                    named_args << NamedArgument.new(name, value_expr, arg_span, name_span, value_span)
+                    named_args << NamedArgument.new(name_slice, value_expr, arg_span, name_span, value_span)
                     skip_trivia
                   else
                     # Positional argument (including type-restricted assignments like "x : Type = value")
