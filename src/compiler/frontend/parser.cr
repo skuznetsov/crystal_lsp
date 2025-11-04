@@ -4219,11 +4219,15 @@ module CrystalV2
           advance
           skip_trivia
 
-          # Phase 103I: Parse full type annotation (supports union types, generics, etc.)
-          type_start_token = current_token
-          type_slice = parse_type_annotation
-          type_end_token = previous_token.not_nil!
+          # Phase 103K: Parse type using parse_bare_proc_type
+          # This handles all type syntax including proc types: A, B -> C
+          type_slice = parse_bare_proc_type
+          if type_slice.nil?
+            emit_unexpected(current_token)
+            return PREFIX_ERROR
+          end
 
+          type_end_token = previous_token.not_nil!
           alias_span = alias_token.span.cover(type_end_token.span)
 
           @arena.add_typed(
