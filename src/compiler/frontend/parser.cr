@@ -1332,9 +1332,12 @@ module CrystalV2
               # Parse parameter name (Identifier or InstanceVar for shorthand syntax)
               # Phase BLOCK_CAPTURE: For capture block (&), name is optional
               # Phase 103J: For splat (*), name is optional (named-only separator)
+              # Phase 103K: External parameter names (e.g., "to limit")
               name_token = current_token
               param_name : Slice(UInt8)?
               param_name_span : Span?
+              external_name : Slice(UInt8)? = nil
+              external_name_span : Span? = nil
               is_instance_var = false
 
               # Phase 103J: Check for anonymous splat (named-only separator)
@@ -1355,6 +1358,8 @@ module CrystalV2
               else
                 # Regular parameter or named block parameter
                 # Phase KEYWORD_PARAMS: Allow keywords as parameter names (e.g., 'of', 'as', 'in')
+                # Phase 103K: Check for external parameter names (e.g., "to limit")
+
                 case name_token.kind
                 when Token::Kind::Identifier, Token::Kind::InstanceVar
                   # Standard parameter names
@@ -1366,13 +1371,65 @@ module CrystalV2
                   break
                 end
 
-                # Track if this is instance variable shorthand: @value : T
-                is_instance_var = (name_token.kind == Token::Kind::InstanceVar)
-                param_name = name_token.slice  # TIER 2.1: Zero-copy slice (includes '@' for instance vars)
-                param_name_span = name_token.span
-                param_start_span = prefix_token ? prefix_token.span : name_token.span
-                advance
-                skip_trivia
+                # Phase 103K: External parameter name detection
+                # Pattern: "external internal" where external is identifier/keyword, internal is identifier
+                # Instance vars cannot have external names
+                if name_token.kind != Token::Kind::InstanceVar &&
+                   (name_token.kind == Token::Kind::Identifier ||
+                    name_token.kind == Token::Kind::Of || name_token.kind == Token::Kind::As ||
+                    name_token.kind == Token::Kind::In || name_token.kind == Token::Kind::Out ||
+                    name_token.kind == Token::Kind::Do || name_token.kind == Token::Kind::End ||
+                    name_token.kind == Token::Kind::If || name_token.kind == Token::Kind::Unless)
+
+                  # Save potential external name
+                  potential_external_name = name_token.slice
+                  potential_external_span = name_token.span
+                  advance
+
+                  # Check if there's space/newline followed by another identifier
+                  # Space indicates: "to limit" pattern
+                  # No space indicates: single name or type annotation coming
+                  if (current_token.kind == Token::Kind::Whitespace || current_token.kind == Token::Kind::Newline)
+                    # Skip whitespace
+                    saved_index = @index
+                    skip_trivia
+
+                    # Check if next token is identifier (internal name)
+                    if current_token.kind == Token::Kind::Identifier
+                      # External name pattern confirmed: "to limit"
+                      external_name = potential_external_name
+                      external_name_span = potential_external_span
+                      param_name = current_token.slice
+                      param_name_span = current_token.span
+                      param_start_span = prefix_token ? prefix_token.span : potential_external_span
+                      is_instance_var = false
+                      advance
+                      skip_trivia
+                    else
+                      # Not external name pattern, just regular parameter
+                      param_name = potential_external_name
+                      param_name_span = potential_external_span
+                      param_start_span = prefix_token ? prefix_token.span : potential_external_span
+                      is_instance_var = false
+                      # Already advanced and skipped trivia
+                    end
+                  else
+                    # No space after, just regular parameter name
+                    param_name = potential_external_name
+                    param_name_span = potential_external_span
+                    param_start_span = prefix_token ? prefix_token.span : potential_external_span
+                    is_instance_var = false
+                    skip_trivia
+                  end
+                else
+                  # Instance variable shorthand: @value : T (no external name possible)
+                  is_instance_var = (name_token.kind == Token::Kind::InstanceVar)
+                  param_name = name_token.slice  # TIER 2.1: Zero-copy slice (includes '@' for instance vars)
+                  param_name_span = name_token.span
+                  param_start_span = prefix_token ? prefix_token.span : name_token.span
+                  advance
+                  skip_trivia
+                end
               end
 
               # Parse optional type annotation: : Type
@@ -1689,10 +1746,12 @@ module CrystalV2
 
               params << Parameter.new(
                 param_name,
+                external_name,  # Phase 103K: External parameter name
                 type_annotation,
                 default_value,
                 param_span,
                 param_name_span,
+                external_name_span,  # Phase 103K: External name span
                 param_type_span,
                 default_value_span,
                 is_splat,
@@ -3400,10 +3459,12 @@ module CrystalV2
               # For now, block params only have name (no type annotation)
               params << Parameter.new(
                 param_name,
+                nil,              # Phase 103K: no external name for block params
                 nil,              # no type annotation
                 nil,              # no default value
                 param_span,       # full span = name span for now
                 param_name_span,  # name span
+                nil,              # Phase 103K: no external name span
                 nil,              # no type span
                 nil               # no default span
               )
@@ -3517,10 +3578,12 @@ module CrystalV2
 
                 params << Parameter.new(
                   param_name,
+                  nil,              # Phase 103K: no external name for fun params
                   type_annotation,
                   nil,              # no default value
                   param_span,
                   param_name_span,
+                  nil,              # Phase 103K: no external name span
                   type_span,
                   nil               # no default span
                 )

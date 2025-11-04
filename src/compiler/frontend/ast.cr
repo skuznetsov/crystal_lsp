@@ -153,10 +153,12 @@ module CrystalV2
       #   def foo(x : Int32)   → Parameter("x", "Int32", span, name_span, type_span)
       struct Parameter
         getter name : Slice(UInt8)?          # Phase BLOCK_CAPTURE: nil for anonymous block (&)
+        getter external_name : Slice(UInt8)?  # Phase 103K: External parameter name (e.g., "to" in "def foo(to limit)")
         getter type_annotation : Slice(UInt8)?
         getter default_value : ExprId?  # Phase 71: default parameter value
         getter span : Span              # Full "x : Int32 = 5" span
         getter name_span : Span?        # Phase BLOCK_CAPTURE: nil for anonymous block
+        getter external_name_span : Span?  # Phase 103K: External name span for navigation
         getter type_span : Span?        # Just "Int32" for hover (optional)
         getter default_span : Span?     # Phase 71: Just default value span
         getter is_splat : Bool          # Phase 68: *args (single splat)
@@ -166,10 +168,12 @@ module CrystalV2
 
         def initialize(
           @name : Slice(UInt8)?,       # Phase BLOCK_CAPTURE: optional for anonymous block
+          @external_name : Slice(UInt8)? = nil,  # Phase 103K: External parameter name
           @type_annotation : Slice(UInt8)? = nil,
           @default_value : ExprId? = nil,
           @span : Span = Span.new(0, 0, 0, 0, 0, 0),
           @name_span : Span? = nil,    # Phase BLOCK_CAPTURE: optional
+          @external_name_span : Span? = nil,  # Phase 103K: External name span
           @type_span : Span? = nil,
           @default_span : Span? = nil,
           @is_splat : Bool = false,
