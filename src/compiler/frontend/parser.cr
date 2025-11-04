@@ -7992,9 +7992,30 @@ module CrystalV2
               ))
             end
 
+            # Phase 103J: Parse method chains: &.value.close
+            # After initial method, continue parsing additional .method calls
+            skip_trivia
+            while current_token.kind == Token::Kind::Operator
+              advance  # consume '.'
+              skip_trivia
+
+              # Parse next method name
+              next_method_name = current_token.slice
+              next_method_span = current_token.span
+              advance
+
+              # Create chained MemberAccess with previous call_expr as receiver
+              chain_span = @arena[call_expr].span.cover(next_method_span)
+              call_expr = @arena.add_typed(MemberAccessNode.new(
+                chain_span,
+                call_expr,
+                next_method_name
+              ))
+              skip_trivia
+            end
+
             # Phase 101: Check for trailing do...end or {...} block (Amp case)
             # This handles: &.each_value do |x| ... end
-            skip_trivia
             if current_token.kind == Token::Kind::Do || current_token.kind == Token::Kind::LBrace
               trailing_block = parse_block
               return PREFIX_ERROR if trailing_block.invalid?
@@ -8033,9 +8054,30 @@ module CrystalV2
               ))
             end
 
+            # Phase 103J: Parse method chains: &.value.close
+            # After initial method, continue parsing additional .method calls
+            skip_trivia
+            while current_token.kind == Token::Kind::Operator
+              advance  # consume '.'
+              skip_trivia
+
+              # Parse next method name
+              next_method_name = current_token.slice
+              next_method_span = current_token.span
+              advance
+
+              # Create chained MemberAccess with previous call_expr as receiver
+              chain_span = @arena[call_expr].span.cover(next_method_span)
+              call_expr = @arena.add_typed(MemberAccessNode.new(
+                chain_span,
+                call_expr,
+                next_method_name
+              ))
+              skip_trivia
+            end
+
             # Phase 101: Check for trailing do...end or {...} block (AmpDot case)
             # This handles: &.each_value do |x| ... end
-            skip_trivia
             if current_token.kind == Token::Kind::Do || current_token.kind == Token::Kind::LBrace
               trailing_block = parse_block
               return PREFIX_ERROR if trailing_block.invalid?
