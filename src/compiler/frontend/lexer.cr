@@ -26,8 +26,13 @@ module CrystalV2
           end
         end
 
-        def each_token(&block : Token ->)
+        # Iterate all tokens. When skip_trivia is true, omits Whitespace and Comment tokens
+        # but still yields Newline (needed by the parser for statement boundaries).
+        def each_token(*, skip_trivia : Bool = false, &block : Token ->)
           while token = next_token
+            if skip_trivia && (token.kind == Token::Kind::Whitespace || token.kind == Token::Kind::Comment)
+              next
+            end
             block.call token
             break if token.kind == Token::Kind::EOF
           end

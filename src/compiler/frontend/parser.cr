@@ -27,7 +27,9 @@ module CrystalV2
 
         def initialize(lexer : Lexer)
           @tokens = [] of Token
-          lexer.each_token { |token| @tokens << token }
+          # Parser: skip trivia (Whitespace, Comment) but keep Newline for statement boundaries.
+          keep_trivia = ENV["CRYSTAL_V2_PARSER_KEEP_TRIVIA"]? != nil
+          lexer.each_token(skip_trivia: !keep_trivia) { |token| @tokens << token }
           @index = 0
           @arena = AstArena.new
           @diagnostics = [] of Diagnostic
@@ -48,7 +50,8 @@ module CrystalV2
         # Used by macro expander to add parsed nodes to existing arena
         def initialize(lexer : Lexer, @arena : AstArena)
           @tokens = [] of Token
-          lexer.each_token { |token| @tokens << token }
+          keep_trivia = ENV["CRYSTAL_V2_PARSER_KEEP_TRIVIA"]? != nil
+          lexer.each_token(skip_trivia: !keep_trivia) { |token| @tokens << token }
           @index = 0
           @diagnostics = [] of Diagnostic
           @macro_terminator = nil
