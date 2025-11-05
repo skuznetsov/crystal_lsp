@@ -68,7 +68,8 @@ module CrystalV2
         end
 
         def parse_program : Program
-          roots = [] of ExprId
+          # Preallocate a modest capacity to reduce growth during parse
+          roots = Array(ExprId).new(64)
           while current_token.kind != Token::Kind::EOF
             skip_statement_end
             break if current_token.kind == Token::Kind::EOF
@@ -680,7 +681,7 @@ module CrystalV2
           skip_whitespace_and_optional_newlines
 
           # Parse optional arguments
-          args = [] of ExprId
+          args = Array(ExprId).new(4)
           named_args = nil
 
           if current_token.kind == Token::Kind::LParen
@@ -696,7 +697,7 @@ module CrystalV2
                 next_idx = @index + 1
                 if next_idx < @tokens.size && @tokens[next_idx].kind == Token::Kind::Colon
                   # This is a named argument
-                  named_args ||= [] of NamedArgument
+                  named_args ||= Array(NamedArgument).new(2)
 
                   # Get identifier name (zero-copy slice)
                   name_token = current_token
@@ -1292,7 +1293,7 @@ module CrystalV2
           # Phase 36: Abstract methods have no body
           body_ids = nil
           if !is_abstract
-            actual_body = [] of ExprId
+            actual_body = Array(ExprId).new(4)
             loop do
               skip_trivia
               token = current_token
@@ -1413,7 +1414,7 @@ module CrystalV2
         end
 
         private def parse_method_params
-          params = [] of Parameter
+          params = Array(Parameter).new(2)
           skip_trivia
           return params unless operator_token?(current_token, Token::Kind::LParen)
 
@@ -1925,7 +1926,7 @@ module CrystalV2
           consume_newlines
 
           # Parse then body
-          then_body = [] of ExprId
+          then_body = Array(ExprId).new(2)
           loop do
             skip_trivia
             token = current_token
@@ -1962,7 +1963,7 @@ module CrystalV2
             consume_newlines
 
             # Parse elsif body
-            elsif_body = [] of ExprId
+            elsif_body = Array(ExprId).new(2)
             loop do
               skip_trivia
               token = current_token
@@ -1992,7 +1993,7 @@ module CrystalV2
             advance
             consume_newlines
 
-            else_body = [] of ExprId
+            else_body = Array(ExprId).new(2)
             loop do
               skip_trivia
               token = current_token
@@ -2052,7 +2053,7 @@ module CrystalV2
           consume_newlines
 
           # Parse then body (executed when condition is false)
-          then_body = [] of ExprId
+          then_body = Array(ExprId).new(2)
           loop do
             skip_trivia
             token = current_token
@@ -2071,7 +2072,7 @@ module CrystalV2
             advance
             consume_newlines
 
-            else_body = [] of ExprId
+            else_body = Array(ExprId).new(2)
             loop do
               skip_trivia
               token = current_token
@@ -2152,7 +2153,7 @@ module CrystalV2
 
             # Parse when conditions (comma-separated)
             # Phase 103: Multi-line when clauses - allow newlines after commas
-            conditions = [] of ExprId
+            conditions = Array(ExprId).new(2)
             loop do
               cond = parse_expression(0)
               return PREFIX_ERROR if cond.invalid?
@@ -2174,7 +2175,7 @@ module CrystalV2
             consume_newlines
 
             # Parse when body
-            when_body = [] of ExprId
+            when_body = Array(ExprId).new(2)
             loop do
               skip_trivia
               token = current_token
@@ -2212,7 +2213,7 @@ module CrystalV2
 
               # Parse in pattern (same as when condition for parser)
               # Type checker will handle pattern matching semantics
-              patterns = [] of ExprId
+              patterns = Array(ExprId).new(2)
               loop do
                 pattern = parse_expression(0)
                 return PREFIX_ERROR if pattern.invalid?
@@ -2234,7 +2235,7 @@ module CrystalV2
               consume_newlines
 
               # Parse in body
-              in_body = [] of ExprId
+              in_body = Array(ExprId).new(2)
               loop do
                 skip_trivia
                 token = current_token
@@ -2265,7 +2266,7 @@ module CrystalV2
             advance
             consume_newlines
 
-            else_body = [] of ExprId
+            else_body = Array(ExprId).new(2)
             loop do
               skip_trivia
               token = current_token
@@ -2335,7 +2336,7 @@ module CrystalV2
             consume_newlines
 
             # Parse when body
-            when_body = [] of ExprId
+            when_body = Array(ExprId).new(2)
             loop do
               skip_trivia
               token = current_token
@@ -2364,7 +2365,7 @@ module CrystalV2
             advance
             consume_newlines
 
-            else_body = [] of ExprId
+            else_body = Array(ExprId).new(2)
             loop do
               skip_trivia
               token = current_token
@@ -2418,7 +2419,7 @@ module CrystalV2
           consume_newlines
 
           # Parse body
-          body_ids = [] of ExprId
+          body_ids = Array(ExprId).new(4)
           loop do
             skip_trivia
             token = current_token
@@ -2465,7 +2466,7 @@ module CrystalV2
           consume_newlines
 
           # Parse body
-          body_ids = [] of ExprId
+          body_ids = Array(ExprId).new(4)
           loop do
             skip_trivia
             token = current_token
@@ -2511,7 +2512,7 @@ module CrystalV2
             consume_newlines
 
             # Parse body
-            body_ids = [] of ExprId
+            body_ids = Array(ExprId).new(4)
             loop do
               skip_trivia
               token = current_token
@@ -2581,7 +2582,7 @@ module CrystalV2
           consume_newlines
 
           # Parse body
-          body_ids = [] of ExprId
+          body_ids = Array(ExprId).new(4)
           loop do
             skip_trivia
             token = current_token
@@ -2649,7 +2650,7 @@ module CrystalV2
           consume_newlines
 
           # Parse body
-          body_ids = [] of ExprId
+          body_ids = Array(ExprId).new(4)
           loop do
             skip_trivia
             token = current_token
@@ -2690,7 +2691,7 @@ module CrystalV2
           consume_newlines
 
           # Parse main body
-          body_ids = [] of ExprId
+          body_ids = Array(ExprId).new(4)
           loop do
             skip_trivia
             token = current_token
@@ -2741,7 +2742,7 @@ module CrystalV2
             consume_newlines
 
             # Parse rescue body
-            rescue_body = [] of ExprId
+            rescue_body = Array(ExprId).new(2)
             loop do
               skip_trivia
               token = current_token
@@ -2763,7 +2764,7 @@ module CrystalV2
             advance  # consume 'ensure'
             consume_newlines
 
-            ensure_body = [] of ExprId
+            ensure_body = Array(ExprId).new(2)
             loop do
               skip_trivia
               token = current_token
@@ -2875,7 +2876,7 @@ module CrystalV2
           consume_newlines
 
           # Parse body
-          body_ids = [] of ExprId
+          body_ids = Array(ExprId).new(4)
           loop do
             skip_trivia
             token = current_token
@@ -3037,7 +3038,7 @@ module CrystalV2
             @arena.add_typed(YieldNode.new(yield_token.span, nil))
           else
             # Yield with args - parse comma-separated expressions
-            args = [] of ExprId
+            args = Array(ExprId).new(2)
             loop do
               arg = parse_expression(0)
               return PREFIX_ERROR if arg.invalid?
@@ -3071,7 +3072,7 @@ module CrystalV2
             advance  # consume (
             skip_trivia
 
-            args = [] of ExprId
+            args = Array(ExprId).new(2)
 
             # Check for empty parens: super()
             if current_token.kind == Token::Kind::RParen
@@ -3140,7 +3141,7 @@ module CrystalV2
             advance  # consume (
             skip_trivia
 
-            args = [] of ExprId
+            args = Array(ExprId).new(2)
 
             # Check for empty parens: previous_def()
             if current_token.kind == Token::Kind::RParen
@@ -3210,7 +3211,7 @@ module CrystalV2
           advance  # consume (
           skip_trivia
 
-          args = [] of ExprId
+          args = Array(ExprId).new(2)
 
           # Parse at least one argument
           loop do
@@ -3256,7 +3257,7 @@ module CrystalV2
           advance  # consume (
           skip_trivia
 
-          args = [] of ExprId
+          args = Array(ExprId).new(2)
 
           # Parse at least one argument
           loop do
@@ -3302,7 +3303,7 @@ module CrystalV2
           advance  # consume (
           skip_trivia
 
-          args = [] of ExprId
+          args = Array(ExprId).new(2)
 
           # Parse at least one argument
           loop do
@@ -3436,7 +3437,7 @@ module CrystalV2
           advance  # consume (
           skip_trivia
 
-          args = [] of ExprId
+          args = Array(ExprId).new(2)
 
           # Parse at least one argument
           loop do
@@ -3594,7 +3595,7 @@ module CrystalV2
           skip_trivia
 
           # Parse optional block parameters: |x, y|
-          params = [] of Parameter
+          params = Array(Parameter).new(2)
           if current_token.kind == Token::Kind::Pipe
             advance  # consume opening |
             skip_trivia
@@ -3644,7 +3645,7 @@ module CrystalV2
           end
 
           # Parse block body
-          body = [] of ExprId
+          body = Array(ExprId).new(4)
           loop do
             skip_trivia
 
@@ -3692,7 +3693,7 @@ module CrystalV2
           skip_trivia
 
           # Parse optional parameters: (x : Type, y : Type)
-          params = [] of Parameter
+          params = Array(Parameter).new(2)
           return_type : Slice(UInt8)? = nil
 
           if current_token.kind == Token::Kind::LParen
@@ -3790,7 +3791,7 @@ module CrystalV2
 
           # Parse proc body - following original parser's parse_expressions pattern
           # Use parse_statement (equivalent to parse_multi_assign) to handle assignments
-          body = [] of ExprId
+          body = Array(ExprId).new(4)
 
           # Check for empty body
           if (is_brace_form && current_token.kind == Token::Kind::RBrace) ||
@@ -3868,7 +3869,7 @@ module CrystalV2
               CallNode.new(
                 call_span,
                 call_expr,
-                [] of ExprId,
+                Array(ExprId).new(0),
                 block_id
               )
             )
@@ -3896,7 +3897,7 @@ module CrystalV2
               CallNode.new(
                 call_span,
                 call_expr,
-                [] of ExprId,
+                Array(ExprId).new(0),
                 block_id
               )
             )
@@ -3944,7 +3945,7 @@ module CrystalV2
                 condition,
                 [stmt],
                 nil,
-                [] of ExprId
+                Array(ExprId).new(0)
               )
             )
           end
@@ -3968,7 +3969,7 @@ module CrystalV2
                 unless_span,
                 condition,
                 [stmt],
-                [] of ExprId
+                Array(ExprId).new(0)
               )
             )
           end
@@ -4057,7 +4058,7 @@ module CrystalV2
 
           consume_newlines
 
-          body_ids = [] of ExprId
+          body_ids = Array(ExprId).new(4)
           loop do
             skip_trivia
             token = current_token
@@ -4273,7 +4274,7 @@ module CrystalV2
 
           consume_newlines
 
-          body_ids = [] of ExprId
+          body_ids = Array(ExprId).new(4)
           loop do
             skip_trivia
             token = current_token
@@ -4372,7 +4373,7 @@ module CrystalV2
 
           # Phase 103G: Parse enum members and methods
           members = [] of EnumMember
-          method_bodies = [] of ExprId  # Store method definitions
+          method_bodies = Array(ExprId).new(4)  # Store method definitions
 
           loop do
             skip_trivia
@@ -4699,7 +4700,7 @@ module CrystalV2
 
           consume_newlines
 
-          body_ids = [] of ExprId
+          body_ids = Array(ExprId).new(4)
           loop do
             skip_trivia
             token = current_token
@@ -4946,7 +4947,7 @@ module CrystalV2
         private def parse_macro_body
           @macro_mode += 1
           begin
-            pieces = [] of MacroPiece
+            pieces = Array(MacroPiece).new(8)
             buffer = IO::Memory.new
             buffer_start_token : Token? = nil
             control_depth = 0
@@ -5353,8 +5354,8 @@ module CrystalV2
           @parsing_call_args += 1
 
           # Parse arguments separated by commas
-          args = [] of ExprId
-          named_args = [] of NamedArgument
+          args = Array(ExprId).new(2)
+          named_args = Array(NamedArgument).new(2)
 
           loop do
             # Check if we're at a block instead of arguments
@@ -5969,7 +5970,7 @@ module CrystalV2
           @bracket_depth += 1  # Phase 103: entering brackets
           skip_whitespace_and_optional_newlines
 
-          elements = [] of ExprId
+          elements = Array(ExprId).new(4)
           of_type_expr : ExprId? = nil
 
           # Check for closing bracket (empty array)
@@ -6611,8 +6612,8 @@ module CrystalV2
           @paren_depth += 1  # Phase 103: entering parentheses
           skip_whitespace_and_optional_newlines
 
-          args = [] of ExprId
-          named_args = [] of NamedArgument
+          args = Array(ExprId).new(2)
+          named_args = Array(NamedArgument).new(2)
 
           # Empty call: foo()
           unless current_token.kind == Token::Kind::RParen
@@ -6773,7 +6774,7 @@ module CrystalV2
           lbracket = current_token
           advance
           @bracket_depth += 1  # Phase 103: entering brackets
-          indexes = [] of ExprId
+          indexes = Array(ExprId).new(1)
           skip_whitespace_and_optional_newlines
           unless current_token.kind == Token::Kind::RBracket
             loop do
@@ -6920,8 +6921,8 @@ module CrystalV2
                 # Try to parse arguments
                 @parsing_call_args += 1
 
-                args = [] of ExprId
-                named_args = [] of NamedArgument
+                args = Array(ExprId).new(2)
+                named_args = Array(NamedArgument).new(2)
 
                 loop do
                   # Parse one argument
@@ -7315,7 +7316,7 @@ module CrystalV2
           skip_trivia
 
           # Parse type arguments (comma-separated identifiers)
-          type_args = [] of ExprId
+          type_args = Array(ExprId).new(2)
 
           unless current_token.kind == Token::Kind::RParen
             loop do
@@ -8556,7 +8557,7 @@ module CrystalV2
         # Full implementation would properly parse expressions and text
         private def parse_macro_body_until_branch : ExprId
           start_span = current_token.span
-          pieces = [] of MacroPiece
+          pieces = Array(MacroPiece).new(8)
           depth = 0
 
           # Skip tokens until we hit {% keyword at depth 0
@@ -8929,7 +8930,7 @@ module CrystalV2
         # Example: fun foo(x : Int, callback : Int -> Void, ...) : Bool
         # Returns: {params, varargs_flag} or ExprId on error
         private def parse_fun_params : {Array(Parameter), Bool} | ExprId
-          params = [] of Parameter
+          params = Array(Parameter).new(2)
           varargs = false
           skip_trivia
           return {params, varargs} unless operator_token?(current_token, Token::Kind::LParen)
