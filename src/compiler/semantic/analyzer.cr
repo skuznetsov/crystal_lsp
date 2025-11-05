@@ -18,8 +18,8 @@ module CrystalV2
         getter name_resolver_diagnostics : Array(Frontend::Diagnostic)
         getter type_inference_diagnostics : Array(Diagnostic)
 
-        def initialize(@program : Program)
-          @global_context = Context.new(SymbolTable.new)
+        def initialize(@program : Program, context : Context? = nil)
+          @global_context = context || Context.new(SymbolTable.new)
           @semantic_diagnostics = [] of Diagnostic
           @name_resolver_diagnostics = [] of Frontend::Diagnostic
           @type_inference_diagnostics = [] of Diagnostic

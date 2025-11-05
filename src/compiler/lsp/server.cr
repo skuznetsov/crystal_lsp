@@ -28,9 +28,23 @@ module CrystalV2
         end
       end
 
+      struct PreludeState
+        getter path : String
+        getter program : Frontend::Program
+        getter symbol_table : Semantic::SymbolTable
+        getter diagnostics : Array(Diagnostic)
+        getter stub : Bool
+
+        def initialize(@path : String, @program : Frontend::Program, @symbol_table : Semantic::SymbolTable, @diagnostics : Array(Diagnostic), @stub : Bool)
+        end
+      end
+
       # Minimal LSP Server implementation
       # Handles initialize, didOpen, publishDiagnostics, and hover
       class Server
+        PRELUDE_PATH = File.expand_path("../../prelude.cr", __DIR__)
+        PRELUDE_STUB_PATH = File.expand_path("prelude_stub.cr", __DIR__)
+
         # Security constants - prevent DoS attacks and resource exhaustion
         # These limits balance security with practical usability for large projects
         MAX_RENAME_OCCURRENCES = 10000   # Maximum number of edits in single rename operation
@@ -41,9 +55,14 @@ module CrystalV2
         @output : IO
         @documents : Hash(String, DocumentState)
         @initialized : Bool = false
+        @prelude_state : PreludeState?
+        @prelude_mtime : Time?
+        @prelude_real_mtime : Time?
 
         def initialize(@input = STDIN, @output = STDOUT)
           @documents = {} of String => DocumentState
+          @prelude_real_mtime = nil
+          load_prelude
         end
 
         # Main server loop
@@ -166,7 +185,7 @@ module CrystalV2
           when "textDocument/didOpen"
             handle_did_open(params) if params
           when "textDocument/didChange"
-            # TODO: Handle document changes
+            handle_did_change(params) if params
           when "textDocument/didClose"
             handle_did_close(params) if params
           when "exit"
@@ -218,7 +237,10 @@ module CrystalV2
         # Analyze document and return diagnostics, program, type context, identifier symbols, and symbol table
         private def analyze_document(source : String) : {Array(Diagnostic), Frontend::Program, Semantic::TypeContext?, Hash(Frontend::ExprId, Semantic::Symbol)?, Semantic::SymbolTable?}
           debug("Analyzing document: #{source.lines.size} lines, #{source.size} bytes")
+          ensure_prelude_loaded
+
           diagnostics = [] of Diagnostic
+          using_stub = @prelude_state.try(&.stub) || false
           type_context = nil
           identifier_symbols = nil
           symbol_table = nil
@@ -236,7 +258,7 @@ module CrystalV2
 
           # If parsing succeeded, run semantic analysis
           if parser.diagnostics.empty?
-            analyzer = Semantic::Analyzer.new(program)
+            analyzer = Semantic::Analyzer.new(program, build_context_with_prelude)
             analyzer.collect_symbols
             debug("Symbol collection complete")
 
@@ -247,33 +269,157 @@ module CrystalV2
             debug("Name resolution complete: #{result.diagnostics.size} diagnostics, #{identifier_symbols.size} identifiers resolved")
 
             # Convert semantic diagnostics
-            analyzer.semantic_diagnostics.each do |diag|
-              diagnostics << Diagnostic.from_semantic(diag, source)
-            end
-
-            # Convert name resolution diagnostics
-            result.diagnostics.each do |diag|
-              diagnostics << Diagnostic.from_parser(diag)
-            end
-
-            # Run type inference if no errors so far
-            if !analyzer.semantic_errors? && result.diagnostics.empty?
-              debug("Starting type inference")
-              engine = analyzer.infer_types(result.identifier_symbols)
-              type_context = engine.context
-              debug("Type inference complete: #{analyzer.type_inference_diagnostics.size} diagnostics")
-
-              # Convert type inference diagnostics
-              analyzer.type_inference_diagnostics.each do |diag|
+            unless using_stub
+              analyzer.semantic_diagnostics.each do |diag|
                 diagnostics << Diagnostic.from_semantic(diag, source)
               end
+
+              result.diagnostics.each do |diag|
+                diagnostics << Diagnostic.from_parser(diag)
+              end
+
+              if !analyzer.semantic_errors? && result.diagnostics.empty?
+                debug("Starting type inference")
+                engine = analyzer.infer_types(result.identifier_symbols)
+                type_context = engine.context
+                debug("Type inference complete: #{analyzer.type_inference_diagnostics.size} diagnostics")
+
+                analyzer.type_inference_diagnostics.each do |diag|
+                  diagnostics << Diagnostic.from_semantic(diag, source)
+                end
+              else
+                debug("Skipping type inference due to errors")
+              end
             else
-              debug("Skipping type inference due to errors")
+              debug("Stub prelude active; skipping semantic diagnostics")
             end
           end
 
           debug("Analysis complete: #{diagnostics.size} total diagnostics")
           {diagnostics, program, type_context, identifier_symbols, symbol_table}
+        end
+
+        private def load_prelude
+          return if try_load_prelude(PRELUDE_PATH, "Crystal prelude")
+
+          log_error("Falling back to LSP stub prelude definitions")
+          unless try_load_prelude(PRELUDE_STUB_PATH, "LSP stub prelude")
+            log_error("Unable to load stub prelude; continuing without built-in symbols")
+            @prelude_state = nil
+            @prelude_mtime = nil
+          end
+        end
+
+        private def try_load_prelude(path : String, label : String) : Bool
+          unless File.exists?(path)
+            debug("#{label} not found at #{path}")
+            @prelude_real_mtime = nil if path == PRELUDE_PATH
+            return false
+          end
+
+          debug("Loading #{label} from #{path}")
+          source = File.read(path)
+          lexer = Frontend::Lexer.new(source)
+          parser = Frontend::Parser.new(lexer)
+          program = parser.parse_program
+
+          diagnostics = [] of Diagnostic
+          parser.diagnostics.each { |diag| diagnostics << Diagnostic.from_parser(diag) }
+
+          analyzer = Semantic::Analyzer.new(program)
+          analyzer.collect_symbols
+          result = analyzer.resolve_names
+
+          analyzer.semantic_diagnostics.each { |diag| diagnostics << Diagnostic.from_semantic(diag, source) }
+          result.diagnostics.each { |diag| diagnostics << Diagnostic.from_parser(diag) }
+
+          begin
+            if !analyzer.semantic_errors? && result.diagnostics.empty?
+              engine = analyzer.infer_types(result.identifier_symbols)
+              analyzer.type_inference_diagnostics.each { |diag| diagnostics << Diagnostic.from_semantic(diag, source) }
+            end
+          rescue ex
+            log_error("#{label} type inference failed: #{ex.message}")
+            @prelude_real_mtime = File.info(path).modification_time if path == PRELUDE_PATH
+            return false
+          end
+
+          if diagnostics.empty?
+            stub = path == PRELUDE_STUB_PATH
+            @prelude_state = PreludeState.new(path, program, analyzer.global_context.symbol_table, diagnostics, stub)
+            @prelude_mtime = File.info(path).modification_time
+            @prelude_real_mtime = @prelude_mtime if path == PRELUDE_PATH
+            debug("#{label} loaded successfully")
+            true
+          else
+            log_error("#{label} produced #{diagnostics.size} diagnostics; ignoring")
+            @prelude_real_mtime = File.info(path).modification_time if path == PRELUDE_PATH
+            false
+          end
+        rescue ex
+          log_error("Failed to load #{label}: #{ex.message}")
+          log_error(ex.inspect_with_backtrace)
+          false
+        end
+
+        private def ensure_prelude_loaded
+          unless prelude = @prelude_state
+            load_prelude
+            return
+          end
+
+          active_path = prelude.path
+
+          if File.exists?(active_path)
+            mtime = File.info(active_path).modification_time
+            if @prelude_mtime.nil? || mtime != @prelude_mtime
+              debug("Active prelude changed on disk; reloading")
+              load_prelude
+              return
+            end
+          else
+            log_error("Active prelude file missing at #{active_path}; clearing cached state")
+            @prelude_state = nil
+            @prelude_mtime = nil
+            load_prelude
+            return
+          end
+
+          if prelude.path != PRELUDE_PATH && File.exists?(PRELUDE_PATH)
+            real_mtime = File.info(PRELUDE_PATH).modification_time
+            if @prelude_real_mtime.nil? || real_mtime != @prelude_real_mtime
+              debug("Real Crystal prelude changed; attempting reload")
+              load_prelude
+            end
+          end
+        end
+
+        private def build_context_with_prelude : Semantic::Context
+          if prelude = @prelude_state
+            Semantic::Context.new(Semantic::SymbolTable.new(prelude.symbol_table))
+          else
+            Semantic::Context.new(Semantic::SymbolTable.new)
+          end
+        end
+
+        private def handle_did_change(params : JSON::Any)
+          text_document = params["textDocument"]
+          uri = text_document["uri"].as_s
+          version = text_document["version"].as_i
+
+          changes = params["contentChanges"].as_a
+          return if changes.empty?
+
+          new_text = changes.last["text"].as_s
+          existing = @documents[uri]?
+          language_id = existing.try(&.text_document.language_id) || "crystal"
+
+          diagnostics, program, type_context, identifier_symbols, symbol_table = analyze_document(new_text)
+
+          doc = TextDocumentItem.new(uri: uri, language_id: language_id, version: version, text: new_text)
+          @documents[uri] = DocumentState.new(doc, program, type_context, identifier_symbols, symbol_table)
+
+          publish_diagnostics(uri, diagnostics, version)
         end
 
         # Find expression at the given position (LSP 0-indexed -> Span 1-indexed)

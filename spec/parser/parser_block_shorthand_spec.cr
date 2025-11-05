@@ -93,6 +93,18 @@ describe "CrystalV2::Compiler::Frontend::Parser" do
       parser.diagnostics.size.should eq(0)
     end
 
+    it "parses block shorthand with nilable index and nested call" do
+      source = <<-CRYSTAL
+      source.lines[idx+1]?.try(&.includes?("->"))
+      CRYSTAL
+
+      parser = CrystalV2::Compiler::Frontend::Parser.new(CrystalV2::Compiler::Frontend::Lexer.new(source))
+      program = parser.parse_program
+
+      program.roots.size.should eq(1)
+      parser.diagnostics.size.should eq(0)
+    end
+
     it "parses block shorthand with operator call" do
       source = <<-CRYSTAL
       numbers.map &.+(1)

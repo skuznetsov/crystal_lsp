@@ -61,6 +61,15 @@ module CrystalV2
         end
       end
 
+      class ModuleSymbol < Symbol
+        getter scope : SymbolTable
+
+        def initialize(name : String, node_id : ExprId, *, scope : SymbolTable)
+          super(name, node_id)
+          @scope = scope
+        end
+      end
+
       class VariableSymbol < Symbol
         getter declared_type : String?
 

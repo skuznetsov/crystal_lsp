@@ -52,6 +52,8 @@ module CrystalV2
             handle_def(node_id, node)
           when Frontend::ClassNode
             handle_class(node_id, node)
+          when Frontend::ModuleNode
+            handle_module(node_id, node)
           when Frontend::GetterNode, Frontend::SetterNode, Frontend::PropertyNode
             # Phase 87B-1: Expand accessor macros to method definitions
             expand_accessor_macro(node_id, node)
@@ -174,6 +176,33 @@ module CrystalV2
           (node.body || [] of Frontend::ExprId).each do |expr_id|
             visit(expr_id)
           end
+          pop_table
+        end
+
+        private def handle_module(node_id : Frontend::ExprId, node : Frontend::ModuleNode)
+          name_slice = node.name
+          return unless name_slice
+
+          name = String.new(name_slice)
+          table = current_table
+
+          symbol = table.lookup_local(name)
+          module_symbol = case symbol
+          when ModuleSymbol
+            symbol
+          else
+            new_scope = SymbolTable.new(table)
+            created = ModuleSymbol.new(name, node_id, scope: new_scope)
+            if symbol
+              table.redefine(name, created)
+            else
+              table.define(name, created)
+            end
+            created
+          end
+
+          push_table(module_symbol.scope)
+          (node.body || [] of Frontend::ExprId).each { |expr_id| visit(expr_id) }
           pop_table
         end
 

@@ -116,7 +116,7 @@ module CrystalV2
         property folding_range_provider : Bool? = true
 
         @[JSON::Field(key: "semanticTokensProvider")]
-        property semantic_tokens_provider : JSON::Any? = JSON.parse(%{{"legend":{"tokenTypes":["class","function","variable","parameter","property","keyword","comment","string","number","operator"],"tokenModifiers":["declaration","definition","readonly","static","deprecated","abstract","async","modification","documentation","defaultLibrary"]},"range":false,"full":true}})
+        property semantic_tokens_provider : JSON::Any? = JSON.parse(%{{"legend":{"tokenTypes":["namespace","type","class","enum","interface","struct","typeParameter","parameter","variable","property","enumMember","event","function","method","macro","keyword","modifier","comment","string","number","regexp","operator"],"tokenModifiers":["declaration","definition","readonly","static","deprecated","abstract","async","modification","documentation","defaultLibrary"]},"range":false,"full":true}})
 
         @[JSON::Field(key: "inlayHintProvider")]
         property inlay_hint_provider : Bool? = true
