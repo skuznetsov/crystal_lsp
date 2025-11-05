@@ -60,7 +60,7 @@ describe Semantic::SymbolCollector do
 
     symbol = context.symbol_table.lookup("greet").should_not be_nil
     method_symbol = symbol.as(Semantic::MethodSymbol)
-    method_symbol.params.map { |p| String.new(p.name) }.should eq(["name"])
+    method_symbol.params.map { |p| String.new(p.name.not_nil!) }.should eq(["name"])
     method_symbol.scope.lookup("name").should be_a(Semantic::VariableSymbol)
   end
 

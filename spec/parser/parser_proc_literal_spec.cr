@@ -41,7 +41,7 @@ describe "CrystalV2::Compiler::Frontend::Parser" do
 
       params = proc_node.as(CrystalV2::Compiler::Frontend::ProcLiteralNode).params.not_nil!
       params.size.should eq(1)
-      String.new(params[0].name).should eq("x")
+      String.new(params[0].name.not_nil!).should eq("x")
       params[0].type_annotation.should be_nil
     end
 
@@ -59,7 +59,7 @@ describe "CrystalV2::Compiler::Frontend::Parser" do
 
       params = proc_node.as(CrystalV2::Compiler::Frontend::ProcLiteralNode).params.not_nil!
       params.size.should eq(1)
-      String.new(params[0].name).should eq("x")
+      String.new(params[0].name.not_nil!).should eq("x")
 
       type_annotation = params[0].type_annotation.not_nil!
       String.new(type_annotation).should eq("Int32")
@@ -78,10 +78,10 @@ describe "CrystalV2::Compiler::Frontend::Parser" do
       params = proc_node.as(CrystalV2::Compiler::Frontend::ProcLiteralNode).params.not_nil!
       params.size.should eq(2)
 
-      String.new(params[0].name).should eq("x")
+      String.new(params[0].name.not_nil!).should eq("x")
       String.new(params[0].type_annotation.not_nil!).should eq("Int32")
 
-      String.new(params[1].name).should eq("y")
+      String.new(params[1].name.not_nil!).should eq("y")
       String.new(params[1].type_annotation.not_nil!).should eq("Int32")
     end
 
@@ -98,10 +98,10 @@ describe "CrystalV2::Compiler::Frontend::Parser" do
       params = proc_node.as(CrystalV2::Compiler::Frontend::ProcLiteralNode).params.not_nil!
       params.size.should eq(2)
 
-      String.new(params[0].name).should eq("x")
+      String.new(params[0].name.not_nil!).should eq("x")
       params[0].type_annotation.should be_nil
 
-      String.new(params[1].name).should eq("y")
+      String.new(params[1].name.not_nil!).should eq("y")
       params[1].type_annotation.should be_nil
     end
 
@@ -139,7 +139,7 @@ describe "CrystalV2::Compiler::Frontend::Parser" do
 
       params = proc_node.as(CrystalV2::Compiler::Frontend::ProcLiteralNode).params.not_nil!
       params.size.should eq(1)
-      String.new(params[0].name).should eq("x")
+      String.new(params[0].name.not_nil!).should eq("x")
 
       body = proc_node.as(CrystalV2::Compiler::Frontend::ProcLiteralNode).body.not_nil!
       body.size.should eq(1)

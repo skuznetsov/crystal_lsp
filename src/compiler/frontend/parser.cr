@@ -23,6 +23,7 @@ module CrystalV2
         @string_pool : StringPool  # Week 1 Day 2: for interning generic type annotations
         @debug_enabled : Bool  # Debug output control
         @parsing_call_args : Int32  # Prevent nested calls without parens during argument parsing
+        @macro_mode : Int32
 
         def initialize(lexer : Lexer)
           @tokens = [] of Token
@@ -40,6 +41,7 @@ module CrystalV2
           @string_pool = lexer.string_pool  # Week 1 Day 2: share string pool for deduplication
           @debug_enabled = ENV["PARSER_DEBUG"]? == "1"  # Enable debug via PARSER_DEBUG=1
           @parsing_call_args = 0  # Not parsing call args initially
+          @macro_mode = 0
         end
 
         # Phase 87B-2: Constructor for reparsing with existing arena
@@ -59,6 +61,7 @@ module CrystalV2
           @string_pool = lexer.string_pool  # Week 1 Day 2: share string pool for deduplication
           @debug_enabled = ENV["PARSER_DEBUG"]? == "1"  # Enable debug via PARSER_DEBUG=1
           @parsing_call_args = 0  # Not parsing call args initially
+          @macro_mode = 0
         end
 
         def parse_program : Program
@@ -769,9 +772,13 @@ module CrystalV2
           left = @arena.add(node)
           advance
 
+          # Allow whitespace before :: segments (e.g., Foo :: Bar)
+          skip_trivia
+
           # Handle :: for paths like JSON::Field or A::B::C
           while current_token.kind == Token::Kind::ColonColon
             left = parse_path(left)
+            skip_trivia
           end
 
           left
@@ -4933,110 +4940,115 @@ module CrystalV2
         end
 
         private def parse_macro_body
-          pieces = [] of MacroPiece
-          buffer = IO::Memory.new
-          buffer_start_token : Token? = nil
-          control_depth = 0
-          macro_trim_left = false
-          macro_trim_right = false
-          trim_next_left = false
-          trim_final = false
+          @macro_mode += 1
+          begin
+            pieces = [] of MacroPiece
+            buffer = IO::Memory.new
+            buffer_start_token : Token? = nil
+            control_depth = 0
+            macro_trim_left = false
+            macro_trim_right = false
+            trim_next_left = false
+            trim_final = false
 
-          loop do
-            if trim_next_left
-              skip_macro_whitespace_after_escape
-              trim_final = true  # Remember for final flush
-              trim_next_left = false
-            end
+            loop do
+              if trim_next_left
+                skip_macro_whitespace_after_escape
+                trim_final = true  # Remember for final flush
+                trim_next_left = false
+              end
 
-            token = current_token
-            break if token.kind == Token::Kind::EOF
+              token = current_token
+              break if token.kind == Token::Kind::EOF
 
-            if control_depth == 0 && token.kind == Token::Kind::End
-              break
-            end
+              if control_depth == 0 && token.kind == Token::Kind::End
+                break
+              end
 
-            if macro_control_start?
-              left_trim = macro_control_left_trim?
-              already_empty = pieces.empty?
-              trim_applied = left_trim
-              flush_macro_text(buffer, pieces, trim_applied, buffer_start_token, previous_token)
-              buffer_start_token = nil
-              macro_trim_left ||= already_empty && trim_applied
+              if macro_control_start?
+                left_trim = macro_control_left_trim?
+                already_empty = pieces.empty?
+                trim_applied = left_trim
+                flush_macro_text(buffer, pieces, trim_applied, buffer_start_token, previous_token)
+                buffer_start_token = nil
+                macro_trim_left ||= already_empty && trim_applied
 
-              piece, effect, skip_whitespace = parse_macro_control_piece
-              pieces << piece
+                piece, effect, skip_whitespace = parse_macro_control_piece
+                pieces << piece
 
-              # Special handling for comment blocks - skip content
-              if piece.control_keyword == "comment" && effect == :push
-                comment_depth = 1
-                # Skip tokens until matching {% end %}
-                loop do
-                  break if comment_depth == 0
-                  break if current_token.kind == Token::Kind::EOF
+                # Special handling for comment blocks - skip content
+                if piece.control_keyword == "comment" && effect == :push
+                  comment_depth = 1
+                  # Skip tokens until matching {% end %}
+                  loop do
+                    break if comment_depth == 0
+                    break if current_token.kind == Token::Kind::EOF
 
-                  if macro_control_start?
-                    inner_piece, inner_effect, _ = parse_macro_control_piece
-                    case inner_effect
-                    when :push
-                      comment_depth += 1
-                    when :pop
-                      comment_depth -= 1
-                      if comment_depth == 0
-                        pieces << inner_piece  # Add the closing {% end %}
+                    if macro_control_start?
+                      inner_piece, inner_effect, _ = parse_macro_control_piece
+                      case inner_effect
+                      when :push
+                        comment_depth += 1
+                      when :pop
+                        comment_depth -= 1
+                        if comment_depth == 0
+                          pieces << inner_piece  # Add the closing {% end %}
+                        end
                       end
+                    else
+                      # Skip any other tokens
+                      advance
                     end
-                  else
-                    # Skip any other tokens
-                    advance
                   end
+                  trim_next_left = skip_whitespace
+                  next
                 end
+
+                case effect
+                when :push
+                  control_depth += 1
+                when :pop
+                  break if control_depth == 0
+                  control_depth -= 1
+                end
+
+                macro_trim_right ||= skip_whitespace
+                macro_trim_right ||= skip_whitespace
+                trim_next_left = skip_whitespace
+                next
+              elsif macro_expression_start?
+                left_trim = macro_expression_left_trim?
+                already_empty = pieces.empty?
+                trim_applied = left_trim
+                flush_macro_text(buffer, pieces, trim_applied, buffer_start_token, previous_token)
+                buffer_start_token = nil
+                macro_trim_left ||= already_empty && trim_applied
+
+                piece, skip_whitespace = parse_macro_expression_piece
+                pieces << piece
+
                 trim_next_left = skip_whitespace
                 next
               end
 
-              case effect
-              when :push
-                control_depth += 1
-              when :pop
-                break if control_depth == 0
-                control_depth -= 1
+              # Track start of text buffer
+              if buffer_start_token.nil? && buffer.size == 0
+                buffer_start_token = token
               end
 
-              macro_trim_right ||= skip_whitespace
-              macro_trim_right ||= skip_whitespace
-              trim_next_left = skip_whitespace
-              next
-            elsif macro_expression_start?
-              left_trim = macro_expression_left_trim?
-              already_empty = pieces.empty?
-              trim_applied = left_trim
-              flush_macro_text(buffer, pieces, trim_applied, buffer_start_token, previous_token)
-              buffer_start_token = nil
-              macro_trim_left ||= already_empty && trim_applied
-
-              piece, skip_whitespace = parse_macro_expression_piece
-              pieces << piece
-
-              trim_next_left = skip_whitespace
-              next
+              buffer.write(token.slice)
+              advance
             end
 
-            # Track start of text buffer
-            if buffer_start_token.nil? && buffer.size == 0
-              buffer_start_token = token
-            end
-
-            buffer.write(token.slice)
-            advance
+            flush_macro_text(buffer, pieces, trim_final, buffer_start_token, previous_token)
+            {
+              pieces,
+              macro_trim_left || pieces.first?.try(&.trim_left) || false,
+              macro_trim_right || pieces.last?.try(&.trim_right) || false,
+            }
+          ensure
+            @macro_mode -= 1
           end
-
-          flush_macro_text(buffer, pieces, trim_final, buffer_start_token, previous_token)
-          {
-            pieces,
-            macro_trim_left || pieces.first?.try(&.trim_left) || false,
-            macro_trim_right || pieces.last?.try(&.trim_right) || false,
-          }
         end
         private def flush_macro_text(buffer, pieces, trim_trailing = false, start_token : Token? = nil, end_token : Token? = nil)
           return if buffer.size == 0
@@ -5272,6 +5284,8 @@ module CrystalV2
             # Note: 'in' is already allowed as identifier (see Identifier case in parse_prefix)
             return PREFIX_ERROR unless next_comes_colon_space?
           when Token::Kind::Newline, Token::Kind::EOF
+            return PREFIX_ERROR
+          when Token::Kind::ColonColon
             return PREFIX_ERROR
           # Phase 103H: Arithmetic operators (Plus, Minus, Star) need special handling
           # They can be unary (no space after) or binary (space after)
@@ -5844,18 +5858,22 @@ module CrystalV2
             # Phase 9: Array literal
             parse_array_literal
           when Token::Kind::LBrace
-            # Phase 103B: Check for macro control {% or macro expression {{
-            # Use lookahead to distinguish {hash}, {% control %}, {{ expr }}
+            # Phase 103B: Check for macro control {% or macro expression {{ only inside macro bodies
             next_tok = peek_token
-            case next_tok.kind
-            when Token::Kind::Percent
-              # {% if/for/... %}...{% end %}
-              parse_percent_macro_control
-            when Token::Kind::LBrace
-              # {{ expression }}
-              parse_percent_macro_expression
+            if @macro_mode > 0
+              case next_tok.kind
+              when Token::Kind::Percent
+                # {% if/for/... %}...{% end %}
+                parse_percent_macro_control
+              when Token::Kind::LBrace
+                # {{ expression }}
+                parse_percent_macro_expression
+              else
+                # Phase 14/15: Hash or Tuple literal (disambiguated by presence of =>)
+                parse_hash_or_tuple
+              end
             else
-              # Phase 14/15: Hash or Tuple literal (disambiguated by presence of =>)
+              # Outside macro bodies treat {{...}} as nested literals (e.g. tuples)
               parse_hash_or_tuple
             end
           when Token::Kind::ThinArrow
@@ -6213,7 +6231,7 @@ module CrystalV2
               break
             when Token::Kind::Comma
               advance  # consume comma
-              skip_trivia
+              skip_whitespace_and_optional_newlines
 
               # Allow trailing comma
               if current_token.kind == Token::Kind::RBrace
@@ -6224,7 +6242,7 @@ module CrystalV2
               elem = parse_expression(0)
               return PREFIX_ERROR if elem.invalid?
               elements << elem
-              skip_trivia
+              skip_whitespace_and_optional_newlines
             else
               emit_unexpected(current_token)
               return PREFIX_ERROR
@@ -6756,12 +6774,39 @@ module CrystalV2
           @bracket_depth -= 1  # Phase 103: exiting brackets
           expect_operator(Token::Kind::RBracket)
           spans = [] of Span
-          spans << lbracket.span
           spans << node_span(target)
+          spans << lbracket.span
           indexes.each { |idx| spans << node_span(idx) }
           if closing_span = previous_token.try(&.span)
             spans << closing_span
           end
+
+          if current_token.kind == Token::Kind::Question
+            question_token = current_token
+            spans << question_token.span
+            advance
+
+            # Build callee: target.[]?
+            method_slice = @string_pool.intern("[]?".to_slice)
+            callee_span = Span.cover_all([node_span(target), question_token.span])
+            callee = @arena.add_typed(
+              MemberAccessNode.new(
+                callee_span,
+                target,
+                method_slice
+              )
+            )
+
+            call_span = Span.cover_all(spans)
+            return @arena.add_typed(
+              CallNode.new(
+                call_span,
+                callee,
+                indexes
+              )
+            )
+          end
+
           index_span = Span.cover_all(spans)
           @arena.add_typed(IndexNode.new(index_span, target, indexes))
         end
@@ -6837,6 +6882,10 @@ module CrystalV2
               when Token::Kind::Eq
                 # Assignment, not argument
                 node
+              when Token::Kind::Colon
+                node
+              when Token::Kind::NilCoalesce
+                node
               when Token::Kind::OrOr, Token::Kind::AndAnd,
                    Token::Kind::Question,  # ternary operator
                    Token::Kind::Arrow,     # hash arrow =>
@@ -6849,7 +6898,8 @@ module CrystalV2
                    Token::Kind::Pipe, Token::Kind::Caret,
                    Token::Kind::LShift, Token::Kind::RShift,
                    Token::Kind::DotDot, Token::Kind::DotDotDot,
-                   Token::Kind::Match, Token::Kind::NotMatch  # =~, !~
+                   Token::Kind::Match, Token::Kind::NotMatch,  # =~, !~
+                   Token::Kind::In
                 # Binary/logical operators that can't start arguments
                 node
               else
@@ -7501,6 +7551,7 @@ module CrystalV2
         end
 
         private def macro_expression_start?
+          return false if @macro_mode == 0
           current = current_token
           return false unless current.kind == Token::Kind::LBrace
           peek = peek_token
@@ -7515,6 +7566,7 @@ module CrystalV2
         end
 
         private def macro_control_start?
+          return false if @macro_mode == 0
           current = current_token
           return false unless current.kind == Token::Kind::LBrace
           peek = peek_token
@@ -8749,26 +8801,7 @@ module CrystalV2
             end
 
             # Phase 103J: Parse method chains: &.value.close
-            # After initial method, continue parsing additional .method calls
-            skip_trivia
-            while current_token.kind == Token::Kind::Operator
-              advance  # consume '.'
-              skip_trivia
-
-              # Parse next method name
-              next_method_name = current_token.slice
-              next_method_span = current_token.span
-              advance
-
-              # Create chained MemberAccess with previous call_expr as receiver
-              chain_span = @arena[call_expr].span.cover(next_method_span)
-              call_expr = @arena.add_typed(MemberAccessNode.new(
-                chain_span,
-                call_expr,
-                next_method_name
-              ))
-              skip_trivia
-            end
+            call_expr = consume_block_shorthand_postfix(call_expr)
 
             # Phase 101: Check for trailing do...end or {...} block (Amp case)
             # This handles: &.each_value do |x| ... end
@@ -8811,26 +8844,7 @@ module CrystalV2
             end
 
             # Phase 103J: Parse method chains: &.value.close
-            # After initial method, continue parsing additional .method calls
-            skip_trivia
-            while current_token.kind == Token::Kind::Operator
-              advance  # consume '.'
-              skip_trivia
-
-              # Parse next method name
-              next_method_name = current_token.slice
-              next_method_span = current_token.span
-              advance
-
-              # Create chained MemberAccess with previous call_expr as receiver
-              chain_span = @arena[call_expr].span.cover(next_method_span)
-              call_expr = @arena.add_typed(MemberAccessNode.new(
-                chain_span,
-                call_expr,
-                next_method_name
-              ))
-              skip_trivia
-            end
+            call_expr = consume_block_shorthand_postfix(call_expr)
 
             # Phase 101: Check for trailing do...end or {...} block (AmpDot case)
             # This handles: &.each_value do |x| ... end
@@ -8874,6 +8888,28 @@ module CrystalV2
           ))
 
           block_id
+        end
+
+        private def consume_block_shorthand_postfix(call_expr : ExprId) : ExprId
+          loop do
+            skip_trivia
+            token = current_token
+            case token.kind
+            when Token::Kind::Operator
+              if slice_eq?(token.slice, ".")
+                call_expr = parse_member_access(call_expr)
+              else
+                break
+              end
+            when Token::Kind::LParen
+              call_expr = parse_parenthesized_call(call_expr)
+            when Token::Kind::LBracket
+              call_expr = parse_index(call_expr)
+            else
+              break
+            end
+          end
+          call_expr
         end
 
         # Phase 103K: Parse fun parameters (supports proc types and varargs)

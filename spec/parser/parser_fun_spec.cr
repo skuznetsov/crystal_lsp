@@ -51,7 +51,7 @@ describe "CrystalV2::Compiler::Frontend::Parser" do
 
       params = fun_node.as(CrystalV2::Compiler::Frontend::FunNode).params.not_nil!
       params.size.should eq(1)
-      String.new(params[0].name).should eq("format")
+      String.new(params[0].name.not_nil!).should eq("format")
       String.new(params[0].type_annotation.not_nil!).should eq("UInt8")
     end
 
@@ -100,7 +100,7 @@ describe "CrystalV2::Compiler::Frontend::Parser" do
 
       params = fun_node.as(CrystalV2::Compiler::Frontend::FunNode).params.not_nil!
       params.size.should eq(1)
-      String.new(params[0].name).should eq("size")
+      String.new(params[0].name.not_nil!).should eq("size")
       String.new(params[0].type_annotation.not_nil!).should eq("UInt64")
 
       String.new(fun_node.as(CrystalV2::Compiler::Frontend::FunNode).return_type.not_nil!).should eq("Void")
@@ -165,13 +165,13 @@ describe "CrystalV2::Compiler::Frontend::Parser" do
       params = fun_node.as(CrystalV2::Compiler::Frontend::FunNode).params.not_nil!
       params.size.should eq(3)
 
-      String.new(params[0].name).should eq("s1")
+      String.new(params[0].name.not_nil!).should eq("s1")
       String.new(params[0].type_annotation.not_nil!).should eq("UInt8")
 
-      String.new(params[1].name).should eq("s2")
+      String.new(params[1].name.not_nil!).should eq("s2")
       String.new(params[1].type_annotation.not_nil!).should eq("UInt8")
 
-      String.new(params[2].name).should eq("n")
+      String.new(params[2].name.not_nil!).should eq("n")
       String.new(params[2].type_annotation.not_nil!).should eq("UInt64")
 
       String.new(fun_node.as(CrystalV2::Compiler::Frontend::FunNode).return_type.not_nil!).should eq("Int32")

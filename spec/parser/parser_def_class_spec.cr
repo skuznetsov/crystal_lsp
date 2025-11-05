@@ -16,7 +16,7 @@ describe CrystalV2::Compiler::Frontend::Parser do
     program.roots.size.should eq(1)
     def_node = program.arena[program.roots.first].as(CrystalV2::Compiler::Frontend::DefNode)
     String.new(def_node.name).should eq("greet")
-    def_node.params.not_nil!.map { |p| String.new(p.name) }.should eq(["name"])
+    def_node.params.not_nil!.map { |p| String.new(p.name.not_nil!) }.should eq(["name"])
     def_node.body.not_nil!.size.should eq(1)
   end
 
@@ -52,7 +52,7 @@ describe CrystalV2::Compiler::Frontend::Parser do
 
     params = def_node.params.not_nil!
     params.size.should eq(1)
-    String.new(params[0].name).should eq("x")
+    String.new(params[0].name.not_nil!).should eq("x")
     String.new(params[0].type_annotation.not_nil!).should eq("Int32")
   end
 
@@ -71,9 +71,9 @@ describe CrystalV2::Compiler::Frontend::Parser do
 
     params = def_node.params.not_nil!
     params.size.should eq(2)
-    String.new(params[0].name).should eq("x")
+    String.new(params[0].name.not_nil!).should eq("x")
     String.new(params[0].type_annotation.not_nil!).should eq("String")
-    String.new(params[1].name).should eq("y")
+    String.new(params[1].name.not_nil!).should eq("y")
     String.new(params[1].type_annotation.not_nil!).should eq("String")
   end
 
@@ -92,11 +92,11 @@ describe CrystalV2::Compiler::Frontend::Parser do
 
     params = def_node.params.not_nil!
     params.size.should eq(3)
-    String.new(params[0].name).should eq("x")
+    String.new(params[0].name.not_nil!).should eq("x")
     params[0].type_annotation.should be_nil
-    String.new(params[1].name).should eq("y")
+    String.new(params[1].name.not_nil!).should eq("y")
     String.new(params[1].type_annotation.not_nil!).should eq("Int32")
-    String.new(params[2].name).should eq("z")
+    String.new(params[2].name.not_nil!).should eq("z")
     params[2].type_annotation.should be_nil
   end
 
@@ -152,7 +152,7 @@ describe CrystalV2::Compiler::Frontend::Parser do
     # Check params
     params = def_node.params.not_nil!
     params.size.should eq(2)
-    String.new(params[0].name).should eq("x")
+    String.new(params[0].name.not_nil!).should eq("x")
     String.new(params[0].type_annotation.not_nil!).should eq("Int32")
 
     # Check return type

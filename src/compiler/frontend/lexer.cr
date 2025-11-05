@@ -177,7 +177,7 @@ module CrystalV2
           when "begin"  then Token::Kind::Begin   # Phase 28
           when "rescue" then Token::Kind::Rescue  # Phase 29
           when "ensure" then Token::Kind::Ensure  # Phase 29
-          # "raise" is NOT a keyword in Crystal - it's a regular method call
+          when "raise"  then Token::Kind::Raise   # Phase 29: raise exception
           when "require" then Token::Kind::Require  # Phase 65
           when "with" then Token::Kind::With  # Phase 67
           when "module" then Token::Kind::Module  # Phase 31

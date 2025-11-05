@@ -70,7 +70,7 @@ module CrystalV2
           Begin   # Phase 28
           Rescue  # Phase 29: exception handling
           Ensure  # Phase 29: exception handling
-          # Raise removed - it's a regular method, not a keyword
+          Raise   # Phase 29: raise exception
           Require  # Phase 65: require (import file/library)
           With  # Phase 67: with (context block)
           Module  # Phase 31: module definition
