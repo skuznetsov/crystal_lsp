@@ -42,7 +42,16 @@ module CrystalV2
       # Minimal LSP Server implementation
       # Handles initialize, didOpen, publishDiagnostics, and hover
       class Server
-        PRELUDE_PATH = File.expand_path("../../prelude.cr", __DIR__)
+        # Try to resolve the real Crystal prelude from common locations.
+        # Preferred: repo root at src/prelude.cr. Fallback: relative to this dir.
+        PRELUDE_PATH = begin
+          root_prelude = File.expand_path("../../../../src/prelude.cr", __DIR__)
+          if File.exists?(root_prelude)
+            root_prelude
+          else
+            File.expand_path("../../prelude.cr", __DIR__)
+          end
+        end
         PRELUDE_STUB_PATH = File.expand_path("prelude_stub.cr", __DIR__)
 
         # Security constants - prevent DoS attacks and resource exhaustion
@@ -62,7 +71,12 @@ module CrystalV2
         def initialize(@input = STDIN, @output = STDOUT)
           @documents = {} of String => DocumentState
           @prelude_real_mtime = nil
-          load_prelude
+          # Allow forcing the stub prelude for debugging via environment variable
+          if ENV["CRYSTALV2_LSP_FORCE_STUB"]?
+            try_load_prelude(PRELUDE_STUB_PATH, "LSP stub prelude")
+          else
+            load_prelude
+          end
         end
 
         # Main server loop
@@ -299,6 +313,17 @@ module CrystalV2
           {diagnostics, program, type_context, identifier_symbols, symbol_table}
         end
 
+        # Debug helper: analyze a source string and return LSP diagnostics and semantic tokens
+        # This bypasses JSON-RPC and is intended for debug_tests/* scripts.
+        def debug_analyze(source : String) : {Array(Diagnostic), SemanticTokens, Bool, String}
+          ensure_prelude_loaded
+          using_stub = @prelude_state.try(&.stub) || false
+          diagnostics, program, _tc, _ids, _symtab = analyze_document(source)
+          tokens = collect_semantic_tokens(program, source)
+          prelude_path = @prelude_state.try(&.path) || "(none)"
+          {diagnostics, tokens, using_stub, prelude_path}
+        end
+
         private def load_prelude
           return if try_load_prelude(PRELUDE_PATH, "Crystal prelude")
 
@@ -346,7 +371,15 @@ module CrystalV2
 
           if diagnostics.empty?
             stub = path == PRELUDE_STUB_PATH
-            @prelude_state = PreludeState.new(path, program, analyzer.global_context.symbol_table, diagnostics, stub)
+            table = analyzer.global_context.symbol_table
+
+            # Sanity check: ensure basic builtins exist; otherwise prefer stub
+            unless stub || prelude_sanity_ok?(table)
+              log_error("#{label} appears incomplete (missing Kernel.puts/Dir.glob); falling back to stub")
+              return false
+            end
+
+            @prelude_state = PreludeState.new(path, program, table, diagnostics, stub)
             @prelude_mtime = File.info(path).modification_time
             @prelude_real_mtime = @prelude_mtime if path == PRELUDE_PATH
             debug("#{label} loaded successfully")
@@ -360,6 +393,29 @@ module CrystalV2
           log_error("Failed to load #{label}: #{ex.message}")
           log_error(ex.inspect_with_backtrace)
           false
+        end
+
+        # Minimal sanity check for real prelude
+        private def prelude_sanity_ok?(table : Semantic::SymbolTable) : Bool
+          # puts exists either at top-level or Kernel
+          has_puts = !!table.lookup("puts")
+          unless has_puts
+            if kernel = table.lookup("Kernel")
+              if kernel.is_a?(Semantic::ModuleSymbol)
+                has_puts = !!kernel.scope.lookup("puts")
+              end
+            end
+          end
+
+          # Dir.glob exists
+          has_dir_glob = false
+          if dir = table.lookup("Dir")
+            if dir.is_a?(Semantic::ModuleSymbol)
+              has_dir_glob = !!dir.scope.lookup("glob")
+            end
+          end
+
+          has_puts && has_dir_glob
         end
 
         private def ensure_prelude_loaded
@@ -1888,6 +1944,7 @@ module CrystalV2
           end
 
           collect_keyword_tokens(source, raw_tokens)
+          collect_string_like_tokens(source, raw_tokens)
 
           # Sort tokens by line, then by start_char
           raw_tokens.sort_by! { |t| {t.line, t.start_char} }
@@ -1908,11 +1965,63 @@ module CrystalV2
           node = arena[node_id]
 
           case node
+          when Frontend::MacroDefNode
+            collect_tokens_recursive(arena, node.body, tokens) unless node.body.invalid?
+
+          when Frontend::MacroExpressionNode
+            collect_tokens_recursive(arena, node.expression, tokens)
+
+          when Frontend::MacroIfNode
+            collect_tokens_recursive(arena, node.condition, tokens)
+            collect_tokens_recursive(arena, node.then_body, tokens)
+            if else_body = node.else_body
+              collect_tokens_recursive(arena, else_body, tokens)
+            end
+
+          when Frontend::MacroForNode
+            collect_tokens_recursive(arena, node.iterable, tokens)
+            collect_tokens_recursive(arena, node.body, tokens)
+
+          when Frontend::MacroLiteralNode
+            pieces = Frontend.node_macro_pieces(node) || [] of Frontend::MacroPiece
+            pieces.each do |piece|
+              case piece.kind
+              when Frontend::MacroPiece::Kind::Text
+                if span = piece.span
+                  line = span.start_line - 1
+                  col  = span.start_column - 1
+                  len  = span.end_column - span.start_column
+                  tokens << RawToken.new(line, col, len, SemanticTokenType::String.value)
+                end
+              when Frontend::MacroPiece::Kind::Expression
+                if expr = piece.expr
+                  collect_tokens_recursive(arena, expr, tokens)
+                end
+              else
+                # Control pieces: no direct tokens
+              end
+            end
           when Frontend::MemberAccessNode
+            # Recurse into receiver
             collect_tokens_recursive(arena, node.object, tokens)
+            # Emit token for member name span (best-effort using name length)
+            line = node.span.end_line - 1
+            member_len = node.member.size
+            # Compute start column from end column minus member length
+            col = (node.span.end_column - member_len) - 1
+            if col >= 0 && member_len > 0
+              tokens << RawToken.new(line, col, member_len, SemanticTokenType::Method.value)
+            end
 
           when Frontend::SafeNavigationNode
             collect_tokens_recursive(arena, node.object, tokens)
+            # Emit token for member name after &.
+            line = node.span.end_line - 1
+            member_len = node.member.size
+            col = (node.span.end_column - member_len) - 1
+            if col >= 0 && member_len > 0
+              tokens << RawToken.new(line, col, member_len, SemanticTokenType::Method.value)
+            end
 
           when Frontend::IndexNode
             collect_tokens_recursive(arena, node.object, tokens)
@@ -1984,11 +2093,8 @@ module CrystalV2
             tokens << RawToken.new(line, col, length, SemanticTokenType::Variable.value)
 
           when Frontend::StringNode
-            # Token for string literal
-            line = node.span.start_line - 1
-            col = node.span.start_column - 1
-            length = node.span.end_column - node.span.start_column
-            tokens << RawToken.new(line, col, length, SemanticTokenType::String.value)
+            # Handled by lexical pass in collect_string_like_tokens to avoid overlap
+            # (no token emission here)
 
           when Frontend::NumberNode
             # Token for number literal
@@ -2006,7 +2112,18 @@ module CrystalV2
 
           when Frontend::CallNode
             # Process callee, arguments, block
-            collect_tokens_recursive(arena, node.callee, tokens) unless node.callee.invalid?
+            unless node.callee.invalid?
+              callee_node = arena[node.callee]
+              # If the callee is a bare identifier, color it as a method
+              if callee_node.is_a?(Frontend::IdentifierNode)
+                line = callee_node.span.start_line - 1
+                col = callee_node.span.start_column - 1
+                length = callee_node.name.size
+                tokens << RawToken.new(line, col, length, SemanticTokenType::Method.value)
+              else
+                collect_tokens_recursive(arena, node.callee, tokens)
+              end
+            end
             node.args.each { |arg_id| collect_tokens_recursive(arena, arg_id, tokens) }
             if block = node.block
               collect_tokens_recursive(arena, block, tokens) unless block.invalid?
@@ -2079,6 +2196,203 @@ module CrystalV2
             col  = tok.span.start_column - 1
             length = tok.slice.size
             tokens << RawToken.new(line, col, length, SemanticTokenType::Keyword.value)
+          end
+        end
+
+        # Add string-like tokens (strings, chars, regex, interpolations) from the lexer
+        private def collect_string_like_tokens(source : String, tokens : Array(RawToken))
+          lexer = Frontend::Lexer.new(source)
+          lexer.each_token do |tok|
+            case tok.kind
+            when Frontend::Token::Kind::String
+              # Simple strings: color entire span as string
+              line = tok.span.start_line - 1
+              # Token slice excludes opening quote; shift start column by +1
+              col  = tok.span.start_column
+              length = tok.slice.size
+              tokens << RawToken.new(line, col, length, SemanticTokenType::String.value)
+
+            when Frontend::Token::Kind::StringInterpolation
+              # Interpolated strings: split into string text segments and embedded expression tokens
+              collect_interpolated_string_tokens(tok, tokens)
+
+            when Frontend::Token::Kind::Char
+              line = tok.span.start_line - 1
+              # Exclude opening quote for char literal too
+              col  = tok.span.start_column
+              length = tok.slice.size
+              tokens << RawToken.new(line, col, length, SemanticTokenType::String.value)
+
+            when Frontend::Token::Kind::Regex
+              line = tok.span.start_line - 1
+              # Exclude opening '/'
+              col  = tok.span.start_column
+              length = tok.slice.size
+              tokens << RawToken.new(line, col, length, SemanticTokenType::Regexp.value)
+            end
+          end
+        end
+
+        # Map token kinds (from a sub-lexer) to semantic token types for interpolation content
+        private def map_kind_for_interpolation(kind : Frontend::Token::Kind) : Int32?
+          return SemanticTokenType::Keyword.value if keyword_kind?(kind)
+
+          case kind
+          when Frontend::Token::Kind::Identifier,
+               Frontend::Token::Kind::InstanceVar,
+               Frontend::Token::Kind::ClassVar,
+               Frontend::Token::Kind::GlobalVar
+            SemanticTokenType::Variable.value
+
+          when Frontend::Token::Kind::Number
+            SemanticTokenType::Number.value
+
+          when Frontend::Token::Kind::String,
+               Frontend::Token::Kind::StringInterpolation,
+               Frontend::Token::Kind::Char
+            SemanticTokenType::String.value
+
+          when Frontend::Token::Kind::Regex
+            SemanticTokenType::Regexp.value
+
+          when Frontend::Token::Kind::Newline,
+               Frontend::Token::Kind::Whitespace,
+               Frontend::Token::Kind::Comment,
+               Frontend::Token::Kind::EOF
+            nil
+
+          else
+            # Operators and punctuation
+            SemanticTokenType::Operator.value
+          end
+        end
+
+        # Emit tokens for an interpolated string token: splits text and expressions
+        private def collect_interpolated_string_tokens(tok : Frontend::Token, tokens : Array(RawToken))
+          content = String.new(tok.slice)
+          i = 0
+          line0 = tok.span.start_line - 1
+          # Column at the first CONTENT char (after opening quote)
+          col0  = tok.span.start_column
+
+          # Helper to flush a run of plain text as String tokens (split across lines)
+          flush_text = ->(start_line0 : Int32, start_col0 : Int32, text : String) do
+            cur_line0 = start_line0
+            cur_col0  = start_col0
+            seg_start = 0
+            j = 0
+            while j < text.bytesize
+              if text.byte_at(j) == '\n'.ord.to_u8
+                # Emit current line segment if any
+                if j > seg_start
+                  length = j - seg_start
+                  tokens << RawToken.new(cur_line0, cur_col0, length, SemanticTokenType::String.value)
+                end
+                # Move to next line
+                cur_line0 += 1
+                cur_col0 = 0
+                j += 1
+                seg_start = j
+              else
+                j += 1
+              end
+            end
+            # Emit tail segment
+            if seg_start < text.bytesize
+              length = text.bytesize - seg_start
+              tokens << RawToken.new(cur_line0, cur_col0, length, SemanticTokenType::String.value)
+            end
+          end
+
+          while i < content.bytesize
+            # Emit text until next interpolation
+            seg_start_i = i
+            seg_line0 = line0
+            seg_col0  = col0
+            while i + 1 < content.bytesize && !(content.byte_at(i) == '#'.ord.to_u8 && content.byte_at(i + 1) == '{'.ord.to_u8)
+              if content.byte_at(i) == '\n'.ord.to_u8
+                # Flush segment up to (but not including) this newline
+                if i > seg_start_i
+                  segment = content.byte_slice(seg_start_i, i - seg_start_i)
+                  flush_text.call(seg_line0, seg_col0, segment)
+                end
+                # Consume newline and update positions
+                i += 1
+                line0 += 1
+                col0 = 0
+                # Next segment starts after newline
+                seg_start_i = i
+                seg_line0 = line0
+                seg_col0 = col0
+              else
+                i += 1
+                col0 += 1
+              end
+            end
+            # Flush remaining text segment (if any)
+            if i > seg_start_i
+              segment = content.byte_slice(seg_start_i, i - seg_start_i)
+              flush_text.call(seg_line0, seg_col0, segment)
+            end
+
+            break if i >= content.bytesize
+
+            # At '#{' start
+            # Emit operator token for '#{'
+            tokens << RawToken.new(line0, col0, 2, SemanticTokenType::Operator.value)
+            i += 2
+            col0 += 2
+
+            # Capture expression until matching '}' with brace nesting
+            expr_start_i = i
+            expr_base_line0 = line0
+            expr_base_col0  = col0
+            depth = 1
+            while i < content.bytesize && depth > 0
+              byte = content.byte_at(i)
+              if byte == '{'.ord.to_u8
+                depth += 1
+                i += 1
+                col0 += 1
+              elsif byte == '}'.ord.to_u8
+                depth -= 1
+                break if depth == 0
+                i += 1
+                col0 += 1
+              elsif byte == '\n'.ord.to_u8
+                i += 1
+                line0 += 1
+                col0 = 0
+              else
+                i += 1
+                col0 += 1
+              end
+            end
+
+            # Lex and emit tokens for the expression content
+            expr_len = i > expr_start_i ? (i - expr_start_i) : 0
+            if expr_len > 0
+              expr_bytes = content.byte_slice(expr_start_i, expr_len)
+              expr_text = String.new(expr_bytes.to_slice)
+              sub_lexer = Frontend::Lexer.new(expr_text)
+              sub_lexer.each_token do |t2|
+                mapped = map_kind_for_interpolation(t2.kind)
+                next unless mapped
+                local_line0 = t2.span.start_line - 1
+                local_col0  = t2.span.start_column - 1
+                global_line0 = expr_base_line0 + local_line0
+                global_col0  = local_line0 == 0 ? expr_base_col0 + local_col0 : local_col0
+                length = t2.slice.size
+                tokens << RawToken.new(global_line0, global_col0, length, mapped)
+              end
+            end
+
+            # Emit operator token for closing '}' if present
+            if i < content.bytesize && content.byte_at(i) == '}'.ord.to_u8
+              tokens << RawToken.new(line0, col0, 1, SemanticTokenType::Operator.value)
+              i += 1
+              col0 += 1
+            end
           end
         end
 
