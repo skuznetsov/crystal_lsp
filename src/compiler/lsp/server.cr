@@ -1887,6 +1887,8 @@ module CrystalV2
             collect_tokens_recursive(program.arena, root_id, raw_tokens)
           end
 
+          collect_keyword_tokens(source, raw_tokens)
+
           # Sort tokens by line, then by start_char
           raw_tokens.sort_by! { |t| {t.line, t.start_char} }
 
@@ -1906,6 +1908,36 @@ module CrystalV2
           node = arena[node_id]
 
           case node
+          when Frontend::MemberAccessNode
+            collect_tokens_recursive(arena, node.object, tokens)
+
+          when Frontend::SafeNavigationNode
+            collect_tokens_recursive(arena, node.object, tokens)
+
+          when Frontend::IndexNode
+            collect_tokens_recursive(arena, node.object, tokens)
+            node.indexes.each { |idx| collect_tokens_recursive(arena, idx, tokens) }
+
+          when Frontend::BlockNode
+            node.body.each { |expr_id| collect_tokens_recursive(arena, expr_id, tokens) }
+
+          when Frontend::ArrayLiteralNode
+            node.elements.each { |e| collect_tokens_recursive(arena, e, tokens) }
+
+          when Frontend::TupleLiteralNode
+            node.elements.each { |e| collect_tokens_recursive(arena, e, tokens) }
+
+          when Frontend::NamedTupleLiteralNode
+            node.entries.each do |entry|
+              collect_tokens_recursive(arena, entry.value, tokens)
+            end
+
+          when Frontend::HashLiteralNode
+            node.entries.each do |entry|
+              collect_tokens_recursive(arena, entry.key, tokens)
+              collect_tokens_recursive(arena, entry.value, tokens)
+            end
+
           when Frontend::ClassNode
             # Token for class name
             # Convert from 1-indexed to 0-indexed
@@ -2034,6 +2066,41 @@ module CrystalV2
 
           else
             # Other node types don't generate semantic tokens
+          end
+        end
+
+
+        # Collect keyword tokens directly from lexical tokens for reliable highlighting of control flow
+        private def collect_keyword_tokens(source : String, tokens : Array(RawToken))
+          lexer = Frontend::Lexer.new(source)
+          lexer.each_token do |tok|
+            next unless keyword_kind?(tok.kind)
+            line = tok.span.start_line - 1
+            col  = tok.span.start_column - 1
+            length = tok.slice.size
+            tokens << RawToken.new(line, col, length, SemanticTokenType::Keyword.value)
+          end
+        end
+
+        # Subset of keywords we want colored by LSP regardless of semantic layer
+        private def keyword_kind?(kind : Frontend::Token::Kind) : Bool
+          case kind
+          when Frontend::Token::Kind::If,
+               Frontend::Token::Kind::Else,
+               Frontend::Token::Kind::Elsif,
+               Frontend::Token::Kind::End,
+               Frontend::Token::Kind::Do,
+               Frontend::Token::Kind::Begin,
+               Frontend::Token::Kind::While,
+               Frontend::Token::Kind::Until,
+               Frontend::Token::Kind::Unless,
+               Frontend::Token::Kind::Case,
+               Frontend::Token::Kind::Then,
+               Frontend::Token::Kind::Rescue,
+               Frontend::Token::Kind::Ensure
+            true
+          else
+            false
           end
         end
 
