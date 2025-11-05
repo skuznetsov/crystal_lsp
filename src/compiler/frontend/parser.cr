@@ -67,7 +67,7 @@ module CrystalV2
         def parse_program : Program
           roots = [] of ExprId
           while current_token.kind != Token::Kind::EOF
-            skip_trivia
+            skip_statement_end
             break if current_token.kind == Token::Kind::EOF
 
             if macro_definition_start?
@@ -241,7 +241,7 @@ module CrystalV2
           left = parse_op_assign
           return PREFIX_ERROR if left.invalid?
 
-          skip_trivia
+          skip_whitespace_and_optional_newlines
           token = current_token
 
           # Phase 73: Check for multiple assignment: a, b = ...
@@ -773,7 +773,7 @@ module CrystalV2
           advance
 
           # Allow whitespace before :: segments (e.g., Foo :: Bar)
-          skip_trivia
+          skip_whitespace_and_optional_newlines
 
           # Handle :: for paths like JSON::Field or A::B::C
           while current_token.kind == Token::Kind::ColonColon
@@ -862,7 +862,7 @@ module CrystalV2
           var = @arena.add_typed(IdentifierNode.new(var_span, identifier_token.slice))
 
           # Skip whitespace and consume ':'
-          skip_trivia
+          skip_whitespace_and_optional_newlines
           unless current_token.kind == Token::Kind::Colon
             @diagnostics << Diagnostic.new("Expected ':' in type declaration", current_token.span)
             return PREFIX_ERROR
@@ -888,7 +888,7 @@ module CrystalV2
           value = nil
           if current_token.kind == Token::Kind::Eq
             advance  # consume '='
-            skip_trivia
+            skip_whitespace_and_optional_newlines
             value = parse_expression(0)
             return PREFIX_ERROR if value.invalid?
           end
@@ -1050,7 +1050,7 @@ module CrystalV2
           when Token::Kind::Self
             receiver = current_token
             advance
-            skip_trivia
+            skip_whitespace_and_optional_newlines
 
             if current_token.kind == Token::Kind::Operator && slice_eq?(current_token.slice, ".")
               dot = current_token
