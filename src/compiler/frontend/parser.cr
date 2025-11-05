@@ -579,27 +579,28 @@ module CrystalV2
           end
         end
 
-        # Lookahead: check if pattern " : " (space + colon) follows
+        # Lookahead: check if a colon follows on the same line AND is separated by space
         # Used to distinguish "x : Type" (type restriction) from "x: value" (named arg)
-        # Returns true if whitespace followed by colon, false otherwise
-        # Does NOT consume any tokens
+        # Returns true if colon is present with at least one space before it on the same line.
+        # Does NOT consume any tokens.
         private def next_comes_colon_space? : Bool
           saved_pos = @index
-
-          # Start from NEXT token
-          @index += 1
-
-          # Skip whitespace (but NOT newlines - type restrictions must be on same line)
-          while @index < @tokens.size && @tokens[@index].kind == Token::Kind::Whitespace
-            @index += 1
+          current = @tokens[@index]
+          i = @index + 1
+          # Skip comments/whitespace if present (compat mode), but not newlines
+          while i < @tokens.size && (@tokens[i].kind == Token::Kind::Whitespace || @tokens[i].kind == Token::Kind::Comment)
+            i += 1
           end
-
-          # Check if we hit a colon
-          result = @index < @tokens.size && @tokens[@index].kind == Token::Kind::Colon
-
+          result = false
+          if i < @tokens.size && @tokens[i].kind == Token::Kind::Colon
+            colon_tok = @tokens[i]
+            if colon_tok.span.start_line == current.span.end_line
+              # Require at least one space between identifier and colon
+              result = colon_tok.span.start_column > current.span.end_column
+            end
+          end
           # Restore position
           @index = saved_pos
-
           result
         end
 
@@ -5683,9 +5684,12 @@ module CrystalV2
               # Treat as identifier
               identifier_token = token
               advance
-              space_consumed = current_token.kind == Token::Kind::Whitespace
+              # With skip_trivia, detect space by span gap
+              gap_before_colon = current_token.kind == Token::Kind::Colon &&
+                                  current_token.span.start_line == identifier_token.span.end_line &&
+                                  current_token.span.start_column > identifier_token.span.end_column
               skip_trivia
-              if space_consumed && current_token.kind == Token::Kind::Colon && @no_type_declaration == 0
+              if (gap_before_colon || current_token.kind == Token::Kind::Whitespace) && current_token.kind == Token::Kind::Colon && @no_type_declaration == 0
                 parse_type_declaration_from_identifier(identifier_token)
               else
                 @arena.add_typed(IdentifierNode.new(identifier_token.span, identifier_token.slice))
@@ -5699,9 +5703,11 @@ module CrystalV2
               # Treat as identifier
               identifier_token = token
               advance
-              space_consumed = current_token.kind == Token::Kind::Whitespace
+              gap_before_colon = current_token.kind == Token::Kind::Colon &&
+                                  current_token.span.start_line == identifier_token.span.end_line &&
+                                  current_token.span.start_column > identifier_token.span.end_column
               skip_trivia
-              if space_consumed && current_token.kind == Token::Kind::Colon && @no_type_declaration == 0
+              if (gap_before_colon || current_token.kind == Token::Kind::Whitespace) && current_token.kind == Token::Kind::Colon && @no_type_declaration == 0
                 parse_type_declaration_from_identifier(identifier_token)
               else
                 @arena.add_typed(IdentifierNode.new(identifier_token.span, identifier_token.slice))
@@ -5716,9 +5722,11 @@ module CrystalV2
             # Method definitions are handled in parse_op_assign via definition_start?
             identifier_token = token
             advance
-            space_consumed = current_token.kind == Token::Kind::Whitespace
+            gap_before_colon = current_token.kind == Token::Kind::Colon &&
+                                current_token.span.start_line == identifier_token.span.end_line &&
+                                current_token.span.start_column > identifier_token.span.end_column
             skip_trivia
-            if space_consumed && current_token.kind == Token::Kind::Colon && @no_type_declaration == 0
+            if (gap_before_colon || current_token.kind == Token::Kind::Whitespace) && current_token.kind == Token::Kind::Colon && @no_type_declaration == 0
               # Type declaration: def : Type = value
               parse_type_declaration_from_identifier(identifier_token)
             else
@@ -5769,8 +5777,9 @@ module CrystalV2
             advance  # Move past identifier
 
             # Phase CALLS_WITHOUT_PARENS: Check for whitespace before skip_trivia
-            # This allows us to parse calls like: foo arg1, arg2
-            space_consumed = current_token.kind == Token::Kind::Whitespace
+            # With no-trivia lexing, approximate with span gap where needed
+            next_tok = current_token
+            space_consumed = (next_tok.kind == Token::Kind::Whitespace)
             skip_trivia
 
             # Check if uppercase identifier followed by (
@@ -5782,7 +5791,9 @@ module CrystalV2
             # Phase 103: Check for type annotation (if enabled)
             # Must check for space before colon: "x : Type" not "x: value" (named arg)
             # After skip_trivia, we're at the colon; space_consumed tells us if there was space before
-            elsif @no_type_declaration == 0 && space_consumed && current_token.kind == Token::Kind::Colon
+            elsif @no_type_declaration == 0 && current_token.kind == Token::Kind::Colon &&
+                  (space_consumed || (current_token.span.start_line == identifier_token.span.end_line &&
+                   current_token.span.start_column > identifier_token.span.end_column))
               # This is type declaration: x : Type = value
               parse_type_declaration_from_identifier(identifier_token)
             # Phase CALLS_WITHOUT_PARENS: Try to parse call arguments if space was consumed
