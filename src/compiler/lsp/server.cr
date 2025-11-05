@@ -1688,6 +1688,35 @@ module CrystalV2
           node = arena[node_id]
 
           case node
+          when Frontend::MemberAccessNode
+            collect_tokens_recursive(arena, node.object, tokens)
+
+          when Frontend::SafeNavigationNode
+            collect_tokens_recursive(arena, node.object, tokens)
+
+          when Frontend::IndexNode
+            collect_tokens_recursive(arena, node.object, tokens)
+            node.indexes.each { |idx| collect_tokens_recursive(arena, idx, tokens) }
+
+          when Frontend::BlockNode
+            node.body.each { |expr_id| collect_tokens_recursive(arena, expr_id, tokens) }
+
+          when Frontend::ArrayLiteralNode
+            node.elements.each { |e| collect_tokens_recursive(arena, e, tokens) }
+
+          when Frontend::TupleLiteralNode
+            node.elements.each { |e| collect_tokens_recursive(arena, e, tokens) }
+
+          when Frontend::NamedTupleLiteralNode
+            node.entries.each do |entry|
+              collect_tokens_recursive(arena, entry.value, tokens)
+            end
+
+          when Frontend::HashLiteralNode
+            node.entries.each do |entry|
+              collect_tokens_recursive(arena, entry.key, tokens)
+              collect_tokens_recursive(arena, entry.value, tokens)
+            end
           when Frontend::DefNode
             # Fold methods (from def to end)
             # Only fold if method has a body

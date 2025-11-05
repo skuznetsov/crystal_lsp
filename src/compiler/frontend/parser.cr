@@ -7566,7 +7566,6 @@ module CrystalV2
         end
 
         private def macro_control_start?
-          return false if @macro_mode == 0
           current = current_token
           return false unless current.kind == Token::Kind::LBrace
           peek = peek_token
