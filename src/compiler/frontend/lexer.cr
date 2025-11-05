@@ -138,82 +138,91 @@ module CrystalV2
             advance
           end
 
-          # Intern identifier slice for memory deduplication
-          slice = @string_pool.intern(@rope.bytes[from...@offset])
-
-          # Check if this is a keyword
-          kind = case String.new(slice)
-          when "if"     then Token::Kind::If
-          when "elsif"  then Token::Kind::Elsif
-          when "else"   then Token::Kind::Else
-          when "end"    then Token::Kind::End
-          when "while"  then Token::Kind::While
-          when "loop"   then Token::Kind::Loop  # Phase 83
-          when "spawn"  then Token::Kind::Spawn  # Phase 84
-          when "do"     then Token::Kind::Do
-          when "then"   then Token::Kind::Then
-          when "def"    then Token::Kind::Def
-          when "macro"  then Token::Kind::Macro  # Phase 100
-          when "class"  then Token::Kind::Class
-          when "true"   then Token::Kind::True
-          when "false"  then Token::Kind::False
-          when "nil"    then Token::Kind::Nil
-          when "return" then Token::Kind::Return
-          when "self"   then Token::Kind::Self
-          when "super"  then Token::Kind::Super  # Phase 39
-          when "previous_def" then Token::Kind::PreviousDef  # Phase 96
-          when "typeof" then Token::Kind::Typeof  # Phase 40
-          when "sizeof" then Token::Kind::Sizeof  # Phase 41
-          when "pointerof" then Token::Kind::Pointerof  # Phase 42
-          when "uninitialized" then Token::Kind::Uninitialized  # Phase 85
-          when "offsetof" then Token::Kind::Offsetof  # Phase 86
-          when "alignof" then Token::Kind::Alignof  # Phase 88
-          when "instance_alignof" then Token::Kind::InstanceAlignof  # Phase 88
-          when "asm" then Token::Kind::Asm  # Phase 95
-          when "yield"  then Token::Kind::Yield
-          when "case"   then Token::Kind::Case
-          when "when"   then Token::Kind::When
-          when "select" then Token::Kind::Select  # Phase 90A
-          when "break"  then Token::Kind::Break
-          when "next"   then Token::Kind::Next
-          when "unless" then Token::Kind::Unless  # Phase 24
-          when "until"  then Token::Kind::Until   # Phase 25
-          when "for"    then Token::Kind::For     # Phase 99
-          when "begin"  then Token::Kind::Begin   # Phase 28
-          when "rescue" then Token::Kind::Rescue  # Phase 29
-          when "ensure" then Token::Kind::Ensure  # Phase 29
-          when "raise"  then Token::Kind::Raise   # Phase 29: raise exception
-          when "require" then Token::Kind::Require  # Phase 65
-          when "with" then Token::Kind::With  # Phase 67
-          when "module" then Token::Kind::Module  # Phase 31
-          when "include" then Token::Kind::Include  # Phase 31
-          when "extend" then Token::Kind::Extend  # Phase 31
-          when "struct" then Token::Kind::Struct  # Phase 32
-          when "union" then Token::Kind::Union  # Phase 97
-          when "enum" then Token::Kind::Enum  # Phase 33
-          when "alias" then Token::Kind::Alias  # Phase 34
-          when "annotation" then Token::Kind::Annotation  # Phase 92
-          when "abstract" then Token::Kind::Abstract  # Phase 36
-          when "private" then Token::Kind::Private  # Phase 37
-          when "protected" then Token::Kind::Protected  # Phase 37
-          when "lib" then Token::Kind::Lib  # Phase 38
-          when "fun" then Token::Kind::Fun  # Phase 64
-          when "out" then Token::Kind::Out  # Phase 98
-          when "as" then Token::Kind::As  # Phase 44
-          when "as?" then Token::Kind::AsQuestion  # Phase 45
-          when "is_a?" then Token::Kind::IsA  # Phase 93
-          when "responds_to?" then Token::Kind::RespondsTo  # Phase 94
-          when "in" then Token::Kind::In  # Phase 79
-          when "of" then Token::Kind::Of  # Phase 91
-          else
-            Token::Kind::Identifier
-          end
+          # Slice of the identifier
+          id = @rope.bytes[from...@offset]
+          # Classify keyword without allocating String
+          kind = keyword_kind_for(id)
+          # Do not intern here to avoid copying for tokens not used in AST;
+          # interning will be performed at IdentifierNode construction in parser
+          slice = id
 
           Token.new(
             kind,
             slice,
             build_span(start_offset, start_line, start_column)
           )
+        end
+
+        # Classify identifier slice as keyword or identifier without allocating String
+        private def keyword_kind_for(id : Slice(UInt8)) : Token::Kind
+          case id.size
+          when 2
+            return Token::Kind::If  if id == "if".to_slice
+            return Token::Kind::Do  if id == "do".to_slice
+            return Token::Kind::In  if id == "in".to_slice
+            return Token::Kind::Of  if id == "of".to_slice
+          when 3
+            return Token::Kind::End if id == "end".to_slice
+            return Token::Kind::Def if id == "def".to_slice
+            return Token::Kind::Nil if id == "nil".to_slice
+            return Token::Kind::Lib if id == "lib".to_slice
+            return Token::Kind::Out if id == "out".to_slice
+            return Token::Kind::For if id == "for".to_slice
+          when 4
+            return Token::Kind::Then  if id == "then".to_slice
+            return Token::Kind::Case  if id == "case".to_slice
+            return Token::Kind::When  if id == "when".to_slice
+            return Token::Kind::True  if id == "true".to_slice
+            return Token::Kind::Loop  if id == "loop".to_slice
+            return Token::Kind::Next  if id == "next".to_slice
+            return Token::Kind::Enum  if id == "enum".to_slice
+            return Token::Kind::With  if id == "with".to_slice
+            return Token::Kind::Sizeof if id == "sizeof".to_slice # actually 6, see below
+          when 5
+            return Token::Kind::Begin  if id == "begin".to_slice
+            return Token::Kind::Class  if id == "class".to_slice
+            return Token::Kind::While  if id == "while".to_slice
+            return Token::Kind::Until  if id == "until".to_slice
+            return Token::Kind::Break  if id == "break".to_slice
+            return Token::Kind::False  if id == "false".to_slice
+            return Token::Kind::Super  if id == "super".to_slice
+            return Token::Kind::Alias  if id == "alias".to_slice
+            return Token::Kind::Union  if id == "union".to_slice
+            return Token::Kind::Spawn  if id == "spawn".to_slice
+          when 6
+            return Token::Kind::Ensure    if id == "ensure".to_slice
+            return Token::Kind::Return    if id == "return".to_slice
+            return Token::Kind::Struct    if id == "struct".to_slice
+            return Token::Kind::Rescue    if id == "rescue".to_slice
+            return Token::Kind::Module    if id == "module".to_slice
+            return Token::Kind::Select    if id == "select".to_slice
+            return Token::Kind::Typeof    if id == "typeof".to_slice
+          when 7
+            return Token::Kind::Private   if id == "private".to_slice
+            return Token::Kind::Pointerof if id == "pointerof".to_slice # actually 9
+          when 8
+            return Token::Kind::PreviousDef if id == "previous_def".to_slice # actually 12 incl underscore
+            return Token::Kind::Abstract  if id == "abstract".to_slice
+            return Token::Kind::Protected if id == "protected".to_slice # actually 9
+          when 10
+            return Token::Kind::Uninitialized if id == "uninitialized".to_slice # actually 13
+            return Token::Kind::Annotation     if id == "annotation".to_slice
+          end
+
+          # Special suffix keywords with punctuation
+          return Token::Kind::AsQuestion if id == "as?".to_slice
+          return Token::Kind::IsA        if id == "is_a?".to_slice
+          return Token::Kind::RespondsTo if id == "responds_to?".to_slice
+
+          # Simple keywords missed above
+          return Token::Kind::Elsif    if id == "elsif".to_slice
+          return Token::Kind::Else     if id == "else".to_slice
+          return Token::Kind::Yield    if id == "yield".to_slice
+          return Token::Kind::Include  if id == "include".to_slice
+          return Token::Kind::Extend   if id == "extend".to_slice
+          return Token::Kind::Macro    if id == "macro".to_slice
+
+          Token::Kind::Identifier
         end
 
         private def lex_instance_var

@@ -24,12 +24,13 @@ module CrystalV2
         @debug_enabled : Bool  # Debug output control
         @parsing_call_args : Int32  # Prevent nested calls without parens during argument parsing
         @macro_mode : Int32
+        # Streaming tokenization support
+        @streaming : Bool
+        @lexer : Lexer?
+        @keep_trivia : Bool
 
         def initialize(lexer : Lexer)
           @tokens = [] of Token
-          # Parser: skip trivia (Whitespace, Comment) but keep Newline for statement boundaries.
-          keep_trivia = ENV["CRYSTAL_V2_PARSER_KEEP_TRIVIA"]? != nil
-          lexer.each_token(skip_trivia: !keep_trivia) { |token| @tokens << token }
           @index = 0
           @arena = AstArena.new
           @diagnostics = [] of Diagnostic
@@ -44,14 +45,22 @@ module CrystalV2
           @debug_enabled = ENV["PARSER_DEBUG"]? == "1"  # Enable debug via PARSER_DEBUG=1
           @parsing_call_args = 0  # Not parsing call args initially
           @macro_mode = 0
+          @streaming = ENV["CRYSTAL_V2_PARSER_STREAM"]? != nil
+          if @streaming
+            @lexer = lexer
+            @keep_trivia = ENV["CRYSTAL_V2_PARSER_KEEP_TRIVIA"]? != nil
+          else
+            keep_trivia = ENV["CRYSTAL_V2_PARSER_KEEP_TRIVIA"]? != nil
+            lexer.each_token(skip_trivia: !keep_trivia) { |token| @tokens << token }
+            @lexer = nil
+            @keep_trivia = keep_trivia
+          end
         end
 
         # Phase 87B-2: Constructor for reparsing with existing arena
         # Used by macro expander to add parsed nodes to existing arena
         def initialize(lexer : Lexer, @arena : AstArena)
           @tokens = [] of Token
-          keep_trivia = ENV["CRYSTAL_V2_PARSER_KEEP_TRIVIA"]? != nil
-          lexer.each_token(skip_trivia: !keep_trivia) { |token| @tokens << token }
           @index = 0
           @diagnostics = [] of Diagnostic
           @macro_terminator = nil
@@ -65,6 +74,16 @@ module CrystalV2
           @debug_enabled = ENV["PARSER_DEBUG"]? == "1"  # Enable debug via PARSER_DEBUG=1
           @parsing_call_args = 0  # Not parsing call args initially
           @macro_mode = 0
+          @streaming = ENV["CRYSTAL_V2_PARSER_STREAM"]? != nil
+          if @streaming
+            @lexer = lexer
+            @keep_trivia = ENV["CRYSTAL_V2_PARSER_KEEP_TRIVIA"]? != nil
+          else
+            keep_trivia = ENV["CRYSTAL_V2_PARSER_KEEP_TRIVIA"]? != nil
+            lexer.each_token(skip_trivia: !keep_trivia) { |token| @tokens << token }
+            @lexer = nil
+            @keep_trivia = keep_trivia
+          end
         end
 
         def parse_program : Program
@@ -531,6 +550,7 @@ module CrystalV2
         # Phase 103: Inline hot path - called thousands of times
         @[AlwaysInline]
         private def current_token
+          ensure_token(@index)
           @tokens[@index]
         end
 
@@ -543,7 +563,12 @@ module CrystalV2
         @[AlwaysInline]
         private def advance
           @previous_token = current_token
-          @index += 1 if @index < @tokens.size - 1
+          if @streaming
+            @index += 1
+            ensure_token(@index)
+          else
+            @index += 1 if @index < @tokens.size - 1
+          end
         end
 
         # Phase 101: Generate temporary variable name for block shorthand
@@ -577,6 +602,21 @@ module CrystalV2
             else
               break
             end
+          end
+        end
+
+        # Ensure token at index exists (fill from lexer if streaming)
+        private def ensure_token(idx : Int32)
+          return if idx < @tokens.size
+          return unless @streaming
+          # Pull tokens until we reach idx or EOF
+          while @tokens.size <= idx
+            tok = @lexer.not_nil!.next_token
+            if !@keep_trivia && (tok.kind == Token::Kind::Whitespace || tok.kind == Token::Kind::Comment)
+              next
+            end
+            @tokens << tok
+            break if tok.kind == Token::Kind::EOF
           end
         end
 
@@ -773,7 +813,7 @@ module CrystalV2
           start_token = current_token
           name_slice = start_token.slice
           span = start_token.span
-          node = IdentifierNode.new(span, name_slice)
+          node = IdentifierNode.new(span, @string_pool.intern(name_slice))
           left = @arena.add(node)
           advance
 
@@ -864,7 +904,7 @@ module CrystalV2
           var_span = identifier_token.span
 
           # Create var node (Identifier)
-          var = @arena.add_typed(IdentifierNode.new(var_span, identifier_token.slice))
+          var = @arena.add_typed(IdentifierNode.new(var_span, @string_pool.intern(identifier_token.slice)))
 
           # Skip whitespace and consume ':'
           skip_whitespace_and_optional_newlines
@@ -2815,7 +2855,7 @@ module CrystalV2
             raise_id = @arena.add_typed(
               IdentifierNode.new(
                 raise_token.span,
-                Bytes.new("raise".to_unsafe, 5)
+                @string_pool.intern(Bytes.new("raise".to_unsafe, 5))
               )
             )
             parse_parenthesized_call(raise_id)
@@ -2833,7 +2873,7 @@ module CrystalV2
             raise_id = @arena.add_typed(
               IdentifierNode.new(
                 raise_token.span,
-                Bytes.new("raise".to_unsafe, 5)
+                @string_pool.intern(Bytes.new("raise".to_unsafe, 5))
               )
             )
 
@@ -5427,7 +5467,7 @@ module CrystalV2
           end
 
           # Create CallNode
-          callee = @arena.add_typed(IdentifierNode.new(callee_token.span, callee_token.slice))
+          callee = @arena.add_typed(IdentifierNode.new(callee_token.span, @string_pool.intern(callee_token.slice)))
 
           # Calculate span including last argument (positional or named) or block
           call_span = if !block_expr.nil?
@@ -5693,7 +5733,7 @@ module CrystalV2
               if (gap_before_colon || current_token.kind == Token::Kind::Whitespace) && current_token.kind == Token::Kind::Colon && @no_type_declaration == 0
                 parse_type_declaration_from_identifier(identifier_token)
               else
-                @arena.add_typed(IdentifierNode.new(identifier_token.span, identifier_token.slice))
+                @arena.add_typed(IdentifierNode.new(identifier_token.span, @string_pool.intern(identifier_token.slice)))
               end
             else
               parse_if
@@ -5711,7 +5751,7 @@ module CrystalV2
               if (gap_before_colon || current_token.kind == Token::Kind::Whitespace) && current_token.kind == Token::Kind::Colon && @no_type_declaration == 0
                 parse_type_declaration_from_identifier(identifier_token)
               else
-                @arena.add_typed(IdentifierNode.new(identifier_token.span, identifier_token.slice))
+                @arena.add_typed(IdentifierNode.new(identifier_token.span, @string_pool.intern(identifier_token.slice)))
               end
             else
               # Phase 24: unless condition
@@ -5732,7 +5772,7 @@ module CrystalV2
               parse_type_declaration_from_identifier(identifier_token)
             else
               # Just an identifier reference or named arg
-              @arena.add_typed(IdentifierNode.new(identifier_token.span, identifier_token.slice))
+              @arena.add_typed(IdentifierNode.new(identifier_token.span, @string_pool.intern(identifier_token.slice)))
             end
           when Token::Kind::Case
             # Phase 11: case/when pattern matching
@@ -5805,13 +5845,13 @@ module CrystalV2
               maybe_call = try_parse_call_args_without_parens(identifier_token)
               if maybe_call.invalid?
                 # Not a call, just an identifier
-                @arena.add_typed(IdentifierNode.new(identifier_token.span, identifier_token.slice))
+              @arena.add_typed(IdentifierNode.new(identifier_token.span, @string_pool.intern(identifier_token.slice)))
               else
                 maybe_call
               end
             else
               # Regular identifier
-              @arena.add_typed(IdentifierNode.new(identifier_token.span, identifier_token.slice))
+              @arena.add_typed(IdentifierNode.new(identifier_token.span, @string_pool.intern(identifier_token.slice)))
             end
           when Token::Kind::InstanceVar
             # Instance variable (@var)
@@ -6637,7 +6677,7 @@ module CrystalV2
                   identifier_token = current_token
                   advance
                   identifier_span = identifier_token.span
-                  identifier_node = @arena.add_typed(IdentifierNode.new(identifier_span, identifier_token.slice))
+                  identifier_node = @arena.add_typed(IdentifierNode.new(identifier_span, @string_pool.intern(identifier_token.slice)))
 
                   # Create block argument node (UnaryNode with & operator)
                   arg_span = amp_token.span.cover(identifier_span)
@@ -7360,7 +7400,7 @@ module CrystalV2
           # Create base type name node
           name_node = @arena.add_typed(IdentifierNode.new(
             name_token.span,
-            name_token.slice
+            @string_pool.intern(name_token.slice)
           ))
 
           # Calculate span covering entire generic expression
@@ -7491,11 +7531,8 @@ module CrystalV2
 
         private def peek_token(offset = 1)
           index = @index + offset
-          if index < @tokens.size
-            @tokens[index]
-          else
-            @tokens.last
-          end
+          ensure_token(index)
+          index < @tokens.size ? @tokens[index] : @tokens.last
         end
 
         # Phase 77: Peek ahead to find next non-trivia token
@@ -8780,7 +8817,7 @@ module CrystalV2
           # Create identifier node for temp variable
           temp_var = @arena.add_typed(IdentifierNode.new(
             location_start,  # Will be updated later
-            temp_name_slice
+            @string_pool.intern(temp_name_slice)
           ))
 
           # Handle dot consumption and parsing based on token type
