@@ -2,6 +2,7 @@ require "./ast"
 require "./lexer"
 require "./lexer/token"
 require "./parser/diagnostic"
+require "./small_vec"
 
 module CrystalV2
   module Compiler
@@ -87,15 +88,15 @@ module CrystalV2
         end
 
         def parse_program : Program
-          # Preallocate a modest capacity to reduce growth during parse
-          roots = Array(ExprId).new(64)
+          # Use SmallVec to reduce heap churn when collecting roots
+          roots_builder = SmallVec(ExprId, 64).new
           while current_token.kind != Token::Kind::EOF
             skip_statement_end
             break if current_token.kind == Token::Kind::EOF
 
             if macro_definition_start?
               macro_def = parse_macro_definition
-              roots << macro_def unless macro_def.invalid?
+              roots_builder << macro_def unless macro_def.invalid?
               consume_newlines
               next
             end
@@ -105,7 +106,7 @@ module CrystalV2
             if macro_control_start?
               debug("parse_program: macro_control_start? returned true, calling parse_percent_macro_control")
               macro_ctrl = parse_percent_macro_control
-              roots << macro_ctrl unless macro_ctrl.invalid?
+              roots_builder << macro_ctrl unless macro_ctrl.invalid?
               consume_newlines
               next
             end
@@ -147,16 +148,16 @@ module CrystalV2
                 else
                   PREFIX_ERROR
                 end
-              roots << node unless node.invalid?
+              roots_builder << node unless node.invalid?
               consume_newlines
               next
             end
 
             expr = parse_statement
-            roots << expr unless expr.invalid?
+            roots_builder << expr unless expr.invalid?
             consume_newlines
           end
-          Program.new(@arena, roots)
+          Program.new(@arena, roots_builder.to_a)
         end
 
         # Parse a statement (assignment or expression)
@@ -6789,7 +6790,7 @@ module CrystalV2
           expect_operator(Token::Kind::RParen)
 
           # Calculate span
-          spans = [] of Span
+          spans = Array(Span).new(8)
           spans << lparen.span
           spans << node_span(callee)
           args.each { |arg| spans << node_span(arg) }
