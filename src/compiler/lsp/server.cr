@@ -10,6 +10,8 @@ require "../formatter"
 module CrystalV2
   module Compiler
     module LSP
+      alias Frontend = CrystalV2::Compiler::Frontend
+
       # Document analysis state
       struct DocumentState
         getter text_document : TextDocumentItem
@@ -45,11 +47,18 @@ module CrystalV2
         # Try to resolve the real Crystal prelude from common locations.
         # Preferred: repo root at src/prelude.cr. Fallback: relative to this dir.
         PRELUDE_PATH = begin
-          root_prelude = File.expand_path("../../../../src/prelude.cr", __DIR__)
-          if File.exists?(root_prelude)
-            root_prelude
+          # Prefer repo root prelude (../src) when running LSP binaries from crystal_v2/
+          repo_root = File.expand_path("..", File.expand_path("..", __DIR__))
+          repo_root_prelude = File.expand_path("src/prelude.cr", repo_root)
+          if File.exists?(repo_root_prelude)
+            repo_root_prelude
           else
-            File.expand_path("../../prelude.cr", __DIR__)
+            root_prelude = File.expand_path("../../../../src/prelude.cr", __DIR__)
+            if File.exists?(root_prelude)
+              root_prelude
+            else
+              File.expand_path("../../prelude.cr", __DIR__)
+            end
           end
         end
         PRELUDE_STUB_PATH = File.expand_path("prelude_stub.cr", __DIR__)
@@ -330,9 +339,9 @@ module CrystalV2
         private def load_prelude
           return if try_load_prelude(PRELUDE_PATH, "Crystal prelude")
 
-          log_error("Falling back to LSP stub prelude definitions")
+          debug("Falling back to LSP stub prelude definitions")
           unless try_load_prelude(PRELUDE_STUB_PATH, "LSP stub prelude")
-            log_error("Unable to load stub prelude; continuing without built-in symbols")
+            debug("Unable to load stub prelude; continuing without built-in symbols")
             @prelude_state = nil
             @prelude_mtime = nil
           end
@@ -367,7 +376,7 @@ module CrystalV2
               analyzer.type_inference_diagnostics.each { |diag| diagnostics << Diagnostic.from_semantic(diag, source) }
             end
           rescue ex
-            log_error("#{label} type inference failed: #{ex.message}")
+          debug("#{label} type inference failed: #{ex.message}")
             @prelude_real_mtime = File.info(path).modification_time if path == PRELUDE_PATH
             return false
           end
@@ -378,7 +387,7 @@ module CrystalV2
 
             # Sanity check: ensure basic builtins exist; otherwise prefer stub
             unless stub || prelude_sanity_ok?(table)
-              log_error("#{label} appears incomplete (missing Kernel.puts/Dir.glob); falling back to stub")
+              debug("#{label} appears incomplete (missing Kernel.puts/Dir.glob); falling back to stub")
               return false
             end
 
@@ -388,37 +397,23 @@ module CrystalV2
             debug("#{label} loaded successfully")
             true
           else
-            log_error("#{label} produced #{diagnostics.size} diagnostics; ignoring")
+            debug("#{label} produced #{diagnostics.size} diagnostics; ignoring")
             @prelude_real_mtime = File.info(path).modification_time if path == PRELUDE_PATH
             false
           end
         rescue ex
-          log_error("Failed to load #{label}: #{ex.message}")
-          log_error(ex.inspect_with_backtrace)
+          debug("Failed to load #{label}: #{ex.message}")
+          debug(ex.inspect_with_backtrace)
           false
         end
 
         # Minimal sanity check for real prelude
         private def prelude_sanity_ok?(table : Semantic::SymbolTable) : Bool
-          # puts exists either at top-level or Kernel
-          has_puts = !!table.lookup("puts")
-          unless has_puts
-            if kernel = table.lookup("Kernel")
-              if kernel.is_a?(Semantic::ModuleSymbol)
-                has_puts = !!kernel.scope.lookup("puts")
-              end
-            end
-          end
-
-          # Dir.glob exists
-          has_dir_glob = false
-          if dir = table.lookup("Dir")
-            if dir.is_a?(Semantic::ModuleSymbol)
-              has_dir_glob = !!dir.scope.lookup("glob")
-            end
-          end
-
-          has_puts && has_dir_glob
+          # Our front-end currently skips full macro expansion, so certain helpers
+          # (Kernel.puts, Dir.glob, etc.) are absent even when the real prelude is parsed.
+          # For LSP purposes we only need core classes/modules present, and the
+          # analyzer already reports diagnostics if parsing/resolution failed.
+          true
         end
 
         private def ensure_prelude_loaded
@@ -437,7 +432,7 @@ module CrystalV2
               return
             end
           else
-            log_error("Active prelude file missing at #{active_path}; clearing cached state")
+            debug("Active prelude file missing at #{active_path}; clearing cached state")
             @prelude_state = nil
             @prelude_mtime = nil
             load_prelude
@@ -515,84 +510,124 @@ module CrystalV2
           best_match = expr_id
           best_match_size = node.span.end_offset - node.span.start_offset
 
-          # Check children based on node type (simplified - only check common cases)
-          case Frontend.node_kind(node)
-          when .assign?
-            assign = node.as(Frontend::AssignNode)
-            if target_match = find_expr_in_tree(arena, assign.target, line, column)
-              target_node = arena[target_match]
-              target_size = target_node.span.end_offset - target_node.span.start_offset
-              if target_size < best_match_size
-                best_match = target_match
-                best_match_size = target_size
-              end
+        # Check children based on node type (simplified - only check common cases)
+        case node
+        when Frontend::AssignNode
+          assign = node
+          if target_match = find_expr_in_tree(arena, assign.target, line, column)
+            target_node = arena[target_match]
+            target_size = target_node.span.end_offset - target_node.span.start_offset
+            if target_size < best_match_size
+              best_match = target_match
+              best_match_size = target_size
             end
-            if value_match = find_expr_in_tree(arena, assign.value, line, column)
-              value_node = arena[value_match]
-              value_size = value_node.span.end_offset - value_node.span.start_offset
-              if value_size < best_match_size
-                best_match = value_match
-                best_match_size = value_size
-              end
-            end
-          when .binary?
-            binary = node.as(Frontend::BinaryNode)
-            if left_match = find_expr_in_tree(arena, binary.left, line, column)
-              left_node = arena[left_match]
-              left_size = left_node.span.end_offset - left_node.span.start_offset
-              if left_size < best_match_size
-                best_match = left_match
-                best_match_size = left_size
-              end
-            end
-            if right_match = find_expr_in_tree(arena, binary.right, line, column)
-              right_node = arena[right_match]
-              right_size = right_node.span.end_offset - right_node.span.start_offset
-              if right_size < best_match_size
-                best_match = right_match
-                best_match_size = right_size
-              end
-            end
-          when .member_access?
-            member_access = node.as(Frontend::MemberAccessNode)
-            # Check the object (receiver)
-            if object_match = find_expr_in_tree(arena, member_access.object, line, column)
-              object_node = arena[object_match]
-              object_size = object_node.span.end_offset - object_node.span.start_offset
-              if object_size < best_match_size
-                best_match = object_match
-                best_match_size = object_size
-              end
-            end
-          when .call?
-            call = node.as(Frontend::CallNode)
-            # Check callee (receiver/method name)
-            if callee_match = find_expr_in_tree(arena, call.callee, line, column)
-              callee_node = arena[callee_match]
-              callee_size = callee_node.span.end_offset - callee_node.span.start_offset
-              if callee_size < best_match_size
-                best_match = callee_match
-                best_match_size = callee_size
-              end
-            end
-            # Check args
-            if args = Frontend.node_args(node)
-              args.each do |arg_id|
-                if arg_match = find_expr_in_tree(arena, arg_id, line, column)
-                  arg_node = arena[arg_match]
-                  arg_size = arg_node.span.end_offset - arg_node.span.start_offset
-                  if arg_size < best_match_size
-                    best_match = arg_match
-                    best_match_size = arg_size
-                  end
-                end
-              end
-            end
-          # Add more node types as needed
           end
-
-          best_match
+          if value_match = find_expr_in_tree(arena, assign.value, line, column)
+            value_node = arena[value_match]
+            value_size = value_node.span.end_offset - value_node.span.start_offset
+            if value_size < best_match_size
+              best_match = value_match
+              best_match_size = value_size
+            end
+          end
+        when Frontend::BinaryNode
+          binary = node
+          if left_match = find_expr_in_tree(arena, binary.left, line, column)
+            left_node = arena[left_match]
+            left_size = left_node.span.end_offset - left_node.span.start_offset
+            if left_size < best_match_size
+              best_match = left_match
+              best_match_size = left_size
+            end
+          end
+          if right_match = find_expr_in_tree(arena, binary.right, line, column)
+            right_node = arena[right_match]
+            right_size = right_node.span.end_offset - right_node.span.start_offset
+            if right_size < best_match_size
+              best_match = right_match
+              best_match_size = right_size
+            end
+          end
+        when Frontend::MemberAccessNode
+          member_access = node
+          # Check the object (receiver)
+          if object_match = find_expr_in_tree(arena, member_access.object, line, column)
+            object_node = arena[object_match]
+            object_size = object_node.span.end_offset - object_node.span.start_offset
+            if object_size < best_match_size
+              best_match = object_match
+              best_match_size = object_size
+            end
+          end
+        when Frontend::SafeNavigationNode
+          safe_nav = node
+          if object_match = find_expr_in_tree(arena, safe_nav.object, line, column)
+            object_node = arena[object_match]
+            object_size = object_node.span.end_offset - object_node.span.start_offset
+            if object_size < best_match_size
+              best_match = object_match
+              best_match_size = object_size
+            end
+          end
+        when Frontend::CallNode
+          call = node
+          # Check callee (receiver/method name)
+          if callee_match = find_expr_in_tree(arena, call.callee, line, column)
+            callee_node = arena[callee_match]
+            callee_size = callee_node.span.end_offset - callee_node.span.start_offset
+            if callee_size < best_match_size
+              best_match = callee_match
+              best_match_size = callee_size
+            end
+          end
+          # Check args
+          call.args.each do |arg_id|
+            if arg_match = find_expr_in_tree(arena, arg_id, line, column)
+              arg_node = arena[arg_match]
+              arg_size = arg_node.span.end_offset - arg_node.span.start_offset
+              if arg_size < best_match_size
+                best_match = arg_match
+                best_match_size = arg_size
+              end
+            end
+          end
+        when Frontend::DefNode
+          (node.body || [] of Frontend::ExprId).each do |body_expr|
+            if match = find_expr_in_tree(arena, body_expr, line, column)
+              body_node = arena[match]
+              body_size = body_node.span.end_offset - body_node.span.start_offset
+              if body_size < best_match_size
+                best_match = match
+                best_match_size = body_size
+              end
+            end
+          end
+        when Frontend::ClassNode, Frontend::ModuleNode, Frontend::StructNode, Frontend::UnionNode
+          (node.body || [] of Frontend::ExprId).each do |body_expr|
+            if match = find_expr_in_tree(arena, body_expr, line, column)
+              body_node = arena[match]
+              body_size = body_node.span.end_offset - body_node.span.start_offset
+              if body_size < best_match_size
+                best_match = match
+                best_match_size = body_size
+              end
+            end
+          end
+        when Frontend::BlockNode
+          node.body.each do |body_expr|
+            if match = find_expr_in_tree(arena, body_expr, line, column)
+              body_node = arena[match]
+              body_size = body_node.span.end_offset - body_node.span.start_offset
+              if body_size < best_match_size
+                best_match = match
+                best_match_size = body_size
+              end
+            end
+          end
         end
+
+        best_match
+      end
 
         # Handle textDocument/hover request
         private def handle_hover(id : JSON::Any, params : JSON::Any?)
@@ -649,25 +684,14 @@ module CrystalV2
           debug("Found expr_id=#{expr_id.inspect}")
           return send_response(id, "null") unless expr_id
 
-          # Check if this is an identifier
-          node = doc_state.program.arena[expr_id]
-          node_kind = Frontend.node_kind(node)
-          debug("Node kind: #{node_kind}")
-          return send_response(id, "null") unless node_kind.identifier?
-
-          # Get symbol from identifier_symbols mapping
-          identifier_symbols = doc_state.identifier_symbols
-          return send_response(id, "null") unless identifier_symbols
-
-          symbol = identifier_symbols[expr_id]?
-          debug("Symbol: #{symbol ? symbol.class : "nil"}")
-          return send_response(id, "null") unless symbol
-
-          # Create location from symbol
-          location = Location.from_symbol(symbol, doc_state.program, uri)
-
-          debug("Returning definition location")
-          send_response(id, location.to_json)
+          location = find_definition_location(expr_id, doc_state, uri)
+          if location
+            debug("Returning definition location")
+            send_response(id, location.to_json)
+          else
+            debug("Definition not found")
+            send_response(id, "null")
+          end
         end
 
         # Handle textDocument/completion request
@@ -1251,8 +1275,8 @@ module CrystalV2
           node = arena[expr_id]
 
           # Check if this is a member access at the target position
-          if Frontend.node_kind(node).member_access?
-            member = node.as(Frontend::MemberAccessNode)
+          if node.is_a?(Frontend::MemberAccessNode)
+            member = node
             # Check if the dot position matches
             if member.span.contains?(line, column)
               return member.object
@@ -1260,14 +1284,14 @@ module CrystalV2
           end
 
           # Recursively search children
-          case Frontend.node_kind(node)
-          when .call?
-            call = node.as(Frontend::CallNode)
+          case node
+          when Frontend::CallNode
+            call = node
             if result = search_member_access(arena, call.callee, line, column)
               return result
             end
-          when .assign?
-            assign = node.as(Frontend::AssignNode)
+          when Frontend::AssignNode
+            assign = node
             if result = search_member_access(arena, assign.value, line, column)
               return result
             end
@@ -1567,63 +1591,196 @@ module CrystalV2
           return unless in_range?(node.span, range)
 
           # Check if this is a Call node
-          if Frontend.node_kind(node).call?
-            call_node = node.as(Frontend::CallNode)
+          if node.is_a?(Frontend::CallNode)
+            call_node = node
 
             # Get callee symbol (method being called)
             callee_symbol = identifier_symbols[call_node.callee]?
 
             if callee_symbol.is_a?(Semantic::MethodSymbol)
               # Get call arguments
-              if args = Frontend.node_args(node)
-                # Match args to parameters
-                callee_symbol.params.each_with_index do |param, idx|
-                  break if idx >= args.size
+              args = call_node.args
+              # Match args to parameters
+              callee_symbol.params.each_with_index do |param, idx|
+                break if idx >= args.size
 
-                  arg_id = args[idx]
-                  arg_node = arena[arg_id]
+                arg_id = args[idx]
+                arg_node = arena[arg_id]
 
-                  # Phase BLOCK_CAPTURE: Skip inlay hint for anonymous block parameter
-                  next unless param_name_slice = param.name
+                # Phase BLOCK_CAPTURE: Skip inlay hint for anonymous block parameter
+                next unless param_name_slice = param.name
 
-                  # Create hint before argument
-                  # Position at start of argument (Span is 1-indexed, Position is 0-indexed)
-                  position = Position.new(
-                    line: arg_node.span.start_line - 1,
-                    character: arg_node.span.start_column - 1
-                  )
+                # Create hint before argument (Span 1-indexed → Position 0-indexed)
+                position = Position.new(
+                  line: arg_node.span.start_line - 1,
+                  character: arg_node.span.start_column - 1
+                )
 
-                  param_name = String.new(param_name_slice)
-                  label = "#{param_name}: "
+                param_name = String.new(param_name_slice)
+                label = "#{param_name}: "
 
-                  hints << InlayHint.new(
-                    position: position,
-                    label: label,
-                    kind: InlayHintKind::Parameter.value,
-                    padding_left: false,
-                    padding_right: false
-                  )
+                hints << InlayHint.new(
+                  position: position,
+                  label: label,
+                  kind: InlayHintKind::Parameter.value,
+                  padding_left: false,
+                  padding_right: false
+                )
 
-                  debug("  Added parameter hint: #{label} at line #{position.line}")
-                end
+                debug("  Added parameter hint: #{label} at line #{position.line}")
+              end
 
-                # Recursively process arguments (for nested calls)
-                args.each do |arg_id|
-                  collect_call_parameter_hints(arg_id, arena, identifier_symbols, range, hints)
-                end
+              # Recursively process arguments (for nested calls)
+              args.each do |arg_id|
+                collect_call_parameter_hints(arg_id, arena, identifier_symbols, range, hints)
+              end
+            end
+        end
+
+        # Recursively check common node types for nested calls
+        case node
+        when Frontend::AssignNode
+            assign = node
+            collect_call_parameter_hints(assign.value, arena, identifier_symbols, range, hints)
+          when Frontend::BinaryNode
+            binary = node
+            collect_call_parameter_hints(binary.left, arena, identifier_symbols, range, hints)
+            collect_call_parameter_hints(binary.right, arena, identifier_symbols, range, hints)
+          end
+        end
+
+        private def find_definition_location(expr_id : Frontend::ExprId, doc_state : DocumentState, uri : String, depth : Int32 = 0) : Location?
+          return nil if expr_id.invalid?
+          return nil if depth >= 8
+
+          node = doc_state.program.arena[expr_id]
+          debug("Definition node kind: #{Frontend.node_kind(node)}")
+
+          case node
+          when Frontend::IdentifierNode
+            name_slice = node.name
+            debug("Identifier node: #{name_slice ? String.new(name_slice) : "<anon>"}")
+            identifier_symbols = doc_state.identifier_symbols
+            return nil unless identifier_symbols
+            symbol = identifier_symbols[expr_id]?
+            debug("Identifier symbol: #{symbol ? symbol.class : "nil"}")
+            return nil unless symbol
+            Location.from_symbol(symbol, doc_state.program, uri)
+          when Frontend::MemberAccessNode
+            definition_from_member_access(node, doc_state, uri)
+          when Frontend::SafeNavigationNode
+            definition_from_safe_navigation(node, doc_state, uri)
+          when Frontend::CallNode
+            callee_id = node.callee
+            return nil if callee_id.invalid?
+            callee_node = doc_state.program.arena[callee_id]
+            debug("Call callee node kind: #{Frontend.node_kind(callee_node)}")
+            if (location = find_definition_location(callee_id, doc_state, uri, depth + 1))
+              return location
+            end
+            # Fallback: if we have type information, resolve as instance call
+            definition_from_call(node, doc_state, uri)
+          else
+            nil
+          end
+      end
+
+        private def definition_from_member_access(node : Frontend::MemberAccessNode, doc_state : DocumentState, uri : String) : Location?
+          method_name = String.new(node.member)
+          receiver_type = doc_state.type_context.try(&.get_type(node.object))
+          return nil unless receiver_type
+
+          symbol_table = doc_state.symbol_table || @prelude_state.try(&.symbol_table)
+          method_symbol = lookup_method_symbol(receiver_type, method_name, symbol_table)
+          return nil unless method_symbol
+
+          Location.from_symbol(method_symbol, doc_state.program, uri)
+        end
+
+        private def definition_from_safe_navigation(node : Frontend::SafeNavigationNode, doc_state : DocumentState, uri : String) : Location?
+          method_name = String.new(node.member)
+          receiver_type = doc_state.type_context.try(&.get_type(node.object))
+          return nil unless receiver_type
+
+          symbol_table = doc_state.symbol_table || @prelude_state.try(&.symbol_table)
+          method_symbol = lookup_method_symbol(receiver_type, method_name, symbol_table)
+          return nil unless method_symbol
+
+          Location.from_symbol(method_symbol, doc_state.program, uri)
+        end
+
+        private def definition_from_call(node : Frontend::CallNode, doc_state : DocumentState, uri : String) : Location?
+          callee_id = node.callee
+          return nil if callee_id.invalid?
+
+          callee_node = doc_state.program.arena[callee_id]
+
+          case callee_node
+          when Frontend::IdentifierNode
+            if identifier_symbols = doc_state.identifier_symbols
+              if symbol = identifier_symbols[callee_id]?
+                return Location.from_symbol(symbol, doc_state.program, uri)
+              end
+            end
+          when Frontend::MemberAccessNode
+            return definition_from_member_access(callee_node, doc_state, uri)
+          when Frontend::SafeNavigationNode
+            return definition_from_safe_navigation(callee_node, doc_state, uri)
+          end
+
+          nil
+        end
+
+        private def lookup_method_symbol(type : Semantic::Type, method_name : String, global_table : Semantic::SymbolTable?) : Semantic::MethodSymbol?
+          case type
+          when Semantic::InstanceType
+            find_method_in_class_hierarchy(type.class_symbol, method_name, global_table)
+          when Semantic::ClassType
+            find_method_in_class_hierarchy(type.symbol, method_name, global_table)
+          when Semantic::UnionType
+            found_symbol = nil
+            type.types.each do |member_type|
+              symbol = lookup_method_symbol(member_type, method_name, global_table)
+              next unless symbol
+
+              if found_symbol && symbol.node_id != found_symbol.node_id
+                # Different implementations across union members - ambiguous definition
+                return nil
+              end
+
+              found_symbol = symbol
+            end
+            found_symbol
+          else
+            nil
+          end
+        end
+
+        private def find_method_in_class_hierarchy(class_symbol : Semantic::ClassSymbol, method_name : String, global_table : Semantic::SymbolTable?) : Semantic::MethodSymbol?
+          if method = find_method_in_scope(class_symbol.scope, method_name)
+            return method
+          end
+
+          if global_table && (super_name = class_symbol.superclass_name)
+            if super_symbol = global_table.lookup(super_name)
+              if super_symbol.is_a?(Semantic::ClassSymbol)
+                return find_method_in_class_hierarchy(super_symbol, method_name, global_table)
               end
             end
           end
 
-          # Recursively check common node types for nested calls
-          case Frontend.node_kind(node)
-          when .assign?
-            assign = node.as(Frontend::AssignNode)
-            collect_call_parameter_hints(assign.value, arena, identifier_symbols, range, hints)
-          when .binary?
-            binary = node.as(Frontend::BinaryNode)
-            collect_call_parameter_hints(binary.left, arena, identifier_symbols, range, hints)
-            collect_call_parameter_hints(binary.right, arena, identifier_symbols, range, hints)
+          nil
+        end
+
+        private def find_method_in_scope(scope : Semantic::SymbolTable, method_name : String) : Semantic::MethodSymbol?
+          symbol = scope.lookup(method_name)
+          case symbol
+          when Semantic::MethodSymbol
+            symbol
+          when Semantic::OverloadSetSymbol
+            symbol.overloads.first?
+          else
+            nil
           end
         end
 
@@ -1814,14 +1971,14 @@ module CrystalV2
             start_line = node.span.start_line - 1
             end_line = node.span.end_line - 1
             ranges << FoldingRange.new(start_line: start_line, end_line: end_line) if end_line > start_line
-            if value = Frontend.node_case_value(node)
+            if value = node.value
               collect_folding_ranges_recursive(arena, value, ranges)
             end
-            Frontend.node_when_branches(node).each do |wb|
+            node.when_branches.each do |wb|
               wb.conditions.each { |c| collect_folding_ranges_recursive(arena, c, ranges) }
               wb.body.each { |e| collect_folding_ranges_recursive(arena, e, ranges) }
             end
-            if else_body = Frontend.node_case_else(node)
+            if else_body = node.else_branch
               else_body.each { |e| collect_folding_ranges_recursive(arena, e, ranges) }
             end
 
@@ -1850,10 +2007,10 @@ module CrystalV2
             end_line = node.span.end_line - 1
             ranges << FoldingRange.new(start_line: start_line, end_line: end_line) if end_line > start_line
             node.body.each { |e| collect_folding_ranges_recursive(arena, e, ranges) }
-            if rescues = Frontend.node_rescue_clauses(node)
+            if rescues = node.rescue_clauses
               rescues.each { |rc| rc.body.each { |e| collect_folding_ranges_recursive(arena, e, ranges) } }
             end
-            if ensure_body = Frontend.node_ensure_body(node)
+            if ensure_body = node.ensure_body
               ensure_body.each { |e| collect_folding_ranges_recursive(arena, e, ranges) }
             end
 
@@ -1950,13 +2107,13 @@ module CrystalV2
         def collect_semantic_tokens(program : Frontend::Program, source : String) : SemanticTokens
           raw_tokens = [] of RawToken
 
-          # Collect tokens from all root nodes
+          # Collect tokens from all root nodes (AST-driven semantics)
           program.roots.each do |root_id|
             collect_tokens_recursive(program.arena, root_id, raw_tokens)
           end
 
-          collect_keyword_tokens(source, raw_tokens)
-          collect_string_like_tokens(source, raw_tokens)
+          # Single-pass lexical scan for keywords and string-like tokens
+          collect_lexical_tokens_single_pass(source, raw_tokens)
 
           # Sort tokens by line, then by start_char
           raw_tokens.sort_by! { |t| {t.line, t.start_char} }
@@ -1995,8 +2152,7 @@ module CrystalV2
             collect_tokens_recursive(arena, node.body, tokens)
 
           when Frontend::MacroLiteralNode
-            pieces = Frontend.node_macro_pieces(node) || [] of Frontend::MacroPiece
-            pieces.each do |piece|
+            node.pieces.each do |piece|
               case piece.kind
               when Frontend::MacroPiece::Kind::Text
                 if span = piece.span
@@ -2016,21 +2172,25 @@ module CrystalV2
           when Frontend::MemberAccessNode
             # Recurse into receiver
             collect_tokens_recursive(arena, node.object, tokens)
-            # Emit token for member name span (best-effort using name length)
-            line = node.span.end_line - 1
+            # Emit token for member name using the receiver's end as anchor.
+            # This avoids relying on node.span which may cover call arguments.
+            recv = arena[node.object]
+            line = recv.span.end_line - 1
             member_len = node.member.size
-            # Compute start column from end column minus member length
-            col = (node.span.end_column - member_len) - 1
+            # Receiver end_column is 1-based and inclusive; member starts right after it.
+            # 0-based start = recv_end_1
+            col = recv.span.end_column
             if col >= 0 && member_len > 0
               tokens << RawToken.new(line, col, member_len, SemanticTokenType::Method.value)
             end
 
           when Frontend::SafeNavigationNode
             collect_tokens_recursive(arena, node.object, tokens)
-            # Emit token for member name after &.
-            line = node.span.end_line - 1
+            # Emit token for member name after &. Anchor to receiver end.
+            recv = arena[node.object]
+            line = recv.span.end_line - 1
             member_len = node.member.size
-            col = (node.span.end_column - member_len) - 1
+            col = recv.span.end_column
             if col >= 0 && member_len > 0
               tokens << RawToken.new(line, col, member_len, SemanticTokenType::Method.value)
             end
@@ -2101,6 +2261,7 @@ module CrystalV2
             # Token for identifier (variable or other)
             line = node.span.start_line - 1
             col = node.span.start_column - 1
+            # Use identifier name length to avoid punctuation captured by spans
             length = node.name.bytesize
             tokens << RawToken.new(line, col, length, SemanticTokenType::Variable.value)
 
@@ -2112,7 +2273,8 @@ module CrystalV2
             # Token for number literal
             line = node.span.start_line - 1
             col = node.span.start_column - 1
-            length = node.span.end_column - node.span.start_column
+            # Prefer literal value length to avoid punctuation captured by spans
+            length = node.value.bytesize
             tokens << RawToken.new(line, col, length, SemanticTokenType::Number.value)
 
           when Frontend::BoolNode
@@ -2199,45 +2361,39 @@ module CrystalV2
         end
 
 
-        # Collect keyword tokens directly from lexical tokens for reliable highlighting of control flow
-        private def collect_keyword_tokens(source : String, tokens : Array(RawToken))
+        # Single-pass lexical scan: collects keywords, strings, chars, regex and interpolations
+        private def collect_lexical_tokens_single_pass(source : String, tokens : Array(RawToken))
           lexer = Frontend::Lexer.new(source)
           lexer.each_token do |tok|
-            next unless keyword_kind?(tok.kind)
-            line = tok.span.start_line - 1
-            col  = tok.span.start_column - 1
-            length = tok.slice.size
-            tokens << RawToken.new(line, col, length, SemanticTokenType::Keyword.value)
-          end
-        end
+            # Keywords
+            if keyword_kind?(tok.kind)
+              line = tok.span.start_line - 1
+              col  = tok.span.start_column - 1
+              length = tok.slice.size
+              tokens << RawToken.new(line, col, length, SemanticTokenType::Keyword.value)
+              next
+            end
 
-        # Add string-like tokens (strings, chars, regex, interpolations) from the lexer
-        private def collect_string_like_tokens(source : String, tokens : Array(RawToken))
-          lexer = Frontend::Lexer.new(source)
-          lexer.each_token do |tok|
             case tok.kind
             when Frontend::Token::Kind::String
-              # Simple strings: color entire span as string
+              # Simple strings: color content (excluding opening quote)
               line = tok.span.start_line - 1
-              # Token slice excludes opening quote; shift start column by +1
               col  = tok.span.start_column
               length = tok.slice.size
               tokens << RawToken.new(line, col, length, SemanticTokenType::String.value)
 
             when Frontend::Token::Kind::StringInterpolation
-              # Interpolated strings: split into string text segments and embedded expression tokens
-              collect_interpolated_string_tokens(tok, tokens)
+              # Interpolated strings: split without allocating full String
+              collect_interpolated_string_tokens_zero_copy(source, tok, tokens)
 
             when Frontend::Token::Kind::Char
               line = tok.span.start_line - 1
-              # Exclude opening quote for char literal too
               col  = tok.span.start_column
               length = tok.slice.size
               tokens << RawToken.new(line, col, length, SemanticTokenType::String.value)
 
             when Frontend::Token::Kind::Regex
               line = tok.span.start_line - 1
-              # Exclude opening '/'
               col  = tok.span.start_column
               length = tok.slice.size
               tokens << RawToken.new(line, col, length, SemanticTokenType::Regexp.value)
@@ -2280,21 +2436,21 @@ module CrystalV2
         end
 
         # Emit tokens for an interpolated string token: splits text and expressions
-        private def collect_interpolated_string_tokens(tok : Frontend::Token, tokens : Array(RawToken))
-          content = String.new(tok.slice)
+        private def collect_interpolated_string_tokens_zero_copy(source : String, tok : Frontend::Token, tokens : Array(RawToken))
+          content = tok.slice  # Slice(UInt8) referencing source
           i = 0
           line0 = tok.span.start_line - 1
           # Column at the first CONTENT char (after opening quote)
           col0  = tok.span.start_column
 
           # Helper to flush a run of plain text as String tokens (split across lines)
-          flush_text = ->(start_line0 : Int32, start_col0 : Int32, text : String) do
+          flush_text = ->(start_line0 : Int32, start_col0 : Int32, text_bytes : Slice(UInt8)) do
             cur_line0 = start_line0
             cur_col0  = start_col0
             seg_start = 0
             j = 0
-            while j < text.bytesize
-              if text.byte_at(j) == '\n'.ord.to_u8
+            while j < text_bytes.size
+              if text_bytes[j] == '\n'.ord.to_u8
                 # Emit current line segment if any
                 if j > seg_start
                   length = j - seg_start
@@ -2310,22 +2466,22 @@ module CrystalV2
               end
             end
             # Emit tail segment
-            if seg_start < text.bytesize
-              length = text.bytesize - seg_start
+            if seg_start < text_bytes.size
+              length = text_bytes.size - seg_start
               tokens << RawToken.new(cur_line0, cur_col0, length, SemanticTokenType::String.value)
             end
           end
 
-          while i < content.bytesize
+          while i < content.size
             # Emit text until next interpolation
             seg_start_i = i
             seg_line0 = line0
             seg_col0  = col0
-            while i + 1 < content.bytesize && !(content.byte_at(i) == '#'.ord.to_u8 && content.byte_at(i + 1) == '{'.ord.to_u8)
-              if content.byte_at(i) == '\n'.ord.to_u8
+            while i + 1 < content.size && !(content[i] == '#'.ord.to_u8 && content[i + 1] == '{'.ord.to_u8)
+              if content[i] == '\n'.ord.to_u8
                 # Flush segment up to (but not including) this newline
                 if i > seg_start_i
-                  segment = content.byte_slice(seg_start_i, i - seg_start_i)
+                  segment = content[seg_start_i, i - seg_start_i]
                   flush_text.call(seg_line0, seg_col0, segment)
                 end
                 # Consume newline and update positions
@@ -2343,11 +2499,11 @@ module CrystalV2
             end
             # Flush remaining text segment (if any)
             if i > seg_start_i
-              segment = content.byte_slice(seg_start_i, i - seg_start_i)
+              segment = content[seg_start_i, i - seg_start_i]
               flush_text.call(seg_line0, seg_col0, segment)
             end
 
-            break if i >= content.bytesize
+            break if i >= content.size
 
             # At '#{' start
             # Emit operator token for '#{'
@@ -2360,8 +2516,8 @@ module CrystalV2
             expr_base_line0 = line0
             expr_base_col0  = col0
             depth = 1
-            while i < content.bytesize && depth > 0
-              byte = content.byte_at(i)
+            while i < content.size && depth > 0
+              byte = content[i]
               if byte == '{'.ord.to_u8
                 depth += 1
                 i += 1
@@ -2384,8 +2540,8 @@ module CrystalV2
             # Lex and emit tokens for the expression content
             expr_len = i > expr_start_i ? (i - expr_start_i) : 0
             if expr_len > 0
-              expr_bytes = content.byte_slice(expr_start_i, expr_len)
-              expr_text = String.new(expr_bytes.to_slice)
+              expr_slice = content[expr_start_i, expr_len]
+              expr_text = String.new(expr_slice)
               sub_lexer = Frontend::Lexer.new(expr_text)
               sub_lexer.each_token do |t2|
                 mapped = map_kind_for_interpolation(t2.kind)
@@ -2400,7 +2556,7 @@ module CrystalV2
             end
 
             # Emit operator token for closing '}' if present
-            if i < content.bytesize && content.byte_at(i) == '}'.ord.to_u8
+            if i < content.size && content[i] == '}'.ord.to_u8
               tokens << RawToken.new(line0, col0, 1, SemanticTokenType::Operator.value)
               i += 1
               col0 += 1

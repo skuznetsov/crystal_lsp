@@ -7,6 +7,7 @@ module CrystalV2
   module Compiler
     module Semantic
       class NameResolver
+        BLOCK_SYMBOL_NODE_ID = Frontend::ExprId.new(-1)
         alias Program = Frontend::Program
         alias ExprId = Frontend::ExprId
         alias Diagnostic = Frontend::Diagnostic
@@ -88,6 +89,10 @@ module CrystalV2
             visit_until(node)
           when Frontend::LoopNode
             visit_loop(node)
+          when Frontend::BlockNode
+            visit_block(node)
+          when Frontend::ProcLiteralNode
+            visit_proc_literal(node)
           else
             # Other kinds currently unsupported; ignore
           end
@@ -233,7 +238,82 @@ module CrystalV2
         end
 
         private def visit_loop(node : Frontend::LoopNode)
-          # Visit body
+          node.body.each { |expr_id| visit(expr_id) }
+        end
+
+        private def visit_block(node : Frontend::BlockNode)
+          prev_table = @current_table
+          block_scope = SymbolTable.new(prev_table)
+          @current_table = block_scope
+
+          node.params.try do |params|
+            params.each do |param|
+              if default = param.default_value
+                visit(default)
+              end
+
+              next unless param_name = param.name
+              name = String.new(param_name)
+              declared_type = param.type_annotation.try { |ann| String.new(ann) }
+
+              unless block_scope.lookup_local(name)
+                block_scope.define(name, VariableSymbol.new(name, BLOCK_SYMBOL_NODE_ID, declared_type: declared_type))
+              end
+            end
+          end
+
+          node.body.each { |expr_id| visit(expr_id) }
+
+          @current_table = prev_table
+        end
+
+        private def visit_proc_literal(node : Frontend::ProcLiteralNode)
+          prev_table = @current_table
+          proc_scope = SymbolTable.new(prev_table)
+          @current_table = proc_scope
+
+          node.params.try do |params|
+            params.each do |param|
+              if default = param.default_value
+                visit(default)
+              end
+
+              next unless param_name = param.name
+              name = String.new(param_name)
+              declared_type = param.type_annotation.try { |ann| String.new(ann) }
+
+              unless proc_scope.lookup_local(name)
+                proc_scope.define(name, VariableSymbol.new(name, BLOCK_SYMBOL_NODE_ID, declared_type: declared_type))
+              end
+            end
+          end
+
+          node.body.each { |expr_id| visit(expr_id) }
+
+          @current_table = prev_table
+        end
+
+        private def visit_block(node : Frontend::BlockNode)
+          node.params.try do |params|
+            params.each do |param|
+              if default = param.default_value
+                visit(default)
+              end
+            end
+          end
+
+          node.body.each { |expr_id| visit(expr_id) }
+        end
+
+        private def visit_proc_literal(node : Frontend::ProcLiteralNode)
+          node.params.try do |params|
+            params.each do |param|
+              if default = param.default_value
+                visit(default)
+              end
+            end
+          end
+
           node.body.each { |expr_id| visit(expr_id) }
         end
       end

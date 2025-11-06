@@ -9,7 +9,7 @@ echo "Building Crystal V2 LSP server..."
 mkdir -p bin
 
 # Compile LSP server
-crystal build src/lsp_main.cr -o bin/crystal_v2_lsp --release
+crystal build -s -p -t -d src/lsp_main.cr -o bin/crystal_v2_lsp --release
 
 echo "✓ LSP server built: bin/crystal_v2_lsp"
 echo ""

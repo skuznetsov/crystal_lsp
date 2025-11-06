@@ -37,6 +37,8 @@ module CrystalV2
 
         @current_class : ClassSymbol?  # Phase 5C: Track current class for instance var types
         @receiver_type_context : InstanceType?  # Week 1: Track receiver's instance type for generic method body inference
+        @depth : Int32
+        MAX_DEPTH = 512
 
         # Debug flag - set via environment variable TYPE_INFERENCE_DEBUG=1
         @@debug : Bool = ENV["TYPE_INFERENCE_DEBUG"]? == "1"
@@ -52,6 +54,7 @@ module CrystalV2
           @instance_var_types = {} of String => Type  # Phase 5A: Track instance variable types
           @current_class = nil
           @receiver_type_context = nil
+          @depth = 0
         end
 
         # Debug helper
@@ -69,6 +72,50 @@ module CrystalV2
 
         # Recursive type inference for a single expression
         private def infer_expression(expr_id : ExprId) : Type
+          # Iterative fast path to avoid deep recursion/stack overflows
+          if t0 = @context.get_type(expr_id)
+            return t0
+          end
+          # local frame as tuple {id, visited}, plus state map 0/1/2
+          stack = [] of {ExprId, Bool}
+          state = {} of ExprId => Int32
+          stack << {expr_id, false}
+          state[expr_id] = 1
+          while frame = stack.pop?
+            id = frame[0]
+            next if @context.get_type(id)
+            node = @program.arena[id]
+            if !frame[1]
+              stack << {id, true}
+              children_of(node).each do |child|
+                next if @context.get_type(child)
+                case state[child]?
+                when 2
+                  next
+                when 1
+                  # Cycle detected; assign nil_type to break it
+                  @context.set_type(child, @context.nil_type)
+                  next
+                else
+                  state[child] = 1
+                  stack << {child, false}
+                end
+              end
+            else
+              t = compute_node_type_no_recurse(node, id)
+              @context.set_type(id, t)
+              state[id] = 2
+            end
+          end
+          if t1 = @context.get_type(expr_id)
+            return t1
+          end
+          # Fallback to recursive implementation below (should be unreachable)
+          if @depth > MAX_DEPTH
+            debug("max recursion depth reached at expr #{expr_id}")
+            return @context.nil_type
+          end
+          @depth += 1
           node = @program.arena[expr_id]
 
           result_type = case Frontend.node_kind(node)
@@ -275,8 +322,14 @@ module CrystalV2
             infer_extend(node)
           when .struct?
             # Phase 32: Struct definition (value type)
-            # At parsing stage, handled identically to class
-            infer_struct(node.as(Frontend::StructNode), expr_id)
+            # At parsing stage, handled identically to class; be tolerant to AST nuances
+            if node.is_a?(Frontend::StructNode)
+              infer_struct(node.as(Frontend::StructNode), expr_id)
+            elsif node.is_a?(Frontend::ClassNode)
+              infer_class(node.as(Frontend::ClassNode), expr_id)
+            else
+              @context.nil_type
+            end
           when .union?
             # Phase 97: Union definition (C bindings)
             # At parsing stage, handled identically to class
@@ -309,6 +362,171 @@ module CrystalV2
           # but this ensures ALL expressions have types set, even for nested calls)
           @context.set_type(expr_id, result_type)
           result_type
+        ensure
+          @depth -= 1
+        end
+
+        # Return direct child ExprIds of a node (used by iterative inference)
+        private def children_of(node) : Array(ExprId)
+          children = [] of ExprId
+          case node
+          when Frontend::GroupingNode
+            children << node.expression
+          when Frontend::UnaryNode
+            children << node.operand
+          when Frontend::BinaryNode
+            children << node.left; children << node.right
+          when Frontend::AssignNode
+            children << node.target; children << node.value
+          when Frontend::IndexNode
+            children << node.object; node.indexes.each { |e| children << e }
+          when Frontend::MemberAccessNode
+            children << node.object
+          when Frontend::SafeNavigationNode
+            children << node.object
+          when Frontend::CallNode
+            children << node.callee
+            node.args.each { |e| children << e }
+            if blk = node.block
+              children << blk
+            end
+            if named = node.named_args
+              named.each { |na| children << na.value }
+            end
+          when Frontend::IfNode
+            children << node.condition
+            node.then_body.each { |e| children << e }
+            node.elsifs.try &.each { |br| children << br.condition; br.body.each { |e| children << e } }
+            node.else_body.try &.each { |e| children << e }
+          when Frontend::UnlessNode
+            children << node.condition
+            node.then_branch.each { |e| children << e }
+            node.else_branch.try &.each { |e| children << e }
+          when Frontend::WhileNode
+            children << node.condition; node.body.each { |e| children << e }
+          when Frontend::UntilNode
+            children << node.condition; node.body.each { |e| children << e }
+          when Frontend::LoopNode
+            node.body.each { |e| children << e }
+          when Frontend::BlockNode
+            node.body.each { |e| children << e }
+          when Frontend::ProcLiteralNode
+            node.body.each { |e| children << e }
+          when Frontend::CaseNode
+            if v = node.value; children << v; end
+            node.when_branches.each { |br| br.conditions.each { |c| children << c }; br.body.each { |e| children << e } }
+            node.else_branch.try &.each { |e| children << e }
+          when Frontend::SelectNode
+            node.branches.each { |br| children << br.condition; br.body.each { |e| children << e } }
+            node.else_branch.try &.each { |e| children << e }
+          when Frontend::BeginNode
+            node.body.each { |e| children << e }
+            node.rescue_clauses.try &.each { |rc| rc.body.each { |e| children << e } }
+            if en = node.ensure_body; en.each { |e| children << e }; end
+          when Frontend::RaiseNode
+            if v = node.value; children << v; end
+          when Frontend::WithNode
+            node.body.each { |e| children << e }
+          when Frontend::TupleLiteralNode
+            node.elements.each { |e| children << e }
+          when Frontend::ArrayLiteralNode
+            if elems = node.elements; elems.each { |e| children << e }; end
+          when Frontend::HashLiteralNode
+            node.entries.each { |entry| children << entry.key; children << entry.value }
+          when Frontend::DefNode
+            (node.body || [] of ExprId).each { |e| children << e }
+          when Frontend::ClassNode
+            (node.body || [] of ExprId).each { |e| children << e }
+          when Frontend::ModuleNode
+            (node.body || [] of ExprId).each { |e| children << e }
+          when Frontend::StructNode
+            (node.body || [] of ExprId).each { |e| children << e }
+          when Frontend::UnionNode
+            (node.body || [] of ExprId).each { |e| children << e }
+          when Frontend::ConstantNode
+            children << node.value
+          end
+          children
+        end
+
+        # Compute node type using already computed children (no recursion)
+        private def compute_node_type_no_recurse(node, expr_id : ExprId) : Type
+          case node
+          when Frontend::NumberNode
+            infer_number(node)
+          when Frontend::StringNode
+            infer_string(node)
+          when Frontend::UnaryNode
+            op = Frontend.node_operator_string(node) || ""
+            if op == "!"
+              @context.bool_type
+            else
+              # +x, -x, ~x: return operand's type
+              @context.get_type(node.operand) || @context.nil_type
+            end
+          when Frontend::BinaryNode
+            op = Frontend.node_operator_string(node) || ""
+            l = @context.get_type(node.left) || @context.nil_type
+            r = @context.get_type(node.right) || @context.nil_type
+            case op
+            when "==", "!=", "<", ">", "<=", ">=", "&&", "||"
+              @context.bool_type
+            when "+", "-", "*", "/"
+              # Numeric ops (simplified): return left type
+              l
+            when "..", "..."
+              # Range(begin,end): type ignores exclusivity for now
+              RangeType.new(l, r)
+            else
+              # Default: union of operand types
+              @context.union_of([l, r])
+            end
+          when Frontend::IfNode
+            then_types = node.then_body.map { |e| @context.get_type(e) || @context.nil_type }
+            then_type = @context.union_of(then_types)
+            else_types = (node.else_body || [] of Frontend::ExprId).map { |e| @context.get_type(e) || @context.nil_type }
+            else_type = else_types.empty? ? @context.nil_type : @context.union_of(else_types)
+            @context.union_of([then_type, else_type])
+          when Frontend::UnlessNode
+            then_types = node.then_branch.map { |e| @context.get_type(e) || @context.nil_type }
+            then_type = @context.union_of(then_types)
+            else_types = (node.else_branch || [] of Frontend::ExprId).map { |e| @context.get_type(e) || @context.nil_type }
+            else_type = else_types.empty? ? @context.nil_type : @context.union_of(else_types)
+            @context.union_of([then_type, else_type])
+          when Frontend::WhileNode, Frontend::UntilNode, Frontend::LoopNode
+            # Loop expression evaluates to Nil (simplified)
+            @context.nil_type
+          when Frontend::BoolNode
+            infer_bool(node)
+          when Frontend::NilNode
+            infer_nil(node)
+          when Frontend::SymbolNode
+            infer_symbol(node)
+          when Frontend::ArrayLiteralNode
+            if elems = node.elements
+              types = Array(Type).new(elems.size)
+              elems.each { |e| types << (@context.get_type(e) || @context.nil_type) }
+              element_type = @context.union_of(types)
+              ArrayType.new(element_type)
+            else
+              ArrayType.new(@context.nil_type)
+            end
+          when Frontend::TupleLiteralNode
+            elems = node.elements
+            types = Array(Type).new(elems.size)
+            elems.each { |e| types << (@context.get_type(e) || @context.nil_type) }
+            TupleType.new(types)
+          when Frontend::HashLiteralNode
+            kt = Array(Type).new(node.entries.size)
+            vt = Array(Type).new(node.entries.size)
+            node.entries.each do |entry|
+              kt << (@context.get_type(entry.key) || @context.nil_type)
+              vt << (@context.get_type(entry.value) || @context.nil_type)
+            end
+            HashType.new(@context.union_of(kt), @context.union_of(vt))
+          else
+            @context.nil_type
+          end
         end
 
         # ============================================================
@@ -1498,7 +1716,8 @@ module CrystalV2
 
           # Infer type arguments and normalize them
           # ClassType(Int32) → PrimitiveType("Int32")
-          type_args = node.type_args.map_with_index do |arg, i|
+          type_args = Array(Type).new(node.type_args.size)
+          node.type_args.each_with_index do |arg, i|
             if ENV["DEBUG"]?
               arg_node = @program.arena[arg]
               puts "  arg #{i}: node=#{arg_node.class}"
@@ -1507,7 +1726,7 @@ module CrystalV2
             if ENV["DEBUG"]?
               puts "    inferred: #{inferred.class} = #{inferred.inspect}"
             end
-            normalize_type_argument(inferred)
+            type_args << normalize_type_argument(inferred)
           end
 
           # If base is a class (Box), create ClassType with type args
@@ -1630,8 +1849,9 @@ module CrystalV2
                 element_type = @context.nil_type
               else
                 # Infer from elements (ignore 'of' type for now)
-                element_types = elements.map { |elem_id| infer_expression(elem_id) }
-                element_type = union_of(element_types)
+                tmp = Array(Type).new(elements.size)
+                elements.each { |elem_id| tmp << infer_expression(elem_id) }
+                element_type = union_of(tmp)
               end
             else
               element_type = @context.nil_type
@@ -1644,10 +1864,10 @@ module CrystalV2
               element_type = @context.nil_type
             else
               # Infer type of each element
-              element_types = elements.map { |elem_id| infer_expression(elem_id) }
-
+              tmp = Array(Type).new(elements.size)
+              elements.each { |elem_id| tmp << infer_expression(elem_id) }
               # Union all element types
-              element_type = @context.union_of(element_types)
+              element_type = @context.union_of(tmp)
             end
           else
             # Empty array without elements or type - shouldn't happen
@@ -1776,7 +1996,8 @@ module CrystalV2
             # Week 1 Day 2: Top-level function call (e.g., identity(42))
             method_name = String.new(callee_node.name)
             # Infer argument types
-            arg_types = node.args.map { |arg_id| infer_expression(arg_id) }
+            arg_types = Array(Type).new(node.args.size)
+            node.args.each { |arg_id| arg_types << infer_expression(arg_id) }
             # Lookup method in global scope
             return infer_top_level_function_call(method_name, arg_types, expr_id)
           else
@@ -1790,7 +2011,8 @@ module CrystalV2
           # Box(Int32).new(42) → use explicit type args
           if method_name == "new" && receiver_type.is_a?(ClassType)
             # Infer argument types first
-            arg_types = node.args.map { |arg_id| infer_expression(arg_id) }
+            arg_types = Array(Type).new(node.args.size)
+            node.args.each { |arg_id| arg_types << infer_expression(arg_id) }
 
             # DEBUG: Print receiver_type info
             if ENV["DEBUG"]?
@@ -1815,7 +2037,8 @@ module CrystalV2
             end
           end
 
-          arg_types = node.args.map { |arg_id| infer_expression(arg_id) }
+          arg_types = Array(Type).new(node.args.size)
+          node.args.each { |arg_id| arg_types << infer_expression(arg_id) }
 
           if named_args = node.named_args
             named_args.each { |named_arg| infer_expression(named_arg.value) }
@@ -2559,7 +2782,10 @@ module CrystalV2
           elements = node.elements
           return TupleType.new([] of Type) if elements.empty?
 
-          element_types = elements.map { |elem_id| infer_expression(elem_id) }
+          element_types = Array(Type).new(elements.size)
+          elements.each do |elem_id|
+            element_types << infer_expression(elem_id)
+          end
           TupleType.new(element_types)
         end
 

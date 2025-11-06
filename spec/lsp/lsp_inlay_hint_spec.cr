@@ -202,8 +202,8 @@ describe "LSP InlayHint" do
 
       # Method should have 2 parameters
       method_symbol.params.size.should eq(2)
-      String.new(method_symbol.params[0].name).should eq("x")
-      String.new(method_symbol.params[1].name).should eq("y")
+      String.new(method_symbol.params[0].name.not_nil!).should eq("x")
+      String.new(method_symbol.params[1].name.not_nil!).should eq("y")
     end
 
     it "finds method symbols for nested calls" do
@@ -264,7 +264,7 @@ describe "LSP InlayHint" do
 
       # Method should have 1 parameter
       method_symbol.params.size.should eq(1)
-      String.new(method_symbol.params[0].name).should eq("name")
+      String.new(method_symbol.params[0].name.not_nil!).should eq("name")
     end
 
     it "handles methods with no parameters" do

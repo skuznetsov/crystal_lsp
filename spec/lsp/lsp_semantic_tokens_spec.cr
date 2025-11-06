@@ -6,6 +6,30 @@ require "../../src/compiler/lsp/messages"
 require "../../src/compiler/lsp/server"
 require "../../src/compiler/frontend/parser"
 
+# Helper methods for decoding semantic tokens in tests
+module SemanticTokensSpecHelper
+  def self.decode_tokens(data : Array(Int32)) : Array({Int32, Int32, Int32, Int32})
+    out = [] of {Int32, Int32, Int32, Int32}
+    prev_line = 0
+    prev_start = 0
+    i = 0
+    while i + 4 < data.size
+      delta_line = data[i]
+      delta_start = data[i + 1]
+      length = data[i + 2]
+      token_type = data[i + 3]
+      # modifiers = data[i + 4]
+      line = prev_line + delta_line
+      start_char = delta_line == 0 ? prev_start + delta_start : delta_start
+      out << {line, start_char, length, token_type}
+      prev_line = line
+      prev_start = start_char
+      i += 5
+    end
+    out
+  end
+end
+
 describe "LSP Semantic Tokens" do
   describe "SemanticTokens struct" do
     it "creates semantic tokens with empty data" do
@@ -168,6 +192,30 @@ describe "LSP Semantic Tokens" do
       end
 
       has_class_token.should be_true
+    end
+
+    it "has precise positions for member and number tokens" do
+      source = <<-CRYSTAL
+      obj.calculate
+      x = 42
+      CRYSTAL
+
+      lexer = CrystalV2::Compiler::Frontend::Lexer.new(source)
+      parser = CrystalV2::Compiler::Frontend::Parser.new(lexer)
+      program = parser.parse_program
+
+      server = CrystalV2::Compiler::LSP::Server.new
+      tokens = server.collect_semantic_tokens(program, source)
+
+      decoded = SemanticTokensSpecHelper.decode_tokens(tokens.data)
+
+      # Expect a Method token (13) starting at column 4 on line 0 ("obj.")
+      has_member_at_4 = decoded.any? { |(line, col, len, type)| line == 0 && col == 4 && type == 13 && len == "calculate".size }
+      has_member_at_4.should be_true
+
+      # Expect a Number token (19) starting at column 4 on line 1 (after "x = ") with length 2
+      has_number_42 = decoded.any? { |(line, col, len, type)| line == 1 && col == 4 && type == 19 && len == 2 }
+      has_number_42.should be_true
     end
 
     it "collects method token" do

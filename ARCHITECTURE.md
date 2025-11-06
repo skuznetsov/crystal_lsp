@@ -67,11 +67,11 @@ virtual_arena.replace_file_arena(changed_file, parse(changed_file))
 ```
 ┌─────────────────────────────────┐
 │    Compiler (Monolith)          │
-│  ┌─────────────────────────┐   │
-│  │  Parse → Semantic →     │   │
-│  │  Normalize → Codegen    │   │
-│  │  (All tightly coupled)  │   │
-│  └─────────────────────────┘   │
+│  ┌─────────────────────────┐    │
+│  │  Parse → Semantic →     │    │
+│  │  Normalize → Codegen    │    │
+│  │  (All tightly coupled)  │    │
+│  └─────────────────────────┘    │
 └─────────────────────────────────┘
 ```
 
@@ -79,7 +79,7 @@ virtual_arena.replace_file_arena(changed_file, parse(changed_file))
 
 ```
 ┌───────────┐  Program  ┌─────────────┐  Symbols  ┌──────────┐
-│  Parser   │─────────→│  Semantic   │─────────→│   Type   │
+│  Parser   │──────────→│  Semantic   │──────────→│   Type   │
 │           │           │  Collector  │           │ Inference│
 └───────────┘           └─────────────┘           └──────────┘
      ↑                        ↑                         ↑
@@ -121,8 +121,8 @@ independently           full parsing               codegen
 
 ```
 ┌──────────────────────────────────────────────────────┐
-│                     User Input                        │
-│              (Code files, LSP requests)               │
+│                     User Input                       │
+│              (Code files, LSP requests)              │
 └─────────────────┬────────────────────────────────────┘
                   │
       ┌───────────▼───────────┐
@@ -1047,7 +1047,7 @@ query check_types(program : Program, types : TypeContext) : Array(Error)
 Developer's Laptop              Remote Build Server
 ┌──────────────────┐            ┌─────────────────┐
 │  VS Code         │            │  crystal tool   │
-│  ├─ Extension    │◄───SSH────┤  lsp --remote   │
+│  ├─ Extension    │◄────SSH────┤  lsp --remote   │
 │  └─ LSP Client   │            │                 │
 └──────────────────┘            └─────────────────┘
 ```

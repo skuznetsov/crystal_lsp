@@ -154,20 +154,29 @@ module CrystalV2
         end
 
         # Classify identifier slice as keyword or identifier without allocating String
+        # Correct length buckets; avoid misclassification (fast-path by size, exact compare by slice)
         private def keyword_kind_for(id : Slice(UInt8)) : Token::Kind
+          # Special suffix keywords with punctuation
+          return Token::Kind::AsQuestion  if id == "as?".to_slice
+          return Token::Kind::IsA         if id == "is_a?".to_slice
+          return Token::Kind::RespondsTo  if id == "responds_to?".to_slice
+
           case id.size
           when 2
-            return Token::Kind::If  if id == "if".to_slice
-            return Token::Kind::Do  if id == "do".to_slice
-            return Token::Kind::In  if id == "in".to_slice
-            return Token::Kind::Of  if id == "of".to_slice
+            return Token::Kind::If   if id == "if".to_slice
+            return Token::Kind::Do   if id == "do".to_slice
+            return Token::Kind::In   if id == "in".to_slice
+            return Token::Kind::Of   if id == "of".to_slice
+            return Token::Kind::As   if id == "as".to_slice
           when 3
-            return Token::Kind::End if id == "end".to_slice
-            return Token::Kind::Def if id == "def".to_slice
-            return Token::Kind::Nil if id == "nil".to_slice
-            return Token::Kind::Lib if id == "lib".to_slice
-            return Token::Kind::Out if id == "out".to_slice
-            return Token::Kind::For if id == "for".to_slice
+            return Token::Kind::End  if id == "end".to_slice
+            return Token::Kind::Def  if id == "def".to_slice
+            return Token::Kind::Nil  if id == "nil".to_slice
+            return Token::Kind::Lib  if id == "lib".to_slice
+            return Token::Kind::Out  if id == "out".to_slice
+            return Token::Kind::For  if id == "for".to_slice
+            return Token::Kind::Fun  if id == "fun".to_slice
+            return Token::Kind::Asm  if id == "asm".to_slice
           when 4
             return Token::Kind::Then  if id == "then".to_slice
             return Token::Kind::Case  if id == "case".to_slice
@@ -177,50 +186,54 @@ module CrystalV2
             return Token::Kind::Next  if id == "next".to_slice
             return Token::Kind::Enum  if id == "enum".to_slice
             return Token::Kind::With  if id == "with".to_slice
-            return Token::Kind::Sizeof if id == "sizeof".to_slice # actually 6, see below
+            return Token::Kind::Else  if id == "else".to_slice
+            return Token::Kind::Self  if id == "self".to_slice
           when 5
-            return Token::Kind::Begin  if id == "begin".to_slice
-            return Token::Kind::Class  if id == "class".to_slice
-            return Token::Kind::While  if id == "while".to_slice
-            return Token::Kind::Until  if id == "until".to_slice
-            return Token::Kind::Break  if id == "break".to_slice
-            return Token::Kind::False  if id == "false".to_slice
-            return Token::Kind::Super  if id == "super".to_slice
-            return Token::Kind::Alias  if id == "alias".to_slice
-            return Token::Kind::Union  if id == "union".to_slice
-            return Token::Kind::Spawn  if id == "spawn".to_slice
+            return Token::Kind::Begin   if id == "begin".to_slice
+            return Token::Kind::Class   if id == "class".to_slice
+            return Token::Kind::While   if id == "while".to_slice
+            return Token::Kind::Until   if id == "until".to_slice
+            return Token::Kind::Break   if id == "break".to_slice
+            return Token::Kind::False   if id == "false".to_slice
+            return Token::Kind::Super   if id == "super".to_slice
+            return Token::Kind::Alias   if id == "alias".to_slice
+            return Token::Kind::Union   if id == "union".to_slice
+            return Token::Kind::Spawn   if id == "spawn".to_slice
+            return Token::Kind::Elsif   if id == "elsif".to_slice
+            return Token::Kind::Yield   if id == "yield".to_slice
+            return Token::Kind::Raise   if id == "raise".to_slice
+            return Token::Kind::Macro   if id == "macro".to_slice
           when 6
-            return Token::Kind::Ensure    if id == "ensure".to_slice
-            return Token::Kind::Return    if id == "return".to_slice
-            return Token::Kind::Struct    if id == "struct".to_slice
-            return Token::Kind::Rescue    if id == "rescue".to_slice
-            return Token::Kind::Module    if id == "module".to_slice
-            return Token::Kind::Select    if id == "select".to_slice
-            return Token::Kind::Typeof    if id == "typeof".to_slice
+            return Token::Kind::Ensure   if id == "ensure".to_slice
+            return Token::Kind::Return   if id == "return".to_slice
+            return Token::Kind::Struct   if id == "struct".to_slice
+            return Token::Kind::Rescue   if id == "rescue".to_slice
+            return Token::Kind::Module   if id == "module".to_slice
+            return Token::Kind::Select   if id == "select".to_slice
+            return Token::Kind::Typeof   if id == "typeof".to_slice
+            return Token::Kind::Unless   if id == "unless".to_slice
+            return Token::Kind::Sizeof   if id == "sizeof".to_slice
+            return Token::Kind::Extend   if id == "extend".to_slice
           when 7
-            return Token::Kind::Private   if id == "private".to_slice
-            return Token::Kind::Pointerof if id == "pointerof".to_slice # actually 9
+            return Token::Kind::Private  if id == "private".to_slice
+            return Token::Kind::Include  if id == "include".to_slice
+            return Token::Kind::Require  if id == "require".to_slice
+            return Token::Kind::Alignof  if id == "alignof".to_slice
           when 8
-            return Token::Kind::PreviousDef if id == "previous_def".to_slice # actually 12 incl underscore
-            return Token::Kind::Abstract  if id == "abstract".to_slice
-            return Token::Kind::Protected if id == "protected".to_slice # actually 9
+            return Token::Kind::Abstract if id == "abstract".to_slice
+            return Token::Kind::Offsetof if id == "offsetof".to_slice
+          when 9
+            return Token::Kind::Protected if id == "protected".to_slice
+            return Token::Kind::Pointerof if id == "pointerof".to_slice
           when 10
-            return Token::Kind::Uninitialized if id == "uninitialized".to_slice # actually 13
-            return Token::Kind::Annotation     if id == "annotation".to_slice
+            return Token::Kind::Annotation if id == "annotation".to_slice
+          when 12
+            return Token::Kind::PreviousDef if id == "previous_def".to_slice
+          when 13
+            return Token::Kind::Uninitialized if id == "uninitialized".to_slice
+          when 16
+            return Token::Kind::InstanceAlignof if id == "instance_alignof".to_slice
           end
-
-          # Special suffix keywords with punctuation
-          return Token::Kind::AsQuestion if id == "as?".to_slice
-          return Token::Kind::IsA        if id == "is_a?".to_slice
-          return Token::Kind::RespondsTo if id == "responds_to?".to_slice
-
-          # Simple keywords missed above
-          return Token::Kind::Elsif    if id == "elsif".to_slice
-          return Token::Kind::Else     if id == "else".to_slice
-          return Token::Kind::Yield    if id == "yield".to_slice
-          return Token::Kind::Include  if id == "include".to_slice
-          return Token::Kind::Extend   if id == "extend".to_slice
-          return Token::Kind::Macro    if id == "macro".to_slice
 
           Token::Kind::Identifier
         end
@@ -561,48 +574,78 @@ module CrystalV2
           )
         end
 
-        # Phase 53: Extract number suffix parsing to helper
+        # Phase 53: Extract number suffix parsing to helper (byte-wise, no String allocations)
         # Phase 103J: Parse numeric type suffix (_i8, _i16, _i32, _i64, _i128, _u8, _u16, _u32, _u64, _u128, _f32, _f64)
         # Used by hex, binary, octal number parsers
         private def lex_number_suffix : NumberKind?
-          if @offset < @rope.size && current_byte == '_'.ord.to_u8
-            suffix_start = @offset
-            advance  # consume '_'
+          return nil unless @offset < @rope.size && current_byte == '_'.ord.to_u8
+          suffix_start = @offset
+          advance  # consume '_'
 
-            # Read suffix characters
-            suffix_from = @offset
-            while @offset < @rope.size && (ascii_letter?(current_byte) || ascii_number?(current_byte))
-              advance
+          from = @offset
+          while @offset < @rope.size && (ascii_letter?(current_byte) || ascii_number?(current_byte))
+            advance
+          end
+          len = @offset - from
+          bytes = @rope.bytes
+
+          kind = nil.as(NumberKind?)
+          case len
+          when 2
+            if bytes[from] == 'i'.ord.to_u8
+              case bytes[from + 1]
+              when '8'.ord.to_u8  then kind = NumberKind::I8
+              end
+            elsif bytes[from] == 'u'.ord.to_u8
+              case bytes[from + 1]
+              when '8'.ord.to_u8  then kind = NumberKind::U8
+              end
             end
-
-            suffix = String.new(@rope.bytes[suffix_from...@offset])
-            number_kind = case suffix
-            # Signed integers
-            when "i8"   then NumberKind::I8
-            when "i16"  then NumberKind::I16
-            when "i32"  then NumberKind::I32
-            when "i64"  then NumberKind::I64
-            when "i128" then NumberKind::I128
-            # Unsigned integers
-            when "u8"   then NumberKind::U8
-            when "u16"  then NumberKind::U16
-            when "u32"  then NumberKind::U32
-            when "u64"  then NumberKind::U64
-            when "u128" then NumberKind::U128
-            # Floats
-            when "f32"  then NumberKind::F32
-            when "f64"  then NumberKind::F64
-            else
-              # Unknown suffix - ignore and treat as separate token
-              # Reset to before underscore
-              @offset = suffix_start
-              nil
+          when 3
+            if bytes[from] == 'i'.ord.to_u8
+              # i16/i32/i64
+              if bytes[from + 1] == '1'.ord.to_u8 && bytes[from + 2] == '6'.ord.to_u8
+                kind = NumberKind::I16
+              elsif bytes[from + 1] == '3'.ord.to_u8 && bytes[from + 2] == '2'.ord.to_u8
+                kind = NumberKind::I32
+              elsif bytes[from + 1] == '6'.ord.to_u8 && bytes[from + 2] == '4'.ord.to_u8
+                kind = NumberKind::I64
+              end
+            elsif bytes[from] == 'u'.ord.to_u8
+              # u16/u32/u64
+              if bytes[from + 1] == '1'.ord.to_u8 && bytes[from + 2] == '6'.ord.to_u8
+                kind = NumberKind::U16
+              elsif bytes[from + 1] == '3'.ord.to_u8 && bytes[from + 2] == '2'.ord.to_u8
+                kind = NumberKind::U32
+              elsif bytes[from + 1] == '6'.ord.to_u8 && bytes[from + 2] == '4'.ord.to_u8
+                kind = NumberKind::U64
+              end
+            elsif bytes[from] == 'f'.ord.to_u8
+              # f32/f64
+              if bytes[from + 1] == '3'.ord.to_u8 && bytes[from + 2] == '2'.ord.to_u8
+                kind = NumberKind::F32
+              elsif bytes[from + 1] == '6'.ord.to_u8 && bytes[from + 2] == '4'.ord.to_u8
+                kind = NumberKind::F64
+              end
             end
-
-            return number_kind
+          when 4
+            # i128/u128
+            if bytes[from] == 'i'.ord.to_u8
+              if bytes[from + 1] == '1'.ord.to_u8 && bytes[from + 2] == '2'.ord.to_u8 && bytes[from + 3] == '8'.ord.to_u8
+                kind = NumberKind::I128
+              end
+            elsif bytes[from] == 'u'.ord.to_u8
+              if bytes[from + 1] == '1'.ord.to_u8 && bytes[from + 2] == '2'.ord.to_u8 && bytes[from + 3] == '8'.ord.to_u8
+                kind = NumberKind::U128
+              end
+            end
           end
 
-          nil
+          unless kind
+            # Unknown suffix - reset to before underscore and ignore
+            @offset = suffix_start
+          end
+          kind
         end
 
         private def lex_string

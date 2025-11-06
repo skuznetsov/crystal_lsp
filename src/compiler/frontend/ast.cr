@@ -196,17 +196,20 @@ module CrystalV2
       struct NamedTupleEntry
         getter key : Slice(UInt8)       # TIER 2.3: Zero-copy slice
         getter value : ExprId
-        getter span : Span              # Full "key: value" span
         getter key_span : Span          # Just "key"
         getter value_span : Span        # Just value expression
 
         def initialize(
           @key : Slice(UInt8),
           @value : ExprId,
-          @span : Span,
           @key_span : Span,
           @value_span : Span
         )
+        end
+
+        # Compute full span on demand to avoid storing redundant span
+        def span : Span
+          key_span.cover(value_span)
         end
       end
 
@@ -222,17 +225,20 @@ module CrystalV2
       struct NamedArgument
         getter name : Slice(UInt8)      # Zero-copy slice from source
         getter value : ExprId
-        getter span : Span              # Full "name: value" span
         getter name_span : Span         # Just "name"
         getter value_span : Span        # Just value expression
 
         def initialize(
           @name : Slice(UInt8),
           @value : ExprId,
-          @span : Span,
           @name_span : Span,
           @value_span : Span
         )
+        end
+
+        # Compute full span on demand
+        def span : Span
+          name_span.cover(value_span)
         end
       end
 
@@ -256,18 +262,30 @@ module CrystalV2
         getter name : Slice(UInt8)
         getter type_annotation : Slice(UInt8)?
         getter default_value : ExprId?
-        getter span : Span              # Full "name : String = value" span
         getter name_span : Span         # Just "name" for rename
         getter type_span : Span?        # Just "String" for hover (optional)
+        getter default_span : Span?     # Span of default value expression (optional)
 
         def initialize(
           @name : Slice(UInt8),
           @type_annotation : Slice(UInt8)? = nil,
           @default_value : ExprId? = nil,
-          @span : Span = Span.new(0, 0, 0, 0, 0, 0),
           @name_span : Span = Span.new(0, 0, 0, 0, 0, 0),
-          @type_span : Span? = nil
+          @type_span : Span? = nil,
+          @default_span : Span? = nil
         )
+        end
+
+        # Compute full span on demand from available pieces
+        def span : Span
+          s = name_span
+          if ts = type_span
+            s = s.cover(ts)
+          end
+          if ds = default_span
+            s = s.cover(ds)
+          end
+          s
         end
       end
 
@@ -3160,8 +3178,8 @@ end
       class AstArena
         getter nodes : Array(TypedNode)
 
-        def initialize
-          @nodes = [] of TypedNode
+        def initialize(capacity : Int32 = 0)
+          @nodes = capacity > 0 ? Array(TypedNode).new(capacity) : [] of TypedNode
         end
 
         @[AlwaysInline]
@@ -3325,7 +3343,61 @@ end
       end
 
       # Arena type that can be either single-file or multi-file
-      alias ArenaLike = AstArena | VirtualArena
+      # PageArena: Page-backed arena to reduce GC reallocations
+      class PageArena
+        PAGE = 1024
+        @pages : Array(StaticArray(TypedNode, PAGE))
+        @count : Int32
+
+        def initialize
+          @pages = [] of StaticArray(TypedNode, PAGE)
+          @count = 0
+        end
+
+        @[AlwaysInline]
+        def add(node : TypedNode) : ExprId
+          idx = @count
+          page_index = idx // PAGE
+          offset = idx % PAGE
+          if page_index >= @pages.size
+            page = uninitialized StaticArray(TypedNode, PAGE)
+            @pages << page
+          end
+          @pages[page_index][offset] = node
+          @count = idx + 1
+          ExprId.new(idx)
+        end
+
+        # Compatibility shim
+        @[AlwaysInline]
+        def add_typed(node : TypedNode) : ExprId
+          add(node)
+        end
+
+        @[AlwaysInline]
+        def [](id : ExprId) : TypedNode
+          idx = id.index
+          page_index = idx // PAGE
+          offset = idx % PAGE
+          @pages[page_index][offset]
+        end
+
+        def size
+          @count
+        end
+
+        @[AlwaysInline]
+        def typed?(id : ExprId) : Bool
+          true
+        end
+
+        @[AlwaysInline]
+        def get_typed(id : ExprId) : TypedNode
+          self[id]
+        end
+      end
+
+      alias ArenaLike = AstArena | VirtualArena | PageArena
 
       struct Program
         getter arena : ArenaLike
