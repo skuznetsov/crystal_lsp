@@ -169,7 +169,8 @@ describe "LSP Call Hierarchy" do
       item = CrystalV2::Compiler::LSP::CallHierarchyItem.from_method(
         method_symbol,
         program,
-        "file:///test.cr"
+        "file:///test.cr",
+        program.roots.object_id
       )
 
       item.should_not be_nil

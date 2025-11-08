@@ -107,6 +107,15 @@ module CrystalV2
         property last : String?
       end
 
+      struct DiagnosticsEntry
+        getter uri : String
+        getter count : Int32
+        getter version : Int32?
+
+        def initialize(@uri : String, @count : Int32, @version : Int32?)
+        end
+      end
+
       DEFAULT_SCENARIO = [
         FileScenario.new(
           "crystal_v2/debug_tests/check_lexer.cr",
@@ -114,6 +123,7 @@ module CrystalV2
           1,
           [
             ActionSpec.point("hover Frontend::Lexer", "textDocument/hover", PositionSpec.new("Frontend::Lexer")),
+            ActionSpec.point("hover block param", "textDocument/hover", PositionSpec.new("param.name", 1, NeedleMode::Start, 2)),
             ActionSpec.point("definition Frontend::Lexer", "textDocument/definition", PositionSpec.new("Frontend::Lexer")),
             ActionSpec.point(
               "references def_node",
@@ -123,8 +133,8 @@ module CrystalV2
             ),
             ActionSpec.point("completion after parser.", "textDocument/completion", PositionSpec.new("parser.", 1, NeedleMode::End)),
             ActionSpec.point("signature help Parser.new", "textDocument/signatureHelp", PositionSpec.new("Frontend::Parser.new(", 1, NeedleMode::End)),
-            ActionSpec.point("prepare rename def_node", "textDocument/prepareRename", PositionSpec.new("def_node", 2)),
-            ActionSpec.rename("rename def_node → method_info", "textDocument/rename", PositionSpec.new("def_node", 2), "method_info"),
+            ActionSpec.point("prepare rename def_node", "textDocument/prepareRename", PositionSpec.new("def_node", 1)),
+            ActionSpec.rename("rename def_node → method_info", "textDocument/rename", PositionSpec.new("def_node", 1), "method_info"),
             ActionSpec.document("document symbols", "textDocument/documentSymbol"),
             ActionSpec.document("folding ranges", "textDocument/foldingRange"),
             ActionSpec.document("semantic tokens", "textDocument/semanticTokens/full"),
@@ -146,6 +156,17 @@ module CrystalV2
             ActionSpec.call_hierarchy("call hierarchy handle_completion", PositionSpec.new("def handle_completion", 1, NeedleMode::Start, 4)),
           ]
         ),
+        FileScenario.new(
+          "crystal_v2/benchmarks/bench_parser_single.cr",
+          "crystal",
+          1,
+          [
+            ActionSpec.point("hover Parser.new bench", "textDocument/hover", PositionSpec.new("Parser.new(", 1, NeedleMode::Start)),
+            ActionSpec.point("definition Lexer bench", "textDocument/definition", PositionSpec.new("Lexer.new(", 1, NeedleMode::Start)),
+            ActionSpec.point("signature help Parser.new bench", "textDocument/signatureHelp", PositionSpec.new("Parser.new(", 1, NeedleMode::End)),
+            ActionSpec.point("completion parser. bench", "textDocument/completion", PositionSpec.new("parser.", 3, NeedleMode::End)),
+          ]
+        ),
       ]
 
       class Runner
@@ -157,6 +178,7 @@ module CrystalV2
           @results = [] of Result
           @stash = Hash(Int32, JSON::Any).new
           @next_id = 1
+          @diagnostics_by_uri = Hash(String, DiagnosticsEntry).new
         end
 
         def run
@@ -178,6 +200,7 @@ module CrystalV2
         private getter queue
         private getter notifications
         private getter results
+        private getter diagnostics_by_uri
 
         private def start_server
           raise "Server command is empty" if @server_cmd.empty?
@@ -422,16 +445,21 @@ module CrystalV2
           prepare_resp, prepare_dur = request("textDocument/prepareCallHierarchy", prepare_params)
           log_result("#{action.name} (prepare)", "textDocument/prepareCallHierarchy", prepare_resp, prepare_dur)
 
-          items = prepare_resp["result"]?.try(&.as_a) || [] of JSON::Any
+          res = prepare_resp["result"]?
+          items = if json_null?(res)
+                    [] of JSON::Any
+                  else
+                    res.try(&.as_a?) || [] of JSON::Any
+                  end
           return if items.empty?
 
           item = items.first
           incoming_resp, incoming_dur = request("callHierarchy/incomingCalls", {item: item})
-          incoming_count = incoming_resp["result"]?.try(&.as_a.size) || 0
+          incoming_count = incoming_resp["result"]?.try { |json| json_null?(json) ? 0 : json.as_a.size } || 0
           log_result("#{action.name} (incoming x#{incoming_count})", "callHierarchy/incomingCalls", incoming_resp, incoming_dur)
 
           outgoing_resp, outgoing_dur = request("callHierarchy/outgoingCalls", {item: item})
-          outgoing_count = outgoing_resp["result"]?.try(&.as_a.size) || 0
+          outgoing_count = outgoing_resp["result"]?.try { |json| json_null?(json) ? 0 : json.as_a.size } || 0
           log_result("#{action.name} (outgoing x#{outgoing_count})", "callHierarchy/outgoingCalls", outgoing_resp, outgoing_dur)
         end
 
@@ -598,6 +626,11 @@ module CrystalV2
           params = message["params"]?
           if method == "textDocument/publishDiagnostics" && params
             stats.diagnostics += params["diagnostics"]?.try(&.as_a.size) || 0
+            if uri = params["uri"]?.try(&.as_s)
+              count = params["diagnostics"]?.try(&.as_a.size) || 0
+              version = params["version"]?.try(&.as_i)
+              diagnostics_by_uri[uri] = DiagnosticsEntry.new(uri, count, version)
+            end
           elsif method == "window/logMessage" && params
             stats.last = params["message"]?.try(&.as_s)
           end
@@ -637,7 +670,12 @@ module CrystalV2
             arr = safe_array(result)
             arr.empty? ? "0 items" : "#{arr.size} items"
           when "textDocument/signatureHelp"
-            sigs = result.try(&.["signatures"]?).try(&.as_a) || [] of JSON::Any
+            sigs = [] of JSON::Any
+            unless json_null?(result)
+              if hash = result.try(&.as_h?)
+                sigs = hash["signatures"]?.try(&.as_a) || [] of JSON::Any
+              end
+            end
             "#{sigs.size} signatures"
           when "textDocument/documentSymbol"
             arr = safe_array(result)
@@ -649,7 +687,10 @@ module CrystalV2
             arr = safe_array(result)
             arr.empty? ? "0 hints" : "#{arr.size} hints"
           when "textDocument/semanticTokens/full"
-            data = result.try(&.["data"]?).try(&.as_a) || [] of JSON::Any
+            data = [] of JSON::Any
+            unless json_null?(result)
+              data = result.try(&.as_h?).try(&.fetch("data", nil)).try(&.as_a) || [] of JSON::Any
+            end
             "#{data.size} ints"
           when "textDocument/codeAction"
             arr = safe_array(result)
@@ -659,16 +700,24 @@ module CrystalV2
             arr.empty? ? "no edits" : "#{arr.size} edits"
           when "textDocument/rename"
             edits = 0
-            if res = result
-              if changes = res["changes"]?
-                changes.as_h.each_value do |value|
-                  edits += value.as_a.size
+            unless json_null?(result)
+              if res_hash = result.try(&.as_h?)
+                if changes = res_hash["changes"]?
+                  changes.as_h.each_value do |value|
+                    edits += value.as_a.size
+                  end
                 end
               end
             end
             "#{edits} edits"
           when "textDocument/prepareRename"
-            result ? "placeholder=#{result["placeholder"]?.try(&.as_s) || "?"}" : "null"
+            if json_null?(result)
+              "null"
+            elsif hash = result.try(&.as_h?)
+              "placeholder=#{hash["placeholder"]?.try(&.as_s) || "?"}"
+            else
+              "null"
+            end
           when "callHierarchy/incomingCalls", "callHierarchy/outgoingCalls"
             arr = safe_array(result)
             arr.empty? ? "0 calls" : "#{arr.size} calls"
@@ -681,6 +730,10 @@ module CrystalV2
           json.try(&.as_a) || [] of JSON::Any
         rescue TypeCastError
           [] of JSON::Any
+        end
+
+        private def json_null?(json : JSON::Any?) : Bool
+          json.nil? || json.try(&.raw).nil?
         end
 
         private def print_summary
@@ -701,6 +754,16 @@ module CrystalV2
               line += ", diagnostics=#{stats.diagnostics}" if stats.diagnostics > 0
               line += ", last=#{stats.last}" if stats.last
               puts line
+            end
+          end
+
+          unless diagnostics_by_uri.empty?
+            puts
+            puts "Diagnostics by file:"
+            diagnostics_by_uri.each_value do |entry|
+              count_label = entry.count == 1 ? "1 issue" : "#{entry.count} issues"
+              version_suffix = entry.version ? " (version #{entry.version})" : ""
+              puts "- #{entry.uri}: #{count_label}#{version_suffix}"
             end
           end
         end
@@ -772,6 +835,7 @@ module CrystalV2
         property timeout : Float64 = DEFAULT_TIMEOUT
         property scenario : Array(FileScenario) = DEFAULT_SCENARIO
         property verbose : Bool = false
+        property files : Array(String) = [] of String
       end
 
       def self.parse_options(argv : Array(String)) : Options
@@ -794,6 +858,10 @@ module CrystalV2
 
           opts.on("-v", "--verbose", "Print raw notifications and stderr") do
             options.verbose = true
+          end
+
+          opts.on("--file=PATH", "Add a Crystal file to open (repeatable)") do |path|
+            options.files << path
           end
 
           opts.on("-h", "--help", "Show help") do
@@ -877,8 +945,17 @@ module CrystalV2
 
       def self.run(argv = ARGV)
         options = parse_options(argv)
-        runner = Runner.new(options.server, options.scenario, options.timeout, options.verbose)
+        scenarios = scenarios_for(options)
+        runner = Runner.new(options.server, scenarios, options.timeout, options.verbose)
         runner.run
+      end
+
+      def self.scenarios_for(options : Options) : Array(FileScenario)
+        return options.scenario if options.files.empty?
+
+        options.files.map do |path|
+          FileScenario.new(path, "crystal", 1, [] of ActionSpec)
+        end
       end
     end
   end

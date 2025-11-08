@@ -76,9 +76,9 @@ module CrystalV2
           when Frontend::MacroDefNode
             # Body handled via MacroLiteral; skip definition node
           when Frontend::DefNode
-            visit_def(node)
+            visit_def(node_id, node)
           when Frontend::ClassNode
-            visit_class(node)
+            visit_class(node_id, node)
           when Frontend::IfNode
             visit_if(node)
           when Frontend::UnlessNode
@@ -93,6 +93,8 @@ module CrystalV2
             visit_block(node)
           when Frontend::ProcLiteralNode
             visit_proc_literal(node)
+          when Frontend::ModuleNode
+            visit_module(node_id, node)
           else
             # Other kinds currently unsupported; ignore
           end
@@ -103,9 +105,12 @@ module CrystalV2
           return unless slice
           name = String.new(slice)
 
+          debug("[NameResolver] resolve #{name} in table=#{@current_table.object_id}")
           if symbol = @current_table.lookup(name)
+            debug("[NameResolver] matched #{name} -> #{symbol.class}")
             @identifier_symbols[node_id] = symbol
           else
+            debug("[NameResolver] unresolved #{name}")
             @diagnostics << Diagnostic.new("undefined local variable or method '#{name}'", node.span)
           end
         end
@@ -156,17 +161,26 @@ module CrystalV2
           end
         end
 
-        private def visit_def(node : Frontend::DefNode)
+        private def visit_def(node_id : ExprId, node : Frontend::DefNode)
           name_slice = node.name
           return unless name_slice
 
           name = String.new(name_slice)
           symbol = @current_table.lookup(name)
-          unless symbol.is_a?(MethodSymbol)
-            return
+
+          method_symbol = case symbol
+          when MethodSymbol
+            symbol
+          when OverloadSetSymbol
+            symbol.overloads.find { |overload| overload.node_id == node_id } || symbol.overloads.last?
+          else
+            nil
           end
 
-          method_scope = symbol.scope
+          return unless method_symbol
+
+          method_scope = method_symbol.scope
+          @identifier_symbols[node_id] = method_symbol
           prev_table = @current_table
           @current_table = method_scope
 
@@ -177,7 +191,7 @@ module CrystalV2
           @current_table = prev_table
         end
 
-        private def visit_class(node : Frontend::ClassNode)
+        private def visit_class(node_id : ExprId, node : Frontend::ClassNode)
           name_slice = node.name
           return unless name_slice
 
@@ -195,6 +209,24 @@ module CrystalV2
             visit(expr_id)
           end
 
+          @current_table = prev_table
+        end
+
+        private def visit_module(node_id : ExprId, node : Frontend::ModuleNode)
+          name_slice = node.name
+          return unless name_slice
+
+          name = String.new(name_slice)
+          symbol = @current_table.lookup(name)
+          unless symbol.is_a?(ModuleSymbol)
+            return
+          end
+
+          @identifier_symbols[node_id] = symbol
+
+          prev_table = @current_table
+          @current_table = symbol.scope
+          (node.body || [] of ExprId).each { |expr_id| visit(expr_id) }
           @current_table = prev_table
         end
 
@@ -256,6 +288,7 @@ module CrystalV2
               name = String.new(param_name)
               declared_type = param.type_annotation.try { |ann| String.new(ann) }
 
+              debug("[NameResolver] define block param #{name}")
               unless block_scope.lookup_local(name)
                 block_scope.define(name, VariableSymbol.new(name, BLOCK_SYMBOL_NODE_ID, declared_type: declared_type))
               end
@@ -282,6 +315,7 @@ module CrystalV2
               name = String.new(param_name)
               declared_type = param.type_annotation.try { |ann| String.new(ann) }
 
+              debug("[NameResolver] define proc param #{name}")
               unless proc_scope.lookup_local(name)
                 proc_scope.define(name, VariableSymbol.new(name, BLOCK_SYMBOL_NODE_ID, declared_type: declared_type))
               end
@@ -293,28 +327,9 @@ module CrystalV2
           @current_table = prev_table
         end
 
-        private def visit_block(node : Frontend::BlockNode)
-          node.params.try do |params|
-            params.each do |param|
-              if default = param.default_value
-                visit(default)
-              end
-            end
-          end
-
-          node.body.each { |expr_id| visit(expr_id) }
-        end
-
-        private def visit_proc_literal(node : Frontend::ProcLiteralNode)
-          node.params.try do |params|
-            params.each do |param|
-              if default = param.default_value
-                visit(default)
-              end
-            end
-          end
-
-          node.body.each { |expr_id| visit(expr_id) }
+        private def debug(message : String)
+          return unless ENV.has_key?("LSP_DEBUG_BLOCK")
+          STDOUT.puts(message)
         end
       end
     end

@@ -3,13 +3,16 @@
 
 set -e
 
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+cd "$SCRIPT_DIR"
+
 echo "Building Crystal V2 LSP server..."
 
 # Create bin directory if it doesn't exist
 mkdir -p bin
 
-# Compile LSP server
-crystal build -s -p -t -d src/lsp_main.cr -o bin/crystal_v2_lsp --release
+# Compile LSP server (skip OpenSSL/LibreSSL)
+crystal build -s -p -t -d src/lsp_main.cr -o bin/crystal_v2_lsp --release -D without_openssl
 
 echo "✓ LSP server built: bin/crystal_v2_lsp"
 echo ""

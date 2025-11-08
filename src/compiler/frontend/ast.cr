@@ -1310,8 +1310,9 @@ module CrystalV2
         getter span : Span
         getter name : Slice(UInt8)
         getter type : Slice(UInt8)
+        getter value : ExprId?
 
-        def initialize(@span : Span, @name : Slice(UInt8), @type : Slice(UInt8))
+        def initialize(@span : Span, @name : Slice(UInt8), @type : Slice(UInt8), @value : ExprId? = nil)
         end
       end
 
@@ -2968,6 +2969,10 @@ end
 # type_decl_value (Phase 103)
 
 def self.node_type_decl_value(node : TypeDeclarationNode)
+  node.value
+end
+
+def self.node_type_decl_value(node : InstanceVarDeclNode)
   node.value
 end
 

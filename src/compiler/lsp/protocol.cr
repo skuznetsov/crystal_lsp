@@ -59,7 +59,7 @@ module CrystalV2
           @message : String,
           @severity : Int32? = DiagnosticSeverity::Error.value,
           @source : String? = "crystal-v2",
-          @code : String? = nil
+          @code : String? = nil,
         )
         end
 
@@ -69,13 +69,13 @@ module CrystalV2
           range = Range.from_span(diag.primary_span)
 
           severity = case diag.level
-          when Semantic::DiagnosticLevel::Error
-            DiagnosticSeverity::Error.value
-          when Semantic::DiagnosticLevel::Warning
-            DiagnosticSeverity::Warning.value
-          else
-            DiagnosticSeverity::Information.value
-          end
+                     when Semantic::DiagnosticLevel::Error
+                       DiagnosticSeverity::Error.value
+                     when Semantic::DiagnosticLevel::Warning
+                       DiagnosticSeverity::Warning.value
+                     else
+                       DiagnosticSeverity::Information.value
+                     end
 
           new(
             range: range,
@@ -137,7 +137,7 @@ module CrystalV2
       struct MarkupContent
         include JSON::Serializable
 
-        property kind : String  # "plaintext" or "markdown"
+        property kind : String # "plaintext" or "markdown"
         property value : String
 
         def initialize(@value : String, markdown : Bool = true)
@@ -277,21 +277,21 @@ module CrystalV2
           @label : String,
           @documentation : String? = nil,
           @parameters : Array(ParameterInformation)? = nil,
-          @active_parameter : Int32? = nil
+          @active_parameter : Int32? = nil,
         )
         end
 
         # Create SignatureInformation from MethodSymbol
-        def self.from_method(method : Semantic::MethodSymbol) : SignatureInformation
+        def self.from_method(method : Semantic::MethodSymbol, display_name : String? = nil) : SignatureInformation
           # Format parameters (zero-copy: build strings directly from slices)
           params = method.params.map do |param|
             label = String.build do |io|
               # Phase BLOCK_CAPTURE: Anonymous block has no name
               if param_name = param.name
-                io.write(param_name)  # Write slice directly without copy
+                io.write(param_name) # Write slice directly without copy
                 io << " : "
                 if type_ann = param.type_annotation
-                  io.write(type_ann)  # Write slice directly without copy
+                  io.write(type_ann) # Write slice directly without copy
                 else
                   io << "?"
                 end
@@ -306,7 +306,8 @@ module CrystalV2
           # Format full signature
           params_str = params.map(&.label).join(", ")
           return_type = method.return_annotation || "?"
-          label = "#{method.name}(#{params_str}) : #{return_type}"
+          method_label = (display_name && !display_name.empty?) ? display_name : method.name
+          label = "#{method_label}(#{params_str}) : #{return_type}"
 
           new(
             label: label,
@@ -328,7 +329,7 @@ module CrystalV2
         def initialize(
           @signatures : Array(SignatureInformation),
           @active_signature : Int32? = 0,
-          @active_parameter : Int32? = 0
+          @active_parameter : Int32? = 0,
         )
         end
       end
@@ -370,7 +371,7 @@ module CrystalV2
         include JSON::Serializable
 
         property name : String
-        property kind : Int32  # SymbolKind value
+        property kind : Int32 # SymbolKind value
         property range : Range
         @[JSON::Field(key: "selectionRange")]
         property selection_range : Range
@@ -383,7 +384,7 @@ module CrystalV2
           @range : Range,
           @selection_range : Range,
           @detail : String? = nil,
-          @children : Array(DocumentSymbol)? = nil
+          @children : Array(DocumentSymbol)? = nil,
         )
         end
 
@@ -393,7 +394,7 @@ module CrystalV2
 
           node = program.arena[symbol.node_id]
           range = Range.from_span(node.span)
-          selection_range = range  # MVP: same as range
+          selection_range = range # MVP: same as range
 
           kind = case symbol
                  when Semantic::ClassSymbol
@@ -405,7 +406,7 @@ module CrystalV2
                  when Semantic::MacroSymbol
                    SymbolKind::Function.value
                  else
-                   return nil  # Skip unsupported types
+                   return nil # Skip unsupported types
                  end
 
           # Generate detail string
@@ -479,8 +480,8 @@ module CrystalV2
 
       # InlayHint kind enum
       enum InlayHintKind
-        Type = 1       # Type annotations (e.g., ": Int32")
-        Parameter = 2  # Parameter names (e.g., "value:")
+        Type      = 1 # Type annotations (e.g., ": Int32")
+        Parameter = 2 # Parameter names (e.g., "value:")
       end
 
       # Inlay hint - inline type/parameter annotations
@@ -489,7 +490,7 @@ module CrystalV2
 
         property position : Position
         property label : String
-        property kind : Int32?  # InlayHintKind value
+        property kind : Int32? # InlayHintKind value
 
         @[JSON::Field(key: "paddingLeft")]
         property padding_left : Bool?
@@ -501,7 +502,7 @@ module CrystalV2
           @label : String,
           @kind : Int32? = nil,
           @padding_left : Bool? = nil,
-          @padding_right : Bool? = nil
+          @padding_right : Bool? = nil,
         )
         end
       end
@@ -524,7 +525,7 @@ module CrystalV2
       struct WorkspaceEdit
         include JSON::Serializable
 
-        property changes : Hash(String, Array(TextEdit))  # URI => edits
+        property changes : Hash(String, Array(TextEdit)) # URI => edits
 
         def initialize(@changes : Hash(String, Array(TextEdit)))
         end
@@ -550,21 +551,21 @@ module CrystalV2
         include JSON::Serializable
 
         @[JSON::Field(key: "startLine")]
-        property start_line : Int32  # Zero-based line number
+        property start_line : Int32 # Zero-based line number
 
         @[JSON::Field(key: "startCharacter")]
-        property start_character : Int32?  # Optional: zero-based character offset
+        property start_character : Int32? # Optional: zero-based character offset
 
         @[JSON::Field(key: "endLine")]
-        property end_line : Int32  # Zero-based line number
+        property end_line : Int32 # Zero-based line number
 
         @[JSON::Field(key: "endCharacter")]
-        property end_character : Int32?  # Optional: zero-based character offset
+        property end_character : Int32? # Optional: zero-based character offset
 
-        property kind : String?  # Optional: "comment", "imports", "region"
+        property kind : String? # Optional: "comment", "imports", "region"
 
         @[JSON::Field(key: "collapsedText")]
-        property collapsed_text : String?  # LSP 3.17+: preview text when folded
+        property collapsed_text : String? # LSP 3.17+: preview text when folded
 
         def initialize(
           @start_line : Int32,
@@ -572,7 +573,7 @@ module CrystalV2
           @start_character : Int32? = nil,
           @end_character : Int32? = nil,
           @kind : String? = nil,
-          @collapsed_text : String? = nil
+          @collapsed_text : String? = nil,
         )
         end
       end
@@ -585,9 +586,9 @@ module CrystalV2
         include JSON::Serializable
 
         @[JSON::Field(key: "resultId")]
-        property result_id : String?  # Optional: cache identifier
+        property result_id : String? # Optional: cache identifier
 
-        property data : Array(Int32)  # Delta-encoded token data
+        property data : Array(Int32) # Delta-encoded token data
 
         def initialize(@data : Array(Int32), @result_id : String? = nil)
         end
@@ -601,8 +602,8 @@ module CrystalV2
         include JSON::Serializable
 
         property name : String
-        property kind : Int32  # SymbolKind value
-        property tags : Array(Int32)?  # SymbolTag values
+        property kind : Int32         # SymbolKind value
+        property tags : Array(Int32)? # SymbolTag values
         property detail : String?
         property uri : String
         property range : Range
@@ -618,17 +619,17 @@ module CrystalV2
           @selection_range : Range,
           @tags : Array(Int32)? = nil,
           @detail : String? = nil,
-          @data : JSON::Any? = nil
+          @data : JSON::Any? = nil,
         )
         end
 
         # Create CallHierarchyItem from MethodSymbol
-        def self.from_method(method : Semantic::MethodSymbol, program : Frontend::Program, uri : String) : CallHierarchyItem?
+        def self.from_method(method : Semantic::MethodSymbol, program : Frontend::Program, uri : String, program_id : UInt64) : CallHierarchyItem?
           return nil if method.node_id.invalid?
 
           node = program.arena[method.node_id]
           range = Range.from_span(node.span)
-          selection_range = range  # MVP: same as range
+          selection_range = range # MVP: same as range
 
           # Generate detail (method signature)
           params_str = method.params.map do |p|
@@ -644,13 +645,21 @@ module CrystalV2
           ret = method.return_annotation || "?"
           detail = "(#{params_str}) : #{ret}"
 
+          data_payload = JSON.build do |json|
+            json.object do
+              json.field "programId", program_id
+              json.field "nodeIndex", method.node_id.index
+            end
+          end
+
           new(
             name: method.name,
             kind: SymbolKind::Method.value,
             uri: uri,
             range: range,
             selection_range: selection_range,
-            detail: detail
+            detail: detail,
+            data: JSON.parse(data_payload)
           )
         end
       end
@@ -685,13 +694,13 @@ module CrystalV2
 
       # Code action kinds - predefined types of actions
       module CodeActionKind
-        Empty                = ""
-        QuickFix             = "quickfix"
-        Refactor             = "refactor"
-        RefactorExtract      = "refactor.extract"
-        RefactorInline       = "refactor.inline"
-        RefactorRewrite      = "refactor.rewrite"
-        Source               = "source"
+        Empty                 = ""
+        QuickFix              = "quickfix"
+        Refactor              = "refactor"
+        RefactorExtract       = "refactor.extract"
+        RefactorInline        = "refactor.inline"
+        RefactorRewrite       = "refactor.rewrite"
+        Source                = "source"
         SourceOrganizeImports = "source.organizeImports"
       end
 
@@ -716,7 +725,7 @@ module CrystalV2
           @edit : WorkspaceEdit? = nil,
           @is_preferred : Bool? = nil,
           @disabled : Hash(String, String)? = nil,
-          @data : JSON::Any? = nil
+          @data : JSON::Any? = nil,
         )
         end
       end

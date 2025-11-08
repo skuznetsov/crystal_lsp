@@ -655,14 +655,35 @@ module CrystalV2
           has_interpolation = false
           has_escapes = false
 
-          # Phase 54: Check if string contains escapes or interpolation
-          # First pass: detect escapes/interpolation
+          # Phase 54: Check if string contains escapes or interpolation.
+          # Track interpolation brace depth so embedded quotes inside #{...} don't terminate scanning.
           scan_offset = @offset
-          while scan_offset < @rope.size && @rope.bytes[scan_offset] != DOUBLE_QUOTE
+          brace_depth = 0
+          while scan_offset < @rope.size
             byte = @rope.bytes[scan_offset]
-            if byte == HASH && scan_offset + 1 < @rope.size && @rope.bytes[scan_offset + 1] == LEFT_BRACE
+
+            if brace_depth == 0 && byte == DOUBLE_QUOTE
+              break
+            end
+
+            if byte == HASH && scan_offset + 1 < @rope.size && @rope.bytes[scan_offset + 1] == LEFT_BRACE && brace_depth == 0
               has_interpolation = true
-            elsif byte == '\\'.ord.to_u8
+              brace_depth = 1
+              scan_offset += 2
+              next
+            end
+
+            if brace_depth > 0
+              if byte == LEFT_BRACE
+                brace_depth += 1
+              elsif byte == RIGHT_BRACE
+                brace_depth -= 1
+              end
+              scan_offset += 1
+              next
+            end
+
+            if byte == '\\'.ord.to_u8
               has_escapes = true
             end
             scan_offset += 1
@@ -670,7 +691,21 @@ module CrystalV2
 
           # If no escapes, use original fast path
           if !has_escapes
-            while @offset < @rope.size && current_byte != DOUBLE_QUOTE
+            brace_depth_fast = 0
+            while @offset < @rope.size
+              if brace_depth_fast == 0 && current_byte == DOUBLE_QUOTE
+                break
+              end
+
+              if brace_depth_fast == 0 && current_byte == HASH && @offset + 1 < @rope.size && @rope.bytes[@offset + 1] == LEFT_BRACE
+                brace_depth_fast = 1
+                advance(2)
+                next
+              elsif brace_depth_fast > 0
+                brace_depth_fast += 1 if current_byte == LEFT_BRACE
+                brace_depth_fast -= 1 if current_byte == RIGHT_BRACE
+              end
+
               advance
             end
             advance if @offset < @rope.size # closing quote
@@ -686,8 +721,29 @@ module CrystalV2
           # Phase 54: Process escape sequences
           processed = Bytes.new(scan_offset - from)  # Allocate with estimated size
           buffer = IO::Memory.new
+          brace_depth_processed = 0
 
-          while @offset < @rope.size && current_byte != DOUBLE_QUOTE
+          while @offset < @rope.size
+            break if brace_depth_processed == 0 && current_byte == DOUBLE_QUOTE
+
+            if brace_depth_processed == 0 && current_byte == HASH && @offset + 1 < @rope.size && @rope.bytes[@offset + 1] == LEFT_BRACE
+              buffer.write_byte(current_byte)
+              advance
+              buffer.write_byte(current_byte)
+              advance
+              brace_depth_processed += 1
+              next
+            elsif brace_depth_processed > 0
+              if current_byte == LEFT_BRACE
+                brace_depth_processed += 1
+              elsif current_byte == RIGHT_BRACE
+                brace_depth_processed -= 1
+              end
+              buffer.write_byte(current_byte)
+              advance
+              next
+            end
+
             if current_byte == '\\'.ord.to_u8 && @offset + 1 < @rope.size
               # Escape sequence
               advance  # Skip backslash
@@ -1629,6 +1685,7 @@ module CrystalV2
         AT_SIGN      = '@'.ord.to_u8
         DOLLAR_SIGN  = '$'.ord.to_u8  # Phase 75: for global variables
         LEFT_BRACE   = '{'.ord.to_u8  # Phase 8: for interpolation detection
+        RIGHT_BRACE  = '}'.ord.to_u8
         COLON        = ':'.ord.to_u8  # Phase 16: for symbol literals
 
         private def build_span(start_offset, start_line, start_column)
