@@ -5222,6 +5222,9 @@ module CrystalV2
           when Token::Kind::RBrace, Token::Kind::RParen, Token::Kind::RBracket
             # Closing delimiters are never arguments
             return PREFIX_ERROR
+          when Token::Kind::LParen
+            # Regular call with parentheses, handled separately
+            return PREFIX_ERROR
           when Token::Kind::End
             # 'end' always ends a block/structure, never an argument
             return PREFIX_ERROR unless next_comes_colon_space?
@@ -5760,7 +5763,7 @@ module CrystalV2
               parse_type_declaration_from_identifier(identifier_token)
             # Phase CALLS_WITHOUT_PARENS: Try to parse call arguments if space was consumed
             # Don't try to parse nested calls when already parsing call arguments
-            elsif @parsing_call_args == 0
+            elsif space_consumed && @parsing_call_args == 0
               # Attempt to parse call arguments without parentheses
               # Example: def_equals value, kind
               maybe_call = try_parse_call_args_without_parens(identifier_token)
