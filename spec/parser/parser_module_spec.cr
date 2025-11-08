@@ -208,6 +208,40 @@ describe "CrystalV2::Compiler::Frontend::Parser" do
       CrystalV2::Compiler::Frontend.node_kind(method_node).should eq(CrystalV2::Compiler::Frontend::NodeKind::Def)
     end
 
+    it "parses include with namespace" do
+      source = <<-CRYSTAL
+        class Example
+          include JSON::Serializable
+        end
+      CRYSTAL
+
+      parser = CrystalV2::Compiler::Frontend::Parser.new(CrystalV2::Compiler::Frontend::Lexer.new(source))
+      program = parser.parse_program
+      arena = program.arena
+
+      class_node = arena[program.roots.first]
+      body = CrystalV2::Compiler::Frontend.node_class_body(class_node).not_nil!
+      body.size.should eq(1)
+
+      include_node = arena[body[0]]
+      CrystalV2::Compiler::Frontend.node_kind(include_node).should eq(CrystalV2::Compiler::Frontend::NodeKind::Include)
+      target_id = CrystalV2::Compiler::Frontend.node_include_target(include_node)
+      target_node = arena[target_id]
+      CrystalV2::Compiler::Frontend.node_kind(target_node).should eq(CrystalV2::Compiler::Frontend::NodeKind::Path)
+
+      path_node = target_node.as(CrystalV2::Compiler::Frontend::PathNode)
+      left_id = path_node.left.not_nil!
+      right_id = path_node.right
+
+      left_node = arena[left_id].as(CrystalV2::Compiler::Frontend::IdentifierNode)
+      String.new(left_node.name).should eq("JSON")
+
+      right_node = arena[right_id].as(CrystalV2::Compiler::Frontend::IdentifierNode)
+      String.new(right_node.name).should eq("Serializable")
+
+      String.new(CrystalV2::Compiler::Frontend.node_include_name(include_node).not_nil!).should eq("Serializable")
+    end
+
     it "parses class with methods and includes" do
       source = <<-CRYSTAL
         class Calculator

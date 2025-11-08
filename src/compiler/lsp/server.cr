@@ -1283,6 +1283,10 @@ module CrystalV2
             if else_body = node.else_branch
               else_body.each { |expr| yield expr }
             end
+          when Frontend::IncludeNode
+            yield node.target unless node.target.invalid?
+          when Frontend::ExtendNode
+            yield node.target unless node.target.invalid?
           when Frontend::ReturnNode
             if value = node.value
               yield value unless value.invalid?
@@ -1396,6 +1400,14 @@ module CrystalV2
           return send_response(id, "null") unless expr_id
 
           node = doc_state.program.arena[expr_id]
+          case node
+          when Frontend::IncludeNode
+            expr_id = node.target unless node.target.invalid?
+            node = doc_state.program.arena[expr_id] unless expr_id.invalid?
+          when Frontend::ExtendNode
+            expr_id = node.target unless node.target.invalid?
+            node = doc_state.program.arena[expr_id] unless expr_id.invalid?
+          end
           span = node.span
           snippet = extract_snippet(doc_state.text_document.text, span)
           debug("Definition node class=#{node.class} span=#{span.start_line}:#{span.start_column}-#{span.end_line}:#{span.end_column} snippet='#{snippet}'")
@@ -2934,6 +2946,10 @@ module CrystalV2
             end
             # Fallback: if we have type information, resolve as instance call
             definition_from_call(node, doc_state, uri)
+          when Frontend::IncludeNode
+            find_definition_location(node.target, doc_state, uri, depth + 1)
+          when Frontend::ExtendNode
+            find_definition_location(node.target, doc_state, uri, depth + 1)
           else
             nil
           end
@@ -3912,8 +3928,10 @@ module CrystalV2
             end
           when Frontend::IncludeNode
             emit_name_token(context, node.span, node.name, SemanticTokenType::Type.value, tokens)
+            collect_tokens_recursive(context, node.target, tokens)
           when Frontend::ExtendNode
             emit_name_token(context, node.span, node.name, SemanticTokenType::Type.value, tokens)
+            collect_tokens_recursive(context, node.target, tokens)
           when Frontend::LibNode
             emit_name_token(context, node.span, node.name, SemanticTokenType::Namespace.value, tokens)
             if body = node.body

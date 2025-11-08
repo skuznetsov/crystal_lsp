@@ -1083,16 +1083,18 @@ module CrystalV2
       struct IncludeNode
         getter span : Span
         getter name : Slice(UInt8)
+        getter target : ExprId
 
-        def initialize(@span : Span, @name : Slice(UInt8))
+        def initialize(@span : Span, @name : Slice(UInt8), @target : ExprId)
         end
       end
 
       struct ExtendNode
         getter span : Span
         getter name : Slice(UInt8)
+        getter target : ExprId
 
-        def initialize(@span : Span, @name : Slice(UInt8))
+        def initialize(@span : Span, @name : Slice(UInt8), @target : ExprId)
         end
       end
 
@@ -3132,6 +3134,14 @@ def self.node_extend_name(node : TypedNode) : Slice(UInt8)?
   nil
 end
 
+def self.node_extend_target(node : ExtendNode) : ExprId
+  node.target
+end
+
+def self.node_extend_target(node : TypedNode) : ExprId
+  ExprId.new(-1)
+end
+
 # include_name
 
 def self.node_include_name(node : IncludeNode) : Slice(UInt8)?
@@ -3140,6 +3150,14 @@ end
 
 def self.node_include_name(node : TypedNode) : Slice(UInt8)?
   nil
+end
+
+def self.node_include_target(node : IncludeNode) : ExprId
+  node.target
+end
+
+def self.node_include_target(node : TypedNode) : ExprId
+  ExprId.new(-1)
 end
 
 # operator

@@ -4665,25 +4665,24 @@ module CrystalV2
         end
 
         # Phase 31: Parse include statement
-        # Grammar: include ModuleName
+        # Grammar: include ModuleName or include Namespace::Module
         private def parse_include : ExprId
           include_token = current_token
           advance
           skip_trivia
 
-          name_token = current_token
-          unless name_token.kind == Token::Kind::Identifier
-            emit_unexpected(name_token)
-            return PREFIX_ERROR
-          end
-          advance
+          target_expr = parse_path_or_identifier
+          return PREFIX_ERROR if target_expr.invalid?
 
-          include_span = include_token.span.cover(name_token.span)
+          name_slice = final_identifier_slice(target_expr)
+          target_span = @arena[target_expr].span
+          include_span = include_token.span.cover(target_span)
 
           @arena.add_typed(
             IncludeNode.new(
               include_span,
-              name_token.slice
+              name_slice,
+              target_expr
             )
           )
         end
@@ -4695,21 +4694,32 @@ module CrystalV2
           advance
           skip_trivia
 
-          name_token = current_token
-          unless name_token.kind == Token::Kind::Identifier
-            emit_unexpected(name_token)
-            return PREFIX_ERROR
-          end
-          advance
+          target_expr = parse_path_or_identifier
+          return PREFIX_ERROR if target_expr.invalid?
 
-          extend_span = extend_token.span.cover(name_token.span)
+          name_slice = final_identifier_slice(target_expr)
+          target_span = @arena[target_expr].span
+          extend_span = extend_token.span.cover(target_span)
 
           @arena.add_typed(
             ExtendNode.new(
               extend_span,
-              name_token.slice
+              name_slice,
+              target_expr
             )
           )
+        end
+
+        private def final_identifier_slice(expr_id : ExprId) : Slice(UInt8)
+          node = @arena[expr_id]
+          case node
+          when IdentifierNode
+            node.name
+          when PathNode
+            final_identifier_slice(node.right)
+          else
+            Slice(UInt8).new(0)
+          end
         end
 
         # Phase 5C: Parse instance variable declaration: @var : Type
