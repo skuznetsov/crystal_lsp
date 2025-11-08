@@ -33,14 +33,30 @@ module CrystalV2
         end
       end
 
+      struct PreludeSymbolOrigin
+        getter program : Frontend::Program
+        getter uri : String
+
+        def initialize(@program : Frontend::Program, @uri : String)
+        end
+      end
+
       struct PreludeState
         getter path : String
         getter program : Frontend::Program
         getter symbol_table : Semantic::SymbolTable
         getter diagnostics : Array(Diagnostic)
         getter stub : Bool
+        getter symbol_origins : Hash(Semantic::Symbol, PreludeSymbolOrigin)
 
-        def initialize(@path : String, @program : Frontend::Program, @symbol_table : Semantic::SymbolTable, @diagnostics : Array(Diagnostic), @stub : Bool)
+        def initialize(
+          @path : String,
+          @program : Frontend::Program,
+          @symbol_table : Semantic::SymbolTable,
+          @diagnostics : Array(Diagnostic),
+          @stub : Bool,
+          @symbol_origins : Hash(Semantic::Symbol, PreludeSymbolOrigin)
+        )
         end
       end
 
@@ -534,22 +550,61 @@ module CrystalV2
         end
 
         private def resolve_require_path(base_dir : String, require_path : String) : String?
-          expanded = if require_path.starts_with?("/")
-            require_path
-          else
-            File.expand_path(require_path, base_dir)
+          forms = normalize_require_forms(require_path)
+          candidates = [] of String
+
+          append_require_candidates(candidates, nil, forms)
+          append_require_candidates(candidates, base_dir, forms)
+
+          if project_root = find_project_root(base_dir)
+            append_require_candidates(candidates, project_root, forms)
+            append_require_candidates(candidates, File.join(project_root, "src"), forms)
+            Dir.glob(File.join(project_root, "lib", "*", "src")).each do |lib_src|
+              append_require_candidates(candidates, lib_src, forms)
+            end
           end
 
-          if File.file?(expanded)
-            return expanded
-          elsif File.file?("#{expanded}.cr")
-            return "#{expanded}.cr"
-          elsif File.directory?(expanded)
-            candidate = File.join(expanded, "index.cr")
+          stdlib_src = File.dirname(PRELUDE_PATH)
+          append_require_candidates(candidates, stdlib_src, forms)
+
+          candidates.each do |candidate|
             return candidate if File.file?(candidate)
+            next unless File.directory?(candidate)
+            index_file = File.join(candidate, "index.cr")
+            return index_file if File.file?(index_file)
           end
 
           nil
+        end
+
+        private def normalize_require_forms(path : String) : Array(String)
+          forms = [] of String
+          forms << path
+          unless path.ends_with?(".cr")
+            forms << "#{path}.cr"
+          end
+          forms
+        end
+
+        private def append_require_candidates(list : Array(String), base : String?, forms : Array(String))
+          forms.each do |form|
+            expanded = if base
+              File.expand_path(form, base)
+            else
+              form
+            end
+            list << expanded
+          end
+        end
+
+        private def find_project_root(start_dir : String) : String?
+          dir = File.expand_path(start_dir)
+          loop do
+            return dir if File.exists?(File.join(dir, "shard.yml")) || File.exists?(File.join(dir, ".git"))
+            parent = File.dirname(dir)
+            return dir if parent == dir
+            dir = parent
+          end
         end
 
         # Main server loop
@@ -807,7 +862,7 @@ module CrystalV2
         def debug_analyze(source : String) : {Array(Diagnostic), SemanticTokens, Bool, String}
           ensure_prelude_loaded
           using_stub = @prelude_state.try(&.stub) || false
-          diagnostics, program, _tc, _ids, _symtab, _req = analyze_document(source)
+          diagnostics, program, type_context, identifier_symbols, symbol_table, _req = analyze_document(source)
           tokens = collect_semantic_tokens(program, source, identifier_symbols, type_context, symbol_table)
           prelude_path = @prelude_state.try(&.path) || "(none)"
           {diagnostics, tokens, using_stub, prelude_path}
@@ -840,6 +895,47 @@ module CrystalV2
           diagnostics = [] of Diagnostic
           parser.diagnostics.each { |diag| diagnostics << Diagnostic.from_parser(diag) }
 
+          debug("Trying real prelude branch? #{path == PRELUDE_PATH}")
+          prelude_state = if path == PRELUDE_PATH
+            build_real_prelude_state(path, program, source, diagnostics)
+          else
+            build_single_file_prelude_state(path, program, source, diagnostics)
+          end
+
+          unless prelude_state
+            diagnostics.each { |diag| debug("#{label} diagnostic: #{diag.message}") } unless diagnostics.empty?
+            debug("#{label} produced #{diagnostics.size} diagnostics; ignoring")
+            @prelude_real_mtime = File.info(path).modification_time if path == PRELUDE_PATH
+            return false
+          end
+
+          stub = path == PRELUDE_STUB_PATH
+          table = prelude_state.symbol_table
+
+          # Sanity check: ensure basic builtins exist; otherwise prefer stub
+          unless stub || prelude_sanity_ok?(table)
+            debug("#{label} appears incomplete (missing Kernel.puts/Dir.glob); falling back to stub")
+            return false
+          end
+
+          @prelude_state = prelude_state
+          @prelude_mtime = File.info(path).modification_time
+          @prelude_real_mtime = @prelude_mtime if path == PRELUDE_PATH
+          register_prelude_symbols(@prelude_state.not_nil!)
+          debug("#{label} loaded successfully")
+          true
+        rescue ex
+          debug("Failed to load #{label}: #{ex.message}")
+          debug(ex.inspect_with_backtrace)
+          false
+        end
+
+        private def build_single_file_prelude_state(
+          path : String,
+          program : Frontend::Program,
+          source : String,
+          diagnostics : Array(Diagnostic)
+        ) : PreludeState?
           analyzer = Semantic::Analyzer.new(program)
           analyzer.collect_symbols
           result = analyzer.resolve_names
@@ -853,37 +949,297 @@ module CrystalV2
               analyzer.type_inference_diagnostics.each { |diag| diagnostics << Diagnostic.from_semantic(diag, source) }
             end
           rescue ex
-            debug("#{label} type inference failed: #{ex.message}")
-            @prelude_real_mtime = File.info(path).modification_time if path == PRELUDE_PATH
-            return false
+            debug("Prelude type inference failed for #{path}: #{ex.message}")
+            return nil
           end
 
-          if diagnostics.empty?
-            stub = path == PRELUDE_STUB_PATH
-            table = analyzer.global_context.symbol_table
+          return nil unless diagnostics.empty?
 
-            # Sanity check: ensure basic builtins exist; otherwise prefer stub
-            unless stub || prelude_sanity_ok?(table)
-              debug("#{label} appears incomplete (missing Kernel.puts/Dir.glob); falling back to stub")
+          uri = file_uri(path)
+          origins = build_full_symbol_origin_map(analyzer.global_context.symbol_table, program, uri)
+          stub = path == PRELUDE_STUB_PATH
+          PreludeState.new(path, program, analyzer.global_context.symbol_table, diagnostics, stub, origins)
+        end
+
+        private def build_real_prelude_state(
+          path : String,
+          program : Frontend::Program,
+          source : String,
+          diagnostics : Array(Diagnostic)
+        ) : PreludeState?
+          debug("Starting real prelude build for #{path}")
+          context = Semantic::Context.new(Semantic::SymbolTable.new)
+          origins = {} of Semantic::Symbol => PreludeSymbolOrigin
+          visited = Set(String).new
+          program_cache = {path => program}
+          source_cache = {path => source}
+
+          unless process_prelude_dependency(path, context, origins, visited, diagnostics, program_cache, source_cache)
+            return nil
+          end
+
+          return nil unless diagnostics.empty?
+
+          PreludeState.new(path, program, context.symbol_table, diagnostics, false, origins)
+        end
+
+        private def process_prelude_dependency(
+          path : String,
+          context : Semantic::Context,
+          origins : Hash(Semantic::Symbol, PreludeSymbolOrigin),
+          visited : Set(String),
+          diagnostics : Array(Diagnostic),
+          program_cache : Hash(String, Frontend::Program),
+          source_cache : Hash(String, String)
+        ) : Bool
+          return true if visited.includes?(path)
+          visited << path
+
+          debug("Analyzing prelude file #{path}")
+
+          program = program_cache[path]?
+          source = source_cache[path]?
+          unless program && source
+            unless load_prelude_program(path, program_cache, source_cache, diagnostics)
+              if optional_prelude_file?(path)
+                debug("Skipping optional prelude dependency #{path} due to parse errors")
+                return true
+              else
+                return false
+              end
+            end
+            program = program_cache[path]
+            source = source_cache[path]
+          end
+          return false unless program && source
+
+          base_dir = File.dirname(path)
+          requires = collect_require_paths(program, base_dir)
+          debug("  discovered #{requires.size} require(s)")
+
+          requires.each do |req|
+            next if visited.includes?(req)
+            unless program_cache[req]?
+              unless load_prelude_program(req, program_cache, source_cache, diagnostics)
+                if optional_prelude_file?(req)
+                  debug("Skipping optional prelude dependency #{req} due to parse errors")
+                  visited << req
+                  next
+                else
+                  debug("Failed to parse prelude dependency #{req}")
+                  return false
+                end
+              end
+            end
+            unless process_prelude_dependency(req, context, origins, visited, diagnostics, program_cache, source_cache)
               return false
             end
-
-            @prelude_state = PreludeState.new(path, program, table, diagnostics, stub)
-            @prelude_mtime = File.info(path).modification_time
-            @prelude_real_mtime = @prelude_mtime if path == PRELUDE_PATH
-            register_prelude_symbols(@prelude_state.not_nil!)
-            debug("#{label} loaded successfully")
-            true
-          else
-            diagnostics.each { |diag| debug("#{label} diagnostic: #{diag.message}") }
-            debug("#{label} produced #{diagnostics.size} diagnostics; ignoring")
-            @prelude_real_mtime = File.info(path).modification_time if path == PRELUDE_PATH
-            false
           end
+
+          analyzer = Semantic::Analyzer.new(program, context)
+          analyzer.collect_symbols
+          analyzer.semantic_diagnostics.each { |diag| diagnostics << Diagnostic.from_semantic(diag, source) }
+          result = analyzer.resolve_names
+          result.diagnostics.each { |diag| diagnostics << Diagnostic.from_parser(diag) }
+
+          if analyzer.semantic_errors? || result.diagnostics.any?
+            if optional_prelude_file?(path)
+              debug("Skipping optional prelude dependency #{path} due to semantic errors")
+              return true
+            else
+              debug("Semantic errors while loading #{path}")
+              return false
+            end
+          end
+
+          uri = file_uri(path)
+          record_prelude_symbol_origins_from_program(program, context.symbol_table, origins, uri)
+          debug("  registered symbols for #{path}")
+          true
         rescue ex
-          debug("Failed to load #{label}: #{ex.message}")
-          debug(ex.inspect_with_backtrace)
+          debug("Failed to process prelude file #{path}: #{ex.message}")
           false
+        end
+
+        private def load_prelude_program(
+          path : String,
+          program_cache : Hash(String, Frontend::Program),
+          source_cache : Hash(String, String),
+          diagnostics : Array(Diagnostic)
+        ) : Bool
+          source = File.read(path)
+          lexer = Frontend::Lexer.new(source)
+          parser = Frontend::Parser.new(lexer)
+          program = parser.parse_program
+          parser.diagnostics.each { |diag| diagnostics << Diagnostic.from_parser(diag) }
+          return false unless parser.diagnostics.empty?
+          program_cache[path] = program
+          source_cache[path] = source
+          true
+        rescue ex
+          debug("Failed to read prelude dependency #{path}: #{ex.message}")
+          false
+        end
+
+        private def optional_prelude_file?(path : String) : Bool
+          File.basename(path) == "macros.cr"
+        end
+
+        private def build_full_symbol_origin_map(
+          table : Semantic::SymbolTable,
+          program : Frontend::Program,
+          uri : String
+        ) : Hash(Semantic::Symbol, PreludeSymbolOrigin)
+          origins = {} of Semantic::Symbol => PreludeSymbolOrigin
+          record_symbol_origin_from_scope(table, program, uri, origins)
+          origins
+        end
+
+        private def record_symbol_origin_from_scope(
+          table : Semantic::SymbolTable,
+          program : Frontend::Program,
+          uri : String,
+          origins : Hash(Semantic::Symbol, PreludeSymbolOrigin)
+        )
+          table.each_local_symbol do |_name, symbol|
+            case symbol
+            when Semantic::OverloadSetSymbol
+              symbol.overloads.each do |overload|
+                origins[overload] = PreludeSymbolOrigin.new(program, uri)
+              end
+            when Semantic::MethodSymbol
+              origins[symbol] = PreludeSymbolOrigin.new(program, uri)
+            when Semantic::ClassSymbol, Semantic::ModuleSymbol
+              origins[symbol] = PreludeSymbolOrigin.new(program, uri)
+              record_symbol_origin_from_scope(symbol.scope, program, uri, origins)
+            else
+              origins[symbol] = PreludeSymbolOrigin.new(program, uri)
+            end
+          end
+        end
+
+        private def record_prelude_symbol_origins_from_program(
+          program : Frontend::Program,
+          table : Semantic::SymbolTable,
+          origins : Hash(Semantic::Symbol, PreludeSymbolOrigin),
+          uri : String
+        )
+          arena = program.arena
+          program.roots.each do |expr_id|
+            record_prelude_symbol_origin(expr_id, arena, table, origins, program, uri)
+          end
+        end
+
+        private def record_prelude_symbol_origin(
+          expr_id : Frontend::ExprId,
+          arena : Frontend::ArenaLike,
+          current_table : Semantic::SymbolTable,
+          origins : Hash(Semantic::Symbol, PreludeSymbolOrigin),
+          program : Frontend::Program,
+          uri : String
+        )
+          return if expr_id.invalid?
+
+          node = arena[expr_id]
+          case node
+          when Frontend::VisibilityModifierNode
+            record_prelude_symbol_origin(node.expression, arena, current_table, origins, program, uri)
+          when Frontend::ClassNode
+            record_class_like_origin(node.name, node.body, current_table, origins, program, uri, arena)
+          when Frontend::StructNode
+            record_class_like_origin(node.name, node.body, current_table, origins, program, uri, arena)
+          when Frontend::ModuleNode
+            record_module_origin(node.name, node.body, current_table, origins, program, uri, arena)
+          when Frontend::DefNode
+            register_method_origin(node, expr_id, current_table, origins, program, uri)
+          when Frontend::MacroDefNode
+            record_macro_origin(node.name, current_table, origins, program, uri)
+          end
+        rescue
+          # Ignore nodes we cannot map yet
+        end
+
+        private def record_class_like_origin(
+          name_slice : Slice(UInt8)?,
+          body : Array(Frontend::ExprId)?,
+          current_table : Semantic::SymbolTable,
+          origins : Hash(Semantic::Symbol, PreludeSymbolOrigin),
+          program : Frontend::Program,
+          uri : String,
+          arena : Frontend::ArenaLike
+        )
+          return unless name_slice
+          name = String.new(name_slice)
+          symbol = current_table.lookup_local(name)
+          return unless symbol.is_a?(Semantic::ClassSymbol)
+
+          origins[symbol] ||= PreludeSymbolOrigin.new(program, uri)
+          return unless body
+          body.each do |child|
+            record_prelude_symbol_origin(child, arena, symbol.scope, origins, program, uri)
+          end
+        end
+
+        private def record_module_origin(
+          name_slice : Slice(UInt8)?,
+          body : Array(Frontend::ExprId)?,
+          current_table : Semantic::SymbolTable,
+          origins : Hash(Semantic::Symbol, PreludeSymbolOrigin),
+          program : Frontend::Program,
+          uri : String,
+          arena : Frontend::ArenaLike
+        )
+          return unless name_slice
+          name = String.new(name_slice)
+          symbol = current_table.lookup_local(name)
+          return unless symbol.is_a?(Semantic::ModuleSymbol)
+
+          origins[symbol] ||= PreludeSymbolOrigin.new(program, uri)
+          return unless body
+          body.each do |child|
+            record_prelude_symbol_origin(child, arena, symbol.scope, origins, program, uri)
+          end
+        end
+
+        private def record_macro_origin(
+          name_slice : Slice(UInt8)?,
+          current_table : Semantic::SymbolTable,
+          origins : Hash(Semantic::Symbol, PreludeSymbolOrigin),
+          program : Frontend::Program,
+          uri : String
+        )
+          return unless name_slice
+          name = String.new(name_slice)
+          symbol = current_table.lookup_local(name)
+          return unless symbol.is_a?(Semantic::MacroSymbol)
+          origins[symbol] ||= PreludeSymbolOrigin.new(program, uri)
+        end
+
+        private def register_method_origin(
+          node : Frontend::DefNode,
+          expr_id : Frontend::ExprId,
+          current_table : Semantic::SymbolTable,
+          origins : Hash(Semantic::Symbol, PreludeSymbolOrigin),
+          program : Frontend::Program,
+          uri : String
+        )
+          name_slice = node.name
+          return unless name_slice
+          name = String.new(name_slice)
+          symbol = current_table.lookup_local(name)
+          return unless symbol
+
+          case symbol
+          when Semantic::MethodSymbol
+            if symbol.node_id.index == expr_id.index
+              origins[symbol] ||= PreludeSymbolOrigin.new(program, uri)
+            end
+          when Semantic::OverloadSetSymbol
+            symbol.overloads.each do |overload|
+              next unless overload.node_id.index == expr_id.index
+              origins[overload] ||= PreludeSymbolOrigin.new(program, uri)
+            end
+          end
         end
 
         # Minimal sanity check for real prelude
@@ -967,7 +1323,7 @@ module CrystalV2
         private def register_prelude_symbols(prelude : PreludeState)
           unregister_symbols(@prelude_symbols)
           symbols = [] of Semantic::Symbol
-          register_symbols_from_table(prelude.symbol_table, prelude.program, prelude.path, symbols)
+          register_symbols_from_table(prelude.symbol_table, prelude.program, prelude.path, symbols, prelude.symbol_origins)
           @prelude_symbols = symbols
         end
 
@@ -976,9 +1332,18 @@ module CrystalV2
           program : Frontend::Program,
           uri : String,
           output : Array(Semantic::Symbol),
+          origins : Hash(Semantic::Symbol, PreludeSymbolOrigin)? = nil,
         )
           table.each_local_symbol do |_name, symbol|
-            register_symbol(symbol, program, uri, output)
+            symbol_program = program
+            symbol_uri = uri
+            if origins
+              if origin = origins[symbol]?
+                symbol_program = origin.program
+                symbol_uri = origin.uri
+              end
+            end
+            register_symbol(symbol, symbol_program, symbol_uri, output, origins)
           end
         end
 
@@ -987,10 +1352,11 @@ module CrystalV2
           program : Frontend::Program,
           uri : String,
           output : Array(Semantic::Symbol),
+          origins : Hash(Semantic::Symbol, PreludeSymbolOrigin)? = nil,
         )
           case symbol
           when Semantic::OverloadSetSymbol
-            symbol.overloads.each { |overload| register_symbol(overload, program, uri, output) }
+            symbol.overloads.each { |overload| register_symbol(overload, program, uri, output, origins) }
           else
             @symbol_locations[symbol] = SymbolLocation.new(uri, program, program_key(program))
             register_node_for_symbol(symbol, program)
@@ -1001,10 +1367,10 @@ module CrystalV2
             case symbol
             when Semantic::ClassSymbol
               output << symbol
-              register_symbols_from_table(symbol.scope, program, uri, output)
+              register_symbols_from_table(symbol.scope, program, uri, output, origins)
             when Semantic::ModuleSymbol
               output << symbol
-              register_symbols_from_table(symbol.scope, program, uri, output)
+              register_symbols_from_table(symbol.scope, program, uri, output, origins)
             when Semantic::MethodSymbol
               output << symbol
               register_method(symbol, program)

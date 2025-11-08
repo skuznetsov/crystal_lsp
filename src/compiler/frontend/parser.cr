@@ -944,7 +944,8 @@ module CrystalV2
                  Token::Kind::Comma,  # Phase 30: multiple generic params Hash(K, V)
                  Token::Kind::LBracket, Token::Kind::RBracket,  # Static arrays Type[N]
                  Token::Kind::LBrace, Token::Kind::RBrace,  # Tuple literals {A, B}
-                 Token::Kind::Question  # Nullable types Type?
+                 Token::Kind::Question,  # Nullable types Type?
+                 Token::Kind::Star, Token::Kind::StarStar  # Pointer suffixes Type*, Type**
               true
             when Token::Kind::Whitespace
               # Skip whitespace but continue parsing
