@@ -156,7 +156,9 @@ module CrystalV2
           LBracket    # [
           RBracket    # ]
           LBrace      # {
+          LBracePercent # {% (macro control start)
           RBrace      # }
+          PercentRBrace # %} (macro control end)
           Comma       # ,
           Semicolon   # ;
           Colon       # :

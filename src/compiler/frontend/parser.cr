@@ -4898,7 +4898,7 @@ module CrystalV2
                 buffer_start_token = nil
                 macro_trim_left ||= already_empty && trim_applied
 
-                piece, effect, skip_whitespace = parse_macro_control_piece
+                piece, effect, skip_whitespace = parse_macro_control_piece(left_trim)
                 pieces << piece
 
                 # Special handling for comment blocks - skip content
@@ -4910,7 +4910,8 @@ module CrystalV2
                     break if current_token.kind == Token::Kind::EOF
 
                     if macro_control_start?
-                      inner_piece, inner_effect, _ = parse_macro_control_piece
+                      inner_left_trim = macro_control_left_trim?
+                      inner_piece, inner_effect, _ = parse_macro_control_piece(inner_left_trim)
                       case inner_effect
                       when :push
                         comment_depth += 1
@@ -4952,6 +4953,16 @@ module CrystalV2
                 piece, skip_whitespace = parse_macro_expression_piece
                 pieces << piece
 
+                trim_next_left = skip_whitespace
+                next
+              elsif macro_variable_start?
+                already_empty = pieces.empty?
+                flush_macro_text(buffer, pieces, false, buffer_start_token, previous_token)
+                buffer_start_token = nil
+                macro_trim_left ||= already_empty
+
+                piece, skip_whitespace = parse_macro_variable_piece
+                pieces << piece
                 trim_next_left = skip_whitespace
                 next
               end
@@ -5078,9 +5089,10 @@ module CrystalV2
                    left_kind == Frontend::NodeKind::InstanceVar ||
                    left_kind == Frontend::NodeKind::ClassVar ||
                    left_kind == Frontend::NodeKind::Global ||
+                   left_kind == Frontend::NodeKind::MacroVar ||
                    left_kind == Frontend::NodeKind::Index ||
                    left_kind == Frontend::NodeKind::MemberAccess
-              @diagnostics << Diagnostic.new("Assignment target must be an identifier, instance variable, class variable, global variable, or index expression", token.span)
+              @diagnostics << Diagnostic.new("Assignment target must be an identifier, instance variable, class variable, global variable, macro variable, or index expression", token.span)
               return PREFIX_ERROR
             end
 
@@ -5592,6 +5604,15 @@ module CrystalV2
         end
 
         private def parse_prefix : ExprId
+          if macro_context?
+            token = current_token
+            if macro_closing_sequence?(token)
+              return PREFIX_ERROR
+            elsif macro_variable_start?
+              return parse_macro_variable_reference
+            end
+          end
+
           token = current_token
           debug("parse_prefix: token=#{token.kind}")
           case token.kind
@@ -7549,24 +7570,98 @@ module CrystalV2
         private def macro_expression_left_trim?
           second = peek_token(1)
           third = peek_token(2)
-          second.kind == Token::Kind::LBrace &&
-            third.kind == Token::Kind::Operator && slice_eq?(third.slice, "-")
+          second.kind == Token::Kind::LBrace && macro_trim_token?(third)
+        end
+
+        private def macro_context? : Bool
+          @macro_mode > 0 || @macro_terminator == :control
+        end
+
+        private def macro_closing_sequence?(token : Token) : Bool
+          if token.kind == Token::Kind::PercentRBrace
+            return true
+          elsif token.kind == Token::Kind::Percent
+            next_token = peek_token
+            return next_token.kind == Token::Kind::RBrace
+          elsif token.kind == Token::Kind::Minus
+            next_token = peek_token
+            if next_token.kind == Token::Kind::PercentRBrace
+              return true
+            elsif next_token.kind == Token::Kind::Percent
+              next_next = peek_token(2)
+              return next_next.kind == Token::Kind::RBrace
+            end
+          end
+          false
+        end
+
+        private def macro_variable_start? : Bool
+          return false unless macro_context?
+          return false unless current_token.kind == Token::Kind::Percent
+          next_token = peek_next_non_trivia
+          next_token.kind == Token::Kind::Identifier
+        end
+
+        private def parse_macro_variable_piece : {MacroPiece, Bool}
+          start_token = current_token
+          advance  # consume '%'
+          skip_macro_whitespace
+
+          name_token = current_token
+          unless name_token.kind == Token::Kind::Identifier
+            emit_unexpected(name_token)
+            span = start_token.span
+            span = span.cover(name_token.span) if name_token
+            return {MacroPiece.text("%", span), false}
+          end
+
+          name = token_text(name_token)
+          advance
+
+          newline_escape = consume_macro_newline_escape?
+          macro_span = start_token.span.cover(name_token.span)
+          piece = MacroPiece.macro_var(name, macro_span)
+          {piece, newline_escape}
+        end
+
+        private def parse_macro_variable_reference : ExprId
+          percent_token = current_token
+          advance
+
+          name_token = current_token
+          unless name_token.kind == Token::Kind::Identifier
+            emit_unexpected(name_token)
+            return PREFIX_ERROR
+          end
+
+          span = percent_token.span.cover(name_token.span)
+          node = MacroVarNode.new(span, name_token.slice)
+          advance
+          @arena.add_typed(node)
         end
 
         private def macro_control_start?
-          current = current_token
-          return false unless current.kind == Token::Kind::LBrace
-          peek = peek_token
-          # Phase 18: % changed from Operator to Percent token
-          peek.kind == Token::Kind::Percent
+          current_token.kind == Token::Kind::LBracePercent
         end
 
         private def macro_control_left_trim?
-          second = peek_token(1)
-          third = peek_token(2)
-          # Phase 18: % changed from Operator to Percent token
-          second.kind == Token::Kind::Percent &&
-            (third.kind == Token::Kind::Minus || (third.kind == Token::Kind::Operator && slice_eq?(third.slice, "-")))
+          return false unless current_token.kind == Token::Kind::LBracePercent
+          next_token = peek_token
+          macro_trim_token?(next_token)
+        end
+
+        private def macro_trim_token?(token : Token) : Bool
+          token.kind == Token::Kind::Minus ||
+            (token.kind == Token::Kind::Operator && slice_eq?(token.slice, "-"))
+        end
+
+        private def macro_trim_operator? : Bool
+          if macro_trim_token?(current_token)
+            advance
+            true
+          else
+            false
+          end
         end
 
         private def macro_terminator_reached?(token : Token)
@@ -7575,10 +7670,97 @@ module CrystalV2
             return true if operator_token?(token, "}")
             return true if operator_token?(token, "-") && operator_token?(peek_token(1), "}")
           when :control
-            return true if operator_token?(token, "%")
-            return true if operator_token?(token, "-") && operator_token?(peek_token(1), "%")
+            if token.kind == Token::Kind::PercentRBrace
+              return true
+            elsif token.kind == Token::Kind::Minus
+              next_token = peek_token(1)
+              return true if next_token.kind == Token::Kind::PercentRBrace
+            else
+              return true if operator_token?(token, "%") && operator_token?(peek_token(1), "}")
+            end
           end
           false
+        end
+
+        private def consume_macro_close_span(message = "Expected '%}'") : Span?
+          token = current_token
+          case token.kind
+          when Token::Kind::PercentRBrace
+            advance
+            token.span
+          when Token::Kind::Percent
+            percent_span = token.span
+            advance
+            closing = current_token
+            unless closing.kind == Token::Kind::RBrace
+              @diagnostics << Diagnostic.new(message, closing.span)
+              advance unless closing.kind == Token::Kind::EOF
+              return nil
+            end
+            span = percent_span.cover(closing.span)
+            advance
+            span
+          else
+            @diagnostics << Diagnostic.new(message, token.span)
+            advance unless token.kind == Token::Kind::EOF
+            nil
+          end
+        end
+
+        private def consume_macro_control_start : Span?
+          start_token = current_token
+          case start_token.kind
+          when Token::Kind::LBracePercent
+            advance
+            start_token.span
+          when Token::Kind::LBrace
+            advance
+            percent_token = current_token
+            unless percent_token.kind == Token::Kind::Percent
+              emit_unexpected(percent_token)
+              return nil
+            end
+            span = start_token.span.cover(percent_token.span)
+            advance
+            span
+          else
+            emit_unexpected(start_token)
+            advance unless start_token.kind == Token::Kind::EOF
+            nil
+          end
+        end
+
+        private def expect_macro_close(message = "Expected '%}'") : Bool
+          !!consume_macro_close_span(message)
+        end
+
+        private def peek_macro_keyword : String?
+          saved_index = @index
+          token = current_token
+
+          if token.kind == Token::Kind::LBracePercent
+            advance
+          elsif token.kind == Token::Kind::LBrace
+            next_token = peek_token
+            unless next_token.kind == Token::Kind::Percent
+              @index = saved_index
+              return nil
+            end
+            advance  # consume {
+            advance  # consume %
+          else
+            return nil
+          end
+
+          if macro_trim_token?(current_token)
+            advance
+          end
+
+          skip_trivia
+          keyword = token_text(current_token)
+          @index = saved_index
+          @previous_token = nil
+          keyword
         end
 
         private def operator_token?(token : Token, kind : Token::Kind)
@@ -7678,20 +7860,31 @@ module CrystalV2
           {vars, iterable}
         end
 
-        private def parse_macro_control_piece
+        private def parse_macro_control_piece(left_trim : Bool)
           start_token = current_token
-          # Phase 15/18: { is LBrace, % is Percent token
-          expect_operator(Token::Kind::LBrace)
-          expect_operator(Token::Kind::Percent)
+
+          unless start_token.kind == Token::Kind::LBracePercent
+            emit_unexpected(start_token)
+            return {MacroPiece.text("", start_token.span), :none, false}
+          end
+          advance  # consume {% (combined token)
+
+          if macro_trim_token?(current_token)
+            left_trim = true
+            advance
+          end
+
           skip_macro_whitespace
 
           keyword_token = current_token
+          keyword_index = @index
           keyword = token_text(keyword_token)
           advance
 
           expr = nil
           iter_vars = nil
           iterable = nil
+          handled_as_control = true
 
           case keyword
           when "for"
@@ -7703,49 +7896,76 @@ module CrystalV2
           when "else", "end", "comment"
             # no expression
           else
-            emit_unexpected(keyword_token)
+            handled_as_control = false
           end
 
-          skip_macro_whitespace
+          if handled_as_control
+            skip_macro_whitespace
+            right_trim = macro_trim_operator?
 
-          # Phase 15/18: % is Percent, } is RBrace
-          expect_operator(Token::Kind::Percent)
-          expect_operator(Token::Kind::RBrace)
-          end_token = previous_token
-
-          newline_escape = consume_macro_newline_escape?
-          skip_whitespace = newline_escape
-
-          kind = case keyword
-            when "else"
-              MacroPiece::Kind::ControlElse
-            when "elsif"
-              MacroPiece::Kind::ControlElseIf
-            when "end"
-              MacroPiece::Kind::ControlEnd
-            else
-              MacroPiece::Kind::ControlStart
+            previous_context = @expect_context
+            end_span = nil
+            begin
+              @expect_context = "macro control #{keyword}"
+              end_span = consume_macro_close_span("Expected '%}' after #{keyword}")
+            ensure
+              @expect_context = previous_context
             end
 
-          # Capture span covering full {% ... %} section
-          control_span = if end_token
-            start_token.span.cover(end_token.span)
+            unless end_span
+              end_span = start_token.span
+            end
+
+            newline_escape = consume_macro_newline_escape?
+            skip_whitespace = newline_escape || right_trim
+
+            kind = case keyword
+              when "else"
+                MacroPiece::Kind::ControlElse
+              when "elsif"
+                MacroPiece::Kind::ControlElseIf
+              when "end"
+                MacroPiece::Kind::ControlEnd
+              else
+                MacroPiece::Kind::ControlStart
+              end
+
+            control_span = start_token.span.cover(end_span)
+            piece = MacroPiece.control(kind, keyword, expr, left_trim, right_trim, iter_vars, iterable, control_span)
+
+            effect = case keyword
+              when "if", "unless", "for", "while", "comment"
+                :push
+              when "end"
+                :pop
+              else
+                :none
+              end
+
+            {piece, effect, skip_whitespace}
           else
-            start_token.span
-          end
-
-          piece = MacroPiece.control(kind, keyword, expr, false, false, iter_vars, iterable, control_span)
-
-          effect = case keyword
-            when "if", "unless", "for", "while", "comment"
-              :push
-            when "end"
-              :pop
-            else
-              :none
+            @index = keyword_index
+            skip_macro_whitespace if current_token.kind == Token::Kind::Whitespace
+            previous_context = @expect_context
+            begin
+              @expect_context = "macro control expr #{keyword}"
+              expr = with_macro_terminator(:control) { parse_statement }
+            ensure
+              @expect_context = previous_context
             end
+            skip_macro_whitespace
 
-          {piece, effect, skip_whitespace}
+            right_trim = macro_trim_operator?
+            closing_span = consume_macro_close_span("Expected '%}' after macro expression")
+            closing_span ||= start_token.span
+            newline_escape = consume_macro_newline_escape?
+            skip_whitespace = newline_escape || right_trim
+
+            macro_span = start_token.span.cover(closing_span)
+            macro_expr_id = @arena.add_typed(MacroExpressionNode.new(macro_span, expr))
+            piece = MacroPiece.expression(macro_expr_id, left_trim, right_trim, macro_span)
+            {piece, :none, skip_whitespace}
+          end
         end
 
         private def expect_identifier(expected : String)
@@ -7795,20 +8015,12 @@ module CrystalV2
         # Called from parse_prefix when seeing {% token sequence
         # Returns MacroIfNode or MacroForNode wrapped in ExprId
         private def parse_percent_macro_control : ExprId
-          start_span = current_token.span
+          start_span = consume_macro_control_start
+          return PREFIX_ERROR unless start_span
 
-          # Expect {% sequence
-          unless current_token.kind == Token::Kind::LBrace
-            emit_unexpected(current_token)
-            return PREFIX_ERROR
+          if macro_trim_token?(current_token)
+            advance
           end
-          advance  # consume {
-
-          unless current_token.kind == Token::Kind::Percent
-            emit_unexpected(current_token)
-            return PREFIX_ERROR
-          end
-          advance  # consume %
 
           skip_trivia
 
@@ -7849,18 +8061,9 @@ module CrystalV2
 
           skip_trivia
 
-          # Expect %}
-          unless current_token.kind == Token::Kind::Percent
-            @diagnostics << Diagnostic.new("Expected '%}' after if condition", current_token.span)
+          unless expect_macro_close("Expected '%}' after if condition")
             return PREFIX_ERROR
           end
-          advance  # consume %
-
-          unless current_token.kind == Token::Kind::RBrace
-            @diagnostics << Diagnostic.new("Expected '}' after '%'", current_token.span)
-            return PREFIX_ERROR
-          end
-          advance  # consume }
 
           # Parse body until {% elsif %}, {% else %}, or {% end %}
           then_body = parse_macro_body_until_branch
@@ -7871,17 +8074,15 @@ module CrystalV2
 
           # After parsing then_body, we should be at {% elsif/else/end %}
           # Consume {% end %} or handle elsif/else
-          unless current_token.kind == Token::Kind::LBrace
+          branch_start_span = consume_macro_control_start
+          unless branch_start_span
             @diagnostics << Diagnostic.new("Expected '{% end %}', '{% elsif %}', or '{% else %}'", current_token.span)
             return PREFIX_ERROR
           end
-          advance  # {
 
-          unless current_token.kind == Token::Kind::Percent
-            @diagnostics << Diagnostic.new("Expected '%' after '{'", current_token.span)
-            return PREFIX_ERROR
+          if macro_trim_token?(current_token)
+            advance
           end
-          advance  # %
 
           skip_trivia
 
@@ -7893,18 +8094,10 @@ module CrystalV2
           # Handle end - simplest case (no else/elsif)
           if branch_keyword == "end"
             # Expect %}
-            unless current_token.kind == Token::Kind::Percent
-              @diagnostics << Diagnostic.new("Expected '%}' after end", current_token.span)
+            end_span = consume_macro_close_span("Expected '%}' after end")
+            unless end_span
               return PREFIX_ERROR
             end
-            advance
-
-            unless current_token.kind == Token::Kind::RBrace
-              @diagnostics << Diagnostic.new("Expected '}' after '%'", current_token.span)
-              return PREFIX_ERROR
-            end
-            end_span = current_token.span
-            advance
 
             full_span = start_span.cover(end_span)
             return @arena.add_typed(MacroIfNode.new(full_span, condition, then_body, else_body))
@@ -7913,34 +8106,24 @@ module CrystalV2
           # Handle else branch
           if branch_keyword == "else"
             # Expect %}
-            unless current_token.kind == Token::Kind::Percent
-              @diagnostics << Diagnostic.new("Expected '%}' after else", current_token.span)
+            unless expect_macro_close("Expected '%}' after else")
               return PREFIX_ERROR
             end
-            advance
-
-            unless current_token.kind == Token::Kind::RBrace
-              @diagnostics << Diagnostic.new("Expected '}' after '%'", current_token.span)
-              return PREFIX_ERROR
-            end
-            advance
 
             # Parse else body
             else_body = parse_macro_body_until_branch
             return PREFIX_ERROR if else_body.invalid?
 
             # Now expect {% end %}
-            unless current_token.kind == Token::Kind::LBrace
+            end_start_span = consume_macro_control_start
+            unless end_start_span
               @diagnostics << Diagnostic.new("Expected '{% end %}'", current_token.span)
               return PREFIX_ERROR
             end
-            advance  # {
 
-            unless current_token.kind == Token::Kind::Percent
-              @diagnostics << Diagnostic.new("Expected '%' after '{'", current_token.span)
-              return PREFIX_ERROR
+            if macro_trim_token?(current_token)
+              advance
             end
-            advance  # %
 
             skip_trivia
 
@@ -7953,18 +8136,10 @@ module CrystalV2
 
             skip_trivia
 
-            unless current_token.kind == Token::Kind::Percent
-              @diagnostics << Diagnostic.new("Expected '%}' after end", current_token.span)
+            end_span = consume_macro_close_span("Expected '%}' after end")
+            unless end_span
               return PREFIX_ERROR
             end
-            advance  # %
-
-            unless current_token.kind == Token::Kind::RBrace
-              @diagnostics << Diagnostic.new("Expected '}' after '%'", current_token.span)
-              return PREFIX_ERROR
-            end
-            end_span = current_token.span
-            advance  # }
 
             full_span = start_span.cover(end_span)
             return @arena.add_typed(MacroIfNode.new(full_span, condition, then_body, else_body))
@@ -7982,34 +8157,24 @@ module CrystalV2
             skip_trivia
 
             # Now expect %}
-            unless current_token.kind == Token::Kind::Percent
-              @diagnostics << Diagnostic.new("Expected '%}' after elsif condition", current_token.span)
+            unless expect_macro_close("Expected '%}' after elsif condition")
               return PREFIX_ERROR
             end
-            advance
-
-            unless current_token.kind == Token::Kind::RBrace
-              @diagnostics << Diagnostic.new("Expected '}' after '%'", current_token.span)
-              return PREFIX_ERROR
-            end
-            advance
 
             # Parse elsif body
             elsif_body = parse_macro_body_until_branch
             return PREFIX_ERROR if elsif_body.invalid?
 
             # Check what's next (could be another elsif, else, or end)
-            unless current_token.kind == Token::Kind::LBrace
+            next_branch_span = consume_macro_control_start
+            unless next_branch_span
               @diagnostics << Diagnostic.new("Expected '{% end %}', '{% elsif %}', or '{% else %}'", current_token.span)
               return PREFIX_ERROR
             end
-            advance  # {
 
-            unless current_token.kind == Token::Kind::Percent
-              @diagnostics << Diagnostic.new("Expected '%' after '{'", current_token.span)
-              return PREFIX_ERROR
+            if macro_trim_token?(current_token)
+              advance
             end
-            advance  # %
 
             skip_trivia
 
@@ -8023,18 +8188,10 @@ module CrystalV2
 
             if next_keyword == "end"
               # End of elsif chain
-              unless current_token.kind == Token::Kind::Percent
-                @diagnostics << Diagnostic.new("Expected '%}' after end", current_token.span)
+              end_span = consume_macro_close_span("Expected '%}' after end")
+              unless end_span
                 return PREFIX_ERROR
               end
-              advance
-
-              unless current_token.kind == Token::Kind::RBrace
-                @diagnostics << Diagnostic.new("Expected '}' after '%'", current_token.span)
-                return PREFIX_ERROR
-              end
-              end_span = current_token.span
-              advance
             elsif next_keyword == "elsif"
               # Another elsif - need to handle recursively
               # Backtrack to handle it properly
@@ -8053,34 +8210,24 @@ module CrystalV2
               end_span = previous_token.not_nil!.span
             elsif next_keyword == "else"
               # Else after elsif
-              unless current_token.kind == Token::Kind::Percent
-                @diagnostics << Diagnostic.new("Expected '%}' after else", current_token.span)
+              unless expect_macro_close("Expected '%}' after else")
                 return PREFIX_ERROR
               end
-              advance
-
-              unless current_token.kind == Token::Kind::RBrace
-                @diagnostics << Diagnostic.new("Expected '}' after '%'", current_token.span)
-                return PREFIX_ERROR
-              end
-              advance
 
               # Parse else body
               elsif_else_body = parse_macro_body_until_branch
               return PREFIX_ERROR if elsif_else_body.invalid?
 
               # Expect {% end %}
-              unless current_token.kind == Token::Kind::LBrace
+              end_start = consume_macro_control_start
+              unless end_start
                 @diagnostics << Diagnostic.new("Expected '{% end %}'", current_token.span)
                 return PREFIX_ERROR
               end
-              advance
 
-              unless current_token.kind == Token::Kind::Percent
-                @diagnostics << Diagnostic.new("Expected '%' after '{'", current_token.span)
-                return PREFIX_ERROR
+              if macro_trim_token?(current_token)
+                advance
               end
-              advance
 
               skip_trivia
 
@@ -8092,18 +8239,10 @@ module CrystalV2
 
               skip_trivia
 
-              unless current_token.kind == Token::Kind::Percent
-                @diagnostics << Diagnostic.new("Expected '%}' after end", current_token.span)
+              end_span = consume_macro_close_span("Expected '%}' after end")
+              unless end_span
                 return PREFIX_ERROR
               end
-              advance
-
-              unless current_token.kind == Token::Kind::RBrace
-                @diagnostics << Diagnostic.new("Expected '}' after '%'", current_token.span)
-                return PREFIX_ERROR
-              end
-              end_span = current_token.span
-              advance
             else
               @diagnostics << Diagnostic.new("Expected 'end', 'elsif', or 'else', got '#{next_keyword}'", current_token.span)
               return PREFIX_ERROR
@@ -8123,18 +8262,12 @@ module CrystalV2
 
         # Helper for recursive elsif handling
         private def parse_macro_if_control_branch_recursively(start_span : Span) : ExprId
-          # We're at {% - parse the control block
-          unless current_token.kind == Token::Kind::LBrace
-            @diagnostics << Diagnostic.new("Expected '{'", current_token.span)
-            return PREFIX_ERROR
-          end
-          advance
+          start_token_span = consume_macro_control_start
+          return PREFIX_ERROR unless start_token_span
 
-          unless current_token.kind == Token::Kind::Percent
-            @diagnostics << Diagnostic.new("Expected '%'", current_token.span)
-            return PREFIX_ERROR
+          if macro_trim_token?(current_token)
+            advance
           end
-          advance
 
           skip_trivia
 
@@ -8154,34 +8287,24 @@ module CrystalV2
 
           skip_trivia
 
-          unless current_token.kind == Token::Kind::Percent
-            @diagnostics << Diagnostic.new("Expected '%}' after condition", current_token.span)
+          unless consume_macro_close_span("Expected '%}' after condition")
             return PREFIX_ERROR
           end
-          advance
-
-          unless current_token.kind == Token::Kind::RBrace
-            @diagnostics << Diagnostic.new("Expected '}'", current_token.span)
-            return PREFIX_ERROR
-          end
-          advance
 
           # Parse body
           body = parse_macro_body_until_branch
           return PREFIX_ERROR if body.invalid?
 
           # Check for next branch
-          unless current_token.kind == Token::Kind::LBrace
+          next_branch_span = consume_macro_control_start
+          unless next_branch_span
             @diagnostics << Diagnostic.new("Expected control block", current_token.span)
             return PREFIX_ERROR
           end
-          advance
 
-          unless current_token.kind == Token::Kind::Percent
-            @diagnostics << Diagnostic.new("Expected '%'", current_token.span)
-            return PREFIX_ERROR
+          if macro_trim_token?(current_token)
+            advance
           end
-          advance
 
           skip_trivia
 
@@ -8194,17 +8317,9 @@ module CrystalV2
 
           if next_keyword == "end"
             # End of chain
-            unless current_token.kind == Token::Kind::Percent
-              @diagnostics << Diagnostic.new("Expected '%}'", current_token.span)
+            unless consume_macro_close_span("Expected '%}'")
               return PREFIX_ERROR
             end
-            advance
-
-            unless current_token.kind == Token::Kind::RBrace
-              @diagnostics << Diagnostic.new("Expected '}'", current_token.span)
-              return PREFIX_ERROR
-            end
-            advance
           elsif next_keyword == "elsif"
             # Another elsif
             unadvance
@@ -8216,33 +8331,23 @@ module CrystalV2
             return PREFIX_ERROR if else_body.invalid?
           elsif next_keyword == "else"
             # Else branch
-            unless current_token.kind == Token::Kind::Percent
-              @diagnostics << Diagnostic.new("Expected '%}'", current_token.span)
+            unless consume_macro_close_span("Expected '%}'")
               return PREFIX_ERROR
             end
-            advance
-
-            unless current_token.kind == Token::Kind::RBrace
-              @diagnostics << Diagnostic.new("Expected '}'", current_token.span)
-              return PREFIX_ERROR
-            end
-            advance
 
             else_body = parse_macro_body_until_branch
             return PREFIX_ERROR if else_body.invalid?
 
             # Expect end
-            unless current_token.kind == Token::Kind::LBrace
+            end_span = consume_macro_control_start
+            unless end_span
               @diagnostics << Diagnostic.new("Expected '{% end %}'", current_token.span)
               return PREFIX_ERROR
             end
-            advance
 
-            unless current_token.kind == Token::Kind::Percent
-              @diagnostics << Diagnostic.new("Expected '%'", current_token.span)
-              return PREFIX_ERROR
+            if macro_trim_token?(current_token)
+              advance
             end
-            advance
 
             skip_trivia
 
@@ -8254,17 +8359,9 @@ module CrystalV2
 
             skip_trivia
 
-            unless current_token.kind == Token::Kind::Percent
-              @diagnostics << Diagnostic.new("Expected '%}'", current_token.span)
+            unless consume_macro_close_span("Expected '%}'")
               return PREFIX_ERROR
             end
-            advance
-
-            unless current_token.kind == Token::Kind::RBrace
-              @diagnostics << Diagnostic.new("Expected '}'", current_token.span)
-              return PREFIX_ERROR
-            end
-            advance
           else
             @diagnostics << Diagnostic.new("Expected 'end', 'elsif', or 'else'", current_token.span)
             return PREFIX_ERROR
@@ -8313,34 +8410,24 @@ module CrystalV2
           skip_trivia
 
           # Expect %}
-          unless current_token.kind == Token::Kind::Percent
-            @diagnostics << Diagnostic.new("Expected '%}' after for header", current_token.span)
+          unless expect_macro_close("Expected '%}' after for header")
             return PREFIX_ERROR
           end
-          advance
-
-          unless current_token.kind == Token::Kind::RBrace
-            @diagnostics << Diagnostic.new("Expected '}' after '%'", current_token.span)
-            return PREFIX_ERROR
-          end
-          advance
 
           # Parse body until {% end %}
           body = parse_macro_body_until_end
           return PREFIX_ERROR if body.invalid?
 
           # Expect {% end %}
-          unless current_token.kind == Token::Kind::LBrace
+          end_start_span = consume_macro_control_start
+          unless end_start_span
             @diagnostics << Diagnostic.new("Expected '{% end %}' to close for loop", current_token.span)
             return PREFIX_ERROR
           end
-          advance
 
-          unless current_token.kind == Token::Kind::Percent
-            @diagnostics << Diagnostic.new("Expected '%' in {% end %}", current_token.span)
-            return PREFIX_ERROR
+          if macro_trim_token?(current_token)
+            advance
           end
-          advance
 
           skip_trivia
 
@@ -8352,18 +8439,10 @@ module CrystalV2
 
           skip_trivia
 
-          unless current_token.kind == Token::Kind::Percent
-            @diagnostics << Diagnostic.new("Expected '%}' after end", current_token.span)
+          end_span = consume_macro_close_span("Expected '%}' after end")
+          unless end_span
             return PREFIX_ERROR
           end
-          advance
-
-          unless current_token.kind == Token::Kind::RBrace
-            @diagnostics << Diagnostic.new("Expected '}' after '%'", current_token.span)
-            return PREFIX_ERROR
-          end
-          end_span = current_token.span
-          advance
 
           full_span = start_span.cover(end_span)
           @arena.add_typed(MacroForNode.new(full_span, vars, iterable, body))
@@ -8380,19 +8459,10 @@ module CrystalV2
 
           skip_trivia
 
-          # Expect %}
-          unless current_token.kind == Token::Kind::Percent
-            @diagnostics << Diagnostic.new("Expected '%}' after macro expression", current_token.span)
+          end_span = consume_macro_close_span("Expected '%}' after macro expression")
+          unless end_span
             return PREFIX_ERROR
           end
-          advance  # consume %
-
-          unless current_token.kind == Token::Kind::RBrace
-            @diagnostics << Diagnostic.new("Expected '}' after '%'", current_token.span)
-            return PREFIX_ERROR
-          end
-          end_span = current_token.span
-          advance  # consume }
 
           full_span = start_span.cover(end_span)
           @arena.add_typed(MacroExpressionNode.new(full_span, expr))
@@ -8400,35 +8470,24 @@ module CrystalV2
 
         # Phase 103J: Parse {% begin %}...{% end %}
         private def parse_macro_begin_control(start_span : Span) : ExprId
-          # Expect %}
-          unless current_token.kind == Token::Kind::Percent
-            @diagnostics << Diagnostic.new("Expected '%}' after begin", current_token.span)
+          unless expect_macro_close("Expected '%}' after begin")
             return PREFIX_ERROR
           end
-          advance  # consume %
-
-          unless current_token.kind == Token::Kind::RBrace
-            @diagnostics << Diagnostic.new("Expected '}' after '%'", current_token.span)
-            return PREFIX_ERROR
-          end
-          advance  # consume }
 
           # Parse body until {% end %}
           body = parse_macro_body_until_branch
           return PREFIX_ERROR if body.invalid?
 
           # Expect {% end %}
-          unless current_token.kind == Token::Kind::LBrace
+          end_start = consume_macro_control_start
+          unless end_start
             @diagnostics << Diagnostic.new("Expected '{% end %}'", current_token.span)
             return PREFIX_ERROR
           end
-          advance  # {
 
-          unless current_token.kind == Token::Kind::Percent
-            @diagnostics << Diagnostic.new("Expected '%' after '{'", current_token.span)
-            return PREFIX_ERROR
+          if macro_trim_token?(current_token)
+            advance
           end
-          advance  # %
 
           skip_trivia
 
@@ -8440,19 +8499,10 @@ module CrystalV2
 
           skip_trivia
 
-          # Expect %}
-          unless current_token.kind == Token::Kind::Percent
-            @diagnostics << Diagnostic.new("Expected '%}' after end", current_token.span)
+          end_span = consume_macro_close_span("Expected '%}' after end")
+          unless end_span
             return PREFIX_ERROR
           end
-          advance
-
-          unless current_token.kind == Token::Kind::RBrace
-            @diagnostics << Diagnostic.new("Expected '}' after '%'", current_token.span)
-            return PREFIX_ERROR
-          end
-          end_span = current_token.span
-          advance
 
           # {% begin %} is like {% if true %} - always executes
           full_span = start_span.cover(end_span)
@@ -8471,35 +8521,24 @@ module CrystalV2
 
           skip_trivia
 
-          # Expect %}
-          unless current_token.kind == Token::Kind::Percent
-            @diagnostics << Diagnostic.new("Expected '%}' after do", current_token.span)
+          unless expect_macro_close("Expected '%}' after do")
             return PREFIX_ERROR
           end
-          advance  # consume %
-
-          unless current_token.kind == Token::Kind::RBrace
-            @diagnostics << Diagnostic.new("Expected '}' after '%'", current_token.span)
-            return PREFIX_ERROR
-          end
-          advance  # consume }
 
           # Parse body until {% end %} - verbatim content
           body = parse_macro_body_until_branch
           return PREFIX_ERROR if body.invalid?
 
           # Expect {% end %}
-          unless current_token.kind == Token::Kind::LBrace
+          end_start = consume_macro_control_start
+          unless end_start
             @diagnostics << Diagnostic.new("Expected '{% end %}'", current_token.span)
             return PREFIX_ERROR
           end
-          advance  # {
 
-          unless current_token.kind == Token::Kind::Percent
-            @diagnostics << Diagnostic.new("Expected '%' after '{'", current_token.span)
-            return PREFIX_ERROR
+          if macro_trim_token?(current_token)
+            advance
           end
-          advance  # %
 
           skip_trivia
 
@@ -8511,19 +8550,10 @@ module CrystalV2
 
           skip_trivia
 
-          # Expect %}
-          unless current_token.kind == Token::Kind::Percent
-            @diagnostics << Diagnostic.new("Expected '%}' after end", current_token.span)
+          end_span = consume_macro_close_span("Expected '%}' after end")
+          unless end_span
             return PREFIX_ERROR
           end
-          advance
-
-          unless current_token.kind == Token::Kind::RBrace
-            @diagnostics << Diagnostic.new("Expected '}' after '%'", current_token.span)
-            return PREFIX_ERROR
-          end
-          end_span = current_token.span
-          advance
 
           # Verbatim returns the literal body
           full_span = start_span.cover(end_span)
@@ -8547,28 +8577,12 @@ module CrystalV2
             end
 
             # Check for {% sequence
-            if current_token.kind == Token::Kind::LBrace
-              next_tok = peek_token
-              if next_tok.kind == Token::Kind::Percent
-                # Peek at keyword
-                saved = @index
-                advance  # {
-                advance  # %
-                skip_trivia
-                keyword_tok = current_token
-                keyword = token_text(keyword_tok)
-                @index = saved  # restore
-
-                # Check keyword type
-                if depth == 0 && (keyword == "elsif" || keyword == "else" || keyword == "end")
-                  # Stop - found our target
-                  break
-                elsif keyword == "if" || keyword == "for" || keyword == "unless" || keyword == "while" || keyword == "begin" || keyword == "verbatim"
-                  # Phase 103J: Added begin and verbatim to nested controls
-                  # Nested control - skip it entirely
-                  skip_nested_macro_control
-                  next
-                end
+            if keyword = peek_macro_keyword
+              if depth == 0 && (keyword == "elsif" || keyword == "else" || keyword == "end")
+                break
+              elsif keyword == "if" || keyword == "for" || keyword == "unless" || keyword == "while" || keyword == "begin" || keyword == "verbatim"
+                skip_nested_macro_control
+                next
               end
             end
 
@@ -8583,8 +8597,12 @@ module CrystalV2
         # Skip an entire nested macro control structure {% ... %}...{% end %}
         private def skip_nested_macro_control
           depth = 1
-          advance  # {
-          advance  # %
+          start_span = consume_macro_control_start
+          return unless start_span
+
+          if macro_trim_token?(current_token)
+            advance
+          end
 
           loop do
             if current_token.kind == Token::Kind::EOF
@@ -8592,34 +8610,30 @@ module CrystalV2
             end
 
             # Check for {% sequence
-            if current_token.kind == Token::Kind::LBrace
-              next_tok = peek_token
-              if next_tok.kind == Token::Kind::Percent
-                # Peek at keyword
-                saved = @index
-                advance  # {
-                advance  # %
-                skip_trivia
-                keyword = token_text(current_token)
+            if keyword = peek_macro_keyword
+              saved = @index
+              consume_macro_control_start
 
-                if keyword == "if" || keyword == "for" || keyword == "unless" || keyword == "while" || keyword == "begin" || keyword == "verbatim"
-                  # Phase 103J: Added begin and verbatim
-                  depth += 1
-                elsif keyword == "end"
-                  depth -= 1
-                  if depth == 0
-                    # Consume entire {% end %}
-                    # current position: after 'end' keyword (from peek above)
-                    skip_trivia
-                    advance if current_token.kind == Token::Kind::Percent
-                    advance if current_token.kind == Token::Kind::RBrace
-                    return
-                  end
-                end
-
-                # Continue from saved position
-                @index = saved
+              if macro_trim_token?(current_token)
+                advance
               end
+
+              skip_trivia
+              keyword = token_text(current_token)
+
+              if keyword == "if" || keyword == "for" || keyword == "unless" || keyword == "while" || keyword == "begin" || keyword == "verbatim"
+                depth += 1
+              elsif keyword == "end"
+                depth -= 1
+                if depth == 0
+                  skip_trivia
+                  consume_macro_close_span
+                  return
+                end
+              end
+
+              @index = saved
+              @previous_token = nil
             end
 
             advance
