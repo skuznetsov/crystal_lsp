@@ -355,15 +355,104 @@ module CrystalV2
           nil
         end
 
-        private def fallback_symbol_type(symbol : Semantic::Symbol) : String?
+        private def fallback_symbol_type(symbol : Semantic::Symbol, doc_state : DocumentState? = nil) : String?
           case symbol
           when Semantic::VariableSymbol
             symbol.declared_type || "Unknown"
           when Semantic::MethodSymbol
             format_method_from_symbol(symbol)
+          when Semantic::ClassSymbol
+            if doc_state
+              format_class_symbol(symbol, doc_state)
+            else
+              "class #{symbol.name}"
+            end
+          when Semantic::ModuleSymbol
+            if doc_state
+              format_module_symbol(symbol, doc_state)
+            else
+              "module #{symbol.name}"
+            end
           else
             nil
           end
+        end
+
+        private def format_class_symbol(symbol : Semantic::ClassSymbol, doc_state : DocumentState) : String
+          arena = doc_state.program.arena
+          node = fetch_node(arena, symbol.node_id)
+          name = symbol.name
+
+          prefix = "class"
+          type_params = nil
+          super_name = symbol.superclass_name
+
+          case node
+          when Frontend::ClassNode
+            if node.class_is_struct
+              prefix = "struct"
+            elsif node.class_is_union
+              prefix = "union"
+            elsif node.class_is_abstract
+              prefix = "abstract class"
+            end
+
+            type_params = node.type_params.try do |params|
+              params.map { |param| String.new(param) }
+            end
+
+            super_name ||= node.super_name.try { |slice| String.new(slice) }
+          when Frontend::StructNode
+            prefix = "struct"
+          when Frontend::UnionNode
+            prefix = "union"
+          end
+
+          String.build do |io|
+            io << prefix << ' ' << name
+            if type_params && !type_params.empty?
+              io << '('
+              type_params.each_with_index do |param, idx|
+                io << ", " if idx > 0
+                io << param
+              end
+              io << ')'
+            end
+            if super_name && !super_name.empty?
+              io << " < " << super_name
+            end
+          end
+        end
+
+        private def format_module_symbol(symbol : Semantic::ModuleSymbol, doc_state : DocumentState) : String
+          arena = doc_state.program.arena
+          node = fetch_node(arena, symbol.node_id)
+          type_params = nil
+
+          if node.is_a?(Frontend::ModuleNode)
+            type_params = node.type_params.try do |params|
+              params.map { |param| String.new(param) }
+            end
+          end
+
+          String.build do |io|
+            io << "module " << symbol.name
+            if type_params && !type_params.empty?
+              io << '('
+              type_params.each_with_index do |param, idx|
+                io << ", " if idx > 0
+                io << param
+              end
+              io << ')'
+            end
+          end
+        end
+
+        private def fetch_node(arena : Frontend::ArenaLike, expr_id : Frontend::ExprId)
+          return nil if expr_id.invalid?
+          arena[expr_id]
+        rescue
+          nil
         end
 
         private def format_method_from_symbol(symbol : Semantic::MethodSymbol, display_name : String? = nil) : String
@@ -1463,7 +1552,7 @@ module CrystalV2
           end
 
           if type_str.nil? && symbol
-            type_str = fallback_symbol_type(symbol)
+            type_str = fallback_symbol_type(symbol, doc_state)
           end
 
           if type_str.nil?
