@@ -1107,11 +1107,59 @@ module CrystalV2
           skip_trivia
 
           name_token = current_token
-          unless name_token.kind == Token::Kind::Identifier
+          macro_name_slice : Slice(UInt8)
+
+          case name_token.kind
+          when Token::Kind::Identifier
+            macro_name_slice = name_token.slice
+            advance
+
+            # Support setter-like macro names foo=
+            if current_token.kind == Token::Kind::Eq
+              advance
+              setter_name = String.build do |io|
+                io.write(macro_name_slice)
+                io.write_byte('='.ord.to_u8)
+              end
+              macro_name_slice = @string_pool.intern(setter_name.to_slice)
+            end
+          when Token::Kind::LBracket
+            bracket_start = name_token
+            advance
+            skip_trivia
+
+            unless current_token.kind == Token::Kind::RBracket
+              emit_unexpected(current_token)
+              return PREFIX_ERROR
+            end
+            bracket_end = current_token
+            advance
+            skip_trivia
+
+            if current_token.kind == Token::Kind::Eq
+              advance
+              macro_name_slice = @string_pool.intern("[]=".to_slice)
+            else
+              macro_name_slice = @string_pool.intern("[]".to_slice)
+            end
+
+            # For span calculations below keep original LBracket token
+            name_token = bracket_start
+          when Token::Kind::Plus, Token::Kind::Minus, Token::Kind::Star, Token::Kind::Slash,
+               Token::Kind::FloorDiv, Token::Kind::Percent, Token::Kind::StarStar,
+               Token::Kind::Less, Token::Kind::Greater, Token::Kind::LessEq, Token::Kind::GreaterEq,
+               Token::Kind::EqEq, Token::Kind::EqEqEq, Token::Kind::NotEq, Token::Kind::Spaceship,
+               Token::Kind::Match, Token::Kind::NotMatch,
+               Token::Kind::Amp, Token::Kind::Pipe, Token::Kind::Caret, Token::Kind::Tilde,
+               Token::Kind::LShift, Token::Kind::RShift,
+               Token::Kind::DotDot, Token::Kind::DotDotDot,
+               Token::Kind::AmpPlus, Token::Kind::AmpMinus, Token::Kind::AmpStar, Token::Kind::AmpStarStar
+            macro_name_slice = name_token.slice
+            advance
+          else
             emit_unexpected(name_token)
             return PREFIX_ERROR
           end
-          advance
 
           skip_macro_parameters
           consume_newlines
@@ -1137,7 +1185,7 @@ module CrystalV2
           @arena.add_typed(
             MacroDefNode.new(
               macro_span,
-              name_token.slice,
+              macro_name_slice,
               body_id
             )
           )
@@ -5802,15 +5850,21 @@ module CrystalV2
             # Don't try to parse nested calls when already parsing call arguments
             elsif space_consumed && @parsing_call_args == 0 &&
                   !(prev_token && prev_token.kind == Token::Kind::Operator && slice_eq?(prev_token.slice, "."))
-              # Attempt to parse call arguments without parentheses
-              # Example: def_equals value, kind
-              maybe_call = try_parse_call_args_without_parens(identifier_token)
-              if maybe_call.invalid?
-                # Not a call, just an identifier
+              boundary_token = current_token
+
+              if call_without_parens_disallowed?(boundary_token)
                 @arena.add_typed(IdentifierNode.new(identifier_token.span, @string_pool.intern(identifier_token.slice)))
               else
-                debug("parse_prefix: converted #{String.new(identifier_token.slice)} into call without parens")
-                maybe_call
+                # Attempt to parse call arguments without parentheses
+                # Example: def_equals value, kind
+                maybe_call = try_parse_call_args_without_parens(identifier_token)
+                if maybe_call.invalid?
+                  # Not a call, just an identifier
+                  @arena.add_typed(IdentifierNode.new(identifier_token.span, @string_pool.intern(identifier_token.slice)))
+                else
+                  debug("parse_prefix: converted #{String.new(identifier_token.slice)} into call without parens")
+                  maybe_call
+                end
               end
             else
               # Regular identifier
@@ -7040,52 +7094,8 @@ module CrystalV2
             end
 
             if space_consumed && @parsing_call_args == 0
-              # After consuming space, check if next token could start an argument
-              # If it's a newline, don't try to parse arguments (new statement on next line)
               token = current_token
-              case token.kind
-              when Token::Kind::Newline, Token::Kind::EOF,
-                   Token::Kind::Semicolon, Token::Kind::Then,
-                   Token::Kind::End, Token::Kind::Elsif, Token::Kind::Else,
-                   Token::Kind::When, Token::Kind::Rescue, Token::Kind::Ensure,
-                   Token::Kind::If, Token::Kind::Unless,
-                   Token::Kind::While, Token::Kind::Until,
-                   Token::Kind::RParen, Token::Kind::RBracket, Token::Kind::RBrace,
-                   Token::Kind::Comma,
-                   Token::Kind::Amp  # Block parameter (&.method)
-                # These tokens indicate end of expression, not start of arguments
-                node
-              when Token::Kind::LBrace, Token::Kind::Do
-                # Block, not arguments - return and let postfix loop handle it
-                # Example: .tap { } or .each do |x|
-                node
-              when Token::Kind::Eq
-                # Assignment, not argument
-                node
-              when Token::Kind::Colon
-                node
-              when Token::Kind::NilCoalesce
-                node
-              when Token::Kind::Plus, Token::Kind::Minus, Token::Kind::Star, Token::Kind::StarStar,
-                   Token::Kind::Slash, Token::Kind::FloorDiv, Token::Kind::Percent,
-                   Token::Kind::OrOr, Token::Kind::AndAnd,
-                   Token::Kind::Question,  # ternary operator
-                   Token::Kind::Arrow,     # hash arrow =>
-                   # Comparison operators
-                   Token::Kind::EqEq, Token::Kind::NotEq,
-                   Token::Kind::Less, Token::Kind::Greater,
-                   Token::Kind::LessEq, Token::Kind::GreaterEq,
-                   Token::Kind::Spaceship,  # <=>
-                   # Other binary operators that can't be prefix
-                   Token::Kind::Pipe, Token::Kind::Caret,
-                   Token::Kind::LShift, Token::Kind::RShift,
-                   Token::Kind::DotDot, Token::Kind::DotDotDot,
-                   Token::Kind::Match, Token::Kind::NotMatch,  # =~, !~
-                   Token::Kind::In
-                # Binary/logical operators that can't start arguments
-                node
-              when Token::Kind::LParen
-                # Parenthesized call (e.g., foo.bar (1)) - let the postfix loop handle it
+              if call_without_parens_disallowed?(token)
                 node
               else
                 # Try to parse arguments
@@ -7177,10 +7187,143 @@ module CrystalV2
               )
             )
             advance
-            node
+
+            # Check if this member access is followed by arguments without parentheses
+            # Example: Foo.bar 1, b: 2 → CallNode with MemberAccessNode as callee
+            # Must check for space (not newline!) like original Crystal parser
+            space_consumed = false
+            next_token_view = current_token
+            if next_token_view.kind == Token::Kind::Whitespace
+              advance  # Consume space
+              space_consumed = true
+            elsif next_token_view.span.start_line == member_token.span.end_line &&
+                  next_token_view.span.start_offset > member_token.span.end_offset
+              # Heuristic: even without explicit whitespace tokens (default lexing),
+              # detect a gap on the same line to allow DSL-style calls like
+              # json.field "value", foo
+              space_consumed = true
+            end
+
+            if space_consumed && @parsing_call_args == 0
+              token = current_token
+              if call_without_parens_disallowed?(token)
+                node
+              else
+                # Try to parse arguments
+                @parsing_call_args += 1
+
+                args_b = SmallVec(ExprId, 4).new
+                named_b = SmallVec(NamedArgument, 2).new
+
+                loop do
+                  # Stop parsing arguments if a block starts here; let postfix loop attach it.
+                  break if current_token.kind == Token::Kind::LBrace || current_token.kind == Token::Kind::Do
+
+                  # Parse one argument
+                  arg = parse_op_assign
+                  if arg.invalid?
+                    @parsing_call_args -= 1
+                    return PREFIX_ERROR
+                  end
+
+                  # Check if this is a named argument BEFORE skipping trivia
+                  # Named arguments require NO space before colon: "name: value"
+                  # Type restrictions require space: "name : Type = value"
+                  # By checking current token before skip_trivia, we can distinguish them
+                  arg_node = @arena[arg]
+                  if Frontend.node_kind(arg_node) == Frontend::NodeKind::Identifier &&
+                     current_token.kind == Token::Kind::Colon
+                    # Named argument! (no whitespace before colon, zero-copy)
+                    name_span = arg_node.span
+                    name_slice = Frontend.node_literal(arg_node).not_nil!
+
+                    advance  # consume ':'
+                    skip_trivia
+
+                    value_expr = parse_op_assign
+                    if value_expr.invalid?
+                      @parsing_call_args -= 1
+                      return PREFIX_ERROR
+                    end
+
+                    value_span = @arena[value_expr].span
+
+                    named_b << NamedArgument.new(name_slice, value_expr, name_span, value_span)
+                    skip_trivia
+                  else
+                    # Positional argument (including type-restricted assignments like "x : Type = value")
+                    skip_trivia
+                    args_b << arg
+                  end
+
+                  # Check for comma
+                  if current_token.kind == Token::Kind::Comma
+                    advance
+                    skip_trivia
+                  else
+                    # If the next token starts a block, allow the postfix loop to handle it.
+                    break if current_token.kind == Token::Kind::LBrace || current_token.kind == Token::Kind::Do
+                    break
+                  end
+                end
+
+                # Create CallNode with MemberAccessNode as callee
+                # Materialize arrays once
+                args = args_b.to_a
+                named_args = named_b.to_a
+                last_arg_id = args.last? || named_args.last?.try(&.value) || node
+                call_span = member_span.cover(@arena[last_arg_id].span)
+                result = @arena.add_typed(CallNode.new(
+                  call_span,
+                  node,  # MemberAccessNode as callee
+                  args,
+                  nil,   # no block
+                  named_args.empty? ? nil : named_args
+                ))
+
+                @parsing_call_args -= 1
+                result
+              end
+            else
+              node
+            end
           else
             emit_unexpected(member_token)
             receiver
+          end
+        end
+
+        private def call_without_parens_disallowed?(token : Token) : Bool
+          case token.kind
+          when Token::Kind::Newline, Token::Kind::EOF,
+               Token::Kind::Semicolon, Token::Kind::Then,
+               Token::Kind::End, Token::Kind::Elsif, Token::Kind::Else,
+               Token::Kind::When, Token::Kind::Rescue, Token::Kind::Ensure,
+               Token::Kind::If, Token::Kind::Unless,
+               Token::Kind::While, Token::Kind::Until,
+               Token::Kind::RParen, Token::Kind::RBracket, Token::Kind::RBrace,
+               Token::Kind::Comma,
+               Token::Kind::Amp,
+               Token::Kind::LBrace, Token::Kind::Do,
+               Token::Kind::Eq, Token::Kind::Colon,
+               Token::Kind::NilCoalesce,
+               Token::Kind::Plus, Token::Kind::Minus, Token::Kind::Star, Token::Kind::StarStar,
+               Token::Kind::Slash, Token::Kind::FloorDiv, Token::Kind::Percent,
+               Token::Kind::OrOr, Token::Kind::AndAnd,
+               Token::Kind::Question, Token::Kind::Arrow,
+               Token::Kind::EqEq, Token::Kind::NotEq,
+               Token::Kind::Less, Token::Kind::Greater,
+               Token::Kind::LessEq, Token::Kind::GreaterEq,
+               Token::Kind::Spaceship,
+               Token::Kind::Pipe, Token::Kind::Caret,
+               Token::Kind::LShift, Token::Kind::RShift,
+               Token::Kind::DotDot, Token::Kind::DotDotDot,
+               Token::Kind::Match, Token::Kind::NotMatch,
+               Token::Kind::In,
+               Token::Kind::LParen
+            true
+          else
+            false
           end
         end
 
