@@ -5766,6 +5766,7 @@ module CrystalV2
             # Phase CALLS_WITHOUT_PARENS: Track whitespace for method calls without parentheses
             # Phase KEYWORD_AS_IDENT: Keywords 'of', 'as', 'in' can be identifiers in expression position
             identifier_token = token
+            prev_token = @previous_token
             advance  # Move past identifier
 
             # Phase CALLS_WITHOUT_PARENS: Check for whitespace before skip_trivia
@@ -5799,7 +5800,8 @@ module CrystalV2
               parse_type_declaration_from_identifier(identifier_token)
           # Phase CALLS_WITHOUT_PARENS: Try to parse call arguments if space was consumed
             # Don't try to parse nested calls when already parsing call arguments
-            elsif space_consumed && @parsing_call_args == 0
+            elsif space_consumed && @parsing_call_args == 0 &&
+                  !(prev_token && prev_token.kind == Token::Kind::Operator && slice_eq?(prev_token.slice, "."))
               # Attempt to parse call arguments without parentheses
               # Example: def_equals value, kind
               maybe_call = try_parse_call_args_without_parens(identifier_token)
@@ -7064,7 +7066,8 @@ module CrystalV2
                 node
               when Token::Kind::NilCoalesce
                 node
-              when Token::Kind::OrOr, Token::Kind::AndAnd,
+              when Token::Kind::Slash, Token::Kind::FloorDiv, Token::Kind::Percent,
+                   Token::Kind::OrOr, Token::Kind::AndAnd,
                    Token::Kind::Question,  # ternary operator
                    Token::Kind::Arrow,     # hash arrow =>
                    # Comparison operators
