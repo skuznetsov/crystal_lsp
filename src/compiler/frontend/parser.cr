@@ -1532,13 +1532,10 @@ module CrystalV2
                   potential_external_span = name_token.span
                   advance
 
-                  # Check if there's space/newline followed by another identifier or instance var
-                  # Space indicates: "to limit" or "calculation @time" pattern
-                  # No space indicates: single name or type annotation coming
-                  if (current_token.kind == Token::Kind::Whitespace || current_token.kind == Token::Kind::Newline)
-                    # Skip whitespace
-                    saved_index = @index
-                    skip_trivia
+                  # Check if there's visible gap followed by another identifier or instance var
+                  # Gap indicates: "to limit" or "calculation @time" pattern
+                  if gap_after_span?(potential_external_span, current_token)
+                    skip_trivia if @keep_trivia
 
                     # Check if next token is identifier or instance var (internal name)
                     if current_token.kind == Token::Kind::Identifier
@@ -1555,7 +1552,7 @@ module CrystalV2
                       # External name + instance var: "calculation @time"
                       external_name = potential_external_name
                       external_name_span = potential_external_span
-                      param_name = current_token.slice
+                      param_name = slice_without_prefix(current_token.slice, 1)
                       param_name_span = current_token.span
                       param_start_span = prefix_token ? prefix_token.span : potential_external_span
                       is_instance_var = true
@@ -1580,7 +1577,7 @@ module CrystalV2
                 else
                   # Instance variable shorthand without external name: @value : T
                   is_instance_var = (name_token.kind == Token::Kind::InstanceVar)
-                  param_name = name_token.slice  # TIER 2.1: Zero-copy slice (includes '@' for instance vars)
+                  param_name = is_instance_var ? slice_without_prefix(name_token.slice, 1) : name_token.slice
                   param_name_span = name_token.span
                   param_start_span = prefix_token ? prefix_token.span : name_token.span
                   advance
@@ -1727,6 +1724,19 @@ module CrystalV2
           expect_operator(Token::Kind::RParen)
           @paren_depth -= 1  # Exiting parameter list delimiters
           params_b.to_a
+        end
+
+        private def gap_after_span?(span : Span, token : Token) : Bool
+          if @keep_trivia
+            token.kind == Token::Kind::Whitespace || token.kind == Token::Kind::Newline
+          else
+            token.span.start_offset > span.end_offset
+          end
+        end
+
+        private def slice_without_prefix(slice : Slice(UInt8), bytes : Int32) : Slice(UInt8)
+          return slice if slice.size <= bytes
+          Slice.new(slice.to_unsafe + bytes, slice.size - bytes)
         end
 
         # Phase 2: Parse if/elsif/else
