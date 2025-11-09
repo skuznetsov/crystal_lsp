@@ -5608,6 +5608,7 @@ module CrystalV2
           else
             skip_trivia
           end
+
           left = parse_prefix
           debug("parse_expression(#{precedence}): after parse_prefix, left=#{left.invalid? ? "invalid" : "valid"}")
           return PREFIX_ERROR if left.invalid?
@@ -8556,7 +8557,20 @@ module CrystalV2
             # Phase 103J: Unknown keywords → parse as macro expression (method call)
             # Example: {% skip_file %}, {% raise "error" %}, etc.
             debug("parse_percent_macro_control: parsing '#{keyword}' as macro expression")
-            parse_macro_expression_control(start_span, keyword_token, keyword_index)
+            expr = parse_macro_expression_control(start_span, keyword_token, keyword_index)
+
+            # Skip trivia unconditionally (matching original parser's skip_space_or_newline)
+            # This skips the newline before %} regardless of flags
+            skip_trivia
+
+            # Consume the %} token
+            end_span = consume_macro_close_span("Expected '%}' after macro expression")
+            unless end_span
+              return PREFIX_ERROR
+            end
+
+            full_span = start_span.cover(end_span)
+            @arena.add_typed(MacroExpressionNode.new(full_span, expr))
           end
         ensure
           @macro_terminator = previous_terminator
@@ -8756,22 +8770,23 @@ module CrystalV2
           # We've already consumed {% keyword; reset to start of expression
           distance = @index - keyword_index
           unadvance(distance) if distance > 0
-          expr = with_macro_terminator(:control) { parse_expression(0) }
+
+          # Set flag to enable newline skipping in macro expressions (like original parser)
+          @in_macro_expression = true
+
+          # Parse as assignment/expression (like original parser's parse_op_assign)
+          # This handles: x = 123, method_call, @type, etc.
+          expr = parse_op_assign
+
+          # Clear flag (matching original parser which clears before caller's skip)
+          @in_macro_expression = false
+
           if expr.invalid?
             expr = fallback_macro_expression(keyword_token)
-          else
-            expr = parse_postfix_if_modifier(expr)
           end
 
-          skip_trivia
-
-          end_span = consume_macro_close_span("Expected '%}' after macro expression")
-          unless end_span
-            return PREFIX_ERROR
-          end
-
-          full_span = start_span.cover(end_span)
-          @arena.add_typed(MacroExpressionNode.new(full_span, expr))
+          # Return expression - caller will skip trivia and consume %}
+          expr
         end
 
         private def fallback_macro_expression(keyword_token : Token) : ExprId
