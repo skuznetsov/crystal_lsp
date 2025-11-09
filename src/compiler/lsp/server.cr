@@ -4458,6 +4458,9 @@ module CrystalV2
           when Frontend::ClassVarDeclNode
             emit_span_token(node.span, node.name.size, SemanticTokenType::Property.value, tokens, DECLARATION_MODIFIER)
             emit_type_annotation_token(context, node.span, node.type, tokens)
+            if value = node.value
+              collect_tokens_recursive(context, value, tokens) unless value.invalid?
+            end
           when Frontend::GlobalVarDeclNode
             emit_span_token(node.span, node.name.size, SemanticTokenType::Variable.value, tokens, DECLARATION_MODIFIER)
             emit_type_annotation_token(context, node.span, node.type, tokens)

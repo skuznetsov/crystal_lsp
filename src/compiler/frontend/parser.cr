@@ -4324,18 +4324,19 @@ module CrystalV2
           advance
           skip_trivia
 
-          # Parse optional base type: : Type
-          base_type_token = nil
+          # Parse optional base type: : Type (supports namespaces/generics)
+          base_type_slice : Slice(UInt8)? = nil
           if current_token.kind == Token::Kind::Colon
             advance  # consume ':'
             skip_trivia
 
-            base_type_token = current_token
-            unless base_type_token.kind == Token::Kind::Identifier
-              emit_unexpected(base_type_token)
+            type_slice = parse_type_annotation
+            if type_slice.empty?
+              emit_unexpected(current_token)
               return PREFIX_ERROR
             end
-            advance
+            base_type_slice = type_slice
+
             skip_trivia
           end
 
@@ -4350,6 +4351,14 @@ module CrystalV2
             token = current_token
             break if token.kind == Token::Kind::End
             break if token.kind == Token::Kind::EOF
+
+            # Allow macro control blocks inside enums (e.g., {% for %})
+            if macro_control_start?
+              macro_expr = parse_percent_macro_control
+              method_bodies_b << macro_expr unless macro_expr.invalid?
+              consume_newlines
+              next
+            end
 
             # Phase 103G: Check if this is a method/macro definition
             if definition_start?
@@ -4424,7 +4433,7 @@ module CrystalV2
             EnumNode.new(
               enum_span,
               name_token.slice,
-              base_type_token.try(&.slice),
+              base_type_slice,
               members
             )
           )
@@ -4868,12 +4877,32 @@ module CrystalV2
           type_end_token = previous_token
 
           end_span = type_end_token ? type_end_token.span : type_start_token.span
-          decl_span = cvar_token.span.cover(end_span)
+
+          # Optional default value: @@var : Type = expr
+          default_value = nil
+          default_span = nil
+          if operator_token?(current_token, Token::Kind::Eq)
+            advance
+            skip_whitespace_and_optional_newlines
+            value_expr = parse_expression(0)
+            if value_expr.invalid?
+              return PREFIX_ERROR
+            end
+            default_value = value_expr
+            default_span = @arena[value_expr].span
+          end
+
+          decl_span = if default_span
+            cvar_token.span.cover(default_span)
+          else
+            cvar_token.span.cover(end_span)
+          end
 
           @arena.add_typed(ClassVarDeclNode.new(
             decl_span,
             cvar_token.slice,
-            type_slice
+            type_slice,
+            default_value
           ))
         end
 
@@ -5153,6 +5182,7 @@ module CrystalV2
                    left_kind == Frontend::NodeKind::InstanceVar ||
                    left_kind == Frontend::NodeKind::ClassVar ||
                    left_kind == Frontend::NodeKind::Global ||
+                   left_kind == Frontend::NodeKind::Constant ||
                    left_kind == Frontend::NodeKind::MacroVar ||
                    left_kind == Frontend::NodeKind::Index ||
                    left_kind == Frontend::NodeKind::MemberAccess
@@ -6900,9 +6930,9 @@ module CrystalV2
                   advance  # consume ':'
                   skip_whitespace_and_optional_newlines
 
-                  # Parse value expression
+                  # Parse value expression (allow assignments inside args)
                   @no_type_declaration += 1
-                  value_expr = parse_expression(0)
+                  value_expr = parse_op_assign
                   @no_type_declaration -= 1
                   return PREFIX_ERROR if value_expr.invalid?
                   value_span = @arena[value_expr].span
@@ -6911,10 +6941,10 @@ module CrystalV2
                   named_b << NamedArgument.new(name_slice, value_expr, name_span, value_span)
                   skip_whitespace_and_optional_newlines
                 else
-                  # Parse first expression/identifier
+                  # Parse first argument expression (allow assignments)
                   # Disable type declarations to allow identifier: syntax for named args
                   @no_type_declaration += 1
-                  arg_expr = parse_expression(0)
+                  arg_expr = parse_op_assign
                   @no_type_declaration -= 1
                   return PREFIX_ERROR if arg_expr.invalid?
                   skip_whitespace_and_optional_newlines
@@ -6934,7 +6964,7 @@ module CrystalV2
                       # Parse value expression
                       # Disable type declarations in value (may contain nested named tuples/args)
                       @no_type_declaration += 1
-                      value_expr = parse_expression(0)
+                      value_expr = parse_op_assign
                       @no_type_declaration -= 1
                       return PREFIX_ERROR if value_expr.invalid?
                       value_span = @arena[value_expr].span
@@ -9040,6 +9070,21 @@ module CrystalV2
           else
             @diagnostics << Diagnostic.new("Expected '&' or '&.' for block shorthand", current_token.span)
             return PREFIX_ERROR
+          end
+
+          # Handle setter-style shorthand: &.foo=(value)
+          if current_token.kind == Token::Kind::Eq
+            advance
+            skip_whitespace_and_optional_newlines
+            value_expr = parse_expression(0)
+            return PREFIX_ERROR if value_expr.invalid?
+
+            assign_span = @arena[call_expr].span.cover(@arena[value_expr].span)
+            call_expr = @arena.add_typed(AssignNode.new(
+              assign_span,
+              call_expr,
+              value_expr
+            ))
           end
 
           return PREFIX_ERROR if call_expr.invalid?

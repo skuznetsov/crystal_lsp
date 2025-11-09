@@ -330,6 +330,7 @@ module CrystalV2
 
       enum NodeKind
         Identifier
+        MacroVar
         InstanceVar  # @var
         InstanceVarDecl  # @var : Type (Phase 5C)
         ClassVar  # Phase 76: @@var (class variable)
@@ -432,6 +433,7 @@ module CrystalV2
           ControlElseIf
           ControlElse
           ControlEnd
+          MacroVar
         end
 
         getter kind : Kind
@@ -443,20 +445,36 @@ module CrystalV2
         getter iter_vars : Array(String)?
         getter iterable : ExprId?
         getter span : Span?
+        getter macro_var_name : String?
 
         def self.text(value : String, span : Span? = nil)
-          new(Kind::Text, value, nil, nil, false, false, nil, nil, span)
+          new(Kind::Text, value, nil, nil, false, false, nil, nil, span, nil)
         end
 
         def self.expression(expr : ExprId, trim_left : Bool = false, trim_right : Bool = false, span : Span? = nil)
-          new(Kind::Expression, nil, expr, nil, trim_left, trim_right, nil, nil, span)
+          new(Kind::Expression, nil, expr, nil, trim_left, trim_right, nil, nil, span, nil)
         end
 
         def self.control(kind : Kind, keyword : String, expr : ExprId? = nil, trim_left : Bool = false, trim_right : Bool = false, iter_vars : Array(String)? = nil, iterable : ExprId? = nil, span : Span? = nil)
-          new(kind, nil, expr, keyword, trim_left, trim_right, iter_vars, iterable, span)
+          new(kind, nil, expr, keyword, trim_left, trim_right, iter_vars, iterable, span, nil)
         end
 
-        def initialize(@kind : Kind, @text : String?, @expr : ExprId?, @control_keyword : String?, @trim_left : Bool = false, @trim_right : Bool = false, @iter_vars : Array(String)? = nil, @iterable : ExprId? = nil, @span : Span? = nil)
+        def self.macro_var(name : String, span : Span? = nil)
+          new(Kind::MacroVar, nil, nil, nil, false, false, nil, nil, span, name)
+        end
+
+        def initialize(
+          @kind : Kind,
+          @text : String?,
+          @expr : ExprId?,
+          @control_keyword : String?,
+          @trim_left : Bool = false,
+          @trim_right : Bool = false,
+          @iter_vars : Array(String)? = nil,
+          @iterable : ExprId? = nil,
+          @span : Span? = nil,
+          @macro_var_name : String? = nil
+        )
         end
       end
 
@@ -531,6 +549,14 @@ module CrystalV2
       # Examples: foo, self, initialize
       # Size: ~40 bytes
       struct IdentifierNode
+        getter span : Span
+        getter name : Slice(UInt8)
+
+        def initialize(@span : Span, @name : Slice(UInt8))
+        end
+      end
+
+      struct MacroVarNode
         getter span : Span
         getter name : Slice(UInt8)
 
@@ -1322,8 +1348,9 @@ module CrystalV2
         getter span : Span
         getter name : Slice(UInt8)
         getter type : Slice(UInt8)
+        getter value : ExprId?
 
-        def initialize(@span : Span, @name : Slice(UInt8), @type : Slice(UInt8))
+        def initialize(@span : Span, @name : Slice(UInt8), @type : Slice(UInt8), @value : ExprId? = nil)
         end
       end
 
@@ -1474,7 +1501,7 @@ module CrystalV2
       # Crystal adds a tag (4-8 bytes) to identify which type is stored.
       # Total size = tag + max(all structs) = 8 + 88 = 96 bytes worst case
       # Still 10x better than 1024-byte ExpressionNode!
-      alias TypedNode = NumberNode | IdentifierNode | BinaryNode | CallNode | IfNode |
+      alias TypedNode = NumberNode | IdentifierNode | MacroVarNode | BinaryNode | CallNode | IfNode |
                         StringNode | CharNode | RegexNode | BoolNode | NilNode | SymbolNode |
                         ArrayLiteralNode | HashLiteralNode | TupleLiteralNode | NamedTupleLiteralNode | RangeNode |
                         UnaryNode | TernaryNode |
@@ -1510,6 +1537,10 @@ module CrystalV2
 
       def self.node_kind(node : IdentifierNode) : NodeKind
         NodeKind::Identifier
+      end
+
+      def self.node_kind(node : MacroVarNode) : NodeKind
+        NodeKind::MacroVar
       end
 
       def self.node_kind(node : BinaryNode) : NodeKind
@@ -1884,6 +1915,10 @@ module CrystalV2
 
 
       def self.node_literal(node : IdentifierNode) : Slice(UInt8)?
+        node.name
+      end
+
+      def self.node_literal(node : MacroVarNode) : Slice(UInt8)?
         node.name
       end
 
