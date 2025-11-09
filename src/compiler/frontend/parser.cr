@@ -3,6 +3,7 @@ require "./lexer"
 require "./lexer/token"
 require "./parser/diagnostic"
 require "./small_vec"
+require "./watchdog"
 
 module CrystalV2
   module Compiler
@@ -85,6 +86,7 @@ module CrystalV2
             token = current_token
             break if token.kind == Token::Kind::Rescue || token.kind == Token::Kind::Ensure || token.kind == Token::Kind::End
             break if token.kind == Token::Kind::EOF
+            break if macro_terminator_reached?(token)  # Phase 103K: Stop at macro terminators
 
             expr = parse_statement
             body_ids_b << expr unless expr.invalid?
@@ -606,6 +608,7 @@ module CrystalV2
         # Phase 103: Inline hot path - called after every token
         @[AlwaysInline]
         private def advance
+          Watchdog.check!
           @previous_token = current_token
           if @streaming
             @index += 1
@@ -1821,6 +1824,7 @@ module CrystalV2
             token = current_token
             break if token.kind == Token::Kind::Elsif || token.kind == Token::Kind::Else || token.kind == Token::Kind::End
             break if token.kind == Token::Kind::EOF
+            break if macro_terminator_reached?(token)  # Phase 103K: Stop at macro terminators
 
             expr = parse_statement
             then_body_b << expr unless expr.invalid?
@@ -1858,6 +1862,7 @@ module CrystalV2
               token = current_token
               break if token.kind == Token::Kind::Elsif || token.kind == Token::Kind::Else || token.kind == Token::Kind::End
               break if token.kind == Token::Kind::EOF
+              break if macro_terminator_reached?(token)  # Phase 103K: Stop at macro terminators
 
               expr = parse_statement
               elsif_body_b << expr unless expr.invalid?
@@ -1888,6 +1893,7 @@ module CrystalV2
               token = current_token
               break if token.kind == Token::Kind::End
               break if token.kind == Token::Kind::EOF
+              break if macro_terminator_reached?(token)  # Phase 103K: Stop at macro terminators
 
               expr = parse_statement
               else_body_b << expr unless expr.invalid?
@@ -1950,6 +1956,7 @@ module CrystalV2
             token = current_token
             break if token.kind == Token::Kind::Else || token.kind == Token::Kind::End
             break if token.kind == Token::Kind::EOF
+            break if macro_terminator_reached?(token)  # Phase 103K: Stop at macro terminators
 
             expr = parse_statement
             then_body_b << expr unless expr.invalid?
@@ -1969,6 +1976,7 @@ module CrystalV2
               token = current_token
               break if token.kind == Token::Kind::End
               break if token.kind == Token::Kind::EOF
+              break if macro_terminator_reached?(token)  # Phase 103K: Stop at macro terminators
 
               expr = parse_statement
               else_body_b << expr unless expr.invalid?
@@ -2166,6 +2174,7 @@ module CrystalV2
               token = current_token
               break if token.kind == Token::Kind::End
               break if token.kind == Token::Kind::EOF
+              break if macro_terminator_reached?(token)  # Phase 103K: Stop at macro terminators
 
               expr = parse_statement
               else_body_b << expr unless expr.invalid?
@@ -2268,6 +2277,7 @@ module CrystalV2
               token = current_token
               break if token.kind == Token::Kind::End
               break if token.kind == Token::Kind::EOF
+              break if macro_terminator_reached?(token)  # Phase 103K: Stop at macro terminators
 
               expr = parse_statement
               else_body_b << expr unless expr.invalid?
@@ -4251,7 +4261,23 @@ module CrystalV2
             break if token.kind == Token::Kind::End
             break if token.kind == Token::Kind::EOF
 
-            if definition_start?
+            if token.kind == Token::Kind::InstanceVar
+              next_token = peek_next_non_trivia
+              if next_token.kind == Token::Kind::Colon
+                expr = parse_instance_var_decl
+              else
+                expr = parse_statement
+              end
+            elsif token.kind == Token::Kind::ClassVar
+              next_token = peek_next_non_trivia
+              if next_token.kind == Token::Kind::Colon
+                expr = parse_class_var_decl
+              else
+                expr = parse_statement
+              end
+            elsif token.kind == Token::Kind::Identifier && slice_eq?(token.slice, "type")
+              expr = parse_lib_type_alias
+            elsif definition_start?
               expr = case current_token.kind
                 when Token::Kind::Def
                   parse_def
@@ -4303,6 +4329,45 @@ module CrystalV2
               lib_span,
               name_token.slice,
               body_ids_b.to_a
+            )
+          )
+        end
+
+        private def parse_lib_type_alias : ExprId
+          type_token = current_token
+          advance  # consume 'type'
+          skip_trivia
+
+          name_token = current_token
+          unless name_token.kind == Token::Kind::Identifier
+            emit_unexpected(name_token)
+            return PREFIX_ERROR
+          end
+          advance
+          skip_trivia
+
+          unless current_token.kind == Token::Kind::Eq
+            emit_unexpected(current_token)
+            return PREFIX_ERROR
+          end
+          advance
+          skip_trivia
+
+          type_start_token = current_token
+          type_slice = parse_type_annotation
+          if type_slice.empty?
+            emit_unexpected(current_token)
+            return PREFIX_ERROR
+          end
+
+          type_end_token = previous_token || type_start_token
+          alias_span = type_token.span.cover(type_end_token.span)
+
+          @arena.add_typed(
+            AliasNode.new(
+              alias_span,
+              name_token.slice,
+              type_slice
             )
           )
         end
@@ -4463,15 +4528,15 @@ module CrystalV2
           advance
           skip_trivia
 
-          # Phase 103K: Parse type using parse_bare_proc_type
-          # This handles all type syntax including proc types: A, B -> C
-          type_slice = parse_bare_proc_type
-          if type_slice.nil?
+          # Parse full type annotation (supports proc types, tuples, aliases)
+          type_start_token = current_token
+          type_slice = parse_type_annotation
+          if type_slice.empty?
             emit_unexpected(current_token)
             return PREFIX_ERROR
           end
 
-          type_end_token = previous_token.not_nil!
+          type_end_token = previous_token || type_start_token
           alias_span = alias_token.span.cover(type_end_token.span)
 
           @arena.add_typed(
@@ -4679,7 +4744,23 @@ module CrystalV2
             break if token.kind == Token::Kind::End
             break if token.kind == Token::Kind::EOF
 
-            if definition_start?
+            if token.kind == Token::Kind::InstanceVar
+              next_token = peek_next_non_trivia
+              if next_token.kind == Token::Kind::Colon
+                expr = parse_instance_var_decl
+              else
+                expr = parse_statement
+              end
+            elsif token.kind == Token::Kind::ClassVar
+              next_token = peek_next_non_trivia
+              if next_token.kind == Token::Kind::Colon
+                expr = parse_class_var_decl
+              else
+                expr = parse_statement
+              end
+            elsif token.kind == Token::Kind::Identifier && slice_eq?(token.slice, "type")
+              expr = parse_lib_type_alias
+            elsif definition_start?
               expr = case current_token.kind
                 when Token::Kind::Def
                   parse_def
@@ -8700,47 +8781,77 @@ module CrystalV2
             return PREFIX_ERROR
           end
 
-          # Parse body until {% end %} - verbatim content
-          body = parse_macro_body_until_branch
-          return PREFIX_ERROR if body.invalid?
-
-          # Expect {% end %}
-          end_start = consume_macro_control_start
-          unless end_start
-            @diagnostics << Diagnostic.new("Expected '{% end %}'", current_token.span)
+          verbatim_end_span = fast_forward_verbatim_body
+          unless verbatim_end_span
+            @diagnostics << Diagnostic.new("Unterminated verbatim block", current_token.span)
             return PREFIX_ERROR
           end
 
-          if macro_trim_token?(current_token)
+          verbatim_span = start_span.cover(verbatim_end_span)
+          # TODO: Flag MacroLiteral as verbatim when we support it
+          @arena.add_typed(MacroLiteralNode.new(verbatim_span, [] of MacroPiece, false, false))
+        end
+
+        private def fast_forward_verbatim_body : Span?
+          depth = 1
+          loop do
+            token = current_token
+            return nil if token.kind == Token::Kind::EOF
+
+            if token.kind == Token::Kind::LBracePercent
+              saved_index = @index
+              control_span = consume_macro_control_start
+              unless control_span
+                @index = saved_index
+                @previous_token = nil
+                advance
+                next
+              end
+
+              if macro_trim_token?(current_token)
+                advance
+              end
+
+              skip_trivia
+
+              keyword = token_text(current_token)
+              advance
+              skip_trivia
+
+              if keyword == "verbatim"
+                if token_text(current_token) == "do"
+                  advance
+                  skip_trivia
+                end
+
+                unless expect_macro_close("Expected '%}' after verbatim do")
+                  return nil
+                end
+
+                depth += 1
+                next
+              elsif keyword == "end"
+                end_span = consume_macro_close_span("Expected '%}' after end")
+                return nil unless end_span
+                depth -= 1
+                return control_span.cover(end_span) if depth == 0
+                next
+              end
+
+              # Not verbatim/end: treat as literal and rewind
+              @index = saved_index
+              @previous_token = nil
+            end
+
             advance
           end
-
-          skip_trivia
-
-          unless token_text(current_token) == "end"
-            @diagnostics << Diagnostic.new("Expected 'end'", current_token.span)
-            return PREFIX_ERROR
-          end
-          advance  # end
-
-          skip_trivia
-
-          end_span = consume_macro_close_span("Expected '%}' after end")
-          unless end_span
-            return PREFIX_ERROR
-          end
-
-          # Verbatim returns the literal body
-          full_span = start_span.cover(end_span)
-          # TODO: Mark verbatim flag on MacroLiteralNode when we support it
-          body
         end
 
         # Parse macro body content until we hit {% elsif/else/end %}
         # Returns MacroLiteralNode with the body content
         # STUB VERSION: Just skip all tokens until target keyword
         # Full implementation would properly parse expressions and text
-        private def parse_macro_body_until_branch : ExprId
+        private def parse_macro_body_until_branch(stop_on_branch : Bool = true) : ExprId
           start_span = current_token.span
           pieces = SmallVec(MacroPiece, 16).new
           depth = 0
@@ -8753,7 +8864,9 @@ module CrystalV2
 
             # Check for {% sequence
             if keyword = peek_macro_keyword
-              if depth == 0 && (keyword == "elsif" || keyword == "else" || keyword == "end")
+              if depth == 0 && keyword == "end"
+                break
+              elsif stop_on_branch && depth == 0 && (keyword == "elsif" || keyword == "else")
                 break
               elsif keyword == "if" || keyword == "for" || keyword == "unless" || keyword == "while" || keyword == "begin" || keyword == "verbatim"
                 skip_nested_macro_control
