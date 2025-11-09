@@ -7066,7 +7066,8 @@ module CrystalV2
                 node
               when Token::Kind::NilCoalesce
                 node
-              when Token::Kind::Slash, Token::Kind::FloorDiv, Token::Kind::Percent,
+              when Token::Kind::Plus, Token::Kind::Minus, Token::Kind::Star, Token::Kind::StarStar,
+                   Token::Kind::Slash, Token::Kind::FloorDiv, Token::Kind::Percent,
                    Token::Kind::OrOr, Token::Kind::AndAnd,
                    Token::Kind::Question,  # ternary operator
                    Token::Kind::Arrow,     # hash arrow =>
@@ -9234,6 +9235,30 @@ module CrystalV2
         # Returns type as zero-copy slice covering the full type expression
         private def parse_bare_proc_type : Slice(UInt8)?
           start_token = current_token
+
+          # Allow bare proc notation with no arguments: -> ReturnType or just ->
+          if start_token.kind == Token::Kind::ThinArrow
+            advance
+            skip_trivia
+
+            has_return_type = case current_token.kind
+                              when Token::Kind::Identifier, Token::Kind::Self,
+                                   Token::Kind::Typeof, Token::Kind::LParen
+                                true
+                              else
+                                false
+                              end
+
+            if has_return_type
+              return_type = parse_union_type_for_annotation
+              return nil if return_type.nil?
+            end
+
+            end_token = previous_token || start_token
+            start_ptr = start_token.slice.to_unsafe
+            end_ptr = end_token.slice.to_unsafe + end_token.slice.size
+            return Slice.new(start_ptr, end_ptr - start_ptr)
+          end
 
           # Parse first type
           first_type_start = current_token
