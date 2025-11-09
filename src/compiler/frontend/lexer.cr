@@ -848,7 +848,8 @@ module CrystalV2
                Token::Kind::Char, Token::Kind::Symbol, Token::Kind::InstanceVar,
                Token::Kind::RParen, Token::Kind::RBracket, Token::Kind::RBrace,
                Token::Kind::True, Token::Kind::False, Token::Kind::Nil,
-               Token::Kind::Self, Token::Kind::Regex
+               Token::Kind::Self, Token::Kind::Regex,
+               Token::Kind::Def, Token::Kind::Macro
             # After these, '/' is division
             false
           else
@@ -1148,8 +1149,10 @@ module CrystalV2
               Token::Kind::Slash
             end
           when '%'.ord.to_u8
-            # Check for %=
-            if @offset < @rope.size && current_byte == '='.ord.to_u8
+            if @offset < @rope.size && current_byte == '}'.ord.to_u8
+              advance
+              Token::Kind::PercentRBrace
+            elsif @offset < @rope.size && current_byte == '='.ord.to_u8
               advance
               Token::Kind::PercentEq  # Phase 20: Compound assignment
             else
@@ -1177,7 +1180,12 @@ module CrystalV2
           when ':'.ord.to_u8
             Token::Kind::Colon
           when '{'.ord.to_u8
-            Token::Kind::LBrace
+            if @offset < @rope.size && current_byte == '%'.ord.to_u8
+              advance
+              Token::Kind::LBracePercent
+            else
+              Token::Kind::LBrace
+            end
           when '}'.ord.to_u8
             Token::Kind::RBrace
           when '<'.ord.to_u8

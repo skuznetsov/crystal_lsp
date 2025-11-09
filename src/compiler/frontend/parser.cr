@@ -8187,6 +8187,7 @@ module CrystalV2
 
           # Get keyword (if, for, unless, etc.)
           keyword_token = current_token
+          keyword_index = @index
           keyword = token_text(keyword_token)
           advance
 
@@ -8210,7 +8211,7 @@ module CrystalV2
             # Phase 103J: Unknown keywords → parse as macro expression (method call)
             # Example: {% skip_file %}, {% raise "error" %}, etc.
             debug("parse_percent_macro_control: parsing '#{keyword}' as macro expression")
-            parse_macro_expression_control(start_span, keyword_token)
+            parse_macro_expression_control(start_span, keyword_token, keyword_index)
           end
         end
 
@@ -8611,12 +8612,16 @@ module CrystalV2
 
         # Phase 103J: Parse {% expression %} - macro method calls
         # Example: {% skip_file %}, {% raise "error" %}, {% @type %}
-        private def parse_macro_expression_control(start_span : Span, keyword_token : Token) : ExprId
-          # We've already consumed {% keyword
-          # Now parse the rest as an expression until %}
-          unadvance  # Go back to keyword token
+        private def parse_macro_expression_control(start_span : Span, keyword_token : Token, keyword_index : Int32) : ExprId
+          # We've already consumed {% keyword; reset to start of expression
+          distance = @index - keyword_index
+          unadvance(distance) if distance > 0
           expr = with_macro_terminator(:control) { parse_expression(0) }
-          return PREFIX_ERROR if expr.invalid?
+          if expr.invalid?
+            expr = fallback_macro_expression(keyword_token)
+          else
+            expr = parse_postfix_if_modifier(expr)
+          end
 
           skip_trivia
 
@@ -8627,6 +8632,21 @@ module CrystalV2
 
           full_span = start_span.cover(end_span)
           @arena.add_typed(MacroExpressionNode.new(full_span, expr))
+        end
+
+        private def fallback_macro_expression(keyword_token : Token) : ExprId
+          fast_forward_macro_expression
+          name_slice = @string_pool.intern(keyword_token.slice)
+          @arena.add_typed(IdentifierNode.new(keyword_token.span, name_slice))
+        end
+
+        private def fast_forward_macro_expression
+          loop do
+            token = current_token
+            break if token.kind == Token::Kind::EOF
+            break if macro_closing_sequence?(token)
+            advance
+          end
         end
 
         # Phase 103J: Parse {% begin %}...{% end %}
@@ -8780,14 +8800,16 @@ module CrystalV2
               end
 
               skip_trivia
-              keyword = token_text(current_token)
+              keyword_token = current_token
+              keyword_text = token_text(keyword_token)
+              advance
+              skip_trivia
 
-              if keyword == "if" || keyword == "for" || keyword == "unless" || keyword == "while" || keyword == "begin" || keyword == "verbatim"
+              if keyword_text == "if" || keyword_text == "for" || keyword_text == "unless" || keyword_text == "while" || keyword_text == "begin" || keyword_text == "verbatim"
                 depth += 1
-              elsif keyword == "end"
+              elsif keyword_text == "end"
                 depth -= 1
                 if depth == 0
-                  skip_trivia
                   consume_macro_close_span
                   return
                 end
