@@ -5824,9 +5824,13 @@ module CrystalV2
             advance
             id
           when Token::Kind::String
-            id = @arena.add_typed(StringNode.new(token.span, token.slice))
-            advance
-            id
+            if percent_literal_token?(token)
+              parse_percent_literal(token)
+            else
+              id = @arena.add_typed(StringNode.new(token.span, token.slice))
+              advance
+              id
+            end
           when Token::Kind::Char
             # Phase 56: Character literals
             id = @arena.add_typed(CharNode.new(token.span, token.slice))
@@ -5861,8 +5865,12 @@ module CrystalV2
           when Token::Kind::LParen
             parse_grouping
           when Token::Kind::LBracket
-            # Phase 9: Array literal
-            parse_array_literal
+            if percent_literal_token?(token)
+              parse_percent_literal(token)
+            else
+              # Phase 9: Array literal
+              parse_array_literal
+            end
           when Token::Kind::LBrace
             # Phase 103B: Check for macro control {% or macro expression {{ only inside macro bodies
             next_tok = peek_token
@@ -6036,6 +6044,159 @@ module CrystalV2
             elements_b.to_a,
             of_type_expr
           ))
+        end
+
+        private def percent_literal_token?(token : Token) : Bool
+          slice = token.slice
+          slice.size >= 2 && slice[0] == '%'.ord
+        end
+
+        private def parse_percent_literal(token : Token) : ExprId
+          literal_text = String.new(token.slice)
+          info = percent_literal_info(literal_text)
+          advance
+
+          case info[:kind]
+          when :word_array
+            words = percent_literal_words(info[:content])
+            build_percent_array_literal(words, token.span, as_symbols: false)
+          when :symbol_array
+            words = percent_literal_words(info[:content])
+            build_percent_array_literal(words, token.span, as_symbols: true)
+          else
+            value = percent_literal_unescape(info[:content])
+            slice = @string_pool.intern(value.to_slice)
+            @arena.add_typed(StringNode.new(token.span, slice))
+          end
+        end
+
+        private def percent_literal_info(literal : String) : NamedTuple(kind: Symbol, content: String)
+          bytesize = literal.bytesize
+          return {kind: :string, content: literal} if bytesize < 3 || literal[0] != '%'
+
+          idx = 1
+          type_char = nil
+          if idx < bytesize
+            char = literal.byte_at(idx).chr
+            if char.ascii_letter?
+              type_char = char
+              idx += 1
+            end
+          end
+
+          return {kind: :string, content: ""} if idx >= bytesize
+
+          open_char = literal.byte_at(idx).chr
+          closing_char = percent_closing_delimiter(open_char)
+          idx += 1
+
+          content_length = bytesize - idx - 1
+          content_length = 0 if content_length < 0
+          content = content_length > 0 ? literal.byte_slice(idx, content_length) : ""
+
+          normalized_type = type_char ? type_char.downcase : nil
+          kind = case normalized_type
+          when 'w'
+            :word_array
+          when 'i'
+            :symbol_array
+          else
+            :string
+          end
+
+          {kind: kind, content: content}
+        rescue
+          {kind: :string, content: literal}
+        end
+
+        private def percent_closing_delimiter(open_char : Char) : Char
+          case open_char
+          when '(' then ')'
+          when '[' then ']'
+          when '{' then '}'
+          when '<' then '>'
+          when '|' then '|'
+          else
+            open_char
+          end
+        end
+
+        private def percent_literal_words(content : String) : Array(String)
+          return [] of String if content.empty?
+
+          words = [] of String
+          current = String.new
+          i = 0
+          bytesize = content.bytesize
+
+          while i < bytesize
+            char = content.byte_at(i).chr
+            if char.ascii_whitespace?
+              unless current.empty?
+                words << current
+                current = String.new
+              end
+              i += 1
+              next
+            elsif char == '\\'
+              i += 1
+              if i < bytesize
+                current += content.byte_at(i).chr
+              end
+              i += 1
+              next
+            else
+              current += char
+              i += 1
+            end
+          end
+
+          words << current unless current.empty?
+          words
+        end
+
+        private def build_percent_array_literal(words : Array(String), span : Span, as_symbols : Bool) : ExprId
+          elements = Array(ExprId).new(words.size)
+          words.each do |word|
+            if as_symbols
+              symbol_text = ":" + word
+              slice = @string_pool.intern(symbol_text.to_slice)
+              node = @arena.add_typed(SymbolNode.new(span, slice))
+              elements << node
+            else
+              slice = @string_pool.intern(word.to_slice)
+              node = @arena.add_typed(StringNode.new(span, slice))
+              elements << node
+            end
+          end
+
+          @arena.add_typed(ArrayLiteralNode.new(span, elements))
+        end
+
+        private def percent_literal_unescape(content : String) : String
+          return content unless content.includes?('\\')
+
+          String.build do |io|
+            i = 0
+            bytesize = content.bytesize
+            while i < bytesize
+              byte = content.byte_at(i)
+              if byte == '\\'.ord && i + 1 < bytesize
+                i += 1
+                escaped = content.byte_at(i).chr
+                case escaped
+                when 'n' then io << '\n'
+                when 'r' then io << '\r'
+                when 't' then io << '\t'
+                else
+                  io << escaped
+                end
+              else
+                io.write_byte(byte)
+              end
+              i += 1
+            end
+          end
         end
 
         # Phase 14: Parse hash literal {"key" => value} or {} of K => V
