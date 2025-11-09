@@ -7317,6 +7317,7 @@ module CrystalV2
                Token::Kind::NilCoalesce,
                Token::Kind::Plus, Token::Kind::Minus, Token::Kind::Star, Token::Kind::StarStar,
                Token::Kind::Slash, Token::Kind::FloorDiv, Token::Kind::Percent,
+               Token::Kind::PercentRBrace,
                Token::Kind::OrOr, Token::Kind::AndAnd,
                Token::Kind::Question, Token::Kind::Arrow,
                Token::Kind::EqEq, Token::Kind::NotEq,
@@ -8387,119 +8388,28 @@ module CrystalV2
 
         # Parse {% if condition %}...{% end %} or {% unless %}
         private def parse_macro_if_control(start_span : Span, keyword : String) : ExprId
-          # Parse condition
+          branches = [] of NamedTuple(span: Span, condition: ExprId, body: ExprId)
+
           condition = parse_expression(0)
           return PREFIX_ERROR if condition.invalid?
 
           skip_trivia
 
-          unless expect_macro_close("Expected '%}' after if condition")
+          unless expect_macro_close("Expected '%}' after #{keyword} condition")
             return PREFIX_ERROR
           end
 
-          # Parse body until {% elsif %}, {% else %}, or {% end %}
           then_body = parse_macro_body_until_branch
           return PREFIX_ERROR if then_body.invalid?
 
-          # Check for elsif/else branches
+          branches << {span: start_span, condition: condition, body: then_body}
+
           else_body : ExprId? = nil
+          final_end_span : Span? = nil
 
-          # After parsing then_body, we should be at {% elsif/else/end %}
-          # Consume {% end %} or handle elsif/else
-          branch_start_span = consume_macro_control_start
-          unless branch_start_span
-            @diagnostics << Diagnostic.new("Expected '{% end %}', '{% elsif %}', or '{% else %}'", current_token.span)
-            return PREFIX_ERROR
-          end
-
-          if macro_trim_token?(current_token)
-            advance
-          end
-
-          skip_trivia
-
-          branch_keyword = token_text(current_token)
-          advance  # consume keyword
-
-          skip_trivia
-
-          # Handle end - simplest case (no else/elsif)
-          if branch_keyword == "end"
-            # Expect %}
-            end_span = consume_macro_close_span("Expected '%}' after end")
-            unless end_span
-              return PREFIX_ERROR
-            end
-
-            full_span = start_span.cover(end_span)
-            return @arena.add_typed(MacroIfNode.new(full_span, condition, then_body, else_body))
-          end
-
-          # Handle else branch
-          if branch_keyword == "else"
-            # Expect %}
-            unless expect_macro_close("Expected '%}' after else")
-              return PREFIX_ERROR
-            end
-
-            # Parse else body
-            else_body = parse_macro_body_until_branch
-            return PREFIX_ERROR if else_body.invalid?
-
-            # Now expect {% end %}
-            end_start_span = consume_macro_control_start
-            unless end_start_span
-              @diagnostics << Diagnostic.new("Expected '{% end %}'", current_token.span)
-              return PREFIX_ERROR
-            end
-
-            if macro_trim_token?(current_token)
-              advance
-            end
-
-            skip_trivia
-
-            end_keyword = token_text(current_token)
-            unless end_keyword == "end"
-              @diagnostics << Diagnostic.new("Expected 'end', got '#{end_keyword}'", current_token.span)
-              return PREFIX_ERROR
-            end
-            advance  # end
-
-            skip_trivia
-
-            end_span = consume_macro_close_span("Expected '%}' after end")
-            unless end_span
-              return PREFIX_ERROR
-            end
-
-            full_span = start_span.cover(end_span)
-            return @arena.add_typed(MacroIfNode.new(full_span, condition, then_body, else_body))
-          end
-
-          # Handle elsif branch (recursive)
-          if branch_keyword == "elsif"
-            # Save start position for the elsif node
-            elsif_start = previous_token.not_nil!.span
-
-            # We're positioned after {% elsif, now parse the condition
-            elsif_condition = parse_expression(0)
-            return PREFIX_ERROR if elsif_condition.invalid?
-
-            skip_trivia
-
-            # Now expect %}
-            unless expect_macro_close("Expected '%}' after elsif condition")
-              return PREFIX_ERROR
-            end
-
-            # Parse elsif body
-            elsif_body = parse_macro_body_until_branch
-            return PREFIX_ERROR if elsif_body.invalid?
-
-            # Check what's next (could be another elsif, else, or end)
-            next_branch_span = consume_macro_control_start
-            unless next_branch_span
+          loop do
+            branch_start_span = consume_macro_control_start
+            unless branch_start_span
               @diagnostics << Diagnostic.new("Expected '{% end %}', '{% elsif %}', or '{% else %}'", current_token.span)
               return PREFIX_ERROR
             end
@@ -8510,49 +8420,36 @@ module CrystalV2
 
             skip_trivia
 
-            next_keyword = token_text(current_token)
-            advance  # consume keyword
+            branch_keyword = token_text(current_token)
+            advance
 
             skip_trivia
 
-            # Recursively handle remaining branches
-            elsif_else_body : ExprId? = nil
+            case branch_keyword
+            when "elsif"
+              branch_condition = parse_expression(0)
+              return PREFIX_ERROR if branch_condition.invalid?
 
-            if next_keyword == "end"
-              # End of elsif chain
-              end_span = consume_macro_close_span("Expected '%}' after end")
-              unless end_span
+              skip_trivia
+
+              unless expect_macro_close("Expected '%}' after elsif condition")
                 return PREFIX_ERROR
               end
-            elsif next_keyword == "elsif"
-              # Another elsif - need to handle recursively
-              # Backtrack to handle it properly
-              unadvance  # back to keyword
-              skip_trivia
-              unadvance  # back to %
-              unadvance  # back to {
 
-              # Now recursively parse remaining elsif/else/end
-              saved_span = elsif_start
-              @index += 1  # forward to {
+              branch_body = parse_macro_body_until_branch
+              return PREFIX_ERROR if branch_body.invalid?
 
-              # Build nested elsif as else branch
-              elsif_else_body = parse_macro_if_control_branch_recursively(saved_span)
-              return PREFIX_ERROR if elsif_else_body.invalid?
-              end_span = previous_token.not_nil!.span
-            elsif next_keyword == "else"
-              # Else after elsif
+              branches << {span: branch_start_span, condition: branch_condition, body: branch_body}
+            when "else"
               unless expect_macro_close("Expected '%}' after else")
                 return PREFIX_ERROR
               end
 
-              # Parse else body
-              elsif_else_body = parse_macro_body_until_branch
-              return PREFIX_ERROR if elsif_else_body.invalid?
+              else_body = parse_macro_body_until_branch
+              return PREFIX_ERROR if else_body.invalid?
 
-              # Expect {% end %}
-              end_start = consume_macro_control_start
-              unless end_start
+              end_start_span = consume_macro_control_start
+              unless end_start_span
                 @diagnostics << Diagnostic.new("Expected '{% end %}'", current_token.span)
                 return PREFIX_ERROR
               end
@@ -8571,135 +8468,32 @@ module CrystalV2
 
               skip_trivia
 
-              end_span = consume_macro_close_span("Expected '%}' after end")
-              unless end_span
+              final_end_span = consume_macro_close_span("Expected '%}' after end")
+              unless final_end_span
                 return PREFIX_ERROR
               end
+
+              break
+            when "end"
+              final_end_span = consume_macro_close_span("Expected '%}' after end")
+              unless final_end_span
+                return PREFIX_ERROR
+              end
+              break
             else
-              @diagnostics << Diagnostic.new("Expected 'end', 'elsif', or 'else', got '#{next_keyword}'", current_token.span)
+              @diagnostics << Diagnostic.new("Expected 'elsif', 'else', or 'end'", current_token.span)
               return PREFIX_ERROR
             end
-
-            # Create nested if for elsif
-            elsif_if = @arena.add_typed(MacroIfNode.new(elsif_start, elsif_condition, elsif_body, elsif_else_body))
-
-            full_span = start_span.cover(end_span)
-            return @arena.add_typed(MacroIfNode.new(full_span, condition, then_body, elsif_if))
           end
 
-          # Unknown keyword
-          @diagnostics << Diagnostic.new("Expected 'end', 'elsif', or 'else', got '#{branch_keyword}'", current_token.span)
-          PREFIX_ERROR
-        end
+          end_span = final_end_span || start_span
+          full_span = start_span.cover(end_span)
 
-        # Helper for recursive elsif handling
-        private def parse_macro_if_control_branch_recursively(start_span : Span) : ExprId
-          start_token_span = consume_macro_control_start
-          return PREFIX_ERROR unless start_token_span
-
-          if macro_trim_token?(current_token)
-            advance
+          current_else = else_body
+          branches.reverse_each do |branch|
+            current_else = @arena.add_typed(MacroIfNode.new(full_span, branch[:condition], branch[:body], current_else))
           end
-
-          skip_trivia
-
-          keyword = token_text(current_token)
-          advance
-
-          skip_trivia
-
-          if keyword != "elsif"
-            @diagnostics << Diagnostic.new("Expected 'elsif', got '#{keyword}'", current_token.span)
-            return PREFIX_ERROR
-          end
-
-          # Parse elsif condition
-          condition = parse_expression(0)
-          return PREFIX_ERROR if condition.invalid?
-
-          skip_trivia
-
-          unless consume_macro_close_span("Expected '%}' after condition")
-            return PREFIX_ERROR
-          end
-
-          # Parse body
-          body = parse_macro_body_until_branch
-          return PREFIX_ERROR if body.invalid?
-
-          # Check for next branch
-          next_branch_span = consume_macro_control_start
-          unless next_branch_span
-            @diagnostics << Diagnostic.new("Expected control block", current_token.span)
-            return PREFIX_ERROR
-          end
-
-          if macro_trim_token?(current_token)
-            advance
-          end
-
-          skip_trivia
-
-          next_keyword = token_text(current_token)
-          advance
-
-          skip_trivia
-
-          else_body : ExprId? = nil
-
-          if next_keyword == "end"
-            # End of chain
-            unless consume_macro_close_span("Expected '%}'")
-              return PREFIX_ERROR
-            end
-          elsif next_keyword == "elsif"
-            # Another elsif
-            unadvance
-            skip_trivia
-            unadvance(2)
-            @index += 1
-
-            else_body = parse_macro_if_control_branch_recursively(start_span)
-            return PREFIX_ERROR if else_body.invalid?
-          elsif next_keyword == "else"
-            # Else branch
-            unless consume_macro_close_span("Expected '%}'")
-              return PREFIX_ERROR
-            end
-
-            else_body = parse_macro_body_until_branch
-            return PREFIX_ERROR if else_body.invalid?
-
-            # Expect end
-            end_span = consume_macro_control_start
-            unless end_span
-              @diagnostics << Diagnostic.new("Expected '{% end %}'", current_token.span)
-              return PREFIX_ERROR
-            end
-
-            if macro_trim_token?(current_token)
-              advance
-            end
-
-            skip_trivia
-
-            unless token_text(current_token) == "end"
-              @diagnostics << Diagnostic.new("Expected 'end'", current_token.span)
-              return PREFIX_ERROR
-            end
-            advance
-
-            skip_trivia
-
-            unless consume_macro_close_span("Expected '%}'")
-              return PREFIX_ERROR
-            end
-          else
-            @diagnostics << Diagnostic.new("Expected 'end', 'elsif', or 'else'", current_token.span)
-            return PREFIX_ERROR
-          end
-
-          @arena.add_typed(MacroIfNode.new(start_span, condition, body, else_body))
+          current_else || PREFIX_ERROR
         end
 
         # Parse {% for vars in iterable %}...{% end %}
