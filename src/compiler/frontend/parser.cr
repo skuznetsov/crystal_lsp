@@ -26,6 +26,7 @@ module CrystalV2
         @debug_enabled : Bool  # Debug output control
         @parsing_call_args : Int32  # Prevent nested calls without parens during argument parsing
         @macro_mode : Int32
+        @in_macro_expression : Bool  # Flag to track parsing inside {% ... %} expressions
         # Streaming tokenization support
         @streaming : Bool
         @lexer : Lexer?
@@ -53,6 +54,7 @@ module CrystalV2
           @debug_enabled = ENV["PARSER_DEBUG"]? == "1"  # Enable debug via PARSER_DEBUG=1
           @parsing_call_args = 0  # Not parsing call args initially
           @macro_mode = 0
+          @in_macro_expression = false  # Not in macro expression initially
           @streaming = ENV["CRYSTAL_V2_PARSER_STREAM"]? != nil
           @expect_context = nil
           if @streaming
@@ -120,6 +122,7 @@ module CrystalV2
           @debug_enabled = ENV["PARSER_DEBUG"]? == "1"  # Enable debug via PARSER_DEBUG=1
           @parsing_call_args = 0  # Not parsing call args initially
           @macro_mode = 0
+          @in_macro_expression = false  # Not in macro expression initially
           @streaming = ENV["CRYSTAL_V2_PARSER_STREAM"]? != nil
           @expect_context = nil
           if @streaming
@@ -648,7 +651,9 @@ module CrystalV2
             when Token::Kind::Whitespace, Token::Kind::Comment
               advance
             when Token::Kind::Newline
-              if macro_context?
+              # Skip newlines in macro contexts OR when parsing macro expressions
+              # This matches original parser's behavior: skip_space_or_newline inside macro expressions
+              if macro_context? || @in_macro_expression
                 advance
               else
                 break
@@ -8102,6 +8107,49 @@ module CrystalV2
           end
         end
 
+        # Check if keyword is a macro control keyword (vs expression)
+        # Control keywords: if, unless, for, while, begin, verbatim, else, elsif, end, comment
+        # Expression keywords: everything else (e.g., skip_file, raise, @type, x = 1)
+        private def is_control_keyword?(keyword : String) : Bool
+          case keyword
+          when "if", "unless", "for", "while", "begin", "verbatim",
+               "else", "elsif", "end", "comment"
+            true
+          else
+            false
+          end
+        end
+
+        # Peek ahead after {% to determine if this is a control or expression
+        # Handles whitespace/newlines like original parser's next_token_skip_space_or_newline
+        private def peek_macro_keyword_after_lbracepercent : String?
+          return nil unless current_token.kind == Token::Kind::LBracePercent
+
+          saved_index = @index
+          saved_previous = @previous_token
+
+          advance # skip {%
+
+          # Skip optional trim token (-)
+          if macro_trim_token?(current_token)
+            advance
+          end
+
+          skip_macro_whitespace # skip whitespace/newlines
+
+          keyword = if current_token.kind == Token::Kind::Identifier
+            token_text(current_token)
+          else
+            nil
+          end
+
+          # Restore position
+          @index = saved_index
+          @previous_token = saved_previous
+
+          keyword
+        end
+
         private def macro_terminator_reached?(token : Token)
           case @macro_terminator
           when :expression
@@ -8306,39 +8354,41 @@ module CrystalV2
             emit_unexpected(start_token)
             return {MacroPiece.text("", start_token.span), :none, false}
           end
-          advance  # consume {% (combined token)
 
-          if macro_trim_token?(current_token)
-            left_trim = true
-            advance
-          end
-
-          skip_macro_whitespace
-
-          keyword_token = current_token
-          keyword_index = @index
-          keyword = token_text(keyword_token)
-          advance
-
-          expr = nil
-          iter_vars = nil
-          iterable = nil
-          handled_as_control = true
-
-          case keyword
-          when "for"
-            skip_macro_whitespace
-            iter_vars, iterable = parse_macro_for_header
-          when "if", "unless", "while", "elsif"
-            skip_macro_whitespace
-            expr = with_macro_terminator(:control) { parse_expression(0) }
-          when "else", "end", "comment"
-            # no expression
-          else
-            handled_as_control = false
-          end
+          # Peek ahead to determine if this is a control keyword or expression
+          keyword_peek = peek_macro_keyword_after_lbracepercent
+          handled_as_control = keyword_peek && is_control_keyword?(keyword_peek)
 
           if handled_as_control
+            # BRANCH A: Macro control (if, for, begin, verbatim, etc.)
+            advance  # consume {% (combined token)
+
+            if macro_trim_token?(current_token)
+              left_trim = true
+              advance
+            end
+
+            skip_macro_whitespace
+
+            keyword_token = current_token
+            keyword_index = @index
+            keyword = token_text(keyword_token)
+            advance
+
+            expr = nil
+            iter_vars = nil
+            iterable = nil
+
+            case keyword
+            when "for"
+              skip_macro_whitespace
+              iter_vars, iterable = parse_macro_for_header
+            when "if", "unless", "while", "elsif"
+              skip_macro_whitespace
+              expr = with_macro_terminator(:control) { parse_expression(0) }
+            when "else", "end", "comment", "begin", "verbatim"
+              # no expression needed
+            end
             skip_macro_whitespace
             right_trim = macro_trim_operator?
 
@@ -8373,7 +8423,7 @@ module CrystalV2
             piece = MacroPiece.control(kind, keyword, expr, left_trim, right_trim, iter_vars, iterable, control_span)
 
             effect = case keyword
-              when "if", "unless", "for", "while", "comment"
+              when "if", "unless", "for", "while", "comment", "begin", "verbatim"
                 :push
               when "end"
                 :pop
@@ -8383,14 +8433,29 @@ module CrystalV2
 
             {piece, effect, skip_whitespace}
           else
-            @index = keyword_index
-            skip_macro_whitespace if current_token.kind == Token::Kind::Whitespace
+            # BRANCH B: Macro expression (not a control keyword)
+            # Examples: {% x = 1 %}, {% @type %}, {% raise "error" %}
+            advance  # consume {% (combined token)
+
+            if macro_trim_token?(current_token)
+              left_trim = true
+              advance
+            end
+
+            skip_macro_whitespace
+
+            # Set flag to enable newline skipping in macro expressions (like original parser)
             previous_context = @expect_context
+            previous_in_macro = @in_macro_expression
             begin
-              @expect_context = "macro control expr #{keyword}"
-              expr = with_macro_terminator(:control) { parse_statement }
+              @expect_context = "macro expression"
+              @in_macro_expression = true  # Enable newline skipping
+              # Use parse_expression (single expression) not parse_statement (multiple statements)
+              # This matches original parser's parse_expression_inside_macro behavior
+              expr = with_macro_terminator(:control) { parse_expression(0) }
             ensure
               @expect_context = previous_context
+              @in_macro_expression = previous_in_macro
             end
             skip_macro_whitespace
 
@@ -8767,6 +8832,7 @@ module CrystalV2
         end
 
         # Phase 103J: Parse {% verbatim do %}...{% end %}
+        # verbatim blocks are parsed (not skipped) but executed literally during macro expansion
         private def parse_macro_verbatim_control(start_span : Span) : ExprId
           # Expect 'do' keyword
           unless token_text(current_token) == "do"
@@ -8781,15 +8847,27 @@ module CrystalV2
             return PREFIX_ERROR
           end
 
-          verbatim_end_span = fast_forward_verbatim_body
-          unless verbatim_end_span
-            @diagnostics << Diagnostic.new("Unterminated verbatim block", current_token.span)
+          # Parse the macro body (like original Crystal parser does)
+          pieces, macro_trim_left, macro_trim_right = parse_macro_body
+
+          # Expect {% end %}
+          unless token_text(current_token) == "end"
+            @diagnostics << Diagnostic.new("Expected 'end' to close verbatim block", current_token.span)
+            return PREFIX_ERROR
+          end
+          end_keyword_span = current_token.span
+          advance  # consume 'end'
+
+          skip_trivia
+
+          end_span = consume_macro_close_span("Expected '%}' after end")
+          unless end_span
             return PREFIX_ERROR
           end
 
-          verbatim_span = start_span.cover(verbatim_end_span)
-          # TODO: Flag MacroLiteral as verbatim when we support it
-          @arena.add_typed(MacroLiteralNode.new(verbatim_span, [] of MacroPiece, false, false))
+          verbatim_span = start_span.cover(end_span)
+          # Create MacroLiteral node with parsed pieces (verbatim semantics handled at expansion time)
+          @arena.add_typed(MacroLiteralNode.new(verbatim_span, pieces, macro_trim_left, macro_trim_right))
         end
 
         private def fast_forward_verbatim_body : Span?
