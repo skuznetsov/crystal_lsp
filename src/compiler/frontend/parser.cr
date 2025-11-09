@@ -644,6 +644,12 @@ module CrystalV2
             case current_token.kind
             when Token::Kind::Whitespace, Token::Kind::Comment
               advance
+            when Token::Kind::Newline
+              if macro_context?
+                advance
+              else
+                break
+              end
             else
               break
             end
@@ -5937,6 +5943,8 @@ module CrystalV2
               # Phase 9: Array literal
               parse_array_literal
             end
+          when Token::Kind::LBracePercent
+            parse_percent_macro_control
           when Token::Kind::LBrace
             # Phase 103B: Check for macro control {% or macro expression {{ only inside macro bodies
             next_tok = peek_token
@@ -8118,7 +8126,8 @@ module CrystalV2
         end
 
         private def skip_macro_whitespace
-          while current_token.kind == Token::Kind::Whitespace
+          while current_token.kind == Token::Kind::Whitespace ||
+                current_token.kind == Token::Kind::Newline
             advance
           end
         end
@@ -8333,6 +8342,8 @@ module CrystalV2
         # Called from parse_prefix when seeing {% token sequence
         # Returns MacroIfNode or MacroForNode wrapped in ExprId
         private def parse_percent_macro_control : ExprId
+          previous_terminator = @macro_terminator
+          @macro_terminator = :control
           start_span = consume_macro_control_start
           return PREFIX_ERROR unless start_span
 
@@ -8370,6 +8381,8 @@ module CrystalV2
             debug("parse_percent_macro_control: parsing '#{keyword}' as macro expression")
             parse_macro_expression_control(start_span, keyword_token, keyword_index)
           end
+        ensure
+          @macro_terminator = previous_terminator
         end
 
         # Parse {% if condition %}...{% end %} or {% unless %}
