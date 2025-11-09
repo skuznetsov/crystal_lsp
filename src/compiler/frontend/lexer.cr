@@ -385,6 +385,11 @@ module CrystalV2
             advance
           end
 
+          # Setter-style symbols can end with '=' (e.g., :foo=)
+          if @offset < @rope.size && current_byte == '='.ord.to_u8
+            advance
+          end
+
           Token.new(
             Token::Kind::Symbol,
             @rope.bytes[from...@offset],
