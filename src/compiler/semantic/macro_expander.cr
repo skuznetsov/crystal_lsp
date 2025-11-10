@@ -41,24 +41,38 @@ module CrystalV2
         def initialize(@program : Program, @arena : Frontend::ArenaLike)
           @diagnostics = [] of Diagnostic
           @depth = 0
+          @macro_var_counter = 0
         end
 
         # Expansion context for macro evaluation
-        struct Context
+        class Context
           getter variables : Hash(String, String)
+          getter macro_vars : Hash(String, String)
           getter depth : Int32
 
-          def initialize(@variables = {} of String => String, @depth = 0)
+          def initialize(
+            @variables = {} of String => String,
+            @macro_vars = {} of String => String,
+            @depth = 0
+          )
           end
 
           def with_depth(new_depth : Int32) : Context
-            Context.new(@variables.dup, new_depth)
+            Context.new(@variables, @macro_vars, new_depth)
           end
 
           def with_variable(name : String, value : String) : Context
             new_vars = @variables.dup
             new_vars[name] = value
-            Context.new(new_vars, @depth)
+            Context.new(new_vars, @macro_vars, @depth)
+          end
+
+          def set_macro_var(name : String, value : String)
+            @macro_vars[name] = value
+          end
+
+          def macro_var(name : String) : String?
+            @macro_vars[name]?
           end
         end
 
@@ -111,7 +125,7 @@ module CrystalV2
             end
           end
 
-          Context.new(variables, @depth)
+          Context.new(variables, {} of String => String, @depth)
         end
 
         # Convert expression to string representation (for parameter binding)
@@ -153,6 +167,17 @@ module CrystalV2
                 # {{ expr }} - evaluate and stringify
                 if expr_id = piece.expr
                   value = evaluate_expression(expr_id, context)
+                  str << value
+                end
+                index += 1
+              when .macro_var?
+                if name = piece.macro_var_name
+                  value = context.macro_var(name)
+                  unless value
+                    fresh = fresh_macro_var_name(name)
+                    context.set_macro_var(name, fresh)
+                    value = fresh
+                  end
                   str << value
                 end
                 index += 1
@@ -224,6 +249,17 @@ module CrystalV2
             # String literal: "hello"
             Frontend.node_literal_string(node) || ""
 
+          when .macro_var?
+            literal = Frontend.node_literal_string(node)
+            return "" unless literal
+            if value = context.macro_var(literal)
+              value
+            else
+              fresh = fresh_macro_var_name(literal)
+              context.set_macro_var(literal, fresh)
+              fresh
+            end
+
           when .identifier?
             # Variable reference: look up in context
             if name = Frontend.node_literal_string(node)
@@ -245,6 +281,24 @@ module CrystalV2
             # Return empty string (graceful degradation)
             ""
           end
+        end
+
+        private def fresh_macro_var_name(base : String) : String
+          sanitized = String.build do |builder|
+            base.each_char do |ch|
+              if ch.alphanumeric? || ch == '_'
+                builder << ch
+              else
+                builder << '_'
+              end
+            end
+          end
+
+          sanitized = "tmp" if sanitized.empty?
+          sanitized = "_#{sanitized}" if sanitized[0].number?
+
+          @macro_var_counter += 1
+          "__macro_#{sanitized}_#{@macro_var_counter}"
         end
 
         # Phase 87B-3: Control Flow Methods
@@ -355,6 +409,17 @@ module CrystalV2
               when .expression?
                 if expr_id = piece.expr
                   value = evaluate_expression(expr_id, context)
+                  str << value
+                end
+                index += 1
+              when .macro_var?
+                if name = piece.macro_var_name
+                  value = context.macro_var(name)
+                  unless value
+                    fresh = fresh_macro_var_name(name)
+                    context.set_macro_var(name, fresh)
+                    value = fresh
+                  end
                   str << value
                 end
                 index += 1

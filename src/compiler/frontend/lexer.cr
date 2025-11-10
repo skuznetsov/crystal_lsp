@@ -1,6 +1,7 @@
 require "./rope"
 require "./lexer/token"
 require "./string_pool"
+require "./watchdog"
 
 module CrystalV2
   module Compiler
@@ -94,6 +95,7 @@ module CrystalV2
 
         private def advance(count : Int32 = 1)
           count.times do
+            Watchdog.check!
             byte = current_byte
             @offset += 1
             if byte == NEWLINE
@@ -1500,6 +1502,14 @@ module CrystalV2
             # Plain percent literal: %(...) - creates string
             open_delim = next_byte
             close_delim = closing_delimiter(open_delim)
+            advance  # consume opening delimiter
+          when 'q', 'Q'
+            advance  # consume 'q' or 'Q'
+            return nil if @offset >= @rope.size
+            open_delim = current_byte
+            return nil unless open_delim.chr.in?('(', '[', '{', '<', '|')
+            close_delim = closing_delimiter(open_delim)
+            literal_type = Token::Kind::String
             advance  # consume opening delimiter
           when 'w'
             # %w(...) - word array
