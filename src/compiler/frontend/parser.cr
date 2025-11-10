@@ -8140,7 +8140,12 @@ module CrystalV2
 
           skip_macro_whitespace # skip whitespace/newlines
 
-          keyword = if current_token.kind == Token::Kind::Identifier
+          # Handle both identifiers and keyword tokens (for, if, while, etc.)
+          keyword = case current_token.kind
+          when Token::Kind::Identifier,
+               Token::Kind::For, Token::Kind::If, Token::Kind::Unless,
+               Token::Kind::While, Token::Kind::Begin, Token::Kind::End,
+               Token::Kind::Else, Token::Kind::Elsif
             token_text(current_token)
           else
             nil
@@ -8858,25 +8863,14 @@ module CrystalV2
             return PREFIX_ERROR
           end
 
-          # Parse the macro body (like original Crystal parser does)
+          # Parse the macro body - it will consume {% end %} automatically
+          # parse_macro_body handles the {% end %} internally and adds it to pieces
           pieces, macro_trim_left, macro_trim_right = parse_macro_body
 
-          # Expect {% end %}
-          unless token_text(current_token) == "end"
-            @diagnostics << Diagnostic.new("Expected 'end' to close verbatim block", current_token.span)
-            return PREFIX_ERROR
-          end
-          end_keyword_span = current_token.span
-          advance  # consume 'end'
-
-          skip_trivia
-
-          end_span = consume_macro_close_span("Expected '%}' after end")
-          unless end_span
-            return PREFIX_ERROR
-          end
-
-          verbatim_span = start_span.cover(end_span)
+          # After parse_macro_body, {% end %} has already been consumed
+          # Use current token's span start as the end of verbatim block
+          end_token = @index > 0 ? @tokens[@index - 1] : current_token
+          verbatim_span = start_span.cover(end_token.span)
           # Create MacroLiteral node with parsed pieces (verbatim semantics handled at expansion time)
           @arena.add_typed(MacroLiteralNode.new(verbatim_span, pieces, macro_trim_left, macro_trim_right))
         end
