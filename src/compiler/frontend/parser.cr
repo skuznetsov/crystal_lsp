@@ -5234,6 +5234,7 @@ module CrystalV2
         # Example: clone = 42 (in method body)
         # Example: property expansion = false (assignment as macro argument)
         private def parse_op_assign : ExprId
+          Watchdog.check!  # Guard against infinite recursion
           debug("parse_op_assign: ENTERING")
           left = parse_expression(0)
           return PREFIX_ERROR if left.invalid?
@@ -5603,6 +5604,7 @@ module CrystalV2
         end
 
         protected def parse_expression(precedence : Int32) : ExprId
+          Watchdog.check!  # Guard against infinite recursion
           if inside_delimiters?
             skip_whitespace_and_optional_newlines
           else
@@ -8771,15 +8773,9 @@ module CrystalV2
           distance = @index - keyword_index
           unadvance(distance) if distance > 0
 
-          # Set flag to enable newline skipping in macro expressions (like original parser)
-          @in_macro_expression = true
-
           # Parse as assignment/expression (like original parser's parse_op_assign)
           # This handles: x = 123, method_call, @type, etc.
           expr = parse_op_assign
-
-          # Clear flag (matching original parser which clears before caller's skip)
-          @in_macro_expression = false
 
           if expr.invalid?
             expr = fallback_macro_expression(keyword_token)
