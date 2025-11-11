@@ -5612,9 +5612,49 @@ module CrystalV2
               break
             end
 
-            # Parse one argument
-            # Could be: positional arg, assignment as arg, or named arg
-            arg = parse_op_assign
+            # Handle block shorthand and captures in no-parens calls
+            if current_token.kind == Token::Kind::AmpDot
+              amp_token = current_token
+              advance
+              skip_trivia
+              arg = parse_block_shorthand(amp_token)
+            elsif current_token.kind == Token::Kind::Amp
+              amp_token = current_token
+              advance
+              skip_trivia
+              if current_token.kind == Token::Kind::Operator
+                # &.method with space
+                arg = parse_block_shorthand(amp_token)
+              elsif current_token.kind == Token::Kind::Identifier || current_token.kind == Token::Kind::InstanceVar
+                # &block variable capture
+                ident_token = current_token
+                advance
+                ident_span = ident_token.span
+                ident_node = @arena.add_typed(IdentifierNode.new(ident_span, @string_pool.intern(ident_token.slice)))
+                arg_span = amp_token.span.cover(ident_span)
+                arg = @arena.add_typed(UnaryNode.new(arg_span, amp_token.slice, ident_node))
+              else
+                # Not a block shorthand/capture, rewind amp and parse normally
+                unadvance
+                arg = parse_op_assign
+              end
+            elsif current_token.kind == Token::Kind::Star || current_token.kind == Token::Kind::StarStar
+              # Splat arguments
+              star_token = current_token
+              advance
+              skip_trivia
+              value_expr = parse_op_assign
+              if value_expr.invalid?
+                @parsing_call_args -= 1
+                return PREFIX_ERROR
+              end
+              span = star_token.span.cover(@arena[value_expr].span)
+              arg = @arena.add_typed(SplatNode.new(span, value_expr))
+            else
+              # Parse one argument
+              # Could be: positional arg, assignment as arg, or named arg
+              arg = parse_op_assign
+            end
             if arg.invalid?
               @parsing_call_args -= 1
               return PREFIX_ERROR
