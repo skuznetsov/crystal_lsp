@@ -7105,6 +7105,27 @@ module CrystalV2
                 arg_expr = parse_block_shorthand(amp_token)
                 return PREFIX_ERROR if arg_expr.invalid?
               else
+                # Phase 68: Splat arguments (*args, **kwargs)
+                if current_token.kind == Token::Kind::Star || current_token.kind == Token::Kind::StarStar
+                  star_token = current_token
+                  advance
+                  skip_whitespace_and_optional_newlines
+                  value_expr = parse_op_assign
+                  return PREFIX_ERROR if value_expr.invalid?
+                  span = star_token.span.cover(@arena[value_expr].span)
+                  arg_expr = @arena.add_typed(SplatNode.new(span, value_expr))
+                  args_b << arg_expr
+                  skip_whitespace_and_optional_newlines
+                  goto_comma = current_token.kind == Token::Kind::Comma
+                  if goto_comma
+                    advance
+                    skip_whitespace_and_optional_newlines
+                    next
+                  else
+                    # Allow immediate closing paren
+                    next
+                  end
+                end
                 # Phase NAMED_ARGUMENTS: Check if this is named argument BEFORE parsing expression
                 # Pattern: identifier/keyword : value
                 # This handles keywords like 'of:' which wouldn't create Identifier nodes
@@ -7340,8 +7361,21 @@ module CrystalV2
                   # Stop parsing arguments if a block starts here; let postfix loop attach it.
                   break if current_token.kind == Token::Kind::LBrace || current_token.kind == Token::Kind::Do
 
-                  # Parse one argument
-                  arg = parse_op_assign
+                  # Parse one argument, support splat
+                  if current_token.kind == Token::Kind::Star || current_token.kind == Token::Kind::StarStar
+                    star_token = current_token
+                    advance
+                    skip_trivia
+                    value_expr = parse_op_assign
+                    if value_expr.invalid?
+                      @parsing_call_args -= 1
+                      return PREFIX_ERROR
+                    end
+                    span = star_token.span.cover(@arena[value_expr].span)
+                    arg = @arena.add_typed(SplatNode.new(span, value_expr))
+                  else
+                    arg = parse_op_assign
+                  end
                   if arg.invalid?
                     @parsing_call_args -= 1
                     return PREFIX_ERROR
