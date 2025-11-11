@@ -2423,53 +2423,57 @@ module CrystalV2
           advance
           skip_trivia
 
-          # Expect "do" keyword
-          token = current_token
-          unless token.kind == Token::Kind::Do
+          # Support both `loop do ... end` and `loop { ... }`
+          if current_token.kind == Token::Kind::Do
+            advance
+            consume_newlines
+
+            body_ids, rescue_clauses, ensure_body = parse_block_body_with_optional_rescue
+
+            if rescue_clauses || ensure_body
+              begin_span = if body_ids.empty?
+                loop_token.span
+              else
+                first_span = @arena[body_ids.first].span
+                last_span = @arena[body_ids.last].span
+                first_span.cover(last_span)
+              end
+
+              begin_node_id = @arena.add_typed(
+                BeginNode.new(
+                  begin_span,
+                  body_ids,
+                  rescue_clauses,
+                  ensure_body
+                )
+              )
+              body_ids = [begin_node_id]
+            end
+
+            expect_identifier("end")
+            end_token = previous_token
+            consume_newlines
+
+            loop_span = if end_token
+              loop_token.span.cover(end_token.span)
+            else
+              loop_token.span
+            end
+
+            return @arena.add_typed(LoopNode.new(loop_span, body_ids))
+
+          elsif current_token.kind == Token::Kind::LBrace
+            # Brace form: parse a block and reuse its body as loop body
+            block_id = parse_block
+            return PREFIX_ERROR if block_id.invalid?
+            block_node = @arena[block_id]
+            body = Frontend.node_block_body(block_node) || [] of ExprId
+            loop_span = loop_token.span.cover(block_node.span)
+            return @arena.add_typed(LoopNode.new(loop_span, body))
+          else
             emit_unexpected(current_token)
             return PREFIX_ERROR
           end
-          advance
-          consume_newlines
-
-          body_ids, rescue_clauses, ensure_body = parse_block_body_with_optional_rescue
-
-          if rescue_clauses || ensure_body
-            begin_span = if body_ids.empty?
-              loop_token.span
-            else
-              first_span = @arena[body_ids.first].span
-              last_span = @arena[body_ids.last].span
-              first_span.cover(last_span)
-            end
-
-            begin_node_id = @arena.add_typed(
-              BeginNode.new(
-                begin_span,
-                body_ids,
-                rescue_clauses,
-                ensure_body
-              )
-            )
-            body_ids = [begin_node_id]
-          end
-
-          expect_identifier("end")
-          end_token = previous_token
-          consume_newlines
-
-          loop_span = if end_token
-            loop_token.span.cover(end_token.span)
-          else
-            loop_token.span
-          end
-
-          @arena.add_typed(
-            LoopNode.new(
-              loop_span,
-              body_ids
-            )
-          )
         end
 
         # Phase 84: spawn fiber (concurrency)
