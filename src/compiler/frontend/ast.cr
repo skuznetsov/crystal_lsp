@@ -595,6 +595,17 @@ module CrystalV2
         end
       end
 
+      # SplatNode: Splat argument in calls/yield
+      # Examples: foo(*args), yield *tuple
+      # Size: ~40 bytes
+      struct SplatNode
+        getter span : Span
+        getter expr : ExprId
+
+        def initialize(@span : Span, @expr : ExprId)
+        end
+      end
+
       # IfNode: Conditional expressions
       # Examples: if condition then body end
       # Size: ~88 bytes

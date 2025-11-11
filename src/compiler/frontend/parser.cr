@@ -3018,7 +3018,18 @@ module CrystalV2
             # Yield with args - parse comma-separated expressions
             args_b = SmallVec(ExprId, 2).new
             loop do
-              arg = parse_expression(0)
+              # Support splat arguments: yield *tuple
+              if current_token.kind == Token::Kind::Star
+                star_token = current_token
+                advance
+                skip_trivia
+                value = parse_expression(0)
+                return PREFIX_ERROR if value.invalid?
+                span = star_token.span.cover(@arena[value].span)
+                arg = @arena.add_typed(SplatNode.new(span, value))
+              else
+                arg = parse_expression(0)
+              end
               return PREFIX_ERROR if arg.invalid?
               args_b << arg
 
