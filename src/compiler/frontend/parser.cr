@@ -1739,61 +1739,25 @@ module CrystalV2
                 skip_trivia
 
                 if is_block
-                  # Phase 103: Block parameter - parse proc type
-                  # Key insight: NEVER break on comma before finding arrow
-                  # Examples:
-                  #   Token ->               (single arg proc)
-                  #   String, Int32 ->       (multi-arg proc)
-                  #   (Int32, String) -> Bool (parenthesized proc)
-                  type_start = current_token
-                  last_type_token = type_start  # TIER 2.4: Track last token for zero-copy slice
-                  found_arrow = false
-                  paren_depth = 0
-
-                  loop do
-                    break if current_token.kind == Token::Kind::EOF
-
-                    # Track parentheses for complex proc types
-                    if operator_token?(current_token, Token::Kind::LParen)
-                      paren_depth += 1
-                    elsif operator_token?(current_token, Token::Kind::RParen)
-                      # If at depth 0, this closes the parameter list
-                      break if paren_depth == 0
-                      paren_depth -= 1
-                    end
-
-                    # Check for -> (proc type arrow)
-                    if current_token.kind == Token::Kind::ThinArrow
-                      last_type_token = current_token  # TIER 2.4: Update last token
-                      advance
-                      found_arrow = true
-                      # Continue to collect optional return type
-                      next
-                    end
-
-                    # AFTER finding arrow, stop at delimiters
-                    if found_arrow && paren_depth == 0
-                      break if current_token.kind == Token::Kind::Comma
-                      break if operator_token?(current_token, Token::Kind::RParen)
-                    end
-
-                    # BEFORE finding arrow, collect everything (including commas)
-                    last_type_token = current_token  # TIER 2.4: Update last token (was token_text)
-                    advance
-
-                    # Skip whitespace but include in token stream
-                    if current_token.kind == Token::Kind::Whitespace
-                      advance
-                    end
+                  # Block parameter: parse full proc type (supports: A, B -> C, Tuple(K,V), etc.)
+                  type_start_token = current_token
+                  parsed_type = parse_bare_proc_type
+                  if parsed_type.nil?
+                    # Fallback to general type annotation parser (should rarely happen)
+                    parsed_type = parse_type_annotation
                   end
 
-                  # TIER 2.4: Zero-copy proc type parsing using pointer arithmetic
-                  if last_type_token != type_start || current_token.kind == Token::Kind::EOF
-                    start_ptr = type_start.slice.to_unsafe
-                    end_ptr = last_type_token.slice.to_unsafe + last_type_token.slice.size
-                    type_annotation = Slice.new(start_ptr, end_ptr - start_ptr)
+                  if parsed_type.nil?
+                    emit_unexpected(type_start_token)
+                  else
+                    type_annotation = parsed_type
+                    type_end_token = previous_token
+                    if type_end_token
+                      param_type_span = type_start_token.span.cover(type_end_token.span)
+                    else
+                      param_type_span = type_start_token.span
+                    end
                   end
-                  param_type_span = type_start.span.cover(previous_token.not_nil!.span) if previous_token
                 else
                   # Regular parameter - parse full type including possible proc types
                   # Use parse_bare_proc_type to allow comma-separated inputs before '->'
