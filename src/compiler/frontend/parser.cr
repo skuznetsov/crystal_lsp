@@ -9882,6 +9882,17 @@ module CrystalV2
 
           # Build full type with suffixes as zero-copy slice
           end_token = previous_token.not_nil!
+          # Allow trailing '.class' after type
+          if current_token.kind == Token::Kind::Operator && slice_eq?(current_token.slice, ".")
+            saved = @index
+            advance
+            if current_token.kind == Token::Kind::Class
+              end_token = current_token
+              advance
+            else
+              @index = saved
+            end
+          end
           start_ptr = start_token.slice.to_unsafe
           end_ptr = end_token.slice.to_unsafe + end_token.slice.size
           Slice.new(start_ptr, end_ptr - start_ptr)
