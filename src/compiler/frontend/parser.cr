@@ -243,6 +243,9 @@ module CrystalV2
           end
           debug("parse_statement: macro_control_start? returned false, proceeding normally")
 
+          # Annotate expectation context for better diagnostics control
+          @expect_context = "statement"
+
           # Robustness: if a stray closing parenthesis appears at statement start,
           # advance past it to recover and continue parsing. This avoids emitting
           # a spurious 'unexpected RParen' when previous constructs already
@@ -8147,6 +8150,10 @@ module CrystalV2
           end
           # Suppress a known false positive: closing ')' while parsing method parameter list
           if @parsing_method_params && token.kind == Token::Kind::RParen
+            return
+          end
+          # Suppress false positive: stray ')' at statement start
+          if token.kind == Token::Kind::RParen && @expect_context == "statement"
             return
           end
           @diagnostics << Diagnostic.new("unexpected #{token.kind}", token.span)
