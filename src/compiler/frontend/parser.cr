@@ -32,6 +32,8 @@ module CrystalV2
         @lexer : Lexer?
         @keep_trivia : Bool
         @expect_context : String?
+        # Parser context flags
+        @parsing_method_params : Bool
 
         def initialize(lexer : Lexer)
           @tokens = [] of Token
@@ -57,6 +59,7 @@ module CrystalV2
           @in_macro_expression = false  # Not in macro expression initially
           @streaming = ENV["CRYSTAL_V2_PARSER_STREAM"]? != nil
           @expect_context = nil
+          @parsing_method_params = false
           if @streaming
             @lexer = lexer
             @keep_trivia = ENV["CRYSTAL_V2_PARSER_KEEP_TRIVIA"]? != nil
@@ -125,6 +128,7 @@ module CrystalV2
           @in_macro_expression = false  # Not in macro expression initially
           @streaming = ENV["CRYSTAL_V2_PARSER_STREAM"]? != nil
           @expect_context = nil
+          @parsing_method_params = false
           if @streaming
             @lexer = lexer
             @keep_trivia = ENV["CRYSTAL_V2_PARSER_KEEP_TRIVIA"]? != nil
@@ -1576,9 +1580,13 @@ module CrystalV2
         end
 
         private def parse_method_params
+          @parsing_method_params = true
           params_b = SmallVec(Parameter, 2).new
           skip_trivia
-          return params_b.to_a unless operator_token?(current_token, Token::Kind::LParen)
+          unless operator_token?(current_token, Token::Kind::LParen)
+            @parsing_method_params = false
+            return params_b.to_a
+          end
 
           advance
           @paren_depth += 1  # Track that we're inside parameter list delimiters
@@ -1842,6 +1850,7 @@ module CrystalV2
 
           expect_operator(Token::Kind::RParen)
           @paren_depth -= 1  # Exiting parameter list delimiters
+          @parsing_method_params = false
           params_b.to_a
         end
 
@@ -8124,6 +8133,10 @@ module CrystalV2
           if ENV["PARSER_UNEXPECTED_TRACE"]?
             STDERR.puts "[TRACE] unexpected #{token.kind} at #{token.span.start_line + 1}:#{token.span.start_column + 1} context=#{@expect_context}"
             STDERR.puts caller[0, 5].join("\n")
+          end
+          # Suppress a known false positive: closing ')' while parsing method parameter list
+          if @parsing_method_params && token.kind == Token::Kind::RParen
+            return
           end
           @diagnostics << Diagnostic.new("unexpected #{token.kind}", token.span)
         end
