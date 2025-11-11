@@ -1742,11 +1742,16 @@ module CrystalV2
                   end
                   param_type_span = type_start.span.cover(previous_token.not_nil!.span) if previous_token
                 else
-                  # Regular parameter - delegate to general type parser
+                  # Regular parameter - parse full type including possible proc types
+                  # Use parse_bare_proc_type to allow comma-separated inputs before '->'
                   type_start_token = current_token
-                  start_index = @index
-                  parsed_type = parse_type_annotation
-                  if @index == start_index
+                  parsed_type = parse_bare_proc_type
+                  if parsed_type.nil?
+                    # Fallback to generic type annotation parser to avoid regressions
+                    parsed_type = parse_type_annotation
+                  end
+
+                  if parsed_type.nil?
                     emit_unexpected(type_start_token)
                   else
                     type_annotation = parsed_type
