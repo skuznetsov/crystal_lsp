@@ -457,7 +457,13 @@ module CrystalV2
           when Frontend::HashLiteralNode
             node.entries.each { |entry| children << entry.key; children << entry.value }
           when Frontend::DefNode
-            (node.body || [] of ExprId).each { |e| children << e }
+            # DO NOT process method body as children!
+            # Method bodies should only be type-inferred when the method is called
+            # (via infer_method_body_type), at which point receiver context is set up
+            # for generic type substitution. Processing them here would infer types
+            # without proper context, causing generic instance variables to return Nil.
+            # (similar issue to ProcLiteralNode - see lines 577-583)
+            # No children for DefNode
           when Frontend::ClassNode
             (node.body || [] of ExprId).each { |e| children << e }
           when Frontend::ModuleNode
@@ -556,8 +562,12 @@ module CrystalV2
             # Return nil to trigger recursive fallback
             nil
           when Frontend::ProcLiteralNode
-            # Proc literals have Proc type (simplified for now)
-            @context.proc_type
+            # MUST use recursive path to properly handle parameter scoping
+            # The recursive infer_proc_literal method registers parameters in @assignments,
+            # infers body expression types, then cleans up the scope.
+            # The iterative path can't handle this because it processes children (body)
+            # before the parent (proc), so parameters aren't available yet.
+            nil
           when Frontend::GroupingNode
             # Parenthesized expressions have the type of their inner expression
             infer_expression(node.expression)
@@ -572,19 +582,10 @@ module CrystalV2
             end_type = infer_expression(node.end_expr)
             RangeType.new(begin_type, end_type)
           when Frontend::BeginNode
-            # begin/end block returns type of last expression (rescue handled in recursive path)
-            if node.rescue_clauses.nil? && node.ensure_body.nil?
-              # Simple begin/end without exception handling
-              body = node.body
-              if body && !body.empty?
-                infer_expression(body.last)
-              else
-                @context.nil_type
-              end
-            else
-              # Has exception handling - needs recursive inference
-              nil  # Complex - trigger fallback
-            end
+            # Must use recursive path to ensure all body expressions are inferred
+            # The iterative path correctly identifies children (line 445-449)
+            # but we need the recursive infer_begin to run to properly handle scoping
+            nil
           when Frontend::CaseNode
             # Case/when needs proper Nil handling for missing else
             # Return nil to trigger recursive path where this is done correctly
@@ -596,13 +597,17 @@ module CrystalV2
             # is updated during recursive inference, not in @context.
             nil
           when Frontend::InstanceVarNode
-            # Look up instance variable
-            name = String.new(node.name)
-            clean_name = name.starts_with?("@") ? name[1..-1] : name
-            @instance_var_types[clean_name]? || @context.nil_type
+            # MUST use recursive path to properly handle type parameter substitution
+            # The recursive infer_instance_var method checks @receiver_type_context
+            # and substitutes type parameters (e.g., T → Int32 in Box(Int32).direct_value)
+            # The iterative path can't handle this because it only looks up @instance_var_types
+            # which doesn't have information about type parameter substitutions
+            nil
           when Frontend::StringInterpolationNode
-            # String interpolation always produces String
-            @context.string_type
+            # Must use recursive path to ensure expression pieces are inferred
+            # The iterative path correctly identifies children (line 478-483)
+            # but we need the recursive infer_string_interpolation to run
+            nil
           else
             # Unknown/complex node - return nil to trigger recursive fallback
             nil
@@ -652,7 +657,8 @@ module CrystalV2
         private def infer_identifier(node : Frontend::IdentifierNode, expr_id : ExprId) : Type
           identifier_name = String.new(node.name)
 
-          debug("infer_identifier: name = #{identifier_name}")
+          debug("infer_identifier: name = '#{identifier_name}' (object_id=#{identifier_name.object_id})")
+          debug("  @assignments has #{@assignments.size} entries: #{@assignments.keys.inspect}")
 
           # Week 1: Check for built-in type names used as type arguments
           # In Box(Int32), Int32 is an identifier that should map to PrimitiveType
@@ -670,6 +676,8 @@ module CrystalV2
           if assigned_type = @assignments[identifier_name]?
             debug("  Found in @assignments: #{assigned_type}")
             return assigned_type
+          else
+            debug("  NOT found in @assignments")
           end
 
           # Try name resolution first
@@ -720,9 +728,30 @@ module CrystalV2
             end
           end
 
-          # Process method body
-          (node.body || [] of ExprId).each do |body_expr_id|
-            infer_expression(body_expr_id)
+          # Selective body inference strategy:
+          # - Generic classes: DEFER body inference until method is called
+          #   (need receiver context for type parameter substitution)
+          # - Non-generic classes: INFER body immediately
+          #   (no substitution needed, allows return statements to work)
+
+          if body = Frontend.node_def_body(node)
+            # Check if current class is generic (has type parameters)
+            is_generic = false
+            if current_class = @current_class
+              # @current_class is ClassSymbol during class definition (set in infer_class)
+              if current_class.responds_to?(:type_parameters)
+                type_params = current_class.type_parameters
+                is_generic = type_params && !type_params.empty?
+              end
+            end
+
+            # Only infer body for non-generic classes
+            # Generic classes need receiver context for type parameter substitution
+            unless is_generic
+              body.each do |stmt|
+                infer_expression(stmt)
+              end
+            end
           end
 
           # Method definitions don't have value types (they're statements)
@@ -1911,7 +1940,8 @@ module CrystalV2
             end
           end
 
-          # Type will be set by infer_expression
+          # Set the type for the string interpolation node itself
+          @context.set_type(expr_id, @context.string_type)
           @context.string_type
         end
 
@@ -2043,8 +2073,12 @@ module CrystalV2
           end
 
           # Lookup method with overload resolution
-          result_type = if method = lookup_method(receiver_type, method_name, arg_types)
+          method = lookup_method(receiver_type, method_name, arg_types)
+          debug("  lookup_method returned: #{method ? "MethodSymbol(#{method.name})" : "nil"}")
+
+          result_type = if method
             if ann = method.return_annotation
+              debug("  Method has return annotation: #{ann}")
               # Week 1: Substitute type parameters in return type
               # If receiver is InstanceType with type_args, substitute T → Int32
               if receiver_type.is_a?(InstanceType) && (type_args = receiver_type.type_args) && (type_params = receiver_type.class_symbol.type_parameters)
@@ -2053,16 +2087,19 @@ module CrystalV2
                 parse_type_name(ann)
               end
             else
+              debug("  No return annotation - inferring from method body")
               # Week 1: No return annotation - infer from method body
               # For generic methods, set receiver context for type parameter substitution
-              infer_method_body_type(method, receiver_type)
+              body_type = infer_method_body_type(method, receiver_type)
+              debug("  infer_method_body_type returned: #{body_type.class.name}: #{body_type}")
+              body_type
             end
           else
             emit_error("Method '#{method_name}' not found on #{receiver_type}", expr_id)
             @context.nil_type
           end
 
-          # Type will be set by infer_expression
+          debug("  infer_member_access returning: #{result_type.class.name}: #{result_type}")
           result_type
         end
 
@@ -2625,9 +2662,32 @@ module CrystalV2
 
         # Phase 74: Proc literal type inference
         private def infer_proc_literal(node : Frontend::ProcLiteralNode, expr_id : ExprId) : Type
-          params = node.params || [] of Parameter
+          # Register proc parameters in @assignments BEFORE inferring body
+          # This makes them available for type inference in body expressions
+          if params = node.params
+            params.each do |param|
+              if param_name = param.name
+                param_type = if type_ann = param.type_annotation
+                               parse_type_name(String.new(type_ann))
+                             else
+                               @context.nil_type
+                             end
+                @assignments[String.new(param_name)] = param_type
+              end
+            end
+          end
 
+          # Infer types for body expressions (with parameters in scope)
           body_type = infer_block_result(node.body || [] of ExprId)
+
+          # Clean up proc parameters from @assignments (restore scope)
+          if params = node.params
+            params.each do |param|
+              if param_name = param.name
+                @assignments.delete(String.new(param_name))
+              end
+            end
+          end
 
           # If return type is annotated, use it
           # Otherwise use inferred body type
