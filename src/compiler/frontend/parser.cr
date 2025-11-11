@@ -7555,17 +7555,27 @@ module CrystalV2
           advance
           skip_trivia
 
-          # Parse right side - must be identifier
+          # Parse right side - prefer identifier, but allow keyword method/const names too
           right_token = current_token
-          unless right_token.kind == Token::Kind::Identifier
-            emit_unexpected(right_token)
-            return left
+          slice = right_token.slice
+          if right_token.kind != Token::Kind::Identifier
+            if slice.empty?
+              emit_unexpected(right_token)
+              return left
+            end
+            first = slice[0]
+            unless (first >= 'a'.ord.to_u8 && first <= 'z'.ord.to_u8) ||
+                   (first >= 'A'.ord.to_u8 && first <= 'Z'.ord.to_u8) ||
+                   first == '_'.ord.to_u8
+              emit_unexpected(right_token)
+              return left
+            end
           end
 
           right_id = @arena.add_typed(
             IdentifierNode.new(
               right_token.span,
-              right_token.slice
+              slice
             )
           )
           advance
@@ -7588,17 +7598,27 @@ module CrystalV2
           advance
           skip_trivia
 
-          # Parse identifier after ::
+          # Parse identifier (or keyword-like name) after ::
           identifier_token = current_token
-          unless identifier_token.kind == Token::Kind::Identifier
-            emit_unexpected(identifier_token)
-            return PREFIX_ERROR
+          slice = identifier_token.slice
+          if identifier_token.kind != Token::Kind::Identifier
+            if slice.empty?
+              emit_unexpected(identifier_token)
+              return PREFIX_ERROR
+            end
+            first = slice[0]
+            unless (first >= 'a'.ord.to_u8 && first <= 'z'.ord.to_u8) ||
+                   (first >= 'A'.ord.to_u8 && first <= 'Z'.ord.to_u8) ||
+                   first == '_'.ord.to_u8
+              emit_unexpected(identifier_token)
+              return PREFIX_ERROR
+            end
           end
 
           right_id = @arena.add_typed(
             IdentifierNode.new(
               identifier_token.span,
-              identifier_token.slice
+              slice
             )
           )
           advance
