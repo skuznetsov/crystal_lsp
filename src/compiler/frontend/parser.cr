@@ -243,6 +243,17 @@ module CrystalV2
           end
           debug("parse_statement: macro_control_start? returned false, proceeding normally")
 
+          # Robustness: if a stray closing parenthesis appears at statement start,
+          # advance past it to recover and continue parsing. This avoids emitting
+          # a spurious 'unexpected RParen' when previous constructs already
+          # consumed the corresponding opening parenthesis (e.g., complex proc
+          # types in method headers).
+          if current_token.kind == Token::Kind::RParen
+            advance
+            skip_trivia
+            return parse_statement
+          end
+
           # Check for definition keywords (def, class, etc.)
           # These can appear in blocks that get yielded to macros (like record)
           if definition_start?
