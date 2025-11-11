@@ -982,6 +982,9 @@ module CrystalV2
                  Token::Kind::Question,  # Nullable types Type?
                  Token::Kind::Star, Token::Kind::StarStar  # Pointer suffixes Type*, Type**
               true
+            when Token::Kind::Class
+              # Allow suffix ".class" in type contexts like is_a?(Alone.class)
+              last_type_token.kind == Token::Kind::Operator && slice_eq?(last_type_token.slice, ".")
             when Token::Kind::Whitespace
               # Skip whitespace but continue parsing
               advance
