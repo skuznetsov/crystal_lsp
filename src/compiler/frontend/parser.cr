@@ -7864,34 +7864,37 @@ module CrystalV2
           advance  # Skip 'responds_to?' keyword
           skip_trivia
 
-          # Expect opening parenthesis
-          unless current_token.kind == Token::Kind::LParen
-            emit_unexpected(current_token)
-            return PREFIX_ERROR
+          if current_token.kind == Token::Kind::LParen
+            # With parentheses: .responds_to?(:method)
+            lparen = current_token
+            advance
+            skip_trivia
+
+            method_name_expr = parse_expression(0)
+            skip_trivia
+
+            unless current_token.kind == Token::Kind::RParen
+              emit_unexpected(current_token)
+              return PREFIX_ERROR
+            end
+            rparen = current_token
+            advance
+
+            responds_to_span = node_span(receiver)
+              .cover(dot.span)
+              .cover(responds_to_token.span)
+              .cover(lparen.span)
+              .cover(node_span(method_name_expr))
+              .cover(rparen.span)
+          else
+            # Without parentheses: .responds_to? :method
+            method_name_expr = parse_expression(0)
+            return PREFIX_ERROR if method_name_expr.invalid?
+            responds_to_span = node_span(receiver)
+              .cover(dot.span)
+              .cover(responds_to_token.span)
+              .cover(node_span(method_name_expr))
           end
-          lparen = current_token
-          advance
-          skip_trivia
-
-          # Parse method name (Symbol or String expression)
-          method_name_expr = parse_expression(0)
-          skip_trivia
-
-          # Expect closing parenthesis
-          unless current_token.kind == Token::Kind::RParen
-            emit_unexpected(current_token)
-            return PREFIX_ERROR
-          end
-          rparen = current_token
-          advance
-
-          # Create RespondsTo node
-          responds_to_span = node_span(receiver)
-            .cover(dot.span)
-            .cover(responds_to_token.span)
-            .cover(lparen.span)
-            .cover(node_span(method_name_expr))
-            .cover(rparen.span)
 
           @arena.add_typed(
             RespondsToNode.new(
