@@ -1652,6 +1652,11 @@ module CrystalV2
                 # Phase KEYWORD_PARAMS: Allow keywords as parameter names (e.g., 'of', 'as', 'in')
                 # Phase 103K: Check for external parameter names (e.g., "to limit")
 
+                # Safety: if we reached closing paren, stop parsing parameters gracefully
+                if operator_token?(name_token, Token::Kind::RParen)
+                  break
+                end
+
                 case name_token.kind
                 when Token::Kind::Identifier, Token::Kind::InstanceVar
                   # Standard parameter names
