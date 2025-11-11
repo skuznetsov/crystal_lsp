@@ -94,7 +94,11 @@ module CrystalV2
                   next
                 when 1
                   # Cycle detected; assign nil_type to break it
-                  @context.set_type(child, @context.nil_type)
+                  # EXCEPTION: Don't set Nil for IdentifierNode - it needs to check @assignments
+                  child_node = @program.arena[child]
+                  unless child_node.is_a?(Frontend::IdentifierNode)
+                    @context.set_type(child, @context.nil_type)
+                  end
                   next
                 else
                   state[child] = 1
@@ -105,10 +109,15 @@ module CrystalV2
               # Try to compute type for simple nodes
               if t = compute_node_type_no_recurse(node, id)
                 # Successfully computed - mark as done
+                debug("ITERATIVE: #{node.class.name.split("::").last} computed type #{t}")
                 @context.set_type(id, t)
                 state[id] = 2
               else
                 # Complex node - skip in iterative path, leave for recursive fallback
+                debug("ITERATIVE: #{node.class.name.split("::").last} returned nil, will use recursive")
+                # IMPORTANT: Clear any type that might have been set by cycle detection (line 97)
+                # Otherwise line 86 will skip this node even though it needs recursive processing
+                @context.expression_types.delete(id)
                 state[id] = 0  # Reset to allow recursive processing
               end
             end
@@ -494,34 +503,24 @@ module CrystalV2
             end
           when Frontend::BinaryNode
             op = Frontend.node_operator_string(node) || ""
-            l = infer_expression(node.left)
-            r = infer_expression(node.right)
             case op
             when "==", "!=", "<", ">", "<=", ">=", "&&", "||"
               @context.bool_type
-            when "+", "-", "*", "/"
-              # Numeric ops (simplified): return left type
-              l
             when "..", "..."
               # Range(begin,end): type ignores exclusivity for now
+              l = infer_expression(node.left)
+              r = infer_expression(node.right)
               RangeType.new(l, r)
             else
-              # Default: union of operand types
-              @context.union_of([l, r])
+              # Arithmetic and other operators need validation
+              # Return nil to trigger recursive path
+              nil
             end
-          when Frontend::IfNode
-            then_types = node.then_body.map { |e| infer_expression(e) }
-            then_type = @context.union_of(then_types)
-            else_types = (node.else_body || [] of Frontend::ExprId).map { |e| infer_expression(e) }
-            else_type = else_types.empty? ? @context.nil_type : @context.union_of(else_types)
-            @context.union_of([then_type, else_type])
-          when Frontend::UnlessNode
-            then_types = node.then_branch.map { |e| infer_expression(e) }
-            then_type = @context.union_of(then_types)
-            else_types = (node.else_branch || [] of Frontend::ExprId).map { |e| infer_expression(e) }
-            else_type = else_types.empty? ? @context.nil_type : @context.union_of(else_types)
-            @context.union_of([then_type, else_type])
-          when Frontend::WhileNode, Frontend::UntilNode, Frontend::LoopNode
+          when Frontend::IfNode, Frontend::UnlessNode, Frontend::WhileNode, Frontend::UntilNode
+            # Control flow nodes need validation (condition type checking)
+            # Return nil to trigger recursive fallback where diagnostics are emitted
+            nil
+          when Frontend::LoopNode
             # Loop expression evaluates to Nil (simplified)
             @context.nil_type
           when Frontend::BoolNode
@@ -587,28 +586,15 @@ module CrystalV2
               nil  # Complex - trigger fallback
             end
           when Frontend::CaseNode
-            # case/when returns union of all branch types
-            branch_types = Array(Type).new
-            node.when_branches.each do |br|
-              if br.body && !br.body.empty?
-                branch_types << infer_expression(br.body.last)
-              end
-            end
-            if else_branch = node.else_branch
-              if !else_branch.empty?
-                branch_types << infer_expression(else_branch.last)
-              end
-            end
-            if branch_types.empty?
-              @context.nil_type
-            else
-              @context.union_of(branch_types)
-            end
+            # Case/when needs proper Nil handling for missing else
+            # Return nil to trigger recursive path where this is done correctly
+            nil
           when Frontend::IdentifierNode
-            # For identifiers: check @assignments (local vars) first
-            # If not found, return nil to trigger recursive fallback for symbol lookup
-            name = String.new(node.name)
-            @assignments[name]?  # Returns Type or nil
+            # FIX: Always use recursive path for identifiers to ensure consistent
+            # @assignments lookup across all IdentifierNodes with the same name.
+            # The iterative path can't handle this properly because @assignments
+            # is updated during recursive inference, not in @context.
+            nil
           when Frontend::InstanceVarNode
             # Look up instance variable
             name = String.new(node.name)
