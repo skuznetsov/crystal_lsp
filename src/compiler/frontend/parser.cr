@@ -1390,6 +1390,26 @@ module CrystalV2
             end
           end
 
+          # Support optional universal quantification: forall U, V
+          # Syntax appears after parameter list and optional return type
+          # Example: def foo(x : T) : U forall U, T
+          if current_token.kind == Token::Kind::Identifier && slice_eq?(current_token.slice, "forall")
+            advance
+            skip_trivia
+            # Parse one or more identifiers separated by commas
+            if current_token.kind == Token::Kind::Identifier
+              advance
+              skip_trivia
+              while current_token.kind == Token::Kind::Comma
+                advance
+                skip_trivia
+                break unless current_token.kind == Token::Kind::Identifier
+                advance
+                skip_trivia
+              end
+            end
+          end
+
           consume_newlines
 
         # Phase 36: Abstract methods have no body
