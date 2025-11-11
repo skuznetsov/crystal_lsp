@@ -1347,8 +1347,24 @@ module CrystalV2
             advance
 
           else
-            emit_unexpected(name_token)
-            return PREFIX_ERROR
+            # Allow keywords as method names (e.g., `def select`, `def class`, etc.)
+            # Treat any identifier-like slice as a valid method name
+            slice = name_token.slice
+            if slice.size > 0
+              first = slice[0]
+              if (first >= 'a'.ord.to_u8 && first <= 'z'.ord.to_u8) ||
+                 (first >= 'A'.ord.to_u8 && first <= 'Z'.ord.to_u8) ||
+                 first == '_'.ord.to_u8
+                method_name_slice = slice
+                advance
+              else
+                emit_unexpected(name_token)
+                return PREFIX_ERROR
+              end
+            else
+              emit_unexpected(name_token)
+              return PREFIX_ERROR
+            end
           end
 
           params = parse_method_params
