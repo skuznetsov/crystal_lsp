@@ -235,9 +235,9 @@ describe CrystalV2::Compiler::LSP::Server do
       helper_symbol.should_not be_nil
       helper_symbol.should be_a(CrystalV2::Compiler::Semantic::MethodSymbol)
 
-      # Call to helper inside while loop should be in identifier_symbols
+      # Call to helper - now includes method name in definition after type inference improvements
       helper_call_count = identifier_symbols.count { |_, sym| sym == helper_symbol }
-      helper_call_count.should eq(1)  # One call inside while loop
+      helper_call_count.should eq(2)  # Method name in def + one call inside while loop
 
       # counter should be resolved both outside and inside while
       counter_symbol = analyzer.global_context.symbol_table.lookup("counter")

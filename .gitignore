@@ -3,6 +3,8 @@
 
 # Build artifacts
 bin/crystal
+bin/crystal_v2_lsp*
+*.dwarf
 
 # IDE
 .vscode/

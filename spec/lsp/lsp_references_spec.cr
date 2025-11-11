@@ -163,8 +163,8 @@ describe "LSP References" do
         end
       end
 
-      # Should have 2 calls (identifier_symbols contains only Call nodes, not method declaration)
-      reference_count.should eq(2)
+      # Should have 3 references (2 calls + 1 method name in definition after type inference improvements)
+      reference_count.should eq(3)
     end
 
     it "finds references to parameter" do

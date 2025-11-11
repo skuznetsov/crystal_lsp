@@ -4,11 +4,19 @@ This document tracks features and functionality that are not yet implemented or 
 
 ## Status: Current Test Results
 - **Total Examples:** 1425
-- **Passing:** 1423 (99.86%)
-- **Failures:** 2 (0.14%)
+- **Passing:** 1425 (100%)
+- **Failures:** 0 (0%)
 - **Errors:** 0 (0%)
 - **Pending:** 6 (skipped)
 - **Last Updated:** 2025-11-10
+
+### LSP Testing on Stdlib (2025-11-10)
+Tested LSP server on key stdlib modules - all passing with **0 diagnostics**:
+- `src/json/serialization.cr` - 0 диагностик
+- `src/string.cr` - 0 диагностик
+- `src/array.cr` - 0 диагностик
+- `src/hash.cr` - 0 диагностик
+- `src/set.cr` - 0 диагностик
 
 ### Recent Progress
 - **Session Start (earlier):** 14 failures, 1 error (15 total issues)
@@ -360,4 +368,103 @@ This TODO.md should be kept in sync with:
 
 ---
 
-Last Updated: 2025-11-10
+## 9. LSP Features - Status & Roadmap
+
+### Current LSP Coverage: ~64% (16/25+ key features)
+
+**✅ Implemented Features:**
+1. textDocument/hover - тип при наведении
+2. textDocument/definition - переход к определению
+3. textDocument/completion - автодополнение
+4. textDocument/signatureHelp - подсказки сигнатур
+5. textDocument/documentSymbol - символы документа (outline)
+6. textDocument/references - поиск ссылок
+7. textDocument/inlayHint - inline подсказки типов
+8. textDocument/rename + prepareRename - переименование
+9. textDocument/foldingRange - складывание блоков
+10. textDocument/semanticTokens/full - семантическая подсветка
+11. textDocument/prepareCallHierarchy - подготовка call hierarchy
+12. textDocument/codeAction - code actions
+13. textDocument/formatting - форматирование
+14. textDocument/rangeFormatting - форматирование выделения
+15. textDocument/publishDiagnostics - диагностики
+16. workspace/symbol - глобальный поиск символов (Cmd+T)
+
+### 🎯 LSP Roadmap - Priority Order
+
+#### **Tier 1: MUST HAVE** (критичны для DX)
+1. ❌ **textDocument/typeDefinition** - переход к типу
+   - DX Impact: 🔥🔥🔥 Критично для навигации
+   - Effort: Low (уже есть type context)
+   - Benefit: Быстрая навигация к определениям типов
+
+2. ❌ **textDocument/implementation** - найти имплементации
+   - DX Impact: 🔥🔥🔥 Критично для полиморфизма
+   - Effort: Medium (нужен анализ иерархии)
+   - Benefit: Понимание кода с inheritance/overrides
+
+3. ❌ **textDocument/codeLens** - показать refs/usages над методами
+   - DX Impact: 🔥🔥 Очень полезно
+   - Effort: Low (уже есть references)
+   - Benefit: Быстрая информация о популярности методов
+
+4. ❌ **textDocument/selectionRange** - smart selection (expand/shrink)
+   - DX Impact: 🔥🔥 Ускоряет редактирование
+   - Effort: Low (AST уже есть)
+   - Benefit: Удобное выделение AST-узлов
+
+#### **Tier 2: SHOULD HAVE** (сильно улучшают DX)
+6. ❌ **workspace/willRenameFiles** + **didRenameFiles** - auto-update imports
+   - DX Impact: 🔥🔥 Рефакторинг
+   - Effort: Medium
+   - Benefit: Автоматическое обновление путей
+
+7. ❌ **callHierarchy/incomingCalls** + **outgoingCalls** - полная call hierarchy
+   - DX Impact: 🔥 Навигация
+   - Effort: Medium (prepare есть)
+   - Benefit: Понимание потока вызовов
+
+8. ❌ **textDocument/prepareTypeHierarchy** + **typeHierarchy/**/
+   - DX Impact: 🔥🔥 ООП навигация
+   - Effort: Medium
+   - Benefit: Визуализация иерархии классов
+
+9. ❌ **workspace/executeCommand** - кастомные команды
+   - DX Impact: 🔥🔥 Интеграция инструментов
+   - Effort: Low
+   - Benefit: Run tests, format, etc.
+
+10. ❌ **textDocument/documentHighlight** - подсветка вхождений
+    - DX Impact: 🔥 Навигация
+    - Effort: Low (есть references)
+    - Benefit: Визуальная ориентация
+
+#### **Tier 3: NICE TO HAVE** (современные фичи)
+11. ❌ **textDocument/linkedEditingRange** - синхронное редактирование
+12. ❌ **textDocument/onTypeFormatting** - форматирование при вводе
+13. ❌ **semanticTokens/range** + **delta** - оптимизация
+14. ❌ **textDocument/inlineCompletion** - AI-assisted (Copilot-style)
+15. ❌ **textDocument/documentLink** - кликабельные ссылки
+16. ❌ **textDocument/colorPresentation** - подсветка цветов
+17. ❌ **textDocument/declaration** - forward declarations
+
+### Implementation Plan
+
+**Session 1 (Current):**
+- ✅ Анализ текущего состояния LSP
+- ⏳ Реализация Tier 1.1: workspace/symbol
+
+**Session 2:**
+- Tier 1.2: typeDefinition
+- Tier 1.3: implementation
+
+**Session 3:**
+- Tier 1.4: codeLens
+- Tier 1.5: selectionRange
+
+**Session 4+:**
+- Tier 2 features по мере необходимости
+
+---
+
+Last Updated: 2025-11-11

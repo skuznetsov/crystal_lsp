@@ -224,8 +224,8 @@ describe "LSP Rename" do
         call_count += 1 if symbol == calc_symbol
       end
 
-      # Should have 2 calls
-      call_count.should eq(2)
+      # Should have 3 references (2 calls + 1 method name in definition after type inference improvements)
+      call_count.should eq(3)
     end
 
     it "finds parameter usages within method scope" do

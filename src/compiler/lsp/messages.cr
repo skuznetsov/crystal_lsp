@@ -74,7 +74,7 @@ module CrystalV2
         include JSON::Serializable
 
         @[JSON::Field(key: "textDocumentSync")]
-        property text_document_sync : Int32? = 1  # Full sync
+        property text_document_sync : Int32? = 1 # Full sync
 
         @[JSON::Field(key: "hoverProvider")]
         property hover_provider : Bool? = true
@@ -98,7 +98,7 @@ module CrystalV2
         property document_symbol_provider : Bool? = true
 
         @[JSON::Field(key: "workspaceSymbolProvider")]
-        property workspace_symbol_provider : Bool? = false
+        property workspace_symbol_provider : Bool? = true
 
         @[JSON::Field(key: "codeActionProvider")]
         property code_action_provider : Bool? = true
@@ -135,7 +135,7 @@ module CrystalV2
           @document_range_formatting_provider = true,
           @folding_range_provider = true,
           @inlay_hint_provider = true,
-          @call_hierarchy_provider = true
+          @call_hierarchy_provider = true,
         )
           @completion_provider = JSON.parse(%{{"triggerCharacters":[".","@"]}})
           @signature_help_provider = JSON.parse(%{{"triggerCharacters":["(", ","]}})
@@ -143,7 +143,7 @@ module CrystalV2
           # Align legend with SemanticTokenType enum; include full standard set
           @semantic_tokens_provider = JSON.parse(%{{"legend":{"tokenTypes":["namespace","type","class","enum","interface","struct","typeParameter","parameter","variable","property","enumMember","event","function","method","macro","keyword","modifier","comment","string","number","regexp","operator"],"tokenModifiers":["declaration","definition","readonly","static","deprecated","abstract","async","modification","documentation","defaultLibrary"]},"range":false,"full":true}})
           @document_highlight_provider = false
-          @workspace_symbol_provider = false
+          @workspace_symbol_provider = true
         end
       end
 
@@ -262,7 +262,7 @@ module CrystalV2
 
         @[JSON::Field(key: "textDocument")]
         property text_document : TextDocumentIdentifier
-        property range : Range  # Visible viewport range
+        property range : Range # Visible viewport range
 
         def initialize(@text_document : TextDocumentIdentifier, @range : Range)
         end

@@ -476,6 +476,58 @@ module CrystalV2
         end
       end
 
+      # SymbolInformation for workspace/symbol (simpler than DocumentSymbol, includes location URI)
+      struct SymbolInformation
+        include JSON::Serializable
+
+        property name : String
+        property kind : Int32 # SymbolKind value
+        property location : Location
+        @[JSON::Field(key: "containerName")]
+        property container_name : String?
+
+        def initialize(
+          @name : String,
+          @kind : Int32,
+          @location : Location,
+          @container_name : String? = nil,
+        )
+        end
+
+        # Create SymbolInformation from semantic symbol
+        def self.from_symbol(symbol : Semantic::Symbol, program : Frontend::Program, uri : String, container : String? = nil) : SymbolInformation?
+          return nil if symbol.node_id.invalid?
+
+          node = program.arena[symbol.node_id]
+          range = Range.from_span(node.span)
+          location = Location.new(uri: uri, range: range)
+
+          kind = case symbol
+                 when Semantic::ClassSymbol
+                   SymbolKind::Class
+                 when Semantic::MethodSymbol
+                   SymbolKind::Method
+                 when Semantic::VariableSymbol
+                   SymbolKind::Variable
+                 when Semantic::ModuleSymbol
+                   SymbolKind::Module
+                 when Semantic::MacroSymbol
+                   SymbolKind::Function # Treat macros as functions
+                 else
+                   nil
+                 end
+
+          return nil unless kind
+
+          new(
+            name: symbol.name,
+            kind: kind.value,
+            location: location,
+            container_name: container
+          )
+        end
+      end
+
       # Inlay hint structures (LSP 3.17)
 
       # InlayHint kind enum
