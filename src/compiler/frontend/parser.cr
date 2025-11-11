@@ -3554,7 +3554,7 @@ module CrystalV2
           advance  # consume { or do
           skip_trivia
 
-          # Parse optional block parameters: |x, y|
+          # Parse optional block parameters: |x, y|, supports splat: |*kv|
           params_b = SmallVec(Parameter, 2).new
           if current_token.kind == Token::Kind::Pipe
             advance  # consume opening |
@@ -3562,6 +3562,20 @@ module CrystalV2
 
             # Parse parameter list
             loop do
+              is_splat = false
+              is_double_splat = false
+
+              # Optional splat markers
+              if current_token.kind == Token::Kind::StarStar
+                is_double_splat = true
+                advance
+                skip_trivia
+              elsif current_token.kind == Token::Kind::Star
+                is_splat = true
+                advance
+                skip_trivia
+              end
+
               name_token = current_token
               unless name_token.kind == Token::Kind::Identifier
                 emit_unexpected(name_token)
@@ -3574,18 +3588,44 @@ module CrystalV2
               advance
               skip_trivia
 
-              # TODO: Support type annotations in block params
-              # For now, block params only have name (no type annotation)
+              # Support optional type annotation in block params: |x : Type|
+              type_annotation : Slice(UInt8)? = nil
+              param_type_span : Span? = nil
+              if current_token.kind == Token::Kind::Colon
+                advance
+                skip_trivia
+                type_start_token = current_token
+                parsed_type = parse_type_annotation
+                unless parsed_type.nil?
+                  type_annotation = parsed_type
+                  type_end_token = previous_token
+                  if type_end_token
+                    param_type_span = type_start_token.span.cover(type_end_token.span)
+                    param_span = param_span.cover(param_type_span)
+                  else
+                    param_type_span = type_start_token.span
+                    param_span = param_span.cover(param_type_span)
+                  end
+                else
+                  emit_unexpected(type_start_token)
+                end
+                skip_trivia
+              end
+
               params_b << Parameter.new(
                 param_name,
                 nil,              # Phase 103K: no external name for block params
-                nil,              # no type annotation
+                type_annotation,  # optional type annotation
                 nil,              # no default value
-                param_span,       # full span = name span for now
+                param_span,       # full span covers name and optional type
                 param_name_span,  # name span
                 nil,              # Phase 103K: no external name span
-                nil,              # no type span
-                nil               # no default span
+                param_type_span,  # optional type span
+                nil,              # no default span
+                is_splat,
+                is_double_splat,
+                false,            # is_block flag: block params are not '&'
+                false             # is_instance_var
               )
 
               # Check for comma or closing |
