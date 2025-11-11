@@ -6578,16 +6578,24 @@ module CrystalV2
             advance  # consume }
             skip_trivia
 
-            # Check for "of K => V" syntax
-            if current_token.kind == Token::Kind::Identifier && slice_eq?(current_token.slice, "of")
+            # Check for "of K => V" syntax (accept keyword Of or identifier "of")
+            if current_token.kind == Token::Kind::Of ||
+               (current_token.kind == Token::Kind::Identifier && slice_eq?(current_token.slice, "of"))
               advance
               skip_trivia
 
               # Parse key type
               key_type_token = current_token
-              if key_type_token.kind == Token::Kind::Identifier
-                of_key_type = key_type_token.slice
-                advance
+              if key_type_token.kind.in?(Token::Kind::Identifier, Token::Kind::Self, Token::Kind::ColonColon)
+                # Reuse type annotation parser to support paths/generics
+                type_start = current_token
+                type_slice = parse_type_annotation
+                if previous_token
+                  of_key_type = type_slice
+                else
+                  emit_unexpected(type_start)
+                  return PREFIX_ERROR
+                end
                 skip_trivia
 
                 # Expect =>
@@ -6599,12 +6607,12 @@ module CrystalV2
                 skip_trivia
 
                 # Parse value type
-                value_type_token = current_token
-                if value_type_token.kind == Token::Kind::Identifier
-                  of_value_type = value_type_token.slice
-                  advance
+                value_start = current_token
+                value_slice = parse_type_annotation
+                if previous_token
+                  of_value_type = value_slice
                 else
-                  emit_unexpected(value_type_token)
+                  emit_unexpected(value_start)
                   return PREFIX_ERROR
                 end
               else
