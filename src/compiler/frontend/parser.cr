@@ -1585,6 +1585,15 @@ module CrystalV2
                 param_name_span = nil
                 param_start_span = prefix_token.not_nil!.span
                 # Don't advance - comma/rparen will be handled below
+              elsif is_block && current_token.kind == Token::Kind::Colon
+                # Anonymous typed block parameter: & : ProcType
+                # Don't require a name; leave param_name nil and let the
+                # type-annotation branch below consume ':' and the proc type.
+                param_name = nil
+                param_name_span = nil
+                param_start_span = prefix_token.not_nil!.span
+                # Intentionally do not advance here; ':' is consumed by the
+                # type annotation parser below.
               else
                 # Regular parameter or named block parameter
                 # Phase KEYWORD_PARAMS: Allow keywords as parameter names (e.g., 'of', 'as', 'in')
