@@ -150,15 +150,35 @@ module CrystalV2
               next
             end
 
-            # Phase 103J: Check for macro control ({% if %}, {% for %}, etc.)
-            debug("parse_program: current=#{current_token.kind}, checking macro_control_start?")
-            if macro_control_start?
-              debug("parse_program: macro_control_start? returned true, calling parse_percent_macro_control")
-              macro_ctrl = parse_percent_macro_control
-              roots_builder << macro_ctrl unless macro_ctrl.invalid?
-              consume_newlines
-              next
+          # Phase 103J: Check for macro control ({% if %}, {% for %}, etc.)
+          debug("parse_program: current=#{current_token.kind}, checking macro_control_start?")
+          if macro_control_start?
+            # Special-case top-level skip_file: {% skip_file ... %}
+            if roots_builder.size == 0
+              if keyword = peek_macro_keyword
+                if keyword == "skip_file"
+                  # Consume control start
+                  control_span = consume_macro_control_start
+                  if macro_trim_token?(current_token)
+                    advance
+                  end
+                  skip_trivia
+                  # consume keyword 'skip_file'
+                  advance
+                  skip_trivia
+                  # consume closing %}
+                  consume_macro_close_span("Expected '%}' after skip_file")
+                  # Short-circuit: ignore rest of file for LSP parsing
+                  break
+                end
+              end
             end
+            debug("parse_program: macro_control_start? returned true, calling parse_percent_macro_control")
+            macro_ctrl = parse_percent_macro_control
+            roots_builder << macro_ctrl unless macro_ctrl.invalid?
+            consume_newlines
+            next
+          end
             debug("parse_program: macro_control_start? returned false, proceeding normally")
 
             if definition_start?
@@ -8395,7 +8415,15 @@ module CrystalV2
             when "if", "unless", "while", "elsif"
               skip_macro_whitespace
               expr = with_macro_terminator(:control) { parse_expression(0) }
-            when "else", "end", "comment", "begin", "verbatim"
+            when "verbatim"
+              # verbatim requires 'do' keyword before %}: {% verbatim do %}
+              skip_macro_whitespace
+              unless token_text(current_token) == "do"
+                @diagnostics << Diagnostic.new("Expected 'do' after verbatim", current_token.span)
+                return {MacroPiece.text("", start_token.span), :none, false}
+              end
+              advance  # consume 'do'
+            when "else", "end", "comment", "begin"
               # no expression needed
             end
             skip_macro_whitespace
@@ -8456,17 +8484,20 @@ module CrystalV2
             # Set flag to enable newline skipping in macro expressions (like original parser)
             previous_context = @expect_context
             previous_in_macro = @in_macro_expression
-            begin
-              @expect_context = "macro expression"
-              @in_macro_expression = true  # Enable newline skipping
-              # Use parse_expression (single expression) not parse_statement (multiple statements)
-              # This matches original parser's parse_expression_inside_macro behavior
-              expr = with_macro_terminator(:control) { parse_expression(0) }
-            ensure
-              @expect_context = previous_context
-              @in_macro_expression = previous_in_macro
-            end
+            @expect_context = "macro expression"
+            @in_macro_expression = true  # Enable newline skipping
+
+            # Use parse_expression (single expression) not parse_statement (multiple statements)
+            # This matches original parser's parse_expression_inside_macro behavior
+            expr = with_macro_terminator(:control) { parse_expression(0) }
+
+            # CRITICAL: Skip whitespace BEFORE resetting @in_macro_expression flag
+            # This allows newlines to be skipped (matching original parser behavior)
             skip_macro_whitespace
+
+            # Now restore context and flag
+            @expect_context = previous_context
+            @in_macro_expression = previous_in_macro
 
             right_trim = macro_trim_operator?
             closing_span = consume_macro_close_span("Expected '%}' after macro expression")
@@ -8884,47 +8915,48 @@ module CrystalV2
 
             if token.kind == Token::Kind::LBracePercent
               saved_index = @index
-              control_span = consume_macro_control_start
-              unless control_span
+              start_control_span = consume_macro_control_start
+              unless start_control_span
                 @index = saved_index
                 @previous_token = nil
                 advance
                 next
               end
 
+              # Optional trim
               if macro_trim_token?(current_token)
                 advance
               end
 
               skip_trivia
-
-              keyword = token_text(current_token)
+              kw = token_text(current_token)
               advance
               skip_trivia
 
-              if keyword == "verbatim"
-                if token_text(current_token) == "do"
+              case kw
+              when "if", "for", "unless", "while", "begin", "verbatim"
+                # For verbatim do, there may be an extra 'do'
+                if kw == "verbatim" && token_text(current_token) == "do"
                   advance
                   skip_trivia
                 end
-
-                unless expect_macro_close("Expected '%}' after verbatim do")
+                # Expect close %}
+                unless expect_macro_close("Expected '%}' after #{kw}")
                   return nil
                 end
-
                 depth += 1
                 next
-              elsif keyword == "end"
+              when "end"
                 end_span = consume_macro_close_span("Expected '%}' after end")
                 return nil unless end_span
                 depth -= 1
-                return control_span.cover(end_span) if depth == 0
+                return start_control_span.cover(end_span) if depth == 0
                 next
+              else
+                # Some other control header: treat as literal; rewind and step one token
+                @index = saved_index
+                @previous_token = nil
               end
-
-              # Not verbatim/end: treat as literal and rewind
-              @index = saved_index
-              @previous_token = nil
             end
 
             advance
