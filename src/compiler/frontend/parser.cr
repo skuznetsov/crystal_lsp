@@ -960,13 +960,17 @@ module CrystalV2
               bracket_depth -= 1
             end
 
-            # Track brace depth (tuple type literals like {Int32, String})
+            # Track brace depth (tuple/named tuple type literals like {Int32, String})
             if operator_token?(token, Token::Kind::LBrace)
-              break if brace_depth == 0  # Don't consume { when it's not part of type (e.g., proc body)
+              # In type annotation context, '{' starts a tuple/named tuple type
               brace_depth += 1
             elsif operator_token?(token, Token::Kind::RBrace)
-              break if brace_depth == 0
-              brace_depth -= 1
+              # Only break if this '}' would close outer context (shouldn't happen inside type)
+              if brace_depth > 0
+                brace_depth -= 1
+              else
+                break
+              end
             end
 
             # Check if this token is part of type annotation
