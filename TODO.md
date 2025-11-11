@@ -4,9 +4,9 @@ This document tracks features and functionality that are not yet implemented or 
 
 ## Status: Current Test Results
 - **Total Examples:** 1425
-- **Passing:** 1421 (99.72%)
-- **Failures:** 3 (0.21%)
-- **Errors:** 1 (0.07%)
+- **Passing:** 1423 (99.86%)
+- **Failures:** 2 (0.14%)
+- **Errors:** 0 (0%)
 - **Pending:** 6 (skipped)
 - **Last Updated:** 2025-11-10
 
@@ -14,44 +14,34 @@ This document tracks features and functionality that are not yet implemented or 
 - **Session Start (earlier):** 14 failures, 1 error (15 total issues)
 - **After Compound Assignment + Union Types:** 5 failures, 1 error (6 total issues)
 - **After String Interpolation + Begin/End fixes:** 3 failures, 1 error (4 total issues)
-- **Total Improvement:** 11 tests fixed (73% reduction in failures)
-- **Fixes:** Union types (2) + Compound assignments (7) + String interpolation (1) + Begin/end (1)
+- **After Proc Literal Parser Fix:** 2 failures, 0 errors (2 total issues)
+- **Total Improvement:** 13 tests fixed (87% reduction in failures)
+- **Fixes:** Union types (2) + Compound assignments (7) + String interpolation (1) + Begin/end (1) + Proc literal parser (2)
 
 ## 1. Parser - Missing Features
 
-### 1.1 Proc Literal Return Type Annotation
-**Status:** NOT IMPLEMENTED
-**Priority:** Medium
-**Test Files:** `spec/semantic_proc_literal_spec.cr:68`
+### 1.1 Proc Literal Return Type Annotation ✅ FIXED
+**Status:** COMPLETED (2025-11-10)
+**Priority:** Medium (was)
+**Test Files:** PASSING
+- `spec/parser/parser_proc_literal_spec.cr:108` ✅
+- `spec/semantic_proc_literal_spec.cr:68` ✅
 
-**Issue:**
-Parser does not support proc literal syntax with return type annotation:
+**Issue (was):**
+Parser incorrectly consumed `{` as part of type annotation in proc literals:
 ```crystal
 ->(x : Int32) : Int32 { x * 2 }
-#              ^^^^^^^^ - Return type annotation not supported
-```
-
-**Works:**
-```crystal
-->(x : Int32) { x * 2 }  # Without return type annotation
-```
-
-**Error:**
-```
-unexpected EOF
+#                     ^ Parser treated this as tuple type start
 ```
 
 **Root Cause:**
-Parser's proc literal parsing logic doesn't handle the optional `: ReturnType` syntax after the parameter list.
+`parse_type_annotation` method treated `{` as tuple type literal (`{Int32, String}`) and consumed proc body as part of the type.
 
-**Required Changes:**
-- Modify `parse_proc_literal` method in `parser.cr`
-- Add return type annotation parsing after closing `)` of parameter list
-- Store return type in ProcLiteralNode AST structure
+**Solution:**
+Added break condition in `parse_type_annotation` (line 945) when encountering `{` at `brace_depth==0` to prevent consuming non-type tokens like proc body.
 
-**Files to Modify:**
-- `src/compiler/frontend/parser.cr` (proc literal parsing)
-- `src/compiler/frontend/ast.cr` (ProcLiteralNode structure)
+**Files Modified:**
+- `src/compiler/frontend/parser.cr:945` - Add LBrace break check
 
 ---
 
