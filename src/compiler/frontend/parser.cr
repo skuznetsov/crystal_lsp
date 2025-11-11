@@ -1388,7 +1388,17 @@ module CrystalV2
             start_index = @index
             parsed_return_type = parse_type_annotation
             if @index == start_index
-              emit_unexpected(type_start_token)
+              # Fallback: handle atomic types like tuple types {A, B}
+              if current_token.kind == Token::Kind::LBrace
+                atomic = parse_atomic_type_for_annotation
+                if atomic
+                  return_type = atomic
+                else
+                  emit_unexpected(type_start_token)
+                end
+              else
+                emit_unexpected(type_start_token)
+              end
             else
               return_type = parsed_return_type
             end
