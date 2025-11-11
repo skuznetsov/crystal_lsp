@@ -1519,6 +1519,7 @@ module CrystalV2
                         InstanceVarNode | ClassVarNode | GlobalNode | SelfNode | ImplicitObjNode |
                         UnlessNode | WhileNode | UntilNode | ForNode | LoopNode | CaseNode |
                         BreakNode | NextNode | ReturnNode | YieldNode | SpawnNode |
+                        SplatNode |
                         IndexNode | MemberAccessNode | SafeNavigationNode |
                         AssignNode | MultipleAssignNode |
                         BlockNode | ProcLiteralNode | StringInterpolationNode | GroupingNode |
