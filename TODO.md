@@ -4,17 +4,18 @@ This document tracks features and functionality that are not yet implemented or 
 
 ## Status: Current Test Results
 - **Total Examples:** 1425
-- **Passing:** 1419 (99.6%)
-- **Failures:** 5 (0.35%)
+- **Passing:** 1421 (99.72%)
+- **Failures:** 3 (0.21%)
 - **Errors:** 1 (0.07%)
 - **Pending:** 6 (skipped)
 - **Last Updated:** 2025-11-10
 
 ### Recent Progress
-- **Session Start:** 14 failures, 1 error (15 total issues)
-- **After Compound Assignment Fix:** 5 failures, 1 error (6 total issues)
-- **Improvement:** 9 tests fixed (60% reduction in failures)
-- **Fixes:** Union types (2 tests) + Compound assignments (7 tests)
+- **Session Start (earlier):** 14 failures, 1 error (15 total issues)
+- **After Compound Assignment + Union Types:** 5 failures, 1 error (6 total issues)
+- **After String Interpolation + Begin/End fixes:** 3 failures, 1 error (4 total issues)
+- **Total Improvement:** 11 tests fixed (73% reduction in failures)
+- **Fixes:** Union types (2) + Compound assignments (7) + String interpolation (1) + Begin/end (1)
 
 ## 1. Parser - Missing Features
 
@@ -171,7 +172,43 @@ end
 
 ## 4. Recently Fixed Issues ✅
 
-### 4.1 Diagnostic Emission
+### 4.1 String Interpolation Expression Types ✅
+**Fixed:** 2025-11-10
+**Test:** `spec/semantic/type_inference_spec.cr:1706`
+
+**Issue:**
+Expressions inside string interpolation (like `#{x + y}`) were returning `nil` type instead of their actual type (Int32).
+
+**Root Cause:**
+`compute_node_type_no_recurse` was returning `string_type` for StringInterpolationNode at lines 594-598, taking the iterative shortcut. This skipped the recursive `infer_string_interpolation` method which actually infers types for the expression pieces.
+
+**Solution:**
+Changed StringInterpolationNode handling in `compute_node_type_no_recurse` (lines 594-598) to return `nil`, forcing the recursive path where `infer_string_interpolation` is called and expression pieces get their types inferred.
+
+**Files Modified:**
+- `src/compiler/semantic/type_inference_engine.cr:594-598, 1914-1916`
+
+---
+
+### 4.2 Begin/End Block Return Type ✅
+**Fixed:** 2025-11-10
+**Test:** `spec/semantic/type_inference_begin_spec.cr:146`
+
+**Issue:**
+`begin...end` blocks were returning `Nil` instead of the type of their last expression.
+
+**Root Cause:**
+`compute_node_type_no_recurse` was handling BeginNode in the iterative path (lines 574-587) trying to call `infer_expression(body.last)`, but this couldn't work reliably if body expressions hadn't been processed yet.
+
+**Solution:**
+Changed BeginNode handling in `compute_node_type_no_recurse` (lines 574-578) to return `nil`, forcing the recursive path where `infer_begin` properly handles scoping and returns the type of the last expression.
+
+**Files Modified:**
+- `src/compiler/semantic/type_inference_engine.cr:574-578`
+
+---
+
+### 4.3 Diagnostic Emission
 **Fixed:** 2025-11-10
 **Commit:** (current session)
 

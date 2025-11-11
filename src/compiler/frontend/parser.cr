@@ -942,6 +942,7 @@ module CrystalV2
 
             # Track brace depth (tuple type literals like {Int32, String})
             if operator_token?(token, Token::Kind::LBrace)
+              break if brace_depth == 0  # Don't consume { when it's not part of type (e.g., proc body)
               brace_depth += 1
             elsif operator_token?(token, Token::Kind::RBrace)
               break if brace_depth == 0
