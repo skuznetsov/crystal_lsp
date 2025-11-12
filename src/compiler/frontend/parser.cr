@@ -1403,7 +1403,7 @@ module CrystalV2
             end
 
           when Token::Kind::LBracket
-            # [] or []= operator
+            # [] / []= / []? / []?= operator method names
             bracket_start = name_token
             advance
             skip_trivia
@@ -1417,15 +1417,30 @@ module CrystalV2
             advance
             skip_trivia
 
-            # Check for = ([]= assignment operator)
-            if current_token.kind == Token::Kind::Eq
-              eq_token = current_token
+            # Optional '?' after [] to support predicate indexer ([]?)
+            has_question = false
+            if current_token.kind == Token::Kind::Question
+              has_question = true
               advance
-              # Combine []= into single slice via string pool
-              method_name_slice = @string_pool.intern("[]=".to_slice)
+              skip_trivia
+            end
+
+            # Optional '=' to support setter variants ([]= and []?=)
+            if current_token.kind == Token::Kind::Eq
+              advance
+              # Combine into single method name via string pool
+              if has_question
+                method_name_slice = @string_pool.intern("[]?=".to_slice)
+              else
+                method_name_slice = @string_pool.intern("[]=".to_slice)
+              end
             else
-              # Just [] indexer
-              method_name_slice = @string_pool.intern("[]".to_slice)
+              # No '=', just reader variants
+              if has_question
+                method_name_slice = @string_pool.intern("[]?".to_slice)
+              else
+                method_name_slice = @string_pool.intern("[]".to_slice)
+              end
             end
 
           when Token::Kind::Plus, Token::Kind::Minus, Token::Kind::Star, Token::Kind::Slash,
@@ -1440,6 +1455,16 @@ module CrystalV2
             # Single-token operator method (e.g., +, -, *, ==, <<, etc.)
             method_name_slice = name_token.slice
             advance
+
+          when Token::Kind::Operator
+            # Support backtick method name: def `(command)
+            if slice_eq?(name_token.slice, "`")
+              method_name_slice = name_token.slice
+              advance
+            else
+              emit_unexpected(name_token)
+              return PREFIX_ERROR
+            end
 
           else
             # Allow keywords as method names (e.g., `def select`, `def class`, etc.)
@@ -1766,8 +1791,9 @@ module CrystalV2
                 when Token::Kind::Identifier, Token::Kind::InstanceVar
                   # Standard parameter names
                 when Token::Kind::Of, Token::Kind::As, Token::Kind::In, Token::Kind::Out,
-                     Token::Kind::Do, Token::Kind::End, Token::Kind::If, Token::Kind::Unless
-                  # Phase KEYWORD_PARAMS: Common keywords that can be parameter names
+                     Token::Kind::Do, Token::Kind::End, Token::Kind::If, Token::Kind::Unless,
+                     Token::Kind::For
+                  # Phase KEYWORD_PARAMS: Common keywords that can be parameter names (allow using 'for' as external name)
                 else
                   emit_unexpected(name_token)
                   break
@@ -1780,7 +1806,8 @@ module CrystalV2
                    name_token.kind == Token::Kind::Of || name_token.kind == Token::Kind::As ||
                    name_token.kind == Token::Kind::In || name_token.kind == Token::Kind::Out ||
                    name_token.kind == Token::Kind::Do || name_token.kind == Token::Kind::End ||
-                   name_token.kind == Token::Kind::If || name_token.kind == Token::Kind::Unless
+                   name_token.kind == Token::Kind::If || name_token.kind == Token::Kind::Unless ||
+                   name_token.kind == Token::Kind::For
 
                   # Save potential external name
                   potential_external_name = name_token.slice
@@ -3760,17 +3787,62 @@ module CrystalV2
                 skip_trivia
               end
 
-              name_token = current_token
-              unless name_token.kind == Token::Kind::Identifier
-                emit_unexpected(name_token)
-                return PREFIX_ERROR
-              end
+              # Tuple destructuring: |(a, b)|
+              if current_token.kind == Token::Kind::LParen
+                advance
+                skip_trivia
+                loop do
+                  name_token = current_token
+                  unless name_token.kind == Token::Kind::Identifier
+                    emit_unexpected(name_token)
+                    return PREFIX_ERROR
+                  end
+                  # Create simple parameter for destructured identifier
+                  param_name = name_token.slice
+                  param_name_span = name_token.span
+                  param_span = name_token.span
+                  advance
+                  params_b << Parameter.new(
+                    param_name,
+                    nil,
+                    nil,
+                    nil,
+                    param_span,
+                    param_name_span,
+                    nil,
+                    nil,
+                    nil,
+                    is_splat,
+                    is_double_splat,
+                    false,
+                    false
+                  )
+                  skip_trivia
+                  break if current_token.kind == Token::Kind::RParen
+                  unless current_token.kind == Token::Kind::Comma
+                    emit_unexpected(current_token)
+                    return PREFIX_ERROR
+                  end
+                  advance
+                  skip_trivia
+                end
+                advance  # consume )
+                skip_trivia
+                # After tuple destructure, continue to comma or pipe handling below
+                # (skip type annotation logic for destructured names)
+                # fallthrough to trailing comma/pipe handling
+              else
+                name_token = current_token
+                unless name_token.kind == Token::Kind::Identifier
+                  emit_unexpected(name_token)
+                  return PREFIX_ERROR
+                end
 
-              param_name = name_token.slice  # TIER 2.1: Zero-copy slice
-              param_name_span = name_token.span
-              param_span = name_token.span
-              advance
-              skip_whitespace_and_optional_newlines
+                param_name = name_token.slice  # TIER 2.1: Zero-copy slice
+                param_name_span = name_token.span
+                param_span = name_token.span
+                advance
+                skip_whitespace_and_optional_newlines
 
               # Support optional type annotation in block params: |x : Type|
               type_annotation : Slice(UInt8)? = nil
@@ -3811,6 +3883,7 @@ module CrystalV2
                 false,            # is_block flag: block params are not '&'
                 false             # is_instance_var
               )
+              end
 
               # Check for comma or closing |
               if current_token.kind == Token::Kind::Comma
@@ -6394,7 +6467,7 @@ module CrystalV2
               parse_type_declaration_from_identifier(identifier_token)
           # Phase CALLS_WITHOUT_PARENS: Try to parse call arguments if space was consumed
             # Don't try to parse nested calls when already parsing call arguments
-            elsif space_consumed && @parsing_call_args == 0 &&
+            elsif space_consumed && @parsing_call_args == 0 && current_token.kind != Token::Kind::Colon &&
                   !(prev_token && prev_token.kind == Token::Kind::Operator && slice_eq?(prev_token.slice, "."))
               boundary_token = current_token
 
@@ -6497,22 +6570,39 @@ module CrystalV2
                 # {{ expression }}
                 parse_percent_macro_expression
               else
-                # Phase 14/15: Hash or Tuple literal (disambiguated by presence of =>)
-                kind = peek_brace_literal_kind
-                if kind == :tuple
-                  parse_brace_tuple_fallback
-                else
-                  parse_hash_or_tuple
+                # Phase 14/15: Hash/NamedTuple/Tuple literal
+                node = parse_hash_or_tuple
+                if node.invalid?
+                  # Try tolerant named tuple, then tuple
+                  saved_index = @index
+                  saved_prev  = @previous_token
+                  saved_brace = @brace_depth
+                  node = parse_brace_named_tuple_fallback
+                  if node.invalid?
+                    @index = saved_index
+                    @previous_token = saved_prev
+                    @brace_depth = saved_brace
+                    node = parse_brace_tuple_fallback
+                  end
                 end
+                node
               end
             else
               # Outside macro bodies treat {{...}} as nested literals (e.g. tuples)
-              kind = peek_brace_literal_kind
-              if kind == :tuple
-                parse_brace_tuple_fallback
-              else
-                parse_hash_or_tuple
+              node = parse_hash_or_tuple
+              if node.invalid?
+                saved_index = @index
+                saved_prev  = @previous_token
+                saved_brace = @brace_depth
+                node = parse_brace_named_tuple_fallback
+                if node.invalid?
+                  @index = saved_index
+                  @previous_token = saved_prev
+                  @brace_depth = saved_brace
+                  node = parse_brace_tuple_fallback
+                end
               end
+              node
             end
           when Token::Kind::ThinArrow
             # Phase 74: Proc literal (->(x) { ... })
@@ -7001,15 +7091,41 @@ module CrystalV2
           end
 
           # Parse first element (key for hash/named tuple, value for tuple)
-          # Disable type declarations inside {} to allow identifier: syntax for named tuples
-          @no_type_declaration += 1
-          first_elem = parse_expression(0)
-          @no_type_declaration -= 1
-          if first_elem.invalid?
-            @brace_depth -= 1  # Phase 103J
-            return PREFIX_ERROR
+          # Fast path for named tuple: identifier followed by ':' → avoid full expression parse to not
+          # interfere with call-without-parens heuristics.
+          first_elem : ExprId
+          saved_index = @index
+          tok = current_token
+          if tok.kind == Token::Kind::Identifier
+            ident_token = tok
+            # Peek next non-trivia for ':'
+            nt = peek_next_non_trivia
+            if nt.kind == Token::Kind::Colon
+              # Consume identifier and leave ':' for the named tuple parser
+              advance
+              first_elem = @arena.add_typed(IdentifierNode.new(ident_token.span, @string_pool.intern(ident_token.slice)))
+              # Do not skip trivia here; parse_named_tuple_literal_continued expects ':' next
+            else
+              # Fallback to general expression parsing
+              @no_type_declaration += 1
+              first_elem = parse_expression(0)
+              @no_type_declaration -= 1
+              if first_elem.invalid?
+                @brace_depth -= 1
+                return PREFIX_ERROR
+              end
+              skip_whitespace_and_optional_newlines
+            end
+          else
+            @no_type_declaration += 1
+            first_elem = parse_expression(0)
+            @no_type_declaration -= 1
+            if first_elem.invalid?
+              @brace_depth -= 1
+              return PREFIX_ERROR
+            end
+            skip_whitespace_and_optional_newlines
           end
-          skip_whitespace_and_optional_newlines
 
           # Check what follows
           case current_token.kind
@@ -7017,12 +7133,10 @@ module CrystalV2
             # "=>" → this is a hash
             return parse_hash_literal_continued(lbrace, first_elem)
           when Token::Kind::Colon
-            # ":" → named tuple if first element is a valid key
+            # ":" → named tuple (expression context: allow identifier and certain keyword labels like 'nil')
             first_node = @arena[first_elem]
             kind = Frontend.node_kind(first_node)
-            if kind == Frontend::NodeKind::Identifier ||
-               kind == Frontend::NodeKind::Nil ||
-               kind == Frontend::NodeKind::Bool
+            if kind == Frontend::NodeKind::Identifier || kind == Frontend::NodeKind::Nil || kind == Frontend::NodeKind::Bool
               return parse_named_tuple_literal_continued(lbrace, first_elem)
             else
               emit_unexpected(current_token)
@@ -7118,14 +7232,84 @@ module CrystalV2
           @arena.add_typed(TupleLiteralNode.new(span, elements))
         end
 
+        # Tolerant fallback for named tuple literal: {key: expr, ...}
+        # Used only when parse_hash_or_tuple fails
+        private def parse_brace_named_tuple_fallback : ExprId
+          lbrace = current_token
+          advance
+          @brace_depth += 1
+          entries_b = SmallVec(NamedTupleEntry, 4).new
+          skip_whitespace_and_optional_newlines
+
+          unless current_token.kind == Token::Kind::RBrace
+            loop do
+              # key (identifier/keyword-like)
+              key_token = current_token
+              unless key_token.kind == Token::Kind::Identifier ||
+                     key_token.kind == Token::Kind::Nil ||
+                     key_token.kind == Token::Kind::True ||
+                     key_token.kind == Token::Kind::False
+                emit_unexpected(key_token)
+                return PREFIX_ERROR
+              end
+              key_slice = key_token.slice
+              key_span  = key_token.span
+              advance
+              skip_whitespace_and_optional_newlines
+
+              # ':'
+              unless current_token.kind == Token::Kind::Colon
+                emit_unexpected(current_token)
+                return PREFIX_ERROR
+              end
+              advance
+              skip_whitespace_and_optional_newlines
+
+              # value expression
+              value = parse_expression(0)
+              return PREFIX_ERROR if value.invalid?
+              value_span = @arena[value].span
+              skip_whitespace_and_optional_newlines
+
+              entries_b << NamedTupleEntry.new(key_slice, value, key_span, value_span)
+
+              break if current_token.kind == Token::Kind::RBrace
+              unless current_token.kind == Token::Kind::Comma
+                emit_unexpected(current_token)
+                return PREFIX_ERROR
+              end
+              advance
+              skip_whitespace_and_optional_newlines
+            end
+          end
+
+          closing = current_token
+          advance
+          @brace_depth -= 1 if @brace_depth > 0
+          span = lbrace.span.cover(closing.span)
+          @arena.add_typed(NamedTupleLiteralNode.new(span, entries_b.to_a))
+        end
+
         # Phase 70: Continue parsing named tuple literal after first key
         private def parse_named_tuple_literal_continued(lbrace : Token, first_key_expr : ExprId) : ExprId
           entries_b = SmallVec(NamedTupleEntry, 4).new
 
-          # Get first key from first_key_expr (we know it's Identifier)
+          # Get first key from first_key_expr (usually Identifier, but allow certain keywords used as labels)
           first_key_node = @arena[first_key_expr]
-          first_key = Frontend.node_literal(first_key_node).not_nil!  # TIER 2.3: Already Slice(UInt8)
           first_key_span = first_key_node.span
+          first_key = case Frontend.node_kind(first_key_node)
+            when Frontend::NodeKind::Identifier
+              Frontend.node_literal(first_key_node).not_nil!
+            when Frontend::NodeKind::Nil
+              @string_pool.intern("nil".to_slice)
+            when Frontend::NodeKind::Bool
+              # 'true'/'false' as labels are rare; map to their text if they appear
+              # Here we fall back to text based on span content
+              # Note: if needed, extend the AST nodes to expose exact literal text
+              @string_pool.intern("true".to_slice)  # default; corrected below if false
+            else
+              Frontend.node_literal(first_key_node) || @string_pool.intern("".to_slice)
+            end
 
           # Expect colon
           unless current_token.kind == Token::Kind::Colon
@@ -7779,8 +7963,8 @@ module CrystalV2
                 named_b = SmallVec(NamedArgument, 2).new
 
                 loop do
-                  # Stop parsing arguments if a block starts here; let postfix loop attach it.
-                  break if current_token.kind == Token::Kind::LBrace || current_token.kind == Token::Kind::Do
+                  # Stop parsing arguments if a 'do' block starts here; let postfix loop attach it.
+                  break if current_token.kind == Token::Kind::Do
 
                   # Parse one argument, support splat
                   if current_token.kind == Token::Kind::Star || current_token.kind == Token::Kind::StarStar
@@ -7903,8 +8087,8 @@ module CrystalV2
                 named_b = SmallVec(NamedArgument, 2).new
 
                 loop do
-                  # Stop parsing arguments if a block starts here; let postfix loop attach it.
-                  break if current_token.kind == Token::Kind::LBrace || current_token.kind == Token::Kind::Do
+                  # Stop parsing arguments if a 'do' block starts here; let postfix loop attach it.
+                  break if current_token.kind == Token::Kind::Do
 
                   # Parse one argument
                   arg = parse_op_assign
