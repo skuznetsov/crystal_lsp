@@ -5982,6 +5982,10 @@ module CrystalV2
         end
 
         private def parse_prefix : ExprId
+          # Treat leading newlines as whitespace in expression context
+          while current_token.kind == Token::Kind::Newline
+            advance
+          end
           if macro_context?
             token = current_token
             if macro_closing_sequence?(token)
