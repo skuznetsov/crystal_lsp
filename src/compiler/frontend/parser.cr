@@ -185,6 +185,33 @@ module CrystalV2
           end
             debug("parse_program: macro_control_start? returned false, proceeding normally")
 
+            # Fast path: handle top-level definitions directly (robust against stray separators)
+            token = current_token
+            case token.kind
+            when Token::Kind::Def      then node = parse_def
+            when Token::Kind::Macro    then node = parse_macro_definition
+            when Token::Kind::Class    then node = parse_class
+            when Token::Kind::Module   then node = parse_module
+            when Token::Kind::Struct   then node = parse_struct
+            when Token::Kind::Union    then node = parse_union
+            when Token::Kind::Enum     then node = parse_enum
+            when Token::Kind::Alias    then node = parse_alias
+            when Token::Kind::Annotation then node = parse_annotation_def
+            when Token::Kind::Abstract then node = parse_abstract
+            when Token::Kind::Private  then node = parse_private
+            when Token::Kind::Protected then node = parse_protected
+            when Token::Kind::Lib      then node = parse_lib
+            when Token::Kind::Fun      then node = parse_fun
+            else
+              node = nil
+            end
+
+            if node
+              roots_builder << node unless node.invalid?
+              skip_statement_end
+              next
+            end
+
             if definition_start?
               node = case current_token.kind
                 when Token::Kind::Def
@@ -222,13 +249,13 @@ module CrystalV2
                   PREFIX_ERROR
                 end
               roots_builder << node unless node.invalid?
-              consume_newlines
+              skip_statement_end
               next
             end
 
             expr = parse_statement
             roots_builder << expr unless expr.invalid?
-            consume_newlines
+            skip_statement_end
           end
           Program.new(@arena, roots_builder.to_a)
         end
@@ -247,6 +274,13 @@ module CrystalV2
 
           # Annotate expectation context for better diagnostics control
           @expect_context = "statement"
+
+          # Treat a leading semicolon as a pure statement separator and skip it.
+          if current_token.kind == Token::Kind::Semicolon
+            advance
+            skip_statement_end
+            return parse_statement
+          end
 
           # Robustness: if a stray closing parenthesis appears at statement start,
           # advance past it to recover and continue parsing. This avoids emitting
@@ -1253,7 +1287,8 @@ module CrystalV2
           skip_statement_end
           expect_identifier("end")
           end_token = previous_token
-          consume_newlines
+          # Allow immediate separators after header (e.g., `struct X; end`)
+          skip_statement_end
 
           end_span = end_token.try(&.span)
           body_span = end_span ? name_token.span.cover(end_span) : name_token.span
@@ -1468,7 +1503,8 @@ module CrystalV2
             end
           end
 
-          consume_newlines
+          # Allow separators after header (supports one-liners like `struct X; end`)
+          skip_statement_end
 
         # Phase 36: Abstract methods have no body
         body_ids = nil
@@ -2626,7 +2662,8 @@ module CrystalV2
           # Parse body
           body_ids_b = SmallVec(ExprId, 4).new
           loop do
-            skip_trivia
+            # Tolerate newlines and semicolons between members
+            skip_statement_end
             token = current_token
             break if token.kind == Token::Kind::End
             break if token.kind == Token::Kind::EOF
@@ -8404,7 +8441,7 @@ module CrystalV2
             true
           when Token::Kind::Of, Token::Kind::As, Token::Kind::In, Token::Kind::Out,
                Token::Kind::Do, Token::Kind::End, Token::Kind::If, Token::Kind::Unless,
-               Token::Kind::Def
+               Token::Kind::Def, Token::Kind::For, Token::Kind::Then
             # Phase 103F: Keywords that can be used as parameter/argument names
             # Includes 'def' for cases like: getter def : Def, initialize(def: value)
             true
