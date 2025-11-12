@@ -88,8 +88,20 @@ module CrystalV2
         private def accessor_macro_callee?(callee_token : Token) : Bool
           return false unless callee_token.kind == Token::Kind::Identifier
           slice = callee_token.slice
-          slice_eq?(slice, "getter") || slice_eq?(slice, "setter") || slice_eq?(slice, "property") ||
-            slice_eq?(slice, "class_getter") || slice_eq?(slice, "class_setter") || slice_eq?(slice, "class_property")
+          # Allow optional '?' suffix for predicate accessors (e.g., property?)
+          base = slice
+          if base.size > 0 && base[base.size - 1] == '?'.ord.to_u8
+            base = Slice.new(base.to_unsafe, base.size - 1)
+          end
+          slice_eq?(base, "getter") || slice_eq?(base, "setter") || slice_eq?(base, "property") ||
+            slice_eq?(base, "class_getter") || slice_eq?(base, "class_setter") || slice_eq?(base, "class_property")
+        end
+
+        # Recognize macros that accept typed field lists: name : Type [= value]
+        private def typed_macro_args_callee?(callee_token : Token) : Bool
+          return false unless callee_token.kind == Token::Kind::Identifier
+          slice = callee_token.slice
+          accessor_macro_callee?(callee_token) || slice_eq?(slice, "record")
         end
 
         private def parse_block_body_with_optional_rescue : Tuple(Array(ExprId), Array(RescueClause)?, Array(ExprId)?)
@@ -1474,9 +1486,18 @@ module CrystalV2
               first = slice[0]
               if (first >= 'a'.ord.to_u8 && first <= 'z'.ord.to_u8) ||
                  (first >= 'A'.ord.to_u8 && first <= 'Z'.ord.to_u8) ||
-                 first == '_'.ord.to_u8
+                  first == '_'.ord.to_u8
                 method_name_slice = slice
                 advance
+                # Support setter-like keywords: def private=(...)
+                if current_token.kind == Token::Kind::Eq
+                  advance
+                  setter_name = String.build do |io|
+                    io.write(method_name_slice)
+                    io.write_byte('='.ord.to_u8)
+                  end
+                  method_name_slice = @string_pool.intern(setter_name.to_slice)
+                end
               else
                 emit_unexpected(name_token)
                 return PREFIX_ERROR
@@ -3966,6 +3987,35 @@ module CrystalV2
               skip_trivia
             end
 
+            # Special-case: typed empty hash literal inside block: {} of K => V
+            if current_token.kind == Token::Kind::LBrace
+              save_idx = @index
+              lbrace_tok = current_token
+              advance
+              if current_token.kind == Token::Kind::RBrace
+                advance
+                skip_trivia
+                if current_token.kind == Token::Kind::Of || (current_token.kind == Token::Kind::Identifier && slice_eq?(current_token.slice, "of"))
+                  advance
+                  skip_trivia
+                  key_type = parse_type_annotation
+                  skip_trivia
+                  if current_token.kind == Token::Kind::Arrow || (current_token.kind == Token::Kind::Operator && slice_eq?(current_token.slice, "=>"))
+                    advance
+                    skip_trivia
+                    value_type = parse_type_annotation
+                    # Build node and append
+                    span = lbrace_tok.span
+                    hash_node = @arena.add_typed(HashLiteralNode.new(span, [] of HashEntry, key_type, value_type))
+                    body_b << hash_node
+                    next
+                  end
+                end
+              end
+              # Not a typed empty hash; rewind and parse normally
+              @index = save_idx
+            end
+
             # Check for block terminator
             if is_brace_form
               break if current_token.kind == Token::Kind::RBrace
@@ -4424,12 +4474,21 @@ module CrystalV2
               next_token = peek_next_non_trivia
               is_accessor = (next_token.kind == Token::Kind::Identifier || is_keyword_identifier?(next_token))
 
-              if is_accessor && slice_eq?(token.slice, "getter")
-                expr = parse_accessor_macro(:getter)
-              elsif is_accessor && slice_eq?(token.slice, "setter")
-                expr = parse_accessor_macro(:setter)
-              elsif is_accessor && slice_eq?(token.slice, "property")
-                expr = parse_accessor_macro(:property)
+              if is_accessor && accessor_macro_callee?(token)
+                name = token.slice
+                base = if name.size > 0 && name[name.size - 1] == '?'.ord.to_u8
+                  Slice.new(name.to_unsafe, name.size - 1)
+                else
+                  name
+                end
+                kind = if slice_eq?(base, "getter") || slice_eq?(base, "class_getter")
+                  :getter
+                elsif slice_eq?(base, "setter") || slice_eq?(base, "class_setter")
+                  :setter
+                else
+                  :property
+                end
+                expr = parse_accessor_macro(kind)
               elsif definition_start?
                 expr = case current_token.kind
                   when Token::Kind::Def
@@ -5114,7 +5173,16 @@ module CrystalV2
                    raise "Unknown accessor kind: #{kind}"
                  end
 
-          @arena.add_typed(node)
+          result = @arena.add_typed(node)
+
+          # Optional block after accessor macro: getter x : T do ... end
+          consume_newlines
+          if current_token.kind == Token::Kind::Do || current_token.kind == Token::Kind::LBrace
+            blk = parse_block
+            blk unless blk.invalid?
+          end
+
+          result
         end
 
         # Helper: Check if token is a keyword that can be used as identifier in some contexts
@@ -5974,8 +6042,51 @@ module CrystalV2
               arg = @arena.add_typed(SplatNode.new(span, value_expr))
             else
               # Parse one argument
-              # Could be: positional arg, assignment as arg, or named arg
-              arg = parse_op_assign
+              # For typed macro callees (e.g., record), allow name : Type [= value]
+              if typed_macro_args_callee?(callee_token) && (current_token.kind == Token::Kind::Identifier || is_keyword_identifier?(current_token))
+                # Lookahead for ':' to confirm typed field
+                save_idx = @index
+                name_tok = current_token
+                advance
+                if current_token.kind == Token::Kind::Colon
+                  # Build declaration directly
+                  skip_whitespace_and_optional_newlines
+                  type_start = current_token
+                  type_slice = parse_type_annotation
+                  type_end = previous_token || type_start
+                  skip_whitespace_and_optional_newlines
+                  typed_value_expr : ExprId? = nil
+                  if current_token.kind == Token::Kind::Eq
+                    advance
+                    skip_whitespace_and_optional_newlines
+                    typed_value_expr = parse_op_assign
+                    if typed_value_expr.invalid?
+                      @parsing_call_args -= 1
+                      return PREFIX_ERROR
+                    end
+                  end
+                  full_span = if typed_value_expr
+                    name_tok.span.cover(@arena[typed_value_expr].span)
+                  else
+                    name_tok.span.cover(type_end.span)
+                  end
+                  arg = @arena.add_typed(
+                    TypeDeclarationNode.new(
+                      full_span,
+                      name_tok.slice,
+                      type_slice,
+                      typed_value_expr
+                    )
+                  )
+                else
+                  # Not a typed field, rewind and parse normally
+                  @index = save_idx
+                  arg = parse_op_assign
+                end
+              else
+                # Could be: positional arg, assignment as arg, or named arg
+                arg = parse_op_assign
+              end
             end
             if arg.invalid?
               @parsing_call_args -= 1
@@ -5986,7 +6097,7 @@ module CrystalV2
 
             # Check if this is a named argument: identifier followed by colon
             # Accessor-like macro arguments: name : Type [= value]
-            if accessor_macro_callee?(callee_token)
+            if typed_macro_args_callee?(callee_token)
               arg_node = @arena[arg]
               if Frontend.node_kind(arg_node) == Frontend::NodeKind::Identifier && current_token.kind == Token::Kind::Colon
                 name_span = arg_node.span
@@ -6886,7 +6997,7 @@ module CrystalV2
           skip_trivia
 
           # Phase 91: Check for "of Type" after closing bracket
-          if current_token.kind == Token::Kind::Of
+          if current_token.kind == Token::Kind::Of || (current_token.kind == Token::Kind::Identifier && slice_eq?(current_token.slice, "of"))
             advance
             skip_trivia
 
@@ -7095,7 +7206,7 @@ module CrystalV2
                 skip_trivia
 
                 # Expect =>
-                unless current_token.kind == Token::Kind::Arrow
+                unless current_token.kind == Token::Kind::Arrow || (current_token.kind == Token::Kind::Operator && slice_eq?(current_token.slice, "=>"))
                   emit_unexpected(current_token)
                   return PREFIX_ERROR
                 end
@@ -7187,7 +7298,7 @@ module CrystalV2
           hash_span = lbrace.span.cover(closing_brace.span)
           @arena.add_typed(HashLiteralNode.new(
             hash_span,
-            entries,
+            entries_b.to_a,
             of_key_type,
             of_value_type
           ))
