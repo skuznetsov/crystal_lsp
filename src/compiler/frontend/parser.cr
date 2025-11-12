@@ -3582,28 +3582,28 @@ module CrystalV2
           )
         end
 
-        # Phase 98: Parse out keyword (C bindings output parameter)
-        # Grammar: out identifier
+        # Phase 98: Parse out keyword (output parameter)
+        # Grammar: out identifier | out @ivar | out @@cvar | out $gvar
         private def parse_out : ExprId
           out_token = current_token
           advance
           skip_trivia
 
-          # Expect identifier
-          unless current_token.kind == Token::Kind::Identifier
-            emit_unexpected(current_token)
+          # Accept identifier/instance/class/global variable as out target
+          id_token = current_token
+          case id_token.kind
+          when Token::Kind::Identifier, Token::Kind::InstanceVar, Token::Kind::ClassVar, Token::Kind::GlobalVar
+            advance
+            @arena.add_typed(
+              OutNode.new(
+                out_token.span.cover(id_token.span),
+                id_token.slice
+              )
+            )
+          else
+            emit_unexpected(id_token)
             return PREFIX_ERROR
           end
-
-          identifier_token = current_token
-          advance
-
-          @arena.add_typed(
-            OutNode.new(
-              out_token.span.cover(identifier_token.span),
-              identifier_token.slice
-            )
-          )
         end
 
         # Phase 10: Parse block
