@@ -6848,6 +6848,9 @@ module CrystalV2
               skip_statement_end
             end
             case current_token.kind
+            when Token::Kind::Newline
+              advance
+              next
             when Token::Kind::RBrace
               # End of named tuple
               break
