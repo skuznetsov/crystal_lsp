@@ -523,7 +523,8 @@ module CrystalV2
             assign_token = token
             is_compound = assign_token.kind != Token::Kind::Eq
             advance
-            skip_trivia
+            # Allow newline after '=' in assignments
+            skip_statement_end
 
             # Parse right-hand side expression
             rhs = parse_expression(0)
