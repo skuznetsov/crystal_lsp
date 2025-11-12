@@ -64,8 +64,23 @@ module CrystalV2
           when byte == DOUBLE_QUOTE
             lex_string
           when byte == BACKTICK
-            # Command literal with interpolation: `...` (treated as string-like token)
-            lex_backtick
+            # Disambiguate between backtick command literal and backtick method name.
+            # If the last significant token was `def`, a backtick denotes the
+            # special backtick operator method name (def `(args)), not a command
+            # literal. In that case, emit a single-character Operator token and
+            # let the parser handle the method name.
+            if @last_token_kind == Token::Kind::Def
+              start_offset, start_line, start_column = capture_position
+              advance # consume the backtick character
+              Token.new(
+                Token::Kind::Operator,
+                Bytes[BACKTICK],
+                build_span(start_offset, start_line, start_column)
+              )
+            else
+              # Command literal with optional interpolation: `...`
+              lex_backtick
+            end
           when byte == SINGLE_QUOTE
             # Phase 56: Character literals
             lex_char
