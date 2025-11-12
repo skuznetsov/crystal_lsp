@@ -6843,6 +6843,10 @@ module CrystalV2
           loop do
             # Allow newlines between entries
             skip_whitespace_and_optional_newlines
+            # Be extra permissive: also tolerate standalone newlines
+            if current_token.kind == Token::Kind::Newline
+              skip_statement_end
+            end
             case current_token.kind
             when Token::Kind::RBrace
               # End of named tuple
