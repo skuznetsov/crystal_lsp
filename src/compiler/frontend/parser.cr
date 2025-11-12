@@ -84,6 +84,14 @@ module CrystalV2
           end
         end
 
+        # Recognize accessor-like macros where arguments may be type declarations
+        private def accessor_macro_callee?(callee_token : Token) : Bool
+          return false unless callee_token.kind == Token::Kind::Identifier
+          slice = callee_token.slice
+          slice_eq?(slice, "getter") || slice_eq?(slice, "setter") || slice_eq?(slice, "property") ||
+            slice_eq?(slice, "class_getter") || slice_eq?(slice, "class_setter") || slice_eq?(slice, "class_property")
+        end
+
         private def parse_block_body_with_optional_rescue : Tuple(Array(ExprId), Array(RescueClause)?, Array(ExprId)?)
           body_ids_b = SmallVec(ExprId, 4).new
           loop do
@@ -1057,7 +1065,8 @@ module CrystalV2
                  Token::Kind::LParen, Token::Kind::RParen,  # Phase 30: generics like Array(Int32)
                  Token::Kind::Comma,  # Phase 30: multiple generic params Hash(K, V)
                  Token::Kind::LBracket, Token::Kind::RBracket,  # Static arrays Type[N]
-                 Token::Kind::LBrace, Token::Kind::RBrace,  # Tuple literals {A, B}
+                 Token::Kind::LBrace, Token::Kind::RBrace,  # Tuple/named tuple literals {A, B} / {k: V}
+                 Token::Kind::Colon,  # Named tuple key separator in type context
                  Token::Kind::Question,  # Nullable types Type?
                  Token::Kind::Star, Token::Kind::StarStar  # Pointer suffixes Type*, Type**
               true
@@ -1974,7 +1983,8 @@ module CrystalV2
           if token.kind == Token::Kind::Then
             advance
           end
-          consume_newlines
+          # Allow separators after header (supports one-liners like `struct X; end`)
+          skip_statement_end
 
           # Parse then body
           then_body_b = SmallVec(ExprId, 4).new
@@ -2062,7 +2072,8 @@ module CrystalV2
 
           expect_identifier("end")
           end_token = previous_token
-          consume_newlines
+          # Allow separators after header (supports one-liners like `struct X; end`)
+          skip_statement_end
 
           if_span = if end_token
             if_token.span.cover(end_token.span)
@@ -2106,7 +2117,8 @@ module CrystalV2
           if token.kind == Token::Kind::Then
             advance
           end
-          consume_newlines
+          # Allow separators after header (supports one-liners like `struct X; end`)
+          skip_statement_end
 
           # Parse then body (executed when condition is false)
           then_body_b = SmallVec(ExprId, 4).new
@@ -2145,7 +2157,8 @@ module CrystalV2
 
           expect_identifier("end")
           end_token = previous_token
-          consume_newlines
+          # Allow separators after header (supports one-liners like `struct X; end`)
+          skip_statement_end
 
           unless_span = if end_token
             unless_token.span.cover(end_token.span)
@@ -2378,7 +2391,8 @@ module CrystalV2
         private def parse_select : ExprId
           select_token = current_token
           advance
-          consume_newlines
+          # Allow separators after header (supports one-liners like `struct X; end`)
+          skip_statement_end
 
           # Parse when branches
           select_branches_b = SmallVec(SelectBranch, 4).new
@@ -2454,7 +2468,8 @@ module CrystalV2
 
           expect_identifier("end")
           end_token = previous_token
-          consume_newlines
+          # Allow separators after header (supports one-liners like `struct X; end`)
+          skip_statement_end
 
           select_span = if end_token
             select_token.span.cover(end_token.span)
@@ -2972,14 +2987,16 @@ module CrystalV2
           # Parse body
           body_ids_b = SmallVec(ExprId, 4).new
           loop do
-            skip_trivia
+            # Tolerate newlines and semicolons between members
+            skip_statement_end
             token = current_token
             break if token.kind == Token::Kind::End
             break if token.kind == Token::Kind::EOF
 
             expr = parse_statement
             body_ids_b << expr unless expr.invalid?
-            consume_newlines
+            # Allow separators between members
+            skip_statement_end
           end
 
           expect_identifier("end")
@@ -4236,7 +4253,8 @@ module CrystalV2
             advance
           end
 
-          consume_newlines
+          # Allow separators after header (supports one-liners like `struct X; end`)
+          skip_statement_end
 
           body_ids_b = SmallVec(ExprId, 4).new
           loop do
@@ -5840,6 +5858,49 @@ module CrystalV2
             skip_trivia
 
             # Check if this is a named argument: identifier followed by colon
+            # Accessor-like macro arguments: name : Type [= value]
+            if accessor_macro_callee?(callee_token)
+              arg_node = @arena[arg]
+              if Frontend.node_kind(arg_node) == Frontend::NodeKind::Identifier && current_token.kind == Token::Kind::Colon
+                name_span = arg_node.span
+                name_slice = Frontend.node_literal(arg_node).not_nil!
+
+                advance  # consume ':'
+                skip_whitespace_and_optional_newlines
+
+                type_start_token = current_token
+                type_slice = parse_type_annotation
+                type_end_token = previous_token || type_start_token
+                skip_whitespace_and_optional_newlines
+
+                decl_value_expr : ExprId? = nil
+                if current_token.kind == Token::Kind::Eq
+                  advance
+                  skip_whitespace_and_optional_newlines
+                  decl_value_expr = parse_op_assign
+                  return PREFIX_ERROR if decl_value_expr.invalid?
+                end
+
+                full_span = if decl_value_expr
+                  name_span.cover(@arena[decl_value_expr].span)
+                else
+                  name_span.cover(type_end_token.span)
+                end
+
+                decl = @arena.add_typed(
+                  TypeDeclarationNode.new(
+                    full_span,
+                    name_slice,
+                    type_slice,
+                    decl_value_expr
+                  )
+                )
+                args_b << decl
+                skip_trivia
+                next
+              end
+            end
+
             # Pattern: name: value
             arg_node = @arena[arg]
             if Frontend.node_kind(arg_node) == Frontend::NodeKind::Identifier &&
