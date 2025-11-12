@@ -1245,9 +1245,12 @@ module CrystalV2
           end
 
           skip_macro_parameters
-          consume_newlines
+          # Allow immediate separators after header (e.g., `struct X; end`)
+          skip_statement_end
 
           pieces, trim_left, trim_right = parse_macro_body
+          # Allow trailing separators before 'end'
+          skip_statement_end
           expect_identifier("end")
           end_token = previous_token
           consume_newlines
@@ -2445,14 +2448,16 @@ module CrystalV2
           # Parse body
           body_ids_b = SmallVec(ExprId, 4).new
           loop do
-            skip_trivia
+            # Allow statement separators inside class/struct bodies
+            skip_statement_end
             token = current_token
             break if token.kind == Token::Kind::End
             break if token.kind == Token::Kind::EOF
 
             expr = parse_statement
             body_ids_b << expr unless expr.invalid?
-            consume_newlines
+            # Allow separators between members
+            skip_statement_end
           end
 
           expect_identifier("end")
@@ -6867,13 +6872,14 @@ module CrystalV2
             # "=>" → this is a hash
             return parse_hash_literal_continued(lbrace, first_elem)
           when Token::Kind::Colon
-            # ":" → check if first_elem is identifier for named tuple
+            # ":" → named tuple if first element is a valid key
             first_node = @arena[first_elem]
-            if Frontend.node_kind(first_node) == Frontend::NodeKind::Identifier
-              # identifier: value → named tuple
+            kind = Frontend.node_kind(first_node)
+            if kind == Frontend::NodeKind::Identifier ||
+               kind == Frontend::NodeKind::Nil ||
+               kind == Frontend::NodeKind::Bool
               return parse_named_tuple_literal_continued(lbrace, first_elem)
             else
-              # non-identifier: value → error
               emit_unexpected(current_token)
               return PREFIX_ERROR
             end
@@ -7022,13 +7028,17 @@ module CrystalV2
                 break
               end
 
-              # Parse key (must be identifier)
+              # Parse key (identifier or selected keywords like nil/true/false)
               key_token = current_token
-              unless key_token.kind == Token::Kind::Identifier
+              valid_key = key_token.kind == Token::Kind::Identifier ||
+                          key_token.kind == Token::Kind::Nil ||
+                          key_token.kind == Token::Kind::True ||
+                          key_token.kind == Token::Kind::False
+              unless valid_key
                 emit_unexpected(key_token)
                 return PREFIX_ERROR
               end
-              key = key_token.slice  # TIER 2.3: Zero-copy slice
+              key = key_token.slice  # TIER 2.3: Zero-copy slice (includes keyword text)
               key_span = key_token.span
               advance
               skip_whitespace_and_optional_newlines
