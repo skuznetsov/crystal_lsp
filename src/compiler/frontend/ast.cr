@@ -1563,6 +1563,13 @@ module CrystalV2
         NodeKind::Call
       end
 
+      def self.node_kind(node : SplatNode) : NodeKind
+        # There is no dedicated NodeKind for SplatNode in this lightweight
+        # classification. Treat it as a Call argument-level construct; most
+        # places won't branch on this. We can reuse Unary as closest fit.
+        NodeKind::Unary
+      end
+
       def self.node_kind(node : IfNode) : NodeKind
         NodeKind::If
       end

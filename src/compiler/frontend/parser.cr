@@ -369,11 +369,16 @@ module CrystalV2
             return parse_postfix_if_modifier(stmt)
           end
 
-          # Phase 39: super statements
-          if current_token.kind == Token::Kind::Super
-            stmt = parse_super
-            return parse_postfix_if_modifier(stmt)
-          end
+          # Phase 39: super as statement (removed)
+          # Upstream Crystal treats `super` as an expression, which allows
+          # constructs like `super || fallback` to parse as a binary
+          # expression. Special-casing `super` here short-circuits statement
+          # parsing and prevents the binary/infix layer from seeing the
+          # following operator, leading to diagnostics such as
+          # "unexpected OrOr". We therefore do not handle `super` in
+          # parse_statement and let it flow through the regular
+          # expression/infix pipeline via `parse_op_assign` -> `parse_expression`.
+          # Postfix modifiers (if/unless) are still handled in `parse_prefix`.
 
           # Phase 96: previous_def statements
           if current_token.kind == Token::Kind::PreviousDef
@@ -7788,10 +7793,40 @@ module CrystalV2
           closing_brace = current_token
           advance
 
+          # Optional trailing "of K => V" after non-empty hash
+          of_key_type : Slice(UInt8)? = nil
+          of_value_type : Slice(UInt8)? = nil
+          skip_trivia
+          if current_token.kind == Token::Kind::Of || (current_token.kind == Token::Kind::Identifier && slice_eq?(current_token.slice, "of"))
+            advance
+            skip_trivia
+            key_type = parse_type_annotation
+            if key_type.empty?
+              emit_unexpected(current_token)
+              return PREFIX_ERROR
+            end
+            of_key_type = key_type
+            skip_trivia
+            unless current_token.kind == Token::Kind::Arrow || (current_token.kind == Token::Kind::Operator && slice_eq?(current_token.slice, "=>"))
+              emit_unexpected(current_token)
+              return PREFIX_ERROR
+            end
+            advance
+            skip_trivia
+            value_type = parse_type_annotation
+            if value_type.empty?
+              emit_unexpected(current_token)
+              return PREFIX_ERROR
+            end
+            of_value_type = value_type
+          end
+
           hash_span = lbrace.span.cover(closing_brace.span)
           @arena.add_typed(HashLiteralNode.new(
             hash_span,
-            entries_b.to_a
+            entries_b.to_a,
+            of_key_type,
+            of_value_type
           ))
         end
 
@@ -8451,6 +8486,12 @@ module CrystalV2
                Token::Kind::Amp,
                Token::Kind::LBrace, Token::Kind::Do,
                Token::Kind::Eq, Token::Kind::Colon,
+               Token::Kind::OrOrEq, Token::Kind::AndAndEq,
+               Token::Kind::PlusEq, Token::Kind::MinusEq, Token::Kind::StarEq,
+               Token::Kind::SlashEq, Token::Kind::FloorDivEq, Token::Kind::PercentEq,
+               Token::Kind::StarStarEq, Token::Kind::AmpEq, Token::Kind::PipeEq,
+               Token::Kind::CaretEq, Token::Kind::LShiftEq, Token::Kind::RShiftEq,
+               Token::Kind::NilCoalesceEq,
                Token::Kind::NilCoalesce,
                Token::Kind::Plus, Token::Kind::Minus, Token::Kind::Star, Token::Kind::StarStar,
                Token::Kind::Slash, Token::Kind::FloorDiv, Token::Kind::Percent,
