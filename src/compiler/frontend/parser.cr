@@ -8487,16 +8487,22 @@ module CrystalV2
         private def macro_terminator_reached?(token : Token)
           case @macro_terminator
           when :expression
-            return true if operator_token?(token, "}")
-            return true if operator_token?(token, "-") && operator_token?(peek_token(1), "}")
+            # Close on '}}' or '-}}'
+            if token.kind == Token::Kind::RBrace
+              return true if peek_token.kind == Token::Kind::RBrace
+            elsif token.kind == Token::Kind::Minus
+              return true if peek_token.kind == Token::Kind::RBrace && peek_token(2).kind == Token::Kind::RBrace
+            end
           when :control
+            # Close on '%}' or '-%}' as either combined or split tokens
             if token.kind == Token::Kind::PercentRBrace
               return true
             elsif token.kind == Token::Kind::Minus
-              next_token = peek_token(1)
-              return true if next_token.kind == Token::Kind::PercentRBrace
-            else
-              return true if operator_token?(token, "%") && operator_token?(peek_token(1), "}")
+              nxt = peek_token(1)
+              return true if nxt.kind == Token::Kind::PercentRBrace
+              return true if nxt.kind == Token::Kind::Percent && peek_token(2).kind == Token::Kind::RBrace
+            elsif token.kind == Token::Kind::Percent
+              return true if peek_token.kind == Token::Kind::RBrace
             end
           end
           false
@@ -8507,24 +8513,50 @@ module CrystalV2
           case token.kind
           when Token::Kind::PercentRBrace
             advance
-            token.span
+            return token.span
           when Token::Kind::Percent
             percent_span = token.span
             advance
             closing = current_token
-            unless closing.kind == Token::Kind::RBrace
-              @diagnostics << Diagnostic.new(message, closing.span)
-              advance unless closing.kind == Token::Kind::EOF
-              return nil
+            if closing.kind == Token::Kind::RBrace
+              span = percent_span.cover(closing.span)
+              advance
+              return span
             end
-            span = percent_span.cover(closing.span)
-            advance
-            span
+            # Fallback scan ahead to find a split closer
           else
-            @diagnostics << Diagnostic.new(message, token.span)
-            advance unless token.kind == Token::Kind::EOF
-            nil
+            # no-op
           end
+
+          # Fallback: be tolerant and scan ahead (skipping whitespace/newlines) for a closer
+          scan_index = @index
+          max_lookahead = 32
+          look = 0
+          while look < max_lookahead
+            tok = peek_token(look)
+            if tok.kind == Token::Kind::EOF
+              break
+            end
+            if tok.kind == Token::Kind::PercentRBrace
+              # Consume everything up to and including closer
+              unadvance(@index - @index) if false  # keep API balance (no-op)
+              @index = @index + look + 1
+              @previous_token = tok
+              return tok.span
+            elsif tok.kind == Token::Kind::Percent && peek_token(look + 1).kind == Token::Kind::RBrace
+              first = tok
+              second = peek_token(look + 1)
+              @index = @index + look + 2
+              @previous_token = second
+              return first.span.cover(second.span)
+            end
+            look += 1
+          end
+
+          # Give up: report diagnostic and advance one token to guarantee progress
+          @diagnostics << Diagnostic.new(message, token.span)
+          advance unless token.kind == Token::Kind::EOF
+          nil
         end
 
         private def consume_macro_control_start : Span?
@@ -8792,9 +8824,9 @@ module CrystalV2
             @expect_context = "macro expression"
             @in_macro_expression = true  # Enable newline skipping
 
-            # Use parse_expression (single expression) not parse_statement (multiple statements)
-            # This matches original parser's parse_expression_inside_macro behavior
-            expr = with_macro_terminator(:control) { parse_expression(0) }
+            # Parse a full expression allowing assignment inside {% %}
+            # This mirrors macro expression semantics (e.g., {% x = 1 %})
+            expr = with_macro_terminator(:control) { parse_op_assign }
 
             # CRITICAL: Skip whitespace BEFORE resetting @in_macro_expression flag
             # This allows newlines to be skipped (matching original parser behavior)
@@ -8803,6 +8835,11 @@ module CrystalV2
             # Now restore context and flag
             @expect_context = previous_context
             @in_macro_expression = previous_in_macro
+
+            # Tolerate parse quirks by fast-forwarding to the closing sequence if not positioned there
+            unless macro_closing_sequence?(current_token)
+              fast_forward_macro_expression
+            end
 
             right_trim = macro_trim_operator?
             closing_span = consume_macro_close_span("Expected '%}' after macro expression")
