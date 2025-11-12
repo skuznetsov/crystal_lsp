@@ -2151,7 +2151,8 @@ module CrystalV2
               skip_trivia
               break unless current_token.kind == Token::Kind::Comma
               advance  # consume comma
-              consume_newlines  # Phase 103: allow newlines after comma
+            # Allow statement separators (newlines/semicolons) after comma
+            skip_statement_end
             end
 
             skip_trivia
@@ -2161,7 +2162,8 @@ module CrystalV2
               advance
             end
 
-            consume_newlines
+            # Allow statement separators before the branch body
+            skip_statement_end
 
             # Parse when body
             when_body_b = SmallVec(ExprId, 2).new
@@ -2172,7 +2174,8 @@ module CrystalV2
 
               stmt = parse_statement
               when_body_b << stmt unless stmt.invalid?
-              consume_newlines
+              # Allow statement separators between statements in branch body
+              skip_statement_end
             end
 
             # Capture when span
@@ -2211,7 +2214,8 @@ module CrystalV2
                 skip_trivia
                 break unless current_token.kind == Token::Kind::Comma
                 advance  # consume comma
-                consume_newlines
+                # Allow statement separators after comma in patterns list
+                skip_statement_end
               end
 
               skip_trivia
@@ -2221,7 +2225,8 @@ module CrystalV2
                 advance
               end
 
-              consume_newlines
+              # Allow statement separators before the branch body
+              skip_statement_end
 
               # Parse in body
               in_body_b = SmallVec(ExprId, 2).new
@@ -2232,7 +2237,8 @@ module CrystalV2
 
                 stmt = parse_statement
                 in_body_b << stmt unless stmt.invalid?
-                consume_newlines
+                # Allow statement separators between statements in branch body
+                skip_statement_end
               end
 
               # Capture in span
@@ -2253,7 +2259,8 @@ module CrystalV2
           token = current_token
           if token.kind == Token::Kind::Else
             advance
-            consume_newlines
+            # Allow statement separators before else body
+            skip_statement_end
 
             else_body_b = SmallVec(ExprId, 4).new
             loop do
@@ -2265,7 +2272,8 @@ module CrystalV2
 
               expr = parse_statement
               else_body_b << expr unless expr.invalid?
-              consume_newlines
+              # Allow statement separators between statements in else body
+              skip_statement_end
             end
           end
 
