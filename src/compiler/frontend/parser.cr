@@ -3282,7 +3282,10 @@ module CrystalV2
         end
 
         # Phase 41: Parse sizeof (size in bytes)
-        # Grammar: sizeof(expr) | sizeof(expr1, expr2, ...)
+        # Grammar: sizeof(type) | sizeof(expr) | sizeof(arg1, arg2, ...)
+        # Each arg may be either a type annotation (e.g., Void*, LibC::X, {Int32, Int32})
+        # or a regular expression. This mirrors typeof() parsing strategy but
+        # materializes a SizeofNode.
         private def parse_sizeof : ExprId
           sizeof_token = current_token
           advance
@@ -3298,10 +3301,19 @@ module CrystalV2
 
           args_b = SmallVec(ExprId, 2).new
 
-          # Parse at least one argument
+          # Parse at least one argument (type-or-expr)
           loop do
-            arg = parse_expression(0)
-            return PREFIX_ERROR if arg.invalid?
+            # Try to parse a type annotation first
+            type_start = current_token
+            type_slice = parse_type_annotation
+            if previous_token && (type_start.span != current_token.span)
+              # Consumed something as type; wrap as IdentifierNode carrying the slice
+              arg = @arena.add_typed(IdentifierNode.new(type_start.span.cover(previous_token.not_nil!.span), @string_pool.intern(type_slice)))
+            else
+              # Fallback to expression parsing
+              arg = parse_expression(0)
+              return PREFIX_ERROR if arg.invalid?
+            end
             args_b << arg
 
             skip_trivia
