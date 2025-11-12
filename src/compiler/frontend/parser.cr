@@ -253,7 +253,7 @@ module CrystalV2
           # types in method headers).
           if current_token.kind == Token::Kind::RParen
             advance
-            skip_trivia
+            skip_whitespace_and_optional_newlines
             return parse_statement
           end
 
@@ -6344,10 +6344,19 @@ module CrystalV2
         private def parse_grouping : ExprId
           lparen = current_token
           advance
-          # Phase 103H: Call parse_op_assign to support assignments in parentheses
-          # Example: (x = y) or if (queue = @queue) && !queue.empty?
+          # Parse first expression
           expr = parse_op_assign
           return PREFIX_ERROR if expr.invalid?
+          # Allow multiple expressions separated by ';' inside parentheses; return last
+          loop do
+            skip_trivia
+            break unless current_token.kind == Token::Kind::Semicolon
+            advance
+            skip_whitespace_and_optional_newlines
+            next_expr = parse_op_assign
+            return PREFIX_ERROR if next_expr.invalid?
+            expr = next_expr
+          end
           expect_operator(Token::Kind::RParen)
           closing_span = previous_token.try(&.span)
           grouping_span = cover_optional_spans(lparen.span, node_span(expr), closing_span)
