@@ -5832,7 +5832,11 @@ module CrystalV2
           return PREFIX_ERROR if left.invalid?
 
           loop do
-            skip_trivia
+            if inside_delimiters?
+              skip_whitespace_and_optional_newlines
+            else
+              skip_trivia
+            end
             token = current_token
             debug("parse_expression(#{precedence}): postfix loop, token=#{token.kind}")
             if macro_terminator_reached?(token)
@@ -6305,11 +6309,34 @@ module CrystalV2
                 parse_percent_macro_expression
               else
                 # Phase 14/15: Hash or Tuple literal (disambiguated by presence of =>)
-                parse_hash_or_tuple
+                saved_index = @index
+                saved_prev = @previous_token
+                saved_brace = @brace_depth
+                node = parse_hash_or_tuple
+                if node.invalid?
+                  # Fallback: tolerant tuple literal parser
+                  @index = saved_index
+                  @previous_token = saved_prev
+                  @brace_depth = saved_brace
+                  parse_brace_tuple_fallback
+                else
+                  node
+                end
               end
             else
               # Outside macro bodies treat {{...}} as nested literals (e.g. tuples)
-              parse_hash_or_tuple
+              saved_index = @index
+              saved_prev = @previous_token
+              saved_brace = @brace_depth
+              node = parse_hash_or_tuple
+              if node.invalid?
+                @index = saved_index
+                @previous_token = saved_prev
+                @brace_depth = saved_brace
+                parse_brace_tuple_fallback
+              else
+                node
+              end
             end
           when Token::Kind::ThinArrow
             # Phase 74: Proc literal (->(x) { ... })
@@ -6376,15 +6403,17 @@ module CrystalV2
         end
 
         # Phase 103H: Grouping (parentheses) - supports assignments like (x = y)
+        # and tolerates newlines inside parentheses
         private def parse_grouping : ExprId
           lparen = current_token
           advance
-          # Parse first expression
+          @paren_depth += 1  # Entering parentheses context
+          # Parse first expression (allow assignments)
           expr = parse_op_assign
           return PREFIX_ERROR if expr.invalid?
           # Allow multiple expressions separated by ';' inside parentheses; return last
           loop do
-            skip_trivia
+            skip_whitespace_and_optional_newlines
             break unless current_token.kind == Token::Kind::Semicolon
             advance
             skip_whitespace_and_optional_newlines
@@ -6393,6 +6422,7 @@ module CrystalV2
             expr = next_expr
           end
           expect_operator(Token::Kind::RParen)
+          @paren_depth -= 1  # Exiting parentheses context
           closing_span = previous_token.try(&.span)
           grouping_span = cover_optional_spans(lparen.span, node_span(expr), closing_span)
           @arena.add_typed(GroupingNode.new(grouping_span, expr))
@@ -6869,12 +6899,46 @@ module CrystalV2
 
           closing_brace = current_token
           advance
+          # Balance brace depth started in parse_hash_or_tuple
+          @brace_depth -= 1 if @brace_depth > 0
 
           tuple_span = lbrace.span.cover(closing_brace.span)
           @arena.add_typed(TupleLiteralNode.new(
             tuple_span,
             elements
           ))
+        end
+
+        # Tolerant fallback for tuple literal: {expr, expr, ...}
+        # Used only when parse_hash_or_tuple fails (should be rare)
+        private def parse_brace_tuple_fallback : ExprId
+          lbrace = current_token
+          advance
+          @brace_depth += 1
+          elements = [] of ExprId
+          skip_whitespace_and_optional_newlines
+
+          unless current_token.kind == Token::Kind::RBrace
+            loop do
+              elem = parse_expression(0)
+              return PREFIX_ERROR if elem.invalid?
+              elements << elem
+              skip_whitespace_and_optional_newlines
+              break if current_token.kind == Token::Kind::RBrace
+              unless current_token.kind == Token::Kind::Comma
+                emit_unexpected(current_token)
+                return PREFIX_ERROR
+              end
+              advance
+              skip_whitespace_and_optional_newlines
+            end
+          end
+
+          closing = current_token
+          advance
+          @brace_depth -= 1 if @brace_depth > 0
+          span = lbrace.span.cover(closing.span)
+          @arena.add_typed(TupleLiteralNode.new(span, elements))
         end
 
         # Phase 70: Continue parsing named tuple literal after first key
