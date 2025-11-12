@@ -9703,7 +9703,8 @@ module CrystalV2
 
             has_return_type = case current_token.kind
                               when Token::Kind::Identifier, Token::Kind::Self,
-                                   Token::Kind::Typeof, Token::Kind::LParen
+                                   Token::Kind::Typeof, Token::Kind::LParen,
+                                   Token::Kind::LBrace
                                 true
                               else
                                 false
@@ -9761,7 +9762,8 @@ module CrystalV2
           # Check if there's a type after the arrow
           has_return_type = case current_token.kind
                             when Token::Kind::Identifier, Token::Kind::Self,
-                                 Token::Kind::Typeof, Token::Kind::LParen
+                                 Token::Kind::Typeof, Token::Kind::LParen,
+                                 Token::Kind::LBrace
                               true
                             else
                               false
