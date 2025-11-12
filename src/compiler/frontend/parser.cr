@@ -253,7 +253,8 @@ module CrystalV2
           # types in method headers).
           if current_token.kind == Token::Kind::RParen
             advance
-            skip_whitespace_and_optional_newlines
+            # Allow newline after '=' in assignments
+            skip_statement_end
             return parse_statement
           end
 
