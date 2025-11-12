@@ -1164,8 +1164,9 @@ module CrystalV2
               Token::Kind::PercentEq  # Phase 20: Compound assignment
             else
               # Try to parse as percent literal (%(), %w(), %i(), etc)
+              # Only when context allows starting a literal (not after 'def', etc.)
               # Note: we already advanced past '%', so we're at next char
-              if token = scan_percent_literal(start_offset, start_line, start_column)
+              if percent_literal_allowed? && (token = scan_percent_literal(start_offset, start_line, start_column))
                 return token
               else
                 # Not a percent literal, treat as modulo operator
@@ -1862,6 +1863,13 @@ module CrystalV2
           is_identifier_start?(byte) ||
             (byte >= '0'.ord.to_u8 && byte <= '9'.ord.to_u8)
         end
+      end
+
+      # Heuristic: percent literal can start only in expression-start contexts.
+      # Minimal safeguard: disallow immediately after 'def' (method header), so
+      # 'def %(x)' is parsed as operator method name, not a percent literal.
+      private def percent_literal_allowed? : Bool
+        @last_token_kind != Token::Kind::Def
       end
     end
   end
