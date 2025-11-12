@@ -6271,6 +6271,13 @@ module CrystalV2
           when Token::Kind::ThinArrow
             # Phase 74: Proc literal (->(x) { ... })
             parse_proc_literal
+          when Token::Kind::DotDot, Token::Kind::DotDotDot
+            # Beginless/endless/full range literal used as value (e.g., point_range: ..)
+            range_token = token
+            advance
+            nil_begin = @arena.add_typed(NilNode.new(range_token.span))
+            nil_end = @arena.add_typed(NilNode.new(range_token.span))
+            @arena.add_typed(RangeNode.new(range_token.span, nil_begin, nil_end, range_token.kind == Token::Kind::DotDotDot))
           when Token::Kind::Operator
             # Phase IMPLICIT_RECEIVER: Handle implicit receiver (.method)
             # Phase ANNOTATIONS: Handle annotations (@[...])
