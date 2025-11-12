@@ -347,6 +347,25 @@ module CrystalV2
             return parse_extend
           end
 
+          # Fast-path: tuple/hash literal at statement start
+          if current_token.kind == Token::Kind::LBrace
+            nxt = peek_token
+            unless nxt.kind == Token::Kind::Percent || nxt.kind == Token::Kind::LBrace
+              # Not a macro; try tolerant tuple first, then full disambiguation
+              saved_index = @index
+              saved_prev = @previous_token
+              saved_brace = @brace_depth
+              tuple_try = parse_brace_tuple_fallback
+              unless tuple_try.invalid?
+                return tuple_try
+              end
+              @index = saved_index
+              @previous_token = saved_prev
+              @brace_depth = saved_brace
+              return parse_hash_or_tuple
+            end
+          end
+
           # Parse expression or assignment (like original Crystal's parse_op_assign)
           # This handles: assignments, multiple assignments, type declarations
           left = parse_op_assign
@@ -6309,33 +6328,20 @@ module CrystalV2
                 parse_percent_macro_expression
               else
                 # Phase 14/15: Hash or Tuple literal (disambiguated by presence of =>)
-                saved_index = @index
-                saved_prev = @previous_token
-                saved_brace = @brace_depth
-                node = parse_hash_or_tuple
-                if node.invalid?
-                  # Fallback: tolerant tuple literal parser
-                  @index = saved_index
-                  @previous_token = saved_prev
-                  @brace_depth = saved_brace
+                kind = peek_brace_literal_kind
+                if kind == :tuple
                   parse_brace_tuple_fallback
                 else
-                  node
+                  parse_hash_or_tuple
                 end
               end
             else
               # Outside macro bodies treat {{...}} as nested literals (e.g. tuples)
-              saved_index = @index
-              saved_prev = @previous_token
-              saved_brace = @brace_depth
-              node = parse_hash_or_tuple
-              if node.invalid?
-                @index = saved_index
-                @previous_token = saved_prev
-                @brace_depth = saved_brace
+              kind = peek_brace_literal_kind
+              if kind == :tuple
                 parse_brace_tuple_fallback
               else
-                node
+                parse_hash_or_tuple
               end
             end
           when Token::Kind::ThinArrow
@@ -7053,7 +7059,10 @@ module CrystalV2
         # Phase 14: Parse empty hash literal
         private def parse_hash_literal_from_lbrace(lbrace : Token) : ExprId
           # Current token is RBrace
+          closing_brace = current_token
           advance  # consume }
+          # Balance the brace depth increment done in parse_hash_or_tuple
+          @brace_depth -= 1 if @brace_depth > 0
           skip_trivia
 
           entries = [] of HashEntry
@@ -7089,8 +7098,8 @@ module CrystalV2
             skip_trivia
           end
 
-          # Use lbrace span as start, current as end (after "of K => V" if present)
-          closing_span = lbrace.span.cover(lbrace.span)  # Minimal span for now
+          # Use lbrace..closing_brace as span
+          closing_span = lbrace.span.cover(closing_brace.span)
           @arena.add_typed(HashLiteralNode.new(
             closing_span,
             entries,
@@ -8484,6 +8493,73 @@ module CrystalV2
           return false unless current_token.kind == Token::Kind::LBracePercent
           next_token = peek_token
           macro_trim_token?(next_token)
+        end
+
+        # Peek ahead inside a '{' ... '}' literal to guess its kind without consuming tokens.
+        # Returns :hash, :named_tuple, :tuple, or :unknown (fallback to general parser).
+        private def peek_brace_literal_kind : Symbol
+          # We assume current_token is LBrace
+          idx = @index + 1
+          paren = 0; bracket = 0; brace = 0
+          last_non_trivia_kind = nil
+          last_non_trivia_idx = idx - 1
+          # Limit lookahead to avoid pathological cases
+          max_lookahead = 128
+          steps = 0
+
+          while steps < max_lookahead
+            ensure_token(idx)
+            break if idx >= @tokens.size
+            tok = @tokens[idx]
+
+            # Track non-trivia
+            if tok.kind != Token::Kind::Whitespace && tok.kind != Token::Kind::Newline && tok.kind != Token::Kind::Comment
+              last_non_trivia_kind = tok.kind
+              last_non_trivia_idx = idx
+            end
+
+            # Empty hash: immediately '}'
+            if brace == 0 && paren == 0 && bracket == 0 && tok.kind == Token::Kind::RBrace
+              return :hash  # {} is a hash in Crystal
+            end
+
+            # Track nesting
+            case tok.kind
+            when Token::Kind::LParen;   paren += 1
+            when Token::Kind::RParen;   paren -= 1 if paren > 0
+            when Token::Kind::LBracket; bracket += 1
+            when Token::Kind::RBracket; bracket -= 1 if bracket > 0
+            when Token::Kind::LBrace;   brace += 1
+            when Token::Kind::RBrace
+              if brace > 0
+                brace -= 1
+              else
+                # Top-level closing brace without prior decision → treat as tuple
+                return :tuple
+              end
+            end
+
+            if paren == 0 && bracket == 0 && brace == 0
+              # Top-level tokens that help disambiguate
+              if tok.kind == Token::Kind::Arrow
+                return :hash
+              elsif tok.kind == Token::Kind::Comma
+                return :tuple
+              elsif tok.kind == Token::Kind::Colon
+                # Named tuple only when previous non-trivia is Identifier and not part of '::'
+                prev2 = last_non_trivia_idx >= 1 ? @tokens[last_non_trivia_idx] : tok
+                next_tok = (ensure_token(idx + 1); idx + 1 < @tokens.size ? @tokens[idx + 1] : tok)
+                if last_non_trivia_kind == Token::Kind::Identifier && next_tok.kind != Token::Kind::Colon
+                  return :named_tuple
+                end
+              end
+            end
+
+            idx += 1
+            steps += 1
+          end
+
+          :unknown
         end
 
         private def macro_trim_token?(token : Token) : Bool
