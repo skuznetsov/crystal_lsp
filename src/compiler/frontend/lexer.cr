@@ -320,9 +320,19 @@ module CrystalV2
           # Consume $
           advance
 
-          # Global variable must start with identifier character
+          # Special-case: allow "$?" and "$!" global variables
+          if @offset < @rope.size && (current_byte == QUESTION || current_byte == EXCLAMATION)
+            advance
+            return Token.new(
+              Token::Kind::GlobalVar,
+              @string_pool.intern(@rope.bytes[from...@offset]),
+              build_span(start_offset, start_line, start_column)
+            )
+          end
+
+          # Global variable must start with identifier character otherwise
           if @offset >= @rope.size || !identifier_start?(current_byte)
-            # Invalid global variable - just $, return as operator
+            # Invalid global variable - just '$' as operator
             return Token.new(
               Token::Kind::Operator,
               @rope.bytes[from...@offset],
@@ -1474,6 +1484,13 @@ module CrystalV2
 
         private def ascii_number?(byte : UInt8) : Bool
           byte >= '0'.ord && byte <= '9'.ord
+        end
+
+        # Heuristic: percent literal can start only in expression-start contexts.
+        # Minimal safeguard: disallow immediately after 'def' (method header), so
+        # 'def %(x)' is parsed as operator method name, not a percent literal.
+        private def percent_literal_allowed? : Bool
+          @last_token_kind != Token::Kind::Def
         end
 
         # Phase PERCENT_LITERALS: Get closing delimiter for opening delimiter
