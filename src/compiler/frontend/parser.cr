@@ -5914,7 +5914,15 @@ module CrystalV2
               right = parse_expression(current_precedence + 1)
               @no_type_declaration -= 1
             else
-              right = parse_expression(current_precedence + 1)
+              # Special-case endless ranges: `a..` or `a...` → missing right side
+              if (token.kind == Token::Kind::DotDot || token.kind == Token::Kind::DotDotDot) &&
+                 (current_token.kind.in?(Token::Kind::RParen, Token::Kind::RBracket, Token::Kind::RBrace,
+                                          Token::Kind::Comma, Token::Kind::Semicolon, Token::Kind::End,
+                                          Token::Kind::Else, Token::Kind::Elsif, Token::Kind::Do, Token::Kind::LBrace))
+                right = @arena.add_typed(NilNode.new(current_token.span))
+              else
+                right = parse_expression(current_precedence + 1)
+              end
             end
             if right.invalid?
               left = PREFIX_ERROR
