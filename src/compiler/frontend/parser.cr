@@ -3727,6 +3727,8 @@ module CrystalV2
             stmt = parse_statement
             return PREFIX_ERROR if stmt.invalid?
             body_b << stmt
+            # Allow semicolons/newlines between statements inside blocks
+            skip_statement_end
           end
 
           # Consume closing delimiter
