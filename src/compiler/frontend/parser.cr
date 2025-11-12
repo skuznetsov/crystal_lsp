@@ -2315,11 +2315,13 @@ module CrystalV2
               advance
               skip_trivia
 
-              # Parse in pattern (same as when condition for parser)
-              # Type checker will handle pattern matching semantics
+              # Parse in pattern list. Accept both regular expressions and
+              # dot-predicate shorthand (e.g., `in .i8? then ...`).
+              # In the dot-predicate form we attach the member access to the
+              # case value when present so the AST remains consistent.
               patterns_b = SmallVec(ExprId, 2).new
               loop do
-                pattern = parse_expression(0)
+                pattern = parse_in_pattern_expr(value)
                 return PREFIX_ERROR if pattern.invalid?
                 patterns_b << pattern
 
@@ -2410,6 +2412,40 @@ module CrystalV2
               in_branches  # Phase PERCENT_LITERALS: pattern matching branches
             )
           )
+        end
+
+        # Parse a single `in`-pattern expression.
+        # Supports:
+        #  - Regular expression pattern (fallback to parse_expression)
+        #  - Dot-predicate shorthand: `.pred?` which is desugared into
+        #    a member access on the case value (when provided).
+        private def parse_in_pattern_expr(case_value : ExprId?) : ExprId
+          # Accept leading dot shorthand only when a case value exists
+          if case_value && current_token.kind == Token::Kind::Operator && slice_eq?(current_token.slice, ".")
+            dot = current_token
+            advance
+            skip_trivia
+
+            # Expect an identifier after the dot (supports suffix ?/!)
+            name = current_token
+            unless name.kind == Token::Kind::Identifier
+              emit_unexpected(name)
+              return PREFIX_ERROR
+            end
+            member_span = @arena[case_value.not_nil!].span.cover(dot.span).cover(name.span)
+            node = @arena.add_typed(
+              MemberAccessNode.new(
+                member_span,
+                case_value.not_nil!,
+                name.slice
+              )
+            )
+            advance
+            return node
+          end
+
+          # Fallback: regular expression
+          parse_expression(0)
         end
 
         # Phase 90A: Parse select (concurrent channel operation selection)
