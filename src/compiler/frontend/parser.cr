@@ -6856,7 +6856,7 @@ module CrystalV2
               break
             when Token::Kind::Comma
               advance  # consume comma
-              skip_trivia
+              skip_whitespace_and_optional_newlines
 
               # Allow trailing comma
               if current_token.kind == Token::Kind::RBrace
@@ -6872,7 +6872,7 @@ module CrystalV2
               key = key_token.slice  # TIER 2.3: Zero-copy slice
               key_span = key_token.span
               advance
-              skip_trivia
+              skip_whitespace_and_optional_newlines
 
               # Expect colon
               unless current_token.kind == Token::Kind::Colon
