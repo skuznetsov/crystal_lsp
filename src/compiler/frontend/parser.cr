@@ -6431,6 +6431,9 @@ module CrystalV2
           when Token::Kind::Case
             # Phase 11: case/when pattern matching
             parse_case
+          when Token::Kind::IsA
+            # Allow bare is_a?(Type) with implicit self receiver
+            parse_is_a_bare
           when Token::Kind::Select
             # Phase 90A: select/when concurrent channel operations
             parse_select
@@ -6702,6 +6705,57 @@ module CrystalV2
             advance
             PREFIX_ERROR
           end
+        end
+
+        # Bare is_a?(Type) with implicit self receiver
+        private def parse_is_a_bare : ExprId
+          is_a_token = current_token
+          advance
+          skip_trivia
+
+          # Expect '('
+          unless current_token.kind == Token::Kind::LParen
+            emit_unexpected(current_token)
+            return PREFIX_ERROR
+          end
+          lparen = current_token
+          advance
+          skip_trivia
+
+          # Parse target type using type annotation parser
+          type_start = current_token
+          target_type = parse_type_annotation
+          type_end = previous_token
+          unless type_end
+            emit_unexpected(type_start)
+            return PREFIX_ERROR
+          end
+          skip_trivia
+
+          # Expect ')'
+          unless current_token.kind == Token::Kind::RParen
+            emit_unexpected(current_token)
+            return PREFIX_ERROR
+          end
+          rparen = current_token
+          advance
+
+          # Receiver is implicit self
+          self_node = @arena.add_typed(SelfNode.new(is_a_token.span))
+
+          span = is_a_token.span
+            .cover(lparen.span)
+            .cover(type_start.span)
+            .cover(type_end.span)
+            .cover(rparen.span)
+
+          @arena.add_typed(
+            IsANode.new(
+              span,
+              self_node,
+              target_type
+            )
+          )
         end
 
         # Phase 103H: Grouping (parentheses) - supports assignments like (x = y)
