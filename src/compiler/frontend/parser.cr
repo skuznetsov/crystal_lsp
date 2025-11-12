@@ -1044,7 +1044,7 @@ module CrystalV2
             return PREFIX_ERROR
           end
           advance  # consume ':'
-          skip_trivia
+          skip_whitespace_and_optional_newlines
 
           # Parse type annotation (supports namespaces, generics, suffixes)
           type_start_token = current_token
@@ -3067,7 +3067,7 @@ module CrystalV2
               break if current_token.kind != Token::Kind::Comma
 
               advance  # consume comma
-              skip_trivia
+              skip_whitespace_and_optional_newlines
             end
 
             args = args_b.to_a
@@ -3646,7 +3646,7 @@ module CrystalV2
               param_name_span = name_token.span
               param_span = name_token.span
               advance
-              skip_trivia
+              skip_whitespace_and_optional_newlines
 
               # Support optional type annotation in block params: |x : Type|
               type_annotation : Slice(UInt8)? = nil
@@ -6871,13 +6871,13 @@ module CrystalV2
                 return PREFIX_ERROR
               end
               advance  # consume :
-              skip_trivia
+              skip_whitespace_and_optional_newlines
 
               # Parse value
               value = parse_expression(0)
               return PREFIX_ERROR if value.invalid?
               value_span = @arena[value].span
-              skip_trivia
+              skip_whitespace_and_optional_newlines
 
               # Create entry
               entries_b << NamedTupleEntry.new(
