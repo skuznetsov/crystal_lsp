@@ -5346,13 +5346,21 @@ module CrystalV2
           advance
           skip_trivia
 
-          # Expect identifier (method name)
+          # Expect method name: identifier, keyword-like, or operator (e.g., .>(0))
           method_token = current_token
-          unless method_token.kind == Token::Kind::Identifier
-            emit_unexpected(method_token)
-            return PREFIX_ERROR
+          case method_token.kind
+          when Token::Kind::Identifier
+            advance
+          else
+            # Allow operators and keywords as method names after '.'
+            # e.g., .>(0), .<(0), .is_a?(T)
+            # Accept any non-empty slice as a method name token
+            if method_token.slice.empty?
+              emit_unexpected(method_token)
+              return PREFIX_ERROR
+            end
+            advance
           end
-          advance
 
           # Create ImplicitObjNode as receiver
           implicit_obj = @arena.add_typed(ImplicitObjNode.new(dot_token.span))
