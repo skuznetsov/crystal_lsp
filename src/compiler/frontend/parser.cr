@@ -1550,7 +1550,8 @@ module CrystalV2
           expect_identifier("end")
           @expect_context = previous_context
           end_token = previous_token
-          consume_newlines
+          # Allow separators after header (supports one-liners like `struct X; end`)
+          skip_statement_end
         else
           # Abstract methods have no body, no 'end' keyword
           end_token = nil
@@ -1595,6 +1596,17 @@ module CrystalV2
             return PREFIX_ERROR
           end
           advance
+          # Support namespaced class/struct: class Foo::Bar
+          while current_token.kind == Token::Kind::ColonColon
+            advance
+            skip_trivia
+            if current_token.kind != Token::Kind::Identifier
+              emit_unexpected(current_token)
+              return PREFIX_ERROR
+            end
+            name_token = current_token
+            advance
+          end
           skip_trivia
 
           # Check for alias: fun name = real_name
@@ -2731,7 +2743,8 @@ module CrystalV2
           # Parse body
           body_ids_b = SmallVec(ExprId, 4).new
           loop do
-            skip_trivia
+            # Tolerate newlines and semicolons between members
+            skip_statement_end
             token = current_token
             break if token.kind == Token::Kind::End
             break if token.kind == Token::Kind::EOF
@@ -4193,6 +4206,17 @@ module CrystalV2
             return PREFIX_ERROR
           end
           advance
+          # Support namespaced module: module Foo::Bar
+          while current_token.kind == Token::Kind::ColonColon
+            advance
+            skip_trivia
+            if current_token.kind != Token::Kind::Identifier
+              emit_unexpected(current_token)
+              return PREFIX_ERROR
+            end
+            name_token = current_token
+            advance
+          end
 
           # Phase 61: Parse optional type parameters: (T, K, V)
           skip_trivia
@@ -4298,12 +4322,32 @@ module CrystalV2
                 # Phase 5B: Regular statement
                 expr = parse_statement
               end
+            elsif definition_start?
+              # Handle embedded definitions regardless of starting token (def/class/struct/etc.)
+              expr = case current_token.kind
+                when Token::Kind::Def      then parse_def
+                when Token::Kind::Fun      then parse_fun
+                when Token::Kind::Class    then parse_class
+                when Token::Kind::Module   then parse_module
+                when Token::Kind::Struct   then parse_struct
+                when Token::Kind::Union    then parse_union
+                when Token::Kind::Enum     then parse_enum
+                when Token::Kind::Alias    then parse_alias
+                when Token::Kind::Annotation then parse_annotation_def
+                when Token::Kind::Abstract then parse_abstract
+                when Token::Kind::Private  then parse_private
+                when Token::Kind::Protected then parse_protected
+                when Token::Kind::Lib      then parse_lib
+                else
+                  parse_statement
+                end
             else
               # Phase 5B: Use parse_statement for assignments
               expr = parse_statement
             end
             body_ids_b << expr unless expr.invalid?
-            consume_newlines
+            # Allow separators between members
+            skip_statement_end
           end
 
           expect_identifier("end")
@@ -5063,6 +5107,8 @@ module CrystalV2
           skip_trivia
 
           target_expr = parse_path_or_identifier
+          # Support generic module include: include Enumerable(T)
+          target_expr = parse_generic_application(target_expr)
           return PREFIX_ERROR if target_expr.invalid?
 
           name_slice = final_identifier_slice(target_expr)
@@ -5086,6 +5132,7 @@ module CrystalV2
           skip_trivia
 
           target_expr = parse_path_or_identifier
+          target_expr = parse_generic_application(target_expr)
           return PREFIX_ERROR if target_expr.invalid?
 
           name_slice = final_identifier_slice(target_expr)
@@ -7990,6 +8037,40 @@ module CrystalV2
               right_id
             )
           )
+        end
+
+        # Parse generic application: Base(TypeArg1, TypeArg2, ...)
+        # Returns GenericNode(base, args) or the original base if no '('
+        private def parse_generic_application(base : ExprId) : ExprId
+          return base unless current_token.kind == Token::Kind::LParen
+
+          lparen = current_token
+          advance
+          @paren_depth += 1
+          skip_whitespace_and_optional_newlines
+
+          args_b = SmallVec(ExprId, 3).new
+          unless current_token.kind == Token::Kind::RParen
+            loop do
+              arg = parse_expression(0)
+              return base if arg.invalid?
+              args_b << arg
+              skip_whitespace_and_optional_newlines
+              break unless current_token.kind == Token::Kind::Comma
+              advance
+              skip_whitespace_and_optional_newlines
+            end
+          end
+
+          expect_operator(Token::Kind::RParen)
+          @paren_depth -= 1
+          close_span = previous_token.try(&.span)
+          span = if close_span
+            node_span(base).cover(close_span)
+          else
+            node_span(base)
+          end
+          @arena.add_typed(GenericNode.new(span, base, args_b.to_a))
         end
 
         # Phase 44: Parse type cast (.as(Type))
