@@ -6841,6 +6841,8 @@ module CrystalV2
 
           # Parse remaining entries
           loop do
+            # Allow newlines between entries
+            skip_whitespace_and_optional_newlines
             case current_token.kind
             when Token::Kind::RBrace
               # End of named tuple
