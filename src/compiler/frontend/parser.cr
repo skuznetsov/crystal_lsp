@@ -235,6 +235,8 @@ module CrystalV2
 
         # Parse a statement (assignment or expression)
         private def parse_statement : ExprId
+          # Normalize leading trivia at statement start
+          skip_trivia
           # Phase 103J: Check for macro control ({% if %}, {% for %}, etc.)
           debug("parse_statement: current=#{current_token.kind}, checking macro_control_start?")
           if macro_control_start?
@@ -5858,6 +5860,16 @@ module CrystalV2
             end
             token = current_token
             debug("parse_expression(#{precedence}): postfix loop, token=#{token.kind}")
+            # Statement boundary guard: if a new '{' starts on a new line (or after ';')
+            # and we're not inside delimiters, treat it as the start of a new statement,
+            # not as a block attachment to the current expression.
+            if token.kind == Token::Kind::LBrace && !inside_delimiters?
+              if prev = previous_token
+                if prev.kind == Token::Kind::Newline || prev.kind == Token::Kind::Semicolon
+                  break
+                end
+              end
+            end
             if macro_terminator_reached?(token)
               debug("parse_expression(#{precedence}): macro terminator reached")
               break
@@ -5876,7 +5888,15 @@ module CrystalV2
               if @parsing_call_args > 0
                 break
               end
-              left = attach_block_to_call(left)
+              # Only attach a block if 'left' can accept one (call-like). Otherwise,
+              # treat '{' as start of a new statement (e.g., a tuple/hash literal).
+              if can_attach_block_to?(left)
+                debug("parse_expression: attaching block to call")
+                left = attach_block_to_call(left)
+              else
+                debug("parse_expression: breaking on '{' to start new statement (not a call)")
+                break
+              end
               next
             when Token::Kind::Do
               # Phase 10: Block with do/end syntax
@@ -7254,6 +7274,23 @@ module CrystalV2
             token.span,
             pieces_b.to_a
           ))
+        end
+
+        # Determine if an expression can accept a trailing block
+        # Only calls and member accesses (and identifiers that can form calls)
+        # are valid block receivers. Literals like Nil/Number/etc. are not.
+        private def can_attach_block_to?(expr : ExprId) : Bool
+          node = @arena[expr]
+          case Frontend.node_kind(node)
+          when Frontend::NodeKind::Call
+            true
+          when Frontend::NodeKind::MemberAccess
+            true
+          when Frontend::NodeKind::Identifier
+            true
+          else
+            false
+          end
         end
 
         # Helper: Parse expression text from interpolation
