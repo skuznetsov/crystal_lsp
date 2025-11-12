@@ -323,9 +323,39 @@ module CrystalV2
           # Consume $
           advance
 
-          # Special-case: allow "$?" and "$!" global variables
+          # Special-case: allow regex globals and status: $?, $!, $1, $2, ..., $~ (with optional '?')
           if @offset < @rope.size && (current_byte == QUESTION || current_byte == EXCLAMATION)
             advance
+            return Token.new(
+              Token::Kind::GlobalVar,
+              @string_pool.intern(@rope.bytes[from...@offset]),
+              build_span(start_offset, start_line, start_column)
+            )
+          end
+
+          # Regex capture globals: $1, $2, ..., optional '?'
+          if @offset < @rope.size && ascii_number?(current_byte)
+            # consume digits
+            while @offset < @rope.size && ascii_number?(current_byte)
+              advance
+            end
+            # optional suffix '?'
+            if @offset < @rope.size && current_byte == QUESTION
+              advance
+            end
+            return Token.new(
+              Token::Kind::GlobalVar,
+              @string_pool.intern(@rope.bytes[from...@offset]),
+              build_span(start_offset, start_line, start_column)
+            )
+          end
+
+          # Regex match data: $~ (optional '?')
+          if @offset < @rope.size && current_byte == '~'.ord.to_u8
+            advance
+            if @offset < @rope.size && current_byte == QUESTION
+              advance
+            end
             return Token.new(
               Token::Kind::GlobalVar,
               @string_pool.intern(@rope.bytes[from...@offset]),
@@ -1654,6 +1684,64 @@ module CrystalV2
             close_delim = closing_delimiter(open_delim)
             literal_type = Token::Kind::String
             advance  # consume opening delimiter
+          when 'r'
+            # %r(...) - regex literal
+            advance  # consume 'r'
+            return nil if @offset >= @rope.size
+            open_delim = current_byte
+            return nil unless open_delim.chr.in?('(', '[', '{', '<', '|')
+            close_delim = closing_delimiter(open_delim)
+            advance  # consume opening delimiter
+
+            # Capture pattern content with nesting
+            regex_buffer = IO::Memory.new
+            nesting_level = 0
+            while @offset < @rope.size
+              byte = current_byte
+              if byte == close_delim
+                if nesting_level == 0
+                  advance  # consume closing delimiter
+                  break
+                else
+                  nesting_level -= 1
+                  regex_buffer.write_byte byte
+                  advance
+                end
+              elsif byte == open_delim && open_delim != close_delim
+                nesting_level += 1
+                regex_buffer.write_byte byte
+                advance
+              elsif byte == NEWLINE
+                regex_buffer.write_byte byte
+                advance
+                @line += 1
+                @column = 1
+              else
+                # Preserve escapes as-is
+                if byte == '\\'.ord.to_u8 && @offset + 1 < @rope.size
+                  regex_buffer.write_byte byte
+                  advance
+                  regex_buffer.write_byte current_byte
+                  advance
+                else
+                  regex_buffer.write_byte byte
+                  advance
+                end
+              end
+            end
+
+            # Optional flags (i, m, x, s, etc.)
+            if @offset < @rope.size && ascii_letter?(current_byte)
+              regex_buffer.write_byte '/'.ord.to_u8
+              while @offset < @rope.size && ascii_letter?(current_byte)
+                regex_buffer.write_byte current_byte
+                advance
+              end
+            end
+
+            processed = regex_buffer.to_slice
+            @processed_strings << processed
+            return Token.new(Token::Kind::Regex, processed, build_span(start_offset, start_line, start_column))
           when 'w'
             # %w(...) - word array
             advance  # consume 'w'
