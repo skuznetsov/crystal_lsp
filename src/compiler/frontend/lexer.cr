@@ -63,6 +63,9 @@ module CrystalV2
             lex_number
           when byte == DOUBLE_QUOTE
             lex_string
+          when byte == BACKTICK
+            # Command literal with interpolation: `...` (treated as string-like token)
+            lex_backtick
           when byte == SINGLE_QUOTE
             # Phase 56: Character literals
             lex_char
@@ -849,6 +852,128 @@ module CrystalV2
           Token.new(
             kind,
             processed_bytes,
+            build_span(start_offset, start_line, start_column)
+          )
+        end
+
+        # Lex backtick command literal: ` ... `
+        # Behaves like a string with optional interpolation (#{ ... }).
+        # Emits StringInterpolation when interpolation is present, otherwise String.
+        private def lex_backtick
+          start_offset, start_line, start_column = capture_position
+          advance # opening backtick
+          from = @offset
+          has_interpolation = false
+          has_escapes = false
+
+          # Scan ahead to detect interpolation and choose fast/slow path
+          scan_offset = @offset
+          brace_depth = 0
+          while scan_offset < @rope.size
+            byte = @rope.bytes[scan_offset]
+
+            if brace_depth == 0 && byte == BACKTICK
+              break
+            end
+
+            if byte == HASH && scan_offset + 1 < @rope.size && @rope.bytes[scan_offset + 1] == LEFT_BRACE && brace_depth == 0
+              has_interpolation = true
+              brace_depth = 1
+              scan_offset += 2
+              next
+            end
+
+            if brace_depth > 0
+              if byte == LEFT_BRACE
+                brace_depth += 1
+              elsif byte == RIGHT_BRACE
+                brace_depth -= 1
+              end
+              scan_offset += 1
+              next
+            end
+
+            if byte == '\\'.ord.to_u8
+              has_escapes = true
+            end
+            scan_offset += 1
+          end
+
+          if !has_escapes
+            brace_depth_fast = 0
+            while @offset < @rope.size
+              if brace_depth_fast == 0 && current_byte == BACKTICK
+                break
+              end
+
+              if brace_depth_fast == 0 && current_byte == HASH && @offset + 1 < @rope.size && @rope.bytes[@offset + 1] == LEFT_BRACE
+                brace_depth_fast = 1
+                advance(2)
+                next
+              elsif brace_depth_fast > 0
+                brace_depth_fast += 1 if current_byte == LEFT_BRACE
+                brace_depth_fast -= 1 if current_byte == RIGHT_BRACE
+              end
+
+              advance
+            end
+            advance if @offset < @rope.size # closing backtick
+
+            kind = has_interpolation ? Token::Kind::StringInterpolation : Token::Kind::String
+            return Token.new(
+              kind,
+              @rope.bytes[from...@offset - 1],
+              build_span(start_offset, start_line, start_column)
+            )
+          end
+
+          # Slow path (escapes present): copy bytes while tracking interpolation braces
+          processed = Bytes.new(scan_offset - from)
+          buffer = IO::Memory.new
+          brace_depth_processed = 0
+          while @offset < @rope.size
+            break if brace_depth_processed == 0 && current_byte == BACKTICK
+
+            if brace_depth_processed == 0 && current_byte == HASH && @offset + 1 < @rope.size && @rope.bytes[@offset + 1] == LEFT_BRACE
+              buffer.write_byte(current_byte)
+              advance
+              buffer.write_byte(current_byte)
+              advance
+              brace_depth_processed += 1
+              next
+            elsif brace_depth_processed > 0
+              if current_byte == LEFT_BRACE
+                brace_depth_processed += 1
+              elsif current_byte == RIGHT_BRACE
+                brace_depth_processed -= 1
+              end
+              buffer.write_byte(current_byte)
+              advance
+              next
+            end
+
+            if current_byte == '\\'.ord.to_u8
+              advance
+              if @offset >= @rope.size
+                break
+              end
+              escaped = current_byte
+              buffer.write_byte(escaped)
+              advance
+              next
+            else
+              buffer.write_byte(current_byte)
+              advance
+            end
+          end
+
+          advance if @offset < @rope.size # consume closing backtick
+          processed = buffer.to_slice
+          @processed_strings << processed
+          kind = has_interpolation ? Token::Kind::StringInterpolation : Token::Kind::String
+          Token.new(
+            kind,
+            processed,
             build_span(start_offset, start_line, start_column)
           )
         end
@@ -1719,6 +1844,7 @@ module CrystalV2
         NEWLINE      = 0x0A_u8
         DOUBLE_QUOTE = '"'.ord.to_u8
         SINGLE_QUOTE = '\''.ord.to_u8  # Phase 56: character literals
+        BACKTICK     = '`'.ord.to_u8    # Command literal delimiter
         HASH         = '#'.ord.to_u8
         UNDERSCORE   = '_'.ord.to_u8
         QUESTION     = '?'.ord.to_u8
