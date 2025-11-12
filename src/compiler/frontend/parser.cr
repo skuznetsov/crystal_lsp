@@ -3235,10 +3235,19 @@ module CrystalV2
 
           args_b = SmallVec(ExprId, 2).new
 
-          # Parse at least one argument
+          # Parse at least one argument (expression or type annotation like Void*)
           loop do
-            arg = parse_expression(0)
-            return PREFIX_ERROR if arg.invalid?
+            # Try to parse a type annotation (e.g., Void*, LibC::X, {Int32, Int32})
+            type_start = current_token
+            type_slice = parse_type_annotation
+            if previous_token && (type_start.span != current_token.span)
+              # Consumed something as type; wrap as IdentifierNode carrying the slice
+              arg = @arena.add_typed(IdentifierNode.new(type_start.span.cover(previous_token.not_nil!.span), @string_pool.intern(type_slice)))
+            else
+              # Fallback to expression parsing
+              arg = parse_expression(0)
+              return PREFIX_ERROR if arg.invalid?
+            end
             args_b << arg
 
             skip_trivia
