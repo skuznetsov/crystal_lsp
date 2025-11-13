@@ -449,6 +449,56 @@ module CrystalV2
           skip_whitespace_and_optional_newlines
           token = current_token
 
+          # Special case: extend call arguments without parentheses
+          if token.kind == Token::Kind::Comma && Frontend.node_kind(@arena[left]) == Frontend::NodeKind::Call
+            call_node = @arena[left].as(CallNode)
+            callee_expr = call_node.callee || left
+            accu_args = (call_node.args ? call_node.args.not_nil!.dup : [] of ExprId)
+            accu_named = ([] of NamedArgument)
+            if call_node.named_args
+              call_node.named_args.not_nil!.each { |na| accu_named << na }
+            end
+            loop do
+              advance  # consume comma
+              skip_whitespace_and_optional_newlines
+              break if call_without_parens_disallowed?(current_token)
+
+              if named_arg_start?
+                name_tok = current_token
+                name_slice = name_tok.slice
+                name_span = name_tok.span
+                advance
+                skip_whitespace_and_optional_newlines
+                break unless current_token.kind == Token::Kind::Colon
+                advance
+                skip_whitespace_and_optional_newlines
+                @no_type_declaration += 1
+                val = parse_op_assign
+                @no_type_declaration -= 1
+                break if val.invalid?
+                accu_named << NamedArgument.new(name_slice, val, name_span, @arena[val].span)
+              else
+                arg = parse_op_assign
+                break if arg.invalid?
+                accu_args << arg
+              end
+              skip_whitespace_and_optional_newlines
+              break unless current_token.kind == Token::Kind::Comma
+            end
+            # Rebuild call with extended args
+            last_span = if accu_named.size > 0
+              accu_named.last.span
+            elsif accu_args.size > 0
+              @arena[accu_args.last].span
+            else
+              node_span(left)
+            end
+            new_span = node_span(left).cover(last_span)
+            left = @arena.add_typed(CallNode.new(new_span, callee_expr, accu_args, call_node.block, accu_named.empty? ? call_node.named_args : accu_named))
+            skip_whitespace_and_optional_newlines
+            token = current_token
+          end
+
           # Phase 73: Check for multiple assignment: a, b = ...
           if token.kind == Token::Kind::Comma
             # Parse remaining targets
@@ -8188,13 +8238,62 @@ module CrystalV2
           end
 
           # Create Call node with both positional and named args
-          @arena.add_typed(CallNode.new(
+          result = @arena.add_typed(CallNode.new(
             call_span,
             callee,
             args,
             nil,  # block
             named_args.empty? ? nil : named_args
           ))
+
+          # Support extra no-parens arguments after a parenthesized group:
+          #   foo(expr), more, args
+          skip_whitespace_and_optional_newlines
+          if current_token.kind == Token::Kind::Comma
+            # Seed accumulators from existing args
+            accu_args = (args ? args.dup : [] of ExprId)
+            accu_named = (named_args ? named_args.dup : [] of NamedArgument)
+            loop do
+              advance  # consume comma
+              skip_whitespace_and_optional_newlines
+              break if call_without_parens_disallowed?(current_token)
+
+              if named_arg_start?
+                name_tok = current_token
+                name_slice = name_tok.slice
+                name_span = name_tok.span
+                advance
+                skip_whitespace_and_optional_newlines
+                break unless current_token.kind == Token::Kind::Colon
+                advance
+                skip_whitespace_and_optional_newlines
+                @no_type_declaration += 1
+                val = parse_op_assign
+                @no_type_declaration -= 1
+                break if val.invalid?
+                accu_named << NamedArgument.new(name_slice, val, name_span, @arena[val].span)
+              else
+                arg = parse_op_assign
+                break if arg.invalid?
+                accu_args << arg
+              end
+              skip_whitespace_and_optional_newlines
+              break unless current_token.kind == Token::Kind::Comma
+            end
+
+            # Rebuild call node with extended arguments
+            last_span = if accu_named.size > 0
+              accu_named.last.span
+            elsif accu_args.size > 0
+              @arena[accu_args.last].span
+            else
+              call_span
+            end
+            new_span = call_span.cover(last_span)
+            result = @arena.add_typed(CallNode.new(new_span, callee, accu_args, nil, accu_named.empty? ? nil : accu_named))
+          end
+
+          result
         end
 
         # Phase 103: Updated to support multi-line indexing
@@ -8818,55 +8917,59 @@ module CrystalV2
           )
         end
 
-        # Phase 93: Parse type check (.is_a?(Type))
+        # Phase 93: Parse type check (.is_a?(Type) or .is_a? Type)
         private def parse_is_a(receiver : ExprId, dot : Token, is_a_token : Token) : ExprId
           advance  # Skip 'is_a?' keyword
           skip_trivia
 
-          # Expect opening parenthesis
-          unless current_token.kind == Token::Kind::LParen
-            emit_unexpected(current_token)
-            return PREFIX_ERROR
+          if current_token.kind == Token::Kind::LParen
+            # With parentheses: .is_a?(Type)
+            lparen = current_token
+            advance
+            skip_trivia
+
+            # Parse target type
+            type_start_token = current_token
+            target_type = parse_type_annotation
+            type_end_token = previous_token
+            unless type_end_token
+              emit_unexpected(type_start_token)
+              return PREFIX_ERROR
+            end
+            skip_trivia
+
+            # Expect closing parenthesis
+            unless current_token.kind == Token::Kind::RParen
+              emit_unexpected(current_token)
+              return PREFIX_ERROR
+            end
+            rparen = current_token
+            advance
+
+            is_a_span = node_span(receiver)
+              .cover(dot.span)
+              .cover(is_a_token.span)
+              .cover(lparen.span)
+              .cover(type_start_token.span)
+              .cover(type_end_token.span)
+              .cover(rparen.span)
+          else
+            # Without parentheses: .is_a? Type
+            type_start_token = current_token
+            target_type = parse_type_annotation
+            type_end_token = previous_token
+            unless type_end_token
+              emit_unexpected(type_start_token)
+              return PREFIX_ERROR
+            end
+            is_a_span = node_span(receiver)
+              .cover(dot.span)
+              .cover(is_a_token.span)
+              .cover(type_start_token.span)
+              .cover(type_end_token.span)
           end
-          lparen = current_token
-          advance
-          skip_trivia
 
-          # Parse target type (reuse type-annotation parser to support Foo::Bar, unions, etc.)
-          type_start_token = current_token
-          target_type = parse_type_annotation
-          type_end_token = previous_token
-          unless type_end_token
-            emit_unexpected(type_start_token)
-            return PREFIX_ERROR
-          end
-          skip_trivia
-
-          # Expect closing parenthesis
-          unless current_token.kind == Token::Kind::RParen
-            emit_unexpected(current_token)
-            return PREFIX_ERROR
-          end
-          rparen = current_token
-          advance
-
-          # Create IsA node
-          # Accumulate span without temporary array
-          is_a_span = node_span(receiver)
-            .cover(dot.span)
-            .cover(is_a_token.span)
-            .cover(lparen.span)
-            .cover(type_start_token.span)
-            .cover(type_end_token.span)
-            .cover(rparen.span)
-
-          @arena.add_typed(
-            IsANode.new(
-              is_a_span,
-              receiver,
-              target_type
-            )
-          )
+          @arena.add_typed(IsANode.new(is_a_span, receiver, target_type))
         end
 
         # Phase 94: Parse method check (.responds_to?(:method))
@@ -9130,6 +9233,10 @@ module CrystalV2
           end
           # Suppress false positive: stray ')' at statement start
           if token.kind == Token::Kind::RParen && @expect_context == "statement"
+            return
+          end
+          # Newline at statement start is a separator; don't emit diagnostics
+          if token.kind == Token::Kind::Newline && @expect_context == "statement"
             return
           end
           # Suppress false positive: stray '}' or 'end' at statement start (usually a recovery after
@@ -10667,6 +10774,76 @@ module CrystalV2
             else
               break
             end
+          end
+
+          # Optional: parse no-parens arguments to the shorthand method, e.g.:
+          #   join(@str, ", ", &.accept self)
+          # Here `self` should be consumed as an argument to `accept` without parentheses.
+          begin
+            skip_trivia
+            tok = current_token
+            callee_span = @arena[call_expr].span
+            # Require same line and a visible gap to consider it a no-parens argument.
+            same_line = tok.span.start_line == callee_span.end_line
+            has_gap = tok.span.start_column > callee_span.end_column
+            if same_line && has_gap && @parsing_call_args == 0 && !call_without_parens_disallowed?(tok)
+              # Only allow for call-like nodes (MemberAccess/Call)
+              kind = Frontend.node_kind(@arena[call_expr])
+              if kind == Frontend::NodeKind::MemberAccess || kind == Frontend::NodeKind::Call
+                @parsing_call_args += 1
+                args_b = SmallVec(ExprId, 2).new
+                named_b = SmallVec(NamedArgument, 1).new
+                loop do
+                  # Stop on block delimiters to let outer layer attach them
+                  break if current_token.kind.in?(Token::Kind::Do, Token::Kind::LBrace)
+                  # Parse one arg; allow named arguments (name: value)
+                  if named_arg_start?
+                    name_tok = current_token
+                    name_slice = name_tok.slice
+                    name_span = name_tok.span
+                    advance
+                    skip_whitespace_and_optional_newlines
+                    unless current_token.kind == Token::Kind::Colon
+                      @parsing_call_args -= 1
+                      return call_expr
+                    end
+                    advance
+                    skip_whitespace_and_optional_newlines
+                    @no_type_declaration += 1
+                    val = parse_op_assign
+                    @no_type_declaration -= 1
+                    break if val.invalid?
+                    named_b << NamedArgument.new(name_slice, val, name_span, @arena[val].span)
+                  else
+                    arg = parse_op_assign
+                    break if arg.invalid?
+                    args_b << arg
+                  end
+                  skip_whitespace_and_optional_newlines
+                  if current_token.kind == Token::Kind::Comma
+                    advance
+                    skip_whitespace_and_optional_newlines
+                    next
+                  end
+                  break
+                end
+                args = args_b.to_a
+                named = named_b.to_a
+                last_span = if named.size > 0
+                  named.last.span
+                elsif args.size > 0
+                  @arena[args.last].span
+                else
+                  callee_span
+                end
+                call_span = callee_span.cover(last_span)
+                call_expr = @arena.add_typed(CallNode.new(call_span, call_expr, args, nil, named.empty? ? nil : named))
+                @parsing_call_args -= 1
+              end
+            end
+          rescue
+            # Best-effort; on failure, leave call_expr unchanged
+            @parsing_call_args = 0 if @parsing_call_args > 0
           end
           call_expr
         end
