@@ -502,6 +502,32 @@ module CrystalV2
             end
           end
 
+          # Phase 103L: Exponent part for floats: [eE][+-]?digits(_ allowed)
+          if @offset < @rope.size && (current_byte == 'e'.ord.to_u8 || current_byte == 'E'.ord.to_u8)
+            exp_pos = @offset
+            advance  # consume 'e'/'E'
+            # Optional sign
+            if @offset < @rope.size && (current_byte == '+'.ord.to_u8 || current_byte == '-'.ord.to_u8)
+              advance
+            end
+            # Digits with underscores
+            digits = false
+            while @offset < @rope.size && (ascii_number?(current_byte) || current_byte == UNDERSCORE)
+              digits = true if ascii_number?(current_byte)
+              advance
+            end
+            # Trim trailing underscores
+            while @offset > exp_pos && @rope.bytes[@offset - 1] == UNDERSCORE
+              @offset -= 1
+            end
+            # If we didn't actually consume digits, rewind exponent
+            unless digits
+              @offset = exp_pos
+            else
+              has_decimal = true
+            end
+          end
+
           # Phase 103J: Check for suffix (_i8, _i16, _i32, _i64, _i128, _u8, _u16, _u32, _u64, _u128, _f32, _f64)
           number_kind : NumberKind? = nil
           if @offset < @rope.size && current_byte == '_'.ord.to_u8
@@ -536,6 +562,20 @@ module CrystalV2
               # Reset to before underscore
               @offset = suffix_start
               nil
+            end
+          end
+
+          # Phase 103L: Allow float suffix without underscore (e.g., 1e0f32, 1.0f64)
+          if number_kind.nil? && @offset + 2 < @rope.size && ascii_letter?(current_byte)
+            b0 = @rope.bytes[@offset]
+            b1 = @rope.bytes[@offset + 1]
+            b2 = @rope.bytes[@offset + 2]
+            if b0 == 'f'.ord.to_u8 && b1 == '3'.ord.to_u8 && b2 == '2'.ord.to_u8
+              number_kind = NumberKind::F32
+              advance(3)
+            elsif b0 == 'f'.ord.to_u8 && b1 == '6'.ord.to_u8 && b2 == '4'.ord.to_u8
+              number_kind = NumberKind::F64
+              advance(3)
             end
           end
 
