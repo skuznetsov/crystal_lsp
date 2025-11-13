@@ -1043,6 +1043,10 @@ module CrystalV2
               break if token.kind == Token::Kind::Arrow
               break if token.kind == Token::Kind::Newline
               break if token.kind == Token::Kind::EOF
+              # Stop before universal quantification tail in method headers: "forall U, V"
+              if token.kind == Token::Kind::Identifier && slice_eq?(token.slice, "forall")
+                break
+              end
             end
 
             # Track parenthesis depth (for generics like Array(Int32))
@@ -1078,6 +1082,7 @@ module CrystalV2
             when Token::Kind::Identifier, Token::Kind::Number,
                  Token::Kind::ColonColon, Token::Kind::Operator,
                  Token::Kind::ThinArrow, Token::Kind::Self,  # Phase 103C: self as type
+                 Token::Kind::Typeof,                         # typeof(...) in type position
                  Token::Kind::Pipe,  # Phase 103I: union types (String | Nil)
                  Token::Kind::LParen, Token::Kind::RParen,  # Phase 30: generics like Array(Int32)
                  Token::Kind::Comma,  # Phase 30: multiple generic params Hash(K, V)
@@ -3193,14 +3198,37 @@ module CrystalV2
             # Return without value (implicit nil)
             @arena.add_typed(ReturnNode.new(return_token.span, nil))
           else
-            # Return with value
-            value = parse_expression(0)
-            return PREFIX_ERROR if value.invalid?
+            # Return with value (support multiple values → implicit tuple)
+            first_value = parse_expression(0)
+            return PREFIX_ERROR if first_value.invalid?
 
-            value_span = node_span(value)
-            return_span = return_token.span.cover(value_span)
+            skip_trivia
+            if current_token.kind == Token::Kind::Comma
+              values = [first_value]
+              loop do
+                advance  # consume comma
+                skip_trivia
+                val = parse_expression(0)
+                return PREFIX_ERROR if val.invalid?
+                values << val
+                skip_trivia
+                break unless current_token.kind == Token::Kind::Comma
+              end
 
-            @arena.add_typed(ReturnNode.new(return_span, value))
+              # Create implicit tuple literal of return values
+              first_span = @arena[values.first].span
+              last_span = @arena[values.last].span
+              tuple_span = first_span.cover(last_span)
+              tuple_id = @arena.add_typed(TupleLiteralNode.new(tuple_span, values))
+
+              value_span = node_span(tuple_id)
+              return_span = return_token.span.cover(value_span)
+              @arena.add_typed(ReturnNode.new(return_span, tuple_id))
+            else
+              value_span = node_span(first_value)
+              return_span = return_token.span.cover(value_span)
+              @arena.add_typed(ReturnNode.new(return_span, first_value))
+            end
           end
         end
 
@@ -3242,23 +3270,27 @@ module CrystalV2
         end
 
         # Phase 10: Parse yield expression
-        # Grammar: yield [arg1, arg2, ...]
+        # Grammar: yield | yield(arg1, arg2, ...) | yield arg1, arg2, ...
         private def parse_yield : ExprId
           yield_token = current_token
           advance
           skip_trivia
 
-          # Check if there are yield arguments
-          # yield without args if: newline, EOF, end, else, elsif, postfix modifiers, do, }
-          token = current_token
-          if token.kind.in?(Token::Kind::Newline, Token::Kind::EOF, Token::Kind::End, Token::Kind::Else, Token::Kind::Elsif, Token::Kind::If, Token::Kind::Unless, Token::Kind::While, Token::Kind::Until, Token::Kind::Do, Token::Kind::RBrace)
-            # Yield without args
-            @arena.add_typed(YieldNode.new(yield_token.span, nil))
-          else
-            # Yield with args - parse comma-separated expressions
+          # Parenthesized argument list: yield(...)
+          if current_token.kind == Token::Kind::LParen
+            advance  # consume (
+            skip_trivia
+
             args_b = SmallVec(ExprId, 2).new
+
+            # Empty yield: yield()
+            if current_token.kind == Token::Kind::RParen
+              rparen = current_token
+              advance
+              return @arena.add_typed(YieldNode.new(yield_token.span.cover(rparen.span), [] of ExprId))
+            end
+
             loop do
-              # Support splat arguments: yield *tuple
               if current_token.kind == Token::Kind::Star
                 star_token = current_token
                 advance
@@ -3275,15 +3307,51 @@ module CrystalV2
 
               skip_trivia
               break if current_token.kind != Token::Kind::Comma
-
-              advance  # consume comma
-              skip_whitespace_and_optional_newlines
+              advance
+              skip_trivia
             end
 
+            unless current_token.kind == Token::Kind::RParen
+              emit_unexpected(current_token)
+              return PREFIX_ERROR
+            end
+            rparen = current_token
+            advance
             args = args_b.to_a
-            last_arg_span = node_span(args.last)
-            yield_span = yield_token.span.cover(last_arg_span)
+            last_span = args.empty? ? rparen.span : node_span(args.last)
+            return @arena.add_typed(YieldNode.new(yield_token.span.cover(last_span), args))
+          end
 
+          # Non-parenthesized arguments: yield arg1, arg2, ...
+          token = current_token
+          if token.kind.in?(Token::Kind::Newline, Token::Kind::EOF, Token::Kind::End, Token::Kind::Else, Token::Kind::Elsif, Token::Kind::If, Token::Kind::Unless, Token::Kind::While, Token::Kind::Until, Token::Kind::Do, Token::Kind::RBrace)
+            # Yield without args
+            @arena.add_typed(YieldNode.new(yield_token.span, nil))
+          else
+            args_b = SmallVec(ExprId, 2).new
+            loop do
+              if current_token.kind == Token::Kind::Star
+                star_token = current_token
+                advance
+                skip_trivia
+                value = parse_expression(0)
+                return PREFIX_ERROR if value.invalid?
+                span = star_token.span.cover(@arena[value].span)
+                arg = @arena.add_typed(SplatNode.new(span, value))
+              else
+                arg = parse_expression(0)
+              end
+              return PREFIX_ERROR if arg.invalid?
+              args_b << arg
+
+              skip_trivia
+              break if current_token.kind != Token::Kind::Comma
+              advance
+              skip_whitespace_and_optional_newlines
+            end
+            args = args_b.to_a
+            last_arg_span = args.empty? ? yield_token.span : node_span(args.last)
+            yield_span = yield_token.span.cover(last_arg_span)
             @arena.add_typed(YieldNode.new(yield_span, args))
           end
         end
@@ -8120,8 +8188,20 @@ module CrystalV2
           skip_whitespace_and_optional_newlines
           unless current_token.kind == Token::Kind::RBracket
             loop do
-              expr = parse_expression(0)
-              indexes_b << expr unless expr.invalid?
+              # Support splat inside index: obj[*expr] or obj[**named]
+              if current_token.kind == Token::Kind::Star || current_token.kind == Token::Kind::StarStar
+                star_tok = current_token
+                advance
+                skip_trivia
+                value = parse_expression(0)
+                return PREFIX_ERROR if value.invalid?
+                span = star_tok.span.cover(@arena[value].span)
+                arg = @arena.add_typed(SplatNode.new(span, value))
+                indexes_b << arg
+              else
+                expr = parse_expression(0)
+                indexes_b << expr unless expr.invalid?
+              end
               skip_whitespace_and_optional_newlines
               break unless current_token.kind == Token::Kind::Comma
               advance
