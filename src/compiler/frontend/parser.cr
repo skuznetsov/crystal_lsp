@@ -1835,6 +1835,24 @@ module CrystalV2
           skip_whitespace_and_optional_newlines  # Allow newlines after opening paren
           unless operator_token?(current_token, Token::Kind::RParen)
             loop do
+              # Allow trailing ) early exit
+              break if operator_token?(current_token, Token::Kind::RParen)
+
+              # Tolerate macro controls injected into parameter lists
+              if current_token.kind == Token::Kind::LBracePercent ||
+                 (current_token.kind == Token::Kind::LBrace && peek_token.kind == Token::Kind::Percent)
+                start = consume_macro_control_start
+                if start
+                  advance if macro_trim_token?(current_token)
+                  skip_trivia
+                  kw = token_text(current_token)
+                  advance
+                  skip_trivia
+                  fast_forward_macro_control_block(start, kw)
+                  skip_whitespace_and_optional_newlines
+                  next
+                end
+              end
               break if operator_token?(current_token, Token::Kind::RParen)
               # Phase 68: Check for splat operators (* or **)
               # Phase 103: Check for block parameter (&)
@@ -3473,14 +3491,45 @@ module CrystalV2
               )
             end
 
-            # Parse arguments
+            # Parse arguments (positional, splats, and tolerate named args)
             loop do
-              # Disable type declarations to allow identifier: syntax for named args
-              @no_type_declaration += 1
-              arg = parse_expression(0)
-              @no_type_declaration -= 1
-              return PREFIX_ERROR if arg.invalid?
-              args_b << arg
+              # Named arg: name: value (tolerate by consuming name and ':' and pushing value)
+              if named_arg_start?
+                name_token = current_token
+                advance
+                skip_trivia
+                if current_token.kind == Token::Kind::Colon
+                  advance
+                  skip_trivia
+                  @no_type_declaration += 1
+                  value = parse_expression(0)
+                  @no_type_declaration -= 1
+                  return PREFIX_ERROR if value.invalid?
+                  args_b << value
+                else
+                  # Fallback: treat name as expression
+                  @no_type_declaration += 1
+                  arg = @arena.add_typed(IdentifierNode.new(name_token.span, name_token.slice))
+                  @no_type_declaration -= 1
+                  args_b << arg
+                end
+              elsif current_token.kind == Token::Kind::Star
+                star_token = current_token
+                advance
+                skip_trivia
+                value = parse_expression(0)
+                return PREFIX_ERROR if value.invalid?
+                span = star_token.span.cover(@arena[value].span)
+                arg = @arena.add_typed(SplatNode.new(span, value))
+                args_b << arg
+              else
+                # Positional argument
+                @no_type_declaration += 1
+                arg = parse_expression(0)
+                @no_type_declaration -= 1
+                return PREFIX_ERROR if arg.invalid?
+                args_b << arg
+              end
 
               skip_trivia
               break if current_token.kind != Token::Kind::Comma
@@ -10125,17 +10174,24 @@ module CrystalV2
           skip_trivia
 
           case keyword
-          when "if", "unless", "for", "while", "begin", "verbatim"
+          when "if", "unless", "for", "while", "verbatim"
             # For stability and speed in LSP context, fast-forward entire control block
             # and return a lightweight MacroLiteral node that spans the whole structure.
             block_span = fast_forward_macro_control_block(start_span, keyword)
             return PREFIX_ERROR unless block_span
             pieces = [] of MacroPiece
             @arena.add_typed(MacroLiteralNode.new(block_span, pieces, false, false))
+          when "begin"
+            # Consume header close, then let the body be parsed normally.
+            unless skip_until_macro_close
+              @diagnostics << Diagnostic.new("Expected '%}' after begin", current_token.span)
+              return PREFIX_ERROR
+            end
+            # No node; the following tokens are the real body.
+            PREFIX_ERROR
           when "else", "elsif", "end"
-            # Phase 103J: These keywords are handled by the caller (parse_macro_if_control, etc.)
-            # Return PREFIX_ERROR as a marker - not actually an error
-            debug("parse_percent_macro_control: keyword '#{keyword}' should be handled by caller")
+            # Consume the closer and ignore as control marker in top-level stream
+            skip_until_macro_close
             PREFIX_ERROR
           else
             # Phase 103J: Unknown keywords → parse as macro expression (method call)
@@ -11076,6 +11132,25 @@ module CrystalV2
             loop do
               # Allow trailing comma before closing paren
               break if operator_token?(current_token, Token::Kind::RParen)
+
+              # Tolerate macro controls injected into parameter lists, e.g.
+              # def foo(x, {% if cond %} @[Deprecated] {% end %} y)
+              if current_token.kind == Token::Kind::LBracePercent ||
+                 (current_token.kind == Token::Kind::LBrace && peek_token.kind == Token::Kind::Percent)
+                start = consume_macro_control_start
+                if start
+                  # Optional trim
+                  advance if macro_trim_token?(current_token)
+                  skip_trivia
+                  kw = token_text(current_token)
+                  advance
+                  skip_trivia
+                  fast_forward_macro_control_block(start, kw)
+                  skip_whitespace_and_optional_newlines
+                  # Continue with next token in params
+                  next
+                end
+              end
               # Check for varargs: ...
               if current_token.kind == Token::Kind::DotDotDot
                 varargs = true
