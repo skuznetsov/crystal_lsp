@@ -8126,6 +8126,8 @@ module CrystalV2
               break unless current_token.kind == Token::Kind::Comma
               advance
               skip_whitespace_and_optional_newlines
+              # Allow trailing comma before closing bracket: foo[1, 2, ]
+              break if current_token.kind == Token::Kind::RBracket
             end
           end
           @bracket_depth -= 1  # Phase 103: exiting brackets
@@ -8498,7 +8500,7 @@ module CrystalV2
                Token::Kind::PercentRBrace,
                Token::Kind::OrOr, Token::Kind::AndAnd,
                Token::Kind::Question, Token::Kind::Arrow,
-               Token::Kind::EqEq, Token::Kind::NotEq,
+               Token::Kind::EqEq, Token::Kind::EqEqEq, Token::Kind::NotEq,
                Token::Kind::Less, Token::Kind::Greater,
                Token::Kind::LessEq, Token::Kind::GreaterEq,
                Token::Kind::Spaceship,
