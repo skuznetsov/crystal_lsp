@@ -4401,7 +4401,7 @@ module CrystalV2
           end
 
           # Verify it's a Call or MemberAccess
-          unless Frontend.node_kind(call_node).in?(Frontend::NodeKind::Call, Frontend::NodeKind::MemberAccess)
+          unless Frontend.node_kind(call_node).in?(Frontend::NodeKind::Call, Frontend::NodeKind::MemberAccess, Frontend::NodeKind::Super)
             @diagnostics << Diagnostic.new("Block can only be attached to method call or identifier", call_node.span)
             return PREFIX_ERROR
           end
@@ -4415,6 +4415,16 @@ module CrystalV2
                 call_node.args,
                 block_id,
                 call_node.named_args
+              )
+            )
+          when SuperNode
+            # Attach block to super call
+            @arena.add_typed(
+              CallNode.new(
+                call_span,
+                call_expr,
+                Array(ExprId).new(0),
+                block_id
               )
             )
           when MemberAccessNode
@@ -6947,12 +6957,25 @@ module CrystalV2
             # Phase 74: Proc literal (->(x) { ... })
             parse_proc_literal
           when Token::Kind::DotDot, Token::Kind::DotDotDot
-            # Beginless/endless/full range literal used as value (e.g., point_range: ..)
+            # Beginless/full range at expression start:
+            #   ..n / ...n  → (nil .. n) / (nil ... n)
+            #   ..   / ...  → (nil .. nil) / (nil ... nil)
             range_token = token
             advance
             nil_begin = @arena.add_typed(NilNode.new(range_token.span))
-            nil_end = @arena.add_typed(NilNode.new(range_token.span))
-            @arena.add_typed(RangeNode.new(range_token.span, nil_begin, nil_end, range_token.kind == Token::Kind::DotDotDot))
+            # Decide if there's a right bound
+            skip_trivia
+            if current_token.kind.in?(Token::Kind::RParen, Token::Kind::RBracket, Token::Kind::RBrace,
+                                      Token::Kind::Comma, Token::Kind::End, Token::Kind::Else,
+                                      Token::Kind::Elsif, Token::Kind::Do, Token::Kind::LBrace, Token::Kind::EOF)
+              nil_end = @arena.add_typed(NilNode.new(range_token.span))
+              @arena.add_typed(RangeNode.new(range_token.span, nil_begin, nil_end, range_token.kind == Token::Kind::DotDotDot))
+            else
+              right = parse_expression(0)
+              return PREFIX_ERROR if right.invalid?
+              span = range_token.span.cover(@arena[right].span)
+              @arena.add_typed(RangeNode.new(span, nil_begin, right, range_token.kind == Token::Kind::DotDotDot))
+            end
           when Token::Kind::Operator
             # Phase IMPLICIT_RECEIVER: Handle implicit receiver (.method)
             # Phase ANNOTATIONS: Handle annotations (@[...])
@@ -8033,6 +8056,8 @@ module CrystalV2
           when Frontend::NodeKind::MemberAccess
             true
           when Frontend::NodeKind::Identifier
+            true
+          when Frontend::NodeKind::Super
             true
           else
             false
