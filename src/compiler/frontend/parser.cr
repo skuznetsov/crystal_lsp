@@ -7125,14 +7125,22 @@ module CrystalV2
             skip_trivia
 
             # Phase 91: Check for "of Type" syntax
-            if current_token.kind == Token::Kind::Of
+            if current_token.kind == Token::Kind::Of || (current_token.kind == Token::Kind::Identifier && slice_eq?(current_token.slice, "of"))
               advance
               skip_trivia
 
-              # Parse type expression (supports unions, generics, etc.)
-              type_expr = parse_expression(0)
-              return PREFIX_ERROR if type_expr.invalid?
-              of_type_expr = type_expr
+              # Parse type annotation (supports unions, generics, proc types including bare '->')
+              type_start = current_token
+              type_slice = parse_type_annotation
+              type_end = previous_token
+              if type_end
+                type_span = type_start.span.cover(type_end.span)
+                # Represent type as an Identifier-like node carrying the slice (zero-copy)
+                of_type_expr = @arena.add_typed(IdentifierNode.new(type_span, @string_pool.intern(type_slice)))
+              else
+                emit_unexpected(type_start)
+                return PREFIX_ERROR
+              end
             end
 
             closing_span = previous_token.try(&.span) || lbracket.span
