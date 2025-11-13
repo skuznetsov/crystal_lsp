@@ -10165,8 +10165,9 @@ module CrystalV2
         # Returns the total covered span, or nil on failure (diagnostic already emitted).
         private def fast_forward_macro_control_block(start_span : Span, first_keyword : String) : Span?
           # The header keyword has already been consumed, but not necessarily its closing %}.
-          # Ensure we close the header now before scanning body.
-          unless expect_macro_close("Expected '%}' after #{first_keyword}")
+          # Consume the rest of the header up to the closing '%}'.
+          unless skip_until_macro_close
+            @diagnostics << Diagnostic.new("Expected '%}' after #{first_keyword}", current_token.span)
             return nil
           end
 
@@ -10197,13 +10198,15 @@ module CrystalV2
               case kw
               when "if", "unless", "for", "while", "begin", "verbatim"
                 # Close header and increase nesting
-                unless expect_macro_close("Expected '%}' after #{kw}")
+                unless skip_until_macro_close
+                  @diagnostics << Diagnostic.new("Expected '%}' after #{kw}", current_token.span)
                   return nil
                 end
                 depth += 1
               when "elsif", "else"
                 # Close header, but do not change depth
-                unless expect_macro_close("Expected '%}' after #{kw}")
+                unless skip_until_macro_close
+                  @diagnostics << Diagnostic.new("Expected '%}' after #{kw}", current_token.span)
                   return nil
                 end
               when "end"
@@ -10215,7 +10218,8 @@ module CrystalV2
                 return last_span if depth == 0
               else
                 # Unknown control keyword: close header and continue
-                unless expect_macro_close("Expected '%}' after #{kw}")
+                unless skip_until_macro_close
+                  @diagnostics << Diagnostic.new("Expected '%}' after #{kw}", current_token.span)
                   return nil
                 end
               end
@@ -10224,6 +10228,19 @@ module CrystalV2
 
             # Skip non-macro token
             last_span = tok.span
+            advance
+          end
+        end
+
+        # Scan forward from current token until a macro close sequence ('%}' or '-%}')
+        # is found; consumes the closer and returns true. Returns false on EOF.
+        private def skip_until_macro_close : Bool
+          loop do
+            tok = current_token
+            return false if tok.kind == Token::Kind::EOF
+            if macro_closing_sequence?(tok)
+              return !!consume_macro_close_span
+            end
             advance
           end
         end
