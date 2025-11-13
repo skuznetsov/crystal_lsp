@@ -8347,7 +8347,7 @@ module CrystalV2
                 star_tok = current_token
                 advance
                 skip_trivia
-                value = parse_expression(0)
+                value = parse_op_assign
                 return PREFIX_ERROR if value.invalid?
                 span = star_tok.span.cover(@arena[value].span)
                 arg = @arena.add_typed(SplatNode.new(span, value))
@@ -8384,7 +8384,7 @@ module CrystalV2
                 return PREFIX_ERROR if value_expr.invalid?
                 named_b << NamedArgument.new(name_slice, value_expr, name_span, @arena[value_expr].span)
               else
-                expr = parse_expression(0)
+                expr = parse_op_assign
                 unless expr.invalid?
                   # Retroactive named-arg detection: if we parsed a bare identifier
                   # and the next token is ':', reinterpret as a named argument.
@@ -10125,14 +10125,13 @@ module CrystalV2
           skip_trivia
 
           case keyword
-          when "if", "unless"
-            parse_macro_if_control(start_span, keyword)
-          when "for"
-            parse_macro_for_control(start_span)
-          when "begin"
-            parse_macro_begin_control(start_span)
-          when "verbatim"
-            parse_macro_verbatim_control(start_span)
+          when "if", "unless", "for", "while", "begin", "verbatim"
+            # For stability and speed in LSP context, fast-forward entire control block
+            # and return a lightweight MacroLiteral node that spans the whole structure.
+            block_span = fast_forward_macro_control_block(start_span, keyword)
+            return PREFIX_ERROR unless block_span
+            pieces = [] of MacroPiece
+            @arena.add_typed(MacroLiteralNode.new(block_span, pieces, false, false))
           when "else", "elsif", "end"
             # Phase 103J: These keywords are handled by the caller (parse_macro_if_control, etc.)
             # Return PREFIX_ERROR as a marker - not actually an error
@@ -10159,6 +10158,74 @@ module CrystalV2
           end
         ensure
           @macro_terminator = previous_terminator
+        end
+
+        # Fast-forward a macro control structure from {% <kw> %} to its matching {% end %}.
+        # Handles nesting of control keywords and neutral branches (elsif/else).
+        # Returns the total covered span, or nil on failure (diagnostic already emitted).
+        private def fast_forward_macro_control_block(start_span : Span, first_keyword : String) : Span?
+          # The header keyword has already been consumed, but not necessarily its closing %}.
+          # Ensure we close the header now before scanning body.
+          unless expect_macro_close("Expected '%}' after #{first_keyword}")
+            return nil
+          end
+
+          depth = 1
+          block_start = start_span
+          last_span = start_span
+
+          loop do
+            tok = current_token
+            return last_span if tok.kind == Token::Kind::EOF
+
+            if tok.kind == Token::Kind::LBracePercent || (tok.kind == Token::Kind::LBrace && peek_token.kind == Token::Kind::Percent)
+              # Consume "{%"
+              ctrl_start = consume_macro_control_start
+              unless ctrl_start
+                advance
+                next
+              end
+
+              # Optional trim
+              advance if macro_trim_token?(current_token)
+              skip_trivia
+
+              kw = token_text(current_token)
+              advance
+              skip_trivia
+
+              case kw
+              when "if", "unless", "for", "while", "begin", "verbatim"
+                # Close header and increase nesting
+                unless expect_macro_close("Expected '%}' after #{kw}")
+                  return nil
+                end
+                depth += 1
+              when "elsif", "else"
+                # Close header, but do not change depth
+                unless expect_macro_close("Expected '%}' after #{kw}")
+                  return nil
+                end
+              when "end"
+                # Close 'end' and decrease nesting
+                end_span = consume_macro_close_span("Expected '%}' after end")
+                return nil unless end_span
+                last_span = block_start.cover(end_span)
+                depth -= 1
+                return last_span if depth == 0
+              else
+                # Unknown control keyword: close header and continue
+                unless expect_macro_close("Expected '%}' after #{kw}")
+                  return nil
+                end
+              end
+              next
+            end
+
+            # Skip non-macro token
+            last_span = tok.span
+            advance
+          end
         end
 
         # Parse {% if condition %}...{% end %} or {% unless %}
@@ -10990,6 +11057,8 @@ module CrystalV2
 
           unless operator_token?(current_token, Token::Kind::RParen)
             loop do
+              # Allow trailing comma before closing paren
+              break if operator_token?(current_token, Token::Kind::RParen)
               # Check for varargs: ...
               if current_token.kind == Token::Kind::DotDotDot
                 varargs = true
