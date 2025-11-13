@@ -660,6 +660,7 @@ module CrystalV2
             end
 
             # Phase PERCENT_LITERALS: Handle property assignment (obj.prop = value → obj.prop=(value))
+            # Phase 14B: Handle index assignment (obj[args] = value → obj.[]=(args..., value))
             if left_kind == Frontend::NodeKind::MemberAccess
               # Property assignment: transform to setter call
               # obj.prop = value → obj.prop=(value)
@@ -689,6 +690,30 @@ module CrystalV2
                 [value],        # args: value
                 nil,            # no block
                 nil             # no named args
+              ))
+            elsif left_kind == Frontend::NodeKind::Index
+              # Index assignment: transform to call of []=
+              # obj[args] = value → obj.[]=(args..., value)
+              target = Frontend.node_left(left_node).not_nil!
+              index_args = Frontend.node_args(left_node).not_nil!
+
+              setter_slice = @string_pool.intern("[]=".to_slice)
+              setter_member = @arena.add_typed(MemberAccessNode.new(
+                left_node.span,
+                target,
+                setter_slice
+              ))
+
+              value_span = node_span(value)
+              assign_span = left_node.span.cover(value_span)
+
+              call_args = index_args + [value]
+              stmt = @arena.add_typed(CallNode.new(
+                assign_span,
+                setter_member,
+                call_args,
+                nil,
+                nil
               ))
             else
               # Regular assignment
