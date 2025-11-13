@@ -302,6 +302,15 @@ module CrystalV2
             return parse_statement
           end
 
+          # Tolerate a stray leading comma at statement start (can appear after
+          # recovering from nested literal/block parsing inside composite
+          # literals like named tuples). Skip it and continue.
+          if current_token.kind == Token::Kind::Comma
+            advance
+            skip_statement_end
+            return parse_statement
+          end
+
           # Robustness: if a stray closing parenthesis appears at statement start,
           # advance past it to recover and continue parsing. This avoids emitting
           # a spurious 'unexpected RParen' when previous constructs already
@@ -6356,9 +6365,13 @@ module CrystalV2
             # not as a block attachment to the current expression.
             if token.kind == Token::Kind::LBrace && !inside_delimiters?
               if prev = previous_token
-                if prev.kind == Token::Kind::Newline || prev.kind == Token::Kind::Semicolon
+                # Treat '{' at start of a new line as a new statement (not a block)
+                if prev.kind == Token::Kind::Newline || prev.kind == Token::Kind::Semicolon ||
+                   token.span.start_line > prev.span.end_line
                   break
                 end
+              else
+                break
               end
             end
             if macro_terminator_reached?(token)
@@ -9117,6 +9130,11 @@ module CrystalV2
           end
           # Suppress false positive: stray ')' at statement start
           if token.kind == Token::Kind::RParen && @expect_context == "statement"
+            return
+          end
+          # Suppress false positive: stray '}' or 'end' at statement start (usually a recovery after
+          # a previously parsed expression already consumed the corresponding block or literal).
+          if @expect_context == "statement" && (token.kind == Token::Kind::RBrace || token.kind == Token::Kind::End)
             return
           end
           @diagnostics << Diagnostic.new("unexpected #{token.kind}", token.span)
