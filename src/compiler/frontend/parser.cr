@@ -6595,7 +6595,17 @@ module CrystalV2
             parse_asm
           when Token::Kind::Out
             # Phase 98: out keyword (C bindings output parameter)
-            parse_out
+            # If 'out' is followed by an identifier/ivar/cvar/gvar, treat it as
+            # the out-parameter form. Otherwise, allow 'out' to be used as a
+            # regular identifier in expression position (e.g., `out.value = x`).
+            nxt = peek_next_non_trivia
+            if nxt.kind.in?(Token::Kind::Identifier, Token::Kind::InstanceVar, Token::Kind::ClassVar, Token::Kind::GlobalVar)
+              parse_out
+            else
+              id = @arena.add_typed(IdentifierNode.new(token.span, @string_pool.intern(token.slice)))
+              advance
+              id
+            end
           when Token::Kind::Raise
             # Allow raise in expression context (e.g., x || raise "error")
             stmt = parse_raise
