@@ -1124,7 +1124,7 @@ module CrystalV2
           loop do
             token = current_token
 
-            # Stop conditions (when not inside parentheses/brackets)
+            # Stop conditions when not nested in type delimiters
             if paren_depth == 0 && bracket_depth == 0 && brace_depth == 0
               break if token.kind == Token::Kind::Eq
               break if token.kind == Token::Kind::Comma
@@ -1132,6 +1132,8 @@ module CrystalV2
               break if token.kind == Token::Kind::Arrow
               break if token.kind == Token::Kind::Newline
               break if token.kind == Token::Kind::EOF
+              break if token.kind == Token::Kind::RBracket
+              break if token.kind == Token::Kind::RBrace
               # Stop before universal quantification tail in method headers: "forall U, V"
               if token.kind == Token::Kind::Identifier && slice_eq?(token.slice, "forall")
                 break
@@ -1150,7 +1152,12 @@ module CrystalV2
             if operator_token?(token, Token::Kind::LBracket)
               bracket_depth += 1
             elsif operator_token?(token, Token::Kind::RBracket)
-              bracket_depth -= 1
+              # If this ']' would close an outer context, end the type annotation
+              if bracket_depth == 0
+                break
+              else
+                bracket_depth -= 1
+              end
             end
 
             # Track brace depth (tuple/named tuple type literals like {Int32, String})
@@ -1158,11 +1165,11 @@ module CrystalV2
               # In type annotation context, '{' starts a tuple/named tuple type
               brace_depth += 1
             elsif operator_token?(token, Token::Kind::RBrace)
-              # Only break if this '}' would close outer context (shouldn't happen inside type)
-              if brace_depth > 0
-                brace_depth -= 1
-              else
+              # If this '}' would close an outer context, end the type annotation
+              if brace_depth == 0
                 break
+              else
+                brace_depth -= 1
               end
             end
 
@@ -5990,6 +5997,7 @@ module CrystalV2
                    left_kind == Frontend::NodeKind::ClassVar ||
                    left_kind == Frontend::NodeKind::Global ||
                    left_kind == Frontend::NodeKind::Constant ||
+                   left_kind == Frontend::NodeKind::Path ||
                    left_kind == Frontend::NodeKind::MacroVar ||
                    left_kind == Frontend::NodeKind::Index ||
                    left_kind == Frontend::NodeKind::MemberAccess
@@ -6497,6 +6505,10 @@ module CrystalV2
               # In some complex paths, the index lowering might not capture a
               # trailing '?'. Handle it here as a postfix conversion.
               left = handle_index_question_postfix(left)
+              next
+            when Token::Kind::If, Token::Kind::Unless
+              # Postfix conditional modifier: expr if cond / expr unless cond
+              left = parse_postfix_if_modifier(left)
               next
             when Token::Kind::LBrace
               # Phase 10: Block with {} syntax
@@ -7570,9 +7582,11 @@ module CrystalV2
           saved_index = @index
           tok = current_token
           if tok.kind == Token::Kind::Identifier
+            debug("brace: first token is Identifier #{String.new(tok.slice)}")
             ident_token = tok
             # Peek next non-trivia for ':'
             nt = peek_next_non_trivia
+            debug("brace: next after identifier is #{nt.kind}")
             if nt.kind == Token::Kind::Colon
               # Consume identifier and leave ':' for the named tuple parser
               advance
@@ -7590,6 +7604,7 @@ module CrystalV2
               skip_whitespace_and_optional_newlines
             end
           else
+            debug("brace: first token is #{tok.kind}")
             @no_type_declaration += 1
             first_elem = parse_expression(0)
             @no_type_declaration -= 1
@@ -7601,6 +7616,7 @@ module CrystalV2
           end
 
           # Check what follows
+          debug("brace: after first elem, current=#{current_token.kind}")
           case current_token.kind
           when Token::Kind::Arrow
             # "=>" → this is a hash
@@ -7609,6 +7625,7 @@ module CrystalV2
             # ":" → named tuple (expression context: allow identifier and certain keyword labels like 'nil')
             first_node = @arena[first_elem]
             kind = Frontend.node_kind(first_node)
+            debug("brace: colon after first elem; first kind=#{kind}")
             if kind == Frontend::NodeKind::Identifier || kind == Frontend::NodeKind::Nil || kind == Frontend::NodeKind::Bool
               return parse_named_tuple_literal_continued(lbrace, first_elem)
             else
@@ -7801,6 +7818,7 @@ module CrystalV2
           loop do
             # Allow newlines between entries
             skip_whitespace_and_optional_newlines
+            debug("named_tuple: loop current=#{current_token.kind}")
             # Be extra permissive: also tolerate standalone newlines
             if current_token.kind == Token::Kind::Newline
               skip_statement_end
