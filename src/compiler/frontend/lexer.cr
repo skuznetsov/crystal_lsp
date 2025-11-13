@@ -579,6 +579,50 @@ module CrystalV2
             end
           end
 
+          # Phase 103L: Allow integer suffix without underscore (e.g., 8u64, 1i32)
+          if number_kind.nil? && @offset < @rope.size && ascii_letter?(current_byte)
+            bytes = @rope.bytes
+            b0 = bytes[@offset]
+            # Helper lambda to match a small string and advance
+            match = ->(s : String) do
+              n = s.bytesize
+              return false unless @offset + n <= @rope.size
+              i = 0
+              while i < n
+                break unless bytes[@offset + i] == s.to_unsafe[i]
+                i += 1
+              end
+              return false unless i == n
+              advance(n)
+              true
+            end
+            if b0 == 'i'.ord.to_u8
+              if match.call("i8")
+                number_kind = NumberKind::I8
+              elsif match.call("i16")
+                number_kind = NumberKind::I16
+              elsif match.call("i32")
+                number_kind = NumberKind::I32
+              elsif match.call("i64")
+                number_kind = NumberKind::I64
+              elsif match.call("i128")
+                number_kind = NumberKind::I128
+              end
+            elsif b0 == 'u'.ord.to_u8
+              if match.call("u8")
+                number_kind = NumberKind::U8
+              elsif match.call("u16")
+                number_kind = NumberKind::U16
+              elsif match.call("u32")
+                number_kind = NumberKind::U32
+              elsif match.call("u64")
+                number_kind = NumberKind::U64
+              elsif match.call("u128")
+                number_kind = NumberKind::U128
+              end
+            end
+          end
+
           # Infer NumberKind if not explicitly specified
           if number_kind.nil?
             number_kind = has_decimal ? NumberKind::F64 : NumberKind::I32
@@ -611,7 +655,43 @@ module CrystalV2
           number_kind = lex_number_suffix
 
           # Infer NumberKind if not explicitly specified
-          number_kind ||= NumberKind::I32
+          number_kind ||= begin
+            # Allow integer suffix without underscore (e.g., 0xFFu64)
+            if @offset + 2 < @rope.size && ascii_letter?(current_byte)
+              b0 = @rope.bytes[@offset]
+              if b0 == 'i'.ord.to_u8
+                if @offset + 3 <= @rope.size && @rope.bytes[@offset,3] == "i16".to_slice
+                  advance(3); NumberKind::I16
+                elsif @offset + 3 <= @rope.size && @rope.bytes[@offset,3] == "i32".to_slice
+                  advance(3); NumberKind::I32
+                elsif @offset + 3 <= @rope.size && @rope.bytes[@offset,3] == "i64".to_slice
+                  advance(3); NumberKind::I64
+                elsif @offset + 4 <= @rope.size && @rope.bytes[@offset,4] == "i128".to_slice
+                  advance(4); NumberKind::I128
+                elsif @offset + 2 <= @rope.size && @rope.bytes[@offset,2] == "i8".to_slice
+                  advance(2); NumberKind::I8
+                else
+                  nil
+                end
+              elsif b0 == 'u'.ord.to_u8
+                if @offset + 3 <= @rope.size && @rope.bytes[@offset,3] == "u16".to_slice
+                  advance(3); NumberKind::U16
+                elsif @offset + 3 <= @rope.size && @rope.bytes[@offset,3] == "u32".to_slice
+                  advance(3); NumberKind::U32
+                elsif @offset + 3 <= @rope.size && @rope.bytes[@offset,3] == "u64".to_slice
+                  advance(3); NumberKind::U64
+                elsif @offset + 4 <= @rope.size && @rope.bytes[@offset,4] == "u128".to_slice
+                  advance(4); NumberKind::U128
+                elsif @offset + 2 <= @rope.size && @rope.bytes[@offset,2] == "u8".to_slice
+                  advance(2); NumberKind::U8
+                else
+                  nil
+                end
+              else
+                nil
+              end
+            end || NumberKind::I32
+          end
 
           Token.new(
             Token::Kind::Number,
@@ -640,7 +720,43 @@ module CrystalV2
           number_kind = lex_number_suffix
 
           # Infer NumberKind if not explicitly specified
-          number_kind ||= NumberKind::I32
+          number_kind ||= begin
+            # Allow integer suffix without underscore (e.g., 0b1010u8)
+            if @offset + 2 < @rope.size && ascii_letter?(current_byte)
+              b0 = @rope.bytes[@offset]
+              if b0 == 'i'.ord.to_u8
+                if @offset + 3 <= @rope.size && @rope.bytes[@offset,3] == "i16".to_slice
+                  advance(3); NumberKind::I16
+                elsif @offset + 3 <= @rope.size && @rope.bytes[@offset,3] == "i32".to_slice
+                  advance(3); NumberKind::I32
+                elsif @offset + 3 <= @rope.size && @rope.bytes[@offset,3] == "i64".to_slice
+                  advance(3); NumberKind::I64
+                elsif @offset + 4 <= @rope.size && @rope.bytes[@offset,4] == "i128".to_slice
+                  advance(4); NumberKind::I128
+                elsif @offset + 2 <= @rope.size && @rope.bytes[@offset,2] == "i8".to_slice
+                  advance(2); NumberKind::I8
+                else
+                  nil
+                end
+              elsif b0 == 'u'.ord.to_u8
+                if @offset + 3 <= @rope.size && @rope.bytes[@offset,3] == "u16".to_slice
+                  advance(3); NumberKind::U16
+                elsif @offset + 3 <= @rope.size && @rope.bytes[@offset,3] == "u32".to_slice
+                  advance(3); NumberKind::U32
+                elsif @offset + 3 <= @rope.size && @rope.bytes[@offset,3] == "u64".to_slice
+                  advance(3); NumberKind::U64
+                elsif @offset + 4 <= @rope.size && @rope.bytes[@offset,4] == "u128".to_slice
+                  advance(4); NumberKind::U128
+                elsif @offset + 2 <= @rope.size && @rope.bytes[@offset,2] == "u8".to_slice
+                  advance(2); NumberKind::U8
+                else
+                  nil
+                end
+              else
+                nil
+              end
+            end || NumberKind::I32
+          end
 
           Token.new(
             Token::Kind::Number,
@@ -669,7 +785,43 @@ module CrystalV2
           number_kind = lex_number_suffix
 
           # Infer NumberKind if not explicitly specified
-          number_kind ||= NumberKind::I32
+          number_kind ||= begin
+            # Allow integer suffix without underscore (e.g., 0o755u16)
+            if @offset + 2 < @rope.size && ascii_letter?(current_byte)
+              b0 = @rope.bytes[@offset]
+              if b0 == 'i'.ord.to_u8
+                if @offset + 3 <= @rope.size && @rope.bytes[@offset,3] == "i16".to_slice
+                  advance(3); NumberKind::I16
+                elsif @offset + 3 <= @rope.size && @rope.bytes[@offset,3] == "i32".to_slice
+                  advance(3); NumberKind::I32
+                elsif @offset + 3 <= @rope.size && @rope.bytes[@offset,3] == "i64".to_slice
+                  advance(3); NumberKind::I64
+                elsif @offset + 4 <= @rope.size && @rope.bytes[@offset,4] == "i128".to_slice
+                  advance(4); NumberKind::I128
+                elsif @offset + 2 <= @rope.size && @rope.bytes[@offset,2] == "i8".to_slice
+                  advance(2); NumberKind::I8
+                else
+                  nil
+                end
+              elsif b0 == 'u'.ord.to_u8
+                if @offset + 3 <= @rope.size && @rope.bytes[@offset,3] == "u16".to_slice
+                  advance(3); NumberKind::U16
+                elsif @offset + 3 <= @rope.size && @rope.bytes[@offset,3] == "u32".to_slice
+                  advance(3); NumberKind::U32
+                elsif @offset + 3 <= @rope.size && @rope.bytes[@offset,3] == "u64".to_slice
+                  advance(3); NumberKind::U64
+                elsif @offset + 4 <= @rope.size && @rope.bytes[@offset,4] == "u128".to_slice
+                  advance(4); NumberKind::U128
+                elsif @offset + 2 <= @rope.size && @rope.bytes[@offset,2] == "u8".to_slice
+                  advance(2); NumberKind::U8
+                else
+                  nil
+                end
+              else
+                nil
+              end
+            end || NumberKind::I32
+          end
 
           Token.new(
             Token::Kind::Number,

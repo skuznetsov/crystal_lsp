@@ -9294,7 +9294,8 @@ module CrystalV2
             true
           when Token::Kind::Of, Token::Kind::As, Token::Kind::In, Token::Kind::Out,
                Token::Kind::Do, Token::Kind::End, Token::Kind::If, Token::Kind::Unless,
-               Token::Kind::Def, Token::Kind::For, Token::Kind::Then
+               Token::Kind::Def, Token::Kind::For, Token::Kind::Then,
+               Token::Kind::Else, Token::Kind::Class
             # Phase 103F: Keywords that can be used as parameter/argument names
             # Includes 'def' for cases like: getter def : Def, initialize(def: value)
             true
@@ -10879,26 +10880,24 @@ module CrystalV2
               param_name : Slice(UInt8)?
               param_name_span : Span?
 
-              if current_token.kind == Token::Kind::Identifier
-                # Lookahead to check if this identifier is followed by ':'
-                # If yes: named parameter (name : type)
-                # If no: unnamed parameter (just type - identifier is the type name)
+              # Allow keywords as parameter names (e.g., if/then/else/class) when followed by ':'
+              if token_can_be_arg_name?(current_token)
                 saved_index = @index
+                name_token = current_token
                 advance
                 skip_whitespace_and_optional_newlines
                 has_colon = operator_token?(current_token, Token::Kind::Colon)
-                @index = saved_index  # Restore position
-
+                @index = saved_index
                 if has_colon
-                  # Named parameter: name : type
-                  param_name = current_token.slice
-                  param_name_span = current_token.span
+                  # Consume name and ':'
                   advance
+                  param_name = name_token.slice
+                  param_name_span = name_token.span
                   skip_whitespace_and_optional_newlines
-                  advance  # consume :
+                  advance  # consume ':'
                   skip_whitespace_and_optional_newlines
                 end
-                # If no colon, fall through to parse_bare_proc_type (unnamed parameter)
+                # If no colon, fall through to type parsing (unnamed)
               end
 
               # Parse parameter type using parse_bare_proc_type
