@@ -412,18 +412,23 @@ module CrystalV2
           if current_token.kind == Token::Kind::LBrace
             nxt = peek_token
             unless nxt.kind == Token::Kind::Percent || nxt.kind == Token::Kind::LBrace
-              # Not a macro; try tolerant tuple first, then full disambiguation
+              # Not a macro; first try full disambiguation, then tolerant fallbacks
               saved_index = @index
               saved_prev = @previous_token
               saved_brace = @brace_depth
-              tuple_try = parse_brace_tuple_fallback
-              unless tuple_try.invalid?
-                return tuple_try
-              end
+              node = parse_hash_or_tuple
+              return node unless node.invalid?
               @index = saved_index
               @previous_token = saved_prev
               @brace_depth = saved_brace
-              return parse_hash_or_tuple
+              # Try tolerant tuple, then tolerant named tuple
+              tuple_try = parse_brace_tuple_fallback
+              return tuple_try unless tuple_try.invalid?
+              @index = saved_index
+              @previous_token = saved_prev
+              @brace_depth = saved_brace
+              named_try = parse_brace_named_tuple_fallback
+              return named_try
             end
           end
 
@@ -6852,36 +6857,14 @@ module CrystalV2
           when Token::Kind::LBracePercent
             parse_percent_macro_control
           when Token::Kind::LBrace
-            # Phase 103B: Check for macro control {% or macro expression {{ only inside macro bodies
+            # Recognize macro delimiters regardless of @macro_mode
             next_tok = peek_token
-            if @macro_mode > 0
-              case next_tok.kind
-              when Token::Kind::Percent
-                # {% if/for/... %}...{% end %}
-                parse_percent_macro_control
-              when Token::Kind::LBrace
-                # {{ expression }}
-                parse_percent_macro_expression
-              else
-                # Phase 14/15: Hash/NamedTuple/Tuple literal
-                node = parse_hash_or_tuple
-                if node.invalid?
-                  # Try tolerant named tuple, then tuple
-                  saved_index = @index
-                  saved_prev  = @previous_token
-                  saved_brace = @brace_depth
-                  node = parse_brace_named_tuple_fallback
-                  if node.invalid?
-                    @index = saved_index
-                    @previous_token = saved_prev
-                    @brace_depth = saved_brace
-                    node = parse_brace_tuple_fallback
-                  end
-                end
-                node
-              end
+            if next_tok.kind == Token::Kind::Percent
+              parse_percent_macro_control
+            elsif next_tok.kind == Token::Kind::LBrace
+              parse_percent_macro_expression
             else
-              # Outside macro bodies treat {{...}} as nested literals (e.g. tuples)
+              # Phase 14/15: Hash/NamedTuple/Tuple literal with tolerant fallbacks
               node = parse_hash_or_tuple
               if node.invalid?
                 saved_index = @index
@@ -7560,10 +7543,8 @@ module CrystalV2
               elements << elem
               skip_whitespace_and_optional_newlines
               break if current_token.kind == Token::Kind::RBrace
-              unless current_token.kind == Token::Kind::Comma
-                emit_unexpected(current_token)
-                return PREFIX_ERROR
-              end
+              # Silent fallback: if not a comma, give up without emitting diagnostics
+              return PREFIX_ERROR unless current_token.kind == Token::Kind::Comma
               advance
               skip_whitespace_and_optional_newlines
             end
@@ -7593,7 +7574,6 @@ module CrystalV2
                      key_token.kind == Token::Kind::Nil ||
                      key_token.kind == Token::Kind::True ||
                      key_token.kind == Token::Kind::False
-                emit_unexpected(key_token)
                 return PREFIX_ERROR
               end
               key_slice = key_token.slice
@@ -7602,10 +7582,7 @@ module CrystalV2
               skip_whitespace_and_optional_newlines
 
               # ':'
-              unless current_token.kind == Token::Kind::Colon
-                emit_unexpected(current_token)
-                return PREFIX_ERROR
-              end
+              return PREFIX_ERROR unless current_token.kind == Token::Kind::Colon
               advance
               skip_whitespace_and_optional_newlines
 
@@ -7618,10 +7595,7 @@ module CrystalV2
               entries_b << NamedTupleEntry.new(key_slice, value, key_span, value_span)
 
               break if current_token.kind == Token::Kind::RBrace
-              unless current_token.kind == Token::Kind::Comma
-                emit_unexpected(current_token)
-                return PREFIX_ERROR
-              end
+              return PREFIX_ERROR unless current_token.kind == Token::Kind::Comma
               advance
               skip_whitespace_and_optional_newlines
             end
@@ -7717,10 +7691,8 @@ module CrystalV2
               skip_whitespace_and_optional_newlines
 
               # Expect colon
-              unless current_token.kind == Token::Kind::Colon
-                emit_unexpected(current_token)
-                return PREFIX_ERROR
-              end
+              # Silent fallback: if not a colon, give up without diagnostics
+              return PREFIX_ERROR unless current_token.kind == Token::Kind::Colon
               advance  # consume :
               skip_whitespace_and_optional_newlines
 
@@ -7744,10 +7716,8 @@ module CrystalV2
           end
 
           # Expect closing brace
-          unless current_token.kind == Token::Kind::RBrace
-            emit_unexpected(current_token)
-            return PREFIX_ERROR
-          end
+              # Silent fallback: if not closing brace, give up without diagnostics
+              return PREFIX_ERROR unless current_token.kind == Token::Kind::RBrace
 
           closing_brace = current_token
           advance
