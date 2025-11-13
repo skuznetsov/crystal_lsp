@@ -6445,6 +6445,9 @@ module CrystalV2
               next
             when Token::Kind::LBracket
               left = parse_index(left)
+              # In some complex paths, the index lowering might not capture a
+              # trailing '?'. Handle it here as a postfix conversion.
+              left = handle_index_question_postfix(left)
               next
             when Token::Kind::LBrace
               # Phase 10: Block with {} syntax
@@ -8329,12 +8332,13 @@ module CrystalV2
           result
         end
 
-        # Phase 103: Updated to support multi-line indexing
+        # Phase 103: Updated to support multi-line indexing and named arguments
         private def parse_index(target : ExprId) : ExprId
           lbracket = current_token
           advance
           @bracket_depth += 1  # Phase 103: entering brackets
           indexes_b = SmallVec(ExprId, 3).new
+          named_b = SmallVec(NamedArgument, 2).new
           skip_whitespace_and_optional_newlines
           unless current_token.kind == Token::Kind::RBracket
             loop do
@@ -8348,9 +8352,65 @@ module CrystalV2
                 span = star_tok.span.cover(@arena[value].span)
                 arg = @arena.add_typed(SplatNode.new(span, value))
                 indexes_b << arg
+              elsif named_arg_start? || (
+                # Fallback: inside indexer, treat `name: value` as a named argument
+                # even if generic named_arg_start? guard fails for some reason.
+                # This mirrors Crystal's allowance of named args inside [] calls,
+                # e.g. obj[key, options: value]
+                current_token.kind == Token::Kind::Identifier &&
+                  begin
+                    nxt = peek_next_non_trivia
+                    nxt.kind == Token::Kind::Colon
+                  rescue
+                    false
+                  end
+              )
+                # Named argument inside index: obj[pattern, name: value]
+                name_token = current_token
+                name_slice = name_token.slice
+                name_span = name_token.span
+                advance
+                skip_whitespace_and_optional_newlines
+                unless current_token.kind == Token::Kind::Colon
+                  emit_unexpected(current_token)
+                  @bracket_depth -= 1
+                  return PREFIX_ERROR
+                end
+                advance
+                skip_whitespace_and_optional_newlines
+                @no_type_declaration += 1
+                value_expr = parse_op_assign
+                @no_type_declaration -= 1
+                return PREFIX_ERROR if value_expr.invalid?
+                named_b << NamedArgument.new(name_slice, value_expr, name_span, @arena[value_expr].span)
               else
                 expr = parse_expression(0)
-                indexes_b << expr unless expr.invalid?
+                unless expr.invalid?
+                  # Retroactive named-arg detection: if we parsed a bare identifier
+                  # and the next token is ':', reinterpret as a named argument.
+                  if current_token.kind == Token::Kind::Colon
+                    if node = @arena[expr]
+                      if node.is_a?(IdentifierNode)
+                        name_slice = node.name
+                        name_span = node.span
+                        advance
+                        skip_whitespace_and_optional_newlines
+                        @no_type_declaration += 1
+                        value_expr = parse_op_assign
+                        @no_type_declaration -= 1
+                        return PREFIX_ERROR if value_expr.invalid?
+                        named_b << NamedArgument.new(name_slice, value_expr, name_span, @arena[value_expr].span)
+                      else
+                        # Not an identifier, keep as positional arg and leave ':' to outer context
+                        indexes_b << expr
+                      end
+                    else
+                      indexes_b << expr
+                    end
+                  else
+                    indexes_b << expr
+                  end
+                end
               end
               skip_whitespace_and_optional_newlines
               break unless current_token.kind == Token::Kind::Comma
@@ -8369,35 +8429,62 @@ module CrystalV2
             acc_span = acc_span.cover(closing_span)
           end
 
-          if current_token.kind == Token::Kind::Question
-            question_token = current_token
-            advance
-
-            # Build callee: target.[]?
-            method_slice = @string_pool.intern("[]?".to_slice)
-            callee_span = node_span(target).cover(question_token.span)
+          # If named args present, or '[]?' variant, lower to CallNode target.[](args..., named:)
+          if named_b.size > 0 || current_token.kind == Token::Kind::Question
+            method_name = if current_token.kind == Token::Kind::Question
+              question_token = current_token
+              advance
+              @string_pool.intern("[]?".to_slice)
+            else
+              @string_pool.intern("[]".to_slice)
+            end
             callee = @arena.add_typed(
               MemberAccessNode.new(
-                callee_span,
+                acc_span,
                 target,
-                method_slice
+                method_name
               )
             )
-
-            # Include '?' in the call span
-            call_span = acc_span.cover(question_token.span)
-            indexes = indexes_b.to_a
-            return @arena.add_typed(
+            @arena.add_typed(
               CallNode.new(
-                call_span,
+                acc_span,
                 callee,
-                indexes
+                indexes_b.to_a,
+                nil,
+                named_b.empty? ? nil : named_b.to_a
               )
             )
+          else
+            index_span = acc_span
+            @arena.add_typed(IndexNode.new(index_span, target, indexes_b.to_a))
           end
+        end
 
-          index_span = acc_span
-          @arena.add_typed(IndexNode.new(index_span, target, indexes_b.to_a))
+        # Postfix handler for '[]?' in case index lowering didn't capture it.
+        # If the previous expression is an IndexNode and we see a '?', convert it
+        # to a CallNode for method name "[]?" preserving positional args.
+        private def handle_index_question_postfix(left : ExprId) : ExprId
+          return left unless current_token.kind == Token::Kind::Question
+          node = @arena[left]
+          return left unless node.is_a?(IndexNode)
+          question = current_token
+          advance
+          callee = @arena.add_typed(
+            MemberAccessNode.new(
+              node.span.cover(question.span),
+              node.object,
+              @string_pool.intern("[]?".to_slice)
+            )
+          )
+          @arena.add_typed(
+            CallNode.new(
+              node.span.cover(question.span),
+              callee,
+              node.indexes,
+              nil,
+              nil
+            )
+          )
         end
 
         private def parse_member_access(receiver : ExprId) : ExprId
@@ -8405,6 +8492,12 @@ module CrystalV2
           advance
           skip_trivia
           member_token = current_token
+
+          # Support explicit indexer call via dotted bracket syntax: obj.[]?(args)
+          if member_token.kind == Token::Kind::LBracket
+            # Don't consume member_token here; let parse_index handle it
+            return parse_index(receiver)
+          end
 
           # Phase 44: Check for .as(Type) type cast
           if member_token.kind == Token::Kind::As
