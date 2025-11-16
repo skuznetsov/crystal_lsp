@@ -107,7 +107,7 @@ module CrystalV2
         private def parse_block_body_with_optional_rescue : Tuple(Array(ExprId), Array(RescueClause)?, Array(ExprId)?)
           body_ids_b = SmallVec(ExprId, 4).new
           loop do
-            consume_newlines
+            skip_statement_end
             token = current_token
             break if token.kind == Token::Kind::Rescue || token.kind == Token::Kind::Ensure || token.kind == Token::Kind::End
             break if token.kind == Token::Kind::EOF
@@ -115,7 +115,7 @@ module CrystalV2
 
             expr = parse_statement
             body_ids_b << expr unless expr.invalid?
-            consume_newlines
+            skip_statement_end
           end
 
           rescue_clauses = nil
@@ -2180,7 +2180,7 @@ module CrystalV2
 
             expr = parse_statement
             then_body_b << expr unless expr.invalid?
-            consume_newlines
+            skip_statement_end
           end
 
           # Parse optional elsif branches
@@ -2205,7 +2205,7 @@ module CrystalV2
             if token.kind == Token::Kind::Then
               advance
             end
-            consume_newlines
+            skip_statement_end
 
             # Parse elsif body
             elsif_body_b = SmallVec(ExprId, 2).new
@@ -2218,7 +2218,7 @@ module CrystalV2
 
               expr = parse_statement
               elsif_body_b << expr unless expr.invalid?
-              consume_newlines
+              skip_statement_end
             end
 
             # Capture elsif span (from elsif keyword to last expression)
@@ -2237,7 +2237,7 @@ module CrystalV2
           token = current_token
           if token.kind == Token::Kind::Else
             advance
-            consume_newlines
+            skip_statement_end
 
             else_body_b = SmallVec(ExprId, 4).new
             loop do
@@ -2249,7 +2249,7 @@ module CrystalV2
 
               expr = parse_statement
               else_body_b << expr unless expr.invalid?
-              consume_newlines
+              skip_statement_end
             end
           end
 
