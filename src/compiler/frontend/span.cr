@@ -50,6 +50,11 @@ module CrystalV2
 
           true
         end
+
+        # Convenience constructor for zero-initialized spans.
+        def self.zero
+          Span.new(0, 0, 0, 0, 0, 0)
+        end
       end
     end
   end

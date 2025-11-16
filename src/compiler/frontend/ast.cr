@@ -171,7 +171,7 @@ module CrystalV2
           @external_name : Slice(UInt8)? = nil,  # Phase 103K: External parameter name
           @type_annotation : Slice(UInt8)? = nil,
           @default_value : ExprId? = nil,
-          @span : Span = Span.new(0, 0, 0, 0, 0, 0),
+          @span : Span = Span.zero,
           @name_span : Span? = nil,    # Phase BLOCK_CAPTURE: optional
           @external_name_span : Span? = nil,  # Phase 103K: External name span
           @type_span : Span? = nil,
@@ -270,7 +270,7 @@ module CrystalV2
           @name : Slice(UInt8),
           @type_annotation : Slice(UInt8)? = nil,
           @default_value : ExprId? = nil,
-          @name_span : Span = Span.new(0, 0, 0, 0, 0, 0),
+          @name_span : Span = Span.zero,
           @type_span : Span? = nil,
           @default_span : Span? = nil
         )
@@ -322,7 +322,7 @@ module CrystalV2
         def initialize(
           @name : Slice(UInt8),
           @value : ExprId? = nil,
-          @name_span : Span = Span.new(0, 0, 0, 0, 0, 0),
+          @name_span : Span = Span.zero,
           @value_span : Span? = nil
         )
         end
