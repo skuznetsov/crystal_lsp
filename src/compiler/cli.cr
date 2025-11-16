@@ -56,9 +56,7 @@ module CrystalV2
       end
 
       module Pipeline
-        extend self
-
-        def describe
+        def self.describe
           [
             "Stage 1: Lexing (streaming)",
             "Stage 2: Incremental parsing / AST persistence",

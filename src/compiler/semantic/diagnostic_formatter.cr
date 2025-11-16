@@ -5,10 +5,8 @@ module CrystalV2
   module Compiler
     module Semantic
       module DiagnosticFormatter
-        extend self
-
         # Format a semantic diagnostic with Rust-style multi-span output
-        def format(source : String?, diagnostic : Diagnostic) : String
+        def self.format(source : String?, diagnostic : Diagnostic) : String
           String.build do |io|
             # Header: error[E2001]: message
             io << format_level(diagnostic.level)
@@ -32,7 +30,7 @@ module CrystalV2
           end
         end
 
-        private def format_level(level : DiagnosticLevel) : String
+        private def self.format_level(level : DiagnosticLevel) : String
           case level
           when .error?   then "error"
           when .warning? then "warning"
@@ -41,25 +39,25 @@ module CrystalV2
           end
         end
 
-        private def format_location(span : Frontend::Span) : String
+        private def self.format_location(span : Frontend::Span) : String
           "#{span.start_line}:#{span.start_column}"
         end
 
-        private def format_primary_span(source : String, span : Frontend::Span) : String
+        private def self.format_primary_span(source : String, span : Frontend::Span) : String
           String.build do |io|
             io << "  --> " << format_location(span) << "\n"
             io << format_snippet(source, span)
           end
         end
 
-        private def format_secondary_span(source : String, span : Frontend::Span) : String
+        private def self.format_secondary_span(source : String, span : Frontend::Span) : String
           String.build do |io|
             io << "  --> " << format_location(span) << "\n"
             io << format_snippet(source, span)
           end
         end
 
-        private def format_snippet(source : String, span : Frontend::Span) : String
+        private def self.format_snippet(source : String, span : Frontend::Span) : String
           # Extract relevant lines from source
           lines = source.lines
           start_line = span.start_line
@@ -98,7 +96,7 @@ module CrystalV2
           end
         end
 
-        private def build_underline(
+        private def self.build_underline(
           line : String,
           line_num : Int32,
           span : Frontend::Span,

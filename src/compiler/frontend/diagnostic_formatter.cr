@@ -5,9 +5,7 @@ module CrystalV2
   module Compiler
     module Frontend
       module DiagnosticFormatter
-        extend self
-
-        def format(source : String?, diagnostic : Diagnostic) : String
+        def self.format(source : String?, diagnostic : Diagnostic) : String
           span = diagnostic.span
           range = format_range(span)
           base = String.build do |io|
@@ -29,11 +27,11 @@ module CrystalV2
           end
         end
 
-        private def format_range(span : Span) : String
+        private def self.format_range(span : Span) : String
           "#{span.start_line}:#{span.start_column}-#{span.end_line}:#{span.end_column}"
         end
 
-        private def extract_lines(source : String, span : Span) : Array(String)
+        private def self.extract_lines(source : String, span : Span) : Array(String)
           lines = source.lines
           start_index = span.start_line - 1
           end_index = span.end_line - 1
@@ -41,7 +39,7 @@ module CrystalV2
           lines[start_index..end_index]
         end
 
-        private def build_snippet(lines : Array(String), underlines : Array(String), span : Span, gutter_width : Int32) : String
+        private def self.build_snippet(lines : Array(String), underlines : Array(String), span : Span, gutter_width : Int32) : String
           start_line_index = span.start_line
           String.build do |io|
             lines.each_with_index do |line, index|
@@ -55,7 +53,7 @@ module CrystalV2
           end.rstrip
         end
 
-        private def format_gutter(line_number : Int32?, width : Int32, is_code_line : Bool) : String
+        private def self.format_gutter(line_number : Int32?, width : Int32, is_code_line : Bool) : String
           if line_number
             String.build do |io|
               io << "  " << line_number.to_s.rjust(width) << " | "
@@ -66,7 +64,7 @@ module CrystalV2
           end
         end
 
-        private def build_underlines(lines : Array(String), span : Span) : Array(String)
+        private def self.build_underlines(lines : Array(String), span : Span) : Array(String)
           return [] of String if lines.empty?
           count = lines.size
 
@@ -83,7 +81,7 @@ module CrystalV2
           end
         end
 
-        private def underline_segment(line : String, start_column : Int32, end_column : Int32) : String
+        private def self.underline_segment(line : String, start_column : Int32, end_column : Int32) : String
           length = line.size
           start_index = (start_column - 1).clamp(0, length)
           end_index = (end_column - 1).clamp(start_index, length)

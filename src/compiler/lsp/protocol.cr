@@ -30,8 +30,8 @@ module CrystalV2
         # Create range from Span (compiler internal format)
         def self.from_span(span : Frontend::Span) : Range
           new(
-            start: Position.new(line: span.start_line - 1, character: span.start_column - 1),
-            end: Position.new(line: span.end_line - 1, character: span.end_column - 1)
+            Position.new(line: span.start_line - 1, character: span.start_column - 1),
+            Position.new(line: span.end_line - 1, character: span.end_column - 1)
           )
         end
       end
@@ -158,7 +158,7 @@ module CrystalV2
         # Create Location from Symbol's node span
         def self.from_symbol(symbol : Semantic::Symbol, program : Frontend::Program, uri : String) : Location
           node_id = symbol.node_id
-          return Location.new(uri: uri, range: Range.new(start: Position.new(0, 0), end: Position.new(0, 1))) if node_id.invalid?
+          return Location.new(uri: uri, range: Range.new(Position.new(0, 0), Position.new(0, 1))) if node_id.invalid?
 
           node = program.arena[node_id]
           range = Range.from_span(node.span)

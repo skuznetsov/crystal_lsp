@@ -2354,8 +2354,8 @@ module CrystalV2
           end_char = range_json["end"]["character"].as_i
 
           range = Range.new(
-            start: Position.new(start_line, start_char),
-            end: Position.new(end_line, end_char)
+            Position.new(start_line, start_char),
+            Position.new(end_line, end_char)
           )
 
           debug("InlayHint request: uri=#{uri}, range=#{start_line}:#{start_char}-#{end_line}:#{end_char}")
@@ -2639,7 +2639,7 @@ module CrystalV2
 
           start_pos = Position.new(line: start_line, character: start_char)
           end_pos = Position.new(line: end_line, character: end_char)
-          range = Range.new(start: start_pos, end: end_pos)
+          range = Range.new(start_pos, end_pos)
 
           # Parse diagnostics from context
           diagnostics = [] of Diagnostic
@@ -3820,8 +3820,8 @@ module CrystalV2
               if match = pattern.match(line)
                 start_column = match.begin + match[0].rindex(constant_name).not_nil!
                 range = Range.new(
-                  start: Position.new(line_index, start_column),
-                  end: Position.new(line_index, start_column + constant_name.bytesize)
+                  Position.new(line_index, start_column),
+                  Position.new(line_index, start_column + constant_name.bytesize)
                 )
                 return Location.new(uri: file_uri(path), range: range)
               end
@@ -3871,8 +3871,8 @@ module CrystalV2
               start_column = match.begin + prefix.rindex(method_name).not_nil!
               uri = file_uri(path)
               range = Range.new(
-                start: Position.new(line_index, start_column),
-                end: Position.new(line_index, start_column + method_name.bytesize)
+                Position.new(line_index, start_column),
+                Position.new(line_index, start_column + method_name.bytesize)
               )
               return Location.new(uri: uri, range: range)
             end
@@ -5510,7 +5510,7 @@ module CrystalV2
             end_char = lines.last?.try(&.size) || 0
             end_pos = Position.new(line: end_line, character: end_char)
 
-            range = Range.new(start: start_pos, end: end_pos)
+            range = Range.new(start_pos, end_pos)
             edit = TextEdit.new(range: range, new_text: formatted_source)
 
             debug("Formatted: #{original_source.lines.size} lines → #{formatted_source.lines.size} lines")
