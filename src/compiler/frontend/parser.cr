@@ -1023,6 +1023,7 @@ module CrystalV2
               if current_token.kind == Token::Kind::Identifier
                 # Peek ahead to see if there's a colon
                 next_idx = @index + 1
+                ensure_token(next_idx)
                 if next_idx < @tokens.size && @tokens[next_idx].kind == Token::Kind::Colon
                   # This is a named argument
                   named_b ||= SmallVec(NamedArgument, 2).new
@@ -6804,7 +6805,7 @@ module CrystalV2
               # With skip_trivia, detect space by span gap
               gap_before_colon = current_token.kind == Token::Kind::Colon &&
                                   current_token.span.start_line == identifier_token.span.end_line &&
-                                  current_token.span.start_column > identifier_token.span.end_column + 1
+                                  current_token.span.start_column > identifier_token.span.end_column
               skip_trivia
               if gap_before_colon && current_token.kind == Token::Kind::Colon && @no_type_declaration == 0
                 parse_type_declaration_from_identifier(identifier_token)
@@ -6822,7 +6823,7 @@ module CrystalV2
               advance
               gap_before_colon = current_token.kind == Token::Kind::Colon &&
                                   current_token.span.start_line == identifier_token.span.end_line &&
-                                  current_token.span.start_column > identifier_token.span.end_column + 1
+                                  current_token.span.start_column > identifier_token.span.end_column
               skip_trivia
               if gap_before_colon && current_token.kind == Token::Kind::Colon && @no_type_declaration == 0
                 parse_type_declaration_from_identifier(identifier_token)
@@ -6841,7 +6842,7 @@ module CrystalV2
             advance
             gap_before_colon = current_token.kind == Token::Kind::Colon &&
                                 current_token.span.start_line == identifier_token.span.end_line &&
-                                current_token.span.start_column > identifier_token.span.end_column + 1
+                                current_token.span.start_column > identifier_token.span.end_column
             skip_trivia
             if gap_before_colon && current_token.kind == Token::Kind::Colon && @no_type_declaration == 0
               # Type declaration: def : Type = value
@@ -8946,8 +8947,8 @@ module CrystalV2
           space_consumed = false
           if next_tok.kind == Token::Kind::Whitespace
             space_consumed = true
-          elsif next_tok.span.start_line == identifier_token.span.end_line
-            space_consumed = next_tok.span.start_column > identifier_token.span.end_column
+            elsif next_tok.span.start_line == identifier_token.span.end_line
+              space_consumed = next_tok.span.start_column > identifier_token.span.end_column
           end
           skip_trivia
 
