@@ -19,11 +19,25 @@ module CrystalV2
           @table_stack = [context.symbol_table]
           @diagnostics = [] of Diagnostic
           @macro_expander = MacroExpander.new(@program, @arena)
+          @class_stack = [] of ClassSymbol
+          # Pending root-level annotations (for example,
+          # @[JSON::Serializable::Options] immediately before a class
+          # definition). These annotations are attached to the next class we
+          # see at the top level.
+          @pending_root_annotations = [] of Frontend::ExprId
         end
 
         def collect
           @program.roots.each do |root_id|
-            visit(root_id)
+            node = @arena[root_id]
+
+            case node
+            when Frontend::AnnotationNode
+              # Root-level annotation to be attached to the next class/module.
+              @pending_root_annotations << root_id
+            else
+              visit(root_id)
+            end
           end
           self
         end
@@ -169,13 +183,24 @@ module CrystalV2
           # Phase 5A: Collect instance variable declarations
           # Get the final class symbol from table (may have been redefined)
           final_class_symbol = table.lookup_local(name)
+          pushed_owner = false
           if final_class_symbol.is_a?(ClassSymbol)
+            # Attach any pending root-level annotations to this class
+            unless @pending_root_annotations.empty?
+              attach_class_annotations(final_class_symbol, @pending_root_annotations)
+              @pending_root_annotations.clear
+            end
+            @class_stack << final_class_symbol
+            pushed_owner = true
             collect_instance_vars(final_class_symbol, node.body || [] of Frontend::ExprId)
           end
 
-          (node.body || [] of Frontend::ExprId).each do |expr_id|
-            visit(expr_id)
-          end
+          # Walk the class body in order so that annotations like
+          # @[JSON::Field] apply to the immediately following declaration
+          # (instance variable, property, etc.).
+          collect_class_body(final_class_symbol, node.body || [] of Frontend::ExprId)
+
+          @class_stack.pop if pushed_owner
           pop_table
         end
 
@@ -356,8 +381,11 @@ module CrystalV2
             # Get arguments
             args = Frontend.node_args(node) || [] of Frontend::ExprId
 
-            # Expand macro
-            expanded_id = @macro_expander.expand(symbol, args)
+            # Determine owner type (current class) for @type reflection
+            owner_type = @class_stack.empty? ? nil : @class_stack.last
+
+            # Expand macro with optional owner_type
+            expanded_id = @macro_expander.expand(symbol, args, owner_type)
 
             # Collect diagnostics from expander
             @diagnostics.concat(@macro_expander.diagnostics)
@@ -373,6 +401,182 @@ module CrystalV2
         private def collect_instance_vars(class_symbol : ClassSymbol, body : Array(Frontend::ExprId))
           body.each do |expr_id|
             scan_for_instance_vars(class_symbol, expr_id)
+          end
+        end
+
+        # Attach root-level annotations (e.g., @[JSON::Serializable::Options])
+        # to the owning class symbol.
+        private def attach_class_annotations(class_symbol : ClassSymbol, annotation_ids : Array(Frontend::ExprId))
+          annotation_ids.each do |ann_id|
+            node = @arena[ann_id]
+            next unless node.is_a?(Frontend::AnnotationNode)
+
+            if info = build_annotation_info(node)
+              class_symbol.add_annotation(info)
+            end
+          end
+        end
+
+        # Attach pending annotations to an explicit instance variable
+        # declaration inside a class body.
+        private def attach_ivar_annotations(class_symbol : ClassSymbol, node : Frontend::InstanceVarDeclNode, annotation_ids : Array(Frontend::ExprId))
+          return if annotation_ids.empty?
+
+          ivar_name = String.new(node.name)
+          ivar_name = ivar_name[1..-1] if ivar_name.starts_with?("@")
+
+          annotation_ids.each do |ann_id|
+            ann_node = @arena[ann_id]
+            next unless ann_node.is_a?(Frontend::AnnotationNode)
+
+            if info = build_annotation_info(ann_node)
+              class_symbol.add_ivar_annotation(ivar_name, info)
+            end
+          end
+        end
+
+        # Attach pending annotations to accessor macros (getter/setter/property)
+        # by mapping them to the underlying instance variable name(s).
+        private def attach_accessor_annotations(class_symbol : ClassSymbol, node : Frontend::TypedNode, annotation_ids : Array(Frontend::ExprId))
+          return if annotation_ids.empty?
+
+          specs = Frontend.node_accessor_specs(node)
+          return unless specs
+
+          # Build all annotation infos up front to reuse for each spec
+          infos = annotation_ids.compact_map do |ann_id|
+            ann_node = @arena[ann_id]
+            next unless ann_node.is_a?(Frontend::AnnotationNode)
+            build_annotation_info(ann_node)
+          end
+
+          return if infos.empty?
+
+          specs.each do |spec|
+            spec_name = String.new(spec.name)
+            infos.each do |info|
+              class_symbol.add_ivar_annotation(spec_name, info)
+            end
+          end
+        end
+
+        # Convert an AnnotationNode into AnnotationInfo, extracting the
+        # fully-qualified name and argument expressions.
+        private def build_annotation_info(node : Frontend::AnnotationNode) : AnnotationInfo?
+          full_name = annotation_full_name(node.name)
+          return nil if full_name.empty?
+
+          args = node.args || [] of Frontend::ExprId
+
+          named_args_hash = {} of String => ExprId
+          if named_args = node.named_args
+            named_args.each do |named_arg|
+              key = String.new(named_arg.name)
+              named_args_hash[key] = named_arg.value
+            end
+          end
+
+          AnnotationInfo.new(full_name, args, named_args_hash)
+        end
+
+        # Build a fully-qualified annotation name from its name expression.
+        # Handles simple identifiers and nested PathNode chains such as
+        # JSON::Serializable::Options.
+        private def annotation_full_name(name_expr_id : Frontend::ExprId) : String
+          node = @arena[name_expr_id]
+
+          case node
+          when Frontend::IdentifierNode
+            String.new(node.name)
+          when Frontend::PathNode
+            parts = [] of String
+            current_id = name_expr_id
+
+            # Traverse left-associative PathNode chain
+            while true
+              current = @arena[current_id]
+              case current
+              when Frontend::PathNode
+                right_id = current.right
+                right_name = annotation_full_name(right_id)
+                parts << right_name unless right_name.empty?
+
+                if left_id = current.left
+                  current_id = left_id
+                else
+                  break
+                end
+              when Frontend::IdentifierNode
+                parts << String.new(current.name)
+                break
+              else
+                literal = Frontend.node_literal_string(current)
+                parts << literal if literal
+                break
+              end
+            end
+
+            parts.reverse.join("::")
+          else
+            Frontend.node_literal_string(node) || ""
+          end
+        end
+
+        # Sequential pass over class body to associate annotations with
+        # following declarations (instance variable declarations, accessor
+        # macros, etc.), and to dispatch existing handlers for defs, macros,
+        # and calls.
+        private def collect_class_body(owner : ClassSymbol?, body : Array(Frontend::ExprId))
+          pending_annotations = [] of Frontend::ExprId
+
+          body.each do |expr_id|
+            node = @arena[expr_id]
+
+            case node
+            when Frontend::AnnotationNode
+              # Record annotation to be attached to the next relevant node.
+              pending_annotations << expr_id
+
+            when Frontend::InstanceVarDeclNode
+              if owner
+                attach_ivar_annotations(owner, node, pending_annotations)
+              end
+              pending_annotations.clear
+
+            when Frontend::GetterNode, Frontend::SetterNode, Frontend::PropertyNode
+              if owner
+                attach_accessor_annotations(owner, node, pending_annotations)
+              end
+              pending_annotations.clear
+              # Reuse existing accessor macro expansion logic
+              expand_accessor_macro(expr_id, node)
+
+            when Frontend::DefNode
+              # Method-level definitions use existing handler
+              pending_annotations.clear
+              handle_def(expr_id, node)
+
+            when Frontend::MacroDefNode
+              pending_annotations.clear
+              handle_macro_def(expr_id, node)
+
+            when Frontend::ClassNode
+              # Nested class: clear pending annotations and recurse
+              pending_annotations.clear
+              handle_class(expr_id, node)
+
+            when Frontend::ModuleNode
+              pending_annotations.clear
+              handle_module(expr_id, node)
+
+            when Frontend::CallNode
+              pending_annotations.clear
+              handle_potential_macro_call(expr_id, node)
+
+            else
+              # Any other node breaks the annotation chain
+              pending_annotations.clear
+            end
           end
         end
 

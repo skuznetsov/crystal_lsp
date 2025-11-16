@@ -1,470 +1,136 @@
-# Crystal V2 - Missing Features and Known Issues
-
-This document tracks features and functionality that are not yet implemented or have known issues compared to the original Crystal compiler.
-
-## Status: Current Test Results
-- **Total Examples:** 1425
-- **Passing:** 1425 (100%)
-- **Failures:** 0 (0%)
-- **Errors:** 0 (0%)
-- **Pending:** 6 (skipped)
-- **Last Updated:** 2025-11-10
-
-### LSP Testing on Stdlib (2025-11-10)
-Tested LSP server on key stdlib modules - all passing with **0 diagnostics**:
-- `src/json/serialization.cr` - 0 диагностик
-- `src/string.cr` - 0 диагностик
-- `src/array.cr` - 0 диагностик
-- `src/hash.cr` - 0 диагностик
-- `src/set.cr` - 0 диагностик
-
-### Recent Progress
-- **Session Start (earlier):** 14 failures, 1 error (15 total issues)
-- **After Compound Assignment + Union Types:** 5 failures, 1 error (6 total issues)
-- **After String Interpolation + Begin/End fixes:** 3 failures, 1 error (4 total issues)
-- **After Proc Literal Parser Fix:** 2 failures, 0 errors (2 total issues)
-- **Total Improvement:** 13 tests fixed (87% reduction in failures)
-- **Fixes:** Union types (2) + Compound assignments (7) + String interpolation (1) + Begin/end (1) + Proc literal parser (2)
-
-## 1. Parser - Missing Features
-
-### 1.1 Proc Literal Return Type Annotation ✅ FIXED
-**Status:** COMPLETED (2025-11-10)
-**Priority:** Medium (was)
-**Test Files:** PASSING
-- `spec/parser/parser_proc_literal_spec.cr:108` ✅
-- `spec/semantic_proc_literal_spec.cr:68` ✅
-
-**Issue (was):**
-Parser incorrectly consumed `{` as part of type annotation in proc literals:
-```crystal
-->(x : Int32) : Int32 { x * 2 }
-#                     ^ Parser treated this as tuple type start
-```
-
-**Root Cause:**
-`parse_type_annotation` method treated `{` as tuple type literal (`{Int32, String}`) and consumed proc body as part of the type.
-
-**Solution:**
-Added break condition in `parse_type_annotation` (line 945) when encountering `{` at `brace_depth==0` to prevent consuming non-type tokens like proc body.
-
-**Files Modified:**
-- `src/compiler/frontend/parser.cr:945` - Add LBrace break check
-
----
-
-## 2. Type Inference - Incomplete Features
-
-### 2.1 Compound Assignment Type Inference ✅ FIXED
-**Status:** COMPLETED (2025-11-10)
-**Priority:** High (was)
-**Test Files:** ALL PASSING
-- `spec/semantic/type_inference_spec.cr:3190` (+=) ✅
-- `spec/semantic/type_inference_spec.cr:3212` (-=) ✅
-- `spec/semantic/type_inference_spec.cr:3230` (*=) ✅
-- `spec/semantic/type_inference_spec.cr:3248` (/=) ✅
-- `spec/semantic/type_inference_spec.cr:3266` (%=) ✅
-- `spec/semantic/type_inference_spec.cr:3284` (**=) ✅
-- `spec/semantic/type_inference_spec.cr:3302` (with float) ✅
-
-**Issue (was):**
-Compound assignments like `x += 5` returned `Nil` instead of Int32.
-
-**Root Cause:**
-Cycle detection in iterative loop (line 95-101) was setting IdentifierNodes to `nil_type` when it detected them as "cycles". This prevented the recursive path from checking `@assignments` hash.
-
-**Solution:**
-Modified cycle detection to SKIP IdentifierNodes:
-```crystal
-when 1
-  # Cycle detected; assign nil_type to break it
-  # EXCEPTION: Don't set Nil for IdentifierNode - it needs to check @assignments
-  child_node = @program.arena[child]
-  unless child_node.is_a?(Frontend::IdentifierNode)
-    @context.set_type(child, @context.nil_type)
-  end
-  next
-```
-
-**Files Modified:**
-- `src/compiler/semantic/type_inference_engine.cr:95-102`
-
-**Result:** ALL 7 compound assignment tests now passing!
-
----
-
-### 2.2 Union Type Inference
-**Status:** INCOMPLETE
-**Priority:** Medium
-**Test Files:**
-- `spec/semantic/type_inference_spec.cr:775` (Int64 + Float64 union)
-- `spec/semantic/type_inference_spec.cr:823` (case without else → Nil union)
-- `spec/semantic/type_inference_spec.cr:845` (empty case branch → Nil)
-
-**Issue:**
-Union type creation and inference not fully working in some edge cases.
-
-**Examples:**
-1. Numeric type promotion to union types
-2. Case expressions without else clause should return union with Nil
-3. Empty case branches should return Nil
-
-**Required Investigation:**
-- Union type creation logic in `@context.union_of`
-- Case/when type inference in control flow
-- Integration with nil type
-
----
-
-### 2.3 Numeric Type Promotion
-**Status:** INCOMPLETE
-**Priority:** Medium
-**Test Files:**
-- `spec/semantic/type_inference_spec.cr:775` (Int64 + Float64 → Float64)
-- `spec/semantic/type_inference_spec.cr:808` (complex promotion)
-- `spec/semantic/type_inference_spec.cr:3302` (compound with float)
-- 1 more test
-
-**Issue:**
-Numeric type promotion rules not fully implemented.
-
-**Crystal Rules:**
-- Int32 + Int64 → Int64
-- Int64 + Float64 → Float64
-- Any integer + Float → Float
-- Smaller int + bigger int → bigger int
-
-**Current Status:**
-Basic promotion exists in `promote_numeric_types` method, but edge cases fail.
-
-**Required Work:**
-- Review and complete `promote_numeric_types` logic
-- Handle all combinations of numeric types
-- Test with complex expressions
-
----
-
-## 3. Break/Next Statements
-**Status:** INCOMPLETE
-**Priority:** Medium
-**Test Files:**
-- `spec/semantic/type_inference_spec.cr:2253` (break with value)
-- `spec/semantic/type_inference_spec.cr:2325` (break with String)
-
-**Issue:**
-Break statements with values not properly typed.
-
-**Example:**
-```crystal
-while true
-  break 42  # Should propagate Int32 as loop result type
-end
-```
-
-**Required Investigation:**
-- How break/next values affect loop result types
-- Integration with control flow type inference
-- Union of all break values + normal loop completion type
-
----
-
-## 4. Recently Fixed Issues ✅
-
-### 4.1 String Interpolation Expression Types ✅
-**Fixed:** 2025-11-10
-**Test:** `spec/semantic/type_inference_spec.cr:1706`
-
-**Issue:**
-Expressions inside string interpolation (like `#{x + y}`) were returning `nil` type instead of their actual type (Int32).
-
-**Root Cause:**
-`compute_node_type_no_recurse` was returning `string_type` for StringInterpolationNode at lines 594-598, taking the iterative shortcut. This skipped the recursive `infer_string_interpolation` method which actually infers types for the expression pieces.
-
-**Solution:**
-Changed StringInterpolationNode handling in `compute_node_type_no_recurse` (lines 594-598) to return `nil`, forcing the recursive path where `infer_string_interpolation` is called and expression pieces get their types inferred.
-
-**Files Modified:**
-- `src/compiler/semantic/type_inference_engine.cr:594-598, 1914-1916`
-
----
-
-### 4.2 Begin/End Block Return Type ✅
-**Fixed:** 2025-11-10
-**Test:** `spec/semantic/type_inference_begin_spec.cr:146`
-
-**Issue:**
-`begin...end` blocks were returning `Nil` instead of the type of their last expression.
-
-**Root Cause:**
-`compute_node_type_no_recurse` was handling BeginNode in the iterative path (lines 574-587) trying to call `infer_expression(body.last)`, but this couldn't work reliably if body expressions hadn't been processed yet.
-
-**Solution:**
-Changed BeginNode handling in `compute_node_type_no_recurse` (lines 574-578) to return `nil`, forcing the recursive path where `infer_begin` properly handles scoping and returns the type of the last expression.
-
-**Files Modified:**
-- `src/compiler/semantic/type_inference_engine.cr:574-578`
-
----
-
-### 4.3 Diagnostic Emission
-**Fixed:** 2025-11-10
-**Commit:** (current session)
-
-**Issue:**
-Control flow validation diagnostics (Bool type checks for if/while conditions, operator type validation) were not being emitted.
-
-**Root Cause:**
-`compute_node_type_no_recurse` (iterative path) had logic for IfNode, WhileNode, UnlessNode, and BinaryNode but didn't perform validation. Validation logic was only in recursive methods (infer_if, infer_while, infer_binary).
-
-**Solution:**
-Modified `compute_node_type_no_recurse` to return `nil` for nodes requiring validation, triggering recursive fallback where diagnostics are emitted:
-- IfNode, UnlessNode, WhileNode, UntilNode → return nil
-- BinaryNode (except comparisons and ranges) → return nil
-
-**Tests Fixed:** 4 diagnostic tests
-
----
-
-### 4.2 IdentifierNode Type Inference
-**Fixed:** (previous session)
-**Commit:** 75067baa7
-
-**Issue:**
-Class name identifiers (e.g., `Calculator` in `Calculator.new`) returned Nil instead of ClassType.
-
-**Root Cause:**
-`compute_node_type_no_recurse` for IdentifierNode only checked `@assignments` hash (local variables) and returned `@context.nil_type` for class names. This prevented the recursive fallback to symbol table lookup.
-
-**Solution:**
-Changed IdentifierNode handling to:
-1. Check `@assignments[name]?` first (returns Type or nil)
-2. If nil, return nil to trigger recursive fallback
-3. Recursive path (`infer_identifier`) does symbol table lookup for class names
-
-**Tests Fixed:** 25 tests
-
----
-
-### 4.3 Debug Infrastructure
-**Added:** (previous session)
-
-Added unified `debug()` method pattern across:
-- `lexer.cr`
-- `parser.cr`
-- `type_inference_engine.cr`
-
-**Pattern:**
-```crystal
-@debug_enabled : Bool
-# Set in initializer from ENV["COMPONENT_DEBUG"]? == "1"
-
-private def debug(msg : String)
-  STDERR.puts "[COMPONENT_DEBUG] #{msg}" if @debug_enabled
-end
-```
-
-**Benefit:**
-Consistent debugging experience across all compiler components.
-
----
-
-## 5. Architecture Notes
-
-### 5.1 Dual-Path Type Inference
-The type inference engine uses a dual-path architecture:
-
-1. **Iterative Path:** `compute_node_type_no_recurse`
-   - Processes simple nodes using already-computed child types
-   - Fast, non-recursive
-   - Returns `Type?` (nil for complex nodes)
-
-2. **Recursive Path:** `infer_*` methods
-   - Handles complex nodes requiring validation
-   - Emits diagnostics
-   - Full type computation
-
-**Decision Rule:**
-- Simple nodes (literals, operators with known behavior) → iterative
-- Complex nodes (control flow, method calls, validation required) → recursive (return nil from iterative)
-
-### 5.2 Node Classification
-Nodes are classified by **operational complexity**, not syntactic simplicity:
-
-- **Simple:** NumberNode, StringNode, BoolNode, comparisons, ranges
-- **Complex:** IfNode (needs Bool validation), BinaryNode with arithmetic (needs operator validation), IdentifierNode for class names (needs symbol lookup)
-
----
-
-## 6. Testing Strategy
-
-### 6.1 Current Test Organization
-- `spec/semantic/type_inference_spec.cr` - Main type inference tests
-- `spec/semantic_proc_literal_spec.cr` - Proc literal specific tests
-- `spec/lsp/` - LSP functionality tests (all passing)
-
-### 6.2 Test Execution
-```bash
-# Full test suite
-env CRYSTAL_CACHE_DIR=./.crystal-cache crystal spec
-
-# Specific test
-env CRYSTAL_CACHE_DIR=./.crystal-cache crystal spec spec/semantic/type_inference_spec.cr:170
-
-# With debug output
-env TYPE_INFERENCE_DEBUG=1 CRYSTAL_CACHE_DIR=./.crystal-cache crystal spec
-```
-
----
-
-## 7. Priority Roadmap
-
-### Immediate (This Session)
-1. ✅ Fix diagnostic emission (DONE)
-2. ⏳ Investigate union type issues
-3. ⏳ Investigate numeric promotion
-
-### Short Term (Next Sessions)
-1. Fix break/next type inference
-2. Implement proc literal return type annotation (parser)
-3. Complete numeric promotion logic
-4. Fix union type edge cases
-
-### Medium Term
-1. **Compound assignment** - Complex architectural issue requiring careful investigation
-2. Full test suite passing (100%)
-
-### Long Term
-1. Performance optimization
-2. Full LSP feature parity
-3. Integration with original Crystal codebase
-
----
-
-## 8. References
-
-### Key Files
-- **Parser:** `src/compiler/frontend/parser.cr`
-- **Lexer:** `src/compiler/frontend/lexer.cr`
-- **Type Inference:** `src/compiler/semantic/type_inference_engine.cr`
-- **AST:** `src/compiler/frontend/ast.cr`
-- **Types:** `src/compiler/semantic/type.cr`
-
-### Git Log
-```bash
-# View recent type inference commits
-git log --oneline -- src/compiler/semantic/type_inference_engine.cr
-
-# Current branch
-git status
-# Branch: new_crystal_parser
-```
-
-### Knowledge Base
-This TODO.md should be kept in sync with:
-- Test failures
-- Git commits
-- Session notes
-- Knowledge Core entries (if using MCP)
-
----
-
-## 9. LSP Features - Status & Roadmap
-
-### Current LSP Coverage: ~64% (16/25+ key features)
-
-**✅ Implemented Features:**
-1. textDocument/hover - тип при наведении
-2. textDocument/definition - переход к определению
-3. textDocument/completion - автодополнение
-4. textDocument/signatureHelp - подсказки сигнатур
-5. textDocument/documentSymbol - символы документа (outline)
-6. textDocument/references - поиск ссылок
-7. textDocument/inlayHint - inline подсказки типов
-8. textDocument/rename + prepareRename - переименование
-9. textDocument/foldingRange - складывание блоков
-10. textDocument/semanticTokens/full - семантическая подсветка
-11. textDocument/prepareCallHierarchy - подготовка call hierarchy
-12. textDocument/codeAction - code actions
-13. textDocument/formatting - форматирование
-14. textDocument/rangeFormatting - форматирование выделения
-15. textDocument/publishDiagnostics - диагностики
-16. workspace/symbol - глобальный поиск символов (Cmd+T)
-
-### 🎯 LSP Roadmap - Priority Order
-
-#### **Tier 1: MUST HAVE** (критичны для DX)
-1. ❌ **textDocument/typeDefinition** - переход к типу
-   - DX Impact: 🔥🔥🔥 Критично для навигации
-   - Effort: Low (уже есть type context)
-   - Benefit: Быстрая навигация к определениям типов
-
-2. ❌ **textDocument/implementation** - найти имплементации
-   - DX Impact: 🔥🔥🔥 Критично для полиморфизма
-   - Effort: Medium (нужен анализ иерархии)
-   - Benefit: Понимание кода с inheritance/overrides
-
-3. ❌ **textDocument/codeLens** - показать refs/usages над методами
-   - DX Impact: 🔥🔥 Очень полезно
-   - Effort: Low (уже есть references)
-   - Benefit: Быстрая информация о популярности методов
-
-4. ❌ **textDocument/selectionRange** - smart selection (expand/shrink)
-   - DX Impact: 🔥🔥 Ускоряет редактирование
-   - Effort: Low (AST уже есть)
-   - Benefit: Удобное выделение AST-узлов
-
-#### **Tier 2: SHOULD HAVE** (сильно улучшают DX)
-6. ❌ **workspace/willRenameFiles** + **didRenameFiles** - auto-update imports
-   - DX Impact: 🔥🔥 Рефакторинг
-   - Effort: Medium
-   - Benefit: Автоматическое обновление путей
-
-7. ❌ **callHierarchy/incomingCalls** + **outgoingCalls** - полная call hierarchy
-   - DX Impact: 🔥 Навигация
-   - Effort: Medium (prepare есть)
-   - Benefit: Понимание потока вызовов
-
-8. ❌ **textDocument/prepareTypeHierarchy** + **typeHierarchy/**/
-   - DX Impact: 🔥🔥 ООП навигация
-   - Effort: Medium
-   - Benefit: Визуализация иерархии классов
-
-9. ❌ **workspace/executeCommand** - кастомные команды
-   - DX Impact: 🔥🔥 Интеграция инструментов
-   - Effort: Low
-   - Benefit: Run tests, format, etc.
-
-10. ❌ **textDocument/documentHighlight** - подсветка вхождений
-    - DX Impact: 🔥 Навигация
-    - Effort: Low (есть references)
-    - Benefit: Визуальная ориентация
-
-#### **Tier 3: NICE TO HAVE** (современные фичи)
-11. ❌ **textDocument/linkedEditingRange** - синхронное редактирование
-12. ❌ **textDocument/onTypeFormatting** - форматирование при вводе
-13. ❌ **semanticTokens/range** + **delta** - оптимизация
-14. ❌ **textDocument/inlineCompletion** - AI-assisted (Copilot-style)
-15. ❌ **textDocument/documentLink** - кликабельные ссылки
-16. ❌ **textDocument/colorPresentation** - подсветка цветов
-17. ❌ **textDocument/declaration** - forward declarations
-
-### Implementation Plan
-
-**Session 1 (Current):**
-- ✅ Анализ текущего состояния LSP
-- ⏳ Реализация Tier 1.1: workspace/symbol
-
-**Session 2:**
-- Tier 1.2: typeDefinition
-- Tier 1.3: implementation
-
-**Session 3:**
-- Tier 1.4: codeLens
-- Tier 1.5: selectionRange
-
-**Session 4+:**
-- Tier 2 features по мере необходимости
-
----
-
-Last Updated: 2025-11-11
+# Crystal v2 Frontend & LSP Roadmap
+
+This TODO tracks work to bring the v2 frontend (parser + macros + semantic/type
+layer) to parity with the original Crystal compiler, and then grow beyond it.
+
+The immediate priority is **LSP correctness**: the v2 LSP server must not lie
+about syntax or types and should match what the original compiler would report.
+
+## 1. Parser Parity
+
+- [ ] Run the v2 parser over the entire stdlib and compiler (`src/`,
+      `crystal_v2/src`) with `bin/count_parser_diagnostics` until:
+  - [x] Global diagnostics have been reduced from ~24k to the low hundreds
+        (current runs are ~500–600 diagnostics over ~1500 files).
+  - [ ] All files that compile with the original compiler parse with **0 v2
+        parser diagnostics**.
+- [ ] Align v2 parser behavior with `src/compiler/crystal/syntax/parser.cr`:
+  - [x] Postfix modifiers only attach `if`/`unless` at statement level (no
+        trailing `while`/`until`), mirroring original `parse_expression_suffix`.
+  - [x] Major stdlib/compiler offenders (`reference.cr`, `json/serialization.cr`,
+        `lib_ffi.cr`, many collection/number files) parse with 0 diagnostics.
+  - [ ] Heredocs and multi-line string literals.
+  - [ ] Full `{% ... %}` / `{{ ... }}` macro syntax (including nested and mixed
+        cases, comments, verbatim blocks).
+  - [ ] Edge cases in blocks, postfix modifiers, case/when, rescue/ensure.
+  - [ ] Inline `asm` and other niche constructs used in stdlib/compiler.
+
+## 2. MacroExpander Parity
+
+- [ ] Bring v2 `MacroExpander` to parity with original macro engine:
+  - [x] Implement MVP macro engine:
+    - [x] `{{ ... }}` expansion for basic literals/paths.
+    - [x] `{% if/elsif/else/end %}` with simple boolean/numeric conditions.
+    - [x] `{% for %}` over arrays and integer ranges with safety limits.
+    - [x] `%var` macro variables with deterministic naming.
+    - [x] Re-parse expanded code through the v2 parser.
+  - [ ] `@type.*` API:
+    - [x] `@type.name(generic_args: false)` and `@type.size` (approximate).
+    - [x] `@type.instance_vars` iteration over ivar names.
+    - [x] Minimal `@type.overrides?(Base, "method")` check via symbol tables.
+    - [ ] Rich `@type.name(generic_args: ...)` semantics using the v2 type
+          graph (once available).
+    - [ ] `@type.instance_vars` with full metadata:
+          name, type, default_value, has_default_value?, nilable?, union?,
+          union_types, etc.
+    - [ ] `@type.methods`, `@type.annotation(s)`, `@type.superclass`,
+          full override/virtual information.
+  - [ ] Annotation queries:
+    - [x] Collect annotations on classes and ivars in `SymbolCollector`
+          (`ClassSymbol.annotations`, `ClassSymbol.ivar_annotations`).
+    - [x] Truthiness-style `ivar.annotation(Foo)` / `@type.annotation(Foo)`
+          checks (used as `if ann` / `unless ann`).
+    - [ ] `ivar.annotation(Foo)`, `ivar.annotations(Foo)` returning full
+          `Annotation`-like macro objects (`[]`, `.args`, `.named_args`, etc.).
+    - [ ] `@type.annotation(Foo)`, `@type.annotations(Foo)` returning
+          `Annotation`-like macro objects.
+  - [ ] Macro methods:
+    - [ ] `.stringify`, `.id`, `.class_name`, `.class?`, `.struct?`,
+          `.abstract?`, `.enum?`, `.lib?`, `.annotation?`, etc.
+    - [ ] `typeof(...)`, `sizeof(...)`, `alignof(...)` inside macros.
+  - [ ] Truthiness and condition evaluation:
+    - [ ] Numeric/boolean/string comparisons, `&&`, `||`, `!`, simple arithmetic
+          expressions.
+- [ ] Use original macro specs as oracle:
+  - [ ] `spec/compiler/macro/*`.
+  - [ ] `spec/compiler/codegen/macro_spec.cr`.
+  - [ ] Serialization macros: `spec/std/json/serializable_spec.cr`,
+        `spec/std/yaml/serialization_spec.cr`.
+
+## 3. Semantic & Type Inference Parity
+
+- [ ] Implement full type graph for v2 semantic layer:
+  - [ ] `ClassType`, `ModuleType`, `InstanceType`, `UnionType`, `TupleType`,
+        `ProcType`, `AliasType`, `TypeDefType`, `GenericType`, etc.
+  - [ ] Global types table (Program#types) and per-scope symbol tables.
+- [x] Collect basic symbols via `SymbolCollector`:
+  - [x] Classes, modules, methods, macros, instance variables.
+  - [x] Attach annotations to classes and ivars for macro reflection and LSP.
+- [ ] Type inference:
+  - [ ] Inference for locals, unannotated parameters and returns.
+  - [ ] Unification for generic types and type parameters.
+  - [ ] Nilability and unions (`T?`, `T | Nil`) with flow-sensitive analysis
+        (`if var`, `is_a?`, `case`).
+- [ ] Name resolution and overload resolution:
+  - [ ] Correct lookup for locals, ivars, class vars, globals, constants.
+  - [ ] Method/fun overload resolution based on argument types.
+  - [ ] include/extend, inheritance, virtual types.
+- [ ] Integrate macro expansion into semantic phase:
+  - [ ] Expand where the original compiler does, with enough type context for
+        `@type.*`, `typeof`, `sizeof`, `alignof` in macros.
+- [ ] Use compiler semantic specs as reference (`spec/compiler/*`).
+
+## 4. LSP Server Correctness (Frontload)
+
+Goal: v2 LSP must only report syntax errors that **the v2 parser/semantic layer
+would produce for valid Crystal code**, and its type/hover/definition
+information must match what the original compiler would infer.
+
+- [x] Wire the v2 LSP server to the v2 parser and symbol collector so that
+      v2-only features (e.g. macro-expanded symbols) are driven by the new
+      frontend.
+- [ ] Diagnostics:
+  - [ ] Ensure LSP diagnostics come from v2 parser/semantic layer only.
+  - [ ] Add a harness that diffs v2 parser diagnostics against original
+        compiler errors on a set of representative files (project, stdlib).
+- [ ] Types & hover:
+  - [ ] Make hover/type info use the same type graph as the semantic phase.
+  - [ ] On a curated corpus (project code + stdlib), compare v2 types with
+        original compiler (via `crystal tool context` or similar) and fix
+        mismatches.
+- [ ] Navigation:
+  - [ ] Definition/references must resolve to the same locations original
+        compiler would report (where applicable).
+  - [ ] Include navigation into stdlib/prelude and macro-generated methods
+        (e.g. JSON::Serializable, Tuple, Reference).
+
+## 5. Beyond Parity: IR & Codegen (Next Phase)
+
+(For later, once parity and LSP correctness are achieved.)
+
+- [ ] Design a compact, optimization-friendly IR on top of typed AST:
+  - [ ] SSA-style, LLVM-friendly representation.
+  - [ ] Hooks for profile-guided optimizations (HotSpot-style hot path data).
+  - [ ] Hooks for lifetime/escape analysis (ideas from V and Rust) to support
+        ARC/GRC-like modes without harming DX.
+- [ ] Fast LLVM codegen:
+  - [ ] Efficient lowering from IR to LLVM IR.
+  - [ ] Competitive build times vs Go.
+  - [ ] Room for JIT/AOT hybrids using runtime profiling.
+
+## 6. Immediate Focus (Current Session)
+
+- [ ] Finish tightening v2 parser and MacroExpander until the LSP server:
+  - [ ] Reports only real parser/semantic errors (no false positives).
+  - [ ] Shows types/hover/definitions that match the original compiler on
+        project + stdlib code.

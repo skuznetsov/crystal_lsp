@@ -48,23 +48,30 @@ module CrystalV2
         class Context
           getter variables : Hash(String, String)
           getter macro_vars : Hash(String, String)
+          # Optional owner type for @type reflection macros
+          getter owner_type : ClassSymbol?
           getter depth : Int32
 
           def initialize(
             @variables = {} of String => String,
             @macro_vars = {} of String => String,
+            @owner_type : ClassSymbol? = nil,
             @depth = 0
           )
           end
 
           def with_depth(new_depth : Int32) : Context
-            Context.new(@variables, @macro_vars, new_depth)
+            Context.new(@variables, @macro_vars, @owner_type, new_depth)
           end
 
           def with_variable(name : String, value : String) : Context
             new_vars = @variables.dup
             new_vars[name] = value
-            Context.new(new_vars, @macro_vars, @depth)
+            Context.new(new_vars, @macro_vars, @owner_type, @depth)
+          end
+
+          def with_owner_type(owner : ClassSymbol?) : Context
+            Context.new(@variables, @macro_vars, owner, @depth)
           end
 
           def set_macro_var(name : String, value : String)
@@ -83,8 +90,10 @@ module CrystalV2
 
         # Main expansion entry point
         #
-        # Takes a MacroSymbol and arguments, returns expanded AST node
-        def expand(macro_symbol : MacroSymbol, args : Array(ExprId)) : ExprId
+        # Takes a MacroSymbol and arguments, returns expanded AST node.
+        # Optional owner_type is the class in which the macro is expanded and
+        # is used to support @type.* reflection macros.
+        def expand(macro_symbol : MacroSymbol, args : Array(ExprId), owner_type : ClassSymbol? = nil) : ExprId
           # Clear diagnostics from previous expansions
           @diagnostics.clear
 
@@ -97,7 +106,7 @@ module CrystalV2
           @depth += 1
           begin
             # Bind parameters to arguments
-            context = build_context(macro_symbol, args)
+            context = build_context(macro_symbol, args, owner_type)
 
             # Evaluate macro body
             output = evaluate_macro_body(macro_symbol.body, context)
@@ -109,7 +118,7 @@ module CrystalV2
           end
         end
 
-        private def build_context(macro_symbol : MacroSymbol, args : Array(ExprId)) : Context
+        private def build_context(macro_symbol : MacroSymbol, args : Array(ExprId), owner_type : ClassSymbol?) : Context
           variables = {} of String => String
           params = macro_symbol.params || [] of String
 
@@ -125,7 +134,7 @@ module CrystalV2
             end
           end
 
-          Context.new(variables, {} of String => String, @depth)
+          Context.new(variables, {} of String => String, owner_type, @depth)
         end
 
         # Convert expression to string representation (for parameter binding)
@@ -248,6 +257,13 @@ module CrystalV2
           when .string?
             # String literal: "hello"
             Frontend.node_literal_string(node) || ""
+          when .char?
+            # Char literal: 'a'
+            Frontend.node_literal_string(node) || ""
+          when .symbol?
+            # Symbol literal: :foo
+            literal = Frontend.node_literal_string(node) || ""
+            literal.empty? ? "" : ":#{literal}"
 
           when .macro_var?
             literal = Frontend.node_literal_string(node)
@@ -277,9 +293,268 @@ module CrystalV2
             ""
 
           else
-            # Unsupported expression type for Phase 87B-2
-            # Return empty string (graceful degradation)
-            ""
+            # Additional support for type-reflection and simple member chains
+            if node.is_a?(Frontend::InstanceVarNode)
+              evaluate_instance_var_expression(node, context)
+            elsif node.is_a?(Frontend::MemberAccessNode)
+              evaluate_member_access_expression(node, context)
+            elsif node.is_a?(Frontend::CallNode)
+              evaluate_call_expression(node, context)
+            elsif node.is_a?(Frontend::PathNode)
+              path_to_string(node)
+            else
+              # Unsupported expression type for Phase 87B-2
+              # Return empty string (graceful degradation)
+              ""
+            end
+          end
+        end
+
+        # Evaluate instance variable expressions used in macros
+        # Currently only supports @type for type-reflection macros.
+        private def evaluate_instance_var_expression(node, context : Context) : Value
+          name_slice = node.name
+          name = String.new(name_slice)
+          if name == "@type"
+            if owner = context.owner_type
+              return owner.name
+            end
+          end
+          ""
+        end
+
+        # Evaluate simple member access chains used in macros, such as
+        #   @type.name
+        #   @type.name.id.stringify
+        #   ivar.id
+        private def evaluate_member_access_expression(node, context : Context) : Value
+          # Resolve base value
+          base_value = case obj = @arena[node.object]
+                       when Frontend::InstanceVarNode
+                         evaluate_instance_var_expression(obj, context)
+                       when Frontend::IdentifierNode
+                         var_name = Frontend.node_literal_string(obj) || ""
+                         context.variables[var_name]? || ""
+                       when Frontend::MemberAccessNode
+                         evaluate_member_access_expression(obj, context)
+                       else
+                         ""
+                       end
+
+          member = String.new(node.member)
+
+          # For @type.name and chained calls, just return the type name
+          if base_value != "" && context.owner_type && member == "name"
+            return base_value
+          end
+
+          # For ivar.id / ivar.name / ivar.stringify, propagate base value
+          if member == "id" || member == "name" || member == "stringify"
+            return base_value
+          end
+
+          base_value
+        end
+
+        # Evaluate simple call expressions, primarily to support
+        #   @type.name.stringify
+        #   @type.name(generic_args: false)
+        #   @type.size
+        #   @type.annotation(Foo)
+        #   ivar.id.stringify
+        private def evaluate_call_expression(node, context : Context) : Value
+          callee_id = node.callee
+          return "" unless callee_id
+          callee = @arena[callee_id]
+
+          # Handle type-reflection and annotation helpers
+          if callee.is_a?(Frontend::MemberAccessNode)
+            obj = callee.object
+            member = String.new(callee.member)
+
+            # Basic support for annotation queries:
+            #   @type.annotation(Foo)
+            #   @type.annotations(Foo)
+            #   ivar.annotation(Foo)   (where ivar is a macro variable name)
+            #
+            # Это делает только одно: отвечает на вопрос "есть ли такая
+            # аннотация?", возвращая "1" если да и "" если нет. Этого
+            # достаточно для truthiness в условиях if/unless. Детальный доступ
+            # по индексам/ключам пока не реализуем.
+            if member == "annotation" || member == "annotations"
+              # @type.annotation(Foo)
+              if obj.is_a?(Frontend::InstanceVarNode)
+                ivar_name = String.new(obj.name)
+                if ivar_name == "@type" && context.owner_type
+                  class_symbol = context.owner_type.as(ClassSymbol)
+
+                  filter_name = nil
+                  if arg0_id = node.args[0]?
+                    filter_name = annotation_type_full_name(arg0_id)
+                  end
+
+                  matching = if filter_name
+                    class_symbol.annotations.select { |info| info.full_name == filter_name }
+                  else
+                    class_symbol.annotations
+                  end
+
+                  return matching.empty? ? "" : "1"
+                end
+
+                # Любые другие instance var (не @type) пока не поддерживаем.
+                return ""
+              end
+
+              # ivar.annotation(Foo) где ivar — макро-переменная с именем
+              # инстанс-поля (взятым из @type.instance_vars).
+              if obj.is_a?(Frontend::IdentifierNode) && context.owner_type
+                id_name = Frontend.node_literal_string(obj) || ""
+                base_name = context.variables[id_name]? || ""
+                if base_name.empty?
+                  return ""
+                end
+
+                class_symbol = context.owner_type.as(ClassSymbol)
+
+                filter_name = nil
+                if arg0_id = node.args[0]?
+                  filter_name = annotation_type_full_name(arg0_id)
+                end
+
+                infos = class_symbol.ivar_annotations[base_name]? || [] of AnnotationInfo
+                matching = if filter_name
+                  infos.select { |info| info.full_name == filter_name }
+                else
+                  infos
+                end
+
+                return matching.empty? ? "" : "1"
+              end
+
+              # Остальные приёмники для .annotation/.annotations пока не
+              # интерпретируем.
+              return ""
+            end
+
+            # Support @type.overrides?(BaseType, "method") in a lightweight way
+            # by checking whether the current owner type defines a method with
+            # the given name in its own scope. This approximates the original
+            # semantics enough for macros like @type.overrides?(Reference,
+            # "inspect") and @type.overrides?(Struct, "inspect").
+            if obj.is_a?(Frontend::InstanceVarNode)
+              name = String.new(obj.name)
+              if name == "@type" && context.owner_type && member == "overrides?"
+                class_symbol = context.owner_type.as(ClassSymbol)
+
+                # Arguments: (base_type, method_name) or just (method_name)
+                method_name = nil
+                if node.args.size >= 2
+                  method_name = evaluate_expression(node.args[1], context)
+                elsif node.args.size == 1
+                  method_name = evaluate_expression(node.args[0], context)
+                end
+
+                if method_name && !method_name.empty?
+                  if sym = class_symbol.scope.lookup(method_name)
+                    if sym.is_a?(MethodSymbol) || sym.is_a?(OverloadSetSymbol)
+                      return "1"
+                    end
+                  end
+                end
+
+                # No matching method found on this type
+                return ""
+              end
+            end
+
+            # @type.name(...) / @type.size
+            if obj.is_a?(Frontend::InstanceVarNode)
+              name = String.new(obj.name)
+              if name == "@type" && context.owner_type
+                class_symbol = context.owner_type.as(ClassSymbol)
+
+                case member
+                when "name"
+                  # In Crystal, @type.name(generic_args: false) strips generic
+                  # arguments from the printed name. We approximate this by
+                  # string processing on the class symbol name.
+                  generic_args_false = false
+                  if named_args = node.named_args
+                    named_args.each do |named_arg|
+                      arg_name = String.new(named_arg.name)
+                      next unless arg_name == "generic_args"
+
+                      value_str = evaluate_expression(named_arg.value, context)
+                      generic_args_false = (value_str == "false")
+                    end
+                  end
+
+                  full_name = class_symbol.name
+                  if generic_args_false
+                    # Strip trailing generic arguments: Foo(T, U) → Foo
+                    if idx = full_name.index('(')
+                      return full_name[0, idx]
+                    end
+                  end
+                  return full_name
+
+                when "size"
+                  # Approximate @type.size as the number of generic type
+                  # parameters declared on the owning class.
+                  type_params = class_symbol.type_parameters
+                  return (type_params ? type_params.size : 0).to_s
+                end
+              end
+            end
+
+            # Fallback to member access evaluation (handles .id, .stringify, etc.)
+            return evaluate_member_access_expression(callee, context)
+          end
+
+          ""
+        end
+
+        # Build a fully-qualified annotation type name from its expression,
+        # mirroring the behavior used when collecting AnnotationInfo. Handles
+        # simple identifiers and nested PathNode chains such as
+        # JSON::Serializable::Options.
+        private def annotation_type_full_name(expr_id : ExprId) : String
+          node = @arena[expr_id]
+
+          case node
+          when Frontend::IdentifierNode
+            String.new(node.name)
+          when Frontend::PathNode
+            parts = [] of String
+            current_id = expr_id
+
+            while true
+              current = @arena[current_id]
+              case current
+              when Frontend::PathNode
+                right_id = current.right
+                right_name = annotation_type_full_name(right_id)
+                parts << right_name unless right_name.empty?
+
+                if left_id = current.left
+                  current_id = left_id
+                else
+                  break
+                end
+              when Frontend::IdentifierNode
+                parts << String.new(current.name)
+                break
+              else
+                literal = Frontend.node_literal_string(current)
+                parts << literal if literal
+                break
+              end
+            end
+
+            parts.reverse.join("::")
+          else
+            Frontend.node_literal_string(node) || ""
           end
         end
 
@@ -305,9 +580,65 @@ module CrystalV2
         # ====================================
 
         # Evaluate condition expression to boolean (Crystal truthiness)
-        # CRITICAL: Only false/nil/Nop are falsy. EVERYTHING else is truthy (including 0, "", [])
+        # CRITICAL: false/nil/Nop are falsy. For other expressions we fall back
+        # to evaluating them to a string and treating empty string, "false" and
+        # "nil" as falsy; everything else is truthy. This keeps semantics close
+        # to Crystal while allowing graceful degradation when we cannot fully
+        # interpret an expression.
         private def evaluate_condition(expr_id : ExprId, context : Context) : Bool
           node = @arena[expr_id]
+
+          # Handle boolean connectives && / || at the AST level so we can
+          # compose more precise conditions from simpler ones.
+          if node.is_a?(Frontend::BinaryNode)
+            op = String.new(node.operator)
+
+            case op
+            when "&&"
+              left_cond = evaluate_condition(node.left, context)
+              return false unless left_cond
+              return evaluate_condition(node.right, context)
+            when "||"
+              left_cond = evaluate_condition(node.left, context)
+              return true if left_cond
+              return evaluate_condition(node.right, context)
+            else
+              # Lightweight numeric comparison support (i > 0, i == 0, etc.).
+              left_val = evaluate_expression(node.left, context)
+              right_val = evaluate_expression(node.right, context)
+
+              if (left_int = left_val.to_i?) && (right_int = right_val.to_i?)
+                case op
+                when ">"
+                  return left_int > right_int
+                when ">="
+                  return left_int >= right_int
+                when "<"
+                  return left_int < right_int
+                when "<="
+                  return left_int <= right_int
+                when "=="
+                  return left_int == right_int
+                when "!="
+                  return left_int != right_int
+                end
+              end
+            end
+          end
+
+          # Treat identifier conditions based on the bound macro variable value,
+          # so constructs like `if ann` or `if flag` behave reasonably.
+          if node.is_a?(Frontend::IdentifierNode)
+            name = Frontend.node_literal_string(node)
+            if name && (value = context.variables[name]?)
+              # Consider empty string, "false", and "nil" as falsy.
+              return false if value.empty? || value == "false" || value == "nil"
+              return true
+            else
+              # Unbound macro variable is treated as falsy.
+              return false
+            end
+          end
 
           case Frontend.node_kind(node)
           when .bool?
@@ -317,17 +648,42 @@ module CrystalV2
               return false if literal == "false"
               return true  # "true"
             end
-            return true  # Default to true if no literal
+            # Default to true if it's a bool node without literal (shouldn't happen)
+            return true
 
           when .nil?
             # nil is falsy
             return false
 
           else
-            # EVERYTHING else is truthy in Crystal
-            # This includes: 0, "", [], numbers, strings, arrays, etc.
+            # Fallback: evaluate expression to a string and apply Crystal-like
+            # truthiness. Unsupported expressions tend to evaluate to empty
+            # string, which we treat as falsy, avoiding spurious "true".
+            value = evaluate_expression(expr_id, context)
+            return false if value.empty? || value == "false" || value == "nil"
             return true
           end
+        end
+
+        private def path_to_string(node : Frontend::PathNode) : String
+          parts = [] of String
+          current = node
+          loop do
+            right_node = @arena[current.right]
+            parts << (Frontend.node_literal_string(right_node) || "")
+            if left_id = current.left
+              left_node = @arena[left_id]
+              if left_node.is_a?(Frontend::PathNode)
+                current = left_node
+              else
+                parts << (Frontend.node_literal_string(left_node) || "")
+                break
+              end
+            else
+              break
+            end
+          end
+          parts.reverse.join("::")
         end
 
         # Find matching {% end %} for given {% if %} or {% for %}
@@ -516,6 +872,8 @@ module CrystalV2
 
         # Evaluate {% for VAR in ARRAY %} loop
         # Phase 87B-3: ArrayLiteral only (ranges deferred to Phase 87B-4)
+        # Extended: supports a simple subset of type-reflection loops such as
+        #   {% for ivar, i in @type.instance_vars %}
         # Returns {output, next_index} where next_index points AFTER {% end %}
         private def evaluate_for_block(
           pieces : Array(MacroPiece),
@@ -533,14 +891,14 @@ module CrystalV2
             return {"", end_index + 1}
           end
 
-          # Check single variable (Phase 87B-3 scope)
-          if iter_vars.size != 1
-            emit_error("Multiple loop variables not supported in Phase 87B-3")
+          # Support 1 or 2 loop variables: value and optional index
+          value_var = iter_vars[0]?
+          index_var = iter_vars[1]?
+          unless value_var
+            emit_error("Missing loop variable in {% for %} block")
             end_index = find_matching_end(pieces, start_index)
             return {"", end_index + 1}
           end
-
-          var_name = iter_vars[0]
 
           # Evaluate iterable → get element strings
           iterable_node = @arena[iterable_expr]
@@ -553,6 +911,25 @@ module CrystalV2
           when Frontend::RangeNode
             # Phase 87B-4A: Range path
             expand_range_to_strings(iterable_node)
+
+          when Frontend::MemberAccessNode
+            # Minimal support for @type.instance_vars in type-reflection macros
+            if context.owner_type && iterable_node.object.is_a?(Frontend::InstanceVarNode)
+              ivar_obj = iterable_node.object.as(Frontend::InstanceVarNode)
+              name = String.new(ivar_obj.name)
+              member = String.new(iterable_node.member)
+              if name == "@type" && member == "instance_vars"
+                # Use collected instance variable names from the owning class symbol
+                instance_vars = context.owner_type.instance_vars
+                instance_vars.keys.sort
+              else
+                emit_error("Unsupported member access in for-loop iterable: #{name}.#{member}")
+                nil
+              end
+            else
+              emit_error("For loop iterable must be Array, Range, or @type.instance_vars (Phase 87B-4A)")
+              nil
+            end
 
           else
             emit_error("For loop requires ArrayLiteral or Range (Phase 87B-4A)")
@@ -570,10 +947,13 @@ module CrystalV2
           body_start = start_index + 1
           body_end = end_index - 1
 
-          # Iterate over element values (same for arrays and ranges)
+          # Iterate over element values (same for arrays, ranges, and instance_vars)
           output = String.build do |str|
-            elem_values.each do |elem_value|
-              loop_context = context.with_variable(var_name, elem_value)
+            elem_values.each_with_index do |elem_value, idx|
+              loop_context = context.with_variable(value_var, elem_value)
+              if index_var
+                loop_context = loop_context.with_variable(index_var, idx.to_s)
+              end
               body_output = evaluate_pieces_range(pieces, body_start, body_end, loop_context)
               str << body_output
             end

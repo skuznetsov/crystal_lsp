@@ -42,6 +42,10 @@ module CrystalV2
         getter superclass_name : String?
         getter instance_vars : Hash(String, String?)  # name → type annotation
         getter type_parameters : Array(String)?  # Week 1: Generic type params ["T", "U"]
+        # Collected annotations attached to this class (e.g., @[JSON::Serializable::Options])
+        getter annotations : Array(AnnotationInfo)
+        # Collected annotations per instance variable name (without leading "@")
+        getter ivar_annotations : Hash(String, Array(AnnotationInfo))
 
         def initialize(name : String, node_id : ExprId, *, scope : SymbolTable, superclass_name : String? = nil, type_parameters : Array(String)? = nil)
           super(name, node_id)
@@ -49,6 +53,8 @@ module CrystalV2
           @superclass_name = superclass_name
           @instance_vars = {} of String => String?
           @type_parameters = type_parameters
+          @annotations = [] of AnnotationInfo
+          @ivar_annotations = {} of String => Array(AnnotationInfo)
         end
 
         # Phase 5A: Track instance variable declarations
@@ -58,6 +64,21 @@ module CrystalV2
 
         def get_instance_var_type(name : String) : String?
           @instance_vars[name]?
+        end
+
+        # Attach a class-level annotation
+        def add_annotation(annotation : AnnotationInfo)
+          @annotations << annotation
+        end
+
+        # Attach an annotation to a specific instance variable (name without "@")
+        def add_ivar_annotation(name : String, annotation : AnnotationInfo)
+          list = @ivar_annotations[name]?
+          unless list
+            list = [] of AnnotationInfo
+            @ivar_annotations[name] = list
+          end
+          list << annotation
         end
       end
 
@@ -76,6 +97,19 @@ module CrystalV2
         def initialize(name : String, node_id : ExprId, declared_type : String? = nil)
           super(name, node_id)
           @declared_type = declared_type
+        end
+      end
+
+      # Lightweight representation of an annotation as seen by the semantic
+      # layer and macro expander. It stores the fully-qualified name and
+      # direct references to argument expressions in the frontend arena so
+      # that later phases can interpret them as needed.
+      struct AnnotationInfo
+        getter full_name : String
+        getter args : Array(ExprId)
+        getter named_args : Hash(String, ExprId)
+
+        def initialize(@full_name : String, @args : Array(ExprId), @named_args : Hash(String, ExprId))
         end
       end
 

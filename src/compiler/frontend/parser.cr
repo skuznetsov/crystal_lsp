@@ -164,6 +164,8 @@ module CrystalV2
           # Use SmallVec to reduce heap churn when collecting roots
           roots_builder = SmallVec(ExprId, 64).new
           while current_token.kind != Token::Kind::EOF
+            # Ensure global progress and allow watchdog to interrupt if needed
+            Watchdog.check!
             skip_statement_end
             break if current_token.kind == Token::Kind::EOF
 
@@ -805,9 +807,14 @@ module CrystalV2
           @diagnostics
         end
 
-        # Phase 103: Inline hot path - called thousands of times
+        # Phase 103: Inline hot path - called thousands of times.
+        # We also run the watchdog here so that any tight loop that repeatedly
+        # inspects the current token (even if it forgets to advance) is still
+        # subject to timeout checks. When no deadline is set, this is just a
+        # cheap nil-check in Watchdog.check!.
         @[AlwaysInline]
         private def current_token
+          Watchdog.check!
           ensure_token(@index)
           @tokens[@index]
         end
@@ -1412,10 +1419,23 @@ module CrystalV2
           pieces, trim_left, trim_right = parse_macro_body
           # Allow trailing separators before 'end'
           skip_statement_end
-          expect_identifier("end")
-          end_token = previous_token
-          # Allow immediate separators after header (e.g., `struct X; end`)
-          skip_statement_end
+
+          # In some complex macro bodies (especially those mixing control
+          # macros and nested language constructs) our lightweight macro body
+          # scanner can reach EOF without having seen the final `end` that
+          # closes the macro definition. For tooling purposes we prefer to
+          # recover instead of emitting a hard error: if we're already at EOF,
+          # treat the macro as closed and continue parsing the rest of the
+          # file.
+          end_token : Token? = nil
+          if current_token.kind == Token::Kind::EOF
+            end_token = previous_token
+          else
+            expect_identifier("end")
+            end_token = previous_token
+            # Allow immediate separators after header (e.g., `struct X; end`)
+            skip_statement_end
+          end
 
           end_span = end_token.try(&.span)
           body_span = end_span ? name_token.span.cover(end_span) : name_token.span
@@ -1932,14 +1952,9 @@ module CrystalV2
                   break
                 end
 
-                case name_token.kind
-                when Token::Kind::Identifier, Token::Kind::InstanceVar
-                  # Standard parameter names
-                when Token::Kind::Of, Token::Kind::As, Token::Kind::In, Token::Kind::Out,
-                     Token::Kind::Do, Token::Kind::End, Token::Kind::If, Token::Kind::Unless,
-                     Token::Kind::For
-                  # Phase KEYWORD_PARAMS: Common keywords that can be parameter names (allow using 'for' as external name)
-                else
+                unless name_token.kind == Token::Kind::Identifier ||
+                       name_token.kind == Token::Kind::InstanceVar ||
+                       is_keyword_identifier?(name_token)
                   emit_unexpected(name_token)
                   break
                 end
@@ -1947,12 +1962,7 @@ module CrystalV2
                 # Phase 103K: External parameter name detection
                 # Pattern: "external internal" where external is identifier/keyword, internal is identifier/instance_var
                 # Examples: "to limit", "calculation @time"
-                if name_token.kind == Token::Kind::Identifier ||
-                   name_token.kind == Token::Kind::Of || name_token.kind == Token::Kind::As ||
-                   name_token.kind == Token::Kind::In || name_token.kind == Token::Kind::Out ||
-                   name_token.kind == Token::Kind::Do || name_token.kind == Token::Kind::End ||
-                   name_token.kind == Token::Kind::If || name_token.kind == Token::Kind::Unless ||
-                   name_token.kind == Token::Kind::For
+                if name_token.kind == Token::Kind::Identifier || is_keyword_identifier?(name_token)
 
                   # Save potential external name
                   potential_external_name = name_token.slice
@@ -4205,6 +4215,33 @@ module CrystalV2
               skip_trivia
             end
 
+            # Handle optional ensure section in do/end blocks:
+            #   obj.method do
+            #     ...
+            #   ensure
+            #     ...
+            #   end
+            #
+            # For the purposes of the v2 parser used by tooling we do not need
+            # to model the ensure body explicitly. We simply stop collecting
+            # block statements when we see `ensure` and skip its body until
+            # the closing `end`, leaving the `end` token for the terminator
+            # logic below.
+            if !is_brace_form && current_token.kind == Token::Kind::Ensure
+              advance
+              skip_trivia
+
+              # Skip statements in the ensure section
+              while current_token.kind != Token::Kind::End && current_token.kind != Token::Kind::EOF
+                stmt_skip = parse_statement
+                break if stmt_skip.invalid?
+                skip_statement_end
+              end
+
+              break
+            end
+
+            # Skip newlines in block body
             # Special-case: typed empty hash literal inside block: {} of K => V
             if current_token.kind == Token::Kind::LBrace
               save_idx = @index
@@ -4501,8 +4538,9 @@ module CrystalV2
         # Phase 6: Handle postfix if modifier
         # Grammar: <statement> if <condition>
         # Phase 26: Parse postfix if/unless modifiers
-        # Phase 27: Parse postfix while/until modifiers
-        # Supports: stmt if condition, stmt unless condition, stmt while condition, stmt until condition
+        # Upstream Crystal does not support trailing `while` / `until` modifiers,
+        # so we only implement `if` / `unless` here to stay aligned with the
+        # original parser semantics.
         private def parse_postfix_if_modifier(stmt : ExprId) : ExprId
           # Postfix modifiers must be on the SAME line as the statement
           # If there's a newline between them, the modifier is a separate statement
@@ -4561,52 +4599,6 @@ module CrystalV2
                 condition,
                 [stmt],
                 Array(ExprId).new(0)
-              )
-            )
-          end
-
-          # Phase 27: Check for postfix while
-          if token.kind == Token::Kind::While
-            advance  # consume 'while'
-            skip_trivia
-
-            # Parse condition
-            condition = parse_op_assign
-            return PREFIX_ERROR if condition.invalid?
-
-            # Wrap statement in a while node
-            stmt_span = node_span(stmt)
-            condition_span = node_span(condition)
-            while_span = stmt_span.cover(condition_span)
-
-            return @arena.add_typed(
-              WhileNode.new(
-                while_span,
-                condition,
-                [stmt]
-              )
-            )
-          end
-
-          # Phase 27: Check for postfix until
-          if token.kind == Token::Kind::Until
-            advance  # consume 'until'
-            skip_trivia
-
-            # Parse condition
-            condition = parse_op_assign
-            return PREFIX_ERROR if condition.invalid?
-
-            # Wrap statement in an until node
-            stmt_span = node_span(stmt)
-            condition_span = node_span(condition)
-            until_span = stmt_span.cover(condition_span)
-
-            return @arena.add_typed(
-              UntilNode.new(
-                until_span,
-                condition,
-                [stmt]
               )
             )
           end
@@ -5240,9 +5232,30 @@ module CrystalV2
           advance
           skip_trivia
 
-          # Parse full type annotation (supports proc types, tuples, aliases)
+          # Parse full type annotation. For simple cases we use the regular
+          # type annotation parser. For proc type aliases like:
+          #   alias ClosureFun = Cif*, Void*, Void**, Void* -> Void
+          # we need to allow comma-separated argument types and a trailing
+          # arrow. To support both patterns we first try the regular type
+          # parser, and if we detect a proc-like tail (',' or '->'), we rewind
+          # and delegate to parse_bare_proc_type.
           type_start_token = current_token
+          saved_index = @index
+          saved_previous = @previous_token
+
           type_slice = parse_type_annotation
+
+          # If the next token indicates that the type continues as a proc
+          # signature outside parentheses (comma or ->), reparse as bare proc.
+          if current_token.kind == Token::Kind::Comma || current_token.kind == Token::Kind::ThinArrow
+            @index = saved_index
+            @previous_token = saved_previous
+            type_slice_proc = parse_bare_proc_type
+            if type_slice_proc
+              type_slice = type_slice_proc
+            end
+          end
+
           if type_slice.empty?
             emit_unexpected(current_token)
             return PREFIX_ERROR
@@ -5520,9 +5533,19 @@ module CrystalV2
             consume_newlines
           end
 
-          expect_identifier("end")
-          end_token = previous_token
-          consume_newlines
+          # In rare cases (particularly in files with complex macros and
+          # nested definitions) the module body scanner can reach EOF without
+          # having seen the final `end`. For tooling we prefer to recover
+          # gracefully instead of emitting a hard error: if we're already at
+          # EOF, treat the module as closed at that point.
+          end_token : Token? = nil
+          if current_token.kind == Token::Kind::EOF
+            end_token = previous_token
+          else
+            expect_identifier("end")
+            end_token = previous_token
+            consume_newlines
+          end
 
           module_span = if end_token
             module_token.span.cover(end_token.span)
@@ -6121,7 +6144,10 @@ module CrystalV2
             return result
           end
 
-          # No assignment, just return the expression
+          # No assignment, just return the expression. Postfix modifiers
+          # (if/unless) are attached once at statement level in
+          # parse_statement, similar to the original parser's
+          # parse_expression_suffix behavior.
           debug("parse_op_assign: no assignment, returning expression")
           left
         end
@@ -6507,8 +6533,21 @@ module CrystalV2
               left = handle_index_question_postfix(left)
               next
             when Token::Kind::If, Token::Kind::Unless
-              # Postfix conditional modifier: expr if cond / expr unless cond
-              left = parse_postfix_if_modifier(left)
+              # Postfix conditional modifier: expr if cond / expr unless cond.
+              # If parse_postfix_if_modifier decides this isn't a real postfix
+              # (for example, because the modifier starts on a different line)
+              # it returns the original statement without consuming the token.
+              # In that case, we must break out of the postfix loop instead
+              # of calling it again, otherwise we spin forever on the same
+              # `if`/`unless` token (notably inside delimiters where newlines
+              # are skipped for expression parsing).
+              before_index = @index
+              original_stmt = left
+              new_left = parse_postfix_if_modifier(left)
+              if new_left == original_stmt && @index == before_index
+                break
+              end
+              left = new_left
               next
             when Token::Kind::LBrace
               # Phase 10: Block with {} syntax
@@ -6765,9 +6804,9 @@ module CrystalV2
               # With skip_trivia, detect space by span gap
               gap_before_colon = current_token.kind == Token::Kind::Colon &&
                                   current_token.span.start_line == identifier_token.span.end_line &&
-                                  current_token.span.start_column > identifier_token.span.end_column
+                                  current_token.span.start_column > identifier_token.span.end_column + 1
               skip_trivia
-              if (gap_before_colon || current_token.kind == Token::Kind::Whitespace) && current_token.kind == Token::Kind::Colon && @no_type_declaration == 0
+              if gap_before_colon && current_token.kind == Token::Kind::Colon && @no_type_declaration == 0
                 parse_type_declaration_from_identifier(identifier_token)
               else
                 @arena.add_typed(IdentifierNode.new(identifier_token.span, @string_pool.intern(identifier_token.slice)))
@@ -6783,9 +6822,9 @@ module CrystalV2
               advance
               gap_before_colon = current_token.kind == Token::Kind::Colon &&
                                   current_token.span.start_line == identifier_token.span.end_line &&
-                                  current_token.span.start_column > identifier_token.span.end_column
+                                  current_token.span.start_column > identifier_token.span.end_column + 1
               skip_trivia
-              if (gap_before_colon || current_token.kind == Token::Kind::Whitespace) && current_token.kind == Token::Kind::Colon && @no_type_declaration == 0
+              if gap_before_colon && current_token.kind == Token::Kind::Colon && @no_type_declaration == 0
                 parse_type_declaration_from_identifier(identifier_token)
               else
                 @arena.add_typed(IdentifierNode.new(identifier_token.span, @string_pool.intern(identifier_token.slice)))
@@ -6802,9 +6841,9 @@ module CrystalV2
             advance
             gap_before_colon = current_token.kind == Token::Kind::Colon &&
                                 current_token.span.start_line == identifier_token.span.end_line &&
-                                current_token.span.start_column > identifier_token.span.end_column
+                                current_token.span.start_column > identifier_token.span.end_column + 1
             skip_trivia
-            if (gap_before_colon || current_token.kind == Token::Kind::Whitespace) && current_token.kind == Token::Kind::Colon && @no_type_declaration == 0
+            if gap_before_colon && current_token.kind == Token::Kind::Colon && @no_type_declaration == 0
               # Type declaration: def : Type = value
               parse_type_declaration_from_identifier(identifier_token)
             else
@@ -6860,71 +6899,10 @@ module CrystalV2
           when Token::Kind::Require
             # Phase 65: require statement
             parse_require
-          when Token::Kind::Identifier,
-               Token::Kind::Of, Token::Kind::As, Token::Kind::In
-            # Phase 60: Check if this is a generic type instantiation
-            # Pattern: UppercaseIdentifier(Type1, Type2)
-            # Phase 103: Check for type annotation: identifier : Type = value
-            # Phase CALLS_WITHOUT_PARENS: Track whitespace for method calls without parentheses
-            # Phase KEYWORD_AS_IDENT: Keywords 'of', 'as', 'in' can be identifiers in expression position
-            identifier_token = token
-            prev_token = @previous_token
-            advance  # Move past identifier
-
-            # Phase CALLS_WITHOUT_PARENS: Check for whitespace before skip_trivia
-            # With no-trivia lexing, approximate with span gap where needed
-            next_tok = current_token
-            space_consumed = (next_tok.kind == Token::Kind::Whitespace)
-            unless space_consumed
-              if next_tok.span.start_offset > identifier_token.span.end_offset
-                space_consumed = true
-              else
-                same_line = next_tok.span.start_line == identifier_token.span.end_line
-                gap = next_tok.span.start_column > identifier_token.span.end_column
-                space_consumed = same_line && gap
-              end
-            end
-            skip_trivia
-
-            # Check if uppercase identifier followed by (
-            if identifier_token.slice.size > 0 &&
-               identifier_token.slice[0] >= 'A'.ord && identifier_token.slice[0] <= 'Z'.ord &&
-               current_token.kind == Token::Kind::LParen
-              # This is generic instantiation: Box(Int32)
-              parse_generic_instantiation(identifier_token)
-            # Phase 103: Check for type annotation (if enabled)
-            # Must check for space before colon: "x : Type" not "x: value" (named arg)
-            # After skip_trivia, we're at the colon; space_consumed tells us if there was space before
-            elsif @no_type_declaration == 0 && current_token.kind == Token::Kind::Colon &&
-                  (space_consumed || (current_token.span.start_line == identifier_token.span.end_line &&
-                   current_token.span.start_column > identifier_token.span.end_column))
-              # This is type declaration: x : Type = value
-              parse_type_declaration_from_identifier(identifier_token)
-          # Phase CALLS_WITHOUT_PARENS: Try to parse call arguments if space was consumed
-            # Don't try to parse nested calls when already parsing call arguments
-            elsif space_consumed && @parsing_call_args == 0 && current_token.kind != Token::Kind::Colon &&
-                  !(prev_token && prev_token.kind == Token::Kind::Operator && slice_eq?(prev_token.slice, "."))
-              boundary_token = current_token
-
-              if call_without_parens_disallowed?(boundary_token)
-                @arena.add_typed(IdentifierNode.new(identifier_token.span, @string_pool.intern(identifier_token.slice)))
-              else
-                # Attempt to parse call arguments without parentheses
-                # Example: def_equals value, kind
-                maybe_call = try_parse_call_args_without_parens(identifier_token)
-                if maybe_call.invalid?
-                  # Not a call, just an identifier
-                  @arena.add_typed(IdentifierNode.new(identifier_token.span, @string_pool.intern(identifier_token.slice)))
-                else
-                  debug("parse_prefix: converted #{String.new(identifier_token.slice)} into call without parens")
-                  maybe_call
-                end
-              end
-            else
-              # Regular identifier
-              @arena.add_typed(IdentifierNode.new(identifier_token.span, @string_pool.intern(identifier_token.slice)))
-            end
-          when Token::Kind::InstanceVar
+        when Token::Kind::Identifier,
+             Token::Kind::Of, Token::Kind::As, Token::Kind::In
+          parse_identifier_like(token)
+        when Token::Kind::InstanceVar
             # Instance variable (@var)
             id = @arena.add_typed(InstanceVarNode.new(token.span, token.slice))
             advance
@@ -7001,21 +6979,8 @@ module CrystalV2
             elsif next_tok.kind == Token::Kind::LBrace
               parse_percent_macro_expression
             else
-              # Phase 14/15: Hash/NamedTuple/Tuple literal with tolerant fallbacks
-              node = parse_hash_or_tuple
-              if node.invalid?
-                saved_index = @index
-                saved_prev  = @previous_token
-                saved_brace = @brace_depth
-                node = parse_brace_named_tuple_fallback
-                if node.invalid?
-                  @index = saved_index
-                  @previous_token = saved_prev
-                  @brace_depth = saved_brace
-                  node = parse_brace_tuple_fallback
-                end
-              end
-              node
+              # Phase 14/15: Hash/NamedTuple/Tuple literal — single-pass, no backtracking
+              parse_hash_or_tuple
             end
           when Token::Kind::ThinArrow
             # Phase 74: Proc literal (->(x) { ... })
@@ -7088,9 +7053,13 @@ module CrystalV2
           when Token::Kind::EOF
             PREFIX_ERROR
           else
-            emit_unexpected(token)
-            advance
-            PREFIX_ERROR
+            if is_keyword_identifier?(token)
+              parse_identifier_like(token)
+            else
+              emit_unexpected(token)
+              advance
+              PREFIX_ERROR
+            end
           end
         end
 
@@ -7222,6 +7191,42 @@ module CrystalV2
             if element.invalid?
               return PREFIX_ERROR
             end
+
+            # Support typed elements used in internal DSLs like the VM
+            # instruction table, where array entries can have the form
+            # `[name : Type]`. In these contexts the original Crystal
+            # parser produces a type declaration node even in expression
+            # position. We detect the simple pattern `identifier : Type`
+            # when type declarations are enabled and rewrite the element
+            # into a TypeDeclarationNode by parsing a type annotation
+            # starting at the colon.
+            if @no_type_declaration == 0 && current_token.kind == Token::Kind::Colon
+              node = @arena[element]
+              if Frontend.node_kind(node) == Frontend::NodeKind::Identifier
+                if name_slice = Frontend.node_literal(node)
+                  var_span = node.span
+                  advance  # consume ':'
+                  skip_whitespace_and_optional_newlines
+
+                  type_start_token = current_token
+                  type_slice = parse_type_annotation
+                  type_end_token = previous_token || type_start_token
+
+                  type_span = type_start_token.span.cover(type_end_token.span)
+                  full_span = var_span.cover(type_span)
+
+                  element = @arena.add_typed(
+                    TypeDeclarationNode.new(
+                      full_span,
+                      name_slice,
+                      type_slice,
+                      nil
+                    )
+                  )
+                end
+              end
+            end
+
             elements_b << element
 
             skip_whitespace_and_optional_newlines
@@ -7348,6 +7353,7 @@ module CrystalV2
           bytesize = content.bytesize
 
           while i < bytesize
+            Watchdog.check!
             char = content.byte_at(i).chr
             if char.ascii_whitespace?
               unless current.empty?
@@ -7398,6 +7404,7 @@ module CrystalV2
             i = 0
             bytesize = content.bytesize
             while i < bytesize
+              Watchdog.check!
               byte = content.byte_at(i)
               if byte == '\\'.ord && i + 1 < bytesize
                 i += 1
@@ -7599,6 +7606,8 @@ module CrystalV2
               @no_type_declaration -= 1
               if first_elem.invalid?
                 @brace_depth -= 1
+                # Ensure progress to avoid infinite loop on truncated input
+                advance unless current_token.kind == Token::Kind::EOF
                 return PREFIX_ERROR
               end
               skip_whitespace_and_optional_newlines
@@ -7610,6 +7619,7 @@ module CrystalV2
             @no_type_declaration -= 1
             if first_elem.invalid?
               @brace_depth -= 1
+              advance unless current_token.kind == Token::Kind::EOF
               return PREFIX_ERROR
             end
             skip_whitespace_and_optional_newlines
@@ -7636,8 +7646,10 @@ module CrystalV2
             # "," or "}" → this is a tuple
             return parse_tuple_literal_continued(lbrace, first_elem)
           else
-            # Unexpected token
+            # Unexpected token — advance to guarantee progress and avoid stalls
             emit_unexpected(current_token)
+            advance unless current_token.kind == Token::Kind::EOF
+            @brace_depth -= 1 if @brace_depth > 0
             return PREFIX_ERROR
           end
         end
@@ -7648,6 +7660,7 @@ module CrystalV2
 
           # Check for comma or closing brace
           loop do
+            Watchdog.check!
             case current_token.kind
             when Token::Kind::RBrace
               # End of tuple
@@ -7663,11 +7676,15 @@ module CrystalV2
 
               # Parse next element
               elem = parse_expression(0)
-              return PREFIX_ERROR if elem.invalid?
+              if elem.invalid?
+                advance unless current_token.kind == Token::Kind::EOF
+                return PREFIX_ERROR
+              end
               elements << elem
               skip_whitespace_and_optional_newlines
             else
               emit_unexpected(current_token)
+              advance unless current_token.kind == Token::Kind::EOF
               return PREFIX_ERROR
             end
           end
@@ -7800,8 +7817,8 @@ module CrystalV2
           advance  # consume :
           skip_trivia
 
-          # Parse first value
-          first_value = parse_expression(0)
+          # Parse first value (allow assignments in named tuple values)
+          first_value = parse_op_assign
           return PREFIX_ERROR if first_value.invalid?
           first_value_span = @arena[first_value].span
           skip_trivia
@@ -7816,6 +7833,7 @@ module CrystalV2
 
           # Parse remaining entries
           loop do
+            Watchdog.check!
             # Allow newlines between entries
             skip_whitespace_and_optional_newlines
             debug("named_tuple: loop current=#{current_token.kind}")
@@ -7847,6 +7865,7 @@ module CrystalV2
                           key_token.kind == Token::Kind::False
               unless valid_key
                 emit_unexpected(key_token)
+                advance unless current_token.kind == Token::Kind::EOF
                 return PREFIX_ERROR
               end
               key = key_token.slice  # TIER 2.3: Zero-copy slice (includes keyword text)
@@ -7856,13 +7875,19 @@ module CrystalV2
 
               # Expect colon
               # Silent fallback: if not a colon, give up without diagnostics
-              return PREFIX_ERROR unless current_token.kind == Token::Kind::Colon
+              unless current_token.kind == Token::Kind::Colon
+                advance unless current_token.kind == Token::Kind::EOF
+                return PREFIX_ERROR
+              end
               advance  # consume :
               skip_whitespace_and_optional_newlines
 
-              # Parse value
-              value = parse_expression(0)
-              return PREFIX_ERROR if value.invalid?
+              # Parse value (allow assignments)
+              value = parse_op_assign
+              if value.invalid?
+                advance unless current_token.kind == Token::Kind::EOF
+                return PREFIX_ERROR
+              end
               value_span = @arena[value].span
               skip_whitespace_and_optional_newlines
 
@@ -7875,16 +7900,19 @@ module CrystalV2
               )
             else
               emit_unexpected(current_token)
+              advance unless current_token.kind == Token::Kind::EOF
               return PREFIX_ERROR
             end
           end
 
           # Expect closing brace
-              # Silent fallback: if not closing brace, give up without diagnostics
-              return PREFIX_ERROR unless current_token.kind == Token::Kind::RBrace
+          return PREFIX_ERROR unless current_token.kind == Token::Kind::RBrace
 
           closing_brace = current_token
           advance
+
+          # Balance the brace depth increment done in parse_hash_or_tuple
+          @brace_depth -= 1 if @brace_depth > 0
 
           named_tuple_span = lbrace.span.cover(closing_brace.span)
           @arena.add_typed(NamedTupleLiteralNode.new(
@@ -7975,6 +8003,7 @@ module CrystalV2
 
           # Parse remaining entries
           loop do
+            Watchdog.check!
             unless current_token.kind == Token::Kind::Comma
               break
             end
@@ -8078,9 +8107,11 @@ module CrystalV2
           i = 0
 
           while i < content.size
+            Watchdog.check!
             # Find next #{
             text_start = i
             while i < content.size
+              Watchdog.check!
               break if i + 1 < content.size && content[i] == '#' && content[i + 1] == '{'
               i += 1
             end
@@ -8099,6 +8130,7 @@ module CrystalV2
             expr_start = i
             brace_depth = 1
             while i < content.size && brace_depth > 0
+              Watchdog.check!
               if content[i] == '{'
                 brace_depth += 1
               elsif content[i] == '}'
@@ -8906,6 +8938,51 @@ module CrystalV2
           end
         end
 
+        private def parse_identifier_like(identifier_token : Token) : ExprId
+          prev_token = @previous_token
+          advance
+
+          next_tok = current_token
+          space_consumed = false
+          if next_tok.kind == Token::Kind::Whitespace
+            space_consumed = true
+          elsif next_tok.span.start_line == identifier_token.span.end_line
+            space_consumed = next_tok.span.start_column > identifier_token.span.end_column
+          end
+          skip_trivia
+
+          colon_immediate = current_token.kind == Token::Kind::Colon && !space_consumed
+          macro_call_candidate = typed_macro_args_callee?(identifier_token)
+
+          if identifier_token.slice.size > 0 &&
+             identifier_token.slice[0] >= 'A'.ord && identifier_token.slice[0] <= 'Z'.ord &&
+             current_token.kind == Token::Kind::LParen
+            parse_generic_instantiation(identifier_token)
+          elsif @no_type_declaration == 0 && current_token.kind == Token::Kind::Colon && space_consumed
+            parse_type_declaration_from_identifier(identifier_token)
+          elsif @parsing_call_args == 0 &&
+                (macro_call_candidate ||
+                 colon_immediate ||
+                 (space_consumed && current_token.kind != Token::Kind::Colon &&
+                  !(prev_token && prev_token.kind == Token::Kind::Operator && slice_eq?(prev_token.slice, "."))))
+            boundary_token = current_token
+            force_call = macro_call_candidate || colon_immediate
+            if !force_call && call_without_parens_disallowed?(boundary_token)
+              @arena.add_typed(IdentifierNode.new(identifier_token.span, @string_pool.intern(identifier_token.slice)))
+            else
+              maybe_call = try_parse_call_args_without_parens(identifier_token)
+              if maybe_call.invalid?
+                @arena.add_typed(IdentifierNode.new(identifier_token.span, @string_pool.intern(identifier_token.slice)))
+              else
+                debug("parse_prefix: converted #{String.new(identifier_token.slice)} into call without parens")
+                maybe_call
+              end
+            end
+          else
+            @arena.add_typed(IdentifierNode.new(identifier_token.span, @string_pool.intern(identifier_token.slice)))
+          end
+        end
+
         # Phase 63: Parse path expression (Foo::Bar)
         private def parse_path(left : ExprId) : ExprId
           colon_colon = current_token
@@ -9488,7 +9565,7 @@ module CrystalV2
           when Token::Kind::Of, Token::Kind::As, Token::Kind::In, Token::Kind::Out,
                Token::Kind::Do, Token::Kind::End, Token::Kind::If, Token::Kind::Unless,
                Token::Kind::Def, Token::Kind::For, Token::Kind::Then,
-               Token::Kind::Else, Token::Kind::Class
+               Token::Kind::Else, Token::Kind::Class, Token::Kind::Fun
             # Phase 103F: Keywords that can be used as parameter/argument names
             # Includes 'def' for cases like: getter def : Def, initialize(def: value)
             true
@@ -10835,6 +10912,7 @@ module CrystalV2
           max_end : Span? = nil
           i = 0
           while i < spans.size
+            Watchdog.check!
             if s = spans.unsafe_fetch(i)
               if min_start.nil? || s.start_offset < min_start.not_nil!.start_offset
                 min_start = s
