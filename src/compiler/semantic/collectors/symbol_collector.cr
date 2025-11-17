@@ -19,7 +19,7 @@ module CrystalV2
           @virtual_arena = @arena.is_a?(Frontend::VirtualArena) ? @arena.as(Frontend::VirtualArena) : nil
           @table_stack = [context.symbol_table]
           @diagnostics = [] of Diagnostic
-          @macro_expander = MacroExpander.new(@program, @arena)
+          @macro_expander = MacroExpander.new(@program, @arena, context.flags)
           @class_stack = [] of ClassSymbol
           # Pending root-level annotations (for example,
           # @[JSON::Serializable::Options] immediately before a class

@@ -1,3 +1,4 @@
+require "set"
 require "../frontend/ast"
 require "../frontend/lexer"
 require "../frontend/parser"
@@ -38,10 +39,11 @@ module CrystalV2
 
         getter diagnostics : Array(Diagnostic)
 
-        def initialize(@program : Program, @arena : Frontend::ArenaLike)
+        def initialize(@program : Program, @arena : Frontend::ArenaLike, flags : Set(String)? = nil)
           @diagnostics = [] of Diagnostic
           @depth = 0
           @macro_var_counter = 0
+          @flags = flags || Set(String).new
         end
 
         # Expansion context for macro evaluation
@@ -51,27 +53,29 @@ module CrystalV2
           # Optional owner type for @type reflection macros
           getter owner_type : ClassSymbol?
           getter depth : Int32
+          getter flags : Set(String)
 
           def initialize(
             @variables = {} of String => String,
             @macro_vars = {} of String => String,
             @owner_type : ClassSymbol? = nil,
-            @depth = 0
+            @depth = 0,
+            @flags = Set(String).new
           )
           end
 
           def with_depth(new_depth : Int32) : Context
-            Context.new(@variables, @macro_vars, @owner_type, new_depth)
+            Context.new(@variables, @macro_vars, @owner_type, new_depth, @flags)
           end
 
           def with_variable(name : String, value : String) : Context
             new_vars = @variables.dup
             new_vars[name] = value
-            Context.new(new_vars, @macro_vars, @owner_type, @depth)
+            Context.new(new_vars, @macro_vars, @owner_type, @depth, @flags)
           end
 
           def with_owner_type(owner : ClassSymbol?) : Context
-            Context.new(@variables, @macro_vars, owner, @depth)
+            Context.new(@variables, @macro_vars, owner, @depth, @flags)
           end
 
           def set_macro_var(name : String, value : String)
@@ -80,6 +84,10 @@ module CrystalV2
 
           def macro_var(name : String) : String?
             @macro_vars[name]?
+          end
+
+          def flag?(name : String) : Bool
+            @flags.includes?(name)
           end
         end
 
@@ -134,7 +142,7 @@ module CrystalV2
             end
           end
 
-          Context.new(variables, {} of String => String, owner_type, @depth)
+          Context.new(variables, {} of String => String, owner_type, @depth, @flags)
         end
 
         # Convert expression to string representation (for parameter binding)
@@ -255,15 +263,18 @@ module CrystalV2
             Frontend.node_literal_string(node) || ""
 
           when .string?
-            # String literal: "hello"
-            Frontend.node_literal_string(node) || ""
+            # String literal: "hello" (preserve quotes)
+            literal = Frontend.node_literal_string(node) || ""
+            literal.inspect
           when .char?
             # Char literal: 'a'
-            Frontend.node_literal_string(node) || ""
+            literal = Frontend.node_literal_string(node) || ""
+            literal.empty? ? "" : "'#{literal}'"
           when .symbol?
             # Symbol literal: :foo
             literal = Frontend.node_literal_string(node) || ""
-            literal.empty? ? "" : ":#{literal}"
+            return "" if literal.empty?
+            literal.starts_with?(":") ? literal : ":#{literal}"
 
           when .macro_var?
             literal = Frontend.node_literal_string(node)
@@ -510,9 +521,30 @@ module CrystalV2
 
             # Fallback to member access evaluation (handles .id, .stringify, etc.)
             return evaluate_member_access_expression(callee, context)
+          elsif callee.is_a?(Frontend::IdentifierNode)
+            name = Frontend.node_literal_string(callee) || ""
+            if name == "flag?"
+              return evaluate_flag_call(node, context)
+            end
           end
 
           ""
+        end
+
+        private def evaluate_flag_call(node : Frontend::CallNode, context : Context) : Value
+          arg_id = node.args.first?
+          return "" unless arg_id
+
+          raw_value = evaluate_expression(arg_id, context)
+          flag_name = raw_value.strip
+          if flag_name.starts_with?(":")
+            flag_name = flag_name[1..-1]
+          end
+          if flag_name.starts_with?("\"") && flag_name.ends_with?("\"")
+            flag_name = flag_name[1...-1]
+          end
+
+          context.flag?(flag_name) ? "true" : ""
         end
 
         # Build a fully-qualified annotation type name from its expression,
@@ -918,9 +950,9 @@ module CrystalV2
               ivar_obj = iterable_node.object.as(Frontend::InstanceVarNode)
               name = String.new(ivar_obj.name)
               member = String.new(iterable_node.member)
-              if name == "@type" && member == "instance_vars"
+              if name == "@type" && member == "instance_vars" && context.owner_type
                 # Use collected instance variable names from the owning class symbol
-                instance_vars = context.owner_type.instance_vars
+                instance_vars = context.owner_type.not_nil!.instance_vars
                 instance_vars.keys.sort
               else
                 emit_error("Unsupported member access in for-loop iterable: #{name}.#{member}")
@@ -969,7 +1001,7 @@ module CrystalV2
           range_end = range_node.end_expr
 
           # Evaluate bounds to strings (use empty context for literals)
-          empty_context = Context.new
+          empty_context = Context.new(flags: @flags)
           start_str = evaluate_expression(range_begin, empty_context)
           end_str = evaluate_expression(range_end, empty_context)
 
