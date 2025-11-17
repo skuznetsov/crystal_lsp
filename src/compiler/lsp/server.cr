@@ -1345,7 +1345,16 @@ module CrystalV2
                 symbol_uri = origin.uri
               end
             end
+            symbol_uri = effective_symbol_uri(symbol, symbol_uri)
             register_symbol(symbol, symbol_program, symbol_uri, output, origins)
+          end
+        end
+
+        private def effective_symbol_uri(symbol : Semantic::Symbol, fallback_uri : String) : String
+          if path = symbol.file_path
+            file_uri(path)
+          else
+            fallback_uri
           end
         end
 
@@ -2282,22 +2291,25 @@ module CrystalV2
             when Semantic::OverloadSetSymbol
               # Expand overload sets
               symbol.overloads.each do |overload|
-                if sym_info = SymbolInformation.from_symbol(overload, program, uri, container)
+                overload_uri = effective_symbol_uri(overload, uri)
+                if sym_info = SymbolInformation.from_symbol(overload, program, overload_uri, container)
                   output << sym_info
                 end
               end
             when Semantic::ClassSymbol, Semantic::ModuleSymbol
               # Add the class/module itself
-              if sym_info = SymbolInformation.from_symbol(symbol, program, uri, container)
+              symbol_uri = effective_symbol_uri(symbol, uri)
+              if sym_info = SymbolInformation.from_symbol(symbol, program, symbol_uri, container)
                 output << sym_info
               end
               # Recursively collect children with this symbol as container
               if symbol.responds_to?(:scope)
-                collect_workspace_symbols(symbol.scope, program, uri, query, output, symbol.name)
+                collect_workspace_symbols(symbol.scope, program, symbol_uri, query, output, symbol.name)
               end
             else
               # Add other symbols (methods, constants, variables)
-              if sym_info = SymbolInformation.from_symbol(symbol, program, uri, container)
+              symbol_uri = effective_symbol_uri(symbol, uri)
+              if sym_info = SymbolInformation.from_symbol(symbol, program, symbol_uri, container)
                 output << sym_info
               end
             end

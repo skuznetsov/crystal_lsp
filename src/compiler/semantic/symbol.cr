@@ -8,8 +8,14 @@ module CrystalV2
       abstract class Symbol
         getter name : String
         getter node_id : ExprId
+        getter file_path : String?
 
-        def initialize(@name : String, @node_id : ExprId)
+        def initialize(@name : String, @node_id : ExprId, file_path : String? = nil)
+          @file_path = file_path
+        end
+
+        def file_path=(value : String?)
+          @file_path = value
         end
       end
 
@@ -67,18 +73,18 @@ module CrystalV2
         end
 
         # Attach a class-level annotation
-        def add_annotation(annotation : AnnotationInfo)
-          @annotations << annotation
+        def add_annotation(annotation_info : AnnotationInfo)
+          @annotations << annotation_info
         end
 
         # Attach an annotation to a specific instance variable (name without "@")
-        def add_ivar_annotation(name : String, annotation : AnnotationInfo)
+        def add_ivar_annotation(name : String, annotation_info : AnnotationInfo)
           list = @ivar_annotations[name]?
           unless list
             list = [] of AnnotationInfo
             @ivar_annotations[name] = list
           end
-          list << annotation
+          list << annotation_info
         end
       end
 

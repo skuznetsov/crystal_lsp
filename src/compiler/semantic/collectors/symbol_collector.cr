@@ -16,6 +16,7 @@ module CrystalV2
 
         def initialize(@program : Program, context : Context)
           @arena = @program.arena
+          @virtual_arena = @arena.is_a?(Frontend::VirtualArena) ? @arena.as(Frontend::VirtualArena) : nil
           @table_stack = [context.symbol_table]
           @diagnostics = [] of Diagnostic
           @macro_expander = MacroExpander.new(@program, @arena)
@@ -52,6 +53,19 @@ module CrystalV2
 
         private def pop_table
           @table_stack.pop
+        end
+
+        private def file_path_for(node_id : Frontend::ExprId) : String?
+          return nil unless @virtual_arena
+          @virtual_arena.not_nil!.file_for_id(node_id)
+        rescue
+          nil
+        end
+
+        private def assign_symbol_file(symbol : Symbol, node_id : Frontend::ExprId)
+          if path = file_path_for(node_id)
+            symbol.file_path = path
+          end
         end
 
         private def visit(node_id : Frontend::ExprId)
@@ -91,6 +105,7 @@ module CrystalV2
           end
 
           symbol = MacroSymbol.new(name, node_id, body_id)
+          assign_symbol_file(symbol, node_id)
 
           table = current_table
           if existing = table.lookup_local(name)
@@ -113,6 +128,7 @@ module CrystalV2
 
           method_scope = SymbolTable.new(current_table)
           method_symbol = MethodSymbol.new(name, node_id, params: params, return_annotation: return_annotation, scope: method_scope, type_parameters: type_params)
+          assign_symbol_file(method_symbol, node_id)
 
           table = current_table
           if existing = table.lookup_local(name)
@@ -171,6 +187,7 @@ module CrystalV2
           class_scope = existing.is_a?(ClassSymbol) ? existing.scope : SymbolTable.new(table)
 
           class_symbol = ClassSymbol.new(name, node_id, scope: class_scope, superclass_name: super_name, type_parameters: type_params)
+          assign_symbol_file(class_symbol, node_id)
 
           if existing
             handle_class_redefinition(name, class_symbol, existing, table)
@@ -198,7 +215,7 @@ module CrystalV2
           # Walk the class body in order so that annotations like
           # @[JSON::Field] apply to the immediately following declaration
           # (instance variable, property, etc.).
-          collect_class_body(final_class_symbol, node.body || [] of Frontend::ExprId)
+          collect_class_body(final_class_symbol.as?(ClassSymbol), node.body || [] of Frontend::ExprId)
 
           @class_stack.pop if pushed_owner
           pop_table
@@ -225,6 +242,7 @@ module CrystalV2
             end
             created
           end
+          assign_symbol_file(module_symbol, node_id)
 
           push_table(module_symbol.scope)
           (node.body || [] of Frontend::ExprId).each { |expr_id| visit(expr_id) }
@@ -675,6 +693,7 @@ module CrystalV2
           when ClassSymbol
             verify_superclass_consistency(name, new_symbol, existing)
             new_symbol = ClassSymbol.new(name, new_symbol.node_id, scope: existing.scope, superclass_name: new_symbol.superclass_name || existing.superclass_name, type_parameters: new_symbol.type_parameters || existing.type_parameters)
+            assign_symbol_file(new_symbol, new_symbol.node_id)
             table.redefine(name, new_symbol)
           when MethodSymbol, MacroSymbol, VariableSymbol
             emit_incompatible_redefinition(name, new_symbol, existing)
