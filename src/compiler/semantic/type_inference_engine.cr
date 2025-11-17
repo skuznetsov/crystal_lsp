@@ -705,6 +705,8 @@ module CrystalV2
             # Reference to class → ClassType
             # Class itself is a value (for calling class methods like Dog.new)
             ClassType.new(symbol)
+          when ConstantSymbol
+            infer_expression(symbol.value)
           when MethodSymbol
             # Reference to method → Nil for now
             # TODO: Function types (Phase 5)

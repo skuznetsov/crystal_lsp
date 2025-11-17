@@ -82,6 +82,8 @@ module CrystalV2
             handle_class(node_id, node)
           when Frontend::ModuleNode
             handle_module(node_id, node)
+          when Frontend::ConstantNode
+            handle_constant(node_id, node)
           when Frontend::GetterNode, Frontend::SetterNode, Frontend::PropertyNode
             # Phase 87B-1: Expand accessor macros to method definitions
             expand_accessor_macro(node_id, node)
@@ -247,6 +249,27 @@ module CrystalV2
           push_table(module_symbol.scope)
           (node.body || [] of Frontend::ExprId).each { |expr_id| visit(expr_id) }
           pop_table
+        end
+
+        private def handle_constant(node_id : Frontend::ExprId, node : Frontend::ConstantNode)
+          name_slice = node.name
+          return unless name_slice
+
+          name = String.new(name_slice)
+          value_id = node.value
+
+          const_symbol = ConstantSymbol.new(name, node_id, value_id)
+          assign_symbol_file(const_symbol, node_id)
+
+          table = current_table
+          if existing = table.lookup_local(name)
+            table.redefine(name, const_symbol)
+          else
+            table.define(name, const_symbol)
+          end
+
+          # Visit constant value to collect nested definitions
+          visit(value_id)
         end
 
         # Phase 87B-1: Expand accessor macros to method definitions

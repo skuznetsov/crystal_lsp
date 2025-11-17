@@ -79,6 +79,8 @@ module CrystalV2
             visit_def(node_id, node)
           when Frontend::ClassNode
             visit_class(node_id, node)
+          when Frontend::ConstantNode
+            visit(node.value)
           when Frontend::IfNode
             visit_if(node)
           when Frontend::UnlessNode

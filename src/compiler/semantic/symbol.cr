@@ -97,6 +97,14 @@ module CrystalV2
         end
       end
 
+      class ConstantSymbol < Symbol
+        getter value : ExprId
+
+        def initialize(name : String, node_id : ExprId, @value : ExprId)
+          super(name, node_id)
+        end
+      end
+
       class VariableSymbol < Symbol
         getter declared_type : String?
 
