@@ -178,7 +178,7 @@ module CrystalV2
           debug("Loading dependency #{path}")
           source = File.read(path)
           base_dir = File.dirname(path)
-          diagnostics, program, type_context, identifier_symbols, symbol_table, requires = analyze_document(source, base_dir)
+          diagnostics, program, type_context, identifier_symbols, symbol_table, requires = analyze_document(source, base_dir, path)
 
           text_doc = TextDocumentItem.new(uri: uri, language_id: "crystal", version: 0, text: source)
           dep_state = DocumentState.new(text_doc, program, type_context, identifier_symbols, symbol_table, requires)
@@ -549,6 +549,19 @@ module CrystalV2
           paths
         end
 
+        private def wrap_program_with_file(program : Frontend::Program, path : String?) : Frontend::Program
+          return program unless path
+
+          arena = program.arena
+          return program unless arena.is_a?(Frontend::AstArena)
+
+          virtual_arena = Frontend::VirtualArena.new
+          virtual_arena.add_file_arena(path, arena)
+
+          roots = program.roots.map { |root| Frontend::ExprId.new(root.index) }
+          Frontend::Program.new(virtual_arena, roots)
+        end
+
         private def resolve_require_path(base_dir : String, require_path : String) : String?
           forms = normalize_require_forms(require_path)
           candidates = [] of String
@@ -765,7 +778,7 @@ module CrystalV2
 
           # Analyze and store document
           doc = TextDocumentItem.new(uri: uri, language_id: language_id, version: version, text: text)
-          diagnostics, program, type_context, identifier_symbols, symbol_table, requires = analyze_document(text, base_dir)
+          diagnostics, program, type_context, identifier_symbols, symbol_table, requires = analyze_document(text, base_dir, doc_path)
 
           # Store document state
           @documents[uri] = DocumentState.new(doc, program, type_context, identifier_symbols, symbol_table, requires)
@@ -785,7 +798,7 @@ module CrystalV2
         end
 
         # Analyze document and return diagnostics, program, type context, identifier symbols, and symbol table
-        private def analyze_document(source : String, base_dir : String? = nil) : {Array(Diagnostic), Frontend::Program, Semantic::TypeContext?, Hash(Frontend::ExprId, Semantic::Symbol)?, Semantic::SymbolTable?, Array(String)}
+        private def analyze_document(source : String, base_dir : String? = nil, path : String? = nil) : {Array(Diagnostic), Frontend::Program, Semantic::TypeContext?, Hash(Frontend::ExprId, Semantic::Symbol)?, Semantic::SymbolTable?, Array(String)}
           debug("Analyzing document: #{source.lines.size} lines, #{source.size} bytes")
           ensure_prelude_loaded
 
@@ -799,6 +812,7 @@ module CrystalV2
           lexer = Frontend::Lexer.new(source)
           parser = Frontend::Parser.new(lexer)
           program = parser.parse_program
+          program = wrap_program_with_file(program, path)
 
           # Convert parser diagnostics
           parser.diagnostics.each do |diag|
@@ -1511,7 +1525,7 @@ module CrystalV2
           doc_path = uri_to_path(uri)
           base_dir = doc_path ? File.dirname(doc_path) : nil
 
-          diagnostics, program, type_context, identifier_symbols, symbol_table, requires = analyze_document(new_text, base_dir)
+          diagnostics, program, type_context, identifier_symbols, symbol_table, requires = analyze_document(new_text, base_dir, doc_path)
 
           doc = TextDocumentItem.new(uri: uri, language_id: language_id, version: version, text: new_text)
           @documents[uri] = DocumentState.new(doc, program, type_context, identifier_symbols, symbol_table, requires)
