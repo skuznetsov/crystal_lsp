@@ -560,27 +560,29 @@ module CrystalV2
           worklist << {path, program, base_dir}
           index = 0
 
-          while index < worklist.size
-            current_path, current_program, current_dir = worklist[index]
-            index += 1
+          begin
+            while index < worklist.size
+              current_path, current_program, current_dir = worklist[index]
+              index += 1
 
-            collect_require_paths(current_program, current_dir).each do |req_path|
-              next if req_path == current_path
-              dependencies << req_path
-              next if processed.includes?(req_path)
+              collect_require_paths(current_program, current_dir).each do |req_path|
+                next if req_path == current_path
+                dependencies << req_path
+                next if processed.includes?(req_path)
 
-              if dep_program = parse_dependency_program(req_path)
-                files << {req_path, dep_program}
-                worklist << {req_path, dep_program, File.dirname(req_path)}
-                processed << req_path
+                if dep_program = parse_dependency_program(req_path)
+                  files << {req_path, dep_program}
+                  worklist << {req_path, dep_program, File.dirname(req_path)}
+                  processed << req_path
+                end
               end
             end
-          end
 
-          {merge_program_files(files), dependencies.to_a}
-        rescue ex
-          debug("wrap_program_with_dependencies failed for #{path}: #{ex.message}")
-          {wrap_program_with_file(program, path), dependencies.to_a}
+            {merge_program_files(files), dependencies.to_a}
+          rescue ex
+            debug("wrap_program_with_dependencies failed for #{path}: #{ex.message}")
+            {wrap_program_with_file(program, path), dependencies.to_a}
+          end
         end
 
         private def parse_dependency_program(path : String) : Frontend::Program?
