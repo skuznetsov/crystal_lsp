@@ -947,14 +947,16 @@ module CrystalV2
                             build_single_file_prelude_state(path, program, source, diagnostics)
                           end
 
-          unless prelude_state
+          stub = path == PRELUDE_STUB_PATH
+
+          if prelude_state.nil? || (!stub && !diagnostics.empty?)
             diagnostics.each { |diag| debug("#{label} diagnostic: #{diag.message}") } unless diagnostics.empty?
             debug("#{label} produced #{diagnostics.size} diagnostics; ignoring")
             @prelude_real_mtime = File.info(path).modification_time if path == PRELUDE_PATH
             return false
           end
 
-          stub = path == PRELUDE_STUB_PATH
+          prelude_state = prelude_state.not_nil!
           table = prelude_state.symbol_table
 
           # Sanity check: ensure basic builtins exist; otherwise prefer stub
@@ -997,8 +999,6 @@ module CrystalV2
             debug("Prelude type inference failed for #{path}: #{ex.message}")
             return nil
           end
-
-          return nil unless diagnostics.empty?
 
           uri = file_uri(path)
           origins = build_full_symbol_origin_map(analyzer.global_context.symbol_table, program, uri)
