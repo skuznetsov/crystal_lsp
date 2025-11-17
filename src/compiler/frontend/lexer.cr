@@ -2309,6 +2309,10 @@ module CrystalV2
       private def percent_literal_allowed? : Bool
         @last_token_kind != Token::Kind::Def
       end
+
     end
+
+    # Expose Frontend constants when including CrystalV2::Compiler
+    include Frontend
   end
 end

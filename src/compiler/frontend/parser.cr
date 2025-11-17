@@ -11771,6 +11771,11 @@ module CrystalV2
 
         UNARY_OPERATORS = [Token::Kind::Plus, Token::Kind::Minus, Token::Kind::AmpPlus, Token::Kind::AmpMinus, Token::Kind::Not, Token::Kind::Tilde]
       end
+
+      # Additional helper methods...
     end
+
+    # Expose Frontend constants when including CrystalV2::Compiler
+    include Frontend
   end
 end
