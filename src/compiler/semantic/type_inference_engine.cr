@@ -8,6 +8,7 @@ require "./types/array_type"
 require "./types/range_type"
 require "./types/hash_type"
 require "./types/tuple_type"
+require "./types/module_type"
 require "./analyzer"
 require "../frontend/ast"
 
@@ -1886,26 +1887,22 @@ module CrystalV2
 
         # Phase 63: Type inference for path expressions (Foo::Bar)
         private def infer_path(node : Frontend::PathNode, expr_id : ExprId) : Type
-          # Path expression: navigating nested types/modules
-          # Examples: HTTP::Server, Foo::Bar::Baz, ::TopLevel
-          #
-          # In a full implementation:
-          # - Resolve left side to namespace/type
-          # - Look up right identifier within that namespace
-          # - Return the resolved type
-          # - Handle absolute paths (left = nil)
-          #
-          # For now, infer left (if present) and right, return placeholder
-
-          # Infer left side (if not absolute path)
+          debug("infer_path: expr_id=#{expr_id.index}")
+          # Visit child expressions so nested nodes get types assigned
           if left_expr = node.left
             infer_expression(left_expr)
           end
-
           infer_expression(node.right)
 
-          # Return placeholder type (nil_type for now)
-          # Future: return resolved type from namespace lookup
+          if symbol = resolve_path_symbol(node)
+            debug("  resolved symbol: #{symbol.class.name}")
+            if type = type_from_symbol(symbol)
+              debug("  resolved type: #{type.class.name}")
+              return type
+            end
+          end
+
+          debug("  resolve_path_symbol failed") if @debug_enabled
           @context.nil_type
         end
 
@@ -1925,6 +1922,67 @@ module CrystalV2
 
           # Return nil_type as placeholder (full implementation would return member_type | Nil)
           @context.nil_type
+        end
+
+        private def resolve_path_symbol(node : Frontend::PathNode) : Symbol?
+          return nil unless @global_table
+
+          segments = [] of String
+          collect_path_segments(node, segments)
+          debug("  segments=#{segments.inspect}") if @debug_enabled
+          return nil if segments.empty?
+
+          current_table = @global_table
+          symbol : Symbol? = nil
+
+          segments.each_with_index do |segment, index|
+            return nil unless current_table
+            debug("  resolving segment '#{segment}' (index #{index})") if @debug_enabled
+            symbol = current_table.lookup(segment)
+            debug("    symbol=#{symbol ? symbol.class.name : "nil"}") if @debug_enabled
+            return nil unless symbol
+
+            if index < segments.size - 1
+              current_table = case symbol
+                              when ClassSymbol
+                                symbol.scope
+                              when ModuleSymbol
+                                symbol.scope
+                              else
+                                return nil
+                              end
+            end
+          end
+
+          symbol
+        end
+
+        private def collect_path_segments(node : Frontend::PathNode, segments : Array(String))
+          if left_id = node.left
+            append_path_segments(left_id, segments)
+          end
+          append_path_segments(node.right, segments)
+        end
+
+        private def append_path_segments(expr_id : ExprId, segments : Array(String))
+          expr = @program.arena[expr_id]
+          case expr
+          when Frontend::PathNode
+            collect_path_segments(expr, segments)
+          when Frontend::IdentifierNode
+            segments << String.new(expr.name)
+          end
+        end
+
+        private def type_from_symbol(symbol : Symbol) : Type?
+          case symbol
+          when ClassSymbol
+            ClassType.new(symbol)
+          when ModuleSymbol
+            ModuleType.new(symbol)
+          else
+            nil
+          end
         end
 
         # ============================================================

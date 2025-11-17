@@ -64,6 +64,11 @@ describe CrystalV2::Compiler::LSP::Server do
       dep_symbol.should_not be_nil
       dep_symbol.should be_a(CrystalV2::Compiler::Semantic::ModuleSymbol)
 
+      helper_symbol = dep_symbol.as(CrystalV2::Compiler::Semantic::ModuleSymbol).scope.lookup("Helper")
+      helper_symbol.should_not be_nil
+      helper_symbol.should be_a(CrystalV2::Compiler::Semantic::ClassSymbol)
+
+      diagnostics.should be_empty
     ensure
       FileUtils.rm_rf(base_dir)
     end
