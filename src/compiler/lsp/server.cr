@@ -549,6 +549,75 @@ module CrystalV2
           paths
         end
 
+        private def wrap_program_with_dependencies(program : Frontend::Program, path : String, base_dir : String) : {Frontend::Program, Array(String)}
+          files = [] of {String, Frontend::Program}
+          files << {path, program}
+          dependencies = Set(String).new
+          processed = Set(String).new
+          processed << path
+
+          worklist = [] of {String, Frontend::Program, String}
+          worklist << {path, program, base_dir}
+          index = 0
+
+          while index < worklist.size
+            current_path, current_program, current_dir = worklist[index]
+            index += 1
+
+            collect_require_paths(current_program, current_dir).each do |req_path|
+              next if req_path == current_path
+              dependencies << req_path
+              next if processed.includes?(req_path)
+
+              if dep_program = parse_dependency_program(req_path)
+                files << {req_path, dep_program}
+                worklist << {req_path, dep_program, File.dirname(req_path)}
+                processed << req_path
+              end
+            end
+          end
+
+          {merge_program_files(files), dependencies.to_a}
+        rescue ex
+          debug("wrap_program_with_dependencies failed for #{path}: #{ex.message}")
+          {wrap_program_with_file(program, path), dependencies.to_a}
+        end
+
+        private def parse_dependency_program(path : String) : Frontend::Program?
+          source = File.read(path)
+          lexer = Frontend::Lexer.new(source)
+          parser = Frontend::Parser.new(lexer)
+          parser.parse_program
+        rescue ex
+          debug("Failed to parse dependency #{path}: #{ex.message}")
+          nil
+        end
+
+        private def merge_program_files(files : Array({String, Frontend::Program})) : Frontend::Program
+          virtual_arena = Frontend::VirtualArena.new
+          merged_roots = [] of Frontend::ExprId
+          offset = 0
+
+          files.each do |file_path, file_program|
+            arena = file_program.arena
+            unless arena.is_a?(Frontend::AstArena)
+              debug("Skipping non-AstArena program for #{file_path}")
+              next
+            end
+
+            ast_arena = arena.as(Frontend::AstArena)
+            virtual_arena.add_file_arena(file_path, ast_arena)
+
+            file_program.roots.each do |root_id|
+              merged_roots << Frontend::ExprId.new(root_id.index + offset)
+            end
+
+            offset += ast_arena.size
+          end
+
+          Frontend::Program.new(virtual_arena, merged_roots)
+        end
+
         private def wrap_program_with_file(program : Frontend::Program, path : String?) : Frontend::Program
           return program unless path
 
@@ -807,12 +876,17 @@ module CrystalV2
           type_context = nil
           identifier_symbols = nil
           symbol_table = nil
+          requires = [] of String
 
           # Parse
           lexer = Frontend::Lexer.new(source)
           parser = Frontend::Parser.new(lexer)
           program = parser.parse_program
-          program = wrap_program_with_file(program, path)
+          if path && base_dir
+            program, requires = wrap_program_with_dependencies(program, path, base_dir)
+          else
+            program = wrap_program_with_file(program, path)
+          end
 
           # Convert parser diagnostics
           parser.diagnostics.each do |diag|
@@ -865,8 +939,6 @@ module CrystalV2
               debug("Skipping type inference due to errors")
             end
           end
-
-          requires = base_dir ? collect_require_paths(program, base_dir) : [] of String
 
           debug("Analysis complete: #{diagnostics.size} total diagnostics (requires=#{requires.size})")
           requires.each { |req| debug("  require => #{req}") }
