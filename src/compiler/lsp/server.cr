@@ -949,12 +949,14 @@ module CrystalV2
 
           stub = path == PRELUDE_STUB_PATH
 
-          if prelude_state.nil? || (!stub && !diagnostics.empty?)
+          if prelude_state.nil?
             diagnostics.each { |diag| debug("#{label} diagnostic: #{diag.message}") } unless diagnostics.empty?
             debug("#{label} produced #{diagnostics.size} diagnostics; ignoring")
             @prelude_real_mtime = File.info(path).modification_time if path == PRELUDE_PATH
             return false
           end
+
+          diagnostics.each { |diag| debug("#{label} diagnostic: #{diag.message}") } unless diagnostics.empty?
 
           prelude_state = prelude_state.not_nil!
           table = prelude_state.symbol_table
