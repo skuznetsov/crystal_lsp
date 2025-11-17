@@ -2312,7 +2312,9 @@ module CrystalV2
 
     end
 
-    # Expose Frontend constants when including CrystalV2::Compiler
-    include Frontend
+    # Re-export lexer under CrystalV2::Compiler namespace for convenience
+    module Compiler
+      Lexer = Frontend::Lexer
+    end
   end
 end

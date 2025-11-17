@@ -11775,7 +11775,8 @@ module CrystalV2
       # Additional helper methods...
     end
 
-    # Expose Frontend constants when including CrystalV2::Compiler
-    include Frontend
+    module Compiler
+      Parser = Frontend::Parser
+    end
   end
 end
