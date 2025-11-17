@@ -84,6 +84,8 @@ module CrystalV2
             handle_module(node_id, node)
           when Frontend::ConstantNode
             handle_constant(node_id, node)
+          when Frontend::IncludeNode
+            handle_include(node)
           when Frontend::GetterNode, Frontend::SetterNode, Frontend::PropertyNode
             # Phase 87B-1: Expand accessor macros to method definitions
             expand_accessor_macro(node_id, node)
@@ -270,6 +272,12 @@ module CrystalV2
 
           # Visit constant value to collect nested definitions
           visit(value_id)
+        end
+
+        private def handle_include(node : Frontend::IncludeNode)
+          symbol = resolve_include_target(node)
+          return unless symbol.is_a?(ModuleSymbol)
+          current_table.include_module(symbol)
         end
 
         # Phase 87B-1: Expand accessor macros to method definitions
@@ -873,6 +881,75 @@ module CrystalV2
 
           # Not a builtin, not a defined class → generic type parameter
           true
+        end
+
+        private def resolve_include_target(node : Frontend::IncludeNode) : Symbol?
+          if target_id = node.target
+            resolve_symbol_from_expr(target_id)
+          elsif name_slice = node.name
+            current_table.lookup(String.new(name_slice))
+          else
+            nil
+          end
+        end
+
+        private def resolve_symbol_from_expr(expr_id : Frontend::ExprId) : Symbol?
+          node = @arena[expr_id]
+          case node
+          when Frontend::PathNode
+            segments = [] of String
+            collect_path_segments(node, segments)
+            resolve_symbol_by_segments(segments)
+          when Frontend::IdentifierNode
+            resolve_symbol_by_segments([String.new(node.name)])
+          else
+            nil
+          end
+        end
+
+        private def collect_path_segments(node : Frontend::PathNode, segments : Array(String))
+          if left_id = node.left
+            left_node = @arena[left_id]
+            case left_node
+            when Frontend::PathNode
+              collect_path_segments(left_node, segments)
+            when Frontend::IdentifierNode
+              segments << String.new(left_node.name)
+            end
+          end
+
+          right_node = @arena[node.right]
+          case right_node
+          when Frontend::IdentifierNode
+            segments << String.new(right_node.name)
+          when Frontend::PathNode
+            collect_path_segments(right_node, segments)
+          end
+        end
+
+        private def resolve_symbol_by_segments(segments : Array(String)) : Symbol?
+          return nil if segments.empty?
+          table = @table_stack.first
+          symbol : Symbol? = nil
+          current_table = table
+
+          segments.each_with_index do |segment, index|
+            symbol = current_table.lookup(segment)
+            return nil unless symbol
+
+            if index < segments.size - 1
+              current_table = case symbol
+                              when ModuleSymbol
+                                symbol.scope
+                              when ClassSymbol
+                                symbol.scope
+                              else
+                                return nil
+                              end
+            end
+          end
+
+          symbol
         end
 
         private def symbol_kind(symbol : Symbol) : String

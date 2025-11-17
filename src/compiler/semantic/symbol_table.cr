@@ -1,3 +1,4 @@
+require "set"
 require "./symbol"
 
 module CrystalV2
@@ -6,8 +7,11 @@ module CrystalV2
       class SymbolTable
         getter parent : SymbolTable?
 
+        getter included_modules : Array(ModuleSymbol)
+
         def initialize(@parent : SymbolTable? = nil)
           @symbols = {} of String => Symbol
+          @included_modules = [] of ModuleSymbol
         end
 
         def define(name : String, symbol : Symbol)
@@ -22,7 +26,7 @@ module CrystalV2
         end
 
         def lookup(name : String) : Symbol?
-          @symbols[name]? || @parent.try(&.lookup(name))
+          @symbols[name]? || lookup_included(name, Set(SymbolTable).new) || @parent.try(&.lookup(name))
         end
 
         def local?(name : String) : Bool
@@ -39,7 +43,42 @@ module CrystalV2
           end
         end
 
+        def include_module(symbol : ModuleSymbol)
+          unless @included_modules.includes?(symbol)
+            @included_modules << symbol
+          end
+        end
+
         private getter symbols : Hash(String, Symbol)
+
+        private def lookup_included(name : String, visited : Set(SymbolTable)) : Symbol?
+          @included_modules.each do |mod_symbol|
+            if result = lookup_in_scope(mod_symbol.scope, name, visited)
+              return result
+            end
+          end
+          nil
+        end
+
+        private def lookup_in_scope(table : SymbolTable, name : String, visited : Set(SymbolTable)) : Symbol?
+          return nil unless visited.add?(table)
+
+          if symbol = table.lookup_local(name)
+            return symbol
+          end
+
+          table.included_modules.each do |mod_symbol|
+            if result = lookup_in_scope(mod_symbol.scope, name, visited)
+              return result
+            end
+          end
+
+          if parent = table.parent
+            return lookup_in_scope(parent, name, visited)
+          end
+
+          nil
+        end
       end
 
       class SymbolRedefinitionError < Exception
