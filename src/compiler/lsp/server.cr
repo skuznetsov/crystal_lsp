@@ -21,6 +21,7 @@ module CrystalV2
         getter identifier_symbols : Hash(Frontend::ExprId, Semantic::Symbol)?
         getter symbol_table : Semantic::SymbolTable?
         getter requires : Array(String)
+        getter path : String?
 
         def initialize(
           @text_document : TextDocumentItem,
@@ -29,7 +30,9 @@ module CrystalV2
           @identifier_symbols : Hash(Frontend::ExprId, Semantic::Symbol)? = nil,
           @symbol_table : Semantic::SymbolTable? = nil,
           @requires : Array(String) = [] of String,
+          path : String? = nil,
         )
+          @path = path ? File.expand_path(path) : nil
         end
       end
 
@@ -181,7 +184,7 @@ module CrystalV2
           diagnostics, program, type_context, identifier_symbols, symbol_table, requires = analyze_document(source, base_dir, path)
 
           text_doc = TextDocumentItem.new(uri: uri, language_id: "crystal", version: 0, text: source)
-          dep_state = DocumentState.new(text_doc, program, type_context, identifier_symbols, symbol_table, requires)
+          dep_state = DocumentState.new(text_doc, program, type_context, identifier_symbols, symbol_table, requires, path)
 
           @dependency_documents[uri] = dep_state
           register_document_symbols(uri, dep_state)
@@ -857,7 +860,7 @@ module CrystalV2
           diagnostics, program, type_context, identifier_symbols, symbol_table, requires = analyze_document(text, base_dir, doc_path)
 
           # Store document state
-          @documents[uri] = DocumentState.new(doc, program, type_context, identifier_symbols, symbol_table, requires)
+          @documents[uri] = DocumentState.new(doc, program, type_context, identifier_symbols, symbol_table, requires, doc_path)
           register_document_symbols(uri, @documents[uri])
 
           # Publish diagnostics
@@ -963,7 +966,7 @@ module CrystalV2
           ensure_prelude_loaded
           using_stub = @prelude_state.try(&.stub) || false
           diagnostics, program, type_context, identifier_symbols, symbol_table, _req = analyze_document(source)
-          tokens = collect_semantic_tokens(program, source, identifier_symbols, type_context, symbol_table)
+          tokens = collect_semantic_tokens(program, source, identifier_symbols, type_context, symbol_table, nil)
           prelude_path = @prelude_state.try(&.path) || "(none)"
           {diagnostics, tokens, using_stub, prelude_path}
         end
@@ -1614,7 +1617,7 @@ module CrystalV2
           diagnostics, program, type_context, identifier_symbols, symbol_table, requires = analyze_document(new_text, base_dir, doc_path)
 
           doc = TextDocumentItem.new(uri: uri, language_id: language_id, version: version, text: new_text)
-          @documents[uri] = DocumentState.new(doc, program, type_context, identifier_symbols, symbol_table, requires)
+          @documents[uri] = DocumentState.new(doc, program, type_context, identifier_symbols, symbol_table, requires, doc_path)
           register_document_symbols(uri, @documents[uri])
 
           publish_diagnostics(uri, diagnostics, version)
@@ -2648,7 +2651,8 @@ module CrystalV2
             doc_state.text_document.text,
             doc_state.identifier_symbols,
             doc_state.type_context,
-            doc_state.symbol_table
+            doc_state.symbol_table,
+            doc_state.path
           )
 
           debug("Generated semantic tokens")
@@ -4393,6 +4397,7 @@ module CrystalV2
           getter identifier_symbols : Hash(Frontend::ExprId, Semantic::Symbol)?
           getter type_context : Semantic::TypeContext?
           getter symbol_table : Semantic::SymbolTable?
+          getter target_path : String?
 
           def initialize(
             @program : Frontend::Program,
@@ -4401,7 +4406,22 @@ module CrystalV2
             @identifier_symbols : Hash(Frontend::ExprId, Semantic::Symbol)?,
             @type_context : Semantic::TypeContext?,
             @symbol_table : Semantic::SymbolTable?,
+            target_path : String? = nil,
           )
+            @target_path = target_path ? File.expand_path(target_path) : nil
+          end
+
+          def node_in_target_file?(expr_id : Frontend::ExprId) : Bool
+            return true unless target_path
+            arena = program.arena
+            return true unless arena.is_a?(Frontend::VirtualArena)
+            begin
+              file_path = arena.file_for_id(expr_id)
+              return true if file_path.nil?
+              File.expand_path(file_path) == target_path
+            rescue
+              false
+            end
           end
         end
 
@@ -4413,6 +4433,7 @@ module CrystalV2
           identifier_symbols : Hash(Frontend::ExprId, Semantic::Symbol)? = nil,
           type_context : Semantic::TypeContext? = nil,
           symbol_table : Semantic::SymbolTable? = nil,
+          target_path : String? = nil,
         ) : SemanticTokens
           raw_tokens = [] of RawToken
           context = SemanticTokenContext.new(
@@ -4421,7 +4442,8 @@ module CrystalV2
             source.to_slice,
             identifier_symbols,
             type_context,
-            symbol_table
+            symbol_table,
+            target_path
           )
 
           # Collect tokens from all root nodes (AST-driven semantics)
@@ -4448,6 +4470,7 @@ module CrystalV2
           tokens : Array(RawToken),
         )
           return if node_id.invalid?
+          return unless context.node_in_target_file?(node_id)
           arena = context.program.arena
           node = arena[node_id]
 
