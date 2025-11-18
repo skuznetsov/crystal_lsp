@@ -549,30 +549,6 @@ module CrystalV2
           paths
         end
 
-        private def preload_dependency_symbols(context : Semantic::Context, dependency_paths : Array(String), visited = Set(String).new)
-          dependency_paths.each do |dep_path|
-            next unless File.file?(dep_path)
-            next unless visited.add?(dep_path)
-
-            begin
-              source = File.read(dep_path)
-              lexer = Frontend::Lexer.new(source)
-              parser = Frontend::Parser.new(lexer)
-              dep_program = parser.parse_program
-              dep_program = wrap_program_with_file(dep_program, dep_path)
-
-              analyzer = Semantic::Analyzer.new(dep_program, context)
-              analyzer.collect_symbols
-
-              dep_dir = File.dirname(dep_path)
-              nested_requires = collect_require_paths(dep_program, dep_dir)
-              preload_dependency_symbols(context, nested_requires, visited) unless nested_requires.empty?
-            rescue ex
-              debug("Failed to preload dependency #{dep_path}: #{ex.message}")
-            end
-          end
-        end
-
         private def wrap_program_with_file(program : Frontend::Program, path : String?) : Frontend::Program
           return program unless path
 
@@ -584,6 +560,82 @@ module CrystalV2
 
           roots = program.roots.map { |root| Frontend::ExprId.new(root.index) }
           Frontend::Program.new(virtual_arena, roots)
+        end
+
+        private def merge_program_with_dependencies(program : Frontend::Program, path : String, requires : Array(String)) : Frontend::Program
+          arena = program.arena
+          return program unless arena.is_a?(Frontend::AstArena)
+
+          virtual_arena = Frontend::VirtualArena.new
+          merged_roots = [] of Frontend::ExprId
+          visited = Set(String).new
+          offset = 0
+
+          requires.each do |dep_path|
+            offset = add_dependency_file_to_virtual(virtual_arena, dep_path, offset, merged_roots, visited)
+          end
+
+          offset = add_program_file_to_virtual(virtual_arena, path, arena, program.roots, offset, merged_roots)
+
+          Frontend::Program.new(virtual_arena, merged_roots)
+        rescue ex
+          debug("Failed to merge dependencies: #{ex.message}")
+          program
+        end
+
+        private def add_program_file_to_virtual(
+          virtual_arena : Frontend::VirtualArena,
+          path : String,
+          arena : Frontend::AstArena,
+          roots : Array(Frontend::ExprId),
+          offset : Int32,
+          merged_roots : Array(Frontend::ExprId)
+        ) : Int32
+          virtual_arena.add_file_arena(path, arena)
+          roots.each do |root|
+            merged_roots << Frontend::ExprId.new(root.index + offset)
+          end
+          offset + arena.size
+        end
+
+        private def add_dependency_file_to_virtual(
+          virtual_arena : Frontend::VirtualArena,
+          dep_path : String,
+          offset : Int32,
+          merged_roots : Array(Frontend::ExprId),
+          visited : Set(String)
+        ) : Int32
+          absolute = File.expand_path(dep_path)
+          return offset unless visited.add?(absolute)
+
+          unless File.file?(absolute)
+            debug("Dependency #{absolute} missing on disk")
+            return offset
+          end
+
+          source = File.read(absolute)
+          lexer = Frontend::Lexer.new(source)
+          parser = Frontend::Parser.new(lexer)
+          dep_program = parser.parse_program
+          dep_arena = dep_program.arena
+
+          unless dep_arena.is_a?(Frontend::AstArena)
+            debug("Skipping dependency #{absolute} (virtual arena not supported)")
+            return offset
+          end
+
+          offset = add_program_file_to_virtual(virtual_arena, absolute, dep_arena, dep_program.roots, offset, merged_roots)
+
+          base_dir = File.dirname(absolute)
+          nested = collect_require_paths(dep_program, base_dir)
+          nested.each do |nested_path|
+            offset = add_dependency_file_to_virtual(virtual_arena, nested_path, offset, merged_roots, visited)
+          end
+
+          offset
+        rescue ex
+          debug("Failed to load dependency #{dep_path}: #{ex.message}")
+          offset
         end
 
         private def resolve_require_path(base_dir : String, require_path : String) : String?
@@ -838,7 +890,13 @@ module CrystalV2
           parser = Frontend::Parser.new(lexer)
           program = parser.parse_program
           requires = base_dir ? collect_require_paths(program, base_dir) : [] of String
-          program = wrap_program_with_file(program, path)
+          if path
+            if requires.empty?
+              program = wrap_program_with_file(program, path)
+            else
+              program = merge_program_with_dependencies(program, path, requires)
+            end
+          end
 
           # Convert parser diagnostics
           parser.diagnostics.each do |diag|
@@ -849,9 +907,6 @@ module CrystalV2
           # If parsing succeeded, run semantic analysis
           if parser.diagnostics.empty?
             context = build_context_with_prelude
-            if path && base_dir && !requires.empty?
-              preload_dependency_symbols(context, requires)
-            end
 
             analyzer = Semantic::Analyzer.new(program, context)
             analyzer.collect_symbols

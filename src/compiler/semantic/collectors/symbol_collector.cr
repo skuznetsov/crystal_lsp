@@ -277,6 +277,7 @@ module CrystalV2
         private def handle_include(node : Frontend::IncludeNode)
           symbol = resolve_include_target(node)
           return unless symbol.is_a?(ModuleSymbol)
+          # debug output?
           current_table.include_module(symbol)
         end
 

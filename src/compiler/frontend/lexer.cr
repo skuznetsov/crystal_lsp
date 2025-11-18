@@ -2318,3 +2318,9 @@ module CrystalV2
     end
   end
 end
+
+module CrystalV2
+  module Compiler
+    Lexer = Frontend::Lexer
+  end
+end

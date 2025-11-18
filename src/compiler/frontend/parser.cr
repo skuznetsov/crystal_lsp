@@ -11780,3 +11780,9 @@ module CrystalV2
     end
   end
 end
+
+module CrystalV2
+  module Compiler
+    Parser = Frontend::Parser
+  end
+end
