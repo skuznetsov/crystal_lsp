@@ -4375,6 +4375,31 @@ module CrystalV2
           Operator      = 21
         end
 
+        TOKEN_TYPE_PRIORITY = {
+          SemanticTokenType::Method.value        => 7,
+          SemanticTokenType::Function.value      => 7,
+          SemanticTokenType::Macro.value         => 7,
+          SemanticTokenType::Class.value         => 6,
+          SemanticTokenType::Struct.value        => 6,
+          SemanticTokenType::Enum.value          => 6,
+          SemanticTokenType::Type.value          => 6,
+          SemanticTokenType::Interface.value     => 6,
+          SemanticTokenType::Namespace.value     => 5,
+          SemanticTokenType::TypeParameter.value => 5,
+          SemanticTokenType::Property.value      => 4,
+          SemanticTokenType::EnumMember.value    => 4,
+          SemanticTokenType::Parameter.value     => 4,
+          SemanticTokenType::Variable.value      => 3,
+          SemanticTokenType::Keyword.value       => 3,
+          SemanticTokenType::String.value        => 3,
+          SemanticTokenType::Number.value        => 3,
+          SemanticTokenType::Regexp.value        => 3,
+          SemanticTokenType::Operator.value      => 2,
+          SemanticTokenType::Modifier.value      => 2,
+          SemanticTokenType::Comment.value       => 2,
+          SemanticTokenType::Event.value         => 2,
+        }
+
         # Represents a single semantic token before delta encoding
         private struct RawToken
           property line : Int32
@@ -4455,8 +4480,9 @@ module CrystalV2
           # Single-pass lexical scan for keywords and string-like tokens
           collect_lexical_tokens_single_pass(source, raw_tokens)
 
-          # Sort tokens by line, then by start_char
-          raw_tokens.sort_by! { |t| {t.line, t.start_char} }
+          # Sort tokens by position and prefer higher-priority classifications on ties
+          raw_tokens.sort_by! { |t| {t.line, t.start_char, -token_type_priority(t.token_type), -t.length} }
+          raw_tokens = deduplicate_tokens(raw_tokens)
 
           # Delta-encode tokens
           data = delta_encode_tokens(raw_tokens)
@@ -5322,6 +5348,28 @@ module CrystalV2
         )
           return if length <= 0 || line < 0 || col < 0
           tokens << RawToken.new(line, col, length, token_type, modifiers)
+        end
+
+        private def token_type_priority(token_type : Int32) : Int32
+          TOKEN_TYPE_PRIORITY[token_type]? || 0
+        end
+
+        private def deduplicate_tokens(tokens : Array(RawToken)) : Array(RawToken)
+          return tokens if tokens.empty?
+          deduped = [] of RawToken
+          last_line = Int32::MIN
+          last_start = Int32::MIN
+          last_length = Int32::MIN
+
+          tokens.each do |token|
+            next if token.line == last_line && token.start_char == last_start && token.length == last_length
+            deduped << token
+            last_line = token.line
+            last_start = token.start_char
+            last_length = token.length
+          end
+
+          deduped
         end
 
         # Delta-encode tokens according to LSP specification
