@@ -1636,9 +1636,9 @@ module CrystalV2
         end
 
         # Find expression at the given position (LSP 0-indexed -> Span 1-indexed)
-        private def find_expr_at_position(doc_state : DocumentState, line : Int32, character : Int32) : Frontend::ExprId?
+        private def find_expr_at_position(doc_state : DocumentState, line : Int32, character : Int32, precomputed_offset : Int32? = nil) : Frontend::ExprId?
           return nil if comment_position?(doc_state.text_document.text, line, character)
-          offset = position_to_offset(doc_state.text_document.text, line, character)
+          offset = precomputed_offset || position_to_offset(doc_state.text_document.text, line, character)
           return nil unless offset
 
           arena = doc_state.program.arena
@@ -1648,8 +1648,6 @@ module CrystalV2
           best_match_size = Int32::MAX
 
           target_path = doc_state.path
-          debug_path = target_path || "nil"
-          debug("find_expr_at_position: target_path=#{debug_path} offset=#{offset}")
           doc_state.program.roots.each do |root_id|
             next unless expr_in_document?(doc_state.program, root_id, target_path)
             if match = find_expr_in_tree(arena, root_id, offset)
@@ -1772,6 +1770,29 @@ module CrystalV2
           end
 
           best_match
+        end
+
+        private def member_name_offsets(
+          node : Frontend::MemberAccessNode,
+          arena : Frontend::ArenaLike,
+          source_text : String,
+        ) : {Int32, Int32}?
+          object_span = arena[node.object].span
+          name = String.new(node.member)
+          return nil if name.empty?
+          start_offset = object_span.end_offset
+          finish_offset = node.span.end_offset
+          window = finish_offset - start_offset
+          return nil if window <= 0
+          window = source_text.bytesize - start_offset if start_offset + window > source_text.bytesize
+          return nil if window <= 0
+          segment = source_text.byte_slice(start_offset, window)
+          relative = segment.index(name)
+          return nil unless relative
+          absolute_start = start_offset + relative
+          {absolute_start, absolute_start + name.bytesize}
+        rescue
+          nil
         end
 
         private def each_child_expr(arena : Frontend::ArenaLike, expr_id : Frontend::ExprId, &block : Frontend::ExprId ->)
@@ -2094,12 +2115,15 @@ module CrystalV2
           doc_state = @documents[uri]?
           return send_response(id, "null") unless doc_state
 
+          offset = position_to_offset(doc_state.text_document.text, line, character)
+          return send_response(id, "null") unless offset
+
           # Find expression at position
-          expr_id = find_expr_at_position(doc_state, line, character)
+          expr_id = find_expr_at_position(doc_state, line, character, offset)
           debug("Found expr_id=#{expr_id.inspect}")
           return send_response(id, "null") unless expr_id
 
-          location = find_definition_location(expr_id, doc_state, uri)
+          location = find_definition_location(expr_id, doc_state, uri, 0, offset)
           if location
             debug("Returning definition location")
             send_response(id, [location].to_json)
@@ -3553,7 +3577,7 @@ module CrystalV2
           end
         end
 
-        private def find_definition_location(expr_id : Frontend::ExprId, doc_state : DocumentState, uri : String, depth : Int32 = 0) : Location?
+        private def find_definition_location(expr_id : Frontend::ExprId, doc_state : DocumentState, uri : String, depth : Int32 = 0, target_offset : Int32? = nil) : Location?
           return nil if expr_id.invalid?
           return nil if depth >= 8
 
@@ -3579,7 +3603,7 @@ module CrystalV2
               nil
             end
           when Frontend::MemberAccessNode
-            definition_from_member_access(node, doc_state, uri)
+            definition_from_member_access(node, doc_state, uri, depth, target_offset)
           when Frontend::PathNode
             symbol = doc_state.identifier_symbols.try(&.[expr_id]?)
             debug("Path node: symbol=#{symbol ? symbol.class : "nil"}")
@@ -3591,27 +3615,45 @@ module CrystalV2
             end
             definition_from_path(node, doc_state, uri)
           when Frontend::SafeNavigationNode
-            definition_from_safe_navigation(node, doc_state, uri)
+            definition_from_safe_navigation(node, doc_state, uri, depth, target_offset)
           when Frontend::CallNode
             callee_id = node.callee
             return nil if callee_id.invalid?
             callee_node = doc_state.program.arena[callee_id]
             debug("Call callee node kind: #{Frontend.node_kind(callee_node)}")
-            if (location = find_definition_location(callee_id, doc_state, uri, depth + 1))
+            if (location = find_definition_location(callee_id, doc_state, uri, depth + 1, target_offset))
               return location
             end
             # Fallback: if we have type information, resolve as instance call
-            definition_from_call(node, doc_state, uri)
+            definition_from_call(node, doc_state, uri, depth, target_offset)
           when Frontend::IncludeNode
-            find_definition_location(node.target, doc_state, uri, depth + 1)
+            find_definition_location(node.target, doc_state, uri, depth + 1, target_offset)
           when Frontend::ExtendNode
-            find_definition_location(node.target, doc_state, uri, depth + 1)
+            find_definition_location(node.target, doc_state, uri, depth + 1, target_offset)
           else
             nil
           end
         end
 
-        private def definition_from_member_access(node : Frontend::MemberAccessNode, doc_state : DocumentState, uri : String) : Location?
+        private def definition_from_member_access(
+          node : Frontend::MemberAccessNode,
+          doc_state : DocumentState,
+          uri : String,
+          depth : Int32,
+          target_offset : Int32?,
+        ) : Location?
+          arena = doc_state.program.arena
+          if target_offset
+            object_span = arena[node.object].span
+            if span_contains_offset?(object_span, target_offset)
+              return find_definition_location(node.object, doc_state, uri, depth + 1, target_offset)
+            end
+          end
+
+          member_range = target_offset ? member_name_offsets(node, arena, doc_state.text_document.text) : nil
+          member_selected = target_offset && member_range &&
+                            target_offset >= member_range[0] && target_offset < member_range[1]
+
           if method_symbol = resolve_member_access_method_symbol(node, doc_state)
             if location = location_for_symbol(method_symbol)
               return location
@@ -3619,7 +3661,14 @@ module CrystalV2
             return Location.from_symbol(method_symbol, doc_state.program, uri)
           end
 
-          find_method_location_by_text(doc_state, String.new(node.member))
+          if member_selected
+            find_method_location_by_text(doc_state, String.new(node.member))
+          elsif target_offset && member_range
+            # Clicked outside member name (e.g., trailing space), fall back to object lookup
+            find_definition_location(node.object, doc_state, uri, depth + 1, target_offset)
+          else
+            find_method_location_by_text(doc_state, String.new(node.member))
+          end
         end
 
         private def resolve_member_access_method_symbol(node : Frontend::MemberAccessNode, doc_state : DocumentState) : Semantic::MethodSymbol?
@@ -3670,7 +3719,21 @@ module CrystalV2
           find_constant_location_by_text(doc_state, segments.last?)
         end
 
-        private def definition_from_safe_navigation(node : Frontend::SafeNavigationNode, doc_state : DocumentState, uri : String) : Location?
+        private def definition_from_safe_navigation(
+          node : Frontend::SafeNavigationNode,
+          doc_state : DocumentState,
+          uri : String,
+          depth : Int32,
+          target_offset : Int32?,
+        ) : Location?
+          arena = doc_state.program.arena
+          if target_offset
+            object_span = arena[node.object].span
+            if span_contains_offset?(object_span, target_offset)
+              return find_definition_location(node.object, doc_state, uri, depth + 1, target_offset)
+            end
+          end
+
           method_symbol = resolve_safe_navigation_method_symbol(node, doc_state)
           return nil unless method_symbol
 
@@ -3743,7 +3806,13 @@ module CrystalV2
           nil
         end
 
-        private def definition_from_call(node : Frontend::CallNode, doc_state : DocumentState, uri : String) : Location?
+        private def definition_from_call(
+          node : Frontend::CallNode,
+          doc_state : DocumentState,
+          uri : String,
+          depth : Int32,
+          target_offset : Int32?,
+        ) : Location?
           if method_symbol = resolve_call_method_symbol(node, doc_state)
             if location = location_for_symbol(method_symbol)
               return location
@@ -3761,9 +3830,9 @@ module CrystalV2
               return location
             end
           elsif callee_node.is_a?(Frontend::MemberAccessNode)
-            return definition_from_member_access(callee_node, doc_state, uri)
+            return definition_from_member_access(callee_node, doc_state, uri, depth + 1, target_offset)
           elsif callee_node.is_a?(Frontend::SafeNavigationNode)
-            return definition_from_safe_navigation(callee_node, doc_state, uri)
+            return definition_from_safe_navigation(callee_node, doc_state, uri, depth + 1, target_offset)
           end
 
           nil
