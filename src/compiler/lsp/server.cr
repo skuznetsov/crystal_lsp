@@ -4411,7 +4411,7 @@ module CrystalV2
             @target_path = target_path ? File.expand_path(target_path) : nil
           end
 
-          def node_in_target_file?(expr_id : Frontend::ExprId) : Bool
+          def expr_in_target_file?(expr_id : Frontend::ExprId) : Bool
             return true unless target_path
             arena = program.arena
             return true unless arena.is_a?(Frontend::VirtualArena)
@@ -4448,6 +4448,7 @@ module CrystalV2
 
           # Collect tokens from all root nodes (AST-driven semantics)
           program.roots.each do |root_id|
+            next if target_path && !context.expr_in_target_file?(root_id)
             collect_tokens_recursive(context, root_id, raw_tokens)
           end
 
@@ -4470,7 +4471,6 @@ module CrystalV2
           tokens : Array(RawToken),
         )
           return if node_id.invalid?
-          return unless context.node_in_target_file?(node_id)
           arena = context.program.arena
           node = arena[node_id]
 
