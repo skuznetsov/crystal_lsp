@@ -893,13 +893,7 @@ module CrystalV2
           parser = Frontend::Parser.new(lexer)
           program = parser.parse_program
           requires = base_dir ? collect_require_paths(program, base_dir) : [] of String
-          if path
-            if requires.empty?
-              program = wrap_program_with_file(program, path)
-            else
-              program = merge_program_with_dependencies(program, path, requires)
-            end
-          end
+          program = wrap_program_with_file(program, path)
 
           # Convert parser diagnostics
           parser.diagnostics.each do |diag|
@@ -907,27 +901,30 @@ module CrystalV2
           end
           debug("Parsing complete: #{parser.diagnostics.size} parser diagnostics, #{program.roots.size} root expressions")
 
-          # If parsing succeeded, run semantic analysis
-          if parser.diagnostics.empty?
+          begin
             context = build_context_with_prelude
 
             analyzer = Semantic::Analyzer.new(program, context)
             analyzer.collect_symbols
             debug("Symbol collection complete")
 
-            # Run name resolution
+            # Run name resolution even if parser reported diagnostics; useful for navigation
             result = analyzer.resolve_names
             identifier_symbols = result.identifier_symbols
             symbol_table = analyzer.global_context.symbol_table
             debug("Name resolution complete: #{result.diagnostics.size} diagnostics, #{identifier_symbols.size} identifiers resolved")
 
             unless using_stub
-              analyzer.semantic_diagnostics.each do |diag|
-                diagnostics << Diagnostic.from_semantic(diag, source)
-              end
+              if parser.diagnostics.empty?
+                analyzer.semantic_diagnostics.each do |diag|
+                  diagnostics << Diagnostic.from_semantic(diag, source)
+                end
 
-              result.diagnostics.each do |diag|
-                diagnostics << Diagnostic.from_parser(diag)
+                result.diagnostics.each do |diag|
+                  diagnostics << Diagnostic.from_parser(diag)
+                end
+              else
+                debug("Skipping semantic diagnostics due to #{parser.diagnostics.size} parser diagnostics")
               end
             else
               debug("Stub prelude active; suppressing semantic diagnostics output")
@@ -953,6 +950,8 @@ module CrystalV2
             else
               debug("Skipping type inference due to errors")
             end
+          rescue ex
+            debug("Semantic analysis failed: #{ex.message}")
           end
 
           debug("Analysis complete: #{diagnostics.size} total diagnostics (requires=#{requires.size})")
@@ -1624,6 +1623,18 @@ module CrystalV2
           request_semantic_tokens_refresh
         end
 
+        private def expr_in_document?(program : Frontend::Program, expr_id : Frontend::ExprId, path : String?) : Bool
+          return true unless path
+          arena = program.arena
+          virtual = arena.as?(Frontend::VirtualArena)
+          return true unless virtual
+          file_path = virtual.file_for_id(expr_id)
+          return false unless file_path
+          File.expand_path(file_path) == path
+        rescue
+          false
+        end
+
         # Find expression at the given position (LSP 0-indexed -> Span 1-indexed)
         private def find_expr_at_position(doc_state : DocumentState, line : Int32, character : Int32) : Frontend::ExprId?
           return nil if comment_position?(doc_state.text_document.text, line, character)
@@ -1636,7 +1647,11 @@ module CrystalV2
           best_match : Frontend::ExprId? = nil
           best_match_size = Int32::MAX
 
+          target_path = doc_state.path
+          debug_path = target_path || "nil"
+          debug("find_expr_at_position: target_path=#{debug_path} offset=#{offset}")
           doc_state.program.roots.each do |root_id|
+            next unless expr_in_document?(doc_state.program, root_id, target_path)
             if match = find_expr_in_tree(arena, root_id, offset)
               match_node = arena[match]
               match_size = match_node.span.end_offset - match_node.span.start_offset
