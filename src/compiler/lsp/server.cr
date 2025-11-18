@@ -1020,8 +1020,7 @@ module CrystalV2
 
           # Sanity check: ensure basic builtins exist; otherwise prefer stub
           unless stub || prelude_sanity_ok?(table)
-            debug("#{label} appears incomplete (missing Kernel.puts/Dir.glob); falling back to stub")
-            return false
+            debug("#{label} appears incomplete (missing Kernel.puts/Dir.glob); continuing with partial prelude")
           end
 
           @prelude_state = prelude_state
@@ -1079,10 +1078,8 @@ module CrystalV2
           source_cache = {path => source}
 
           unless process_prelude_dependency(path, context, origins, visited, diagnostics, program_cache, source_cache)
-            return nil
+            debug("Prelude dependency processing reported failure; continuing with partial context")
           end
-
-          return nil unless diagnostics.empty?
 
           PreludeState.new(path, program, context.symbol_table, diagnostics, false, origins)
         end
@@ -1105,17 +1102,14 @@ module CrystalV2
           source = source_cache[path]?
           unless program && source
             unless load_prelude_program(path, program_cache, source_cache, diagnostics)
-              if optional_prelude_file?(path)
-                debug("Skipping optional prelude dependency #{path} due to parse errors")
-                return true
-              else
-                return false
-              end
+              debug("Failed to parse prelude dependency #{path}; continuing without it")
+              return true if optional_prelude_file?(path)
+              return true
             end
             program = program_cache[path]
             source = source_cache[path]
           end
-          return false unless program && source
+          return true unless program && source
 
           base_dir = File.dirname(path)
           requires = collect_require_paths(program, base_dir)
@@ -1125,14 +1119,9 @@ module CrystalV2
             next if visited.includes?(req)
             unless program_cache[req]?
               unless load_prelude_program(req, program_cache, source_cache, diagnostics)
-                if optional_prelude_file?(req)
-                  debug("Skipping optional prelude dependency #{req} due to parse errors")
-                  visited << req
-                  next
-                else
-                  debug("Failed to parse prelude dependency #{req}")
-                  return false
-                end
+                debug("Failed to parse prelude dependency #{req}; continuing without it")
+                visited << req
+                next
               end
             end
             unless process_prelude_dependency(req, context, origins, visited, diagnostics, program_cache, source_cache)
@@ -1142,18 +1131,12 @@ module CrystalV2
 
           analyzer = Semantic::Analyzer.new(program, context)
           analyzer.collect_symbols
-          analyzer.semantic_diagnostics.each { |diag| diagnostics << Diagnostic.from_semantic(diag, source) }
-          result = analyzer.resolve_names
-          result.diagnostics.each { |diag| diagnostics << Diagnostic.from_parser(diag) }
-
-          if analyzer.semantic_errors? || result.diagnostics.any?
-            if optional_prelude_file?(path)
-              debug("Skipping optional prelude dependency #{path} due to semantic errors")
-              return true
-            else
-              debug("Semantic errors while loading #{path}")
-              return false
-            end
+          begin
+            analyzer.semantic_diagnostics.each { |diag| diagnostics << Diagnostic.from_semantic(diag, source) }
+            result = analyzer.resolve_names
+            result.diagnostics.each { |diag| diagnostics << Diagnostic.from_parser(diag) }
+          rescue ex
+            debug("Name resolution failed for #{path}: #{ex.message}")
           end
 
           uri = file_uri(path)
@@ -1186,7 +1169,10 @@ module CrystalV2
         end
 
         private def optional_prelude_file?(path : String) : Bool
-          File.basename(path) == "macros.cr"
+          base = File.basename(path)
+          return true if base == "macros.cr"
+          return true if path.includes?("/crystal/once.cr")
+          false
         end
 
         private def build_full_symbol_origin_map(
@@ -1361,7 +1347,11 @@ module CrystalV2
           has_dir_glob = dir_scope.try(&.lookup("glob"))
           has_file_read = file_scope.try(&.lookup("read"))
 
-          !!(kernel_scope && has_kernel_puts && dir_scope && has_dir_glob && file_scope && has_file_read && top_puts)
+          ok = !!(kernel_scope && has_kernel_puts && dir_scope && has_dir_glob && file_scope && has_file_read && top_puts)
+          unless ok
+            debug("Prelude sanity failed kernel=#{!!kernel_scope} dir=#{!!dir_scope} file=#{!!file_scope} puts=#{!!top_puts} kernel_puts=#{!!has_kernel_puts} dir_glob=#{!!has_dir_glob} file_read=#{!!has_file_read}")
+          end
+          ok
         end
 
         private def ensure_prelude_loaded
