@@ -974,7 +974,14 @@ module CrystalV2
           lexer = Frontend::Lexer.new(source)
           parser = Frontend::Parser.new(lexer)
           program = parser.parse_program
-          analysis_program = path ? wrap_program_with_file(program, path) : program
+          analysis_program = program
+          if path
+            if requires.any?
+              analysis_program = merge_program_with_dependencies(program, path, requires)
+            else
+              analysis_program = wrap_program_with_file(program, path)
+            end
+          end
           uses_compiler_module = includes_compiler_module?(program)
           dependency_states = [] of DocumentState
           if load_requires
