@@ -130,10 +130,11 @@ module CrystalV2
           "Lexer"  => ["CrystalV2", "Compiler", "Frontend", "Lexer"],
           "Parser" => ["CrystalV2", "Compiler", "Frontend", "Parser"],
         }
+        COMPILER_ROOT = File.expand_path("..", __DIR__)
         COMPILER_DEPENDENCY_PATHS = [
-          File.expand_path("../compiler.cr", File.expand_path("..", __DIR__)),
-          File.expand_path("../frontend/lexer.cr", File.expand_path("..", __DIR__)),
-          File.expand_path("../frontend/parser.cr", File.expand_path("..", __DIR__)),
+          File.expand_path("compiler.cr", COMPILER_ROOT),
+          File.expand_path("frontend/lexer.cr", COMPILER_ROOT),
+          File.expand_path("frontend/parser.cr", COMPILER_ROOT),
         ]
 
         # Security constants - prevent DoS attacks and resource exhaustion
@@ -1518,11 +1519,33 @@ module CrystalV2
         private def merge_dependency_symbol_tables(target : Semantic::SymbolTable, dependencies : Array(DocumentState))
           dependencies.each do |dep_state|
             next unless dep_table = dep_state.symbol_table
-            dep_table.each_local_symbol do |name, symbol|
-              target.redefine(name, symbol) unless target.lookup_local(name)
+            merge_symbol_table_into(target, dep_table)
+          end
+        end
+
+        private def merge_symbol_table_into(target : Semantic::SymbolTable, source : Semantic::SymbolTable)
+          source.each_local_symbol do |name, symbol|
+            if existing = target.lookup_local(name)
+              merge_symbol_scopes(existing, symbol)
+            else
+              target.redefine(name, symbol)
             end
-            dep_table.included_modules.each do |mod_symbol|
-              target.include_module(mod_symbol) unless target.included_modules.includes?(mod_symbol)
+          end
+
+          source.included_modules.each do |mod_symbol|
+            target.include_module(mod_symbol) unless target.included_modules.includes?(mod_symbol)
+          end
+        end
+
+        private def merge_symbol_scopes(existing : Semantic::Symbol, incoming : Semantic::Symbol)
+          case existing
+          when Semantic::ModuleSymbol
+            if incoming.is_a?(Semantic::ModuleSymbol)
+              merge_symbol_table_into(existing.scope, incoming.scope)
+            end
+          when Semantic::ClassSymbol
+            if incoming.is_a?(Semantic::ClassSymbol)
+              merge_symbol_table_into(existing.scope, incoming.scope)
             end
           end
         end
