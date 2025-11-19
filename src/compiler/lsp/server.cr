@@ -997,10 +997,12 @@ module CrystalV2
             analyzer.collect_symbols
             debug("Symbol collection complete")
 
+            symbol_table = analyzer.global_context.symbol_table
+            inject_compiler_alias_bindings(symbol_table) if uses_compiler_module
+
             # Run name resolution even if parser reported diagnostics; useful for navigation
             result = analyzer.resolve_names
             identifier_symbols = result.identifier_symbols
-            symbol_table = analyzer.global_context.symbol_table
             debug("Name resolution complete: #{result.diagnostics.size} diagnostics, #{identifier_symbols.size} identifiers resolved")
 
             if ENV["LSP_DEBUG"]? && uses_compiler_module
@@ -1019,8 +1021,6 @@ module CrystalV2
                 debug("Compiler module symbol missing for alias lookup")
               end
             end
-
-            inject_compiler_alias_bindings(symbol_table) if uses_compiler_module
 
             unless using_stub
               if parser.diagnostics.empty?
