@@ -226,7 +226,8 @@ module CrystalV2
 
           debug("Loading dependency #{path}")
           source = File.read(path)
-          if COMPILER_DEPENDENCY_PATHS.includes?(File.expand_path(path))
+          absolute = File.expand_path(path)
+          if absolute == COMPILER_DEPENDENCY_PATHS.first
             source = strip_require_lines(source)
             recursive = false
           end
@@ -968,8 +969,7 @@ module CrystalV2
           # Parse
           lexer = Frontend::Lexer.new(source)
           parser = Frontend::Parser.new(lexer)
-          parsed_program = parser.parse_program
-          program = parsed_program
+          program = parser.parse_program
           uses_compiler_module = includes_compiler_module?(program)
           dependency_states = [] of DocumentState
           if load_requires
@@ -977,18 +977,12 @@ module CrystalV2
             requires = filter_required_files(requirements: raw_requires, includes_compiler: uses_compiler_module)
             requires.each do |req_path|
               debug("Loading dependency #{req_path} (shallow)") if ENV["LSP_DEBUG"]?
-              if dep_state = load_dependency(req_path, recursive: false)
+              if dep_state = load_dependency(req_path, recursive: true)
                 dependency_states << dep_state
               end
             end
           end
-          if path
-            if requires.any?
-              program = merge_program_with_dependencies(parsed_program, path, requires)
-            else
-              program = wrap_program_with_file(parsed_program, path)
-            end
-          end
+          program = wrap_program_with_file(program, path)
 
           # Convert parser diagnostics
           parser.diagnostics.each do |diag|
@@ -1030,18 +1024,20 @@ module CrystalV2
             end
 
             if semantic_diagnostics_enabled?
-              if using_stub
-                debug("Semantic diagnostics disabled while stub prelude active")
-              elsif parser.diagnostics.empty?
-                analyzer.semantic_diagnostics.each do |diag|
-                  diagnostics << Diagnostic.from_semantic(diag, source)
-                end
+              unless using_stub
+                if parser.diagnostics.empty?
+                  analyzer.semantic_diagnostics.each do |diag|
+                    diagnostics << Diagnostic.from_semantic(diag, source)
+                  end
 
-                result.diagnostics.each do |diag|
-                  diagnostics << Diagnostic.from_parser(diag)
+                  result.diagnostics.each do |diag|
+                    diagnostics << Diagnostic.from_parser(diag)
+                  end
+                else
+                  debug("Skipping semantic diagnostics due to #{parser.diagnostics.size} parser diagnostics")
                 end
               else
-                debug("Skipping semantic diagnostics due to #{parser.diagnostics.size} parser diagnostics")
+                debug("Stub prelude active; suppressing semantic diagnostics output")
               end
             else
               debug("Semantic diagnostics disabled via configuration")
@@ -1521,12 +1517,9 @@ module CrystalV2
           return unless symbol_table
 
           symbols = [] of Semantic::Symbol
-          register_symbols_from_table(symbol_table, doc_state.program, uri, symbols)
+          restrict_path = doc_state.path.try { |p| File.expand_path(p) }
+          register_symbols_from_table(symbol_table, doc_state.program, uri, symbols, restrict_path: restrict_path)
           @document_symbol_index[uri] = symbols
-        end
-
-        private def semantic_diagnostics_enabled? : Bool
-          ENV["CRYSTALV2_LSP_ENABLE_SEMANTIC_DIAGNOSTICS"]? == "1"
         end
 
         private def merge_dependency_symbol_tables(target : Semantic::SymbolTable, dependencies : Array(DocumentState))
@@ -1565,6 +1558,10 @@ module CrystalV2
 
         private def strip_require_lines(source : String) : String
           source.each_line.reject { |line| line.lstrip.starts_with?("require ") }.join
+        end
+
+        private def semantic_diagnostics_enabled? : Bool
+          ENV["CRYSTALV2_LSP_ENABLE_SEMANTIC_DIAGNOSTICS"]? == "1"
         end
 
         private def filter_required_files(*, requirements : Array(String), includes_compiler : Bool) : Array(String)
@@ -1641,8 +1638,15 @@ module CrystalV2
           uri : String,
           output : Array(Semantic::Symbol),
           origins : Hash(Semantic::Symbol, PreludeSymbolOrigin)? = nil,
+          *,
+          restrict_path : String? = nil,
         )
           table.each_local_symbol do |_name, symbol|
+            if restrict_path
+              if symbol_path = symbol.file_path
+                next unless File.expand_path(symbol_path) == restrict_path
+              end
+            end
             symbol_program = program
             symbol_uri = uri
             if origins
@@ -1652,7 +1656,7 @@ module CrystalV2
               end
             end
             symbol_uri = effective_symbol_uri(symbol, symbol_uri)
-            register_symbol(symbol, symbol_program, symbol_uri, output, origins)
+            register_symbol(symbol, symbol_program, symbol_uri, output, origins, restrict_path: restrict_path)
           end
         end
 
@@ -1670,10 +1674,12 @@ module CrystalV2
           uri : String,
           output : Array(Semantic::Symbol),
           origins : Hash(Semantic::Symbol, PreludeSymbolOrigin)? = nil,
+          *,
+          restrict_path : String? = nil,
         )
           case symbol
           when Semantic::OverloadSetSymbol
-            symbol.overloads.each { |overload| register_symbol(overload, program, uri, output, origins) }
+            symbol.overloads.each { |overload| register_symbol(overload, program, uri, output, origins, restrict_path: restrict_path) }
           else
             @symbol_locations[symbol] = SymbolLocation.new(uri, program, program_key(program))
             register_node_for_symbol(symbol, program)
@@ -1684,10 +1690,10 @@ module CrystalV2
             case symbol
             when Semantic::ClassSymbol
               output << symbol
-              register_symbols_from_table(symbol.scope, program, uri, output, origins)
+              register_symbols_from_table(symbol.scope, program, uri, output, origins, restrict_path: restrict_path)
             when Semantic::ModuleSymbol
               output << symbol
-              register_symbols_from_table(symbol.scope, program, uri, output, origins)
+              register_symbols_from_table(symbol.scope, program, uri, output, origins, restrict_path: restrict_path)
             when Semantic::MethodSymbol
               output << symbol
               register_method(symbol, program)
