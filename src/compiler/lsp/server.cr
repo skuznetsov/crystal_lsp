@@ -132,7 +132,7 @@ module CrystalV2
         }
         COMPILER_ROOT = File.expand_path("..", __DIR__)
         COMPILER_DEPENDENCY_PATHS = [
-          File.expand_path("compiler.cr", COMPILER_ROOT),
+          File.expand_path("../compiler.cr", COMPILER_ROOT),
           File.expand_path("frontend/lexer.cr", COMPILER_ROOT),
           File.expand_path("frontend/parser.cr", COMPILER_ROOT),
         ]
@@ -1555,10 +1555,13 @@ module CrystalV2
         end
 
         private def filter_required_files(*, requirements : Array(String), includes_compiler : Bool) : Array(String)
-          return [] of String unless includes_compiler
-          normalized = requirements.map { |req| File.expand_path(req) }
-          filtered = COMPILER_DEPENDENCY_PATHS.select { |path| normalized.includes?(path) }
-          filtered.empty? ? COMPILER_DEPENDENCY_PATHS : filtered
+          normalized = requirements.map { |req| File.expand_path(req) }.uniq
+          if includes_compiler
+            COMPILER_DEPENDENCY_PATHS.each do |path|
+              normalized << path unless normalized.includes?(path)
+            end
+          end
+          normalized
         end
 
         private def includes_compiler_module?(program : Frontend::Program) : Bool
