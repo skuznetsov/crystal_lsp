@@ -968,7 +968,8 @@ module CrystalV2
           # Parse
           lexer = Frontend::Lexer.new(source)
           parser = Frontend::Parser.new(lexer)
-          program = parser.parse_program
+          parsed_program = parser.parse_program
+          program = parsed_program
           uses_compiler_module = includes_compiler_module?(program)
           dependency_states = [] of DocumentState
           if load_requires
@@ -981,7 +982,13 @@ module CrystalV2
               end
             end
           end
-          program = wrap_program_with_file(program, path)
+          if path
+            if requires.any?
+              program = merge_program_with_dependencies(parsed_program, path, requires)
+            else
+              program = wrap_program_with_file(parsed_program, path)
+            end
+          end
 
           # Convert parser diagnostics
           parser.diagnostics.each do |diag|
@@ -1022,8 +1029,10 @@ module CrystalV2
               end
             end
 
-            unless using_stub
-              if parser.diagnostics.empty?
+            if semantic_diagnostics_enabled?
+              if using_stub
+                debug("Semantic diagnostics disabled while stub prelude active")
+              elsif parser.diagnostics.empty?
                 analyzer.semantic_diagnostics.each do |diag|
                   diagnostics << Diagnostic.from_semantic(diag, source)
                 end
@@ -1035,7 +1044,7 @@ module CrystalV2
                 debug("Skipping semantic diagnostics due to #{parser.diagnostics.size} parser diagnostics")
               end
             else
-              debug("Stub prelude active; suppressing semantic diagnostics output")
+              debug("Semantic diagnostics disabled via configuration")
             end
 
             should_infer = !analyzer.semantic_errors? && result.diagnostics.empty?
@@ -1050,7 +1059,7 @@ module CrystalV2
               type_context = engine.context
               debug("Type inference complete: #{analyzer.type_inference_diagnostics.size} diagnostics")
 
-              unless using_stub
+              if semantic_diagnostics_enabled? && !using_stub
                 analyzer.type_inference_diagnostics.each do |diag|
                   diagnostics << Diagnostic.from_semantic(diag, source)
                 end
@@ -1514,6 +1523,10 @@ module CrystalV2
           symbols = [] of Semantic::Symbol
           register_symbols_from_table(symbol_table, doc_state.program, uri, symbols)
           @document_symbol_index[uri] = symbols
+        end
+
+        private def semantic_diagnostics_enabled? : Bool
+          ENV["CRYSTALV2_LSP_ENABLE_SEMANTIC_DIAGNOSTICS"]? == "1"
         end
 
         private def merge_dependency_symbol_tables(target : Semantic::SymbolTable, dependencies : Array(DocumentState))
