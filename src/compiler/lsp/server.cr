@@ -1,6 +1,7 @@
 require "json"
 require "set"
 require "uri"
+require "yaml"
 require "./protocol"
 require "./messages"
 require "../frontend/lexer"
@@ -74,6 +75,37 @@ module CrystalV2
 
       # Minimal LSP Server implementation
       # Handles initialize, didOpen, publishDiagnostics, and hover
+      struct ServerConfig
+        getter debug_log_path : String?
+
+        def initialize(@debug_log_path : String? = nil)
+        end
+
+        def self.load : ServerConfig
+          debug_path = ENV["LSP_DEBUG_LOG"]?
+
+          if config_path = ENV["CRYSTALV2_LSP_CONFIG"]?
+            begin
+              raw = File.read(config_path)
+              data = if config_path.ends_with?(".yml") || config_path.ends_with?(".yaml")
+                       YAML.parse(raw)
+                     else
+                       JSON.parse(raw)
+                     end
+              if hash = data.as_h?
+                if value = hash["debug_log_path"]?
+                  debug_path ||= value.as_s?
+                end
+              end
+            rescue ex
+              STDERR.puts("[LSP Config] Failed to load #{config_path}: #{ex.message}")
+            end
+          end
+
+          new(debug_path)
+        end
+      end
+
       class Server
         # Try to resolve the real Crystal prelude from common locations.
         # Preferred: repo root at src/prelude.cr. Fallback: relative to this dir.
@@ -93,6 +125,16 @@ module CrystalV2
           end
         end
         PRELUDE_STUB_PATH = File.expand_path("prelude_stub.cr", __DIR__)
+        COMPILER_MODULE_SEGMENTS = ["CrystalV2", "Compiler"]
+        COMPILER_ALIAS_SEGMENTS = {
+          "Lexer"  => ["CrystalV2", "Compiler", "Frontend", "Lexer"],
+          "Parser" => ["CrystalV2", "Compiler", "Frontend", "Parser"],
+        }
+        COMPILER_DEPENDENCY_PATHS = [
+          File.expand_path("../compiler.cr", File.expand_path("..", __DIR__)),
+          File.expand_path("../frontend/lexer.cr", File.expand_path("..", __DIR__)),
+          File.expand_path("../frontend/parser.cr", File.expand_path("..", __DIR__)),
+        ]
 
         # Security constants - prevent DoS attacks and resource exhaustion
         # These limits balance security with practical usability for large projects
@@ -102,6 +144,7 @@ module CrystalV2
 
         @input : IO
         @output : IO
+        @log_output : IO?
         @documents : Hash(String, DocumentState)
         @initialized : Bool = false
         @prelude_state : PreludeState?
@@ -116,7 +159,9 @@ module CrystalV2
         @program_methods : Hash(UInt64, Array(Semantic::MethodSymbol))
         @dependency_documents : Hash(String, DocumentState)
 
-        def initialize(@input = STDIN, @output = STDOUT)
+        def initialize(@input = STDIN, @output = STDOUT, config : ServerConfig = ServerConfig.load)
+          @config = config
+          @log_output = config.debug_log_path.try { |path| File.open(path, "a") }
           @documents = {} of String => DocumentState
           @prelude_real_mtime = nil
           @seq_id = 1
@@ -167,7 +212,7 @@ module CrystalV2
           end
         end
 
-        private def load_dependency(path : String) : DocumentState?
+        private def load_dependency(path : String, recursive : Bool = true) : DocumentState?
           uri = file_uri(path)
 
           return @documents[uri]? if @documents.has_key?(uri)
@@ -180,15 +225,19 @@ module CrystalV2
 
           debug("Loading dependency #{path}")
           source = File.read(path)
+          if COMPILER_DEPENDENCY_PATHS.includes?(File.expand_path(path))
+            source = strip_require_lines(source)
+            recursive = false
+          end
           base_dir = File.dirname(path)
-          diagnostics, program, type_context, identifier_symbols, symbol_table, requires = analyze_document(source, base_dir, path)
+          diagnostics, program, type_context, identifier_symbols, symbol_table, requires = analyze_document(source, base_dir, path, load_requires: recursive)
 
           text_doc = TextDocumentItem.new(uri: uri, language_id: "crystal", version: 0, text: source)
           dep_state = DocumentState.new(text_doc, program, type_context, identifier_symbols, symbol_table, requires, path)
 
           @dependency_documents[uri] = dep_state
           register_document_symbols(uri, dep_state)
-          ensure_dependencies_loaded(dep_state)
+          ensure_dependencies_loaded(dep_state) if recursive
 
           dep_state
         rescue ex
@@ -552,6 +601,33 @@ module CrystalV2
           paths
         end
 
+        private def includes_compiler_module?(program : Frontend::Program) : Bool
+          arena = program.arena
+          program.roots.any? { |root_id| include_node_matches_compiler?(arena, root_id) }
+        end
+
+        private def include_node_matches_compiler?(arena : Frontend::ArenaLike, expr_id : Frontend::ExprId) : Bool
+          node = arena[expr_id]
+
+          if node.is_a?(Frontend::IncludeNode)
+            target_id = node.target
+            unless target_id.invalid?
+              target_node = arena[target_id]
+              if target_node.is_a?(Frontend::PathNode)
+                segments = collect_path_segments(arena, target_node)
+                return true if segments == COMPILER_MODULE_SEGMENTS
+              end
+            end
+          end
+
+          each_child_expr(arena, expr_id) do |child|
+            next if child.invalid?
+            return true if include_node_matches_compiler?(arena, child)
+          end
+
+          false
+        end
+
         private def wrap_program_with_file(program : Frontend::Program, path : String?) : Frontend::Program
           return program unless path
 
@@ -877,7 +953,7 @@ module CrystalV2
         end
 
         # Analyze document and return diagnostics, program, type context, identifier symbols, and symbol table
-        private def analyze_document(source : String, base_dir : String? = nil, path : String? = nil) : {Array(Diagnostic), Frontend::Program, Semantic::TypeContext?, Hash(Frontend::ExprId, Semantic::Symbol)?, Semantic::SymbolTable?, Array(String)}
+        private def analyze_document(source : String, base_dir : String? = nil, path : String? = nil, load_requires : Bool = true) : {Array(Diagnostic), Frontend::Program, Semantic::TypeContext?, Hash(Frontend::ExprId, Semantic::Symbol)?, Semantic::SymbolTable?, Array(String)}
           debug("Analyzing document: #{source.lines.size} lines, #{source.size} bytes")
           ensure_prelude_loaded
 
@@ -892,7 +968,18 @@ module CrystalV2
           lexer = Frontend::Lexer.new(source)
           parser = Frontend::Parser.new(lexer)
           program = parser.parse_program
-          requires = base_dir ? collect_require_paths(program, base_dir) : [] of String
+          uses_compiler_module = includes_compiler_module?(program)
+          dependency_states = [] of DocumentState
+          if load_requires
+            raw_requires = base_dir ? collect_require_paths(program, base_dir) : [] of String
+            requires = filter_required_files(requirements: raw_requires, includes_compiler: uses_compiler_module)
+            requires.each do |req_path|
+              debug("Loading dependency #{req_path} (shallow)") if ENV["LSP_DEBUG"]?
+              if dep_state = load_dependency(req_path, recursive: false)
+                dependency_states << dep_state
+              end
+            end
+          end
           program = wrap_program_with_file(program, path)
 
           # Convert parser diagnostics
@@ -903,6 +990,7 @@ module CrystalV2
 
           begin
             context = build_context_with_prelude
+            merge_dependency_symbol_tables(context.symbol_table, dependency_states) if dependency_states.any?
 
             analyzer = Semantic::Analyzer.new(program, context)
             analyzer.collect_symbols
@@ -913,6 +1001,25 @@ module CrystalV2
             identifier_symbols = result.identifier_symbols
             symbol_table = analyzer.global_context.symbol_table
             debug("Name resolution complete: #{result.diagnostics.size} diagnostics, #{identifier_symbols.size} identifiers resolved")
+
+            if ENV["LSP_DEBUG"]? && uses_compiler_module
+              compiler_symbol = resolve_path_symbol_in_table(symbol_table, COMPILER_MODULE_SEGMENTS)
+              if compiler_symbol
+                debug("Compiler module symbol present: #{compiler_symbol.class}")
+                COMPILER_ALIAS_SEGMENTS.each do |name, segments|
+                  target_symbol = resolve_path_symbol_in_table(symbol_table, segments)
+                  if target_symbol
+                    debug("Alias target available #{name} => #{segments.join("::")}: #{target_symbol.class}")
+                  else
+                    debug("Alias target missing #{name} => #{segments.join("::")}")
+                  end
+                end
+              else
+                debug("Compiler module symbol missing for alias lookup")
+              end
+            end
+
+            inject_compiler_alias_bindings(symbol_table) if uses_compiler_module
 
             unless using_stub
               if parser.diagnostics.empty?
@@ -1406,6 +1513,74 @@ module CrystalV2
           symbols = [] of Semantic::Symbol
           register_symbols_from_table(symbol_table, doc_state.program, uri, symbols)
           @document_symbol_index[uri] = symbols
+        end
+
+        private def merge_dependency_symbol_tables(target : Semantic::SymbolTable, dependencies : Array(DocumentState))
+          dependencies.each do |dep_state|
+            next unless dep_table = dep_state.symbol_table
+            dep_table.each_local_symbol do |name, symbol|
+              target.redefine(name, symbol) unless target.lookup_local(name)
+            end
+            dep_table.included_modules.each do |mod_symbol|
+              target.include_module(mod_symbol) unless target.included_modules.includes?(mod_symbol)
+            end
+          end
+        end
+
+        private def strip_require_lines(source : String) : String
+          source.each_line.reject { |line| line.lstrip.starts_with?("require ") }.join
+        end
+
+        private def filter_required_files(*, requirements : Array(String), includes_compiler : Bool) : Array(String)
+          return [] of String unless includes_compiler
+          normalized = requirements.map { |req| File.expand_path(req) }
+          filtered = COMPILER_DEPENDENCY_PATHS.select { |path| normalized.includes?(path) }
+          filtered.empty? ? COMPILER_DEPENDENCY_PATHS : filtered
+        end
+
+        private def includes_compiler_module?(program : Frontend::Program) : Bool
+          arena = program.arena
+          program.roots.any? { |root_id| include_node_matches_compiler?(arena, root_id) }
+        end
+
+        private def include_node_matches_compiler?(arena : Frontend::ArenaLike, expr_id : Frontend::ExprId) : Bool
+          node = arena[expr_id]
+          if node.is_a?(Frontend::IncludeNode)
+            target_id = node.target
+            unless target_id.invalid?
+              target_node = arena[target_id]
+              if target_node.is_a?(Frontend::PathNode)
+                segments = collect_path_segments(arena, target_node)
+                return true if segments == COMPILER_MODULE_SEGMENTS
+              end
+            end
+          end
+
+          each_child_expr(arena, expr_id) do |child_id|
+            next if child_id.invalid?
+            return true if include_node_matches_compiler?(arena, child_id)
+          end
+
+          false
+        end
+
+        private def inject_compiler_alias_bindings(symbol_table : Semantic::SymbolTable)
+          compiler_symbol = resolve_path_symbol_in_table(symbol_table, COMPILER_MODULE_SEGMENTS)
+          unless compiler_symbol.is_a?(Semantic::ModuleSymbol)
+            debug("inject_compiler_alias_bindings: missing compiler module") if ENV["LSP_DEBUG"]?
+            return
+          end
+
+          compiler_scope = compiler_symbol.scope
+          COMPILER_ALIAS_SEGMENTS.each do |alias_name, target_segments|
+            target_symbol = resolve_path_symbol_in_table(symbol_table, target_segments)
+            unless target_symbol
+              debug("inject_compiler_alias_bindings: target missing #{alias_name} => #{target_segments.join("::")}") if ENV["LSP_DEBUG"]?
+              next
+            end
+            compiler_scope.redefine(alias_name, target_symbol)
+            debug("inject_compiler_alias_bindings: bound #{alias_name} -> #{target_segments.join("::")}") if ENV["LSP_DEBUG"]?
+          end
         end
 
         private def unregister_document_symbols(uri : String)
@@ -4157,8 +4332,10 @@ module CrystalV2
 
         # Log debug message to stderr if LSP_DEBUG is set
         private def debug(message : String)
-          return unless ENV["LSP_DEBUG"]?
-          STDERR.puts("[LSP DEBUG] #{message}")
+          return unless ENV["LSP_DEBUG"]? || @config.debug_log_path
+          io = @log_output || STDERR
+          io.puts("[LSP DEBUG] #{message}")
+          io.flush
         end
 
         # Log error to stderr
