@@ -708,7 +708,11 @@ module CrystalV2
           offset = add_program_file_to_virtual(virtual_arena, absolute, dep_arena, dep_program.roots, offset, merged_roots)
 
           base_dir = File.dirname(absolute)
-          nested = collect_require_paths(dep_program, base_dir)
+          nested = if absolute == COMPILER_DEPENDENCY_PATHS.first
+            [] of String
+          else
+            collect_require_paths(dep_program, base_dir)
+          end
           nested.each do |nested_path|
             offset = add_dependency_file_to_virtual(virtual_arena, nested_path, offset, merged_roots, visited)
           end
@@ -970,6 +974,7 @@ module CrystalV2
           lexer = Frontend::Lexer.new(source)
           parser = Frontend::Parser.new(lexer)
           program = parser.parse_program
+          analysis_program = path ? wrap_program_with_file(program, path) : program
           uses_compiler_module = includes_compiler_module?(program)
           dependency_states = [] of DocumentState
           if load_requires
@@ -982,19 +987,17 @@ module CrystalV2
               end
             end
           end
-          program = wrap_program_with_file(program, path)
-
           # Convert parser diagnostics
           parser.diagnostics.each do |diag|
             diagnostics << Diagnostic.from_parser(diag)
           end
-          debug("Parsing complete: #{parser.diagnostics.size} parser diagnostics, #{program.roots.size} root expressions")
+          debug("Parsing complete: #{parser.diagnostics.size} parser diagnostics, #{analysis_program.roots.size} root expressions")
 
           begin
             context = build_context_with_prelude
             merge_dependency_symbol_tables(context.symbol_table, dependency_states) if dependency_states.any?
 
-            analyzer = Semantic::Analyzer.new(program, context)
+            analyzer = Semantic::Analyzer.new(analysis_program, context)
             analyzer.collect_symbols
             debug("Symbol collection complete")
 
@@ -1069,7 +1072,7 @@ module CrystalV2
 
           debug("Analysis complete: #{diagnostics.size} total diagnostics (requires=#{requires.size})")
           requires.each { |req| debug("  require => #{req}") }
-          {diagnostics, program, type_context, identifier_symbols, symbol_table, requires}
+          {diagnostics, analysis_program, type_context, identifier_symbols, symbol_table, requires}
         end
 
         # Debug helper: analyze a source string and return LSP diagnostics and semantic tokens
