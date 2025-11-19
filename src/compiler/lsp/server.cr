@@ -1697,10 +1697,11 @@ module CrystalV2
               debug("Registering class symbol #{symbol.name} (#{uri})")
             end
 
-            case symbol
-            when Semantic::ClassSymbol
-              output << symbol
-              register_symbols_from_table(symbol.scope, program, uri, output, origins, restrict_path: restrict_path)
+          case symbol
+          when Semantic::ClassSymbol
+            output << symbol
+            register_symbols_from_table(symbol.scope, program, uri, output, origins, restrict_path: restrict_path)
+            register_symbols_from_table(symbol.class_scope, program, uri, output, origins, restrict_path: restrict_path)
             when Semantic::ModuleSymbol
               output << symbol
               register_symbols_from_table(symbol.scope, program, uri, output, origins, restrict_path: restrict_path)
@@ -3903,7 +3904,8 @@ module CrystalV2
             if receiver_symbol = resolve_receiver_symbol(doc_state, node.object)
               case receiver_symbol
               when Semantic::ClassSymbol
-                method_symbol = find_method_in_class_hierarchy(receiver_symbol, method_name, symbol_table)
+                method_symbol = find_class_method_in_hierarchy(receiver_symbol, method_name, symbol_table) ||
+                  find_method_in_class_hierarchy(receiver_symbol, method_name, symbol_table)
               when Semantic::ModuleSymbol
                 method_symbol = find_method_in_scope(receiver_symbol.scope, method_name)
               end
@@ -4176,6 +4178,37 @@ module CrystalV2
                 end
                 if alternate_name
                   if constructor = find_method_in_class_hierarchy(super_symbol, alternate_name, global_table)
+                    return constructor
+                  end
+                end
+              end
+            end
+          end
+
+          nil
+        end
+
+        private def find_class_method_in_hierarchy(class_symbol : Semantic::ClassSymbol, method_name : String, global_table : Semantic::SymbolTable?) : Semantic::MethodSymbol?
+          alternate_name = method_name == "new" ? "initialize" : nil
+
+          if method = find_method_in_scope(class_symbol.class_scope, method_name)
+            return method
+          end
+
+          if alternate_name
+            if constructor = find_method_in_scope(class_symbol.class_scope, alternate_name)
+              return constructor
+            end
+          end
+
+          if global_table && (super_name = class_symbol.superclass_name)
+            if super_symbol = global_table.lookup(super_name)
+              if super_symbol.is_a?(Semantic::ClassSymbol)
+                if method = find_class_method_in_hierarchy(super_symbol, method_name, global_table)
+                  return method
+                end
+                if alternate_name
+                  if constructor = find_class_method_in_hierarchy(super_symbol, alternate_name, global_table)
                     return constructor
                   end
                 end

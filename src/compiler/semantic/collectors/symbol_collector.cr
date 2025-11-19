@@ -130,11 +130,17 @@ module CrystalV2
           # Week 1 Day 2: Detect generic type parameters from method signature
           type_params = detect_generic_type_parameters(params, return_annotation)
 
-          method_scope = SymbolTable.new(current_table)
+          receiver = node.receiver
+          target_table = current_table
+          if receiver && receiver == "self"
+            target_table = @class_stack.last?.try(&.class_scope) || current_table
+          end
+
+          method_scope = SymbolTable.new(target_table)
           method_symbol = MethodSymbol.new(name, node_id, params: params, return_annotation: return_annotation, scope: method_scope, type_parameters: type_params)
           assign_symbol_file(method_symbol, node_id)
 
-          table = current_table
+          table = target_table
           if existing = table.lookup_local(name)
             handle_method_redefinition(name, method_symbol, existing, table)
           else
@@ -188,9 +194,10 @@ module CrystalV2
 
           table = current_table
           existing = table.lookup_local(name)
-          class_scope = existing.is_a?(ClassSymbol) ? existing.scope : SymbolTable.new(table)
+          instance_scope = existing.is_a?(ClassSymbol) ? existing.scope : SymbolTable.new(table)
+          meta_scope = existing.is_a?(ClassSymbol) ? existing.class_scope : SymbolTable.new(table)
 
-          class_symbol = ClassSymbol.new(name, node_id, scope: class_scope, superclass_name: super_name, type_parameters: type_params)
+          class_symbol = ClassSymbol.new(name, node_id, scope: instance_scope, class_scope: meta_scope, superclass_name: super_name, type_parameters: type_params)
           assign_symbol_file(class_symbol, node_id)
 
           if existing
@@ -199,7 +206,7 @@ module CrystalV2
             table.define(name, class_symbol)
           end
 
-          push_table(class_scope)
+          push_table(instance_scope)
 
           # Phase 5A: Collect instance variable declarations
           # Get the final class symbol from table (may have been redefined)
@@ -724,7 +731,14 @@ module CrystalV2
           case existing
           when ClassSymbol
             verify_superclass_consistency(name, new_symbol, existing)
-            new_symbol = ClassSymbol.new(name, new_symbol.node_id, scope: existing.scope, superclass_name: new_symbol.superclass_name || existing.superclass_name, type_parameters: new_symbol.type_parameters || existing.type_parameters)
+            new_symbol = ClassSymbol.new(
+              name,
+              new_symbol.node_id,
+              scope: existing.scope,
+              class_scope: existing.class_scope,
+              superclass_name: new_symbol.superclass_name || existing.superclass_name,
+              type_parameters: new_symbol.type_parameters || existing.type_parameters
+            )
             assign_symbol_file(new_symbol, new_symbol.node_id)
             table.redefine(name, new_symbol)
           when MethodSymbol, MacroSymbol, VariableSymbol

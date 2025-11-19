@@ -45,6 +45,7 @@ module CrystalV2
 
       class ClassSymbol < Symbol
         getter scope : SymbolTable
+        getter class_scope : SymbolTable
         getter superclass_name : String?
         getter instance_vars : Hash(String, String?)  # name → type annotation
         getter type_parameters : Array(String)?  # Week 1: Generic type params ["T", "U"]
@@ -53,9 +54,10 @@ module CrystalV2
         # Collected annotations per instance variable name (without leading "@")
         getter ivar_annotations : Hash(String, Array(AnnotationInfo))
 
-        def initialize(name : String, node_id : ExprId, *, scope : SymbolTable, superclass_name : String? = nil, type_parameters : Array(String)? = nil)
+        def initialize(name : String, node_id : ExprId, *, scope : SymbolTable, class_scope : SymbolTable, superclass_name : String? = nil, type_parameters : Array(String)? = nil)
           super(name, node_id)
           @scope = scope
+          @class_scope = class_scope
           @superclass_name = superclass_name
           @instance_vars = {} of String => String?
           @type_parameters = type_parameters
