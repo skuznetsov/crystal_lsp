@@ -1934,6 +1934,29 @@ module CrystalV2
           nil
         end
 
+        private def identifier_at(text : String, offset : Int32) : String?
+          return nil if offset < 0 || offset >= text.bytesize
+          start = offset
+          while start > 0
+            ch = text.byte_at?(start - 1)
+            break unless ch && (ch.chr =~ /[A-Za-z0-9_:]/)
+            start -= 1
+          end
+
+          finish = offset
+          while finish < text.bytesize
+            ch = text.byte_at?(finish)
+            break unless ch && (ch.chr =~ /[A-Za-z0-9_:]/)
+            finish += 1
+          end
+
+          return nil if finish <= start
+          slice = text.byte_slice(start, finish - start)
+          String.new(slice.to_slice)
+        rescue
+          nil
+        end
+
         private def comment_position?(text : String, target_line : Int32, character : Int32) : Bool
           return false if target_line < 0
           current_line = 0
@@ -2360,9 +2383,13 @@ module CrystalV2
           # Find expression at position
           expr_id = find_expr_at_position(doc_state, line, character, offset)
           debug("Found expr_id=#{expr_id.inspect}")
-          return send_response(id, "null") unless expr_id
-
-          location = find_definition_location(expr_id, doc_state, uri, 0, offset)
+          location = expr_id ? find_definition_location(expr_id, doc_state, uri, 0, offset) : nil
+          if location.nil?
+            if ident = identifier_at(doc_state.text_document.text, offset)
+              debug("Fallback identifier_at='#{ident}'")
+              location = definition_from_constant(ident, doc_state)
+            end
+          end
           if location
             debug("Returning definition location")
             send_response(id, [location].to_json)
@@ -3954,6 +3981,15 @@ module CrystalV2
 
           if location = find_location_in_dependencies(doc_state, segments)
             return location
+          end
+
+          if prelude = @prelude_state
+            if symbol = resolve_path_symbol_in_table(prelude.symbol_table, segments)
+              if location = location_for_symbol(symbol)
+                return location
+              end
+              return Location.from_symbol(symbol, prelude.program, prelude.path)
+            end
           end
 
           find_constant_location_by_text(doc_state, segments.last?)
