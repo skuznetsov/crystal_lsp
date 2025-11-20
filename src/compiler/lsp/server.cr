@@ -3868,6 +3868,18 @@ module CrystalV2
             else
               nil
             end
+          when Frontend::AssignNode
+            arena = doc_state.program.arena
+            if target_offset
+              target_span = arena[node.target].span
+              if span_contains_offset?(target_span, target_offset)
+                return find_definition_location(node.target, doc_state, uri, depth + 1, target_offset)
+              end
+            end
+            if (location = find_definition_location(node.value, doc_state, uri, depth + 1, target_offset))
+              return location
+            end
+            find_definition_location(node.target, doc_state, uri, depth + 1, target_offset)
           when Frontend::MemberAccessNode
             definition_from_member_access(node, doc_state, uri, depth, target_offset)
           when Frontend::PathNode
@@ -4307,6 +4319,18 @@ module CrystalV2
               return location
             end
             return Location.from_symbol(symbol, doc_state.program, doc_state.text_document.uri)
+          end
+
+          if prelude = @prelude_state
+            if symbol = resolve_path_symbol_in_table(prelude.symbol_table, segments)
+              debug("definition_from_constant: found in prelude #{segments.join("::")}: #{symbol.class}") if ENV["LSP_DEBUG"]?
+              if location = location_for_symbol(symbol)
+                return location
+              end
+              return Location.from_symbol(symbol, prelude.program, prelude.path)
+            else
+              debug("definition_from_constant: not in prelude #{segments.join("::")}") if ENV["LSP_DEBUG"]?
+            end
           end
 
           find_constant_location_by_text(doc_state, name)
