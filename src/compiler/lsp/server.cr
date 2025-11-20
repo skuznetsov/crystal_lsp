@@ -3977,6 +3977,29 @@ module CrystalV2
           segments = collect_path_segments(doc_state.program.arena, node)
           return nil if segments.empty?
 
+          # If path looks like Class.method, resolve class and then class method
+          if segments.size >= 2
+            receiver_segments = segments[0...-1]
+            method_name = segments.last
+            if receiver_symbol = resolve_path_symbol(doc_state, receiver_segments)
+              if receiver_symbol.is_a?(Semantic::ClassSymbol)
+                if method_symbol = find_class_method_in_hierarchy(receiver_symbol, method_name, doc_state.symbol_table)
+                  if location = location_for_symbol(method_symbol)
+                    return location
+                  end
+                  return Location.from_symbol(method_symbol, doc_state.program, uri)
+                end
+              elsif receiver_symbol.is_a?(Semantic::ModuleSymbol)
+                if method_symbol = find_method_in_scope(receiver_symbol.scope, method_name)
+                  if location = location_for_symbol(method_symbol)
+                    return location
+                  end
+                  return Location.from_symbol(method_symbol, doc_state.program, uri)
+                end
+              end
+            end
+          end
+
           if symbol = resolve_path_symbol(doc_state, segments)
             if location = location_for_symbol(symbol)
               return location
