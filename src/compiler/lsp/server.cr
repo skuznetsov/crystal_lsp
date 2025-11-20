@@ -1005,13 +1005,7 @@ module CrystalV2
             end
           end
           analysis_program = program
-          if path
-            if requires.any?
-              analysis_program = merge_program_with_dependencies(program, path, requires)
-            else
-              analysis_program = wrap_program_with_file(program, path)
-            end
-          end
+          analysis_program = wrap_program_with_file(program, path) if path
           # Convert parser diagnostics
           parser.diagnostics.each do |diag|
             diagnostics << Diagnostic.from_parser(diag)
@@ -1938,15 +1932,15 @@ module CrystalV2
           return nil if offset < 0 || offset >= text.bytesize
           start = offset
           while start > 0
-            ch = text.byte_at?(start - 1)
-            break unless ch && (ch.chr =~ /[A-Za-z0-9_:]/)
+            byte = text.byte_at?(start - 1)
+            break unless byte && identifier_char?(byte)
             start -= 1
           end
 
           finish = offset
           while finish < text.bytesize
-            ch = text.byte_at?(finish)
-            break unless ch && (ch.chr =~ /[A-Za-z0-9_:]/)
+            byte = text.byte_at?(finish)
+            break unless byte && identifier_char?(byte)
             finish += 1
           end
 
@@ -1955,6 +1949,13 @@ module CrystalV2
           String.new(slice.to_slice)
         rescue
           nil
+        end
+
+        private def identifier_char?(byte : UInt8) : Bool
+          (byte >= 'A'.ord && byte <= 'Z'.ord) ||
+            (byte >= 'a'.ord && byte <= 'z'.ord) ||
+            (byte >= '0'.ord && byte <= '9'.ord) ||
+            byte == '_'.ord || byte == ':'.ord
         end
 
         private def comment_position?(text : String, target_line : Int32, character : Int32) : Bool
@@ -2024,7 +2025,7 @@ module CrystalV2
             if match = find_expr_in_tree(arena, child_id, offset)
               match_node = arena[match]
               match_size = match_node.span.end_offset - match_node.span.start_offset
-              if match_size < best_match_size
+              if match_size < best_match_size || (match_size == best_match_size && match != best_match)
                 best_match = match
                 best_match_size = match_size
               end
@@ -2378,15 +2379,23 @@ module CrystalV2
           return send_response(id, "null") unless doc_state
 
           offset = position_to_offset(doc_state.text_document.text, line, character)
+          debug("Definition offset=#{offset}") if offset
           return send_response(id, "null") unless offset
+          text = doc_state.text_document.text
+          context_start = Math.max(0, offset - 12)
+          context_end = Math.min(text.bytesize, offset + 16)
+          context_slice = text.byte_slice(context_start, context_end - context_start)
+          debug("Definition context='#{context_slice}'")
 
           # Find expression at position
           expr_id = find_expr_at_position(doc_state, line, character, offset)
           debug("Found expr_id=#{expr_id.inspect}")
           location = expr_id ? find_definition_location(expr_id, doc_state, uri, 0, offset) : nil
           if location.nil?
-            if ident = identifier_at(doc_state.text_document.text, offset)
-              debug("Fallback identifier_at='#{ident}'")
+            ident = identifier_at(doc_state.text_document.text, offset)
+            ident ||= identifier_at(doc_state.text_document.text, offset - 1) if offset > 0
+            debug("Fallback identifier_at='#{ident || "nil"}'")
+            if ident
               location = definition_from_constant(ident, doc_state)
             end
           end
@@ -3848,7 +3857,8 @@ module CrystalV2
           return nil if depth >= 8
 
           node = doc_state.program.arena[expr_id]
-          debug("Definition node kind: #{Frontend.node_kind(node)}")
+          span = node.span
+          debug("Definition node kind: #{Frontend.node_kind(node)} span=#{span.start_line}:#{span.start_column}-#{span.end_line}:#{span.end_column} offs=#{span.start_offset}-#{span.end_offset}")
 
           case node
           when Frontend::IdentifierNode
@@ -3870,6 +3880,10 @@ module CrystalV2
             end
           when Frontend::AssignNode
             arena = doc_state.program.arena
+            target_span = arena[node.target].span
+            value_span = arena[node.value].span
+            debug("Assign target kind=#{Frontend.node_kind(arena[node.target])} span=#{target_span.start_line}:#{target_span.start_column}-#{target_span.end_line}:#{target_span.end_column} offs=#{target_span.start_offset}-#{target_span.end_offset}")
+            debug("Assign value kind=#{Frontend.node_kind(arena[node.value])} span=#{value_span.start_line}:#{value_span.start_column}-#{value_span.end_line}:#{value_span.end_column} offs=#{value_span.start_offset}-#{value_span.end_offset}")
             if target_offset
               target_span = arena[node.target].span
               if span_contains_offset?(target_span, target_offset)
