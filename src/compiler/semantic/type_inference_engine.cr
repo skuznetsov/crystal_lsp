@@ -537,14 +537,7 @@ module CrystalV2
           when Frontend::SymbolNode
             infer_symbol(node)
           when Frontend::ArrayLiteralNode
-            if elems = node.elements
-              types = Array(Type).new(elems.size)
-              elems.each { |e| types << infer_expression(e) }
-              element_type = @context.union_of(types)
-              ArrayType.new(element_type)
-            else
-              ArrayType.new(@context.nil_type)
-            end
+            infer_array_literal(node, expr_id)
           when Frontend::TupleLiteralNode
             elems = node.elements
             types = Array(Type).new(elems.size)
@@ -1030,7 +1023,21 @@ module CrystalV2
           when "Nil"     then @context.nil_type
           when "Char"    then @context.char_type
           else
-            # Unknown type → emit error and return Nil
+            # Try resolving scoped names (Time::Span) by the rightmost segment
+            base_name = name.includes?("::") ? name.split("::").last : name
+
+            if prim = primitive_type_for(base_name)
+              return prim
+            end
+
+            if table = @global_table
+              if symbol = table.lookup(base_name)
+                if type = type_from_symbol(symbol)
+                  return normalize_literal_type(type)
+                end
+              end
+            end
+
             emit_error("Unknown type '#{name}'")
             @context.nil_type
           end
@@ -1887,6 +1894,11 @@ module CrystalV2
           end
         end
 
+        # Normalize literal/annotation types to primitives when possible
+        private def normalize_literal_type(type : Type) : Type
+          normalize_type_argument(type)
+        end
+
         # Phase 63: Type inference for path expressions (Foo::Bar)
         private def infer_path(node : Frontend::PathNode, expr_id : ExprId) : Type
           debug("infer_path: expr_id=#{expr_id.index}")
@@ -2014,22 +2026,23 @@ module CrystalV2
           element_type : Type
 
           # Case 1: Explicit "of Type" syntax ([] of Int32)
-          # Phase 91A: Parser only - just ignore type for now, return placeholder
           if of_type_expr_id = node.of_type
-            # TODO Phase 91B: Extract type from expression and use for validation
-            # For now, infer from elements if present, else return placeholder
-            if elements = node.elements
-              if elements.empty?
-                # Empty array with type - return placeholder
-                element_type = @context.nil_type
-              else
-                # Infer from elements (ignore 'of' type for now)
-                tmp = Array(Type).new(elements.size)
-                elements.each { |elem_id| tmp << infer_expression(elem_id) }
-                element_type = union_of(tmp)
-              end
+            # Try to resolve the explicit element type
+            if explicit_type = type_from_type_expr(of_type_expr_id)
+              element_type = explicit_type
             else
-              element_type = @context.nil_type
+              # Fall back to elements
+              if elements = node.elements
+                if elements.empty?
+                  element_type = @context.nil_type
+                else
+                  tmp = Array(Type).new(elements.size)
+                  elements.each { |elem_id| tmp << infer_expression(elem_id) }
+                  element_type = union_of(tmp)
+                end
+              else
+                element_type = @context.nil_type
+              end
             end
           # Case 2: Infer from elements
           elsif elements = node.elements
@@ -2053,6 +2066,58 @@ module CrystalV2
           # (Type will be set by infer_expression)
           array_type = ArrayType.new(element_type)
           array_type
+        end
+
+        private def type_from_type_expr(expr_id : ExprId) : Type?
+          node = @program.arena[expr_id]
+
+          case node
+          when Frontend::PathNode
+            if symbol = resolve_path_symbol(node)
+              if type = type_from_symbol(symbol)
+                return normalize_literal_type(type)
+              end
+            end
+            if name = rightmost_segment(node)
+              if prim = primitive_type_for(name)
+                return prim
+              end
+            end
+          when Frontend::IdentifierNode
+            table = @global_table
+            return nil unless table
+            name = String.new(node.name)
+            if symbol = table.lookup(name)
+              if type = type_from_symbol(symbol)
+                return normalize_literal_type(type)
+              end
+            end
+            if prim = primitive_type_for(name)
+              return prim
+            end
+          end
+
+          nil
+        end
+
+        private def rightmost_segment(node : Frontend::PathNode) : String?
+          segments = [] of String
+          collect_path_segments(node, segments)
+          segments.last?
+        end
+
+        private def primitive_type_for(name : String) : Type?
+          case name
+          when "Int32"   then @context.int32_type
+          when "Int64"   then @context.int64_type
+          when "Float64" then @context.float64_type
+          when "String"  then @context.string_type
+          when "Bool"    then @context.bool_type
+          when "Nil"     then @context.nil_type
+          when "Char"    then @context.char_type
+          else
+            nil
+          end
         end
 
         private def infer_index(node : Frontend::IndexNode, expr_id : ExprId) : Type
