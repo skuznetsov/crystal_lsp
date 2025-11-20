@@ -37,6 +37,16 @@ module CrystalV2
         end
       end
 
+      struct DependencyWorkspace
+        getter visited : Set(String)
+        getter cache : Hash(String, DocumentState)
+
+        def initialize
+          @visited = Set(String).new
+          @cache = {} of String => DocumentState
+        end
+      end
+
       struct PreludeSymbolOrigin
         getter program : Frontend::Program
         getter uri : String
@@ -207,17 +217,23 @@ module CrystalV2
           symbol
         end
 
-        private def ensure_dependencies_loaded(doc_state : DocumentState)
+        private def ensure_dependencies_loaded(doc_state : DocumentState, workspace : DependencyWorkspace? = nil)
           doc_state.requires.each do |path|
-            load_dependency(path)
+            load_dependency(path, workspace: workspace)
           end
         end
 
-        private def load_dependency(path : String, recursive : Bool = true) : DocumentState?
+        private def load_dependency(path : String, recursive : Bool = true, workspace : DependencyWorkspace? = nil) : DocumentState?
           uri = file_uri(path)
 
           return @documents[uri]? if @documents.has_key?(uri)
           return @dependency_documents[uri]? if @dependency_documents.has_key?(uri)
+          if workspace
+            if cached = workspace.cache[path]?
+              return cached
+            end
+            return nil unless workspace.visited.add?(path)
+          end
 
           unless File.file?(path)
             debug("Dependency missing at #{path}")
@@ -232,14 +248,16 @@ module CrystalV2
             recursive = false
           end
           base_dir = File.dirname(path)
-          diagnostics, program, type_context, identifier_symbols, symbol_table, requires = analyze_document(source, base_dir, path, load_requires: recursive)
+          workspace ||= DependencyWorkspace.new
+          diagnostics, program, type_context, identifier_symbols, symbol_table, requires = analyze_document(source, base_dir, path, load_requires: recursive, workspace: workspace)
 
           text_doc = TextDocumentItem.new(uri: uri, language_id: "crystal", version: 0, text: source)
           dep_state = DocumentState.new(text_doc, program, type_context, identifier_symbols, symbol_table, requires, path)
 
           @dependency_documents[uri] = dep_state
+          workspace.cache[path] = dep_state if workspace
           register_document_symbols(uri, dep_state)
-          ensure_dependencies_loaded(dep_state) if recursive
+          ensure_dependencies_loaded(dep_state, workspace: workspace) if recursive
 
           dep_state
         rescue ex
@@ -939,7 +957,7 @@ module CrystalV2
 
           # Analyze and store document
           doc = TextDocumentItem.new(uri: uri, language_id: language_id, version: version, text: text)
-          diagnostics, program, type_context, identifier_symbols, symbol_table, requires = analyze_document(text, base_dir, doc_path)
+          diagnostics, program, type_context, identifier_symbols, symbol_table, requires = analyze_document(text, base_dir, doc_path, workspace: DependencyWorkspace.new)
 
           # Store document state
           @documents[uri] = DocumentState.new(doc, program, type_context, identifier_symbols, symbol_table, requires, doc_path)
@@ -959,7 +977,7 @@ module CrystalV2
         end
 
         # Analyze document and return diagnostics, program, type context, identifier symbols, and symbol table
-        private def analyze_document(source : String, base_dir : String? = nil, path : String? = nil, load_requires : Bool = true) : {Array(Diagnostic), Frontend::Program, Semantic::TypeContext?, Hash(Frontend::ExprId, Semantic::Symbol)?, Semantic::SymbolTable?, Array(String)}
+        private def analyze_document(source : String, base_dir : String? = nil, path : String? = nil, load_requires : Bool = true, workspace : DependencyWorkspace? = nil) : {Array(Diagnostic), Frontend::Program, Semantic::TypeContext?, Hash(Frontend::ExprId, Semantic::Symbol)?, Semantic::SymbolTable?, Array(String)}
           debug("Analyzing document: #{source.lines.size} lines, #{source.size} bytes")
           ensure_prelude_loaded
 
@@ -974,14 +992,6 @@ module CrystalV2
           lexer = Frontend::Lexer.new(source)
           parser = Frontend::Parser.new(lexer)
           program = parser.parse_program
-          analysis_program = program
-          if path
-            if requires.any?
-              analysis_program = merge_program_with_dependencies(program, path, requires)
-            else
-              analysis_program = wrap_program_with_file(program, path)
-            end
-          end
           uses_compiler_module = includes_compiler_module?(program)
           dependency_states = [] of DocumentState
           if load_requires
@@ -989,9 +999,17 @@ module CrystalV2
             requires = filter_required_files(requirements: raw_requires, includes_compiler: uses_compiler_module)
             requires.each do |req_path|
               debug("Loading dependency #{req_path} (shallow)") if ENV["LSP_DEBUG"]?
-              if dep_state = load_dependency(req_path, recursive: true)
+              if dep_state = load_dependency(req_path, recursive: true, workspace: workspace)
                 dependency_states << dep_state
               end
+            end
+          end
+          analysis_program = program
+          if path
+            if requires.any?
+              analysis_program = merge_program_with_dependencies(program, path, requires)
+            else
+              analysis_program = wrap_program_with_file(program, path)
             end
           end
           # Convert parser diagnostics
@@ -1087,7 +1105,7 @@ module CrystalV2
         def debug_analyze(source : String) : {Array(Diagnostic), SemanticTokens, Bool, String}
           ensure_prelude_loaded
           using_stub = @prelude_state.try(&.stub) || false
-          diagnostics, program, type_context, identifier_symbols, symbol_table, _req = analyze_document(source)
+          diagnostics, program, type_context, identifier_symbols, symbol_table, _req = analyze_document(source, workspace: DependencyWorkspace.new)
           tokens = collect_semantic_tokens(program, source, identifier_symbols, type_context, symbol_table, nil)
           prelude_path = @prelude_state.try(&.path) || "(none)"
           {diagnostics, tokens, using_stub, prelude_path}
@@ -1834,7 +1852,7 @@ module CrystalV2
           doc_path = uri_to_path(uri)
           base_dir = doc_path ? File.dirname(doc_path) : nil
 
-          diagnostics, program, type_context, identifier_symbols, symbol_table, requires = analyze_document(new_text, base_dir, doc_path)
+          diagnostics, program, type_context, identifier_symbols, symbol_table, requires = analyze_document(new_text, base_dir, doc_path, workspace: DependencyWorkspace.new)
 
           doc = TextDocumentItem.new(uri: uri, language_id: language_id, version: version, text: new_text)
           @documents[uri] = DocumentState.new(doc, program, type_context, identifier_symbols, symbol_table, requires, doc_path)
