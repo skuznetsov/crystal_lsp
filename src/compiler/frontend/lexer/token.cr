@@ -155,9 +155,11 @@ module CrystalV2
           RParen      # )
           LBracket    # [
           RBracket    # ]
+          MacroExprStart # {{ (macro expression start)
           LBrace      # {
           LBracePercent # {% (macro control start)
           RBrace      # }
+          MacroExprEnd # }} (macro expression end)
           PercentRBrace # %} (macro control end)
           Comma       # ,
           Semicolon   # ;

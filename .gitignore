@@ -19,5 +19,6 @@ bin/crystal_v2_lsp*
 .DS_Store
 
 # Debug/test files
+tmp/
 test_*.cr
 *.db

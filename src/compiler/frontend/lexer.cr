@@ -81,6 +81,10 @@ module CrystalV2
               # Command literal with optional interpolation: `...`
               lex_backtick
             end
+          when byte == LEFT_BRACE && peek_byte == LEFT_BRACE
+            lex_macro_expr_start
+          when byte == RIGHT_BRACE && peek_byte == RIGHT_BRACE
+            lex_macro_expr_end
           when byte == SINGLE_QUOTE
             # Phase 56: Character literals
             lex_char
@@ -123,6 +127,13 @@ module CrystalV2
               @column += 1
             end
           end
+        end
+
+        # Lookahead without consuming
+        private def peek_byte(offset : Int32 = 1) : UInt8?
+          idx = @offset + offset
+          return nil if idx >= @rope.size
+          @rope.bytes[idx]
         end
 
         private def lex_whitespace
@@ -1453,6 +1464,28 @@ module CrystalV2
           Token.new(
             Token::Kind::Comment,
             @rope.bytes[from...@offset],
+            build_span(start_offset, start_line, start_column)
+          )
+        end
+
+        # Tokenize '{{' as MacroExprStart
+        private def lex_macro_expr_start
+          start_offset, start_line, start_column = capture_position
+          advance(2)
+          Token.new(
+            Token::Kind::MacroExprStart,
+            @rope.bytes[start_offset...@offset],
+            build_span(start_offset, start_line, start_column)
+          )
+        end
+
+        # Tokenize '}}' as MacroExprEnd
+        private def lex_macro_expr_end
+          start_offset, start_line, start_column = capture_position
+          advance(2)
+          Token.new(
+            Token::Kind::MacroExprEnd,
+            @rope.bytes[start_offset...@offset],
             build_span(start_offset, start_line, start_column)
           )
         end

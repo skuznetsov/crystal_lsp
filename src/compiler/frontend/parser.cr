@@ -34,6 +34,10 @@ module CrystalV2
         @expect_context : String?
         # Parser context flags
         @parsing_method_params : Bool
+        # When true, newlines inside braces are skipped as trivia (legacy behavior).
+        # Default false so that newlines inside hashes/blocks act as statement separators,
+        # preventing constructs like `{ expr\n other }` from being glued into a single expression.
+        @skip_newlines_in_braces : Bool = false
 
         def initialize(lexer : Lexer)
           @tokens = [] of Token
@@ -55,16 +59,17 @@ module CrystalV2
           @string_pool = lexer.string_pool  # Week 1 Day 2: share string pool for deduplication
           @debug_enabled = ENV["PARSER_DEBUG"]? == "1"  # Enable debug via PARSER_DEBUG=1
           @parsing_call_args = 0  # Not parsing call args initially
-          @macro_mode = 0
-          @in_macro_expression = false  # Not in macro expression initially
-          @streaming = ENV["CRYSTAL_V2_PARSER_STREAM"]? != nil
-          @expect_context = nil
-          @parsing_method_params = false
-          if @streaming
-            @lexer = lexer
-            @keep_trivia = ENV["CRYSTAL_V2_PARSER_KEEP_TRIVIA"]? != nil
-          else
-            keep_trivia = ENV["CRYSTAL_V2_PARSER_KEEP_TRIVIA"]? != nil
+        @macro_mode = 0
+        @in_macro_expression = false  # Not in macro expression initially
+        @streaming = ENV["CRYSTAL_V2_PARSER_STREAM"]? != nil
+        @expect_context = nil
+        @parsing_method_params = false
+        @skip_newlines_in_braces = true
+        if @streaming
+          @lexer = lexer
+          @keep_trivia = ENV["CRYSTAL_V2_PARSER_KEEP_TRIVIA"]? != nil
+        else
+          keep_trivia = ENV["CRYSTAL_V2_PARSER_KEEP_TRIVIA"]? != nil
             lexer.each_token(skip_trivia: !keep_trivia) { |token| @tokens << token }
             @lexer = nil
             @keep_trivia = keep_trivia
@@ -149,6 +154,7 @@ module CrystalV2
           @streaming = ENV["CRYSTAL_V2_PARSER_STREAM"]? != nil
           @expect_context = nil
           @parsing_method_params = false
+          @skip_newlines_in_braces = true
           if @streaming
             @lexer = lexer
             @keep_trivia = ENV["CRYSTAL_V2_PARSER_KEEP_TRIVIA"]? != nil
@@ -947,9 +953,70 @@ module CrystalV2
         end
 
         # Phase 103: Multi-line expression support
-        # Check if we're inside delimiters (parentheses, brackets, or braces)
+        # Check if we're inside delimiters where newlines should be treated as whitespace.
+        # Braces honor @skip_newlines_in_braces to allow statement-mode parsing inside hashes/blocks.
         private def inside_delimiters? : Bool
-          @paren_depth > 0 || @bracket_depth > 0 || @brace_depth > 0
+          @paren_depth > 0 || @bracket_depth > 0 || (@brace_depth > 0 && @skip_newlines_in_braces)
+        end
+
+        # Temporarily treat newlines inside braces as statement separators (do not skip them).
+        private def with_brace_newlines_as_separators
+          previous = @skip_newlines_in_braces
+          prev_bool = previous.nil? ? true : previous
+          @skip_newlines_in_braces = false
+          yield
+        ensure
+          @skip_newlines_in_braces = !!prev_bool
+        end
+
+        # Temporarily force skipping newlines inside braces (treat as trivia).
+        private def with_brace_newlines_skipped
+          previous = @skip_newlines_in_braces
+          prev_bool = previous.nil? ? false : previous
+          @skip_newlines_in_braces = true
+          yield
+        ensure
+          @skip_newlines_in_braces = !!prev_bool
+        end
+
+        # Fast-forward a macro control block starting at current token `{%`.
+        # Consumes nested `{% ... %}` pairs and stops after the matching `{% end %}`.
+        private def fast_forward_percent_block
+          return unless macro_control_start?
+          depth = 0
+          loop do
+            tok = current_token
+            return if tok.kind == Token::Kind::EOF
+            if macro_control_start?
+              kw = peek_macro_keyword_after_lbracepercent
+              consume_macro_control_start
+              macro_trim_operator?
+              skip_macro_whitespace
+              kw_token = current_token
+              kw_text = token_text(kw_token)
+              advance
+              skip_macro_whitespace
+              skip_until_macro_close
+
+              # Update depth based on keyword
+              if kw_text == "end"
+                depth -= 1
+              elsif kw_text == "else" || kw_text == "elsif"
+                # depth unchanged
+              else
+                depth += 1
+              end
+
+              # For malformed macros (missing end), stop when depth falls below zero
+              if depth <= 0
+                skip_whitespace_and_optional_newlines
+                return
+              end
+              next
+            end
+
+            advance
+          end
         end
 
         # Phase 103: Skip whitespace/comments, and optionally newlines if inside delimiters
@@ -1196,6 +1263,8 @@ module CrystalV2
                  Token::Kind::Question,  # Nullable types Type?
                  Token::Kind::Star, Token::Kind::StarStar  # Pointer suffixes Type*, Type**
               true
+            when Token::Kind::MacroExprStart, Token::Kind::MacroExprEnd
+              true
             when Token::Kind::Class
               # Allow suffix ".class" in type contexts like is_a?(Alone.class)
               last_type_token.kind == Token::Kind::Operator && slice_eq?(last_type_token.slice, ".")
@@ -1210,8 +1279,17 @@ module CrystalV2
 
             break unless is_type_token
 
-            last_type_token = token
-            advance
+            if token.kind == Token::Kind::MacroExprStart
+              # Skip macro expression inside type annotation and include its closing token
+              fast_forward_macro_expression
+              if macro_closing_sequence?(current_token)
+                last_type_token = current_token
+                advance
+              end
+            else
+              last_type_token = token
+              advance
+            end
           end
 
           # Return slice from start to end of type annotation (zero-copy!)
@@ -2152,6 +2230,7 @@ module CrystalV2
         # Grammar: if CONDITION [then] BODY [elsif CONDITION [then] BODY]* [else BODY] end
         # CONDITION can be assignment: if x = compute()
         private def parse_if : ExprId
+          with_brace_newlines_as_separators do
           if_token = current_token
           advance
           skip_trivia
@@ -2278,6 +2357,7 @@ module CrystalV2
               else_arr
             )
           )
+          end
         end
 
         # Phase 24: Parse unless expression (similar to if but without elsif)
@@ -2286,6 +2366,7 @@ module CrystalV2
         # Grammar: unless CONDITION [then] BODY [else BODY] end
         # CONDITION can be assignment: unless x = compute()
         private def parse_unless : ExprId
+          with_brace_newlines_as_separators do
           unless_token = current_token
           advance
           skip_trivia
@@ -2360,6 +2441,7 @@ module CrystalV2
               else_arr
             )
           )
+          end
         end
 
         # Phase 11: Parse case/when expression
@@ -6158,6 +6240,13 @@ module CrystalV2
         # Returns CallNode or PREFIX_ERROR if can't parse as call
         private def try_parse_call_args_without_parens(callee_token : Token) : ExprId
           debug("try_parse_call_args_without_parens: callee=#{String.new(callee_token.slice)}, current_token=#{current_token.kind}")
+          # Inside brace literals (hash/named tuple) a colon is far more likely to
+          # start a key/value entry than a named argument to a call without parens.
+          # Bail out early to avoid misclassifying labels like `si: begin ...`.
+          if @brace_depth > 0
+            # Avoid no-parens call parsing inside hashes/named tuples entirely
+            return PREFIX_ERROR
+          end
           # Check if current token can start an argument
           # Return error for keywords that can't be arguments
           # Phase 103D: Keywords can be identifiers if followed by " : " (type annotation)
@@ -6972,12 +7061,14 @@ module CrystalV2
             end
           when Token::Kind::LBracePercent
             parse_percent_macro_control
+          when Token::Kind::MacroExprStart
+            parse_percent_macro_expression
           when Token::Kind::LBrace
             # Recognize macro delimiters regardless of @macro_mode
             next_tok = peek_token
             if next_tok.kind == Token::Kind::Percent
               parse_percent_macro_control
-            elsif next_tok.kind == Token::Kind::LBrace
+            elsif next_tok.kind == Token::Kind::MacroExprStart
               parse_percent_macro_expression
             else
               # Phase 14/15: Hash/NamedTuple/Tuple literal — single-pass, no backtracking
@@ -7574,30 +7665,57 @@ module CrystalV2
         private def parse_hash_or_tuple : ExprId
           lbrace = current_token
           advance  # consume {
-          @brace_depth += 1  # Phase 103J: Track brace depth for newline handling
-          skip_whitespace_and_optional_newlines
-
-          # Empty {} → hash
-          if current_token.kind == Token::Kind::RBrace
-            # Empty hash - delegate to parse_hash_literal
-            return parse_hash_literal_from_lbrace(lbrace)
+          unless lbrace.kind == Token::Kind::MacroExprStart
+            @brace_depth += 1  # Phase 103J: Track brace depth for newline handling
           end
+          with_brace_newlines_skipped do
+            skip_whitespace_and_optional_newlines
 
-          # Parse first element (key for hash/named tuple, value for tuple)
-          # Fast path for named tuple: identifier followed by ':' → avoid full expression parse to not
-          # interfere with call-without-parens heuristics.
-          first_elem : ExprId
-          saved_index = @index
-          tok = current_token
+            # Skip macro control/expressions between entries (macro-generated hashes)
+            loop do
+              if macro_control_start?
+                # Fast-skip macro-generated entries
+                fast_forward_percent_block
+                skip_whitespace_and_optional_newlines
+                # If macros generated all entries, we might immediately see the closing brace.
+                if current_token.kind == Token::Kind::RBrace
+                  return parse_hash_literal_from_lbrace(lbrace)
+                end
+                next
+              elsif current_token.kind == Token::Kind::MacroExprStart
+                fast_forward_macro_expression
+                advance if macro_closing_sequence?(current_token)
+                skip_whitespace_and_optional_newlines
+                next
+              end
+              break
+            end
+
+            # Empty {} → hash
+            if current_token.kind == Token::Kind::RBrace
+              # Empty hash - delegate to parse_hash_literal
+              return parse_hash_literal_from_lbrace(lbrace)
+            end
+
+            # Parse first element (key for hash/named tuple, value for tuple)
+            # Fast path for named tuple: identifier followed by ':' → avoid full expression parse to not
+            # interfere with call-without-parens heuristics.
+            first_elem : ExprId
+            saved_index = @index
+            tok = current_token
           if tok.kind == Token::Kind::Identifier
             debug("brace: first token is Identifier #{String.new(tok.slice)}")
             ident_token = tok
             # Peek next non-trivia for ':'
             nt = peek_next_non_trivia
             debug("brace: next after identifier is #{nt.kind}")
-            if nt.kind == Token::Kind::Colon
-              # Consume identifier and leave ':' for the named tuple parser
+            if nt.kind == Token::Kind::Colon || nt.kind == Token::Kind::MacroExprStart
+              # Consume identifier and any inline macro expression before colon
               advance
+              if current_token.kind == Token::Kind::MacroExprStart
+                fast_forward_macro_expression
+                advance if macro_closing_sequence?(current_token)
+              end
               first_elem = @arena.add_typed(IdentifierNode.new(ident_token.span, @string_pool.intern(ident_token.slice)))
               # Do not skip trivia here; parse_named_tuple_literal_continued expects ':' next
             else
@@ -7613,22 +7731,29 @@ module CrystalV2
               end
               skip_whitespace_and_optional_newlines
             end
-          else
-            debug("brace: first token is #{tok.kind}")
-            @no_type_declaration += 1
-            first_elem = parse_expression(0)
-            @no_type_declaration -= 1
-            if first_elem.invalid?
-              @brace_depth -= 1
-              advance unless current_token.kind == Token::Kind::EOF
-              return PREFIX_ERROR
+            else
+              debug("brace: first token is #{tok.kind}")
+              @no_type_declaration += 1
+              first_elem = parse_expression(0)
+              @no_type_declaration -= 1
+              if first_elem.invalid?
+                @brace_depth -= 1
+                advance unless current_token.kind == Token::Kind::EOF
+                return PREFIX_ERROR
+              end
+              skip_whitespace_and_optional_newlines
             end
-            skip_whitespace_and_optional_newlines
-          end
 
           # Check what follows
           debug("brace: after first elem, current=#{current_token.kind}")
           case current_token.kind
+          when Token::Kind::Eq
+            # Pattern like {x = expr, y} → treat as tuple with assignment expressions.
+            @index = saved_index
+            @previous_token = nil
+            first_elem = parse_op_assign
+            return PREFIX_ERROR if first_elem.invalid?
+            return parse_tuple_literal_continued(lbrace, first_elem)
           when Token::Kind::Arrow
             # "=>" → this is a hash
             return parse_hash_literal_continued(lbrace, first_elem)
@@ -7647,12 +7772,13 @@ module CrystalV2
             # "," or "}" → this is a tuple
             return parse_tuple_literal_continued(lbrace, first_elem)
           else
-            # Unexpected token — advance to guarantee progress and avoid stalls
-            emit_unexpected(current_token)
-            advance unless current_token.kind == Token::Kind::EOF
+            # Fallback: treat as tolerant tuple
             @brace_depth -= 1 if @brace_depth > 0
-            return PREFIX_ERROR
+            @index = saved_index
+            @previous_token = nil
+            return parse_brace_tuple_fallback
           end
+        end
         end
 
         # Phase 15: Continue parsing tuple literal after first element
@@ -7719,7 +7845,7 @@ module CrystalV2
 
           unless current_token.kind == Token::Kind::RBrace
             loop do
-              elem = parse_expression(0)
+              elem = parse_op_assign
               return PREFIX_ERROR if elem.invalid?
               elements << elem
               skip_whitespace_and_optional_newlines
@@ -7792,6 +7918,7 @@ module CrystalV2
         # Phase 70: Continue parsing named tuple literal after first key
         private def parse_named_tuple_literal_continued(lbrace : Token, first_key_expr : ExprId) : ExprId
           entries_b = SmallVec(NamedTupleEntry, 4).new
+          macro_block_consumed = false
 
           # Get first key from first_key_expr (usually Identifier, but allow certain keywords used as labels)
           first_key_node = @arena[first_key_expr]
@@ -7837,7 +7964,23 @@ module CrystalV2
             Watchdog.check!
             # Allow newlines between entries
             skip_whitespace_and_optional_newlines
-            debug("named_tuple: loop current=#{current_token.kind}")
+            # Allow macro control/expressions inside named tuples (e.g., feature flags)
+            loop do
+              if macro_control_start?
+                fast_forward_percent_block
+                macro_block_consumed = true
+                skip_whitespace_and_optional_newlines
+                debug("named_tuple: skipped macro control block")
+                next
+              elsif current_token.kind == Token::Kind::MacroExprStart
+                fast_forward_macro_expression
+                advance if macro_closing_sequence?(current_token)
+                skip_whitespace_and_optional_newlines
+                next
+              end
+              break
+            end
+            debug("named_tuple: loop current=#{current_token.kind} @#{current_token.span}")
             # Be extra permissive: also tolerate standalone newlines
             if current_token.kind == Token::Kind::Newline
               skip_statement_end
@@ -7858,6 +8001,19 @@ module CrystalV2
                 break
               end
 
+              # Allow macro control blocks between entries (feature-flagged sections)
+              if macro_control_start?
+                fast_forward_percent_block
+                macro_block_consumed = true
+                debug("named_tuple: skipped macro control block after comma")
+                next
+              elsif current_token.kind == Token::Kind::MacroExprStart
+                fast_forward_macro_expression
+                advance if macro_closing_sequence?(current_token)
+                skip_whitespace_and_optional_newlines
+                next
+              end
+
               # Parse key (identifier or selected keywords like nil/true/false)
               key_token = current_token
               valid_key = key_token.kind == Token::Kind::Identifier ||
@@ -7872,6 +8028,11 @@ module CrystalV2
               key = key_token.slice  # TIER 2.3: Zero-copy slice (includes keyword text)
               key_span = key_token.span
               advance
+              # Consume inline macro expression after key, if any
+              if current_token.kind == Token::Kind::MacroExprStart
+                fast_forward_macro_expression
+                advance if macro_closing_sequence?(current_token)
+              end
               skip_whitespace_and_optional_newlines
 
               # Expect colon
@@ -7899,6 +8060,48 @@ module CrystalV2
                 key_span,
                 value_span
               )
+            when Token::Kind::Identifier, Token::Kind::Nil, Token::Kind::True, Token::Kind::False
+              if macro_block_consumed
+                # Macro blocks can emit or remove entries; allow the next entry
+                # to start immediately after a macro control block without an
+                # intervening comma.
+                macro_block_consumed = false
+                key_token = current_token
+                key = key_token.slice
+                key_span = key_token.span
+                advance
+                if current_token.kind == Token::Kind::MacroExprStart
+                  fast_forward_macro_expression
+                  advance if macro_closing_sequence?(current_token)
+                end
+                skip_whitespace_and_optional_newlines
+
+                unless current_token.kind == Token::Kind::Colon
+                  advance unless current_token.kind == Token::Kind::EOF
+                  return PREFIX_ERROR
+                end
+                advance
+                skip_whitespace_and_optional_newlines
+
+                value = parse_op_assign
+                if value.invalid?
+                  advance unless current_token.kind == Token::Kind::EOF
+                  return PREFIX_ERROR
+                end
+                value_span = @arena[value].span
+                skip_whitespace_and_optional_newlines
+
+                entries_b << NamedTupleEntry.new(
+                  key,
+                  value,
+                  key_span,
+                  value_span
+                )
+              else
+                emit_unexpected(current_token)
+                advance unless current_token.kind == Token::Kind::EOF
+                return PREFIX_ERROR
+              end
             else
               emit_unexpected(current_token)
               advance unless current_token.kind == Token::Kind::EOF
@@ -8001,19 +8204,52 @@ module CrystalV2
 
           entries_b = SmallVec(HashEntry, 4).new
           entries_b << HashEntry.new(first_key, first_value, entry_span, arrow_token.span)
+          macro_block_consumed = false
 
           # Parse remaining entries
           loop do
             Watchdog.check!
-            unless current_token.kind == Token::Kind::Comma
-              break
+            skip_whitespace_and_optional_newlines  # Phase 103J
+            # Allow macro control/expressions as standalone entries (macro-generated content)
+            if macro_control_start?
+              fast_forward_percent_block
+              macro_block_consumed = true
+              skip_whitespace_and_optional_newlines  # Phase 103J
+              next
+            elsif current_token.kind == Token::Kind::MacroExprStart
+              fast_forward_macro_expression
+              advance if macro_closing_sequence?(current_token)
+              skip_whitespace_and_optional_newlines
+              next
             end
 
-            advance  # consume comma
-            skip_whitespace_and_optional_newlines  # Phase 103J
+            if current_token.kind == Token::Kind::Comma
+              macro_block_consumed = false
+              advance  # consume comma
+              skip_whitespace_and_optional_newlines  # Phase 103J
 
-            # Allow trailing comma
-            if current_token.kind == Token::Kind::RBrace
+              # Allow trailing comma
+              if current_token.kind == Token::Kind::RBrace
+                break
+              end
+
+              # Skip macro control/expressions between hash entries
+              if macro_control_start?
+                fast_forward_percent_block
+                macro_block_consumed = true
+                skip_whitespace_and_optional_newlines
+                next
+              elsif current_token.kind == Token::Kind::MacroExprStart
+                fast_forward_macro_expression
+                advance if macro_closing_sequence?(current_token)
+                skip_whitespace_and_optional_newlines
+                next
+              end
+            elsif macro_block_consumed && current_token.kind != Token::Kind::RBrace
+              # Macro block produced entries with trailing commas; allow the next entry
+              # to start immediately after the macro section.
+              macro_block_consumed = false
+            else
               break
             end
 
@@ -8620,7 +8856,16 @@ module CrystalV2
           end
 
           if member_token.kind == Token::Kind::Identifier
-            member_span = node_span(receiver).cover(dot.span).cover(member_token.span)
+            # Consume inline macro expressions after member name (foo.bar{{x}} ...)
+            member_end_span = member_token.span
+            advance
+            while current_token.kind == Token::Kind::MacroExprStart
+              fast_forward_macro_expression
+              member_end_span = current_token.span
+              advance if macro_closing_sequence?(current_token)
+            end
+
+            member_span = node_span(receiver).cover(dot.span).cover(member_end_span)
             node = @arena.add_typed(
               MemberAccessNode.new(
                 member_span,
@@ -8628,7 +8873,6 @@ module CrystalV2
                 member_token.slice
               )
             )
-            advance
 
             # Check if this member access is followed by arguments without parentheses
             # Example: Foo.bar 1, b: 2 → CallNode with MemberAccessNode as callee
@@ -8639,8 +8883,8 @@ module CrystalV2
               advance  # Consume space
               space_consumed = true
               next_token_view = current_token
-            elsif next_token_view.span.start_line == member_token.span.end_line &&
-                  next_token_view.span.start_offset > member_token.span.end_offset
+            elsif next_token_view.span.start_line == member_end_span.end_line &&
+                  next_token_view.span.start_offset > member_end_span.end_offset
               # Heuristic: even without explicit whitespace tokens (default lexing),
               # detect a gap on the same line to allow DSL-style calls like
               # json.field "value", foo
@@ -8943,12 +9187,22 @@ module CrystalV2
           prev_token = @previous_token
           advance
 
+          # Allow inline macro expressions inside identifiers (e.g., foo{{bar}}: ...)
+          last_span = identifier_token.span
+          while current_token.kind == Token::Kind::MacroExprStart
+            fast_forward_macro_expression
+            last_span = current_token.span
+            advance if macro_closing_sequence?(current_token)
+          end
+
           next_tok = current_token
           space_consumed = false
           if next_tok.kind == Token::Kind::Whitespace
             space_consumed = true
-            elsif next_tok.span.start_line == identifier_token.span.end_line
-              space_consumed = next_tok.span.start_column > identifier_token.span.end_column
+          elsif next_tok.span.start_line == last_span.end_line
+            space_consumed = next_tok.span.start_column > last_span.end_column
+          elsif next_tok.span.start_line > last_span.end_line
+            space_consumed = true
           end
           skip_trivia
 
@@ -9515,6 +9769,11 @@ module CrystalV2
           if @expect_context == "statement" && (token.kind == Token::Kind::RBrace || token.kind == Token::Kind::End)
             return
           end
+          # In macro expression contexts, tolerate stray closing parens to avoid
+          # cascading diagnostics when fast-forwarded macro bodies leave them on the stream.
+          if @in_macro_expression && token.kind == Token::Kind::RParen
+            return
+          end
           @diagnostics << Diagnostic.new("unexpected #{token.kind}", token.span)
         end
 
@@ -9632,11 +9891,13 @@ module CrystalV2
         end
 
         private def macro_closing_sequence?(token : Token) : Bool
-          if token.kind == Token::Kind::PercentRBrace
+          if token.kind == Token::Kind::PercentRBrace || token.kind == Token::Kind::MacroExprEnd
             return true
           elsif token.kind == Token::Kind::Percent
             next_token = peek_token
             return next_token.kind == Token::Kind::RBrace
+          elsif token.kind == Token::Kind::RBrace
+            return peek_token.kind == Token::Kind::RBrace
           elsif token.kind == Token::Kind::Minus
             next_token = peek_token
             if next_token.kind == Token::Kind::PercentRBrace
@@ -9644,6 +9905,8 @@ module CrystalV2
             elsif next_token.kind == Token::Kind::Percent
               next_next = peek_token(2)
               return next_next.kind == Token::Kind::RBrace
+            elsif next_token.kind == Token::Kind::RBrace
+              return peek_token(2).kind == Token::Kind::RBrace
             end
           end
           false
@@ -9837,7 +10100,9 @@ module CrystalV2
           case @macro_terminator
           when :expression
             # Close on '}}' or '-}}'
-            if token.kind == Token::Kind::RBrace
+            if token.kind == Token::Kind::MacroExprEnd
+              return true
+            elsif token.kind == Token::Kind::RBrace
               return true if peek_token.kind == Token::Kind::RBrace
             elsif token.kind == Token::Kind::Minus
               return true if peek_token.kind == Token::Kind::RBrace && peek_token(2).kind == Token::Kind::RBrace
@@ -9860,6 +10125,9 @@ module CrystalV2
         private def consume_macro_close_span(message = "Expected '%}'") : Span?
           token = current_token
           case token.kind
+          when Token::Kind::MacroExprEnd
+            advance
+            return token.span
           when Token::Kind::PercentRBrace
             advance
             return token.span
@@ -9873,6 +10141,14 @@ module CrystalV2
               return span
             end
             # Fallback scan ahead to find a split closer
+          when Token::Kind::RBrace
+            brace_span = token.span
+            advance
+            if current_token.kind == Token::Kind::RBrace
+              span = brace_span.cover(current_token.span)
+              advance
+              return span
+            end
           else
             # no-op
           end
@@ -9886,7 +10162,7 @@ module CrystalV2
             if tok.kind == Token::Kind::EOF
               break
             end
-            if tok.kind == Token::Kind::PercentRBrace
+            if tok.kind.in?(Token::Kind::PercentRBrace, Token::Kind::MacroExprEnd)
               # Consume everything up to and including closer
               unadvance(@index - @index) if false  # keep API balance (no-op)
               @index = @index + look + 1
@@ -9896,6 +10172,13 @@ module CrystalV2
               first = tok
               second = peek_token(look + 1)
               @index = @index + look + 2
+              @previous_token = second
+              return first.span.cover(second.span)
+            elsif tok.kind == Token::Kind::RBrace && peek_token(look + 1).kind == Token::Kind::RBrace
+              first = tok
+              second = peek_token(look + 1)
+              @index = @index + look + 2
+              @previous_token = second
               @previous_token = second
               return first.span.cover(second.span)
             end
@@ -9912,6 +10195,9 @@ module CrystalV2
           start_token = current_token
           case start_token.kind
           when Token::Kind::LBracePercent
+            advance
+            start_token.span
+          when Token::Kind::MacroExprStart
             advance
             start_token.span
           when Token::Kind::LBrace
@@ -9972,6 +10258,12 @@ module CrystalV2
           # Special case for "-": can be Minus or Operator
           if value == "-"
             return true if token.kind == Token::Kind::Minus
+          end
+          if value == "{{"
+            return true if token.kind.in?(Token::Kind::MacroExprStart, Token::Kind::LBrace) && peek_token.kind == Token::Kind::LBrace
+          end
+          if value == "}}"
+            return true if token.kind.in?(Token::Kind::MacroExprEnd, Token::Kind::RBrace) && peek_token.kind == Token::Kind::RBrace
           end
           # Phase 18: Special case for "%": now Percent token
           if value == "%"
@@ -10186,9 +10478,7 @@ module CrystalV2
             @in_macro_expression = previous_in_macro
 
             # Tolerate parse quirks by fast-forwarding to the closing sequence if not positioned there
-            unless macro_closing_sequence?(current_token)
-              fast_forward_macro_expression
-            end
+            fast_forward_macro_expression unless macro_closing_sequence?(current_token)
 
             right_trim = macro_trim_operator?
             closing_span = consume_macro_close_span("Expected '%}' after macro expression")
@@ -10250,66 +10540,17 @@ module CrystalV2
         # Called from parse_prefix when seeing {% token sequence
         # Returns MacroIfNode or MacroForNode wrapped in ExprId
         private def parse_percent_macro_control : ExprId
-          previous_terminator = @macro_terminator
-          @macro_terminator = :control
+          start_index = @index
           start_span = consume_macro_control_start
           return PREFIX_ERROR unless start_span
-
-          if macro_trim_token?(current_token)
-            advance
-          end
-
-          skip_trivia
-
-          # Get keyword (if, for, unless, etc.)
-          keyword_token = current_token
-          keyword_index = @index
-          keyword = token_text(keyword_token)
-          advance
-
-          skip_trivia
-
-          case keyword
-          when "if", "unless", "for", "while", "verbatim"
-            # For stability and speed in LSP context, fast-forward entire control block
-            # and return a lightweight MacroLiteral node that spans the whole structure.
-            block_span = fast_forward_macro_control_block(start_span, keyword)
-            return PREFIX_ERROR unless block_span
-            pieces = [] of MacroPiece
-            @arena.add_typed(MacroLiteralNode.new(block_span, pieces, false, false))
-          when "begin"
-            # Consume header close, then let the body be parsed normally.
-            unless skip_until_macro_close
-              @diagnostics << Diagnostic.new("Expected '%}' after begin", current_token.span)
-              return PREFIX_ERROR
-            end
-            # No node; the following tokens are the real body.
-            PREFIX_ERROR
-          when "else", "elsif", "end"
-            # Consume the closer and ignore as control marker in top-level stream
-            skip_until_macro_close
-            PREFIX_ERROR
-          else
-            # Phase 103J: Unknown keywords → parse as macro expression (method call)
-            # Example: {% skip_file %}, {% raise "error" %}, etc.
-            debug("parse_percent_macro_control: parsing '#{keyword}' as macro expression")
-            expr = parse_macro_expression_control(start_span, keyword_token, keyword_index)
-
-            # Skip trivia unconditionally (matching original parser's skip_space_or_newline)
-            # This skips the newline before %} regardless of flags
-            skip_trivia
-
-            # Consume the %} token
-            end_span = consume_macro_close_span("Expected '%}' after macro expression")
-            unless end_span
-              return PREFIX_ERROR
-            end
-
-            full_span = start_span.cover(end_span)
-            @arena.add_typed(MacroExpressionNode.new(full_span, expr))
-          end
-        ensure
-          @macro_terminator = previous_terminator
+          # Reset to the start token and skip the entire block quickly.
+          @index = start_index
+          @previous_token = start_index > 0 ? @tokens[start_index - 1] : nil
+          fast_forward_percent_block
+          end_span = @previous_token ? @previous_token.not_nil!.span : start_span
+          block_span = start_span.cover(end_span)
+          pieces = [] of MacroPiece
+          @arena.add_typed(MacroLiteralNode.new(block_span, pieces, false, false))
         end
 
         # Fast-forward a macro control structure from {% <kw> %} to its matching {% end %}.
@@ -10330,6 +10571,59 @@ module CrystalV2
           loop do
             tok = current_token
             return last_span if tok.kind == Token::Kind::EOF
+
+            if macro_closing_sequence?(tok)
+              if closing = consume_macro_close_span
+                last_span = block_start.cover(closing)
+              end
+              break
+            end
+
+            if tok.kind == Token::Kind::LBracePercent || (tok.kind == Token::Kind::LBrace && peek_token.kind == Token::Kind::Percent)
+              ctrl_start = consume_macro_control_start
+              unless ctrl_start
+                advance
+                next
+              end
+              # Optional trim
+              advance if macro_trim_token?(current_token)
+              skip_trivia
+
+              kw = token_text(current_token)
+              advance
+              skip_trivia
+
+              case kw
+              when "if", "unless", "for", "while", "begin", "verbatim"
+                unless skip_until_macro_close
+                  @diagnostics << Diagnostic.new("Expected '%}' after #{kw}", current_token.span)
+                  return nil
+                end
+                depth += 1
+              when "elsif", "else"
+                unless skip_until_macro_close
+                  @diagnostics << Diagnostic.new("Expected '%}' after #{kw}", current_token.span)
+                  return nil
+                end
+              when "end"
+                end_span = consume_macro_close_span("Expected '%}' after end")
+                return nil unless end_span
+                last_span = block_start.cover(end_span)
+                depth -= 1
+                return last_span if depth == 0
+              else
+                unless skip_until_macro_close
+                  @diagnostics << Diagnostic.new("Expected '%}' after #{kw}", current_token.span)
+                  return nil
+                end
+              end
+              next
+            elsif tok.kind == Token::Kind::MacroExprStart
+              # skip macro expression quickly
+              fast_forward_macro_expression
+              last_span = tok.span
+              next
+            end
 
             if tok.kind == Token::Kind::LBracePercent || (tok.kind == Token::Kind::LBrace && peek_token.kind == Token::Kind::Percent)
               # Consume "{%"
@@ -10797,7 +11091,6 @@ module CrystalV2
 
             # Check for {% sequence
             if keyword = peek_macro_keyword
-              saved = @index
               consume_macro_control_start
 
               if macro_trim_token?(current_token)
@@ -10810,18 +11103,31 @@ module CrystalV2
               advance
               skip_trivia
 
-              if keyword_text == "if" || keyword_text == "for" || keyword_text == "unless" || keyword_text == "while" || keyword_text == "begin" || keyword_text == "verbatim"
+              if keyword_text.in?("if", "for", "unless", "while", "begin", "verbatim")
+                expect_macro_close("Expected '%}' after #{keyword_text}")
                 depth += 1
               elsif keyword_text == "end"
+                expect_macro_close("Expected '%}' after end")
                 depth -= 1
-                if depth == 0
-                  consume_macro_close_span
-                  return
-                end
+                return if depth == 0
+              else
+                expect_macro_close("Expected '%}' after #{keyword_text}")
               end
 
-              @index = saved
-              @previous_token = nil
+              next
+            end
+
+            # Skip over macro expressions {{ ... }}
+            if current_token.kind.in?(Token::Kind::MacroExprStart, Token::Kind::LBrace) && (current_token.kind != Token::Kind::LBrace || peek_token.kind == Token::Kind::LBrace)
+              fast_forward_macro_expression
+              next
+            end
+
+            if macro_closing_sequence?(current_token)
+              consume_macro_close_span
+              depth -= 1
+              return if depth <= 0
+              next
             end
 
             advance
@@ -10836,21 +11142,24 @@ module CrystalV2
         # Phase 103B: Parse {{ expr }} in expression context
         # Called from parse_prefix when seeing {{ token sequence
         # Returns MacroExpressionNode wrapped in ExprId
-        private def parse_percent_macro_expression : ExprId
-          start_span = current_token.span
+      private def parse_percent_macro_expression : ExprId
+        start_span = current_token.span
 
-          # Expect {{ sequence
+        # Expect {{ sequence
+        case current_token.kind
+        when Token::Kind::MacroExprStart
+          advance
+        when Token::Kind::LBrace
+          advance
           unless current_token.kind == Token::Kind::LBrace
             emit_unexpected(current_token)
             return PREFIX_ERROR
           end
-          advance  # consume first {
-
-          unless current_token.kind == Token::Kind::LBrace
-            emit_unexpected(current_token)
-            return PREFIX_ERROR
-          end
-          advance  # consume second {
+          advance
+        else
+          emit_unexpected(current_token)
+          return PREFIX_ERROR
+        end
 
           skip_trivia
 
@@ -10861,18 +11170,23 @@ module CrystalV2
           skip_trivia
 
           # Expect }} sequence
-          unless current_token.kind == Token::Kind::RBrace
+          end_span = nil
+          case current_token.kind
+          when Token::Kind::MacroExprEnd
+            end_span = current_token.span
+            advance
+          when Token::Kind::RBrace
+            advance
+            unless current_token.kind == Token::Kind::RBrace
+              @diagnostics << Diagnostic.new("Expected '}' to close macro expression", current_token.span)
+              return PREFIX_ERROR
+            end
+            end_span = current_token.span
+            advance
+          else
             @diagnostics << Diagnostic.new("Expected '}' to close macro expression", current_token.span)
             return PREFIX_ERROR
           end
-          advance  # consume first }
-
-          unless current_token.kind == Token::Kind::RBrace
-            @diagnostics << Diagnostic.new("Expected '}' to close macro expression", current_token.span)
-            return PREFIX_ERROR
-          end
-          end_span = current_token.span
-          advance  # consume second }
 
           full_span = start_span.cover(end_span)
           @arena.add_typed(MacroExpressionNode.new(full_span, expr))
@@ -10880,17 +11194,27 @@ module CrystalV2
 
         private def parse_macro_expression_piece
           start_token = current_token
-          # Phase 15: { is LBrace token
-          expect_operator(Token::Kind::LBrace)
-          expect_operator(Token::Kind::LBrace)
+          if current_token.kind == Token::Kind::MacroExprStart
+            advance
+          else
+            # Phase 15: { is LBrace token
+            expect_operator(Token::Kind::LBrace)
+            expect_operator(Token::Kind::LBrace)
+          end
           skip_macro_whitespace
           expr = with_macro_terminator(:expression) { parse_expression(0) }
           skip_macro_whitespace
 
-          # Phase 15: } is RBrace token
-          expect_operator(Token::Kind::RBrace)
-          expect_operator(Token::Kind::RBrace)
-          closing_span = previous_token.try(&.span)
+          closing_span = nil
+          if current_token.kind == Token::Kind::MacroExprEnd
+            closing_span = current_token.span
+            advance
+          else
+            # Phase 15: } is RBrace token
+            expect_operator(Token::Kind::RBrace)
+            expect_operator(Token::Kind::RBrace)
+            closing_span = previous_token.try(&.span)
+          end
 
           newline_escape = consume_macro_newline_escape?
           skip_whitespace = newline_escape
