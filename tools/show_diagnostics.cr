@@ -16,7 +16,7 @@ rescue KeyError
   # Some stdlib Env impls require rescue for writes; ignore
 end
 
-parser = CrystalV2::Compiler::Frontend::Parser.new(lexer)
+parser = CrystalV2::Compiler::Frontend::Parser.new(lexer, recovery_mode: ENV["CRYSTAL_V2_LSP_RECOVERY"]? == "1")
 
 begin
   # Optional watchdog to prevent hangs during large-file diagnostics.

@@ -41,7 +41,7 @@ module CrystalV2
         # preventing constructs like `{ expr\n other }` from being glued into a single expression.
         @skip_newlines_in_braces : Bool = false
 
-        def initialize(lexer : Lexer)
+        def initialize(lexer : Lexer, *, recovery_mode : Bool = false)
           @tokens = [] of Token
           @index = 0
           # Choose arena implementation (default: AstArena; PageArena via env)
@@ -68,13 +68,12 @@ module CrystalV2
           @expect_context = nil
           @parsing_method_params = false
           @skip_newlines_in_braces = true
-          @recovery_mode = ENV["CRYSTAL_V2_LSP_RECOVERY"]? == "1"
-          @recovery_mode = ENV["CRYSTAL_V2_LSP_RECOVERY"]? == "1"
-        if @streaming
-          @lexer = lexer
-          @keep_trivia = ENV["CRYSTAL_V2_PARSER_KEEP_TRIVIA"]? != nil
-        else
-          keep_trivia = ENV["CRYSTAL_V2_PARSER_KEEP_TRIVIA"]? != nil
+          @recovery_mode = recovery_mode
+          if @streaming
+            @lexer = lexer
+            @keep_trivia = ENV["CRYSTAL_V2_PARSER_KEEP_TRIVIA"]? != nil
+          else
+            keep_trivia = ENV["CRYSTAL_V2_PARSER_KEEP_TRIVIA"]? != nil
             lexer.each_token(skip_trivia: !keep_trivia) { |token| @tokens << token }
             @lexer = nil
             @keep_trivia = keep_trivia
@@ -88,7 +87,7 @@ module CrystalV2
               capacity = 32768
             end
             # Pre-size AstArena capacity heuristically; skip when using PageArena
-            unless ENV["CRYSTAL_V2_PAGE_ARENA"]?
+            unless @arena.is_a?(PageArena)
               @arena = AstArena.new(capacity)
             end
           end
@@ -141,7 +140,7 @@ module CrystalV2
 
         # Phase 87B-2: Constructor for reparsing with existing arena
         # Used by macro expander to add parsed nodes to existing arena
-        def initialize(lexer : Lexer, @arena : ArenaLike)
+        def initialize(lexer : Lexer, @arena : ArenaLike, *, recovery_mode : Bool = false)
           @tokens = [] of Token
           @index = 0
           @diagnostics = [] of Diagnostic
@@ -162,7 +161,7 @@ module CrystalV2
           @expect_context = nil
           @parsing_method_params = false
           @skip_newlines_in_braces = true
-          @recovery_mode = ENV["CRYSTAL_V2_LSP_RECOVERY"]? == "1"
+          @recovery_mode = recovery_mode
           if @streaming
             @lexer = lexer
             @keep_trivia = ENV["CRYSTAL_V2_PARSER_KEEP_TRIVIA"]? != nil

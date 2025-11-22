@@ -11,7 +11,7 @@ lexer.each_token(skip_trivia: false) { |t| tokens << t }
 
 # Recreate parser with pre-tokenized lexer's result
 sub_lexer = CrystalV2::Compiler::Frontend::Lexer.new(source)
-parser = CrystalV2::Compiler::Frontend::Parser.new(sub_lexer)
+  parser = CrystalV2::Compiler::Frontend::Parser.new(sub_lexer, recovery_mode: ENV["CRYSTAL_V2_LSP_RECOVERY"]? == "1")
 parser.parse_program
 
 if ENV["PRINT_TOKENS"]? == "1"

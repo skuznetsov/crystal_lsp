@@ -231,7 +231,7 @@ module CrystalV2
           lexer = Frontend::Lexer.new(output)
 
           # Create parser with existing arena (uses Phase 87B-2 constructor)
-          parser = Frontend::Parser.new(lexer, @arena)
+          parser = Frontend::Parser.new(lexer, @arena, recovery_mode: @recovery_mode)
 
           # Parse as expression
           # Use precedence 0 to parse full expression

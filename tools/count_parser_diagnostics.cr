@@ -26,7 +26,7 @@ scanned = 0
 files.each_with_index do |file, idx|
   source = File.read(file)
   lexer = CrystalV2::Compiler::Frontend::Lexer.new(source)
-  parser = CrystalV2::Compiler::Frontend::Parser.new(lexer)
+  parser = CrystalV2::Compiler::Frontend::Parser.new(lexer, recovery_mode: ENV["CRYSTAL_V2_LSP_RECOVERY"]? == "1")
   begin
     # Optional watchdog to prevent hangs on individual files during a global
     # scan. Enable with environment:
