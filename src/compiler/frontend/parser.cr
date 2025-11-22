@@ -35,6 +35,7 @@ module CrystalV2
         @expect_context : String?
         # Parser context flags
         @parsing_method_params : Bool
+        @recovery_mode : Bool
         # When true, newlines inside braces are skipped as trivia (legacy behavior).
         # Default false so that newlines inside hashes/blocks act as statement separators,
         # preventing constructs like `{ expr\n other }` from being glued into a single expression.
@@ -59,14 +60,16 @@ module CrystalV2
           @no_type_declaration = 0  # Phase 103: Type annotations enabled by default
           @string_pool = lexer.string_pool  # Week 1 Day 2: share string pool for deduplication
           @debug_enabled = ENV["PARSER_DEBUG"]? == "1"  # Enable debug via PARSER_DEBUG=1
-        @parsing_call_args = 0  # Not parsing call args initially
-        @macro_mode = 0
-        @in_macro_expression = false  # Not in macro expression initially
-        @allow_pointer_suffix = 0
-        @streaming = ENV["CRYSTAL_V2_PARSER_STREAM"]? != nil
-        @expect_context = nil
-        @parsing_method_params = false
-        @skip_newlines_in_braces = true
+          @parsing_call_args = 0  # Not parsing call args initially
+          @macro_mode = 0
+          @in_macro_expression = false  # Not in macro expression initially
+          @allow_pointer_suffix = 0
+          @streaming = ENV["CRYSTAL_V2_PARSER_STREAM"]? != nil
+          @expect_context = nil
+          @parsing_method_params = false
+          @skip_newlines_in_braces = true
+          @recovery_mode = ENV["CRYSTAL_V2_LSP_RECOVERY"]? == "1"
+          @recovery_mode = ENV["CRYSTAL_V2_LSP_RECOVERY"]? == "1"
         if @streaming
           @lexer = lexer
           @keep_trivia = ENV["CRYSTAL_V2_PARSER_KEEP_TRIVIA"]? != nil
@@ -151,14 +154,15 @@ module CrystalV2
           @no_type_declaration = 0  # Phase 103: Type annotations enabled by default
           @string_pool = lexer.string_pool  # Week 1 Day 2: share string pool for deduplication
           @debug_enabled = ENV["PARSER_DEBUG"]? == "1"  # Enable debug via PARSER_DEBUG=1
-        @parsing_call_args = 0  # Not parsing call args initially
-        @macro_mode = 0
-        @in_macro_expression = false  # Not in macro expression initially
-        @allow_pointer_suffix = 0
-        @streaming = ENV["CRYSTAL_V2_PARSER_STREAM"]? != nil
+          @parsing_call_args = 0  # Not parsing call args initially
+          @macro_mode = 0
+          @in_macro_expression = false  # Not in macro expression initially
+          @allow_pointer_suffix = 0
+          @streaming = ENV["CRYSTAL_V2_PARSER_STREAM"]? != nil
           @expect_context = nil
           @parsing_method_params = false
           @skip_newlines_in_braces = true
+          @recovery_mode = ENV["CRYSTAL_V2_LSP_RECOVERY"]? == "1"
           if @streaming
             @lexer = lexer
             @keep_trivia = ENV["CRYSTAL_V2_PARSER_KEEP_TRIVIA"]? != nil
@@ -338,7 +342,7 @@ module CrystalV2
           # Tolerate stray branch keywords (else/elsif/rescue/ensure/when) that can
           # appear after macro fast-forwarding or partial recovery. Skip them and
           # continue parsing subsequent statements to avoid cascading diagnostics.
-          if current_token.kind.in?(Token::Kind::Else, Token::Kind::Elsif, Token::Kind::Rescue, Token::Kind::Ensure, Token::Kind::When)
+          if @recovery_mode && current_token.kind.in?(Token::Kind::Else, Token::Kind::Elsif, Token::Kind::Rescue, Token::Kind::Ensure, Token::Kind::When)
             span = current_token.span
             advance
             skip_statement_end
@@ -6208,6 +6212,11 @@ module CrystalV2
                    left_kind == Frontend::NodeKind::MacroVar ||
                    left_kind == Frontend::NodeKind::Index ||
                    left_kind == Frontend::NodeKind::MemberAccess
+              if @recovery_mode
+                @diagnostics << Diagnostic.new("recovered invalid assignment target", token.span)
+              else
+                # Silent failure in strict mode to avoid cascading diagnostics; return error sentinel.
+              end
               return PREFIX_ERROR
             end
 
@@ -9886,6 +9895,13 @@ module CrystalV2
             return
           end
           # Suppress a known false positive: closing ')' while parsing method parameter list
+          if @recovery_mode && token.kind.in?(Token::Kind::Else, Token::Kind::Elsif, Token::Kind::Rescue, Token::Kind::Ensure,
+                                             Token::Kind::When, Token::Kind::Colon, Token::Kind::Eq, Token::Kind::OrOr,
+                                             Token::Kind::Amp, Token::Kind::Spaceship, Token::Kind::Operator, Token::Kind::Arrow,
+                                             Token::Kind::Comma, Token::Kind::Identifier, Token::Kind::EOF)
+            @diagnostics << Diagnostic.new("recovered unexpected #{token.kind}", token.span)
+            return
+          end
           if @parsing_method_params && token.kind == Token::Kind::RParen
             return
           end
