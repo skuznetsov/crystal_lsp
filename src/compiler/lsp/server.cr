@@ -1070,8 +1070,8 @@ module CrystalV2
             end
 
             should_infer = !analyzer.semantic_errors? && result.diagnostics.empty?
-            if @config.best_effort_inference && parser.diagnostics.empty?
-              # Prefer to offer hover/definition even if semantic errors remain.
+            if @config.best_effort_inference
+              # Prefer to offer hover/definition even if semantic errors remain or parser produced recoverable diagnostics.
               should_infer = true
             end
             if using_stub && parser.diagnostics.empty?
