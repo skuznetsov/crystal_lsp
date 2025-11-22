@@ -866,54 +866,74 @@ module CrystalV2
           end
         end
 
+        GUARD_WARN_MS  = 500    # log at debug level above this
+        GUARD_ALERT_MS = 2000   # log at error level above this
+
+        private def with_guard(label : String, &block)
+          start = Time.monotonic
+          begin
+            yield
+          ensure
+            elapsed = Time.monotonic - start
+            ms = (elapsed.total_seconds * 1000).round(1)
+            if ms > GUARD_ALERT_MS
+              log_error("[guard] #{label} took #{ms} ms")
+            elsif ms > GUARD_WARN_MS
+              debug("[guard] #{label} took #{ms} ms")
+            end
+          end
+        end
+
         # Handle JSON-RPC request
         private def handle_request(message : JSON::Any, id : JSON::Any)
           method = message["method"].as_s
           params = message["params"]?
 
-          case method
-          when "initialize"
-            handle_initialize(id, params)
-          when "shutdown"
-            handle_shutdown(id)
-          when "textDocument/hover"
-            handle_hover(id, params)
-          when "textDocument/definition"
-            handle_definition(id, params)
-          when "textDocument/completion"
-            handle_completion(id, params)
-          when "textDocument/signatureHelp"
-            handle_signature_help(id, params)
-          when "textDocument/documentSymbol"
-            handle_document_symbol(id, params)
-          when "textDocument/references"
-            handle_references(id, params)
-          when "textDocument/inlayHint"
-            handle_inlay_hint(id, params)
-          when "textDocument/prepareRename"
-            handle_prepare_rename(id, params)
-          when "textDocument/rename"
-            handle_rename(id, params)
-          when "textDocument/foldingRange"
-            handle_folding_range(id, params)
-          when "textDocument/semanticTokens/full"
-            handle_semantic_tokens(id, params)
-          when "textDocument/prepareCallHierarchy"
-            handle_prepare_call_hierarchy(id, params)
-          when "callHierarchy/incomingCalls"
-            handle_incoming_calls(id, params)
-          when "callHierarchy/outgoingCalls"
-            handle_outgoing_calls(id, params)
-          when "textDocument/codeAction"
-            handle_code_action(id, params)
-          when "textDocument/formatting"
-            handle_formatting(id, params)
-          when "textDocument/rangeFormatting"
-            handle_range_formatting(id, params)
-          when "workspace/symbol"
-            handle_workspace_symbol(id, params)
-          else
-            send_error(id, -32601, "Method not found: #{method}")
+          with_guard("request #{method}") do
+            case method
+            when "initialize"
+              handle_initialize(id, params)
+            when "shutdown"
+              handle_shutdown(id)
+            when "textDocument/hover"
+              handle_hover(id, params)
+            when "textDocument/definition"
+              handle_definition(id, params)
+            when "textDocument/completion"
+              handle_completion(id, params)
+            when "textDocument/signatureHelp"
+              handle_signature_help(id, params)
+            when "textDocument/documentSymbol"
+              handle_document_symbol(id, params)
+            when "textDocument/references"
+              handle_references(id, params)
+            when "textDocument/inlayHint"
+              handle_inlay_hint(id, params)
+            when "textDocument/prepareRename"
+              handle_prepare_rename(id, params)
+            when "textDocument/rename"
+              handle_rename(id, params)
+            when "textDocument/foldingRange"
+              handle_folding_range(id, params)
+            when "textDocument/semanticTokens/full"
+              handle_semantic_tokens(id, params)
+            when "textDocument/prepareCallHierarchy"
+              handle_prepare_call_hierarchy(id, params)
+            when "callHierarchy/incomingCalls"
+              handle_incoming_calls(id, params)
+            when "callHierarchy/outgoingCalls"
+              handle_outgoing_calls(id, params)
+            when "textDocument/codeAction"
+              handle_code_action(id, params)
+            when "textDocument/formatting"
+              handle_formatting(id, params)
+            when "textDocument/rangeFormatting"
+              handle_range_formatting(id, params)
+            when "workspace/symbol"
+              handle_workspace_symbol(id, params)
+            else
+              send_error(id, -32601, "Method not found: #{method}")
+            end
           end
         end
 
@@ -922,20 +942,22 @@ module CrystalV2
           method = message["method"].as_s
           params = message["params"]?
 
-          case method
-          when "initialized"
-            # Client confirms initialization
-            @initialized = true
-          when "textDocument/didOpen"
-            handle_did_open(params) if params
-          when "textDocument/didChange"
-            handle_did_change(params) if params
-          when "textDocument/didClose"
-            handle_did_close(params) if params
-          when "exit"
-            exit(0)
-          else
-            log_error("Unknown notification: #{method}")
+          with_guard("notification #{method}") do
+            case method
+            when "initialized"
+              # Client confirms initialization
+              @initialized = true
+            when "textDocument/didOpen"
+              handle_did_open(params) if params
+            when "textDocument/didChange"
+              handle_did_change(params) if params
+            when "textDocument/didClose"
+              handle_did_close(params) if params
+            when "exit"
+              exit(0)
+            else
+              log_error("Unknown notification: #{method}")
+            end
           end
         end
 
@@ -997,9 +1019,12 @@ module CrystalV2
           requires = [] of String
 
           # Parse
+          parse_start = Time.monotonic
           lexer = Frontend::Lexer.new(source)
           parser = Frontend::Parser.new(lexer, recovery_mode: @config.parser_recovery_mode)
           program = parser.parse_program
+          parse_ms = (Time.monotonic - parse_start).total_seconds * 1000
+          debug("[guard] parse took #{parse_ms.round(1)} ms") if parse_ms > GUARD_WARN_MS
           uses_compiler_module = includes_compiler_module?(program)
           dependency_states = [] of DocumentState
           if load_requires
