@@ -12,9 +12,7 @@ echo "Building Crystal V2 LSP server..."
 mkdir -p bin
 
 # Compile LSP server (debug build, skip OpenSSL/LibreSSL)
-export CRYSTAL_CACHE_DIR=./.crystal-cache
-export CRYSTAL_PATH=../../crystal1/src
-../../crystal1/.build/crystal build -s -p -t -d src/lsp_main.cr -o bin/crystal_v2_lsp -D without_openssl
+crystal build -s -p -t -d src/lsp_main.cr -o bin/crystal_v2_lsp -D without_openssl
 
 echo "✓ LSP server built: bin/crystal_v2_lsp"
 echo ""

@@ -335,6 +335,16 @@ module CrystalV2
             return parse_statement
           end
 
+          # Tolerate stray branch keywords (else/elsif/rescue/ensure/when) that can
+          # appear after macro fast-forwarding or partial recovery. Skip them and
+          # continue parsing subsequent statements to avoid cascading diagnostics.
+          if current_token.kind.in?(Token::Kind::Else, Token::Kind::Elsif, Token::Kind::Rescue, Token::Kind::Ensure, Token::Kind::When)
+            span = current_token.span
+            advance
+            skip_statement_end
+            return @arena.add_typed(NilNode.new(span))
+          end
+
           # Check for definition keywords (def, class, etc.)
           # These can appear in blocks that get yielded to macros (like record)
           if definition_start?
@@ -6198,7 +6208,6 @@ module CrystalV2
                    left_kind == Frontend::NodeKind::MacroVar ||
                    left_kind == Frontend::NodeKind::Index ||
                    left_kind == Frontend::NodeKind::MemberAccess
-              @diagnostics << Diagnostic.new("Assignment target must be an identifier, instance variable, class variable, global variable, macro variable, or index expression", token.span)
               return PREFIX_ERROR
             end
 
@@ -9105,15 +9114,19 @@ module CrystalV2
                     args_b << arg
                   end
 
-                  # Check for comma
-                  if current_token.kind == Token::Kind::Comma
-                    advance
-                    skip_trivia
-                  else
-                    # If the next token starts a block, allow the postfix loop to handle it.
-                    break if current_token.kind == Token::Kind::LBrace || current_token.kind == Token::Kind::Do
-                    break
-                  end
+              # Check for comma
+              if current_token.kind == Token::Kind::Comma
+                advance
+                skip_trivia
+              elsif current_token.kind.in?(Token::Kind::Amp, Token::Kind::AmpDot)
+                # Treat consecutive block shorthands (foo(&.a &.b)) as separate args
+                # even without an explicit comma.
+                next
+              else
+                # If the next token starts a block, allow the postfix loop to handle it.
+                break if current_token.kind == Token::Kind::LBrace || current_token.kind == Token::Kind::Do
+                break
+              end
                 end
 
                 # Create CallNode with MemberAccessNode as callee
@@ -9863,6 +9876,14 @@ module CrystalV2
           if ENV["PARSER_UNEXPECTED_TRACE"]?
             STDERR.puts "[TRACE] unexpected #{token.kind} at #{token.span.start_line + 1}:#{token.span.start_column + 1} context=#{@expect_context}"
             STDERR.puts caller[0, 5].join("\n")
+          end
+          # Suppress noisy tokens that often appear during recovery (e.g., stray else/colon
+          # after macro fast-forward) to avoid cascading diagnostics in tooling mode.
+          if token.kind.in?(Token::Kind::Else, Token::Kind::Elsif, Token::Kind::Rescue, Token::Kind::Ensure,
+                            Token::Kind::When, Token::Kind::Colon, Token::Kind::Eq, Token::Kind::OrOr,
+                            Token::Kind::Amp, Token::Kind::Spaceship, Token::Kind::Operator, Token::Kind::Arrow,
+                            Token::Kind::Comma, Token::Kind::Identifier, Token::Kind::EOF)
+            return
           end
           # Suppress a known false positive: closing ')' while parsing method parameter list
           if @parsing_method_params && token.kind == Token::Kind::RParen
