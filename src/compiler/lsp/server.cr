@@ -5319,6 +5319,15 @@ module CrystalV2
               col = tok.span.start_column
               length = tok.slice.size
               tokens << RawToken.new(line, col, length, SemanticTokenType::Regexp.value)
+            when Frontend::Token::Kind::Identifier
+              # Heuristic: uppercase identifiers are constants/types; color even without semantics
+              slice = tok.slice
+              if slice.size > 0 && slice[0].unsafe_chr.ascii_uppercase?
+                line = tok.span.start_line - 1
+                col = tok.span.start_column - 1
+                length = slice.size
+                tokens << RawToken.new(line, col, length, SemanticTokenType::Type.value)
+              end
             end
           end
         end
