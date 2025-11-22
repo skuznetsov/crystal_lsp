@@ -2981,7 +2981,12 @@ module CrystalV2
             doc_state.path
           )
 
-          debug("Generated semantic tokens")
+          if ENV["LSP_DEBUG"]? || @config.debug_log_path
+            sample = semantic_token_sample(tokens)
+            debug("Semantic tokens count=#{tokens.data.size // 5} uri=#{uri} sample=#{sample}")
+          else
+            debug("Generated semantic tokens")
+          end
           send_response(id, tokens.to_json)
         end
 
@@ -4879,6 +4884,7 @@ module CrystalV2
 
         DECLARATION_MODIFIER = 1 << 0
         NAME_SEARCH_WINDOW   = 512
+        TOKEN_TYPE_NAMES = %w(namespace type class enum interface struct typeParameter parameter variable property enumMember event function method macro keyword modifier comment string number regexp operator)
 
         private struct SemanticTokenContext
           getter program : Frontend::Program
@@ -4953,6 +4959,21 @@ module CrystalV2
           data = delta_encode_tokens(raw_tokens)
 
           SemanticTokens.new(data: data)
+        end
+
+        private def semantic_token_sample(tokens : SemanticTokens, max_items = 10) : Array(String)
+          return [] of String if tokens.data.empty?
+          result = [] of String
+          line = 0
+          col = 0
+          tokens.data.each_slice(5) do |chunk|
+            dl, ds, len, type, mods = chunk
+            line += dl
+            col = dl == 0 ? col + ds : ds
+            result << "#{line + 1}:#{col + 1} len=#{len} type=#{TOKEN_TYPE_NAMES[type]? || type.to_s}"
+            break if result.size >= max_items
+          end
+          result
         end
 
         # Recursively collect tokens from AST nodes
