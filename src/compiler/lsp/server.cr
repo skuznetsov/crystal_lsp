@@ -120,6 +120,8 @@ module CrystalV2
             end
           end
 
+          debug_path = File.expand_path(debug_path) if debug_path
+
           new(debug_path, recovery_mode, best_effort_inference)
         end
       end
@@ -180,7 +182,16 @@ module CrystalV2
 
         def initialize(@input = STDIN, @output = STDOUT, config : ServerConfig = ServerConfig.load)
           @config = config
-          @log_output = config.debug_log_path.try { |path| File.open(path, "a") }
+          @log_output = config.debug_log_path.try do |path|
+            begin
+              dir = File.dirname(path)
+              Dir.mkdir_p(dir) unless Dir.exists?(dir)
+              File.open(path, "a")
+            rescue ex
+              STDERR.puts("[LSP Config] Failed to open debug log #{path}: #{ex.message}")
+              nil
+            end
+          end
           @documents = {} of String => DocumentState
           @prelude_real_mtime = nil
           @seq_id = 1
