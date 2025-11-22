@@ -87,12 +87,14 @@ module CrystalV2
       # Handles initialize, didOpen, publishDiagnostics, and hover
       struct ServerConfig
         getter debug_log_path : String?
+        getter parser_recovery_mode : Bool
 
-        def initialize(@debug_log_path : String? = nil)
+        def initialize(@debug_log_path : String? = nil, @parser_recovery_mode : Bool = true)
         end
 
         def self.load : ServerConfig
           debug_path = ENV["LSP_DEBUG_LOG"]?
+          recovery_mode = true
 
           if config_path = ENV["CRYSTALV2_LSP_CONFIG"]?
             begin
@@ -103,16 +105,15 @@ module CrystalV2
                        JSON.parse(raw)
                      end
               if hash = data.as_h?
-                if value = hash["debug_log_path"]?
-                  debug_path ||= value.as_s?
-                end
+                debug_path ||= hash["debug_log_path"]?.try(&.as_s?)
+                recovery_mode = hash["parser_recovery_mode"]?.try(&.as_bool?)? || recovery_mode
               end
             rescue ex
               STDERR.puts("[LSP Config] Failed to load #{config_path}: #{ex.message}")
             end
           end
 
-          new(debug_path)
+          new(debug_path, recovery_mode)
         end
       end
 
@@ -714,7 +715,7 @@ module CrystalV2
 
           source = File.read(absolute)
           lexer = Frontend::Lexer.new(source)
-          parser = Frontend::Parser.new(lexer)
+          parser = Frontend::Parser.new(lexer, recovery_mode: @config.parser_recovery_mode)
           dep_program = parser.parse_program
           dep_arena = dep_program.arena
 
@@ -990,7 +991,7 @@ module CrystalV2
 
           # Parse
           lexer = Frontend::Lexer.new(source)
-          parser = Frontend::Parser.new(lexer)
+          parser = Frontend::Parser.new(lexer, recovery_mode: @config.parser_recovery_mode)
           program = parser.parse_program
           uses_compiler_module = includes_compiler_module?(program)
           dependency_states = [] of DocumentState
@@ -1126,7 +1127,7 @@ module CrystalV2
           debug("Loading #{label} from #{path}")
           source = File.read(path)
           lexer = Frontend::Lexer.new(source)
-          parser = Frontend::Parser.new(lexer)
+          parser = Frontend::Parser.new(lexer, recovery_mode: @config.parser_recovery_mode)
           program = parser.parse_program
 
           diagnostics = [] of Diagnostic
@@ -1291,7 +1292,7 @@ module CrystalV2
         ) : Bool
           source = File.read(path)
           lexer = Frontend::Lexer.new(source)
-          parser = Frontend::Parser.new(lexer)
+          parser = Frontend::Parser.new(lexer, recovery_mode: @config.parser_recovery_mode)
           program = parser.parse_program
           parser.diagnostics.each { |diag| diagnostics << Diagnostic.from_parser(diag) }
           return false unless parser.diagnostics.empty?
