@@ -108,8 +108,12 @@ module CrystalV2
                      end
               if hash = data.as_h?
                 debug_path ||= hash["debug_log_path"]?.try(&.as_s?)
-                recovery_mode = hash["parser_recovery_mode"]?.try(&.as_bool?)? || recovery_mode
-                best_effort_inference = hash["best_effort_inference"]?.try(&.as_bool?)? || best_effort_inference
+                if value = hash["parser_recovery_mode"]?.try(&.as_bool?)
+                  recovery_mode = value
+                end
+                if value = hash["best_effort_inference"]?.try(&.as_bool?)
+                  best_effort_inference = value
+                end
               end
             rescue ex
               STDERR.puts("[LSP Config] Failed to load #{config_path}: #{ex.message}")
