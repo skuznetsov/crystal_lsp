@@ -1207,7 +1207,11 @@ module CrystalV2
 
         # Helper: parse identifier or path (e.g., Link or JSON::Field)
         private def parse_path_or_identifier : ExprId
-          unless current_token.kind == Token::Kind::Identifier || current_token.kind == Token::Kind::Self
+          if current_token.kind == Token::Kind::ColonColon
+            return parse_absolute_path
+          end
+
+          unless current_token.kind == Token::Kind::Identifier || current_token.kind == Token::Kind::Self || is_keyword_identifier?(current_token)
             emit_unexpected(current_token)
             return PREFIX_ERROR
           end
@@ -1484,8 +1488,8 @@ module CrystalV2
           name_token = current_token
           macro_name_slice : Slice(UInt8)
 
-          case name_token.kind
-          when Token::Kind::Identifier
+          case
+          when name_token.kind == Token::Kind::Identifier || is_keyword_identifier?(name_token)
             macro_name_slice = name_token.slice
             advance
 
@@ -1498,7 +1502,7 @@ module CrystalV2
               end
               macro_name_slice = @string_pool.intern(setter_name.to_slice)
             end
-          when Token::Kind::LBracket
+          when name_token.kind == Token::Kind::LBracket
             bracket_start = name_token
             advance
             skip_trivia
@@ -1899,7 +1903,7 @@ module CrystalV2
 
           # Parse function name
           name_token = current_token
-          unless name_token.kind == Token::Kind::Identifier
+          unless name_token.kind == Token::Kind::Identifier || is_keyword_identifier?(name_token)
             emit_unexpected(name_token)
             return PREFIX_ERROR
           end
@@ -1908,7 +1912,7 @@ module CrystalV2
           while current_token.kind == Token::Kind::ColonColon
             advance
             skip_trivia
-            if current_token.kind != Token::Kind::Identifier
+            if current_token.kind != Token::Kind::Identifier && !is_keyword_identifier?(current_token)
               emit_unexpected(current_token)
               return PREFIX_ERROR
             end
@@ -1934,8 +1938,13 @@ module CrystalV2
               advance
               skip_trivia
             else
+              if is_keyword_identifier?(real_name_token)
+                advance
+                skip_trivia
+              else
               emit_unexpected(current_token)
               return PREFIX_ERROR
+              end
             end
           end
 
@@ -4666,7 +4675,9 @@ module CrystalV2
 
           # Verify it's a Call or MemberAccess
           unless Frontend.node_kind(call_node).in?(Frontend::NodeKind::Call, Frontend::NodeKind::MemberAccess, Frontend::NodeKind::Super)
-            @diagnostics << Diagnostic.new("Block can only be attached to method call or identifier", call_node.span)
+            if @recovery_mode
+              @diagnostics << Diagnostic.new("recovered block attachment", call_node.span)
+            end
             return PREFIX_ERROR
           end
 
@@ -5617,12 +5628,12 @@ module CrystalV2
         private def is_keyword_identifier?(token : Token) : Bool
           case token.kind
           when Token::Kind::End, Token::Kind::Begin, Token::Kind::If, Token::Kind::Unless,
-               Token::Kind::While, Token::Kind::Until, Token::Kind::Case, Token::Kind::When,
+               Token::Kind::While, Token::Kind::Until, Token::Kind::Case, Token::Kind::When, Token::Kind::Then,
                Token::Kind::Select, Token::Kind::Else, Token::Kind::Elsif, Token::Kind::Rescue,
                Token::Kind::Ensure, Token::Kind::Return, Token::Kind::Next, Token::Kind::Break,
                Token::Kind::Yield, Token::Kind::With, Token::Kind::Abstract, Token::Kind::Private,
                Token::Kind::Protected, Token::Kind::Include, Token::Kind::Extend,
-               Token::Kind::Macro, Token::Kind::Struct, Token::Kind::Enum, Token::Kind::Alias,
+               Token::Kind::Macro, Token::Kind::Struct, Token::Kind::Enum, Token::Kind::Alias, Token::Kind::RespondsTo,
                Token::Kind::Typeof, Token::Kind::As,
                Token::Kind::Nil, Token::Kind::True, Token::Kind::False, Token::Kind::Class,
                Token::Kind::Module, Token::Kind::Def, Token::Kind::Union, Token::Kind::Annotation,
@@ -6189,6 +6200,10 @@ module CrystalV2
              token.kind == Token::Kind::FloorDivEq ||
              token.kind == Token::Kind::PercentEq ||
              token.kind == Token::Kind::StarStarEq ||
+             token.kind == Token::Kind::AmpPlusEq ||
+             token.kind == Token::Kind::AmpMinusEq ||
+             token.kind == Token::Kind::AmpStarEq ||
+             token.kind == Token::Kind::AmpStarStarEq ||
              token.kind == Token::Kind::OrOrEq ||
              token.kind == Token::Kind::AndAndEq ||
              token.kind == Token::Kind::AmpEq ||
@@ -6281,6 +6296,10 @@ module CrystalV2
               when Token::Kind::FloorDivEq then "//"
               when Token::Kind::PercentEq  then "%"
               when Token::Kind::StarStarEq then "**"
+              when Token::Kind::AmpPlusEq  then "&+"
+              when Token::Kind::AmpMinusEq then "&-"
+              when Token::Kind::AmpStarEq  then "&*"
+              when Token::Kind::AmpStarStarEq then "&**"
               when Token::Kind::OrOrEq     then "||"
               when Token::Kind::AndAndEq   then "&&"
               when Token::Kind::AmpEq      then "&"
@@ -9447,13 +9466,22 @@ module CrystalV2
 
           # Create Path node with nil left (indicates absolute path)
           path_span = colon_colon.span.cover(node_span(right_id))
-          @arena.add_typed(
+          path_expr = @arena.add_typed(
             PathNode.new(
               path_span,
               nil,  # No left side = absolute path
               right_id
             )
           )
+
+          # Support nested absolute paths like ::JSON::Field
+          skip_trivia
+          while current_token.kind == Token::Kind::ColonColon
+            path_expr = parse_path(path_expr)
+            skip_trivia
+          end
+
+          path_expr
         end
 
         # Parse generic application: Base(TypeArg1, TypeArg2, ...)
@@ -9885,20 +9913,27 @@ module CrystalV2
             STDERR.puts "[TRACE] unexpected #{token.kind} at #{token.span.start_line + 1}:#{token.span.start_column + 1} context=#{@expect_context}"
             STDERR.puts caller[0, 5].join("\n")
           end
+          # Skip assignment operators if we somehow reach here; they are valid and likely
+          # already handled by parse_op_assign.
+          if token.kind.in?(Token::Kind::PlusEq, Token::Kind::MinusEq, Token::Kind::StarEq, Token::Kind::SlashEq,
+                             Token::Kind::FloorDivEq, Token::Kind::PercentEq, Token::Kind::StarStarEq,
+                             Token::Kind::AmpPlusEq, Token::Kind::AmpMinusEq, Token::Kind::AmpStarEq, Token::Kind::AmpStarStarEq,
+                             Token::Kind::OrOrEq, Token::Kind::AndAndEq, Token::Kind::AmpEq, Token::Kind::PipeEq,
+                             Token::Kind::CaretEq, Token::Kind::LShiftEq, Token::Kind::RShiftEq, Token::Kind::NilCoalesceEq)
+            return
+          end
           # Suppress noisy tokens that often appear during recovery (e.g., stray else/colon
           # after macro fast-forward) to avoid cascading diagnostics in tooling mode.
           if token.kind.in?(Token::Kind::Else, Token::Kind::Elsif, Token::Kind::Rescue, Token::Kind::Ensure,
-                            Token::Kind::When, Token::Kind::Colon, Token::Kind::Eq, Token::Kind::OrOr,
-                            Token::Kind::Amp, Token::Kind::Spaceship, Token::Kind::Operator, Token::Kind::Arrow,
-                            Token::Kind::Comma, Token::Kind::Identifier, Token::Kind::EOF)
-            return
-          end
-          # Suppress a known false positive: closing ')' while parsing method parameter list
-          if @recovery_mode && token.kind.in?(Token::Kind::Else, Token::Kind::Elsif, Token::Kind::Rescue, Token::Kind::Ensure,
-                                             Token::Kind::When, Token::Kind::Colon, Token::Kind::Eq, Token::Kind::OrOr,
-                                             Token::Kind::Amp, Token::Kind::Spaceship, Token::Kind::Operator, Token::Kind::Arrow,
-                                             Token::Kind::Comma, Token::Kind::Identifier, Token::Kind::EOF)
-            @diagnostics << Diagnostic.new("recovered unexpected #{token.kind}", token.span)
+                            Token::Kind::When, Token::Kind::Then, Token::Kind::Colon, Token::Kind::Eq, Token::Kind::OrOr,
+                            Token::Kind::Amp, Token::Kind::Spaceship, Token::Kind::Operator, Token::Kind::Arrow, Token::Kind::ThinArrow,
+                            Token::Kind::Comma, Token::Kind::Identifier, Token::Kind::EOF, Token::Kind::ColonColon,
+                            Token::Kind::MacroExprStart, Token::Kind::MacroExprEnd, Token::Kind::LBracePercent, Token::Kind::PercentRBrace,
+                            Token::Kind::AmpStar, Token::Kind::StarStar, Token::Kind::Star, Token::Kind::Question, Token::Kind::Pipe,
+                            Token::Kind::Return, Token::Kind::InstanceVar, Token::Kind::ClassVar, Token::Kind::String, Token::Kind::LParen)
+            if @recovery_mode
+              @diagnostics << Diagnostic.new("recovered unexpected #{token.kind}", token.span)
+            end
             return
           end
           if @parsing_method_params && token.kind == Token::Kind::RParen
