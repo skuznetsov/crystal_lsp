@@ -4,6 +4,8 @@
 # Build artifacts
 bin/crystal
 bin/crystal_v2_lsp*
+compare_parser_outputs
+print_diags_tmp
 *.dwarf
 
 # IDE
