@@ -1313,9 +1313,10 @@ module CrystalV2
         getter span : Span
         getter body : Array(ExprId)
         getter rescue_clauses : Array(RescueClause)?
+        getter else_body : Array(ExprId)?
         getter ensure_body : Array(ExprId)?
 
-        def initialize(@span : Span, @body : Array(ExprId), @rescue_clauses : Array(RescueClause)? = nil, @ensure_body : Array(ExprId)? = nil)
+        def initialize(@span : Span, @body : Array(ExprId), @rescue_clauses : Array(RescueClause)? = nil, @else_body : Array(ExprId)? = nil, @ensure_body : Array(ExprId)? = nil)
         end
       end
 
@@ -2435,6 +2436,16 @@ def self.node_begin_body(node : BeginNode)
 end
 
 def self.node_begin_body(node : TypedNode)
+  nil
+end
+
+# else_body
+
+def self.node_else_body(node : BeginNode)
+  node.else_body
+end
+
+def self.node_else_body(node : TypedNode)
   nil
 end
 

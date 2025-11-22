@@ -8,6 +8,7 @@ module CrystalV2
     module Frontend
       class Lexer
         @last_token_kind : Token::Kind?  # Phase 57: for regex vs division disambiguation
+        @macro_expr_depth : Int32        # Track nesting of {{ ... }} macro expressions
         @string_pool : StringPool  # String interning for memory optimization
         getter string_pool : StringPool  # Week 1 Day 2: expose for parser generic type interning
 
@@ -18,6 +19,7 @@ module CrystalV2
           @column = 1
           @processed_strings = [] of Bytes  # Phase 54: storage for escape-processed strings
           @last_token_kind = nil  # Phase 57: for regex vs division disambiguation
+          @macro_expr_depth = 0
           @string_pool = StringPool.new  # String interning for memory optimization
         end
 
@@ -82,8 +84,10 @@ module CrystalV2
               lex_backtick
             end
           when byte == LEFT_BRACE && peek_byte == LEFT_BRACE
+            @macro_expr_depth += 1
             lex_macro_expr_start
-          when byte == RIGHT_BRACE && peek_byte == RIGHT_BRACE
+          when byte == RIGHT_BRACE && peek_byte == RIGHT_BRACE && @macro_expr_depth > 0
+            @macro_expr_depth -= 1
             lex_macro_expr_end
           when byte == SINGLE_QUOTE
             # Phase 56: Character literals
@@ -2216,19 +2220,36 @@ module CrystalV2
             return nil
           end
           debug "[HEREDOC] current_byte=#{current_byte} (#{current_byte.chr})"
-          unless is_identifier_start?(current_byte)
-            debug "[HEREDOC] returning nil: not identifier start"
-            return nil
-          end
+          delimiter : String
+          if current_byte == SINGLE_QUOTE || current_byte == DOUBLE_QUOTE
+            quote = current_byte
+            advance  # consume opening quote
+            delimiter_start = @offset
+            while @offset < @rope.size && current_byte != quote
+              advance
+            end
+            if @offset >= @rope.size
+              debug "[HEREDOC] returning nil: unterminated quoted delimiter"
+              return nil
+            end
+            delimiter_end = @offset
+            delimiter = String.new(@rope.slice(delimiter_start...delimiter_end))
+            advance  # consume closing quote
+          else
+            unless is_identifier_start?(current_byte)
+              debug "[HEREDOC] returning nil: not identifier start"
+              return nil
+            end
 
-          # Read delimiter
-          delimiter_start = @offset
-          while @offset < @rope.size && is_identifier_part?(current_byte)
-            advance
+            # Read delimiter
+            delimiter_start = @offset
+            while @offset < @rope.size && is_identifier_part?(current_byte)
+              advance
+            end
+            delimiter_end = @offset
+            delimiter = String.new(@rope.slice(delimiter_start...delimiter_end))
           end
-          delimiter_end = @offset
-          delimiter = String.new(@rope.slice(delimiter_start...delimiter_end))
-          debug "[HEREDOC] delimiter='#{delimiter}' (#{delimiter_start}...#{delimiter_end})"
+          debug "[HEREDOC] delimiter='#{delimiter}'"
 
           # Skip to end of line (heredoc content starts on NEXT line)
           while @offset < @rope.size && current_byte != '\n'.ord.to_u8
