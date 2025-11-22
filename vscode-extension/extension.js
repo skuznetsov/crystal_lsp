@@ -28,7 +28,7 @@ function activate(context) {
                 : debugLogPathRaw;
             const dir = path.dirname(expanded);
             fs.mkdirSync(dir, { recursive: true });
-            fs.writeFileSync(tmpConfigPath, JSON.stringify({ debug_log_path: debugLogPath }));
+            fs.writeFileSync(tmpConfigPath, JSON.stringify({ debug_log_path: expanded }));
             env['LSP_DEBUG_LOG'] = expanded; // legacy env for direct path
             env['CRYSTALV2_LSP_CONFIG'] = tmpConfigPath;
         } catch (err) {
