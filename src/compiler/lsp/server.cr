@@ -2408,6 +2408,9 @@ module CrystalV2
             ident ||= identifier_at(doc_state.text_document.text, offset - 1) if offset > 0
             debug("Fallback identifier_at='#{ident || "nil"}'")
             if ident
+              if loc = definition_from_parameters(ident, doc_state, offset)
+                location = loc
+              end
               location = definition_from_constant(ident, doc_state)
             end
           end
@@ -3890,6 +3893,15 @@ module CrystalV2
               end
               return Location.from_symbol(symbol, doc_state.program, uri)
             elsif name_slice
+              if offset = target_offset
+                if location = definition_from_parameters(String.new(name_slice), doc_state, offset)
+                  return location
+                end
+                # Fallback: use identifier span start if click offset fails (e.g., past end_column)
+                if location = definition_from_parameters(String.new(name_slice), doc_state, node.span.start_offset)
+                  return location
+                end
+              end
               return definition_from_constant(String.new(name_slice), doc_state)
             else
               nil
@@ -3941,6 +3953,70 @@ module CrystalV2
           else
             nil
           end
+        end
+
+        # Fallback: resolve identifiers to enclosing def/block/proc parameters when no symbol info
+        private def definition_from_parameters(name : String, doc_state : DocumentState, target_offset : Int32) : Location?
+          arena = doc_state.program.arena
+          path = doc_state.path
+
+          best_node = nil
+          best_span = nil
+
+          # Find the smallest enclosing callable (def/proc/block) containing the click offset
+          i = 0
+          while i < arena.size
+            expr_id = Frontend::ExprId.new(i)
+            node = arena[expr_id]
+            case node
+            when Frontend::DefNode, Frontend::BlockNode, Frontend::ProcLiteralNode
+              span = node.span
+              next unless span_contains_offset?(span, target_offset)
+
+              if path
+                if virtual = arena.as?(Frontend::VirtualArena)
+                  file = virtual.file_for_id(expr_id)
+                  if file && File.expand_path(file) != path
+                    i += 1
+                    next
+                  end
+                end
+              end
+
+              size = span.end_offset - span.start_offset
+              if best_span.nil? || size < (best_span.end_offset - best_span.start_offset)
+                best_span = span
+                best_node = node
+              end
+            end
+            i += 1
+          end
+
+          return nil unless best_node && best_span
+
+          params = case best_node
+                   when Frontend::DefNode
+                     best_node.params
+                   when Frontend::BlockNode
+                     best_node.params
+                   when Frontend::ProcLiteralNode
+                     best_node.params
+                   else
+                     nil
+                   end
+
+          return nil unless params
+
+          params.each do |param|
+            p_name = param.name
+            next unless p_name
+            next unless String.new(p_name) == name
+            span = param.name_span || param.span
+            range = Range.from_span(span)
+            return Location.new(uri: doc_state.text_document.uri, range: range)
+          end
+
+          nil
         end
 
         private def definition_from_member_access(
