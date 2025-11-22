@@ -3877,9 +3877,8 @@ module CrystalV2
             name_slice = node.name
             debug("Identifier node: #{name_slice ? String.new(name_slice) : "<anon>"}")
             identifier_symbols = doc_state.identifier_symbols
-            return nil unless identifier_symbols
-            symbol = identifier_symbols[expr_id]?
-            debug("Identifier symbol: #{symbol ? symbol.class : "nil"}")
+            symbol = identifier_symbols ? identifier_symbols[expr_id]? : nil
+            debug("Identifier symbol: #{symbol ? symbol.class : "nil"} (identifier_symbols nil?=#{identifier_symbols.nil?})")
             if symbol
               if location = location_for_symbol(symbol)
                 return location
@@ -5495,6 +5494,7 @@ module CrystalV2
                Frontend::Token::Kind::Until,
                Frontend::Token::Kind::Unless,
                Frontend::Token::Kind::Case,
+               Frontend::Token::Kind::When,
                Frontend::Token::Kind::Then,
                Frontend::Token::Kind::Rescue,
                Frontend::Token::Kind::Ensure,
