@@ -3462,7 +3462,8 @@ module CrystalV2
             @arena.add_typed(ReturnNode.new(return_token.span, nil))
           else
             # Return with value (support multiple values → implicit tuple)
-            first_value = parse_expression(0)
+            # Use parse_op_assign to allow assignment expressions (return x = 1)
+            first_value = parse_op_assign
             return PREFIX_ERROR if first_value.invalid?
 
             skip_trivia
@@ -3471,7 +3472,7 @@ module CrystalV2
               loop do
                 advance  # consume comma
                 skip_trivia
-                val = parse_expression(0)
+                val = parse_op_assign
                 return PREFIX_ERROR if val.invalid?
                 values << val
                 skip_trivia
@@ -4263,7 +4264,7 @@ module CrystalV2
                 skip_trivia
                 loop do
                   name_token = current_token
-                  unless name_token.kind == Token::Kind::Identifier
+                  unless token_can_be_arg_name?(name_token)
                     emit_unexpected(name_token)
                     return PREFIX_ERROR
                   end
@@ -4303,7 +4304,7 @@ module CrystalV2
                 # fallthrough to trailing comma/pipe handling
               else
                 name_token = current_token
-                unless name_token.kind == Token::Kind::Identifier
+                unless token_can_be_arg_name?(name_token)
                   emit_unexpected(name_token)
                   return PREFIX_ERROR
                 end
