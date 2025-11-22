@@ -45,6 +45,11 @@
           ],
           "default": "off",
           "description": "Traces the communication between VS Code and the language server"
+        },
+        "crystalv2.lsp.debugLogPath": {
+          "type": "string",
+          "default": "",
+          "description": "Write LSP debug logs (including semantic token samples) to this file path when set."
         }
       }
     }

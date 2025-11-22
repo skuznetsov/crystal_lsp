@@ -2,7 +2,8 @@ import json, os, pathlib, subprocess, sys
 
 ROOT = pathlib.Path(__file__).resolve().parents[1]
 SERVER_PATH = ROOT / "bin" / "crystal_v2_lsp"
-DOC_PATH = ROOT / "benchmarks" / "bench_parser_single.cr"
+# Default doc path targets the protocol case block; override via argv
+DOC_PATH = pathlib.Path(sys.argv[1]) if len(sys.argv) > 1 else (ROOT / "src" / "compiler" / "lsp" / "protocol.cr")
 
 if not SERVER_PATH.exists():
     print(f"Server binary not found at {SERVER_PATH}", file=sys.stderr)

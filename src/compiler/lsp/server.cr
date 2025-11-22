@@ -4517,7 +4517,7 @@ module CrystalV2
                 io << '('
                 params.each_with_index do |param, index|
                   io << ", " if index > 0
-                  io << extract_snippet(source_text, param.span)
+                  append_parameter_signature(io, param)
                 end
                 io << ')'
               else

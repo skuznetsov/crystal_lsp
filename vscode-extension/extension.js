@@ -10,9 +10,30 @@ function activate(context) {
     const serverPath = context.asAbsolutePath('../bin/crystal_v2_lsp');
 
     // Server options
+    // Allow user to configure debug logging via VS Code settings.
+    // When crystalV2.lsp.debugLogPath is set, pass CRYSTALV2_LSP_CONFIG pointing to a temp JSON
+    // so the server writes detailed logs (including semantic token samples) to that path.
+    const config = vscode.workspace.getConfiguration('crystalV2');
+    const debugLogPath = config.get('lsp.debugLogPath');
+
+    const env = { ...process.env };
+    if (debugLogPath) {
+        // Inline JSON config via env var; server already understands CRYSTALV2_LSP_CONFIG
+        const tmpConfigPath = `/tmp/crystal_v2_lsp_config_${process.pid}.json`;
+        const fs = require('fs');
+        try {
+            fs.writeFileSync(tmpConfigPath, JSON.stringify({ debug_log_path: debugLogPath }));
+            env['CRYSTALV2_LSP_CONFIG'] = tmpConfigPath;
+        } catch (err) {
+            console.warn('Failed to write LSP debug config', err);
+        }
+        env['LSP_DEBUG'] = '1';
+    }
+
     const serverOptions = {
         command: serverPath,
         args: [],
+        options: { env },
         transport: TransportKind.stdio
     };
 
