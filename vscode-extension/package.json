@@ -52,6 +52,11 @@
           "description": "Write LSP debug logs (including semantic token samples) to this file path when set."
         }
       }
+    },
+    "configurationDefaults": {
+      "[crystal]": {
+        "editor.semanticHighlighting.enabled": true
+      }
     }
   },
   "dependencies": {
