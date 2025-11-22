@@ -88,13 +88,15 @@ module CrystalV2
       struct ServerConfig
         getter debug_log_path : String?
         getter parser_recovery_mode : Bool
+        getter best_effort_inference : Bool
 
-        def initialize(@debug_log_path : String? = nil, @parser_recovery_mode : Bool = true)
+        def initialize(@debug_log_path : String? = nil, @parser_recovery_mode : Bool = true, @best_effort_inference : Bool = true)
         end
 
         def self.load : ServerConfig
           debug_path = ENV["LSP_DEBUG_LOG"]?
           recovery_mode = true
+          best_effort_inference = true
 
           if config_path = ENV["CRYSTALV2_LSP_CONFIG"]?
             begin
@@ -107,13 +109,14 @@ module CrystalV2
               if hash = data.as_h?
                 debug_path ||= hash["debug_log_path"]?.try(&.as_s?)
                 recovery_mode = hash["parser_recovery_mode"]?.try(&.as_bool?)? || recovery_mode
+                best_effort_inference = hash["best_effort_inference"]?.try(&.as_bool?)? || best_effort_inference
               end
             rescue ex
               STDERR.puts("[LSP Config] Failed to load #{config_path}: #{ex.message}")
             end
           end
 
-          new(debug_path, recovery_mode)
+          new(debug_path, recovery_mode, best_effort_inference)
         end
       end
 
@@ -1067,6 +1070,10 @@ module CrystalV2
             end
 
             should_infer = !analyzer.semantic_errors? && result.diagnostics.empty?
+            if @config.best_effort_inference && parser.diagnostics.empty?
+              # Prefer to offer hover/definition even if semantic errors remain.
+              should_infer = true
+            end
             if using_stub && parser.diagnostics.empty?
               debug("Stub prelude active; forcing type inference despite semantic errors")
               should_infer = true
