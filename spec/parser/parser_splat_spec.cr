@@ -244,6 +244,31 @@ describe "CrystalV2::Compiler::Frontend::Parser" do
       String.new(params[0].type_annotation.not_nil!).should eq("*T")
     end
 
+    it "parses method with typed double splat and tuple return type" do
+      source = <<-CRYSTAL
+      def foo(**opts : String) : {Int32, String}
+      end
+      CRYSTAL
+
+      parser = CrystalV2::Compiler::Frontend::Parser.new(CrystalV2::Compiler::Frontend::Lexer.new(source))
+      program = parser.parse_program
+
+      program.roots.size.should eq(1)
+      arena = program.arena
+
+      method_node = arena[program.roots[0]]
+      CrystalV2::Compiler::Frontend.node_kind(method_node).should eq(CrystalV2::Compiler::Frontend::NodeKind::Def)
+
+      params = CrystalV2::Compiler::Frontend.node_def_params(method_node).not_nil!
+      params.size.should eq(1)
+      String.new(params[0].name.not_nil!).should eq("opts")
+      params[0].is_double_splat.should be_true
+      String.new(params[0].type_annotation.not_nil!).should eq("String")
+
+      return_type = CrystalV2::Compiler::Frontend.node_def_return_type(method_node).not_nil!
+      String.new(return_type).should eq("{Int32, String}")
+    end
+
     it "parses splat in method inside class" do
       source = <<-CRYSTAL
       class Foo
