@@ -149,3 +149,4 @@ information must match what the original compiler would infer.
 - [ ] JVM/backends (defer until LSP is solid):
   - [ ] Narrow JVM target (e.g., Java Agent) as an experiment after LSP+graphs are stable.
   - [ ] Keep memory semantics consistent across backends; Shared→GC, Region/Stack→local buffers/FFM where possible.
+- [ ] Zero-copy name handling: reduce `String` allocations in symbol/definition lookup by interning or span-based lookups; build strings only at LSP/JSON boundary.
