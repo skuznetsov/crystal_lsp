@@ -221,6 +221,29 @@ describe "CrystalV2::Compiler::Frontend::Parser" do
       params[3].is_double_splat.should be_true
     end
 
+    it "parses typed splat parameter with splat type" do
+      source = <<-CRYSTAL
+      def foo(*args : *T)
+      end
+      CRYSTAL
+
+      parser = CrystalV2::Compiler::Frontend::Parser.new(CrystalV2::Compiler::Frontend::Lexer.new(source))
+      program = parser.parse_program
+
+      program.roots.size.should eq(1)
+      arena = program.arena
+
+      method_node = arena[program.roots[0]]
+      CrystalV2::Compiler::Frontend.node_kind(method_node).should eq(CrystalV2::Compiler::Frontend::NodeKind::Def)
+
+      params = CrystalV2::Compiler::Frontend.node_def_params(method_node).not_nil!
+      params.size.should eq(1)
+
+      String.new(params[0].name.not_nil!).should eq("args")
+      params[0].is_splat.should be_true
+      String.new(params[0].type_annotation.not_nil!).should eq("*T")
+    end
+
     it "parses splat in method inside class" do
       source = <<-CRYSTAL
       class Foo

@@ -244,5 +244,27 @@ describe "CrystalV2::Compiler::Frontend::Parser" do
       entries[0].key.should eq("a".to_slice)
       entries[4].key.should eq("e".to_slice)
     end
+
+    it "parses hash literal with multiple arrows and chained calls" do
+      source = <<-CRYSTAL
+      RFC_2822_LOCATIONS = {
+        "UT"  => 0,
+        "GMT" => 0,
+        "EST" => -5.hours,
+      }
+      CRYSTAL
+
+      parser = CrystalV2::Compiler::Frontend::Parser.new(CrystalV2::Compiler::Frontend::Lexer.new(source))
+      program = parser.parse_program
+
+      program.roots.size.should eq(1)
+      arena = program.arena
+
+      const_node = arena[program.roots[0]]
+      CrystalV2::Compiler::Frontend.node_kind(const_node).should eq(CrystalV2::Compiler::Frontend::NodeKind::Constant)
+
+      hash = arena[CrystalV2::Compiler::Frontend.node_constant_value(const_node).not_nil!]
+      CrystalV2::Compiler::Frontend.node_kind(hash).should eq(CrystalV2::Compiler::Frontend::NodeKind::HashLiteral)
+    end
   end
 end

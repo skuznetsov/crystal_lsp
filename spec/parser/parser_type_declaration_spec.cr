@@ -197,5 +197,24 @@ describe "CrystalV2::Compiler::Frontend::Parser" do
       String.new(CrystalV2::Compiler::Frontend.node_type_decl_name(type_decl).not_nil!).should eq("data")
       String.new(CrystalV2::Compiler::Frontend.node_type_decl_type(type_decl).not_nil!).should eq("Hash")
     end
+
+    it "parses method with tuple return type annotation" do
+      source = <<-CRYSTAL
+      def pair(x, y) : {Int32, String}
+      end
+      CRYSTAL
+
+      parser = CrystalV2::Compiler::Frontend::Parser.new(CrystalV2::Compiler::Frontend::Lexer.new(source))
+      program = parser.parse_program
+
+      program.roots.size.should eq(1)
+      arena = program.arena
+
+      method_node = arena[program.roots[0]]
+      CrystalV2::Compiler::Frontend.node_kind(method_node).should eq(CrystalV2::Compiler::Frontend::NodeKind::Def)
+
+      return_type = CrystalV2::Compiler::Frontend.node_def_return_type(method_node).not_nil!
+      String.new(return_type).should eq("{Int32, String}")
+    end
   end
 end
