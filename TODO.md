@@ -16,8 +16,8 @@ about syntax or types and should match what the original compiler would report.
         parser diagnostics**.
 - [ ] Close remaining parser gaps seen on vanilla stdlib (CRYSTAL_PATH scan):
   - [x] Command-call chains inside type expressions (`typeof(Enumerable.element_type Enumerable.element_type self)` in `array.cr`).
-  - [ ] Tuple types in annotations (`def foo : {A, B}` and `{K, V}` signatures).
-  - [ ] Double splat in typed params (`def self.new(*args : *T)`).
+  - [x] Tuple types in annotations (`def foo : {A, B}` and `{K, V}` signatures).
+  - [x] Double splat in typed params (`def self.new(*args : *T)`).
   - [ ] Robust block/if/else parsing in large bodies (e.g., `string.cr` around deeply nested conditionals).
   - [ ] Fix false `Arrow` recoveries in `time/format/parser.cr` hash literals.
 - [ ] Align v2 parser behavior with `src/compiler/crystal/syntax/parser.cr`:
