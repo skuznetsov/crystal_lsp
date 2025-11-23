@@ -1951,6 +1951,7 @@ module CrystalV2
           next_byte = current_byte
           literal_type = Token::Kind::String  # default for %()
           array_type : Symbol? = nil  # :word_array for %w(), :symbol_array for %i()
+          type_char : Char? = nil
 
           # Determine literal type
           case next_byte.chr
@@ -1960,6 +1961,7 @@ module CrystalV2
             close_delim = closing_delimiter(open_delim)
             advance  # consume opening delimiter
           when 'q', 'Q'
+            type_char = next_byte.chr
             advance  # consume 'q' or 'Q'
             return nil if @offset >= @rope.size
             open_delim = current_byte
@@ -2027,6 +2029,7 @@ module CrystalV2
             return Token.new(Token::Kind::Regex, processed, build_span(start_offset, start_line, start_column))
           when 'w'
             # %w(...) - word array
+            type_char = 'w'
             advance  # consume 'w'
             return nil if @offset >= @rope.size
             open_delim = current_byte
@@ -2037,6 +2040,7 @@ module CrystalV2
             advance  # consume opening delimiter
           when 'i'
             # %i(...) - symbol array
+            type_char = 'i'
             advance  # consume 'i'
             return nil if @offset >= @rope.size
             open_delim = current_byte
@@ -2053,13 +2057,34 @@ module CrystalV2
           # Scan content with nesting support
           buffer = IO::Memory.new
           nesting_level = 0
+          content_start = @offset
+          content_end = @offset
+          interpolation_depth = 0
+          has_interpolation = false
+          heredoc_inside_interpolation = false
+          interpolation_allowed = array_type.nil? && literal_type == Token::Kind::String && type_char != 'q'
 
           while @offset < @rope.size
             byte = current_byte
 
+            if interpolation_allowed
+              if byte == HASH && @offset + 1 < @rope.size && @rope.bytes[@offset + 1] == LEFT_BRACE
+                has_interpolation = true
+                interpolation_depth += 1
+              elsif interpolation_depth > 0
+                if byte == '<'.ord.to_u8 && @offset + 2 < @rope.size && @rope.bytes[@offset + 1] == '<'.ord.to_u8 && @rope.bytes[@offset + 2] == '-'.ord.to_u8
+                  heredoc_inside_interpolation = true
+                  debug("heredoc in percent literal interpolation detected")
+                end
+                interpolation_depth += 1 if byte == LEFT_BRACE
+                interpolation_depth -= 1 if byte == RIGHT_BRACE
+              end
+            end
+
             # Check for closing delimiter
             if byte == close_delim
               if nesting_level == 0
+                content_end = @offset
                 advance  # consume closing delimiter
                 break
               else
@@ -2083,6 +2108,17 @@ module CrystalV2
               buffer.write_byte byte
               advance
             end
+          end
+
+          span = build_span(start_offset, start_line, start_column)
+
+          if interpolation_allowed && heredoc_inside_interpolation
+            emit_diagnostic("heredoc cannot be used inside interpolation", span)
+          end
+
+          if interpolation_allowed && has_interpolation
+            content_slice = @rope.bytes[content_start...content_end]
+            return Token.new(Token::Kind::StringInterpolation, content_slice, span)
           end
 
           # Get the slice from rope for the entire literal (including delimiters)

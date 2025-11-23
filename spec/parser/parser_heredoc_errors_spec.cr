@@ -14,16 +14,14 @@ describe "CrystalV2::Compiler::Frontend::Parser" do
       parser.diagnostics.should_not be_empty
     end
 
-    pending "heredoc interpolation diagnostic not fully wired yet" do
-      it "reports heredoc inside interpolation" do
-        source = %(\#{<<-HERE}\nHERE)
-        parser = CrystalV2::Compiler::Frontend::Parser.new(
-          CrystalV2::Compiler::Frontend::Lexer.new(source, diagnostics: [] of CrystalV2::Compiler::Frontend::Diagnostic)
-        )
-        parser.parse_program
+    it "reports heredoc inside interpolation" do
+      source = %q("#{<<-HERE}\nHERE")
+      parser = CrystalV2::Compiler::Frontend::Parser.new(
+        CrystalV2::Compiler::Frontend::Lexer.new(source, diagnostics: [] of CrystalV2::Compiler::Frontend::Diagnostic)
+      )
+      parser.parse_program
 
-        parser.diagnostics.should_not be_empty
-      end
+      parser.diagnostics.should_not be_empty
     end
 
     it "reports missing terminator" do
