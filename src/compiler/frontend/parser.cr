@@ -1493,10 +1493,24 @@ module CrystalV2
           name_token = current_token
           macro_name_slice : Slice(UInt8)
 
+          receiver_present = false
+
           case
           when name_token.kind == Token::Kind::Identifier || is_keyword_identifier?(name_token)
             macro_name_slice = name_token.slice
             advance
+
+            # Macro can't have a receiver: detect identifier DOT identifier
+            if current_token.kind == Token::Kind::Operator && current_token.slice == ".".to_slice
+              @diagnostics << Diagnostic.new("macro can't have a receiver", name_token.span.cover(current_token.span))
+              # Consume dot and next identifier to recover
+              advance
+              skip_trivia
+              if current_token.kind == Token::Kind::Identifier
+                advance
+              end
+              return PREFIX_ERROR
+            end
 
             # Support setter-like macro names foo=
             if current_token.kind == Token::Kind::Eq
@@ -1529,6 +1543,10 @@ module CrystalV2
 
             # For span calculations below keep original LBracket token
             name_token = bracket_start
+          when Token::Kind::Do  # Dot token not emitted; treat unexpected receiver tokens similarly
+            # Macro can't have a receiver
+            @diagnostics << Diagnostic.new("macro can't have a receiver", name_token.span)
+            return PREFIX_ERROR
           when Token::Kind::Plus, Token::Kind::Minus, Token::Kind::Star, Token::Kind::Slash,
                Token::Kind::FloorDiv, Token::Kind::Percent, Token::Kind::StarStar,
                Token::Kind::Less, Token::Kind::Greater, Token::Kind::LessEq, Token::Kind::GreaterEq,
@@ -1545,7 +1563,7 @@ module CrystalV2
             return PREFIX_ERROR
           end
 
-          skip_macro_parameters
+          skip_macro_parameters(macro_token, macro_name_slice)
           # Allow immediate separators after header (e.g., `struct X; end`)
           skip_statement_end
 
@@ -5970,20 +5988,59 @@ module CrystalV2
           )
         end
 
-        private def skip_macro_parameters
+        private def skip_macro_parameters(macro_token : Token, macro_name_slice : Slice(UInt8))
           skip_trivia
           return unless current_token.kind == Token::Kind::LParen
 
           advance
           depth = 1
+          seen_bare_splat = false
+          seen_double_splat = false
+          seen_non_block_after_double_splat = false
+          named_after_bare_splat = false
           while depth > 0 && current_token.kind != Token::Kind::EOF
             case current_token.kind
             when Token::Kind::LParen
               depth += 1
             when Token::Kind::RParen
               depth -= 1
+            when Token::Kind::Star
+              # bare * marks end of positional args; named must follow
+              if seen_double_splat
+                @diagnostics << Diagnostic.new("only block parameter is allowed after double splat", current_token.span)
+              end
+              seen_bare_splat = true
+            when Token::Kind::StarStar
+              if seen_double_splat
+                @diagnostics << Diagnostic.new("only block parameter is allowed after double splat", current_token.span)
+              end
+              seen_double_splat = true
+            when Token::Kind::String
+              # external name cannot be empty
+              if current_token.slice.empty?
+                @diagnostics << Diagnostic.new("external parameter name cannot be empty", current_token.span)
+              end
+              if seen_bare_splat && !seen_double_splat
+                named_after_bare_splat = true
+              end
+            when Token::Kind::Identifier
+              if seen_double_splat
+                # any identifier after ** is invalid unless it's a block marker (handled elsewhere)
+                seen_non_block_after_double_splat = true
+              elsif seen_bare_splat
+                # named args must follow bare *
+                @diagnostics << Diagnostic.new("named parameters must follow bare *", current_token.span)
+                named_after_bare_splat = true
+              end
             end
             advance
+          end
+
+          if seen_non_block_after_double_splat
+            @diagnostics << Diagnostic.new("only block parameter is allowed after double splat", macro_token.span)
+          end
+          if seen_bare_splat && !named_after_bare_splat
+            @diagnostics << Diagnostic.new("named parameters must follow bare *", macro_token.span)
           end
         end
 
