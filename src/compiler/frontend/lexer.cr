@@ -940,6 +940,7 @@ module CrystalV2
           # Track interpolation brace depth so embedded quotes inside #{...} don't terminate scanning.
           scan_offset = @offset
           brace_depth = 0
+          heredoc_inside_interpolation = false
           while scan_offset < @rope.size
             byte = @rope.bytes[scan_offset]
 
@@ -955,6 +956,10 @@ module CrystalV2
             end
 
             if brace_depth > 0
+              # Detect heredoc start within interpolation for diagnostics
+              if byte == '<'.ord.to_u8 && scan_offset + 2 < @rope.size && @rope.bytes[scan_offset + 1] == '<'.ord.to_u8 && @rope.bytes[scan_offset + 2] == '-'.ord.to_u8
+                heredoc_inside_interpolation = true
+              end
               if byte == LEFT_BRACE
                 brace_depth += 1
               elsif byte == RIGHT_BRACE
@@ -970,6 +975,11 @@ module CrystalV2
             scan_offset += 1
           end
 
+          # Emit diagnostic if we already saw heredoc opener inside interpolation during scan
+          if heredoc_inside_interpolation
+            emit_diagnostic("heredoc cannot be used inside interpolation", build_span(start_offset, start_line, start_column))
+          end
+
           # If no escapes, use original fast path
           if !has_escapes
             brace_depth_fast = 0
@@ -979,6 +989,9 @@ module CrystalV2
               end
 
               if brace_depth_fast == 0 && current_byte == HASH && @offset + 1 < @rope.size && @rope.bytes[@offset + 1] == LEFT_BRACE
+                if @offset + 4 < @rope.size && @rope.bytes[@offset + 2] == '<'.ord.to_u8 && @rope.bytes[@offset + 3] == '<'.ord.to_u8 && @rope.bytes[@offset + 4] == '-'.ord.to_u8
+                  heredoc_inside_interpolation = true
+                end
                 brace_depth_fast = 1
                 advance(2)
                 next
@@ -992,6 +1005,9 @@ module CrystalV2
             advance if @offset < @rope.size # closing quote
 
             kind = has_interpolation ? Token::Kind::StringInterpolation : Token::Kind::String
+            if heredoc_inside_interpolation
+              emit_diagnostic("heredoc cannot be used inside interpolation", build_span(start_offset, start_line, start_column))
+            end
             return Token.new(
               kind,
               @rope.bytes[from...@offset - 1],
@@ -1015,6 +1031,9 @@ module CrystalV2
               brace_depth_processed += 1
               next
             elsif brace_depth_processed > 0
+              if current_byte == '<'.ord.to_u8 && @offset + 2 < @rope.size && @rope.bytes[@offset + 1] == '<'.ord.to_u8 && @rope.bytes[@offset + 2] == '-'.ord.to_u8
+                heredoc_inside_interpolation = true
+              end
               if current_byte == LEFT_BRACE
                 brace_depth_processed += 1
               elsif current_byte == RIGHT_BRACE
@@ -1110,6 +1129,9 @@ module CrystalV2
 
           # Return token with processed string
           kind = has_interpolation ? Token::Kind::StringInterpolation : Token::Kind::String
+          if heredoc_inside_interpolation
+            emit_diagnostic("heredoc cannot be used inside interpolation", build_span(start_offset, start_line, start_column))
+          end
           Token.new(
             kind,
             processed_bytes,
