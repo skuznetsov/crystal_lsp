@@ -2346,21 +2346,19 @@ module CrystalV2
           # Accumulate content until we find delimiter on its own line
           content = IO::Memory.new
 
+          min_indent_seen = Int32::MAX
+          closing_indent = 0
+
           loop do
             debug "[HEREDOC] loop iteration, offset=#{@offset}"
             line_start = @offset
 
-            # Capture indentation to validate (must be >= 2 for <<- form)
-            indent_start = @offset
+            # Capture indentation (allowed to be zero with <<-)
             while @offset < @rope.size && (current_byte == ' '.ord.to_u8 || current_byte == '\t'.ord.to_u8)
               advance
             end
-            indent = @offset - indent_start
-
-            if indent < 2
-              emit_diagnostic("heredoc line must have an indent greater than or equal to 2", Span.new(line_start, @offset, @line, 1, @line, @column))
-              return nil
-            end
+            indent = @offset - line_start
+            min_indent_seen = indent if indent < min_indent_seen
 
             # Check if this line starts with delimiter (after whitespace)
             matches_delimiter = true
@@ -2379,6 +2377,7 @@ module CrystalV2
               # Check that delimiter is followed by newline or EOF
               if @offset >= @rope.size || current_byte == '\n'.ord.to_u8 || current_byte == '\r'.ord.to_u8
                 debug "[HEREDOC] delimiter properly terminated, breaking"
+                closing_indent = indent
                 # Found end delimiter, consume newline if present
                 if @offset < @rope.size && (current_byte == '\n'.ord.to_u8 || current_byte == '\r'.ord.to_u8)
                   advance
@@ -2411,6 +2410,11 @@ module CrystalV2
             advance
             @line += 1
             @column = 0
+          end
+
+          # Emit diagnostic if content indent is less than closing delimiter indent
+          if min_indent_seen < closing_indent
+            emit_diagnostic("heredoc line must have an indent greater than or equal to #{closing_indent}", Span.new(start_offset, @offset, start_line, start_column, @line, @column))
           end
 
           # Create string token

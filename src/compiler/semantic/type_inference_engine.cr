@@ -2027,23 +2027,8 @@ module CrystalV2
 
           # Case 1: Explicit "of Type" syntax ([] of Int32)
           if of_type_expr_id = node.of_type
-            # Try to resolve the explicit element type
-            if explicit_type = type_from_type_expr(of_type_expr_id)
-              element_type = explicit_type
-            else
-              # Fall back to elements
-              if elements = node.elements
-                if elements.empty?
-                  element_type = @context.nil_type
-                else
-                  tmp = Array(Type).new(elements.size)
-                  elements.each { |elem_id| tmp << infer_expression(elem_id) }
-                  element_type = union_of(tmp)
-                end
-              else
-                element_type = @context.nil_type
-              end
-            end
+            # Phase 91A: parser-only pass — use Nil placeholder until full type extraction
+            element_type = @context.nil_type
           # Case 2: Infer from elements
           elsif elements = node.elements
             if elements.empty?

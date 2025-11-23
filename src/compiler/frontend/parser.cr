@@ -38,6 +38,7 @@ module CrystalV2
         # Parser context flags
         @parsing_method_params : Bool
         @recovery_mode : Bool
+        @allow_inline_rescue : Bool?
         # When true, newlines inside braces are skipped as trivia (legacy behavior).
         # Default false so that newlines inside hashes/blocks act as statement separators,
         # preventing constructs like `{ expr\n other }` from being glued into a single expression.
@@ -69,10 +70,11 @@ module CrystalV2
           @streaming = ENV["CRYSTAL_V2_PARSER_STREAM"]? != nil
           @expect_context = nil
           @parsing_method_params = false
-        @skip_newlines_in_braces = true
-        @recovery_mode = recovery_mode
-        @consume_postfix_modifiers = true
-        @macro_expr_synth_index = nil
+          @skip_newlines_in_braces = true
+          @recovery_mode = recovery_mode
+          @consume_postfix_modifiers = true
+          @macro_expr_synth_index = nil
+          @allow_inline_rescue = true
           # Ensure lexer can emit diagnostics into this parser's buffer
           lexer.diagnostics = @diagnostics
 
@@ -122,16 +124,18 @@ module CrystalV2
 
         private def parse_block_body_with_optional_rescue : Tuple(Array(ExprId), Array(RescueClause)?, Array(ExprId)?, Array(ExprId)?)
           body_ids_b = SmallVec(ExprId, 4).new
-          loop do
-            skip_statement_end
-            token = current_token
-            break if token.kind == Token::Kind::Rescue || token.kind == Token::Kind::Ensure || token.kind == Token::Kind::Else || token.kind == Token::Kind::End
-            break if token.kind == Token::Kind::EOF
-            break if macro_terminator_reached?(token)  # Phase 103K: Stop at macro terminators
+          without_inline_rescue do
+            loop do
+              skip_statement_end
+              token = current_token
+              break if token.kind == Token::Kind::Rescue || token.kind == Token::Kind::Ensure || token.kind == Token::Kind::Else || token.kind == Token::Kind::End
+              break if token.kind == Token::Kind::EOF
+              break if macro_terminator_reached?(token)  # Phase 103K: Stop at macro terminators
 
-            expr = parse_statement
-            body_ids_b << expr unless expr.invalid?
-            skip_statement_end
+              expr = parse_statement
+              body_ids_b << expr unless expr.invalid?
+              skip_statement_end
+            end
           end
 
           rescue_clauses = nil
@@ -170,6 +174,7 @@ module CrystalV2
           @skip_newlines_in_braces = true
           @recovery_mode = recovery_mode
           @consume_postfix_modifiers = true
+          @allow_inline_rescue = true
           if @streaming
             @lexer = lexer
             @keep_trivia = ENV["CRYSTAL_V2_PARSER_KEEP_TRIVIA"]? != nil
@@ -1043,6 +1048,15 @@ module CrystalV2
           @consume_postfix_modifiers = prev
         end
 
+        # Temporarily disable inline rescue operator (so 'rescue' starts a clause in begin blocks)
+        private def without_inline_rescue
+          prev = !!@allow_inline_rescue
+          @allow_inline_rescue = false
+          yield
+        ensure
+          @allow_inline_rescue = prev
+        end
+
         # Fast-forward a macro control block starting at current token `{%`.
         # Consumes nested `{% ... %}` pairs and stops after the matching `{% end %}`.
         private def fast_forward_percent_block
@@ -1267,11 +1281,10 @@ module CrystalV2
         # Examples: Int32, Token::Kind, Array(Int32), Int32 | String, Int32?
         # Returns: Slice from source covering the entire type (zero-copy!)
         private def parse_type_annotation : Slice(UInt8)
-          start_token = current_token
-          last_type_token = start_token
           paren_depth = 0
           bracket_depth = 0
           brace_depth = 0
+          buffer = IO::Memory.new
 
           loop do
             token = current_token
@@ -1286,26 +1299,22 @@ module CrystalV2
               break if token.kind == Token::Kind::EOF
               break if token.kind == Token::Kind::RBracket
               break if token.kind == Token::Kind::RBrace
-              break if token.kind == Token::Kind::LBrace
-              # Stop before universal quantification tail in method headers: "forall U, V"
               if token.kind == Token::Kind::Identifier && slice_eq?(token.slice, "forall")
                 break
               end
             end
 
-            # Track parenthesis depth (for generics like Array(Int32))
+            # Track delimiter nesting
             if operator_token?(token, Token::Kind::LParen)
               paren_depth += 1
             elsif operator_token?(token, Token::Kind::RParen)
-              break if paren_depth == 0  # Closing paren of parameter list
+              break if paren_depth == 0
               paren_depth -= 1
             end
 
-            # Track bracket depth (for static arrays like Int32[10])
             if operator_token?(token, Token::Kind::LBracket)
               bracket_depth += 1
             elsif operator_token?(token, Token::Kind::RBracket)
-              # If this ']' would close an outer context, end the type annotation
               if bracket_depth == 0
                 break
               else
@@ -1313,12 +1322,9 @@ module CrystalV2
               end
             end
 
-            # Track brace depth (tuple/named tuple type literals like {Int32, String})
             if operator_token?(token, Token::Kind::LBrace)
-              # In type annotation context, '{' starts a tuple/named tuple type
               brace_depth += 1
             elsif operator_token?(token, Token::Kind::RBrace)
-              # If this '}' would close an outer context, end the type annotation
               if brace_depth == 0
                 break
               else
@@ -1326,55 +1332,56 @@ module CrystalV2
               end
             end
 
-            # Check if this token is part of type annotation
+            case token.kind
+            when Token::Kind::Whitespace, Token::Kind::Newline
+              buffer.write token.slice
+              advance
+              next
+            end
+
             is_type_token = case token.kind
             when Token::Kind::Identifier, Token::Kind::Number,
                  Token::Kind::ColonColon, Token::Kind::Operator,
-                 Token::Kind::ThinArrow, Token::Kind::Self,  # Phase 103C: self as type
-                 Token::Kind::Typeof,                         # typeof(...) in type position
-                 Token::Kind::Pipe,  # Phase 103I: union types (String | Nil)
-                 Token::Kind::LParen, Token::Kind::RParen,  # Phase 30: generics like Array(Int32)
-                 Token::Kind::Comma,  # Phase 30: multiple generic params Hash(K, V)
-                 Token::Kind::LBracket, Token::Kind::RBracket,  # Static arrays Type[N]
-                 Token::Kind::LBrace, Token::Kind::RBrace,  # Tuple/named tuple literals {A, B} / {k: V}
-                 Token::Kind::Colon,  # Named tuple key separator in type context
-                 Token::Kind::Question,  # Nullable types Type?
-                 Token::Kind::Star, Token::Kind::StarStar  # Pointer suffixes Type*, Type**
+                 Token::Kind::ThinArrow, Token::Kind::Self,
+                 Token::Kind::Typeof,
+                 Token::Kind::Pipe,
+                 Token::Kind::LParen, Token::Kind::RParen,
+                 Token::Kind::Comma,
+                 Token::Kind::LBracket, Token::Kind::RBracket,
+                 Token::Kind::LBrace, Token::Kind::RBrace,
+                 Token::Kind::Colon,
+                 Token::Kind::Question,
+                 Token::Kind::Star, Token::Kind::StarStar
               true
             when Token::Kind::MacroExprStart, Token::Kind::MacroExprEnd
               true
             when Token::Kind::Class
-              # Allow suffix ".class" in type contexts like is_a?(Alone.class)
-              last_type_token.kind == Token::Kind::Operator && slice_eq?(last_type_token.slice, ".")
-            when Token::Kind::Whitespace
-              # Skip whitespace but continue parsing
-              advance
-              next
+              buffer.size > 0 && buffer.to_s.ends_with?(".")
             else
-              # Unknown token in type context
               false
             end
 
             break unless is_type_token
 
             if token.kind == Token::Kind::MacroExprStart
-              # Skip macro expression inside type annotation and include its closing token
+              buffer.write token.slice
               fast_forward_macro_expression
               if macro_closing_sequence?(current_token)
-                last_type_token = current_token
+                buffer.write current_token.slice
                 advance
               end
             else
-              last_type_token = token
+              buffer.write token.slice
+              # Preserve readable spacing after comma in types (e.g., {Int32, String})
+              if token.kind == Token::Kind::Comma
+                nxt = peek_next_non_trivia
+                buffer.write_byte(' '.ord.to_u8) unless nxt.kind == Token::Kind::RBrace
+              end
               advance
             end
           end
 
-          # Return slice from start to end of type annotation (zero-copy!)
-          # This includes whitespace between tokens, which is fine
-          start_ptr = start_token.slice.to_unsafe
-          end_ptr = last_type_token.slice.to_unsafe + last_type_token.slice.size
-          Slice.new(start_ptr, end_ptr - start_ptr)
+          buffer.to_slice
         end
 
         # Phase 103: Parse type declaration from identifier: x : Type = value
@@ -6807,11 +6814,11 @@ module CrystalV2
               left = new_left
               next
             when Token::Kind::LBrace
-              # Phase 10: Block with {} syntax
-              # Don't attach blocks when parsing call arguments - let the call parser handle it
-              if @parsing_call_args > 0
-                break
-              end
+          # Phase 10: Block with {} syntax
+          # Don't attach blocks when parsing call arguments - let the call parser handle it
+          if @parsing_call_args > 0
+            break
+          end
               # Only attach a block if 'left' can accept one (call-like). Otherwise,
               # treat '{' as start of a new statement (e.g., a tuple/hash literal).
               if can_attach_block_to?(left)
@@ -7250,19 +7257,19 @@ module CrystalV2
           when Token::Kind::MacroExprStart
             parse_percent_macro_expression
           when Token::Kind::LBrace
-            # Recognize macro delimiters regardless of @macro_mode
+            # Treat '{{' as tuple/hash unless in macro context
             next_tok = peek_token
-            if next_tok.kind == Token::Kind::Percent
+            if macro_context? && next_tok.kind == Token::Kind::Percent
               parse_percent_macro_control
-            elsif next_tok.kind == Token::Kind::MacroExprStart
+            elsif macro_context? && next_tok.kind == Token::Kind::MacroExprStart
               parse_percent_macro_expression
             else
-              # Phase 14/15: Hash/NamedTuple/Tuple literal — single-pass, no backtracking
-              parse_hash_or_tuple
-            end
+            # Phase 14/15: Hash/NamedTuple/Tuple literal — single-pass, no backtracking
+            parse_hash_or_tuple
+          end
           when Token::Kind::ThinArrow
             # Phase 74: Proc literal (->(x) { ... })
-            parse_proc_literal
+            return parse_proc_literal
           when Token::Kind::DotDot, Token::Kind::DotDotDot
             # Beginless/full range at expression start:
             #   ..n / ...n  → (nil .. n) / (nil ... n)
@@ -9957,6 +9964,9 @@ module CrystalV2
             next_tok = peek_token(1)
             return false if next_tok.kind == Token::Kind::RBrace
           end
+          if token.kind == Token::Kind::Rescue && !@allow_inline_rescue
+            return false
+          end
           BINARY_PRECEDENCE.has_key?(token.kind)
         end
 
@@ -11384,11 +11394,11 @@ module CrystalV2
         # Phase 103B: Parse {{ expr }} in expression context
         # Called from parse_prefix when seeing {{ token sequence
         # Returns MacroExpressionNode wrapped in ExprId
-      private def parse_percent_macro_expression : ExprId
-        start_span = current_token.span
+        private def parse_percent_macro_expression : ExprId
+          start_span = current_token.span
 
-        # Expect {{ sequence
-        case current_token.kind
+          # Expect {{ sequence
+          case current_token.kind
         when Token::Kind::MacroExprStart
           advance
         when Token::Kind::LBrace
