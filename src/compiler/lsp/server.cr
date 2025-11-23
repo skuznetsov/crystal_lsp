@@ -1876,6 +1876,20 @@ module CrystalV2
           end
         end
 
+        private def location_for_prelude_symbol(symbol : Semantic::Symbol) : Location?
+          if prelude = @prelude_state
+            if origin = prelude.symbol_origins[symbol]?
+              return Location.from_symbol(symbol, origin.program, origin.uri)
+            end
+          end
+          if stub = stub_prelude_state
+            if origin = stub.symbol_origins[symbol]?
+              return Location.from_symbol(symbol, origin.program, origin.uri)
+            end
+          end
+          nil
+        end
+
         private def node_symbol_for(program : Frontend::Program, expr_id : Frontend::ExprId) : Semantic::Symbol?
           return nil if expr_id.invalid?
           @node_symbol_index[{program_key(program), expr_id.index}]?
@@ -4151,7 +4165,7 @@ module CrystalV2
           receiver_symbol = resolve_receiver_symbol(doc_state, node.object)
 
           if method_symbol = resolve_member_access_method_symbol(node, doc_state)
-            if location = location_for_symbol(method_symbol)
+            if location = location_for_symbol(method_symbol) || location_for_prelude_symbol(method_symbol)
               return location
             end
             return Location.from_symbol(method_symbol, doc_state.program, uri)
@@ -4177,7 +4191,7 @@ module CrystalV2
           prelude_table = @prelude_state.try(&.symbol_table)
           prelude_state = @prelude_state
           receiver_type = doc_state.type_context.try(&.get_type(node.object))
-          receiver_symbol = resolve_receiver_symbol(doc_state, node.object)
+          receiver_symbol = canonicalize_prelude_receiver(resolve_receiver_symbol(doc_state, node.object))
 
           method_symbol = nil
 
@@ -4249,6 +4263,26 @@ module CrystalV2
 
           method_symbol ||= fallback_method_by_name(method_name, doc_state)
           method_symbol
+        end
+
+        private def canonicalize_prelude_receiver(receiver_symbol : Semantic::Symbol?) : Semantic::Symbol?
+          return receiver_symbol unless receiver_symbol
+          name = receiver_symbol.responds_to?(:name) ? receiver_symbol.name : nil
+          return receiver_symbol unless name
+
+          if prelude = @prelude_state
+            if alt = prelude.symbol_table.lookup(name)
+              return alt if alt.is_a?(Semantic::ClassSymbol)
+            end
+          end
+
+          if stub = stub_prelude_state
+            if alt = stub.symbol_table.lookup(name)
+              return alt if alt.is_a?(Semantic::ClassSymbol)
+            end
+          end
+
+          receiver_symbol
         end
 
         private def resolve_member_access_method_symbol_stub(
