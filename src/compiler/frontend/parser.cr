@@ -10,6 +10,7 @@ module CrystalV2
     module Frontend
       class Parser
         @consume_postfix_modifiers : Bool? = true
+        @macro_expr_synth_index : Int32?
         PREFIX_ERROR = ExprId.new(-1)
         UNARY_PRECEDENCE = 30
 
@@ -68,9 +69,10 @@ module CrystalV2
           @streaming = ENV["CRYSTAL_V2_PARSER_STREAM"]? != nil
           @expect_context = nil
           @parsing_method_params = false
-          @skip_newlines_in_braces = true
-          @recovery_mode = recovery_mode
-          @consume_postfix_modifiers = true
+        @skip_newlines_in_braces = true
+        @recovery_mode = recovery_mode
+        @consume_postfix_modifiers = true
+        @macro_expr_synth_index = nil
           # Ensure lexer can emit diagnostics into this parser's buffer
           lexer.diagnostics = @diagnostics
 
@@ -850,7 +852,32 @@ module CrystalV2
         private def current_token
           Watchdog.check!
           ensure_token(@index)
-          @tokens[@index]
+          tok = @tokens[@index]
+          if @macro_mode == 0
+            case tok.kind
+            when Token::Kind::MacroExprStart
+              # Treat '{{' as two '{' tokens outside macro bodies
+              brace_span = tok.span
+              slice1 = tok.slice.size >= 1 ? tok.slice[0, 1] : "{".to_slice
+              slice2 = tok.slice.size >= 2 ? tok.slice[1, 1] : "{".to_slice
+              if @macro_expr_synth_index != @index
+                @tokens.insert(@index + 1, Token.new(Token::Kind::LBrace, slice2, brace_span))
+                @macro_expr_synth_index = @index
+              end
+              return Token.new(Token::Kind::LBrace, slice1, brace_span)
+            when Token::Kind::MacroExprEnd
+              # Treat '}}' as two '}' tokens outside macro bodies
+              brace_span = tok.span
+              slice1 = tok.slice.size >= 1 ? tok.slice[0, 1] : "}".to_slice
+              slice2 = tok.slice.size >= 2 ? tok.slice[1, 1] : "}".to_slice
+              if @macro_expr_synth_index != @index
+                @tokens.insert(@index + 1, Token.new(Token::Kind::RBrace, slice2, brace_span))
+                @macro_expr_synth_index = @index
+              end
+              return Token.new(Token::Kind::RBrace, slice1, brace_span)
+            end
+          end
+          tok
         end
 
         @[AlwaysInline]
@@ -1278,6 +1305,7 @@ module CrystalV2
               break if token.kind == Token::Kind::EOF
               break if token.kind == Token::Kind::RBracket
               break if token.kind == Token::Kind::RBrace
+              break if token.kind == Token::Kind::LBrace
               # Stop before universal quantification tail in method headers: "forall U, V"
               if token.kind == Token::Kind::Identifier && slice_eq?(token.slice, "forall")
                 break
@@ -3325,108 +3353,23 @@ module CrystalV2
         end
 
         # Phase 29: Parse raise statement
-        # Grammar: raise <expression> | raise(args...) | raise
+        # Grammar: raise | raise <expression>
         # Note: bare 'raise' (re-raise) is only valid in rescue blocks
-        # In Crystal, 'raise' is actually a method, not a keyword, so it supports:
-        #   raise(...)              - call with parentheses
-        #   raise "msg", arg1, arg2 - call without parentheses
-        #   raise expr              - single argument call
         private def parse_raise : ExprId
           raise_token = current_token
           advance
           skip_trivia
 
           token = current_token
-          if token.kind == Token::Kind::LParen
-            # Method call with parentheses: raise(...)
-            raise_id = @arena.add_typed(
-              IdentifierNode.new(
-                raise_token.span,
-                @string_pool.intern(Bytes.new("raise".to_unsafe, 5))
-              )
-            )
-            parse_parenthesized_call(raise_id)
-          elsif token.kind.in?(Token::Kind::Newline, Token::Kind::EOF, Token::Kind::End, Token::Kind::Else, Token::Kind::Elsif, Token::Kind::Rescue, Token::Kind::Ensure)
-            # Bare raise (re-raise current exception)
-            @arena.add_typed(
-              RaiseNode.new(
-                raise_token.span,
-                nil
-              )
-            )
-          else
-            # Method call without parentheses: raise "msg", name: value
-            # Create identifier callee for "raise"
-            callee = @arena.add_typed(
-              IdentifierNode.new(
-                raise_token.span,
-                @string_pool.intern(Bytes.new("raise".to_unsafe, 5))
-              )
-            )
-
-            args_b = SmallVec(ExprId, 2).new
-            named_b = SmallVec(NamedArgument, 2).new
-
-            # Parse first argument
-            first_arg = parse_op_assign
-            return PREFIX_ERROR if first_arg.invalid?
-            args_b << first_arg
-            skip_trivia
-
-            # Consume additional arguments separated by commas
-            loop do
-              if current_token.kind == Token::Kind::Comma
-                advance
-                skip_trivia
-                # Named argument?
-                if named_arg_start?
-                  name_token = current_token
-                  name_slice = name_token.slice
-                  name_span = name_token.span
-                  advance
-                  skip_trivia
-                  # Expect ':'
-                  unless current_token.kind == Token::Kind::Colon
-                    emit_unexpected(current_token)
-                    return PREFIX_ERROR
-                  end
-                  advance
-                  skip_trivia
-                  value_expr = parse_op_assign
-                  return PREFIX_ERROR if value_expr.invalid?
-                  value_span = @arena[value_expr].span
-                  named_b << NamedArgument.new(name_slice, value_expr, name_span, value_span)
-                  skip_trivia
-                else
-                  # Positional argument
-                  nxt = parse_op_assign
-                  return PREFIX_ERROR if nxt.invalid?
-                  args_b << nxt
-                  skip_trivia
-                end
-              else
-                break
-              end
-            end
-
-            args = args_b.to_a
-            named_args = named_b.empty? ? nil : named_b.to_a
-            last_span = if named_args
-              @arena[named_b.last.value].span
-            else
-              @arena[args.last].span
-            end
-            call_span = raise_token.span.cover(last_span)
-            @arena.add_typed(
-              CallNode.new(
-                call_span,
-                callee,
-                args,
-                nil,
-                named_args
-              )
-            )
+          if token.kind.in?(Token::Kind::Newline, Token::Kind::EOF, Token::Kind::End, Token::Kind::Else, Token::Kind::Elsif, Token::Kind::Rescue, Token::Kind::Ensure)
+            return @arena.add_typed(RaiseNode.new(raise_token.span, nil))
           end
+
+          value_expr = parse_expression(0)
+          return PREFIX_ERROR if value_expr.invalid?
+
+          raise_span = raise_token.span.cover(@arena[value_expr].span)
+          @arena.add_typed(RaiseNode.new(raise_span, value_expr))
         end
 
         # Phase 67: Parse with (context block)
@@ -4284,6 +4227,7 @@ module CrystalV2
               )
             )
           else
+            @diagnostics << Diagnostic.new("unexpected token after 'out'", id_token.span)
             emit_unexpected(id_token)
             return PREFIX_ERROR
           end
@@ -7136,17 +7080,8 @@ module CrystalV2
             parse_asm
           when Token::Kind::Out
             # Phase 98: out keyword (C bindings output parameter)
-            # If 'out' is followed by an identifier/ivar/cvar/gvar, treat it as
-            # the out-parameter form. Otherwise, allow 'out' to be used as a
-            # regular identifier in expression position (e.g., `out.value = x`).
-            nxt = peek_next_non_trivia
-            if nxt.kind.in?(Token::Kind::Identifier, Token::Kind::InstanceVar, Token::Kind::ClassVar, Token::Kind::GlobalVar)
-              parse_out
-            else
-              id = @arena.add_typed(IdentifierNode.new(token.span, @string_pool.intern(token.slice)))
-              advance
-              id
-            end
+            # Treat any misuse as diagnostic via parse_out to stay strict/parity.
+            parse_out
           when Token::Kind::Raise
             # Allow raise in expression context (e.g., x || raise "error")
             stmt = parse_raise
@@ -7524,18 +7459,10 @@ module CrystalV2
               advance
               skip_trivia
 
-              # Parse type annotation (supports unions, generics, proc types including bare '->')
-              type_start = current_token
-              type_slice = parse_type_annotation
-              type_end = previous_token
-              if type_end
-                type_span = type_start.span.cover(type_end.span)
-                # Represent type as an Identifier-like node carrying the slice (zero-copy)
-                of_type_expr = @arena.add_typed(IdentifierNode.new(type_span, @string_pool.intern(type_slice)))
-              else
-                emit_unexpected(type_start)
-                return PREFIX_ERROR
-              end
+              # Parse type expression (unions, generics, etc.)
+              type_expr = without_postfix_modifiers { parse_expression(0) }
+              return PREFIX_ERROR if type_expr.invalid?
+              of_type_expr = type_expr
             end
 
             closing_span = previous_token.try(&.span) || lbracket.span
@@ -8696,10 +8623,12 @@ module CrystalV2
         #   foo(1, y: 2)      → mixed (positional first, then named)
         # Phase 103: Updated to support multi-line arguments
         private def parse_parenthesized_call(callee : ExprId) : ExprId
-          lparen = current_token
-          advance
-          @paren_depth += 1  # Phase 103: entering parentheses
-          skip_whitespace_and_optional_newlines
+          @parsing_call_args += 1
+          begin
+            lparen = current_token
+            advance
+            @paren_depth += 1  # Phase 103: entering parentheses
+            skip_whitespace_and_optional_newlines
 
           args_b = SmallVec(ExprId, 4).new
           named_b = SmallVec(NamedArgument, 2).new
@@ -8885,7 +8814,7 @@ module CrystalV2
           # Support extra no-parens arguments after a parenthesized group:
           #   foo(expr), more, args
           skip_whitespace_and_optional_newlines
-          if current_token.kind == Token::Kind::Comma
+          if current_token.kind == Token::Kind::Comma && @parsing_call_args == 0
             # Seed accumulators from existing args
             accu_args = (args ? args.dup : [] of ExprId)
             accu_named = (named_args ? named_args.dup : [] of NamedArgument)
@@ -8930,6 +8859,9 @@ module CrystalV2
           end
 
           result
+          ensure
+            @parsing_call_args -= 1
+          end
         end
 
         # Phase 103: Updated to support multi-line indexing and named arguments
