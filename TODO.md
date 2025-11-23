@@ -20,16 +20,16 @@ about syntax or types and should match what the original compiler would report.
   - [x] Double splat in typed params (`def self.new(*args : *T)`).
   - [ ] Robust block/if/else parsing in large bodies (e.g., `string.cr` around deeply nested conditionals).
   - [ ] Fix false `Arrow` recoveries in `time/format/parser.cr` hash literals.
-- [ ] Align v2 parser behavior with `src/compiler/crystal/syntax/parser.cr`:
-  - [x] Postfix modifiers only attach `if`/`unless` at statement level (no
-        trailing `while`/`until`), mirroring original `parse_expression_suffix`.
-  - [x] Major stdlib/compiler offenders (`reference.cr`, `json/serialization.cr`,
-        `lib_ffi.cr`, many collection/number files) parse with 0 diagnostics.
-  - [ ] Heredocs and multi-line string literals.
-  - [ ] Full `{% ... %}` / `{{ ... }}` macro syntax (including nested and mixed
-        cases, comments, verbatim blocks).
-  - [ ] Edge cases in blocks, postfix modifiers, case/when, rescue/ensure.
-  - [ ] Inline `asm` and other niche constructs used in stdlib/compiler.
+  - [ ] Align v2 parser behavior with `src/compiler/crystal/syntax/parser.cr`:
+    - [x] Postfix modifiers only attach `if`/`unless` at statement level (no
+      trailing `while`/`until`), mirroring original `parse_expression_suffix`.
+    - [x] Major stdlib/compiler offenders (`reference.cr`, `json/serialization.cr`,
+      `lib_ffi.cr`, many collection/number files) parse with 0 diagnostics.
+    - [ ] Heredocs and multi-line string literals (indent/interpolation errors, unterminated).
+    - [ ] Full `{% ... %}` / `{{ ... }}` macro syntax (including nested and mixed
+      cases, comments, verbatim blocks) and macro parameter validation.
+    - [ ] Edge cases in blocks, postfix modifiers, case/when, rescue/ensure.
+    - [ ] Inline `asm` and other niche constructs used in stdlib/compiler.
 
 ## 2. MacroExpander Parity
 
