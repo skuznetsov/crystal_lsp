@@ -2397,6 +2397,7 @@ module CrystalV2
           character = position["character"].as_i
 
           debug("Hover request: line=#{line}, char=#{character}")
+          debug("Prelude state: #{current_prelude_label}")
 
           doc_state = @documents[uri]?
           return send_response(id, "null") unless doc_state
@@ -2518,6 +2519,7 @@ module CrystalV2
           character = position["character"].as_i
 
           debug("Definition request: line=#{line}, char=#{character}")
+          debug("Prelude state: #{current_prelude_label}")
 
           doc_state = @documents[uri]?
           return send_response(id, "null") unless doc_state
@@ -2558,6 +2560,15 @@ module CrystalV2
         rescue ex
           debug("Definition failed after #{(Time.monotonic - started_at).total_milliseconds.round(2)}ms: #{ex.message}")
           raise ex
+        end
+
+        private def current_prelude_label : String
+          if prelude = @prelude_state
+            stub = prelude.stub ? "(stub)" : "(real)"
+            "#{prelude.path} #{stub}"
+          else
+            "none"
+          end
         end
 
         # Handle textDocument/completion request
