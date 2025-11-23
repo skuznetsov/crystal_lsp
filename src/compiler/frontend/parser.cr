@@ -9,6 +9,7 @@ module CrystalV2
   module Compiler
     module Frontend
       class Parser
+        @consume_postfix_modifiers : Bool? = true
         PREFIX_ERROR = ExprId.new(-1)
         UNARY_PRECEDENCE = 30
 
@@ -69,6 +70,7 @@ module CrystalV2
           @parsing_method_params = false
           @skip_newlines_in_braces = true
           @recovery_mode = recovery_mode
+          @consume_postfix_modifiers = true
           # Ensure lexer can emit diagnostics into this parser's buffer
           lexer.diagnostics = @diagnostics
 
@@ -165,6 +167,7 @@ module CrystalV2
           @parsing_method_params = false
           @skip_newlines_in_braces = true
           @recovery_mode = recovery_mode
+          @consume_postfix_modifiers = true
           if @streaming
             @lexer = lexer
             @keep_trivia = ENV["CRYSTAL_V2_PARSER_KEEP_TRIVIA"]? != nil
@@ -699,7 +702,7 @@ module CrystalV2
             skip_statement_end
 
             # Parse right-hand side expression
-            rhs = parse_expression(0)
+            rhs = without_postfix_modifiers { parse_expression(0) }
             return PREFIX_ERROR if rhs.invalid?
 
             # Phase 20/51/52/89: Desugar compound assignment
@@ -1021,6 +1024,15 @@ module CrystalV2
           else
             false
           end
+        end
+
+        # Temporarily disable consumption of postfix modifiers inside nested expression contexts
+        private def without_postfix_modifiers
+          prev = @consume_postfix_modifiers || false
+          @consume_postfix_modifiers = false
+          yield
+        ensure
+          @consume_postfix_modifiers = prev
         end
 
         # Fast-forward a macro control block starting at current token `{%`.
@@ -3122,6 +3134,7 @@ module CrystalV2
 
           # Expect 'in' keyword
           unless current_token.kind == Token::Kind::In
+            @diagnostics << Diagnostic.new("unexpected token, expected 'in' after for variable", current_token.span)
             emit_unexpected(current_token)
             return PREFIX_ERROR
           end
@@ -3511,7 +3524,7 @@ module CrystalV2
           else
             # Return with value (support multiple values → implicit tuple)
             # Use parse_op_assign to allow assignment expressions (return x = 1)
-            first_value = parse_op_assign
+            first_value = without_postfix_modifiers { parse_op_assign }
             return PREFIX_ERROR if first_value.invalid?
 
             skip_trivia
@@ -3520,7 +3533,7 @@ module CrystalV2
               loop do
                 advance  # consume comma
                 skip_trivia
-                val = parse_op_assign
+                val = without_postfix_modifiers { parse_op_assign }
                 return PREFIX_ERROR if val.invalid?
                 values << val
                 skip_trivia
@@ -4743,12 +4756,8 @@ module CrystalV2
           end
         end
 
-        # Phase 6: Handle postfix if modifier
-        # Grammar: <statement> if <condition>
-        # Phase 26: Parse postfix if/unless modifiers
-        # Upstream Crystal does not support trailing `while` / `until` modifiers,
-        # so we only implement `if` / `unless` here to stay aligned with the
-        # original parser semantics.
+        # Phase 6/26/27: Handle postfix modifiers on a statement.
+        # Grammar: <stmt> if/unless/while/until <condition> (same line only)
         private def parse_postfix_if_modifier(stmt : ExprId) : ExprId
           # Postfix modifiers must be on the SAME line as the statement
           # If there's a newline between them, the modifier is a separate statement
@@ -4807,6 +4816,48 @@ module CrystalV2
                 condition,
                 [stmt],
                 Array(ExprId).new(0)
+              )
+            )
+          end
+
+          # Phase 27: postfix while
+          if token.kind == Token::Kind::While
+            advance  # consume 'while'
+            skip_trivia
+
+            condition = parse_op_assign
+            return PREFIX_ERROR if condition.invalid?
+
+            stmt_span = node_span(stmt)
+            condition_span = node_span(condition)
+            while_span = stmt_span.cover(condition_span)
+
+            return @arena.add_typed(
+              WhileNode.new(
+                while_span,
+                condition,
+                [stmt]
+              )
+            )
+          end
+
+          # Phase 27: postfix until
+          if token.kind == Token::Kind::Until
+            advance  # consume 'until'
+            skip_trivia
+
+            condition = parse_op_assign
+            return PREFIX_ERROR if condition.invalid?
+
+            stmt_span = node_span(stmt)
+            condition_span = node_span(condition)
+            until_span = stmt_span.cover(condition_span)
+
+            return @arena.add_typed(
+              UntilNode.new(
+                until_span,
+                condition,
+                [stmt]
               )
             )
           end
@@ -6338,7 +6389,7 @@ module CrystalV2
                 ))
               elsif has_paren
                 # Has parenthesis - parse as normal expression (will call parse_uninitialized)
-                rhs = parse_op_assign
+                rhs = without_postfix_modifiers { parse_op_assign }
                 return PREFIX_ERROR if rhs.invalid?
               else
                 # Invalid: uninitialized can only be used with variables
@@ -6347,7 +6398,7 @@ module CrystalV2
               end
             else
               # Parse right-hand side normally
-              rhs = parse_op_assign  # Recursive for chained assignments
+              rhs = without_postfix_modifiers { parse_op_assign }  # Recursive for chained assignments
               return PREFIX_ERROR if rhs.invalid?
             end
 
@@ -6812,7 +6863,8 @@ module CrystalV2
               # trailing '?'. Handle it here as a postfix conversion.
               left = handle_index_question_postfix(left)
               next
-            when Token::Kind::If, Token::Kind::Unless
+            when Token::Kind::If, Token::Kind::Unless, Token::Kind::While, Token::Kind::Until
+              break unless @consume_postfix_modifiers
               # Postfix conditional modifier: expr if cond / expr unless cond.
               # If parse_postfix_if_modifier decides this isn't a real postfix
               # (for example, because the modifier starts on a different line)
