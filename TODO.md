@@ -14,6 +14,12 @@ about syntax or types and should match what the original compiler would report.
         (current runs are ~500–600 diagnostics over ~1500 files).
   - [ ] All files that compile with the original compiler parse with **0 v2
         parser diagnostics**.
+- [ ] Close remaining parser gaps seen on vanilla stdlib (CRYSTAL_PATH scan):
+  - [x] Command-call chains inside type expressions (`typeof(Enumerable.element_type Enumerable.element_type self)` in `array.cr`).
+  - [ ] Tuple types in annotations (`def foo : {A, B}` and `{K, V}` signatures).
+  - [ ] Double splat in typed params (`def self.new(*args : *T)`).
+  - [ ] Robust block/if/else parsing in large bodies (e.g., `string.cr` around deeply nested conditionals).
+  - [ ] Fix false `Arrow` recoveries in `time/format/parser.cr` hash literals.
 - [ ] Align v2 parser behavior with `src/compiler/crystal/syntax/parser.cr`:
   - [x] Postfix modifiers only attach `if`/`unless` at statement level (no
         trailing `while`/`until`), mirroring original `parse_expression_suffix`.

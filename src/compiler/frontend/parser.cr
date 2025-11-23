@@ -9038,7 +9038,7 @@ module CrystalV2
               space_consumed = true
             end
 
-            if space_consumed && @parsing_call_args == 0
+            if space_consumed
               token = current_token
               if call_without_parens_disallowed?(token)
                 node
@@ -9204,7 +9204,7 @@ module CrystalV2
               space_consumed = true
             end
 
-            if space_consumed && @parsing_call_args == 0
+            if space_consumed
               token = current_token
               if call_without_parens_disallowed?(token)
                 node
@@ -9355,6 +9355,16 @@ module CrystalV2
             space_consumed = next_tok.span.start_column > last_span.end_column
           elsif next_tok.span.start_line > last_span.end_line
             space_consumed = true
+          end
+          # Do not treat immediately-following member/path separators as
+          # implicit whitespace. Without this guard, identifiers followed
+          # directly by '.' or '::' could be misclassified as command calls
+          # (no-paren invocations) and lead to spurious diagnostics in type
+          # expressions like typeof(Enumerable.element_type ...).
+          if space_consumed &&
+             ((next_tok.kind == Token::Kind::Operator && slice_eq?(next_tok.slice, ".")) ||
+              next_tok.kind == Token::Kind::ColonColon)
+            space_consumed = false
           end
           skip_trivia
 
