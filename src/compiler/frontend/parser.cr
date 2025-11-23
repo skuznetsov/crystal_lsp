@@ -12341,14 +12341,5 @@ module CrystalV2
       # Additional helper methods...
     end
 
-    module Compiler
-      Parser = Frontend::Parser
-    end
-  end
-end
-
-module CrystalV2
-  module Compiler
-    Parser = Frontend::Parser
   end
 end

@@ -45,9 +45,11 @@ describe "Type System" do
       expr_id2 = ExprId.new(2)
       scope1 = SymbolTable.new(nil)
       scope2 = SymbolTable.new(nil)
+      class_scope1 = SymbolTable.new(nil)
+      class_scope2 = SymbolTable.new(nil)
 
-      symbol1 = ClassSymbol.new("Foo", expr_id1, scope: scope1)
-      symbol2 = ClassSymbol.new("Foo", expr_id2, scope: scope2)
+      symbol1 = ClassSymbol.new("Foo", expr_id1, scope: scope1, class_scope: class_scope1)
+      symbol2 = ClassSymbol.new("Foo", expr_id2, scope: scope2, class_scope: class_scope2)
 
       type1 = ClassType.new(symbol1)
       type2 = ClassType.new(symbol1)  # Same symbol
@@ -60,7 +62,8 @@ describe "Type System" do
     it "converts to string with class name" do
       expr_id = ExprId.new(1)
       scope = SymbolTable.new(nil)
-      symbol = ClassSymbol.new("MyClass", expr_id, scope: scope)
+      class_scope = SymbolTable.new(nil)
+      symbol = ClassSymbol.new("MyClass", expr_id, scope: scope, class_scope: class_scope)
       type = ClassType.new(symbol)
 
       type.to_s.should eq("MyClass")
@@ -69,7 +72,8 @@ describe "Type System" do
     it "supports type arguments for generics (future use)" do
       expr_id = ExprId.new(1)
       scope = SymbolTable.new(nil)
-      symbol = ClassSymbol.new("Array", expr_id, scope: scope)
+      class_scope = SymbolTable.new(nil)
+      symbol = ClassSymbol.new("Array", expr_id, scope: scope, class_scope: class_scope)
       elem_type = PrimitiveType.new("Int32")
       type = ClassType.new(symbol, [elem_type] of Type)
 

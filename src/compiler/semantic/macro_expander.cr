@@ -39,11 +39,12 @@ module CrystalV2
 
         getter diagnostics : Array(Diagnostic)
 
-        def initialize(@program : Program, @arena : Frontend::ArenaLike, flags : Set(String)? = nil)
+        def initialize(@program : Program, @arena : Frontend::ArenaLike, flags : Set(String)? = nil, *, recovery_mode : Bool = false)
           @diagnostics = [] of Diagnostic
           @depth = 0
           @macro_var_counter = 0
           @flags = flags || Set(String).new
+          @recovery_mode = recovery_mode
         end
 
         # Expansion context for macro evaluation

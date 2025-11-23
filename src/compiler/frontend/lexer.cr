@@ -2454,16 +2454,5 @@ module CrystalV2
       end
 
     end
-
-    # Re-export lexer under CrystalV2::Compiler namespace for convenience
-    module Compiler
-      Lexer = Frontend::Lexer
-    end
-  end
-end
-
-module CrystalV2
-  module Compiler
-    Lexer = Frontend::Lexer
   end
 end
