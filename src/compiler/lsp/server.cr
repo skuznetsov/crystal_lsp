@@ -206,6 +206,8 @@ module CrystalV2
         @node_symbol_index : Hash(Tuple(UInt64, Int32), Semantic::Symbol)
         @program_methods : Hash(UInt64, Array(Semantic::MethodSymbol))
         @dependency_documents : Hash(String, DocumentState)
+        @stub_prelude_state_loaded : Bool = false
+        @stub_prelude_state : PreludeState?
 
         def initialize(@input = STDIN, @output = STDOUT, config : ServerConfig = ServerConfig.load)
           @config = config
@@ -229,6 +231,8 @@ module CrystalV2
           @node_symbol_index = {} of Tuple(UInt64, Int32) => Semantic::Symbol
           @program_methods = Hash(UInt64, Array(Semantic::MethodSymbol)).new { |hash, key| hash[key] = [] of Semantic::MethodSymbol }
           @dependency_documents = {} of String => DocumentState
+          @stub_prelude_state_loaded = false
+          @stub_prelude_state = nil
           # Allow forcing the stub prelude for debugging via environment variable
           if ENV["CRYSTALV2_LSP_FORCE_STUB"]?
             try_load_prelude(PRELUDE_STUB_PATH, "LSP stub prelude")
@@ -1245,6 +1249,22 @@ module CrystalV2
           false
         end
 
+        private def stub_prelude_state : PreludeState?
+          return @stub_prelude_state if @stub_prelude_state_loaded
+          @stub_prelude_state_loaded = true
+
+          source = File.read(PRELUDE_STUB_PATH)
+          lexer = Frontend::Lexer.new(source)
+          parser = Frontend::Parser.new(lexer, recovery_mode: @config.parser_recovery_mode)
+          program = parser.parse_program
+          diagnostics = [] of Diagnostic
+          parser.diagnostics.each { |diag| diagnostics << Diagnostic.from_parser(diag) }
+          @stub_prelude_state = build_single_file_prelude_state(PRELUDE_STUB_PATH, program, source, diagnostics)
+        rescue ex
+          debug("Failed to load stub prelude fallback: #{ex.message}")
+          @stub_prelude_state = nil
+        end
+
         private def build_single_file_prelude_state(
           path : String,
           program : Frontend::Program,
@@ -1369,7 +1389,8 @@ module CrystalV2
           parser = Frontend::Parser.new(lexer, recovery_mode: @config.parser_recovery_mode)
           program = parser.parse_program
           parser.diagnostics.each { |diag| diagnostics << Diagnostic.from_parser(diag) }
-          return false unless parser.diagnostics.empty?
+          # Even with recovery diagnostics, keep the parsed program so we retain symbols
+          # (especially important for stdlib where some files may emit warnings).
           program_cache[path] = program
           source_cache[path] = source
           true
@@ -1968,7 +1989,32 @@ module CrystalV2
             end
           end
 
+          # If we landed on a block, try to refine to identifier/member inside
+          if best_match
+            refined = refine_member_or_identifier(arena, best_match, offset)
+            return refined if refined
+          end
+
           best_match
+        end
+
+        private def refine_member_or_identifier(arena : Frontend::ArenaLike, expr_id : Frontend::ExprId, offset : Int32) : Frontend::ExprId?
+          node = arena[expr_id]
+          case node
+          when Frontend::BlockNode, Frontend::CallNode, Frontend::DefNode
+            each_child_expr(arena, expr_id) do |child_id|
+              next if child_id.invalid?
+              child = arena[child_id]
+              next unless span_contains_offset?(child.span, offset)
+              if child.is_a?(Frontend::MemberAccessNode) || child.is_a?(Frontend::IdentifierNode) || child.is_a?(Frontend::PathNode)
+                return child_id
+              end
+              if nested = refine_member_or_identifier(arena, child_id, offset)
+                return nested
+              end
+            end
+          end
+          nil
         end
 
         private def position_to_offset(text : String, line : Int32, character : Int32) : Int32?
@@ -2384,6 +2430,7 @@ module CrystalV2
             display_name = method_name_for_call(node, doc_state.program.arena)
           when Frontend::MemberAccessNode
             method_symbol ||= resolve_member_access_method_symbol(node, doc_state)
+            method_symbol ||= resolve_member_access_method_symbol_stub(node, doc_state, String.new(node.member))
             display_name = String.new(node.member)
           when Frontend::SafeNavigationNode
             method_symbol ||= resolve_safe_navigation_method_symbol(node, doc_state)
@@ -4101,11 +4148,17 @@ module CrystalV2
           member_selected = target_offset && member_range &&
                             target_offset >= member_range[0] && target_offset < member_range[1]
 
+          receiver_symbol = resolve_receiver_symbol(doc_state, node.object)
+
           if method_symbol = resolve_member_access_method_symbol(node, doc_state)
             if location = location_for_symbol(method_symbol)
               return location
             end
             return Location.from_symbol(method_symbol, doc_state.program, uri)
+          end
+
+          if location = find_prelude_method_location(receiver_symbol, String.new(node.member))
+            return location
           end
 
           if member_selected
@@ -4120,35 +4173,106 @@ module CrystalV2
 
         private def resolve_member_access_method_symbol(node : Frontend::MemberAccessNode, doc_state : DocumentState) : Semantic::MethodSymbol?
           method_name = String.new(node.member)
-          symbol_table = doc_state.symbol_table || @prelude_state.try(&.symbol_table)
+          doc_table = doc_state.symbol_table
+          prelude_table = @prelude_state.try(&.symbol_table)
+          prelude_state = @prelude_state
           receiver_type = doc_state.type_context.try(&.get_type(node.object))
+          receiver_symbol = resolve_receiver_symbol(doc_state, node.object)
 
           method_symbol = nil
+
           if receiver_type
-            method_symbol = lookup_method_symbol(receiver_type, method_name, symbol_table)
-          else
-            if receiver_symbol = resolve_receiver_symbol(doc_state, node.object)
-              case receiver_symbol
-              when Semantic::ClassSymbol
-                method_symbol = find_class_method_in_hierarchy(receiver_symbol, method_name, symbol_table) ||
-                  find_method_in_class_hierarchy(receiver_symbol, method_name, symbol_table)
-              when Semantic::ModuleSymbol
+            method_symbol = lookup_method_symbol(receiver_type, method_name, doc_table)
+            if method_symbol.nil? && prelude_table && prelude_table != doc_table
+              method_symbol = lookup_method_symbol(receiver_type, method_name, prelude_table)
+            end
+          end
+
+          if method_symbol.nil? && receiver_symbol
+            case receiver_symbol
+            when Semantic::ClassSymbol
+              method_symbol = find_class_method_in_hierarchy(receiver_symbol, method_name, doc_table) ||
+                find_method_in_class_hierarchy(receiver_symbol, method_name, doc_table)
+              if method_symbol.nil? && prelude_table
+                method_symbol = find_class_method_in_hierarchy(receiver_symbol, method_name, prelude_table) ||
+                  find_method_in_class_hierarchy(receiver_symbol, method_name, prelude_table)
+              end
+            when Semantic::ModuleSymbol
+              method_symbol = find_method_in_scope(receiver_symbol.scope, method_name)
+              if method_symbol.nil? && prelude_table
                 method_symbol = find_method_in_scope(receiver_symbol.scope, method_name)
               end
             end
           end
 
           # If still unresolved, try prelude symbol table directly (e.g., Time.monotonic)
-          if method_symbol.nil?
-            if prelude = @prelude_state
-              if prelude_method = prelude.symbol_table.lookup(method_name).as?(Semantic::MethodSymbol)
+          if method_symbol.nil? && prelude_table
+            if receiver_symbol.is_a?(Semantic::ClassSymbol)
+              method_symbol = find_class_method_in_hierarchy(receiver_symbol.as(Semantic::ClassSymbol), method_name, prelude_table) ||
+                find_method_in_class_hierarchy(receiver_symbol.as(Semantic::ClassSymbol), method_name, prelude_table)
+            elsif receiver_symbol.is_a?(Semantic::ModuleSymbol)
+              method_symbol = find_method_in_scope(receiver_symbol.as(Semantic::ModuleSymbol).scope, method_name)
+            end
+
+            if method_symbol.nil?
+              if prelude_method = prelude_table.lookup(method_name).as?(Semantic::MethodSymbol)
                 method_symbol = prelude_method
               end
             end
           end
 
+          # If prelude is loaded, try matching by origin (useful when prelude methods weren't attached to the receiver scope)
+          if method_symbol.nil? && receiver_symbol && prelude_state
+            if origin = prelude_state.symbol_origins[receiver_symbol]?
+              if methods = @methods_by_name[method_name]?
+                method_symbol = methods.find do |candidate|
+                  if candidate_origin = prelude_state.symbol_origins[candidate]?
+                    candidate_origin.uri == origin.uri
+                  else
+                    false
+                  end
+                end
+                method_symbol ||= methods.find { |candidate| prelude_state.symbol_origins.has_key?(candidate) }
+              end
+            end
+          end
+
+          method_symbol ||= resolve_member_access_method_symbol_stub(node, doc_state, method_name)
+
+          if method_symbol.nil? && receiver_symbol && ENV["LSP_DEBUG"]?
+            if origin = prelude_state.try(&.symbol_origins[receiver_symbol]?)
+              debug("MemberAccess fallback missed: receiver=#{receiver_symbol.class} origin=#{origin.uri} candidates=#{@methods_by_name[method_name]?.try(&.size) || 0}")
+            else
+              debug("MemberAccess fallback missed: receiver=#{receiver_symbol.class} origin=nil candidates=#{@methods_by_name[method_name]?.try(&.size) || 0}")
+            end
+          end
+
           method_symbol ||= fallback_method_by_name(method_name, doc_state)
           method_symbol
+        end
+
+        private def resolve_member_access_method_symbol_stub(
+          node : Frontend::MemberAccessNode,
+          doc_state : DocumentState,
+          method_name : String
+        ) : Semantic::MethodSymbol?
+          stub = stub_prelude_state
+          return nil unless stub
+
+          receiver_symbol = resolve_receiver_symbol(doc_state, node.object)
+          receiver_name = receiver_symbol.try(&.name) || receiver_name_for(doc_state.program.arena, node.object)
+          return nil unless receiver_name
+
+          stub_receiver = resolve_path_symbol_in_table(stub.symbol_table, [receiver_name])
+          case stub_receiver
+          when Semantic::ClassSymbol
+            find_class_method_in_hierarchy(stub_receiver, method_name, stub.symbol_table) ||
+              find_method_in_class_hierarchy(stub_receiver, method_name, stub.symbol_table)
+          when Semantic::ModuleSymbol
+            find_method_in_scope(stub_receiver.scope, method_name)
+          else
+            nil
+          end
         end
 
         private def definition_from_path(node : Frontend::PathNode, doc_state : DocumentState, uri : String) : Location?
@@ -4573,6 +4697,8 @@ module CrystalV2
                        else
                          nil
                        end
+                     when Frontend::ConstantNode
+                       [String.new(node.name)]
                      when Frontend::PathNode
                        collect_path_segments(arena, node)
                      else
@@ -4583,6 +4709,20 @@ module CrystalV2
           resolve_path_symbol(doc_state, segments) || find_symbol_by_segments(segments)
         end
 
+        private def receiver_name_for(arena : Frontend::ArenaLike, expr_id : Frontend::ExprId) : String?
+          node = arena[expr_id]
+          case node
+          when Frontend::IdentifierNode
+            node.name.try { |slice| String.new(slice) }
+          when Frontend::ConstantNode
+            String.new(node.name)
+          when Frontend::PathNode
+            collect_path_segments(arena, node).last?
+          else
+            nil
+          end
+        end
+
         private def find_method_location_by_text(doc_state : DocumentState, method_name : String) : Location?
           (doc_state.requires || [] of String).each do |path|
             next unless File.file?(path)
@@ -4590,6 +4730,29 @@ module CrystalV2
               return location
             end
           end
+          nil
+        end
+
+        private def find_prelude_method_location(receiver_symbol : Semantic::Symbol?, method_name : String) : Location?
+          return nil unless receiver_symbol
+          return nil unless prelude = @prelude_state
+          origin = prelude.symbol_origins[receiver_symbol]?
+          return nil unless origin
+          path = uri_to_path(origin.uri)
+          if path && File.file?(path)
+            if location = find_method_in_file(path, method_name)
+              return location
+            end
+          end
+
+          if stub = stub_prelude_state
+            if File.file?(stub.path)
+              if location = find_method_in_file(stub.path, method_name)
+                return location
+              end
+            end
+          end
+
           nil
         end
 
@@ -4701,13 +4864,15 @@ module CrystalV2
         private def debug(message : String)
           return unless ENV["LSP_DEBUG"]? || @config.debug_log_path
           io = @log_output || STDERR
-          io.puts("[LSP DEBUG] #{message}")
+          ts = Time.local
+          io.puts("[LSP DEBUG] #{ts.to_s("%H:%M:%S.%3N")} #{message}")
           io.flush
         end
 
         # Log error to stderr
         private def log_error(message : String)
-          STDERR.puts("[LSP Error] #{message}")
+          ts = Time.local
+          STDERR.puts("[LSP Error] #{ts.to_s("%H:%M:%S.%3N")} #{message}")
         end
 
         # Rename helper methods

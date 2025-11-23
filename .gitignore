@@ -1,5 +1,6 @@
 # Crystal cache
 .crystal-cache/
+.crystal_cache/
 
 # Build artifacts
 bin/crystal
@@ -24,3 +25,5 @@ print_diags_tmp
 tmp/
 test_*.cr
 *.db
+
+logs/
