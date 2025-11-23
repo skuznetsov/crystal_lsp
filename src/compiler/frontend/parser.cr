@@ -340,8 +340,8 @@ module CrystalV2
           # consumed the corresponding opening parenthesis (e.g., complex proc
           # types in method headers).
           if current_token.kind == Token::Kind::RParen
+            emit_unexpected(current_token)
             advance
-            # Allow newline after '=' in assignments
             skip_statement_end
             return parse_statement
           end
@@ -508,11 +508,17 @@ module CrystalV2
                 @no_type_declaration += 1
                 val = parse_op_assign
                 @no_type_declaration -= 1
-                break if val.invalid?
+                if val.invalid?
+                  emit_unexpected(current_token)
+                  break
+                end
                 accu_named << NamedArgument.new(name_slice, val, name_span, @arena[val].span)
               else
                 arg = parse_op_assign
-                break if arg.invalid?
+                if arg.invalid?
+                  emit_unexpected(current_token)
+                  break
+                end
                 accu_args << arg
               end
               skip_whitespace_and_optional_newlines
@@ -852,32 +858,7 @@ module CrystalV2
         private def current_token
           Watchdog.check!
           ensure_token(@index)
-          tok = @tokens[@index]
-          if @macro_mode == 0
-            case tok.kind
-            when Token::Kind::MacroExprStart
-              # Treat '{{' as two '{' tokens outside macro bodies
-              brace_span = tok.span
-              slice1 = tok.slice.size >= 1 ? tok.slice[0, 1] : "{".to_slice
-              slice2 = tok.slice.size >= 2 ? tok.slice[1, 1] : "{".to_slice
-              if @macro_expr_synth_index != @index
-                @tokens.insert(@index + 1, Token.new(Token::Kind::LBrace, slice2, brace_span))
-                @macro_expr_synth_index = @index
-              end
-              return Token.new(Token::Kind::LBrace, slice1, brace_span)
-            when Token::Kind::MacroExprEnd
-              # Treat '}}' as two '}' tokens outside macro bodies
-              brace_span = tok.span
-              slice1 = tok.slice.size >= 1 ? tok.slice[0, 1] : "}".to_slice
-              slice2 = tok.slice.size >= 2 ? tok.slice[1, 1] : "}".to_slice
-              if @macro_expr_synth_index != @index
-                @tokens.insert(@index + 1, Token.new(Token::Kind::RBrace, slice2, brace_span))
-                @macro_expr_synth_index = @index
-              end
-              return Token.new(Token::Kind::RBrace, slice1, brace_span)
-            end
-          end
-          tok
+          @tokens[@index]
         end
 
         @[AlwaysInline]
@@ -7417,9 +7398,22 @@ module CrystalV2
           lparen = current_token
           advance
           @paren_depth += 1  # Entering parentheses context
+          skip_whitespace_and_optional_newlines
+
+          # Empty grouping '()' → emit diagnostic and return nil node
+          if current_token.kind == Token::Kind::RParen
+            emit_unexpected(current_token)
+            @paren_depth -= 1
+            advance
+            return @arena.add_typed(NilNode.new(lparen.span.cover(current_token.span)))
+          end
           # Parse first expression (allow assignments)
           expr = parse_op_assign
-          return PREFIX_ERROR if expr.invalid?
+          if expr.invalid?
+            emit_unexpected(current_token)
+            @paren_depth -= 1
+            return PREFIX_ERROR
+          end
           # Allow multiple expressions separated by ';' inside parentheses; return last
           loop do
             skip_whitespace_and_optional_newlines
@@ -7427,7 +7421,11 @@ module CrystalV2
             advance
             skip_whitespace_and_optional_newlines
             next_expr = parse_op_assign
-            return PREFIX_ERROR if next_expr.invalid?
+            if next_expr.invalid?
+              emit_unexpected(current_token)
+              @paren_depth -= 1
+              return PREFIX_ERROR
+            end
             expr = next_expr
           end
           expect_operator(Token::Kind::RParen)
@@ -8651,7 +8649,10 @@ module CrystalV2
                 if current_token.kind == Token::Kind::Operator
                   # This is block shorthand: try &.method (with space: Amp + Operator)
                   arg_expr = parse_block_shorthand(amp_token)
-                  return PREFIX_ERROR if arg_expr.invalid?
+                  if arg_expr.invalid?
+                    emit_unexpected(current_token)
+                    return PREFIX_ERROR
+                  end
                 elsif current_token.kind == Token::Kind::Identifier || current_token.kind == Token::Kind::InstanceVar
                   # Phase 103I: Block capture argument: foo(&block) or foo(&@block)
                   # This passes a block as an argument (not block shorthand)
@@ -8680,7 +8681,10 @@ module CrystalV2
                 advance
                 skip_whitespace_and_optional_newlines
                 arg_expr = parse_block_shorthand(amp_token)
-                return PREFIX_ERROR if arg_expr.invalid?
+                if arg_expr.invalid?
+                  emit_unexpected(current_token)
+                  return PREFIX_ERROR
+                end
               else
                 # Phase 68: Splat arguments (*args, **kwargs)
                 if current_token.kind == Token::Kind::Star || current_token.kind == Token::Kind::StarStar
@@ -8738,7 +8742,10 @@ module CrystalV2
                   @no_type_declaration += 1
                   arg_expr = parse_op_assign
                   @no_type_declaration -= 1
-                  return PREFIX_ERROR if arg_expr.invalid?
+                  if arg_expr.invalid?
+                    emit_unexpected(current_token)
+                    return PREFIX_ERROR
+                  end
                   skip_whitespace_and_optional_newlines
 
                   # Check if this is named argument (identifier followed by colon)
@@ -9837,7 +9844,10 @@ module CrystalV2
           unless current_token.kind == Token::Kind::RParen
             loop do
               arg_expr = parse_generic_type_argument_expr
-              return PREFIX_ERROR if arg_expr.invalid?
+                    if arg_expr.invalid?
+                      emit_unexpected(current_token)
+                      return PREFIX_ERROR
+                    end
               type_args_b << arg_expr
 
               skip_whitespace_and_optional_newlines
@@ -9999,9 +10009,7 @@ module CrystalV2
             return
           end
           # Suppress false positive: stray ')' at statement start
-          if token.kind == Token::Kind::RParen && @expect_context == "statement"
-            return
-          end
+          # Do not suppress stray ')' diagnostics; keep tooling aware of unmatched parens.
           # Newline at statement start is a separator; don't emit diagnostics
           if token.kind == Token::Kind::Newline && @expect_context == "statement"
             return
@@ -10105,15 +10113,24 @@ module CrystalV2
         private def macro_expression_start?
           return false if @macro_mode == 0
           current = current_token
-          return false unless current.kind == Token::Kind::LBrace
-          peek = peek_token
-          peek.kind == Token::Kind::LBrace
+          case current.kind
+          when Token::Kind::MacroExprStart
+            true
+          when Token::Kind::LBrace
+            peek_token.kind == Token::Kind::LBrace
+          else
+            false
+          end
         end
 
         private def macro_expression_left_trim?
-          second = peek_token(1)
-          third = peek_token(2)
-          second.kind == Token::Kind::LBrace && macro_trim_token?(third)
+          if current_token.kind == Token::Kind::MacroExprStart
+            macro_trim_token?(peek_token)
+          else
+            second = peek_token(1)
+            third = peek_token(2)
+            second.kind == Token::Kind::LBrace && macro_trim_token?(third)
+          end
         end
 
         private def macro_context? : Bool

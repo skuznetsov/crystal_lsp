@@ -1650,7 +1650,8 @@ module CrystalV2
               next_byte = current_byte
               if next_byte == '<'.ord.to_u8
                 advance  # consume second '<'
-                # Check for <<- (heredoc)
+                # Check for <<- (heredoc). Allow heredoc in expression contexts too
+                # (assignment like `msg = <<-HERE`). Still keep recovery in scan_heredoc.
                 if @offset < @rope.size && current_byte == '-'.ord.to_u8
                   advance  # consume '-'
                   # Try to scan heredoc
@@ -1658,7 +1659,6 @@ module CrystalV2
                   if heredoc_token
                     return heredoc_token
                   else
-                    # Not a valid heredoc, backtrack (TODO: proper error handling)
                     Token::Kind::LShift  # fallback
                   end
                 # Check for <<= (Phase 52)
