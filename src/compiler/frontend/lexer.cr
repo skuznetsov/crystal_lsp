@@ -7,12 +7,13 @@ module CrystalV2
   module Compiler
     module Frontend
       class Lexer
+        @diagnostics : Array(CrystalV2::Compiler::Frontend::Diagnostic)?
         @last_token_kind : Token::Kind?  # Phase 57: for regex vs division disambiguation
         @macro_expr_depth : Int32        # Track nesting of {{ ... }} macro expressions
         @string_pool : StringPool  # String interning for memory optimization
         getter string_pool : StringPool  # Week 1 Day 2: expose for parser generic type interning
 
-        def initialize(source : String)
+        def initialize(source : String, *, diagnostics : Array(Diagnostic)? = nil)
           @rope = Rope.new(source)
           @offset = 0
           @line = 1
@@ -21,11 +22,18 @@ module CrystalV2
           @last_token_kind = nil  # Phase 57: for regex vs division disambiguation
           @macro_expr_depth = 0
           @string_pool = StringPool.new  # String interning for memory optimization
+          @diagnostics = diagnostics
         end
 
         private def debug(message : String)
           if ENV["LEXER_DEBUG"]?
             STDERR.puts message
+          end
+        end
+
+        private def emit_diagnostic(message : String, span : Span)
+          if diag = @diagnostics
+            diag << Diagnostic.new(message, span)
           end
         end
 
@@ -36,6 +44,7 @@ module CrystalV2
             if skip_trivia && (token.kind == Token::Kind::Whitespace || token.kind == Token::Kind::Comment)
               next
             end
+
             block.call token
             break if token.kind == Token::Kind::EOF
           end
@@ -2221,6 +2230,11 @@ module CrystalV2
           end
           debug "[HEREDOC] current_byte=#{current_byte} (#{current_byte.chr})"
           delimiter : String
+          # Heredoc inside interpolation is not allowed
+          if @macro_expr_depth > 0
+            emit_diagnostic("heredoc cannot be used inside interpolation", Span.new(start_offset, @offset, start_line, start_column, @line, @column))
+            return nil
+          end
           if current_byte == SINGLE_QUOTE || current_byte == DOUBLE_QUOTE
             quote = current_byte
             advance  # consume opening quote
@@ -2257,6 +2271,7 @@ module CrystalV2
           end
           if @offset >= @rope.size
             debug "[HEREDOC] returning nil: EOF before newline after delimiter"
+            emit_diagnostic("Unterminated heredoc", Span.new(start_offset, @offset, start_line, start_column, @line, @column))
             return nil
           end
           advance  # consume newline
@@ -2269,9 +2284,16 @@ module CrystalV2
             debug "[HEREDOC] loop iteration, offset=#{@offset}"
             line_start = @offset
 
-            # Skip leading whitespace (for <<- syntax)
+            # Capture indentation to validate (must be >= 2 for <<- form)
+            indent_start = @offset
             while @offset < @rope.size && (current_byte == ' '.ord.to_u8 || current_byte == '\t'.ord.to_u8)
               advance
+            end
+            indent = @offset - indent_start
+
+            if indent < 2
+              emit_diagnostic("heredoc line must have an indent greater than or equal to 2", Span.new(line_start, @offset, @line, 1, @line, @column))
+              return nil
             end
 
             # Check if this line starts with delimiter (after whitespace)
@@ -2313,6 +2335,7 @@ module CrystalV2
 
             if @offset >= @rope.size
               debug "[HEREDOC] returning nil: unterminated heredoc (EOF before delimiter)"
+              emit_diagnostic("Unterminated heredoc: can't find \"#{delimiter}\" anywhere before the end of file", Span.new(start_offset, @offset, start_line, start_column, @line, @column))
               return nil  # Unterminated heredoc
             end
 

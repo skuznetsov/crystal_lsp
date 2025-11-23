@@ -4,23 +4,21 @@ require "../../src/compiler/frontend/parser"
 
 describe "CrystalV2::Compiler::Frontend::Parser" do
   describe "heredoc error handling" do
-    pending "heredoc indent diagnostics not implemented yet" do
-      it "reports indent error" do
-        source = "<<-HERE\n One\n  #{1}\n  HERE"
-        parser = CrystalV2::Compiler::Frontend::Parser.new(
-          CrystalV2::Compiler::Frontend::Lexer.new(source)
-        )
-        parser.parse_program
+    it "reports indent error" do
+      source = "<<-HERE\n One\n  #{1}\n  HERE"
+      parser = CrystalV2::Compiler::Frontend::Parser.new(
+        CrystalV2::Compiler::Frontend::Lexer.new(source, diagnostics: [] of CrystalV2::Compiler::Frontend::Diagnostic)
+      )
+      parser.parse_program
 
-        parser.diagnostics.should_not be_empty
-      end
+      parser.diagnostics.should_not be_empty
     end
 
-    pending "heredoc interpolation diagnostics not implemented yet" do
+    pending "heredoc interpolation diagnostic not fully wired yet" do
       it "reports heredoc inside interpolation" do
         source = %(\#{<<-HERE}\nHERE)
         parser = CrystalV2::Compiler::Frontend::Parser.new(
-          CrystalV2::Compiler::Frontend::Lexer.new(source)
+          CrystalV2::Compiler::Frontend::Lexer.new(source, diagnostics: [] of CrystalV2::Compiler::Frontend::Diagnostic)
         )
         parser.parse_program
 

@@ -830,6 +830,11 @@ module CrystalV2
           @diagnostics
         end
 
+        # Allow lexer to bubble-up lexical diagnostics (e.g. heredoc errors)
+        def add_diagnostic(message : String, span : Span)
+          @diagnostics << Diagnostic.new(message, span)
+        end
+
         # Phase 103: Inline hot path - called thousands of times.
         # We also run the watchdog here so that any tight loop that repeatedly
         # inspects the current token (even if it forgets to advance) is still
