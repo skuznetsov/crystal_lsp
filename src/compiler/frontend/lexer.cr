@@ -957,15 +957,15 @@ module CrystalV2
             end
 
             if brace_depth > 0
-              # Detect heredoc start within interpolation for diagnostics
-              if byte == '<'.ord.to_u8 && scan_offset + 2 < @rope.size && @rope.bytes[scan_offset + 1] == '<'.ord.to_u8 && @rope.bytes[scan_offset + 2] == '-'.ord.to_u8
-                heredoc_inside_interpolation = true
-              end
-              if byte == LEFT_BRACE
-                brace_depth += 1
-              elsif byte == RIGHT_BRACE
-                brace_depth -= 1
-              end
+            # Detect heredoc start within interpolation for diagnostics
+            if byte == '<'.ord.to_u8 && scan_offset + 2 < @rope.size && @rope.bytes[scan_offset + 1] == '<'.ord.to_u8 && @rope.bytes[scan_offset + 2] == '-'.ord.to_u8
+              heredoc_inside_interpolation = true
+            end
+            if byte == LEFT_BRACE
+              brace_depth += 1
+            elsif byte == RIGHT_BRACE
+              brace_depth -= 1
+            end
               scan_offset += 1
               next
             end
