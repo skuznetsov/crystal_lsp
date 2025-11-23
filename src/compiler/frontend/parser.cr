@@ -69,6 +69,9 @@ module CrystalV2
           @parsing_method_params = false
           @skip_newlines_in_braces = true
           @recovery_mode = recovery_mode
+          # Ensure lexer can emit diagnostics into this parser's buffer
+          lexer.diagnostics = @diagnostics
+
           if @streaming
             @lexer = lexer
             @keep_trivia = ENV["CRYSTAL_V2_PARSER_KEEP_TRIVIA"]? != nil

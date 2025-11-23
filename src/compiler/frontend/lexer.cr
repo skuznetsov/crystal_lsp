@@ -8,6 +8,7 @@ module CrystalV2
     module Frontend
       class Lexer
         @diagnostics : Array(CrystalV2::Compiler::Frontend::Diagnostic)?
+        property diagnostics
         @last_token_kind : Token::Kind?  # Phase 57: for regex vs division disambiguation
         @macro_expr_depth : Int32        # Track nesting of {{ ... }} macro expressions
         @string_pool : StringPool  # String interning for memory optimization
