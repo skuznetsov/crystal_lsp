@@ -134,3 +134,18 @@ information must match what the original compiler would infer.
   - [ ] Reports only real parser/semantic errors (no false positives).
   - [ ] Shows types/hover/definitions that match the original compiler on
         project + stdlib code.
+
+## 7. Follow-up (post-LSP stability)
+
+- [ ] Semantic service/API for agents (separate from LSP critical path):
+  - [ ] Structured queries for symbols/definitions/references/callers.
+  - [ ] Dataflow/path queries (e.g., taint/flows from source→sink) with “slow lane” separate from LSP latency.
+- [ ] Structural patch layer:
+  - [ ] Core operations (rename/extract/introduce_param/move) expressed on AST/symbols with validation against types/flows and diagnostics.
+  - [ ] Text diff only as a serialization of validated structural edits.
+- [ ] Lifetime “coloring” / memory modes:
+  - [ ] Taint-style propagation of lifetimes (stack/region/owned/shared/escaped) to prefer arenas/ARC where safe, fallback to GC when unknown.
+  - [ ] Reports/insights for agents/humans; no hard rejections initially.
+- [ ] JVM/backends (defer until LSP is solid):
+  - [ ] Narrow JVM target (e.g., Java Agent) as an experiment after LSP+graphs are stable.
+  - [ ] Keep memory semantics consistent across backends; Shared→GC, Region/Stack→local buffers/FFM where possible.
