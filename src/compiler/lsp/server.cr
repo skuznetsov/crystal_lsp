@@ -208,6 +208,7 @@ module CrystalV2
         @dependency_documents : Hash(String, DocumentState)
         @stub_prelude_state_loaded : Bool = false
         @stub_prelude_state : PreludeState?
+        @prelude_method_index : Hash(String, Location)
 
         def initialize(@input = STDIN, @output = STDOUT, config : ServerConfig = ServerConfig.load)
           @config = config
@@ -233,6 +234,7 @@ module CrystalV2
           @dependency_documents = {} of String => DocumentState
           @stub_prelude_state_loaded = false
           @stub_prelude_state = nil
+          @prelude_method_index = {} of String => Location
           # Allow forcing the stub prelude for debugging via environment variable
           if ENV["CRYSTALV2_LSP_FORCE_STUB"]?
             try_load_prelude(PRELUDE_STUB_PATH, "LSP stub prelude")
@@ -4166,12 +4168,17 @@ module CrystalV2
 
           if method_symbol = resolve_member_access_method_symbol(node, doc_state)
             if location = location_for_symbol(method_symbol) || location_for_prelude_symbol(method_symbol)
+              if location.uri.ends_with?("prelude_stub.cr")
+                if alt = find_prelude_method_location(receiver_symbol, String.new(node.member), receiver_name_for(arena, node.object))
+                  return alt
+                end
+              end
               return location
             end
             return Location.from_symbol(method_symbol, doc_state.program, uri)
           end
 
-          if location = find_prelude_method_location(receiver_symbol, String.new(node.member))
+          if location = find_prelude_method_location(receiver_symbol, String.new(node.member), receiver_name_for(arena, node.object))
             return location
           end
 
@@ -4767,15 +4774,39 @@ module CrystalV2
           nil
         end
 
-        private def find_prelude_method_location(receiver_symbol : Semantic::Symbol?, method_name : String) : Location?
-          return nil unless receiver_symbol
+        private def find_prelude_method_location(receiver_symbol : Semantic::Symbol?, method_name : String, receiver_name_hint : String? = nil) : Location?
           return nil unless prelude = @prelude_state
-          origin = prelude.symbol_origins[receiver_symbol]?
-          return nil unless origin
-          path = uri_to_path(origin.uri)
-          if path && File.file?(path)
-            if location = find_method_in_file(path, method_name)
-              return location
+          receiver_name = if receiver_symbol.responds_to?(:name)
+            receiver_symbol.name
+          else
+            receiver_name_hint
+          end
+
+          if receiver_symbol
+            if origin = prelude.symbol_origins[receiver_symbol]?
+              path = uri_to_path(origin.uri)
+              if path && File.file?(path)
+                if location = find_method_in_file(path, method_name)
+                  return location
+                end
+              end
+            end
+          end
+
+          # Fallback: derive stdlib file by receiver name and cache
+          if receiver_name
+            cache_key = "#{receiver_name}.#{method_name}"
+            if cached = @prelude_method_index[cache_key]?
+              return cached
+            end
+
+            base_dir = File.dirname(PRELUDE_PATH)
+            candidate = File.join(base_dir, "#{receiver_name.downcase}.cr")
+            if File.file?(candidate)
+              if location = find_method_in_file(candidate, method_name)
+                @prelude_method_index[cache_key] = location
+                return location
+              end
             end
           end
 
