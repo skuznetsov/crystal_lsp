@@ -11,6 +11,7 @@ module CrystalV2
       class Parser
         @consume_postfix_modifiers : Bool? = true
         @macro_expr_synth_index : Int32?
+        @macro_expr_brace_cache : Hash(Int32, Bool)
         PREFIX_ERROR = ExprId.new(-1)
         UNARY_PRECEDENCE = 30
 
@@ -74,6 +75,7 @@ module CrystalV2
           @recovery_mode = recovery_mode
           @consume_postfix_modifiers = true
           @macro_expr_synth_index = nil
+          @macro_expr_brace_cache = Hash(Int32, Bool).new
           @allow_inline_rescue = true
           # Ensure lexer can emit diagnostics into this parser's buffer
           lexer.diagnostics = @diagnostics
@@ -174,6 +176,8 @@ module CrystalV2
           @skip_newlines_in_braces = true
           @recovery_mode = recovery_mode
           @consume_postfix_modifiers = true
+          @macro_expr_synth_index = nil
+          @macro_expr_brace_cache = Hash(Int32, Bool).new
           @allow_inline_rescue = true
           if @streaming
             @lexer = lexer
@@ -863,7 +867,94 @@ module CrystalV2
         private def current_token
           Watchdog.check!
           ensure_token(@index)
-          @tokens[@index]
+          tok = @tokens[@index]
+          if @macro_mode == 0
+            case tok.kind
+            when Token::Kind::MacroExprStart
+              if macro_expr_as_braces?(@index)
+                span = tok.span
+                slice = tok.slice
+                if @macro_expr_synth_index != @index
+                  @tokens.insert(@index + 1, Token.new(Token::Kind::LBrace, slice, span))
+                  @macro_expr_synth_index = @index
+                end
+                return Token.new(Token::Kind::LBrace, slice, span)
+              end
+            when Token::Kind::MacroExprEnd
+              if (start_index = find_matching_macro_expr_start(@index)) && macro_expr_as_braces?(start_index)
+                span = tok.span
+                slice = tok.slice
+                if @macro_expr_synth_index != @index
+                  @tokens.insert(@index + 1, Token.new(Token::Kind::RBrace, slice, span))
+                  @macro_expr_synth_index = @index
+                end
+                return Token.new(Token::Kind::RBrace, slice, span)
+              end
+            end
+          end
+          tok
+        end
+
+        # Heuristic: decide if a `{{ ... }}` sequence should be treated as literal
+        # braces (tuple/hash) instead of a macro expression. We memoize by the
+        # start token index to keep the hot path cheap.
+        private def macro_expr_as_braces?(start_index : Int32) : Bool
+          return false if @macro_mode > 0
+          if cached = @macro_expr_brace_cache[start_index]?
+            return cached
+          end
+
+          brace_like = macro_expr_brace_heuristic(start_index)
+          @macro_expr_brace_cache[start_index] = brace_like
+          brace_like
+        end
+
+        private def macro_expr_brace_heuristic(start_index : Int32) : Bool
+          nest = 0
+          i = start_index + 1
+
+          while i < @tokens.size
+            tok = @tokens[i]
+            case tok.kind
+            when Token::Kind::MacroExprStart, Token::Kind::LBrace, Token::Kind::LBracket, Token::Kind::LParen
+              nest += 1
+            when Token::Kind::MacroExprEnd
+              break if nest == 0
+              nest -= 1 if nest > 0
+            when Token::Kind::RBrace, Token::Kind::RBracket, Token::Kind::RParen
+              nest -= 1 if nest > 0
+            when Token::Kind::Comma
+              # Top-level comma before closing suggests tuple/hash literal
+              return true if nest == 0
+            end
+
+            break if tok.kind == Token::Kind::MacroExprEnd && nest == 0
+            i += 1
+          end
+
+          false
+        end
+
+        private def find_matching_macro_expr_start(index : Int32) : Int32?
+          depth = 0
+          i = index - 1
+
+          while i >= 0
+            tok = @tokens[i]
+            case tok.kind
+            when Token::Kind::MacroExprEnd
+              depth += 1
+            when Token::Kind::MacroExprStart
+              if depth == 0
+                return i
+              else
+                depth -= 1
+              end
+            end
+            i -= 1
+          end
+
+          nil
         end
 
         @[AlwaysInline]
@@ -1285,6 +1376,7 @@ module CrystalV2
           bracket_depth = 0
           brace_depth = 0
           buffer = IO::Memory.new
+          last_type_token : Token? = nil
 
           loop do
             token = current_token
@@ -1299,6 +1391,10 @@ module CrystalV2
               break if token.kind == Token::Kind::EOF
               break if token.kind == Token::Kind::RBracket
               break if token.kind == Token::Kind::RBrace
+              # Stop if we see a '{' after already consuming some type tokens (likely start of body)
+              if token.kind == Token::Kind::LBrace && last_type_token && !last_type_token.kind.in?(Token::Kind::LBrace, Token::Kind::Comma)
+                break
+              end
               if token.kind == Token::Kind::Identifier && slice_eq?(token.slice, "forall")
                 break
               end
@@ -1368,6 +1464,7 @@ module CrystalV2
               fast_forward_macro_expression
               if macro_closing_sequence?(current_token)
                 buffer.write current_token.slice
+                last_type_token = current_token
                 advance
               end
             else
@@ -1377,6 +1474,7 @@ module CrystalV2
                 nxt = peek_next_non_trivia
                 buffer.write_byte(' '.ord.to_u8) unless nxt.kind == Token::Kind::RBrace
               end
+              last_type_token = token
               advance
             end
           end
@@ -7264,9 +7362,9 @@ module CrystalV2
             elsif macro_context? && next_tok.kind == Token::Kind::MacroExprStart
               parse_percent_macro_expression
             else
-            # Phase 14/15: Hash/NamedTuple/Tuple literal — single-pass, no backtracking
-            parse_hash_or_tuple
-          end
+              # Phase 14/15: Hash/NamedTuple/Tuple literal — single-pass, no backtracking
+              parse_hash_or_tuple
+            end
           when Token::Kind::ThinArrow
             # Phase 74: Proc literal (->(x) { ... })
             return parse_proc_literal
