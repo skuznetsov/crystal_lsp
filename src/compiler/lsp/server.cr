@@ -127,20 +127,30 @@ module CrystalV2
       end
 
       class Server
-        # Try to resolve the real Crystal prelude from common locations.
-        # Preferred: repo root at src/prelude.cr. Fallback: relative to this dir.
+        # Try to resolve the real Crystal prelude from vanilla stdlib or repo copies.
         PRELUDE_PATH = begin
-          # Prefer repo root prelude (../src) when running LSP binaries from crystal_v2/
-          repo_root = File.expand_path("..", File.expand_path("..", __DIR__))
-          repo_root_prelude = File.expand_path("src/prelude.cr", repo_root)
-          if File.exists?(repo_root_prelude)
-            repo_root_prelude
+          # 1) Honor CRYSTAL_PATH if present
+          if crystal_path = ENV["CRYSTAL_PATH"]?
+            if path = prelude_from_crystal_path(crystal_path)
+              path
+            end
+          end
+          # 2) Ask installed crystal about CRYSTAL_PATH (best effort)
+          if path = resolve_prelude_via_crystal_env
+            path
           else
-            root_prelude = File.expand_path("../../../../src/prelude.cr", __DIR__)
-            if File.exists?(root_prelude)
-              root_prelude
+            # 3) Local repo fallbacks
+            repo_root = File.expand_path("..", File.expand_path("..", __DIR__))
+            repo_root_prelude = File.expand_path("src/prelude.cr", repo_root)
+            if File.exists?(repo_root_prelude)
+              repo_root_prelude
             else
-              File.expand_path("../../prelude.cr", __DIR__)
+              root_prelude = File.expand_path("../../../../src/prelude.cr", __DIR__)
+              if File.exists?(root_prelude)
+                root_prelude
+              else
+                File.expand_path("../../prelude.cr", __DIR__)
+              end
             end
           end
         end
@@ -156,6 +166,23 @@ module CrystalV2
           File.expand_path("frontend/lexer.cr", COMPILER_ROOT),
           File.expand_path("frontend/parser.cr", COMPILER_ROOT),
         ]
+
+        private def self.prelude_from_crystal_path(path_str : String) : String?
+          path_str.split(':').each do |base|
+            candidate = File.expand_path("prelude.cr", base)
+            return candidate if File.exists?(candidate)
+          end
+          nil
+        end
+
+        private def self.resolve_prelude_via_crystal_env : String?
+          io = IO::Memory.new
+          status = Process.run("crystal", ["env", "CRYSTAL_PATH"], output: io, error: IO::Memory.new, shell: false)
+          return nil unless status.success?
+          prelude_from_crystal_path(io.to_s.strip)
+        rescue
+          nil
+        end
 
         # Security constants - prevent DoS attacks and resource exhaustion
         # These limits balance security with practical usability for large projects
@@ -4107,6 +4134,15 @@ module CrystalV2
                   find_method_in_class_hierarchy(receiver_symbol, method_name, symbol_table)
               when Semantic::ModuleSymbol
                 method_symbol = find_method_in_scope(receiver_symbol.scope, method_name)
+              end
+            end
+          end
+
+          # If still unresolved, try prelude symbol table directly (e.g., Time.monotonic)
+          if method_symbol.nil?
+            if prelude = @prelude_state
+              if prelude_method = prelude.symbol_table.lookup(method_name).as?(Semantic::MethodSymbol)
+                method_symbol = prelude_method
               end
             end
           end

@@ -7,6 +7,25 @@ struct Time
   def self.utc
     Time.new
   end
+
+  # Monotonic clock stub
+  def self.monotonic : Span
+    Span.new
+  end
+
+  struct Span
+    def initialize
+    end
+
+    # Span arithmetic
+    def -(other : Span) : Span
+      Span.new
+    end
+
+    def total_milliseconds : Float64
+      0.0
+    end
+  end
 end
 
 alias Bytes = Slice(UInt8)
