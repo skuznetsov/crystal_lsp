@@ -993,13 +993,16 @@ module CrystalV2
                 if @offset + 4 < @rope.size && @rope.bytes[@offset + 2] == '<'.ord.to_u8 && @rope.bytes[@offset + 3] == '<'.ord.to_u8 && @rope.bytes[@offset + 4] == '-'.ord.to_u8
                   heredoc_inside_interpolation = true
                 end
-                brace_depth_fast = 1
-                advance(2)
-                next
-              elsif brace_depth_fast > 0
-                brace_depth_fast += 1 if current_byte == LEFT_BRACE
-                brace_depth_fast -= 1 if current_byte == RIGHT_BRACE
+              brace_depth_fast = 1
+              advance(2)
+              next
+            elsif brace_depth_fast > 0
+              if current_byte == '<'.ord.to_u8 && @offset + 2 < @rope.size && @rope.bytes[@offset + 1] == '<'.ord.to_u8 && @rope.bytes[@offset + 2] == '-'.ord.to_u8
+                heredoc_inside_interpolation = true
               end
+              brace_depth_fast += 1 if current_byte == LEFT_BRACE
+              brace_depth_fast -= 1 if current_byte == RIGHT_BRACE
+            end
 
               advance
             end
@@ -1191,6 +1194,10 @@ module CrystalV2
               end
 
               if brace_depth_fast == 0 && current_byte == HASH && @offset + 1 < @rope.size && @rope.bytes[@offset + 1] == LEFT_BRACE
+                # Peek immediately after '#{' for heredoc opener
+                if @offset + 4 < @rope.size && @rope.bytes[@offset + 2] == '<'.ord.to_u8 && @rope.bytes[@offset + 3] == '<'.ord.to_u8 && @rope.bytes[@offset + 4] == '-'.ord.to_u8
+                  heredoc_inside_interpolation = true
+                end
                 brace_depth_fast = 1
                 advance(2)
                 next
