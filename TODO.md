@@ -156,3 +156,5 @@ information must match what the original compiler would infer.
   - [ ] Narrow JVM target (e.g., Java Agent) as an experiment after LSP+graphs are stable.
   - [ ] Keep memory semantics consistent across backends; Shared→GC, Region/Stack→local buffers/FFM where possible.
 - [ ] Zero-copy name handling: reduce `String` allocations in symbol/definition lookup by interning or span-based lookups; build strings only at LSP/JSON boundary.
+- [ ] Prefer real prelude load (vanilla stdlib) with cache + mtime tracking; only fall back to stub when parsing fails. Cache resolved prelude path and allow warm reuse across requests.
+- [ ] Add structured LSP/MCP tests that exercise definition/hover against stdlib symbols (`Time.monotonic`, `File.read`, etc.) to catch spinner/null cases.
