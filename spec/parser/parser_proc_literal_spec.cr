@@ -202,6 +202,22 @@ describe "CrystalV2::Compiler::Frontend::Parser" do
       CrystalV2::Compiler::Frontend.node_kind(proc_arg).should eq(CrystalV2::Compiler::Frontend::NodeKind::ProcLiteral)
     end
 
+    it "parses typed array of proc type with no return" do
+      parser = CrystalV2::Compiler::Frontend::Parser.new(
+        CrystalV2::Compiler::Frontend::Lexer.new("arr = [] of ->")
+      )
+      parser.parse_program
+      parser.diagnostics.size.should eq(0)
+    end
+
+    it "parses typed array of proc type with single arg and no return" do
+      parser = CrystalV2::Compiler::Frontend::Parser.new(
+        CrystalV2::Compiler::Frontend::Lexer.new("hooks = [] of Example::Procsy ->")
+      )
+      parser.parse_program
+      parser.diagnostics.size.should eq(0)
+    end
+
     it "parses proc assigned to variable" do
       source = "p = ->(x) { x }"
 

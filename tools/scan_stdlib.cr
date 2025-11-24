@@ -6,7 +6,11 @@ watchdog_timeout = ENV["SCAN_TIMEOUT"]? || (ENV["ENABLE_WATCHDOG"]? ? "0.5" : ni
 timeout_span = watchdog_timeout ? watchdog_timeout.to_f.seconds : nil
 
 paths = (ENV["CRYSTAL_PATH"]? || "").split(":")
-files = paths.flat_map { |p| Dir.glob(File.join(p, "**", "*.cr")) }.sort
+paths.uniq!
+files = paths.flat_map { |p| Dir.glob(File.join(p, "**", "*.cr")) }.sort.reject do |f|
+  # Skip cache directories (compiled tool outputs may appear as dirs with .cr suffix)
+  f.starts_with?("tmp/crystal_cache/")
+end
 total = 0
 reports = [] of {String, Int32}
 timeouts = [] of String

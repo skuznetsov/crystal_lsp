@@ -7620,7 +7620,7 @@ module CrystalV2
 
               # Parse type annotation as a slice and wrap in an Identifier node for now.
               type_start = current_token
-              type_slice = parse_type_annotation
+              type_slice = parse_union_type_for_annotation
               type_end = previous_token || type_start
               if type_slice
                 type_span = type_start.span.cover(type_end.span)
@@ -7710,10 +7710,17 @@ module CrystalV2
             advance
             skip_trivia
 
-            # Parse type expression (supports unions, generics, etc.)
-            type_expr = parse_expression(0)
-            return PREFIX_ERROR if type_expr.invalid?
-            of_type_expr = type_expr
+            # Parse type expression (supports unions, generics, proc types)
+            type_start = current_token
+            type_slice = parse_union_type_for_annotation
+            type_end = previous_token || type_start
+            if type_slice
+              type_span = type_start.span.cover(type_end.span)
+              of_type_expr = @arena.add_typed(IdentifierNode.new(type_span, @string_pool.intern(type_slice)))
+            else
+              emit_unexpected(current_token)
+              return PREFIX_ERROR
+            end
           end
 
           array_span = lbracket.span.cover(closing_bracket.span)
@@ -12180,7 +12187,7 @@ module CrystalV2
 
           # Parse first type
           first_type_start = current_token
-          type = parse_union_type_for_annotation
+          type = parse_atomic_type_with_suffix_for_annotation
           return nil if type.nil?
 
           skip_trivia
@@ -12199,7 +12206,7 @@ module CrystalV2
               advance  # consume comma
               skip_trivia
 
-              next_type = parse_union_type_for_annotation
+              next_type = parse_atomic_type_with_suffix_for_annotation
               return nil if next_type.nil?
 
               skip_trivia
@@ -12278,8 +12285,8 @@ module CrystalV2
         private def parse_union_type_for_annotation : Slice(UInt8)?
           start_token = current_token
 
-          # Parse first type
-          type = parse_atomic_type_with_suffix_for_annotation
+          # Parse first type (proc types included)
+          type = parse_bare_proc_type
           return nil if type.nil?
 
           skip_trivia
@@ -12294,7 +12301,7 @@ module CrystalV2
             advance  # consume |
             skip_trivia
 
-            next_type = parse_atomic_type_with_suffix_for_annotation
+            next_type = parse_bare_proc_type
             return nil if next_type.nil?
 
             skip_trivia
@@ -12499,11 +12506,22 @@ module CrystalV2
             advance  # consume ->
             skip_trivia
 
-            # Parse return type
-            return_type = parse_union_type_for_annotation
-            return nil if return_type.nil?
+            # Parse optional return type (void if absent)
+            has_return_type = case current_token.kind
+                              when Token::Kind::Identifier, Token::Kind::Self,
+                                   Token::Kind::Typeof, Token::Kind::LParen,
+                                   Token::Kind::LBrace
+                                true
+                              else
+                                false
+                              end
 
-            end_token = previous_token.not_nil!
+            if has_return_type
+              return_type = parse_union_type_for_annotation
+              return nil if return_type.nil?
+            end
+
+            end_token = previous_token || start_token
             start_ptr = start_token.slice.to_unsafe
             end_ptr = end_token.slice.to_unsafe + end_token.slice.size
             return Slice.new(start_ptr, end_ptr - start_ptr)
