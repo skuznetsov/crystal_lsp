@@ -1439,6 +1439,7 @@ module CrystalV2
                  Token::Kind::ColonColon, Token::Kind::Operator,
                  Token::Kind::ThinArrow, Token::Kind::Self,
                  Token::Kind::Typeof,
+                 Token::Kind::Yield, Token::Kind::Break, Token::Kind::Next,
                  Token::Kind::Pipe,
                  Token::Kind::LParen, Token::Kind::RParen,
                  Token::Kind::Comma,
@@ -10079,6 +10080,21 @@ module CrystalV2
         end
 
         private def parse_generic_type_argument_expr : ExprId
+          # First, try to parse a type annotation as a whole (covers pointer suffixes, unions, proc types, etc.)
+          start_token = current_token
+          start_index = @index
+          type_slice = parse_type_annotation
+          if @index > start_index
+            end_tok = previous_token || start_token
+            span = start_token.span.cover(end_tok.span)
+            return @arena.add_typed(
+              IdentifierNode.new(
+                span,
+                @string_pool.intern(type_slice)
+              )
+            )
+          end
+
           # Allow splatted type arguments (e.g., Union(*T))
           if current_token.kind == Token::Kind::Star || current_token.kind == Token::Kind::StarStar
             star_token = current_token
