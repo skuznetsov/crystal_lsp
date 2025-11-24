@@ -8795,6 +8795,8 @@ module CrystalV2
 
               # Phase 101: Check for block shorthand (&.method) or block capture (&block)
               # This creates: { |__arg0| __arg0.method } or passes block argument
+              arg_expr : ExprId? = nil
+              pushed = false
               if current_token.kind == Token::Kind::Amp
                 # Save position in case this is not block shorthand
                 amp_token = current_token
@@ -8841,6 +8843,8 @@ module CrystalV2
                   emit_unexpected(current_token)
                   return PREFIX_ERROR
                 end
+                args_b << arg_expr
+                pushed = true
               else
                 # Phase 68: Splat arguments (*args, **kwargs)
                 if current_token.kind == Token::Kind::Star || current_token.kind == Token::Kind::StarStar
@@ -8852,6 +8856,7 @@ module CrystalV2
                   span = star_token.span.cover(@arena[value_expr].span)
                   arg_expr = @arena.add_typed(SplatNode.new(span, value_expr))
                   args_b << arg_expr
+                  pushed = true
                   skip_whitespace_and_optional_newlines
                   goto_comma = current_token.kind == Token::Kind::Comma
                   if goto_comma
@@ -8932,19 +8937,34 @@ module CrystalV2
                   emit_unexpected(current_token)
                   return PREFIX_ERROR
                 end
-              else
-                # Positional argument
+                else
+                  # Positional argument
+                  args_b << arg_expr
+                  pushed = true
+                end
+              end  # close if named_arg_start?
+              # After any branch, ensure amp-based arguments are captured
+              if arg_expr && !arg_expr.invalid? && !pushed
                 args_b << arg_expr
               end
-            end  # close if named_arg_start?
-          end  # close else from Amp/AmpDot check
+            end  # close else from Amp/AmpDot check
 
-              break unless current_token.kind == Token::Kind::Comma
-              advance  # consume comma
+              # Advance to next argument. Support comma-separated args and
+              # consecutive block shorthands without commas: foo(&.a &.b)
               skip_whitespace_and_optional_newlines
+              if current_token.kind == Token::Kind::Comma
+                advance  # consume comma
+                skip_whitespace_and_optional_newlines
 
-              # Handle trailing comma: foo(x: 1, y: 2,)
-              break if current_token.kind == Token::Kind::RParen
+                # Handle trailing comma: foo(x: 1, y: 2,)
+                break if current_token.kind == Token::Kind::RParen
+              elsif current_token.kind.in?(Token::Kind::Amp, Token::Kind::AmpDot)
+                # Treat consecutive block shorthands as separate arguments even
+                # without an explicit comma.
+                next
+              else
+                break
+              end
             end
           end
 
@@ -11901,7 +11921,10 @@ module CrystalV2
             # Require same line and a visible gap to consider it a no-parens argument.
             same_line = tok.span.start_line == callee_span.end_line
             has_gap = tok.span.start_column > callee_span.end_column
-            if same_line && has_gap && @parsing_call_args == 0 && !call_without_parens_disallowed?(tok)
+            allow_inline_args = @parsing_call_args == 0 || tok.kind.in?(Token::Kind::Amp, Token::Kind::AmpDot)
+            disallowed = call_without_parens_disallowed?(tok)
+            disallowed = false if tok.kind.in?(Token::Kind::Amp, Token::Kind::AmpDot)
+            if same_line && has_gap && allow_inline_args && !disallowed
               # Only allow for call-like nodes (MemberAccess/Call)
               kind = Frontend.node_kind(@arena[call_expr])
               if kind == Frontend::NodeKind::MemberAccess || kind == Frontend::NodeKind::Call
@@ -11911,8 +11934,42 @@ module CrystalV2
                 loop do
                   # Stop on block delimiters to let outer layer attach them
                   break if current_token.kind.in?(Token::Kind::Do, Token::Kind::LBrace)
-                  # Parse one arg; allow named arguments (name: value)
-                  if named_arg_start?
+
+                  if current_token.kind == Token::Kind::AmpDot
+                    amp_token = current_token
+                    advance
+                    skip_trivia
+                    arg = parse_block_shorthand(amp_token)
+                    break if arg.invalid?
+                    args_b << arg
+                  elsif current_token.kind == Token::Kind::Amp
+                    amp_token = current_token
+                    advance
+                    skip_trivia
+                    if current_token.kind == Token::Kind::Operator
+                      arg = parse_block_shorthand(amp_token)
+                      break if arg.invalid?
+                      args_b << arg
+                    elsif current_token.kind == Token::Kind::Identifier || current_token.kind == Token::Kind::InstanceVar
+                      ident_tok = current_token
+                      advance
+                      ident_span = ident_tok.span
+                      ident_node = if ident_tok.kind == Token::Kind::Identifier
+                        @arena.add_typed(IdentifierNode.new(ident_span, @string_pool.intern(ident_tok.slice)))
+                      else
+                        @arena.add_typed(InstanceVarNode.new(ident_span, ident_tok.slice))
+                      end
+                      arg_span = amp_token.span.cover(ident_span)
+                      arg = @arena.add_typed(UnaryNode.new(arg_span, amp_token.slice, ident_node))
+                      args_b << arg
+                    else
+                      # Fallback to normal expression starting with amp
+                      unadvance
+                      arg = parse_op_assign
+                      break if arg.invalid?
+                      args_b << arg
+                    end
+                  elsif named_arg_start?
                     name_tok = current_token
                     name_slice = name_tok.slice
                     name_span = name_tok.span
@@ -11934,6 +11991,7 @@ module CrystalV2
                     break if arg.invalid?
                     args_b << arg
                   end
+
                   skip_whitespace_and_optional_newlines
                   if current_token.kind == Token::Kind::Comma
                     advance

@@ -204,5 +204,29 @@ describe "CrystalV2::Compiler::Frontend::Parser" do
       program.roots.size.should eq(1)
       parser.diagnostics.size.should eq(0)
     end
+
+    it "parses block shorthand with nested block argument inside parentheses" do
+      source = <<-CRYSTAL
+      all_break_vars.try(&.all? &.has_key?(name))
+      CRYSTAL
+
+      parser = CrystalV2::Compiler::Frontend::Parser.new(CrystalV2::Compiler::Frontend::Lexer.new(source))
+      program = parser.parse_program
+
+      program.roots.size.should eq(1)
+      parser.diagnostics.size.should eq(0)
+    end
+
+    it "parses block shorthand with indexing and try inside nested argument" do
+      source = <<-CRYSTAL
+      all_break_vars.try(&.any? &.[name]?.try &.nil_if_read?)
+      CRYSTAL
+
+      parser = CrystalV2::Compiler::Frontend::Parser.new(CrystalV2::Compiler::Frontend::Lexer.new(source))
+      program = parser.parse_program
+
+      program.roots.size.should eq(1)
+      parser.diagnostics.size.should eq(0)
+    end
   end
 end
