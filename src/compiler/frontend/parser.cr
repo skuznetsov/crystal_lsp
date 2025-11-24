@@ -7365,7 +7365,19 @@ module CrystalV2
             end
           when Token::Kind::ThinArrow
             # Phase 74: Proc literal (->(x) { ... })
-            return parse_proc_literal
+            # Also handle proc pointer shorthand: ->Type.method
+            nxt = peek_next_non_trivia
+            if nxt.kind.in?(Token::Kind::LParen, Token::Kind::Do, Token::Kind::LBrace)
+              return parse_proc_literal
+            end
+
+            arrow_tok = token
+            advance
+            skip_trivia
+            target = parse_expression(UNARY_PRECEDENCE)
+            return PREFIX_ERROR if target.invalid?
+            span = arrow_tok.span.cover(@arena[target].span)
+            @arena.add_typed(UnaryNode.new(span, arrow_tok.slice, target))
           when Token::Kind::DotDot, Token::Kind::DotDotDot
             # Beginless/full range at expression start:
             #   ..n / ...n  → (nil .. n) / (nil ... n)
