@@ -1,6 +1,8 @@
 require "../src/compiler/frontend/lexer"
 require "../src/compiler/frontend/parser"
+require "../src/compiler/frontend/parser"
 require "../src/compiler/frontend/watchdog"
+require "../src/compiler/frontend/rope"
 
 # Allow running inside stdlib context by prepending stdlib paths and prelude when available.
 # Optional stdlib bootstrap: when CRYSTAL_STDLIB_PATH is provided, prepend it to
@@ -31,6 +33,21 @@ rescue KeyError
 end
 
 parser = CrystalV2::Compiler::Frontend::Parser.new(lexer, recovery_mode: ENV["CRYSTAL_V2_LSP_RECOVERY"]? == "1")
+
+# Optional prelude parse into shared arena to seed constants (best-effort, skip errors)
+if prelude && File.exists?(prelude)
+  begin
+    prelude_src = File.read(prelude)
+    prelude_parser = CrystalV2::Compiler::Frontend::Parser.new(
+      CrystalV2::Compiler::Frontend::Lexer.new(prelude_src),
+      parser.arena,  # share arena to reuse nodes
+      recovery_mode: true
+    )
+    prelude_parser.parse_program
+  rescue
+    # ignore prelude failures; continue with main file
+  end
+end
 
 begin
   # Optional watchdog to prevent hangs during large-file diagnostics.
