@@ -2340,10 +2340,9 @@ module CrystalV2
                     end
                   end
                 else
-                  # Regular parameter - parse full type including possible proc types
-                  # Use parse_bare_proc_type to allow comma-separated inputs before '->'
+                  # Regular parameter - parse full type including unions/proc types
                   type_start_token = current_token
-                  parsed_type = parse_bare_proc_type
+                  parsed_type = parse_union_type_for_annotation
                   if parsed_type.nil?
                     # Fallback to generic type annotation parser to avoid regressions
                     parsed_type = parse_type_annotation
