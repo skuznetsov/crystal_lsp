@@ -2502,13 +2502,11 @@ module CrystalV2
 
           debug("Returning hover with type: #{type_str}")
           send_response(id, hover.to_json)
-          if finished = Time.monotonic
-            debug("Hover completed in #{(finished - started_at).total_milliseconds.round(2)}ms -> hit")
-          end
+          finished = Time.monotonic
+          debug("Hover completed in #{(finished - started_at).total_milliseconds.round(2)}ms -> hit")
         rescue ex
-          if finished = Time.monotonic
-            debug("Hover failed after #{(finished - started_at).total_milliseconds.round(2)}ms: #{ex.message}")
-          end
+          finished = Time.monotonic
+          debug("Hover failed after #{(finished - started_at).total_milliseconds.round(2)}ms: #{ex.message}")
           raise ex
         end
 
@@ -2555,20 +2553,17 @@ module CrystalV2
           if location
             debug("Returning definition location")
             send_response(id, [location].to_json)
-            if finished = Time.monotonic
-              debug("Definition completed in #{(finished - started_at).total_milliseconds.round(2)}ms -> hit")
-            end
+            finished = Time.monotonic
+            debug("Definition completed in #{(finished - started_at).total_milliseconds.round(2)}ms -> hit")
           else
             debug("Definition not found")
             send_response(id, "null")
-            if finished = Time.monotonic
-              debug("Definition completed in #{(finished - started_at).total_milliseconds.round(2)}ms -> miss")
-            end
+            finished = Time.monotonic
+            debug("Definition completed in #{(finished - started_at).total_milliseconds.round(2)}ms -> miss")
           end
         rescue ex
-          if finished = Time.monotonic
-            debug("Definition failed after #{(finished - started_at).total_milliseconds.round(2)}ms: #{ex.message}")
-          end
+          finished = Time.monotonic
+          debug("Definition failed after #{(finished - started_at).total_milliseconds.round(2)}ms: #{ex.message}")
           raise ex
         end
 
