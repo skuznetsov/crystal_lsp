@@ -1385,9 +1385,7 @@ module CrystalV2
             if paren_depth == 0 && bracket_depth == 0 && brace_depth == 0
               break if token.kind == Token::Kind::Eq
               break if token.kind == Token::Kind::Comma
-              break if token.kind == Token::Kind::Arrow
               break if operator_token?(token, Token::Kind::RParen)
-              break if token.kind == Token::Kind::ThinArrow  # stop at -> in types (e.g., Proc(Nil -> Nil))
               break if token.kind == Token::Kind::Newline
               break if token.kind == Token::Kind::EOF
               break if token.kind == Token::Kind::RBracket
@@ -10081,6 +10079,25 @@ module CrystalV2
         end
 
         private def parse_generic_type_argument_expr : ExprId
+          # Allow splatted type arguments (e.g., Union(*T))
+          if current_token.kind == Token::Kind::Star || current_token.kind == Token::Kind::StarStar
+            star_token = current_token
+            advance
+            skip_whitespace_and_optional_newlines
+
+            rhs = parse_generic_type_argument_expr
+            return PREFIX_ERROR if rhs.invalid?
+
+            span = star_token.span.cover(node_span(rhs))
+            return @arena.add_typed(
+              UnaryNode.new(
+                span,
+                star_token.slice,
+                rhs
+              )
+            )
+          end
+
           @no_type_declaration += 1
           expr = parse_expression(0)
           @no_type_declaration -= 1
@@ -12257,9 +12274,51 @@ module CrystalV2
 
             # Try to skip over a type
             case current_token.kind
-            when Token::Kind::Identifier, Token::Kind::Self
+            when Token::Kind::Identifier, Token::Kind::Self, Token::Kind::ColonColon
+              # Identifier or ::Qualified
               advance
               skip_trivia
+
+              # Allow chained ::Foo::Bar in lookahead
+              while current_token.kind == Token::Kind::ColonColon
+                advance
+                skip_trivia
+                break unless current_token.kind == Token::Kind::Identifier
+                advance
+                skip_trivia
+              end
+
+              # Skip generic arguments or parenthesized type args: Foo(Bar, Baz)
+              if current_token.kind == Token::Kind::LParen
+                depth = 1
+                advance
+                while depth > 0 && current_token.kind != Token::Kind::EOF
+                  case current_token.kind
+                  when Token::Kind::LParen
+                    depth += 1
+                  when Token::Kind::RParen
+                    depth -= 1
+                  end
+                  advance
+                end
+                skip_trivia
+              end
+
+              # Skip tuple / named tuple types: {A, B}
+              if current_token.kind == Token::Kind::LBrace
+                depth = 1
+                advance
+                while depth > 0 && current_token.kind != Token::Kind::EOF
+                  case current_token.kind
+                  when Token::Kind::LBrace
+                    depth += 1
+                  when Token::Kind::RBrace
+                    depth -= 1
+                  end
+                  advance
+                end
+                skip_trivia
+              end
 
               # Skip type suffixes
               while current_token.kind == Token::Kind::Star ||
@@ -12268,6 +12327,34 @@ module CrystalV2
                 advance
                 skip_trivia
               end
+            when Token::Kind::LParen
+              # Parenthesized type group
+              depth = 1
+              advance
+              while depth > 0 && current_token.kind != Token::Kind::EOF
+                case current_token.kind
+                when Token::Kind::LParen
+                  depth += 1
+                when Token::Kind::RParen
+                  depth -= 1
+                end
+                advance
+              end
+              skip_trivia
+            when Token::Kind::LBrace
+              # Tuple/named tuple literal type
+              depth = 1
+              advance
+              while depth > 0 && current_token.kind != Token::Kind::EOF
+                case current_token.kind
+                when Token::Kind::LBrace
+                  depth += 1
+                when Token::Kind::RBrace
+                  depth -= 1
+                end
+                advance
+              end
+              skip_trivia
             else
               @index = saved_index
               return false
