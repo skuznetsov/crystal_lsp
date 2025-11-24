@@ -2502,11 +2502,11 @@ module CrystalV2
 
           debug("Returning hover with type: #{type_str}")
           send_response(id, hover.to_json)
-          finished : Time::Span = Time.monotonic
-          debug("Hover completed in #{(finished - started_at).total_milliseconds.round(2)}ms -> hit")
+          elapsed_ms = (Time.monotonic - started_at).total_milliseconds.round(2)
+          debug("Hover completed in #{elapsed_ms}ms -> hit")
         rescue ex
-          finished : Time::Span = Time.monotonic
-          debug("Hover failed after #{(finished - started_at).total_milliseconds.round(2)}ms: #{ex.message}")
+          elapsed_ms = (Time.monotonic - started_at).total_milliseconds.round(2)
+          debug("Hover failed after #{elapsed_ms}ms: #{ex.message}")
           raise ex
         end
 
@@ -2553,17 +2553,17 @@ module CrystalV2
           if location
             debug("Returning definition location")
             send_response(id, [location].to_json)
-            finished : Time::Span = Time.monotonic
-            debug("Definition completed in #{(finished - started_at).total_milliseconds.round(2)}ms -> hit")
+            elapsed_ms = (Time.monotonic - started_at).total_milliseconds.round(2)
+            debug("Definition completed in #{elapsed_ms}ms -> hit")
           else
             debug("Definition not found")
             send_response(id, "null")
-            finished : Time::Span = Time.monotonic
-            debug("Definition completed in #{(finished - started_at).total_milliseconds.round(2)}ms -> miss")
+            elapsed_ms = (Time.monotonic - started_at).total_milliseconds.round(2)
+            debug("Definition completed in #{elapsed_ms}ms -> miss")
           end
         rescue ex
-          finished : Time::Span = Time.monotonic
-          debug("Definition failed after #{(finished - started_at).total_milliseconds.round(2)}ms: #{ex.message}")
+          elapsed_ms = (Time.monotonic - started_at).total_milliseconds.round(2)
+          debug("Definition failed after #{elapsed_ms}ms: #{ex.message}")
           raise ex
         end
 
