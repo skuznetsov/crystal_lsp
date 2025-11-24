@@ -2,6 +2,17 @@ require "../src/compiler/frontend/lexer"
 require "../src/compiler/frontend/parser"
 require "../src/compiler/frontend/watchdog"
 
+# Allow running inside stdlib context by prepending stdlib paths and prelude when available.
+stdlib_path = ENV["CRYSTAL_STDLIB_PATH"]?
+if stdlib_path
+  ENV["CRYSTAL_PATH"] = [ENV["CRYSTAL_PATH"]?, stdlib_path].compact.join(":")
+  prelude = File.join(stdlib_path, "prelude.cr")
+  if File.exists?(prelude)
+    # Preload prelude so constants like IO::FileDescriptor exist during parsing
+    ENV["CRYSTAL_REQUIRE_PRELUDE"] = prelude
+  end
+end
+
 abort "Usage: show_diagnostics <file> [limit]" unless ARGV.size >= 1
 path = ARGV[0]
 limit = (ARGV[1]? || "50").to_i
