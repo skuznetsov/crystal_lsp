@@ -2021,7 +2021,7 @@ module CrystalV2
             each_child_expr(arena, expr_id) do |child_id|
               next if child_id.invalid?
               child = arena[child_id]
-              next unless span_contains_offset?(child.span, offset)
+              next unless span_contains_offset?(child.span, offset) || offset == child.span.end_offset && child.span.end_offset > child.span.start_offset
               if child.is_a?(Frontend::MemberAccessNode) || child.is_a?(Frontend::IdentifierNode) || child.is_a?(Frontend::PathNode)
                 return child_id
               end
