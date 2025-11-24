@@ -7564,34 +7564,23 @@ module CrystalV2
             return @arena.add_typed(TupleLiteralNode.new(grouping_span, elements))
           end
 
-          # If the inner expression is an assignment (including ||=) keep it as-is but
-          # preserve the paren span via a grouping node; this prevents us from treating
-          # the closing paren as stray.
-          inner_node = @arena[elements.first]
-          inner_kind = Frontend.node_kind(inner_node)
-          if inner_kind == Frontend::NodeKind::Assign
-            return @arena.add_typed(GroupingNode.new(grouping_span, elements.first))
-          end
-
-          # If the inner expression is an assignment (including ||=) keep it as-is but
-          # preserve the paren span. Unwrap any nested GroupingNodes first so multiple
-          # layers of parens around assignments don't trigger stray paren diagnostics.
+          # Unwrap nested Grouping nodes to see the real inner expression
           inner_expr = elements.first
           inner_node = @arena[inner_expr]
-          # Peel all grouping wrappers
           loop do
             break unless Frontend.node_kind(inner_node) == Frontend::NodeKind::Grouping
             inner_expr = inner_node.as(GroupingNode).expression
             inner_node = @arena[inner_expr]
           end
 
+          # If the inner expression is an assignment (including ||=), drop the outer
+          # grouping layers and return the assignment as-is. This prevents stray paren
+          # diagnostics for cases like ((@macros ||= {} of ...)).
           if Frontend.node_kind(inner_node) == Frontend::NodeKind::Assign
-            # Return the assignment itself; parens are only span decoration. This avoids
-            # cascading stray paren diagnostics when multiple paren layers wrap ||= typed literals.
             return inner_expr
           end
 
-          @arena.add_typed(GroupingNode.new(grouping_span, elements.first))
+          @arena.add_typed(GroupingNode.new(grouping_span, inner_expr))
         end
 
         # Phase 9: Parse array literal [1, 2, 3] or [] of Type
