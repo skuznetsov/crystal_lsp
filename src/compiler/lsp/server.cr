@@ -4810,16 +4810,17 @@ module CrystalV2
         private def find_prelude_method_location(receiver_symbol : Semantic::Symbol?, method_name : String, receiver_name_hint : String? = nil) : Location?
           return nil unless prelude = @prelude_state
           receiver_name = if receiver_symbol.responds_to?(:name)
-                            receiver_symbol.name
-                          else
-                            receiver_name_hint
-                          end
+            receiver_symbol.name
+          else
+            receiver_name_hint
+          end
 
           if receiver_symbol
             if origin = prelude.symbol_origins[receiver_symbol]?
               path = uri_to_path(origin.uri)
               if path && File.file?(path)
                 if location = find_method_in_file(path, method_name)
+                  @prelude_method_index["#{receiver_name || receiver_symbol}-#{method_name}"] = location
                   return location
                 end
               end
@@ -4829,7 +4830,9 @@ module CrystalV2
           # Fallback: derive stdlib file by receiver name and cache
           if receiver_name
             cache_key = "#{receiver_name}.#{method_name}"
-            if cached = @prelude_method_index[cache_key]?
+            cached = @prelude_method_index[cache_key]?
+            # If cached points to stub, keep searching for a real definition
+            if cached && !cached.uri.ends_with?("prelude_stub.cr")
               return cached
             end
 
