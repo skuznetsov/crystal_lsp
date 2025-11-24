@@ -154,13 +154,13 @@ module CrystalV2
             end
           end
         end
-        PRELUDE_STUB_PATH = File.expand_path("prelude_stub.cr", __DIR__)
+        PRELUDE_STUB_PATH        = File.expand_path("prelude_stub.cr", __DIR__)
         COMPILER_MODULE_SEGMENTS = ["CrystalV2", "Compiler"]
-        COMPILER_ALIAS_SEGMENTS = {
+        COMPILER_ALIAS_SEGMENTS  = {
           "Lexer"  => ["CrystalV2", "Compiler", "Frontend", "Lexer"],
           "Parser" => ["CrystalV2", "Compiler", "Frontend", "Parser"],
         }
-        COMPILER_ROOT = File.expand_path("..", __DIR__)
+        COMPILER_ROOT             = File.expand_path("..", __DIR__)
         COMPILER_DEPENDENCY_PATHS = [
           File.expand_path("../compiler.cr", COMPILER_ROOT),
           File.expand_path("frontend/lexer.cr", COMPILER_ROOT),
@@ -740,7 +740,7 @@ module CrystalV2
           arena : Frontend::AstArena,
           roots : Array(Frontend::ExprId),
           offset : Int32,
-          merged_roots : Array(Frontend::ExprId)
+          merged_roots : Array(Frontend::ExprId),
         ) : Int32
           virtual_arena.add_file_arena(path, arena)
           roots.each do |root|
@@ -754,7 +754,7 @@ module CrystalV2
           dep_path : String,
           offset : Int32,
           merged_roots : Array(Frontend::ExprId),
-          visited : Set(String)
+          visited : Set(String),
         ) : Int32
           absolute = File.expand_path(dep_path)
           return offset unless visited.add?(absolute)
@@ -779,10 +779,10 @@ module CrystalV2
 
           base_dir = File.dirname(absolute)
           nested = if absolute == COMPILER_DEPENDENCY_PATHS.first
-            [] of String
-          else
-            collect_require_paths(dep_program, base_dir)
-          end
+                     [] of String
+                   else
+                     collect_require_paths(dep_program, base_dir)
+                   end
           nested.each do |nested_path|
             offset = add_dependency_file_to_virtual(virtual_arena, nested_path, offset, merged_roots, visited)
           end
@@ -910,8 +910,8 @@ module CrystalV2
           end
         end
 
-        GUARD_WARN_MS  = 500    # log at debug level above this
-        GUARD_ALERT_MS = 2000   # log at error level above this
+        GUARD_WARN_MS  =  500 # log at debug level above this
+        GUARD_ALERT_MS = 2000 # log at error level above this
 
         private def with_guard(label : String, &block)
           start = Time.monotonic
@@ -1807,11 +1807,11 @@ module CrystalV2
               debug("Registering class symbol #{symbol.name} (#{uri})")
             end
 
-          case symbol
-          when Semantic::ClassSymbol
-            output << symbol
-            register_symbols_from_table(symbol.scope, program, uri, output, origins, restrict_path: restrict_path)
-            register_symbols_from_table(symbol.class_scope, program, uri, output, origins, restrict_path: restrict_path)
+            case symbol
+            when Semantic::ClassSymbol
+              output << symbol
+              register_symbols_from_table(symbol.scope, program, uri, output, origins, restrict_path: restrict_path)
+              register_symbols_from_table(symbol.class_scope, program, uri, output, origins, restrict_path: restrict_path)
             when Semantic::ModuleSymbol
               output << symbol
               register_symbols_from_table(symbol.scope, program, uri, output, origins, restrict_path: restrict_path)
@@ -2502,11 +2502,9 @@ module CrystalV2
 
           debug("Returning hover with type: #{type_str}")
           send_response(id, hover.to_json)
-          elapsed_ms = (Time.monotonic - started_at).total_milliseconds.round(2)
-          debug("Hover completed in #{elapsed_ms}ms -> hit")
+          debug("Hover completed in #{elapsed_ms_since(started_at)}ms -> hit")
         rescue ex
-          elapsed_ms = (Time.monotonic - started_at).total_milliseconds.round(2)
-          debug("Hover failed after #{elapsed_ms}ms: #{ex.message}")
+          debug("Hover failed after #{elapsed_ms_since(started_at)}ms: #{ex.message}")
           raise ex
         end
 
@@ -2553,18 +2551,20 @@ module CrystalV2
           if location
             debug("Returning definition location")
             send_response(id, [location].to_json)
-            elapsed_ms = (Time.monotonic - started_at).total_milliseconds.round(2)
-            debug("Definition completed in #{elapsed_ms}ms -> hit")
+            debug("Definition completed in #{elapsed_ms_since(started_at)}ms -> hit")
           else
             debug("Definition not found")
             send_response(id, "null")
-            elapsed_ms = (Time.monotonic - started_at).total_milliseconds.round(2)
-            debug("Definition completed in #{elapsed_ms}ms -> miss")
+            debug("Definition completed in #{elapsed_ms_since(started_at)}ms -> miss")
           end
         rescue ex
-          elapsed_ms = (Time.monotonic - started_at).total_milliseconds.round(2)
-          debug("Definition failed after #{elapsed_ms}ms: #{ex.message}")
+          debug("Definition failed after #{elapsed_ms_since(started_at)}ms: #{ex.message}")
           raise ex
+        end
+
+        private def elapsed_ms_since(start : Time::Span?) : Float64
+          return 0.0 unless start
+          (Time.monotonic - start).total_milliseconds.round(2)
         end
 
         private def current_prelude_label : String
@@ -4240,10 +4240,10 @@ module CrystalV2
             case receiver_symbol
             when Semantic::ClassSymbol
               method_symbol = find_class_method_in_hierarchy(receiver_symbol, method_name, doc_table) ||
-                find_method_in_class_hierarchy(receiver_symbol, method_name, doc_table)
+                              find_method_in_class_hierarchy(receiver_symbol, method_name, doc_table)
               if method_symbol.nil? && prelude_table
                 method_symbol = find_class_method_in_hierarchy(receiver_symbol, method_name, prelude_table) ||
-                  find_method_in_class_hierarchy(receiver_symbol, method_name, prelude_table)
+                                find_method_in_class_hierarchy(receiver_symbol, method_name, prelude_table)
               end
             when Semantic::ModuleSymbol
               method_symbol = find_method_in_scope(receiver_symbol.scope, method_name)
@@ -4257,7 +4257,7 @@ module CrystalV2
           if method_symbol.nil? && prelude_table
             if receiver_symbol.is_a?(Semantic::ClassSymbol)
               method_symbol = find_class_method_in_hierarchy(receiver_symbol.as(Semantic::ClassSymbol), method_name, prelude_table) ||
-                find_method_in_class_hierarchy(receiver_symbol.as(Semantic::ClassSymbol), method_name, prelude_table)
+                              find_method_in_class_hierarchy(receiver_symbol.as(Semantic::ClassSymbol), method_name, prelude_table)
             elsif receiver_symbol.is_a?(Semantic::ModuleSymbol)
               method_symbol = find_method_in_scope(receiver_symbol.as(Semantic::ModuleSymbol).scope, method_name)
             end
@@ -4322,7 +4322,7 @@ module CrystalV2
         private def resolve_member_access_method_symbol_stub(
           node : Frontend::MemberAccessNode,
           doc_state : DocumentState,
-          method_name : String
+          method_name : String,
         ) : Semantic::MethodSymbol?
           stub = stub_prelude_state
           return nil unless stub
@@ -4804,10 +4804,10 @@ module CrystalV2
         private def find_prelude_method_location(receiver_symbol : Semantic::Symbol?, method_name : String, receiver_name_hint : String? = nil) : Location?
           return nil unless prelude = @prelude_state
           receiver_name = if receiver_symbol.responds_to?(:name)
-            receiver_symbol.name
-          else
-            receiver_name_hint
-          end
+                            receiver_symbol.name
+                          else
+                            receiver_name_hint
+                          end
 
           if receiver_symbol
             if origin = prelude.symbol_origins[receiver_symbol]?
@@ -5289,7 +5289,7 @@ module CrystalV2
 
         DECLARATION_MODIFIER = 1 << 0
         NAME_SEARCH_WINDOW   = 512
-        TOKEN_TYPE_NAMES = %w(namespace type class enum interface struct typeParameter parameter variable property enumMember event function method macro keyword modifier comment string number regexp operator)
+        TOKEN_TYPE_NAMES     = %w(namespace type class enum interface struct typeParameter parameter variable property enumMember event function method macro keyword modifier comment string number regexp operator)
 
         private struct SemanticTokenContext
           getter program : Frontend::Program
