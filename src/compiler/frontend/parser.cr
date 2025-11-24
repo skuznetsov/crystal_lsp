@@ -7376,8 +7376,14 @@ module CrystalV2
             end
           when Token::Kind::Raise
             # Allow raise in expression context (e.g., x || raise "error")
-            stmt = parse_raise
-            parse_postfix_if_modifier(stmt)
+            # In call-argument context, treat as identifier to allow usage as a variable/param name.
+            if @parsing_call_args > 0
+              advance
+              @arena.add_typed(IdentifierNode.new(token.span, token.slice))
+            else
+              stmt = parse_raise
+              parse_postfix_if_modifier(stmt)
+            end
           when Token::Kind::Return
             # Allow return in expression contexts (e.g., x || return y)
             stmt = parse_return
