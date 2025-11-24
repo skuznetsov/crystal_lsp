@@ -2242,6 +2242,7 @@ module CrystalV2
 
                 unless name_token.kind == Token::Kind::Identifier ||
                        name_token.kind == Token::Kind::InstanceVar ||
+                       name_token.kind == Token::Kind::ClassVar ||
                        is_keyword_identifier?(name_token)
                   emit_unexpected(name_token)
                   break
@@ -2300,9 +2301,14 @@ module CrystalV2
                     skip_trivia
                   end
                 else
-                  # Instance variable shorthand without external name: @value : T
-                  is_instance_var = (name_token.kind == Token::Kind::InstanceVar)
-                  param_name = is_instance_var ? slice_without_prefix(name_token.slice, 1) : name_token.slice
+                  # Instance/class variable shorthand without external name: @value : T / @@value : T
+                  if name_token.kind == Token::Kind::ClassVar
+                    param_name = slice_without_prefix(name_token.slice, 2)
+                    is_instance_var = false
+                  else
+                    is_instance_var = (name_token.kind == Token::Kind::InstanceVar)
+                    param_name = is_instance_var ? slice_without_prefix(name_token.slice, 1) : name_token.slice
+                  end
                   param_name_span = name_token.span
                   param_start_span = prefix_token ? prefix_token.span : name_token.span
                   advance
@@ -2703,19 +2709,26 @@ module CrystalV2
             conditions_b = SmallVec(ExprId, 2).new
             loop do
               # Support Crystal shorthand: `case expr; when .foo?` => expr.foo?
+              # Extended to allow operator method names: .>(0), .<(scale), etc.
               if value && current_token.kind == Token::Kind::Operator && slice_eq?(current_token.slice, ".")
                 dot_token = current_token
                 advance
                 skip_trivia
                 name_tok = current_token
-                if name_tok.kind == Token::Kind::Identifier || is_keyword_identifier?(name_tok)
+                if name_tok.slice.empty?
+                  emit_unexpected(name_tok)
+                  cond = PREFIX_ERROR
+                else
                   advance
                   span = node_span(value).cover(name_tok.span)
                   member = @arena.add_typed(MemberAccessNode.new(span, value, @string_pool.intern(name_tok.slice)))
-                  cond = @arena.add_typed(CallNode.new(span, member, [] of ExprId))
-                else
-                  emit_unexpected(name_tok)
-                  cond = PREFIX_ERROR
+
+                  # Optional parenthesized arguments: .foo(arg), .>(other.scale)
+                  if current_token.kind == Token::Kind::LParen
+                    cond = parse_parenthesized_call(member)
+                  else
+                    cond = @arena.add_typed(CallNode.new(span, member, [] of ExprId))
+                  end
                 end
               else
                 cond = parse_expression(0)
@@ -3137,6 +3150,57 @@ module CrystalV2
 
           token = current_token
 
+          # Special-case: allow argument list before block, e.g. spawn(name: "x") do ... end
+          if token.kind == Token::Kind::LParen
+            # Parse arguments using call machinery on a dummy callee to consume tokens/diags
+            callee = @arena.add_typed(IdentifierNode.new(spawn_token.span, "spawn".to_slice))
+            call_expr = parse_parenthesized_call(callee)
+            return PREFIX_ERROR if call_expr.invalid?
+            skip_trivia
+            token = current_token
+            if token.kind == Token::Kind::Do
+              # Treat as block-form spawn
+              advance
+              consume_newlines
+
+              body_ids_b = SmallVec(ExprId, 4).new
+              loop do
+                skip_trivia
+                token = current_token
+                break if token.kind == Token::Kind::End
+                break if token.kind == Token::Kind::EOF
+
+                expr = parse_statement
+                body_ids_b << expr unless expr.invalid?
+                consume_newlines
+              end
+
+              expect_identifier("end")
+              end_token = previous_token
+              consume_newlines
+
+              spawn_span = end_token ? spawn_token.span.cover(end_token.span) : spawn_token.span
+              return @arena.add_typed(
+                SpawnNode.new(
+                  spawn_span,
+                  nil,
+                  body_ids_b.to_a
+                )
+              )
+            else
+              # No block, keep parsed call as expression form
+              expr_span = node_span(call_expr)
+              spawn_span = spawn_token.span.cover(expr_span)
+              return @arena.add_typed(
+                SpawnNode.new(
+                  spawn_span,
+                  call_expr,
+                  nil
+                )
+              )
+            end
+          end
+
           # Check if it's block form (spawn do...end) or expression form (spawn expr)
           if token.kind == Token::Kind::Do
             # Block form: spawn do...end
@@ -3151,10 +3215,10 @@ module CrystalV2
               break if token.kind == Token::Kind::End
               break if token.kind == Token::Kind::EOF
 
-              expr = parse_statement
-              body_ids_b << expr unless expr.invalid?
-              consume_newlines
-            end
+                expr = parse_statement
+                body_ids_b << expr unless expr.invalid?
+                consume_newlines
+              end
 
             expect_identifier("end")
             end_token = previous_token
@@ -3754,10 +3818,36 @@ module CrystalV2
               )
             end
 
-            # Parse arguments (positional, splats, and tolerate named args)
+            # Parse arguments (positional, block captures, splats, and tolerate named args)
             loop do
+              # Block capture or shorthand: super(&block) / super(&.call)
+              if current_token.kind == Token::Kind::Amp
+                amp_token = current_token
+                advance
+                skip_trivia
+                if current_token.kind.in?(Token::Kind::Identifier, Token::Kind::InstanceVar)
+                  ident_tok = current_token
+                  ident_node = @arena.add_typed(IdentifierNode.new(ident_tok.span, ident_tok.slice))
+                  advance
+                  span = amp_token.span.cover(ident_tok.span)
+                  args_b << @arena.add_typed(UnaryNode.new(span, amp_token.slice, ident_node))
+                else
+                  # Fallback to normal expression (e.g., super(& expr))
+                  @no_type_declaration += 1
+                  expr = parse_expression(0)
+                  @no_type_declaration -= 1
+                  return PREFIX_ERROR if expr.invalid?
+                  args_b << expr
+                end
+              elsif current_token.kind == Token::Kind::AmpDot
+                amp_token = current_token
+                advance
+                skip_trivia
+                shorthand = parse_block_shorthand(amp_token)
+                return PREFIX_ERROR if shorthand.invalid?
+                args_b << shorthand
               # Named arg: name: value (tolerate by consuming name and ':' and pushing value)
-              if named_arg_start?
+              elsif named_arg_start?
                 name_token = current_token
                 advance
                 skip_trivia
@@ -3833,10 +3923,34 @@ module CrystalV2
 
             unless current_token.kind.in?(Token::Kind::Newline, Token::Kind::EOF, Token::Kind::Semicolon, Token::Kind::End, Token::Kind::Rescue, Token::Kind::Ensure) || !arg_starter
               loop do
-                if named_arg_start?
-                  advance # name
-                  skip_trivia
-                  if current_token.kind == Token::Kind::Colon
+              if current_token.kind == Token::Kind::Amp
+                amp_token = current_token
+                advance
+                skip_trivia
+                if current_token.kind.in?(Token::Kind::Identifier, Token::Kind::InstanceVar)
+                  ident_tok = current_token
+                  ident_node = @arena.add_typed(IdentifierNode.new(ident_tok.span, ident_tok.slice))
+                  advance
+                  span = amp_token.span.cover(ident_tok.span)
+                  args_b << @arena.add_typed(UnaryNode.new(span, amp_token.slice, ident_node))
+                else
+                  @no_type_declaration += 1
+                  expr = parse_expression(0)
+                  @no_type_declaration -= 1
+                  break if expr.invalid?
+                  args_b << expr
+                end
+              elsif current_token.kind == Token::Kind::AmpDot
+                amp_token = current_token
+                advance
+                skip_trivia
+                shorthand = parse_block_shorthand(amp_token)
+                break if shorthand.invalid?
+                args_b << shorthand
+              elsif named_arg_start?
+                advance # name
+                skip_trivia
+                if current_token.kind == Token::Kind::Colon
                     advance
                     skip_trivia
                     @no_type_declaration += 1
@@ -8913,7 +9027,7 @@ module CrystalV2
                   unadvance  # Go back to Amp token
                   # Disable type declarations to allow identifier: syntax for named args
                   @no_type_declaration += 1
-                  arg_expr = parse_expression(0)
+                  arg_expr = with_pointer_suffix { parse_expression(0) }
                   @no_type_declaration -= 1
                   return PREFIX_ERROR if arg_expr.invalid?
                 end
@@ -8936,7 +9050,7 @@ module CrystalV2
                   star_token = current_token
                   advance
                   skip_whitespace_and_optional_newlines
-                  value_expr = parse_op_assign
+                  value_expr = with_pointer_suffix { parse_op_assign }
                   return PREFIX_ERROR if value_expr.invalid?
                   span = star_token.span.cover(@arena[value_expr].span)
                   arg_expr = @arena.add_typed(SplatNode.new(span, value_expr))
@@ -8974,7 +9088,7 @@ module CrystalV2
 
                   # Parse value expression (allow assignments inside args)
                   @no_type_declaration += 1
-                  value_expr = parse_op_assign
+                  value_expr = with_pointer_suffix { parse_op_assign }
                   @no_type_declaration -= 1
                   return PREFIX_ERROR if value_expr.invalid?
                   value_span = @arena[value_expr].span
@@ -8986,7 +9100,7 @@ module CrystalV2
                   # Parse first argument expression (allow assignments)
                   # Disable type declarations to allow identifier: syntax for named args
                   @no_type_declaration += 1
-                  arg_expr = parse_op_assign
+                  arg_expr = with_pointer_suffix { parse_op_assign }
                   @no_type_declaration -= 1
                   if arg_expr.invalid?
                     emit_unexpected(current_token)
@@ -9009,7 +9123,7 @@ module CrystalV2
                       # Parse value expression
                       # Disable type declarations in value (may contain nested named tuples/args)
                       @no_type_declaration += 1
-                      value_expr = parse_op_assign
+                      value_expr = with_pointer_suffix { parse_op_assign }
                       @no_type_declaration -= 1
                       return PREFIX_ERROR if value_expr.invalid?
                       value_span = @arena[value_expr].span
@@ -9101,12 +9215,12 @@ module CrystalV2
                 advance
                 skip_whitespace_and_optional_newlines
                 @no_type_declaration += 1
-                val = parse_op_assign
+                val = with_pointer_suffix { parse_op_assign }
                 @no_type_declaration -= 1
                 break if val.invalid?
                 accu_named << NamedArgument.new(name_slice, val, name_span, @arena[val].span)
               else
-                arg = parse_op_assign
+                arg = with_pointer_suffix { parse_op_assign }
                 break if arg.invalid?
                 accu_args << arg
               end
