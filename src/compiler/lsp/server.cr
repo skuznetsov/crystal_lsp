@@ -2502,9 +2502,13 @@ module CrystalV2
 
           debug("Returning hover with type: #{type_str}")
           send_response(id, hover.to_json)
-          debug("Hover completed in #{(Time.monotonic - started_at).total_milliseconds.round(2)}ms -> hit")
+          if finished = Time.monotonic
+            debug("Hover completed in #{(finished - started_at).total_milliseconds.round(2)}ms -> hit")
+          end
         rescue ex
-          debug("Hover failed after #{(Time.monotonic - started_at).total_milliseconds.round(2)}ms: #{ex.message}")
+          if finished = Time.monotonic
+            debug("Hover failed after #{(finished - started_at).total_milliseconds.round(2)}ms: #{ex.message}")
+          end
           raise ex
         end
 
@@ -2551,14 +2555,20 @@ module CrystalV2
           if location
             debug("Returning definition location")
             send_response(id, [location].to_json)
-            debug("Definition completed in #{(Time.monotonic - started_at).total_milliseconds.round(2)}ms -> hit")
+            if finished = Time.monotonic
+              debug("Definition completed in #{(finished - started_at).total_milliseconds.round(2)}ms -> hit")
+            end
           else
             debug("Definition not found")
             send_response(id, "null")
-            debug("Definition completed in #{(Time.monotonic - started_at).total_milliseconds.round(2)}ms -> miss")
+            if finished = Time.monotonic
+              debug("Definition completed in #{(finished - started_at).total_milliseconds.round(2)}ms -> miss")
+            end
           end
         rescue ex
-          debug("Definition failed after #{(Time.monotonic - started_at).total_milliseconds.round(2)}ms: #{ex.message}")
+          if finished = Time.monotonic
+            debug("Definition failed after #{(finished - started_at).total_milliseconds.round(2)}ms: #{ex.message}")
+          end
           raise ex
         end
 
