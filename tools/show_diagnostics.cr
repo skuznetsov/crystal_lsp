@@ -3,13 +3,16 @@ require "../src/compiler/frontend/parser"
 require "../src/compiler/frontend/watchdog"
 
 # Allow running inside stdlib context by prepending stdlib paths and prelude when available.
+# Optional stdlib bootstrap: when CRYSTAL_STDLIB_PATH is provided, prepend it to
+# CRYSTAL_PATH and load prelude before parsing.
 stdlib_path = ENV["CRYSTAL_STDLIB_PATH"]?
 if stdlib_path
-  ENV["CRYSTAL_PATH"] = [ENV["CRYSTAL_PATH"]?, stdlib_path].compact.join(":")
+  ENV["CRYSTAL_PATH"] = [ENV["CRYSTAL_PATH"]?, "src", stdlib_path].compact.join(":")
   prelude = File.join(stdlib_path, "prelude.cr")
   if File.exists?(prelude)
-    # Preload prelude so constants like IO::FileDescriptor exist during parsing
-    ENV["CRYSTAL_REQUIRE_PRELUDE"] = prelude
+    # Require prelude via loader hook understood by our parser (same env var the
+    # original compiler uses). This allows resolving IO::FileDescriptor, etc.
+    ENV["CRYSTAL_REQUIRE"] = prelude
   end
 end
 
