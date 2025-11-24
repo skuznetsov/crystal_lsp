@@ -3799,11 +3799,62 @@ module CrystalV2
               )
             )
           else
-            # No parentheses: super (implicit - pass all method args)
+            # No parentheses: either bare `super` (implicit args) or `super arg1, name: value`
+            args_b = SmallVec(ExprId, 2).new
+
+            skip_trivia
+            arg_token = current_token
+            arg_starter = named_arg_start? || arg_token.kind.in?(
+              Token::Kind::Identifier, Token::Kind::InstanceVar, Token::Kind::ClassVar, Token::Kind::GlobalVar,
+              Token::Kind::Number, Token::Kind::String, Token::Kind::Char, Token::Kind::Symbol, Token::Kind::Regex,
+              Token::Kind::LParen, Token::Kind::LBrace, Token::Kind::LBracket,
+              Token::Kind::True, Token::Kind::False, Token::Kind::Nil,
+              Token::Kind::Self, Token::Kind::Typeof, Token::Kind::Yield,
+              Token::Kind::Plus, Token::Kind::Minus, Token::Kind::Not, Token::Kind::Tilde,
+              Token::Kind::AmpPlus, Token::Kind::AmpMinus
+            )
+
+            unless current_token.kind.in?(Token::Kind::Newline, Token::Kind::EOF, Token::Kind::Semicolon, Token::Kind::End, Token::Kind::Rescue, Token::Kind::Ensure) || !arg_starter
+              loop do
+                if named_arg_start?
+                  advance # name
+                  skip_trivia
+                  if current_token.kind == Token::Kind::Colon
+                    advance
+                    skip_trivia
+                    @no_type_declaration += 1
+                    value = parse_expression(0)
+                    @no_type_declaration -= 1
+                    break if value.invalid?
+                    args_b << value
+                  end
+                elsif current_token.kind == Token::Kind::Star
+                  star_token = current_token
+                  advance
+                  skip_trivia
+                  value = parse_expression(0)
+                  break if value.invalid?
+                  span = star_token.span.cover(@arena[value].span)
+                  args_b << @arena.add_typed(SplatNode.new(span, value))
+                else
+                  @no_type_declaration += 1
+                  arg = parse_expression(0)
+                  @no_type_declaration -= 1
+                  break if arg.invalid?
+                  args_b << arg
+                end
+
+                skip_trivia
+                break unless current_token.kind == Token::Kind::Comma
+                advance
+                skip_trivia
+              end
+            end
+
             @arena.add_typed(
               SuperNode.new(
-                super_token.span,
-                nil  # nil = implicit args (pass all)
+                args_b.empty? ? super_token.span : super_token.span.cover(node_span(args_b.last)),
+                args_b.empty? ? nil : args_b.to_a  # nil = implicit args (pass all)
               )
             )
           end
