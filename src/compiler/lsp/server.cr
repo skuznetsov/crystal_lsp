@@ -4859,6 +4859,11 @@ module CrystalV2
           pattern = /def\s+(?:self\.|[A-Za-z0-9_:]+\.)?#{Regex.escape(method_name)}/
           line_index = 0
           text.each_line do |line|
+            stripped = line.lstrip
+            if stripped.starts_with?('#')
+              line_index += 1
+              next
+            end
             if match = pattern.match(line)
               prefix = match[0]
               start_column = match.begin + prefix.rindex(method_name).not_nil!
