@@ -1385,7 +1385,9 @@ module CrystalV2
             if paren_depth == 0 && bracket_depth == 0 && brace_depth == 0
               break if token.kind == Token::Kind::Eq
               break if token.kind == Token::Kind::Comma
+              break if token.kind == Token::Kind::Arrow
               break if operator_token?(token, Token::Kind::RParen)
+              break if token.kind == Token::Kind::ThinArrow  # stop at -> in types (e.g., Proc(Nil -> Nil))
               break if token.kind == Token::Kind::Newline
               break if token.kind == Token::Kind::EOF
               break if token.kind == Token::Kind::RBracket
@@ -1438,7 +1440,6 @@ module CrystalV2
             when Token::Kind::Identifier, Token::Kind::Number,
                  Token::Kind::ColonColon, Token::Kind::Operator,
                  Token::Kind::ThinArrow, Token::Kind::Self,
-                 Token::Kind::Arrow,
                  Token::Kind::Typeof,
                  Token::Kind::Pipe,
                  Token::Kind::LParen, Token::Kind::RParen,
