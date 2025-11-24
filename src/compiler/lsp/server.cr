@@ -1206,12 +1206,15 @@ module CrystalV2
 
           debug("Loading #{label} from #{path}")
           source = File.read(path)
+          parse_started = Time.monotonic
           lexer = Frontend::Lexer.new(source)
           parser = Frontend::Parser.new(lexer, recovery_mode: @config.parser_recovery_mode)
           program = parser.parse_program
+          parse_ms = (Time.monotonic - parse_started).total_milliseconds.round(2)
 
           diagnostics = [] of Diagnostic
           parser.diagnostics.each { |diag| diagnostics << Diagnostic.from_parser(diag) }
+          debug("Prelude parse completed in #{parse_ms}ms (#{diagnostics.size} diagnostics)")
 
           debug("Trying real prelude branch? #{path == PRELUDE_PATH}")
           prelude_state = if path == PRELUDE_PATH
@@ -1390,6 +1393,8 @@ module CrystalV2
           lexer = Frontend::Lexer.new(source)
           parser = Frontend::Parser.new(lexer, recovery_mode: @config.parser_recovery_mode)
           program = parser.parse_program
+          diag_count = parser.diagnostics.size
+          debug("Prelude dependency #{path} produced #{diag_count} parser diagnostic(s)") if diag_count > 0
           parser.diagnostics.each { |diag| diagnostics << Diagnostic.from_parser(diag) }
           # Even with recovery diagnostics, keep the parsed program so we retain symbols
           # (especially important for stdlib where some files may emit warnings).
