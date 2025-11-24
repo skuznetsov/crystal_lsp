@@ -2127,6 +2127,7 @@ module CrystalV2
         private def file_uri(path : String) : String
           absolute = File.expand_path(path)
           segments = absolute.split('/').map { |segment| URI.encode_www_form(segment) }
+          segments.shift if segments.first? == ""  # drop leading empty due to absolute path
           "file:///#{segments.join('/')}"
         end
 
