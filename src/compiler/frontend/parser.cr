@@ -1386,7 +1386,6 @@ module CrystalV2
               break if token.kind == Token::Kind::Eq
               break if token.kind == Token::Kind::Comma
               break if operator_token?(token, Token::Kind::RParen)
-              break if token.kind == Token::Kind::Arrow
               break if token.kind == Token::Kind::Newline
               break if token.kind == Token::Kind::EOF
               break if token.kind == Token::Kind::RBracket
@@ -1439,6 +1438,7 @@ module CrystalV2
             when Token::Kind::Identifier, Token::Kind::Number,
                  Token::Kind::ColonColon, Token::Kind::Operator,
                  Token::Kind::ThinArrow, Token::Kind::Self,
+                 Token::Kind::Arrow,
                  Token::Kind::Typeof,
                  Token::Kind::Pipe,
                  Token::Kind::LParen, Token::Kind::RParen,
@@ -6112,8 +6112,7 @@ module CrystalV2
                 # any identifier after ** is invalid unless it's a block marker (handled elsewhere)
                 seen_non_block_after_double_splat = true
               elsif seen_bare_splat
-                # named args must follow bare *
-                @diagnostics << Diagnostic.new("named parameters must follow bare *", current_token.span)
+                # Identifiers after bare * are named parameters; mark so final check passes
                 named_after_bare_splat = true
               end
             end
@@ -6912,11 +6911,7 @@ module CrystalV2
               left = new_left
               next
             when Token::Kind::LBrace
-          # Phase 10: Block with {} syntax
-          # Don't attach blocks when parsing call arguments - let the call parser handle it
-          if @parsing_call_args > 0
-            break
-          end
+              # Phase 10: Block with {} syntax
               # Only attach a block if 'left' can accept one (call-like). Otherwise,
               # treat '{' as start of a new statement (e.g., a tuple/hash literal).
               if can_attach_block_to?(left)
@@ -6929,10 +6924,6 @@ module CrystalV2
               next
             when Token::Kind::Do
               # Phase 10: Block with do/end syntax
-              # Don't attach blocks when parsing call arguments - let the call parser handle it
-              if @parsing_call_args > 0
-                break
-              end
               left = attach_block_to_call(left)
               next
             when Token::Kind::AmpDot
@@ -7166,8 +7157,14 @@ module CrystalV2
             parse_asm
           when Token::Kind::Out
             # Phase 98: out keyword (C bindings output parameter)
-            # Treat any misuse as diagnostic via parse_out to stay strict/parity.
-            parse_out
+            # In non-signature contexts, allow using `out` as an identifier (stdlib uses `out` locals).
+            nxt = peek_next_non_trivia
+            if nxt.kind.in?(Token::Kind::Identifier, Token::Kind::InstanceVar, Token::Kind::ClassVar, Token::Kind::GlobalVar)
+              parse_out
+            else
+              advance
+              @arena.add_typed(IdentifierNode.new(token.span, token.slice))
+            end
           when Token::Kind::Raise
             # Allow raise in expression context (e.g., x || raise "error")
             stmt = parse_raise
@@ -7519,25 +7516,82 @@ module CrystalV2
             @paren_depth -= 1
             return PREFIX_ERROR
           end
-          # Allow multiple expressions separated by ';' inside parentheses; return last
+
+          elements = [expr]
+          saw_comma = false
+
           loop do
             skip_whitespace_and_optional_newlines
-            break unless current_token.kind == Token::Kind::Semicolon
-            advance
-            skip_whitespace_and_optional_newlines
-            next_expr = parse_op_assign
-            if next_expr.invalid?
-              emit_unexpected(current_token)
-              @paren_depth -= 1
-              return PREFIX_ERROR
+
+            if current_token.kind == Token::Kind::Comma
+              saw_comma = true
+              advance
+              skip_whitespace_and_optional_newlines
+              # Allow trailing comma: (1,)
+              break if current_token.kind == Token::Kind::RParen
+              next_expr = parse_op_assign
+              if next_expr.invalid?
+                emit_unexpected(current_token)
+                @paren_depth -= 1
+                return PREFIX_ERROR
+              end
+              elements << next_expr
+              next
             end
-            expr = next_expr
+
+            if current_token.kind == Token::Kind::Semicolon
+              advance
+              skip_whitespace_and_optional_newlines
+              next_expr = parse_op_assign
+              if next_expr.invalid?
+                emit_unexpected(current_token)
+                @paren_depth -= 1
+                return PREFIX_ERROR
+              end
+              elements << next_expr
+              next
+            end
+
+            break
           end
+
           expect_operator(Token::Kind::RParen)
           @paren_depth -= 1  # Exiting parentheses context
           closing_span = previous_token.try(&.span)
-          grouping_span = cover_optional_spans(lparen.span, node_span(expr), closing_span)
-          @arena.add_typed(GroupingNode.new(grouping_span, expr))
+          grouping_span = cover_optional_spans(lparen.span, node_span(elements.last), closing_span)
+
+          if saw_comma || elements.size > 1
+            return @arena.add_typed(TupleLiteralNode.new(grouping_span, elements))
+          end
+
+          # If the inner expression is an assignment (including ||=) keep it as-is but
+          # preserve the paren span via a grouping node; this prevents us from treating
+          # the closing paren as stray.
+          inner_node = @arena[elements.first]
+          inner_kind = Frontend.node_kind(inner_node)
+          if inner_kind == Frontend::NodeKind::Assign
+            return @arena.add_typed(GroupingNode.new(grouping_span, elements.first))
+          end
+
+          # If the inner expression is an assignment (including ||=) keep it as-is but
+          # preserve the paren span. Unwrap any nested GroupingNodes first so multiple
+          # layers of parens around assignments don't trigger stray paren diagnostics.
+          inner_expr = elements.first
+          inner_node = @arena[inner_expr]
+          # Peel all grouping wrappers
+          loop do
+            break unless Frontend.node_kind(inner_node) == Frontend::NodeKind::Grouping
+            inner_expr = inner_node.as(GroupingNode).expression
+            inner_node = @arena[inner_expr]
+          end
+
+          if Frontend.node_kind(inner_node) == Frontend::NodeKind::Assign
+            # Return the assignment itself; parens are only span decoration. This avoids
+            # cascading stray paren diagnostics when multiple paren layers wrap ||= typed literals.
+            return inner_expr
+          end
+
+          @arena.add_typed(GroupingNode.new(grouping_span, elements.first))
         end
 
         # Phase 9: Parse array literal [1, 2, 3] or [] of Type
@@ -7562,10 +7616,17 @@ module CrystalV2
               advance
               skip_trivia
 
-              # Parse type expression (unions, generics, etc.)
-              type_expr = without_postfix_modifiers { parse_expression(0) }
-              return PREFIX_ERROR if type_expr.invalid?
-              of_type_expr = type_expr
+              # Parse type annotation as a slice and wrap in an Identifier node for now.
+              type_start = current_token
+              type_slice = parse_type_annotation
+              type_end = previous_token || type_start
+              if type_slice
+                type_span = type_start.span.cover(type_end.span)
+                of_type_expr = @arena.add_typed(IdentifierNode.new(type_span, @string_pool.intern(type_slice)))
+              else
+                emit_unexpected(current_token)
+                return PREFIX_ERROR
+              end
             end
 
             closing_span = previous_token.try(&.span) || lbracket.span
@@ -11757,6 +11818,31 @@ module CrystalV2
           else
             @diagnostics << Diagnostic.new("Expected '&' or '&.' for block shorthand", current_token.span)
             return PREFIX_ERROR
+          end
+
+          # Optional no-parens arguments after shorthand: &.foo arg1, arg2
+          args_after = [] of ExprId
+          loop do
+            skip_whitespace_and_optional_newlines
+            break if current_token.kind.in?(Token::Kind::RParen, Token::Kind::RBracket, Token::Kind::RBrace,
+                                           Token::Kind::Comma, Token::Kind::Do, Token::Kind::LBrace,
+                                           Token::Kind::End, Token::Kind::EOF, Token::Kind::Newline)
+
+            arg_expr = parse_op_assign
+            break if arg_expr.invalid?
+            args_after << arg_expr
+
+            skip_whitespace_and_optional_newlines
+            if current_token.kind == Token::Kind::Comma
+              advance
+              next
+            end
+            break
+          end
+
+          if args_after.any?
+            call_span = @arena[call_expr].span.cover(@arena[args_after.last].span)
+            call_expr = @arena.add_typed(CallNode.new(call_span, call_expr, args_after, nil))
           end
 
           # Handle setter-style shorthand: &.foo=(value)
