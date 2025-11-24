@@ -2554,7 +2554,7 @@ module CrystalV2
             end
           end
           if location
-            debug("Returning definition location")
+            debug("Returning definition location uri=#{location.uri} range=#{location.range.start.line}:#{location.range.start.character}-#{location.range.end.line}:#{location.range.end.character}")
             send_response(id, [location].to_json)
             debug("Definition completed in #{elapsed_ms_since(started_at)}ms -> hit")
           else
