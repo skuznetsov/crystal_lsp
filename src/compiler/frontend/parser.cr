@@ -10080,19 +10080,54 @@ module CrystalV2
         end
 
         private def parse_generic_type_argument_expr : ExprId
+          # Special-case typeof(...) so we consume the full parenthesized payload (including yields)
+          if current_token.kind == Token::Kind::Typeof
+            start_token = current_token
+            advance
+            skip_trivia
+
+            # Consume balanced parentheses after typeof(
+            if current_token.kind == Token::Kind::LParen
+              depth = 1
+              advance
+              while depth > 0 && current_token.kind != Token::Kind::EOF
+                case current_token.kind
+                when Token::Kind::LParen
+                  depth += 1
+                when Token::Kind::RParen
+                  depth -= 1
+                end
+                advance
+              end
+              skip_trivia
+            end
+
+            end_tok = previous_token || start_token
+            span = start_token.span.cover(end_tok.span)
+            start_ptr = start_token.slice.to_unsafe
+            end_ptr = end_tok.slice.to_unsafe + end_tok.slice.size
+            slice = Slice.new(start_ptr, end_ptr - start_ptr)
+
+            return @arena.add_typed(
+              IdentifierNode.new(
+                span,
+                @string_pool.intern(slice)
+              )
+            )
+          end
+
           # First, try to parse a type annotation as a whole (covers pointer suffixes, unions, proc types, etc.)
+          # Only treat it as a type-argument when we actually consumed tokens (index advanced).
           start_token = current_token
           start_index = @index
           type_slice = parse_type_annotation
           if @index > start_index
             end_tok = previous_token || start_token
             span = start_token.span.cover(end_tok.span)
-            return @arena.add_typed(
-              IdentifierNode.new(
-                span,
-                @string_pool.intern(type_slice)
-              )
-            )
+            # Represent the parsed type arg as a GenericNode over a dummy base Identifier
+            base = @arena.add_typed(IdentifierNode.new(start_token.span, @string_pool.intern("TypeArg".to_slice)))
+            type_expr = @arena.add_typed(IdentifierNode.new(span, @string_pool.intern(type_slice)))
+            return @arena.add_typed(GenericNode.new(span, base, [type_expr]))
           end
 
           # Allow splatted type arguments (e.g., Union(*T))
