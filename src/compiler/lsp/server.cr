@@ -2388,7 +2388,7 @@ module CrystalV2
 
         # Handle textDocument/hover request
         private def handle_hover(id : JSON::Any, params : JSON::Any?)
-          started_at : Time::Span = Time.monotonic
+          started_at = Time.monotonic
           return send_error(id, -32602, "Missing params") unless params
 
           uri = params["textDocument"]["uri"].as_s
@@ -2512,7 +2512,7 @@ module CrystalV2
 
         # Handle textDocument/definition request
         private def handle_definition(id : JSON::Any, params : JSON::Any?)
-          started_at : Time::Span = Time.monotonic
+          started_at = Time.monotonic
           return send_error(id, -32602, "Missing params") unless params
 
           uri = params["textDocument"]["uri"].as_s
