@@ -2,6 +2,17 @@ require "../src/compiler/frontend/lexer"
 require "../src/compiler/frontend/parser"
 require "../src/compiler/frontend/watchdog"
 
+# Optional stdlib bootstrap (mirror show_diagnostics): when CRYSTAL_STDLIB_PATH
+# is provided, prepend it to CRYSTAL_PATH and load prelude to seed constants.
+stdlib_path = ENV["CRYSTAL_STDLIB_PATH"]?
+if stdlib_path
+  ENV["CRYSTAL_PATH"] = [ENV["CRYSTAL_PATH"]?, "src", stdlib_path].compact.join(":")
+  prelude = File.join(stdlib_path, "prelude.cr")
+  if File.exists?(prelude)
+    ENV["CRYSTAL_REQUIRE"] = prelude
+  end
+end
+
 watchdog_timeout = ENV["SCAN_TIMEOUT"]? || (ENV["ENABLE_WATCHDOG"]? ? "0.5" : nil)
 timeout_span = watchdog_timeout ? watchdog_timeout.to_f.seconds : nil
 
