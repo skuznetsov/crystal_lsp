@@ -7159,10 +7159,13 @@ module CrystalV2
               left = parse_path(left)
               next
             when Token::Kind::Operator
-              # Check for operators not yet converted to enum (e.g., ".")
-              if slice_eq?(token.slice, ".")
-                left = parse_member_access(left)
-                next
+              # Allow '?' operator to be handled by infix/ternary logic below.
+              unless slice_eq?(token.slice, "?")
+                # Check for operators not yet converted to enum (e.g., ".")
+                if slice_eq?(token.slice, ".")
+                  left = parse_member_access(left)
+                  next
+                end
               end
             end
 
@@ -7250,6 +7253,31 @@ module CrystalV2
                 break
               end
 
+              left = @arena.add_typed(
+                TernaryNode.new(
+                  cover_optional_spans(node_span(left), token.span, node_span(false_branch)),
+                  left,
+                  right,
+                  false_branch
+                )
+              )
+            elsif token.kind == Token::Kind::Operator && slice_eq?(token.slice, "?")
+              # Treat operator '?' same as Token::Kind::Question
+              skip_trivia
+              unless current_token.kind == Token::Kind::Colon
+                left = PREFIX_ERROR
+                break
+              end
+              colon_token = current_token
+              advance
+              # Parse false branch with same precedence (right-associative)
+              @no_type_declaration += 1
+              false_branch = parse_expression(current_precedence)
+              @no_type_declaration -= 1
+              if false_branch.invalid?
+                left = PREFIX_ERROR
+                break
+              end
               left = @arena.add_typed(
                 TernaryNode.new(
                   cover_optional_spans(node_span(left), token.span, node_span(false_branch)),
@@ -9144,6 +9172,15 @@ module CrystalV2
               end  # close if named_arg_start?
               # After any branch, ensure amp-based arguments are captured
               if arg_expr && !arg_expr.invalid? && !pushed
+                # If additional expression fragments remain (e.g., ternary tails),
+                # keep parsing until we hit the next argument delimiter.
+                loop do
+                  skip_whitespace_and_optional_newlines
+                  break if current_token.kind.in?(Token::Kind::Comma, Token::Kind::RParen, Token::Kind::Amp, Token::Kind::AmpDot, Token::Kind::EOF)
+                  cont = with_pointer_suffix { parse_expression(0) }
+                  break if cont.invalid?
+                  arg_expr = cont
+                end
                 args_b << arg_expr
               end
             end  # close else from Amp/AmpDot check
@@ -9344,8 +9381,27 @@ module CrystalV2
           end
 
           # If named args present, or '[]?' variant, lower to CallNode target.[](args..., named:)
-          if named_b.size > 0 || current_token.kind == Token::Kind::Question
-            method_name = if current_token.kind == Token::Kind::Question
+          question_follows = false
+          if current_token.kind == Token::Kind::Question
+            # Look ahead: if a ':' appears before any delimiter, treat as ternary.
+            scan_idx = @index + 1
+            colon_before_delim = false
+            while scan_idx < @tokens.size
+              tok = @tokens[scan_idx]
+              if tok.kind == Token::Kind::Colon
+                colon_before_delim = true
+                break
+              elsif tok.kind.in?(Token::Kind::Comma, Token::Kind::RParen, Token::Kind::RBracket,
+                                 Token::Kind::Newline, Token::Kind::Semicolon, Token::Kind::End, Token::Kind::EOF)
+                break
+              end
+              scan_idx += 1
+            end
+            question_follows = !colon_before_delim
+          end
+
+          if named_b.size > 0 || question_follows
+            method_name = if question_follows
               question_token = current_token
               advance
               @string_pool.intern("[]?".to_slice)
@@ -9379,6 +9435,21 @@ module CrystalV2
         # to a CallNode for method name "[]?" preserving positional args.
         private def handle_index_question_postfix(left : ExprId) : ExprId
           return left unless current_token.kind == Token::Kind::Question
+          # Look ahead: if a ':' appears before a delimiter, this is ternary.
+          scan_idx = @index + 1
+          colon_before_delim = false
+          while scan_idx < @tokens.size
+            tok = @tokens[scan_idx]
+            if tok.kind == Token::Kind::Colon
+              colon_before_delim = true
+              break
+            elsif tok.kind.in?(Token::Kind::Comma, Token::Kind::RParen, Token::Kind::RBracket,
+                                Token::Kind::Newline, Token::Kind::Semicolon, Token::Kind::End, Token::Kind::EOF)
+              break
+            end
+            scan_idx += 1
+          end
+          return left if colon_before_delim
           node = @arena[left]
           return left unless node.is_a?(IndexNode)
           question = current_token
@@ -10404,6 +10475,7 @@ module CrystalV2
           if token.kind == Token::Kind::Rescue && !@allow_inline_rescue
             return false
           end
+          return true if token.kind == Token::Kind::Operator && slice_eq?(token.slice, "?")
           BINARY_PRECEDENCE.has_key?(token.kind)
         end
 
@@ -10420,6 +10492,9 @@ module CrystalV2
         end
 
         private def precedence_for(token : Token) : Int32
+          if token.kind == Token::Kind::Operator && slice_eq?(token.slice, "?")
+            return 2  # Ternary operator precedence
+          end
           BINARY_PRECEDENCE[token.kind]? || 0
         end
 
