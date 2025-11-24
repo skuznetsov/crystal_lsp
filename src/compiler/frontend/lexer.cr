@@ -2358,7 +2358,8 @@ module CrystalV2
               advance
             end
             indent = @offset - line_start
-            min_indent_seen = indent if indent < min_indent_seen
+            line_has_content = !(current_byte == '\n'.ord.to_u8 || current_byte == '\r'.ord.to_u8)
+            min_indent_seen = indent if line_has_content && indent < min_indent_seen
 
             # Check if this line starts with delimiter (after whitespace)
             matches_delimiter = true
