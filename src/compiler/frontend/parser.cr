@@ -2702,7 +2702,24 @@ module CrystalV2
             # Phase 103: Multi-line when clauses - allow newlines after commas
             conditions_b = SmallVec(ExprId, 2).new
             loop do
-              cond = parse_expression(0)
+              # Support Crystal shorthand: `case expr; when .foo?` => expr.foo?
+              if value && current_token.kind == Token::Kind::Operator && slice_eq?(current_token.slice, ".")
+                dot_token = current_token
+                advance
+                skip_trivia
+                name_tok = current_token
+                if name_tok.kind == Token::Kind::Identifier || is_keyword_identifier?(name_tok)
+                  advance
+                  span = node_span(value).cover(name_tok.span)
+                  member = @arena.add_typed(MemberAccessNode.new(span, value, @string_pool.intern(name_tok.slice)))
+                  cond = @arena.add_typed(CallNode.new(span, member, [] of ExprId))
+                else
+                  emit_unexpected(name_tok)
+                  cond = PREFIX_ERROR
+                end
+              else
+                cond = parse_expression(0)
+              end
               return PREFIX_ERROR if cond.invalid?
               conditions_b << cond
 
@@ -11971,6 +11988,9 @@ module CrystalV2
           args_after = [] of ExprId
           loop do
             skip_whitespace_and_optional_newlines
+            # Stop if we reached setter syntax
+            break if current_token.kind == Token::Kind::Eq
+
             break if current_token.kind.in?(Token::Kind::RParen, Token::Kind::RBracket, Token::Kind::RBrace,
                                            Token::Kind::Comma, Token::Kind::Do, Token::Kind::LBrace,
                                            Token::Kind::End, Token::Kind::EOF, Token::Kind::Newline)
@@ -12000,11 +12020,31 @@ module CrystalV2
             return PREFIX_ERROR if value_expr.invalid?
 
             assign_span = @arena[call_expr].span.cover(@arena[value_expr].span)
-            call_expr = @arena.add_typed(AssignNode.new(
-              assign_span,
-              call_expr,
-              value_expr
-            ))
+
+            # Build setter call on the same receiver if possible
+            call_expr_node = @arena[call_expr]
+            setter_callee : ExprId
+            case call_expr_node
+            when MemberAccessNode
+              base = call_expr_node.object
+              name_slice = call_expr_node.member
+              setter_name_slice = String.build do |io|
+                io.write(name_slice)
+                io << '='
+              end
+              setter_callee = @arena.add_typed(
+                MemberAccessNode.new(
+                  call_expr_node.span,
+                  base,
+                  @string_pool.intern(setter_name_slice.to_slice)
+                )
+              )
+            else
+              # Fallback: treat as Assign to call_expr
+              setter_callee = call_expr
+            end
+
+            call_expr = @arena.add_typed(CallNode.new(assign_span, setter_callee, [value_expr], nil))
           end
 
           return PREFIX_ERROR if call_expr.invalid?
