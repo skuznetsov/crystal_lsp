@@ -10578,14 +10578,16 @@ module CrystalV2
           # Colon and MacroExprStart/End are especially noisy in nested macro contexts.
           # Pipe is noisy in type union contexts during recovery.
           # OrOr is noisy in boolean expression contexts during recovery.
-          if token.kind.in?(Token::Kind::Colon, Token::Kind::MacroExprStart, Token::Kind::MacroExprEnd, Token::Kind::Pipe, Token::Kind::OrOr)
-            # Fully suppress these - they create noise in macro/named arg/type/boolean contexts
+          # EOF is noisy at end of complex expressions during recovery.
+          # Eq is noisy in assignment contexts during recovery.
+          if token.kind.in?(Token::Kind::Colon, Token::Kind::MacroExprStart, Token::Kind::MacroExprEnd, Token::Kind::Pipe, Token::Kind::OrOr, Token::Kind::EOF, Token::Kind::Eq)
+            # Fully suppress these - they create noise in various recovery contexts
             return
           end
           if token.kind.in?(Token::Kind::Else, Token::Kind::Elsif, Token::Kind::Rescue, Token::Kind::Ensure,
-                            Token::Kind::When, Token::Kind::Then, Token::Kind::Eq,
+                            Token::Kind::When, Token::Kind::Then,
                             Token::Kind::Amp, Token::Kind::Spaceship, Token::Kind::Operator, Token::Kind::Arrow, Token::Kind::ThinArrow,
-                            Token::Kind::Comma, Token::Kind::Identifier, Token::Kind::EOF, Token::Kind::ColonColon,
+                            Token::Kind::Comma, Token::Kind::Identifier, Token::Kind::ColonColon,
                             Token::Kind::LBracePercent, Token::Kind::PercentRBrace,
                             Token::Kind::AmpStar, Token::Kind::StarStar, Token::Kind::Star, Token::Kind::Question,
                             Token::Kind::Return, Token::Kind::InstanceVar, Token::Kind::ClassVar, Token::Kind::String, Token::Kind::LParen)
