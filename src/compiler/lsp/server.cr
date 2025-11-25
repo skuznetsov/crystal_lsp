@@ -90,14 +90,21 @@ module CrystalV2
         getter debug_log_path : String?
         getter parser_recovery_mode : Bool
         getter best_effort_inference : Bool
+        getter prelude_symbol_only : Bool
 
-        def initialize(@debug_log_path : String? = nil, @parser_recovery_mode : Bool = true, @best_effort_inference : Bool = true)
+        def initialize(
+          @debug_log_path : String? = nil,
+          @parser_recovery_mode : Bool = true,
+          @best_effort_inference : Bool = true,
+          @prelude_symbol_only : Bool = false
+        )
         end
 
         def self.load : ServerConfig
           debug_path = ENV["LSP_DEBUG_LOG"]?
           recovery_mode = true
           best_effort_inference = true
+          prelude_symbol_only = ENV["LSP_PRELUDE_SYMBOL_ONLY"]? == "1"
 
           if config_path = ENV["CRYSTALV2_LSP_CONFIG"]?
             begin
@@ -115,6 +122,9 @@ module CrystalV2
                 if value = hash["best_effort_inference"]?.try(&.as_bool?)
                   best_effort_inference = value
                 end
+                if value = hash["prelude_symbol_only"]?.try(&.as_bool?)
+                  prelude_symbol_only = value
+                end
               end
             rescue ex
               STDERR.puts("[LSP Config] Failed to load #{config_path}: #{ex.message}")
@@ -123,7 +133,7 @@ module CrystalV2
 
           debug_path = File.expand_path(debug_path) if debug_path
 
-          new(debug_path, recovery_mode, best_effort_inference)
+          new(debug_path, recovery_mode, best_effort_inference, prelude_symbol_only)
         end
       end
 
@@ -1236,7 +1246,7 @@ module CrystalV2
 
           debug("Trying real prelude branch? #{path == PRELUDE_PATH}")
           prelude_state = if path == PRELUDE_PATH
-                            build_real_prelude_state(path, program, source, diagnostics)
+                            build_real_prelude_state(path, program, source, diagnostics, symbol_only: @config.prelude_symbol_only)
                           else
                             build_single_file_prelude_state(path, program, source, diagnostics)
                           end
@@ -1336,15 +1346,16 @@ module CrystalV2
           program : Frontend::Program,
           source : String,
           diagnostics : Array(Diagnostic),
+          symbol_only : Bool = false,
         ) : PreludeState?
-          debug("Starting real prelude build for #{path}")
+          debug("Starting real prelude build for #{path} (symbol_only=#{symbol_only})")
           context = Semantic::Context.new(Semantic::SymbolTable.new)
           origins = {} of Semantic::Symbol => PreludeSymbolOrigin
           visited = Set(String).new
           program_cache = {path => program}
           source_cache = {path => source}
 
-          unless process_prelude_dependency(path, context, origins, visited, diagnostics, program_cache, source_cache)
+          unless process_prelude_dependency(path, context, origins, visited, diagnostics, program_cache, source_cache, symbol_only)
             debug("Prelude dependency processing reported failure; continuing with partial context")
           end
 
@@ -1359,6 +1370,7 @@ module CrystalV2
           diagnostics : Array(Diagnostic),
           program_cache : Hash(String, Frontend::Program),
           source_cache : Hash(String, String),
+          symbol_only : Bool,
         ) : Bool
           return true if visited.includes?(path)
           visited << path
@@ -1391,19 +1403,23 @@ module CrystalV2
                 next
               end
             end
-            unless process_prelude_dependency(req, context, origins, visited, diagnostics, program_cache, source_cache)
+            unless process_prelude_dependency(req, context, origins, visited, diagnostics, program_cache, source_cache, symbol_only)
               return false
             end
           end
 
           analyzer = Semantic::Analyzer.new(program, context)
           analyzer.collect_symbols
-          begin
-            analyzer.semantic_diagnostics.each { |diag| diagnostics << Diagnostic.from_semantic(diag, source) }
-            result = analyzer.resolve_names
-            result.diagnostics.each { |diag| diagnostics << Diagnostic.from_parser(diag) }
-          rescue ex
-            debug("Name resolution failed for #{path}: #{ex.message}")
+          unless symbol_only
+            begin
+              analyzer.semantic_diagnostics.each { |diag| diagnostics << Diagnostic.from_semantic(diag, source) }
+              result = analyzer.resolve_names
+              result.diagnostics.each { |diag| diagnostics << Diagnostic.from_parser(diag) }
+            rescue ex
+              debug("Name resolution failed for #{path}: #{ex.message}")
+            end
+          else
+            debug("Symbol-only prelude: skipping name resolution/type inference for #{path}")
           end
 
           uri = file_uri(path)
