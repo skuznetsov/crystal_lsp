@@ -1,0 +1,15 @@
+{
+  "permissions": {
+    "allow": [
+      "Bash(STREAM=0 ENABLE_WATCHDOG=1 SCAN_TIMEOUT=1 CRYSTAL_V2_LSP_RECOVERY=1 crystal run:*)",
+      "Bash(crystal env:*)",
+      "Bash(CRYSTAL_V2_LSP_RECOVERY=1 crystal run:*)",
+      "Bash(CRYSTAL_PATH=/opt/homebrew/Cellar/crystal/1.18.2/share/crystal/src STREAM=0 ENABLE_WATCHDOG=1 SCAN_TIMEOUT=1 crystal run:*)",
+      "Bash(tee:*)",
+      "Bash(git add:*)",
+      "Bash(git commit:*)"
+    ],
+    "deny": [],
+    "ask": []
+  }
+}

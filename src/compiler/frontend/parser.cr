@@ -10562,11 +10562,16 @@ module CrystalV2
           end
           # Suppress noisy tokens that often appear during recovery (e.g., stray else/colon
           # after macro fast-forward) to avoid cascading diagnostics in tooling mode.
+          # Colon and MacroExprStart/End are especially noisy in nested macro contexts.
+          if token.kind.in?(Token::Kind::Colon, Token::Kind::MacroExprStart, Token::Kind::MacroExprEnd)
+            # Fully suppress these - they create noise in macro/named arg contexts
+            return
+          end
           if token.kind.in?(Token::Kind::Else, Token::Kind::Elsif, Token::Kind::Rescue, Token::Kind::Ensure,
-                            Token::Kind::When, Token::Kind::Then, Token::Kind::Colon, Token::Kind::Eq, Token::Kind::OrOr,
+                            Token::Kind::When, Token::Kind::Then, Token::Kind::Eq, Token::Kind::OrOr,
                             Token::Kind::Amp, Token::Kind::Spaceship, Token::Kind::Operator, Token::Kind::Arrow, Token::Kind::ThinArrow,
                             Token::Kind::Comma, Token::Kind::Identifier, Token::Kind::EOF, Token::Kind::ColonColon,
-                            Token::Kind::MacroExprStart, Token::Kind::MacroExprEnd, Token::Kind::LBracePercent, Token::Kind::PercentRBrace,
+                            Token::Kind::LBracePercent, Token::Kind::PercentRBrace,
                             Token::Kind::AmpStar, Token::Kind::StarStar, Token::Kind::Star, Token::Kind::Question, Token::Kind::Pipe,
                             Token::Kind::Return, Token::Kind::InstanceVar, Token::Kind::ClassVar, Token::Kind::String, Token::Kind::LParen)
             if @recovery_mode
