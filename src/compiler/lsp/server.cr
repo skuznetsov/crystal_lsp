@@ -936,7 +936,7 @@ module CrystalV2
           Watchdog.enable!("LSP watchdog #{label}", REQUEST_WATCHDOG_MS.milliseconds)
           begin
             yield
-          rescue Watchdog::TimeoutError => ex
+          rescue ex : Watchdog::TimeoutError
             log_error("[watchdog] #{label} timed out after #{REQUEST_WATCHDOG_MS}ms: #{ex.message}")
             send_error(id, -32000, "Request timeout") if id
           ensure
