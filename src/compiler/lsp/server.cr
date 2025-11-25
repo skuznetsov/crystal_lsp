@@ -13,6 +13,7 @@ module CrystalV2
   module Compiler
     module LSP
       alias Frontend = CrystalV2::Compiler::Frontend
+      alias Watchdog = Frontend::Watchdog
 
       # Document analysis state
       struct DocumentState
@@ -912,6 +913,7 @@ module CrystalV2
 
         GUARD_WARN_MS  =  500 # log at debug level above this
         GUARD_ALERT_MS = 2000 # log at error level above this
+        REQUEST_WATCHDOG_MS = ENV["LSP_WATCHDOG_TIMEOUT_MS"]?.try(&.to_i) || 0
 
         private def with_guard(label : String, &block)
           start = Time.monotonic
@@ -928,55 +930,71 @@ module CrystalV2
           end
         end
 
+        private def with_watchdog(label : String, id : JSON::Any? = nil, &block)
+          return yield if REQUEST_WATCHDOG_MS <= 0
+
+          Watchdog.enable!("LSP watchdog #{label}", REQUEST_WATCHDOG_MS.milliseconds)
+          begin
+            yield
+          rescue Watchdog::TimeoutError => ex
+            log_error("[watchdog] #{label} timed out after #{REQUEST_WATCHDOG_MS}ms: #{ex.message}")
+            send_error(id, -32000, "Request timeout") if id
+          ensure
+            Watchdog.disable!
+          end
+        end
+
         # Handle JSON-RPC request
         private def handle_request(message : JSON::Any, id : JSON::Any)
           method = message["method"].as_s
           params = message["params"]?
 
           with_guard("request #{method}") do
-            case method
-            when "initialize"
-              handle_initialize(id, params)
-            when "shutdown"
-              handle_shutdown(id)
-            when "textDocument/hover"
-              handle_hover(id, params)
-            when "textDocument/definition"
-              handle_definition(id, params)
-            when "textDocument/completion"
-              handle_completion(id, params)
-            when "textDocument/signatureHelp"
-              handle_signature_help(id, params)
-            when "textDocument/documentSymbol"
-              handle_document_symbol(id, params)
-            when "textDocument/references"
-              handle_references(id, params)
-            when "textDocument/inlayHint"
-              handle_inlay_hint(id, params)
-            when "textDocument/prepareRename"
-              handle_prepare_rename(id, params)
-            when "textDocument/rename"
-              handle_rename(id, params)
-            when "textDocument/foldingRange"
-              handle_folding_range(id, params)
-            when "textDocument/semanticTokens/full"
-              handle_semantic_tokens(id, params)
-            when "textDocument/prepareCallHierarchy"
-              handle_prepare_call_hierarchy(id, params)
-            when "callHierarchy/incomingCalls"
-              handle_incoming_calls(id, params)
-            when "callHierarchy/outgoingCalls"
-              handle_outgoing_calls(id, params)
-            when "textDocument/codeAction"
-              handle_code_action(id, params)
-            when "textDocument/formatting"
-              handle_formatting(id, params)
-            when "textDocument/rangeFormatting"
-              handle_range_formatting(id, params)
-            when "workspace/symbol"
-              handle_workspace_symbol(id, params)
-            else
-              send_error(id, -32601, "Method not found: #{method}")
+            with_watchdog("request #{method}", id) do
+              case method
+              when "initialize"
+                handle_initialize(id, params)
+              when "shutdown"
+                handle_shutdown(id)
+              when "textDocument/hover"
+                handle_hover(id, params)
+              when "textDocument/definition"
+                handle_definition(id, params)
+              when "textDocument/completion"
+                handle_completion(id, params)
+              when "textDocument/signatureHelp"
+                handle_signature_help(id, params)
+              when "textDocument/documentSymbol"
+                handle_document_symbol(id, params)
+              when "textDocument/references"
+                handle_references(id, params)
+              when "textDocument/inlayHint"
+                handle_inlay_hint(id, params)
+              when "textDocument/prepareRename"
+                handle_prepare_rename(id, params)
+              when "textDocument/rename"
+                handle_rename(id, params)
+              when "textDocument/foldingRange"
+                handle_folding_range(id, params)
+              when "textDocument/semanticTokens/full"
+                handle_semantic_tokens(id, params)
+              when "textDocument/prepareCallHierarchy"
+                handle_prepare_call_hierarchy(id, params)
+              when "callHierarchy/incomingCalls"
+                handle_incoming_calls(id, params)
+              when "callHierarchy/outgoingCalls"
+                handle_outgoing_calls(id, params)
+              when "textDocument/codeAction"
+                handle_code_action(id, params)
+              when "textDocument/formatting"
+                handle_formatting(id, params)
+              when "textDocument/rangeFormatting"
+                handle_range_formatting(id, params)
+              when "workspace/symbol"
+                handle_workspace_symbol(id, params)
+              else
+                send_error(id, -32601, "Method not found: #{method}")
+              end
             end
           end
         end
@@ -4199,6 +4217,12 @@ module CrystalV2
 
           receiver_symbol = resolve_receiver_symbol(doc_state, node.object)
 
+          if String.new(node.member) == "new" && receiver_symbol
+            if init_location = constructor_location(receiver_symbol, doc_state)
+              return init_location
+            end
+          end
+
           if method_symbol = resolve_member_access_method_symbol(node, doc_state)
             if location = location_for_symbol(method_symbol) || location_for_prelude_symbol(method_symbol)
               if location.uri.ends_with?("prelude_stub.cr")
@@ -4289,6 +4313,11 @@ module CrystalV2
                 method_symbol ||= methods.find { |candidate| prelude_state.symbol_origins.has_key?(candidate) }
               end
             end
+          end
+
+          if method_symbol.nil? && method_name == "new" && receiver_symbol.is_a?(Semantic::ClassSymbol)
+            method_symbol = find_constructor_symbol(receiver_symbol, doc_table) ||
+                            find_constructor_symbol(receiver_symbol, prelude_table)
           end
 
           method_symbol ||= resolve_member_access_method_symbol_stub(node, doc_state, method_name)
@@ -4802,9 +4831,36 @@ module CrystalV2
             next unless File.file?(path)
             if location = find_method_in_file(path, method_name)
               return location
+            elsif method_name == "new"
+              if location = find_method_in_file(path, "initialize")
+                return location
+              end
             end
           end
           nil
+        end
+
+        private def constructor_location(receiver_symbol : Semantic::Symbol, doc_state : DocumentState) : Location?
+          return nil unless receiver_symbol.is_a?(Semantic::ClassSymbol)
+
+          if method = find_constructor_symbol(receiver_symbol, doc_state.symbol_table)
+            if location = location_for_symbol(method)
+              return location
+            end
+            return Location.from_symbol(method, doc_state.program, doc_state.text_document.uri)
+          end
+
+          if location = find_prelude_method_location(receiver_symbol, "initialize", receiver_symbol.name)
+            return location
+          end
+
+          nil
+        end
+
+        private def find_constructor_symbol(receiver_symbol : Semantic::ClassSymbol, table : Semantic::SymbolTable?) : Semantic::MethodSymbol?
+          return nil unless table
+          find_class_method_in_hierarchy(receiver_symbol, "initialize", table) ||
+            find_method_in_class_hierarchy(receiver_symbol, "initialize", table)
         end
 
         private def find_prelude_method_location(receiver_symbol : Semantic::Symbol?, method_name : String, receiver_name_hint : String? = nil) : Location?

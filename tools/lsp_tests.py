@@ -60,7 +60,14 @@ def run_tests() -> int:
     # Prepare temp files
     tmp_valid = pathlib.Path("/tmp/lsp_test_valid.cr")
     tmp_invalid = pathlib.Path("/tmp/lsp_test_invalid.cr")
-    tmp_valid.write_text('require "time"\nstart = Time.monotonic\n')
+    tmp_valid.write_text(
+        'require "time"\n'
+        'require "json"\n'
+        'require "option_parser"\n'
+        'start = Time.monotonic\n'
+        'val = JSON.parse("{}")\n'
+        'parser = OptionParser.new\n'
+    )
     tmp_invalid.write_text("foo(\n")
 
     env = os.environ.copy()
@@ -146,14 +153,14 @@ def run_tests() -> int:
         proc.kill()
         return 1
 
-    # Hover test on Time.monotonic (line 2, col 12 zero-based)
+    # Hover test on Time.monotonic (line 4th line zero-based index 3, char ~14)
     send(
         proc,
         {
             "jsonrpc": "2.0",
             "id": 4,
             "method": "textDocument/hover",
-            "params": {"textDocument": {"uri": uri_valid}, "position": {"line": 1, "character": 12}},
+            "params": {"textDocument": {"uri": uri_valid}, "position": {"line": 3, "character": 14}},
         },
     )
     hover = await_response(4).get("result", {})
@@ -175,7 +182,7 @@ def run_tests() -> int:
             "jsonrpc": "2.0",
             "id": 5,
             "method": "textDocument/definition",
-            "params": {"textDocument": {"uri": uri_valid}, "position": {"line": 1, "character": 12}},
+            "params": {"textDocument": {"uri": uri_valid}, "position": {"line": 3, "character": 14}},
         },
     )
     defs = await_response(5).get("result", [])
@@ -186,6 +193,48 @@ def run_tests() -> int:
     target_uri = defs[0].get("uri", "")
     if "time.cr" not in target_uri:
         print(f"FAIL: definition uri unexpected: {target_uri}", file=sys.stderr)
+        proc.kill()
+        return 1
+
+    # Definition test for JSON.parse (line 5, col 10 zero-based)
+    send(
+        proc,
+        {
+            "jsonrpc": "2.0",
+            "id": 6,
+            "method": "textDocument/definition",
+            "params": {"textDocument": {"uri": uri_valid}, "position": {"line": 4, "character": 10}},
+        },
+    )
+    defs = await_response(6).get("result", [])
+    if not defs:
+        print("FAIL: no definition returned for JSON.parse", file=sys.stderr)
+        proc.kill()
+        return 1
+    target_uri = defs[0].get("uri", "")
+    if "/json.cr" not in target_uri:
+        print(f"FAIL: definition for JSON.parse unexpected: {target_uri}", file=sys.stderr)
+        proc.kill()
+        return 1
+
+    # Definition test for OptionParser.new (line 6, char ~23)
+    send(
+        proc,
+        {
+            "jsonrpc": "2.0",
+            "id": 7,
+            "method": "textDocument/definition",
+            "params": {"textDocument": {"uri": uri_valid}, "position": {"line": 5, "character": 23}},
+        },
+    )
+    defs = await_response(7).get("result", [])
+    if not defs:
+        print("FAIL: no definition returned for OptionParser.new", file=sys.stderr)
+        proc.kill()
+        return 1
+    target_uri = defs[0].get("uri", "")
+    if "option_parser.cr" not in target_uri:
+        print(f"FAIL: definition for OptionParser.new unexpected: {target_uri}", file=sys.stderr)
         proc.kill()
         return 1
 
