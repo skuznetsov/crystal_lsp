@@ -1244,13 +1244,13 @@ module CrystalV2
           stub = path == PRELUDE_STUB_PATH
 
           if prelude_state.nil?
-            diagnostics.each { |diag| debug("#{label} diagnostic: #{diag.message}") } unless diagnostics.empty?
+            log_prelude_diagnostics(label, diagnostics)
             debug("#{label} produced #{diagnostics.size} diagnostics; ignoring")
             @prelude_real_mtime = File.info(path).modification_time if path == PRELUDE_PATH
             return false
           end
 
-          diagnostics.each { |diag| debug("#{label} diagnostic: #{diag.message}") } unless diagnostics.empty?
+          log_prelude_diagnostics(label, diagnostics)
 
           prelude_state = prelude_state.not_nil!
           table = prelude_state.symbol_table
@@ -1270,6 +1270,20 @@ module CrystalV2
           debug("Failed to load #{label}: #{ex.message}")
           debug(ex.inspect_with_backtrace)
           false
+        end
+
+        private def log_prelude_diagnostics(label : String, diagnostics : Array(Diagnostic))
+          return if diagnostics.empty?
+
+          max_log = ENV["LSP_DEBUG"]? ? 25 : 0
+          if max_log > 0
+            diagnostics.first(max_log).each { |diag| debug("#{label} diagnostic: #{diag.message}") }
+            if diagnostics.size > max_log
+              debug("#{label} diagnostics truncated (#{diagnostics.size - max_log} more)")
+            end
+          else
+            debug("#{label} produced #{diagnostics.size} diagnostics (suppressed)")
+          end
         end
 
         private def stub_prelude_state : PreludeState?
