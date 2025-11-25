@@ -1481,9 +1481,17 @@ module CrystalV2
               build_span(start_offset, start_line, start_column)
             )
           else
-            # Simple character - no escape
+            # Simple character - consume full UTF-8 codepoint until closing quote
             from = @offset
-            advance  # Consume the character
+            bytes_consumed = 0
+            # Consume first byte
+            advance
+            bytes_consumed += 1
+            # Consume continuation bytes (max 3 more) until we hit closing quote or rope end
+            while @offset < @rope.size && current_byte != SINGLE_QUOTE && bytes_consumed < 4
+              advance
+              bytes_consumed += 1
+            end
 
             # Expect closing '
             if @offset < @rope.size && current_byte == SINGLE_QUOTE
@@ -1492,7 +1500,7 @@ module CrystalV2
 
             return Token.new(
               Token::Kind::Char,
-              @rope.bytes[from...from + 1],
+              @rope.bytes[from...from + bytes_consumed],
               build_span(start_offset, start_line, start_column)
             )
           end

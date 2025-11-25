@@ -1383,10 +1383,13 @@ module CrystalV2
 
             # Stop conditions when not nested in type delimiters
             if paren_depth == 0 && bracket_depth == 0 && brace_depth == 0
+              if token.kind == Token::Kind::Newline
+                next_non_trivia = peek_next_non_trivia
+                break unless type_continues_after_newline?(last_type_token, next_non_trivia)
+              end
               break if token.kind == Token::Kind::Eq
               break if token.kind == Token::Kind::Comma
               break if operator_token?(token, Token::Kind::RParen)
-              break if token.kind == Token::Kind::Newline
               break if token.kind == Token::Kind::EOF
               break if token.kind == Token::Kind::RBracket
               break if token.kind == Token::Kind::RBrace
@@ -1480,6 +1483,39 @@ module CrystalV2
           end
 
           buffer.to_slice
+        end
+
+        # Allow multi-line type annotations to continue when:
+        #  - the previous token requires continuation (trailing '|', ',' or namespace separators)
+        #  - no tokens have been consumed yet and the next token can start a type
+        private def type_continues_after_newline?(last_type_token : Token?, next_non_trivia : Token) : Bool
+          if last_type_token
+            kind = last_type_token.kind
+            return true if kind.in?(
+              Token::Kind::Pipe,
+              Token::Kind::Comma,
+              Token::Kind::ColonColon,
+              Token::Kind::ThinArrow,
+              Token::Kind::LParen,
+              Token::Kind::LBracket,
+              Token::Kind::LBrace
+            )
+
+            return false
+          end
+
+          # No tokens consumed yet (type starts on the next line)
+          next_non_trivia.kind.in?(
+            Token::Kind::Identifier,
+            Token::Kind::ColonColon,
+            Token::Kind::LParen,
+            Token::Kind::LBracket,
+            Token::Kind::LBrace,
+            Token::Kind::MacroExprStart,
+            Token::Kind::Self,
+            Token::Kind::Typeof,
+            Token::Kind::Number
+          )
         end
 
         # Phase 103: Parse type declaration from identifier: x : Type = value
@@ -3758,7 +3794,7 @@ module CrystalV2
 
           # Non-parenthesized arguments: yield arg1, arg2, ...
           token = current_token
-          if token.kind.in?(Token::Kind::Newline, Token::Kind::EOF, Token::Kind::End, Token::Kind::Else, Token::Kind::Elsif, Token::Kind::If, Token::Kind::Unless, Token::Kind::While, Token::Kind::Until, Token::Kind::Do, Token::Kind::RBrace)
+          if token.kind.in?(Token::Kind::Newline, Token::Kind::EOF, Token::Kind::End, Token::Kind::Else, Token::Kind::Elsif, Token::Kind::If, Token::Kind::Unless, Token::Kind::While, Token::Kind::Until, Token::Kind::Do, Token::Kind::RBrace, Token::Kind::RParen)
             # Yield without args
             @arena.add_typed(YieldNode.new(yield_token.span, nil))
           else
@@ -4925,9 +4961,7 @@ module CrystalV2
 
           # Verify it's a Call or MemberAccess
           unless Frontend.node_kind(call_node).in?(Frontend::NodeKind::Call, Frontend::NodeKind::MemberAccess, Frontend::NodeKind::Super)
-            if @recovery_mode
-              @diagnostics << Diagnostic.new("recovered block attachment", call_node.span)
-            end
+            # In recovery mode this is usually a spurious block attach; skip diagnostics to avoid noise.
             return PREFIX_ERROR
           end
 
@@ -7335,7 +7369,14 @@ module CrystalV2
             parse_pointerof
           when Token::Kind::Uninitialized
             # Phase 85: uninitialized variable
-            parse_uninitialized
+            # Treat bare `uninitialized` as identifier unless followed by '('
+            if peek_token.kind != Token::Kind::LParen
+              id = @arena.add_typed(IdentifierNode.new(token.span, token.slice))
+              advance
+              id
+            else
+              parse_uninitialized
+            end
           when Token::Kind::Offsetof
             # Phase 86: offset of field in type
             parse_offsetof
