@@ -10580,7 +10580,9 @@ module CrystalV2
           # OrOr is noisy in boolean expression contexts during recovery.
           # EOF is noisy at end of complex expressions during recovery.
           # Eq is noisy in assignment contexts during recovery.
-          if token.kind.in?(Token::Kind::Colon, Token::Kind::MacroExprStart, Token::Kind::MacroExprEnd, Token::Kind::Pipe, Token::Kind::OrOr, Token::Kind::EOF, Token::Kind::Eq)
+          # RParen is noisy (creates duplicate diagnostics) in call/expression contexts during recovery.
+          # NotEq is noisy in comparison contexts during recovery.
+          if token.kind.in?(Token::Kind::Colon, Token::Kind::MacroExprStart, Token::Kind::MacroExprEnd, Token::Kind::Pipe, Token::Kind::OrOr, Token::Kind::EOF, Token::Kind::Eq, Token::Kind::RParen, Token::Kind::NotEq)
             # Fully suppress these - they create noise in various recovery contexts
             return
           end
