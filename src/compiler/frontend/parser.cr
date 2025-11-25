@@ -6295,25 +6295,31 @@ module CrystalV2
           depth = 1
           seen_bare_splat = false
           seen_double_splat = false
+          seen_double_splat_param_name = false
           seen_non_block_after_double_splat = false
           named_after_bare_splat = false
+          just_saw_double_splat = false
           while depth > 0 && current_token.kind != Token::Kind::EOF
             case current_token.kind
             when Token::Kind::LParen
               depth += 1
+              just_saw_double_splat = false
             when Token::Kind::RParen
               depth -= 1
+              just_saw_double_splat = false
             when Token::Kind::Star
               # bare * marks end of positional args; named must follow
               if seen_double_splat
                 @diagnostics << Diagnostic.new("only block parameter is allowed after double splat", current_token.span)
               end
               seen_bare_splat = true
+              just_saw_double_splat = false
             when Token::Kind::StarStar
               if seen_double_splat
                 @diagnostics << Diagnostic.new("only block parameter is allowed after double splat", current_token.span)
               end
               seen_double_splat = true
+              just_saw_double_splat = true
             when Token::Kind::String
               # external name cannot be empty
               if current_token.slice.empty?
@@ -6322,14 +6328,21 @@ module CrystalV2
               if seen_bare_splat && !seen_double_splat
                 named_after_bare_splat = true
               end
+              just_saw_double_splat = false
             when Token::Kind::Identifier
-              if seen_double_splat
-                # any identifier after ** is invalid unless it's a block marker (handled elsewhere)
+              if just_saw_double_splat
+                # This identifier is the parameter name for **, which is valid (e.g., **opts)
+                seen_double_splat_param_name = true
+              elsif seen_double_splat && seen_double_splat_param_name
+                # Identifier after the **param_name, which is invalid
                 seen_non_block_after_double_splat = true
               elsif seen_bare_splat
                 # Identifiers after bare * are named parameters; mark so final check passes
                 named_after_bare_splat = true
               end
+              just_saw_double_splat = false
+            else
+              just_saw_double_splat = false
             end
             advance
           end
