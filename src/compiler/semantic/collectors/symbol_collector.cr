@@ -86,6 +86,8 @@ module CrystalV2
             handle_constant(node_id, node)
           when Frontend::IncludeNode
             handle_include(node)
+          when Frontend::ExtendNode
+            handle_extend(node)
           when Frontend::GetterNode, Frontend::SetterNode, Frontend::PropertyNode
             # Phase 87B-1: Expand accessor macros to method definitions
             expand_accessor_macro(node_id, node)
@@ -286,6 +288,18 @@ module CrystalV2
           return unless symbol.is_a?(ModuleSymbol)
           # debug output?
           current_table.include_module(symbol)
+        end
+
+        private def handle_extend(node : Frontend::ExtendNode)
+          symbol = resolve_mixin_target(node.target, node.name)
+          return unless symbol.is_a?(ModuleSymbol)
+
+          # If we're inside a class, extend should affect the metaclass/class_scope
+          if owner = @class_stack.last?
+            owner.class_scope.include_module(symbol)
+          else
+            current_table.include_module(symbol)
+          end
         end
 
         # Phase 87B-1: Expand accessor macros to method definitions
@@ -902,6 +916,16 @@ module CrystalV2
           if target_id = node.target
             resolve_symbol_from_expr(target_id)
           elsif name_slice = node.name
+            current_table.lookup(String.new(name_slice))
+          else
+            nil
+          end
+        end
+
+        private def resolve_mixin_target(target_id : Frontend::ExprId?, name_slice : Slice(UInt8)?) : Symbol?
+          if target_id
+            resolve_symbol_from_expr(target_id)
+          elsif name_slice
             current_table.lookup(String.new(name_slice))
           else
             nil

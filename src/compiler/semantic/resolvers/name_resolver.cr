@@ -99,6 +99,10 @@ module CrystalV2
         visit_module(node_id, node)
       when Frontend::PathNode
         resolve_path(node_id, node)
+      when Frontend::IncludeNode
+        visit(node.target) if node.target && !node.target.invalid?
+      when Frontend::ExtendNode
+        visit(node.target) if node.target && !node.target.invalid?
       else
         # Other kinds currently unsupported; ignore
       end
