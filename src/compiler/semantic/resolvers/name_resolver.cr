@@ -113,7 +113,7 @@ module CrystalV2
           if symbol = @current_table.lookup(name)
             debug("[NameResolver] matched #{name} -> #{symbol.class}")
             @identifier_symbols[node_id] = symbol
-          else
+          elsif top_level_scope?
             debug("[NameResolver] unresolved #{name}")
             @diagnostics << Diagnostic.new("undefined local variable or method '#{name}'", node.span)
           end
@@ -331,17 +331,17 @@ module CrystalV2
         @current_table = prev_table
       end
 
-      private def resolve_path(node_id : ExprId, node : Frontend::PathNode)
-        segments = collect_path_segments(node)
-        return if segments.empty?
+        private def resolve_path(node_id : ExprId, node : Frontend::PathNode)
+          segments = collect_path_segments(node)
+          return if segments.empty?
 
-        symbol = resolve_path_in_tables(@current_table, segments) || resolve_path_in_tables(@root_table, segments)
-        if symbol
-          @identifier_symbols[node_id] = symbol
-        else
-          @diagnostics << Diagnostic.new("uninitialized constant #{segments.join("::")}", node.span)
+          symbol = resolve_path_in_tables(@current_table, segments) || resolve_path_in_tables(@root_table, segments)
+          if symbol
+            @identifier_symbols[node_id] = symbol
+          elsif top_level_scope?
+            @diagnostics << Diagnostic.new("uninitialized constant #{segments.join("::")}", node.span)
+          end
         end
-      end
 
       private def collect_path_segments(node : Frontend::PathNode) : Array(String)
         result = [] of String
@@ -387,16 +387,20 @@ module CrystalV2
         current
       end
 
-      private def scope_for(symbol : Symbol?) : SymbolTable?
-        case symbol
-        when ClassSymbol
-          symbol.scope
-        when ModuleSymbol
-          symbol.scope
-        else
-          nil
+        private def scope_for(symbol : Symbol?) : SymbolTable?
+          case symbol
+          when ClassSymbol
+            symbol.scope
+          when ModuleSymbol
+            symbol.scope
+          else
+            nil
+          end
         end
-      end
+
+        private def top_level_scope? : Bool
+          @current_table.same?(@root_table)
+        end
 
       private def debug(message : String)
         return unless ENV.has_key?("LSP_DEBUG_BLOCK")
