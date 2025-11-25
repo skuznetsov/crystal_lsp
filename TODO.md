@@ -119,6 +119,9 @@ information must match what the original compiler would infer.
         compiler would report (where applicable).
   - [ ] Include navigation into stdlib/prelude and macro-generated methods
         (e.g. JSON::Serializable, Tuple, Reference).
+- [ ] Prelude handling:
+  - [ ] Add a symbol-only prelude load path (skip full type inference) to avoid timeouts/spam while semantic parity is built.
+  - [ ] Drive prelude toward zero semantic diagnostics by implementing missing macro/builtin/type features; remove reliance on stub.
 
 ## 5. Beyond Parity: IR & Codegen (Next Phase)
 
