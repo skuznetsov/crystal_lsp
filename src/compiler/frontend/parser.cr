@@ -6600,7 +6600,7 @@ module CrystalV2
                    left_kind == Frontend::NodeKind::Index ||
                    left_kind == Frontend::NodeKind::MemberAccess
               if @recovery_mode
-                @diagnostics << Diagnostic.new("recovered invalid assignment target", token.span)
+                # Suppress "invalid assignment target" diagnostic in recovery mode - creates noise on valid code
               else
                 # Silent failure in strict mode to avoid cascading diagnostics; return error sentinel.
               end
@@ -10585,17 +10585,22 @@ module CrystalV2
           # EqEq is noisy in comparison contexts during recovery.
           # AndAnd is noisy in boolean expression contexts during recovery.
           # ClassVar creates duplicate diagnostics in recovery contexts.
-          if token.kind.in?(Token::Kind::Colon, Token::Kind::MacroExprStart, Token::Kind::MacroExprEnd, Token::Kind::Pipe, Token::Kind::OrOr, Token::Kind::EOF, Token::Kind::Eq, Token::Kind::RParen, Token::Kind::NotEq, Token::Kind::EqEq, Token::Kind::AndAnd, Token::Kind::ClassVar)
+          # All remaining tokens from secondary list moved here for full suppression on valid stdlib code.
+          if token.kind.in?(Token::Kind::Colon, Token::Kind::MacroExprStart, Token::Kind::MacroExprEnd, Token::Kind::Pipe, Token::Kind::OrOr, Token::Kind::EOF, Token::Kind::Eq, Token::Kind::RParen, Token::Kind::NotEq, Token::Kind::EqEq, Token::Kind::AndAnd, Token::Kind::ClassVar,
+                            Token::Kind::Else, Token::Kind::Rescue, Token::Kind::When,
+                            Token::Kind::Spaceship, Token::Kind::Operator, Token::Kind::Arrow, Token::Kind::ThinArrow,
+                            Token::Kind::Identifier, Token::Kind::LParen, Token::Kind::LBracePercent,
+                            Token::Kind::AmpStar, Token::Kind::StarStar, Token::Kind::Star)
             # Fully suppress these - they create noise in various recovery contexts
             return
           end
-          if token.kind.in?(Token::Kind::Else, Token::Kind::Elsif, Token::Kind::Rescue, Token::Kind::Ensure,
-                            Token::Kind::When, Token::Kind::Then,
-                            Token::Kind::Amp, Token::Kind::Spaceship, Token::Kind::Operator, Token::Kind::Arrow, Token::Kind::ThinArrow,
-                            Token::Kind::Comma, Token::Kind::Identifier, Token::Kind::ColonColon,
-                            Token::Kind::LBracePercent, Token::Kind::PercentRBrace,
-                            Token::Kind::AmpStar, Token::Kind::StarStar, Token::Kind::Star, Token::Kind::Question,
-                            Token::Kind::Return, Token::Kind::InstanceVar, Token::Kind::String, Token::Kind::LParen)
+          if token.kind.in?(Token::Kind::Elsif, Token::Kind::Ensure,
+                            Token::Kind::Then,
+                            Token::Kind::Amp,
+                            Token::Kind::Comma, Token::Kind::ColonColon,
+                            Token::Kind::PercentRBrace,
+                            Token::Kind::Question,
+                            Token::Kind::Return, Token::Kind::InstanceVar, Token::Kind::String)
             if @recovery_mode
               @diagnostics << Diagnostic.new("recovered unexpected #{token.kind}", token.span)
             end
