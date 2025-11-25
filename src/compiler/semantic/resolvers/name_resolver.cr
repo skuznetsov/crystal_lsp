@@ -79,28 +79,30 @@ module CrystalV2
             visit_def(node_id, node)
           when Frontend::ClassNode
             visit_class(node_id, node)
-          when Frontend::ConstantNode
-            visit(node.value)
-          when Frontend::IfNode
-            visit_if(node)
-          when Frontend::UnlessNode
-            visit_unless(node)
-          when Frontend::WhileNode
-            visit_while(node)
-          when Frontend::UntilNode
-            visit_until(node)
-          when Frontend::LoopNode
-            visit_loop(node)
-          when Frontend::BlockNode
-            visit_block(node)
-          when Frontend::ProcLiteralNode
-            visit_proc_literal(node)
-          when Frontend::ModuleNode
-            visit_module(node_id, node)
-          else
-            # Other kinds currently unsupported; ignore
-          end
-        end
+      when Frontend::ConstantNode
+        visit(node.value)
+      when Frontend::IfNode
+        visit_if(node)
+      when Frontend::UnlessNode
+        visit_unless(node)
+      when Frontend::WhileNode
+        visit_while(node)
+      when Frontend::UntilNode
+        visit_until(node)
+      when Frontend::LoopNode
+        visit_loop(node)
+      when Frontend::BlockNode
+        visit_block(node)
+      when Frontend::ProcLiteralNode
+        visit_proc_literal(node)
+      when Frontend::ModuleNode
+        visit_module(node_id, node)
+      when Frontend::PathNode
+        resolve_path(node_id, node)
+      else
+        # Other kinds currently unsupported; ignore
+      end
+    end
 
         private def resolve_identifier(node_id : ExprId, node : Frontend::IdentifierNode)
           slice = node.name
@@ -324,16 +326,83 @@ module CrystalV2
             end
           end
 
-          node.body.each { |expr_id| visit(expr_id) }
+        node.body.each { |expr_id| visit(expr_id) }
 
-          @current_table = prev_table
-        end
+        @current_table = prev_table
+      end
 
-        private def debug(message : String)
-          return unless ENV.has_key?("LSP_DEBUG_BLOCK")
-          STDOUT.puts(message)
+      private def resolve_path(node_id : ExprId, node : Frontend::PathNode)
+        segments = collect_path_segments(node)
+        return if segments.empty?
+
+        symbol = resolve_path_in_tables(@current_table, segments) || resolve_path_in_tables(@root_table, segments)
+        if symbol
+          @identifier_symbols[node_id] = symbol
+        else
+          @diagnostics << Diagnostic.new("uninitialized constant #{segments.join("::")}", node.span)
         end
       end
+
+      private def collect_path_segments(node : Frontend::PathNode) : Array(String)
+        result = [] of String
+        if left_id = node.left
+          unless left_id.invalid?
+            case left = @arena[left_id]
+            when Frontend::PathNode
+              result.concat(collect_path_segments(left))
+            when Frontend::IdentifierNode
+              if slice = left.name
+                result << String.new(slice)
+              end
+            end
+          end
+        end
+
+        right = @arena[node.right]
+        case right
+        when Frontend::PathNode
+          result.concat(collect_path_segments(right))
+        when Frontend::IdentifierNode
+          if slice = right.name
+            result << String.new(slice)
+          end
+        end
+
+        result
+      end
+
+      private def resolve_path_in_tables(table : SymbolTable, segments : Array(String)) : Symbol?
+        return nil if segments.empty?
+        first, *rest = segments
+        current = table.lookup(first)
+        return current if rest.empty?
+
+        rest.each do |segment|
+          scope = scope_for(current)
+          return nil unless scope
+          current = scope.lookup(segment)
+          return nil unless current
+        end
+
+        current
+      end
+
+      private def scope_for(symbol : Symbol?) : SymbolTable?
+        case symbol
+        when ClassSymbol
+          symbol.scope
+        when ModuleSymbol
+          symbol.scope
+        else
+          nil
+        end
+      end
+
+      private def debug(message : String)
+        return unless ENV.has_key?("LSP_DEBUG_BLOCK")
+        STDOUT.puts(message)
+      end
+    end
     end
   end
 end
