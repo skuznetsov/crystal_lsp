@@ -6,6 +6,7 @@ require "./protocol"
 require "./messages"
 require "./prelude_cache"
 require "./unified_project"
+require "./debouncer"
 require "../frontend/lexer"
 require "../frontend/parser"
 require "../semantic/analyzer"
@@ -93,12 +94,14 @@ module CrystalV2
         getter parser_recovery_mode : Bool
         getter best_effort_inference : Bool
         getter prelude_symbol_only : Bool
+        getter debounce_ms : Int32
 
         def initialize(
           @debug_log_path : String? = nil,
           @parser_recovery_mode : Bool = true,
           @best_effort_inference : Bool = true,
-          @prelude_symbol_only : Bool = false
+          @prelude_symbol_only : Bool = false,
+          @debounce_ms : Int32 = 300  # Default 300ms debounce
         )
         end
 
@@ -107,6 +110,7 @@ module CrystalV2
           recovery_mode = true
           best_effort_inference = true
           prelude_symbol_only = ENV["LSP_PRELUDE_SYMBOL_ONLY"]? == "1"
+          debounce_ms = ENV["LSP_DEBOUNCE_MS"]?.try(&.to_i?) || 300
 
           if config_path = ENV["CRYSTALV2_LSP_CONFIG"]?
             begin
@@ -127,6 +131,9 @@ module CrystalV2
                 if value = hash["prelude_symbol_only"]?.try(&.as_bool?)
                   prelude_symbol_only = value
                 end
+                if value = hash["debounce_ms"]?.try(&.as_i?)
+                  debounce_ms = value
+                end
               end
             rescue ex
               STDERR.puts("[LSP Config] Failed to load #{config_path}: #{ex.message}")
@@ -135,7 +142,7 @@ module CrystalV2
 
           debug_path = File.expand_path(debug_path) if debug_path
 
-          new(debug_path, recovery_mode, best_effort_inference, prelude_symbol_only)
+          new(debug_path, recovery_mode, best_effort_inference, prelude_symbol_only, debounce_ms)
         end
       end
 
@@ -206,7 +213,9 @@ module CrystalV2
         @input : IO
         @output : IO
         @log_output : IO?
-        @documents : Hash(String, DocumentState)
+        @project : UnifiedProjectState
+        @debouncer : Debouncer
+        @documents : Hash(String, DocumentState)  # Legacy - being migrated to @project
         @initialized : Bool = false
         @prelude_state : PreludeState?
         @prelude_mtime : Time?
@@ -235,7 +244,9 @@ module CrystalV2
               nil
             end
           end
-          @documents = {} of String => DocumentState
+          @project = UnifiedProjectState.new
+          @debouncer = Debouncer.new(config.debounce_ms)
+          @documents = {} of String => DocumentState  # Legacy
           @prelude_real_mtime = nil
           @seq_id = 1
           @symbol_locations = {} of Semantic::Symbol => SymbolLocation
@@ -1059,11 +1070,19 @@ module CrystalV2
           doc_path = uri_to_path(uri)
           base_dir = doc_path ? File.dirname(doc_path) : nil
 
-          # Analyze and store document
+          # Update unified project state (new architecture)
+          if doc_path
+            project_start = Time.monotonic
+            project_diagnostics = @project.update_file(doc_path, text, version)
+            project_time = (Time.monotonic - project_start).total_milliseconds
+            debug("UnifiedProject update_file: #{project_time.round(2)}ms, #{project_diagnostics.size} diagnostics")
+          end
+
+          # Legacy: Analyze and store document (will be removed after full migration)
           doc = TextDocumentItem.new(uri: uri, language_id: language_id, version: version, text: text)
           diagnostics, program, type_context, identifier_symbols, symbol_table, requires = analyze_document(text, base_dir, doc_path, workspace: DependencyWorkspace.new)
 
-          # Store document state
+          # Store document state (legacy)
           @documents[uri] = DocumentState.new(doc, program, type_context, identifier_symbols, symbol_table, requires, doc_path)
           register_document_symbols(uri, @documents[uri])
 
@@ -1076,6 +1095,10 @@ module CrystalV2
         private def handle_did_close(params : JSON::Any)
           text_document = params["textDocument"]
           uri = text_document["uri"].as_s
+
+          # Note: We don't remove from @project because the file still exists on disk
+          # and may be referenced by other files. UnifiedProject keeps all project files.
+          # Only remove from legacy @documents
           unregister_document_symbols(uri)
           @documents.delete(uri)
         end
@@ -2201,6 +2224,15 @@ module CrystalV2
           doc_path = uri_to_path(uri)
           base_dir = doc_path ? File.dirname(doc_path) : nil
 
+          # Update unified project state (incremental - only this file re-parsed)
+          if doc_path
+            project_start = Time.monotonic
+            project_diagnostics = @project.update_file(doc_path, new_text, version)
+            project_time = (Time.monotonic - project_start).total_milliseconds
+            debug("UnifiedProject update_file (change): #{project_time.round(2)}ms")
+          end
+
+          # Legacy analysis (will be removed)
           diagnostics, program, type_context, identifier_symbols, symbol_table, requires = analyze_document(new_text, base_dir, doc_path, workspace: DependencyWorkspace.new)
 
           doc = TextDocumentItem.new(uri: uri, language_id: language_id, version: version, text: new_text)

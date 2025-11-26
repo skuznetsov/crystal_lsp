@@ -110,7 +110,7 @@ module CrystalV2
           lexer = Frontend::Lexer.new(source)
           file_arena = Frontend::AstArena.new
           parser = Frontend::Parser.new(lexer, file_arena)
-          program = parser.parse
+          program = parser.parse_program
 
           parse_time = Time.monotonic - parse_start
 
