@@ -10437,10 +10437,10 @@ module CrystalV2
           if @index > start_index
             end_tok = previous_token || start_token
             span = start_token.span.cover(end_tok.span)
-            # Represent the parsed type arg as a GenericNode over a dummy base Identifier
-            base = @arena.add_typed(IdentifierNode.new(start_token.span, @string_pool.intern("TypeArg".to_slice)))
+            # Return the type argument as a simple identifier/constant node
+            # (Don't wrap in GenericNode - that was creating nested generics)
             type_expr = @arena.add_typed(IdentifierNode.new(span, @string_pool.intern(type_slice)))
-            return @arena.add_typed(GenericNode.new(span, base, [type_expr]))
+            return type_expr
           end
 
           # Allow splatted type arguments (e.g., Union(*T))
