@@ -1070,12 +1070,21 @@ module CrystalV2
           doc_path = uri_to_path(uri)
           base_dir = doc_path ? File.dirname(doc_path) : nil
 
-          # Update unified project state (new architecture)
+          # Update unified project state (new architecture) - async with watchdog
           if doc_path
-            project_start = Time.monotonic
-            project_diagnostics = @project.update_file(doc_path, text, version)
-            project_time = (Time.monotonic - project_start).total_milliseconds
-            debug("UnifiedProject update_file: #{project_time.round(2)}ms, #{project_diagnostics.size} diagnostics")
+            spawn do
+              project_start = Time.monotonic
+              begin
+                Frontend::Watchdog.enable!("UnifiedProject update_file timeout", 5.seconds)
+                project_diagnostics = @project.update_file(doc_path, text, version)
+                project_time = (Time.monotonic - project_start).total_milliseconds
+                debug("UnifiedProject update_file: #{project_time.round(2)}ms, #{project_diagnostics.size} diagnostics")
+              rescue ex : Frontend::Watchdog::TimeoutError
+                debug("UnifiedProject update_file TIMEOUT: #{ex.message}")
+              ensure
+                Frontend::Watchdog.disable!
+              end
+            end
           end
 
           # Legacy: Analyze and store document (will be removed after full migration)
@@ -2224,12 +2233,21 @@ module CrystalV2
           doc_path = uri_to_path(uri)
           base_dir = doc_path ? File.dirname(doc_path) : nil
 
-          # Update unified project state (incremental - only this file re-parsed)
+          # Update unified project state (incremental) - async with watchdog
           if doc_path
-            project_start = Time.monotonic
-            project_diagnostics = @project.update_file(doc_path, new_text, version)
-            project_time = (Time.monotonic - project_start).total_milliseconds
-            debug("UnifiedProject update_file (change): #{project_time.round(2)}ms")
+            spawn do
+              project_start = Time.monotonic
+              begin
+                Frontend::Watchdog.enable!("UnifiedProject update_file (change) timeout", 3.seconds)
+                project_diagnostics = @project.update_file(doc_path, new_text, version)
+                project_time = (Time.monotonic - project_start).total_milliseconds
+                debug("UnifiedProject update_file (change): #{project_time.round(2)}ms")
+              rescue ex : Frontend::Watchdog::TimeoutError
+                debug("UnifiedProject update_file (change) TIMEOUT: #{ex.message}")
+              ensure
+                Frontend::Watchdog.disable!
+              end
+            end
           end
 
           # Legacy analysis (will be removed)
@@ -4538,6 +4556,14 @@ module CrystalV2
             end
           end
 
+          # If receiver_symbol is nil, try resolving via identifier_symbols
+          # This handles local variables like: server = Server.new; server.start
+          if method_symbol.nil? && receiver_symbol.nil?
+            if var_class_symbol = resolve_receiver_type_from_identifier(doc_state, node.object)
+              receiver_symbol = var_class_symbol
+            end
+          end
+
           if method_symbol.nil? && receiver_symbol
             case receiver_symbol
             when Semantic::ClassSymbol
@@ -5082,6 +5108,181 @@ module CrystalV2
           return nil unless segments && !segments.empty?
 
           resolve_path_symbol(doc_state, segments) || find_symbol_by_segments(segments)
+        end
+
+        # Resolve receiver type from identifier_symbols for local variables
+        # e.g., for `server.start` where server is a local variable of type Server
+        private def resolve_receiver_type_from_identifier(doc_state : DocumentState, expr_id : Frontend::ExprId) : Semantic::ClassSymbol?
+          identifier_symbols = doc_state.identifier_symbols
+          return nil unless identifier_symbols
+
+          symbol = identifier_symbols[expr_id]?
+          return nil unless symbol
+
+          # Get the type name from the symbol
+          type_name = case symbol
+                      when Semantic::VariableSymbol
+                        symbol.declared_type
+                      when Semantic::InstanceVarSymbol
+                        symbol.declared_type
+                      else
+                        nil
+                      end
+
+          # If no declared type, try type_context for inferred type
+          if type_name.nil? && (type_context = doc_state.type_context)
+            if inferred_type = type_context.get_type(expr_id)
+              type_name = case inferred_type
+                          when Semantic::InstanceType
+                            inferred_type.class_symbol.name
+                          when Semantic::ClassType
+                            inferred_type.symbol.name
+                          else
+                            nil
+                          end
+            end
+          end
+
+          # If still no type, try to find it from the assignment's RHS pattern
+          # e.g., server = Server.new → type is Server
+          if type_name.nil? && symbol.is_a?(Semantic::VariableSymbol)
+            type_name = infer_type_from_assignment(doc_state, symbol)
+          end
+
+          return nil unless type_name
+
+          # Resolve the type name to a ClassSymbol
+          # Try document symbol table first, then prelude
+          if doc_table = doc_state.symbol_table
+            if class_sym = doc_table.lookup(type_name).as?(Semantic::ClassSymbol)
+              return class_sym
+            end
+          end
+
+          if prelude_table = @prelude_state.try(&.symbol_table)
+            if class_sym = prelude_table.lookup(type_name).as?(Semantic::ClassSymbol)
+              return class_sym
+            end
+          end
+
+          nil
+        end
+
+        # Infer type from assignment pattern (e.g., var = ClassName.new)
+        private def infer_type_from_assignment(doc_state : DocumentState, var_symbol : Semantic::VariableSymbol) : String?
+          arena = doc_state.program.arena
+
+          # Find the assignment node that defines this variable
+          # Look through the AST for assignments to this variable
+          doc_state.program.roots.each do |root_id|
+            next if root_id.invalid?
+            if type_name = find_type_in_assignment(arena, root_id, var_symbol.name)
+              return type_name
+            end
+          end
+
+          nil
+        end
+
+        # Recursively search for assignment to var_name and extract type from RHS
+        private def find_type_in_assignment(arena : Frontend::ArenaLike, expr_id : Frontend::ExprId, var_name : String) : String?
+          return nil if expr_id.invalid?
+          node = arena[expr_id]
+
+          case node
+          when Frontend::AssignNode
+            target = arena[node.target]
+            if target.is_a?(Frontend::IdentifierNode) && target.name && String.new(target.name) == var_name
+              # Found assignment to our variable, check RHS pattern
+              return extract_type_from_constructor(arena, node.value)
+            end
+            # Recurse into value
+            return find_type_in_assignment(arena, node.value, var_name)
+          when Frontend::DefNode
+            # Search in method body
+            node.body.try &.each do |body_id|
+              if result = find_type_in_assignment(arena, body_id, var_name)
+                return result
+              end
+            end
+          when Frontend::ClassNode
+            # Search in class body
+            node.body.try &.each do |body_id|
+              if result = find_type_in_assignment(arena, body_id, var_name)
+                return result
+              end
+            end
+          when Frontend::ModuleNode
+            # Search in module body
+            node.body.try &.each do |body_id|
+              if result = find_type_in_assignment(arena, body_id, var_name)
+                return result
+              end
+            end
+          when Frontend::BlockNode
+            # Search in block body
+            if body = node.body
+              body.each do |body_id|
+                if result = find_type_in_assignment(arena, body_id, var_name)
+                  return result
+                end
+              end
+            end
+          when Frontend::IfNode
+            # Search in branches
+            node.then_body.each do |body_id|
+              if result = find_type_in_assignment(arena, body_id, var_name)
+                return result
+              end
+            end
+            node.else_body.try &.each do |body_id|
+              if result = find_type_in_assignment(arena, body_id, var_name)
+                return result
+              end
+            end
+          end
+
+          nil
+        end
+
+        # Extract class name from constructor call pattern (ClassName.new)
+        private def extract_type_from_constructor(arena : Frontend::ArenaLike, expr_id : Frontend::ExprId) : String?
+          node = arena[expr_id]
+          case node
+          when Frontend::CallNode
+            # Check if this is a .new call
+            callee = arena[node.callee]
+            if callee.is_a?(Frontend::MemberAccessNode)
+              member_name = String.new(callee.member)
+              if member_name == "new"
+                # Get the class name from the object
+                obj = arena[callee.object]
+                case obj
+                when Frontend::ConstantNode
+                  return String.new(obj.name)
+                when Frontend::PathNode
+                  # Return the last segment (e.g., Foo::Bar → Bar)
+                  segments = collect_path_segments(arena, obj)
+                  return segments.join("::")
+                end
+              end
+            end
+          when Frontend::MemberAccessNode
+            # Direct ClassName.new without parens
+            member_name = String.new(node.member)
+            if member_name == "new"
+              obj = arena[node.object]
+              case obj
+              when Frontend::ConstantNode
+                return String.new(obj.name)
+              when Frontend::PathNode
+                segments = collect_path_segments(arena, obj)
+                return segments.join("::")
+              end
+            end
+          end
+
+          nil
         end
 
         private def receiver_name_for(arena : Frontend::ArenaLike, expr_id : Frontend::ExprId) : String?
