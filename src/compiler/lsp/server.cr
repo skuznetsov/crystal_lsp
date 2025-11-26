@@ -4344,13 +4344,18 @@ module CrystalV2
               end
               return Location.from_symbol(symbol, doc_state.program, uri)
             elsif name_slice
-              if offset = target_offset
-                if location = definition_from_parameters(String.new(name_slice), doc_state, offset)
-                  return location
-                end
-                # Fallback: use identifier span start if click offset fails (e.g., past end_column)
-                if location = definition_from_parameters(String.new(name_slice), doc_state, node.span.start_offset)
-                  return location
+              # Only fallback to parameter search if identifier_symbols doesn't exist
+              # (meaning semantic analysis wasn't run or failed). If identifier_symbols exists
+              # but doesn't have this ID, the identifier was analyzed and isn't a parameter.
+              if identifier_symbols.nil?
+                if offset = target_offset
+                  if location = definition_from_parameters(String.new(name_slice), doc_state, offset)
+                    return location
+                  end
+                  # Fallback: use identifier span start if click offset fails (e.g., past end_column)
+                  if location = definition_from_parameters(String.new(name_slice), doc_state, node.span.start_offset)
+                    return location
+                  end
                 end
               end
               return definition_from_constant(String.new(name_slice), doc_state)
@@ -4427,9 +4432,18 @@ module CrystalV2
         end
 
         # Fallback: resolve identifiers to enclosing def/block/proc parameters when no symbol info
+        # Maximum arena size for parameter search to prevent O(n) hangs on large files
+        # protocol.cr has ~4000 nodes but VirtualArena includes prelude which is much larger
+        PARAM_SEARCH_MAX_ARENA_SIZE = 5_000
+
         private def definition_from_parameters(name : String, doc_state : DocumentState, target_offset : Int32) : Location?
           arena = doc_state.program.arena
           path = doc_state.path
+
+          # Skip expensive O(n) scan for very large arenas (prelude, large files)
+          if arena.size > PARAM_SEARCH_MAX_ARENA_SIZE
+            return nil
+          end
 
           best_node = nil
           best_span = nil
