@@ -4113,6 +4113,26 @@ module CrystalV2
             else
               nil
             end
+          when Frontend::InstanceVarNode, Frontend::ClassVarNode, Frontend::GlobalNode
+            name_slice = node.name
+            symbol = doc_state.identifier_symbols.try(&.[expr_id]?)
+            if symbol
+              if location = location_for_symbol(symbol)
+                return location
+              end
+              return Location.from_symbol(symbol, doc_state.program, uri)
+            elsif name_slice
+              name = String.new(name_slice)
+              if symbol_table = doc_state.symbol_table
+                if sym = symbol_table.lookup(name)
+                  if location = location_for_symbol(sym)
+                    return location
+                  end
+                  return Location.from_symbol(sym, doc_state.program, uri)
+                end
+              end
+            end
+            nil
           when Frontend::AssignNode
             arena = doc_state.program.arena
             target_span = arena[node.target].span

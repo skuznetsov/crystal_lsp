@@ -39,18 +39,24 @@ module CrystalV2
           Result.new(@identifier_symbols, @diagnostics)
         end
 
-        private def visit(node_id : ExprId)
-          return if node_id.invalid?
-          node = @arena[node_id]
+      private def visit(node_id : ExprId)
+        return if node_id.invalid?
+        node = @arena[node_id]
 
-          case node
-          when Frontend::IdentifierNode
-            resolve_identifier(node_id, node)
-          when Frontend::AssignNode
-            # Visit the value first (it may reference existing variables)
-            visit(node.value)
-            # Then handle the target (which declares a new variable if it's an identifier)
-            handle_assign_target(node.target)
+        case node
+        when Frontend::IdentifierNode
+          resolve_identifier(node_id, node)
+        when Frontend::InstanceVarNode
+          resolve_instance_var(node_id, node)
+        when Frontend::ClassVarNode
+          resolve_class_var(node_id, node)
+        when Frontend::GlobalNode
+          resolve_global_var(node_id, node)
+        when Frontend::AssignNode
+          # Visit the value first (it may reference existing variables)
+          visit(node.value)
+          # Then handle the target (which declares a new variable if it's an identifier)
+          handle_assign_target(node.target)
           when Frontend::MemberAccessNode
             visit(node.object)
           when Frontend::CallNode
@@ -120,6 +126,33 @@ module CrystalV2
           elsif top_level_scope?
             debug("[NameResolver] unresolved #{name}")
             @diagnostics << Diagnostic.new("undefined local variable or method '#{name}'", node.span)
+          end
+        end
+
+        private def resolve_instance_var(node_id : ExprId, node : Frontend::InstanceVarNode)
+          slice = node.name
+          return unless slice
+          name = String.new(slice)
+          if symbol = @current_table.lookup(name)
+            @identifier_symbols[node_id] = symbol
+          end
+        end
+
+        private def resolve_class_var(node_id : ExprId, node : Frontend::ClassVarNode)
+          slice = node.name
+          return unless slice
+          name = String.new(slice)
+          if symbol = @current_table.lookup(name)
+            @identifier_symbols[node_id] = symbol
+          end
+        end
+
+        private def resolve_global_var(node_id : ExprId, node : Frontend::GlobalNode)
+          slice = node.name
+          return unless slice
+          name = String.new(slice)
+          if symbol = @root_table.lookup(name)
+            @identifier_symbols[node_id] = symbol
           end
         end
 

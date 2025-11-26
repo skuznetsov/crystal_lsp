@@ -14,11 +14,11 @@ module CrystalV2
 
         getter diagnostics : Array(Diagnostic)
 
-        def initialize(@program : Program, context : Context)
-          @arena = @program.arena
-          @virtual_arena = @arena.is_a?(Frontend::VirtualArena) ? @arena.as(Frontend::VirtualArena) : nil
-          @table_stack = [context.symbol_table]
-          @diagnostics = [] of Diagnostic
+      def initialize(@program : Program, context : Context)
+        @arena = @program.arena
+        @virtual_arena = @arena.is_a?(Frontend::VirtualArena) ? @arena.as(Frontend::VirtualArena) : nil
+        @table_stack = [context.symbol_table]
+        @diagnostics = [] of Diagnostic
           @macro_expander = MacroExpander.new(@program, @arena, context.flags)
           @class_stack = [] of ClassSymbol
           # Pending root-level annotations (for example,
@@ -68,31 +68,35 @@ module CrystalV2
           end
         end
 
-        private def visit(node_id : Frontend::ExprId)
-          return if node_id.invalid?
+      private def visit(node_id : Frontend::ExprId)
+        return if node_id.invalid?
 
-          node = @arena[node_id]
+        node = @arena[node_id]
 
-          case node
-          when Frontend::MacroDefNode
-            handle_macro_def(node_id, node)
-          when Frontend::DefNode
-            handle_def(node_id, node)
-          when Frontend::ClassNode
-            handle_class(node_id, node)
-          when Frontend::ModuleNode
-            handle_module(node_id, node)
-          when Frontend::ConstantNode
-            handle_constant(node_id, node)
-          when Frontend::IncludeNode
-            handle_include(node)
-          when Frontend::ExtendNode
-            handle_extend(node)
-          when Frontend::GetterNode, Frontend::SetterNode, Frontend::PropertyNode
-            # Phase 87B-1: Expand accessor macros to method definitions
-            expand_accessor_macro(node_id, node)
-          when Frontend::CallNode
-            # Phase 87B-2: Check if call is actually a macro invocation
+        case node
+        when Frontend::MacroDefNode
+          handle_macro_def(node_id, node)
+        when Frontend::DefNode
+          handle_def(node_id, node)
+        when Frontend::ClassNode
+          handle_class(node_id, node)
+        when Frontend::ModuleNode
+          handle_module(node_id, node)
+        when Frontend::ConstantNode
+          handle_constant(node_id, node)
+        when Frontend::IncludeNode
+          handle_include(node)
+        when Frontend::ExtendNode
+          handle_extend(node)
+        when Frontend::GlobalVarDeclNode
+          handle_global_var_decl(node_id, node)
+        when Frontend::AssignNode
+          handle_global_assignment(node)
+        when Frontend::GetterNode, Frontend::SetterNode, Frontend::PropertyNode
+          # Phase 87B-1: Expand accessor macros to method definitions
+          expand_accessor_macro(node_id, node)
+        when Frontend::CallNode
+          # Phase 87B-2: Check if call is actually a macro invocation
             handle_potential_macro_call(node_id, node)
           end
         end
@@ -223,6 +227,7 @@ module CrystalV2
             @class_stack << final_class_symbol
             pushed_owner = true
             collect_instance_vars(final_class_symbol, node.body || [] of Frontend::ExprId)
+            collect_class_vars(final_class_symbol, node.body || [] of Frontend::ExprId)
           end
 
           # Walk the class body in order so that annotations like
@@ -281,6 +286,22 @@ module CrystalV2
 
           # Visit constant value to collect nested definitions
           visit(value_id)
+        end
+
+        private def handle_global_var_decl(node_id : Frontend::ExprId, node : Frontend::GlobalVarDeclNode)
+          name = String.new(node.name)
+          type_ann = node.type.try { |slice| String.new(slice) }
+          define_global_var_symbol(name, type_ann, node_id)
+        end
+
+        private def handle_global_assignment(node : Frontend::AssignNode)
+          target_id = node.target
+          target_node = @arena[target_id]
+          case target_node
+          when Frontend::GlobalNode
+            name = String.new(target_node.name)
+            define_global_var_symbol(name, nil, target_id)
+          end
         end
 
         private def handle_include(node : Frontend::IncludeNode)
@@ -475,6 +496,13 @@ module CrystalV2
           end
         end
 
+        # Collect class variable declarations/assignments (@@var)
+        private def collect_class_vars(class_symbol : ClassSymbol, body : Array(Frontend::ExprId))
+          body.each do |expr_id|
+            scan_for_class_vars(class_symbol, expr_id)
+          end
+        end
+
         # Attach root-level annotations (e.g., @[JSON::Serializable::Options])
         # to the owning class symbol.
         private def attach_class_annotations(class_symbol : ClassSymbol, annotation_ids : Array(Frontend::ExprId))
@@ -662,6 +690,7 @@ module CrystalV2
             var_name = var_name[1..-1] if var_name.starts_with?("@")
             type_annotation = node.type.try { |slice| String.new(slice) }
             class_symbol.add_instance_var(var_name, type_annotation)
+            define_instance_var_symbol(class_symbol, var_name, type_annotation, expr_id)
           when Frontend::AssignNode
             # Check if assignment target is instance variable
             target_id = node.target
@@ -674,6 +703,7 @@ module CrystalV2
                 type_annotation = infer_ivar_type_from_assignment(node.value, current_method)
                 class_symbol.add_instance_var(var_name, type_annotation)
               end
+              define_instance_var_symbol(class_symbol, var_name, nil, target_id)
             end
           when Frontend::DefNode
             # Scan method body for instance variable assignments, passing method context
@@ -690,6 +720,40 @@ module CrystalV2
             (node.else_body || [] of Frontend::ExprId).each { |e| scan_for_instance_vars(class_symbol, e, current_method) }
           when Frontend::WhileNode
             node.body.each { |e| scan_for_instance_vars(class_symbol, e, current_method) }
+          end
+        end
+
+        private def scan_for_class_vars(class_symbol : ClassSymbol, expr_id : Frontend::ExprId, current_method : Frontend::DefNode? = nil)
+          return if expr_id.invalid?
+          node = @arena[expr_id]
+
+          case node
+          when Frontend::ClassVarDeclNode
+            var_name = String.new(node.name)
+            var_name = var_name[2..-1] if var_name.starts_with?("@@")
+            type_annotation = node.type.try { |slice| String.new(slice) }
+            define_class_var_symbol(class_symbol, var_name, type_annotation, expr_id)
+          when Frontend::AssignNode
+            target_id = node.target
+            target_node = @arena[target_id]
+            if target_node.is_a?(Frontend::ClassVarNode)
+              var_name = String.new(target_node.name)
+              var_name = var_name[2..-1] if var_name.starts_with?("@@")
+              type_annotation = nil
+              define_class_var_symbol(class_symbol, var_name, type_annotation, target_id)
+            end
+          when Frontend::DefNode
+            (node.body || [] of Frontend::ExprId).each do |body_expr_id|
+              scan_for_class_vars(class_symbol, body_expr_id, node)
+            end
+          when Frontend::IfNode
+            (node.then_body || [] of Frontend::ExprId).each { |e| scan_for_class_vars(class_symbol, e, current_method) }
+            (node.elsifs || [] of Frontend::ElsifBranch).each do |elsif_branch|
+              elsif_branch.body.each { |e| scan_for_class_vars(class_symbol, e, current_method) }
+            end
+            (node.else_body || [] of Frontend::ExprId).each { |e| scan_for_class_vars(class_symbol, e, current_method) }
+          when Frontend::WhileNode
+            node.body.each { |e| scan_for_class_vars(class_symbol, e, current_method) }
           end
         end
 
@@ -989,6 +1053,53 @@ module CrystalV2
           end
 
           symbol
+        end
+
+        private def define_instance_var_symbol(class_symbol : ClassSymbol, name : String, type_annotation : String?, node_id : Frontend::ExprId)
+          sym_name = name.starts_with?("@") ? name : "@#{name}"
+          sym = InstanceVarSymbol.new(sym_name, node_id, type_annotation)
+          assign_symbol_file(sym, node_id)
+
+          scope = class_symbol.scope
+          if existing = scope.lookup_local(sym_name)
+            scope.redefine(sym_name, sym)
+          else
+            scope.define(sym_name, sym)
+          end
+        rescue SymbolRedefinitionError
+          scope.redefine(sym_name, sym)
+        end
+
+        private def define_class_var_symbol(class_symbol : ClassSymbol, name : String, type_annotation : String?, node_id : Frontend::ExprId)
+          sym_name = name.starts_with?("@@") ? name : "@@#{name}"
+          sym = ClassVarSymbol.new(sym_name, node_id, type_annotation)
+          assign_symbol_file(sym, node_id)
+
+          {class_symbol.scope, class_symbol.class_scope}.each do |scope|
+            next unless scope
+            if existing = scope.lookup_local(sym_name)
+              scope.redefine(sym_name, sym)
+            else
+              scope.define(sym_name, sym)
+            end
+          rescue SymbolRedefinitionError
+            scope.redefine(sym_name, sym)
+          end
+        end
+
+        private def define_global_var_symbol(name : String, declared_type : String?, node_id : Frontend::ExprId)
+          sym_name = name.starts_with?("$") ? name : "$#{name}"
+          sym = GlobalVarSymbol.new(sym_name, node_id, declared_type)
+          assign_symbol_file(sym, node_id)
+
+          root = @table_stack.first
+          if existing = root.lookup_local(sym_name)
+            root.redefine(sym_name, sym)
+          else
+            root.define(sym_name, sym)
+          end
+        rescue SymbolRedefinitionError
+          root.redefine(sym_name, sym)
         end
 
         private def symbol_kind(symbol : Symbol) : String

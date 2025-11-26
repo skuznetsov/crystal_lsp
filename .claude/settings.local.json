@@ -7,7 +7,14 @@
       "Bash(CRYSTAL_PATH=/opt/homebrew/Cellar/crystal/1.18.2/share/crystal/src STREAM=0 ENABLE_WATCHDOG=1 SCAN_TIMEOUT=1 crystal run:*)",
       "Bash(tee:*)",
       "Bash(git add:*)",
-      "Bash(git commit:*)"
+      "Bash(git commit:*)",
+      "Bash(for file in class.cr tuple.cr html.cr)",
+      "Bash(do echo \"=== $file ===\" STREAM=0 ENABLE_WATCHDOG=1 SCAN_TIMEOUT=1 CRYSTAL_V2_LSP_RECOVERY=1 crystal run tools/show_diagnostics.cr -- /opt/homebrew/Cellar/crystal/1.18.2/share/crystal/src/$file)",
+      "Bash(for file in /opt/homebrew/Cellar/crystal/1.18.2/share/crystal/src/compiler/crystal/codegen/cond.cr /opt/homebrew/Cellar/crystal/1.18.2/share/crystal/src/compiler/crystal/semantic/type_guess_visitor.cr /opt/homebrew/Cellar/crystal/1.18.2/share/crystal/src/compiler/crystal/codegen/link.cr /opt/homebrew/Cellar/crystal/1.18.2/share/crystal/src/compiler/crystal/semantic/call_error.cr /opt/homebrew/Cellar/crystal/1.18.2/share/crystal/src/compiler/crystal/interpreter/multidispatch.cr /opt/homebrew/Cellar/crystal/1.18.2/share/crystal/src/uri.cr)",
+      "Bash(/tmp/collect_diags.sh)",
+      "Bash(/tmp/collect_all_remaining.sh)",
+      "Bash(crystal run:*)",
+      "Bash(DEBUG=1 crystal spec:*)"
     ],
     "deny": [],
     "ask": []

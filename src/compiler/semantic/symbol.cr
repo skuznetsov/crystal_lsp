@@ -116,6 +116,36 @@ module CrystalV2
         end
       end
 
+      # Instance variable symbol (e.g., @value inside a class)
+      class InstanceVarSymbol < Symbol
+        getter declared_type : String?
+
+        def initialize(name : String, node_id : ExprId, declared_type : String? = nil, file_path : String? = nil)
+          super(name, node_id, file_path)
+          @declared_type = declared_type
+        end
+      end
+
+      # Class variable symbol (e.g., @@counter)
+      class ClassVarSymbol < Symbol
+        getter declared_type : String?
+
+        def initialize(name : String, node_id : ExprId, declared_type : String? = nil, file_path : String? = nil)
+          super(name, node_id, file_path)
+          @declared_type = declared_type
+        end
+      end
+
+      # Global variable symbol (e.g., $stdout)
+      class GlobalVarSymbol < Symbol
+        getter declared_type : String?
+
+        def initialize(name : String, node_id : ExprId, declared_type : String? = nil, file_path : String? = nil)
+          super(name, node_id, file_path)
+          @declared_type = declared_type
+        end
+      end
+
       # Lightweight representation of an annotation as seen by the semantic
       # layer and macro expander. It stores the fully-qualified name and
       # direct references to argument expressions in the frontend arena so
