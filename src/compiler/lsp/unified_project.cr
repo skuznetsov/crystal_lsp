@@ -64,6 +64,9 @@ module CrystalV2
         # Symbol -> file mapping (for quick invalidation)
         getter symbol_files : Hash(String, String)  # symbol name -> defining file
 
+        # Per-file identifier → symbol mapping (for hover/definition)
+        getter file_identifier_symbols : Hash(String, Hash(Frontend::ExprId, Semantic::Symbol))
+
         # Dirty tracking
         getter dirty_files : Set(String)
 
@@ -78,6 +81,7 @@ module CrystalV2
           @dependencies = Hash(String, Set(String)).new { |h, k| h[k] = Set(String).new }
           @dependents = Hash(String, Set(String)).new { |h, k| h[k] = Set(String).new }
           @symbol_files = {} of String => String
+          @file_identifier_symbols = {} of String => Hash(Frontend::ExprId, Semantic::Symbol)
 
           @dirty_files = Set(String).new
         end
@@ -232,6 +236,11 @@ module CrystalV2
           @symbol_files[name]?
         end
 
+        # Get identifier → symbol mapping for a file (for hover/definition)
+        def identifier_symbols_for_file(path : String) : Hash(Frontend::ExprId, Semantic::Symbol)?
+          @file_identifier_symbols[path]?
+        end
+
         # Create a Program-like view for LSP operations
         def program_for_file(path : String) : Frontend::Program?
           return nil unless @files.has_key?(path)
@@ -261,19 +270,23 @@ module CrystalV2
               # the symbol might be reopened in other files
             end
           end
+          # Also clear identifier symbols for this file
+          @file_identifier_symbols.delete(path)
         end
 
         private def collect_file_symbols(program : Frontend::Program, path : String) : Array(Semantic::Symbol)
           symbols = [] of Semantic::Symbol
-          collector = Semantic::SymbolCollector.new
 
-          program.roots.each do |root_id|
-            next if root_id.invalid?
-            collector.collect(program, root_id, path)
-          end
+          # Create a context with fresh symbol table for this file
+          file_table = Semantic::SymbolTable.new
+          context = Semantic::Context.new(file_table)
 
-          # Extract symbols from collector's table
-          collector.global_scope.each_local_symbol do |name, symbol|
+          # Collect symbols using the Analyzer pattern
+          collector = Semantic::SymbolCollector.new(program, context)
+          collector.collect
+
+          # Extract symbols from the file's symbol table
+          file_table.each_local_symbol do |name, symbol|
             symbols << symbol
             @symbol_files[name] = path
 
@@ -297,30 +310,31 @@ module CrystalV2
 
             # Run name resolution
             resolver = Semantic::NameResolver.new(program, file_table)
-            program.roots.each do |root_id|
-              next if root_id.invalid?
-              resolver.resolve(root_id)
-            end
-            diagnostics.concat(resolver.diagnostics)
+            result = resolver.resolve
 
-            # Run type inference
-            engine = Semantic::TypeInferenceEngine.new(program, file_table)
-            program.roots.each do |root_id|
-              next if root_id.invalid?
-              engine.infer(root_id)
+            # Store identifier symbols for hover/definition
+            @file_identifier_symbols[path] = result.identifier_symbols
+
+            # Convert Frontend::Diagnostic to LSP::Diagnostic
+            result.diagnostics.each do |diag|
+              diagnostics << Diagnostic.from_parser(diag)
             end
 
-            # Update type context
-            engine.context.each do |expr_id, type|
+            # Run type inference using identifier_symbols from name resolution
+            engine = Semantic::TypeInferenceEngine.new(program, result.identifier_symbols, file_table)
+            engine.infer_types
+
+            # Update type context from engine's inferred types
+            engine.context.expression_types.each do |expr_id, type|
               @type_context.set_type(expr_id, type)
             end
           rescue ex
             # Don't crash on semantic errors
             diagnostics << Diagnostic.new(
-              severity: DiagnosticSeverity::Error,
               range: Range.new(Position.new(0, 0), Position.new(0, 0)),
               message: "Semantic analysis error: #{ex.message}",
-              source: "crystal"
+              severity: DiagnosticSeverity::Error.value,
+              source: "crystal-v2"
             )
           end
 
@@ -336,7 +350,11 @@ module CrystalV2
             node = program.arena[root_id]
 
             if node.is_a?(Frontend::RequireNode)
-              req_path = String.new(node.path)
+              # Resolve path ExprId to actual string
+              path_expr = program.arena[node.path]
+              next unless path_expr.is_a?(Frontend::StringNode)
+
+              req_path = String.new(path_expr.value)
               full_path = resolve_require_path(req_path, base_dir)
               requires << full_path if full_path
             end
