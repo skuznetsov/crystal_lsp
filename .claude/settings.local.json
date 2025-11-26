@@ -14,7 +14,13 @@
       "Bash(/tmp/collect_diags.sh)",
       "Bash(/tmp/collect_all_remaining.sh)",
       "Bash(crystal run:*)",
-      "Bash(DEBUG=1 crystal spec:*)"
+      "Bash(DEBUG=1 crystal spec:*)",
+      "Bash(for f in spec/semantic/macro_*.cr)",
+      "Bash(done)",
+      "Bash(for f in spec/semantic/*macro*.cr spec/semantic/*accessor*.cr spec/macro/*.cr spec/parser/*macro*.cr)",
+      "Bash(do [ -f \"$f\" ])",
+      "Bash(crystal build:*)",
+      "Bash(crystal tool format:*)"
     ],
     "deny": [],
     "ask": []

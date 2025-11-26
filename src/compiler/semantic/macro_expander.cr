@@ -61,7 +61,7 @@ module CrystalV2
             @macro_vars = {} of String => String,
             @owner_type : ClassSymbol? = nil,
             @depth = 0,
-            @flags = Set(String).new
+            @flags = Set(String).new,
           )
           end
 
@@ -180,7 +180,6 @@ module CrystalV2
                 # Plain text - append as-is
                 str << piece.text if piece.text
                 index += 1
-
               when .expression?
                 # {{ expr }} - evaluate and stringify
                 if expr_id = piece.expr
@@ -199,7 +198,6 @@ module CrystalV2
                   str << value
                 end
                 index += 1
-
               when .control_start?
                 # {% if %} or {% for %} - delegate to specialized handlers
                 keyword = piece.control_keyword
@@ -217,7 +215,6 @@ module CrystalV2
                   emit_warning("Unknown control keyword: #{keyword}", body_id)
                   index += 1
                 end
-
               else
                 # Skip standalone control flow markers (elsif, else, end)
                 # These are handled inside evaluate_if_block
@@ -262,7 +259,6 @@ module CrystalV2
           when .number?
             # Number literal: 42, 3.14
             Frontend.node_literal_string(node) || ""
-
           when .string?
             # String literal: "hello" (preserve quotes)
             literal = Frontend.node_literal_string(node) || ""
@@ -276,7 +272,6 @@ module CrystalV2
             literal = Frontend.node_literal_string(node) || ""
             return "" if literal.empty?
             literal.starts_with?(":") ? literal : ":#{literal}"
-
           when .macro_var?
             literal = Frontend.node_literal_string(node)
             return "" unless literal
@@ -287,7 +282,6 @@ module CrystalV2
               context.set_macro_var(literal, fresh)
               fresh
             end
-
           when .identifier?
             # Variable reference: look up in context
             if name = Frontend.node_literal_string(node)
@@ -295,15 +289,12 @@ module CrystalV2
             else
               ""
             end
-
           when .bool?
             # Boolean: true/false
             Frontend.node_literal_string(node) || ""
-
           when .nil?
             # Nil literal
             ""
-
           else
             # Additional support for type-reflection and simple member chains
             if node.is_a?(Frontend::InstanceVarNode)
@@ -340,8 +331,17 @@ module CrystalV2
         #   @type.name.id.stringify
         #   ivar.id
         private def evaluate_member_access_expression(node, context : Context) : Value
+          obj = @arena[node.object]
+          member = String.new(node.member)
+
+          # Phase 87B-6: Handle .class_name before evaluating base
+          # Need to know the AST node type, not the evaluated value
+          if member == "class_name"
+            return macro_class_name(obj, context)
+          end
+
           # Resolve base value
-          base_value = case obj = @arena[node.object]
+          base_value = case obj
                        when Frontend::InstanceVarNode
                          evaluate_instance_var_expression(obj, context)
                        when Frontend::IdentifierNode
@@ -353,19 +353,83 @@ module CrystalV2
                          ""
                        end
 
-          member = String.new(node.member)
-
           # For @type.name and chained calls, just return the type name
           if base_value != "" && context.owner_type && member == "name"
             return base_value
           end
 
-          # For ivar.id / ivar.name / ivar.stringify, propagate base value
-          if member == "id" || member == "name" || member == "stringify"
+          # Phase 87B-6: .stringify - convert to string literal (add quotes)
+          if member == "stringify"
+            return macro_stringify(base_value)
+          end
+
+          # Phase 87B-6: .id - convert to identifier (remove quotes/symbol prefix)
+          if member == "id"
+            return macro_id(base_value)
+          end
+
+          # For .name, just return base value
+          if member == "name"
             return base_value
           end
 
           base_value
+        end
+
+        # Phase 87B-6: .stringify - wrap value in quotes to make it a string literal
+        # "foo".stringify → "\"foo\""
+        # foo.stringify → "\"foo\""
+        # 42.stringify → "\"42\""
+        private def macro_stringify(value : String) : String
+          # If already a string literal (starts and ends with quotes), keep as is
+          if value.starts_with?('"') && value.ends_with?('"')
+            return value
+          end
+          # Otherwise wrap in quotes
+          value.inspect
+        end
+
+        # Phase 87B-6: .id - remove quotes/symbol prefix to make identifier
+        # "foo".id → foo
+        # :foo.id → foo
+        # foo.id → foo (no change)
+        private def macro_id(value : String) : String
+          # Remove string quotes
+          if value.starts_with?('"') && value.ends_with?('"') && value.size >= 2
+            return value[1..-2]
+          end
+          # Remove symbol prefix
+          if value.starts_with?(':')
+            return value[1..]
+          end
+          # Already an identifier
+          value
+        end
+
+        # Phase 87B-6: .class_name - return AST node type name
+        private def macro_class_name(node, context : Context) : String
+          # For macro variables, resolve first
+          if node.is_a?(Frontend::IdentifierNode)
+            var_name = Frontend.node_literal_string(node) || ""
+            if context.variables.has_key?(var_name)
+              # This is a macro parameter - we don't track original node type
+              # Return generic "MacroId" for now (matches Crystal behavior for resolved params)
+              return "\"MacroId\""
+            end
+          end
+
+          # Return node type name based on AST kind
+          type_name = case Frontend.node_kind(node)
+                      when .number?     then "NumberLiteral"
+                      when .string?     then "StringLiteral"
+                      when .symbol?     then "SymbolLiteral"
+                      when .char?       then "CharLiteral"
+                      when .bool?       then "BoolLiteral"
+                      when .nil?        then "NilLiteral"
+                      when .identifier? then "MacroId"
+                      else                   "ASTNode"
+                      end
+          "\"#{type_name}\""
         end
 
         # Evaluate simple call expressions, primarily to support
@@ -406,10 +470,10 @@ module CrystalV2
                   end
 
                   matching = if filter_name
-                    class_symbol.annotations.select { |info| info.full_name == filter_name }
-                  else
-                    class_symbol.annotations
-                  end
+                               class_symbol.annotations.select { |info| info.full_name == filter_name }
+                             else
+                               class_symbol.annotations
+                             end
 
                   return matching.empty? ? "" : "1"
                 end
@@ -436,10 +500,10 @@ module CrystalV2
 
                 infos = class_symbol.ivar_annotations[base_name]? || [] of AnnotationInfo
                 matching = if filter_name
-                  infos.select { |info| info.full_name == filter_name }
-                else
-                  infos
-                end
+                             infos.select { |info| info.full_name == filter_name }
+                           else
+                             infos
+                           end
 
                 return matching.empty? ? "" : "1"
               end
@@ -510,7 +574,6 @@ module CrystalV2
                     end
                   end
                   return full_name
-
                 when "size"
                   # Approximate @type.size as the number of generic type
                   # parameters declared on the owning class.
@@ -679,15 +742,13 @@ module CrystalV2
             literal = Frontend.node_literal_string(node)
             if literal
               return false if literal == "false"
-              return true  # "true"
+              return true # "true"
             end
             # Default to true if it's a bool node without literal (shouldn't happen)
             return true
-
           when .nil?
             # nil is falsy
             return false
-
           else
             # Fallback: evaluate expression to a string and apply Crystal-like
             # truthiness. Unsupported expressions tend to evaluate to empty
@@ -732,7 +793,6 @@ module CrystalV2
             when .control_start?
               # Nested control structure
               depth += 1
-
             when .control_end?
               depth -= 1
               return index if depth == 0
@@ -743,14 +803,14 @@ module CrystalV2
 
           # Missing {% end %} - emit error
           emit_error("Unmatched control flow block (missing {% end %})")
-          return pieces.size  # Return end of array (graceful degradation)
+          return pieces.size # Return end of array (graceful degradation)
         end
 
         # Find next {% elsif %} / {% else %} / {% end %} at same depth
         private def find_next_branch_or_end(
           pieces : Array(MacroPiece),
           start : Int32,
-          end_limit : Int32
+          end_limit : Int32,
         ) : Int32
           depth = 0
           index = start
@@ -761,11 +821,9 @@ module CrystalV2
             case piece.kind
             when .control_start?
               depth += 1
-
             when .control_end?
               return index if depth == 0
               depth -= 1
-
             when .control_else_if?, .control_else?
               return index if depth == 0
             end
@@ -782,7 +840,7 @@ module CrystalV2
           pieces : Array(MacroPiece),
           start : Int32,
           end_index : Int32,
-          context : Context
+          context : Context,
         ) : String
           String.build do |str|
             index = start
@@ -794,7 +852,6 @@ module CrystalV2
               when .text?
                 str << piece.text if piece.text
                 index += 1
-
               when .expression?
                 if expr_id = piece.expr
                   value = evaluate_expression(expr_id, context)
@@ -812,7 +869,6 @@ module CrystalV2
                   str << value
                 end
                 index += 1
-
               when .control_start?
                 # Nested control flow
                 keyword = piece.control_keyword
@@ -828,7 +884,6 @@ module CrystalV2
                 else
                   index += 1
                 end
-
               else
                 # Skip control flow markers (elsif, else, end)
                 index += 1
@@ -842,7 +897,7 @@ module CrystalV2
         private def evaluate_if_block(
           pieces : Array(MacroPiece),
           start_index : Int32,
-          context : Context
+          context : Context,
         ) : {String, Int32}
           # Get condition from start piece
           start_piece = pieces[start_index]
@@ -887,12 +942,10 @@ module CrystalV2
                 end
 
                 current += 1
-
               elsif piece.kind.control_else?
                 # No conditions matched, use else
                 output = evaluate_pieces_range(pieces, current + 1, end_index - 1, context)
                 return {output, end_index + 1}
-
               else
                 current += 1
               end
@@ -911,7 +964,7 @@ module CrystalV2
         private def evaluate_for_block(
           pieces : Array(MacroPiece),
           start_index : Int32,
-          context : Context
+          context : Context,
         ) : {String, Int32}
           # Get loop metadata
           start_piece = pieces[start_index]
@@ -937,37 +990,34 @@ module CrystalV2
           iterable_node = @arena[iterable_expr]
 
           elem_values = case iterable_node
-          when Frontend::ArrayLiteralNode
-            # Phase 87B-3: Array path
-            iterable_node.elements.map { |elem_id| stringify_expr(elem_id) }
-
-          when Frontend::RangeNode
-            # Phase 87B-4A: Range path
-            expand_range_to_strings(iterable_node)
-
-          when Frontend::MemberAccessNode
-            # Minimal support for @type.instance_vars in type-reflection macros
-            if context.owner_type && iterable_node.object.is_a?(Frontend::InstanceVarNode)
-              ivar_obj = iterable_node.object.as(Frontend::InstanceVarNode)
-              name = String.new(ivar_obj.name)
-              member = String.new(iterable_node.member)
-              if name == "@type" && member == "instance_vars" && context.owner_type
-                # Use collected instance variable names from the owning class symbol
-                instance_vars = context.owner_type.not_nil!.instance_vars
-                instance_vars.keys.sort
-              else
-                emit_error("Unsupported member access in for-loop iterable: #{name}.#{member}")
-                nil
-              end
-            else
-              emit_error("For loop iterable must be Array, Range, or @type.instance_vars (Phase 87B-4A)")
-              nil
-            end
-
-          else
-            emit_error("For loop requires ArrayLiteral or Range (Phase 87B-4A)")
-            nil
-          end
+                        when Frontend::ArrayLiteralNode
+                          # Phase 87B-3: Array path
+                          iterable_node.elements.map { |elem_id| stringify_expr(elem_id) }
+                        when Frontend::RangeNode
+                          # Phase 87B-4A: Range path
+                          expand_range_to_strings(iterable_node)
+                        when Frontend::MemberAccessNode
+                          # Minimal support for @type.instance_vars in type-reflection macros
+                          if context.owner_type && iterable_node.object.is_a?(Frontend::InstanceVarNode)
+                            ivar_obj = iterable_node.object.as(Frontend::InstanceVarNode)
+                            name = String.new(ivar_obj.name)
+                            member = String.new(iterable_node.member)
+                            if name == "@type" && member == "instance_vars" && context.owner_type
+                              # Use collected instance variable names from the owning class symbol
+                              instance_vars = context.owner_type.not_nil!.instance_vars
+                              instance_vars.keys.sort
+                            else
+                              emit_error("Unsupported member access in for-loop iterable: #{name}.#{member}")
+                              nil
+                            end
+                          else
+                            emit_error("For loop iterable must be Array, Range, or @type.instance_vars (Phase 87B-4A)")
+                            nil
+                          end
+                        else
+                          emit_error("For loop requires ArrayLiteral or Range (Phase 87B-4A)")
+                          nil
+                        end
 
           # Handle error case
           unless elem_values
@@ -1023,10 +1073,10 @@ module CrystalV2
           # Calculate size (helpers normalize RangeNode.exclusive semantics)
           exclusive = range_node.exclusive
           size = if exclusive
-            end_val - start_val
-          else
-            end_val - start_val + 1
-          end
+                   end_val - start_val
+                 else
+                   end_val - start_val + 1
+                 end
 
           # Check size limit (prevent compilation DOS)
           if size > MAX_RANGE_SIZE
@@ -1047,14 +1097,14 @@ module CrystalV2
 
         private def emit_error(message : String, location : ExprId? = nil)
           span = if location
-            @arena[location].span
-          else
-            Frontend::Span.new(0, 0, 1, 1, 1, 1)
-          end
+                   @arena[location].span
+                 else
+                   Frontend::Span.new(0, 0, 1, 1, 1, 1)
+                 end
 
           @diagnostics << Diagnostic.new(
             DiagnosticLevel::Error,
-            "E4001",  # Macro error codes start at E4xxx
+            "E4001", # Macro error codes start at E4xxx
             message,
             span
           )
@@ -1062,14 +1112,14 @@ module CrystalV2
 
         private def emit_warning(message : String, location : ExprId? = nil)
           span = if location
-            @arena[location].span
-          else
-            Frontend::Span.new(0, 0, 1, 1, 1, 1)
-          end
+                   @arena[location].span
+                 else
+                   Frontend::Span.new(0, 0, 1, 1, 1, 1)
+                 end
 
           @diagnostics << Diagnostic.new(
             DiagnosticLevel::Warning,
-            "W4001",  # Macro warning codes
+            "W4001", # Macro warning codes
             message,
             span
           )

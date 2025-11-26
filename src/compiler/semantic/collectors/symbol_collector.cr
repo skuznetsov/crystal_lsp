@@ -1064,10 +1064,12 @@ module CrystalV2
           if existing = scope.lookup_local(sym_name)
             scope.redefine(sym_name, sym)
           else
-            scope.define(sym_name, sym)
+            begin
+              scope.define(sym_name, sym)
+            rescue SymbolRedefinitionError
+              scope.redefine(sym_name, sym)
+            end
           end
-        rescue SymbolRedefinitionError
-          scope.redefine(sym_name, sym)
         end
 
         private def define_class_var_symbol(class_symbol : ClassSymbol, name : String, type_annotation : String?, node_id : Frontend::ExprId)
@@ -1080,10 +1082,12 @@ module CrystalV2
             if existing = scope.lookup_local(sym_name)
               scope.redefine(sym_name, sym)
             else
-              scope.define(sym_name, sym)
+              begin
+                scope.define(sym_name, sym)
+              rescue SymbolRedefinitionError
+                scope.redefine(sym_name, sym)
+              end
             end
-          rescue SymbolRedefinitionError
-            scope.redefine(sym_name, sym)
           end
         end
 
@@ -1096,10 +1100,12 @@ module CrystalV2
           if existing = root.lookup_local(sym_name)
             root.redefine(sym_name, sym)
           else
-            root.define(sym_name, sym)
+            begin
+              root.define(sym_name, sym)
+            rescue SymbolRedefinitionError
+              root.redefine(sym_name, sym)
+            end
           end
-        rescue SymbolRedefinitionError
-          root.redefine(sym_name, sym)
         end
 
         private def symbol_kind(symbol : Symbol) : String
