@@ -32,7 +32,7 @@ module CrystalV2
         getter params : Array(Frontend::Parameter)
         getter return_annotation : String?
         getter scope : SymbolTable
-        getter type_parameters : Array(String)?  # Week 1 Day 2: Generic method type params ["T", "U"]
+        getter type_parameters : Array(String)? # Week 1 Day 2: Generic method type params ["T", "U"]
 
         def initialize(name : String, node_id : ExprId, *, params : Array(Frontend::Parameter) = [] of Frontend::Parameter, return_annotation : String? = nil, scope : SymbolTable, type_parameters : Array(String)? = nil)
           super(name, node_id)
@@ -47,8 +47,8 @@ module CrystalV2
         getter scope : SymbolTable
         getter class_scope : SymbolTable
         getter superclass_name : String?
-        getter instance_vars : Hash(String, String?)  # name → type annotation
-        getter type_parameters : Array(String)?  # Week 1: Generic type params ["T", "U"]
+        getter instance_vars : Hash(String, String?) # name → type annotation
+        getter type_parameters : Array(String)?      # Week 1: Generic type params ["T", "U"]
         # Collected annotations attached to this class (e.g., @[JSON::Serializable::Options])
         getter annotations : Array(AnnotationInfo)
         # Collected annotations per instance variable name (without leading "@")
@@ -87,6 +87,23 @@ module CrystalV2
             @ivar_annotations[name] = list
           end
           list << annotation_info
+        end
+
+        # Phase 87B-4B: Get all method names defined in this class (for @type.methods)
+        def methods : Array(String)
+          result = [] of String
+          @scope.each_local_symbol do |name, symbol|
+            result << name if symbol.is_a?(MethodSymbol)
+          end
+          result.sort
+        end
+
+        # Phase 87B-4B: Check if class has a method with given name
+        def has_method?(name : String) : Bool
+          if sym = @scope.lookup_local(name)
+            return sym.is_a?(MethodSymbol)
+          end
+          false
         end
       end
 

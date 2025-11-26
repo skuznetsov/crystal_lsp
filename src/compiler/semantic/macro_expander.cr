@@ -579,6 +579,27 @@ module CrystalV2
                   # parameters declared on the owning class.
                   type_params = class_symbol.type_parameters
                   return (type_params ? type_params.size : 0).to_s
+                when "methods"
+                  # Phase 87B-4B: @type.methods - return list of method names
+                  # Returns array-like string for use in for-loops
+                  return class_symbol.methods.join(", ")
+                when "has_method?"
+                  # Phase 87B-4B: @type.has_method?("name") - check if method exists
+                  if arg0_id = node.args[0]?
+                    method_name = evaluate_expression(arg0_id, context)
+                    # Strip quotes if present
+                    if method_name.starts_with?('"') && method_name.ends_with?('"')
+                      method_name = method_name[1..-2]
+                    end
+                    return class_symbol.has_method?(method_name) ? "true" : ""
+                  end
+                  return ""
+                when "superclass"
+                  # Phase 87B-4B: @type.superclass - return superclass name
+                  if sc = class_symbol.superclass_name
+                    return sc
+                  end
+                  return ""
                 end
               end
             end
@@ -997,21 +1018,30 @@ module CrystalV2
                           # Phase 87B-4A: Range path
                           expand_range_to_strings(iterable_node)
                         when Frontend::MemberAccessNode
-                          # Minimal support for @type.instance_vars in type-reflection macros
+                          # Support for @type.instance_vars and @type.methods in type-reflection macros
                           if context.owner_type && iterable_node.object.is_a?(Frontend::InstanceVarNode)
                             ivar_obj = iterable_node.object.as(Frontend::InstanceVarNode)
                             name = String.new(ivar_obj.name)
                             member = String.new(iterable_node.member)
-                            if name == "@type" && member == "instance_vars" && context.owner_type
-                              # Use collected instance variable names from the owning class symbol
-                              instance_vars = context.owner_type.not_nil!.instance_vars
-                              instance_vars.keys.sort
+                            if name == "@type" && context.owner_type
+                              class_symbol = context.owner_type.not_nil!
+                              case member
+                              when "instance_vars"
+                                # Phase 87B-4A: Use collected instance variable names
+                                class_symbol.instance_vars.keys.sort
+                              when "methods"
+                                # Phase 87B-4B: Use collected method names
+                                class_symbol.methods
+                              else
+                                emit_error("Unsupported @type member in for-loop: #{member}")
+                                nil
+                              end
                             else
                               emit_error("Unsupported member access in for-loop iterable: #{name}.#{member}")
                               nil
                             end
                           else
-                            emit_error("For loop iterable must be Array, Range, or @type.instance_vars (Phase 87B-4A)")
+                            emit_error("For loop iterable must be Array, Range, @type.instance_vars or @type.methods")
                             nil
                           end
                         else
