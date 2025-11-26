@@ -3559,14 +3559,18 @@ module CrystalV2
         end
 
         # Collect all symbols from symbol table (including parent tables)
-        private def collect_symbols_from_table(table : Semantic::SymbolTable, items : Array(CompletionItem))
+        private def collect_symbols_from_table(table : Semantic::SymbolTable, items : Array(CompletionItem), visited : Set(UInt64)? = nil)
+          # Prevent infinite loops from circular parent references
+          visited ||= Set(UInt64).new
+          return unless visited.add?(table.object_id)
+
           table.each_local_symbol do |name, symbol|
             items << CompletionItem.from_symbol(symbol)
           end
 
           # Also collect from parent table
           if parent = table.parent
-            collect_symbols_from_table(parent, items)
+            collect_symbols_from_table(parent, items, visited)
           end
         end
 
@@ -4949,7 +4953,11 @@ module CrystalV2
           end
         end
 
-        private def find_method_in_class_hierarchy(class_symbol : Semantic::ClassSymbol, method_name : String, global_table : Semantic::SymbolTable?) : Semantic::MethodSymbol?
+        private def find_method_in_class_hierarchy(class_symbol : Semantic::ClassSymbol, method_name : String, global_table : Semantic::SymbolTable?, visited : Set(String)? = nil) : Semantic::MethodSymbol?
+          # Prevent infinite loops from circular inheritance
+          visited ||= Set(String).new
+          return nil unless visited.add?(class_symbol.name)
+
           alternate_name = method_name == "new" ? "initialize" : nil
 
           if method = find_method_in_scope(class_symbol.scope, method_name)
@@ -4965,11 +4973,11 @@ module CrystalV2
           if global_table && (super_name = class_symbol.superclass_name)
             if super_symbol = global_table.lookup(super_name)
               if super_symbol.is_a?(Semantic::ClassSymbol)
-                if method = find_method_in_class_hierarchy(super_symbol, method_name, global_table)
+                if method = find_method_in_class_hierarchy(super_symbol, method_name, global_table, visited)
                   return method
                 end
                 if alternate_name
-                  if constructor = find_method_in_class_hierarchy(super_symbol, alternate_name, global_table)
+                  if constructor = find_method_in_class_hierarchy(super_symbol, alternate_name, global_table, visited)
                     return constructor
                   end
                 end
@@ -4980,7 +4988,11 @@ module CrystalV2
           nil
         end
 
-        private def find_class_method_in_hierarchy(class_symbol : Semantic::ClassSymbol, method_name : String, global_table : Semantic::SymbolTable?) : Semantic::MethodSymbol?
+        private def find_class_method_in_hierarchy(class_symbol : Semantic::ClassSymbol, method_name : String, global_table : Semantic::SymbolTable?, visited : Set(String)? = nil) : Semantic::MethodSymbol?
+          # Prevent infinite loops from circular inheritance
+          visited ||= Set(String).new
+          return nil unless visited.add?(class_symbol.name)
+
           alternate_name = method_name == "new" ? "initialize" : nil
 
           if method = find_method_in_scope(class_symbol.class_scope, method_name)
@@ -4996,11 +5008,11 @@ module CrystalV2
           if global_table && (super_name = class_symbol.superclass_name)
             if super_symbol = global_table.lookup(super_name)
               if super_symbol.is_a?(Semantic::ClassSymbol)
-                if method = find_class_method_in_hierarchy(super_symbol, method_name, global_table)
+                if method = find_class_method_in_hierarchy(super_symbol, method_name, global_table, visited)
                   return method
                 end
                 if alternate_name
-                  if constructor = find_class_method_in_hierarchy(super_symbol, alternate_name, global_table)
+                  if constructor = find_class_method_in_hierarchy(super_symbol, alternate_name, global_table, visited)
                     return constructor
                   end
                 end
