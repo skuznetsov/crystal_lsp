@@ -36,8 +36,8 @@ module CrystalV2
         getter context : TypeContext
         getter diagnostics : Array(Diagnostic)
 
-        @current_class : ClassSymbol?  # Phase 5C: Track current class for instance var types
-        @receiver_type_context : InstanceType?  # Week 1: Track receiver's instance type for generic method body inference
+        @current_class : ClassSymbol?          # Phase 5C: Track current class for instance var types
+        @receiver_type_context : InstanceType? # Week 1: Track receiver's instance type for generic method body inference
         @depth : Int32
         MAX_DEPTH = 512
 
@@ -47,11 +47,12 @@ module CrystalV2
           @program : Frontend::Program,
           @identifier_symbols : Hash(ExprId, Symbol),
           @global_table : SymbolTable? = nil,
-          @context : TypeContext = TypeContext.new
+          @context : TypeContext = TypeContext.new,
         )
           @diagnostics = [] of Diagnostic
-          @assignments = {} of String => Type  # Track variable assignments: name → type
-          @instance_var_types = {} of String => Type  # Phase 5A: Track instance variable types
+          @assignments = {} of String => Type        # Track variable assignments: name → type
+          @instance_var_types = {} of String => Type # Phase 5A: Track instance variable types
+          @flow_narrowings = {} of String => Type    # Phase 95: Flow typing - narrowed types in conditionals
           @current_class = nil
           @receiver_type_context = nil
           @depth = 0
@@ -119,7 +120,7 @@ module CrystalV2
                 # IMPORTANT: Clear any type that might have been set by cycle detection (line 97)
                 # Otherwise line 86 will skip this node even though it needs recursive processing
                 @context.expression_types.delete(id)
-                state[id] = 0  # Reset to allow recursive processing
+                state[id] = 0 # Reset to allow recursive processing
               end
             end
           end
@@ -143,244 +144,244 @@ module CrystalV2
           node = @program.arena[expr_id]
 
           result_type = case Frontend.node_kind(node)
-          when .number?
-            infer_number(node.as(Frontend::NumberNode))
-          when .string?
-            infer_string(node.as(Frontend::StringNode))
-          when .string_interpolation?
-            infer_string_interpolation(node.as(Frontend::StringInterpolationNode), expr_id)
-          when .symbol?
-            # Phase 16: Symbol literals
-            infer_symbol(node.as(Frontend::SymbolNode))
-          when .array_literal?
-            infer_array_literal(node.as(Frontend::ArrayLiteralNode), expr_id)
-          when .bool?
-            infer_bool(node.as(Frontend::BoolNode))
-          when .nil?
-            infer_nil(node.as(Frontend::NilNode))
-          when .identifier?
-            infer_identifier(node.as(Frontend::IdentifierNode), expr_id)
-          when .instance_var?
-            infer_instance_var(node.as(Frontend::InstanceVarNode), expr_id)
-          when .instance_var_decl?
-            # Phase 5C/77: Instance variable declaration (@var : Type)
-            infer_instance_var_decl(node, expr_id)
-          when .class_var?
-            # Phase 76: Class variables
-            infer_class_var(node, expr_id)
-          when .class_var_decl?
-            # Phase 77: Class variable declaration (@@var : Type)
-            infer_class_var_decl(node, expr_id)
-          when .global?
-            # Phase 75: Global variables
-            infer_global(node, expr_id)
-          when .global_var_decl?
-            # Phase 77: Global variable declaration ($var : Type)
-            infer_global_var_decl(node, expr_id)
-          when .unary?
-            # Phase 17: Unary operators (+x, -x, !x)
-            infer_unary(node.as(Frontend::UnaryNode), expr_id)
-          when .binary?
-            infer_binary(node.as(Frontend::BinaryNode), expr_id)
-          when .def?
-            infer_def(node.as(Frontend::DefNode), expr_id)
-          when .class?
-            infer_class(node.as(Frontend::ClassNode), expr_id)
-          when .call?
-            infer_call(node.as(Frontend::CallNode), expr_id)
-          when .member_access?
-            # In Crystal, obj.method without parens is a zero-argument method call
-            infer_member_access(node.as(Frontend::MemberAccessNode), expr_id)
-          when .index?
-            # Phase 9: Array indexing arr[0]
-            infer_index(node.as(Frontend::IndexNode), expr_id)
-          when .if?
-            infer_if(node.as(Frontend::IfNode))
-          when .unless?
-            # Phase 24: unless condition
-            infer_unless(node.as(Frontend::UnlessNode))
-          when .while?
-            infer_while(node.as(Frontend::WhileNode))
-          when .for?
-            # Phase 99: for loop
-            infer_for(node.as(Frontend::ForNode))
-          when .loop?
-            # Phase 83: infinite loop
-            infer_loop(node.as(Frontend::LoopNode))
-          when .spawn?
-            # Phase 84: spawn fiber
-            infer_spawn(node.as(Frontend::SpawnNode))
-          when .until?
-            # Phase 25: until loop
-            infer_until(node.as(Frontend::UntilNode))
-          when .begin?
-            # Phase 28/29: begin/end blocks with rescue/ensure
-            infer_begin(node.as(Frontend::BeginNode))
-          when .raise?
-            # Phase 29: raise exception
-            infer_raise(node.as(Frontend::RaiseNode))
-          when .require?
-            # Phase 65: require statement
-            infer_require(node.as(Frontend::RequireNode))
-          when .type_declaration?
-            # Phase 66: type declaration
-            infer_type_declaration(node)
-          when .with?
-            # Phase 67: with context block
-            infer_with(node.as(Frontend::WithNode))
-          when .getter?
-            # Phase 30: getter macro
-            infer_accessor(node.as(Frontend::GetterNode))
-          when .setter?
-            # Phase 30: setter macro
-            infer_accessor(node.as(Frontend::SetterNode))
-          when .property?
-            # Phase 30: property macro
-            infer_accessor(node.as(Frontend::PropertyNode))
-          when .assign?
-            infer_assign(node.as(Frontend::AssignNode), expr_id)
-          when .multiple_assign?
-            infer_multiple_assign(node.as(Frontend::MultipleAssignNode), expr_id)
-          when .return?
-            infer_return(node.as(Frontend::ReturnNode), expr_id)
-          when .self?
-            infer_self(node, expr_id)
-          when .super?
-            # Phase 39: Super expressions
-            infer_super(node.as(Frontend::SuperNode), expr_id)
-          when .previous_def?
-            # Phase 96: PreviousDef expressions
-            infer_previous_def(node.as(Frontend::PreviousDefNode), expr_id)
-          when .typeof?
-            # Phase 40: Typeof expressions
-            infer_typeof(node.as(Frontend::TypeofNode), expr_id)
-          when .sizeof?
-            # Phase 41: Sizeof expressions
-            infer_sizeof(node.as(Frontend::SizeofNode), expr_id)
-          when .pointerof?
-            # Phase 42: Pointerof expressions
-            infer_pointerof(node.as(Frontend::PointerofNode), expr_id)
-          when .uninitialized?
-            # Phase 85: Uninitialized expressions
-            infer_uninitialized(node.as(Frontend::UninitializedNode), expr_id)
-          when .offsetof?
-            # Phase 86: Offsetof expressions
-            infer_offsetof(node.as(Frontend::OffsetofNode), expr_id)
-          when .alignof?
-            # Phase 88: Alignof expressions
-            infer_alignof(node.as(Frontend::AlignofNode), expr_id)
-          when .instance_alignof?
-            # Phase 88: InstanceAlignof expressions
-            infer_instance_alignof(node.as(Frontend::InstanceAlignofNode), expr_id)
-          when .asm?
-            # Phase 95: Inline assembly expressions
-            infer_asm(node.as(Frontend::AsmNode), expr_id)
-          when .out?
-            # Phase 98: Out keyword (C bindings output parameter)
-            infer_out(node.as(Frontend::OutNode), expr_id)
-          when Frontend::NodeKind::As
-            # Phase 44: Type cast expressions (can't use .as? due to keyword collision)
-            infer_as(node.as(Frontend::AsNode), expr_id)
-          when Frontend::NodeKind::AsQuestion
-            # Phase 45: Safe cast expressions (nilable)
-            infer_as_question(node.as(Frontend::AsQuestionNode), expr_id)
-          when Frontend::NodeKind::IsA
-            # Phase 93: Type check expressions (returns Bool)
-            infer_is_a(node.as(Frontend::IsANode), expr_id)
-          when Frontend::NodeKind::RespondsTo
-            # Phase 94: Method check expressions (returns Bool)
-            infer_responds_to(node.as(Frontend::RespondsToNode), expr_id)
-          when Frontend::NodeKind::Generic
-            # Phase 60: Generic type instantiation
-            infer_generic(node.as(Frontend::GenericNode), expr_id)
-          when Frontend::NodeKind::Path
-            # Phase 63: Path expressions (Foo::Bar)
-            infer_path(node.as(Frontend::PathNode), expr_id)
-          when Frontend::NodeKind::SafeNavigation
-            # Phase 47: Safe navigation expressions (returns nilable)
-            infer_safe_navigation(node.as(Frontend::SafeNavigationNode), expr_id)
-          when .block?
-            # Phase 10: Block literals
-            infer_block(node.as(Frontend::BlockNode), expr_id)
-          when .proc_literal?
-            # Phase 74: Proc literals
-            infer_proc_literal(node.as(Frontend::ProcLiteralNode), expr_id)
-          when .yield?
-            # Phase 10: Yield expressions
-            infer_yield(node.as(Frontend::YieldNode), expr_id)
-          when .case?
-            # Phase 11: Case/when pattern matching
-            infer_case(node.as(Frontend::CaseNode), expr_id)
-          when .select?
-            # Phase 90A: Select/when concurrent channel operations
-            infer_select(node.as(Frontend::SelectNode), expr_id)
-          when .break?
-            # Phase 12: Break expressions
-            infer_break(node.as(Frontend::BreakNode), expr_id)
-          when .next?
-            # Phase 12: Next expressions
-            infer_next(node, expr_id)
-          when .range?
-            # Phase 13: Range expressions
-            infer_range(node.as(Frontend::RangeNode), expr_id)
-          when .hash_literal?
-            # Phase 14: Hash literals
-            infer_hash_literal(node.as(Frontend::HashLiteralNode), expr_id)
-          when .tuple_literal?
-            # Phase 15: Tuple literals
-            infer_tuple_literal(node.as(Frontend::TupleLiteralNode), expr_id)
-          when .named_tuple_literal?
-            # Phase 70: Named tuple literals
-            infer_named_tuple_literal(node.as(Frontend::NamedTupleLiteralNode), expr_id)
-          when .ternary?
-            # Phase 23: Ternary operator
-            infer_ternary(node.as(Frontend::TernaryNode), expr_id)
-          when .module?
-            # Phase 31: Module definition
-            infer_module(node.as(Frontend::ModuleNode), expr_id)
-          when .include?
-            # Phase 31: Include module
-            infer_include(node)
-          when .extend?
-            # Phase 31: Extend module
-            infer_extend(node)
-          when .struct?
-            # Phase 32: Struct definition (value type)
-            # At parsing stage, handled identically to class; be tolerant to AST nuances
-            if node.is_a?(Frontend::StructNode)
-              infer_struct(node.as(Frontend::StructNode), expr_id)
-            elsif node.is_a?(Frontend::ClassNode)
-              infer_class(node.as(Frontend::ClassNode), expr_id)
-            else
-              @context.nil_type
-            end
-          when .union?
-            # Phase 97: Union definition (C bindings)
-            # At parsing stage, handled identically to class
-            infer_union(node.as(Frontend::UnionNode), expr_id)
-          when .enum?
-            # Phase 33: Enum definition (enumerated type)
-            infer_enum(node.as(Frontend::EnumNode))
-          when .alias?
-            # Phase 34: Type alias definition
-            infer_alias(node)
-          when .constant?
-            # Phase 35: Constant declaration
-            infer_constant(node.as(Frontend::ConstantNode))
-          when .lib?
-            # Phase 38: Lib definition (C bindings)
-            infer_lib(node.as(Frontend::LibNode), expr_id)
-          when .fun?
-            # Phase 64: Fun declaration (C function)
-            infer_fun(node)
-          when .grouping?
-            # Grouping expressions: (expr)
-            # Type is the type of the wrapped expression
-            infer_expression(node.as(Frontend::GroupingNode).expression)
-          else
-            # Unknown expression kind
-            @context.nil_type
-          end
+                        when .number?
+                          infer_number(node.as(Frontend::NumberNode))
+                        when .string?
+                          infer_string(node.as(Frontend::StringNode))
+                        when .string_interpolation?
+                          infer_string_interpolation(node.as(Frontend::StringInterpolationNode), expr_id)
+                        when .symbol?
+                          # Phase 16: Symbol literals
+                          infer_symbol(node.as(Frontend::SymbolNode))
+                        when .array_literal?
+                          infer_array_literal(node.as(Frontend::ArrayLiteralNode), expr_id)
+                        when .bool?
+                          infer_bool(node.as(Frontend::BoolNode))
+                        when .nil?
+                          infer_nil(node.as(Frontend::NilNode))
+                        when .identifier?
+                          infer_identifier(node.as(Frontend::IdentifierNode), expr_id)
+                        when .instance_var?
+                          infer_instance_var(node.as(Frontend::InstanceVarNode), expr_id)
+                        when .instance_var_decl?
+                          # Phase 5C/77: Instance variable declaration (@var : Type)
+                          infer_instance_var_decl(node, expr_id)
+                        when .class_var?
+                          # Phase 76: Class variables
+                          infer_class_var(node, expr_id)
+                        when .class_var_decl?
+                          # Phase 77: Class variable declaration (@@var : Type)
+                          infer_class_var_decl(node, expr_id)
+                        when .global?
+                          # Phase 75: Global variables
+                          infer_global(node, expr_id)
+                        when .global_var_decl?
+                          # Phase 77: Global variable declaration ($var : Type)
+                          infer_global_var_decl(node, expr_id)
+                        when .unary?
+                          # Phase 17: Unary operators (+x, -x, !x)
+                          infer_unary(node.as(Frontend::UnaryNode), expr_id)
+                        when .binary?
+                          infer_binary(node.as(Frontend::BinaryNode), expr_id)
+                        when .def?
+                          infer_def(node.as(Frontend::DefNode), expr_id)
+                        when .class?
+                          infer_class(node.as(Frontend::ClassNode), expr_id)
+                        when .call?
+                          infer_call(node.as(Frontend::CallNode), expr_id)
+                        when .member_access?
+                          # In Crystal, obj.method without parens is a zero-argument method call
+                          infer_member_access(node.as(Frontend::MemberAccessNode), expr_id)
+                        when .index?
+                          # Phase 9: Array indexing arr[0]
+                          infer_index(node.as(Frontend::IndexNode), expr_id)
+                        when .if?
+                          infer_if(node.as(Frontend::IfNode))
+                        when .unless?
+                          # Phase 24: unless condition
+                          infer_unless(node.as(Frontend::UnlessNode))
+                        when .while?
+                          infer_while(node.as(Frontend::WhileNode))
+                        when .for?
+                          # Phase 99: for loop
+                          infer_for(node.as(Frontend::ForNode))
+                        when .loop?
+                          # Phase 83: infinite loop
+                          infer_loop(node.as(Frontend::LoopNode))
+                        when .spawn?
+                          # Phase 84: spawn fiber
+                          infer_spawn(node.as(Frontend::SpawnNode))
+                        when .until?
+                          # Phase 25: until loop
+                          infer_until(node.as(Frontend::UntilNode))
+                        when .begin?
+                          # Phase 28/29: begin/end blocks with rescue/ensure
+                          infer_begin(node.as(Frontend::BeginNode))
+                        when .raise?
+                          # Phase 29: raise exception
+                          infer_raise(node.as(Frontend::RaiseNode))
+                        when .require?
+                          # Phase 65: require statement
+                          infer_require(node.as(Frontend::RequireNode))
+                        when .type_declaration?
+                          # Phase 66: type declaration
+                          infer_type_declaration(node)
+                        when .with?
+                          # Phase 67: with context block
+                          infer_with(node.as(Frontend::WithNode))
+                        when .getter?
+                          # Phase 30: getter macro
+                          infer_accessor(node.as(Frontend::GetterNode))
+                        when .setter?
+                          # Phase 30: setter macro
+                          infer_accessor(node.as(Frontend::SetterNode))
+                        when .property?
+                          # Phase 30: property macro
+                          infer_accessor(node.as(Frontend::PropertyNode))
+                        when .assign?
+                          infer_assign(node.as(Frontend::AssignNode), expr_id)
+                        when .multiple_assign?
+                          infer_multiple_assign(node.as(Frontend::MultipleAssignNode), expr_id)
+                        when .return?
+                          infer_return(node.as(Frontend::ReturnNode), expr_id)
+                        when .self?
+                          infer_self(node, expr_id)
+                        when .super?
+                          # Phase 39: Super expressions
+                          infer_super(node.as(Frontend::SuperNode), expr_id)
+                        when .previous_def?
+                          # Phase 96: PreviousDef expressions
+                          infer_previous_def(node.as(Frontend::PreviousDefNode), expr_id)
+                        when .typeof?
+                          # Phase 40: Typeof expressions
+                          infer_typeof(node.as(Frontend::TypeofNode), expr_id)
+                        when .sizeof?
+                          # Phase 41: Sizeof expressions
+                          infer_sizeof(node.as(Frontend::SizeofNode), expr_id)
+                        when .pointerof?
+                          # Phase 42: Pointerof expressions
+                          infer_pointerof(node.as(Frontend::PointerofNode), expr_id)
+                        when .uninitialized?
+                          # Phase 85: Uninitialized expressions
+                          infer_uninitialized(node.as(Frontend::UninitializedNode), expr_id)
+                        when .offsetof?
+                          # Phase 86: Offsetof expressions
+                          infer_offsetof(node.as(Frontend::OffsetofNode), expr_id)
+                        when .alignof?
+                          # Phase 88: Alignof expressions
+                          infer_alignof(node.as(Frontend::AlignofNode), expr_id)
+                        when .instance_alignof?
+                          # Phase 88: InstanceAlignof expressions
+                          infer_instance_alignof(node.as(Frontend::InstanceAlignofNode), expr_id)
+                        when .asm?
+                          # Phase 95: Inline assembly expressions
+                          infer_asm(node.as(Frontend::AsmNode), expr_id)
+                        when .out?
+                          # Phase 98: Out keyword (C bindings output parameter)
+                          infer_out(node.as(Frontend::OutNode), expr_id)
+                        when Frontend::NodeKind::As
+                          # Phase 44: Type cast expressions (can't use .as? due to keyword collision)
+                          infer_as(node.as(Frontend::AsNode), expr_id)
+                        when Frontend::NodeKind::AsQuestion
+                          # Phase 45: Safe cast expressions (nilable)
+                          infer_as_question(node.as(Frontend::AsQuestionNode), expr_id)
+                        when Frontend::NodeKind::IsA
+                          # Phase 93: Type check expressions (returns Bool)
+                          infer_is_a(node.as(Frontend::IsANode), expr_id)
+                        when Frontend::NodeKind::RespondsTo
+                          # Phase 94: Method check expressions (returns Bool)
+                          infer_responds_to(node.as(Frontend::RespondsToNode), expr_id)
+                        when Frontend::NodeKind::Generic
+                          # Phase 60: Generic type instantiation
+                          infer_generic(node.as(Frontend::GenericNode), expr_id)
+                        when Frontend::NodeKind::Path
+                          # Phase 63: Path expressions (Foo::Bar)
+                          infer_path(node.as(Frontend::PathNode), expr_id)
+                        when Frontend::NodeKind::SafeNavigation
+                          # Phase 47: Safe navigation expressions (returns nilable)
+                          infer_safe_navigation(node.as(Frontend::SafeNavigationNode), expr_id)
+                        when .block?
+                          # Phase 10: Block literals
+                          infer_block(node.as(Frontend::BlockNode), expr_id)
+                        when .proc_literal?
+                          # Phase 74: Proc literals
+                          infer_proc_literal(node.as(Frontend::ProcLiteralNode), expr_id)
+                        when .yield?
+                          # Phase 10: Yield expressions
+                          infer_yield(node.as(Frontend::YieldNode), expr_id)
+                        when .case?
+                          # Phase 11: Case/when pattern matching
+                          infer_case(node.as(Frontend::CaseNode), expr_id)
+                        when .select?
+                          # Phase 90A: Select/when concurrent channel operations
+                          infer_select(node.as(Frontend::SelectNode), expr_id)
+                        when .break?
+                          # Phase 12: Break expressions
+                          infer_break(node.as(Frontend::BreakNode), expr_id)
+                        when .next?
+                          # Phase 12: Next expressions
+                          infer_next(node, expr_id)
+                        when .range?
+                          # Phase 13: Range expressions
+                          infer_range(node.as(Frontend::RangeNode), expr_id)
+                        when .hash_literal?
+                          # Phase 14: Hash literals
+                          infer_hash_literal(node.as(Frontend::HashLiteralNode), expr_id)
+                        when .tuple_literal?
+                          # Phase 15: Tuple literals
+                          infer_tuple_literal(node.as(Frontend::TupleLiteralNode), expr_id)
+                        when .named_tuple_literal?
+                          # Phase 70: Named tuple literals
+                          infer_named_tuple_literal(node.as(Frontend::NamedTupleLiteralNode), expr_id)
+                        when .ternary?
+                          # Phase 23: Ternary operator
+                          infer_ternary(node.as(Frontend::TernaryNode), expr_id)
+                        when .module?
+                          # Phase 31: Module definition
+                          infer_module(node.as(Frontend::ModuleNode), expr_id)
+                        when .include?
+                          # Phase 31: Include module
+                          infer_include(node)
+                        when .extend?
+                          # Phase 31: Extend module
+                          infer_extend(node)
+                        when .struct?
+                          # Phase 32: Struct definition (value type)
+                          # At parsing stage, handled identically to class; be tolerant to AST nuances
+                          if node.is_a?(Frontend::StructNode)
+                            infer_struct(node.as(Frontend::StructNode), expr_id)
+                          elsif node.is_a?(Frontend::ClassNode)
+                            infer_class(node.as(Frontend::ClassNode), expr_id)
+                          else
+                            @context.nil_type
+                          end
+                        when .union?
+                          # Phase 97: Union definition (C bindings)
+                          # At parsing stage, handled identically to class
+                          infer_union(node.as(Frontend::UnionNode), expr_id)
+                        when .enum?
+                          # Phase 33: Enum definition (enumerated type)
+                          infer_enum(node.as(Frontend::EnumNode))
+                        when .alias?
+                          # Phase 34: Type alias definition
+                          infer_alias(node)
+                        when .constant?
+                          # Phase 35: Constant declaration
+                          infer_constant(node.as(Frontend::ConstantNode))
+                        when .lib?
+                          # Phase 38: Lib definition (C bindings)
+                          infer_lib(node.as(Frontend::LibNode), expr_id)
+                        when .fun?
+                          # Phase 64: Fun declaration (C function)
+                          infer_fun(node)
+                        when .grouping?
+                          # Grouping expressions: (expr)
+                          # Type is the type of the wrapped expression
+                          infer_expression(node.as(Frontend::GroupingNode).expression)
+                        else
+                          # Unknown expression kind
+                          @context.nil_type
+                        end
 
           # Always set type for this expression (some infer_* methods already do this,
           # but this ensures ALL expressions have types set, even for nested calls)
@@ -437,7 +438,9 @@ module CrystalV2
           when Frontend::ProcLiteralNode
             node.body.each { |e| children << e }
           when Frontend::CaseNode
-            if v = node.value; children << v; end
+            if v = node.value
+              children << v
+            end
             node.when_branches.each { |br| br.conditions.each { |c| children << c }; br.body.each { |e| children << e } }
             node.else_branch.try &.each { |e| children << e }
           when Frontend::SelectNode
@@ -446,15 +449,21 @@ module CrystalV2
           when Frontend::BeginNode
             node.body.each { |e| children << e }
             node.rescue_clauses.try &.each { |rc| rc.body.each { |e| children << e } }
-            if en = node.ensure_body; en.each { |e| children << e }; end
+            if en = node.ensure_body
+              en.each { |e| children << e }
+            end
           when Frontend::RaiseNode
-            if v = node.value; children << v; end
+            if v = node.value
+              children << v
+            end
           when Frontend::WithNode
             node.body.each { |e| children << e }
           when Frontend::TupleLiteralNode
             node.elements.each { |e| children << e }
           when Frontend::ArrayLiteralNode
-            if elems = node.elements; elems.each { |e| children << e }; end
+            if elems = node.elements
+              elems.each { |e| children << e }
+            end
           when Frontend::HashLiteralNode
             node.entries.each { |entry| children << entry.key; children << entry.value }
           when Frontend::DefNode
@@ -664,6 +673,12 @@ module CrystalV2
           when "Bool"    then return @context.bool_type
           when "Nil"     then return @context.nil_type
           when "Char"    then return @context.char_type
+          end
+
+          # Phase 95: Check flow narrowings first (type narrowing in conditionals)
+          if narrowed_type = @flow_narrowings[identifier_name]?
+            debug("  Found in @flow_narrowings: #{narrowed_type}")
+            return narrowed_type
           end
 
           # First, check if this identifier has a tracked assignment
@@ -1061,83 +1076,78 @@ module CrystalV2
           debug("infer_binary: op=#{op}, left_type=#{left_type}, right_type=#{right_type}")
 
           result_type = case op
-          when "+", "-", "*", "/", "//", "%", "**", "<<", ">>", "&", "|", "^", "&+", "&-", "&*", "&**"
-            # Phase 4B.3/4B.5/18/19/21/22/78/89: Try method lookup first for built-in methods
-            # Phase 89: Wrapping arithmetic operators (&+, &-, &*, &**)
-            if method = lookup_method(left_type, op, [right_type])
-              debug("  lookup_method found: #{method.name}, return_annotation=#{method.return_annotation.inspect}")
-              if ann = method.return_annotation
-                result = parse_type_name(ann)
-                debug("  parse_type_name(#{ann}) => #{result}")
-                result
-              else
-                debug("  NO return_annotation, returning nil_type")
-                @context.nil_type
-              end
-            # Fallback: numeric promotion for untyped numeric operators
-            # Exclude << (array push operator) as it has specific semantics
-            elsif op != "<<" && numeric_type?(left_type) && numeric_type?(right_type)
-              debug("  fallback: numeric promotion")
-              promote_numeric_types(left_type, right_type)
-            else
-              # No method found and not numeric types
-              debug("  NO method found, emitting error")
-              emit_error("Operator '#{op}' not defined for #{left_type} and #{right_type}", expr_id)
-              @context.nil_type
-            end
-
-          when "==", "!=", "<", ">", "<=", ">=", "===", "=~", "!~", "in"
-            # Phase 4B.3/4B.5/50/79/80: Try method lookup first for built-in methods
-            # Phase 50: === (case equality) returns Bool like ==
-            # Phase 79: in (containment) returns Bool
-            # Phase 80: =~ (regex match), !~ (regex not match) return Bool
-            if method = lookup_method(left_type, op, [right_type])
-              if ann = method.return_annotation
-                parse_type_name(ann)
-              else
-                @context.bool_type
-              end
-            else
-              # Fallback: comparison operators → Bool for compatible types
-              @context.bool_type
-            end
-
-          when "<=>"
-            # Phase 48: Spaceship operator (three-way comparison)
-            # Returns Int32: -1 (less), 0 (equal), or 1 (greater)
-            # Try method lookup first
-            if method = lookup_method(left_type, op, [right_type])
-              if ann = method.return_annotation
-                parse_type_name(ann)
-              else
-                @context.int32_type
-              end
-            else
-              # Fallback: spaceship operator → Int32
-              @context.int32_type
-            end
-
-          when "&&", "||"
-            # Logical operators
-            unless bool_type?(left_type) && bool_type?(right_type)
-              emit_error("Operator '#{op}' requires bool types, got #{left_type} and #{right_type}", expr_id)
-              @context.nil_type
-            else
-              @context.bool_type
-            end
-
-          when "??"
-            # Phase 81: Nil-coalescing operator
-            # value ?? default - returns value if not nil, otherwise default
-            # Type: Simplified - return union of left and right types
-            # More accurate: return non-nil version of left type | right type
-            # For now: return right type (the fallback type)
-            right_type
-
-          else
-            emit_error("Unknown operator '#{op}'", expr_id)
-            @context.nil_type
-          end
+                        when "+", "-", "*", "/", "//", "%", "**", "<<", ">>", "&", "|", "^", "&+", "&-", "&*", "&**"
+                          # Phase 4B.3/4B.5/18/19/21/22/78/89: Try method lookup first for built-in methods
+                          # Phase 89: Wrapping arithmetic operators (&+, &-, &*, &**)
+                          if method = lookup_method(left_type, op, [right_type])
+                            debug("  lookup_method found: #{method.name}, return_annotation=#{method.return_annotation.inspect}")
+                            if ann = method.return_annotation
+                              result = parse_type_name(ann)
+                              debug("  parse_type_name(#{ann}) => #{result}")
+                              result
+                            else
+                              debug("  NO return_annotation, returning nil_type")
+                              @context.nil_type
+                            end
+                            # Fallback: numeric promotion for untyped numeric operators
+                            # Exclude << (array push operator) as it has specific semantics
+                          elsif op != "<<" && numeric_type?(left_type) && numeric_type?(right_type)
+                            debug("  fallback: numeric promotion")
+                            promote_numeric_types(left_type, right_type)
+                          else
+                            # No method found and not numeric types
+                            debug("  NO method found, emitting error")
+                            emit_error("Operator '#{op}' not defined for #{left_type} and #{right_type}", expr_id)
+                            @context.nil_type
+                          end
+                        when "==", "!=", "<", ">", "<=", ">=", "===", "=~", "!~", "in"
+                          # Phase 4B.3/4B.5/50/79/80: Try method lookup first for built-in methods
+                          # Phase 50: === (case equality) returns Bool like ==
+                          # Phase 79: in (containment) returns Bool
+                          # Phase 80: =~ (regex match), !~ (regex not match) return Bool
+                          if method = lookup_method(left_type, op, [right_type])
+                            if ann = method.return_annotation
+                              parse_type_name(ann)
+                            else
+                              @context.bool_type
+                            end
+                          else
+                            # Fallback: comparison operators → Bool for compatible types
+                            @context.bool_type
+                          end
+                        when "<=>"
+                          # Phase 48: Spaceship operator (three-way comparison)
+                          # Returns Int32: -1 (less), 0 (equal), or 1 (greater)
+                          # Try method lookup first
+                          if method = lookup_method(left_type, op, [right_type])
+                            if ann = method.return_annotation
+                              parse_type_name(ann)
+                            else
+                              @context.int32_type
+                            end
+                          else
+                            # Fallback: spaceship operator → Int32
+                            @context.int32_type
+                          end
+                        when "&&", "||"
+                          # Logical operators
+                          unless bool_type?(left_type) && bool_type?(right_type)
+                            emit_error("Operator '#{op}' requires bool types, got #{left_type} and #{right_type}", expr_id)
+                            @context.nil_type
+                          else
+                            @context.bool_type
+                          end
+                        when "??"
+                          # Phase 81: Nil-coalescing operator
+                          # value ?? default - returns value if not nil, otherwise default
+                          # Type: Simplified - return union of left and right types
+                          # More accurate: return non-nil version of left type | right type
+                          # For now: return right type (the fallback type)
+                          right_type
+                        else
+                          emit_error("Unknown operator '#{op}'", expr_id)
+                          @context.nil_type
+                        end
 
           # Type will be set by infer_expression
           result_type
@@ -1152,54 +1162,54 @@ module CrystalV2
           op = String.new(node.operator)
 
           result_type = case op
-          when "!"
-            # Logical not: always returns Bool
-            # In Crystal: nil and false are falsy, everything else is truthy
-            @context.bool_type
-          when "+"
-            # Unary plus: identity for numeric types
-            if numeric_type?(operand_type)
-              operand_type
-            else
-              emit_error("Unary '+' not defined for #{operand_type}", expr_id)
-              @context.nil_type
-            end
-          when "-"
-            # Unary minus: negation for numeric types
-            if numeric_type?(operand_type)
-              operand_type
-            else
-              emit_error("Unary '-' not defined for #{operand_type}", expr_id)
-              @context.nil_type
-            end
-          when "&+"
-            # Phase 89: Unary wrapping plus (identity with wrapping semantics)
-            if numeric_type?(operand_type)
-              operand_type
-            else
-              emit_error("Unary '&+' not defined for #{operand_type}", expr_id)
-              @context.nil_type
-            end
-          when "&-"
-            # Phase 89: Unary wrapping minus (negation with wrapping semantics)
-            if numeric_type?(operand_type)
-              operand_type
-            else
-              emit_error("Unary '&-' not defined for #{operand_type}", expr_id)
-              @context.nil_type
-            end
-          when "~"
-            # Phase 21: Bitwise NOT for integer types
-            if numeric_type?(operand_type)
-              operand_type
-            else
-              emit_error("Bitwise '~' not defined for #{operand_type}", expr_id)
-              @context.nil_type
-            end
-          else
-            emit_error("Unknown unary operator '#{op}'", expr_id)
-            @context.nil_type
-          end
+                        when "!"
+                          # Logical not: always returns Bool
+                          # In Crystal: nil and false are falsy, everything else is truthy
+                          @context.bool_type
+                        when "+"
+                          # Unary plus: identity for numeric types
+                          if numeric_type?(operand_type)
+                            operand_type
+                          else
+                            emit_error("Unary '+' not defined for #{operand_type}", expr_id)
+                            @context.nil_type
+                          end
+                        when "-"
+                          # Unary minus: negation for numeric types
+                          if numeric_type?(operand_type)
+                            operand_type
+                          else
+                            emit_error("Unary '-' not defined for #{operand_type}", expr_id)
+                            @context.nil_type
+                          end
+                        when "&+"
+                          # Phase 89: Unary wrapping plus (identity with wrapping semantics)
+                          if numeric_type?(operand_type)
+                            operand_type
+                          else
+                            emit_error("Unary '&+' not defined for #{operand_type}", expr_id)
+                            @context.nil_type
+                          end
+                        when "&-"
+                          # Phase 89: Unary wrapping minus (negation with wrapping semantics)
+                          if numeric_type?(operand_type)
+                            operand_type
+                          else
+                            emit_error("Unary '&-' not defined for #{operand_type}", expr_id)
+                            @context.nil_type
+                          end
+                        when "~"
+                          # Phase 21: Bitwise NOT for integer types
+                          if numeric_type?(operand_type)
+                            operand_type
+                          else
+                            emit_error("Bitwise '~' not defined for #{operand_type}", expr_id)
+                            @context.nil_type
+                          end
+                        else
+                          emit_error("Unknown unary operator '#{op}'", expr_id)
+                          @context.nil_type
+                        end
 
           result_type
         end
@@ -1264,8 +1274,8 @@ module CrystalV2
           case type_name
           when "Int32"   then 32
           when "Int64"   then 64
-          when "Float64" then 128  # Floats wider than any integer
-          else 0
+          when "Float64" then 128 # Floats wider than any integer
+          else                0
           end
         end
 
@@ -1281,7 +1291,21 @@ module CrystalV2
             emit_error("If condition must be Bool, got #{condition_type}", condition_id)
           end
 
+          # Phase 95: Extract flow narrowing from is_a? condition
+          narrowing = extract_is_a_narrowing(condition_id)
+
+          # Apply narrowing for then-branch
+          if narrowing
+            var_name, narrowed_type = narrowing
+            @flow_narrowings[var_name] = narrowed_type
+          end
+
           then_type = infer_block_result(node.then_body)
+
+          # Remove narrowing after then-branch
+          if narrowing
+            @flow_narrowings.delete(narrowing[0])
+          end
 
           elsif_types = [] of Type
           if elsifs = node.elsifs
@@ -1292,13 +1316,47 @@ module CrystalV2
                 emit_error("Elsif condition must be Bool, got #{branch_condition_type}", branch_condition)
               end
 
+              # Phase 95: Extract flow narrowing for elsif branch
+              elsif_narrowing = extract_is_a_narrowing(branch_condition)
+              if elsif_narrowing
+                @flow_narrowings[elsif_narrowing[0]] = elsif_narrowing[1]
+              end
+
               elsif_types << infer_block_result(elsif_branch.body)
+
+              if elsif_narrowing
+                @flow_narrowings.delete(elsif_narrowing[0])
+              end
             end
           end
 
           else_type = node.else_body ? infer_block_result(node.else_body.not_nil!) : @context.nil_type
 
           union_of([then_type] + elsif_types + [else_type])
+        end
+
+        # Phase 95: Extract variable name and narrowed type from is_a? condition
+        # Returns {variable_name, narrowed_type} or nil if not an is_a? check
+        private def extract_is_a_narrowing(condition_id : ExprId) : {String, Type}?
+          condition_node = @program.arena[condition_id]
+
+          # Check if condition is an is_a? expression
+          return nil unless condition_node.is_a?(Frontend::IsANode)
+
+          # Get the expression being checked
+          expr_id = condition_node.expression
+          expr_node = @program.arena[expr_id]
+
+          # Only narrow if checking a simple variable (identifier)
+          return nil unless expr_node.is_a?(Frontend::IdentifierNode)
+
+          var_name = String.new(expr_node.name)
+          type_name = String.new(condition_node.target_type)
+
+          # Resolve target type
+          narrowed_type = parse_type_name(type_name)
+
+          {var_name, narrowed_type}
         end
 
         # Phase 24: Type inference for unless (similar to if but without elsif)
@@ -1873,17 +1931,17 @@ module CrystalV2
           if type.is_a?(ClassType)
             # If it's a reference to a primitive class, convert to PrimitiveType
             result = case type.symbol.name
-            when "Int32"   then @context.int32_type
-            when "Int64"   then @context.int64_type
-            when "Float64" then @context.float64_type
-            when "String"  then @context.string_type
-            when "Bool"    then @context.bool_type
-            when "Nil"     then @context.nil_type
-            when "Char"    then @context.char_type
-            else
-              # User-defined class - keep as ClassType
-              type
-            end
+                     when "Int32"   then @context.int32_type
+                     when "Int64"   then @context.int64_type
+                     when "Float64" then @context.float64_type
+                     when "String"  then @context.string_type
+                     when "Bool"    then @context.bool_type
+                     when "Nil"     then @context.nil_type
+                     when "Char"    then @context.char_type
+                     else
+                       # User-defined class - keep as ClassType
+                       type
+                     end
 
             if ENV["DEBUG"]?
               puts "  → normalized to: #{result.class} = #{result.inspect}"
@@ -2029,7 +2087,7 @@ module CrystalV2
           if of_type_expr_id = node.of_type
             # Phase 91A: parser-only pass — use Nil placeholder until full type extraction
             element_type = @context.nil_type
-          # Case 2: Infer from elements
+            # Case 2: Infer from elements
           elsif elements = node.elements
             if elements.empty?
               # Empty array without type annotation - default to Nil
@@ -2116,12 +2174,12 @@ module CrystalV2
             element_type = target_type.element_type
             # Type will be set by infer_expression
             element_type
-          # Phase 14B: Hash indexing
+            # Phase 14B: Hash indexing
           elsif target_type.is_a?(HashType)
             value_type = target_type.value_type
             # Type will be set by infer_expression
             value_type
-          # Phase 15: Tuple indexing
+            # Phase 15: Tuple indexing
           elsif target_type.is_a?(TupleType)
             index_node = @program.arena[index_id]
             unless index_node.is_a?(Frontend::NumberNode)
@@ -2187,27 +2245,27 @@ module CrystalV2
           debug("  lookup_method returned: #{method ? "MethodSymbol(#{method.name})" : "nil"}")
 
           result_type = if method
-            if ann = method.return_annotation
-              debug("  Method has return annotation: #{ann}")
-              # Week 1: Substitute type parameters in return type
-              # If receiver is InstanceType with type_args, substitute T → Int32
-              if receiver_type.is_a?(InstanceType) && (type_args = receiver_type.type_args) && (type_params = receiver_type.class_symbol.type_parameters)
-                substitute_type_parameters(ann, type_args, type_params)
-              else
-                parse_type_name(ann)
-              end
-            else
-              debug("  No return annotation - inferring from method body")
-              # Week 1: No return annotation - infer from method body
-              # For generic methods, set receiver context for type parameter substitution
-              body_type = infer_method_body_type(method, receiver_type)
-              debug("  infer_method_body_type returned: #{body_type.class.name}: #{body_type}")
-              body_type
-            end
-          else
-            emit_error("Method '#{method_name}' not found on #{receiver_type}", expr_id)
-            @context.nil_type
-          end
+                          if ann = method.return_annotation
+                            debug("  Method has return annotation: #{ann}")
+                            # Week 1: Substitute type parameters in return type
+                            # If receiver is InstanceType with type_args, substitute T → Int32
+                            if receiver_type.is_a?(InstanceType) && (type_args = receiver_type.type_args) && (type_params = receiver_type.class_symbol.type_parameters)
+                              substitute_type_parameters(ann, type_args, type_params)
+                            else
+                              parse_type_name(ann)
+                            end
+                          else
+                            debug("  No return annotation - inferring from method body")
+                            # Week 1: No return annotation - infer from method body
+                            # For generic methods, set receiver context for type parameter substitution
+                            body_type = infer_method_body_type(method, receiver_type)
+                            debug("  infer_method_body_type returned: #{body_type.class.name}: #{body_type}")
+                            body_type
+                          end
+                        else
+                          emit_error("Method '#{method_name}' not found on #{receiver_type}", expr_id)
+                          @context.nil_type
+                        end
 
           debug("  infer_member_access returning: #{result_type.class.name}: #{result_type}")
           result_type
@@ -2274,7 +2332,7 @@ module CrystalV2
             # If ClassType already has type_args (explicit Box(Int32)), use them
             if receiver_type.type_args
               return InstanceType.new(receiver_type.symbol, receiver_type.type_args)
-            # Otherwise try to infer type arguments from constructor arguments
+              # Otherwise try to infer type arguments from constructor arguments
             elsif type_args = infer_type_arguments(receiver_type.symbol, arg_types)
               return InstanceType.new(receiver_type.symbol, type_args)
             else
@@ -2372,7 +2430,7 @@ module CrystalV2
               # Case 1: Simple type parameter (e.g., x : T)
               if type_params.includes?(type_name)
                 binding[type_name] = arg_type
-              # Case 2: Generic type with type parameter (e.g., box : Box(T))
+                # Case 2: Generic type with type parameter (e.g., box : Box(T))
               elsif type_name.includes?('(') && type_name.includes?(')')
                 # Parse generic type: "Box(T)" → base="Box", param="T"
                 paren_start = type_name.index('(').not_nil!
@@ -2642,7 +2700,6 @@ module CrystalV2
                 scope: dummy_scope
               )
             end
-
           when "String"
             case method_name
             when "size"
@@ -2675,7 +2732,6 @@ module CrystalV2
                 scope: dummy_scope
               )
             end
-
           when "Bool"
             case method_name
             when "==", "!="
@@ -2982,10 +3038,10 @@ module CrystalV2
           # Break can have an optional value
           # (Type will be set by infer_expression)
           break_type = if value_id = node.value
-            infer_expression(value_id)
-          else
-            @context.nil_type
-          end
+                         infer_expression(value_id)
+                       else
+                         @context.nil_type
+                       end
 
           break_type
         end
@@ -3068,7 +3124,7 @@ module CrystalV2
           # Empty named tuple (shouldn't happen with current parser, but handle)
           if entries.empty?
             # Empty named tuple is valid in Crystal
-            return @context.nil_type  # Placeholder for future NamedTupleType with no fields
+            return @context.nil_type # Placeholder for future NamedTupleType with no fields
           end
 
           # Infer type of each value
@@ -3139,23 +3195,23 @@ module CrystalV2
         private def emit_error(message : String, node_id : ExprId? = nil)
           # Get actual span from node if available
           span = if node_id
-            node = @program.arena[node_id]
-            node.span
-          else
-            # Fallback to dummy span if node not available
-            Frontend::Span.new(
-              start_offset: 0,
-              end_offset: 0,
-              start_line: 1,
-              start_column: 1,
-              end_line: 1,
-              end_column: 1
-            )
-          end
+                   node = @program.arena[node_id]
+                   node.span
+                 else
+                   # Fallback to dummy span if node not available
+                   Frontend::Span.new(
+                     start_offset: 0,
+                     end_offset: 0,
+                     start_line: 1,
+                     start_column: 1,
+                     end_line: 1,
+                     end_column: 1
+                   )
+                 end
 
           diagnostic = Diagnostic.new(
             level: DiagnosticLevel::Error,
-            code: "E3001",  # Type error codes start at E3xxx
+            code: "E3001", # Type error codes start at E3xxx
             message: message,
             primary_span: span
           )
