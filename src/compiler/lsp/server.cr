@@ -4,6 +4,7 @@ require "uri"
 require "yaml"
 require "./protocol"
 require "./messages"
+require "./prelude_cache"
 require "../frontend/lexer"
 require "../frontend/parser"
 require "../semantic/analyzer"
@@ -1215,13 +1216,201 @@ module CrystalV2
         end
 
         private def load_prelude
-          return if try_load_prelude(PRELUDE_PATH, "Crystal prelude")
+          # Phase 1: Try loading from binary cache (fastest path)
+          if try_load_prelude_from_cache
+            debug("Prelude loaded from cache")
+            return
+          end
+
+          # Phase 2: Parse prelude and save to cache
+          if try_load_prelude(PRELUDE_PATH, "Crystal prelude")
+            save_prelude_to_cache
+            return
+          end
 
           debug("Falling back to LSP stub prelude definitions")
           unless try_load_prelude(PRELUDE_STUB_PATH, "LSP stub prelude")
             debug("Unable to load stub prelude; continuing without built-in symbols")
             @prelude_state = nil
             @prelude_mtime = nil
+          end
+        end
+
+        private def try_load_prelude_from_cache : Bool
+          return false unless File.exists?(PRELUDE_PATH)
+
+          stdlib_path = File.dirname(PRELUDE_PATH)
+          cache_start = Time.monotonic
+          cache = PreludeCache.load(stdlib_path)
+
+          unless cache
+            debug("No valid prelude cache found")
+            return false
+          end
+
+          cache_ms = (Time.monotonic - cache_start).total_milliseconds.round(2)
+          debug("Prelude cache loaded in #{cache_ms}ms (#{cache.symbols.size} symbols)")
+
+          # Reconstruct SymbolTable from cache
+          rebuild_start = Time.monotonic
+          table = SymbolReconstructor.rebuild_table(cache)
+          rebuild_ms = (Time.monotonic - rebuild_start).total_milliseconds.round(2)
+          debug("SymbolTable rebuilt in #{rebuild_ms}ms")
+
+          # Create a minimal PreludeState without full program
+          # We need a dummy program for compatibility
+          dummy_arena = Frontend::AstArena.new
+          dummy_program = Frontend::Program.new(dummy_arena, [] of Frontend::ExprId)
+
+          @prelude_state = PreludeState.new(
+            PRELUDE_PATH,
+            dummy_program,
+            table,
+            [] of Diagnostic,
+            false,
+            {} of Semantic::Symbol => PreludeSymbolOrigin
+          )
+          @prelude_mtime = File.info(PRELUDE_PATH).modification_time
+          @prelude_real_mtime = @prelude_mtime
+
+          # Register symbols for LSP lookups
+          register_cached_symbols(cache)
+          true
+        rescue ex
+          debug("Failed to load from cache: #{ex.message}")
+          false
+        end
+
+        private def save_prelude_to_cache
+          return unless prelude = @prelude_state
+          return if prelude.stub
+
+          stdlib_path = File.dirname(PRELUDE_PATH)
+          save_start = Time.monotonic
+
+          # Extract symbols from all registered prelude symbols
+          symbols = [] of CachedSymbolInfo
+          prelude.symbol_origins.each do |symbol, origin|
+            begin
+              info = extract_cached_symbol_info(symbol, origin)
+              symbols << info if info
+            rescue ex
+              debug("Failed to extract symbol #{symbol.name}: #{ex.message}")
+            end
+          end
+
+          # Also extract from symbol table (skip if it fails - symbols from origins are enough)
+          begin
+            table_symbols = SymbolExtractor.extract_symbols(
+              prelude.symbol_table,
+              prelude.program,
+              prelude.path
+            )
+            symbols.concat(table_symbols)
+          rescue ex
+            debug("SymbolExtractor failed: #{ex.message} - using only origin symbols")
+          end
+
+          # Deduplicate by name+path
+          seen = Set(String).new
+          unique_symbols = symbols.select do |s|
+            key = "#{s.parent_scope}::#{s.name}@#{s.file_path}"
+            seen.add?(key)
+          end
+
+          stdlib_hash = PreludeCache.compute_stdlib_hash(stdlib_path)
+          cache = PreludeCache.new(unique_symbols, stdlib_hash)
+          cache.save
+
+          save_ms = (Time.monotonic - save_start).total_milliseconds.round(2)
+          debug("Prelude cache saved in #{save_ms}ms (#{unique_symbols.size} symbols)")
+        rescue ex
+          debug("Failed to save prelude cache: #{ex.message}")
+        end
+
+        private def extract_cached_symbol_info(symbol : Semantic::Symbol, origin : PreludeSymbolOrigin) : CachedSymbolInfo?
+          node_id = symbol.node_id
+          return nil if node_id.index < 0 || node_id.index >= origin.program.arena.size
+
+          span = origin.program.arena[node_id].span
+          line = span.start_line.to_i32
+          column = span.start_column.to_i32
+          file_path = uri_to_path(origin.uri) || symbol.file_path || ""
+
+          case symbol
+          when Semantic::ClassSymbol
+            CachedSymbolInfo.new(
+              name: symbol.name,
+              kind: CachedSymbolInfo::SymbolKind::Class,
+              file_path: file_path,
+              line: line,
+              column: column,
+              superclass: symbol.superclass_name,
+              type_params: symbol.type_parameters
+            )
+          when Semantic::ModuleSymbol
+            CachedSymbolInfo.new(
+              name: symbol.name,
+              kind: CachedSymbolInfo::SymbolKind::Module,
+              file_path: file_path,
+              line: line,
+              column: column
+            )
+          when Semantic::MethodSymbol
+            params = symbol.params.compact_map { |p| p.name.try { |n| String.new(n) } }
+            CachedSymbolInfo.new(
+              name: symbol.name,
+              kind: CachedSymbolInfo::SymbolKind::Method,
+              file_path: file_path,
+              line: line,
+              column: column,
+              params: params,
+              return_type: symbol.return_annotation,
+              type_params: symbol.type_parameters
+            )
+          when Semantic::MacroSymbol
+            CachedSymbolInfo.new(
+              name: symbol.name,
+              kind: CachedSymbolInfo::SymbolKind::Macro,
+              file_path: file_path,
+              line: line,
+              column: column,
+              params: symbol.params
+            )
+          when Semantic::ConstantSymbol
+            CachedSymbolInfo.new(
+              name: symbol.name,
+              kind: CachedSymbolInfo::SymbolKind::Constant,
+              file_path: file_path,
+              line: line,
+              column: column
+            )
+          else
+            nil
+          end
+        end
+
+        private def register_cached_symbols(cache : PreludeCache)
+          cache.symbols.each do |info|
+            # Create Location for each cached symbol
+            uri = file_uri(info.file_path)
+            location = Location.new(
+              uri,
+              Range.new(
+                Position.new(info.line, info.column),
+                Position.new(info.line, info.column + info.name.size)
+              )
+            )
+
+            # Register in method index for quick lookup
+            if info.kind.method?
+              cache_key = if parent = info.parent_scope
+                            "#{parent}.#{info.name}"
+                          else
+                            info.name
+                          end
+              @prelude_method_index[cache_key] = location
+            end
           end
         end
 
