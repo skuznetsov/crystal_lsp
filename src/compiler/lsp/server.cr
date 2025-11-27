@@ -4772,55 +4772,57 @@ module CrystalV2
           name : String,
           target_offset : Int32,
           uri : String,
-          enclosing_callable : Frontend::TypedNode? = nil
+          enclosing_callables : Array(Frontend::TypedNode) = [] of Frontend::TypedNode
         ) : Location?
           return nil if expr_id.invalid?
           node = arena[expr_id]
           span = node.span
           return nil unless span_contains_offset?(span, target_offset)
 
-          # Track enclosing callable (def/block/proc)
-          current_callable = case node
-                             when Frontend::DefNode, Frontend::BlockNode, Frontend::ProcLiteralNode
-                               node
-                             else
-                               enclosing_callable
-                             end
+          # Track enclosing callables stack (def/block/proc)
+          current_callables = case node
+                              when Frontend::DefNode, Frontend::BlockNode, Frontend::ProcLiteralNode
+                                enclosing_callables + [node]
+                              else
+                                enclosing_callables
+                              end
 
           # Recurse into children first (find most specific match)
           each_child_expr(arena, expr_id) do |child_id|
-            if location = find_param_or_local_in_tree(arena, child_id, name, target_offset, uri, current_callable)
+            if location = find_param_or_local_in_tree(arena, child_id, name, target_offset, uri, current_callables)
               return location
             end
           end
 
-          # If this node is an identifier matching name, check enclosing callable's params
-          if current_callable
+          # If this node is an identifier matching name, check all enclosing callables' params
+          if !current_callables.empty?
             case node
             when Frontend::IdentifierNode
               name_slice = node.name
               if name_slice && String.new(name_slice) == name
-                # Check params in enclosing callable
-                params = case current_callable
-                         when Frontend::DefNode then current_callable.params
-                         when Frontend::BlockNode then current_callable.params
-                         when Frontend::ProcLiteralNode then current_callable.params
-                         else nil
-                         end
+                # Check params in all enclosing callables (inner to outer)
+                current_callables.reverse_each do |callable|
+                  params = case callable
+                           when Frontend::DefNode then callable.params
+                           when Frontend::BlockNode then callable.params
+                           when Frontend::ProcLiteralNode then callable.params
+                           else nil
+                           end
 
-                if params
-                  params.each do |param|
-                    p_name = param.name
-                    next unless p_name
-                    next unless String.new(p_name) == name
-                    param_span = param.name_span || param.span
-                    range = Range.from_span(param_span)
-                    return Location.new(uri: uri, range: range)
+                  if params
+                    params.each do |param|
+                      p_name = param.name
+                      next unless p_name
+                      next unless String.new(p_name) == name
+                      param_span = param.name_span || param.span
+                      range = Range.from_span(param_span)
+                      return Location.new(uri: uri, range: range)
+                    end
                   end
                 end
 
-                # Check for local variable assignment in enclosing scope
-                if location = find_local_assignment_in_callable(arena, current_callable, name, uri, target_offset)
+                # Check for local variable assignment in innermost enclosing scope
+                if location = find_local_assignment_in_callable(arena, current_callables.last, name, uri, target_offset)
                   return location
                 end
               end
