@@ -4559,6 +4559,19 @@ module CrystalV2
               if location = location_for_symbol(symbol)
                 return location
               end
+              # For VariableSymbol (params/locals), try precise parameter lookup first
+              # Location.from_symbol may return entire def span for method params
+              if symbol.is_a?(Semantic::VariableSymbol) && name_slice
+                name_str = String.new(name_slice)
+                if offset = target_offset
+                  if location = definition_from_parameters_fast(name_str, doc_state, offset)
+                    return location
+                  end
+                  if location = definition_from_parameters(name_str, doc_state, offset)
+                    return location
+                  end
+                end
+              end
               # Block/proc parameters have invalid node_id - fall through to parameter lookup
               unless symbol.node_id.invalid?
                 return Location.from_symbol(symbol, doc_state.program, uri)
