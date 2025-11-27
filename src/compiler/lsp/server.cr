@@ -4692,9 +4692,94 @@ module CrystalV2
           when Frontend::MacroLiteralNode
             # Inside macro literals, use text-based path extraction
             definition_from_macro_literal(node, doc_state, uri, target_offset)
+          when Frontend::GenericNode
+            # Generic types like Hash(String, ::JSON::Any) - search type args for cursor position
+            definition_from_generic(node, doc_state, uri, depth, target_offset)
           else
             nil
           end
+        end
+
+        # Navigate to definition from within generic type node
+        # Generic types like Hash(String, ::JSON::Any) - find the type arg at cursor position
+        private def definition_from_generic(node : Frontend::GenericNode, doc_state : DocumentState, uri : String, depth : Int32, target_offset : Int32?) : Location?
+          arena = doc_state.program.arena
+
+          # First check if cursor is on the base type (e.g., Hash)
+          base_node = arena[node.base_type]
+          if target_offset
+            base_span = case base_node
+                        when Frontend::ConstantNode then base_node.span
+                        when Frontend::PathNode then base_node.span
+                        when Frontend::IdentifierNode then base_node.span
+                        else nil
+                        end
+            if base_span && base_span.start_offset <= target_offset && target_offset < base_span.end_offset
+              return find_definition_location(node.base_type, doc_state, uri, depth + 1, target_offset)
+            end
+          end
+
+          # Search through type args to find which one contains the cursor
+          node.type_args.each do |arg_id|
+            arg_node = arena[arg_id]
+            arg_span = case arg_node
+                       when Frontend::ConstantNode then arg_node.span
+                       when Frontend::PathNode then arg_node.span
+                       when Frontend::GenericNode then arg_node.span
+                       when Frontend::IdentifierNode then arg_node.span
+                       else nil
+                       end
+
+            if arg_span && target_offset
+              if arg_span.start_offset <= target_offset && target_offset < arg_span.end_offset
+                # For IdentifierNode with namespace path (e.g., "::JSON::Any"), use text-based resolution
+                if arg_node.is_a?(Frontend::IdentifierNode)
+                  arg_name = arg_node.name.try { |s| String.new(s) }
+                  if arg_name && arg_name.includes?("::")
+                    return definition_from_type_identifier(arg_name, arg_span, doc_state, target_offset)
+                  end
+                end
+                return find_definition_location(arg_id, doc_state, uri, depth + 1, target_offset)
+              end
+            end
+          end
+
+          # Fallback: try base type
+          find_definition_location(node.base_type, doc_state, uri, depth + 1, target_offset)
+        end
+
+        # Navigate to definition from IdentifierNode that contains namespace path (e.g., "::JSON::Any")
+        # The parser creates single IdentifierNode for type arguments with paths
+        private def definition_from_type_identifier(name : String, span : Frontend::Span, doc_state : DocumentState, target_offset : Int32) : Location?
+          # Clean up leading ::
+          clean_name = name.gsub(/^::/, "")
+          segments = clean_name.split("::")
+          return nil if segments.empty?
+
+          # Determine which segment the cursor is on based on offset within the span
+          cursor_in_name = target_offset - span.start_offset
+          # Account for leading :: if present
+          leading_colons = name.starts_with?("::") ? 2 : 0
+          cursor_in_name -= leading_colons if cursor_in_name >= leading_colons
+
+          current_pos = 0
+          cursor_segment_index = segments.size - 1  # Default to last
+
+          segments.each_with_index do |seg, idx|
+            seg_end = current_pos + seg.size
+            if cursor_in_name >= current_pos && cursor_in_name < seg_end
+              cursor_segment_index = idx
+              break
+            end
+            current_pos = seg_end + 2  # +2 for ::
+          end
+
+          # Use only segments up to and including cursor position
+          target_segments = segments[0..cursor_segment_index]
+          return nil if target_segments.empty?
+
+          full_path = target_segments.join("::")
+          find_constant_location_by_text(doc_state, full_path)
         end
 
         # Navigate to definition from within macro literal text
@@ -5835,12 +5920,26 @@ module CrystalV2
           # Combine: priority paths first, then other paths
           paths = priority_paths + other_paths
 
-          # Allow leading whitespace for nested definitions (e.g., "  module Serializable" inside JSON module)
+          # Build search patterns:
+          # 1. For nested definitions (e.g., "module Serializable" inside JSON module)
+          # 2. For fully qualified names (e.g., "struct JSON::Any")
           pattern = /^\s*(module|class|struct|abstract class|abstract struct)\s+#{Regex.escape(search_name)}\b/
+          full_pattern = constant_name.includes?("::") ? /^\s*(module|class|struct|abstract class|abstract struct)\s+#{Regex.escape(constant_name)}\b/ : nil
+
           paths.each do |path|
             next unless File.file?(path)
             line_index = 0
             File.each_line(path) do |line|
+              # First try fully qualified name (e.g., "struct JSON::Any")
+              if full_pattern && (match = full_pattern.match(line))
+                start_column = match.begin + match[0].rindex(constant_name).not_nil!
+                range = Range.new(
+                  Position.new(line_index, start_column),
+                  Position.new(line_index, start_column + constant_name.bytesize)
+                )
+                return Location.new(uri: file_uri(path), range: range)
+              end
+              # Then try short name (e.g., "module Serializable")
               if match = pattern.match(line)
                 start_column = match.begin + match[0].rindex(search_name).not_nil!
                 range = Range.new(
