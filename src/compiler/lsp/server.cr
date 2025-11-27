@@ -7174,7 +7174,10 @@ module CrystalV2
         )
           if param_name = param.name
             if name_span = param.name_span
-              emit_span_token(name_span, param_name.bytesize, SemanticTokenType::Parameter.value, tokens)
+              # Use span-based length to handle @foo/@@foo shorthand params correctly
+              # (param.name excludes prefix but name_span includes it)
+              length = name_span.end_column - name_span.start_column
+              emit_span_token(name_span, length, SemanticTokenType::Parameter.value, tokens)
             else
               line = param.span.start_line - 1
               col = param.span.start_column - 1
