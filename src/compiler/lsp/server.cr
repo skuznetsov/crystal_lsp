@@ -95,13 +95,15 @@ module CrystalV2
         getter best_effort_inference : Bool
         getter prelude_symbol_only : Bool
         getter debounce_ms : Int32
+        getter background_indexing : Bool
 
         def initialize(
           @debug_log_path : String? = nil,
           @parser_recovery_mode : Bool = true,
           @best_effort_inference : Bool = true,
           @prelude_symbol_only : Bool = false,
-          @debounce_ms : Int32 = 300  # Default 300ms debounce
+          @debounce_ms : Int32 = 300,  # Default 300ms debounce
+          @background_indexing : Bool = true  # Default: load prelude in background
         )
         end
 
@@ -111,6 +113,8 @@ module CrystalV2
           best_effort_inference = true
           prelude_symbol_only = ENV["LSP_PRELUDE_SYMBOL_ONLY"]? == "1"
           debounce_ms = ENV["LSP_DEBOUNCE_MS"]?.try(&.to_i?) || 300
+          # Background indexing enabled by default, can be disabled via env or config
+          background_indexing = ENV["LSP_BACKGROUND_INDEXING"]? != "0"
 
           if config_path = ENV["CRYSTALV2_LSP_CONFIG"]?
             begin
@@ -134,6 +138,9 @@ module CrystalV2
                 if value = hash["debounce_ms"]?.try(&.as_i?)
                   debounce_ms = value
                 end
+                if value = hash["background_indexing"]?.try(&.as_bool?)
+                  background_indexing = value
+                end
               end
             rescue ex
               STDERR.puts("[LSP Config] Failed to load #{config_path}: #{ex.message}")
@@ -142,7 +149,7 @@ module CrystalV2
 
           debug_path = File.expand_path(debug_path) if debug_path
 
-          new(debug_path, recovery_mode, best_effort_inference, prelude_symbol_only, debounce_ms)
+          new(debug_path, recovery_mode, best_effort_inference, prelude_symbol_only, debounce_ms, background_indexing)
         end
       end
 
@@ -231,6 +238,8 @@ module CrystalV2
         @stub_prelude_state_loaded : Bool = false
         @stub_prelude_state : PreludeState?
         @prelude_method_index : Hash(String, Location)
+        @prelude_loading : Bool = false
+        @prelude_load_channel : Channel(PreludeState?)?
 
         def initialize(@input = STDIN, @output = STDOUT, config : ServerConfig = ServerConfig.load)
           @config = config
@@ -259,9 +268,14 @@ module CrystalV2
           @stub_prelude_state_loaded = false
           @stub_prelude_state = nil
           @prelude_method_index = {} of String => Location
+          @prelude_loading = false
+          @prelude_load_channel = nil
           # Allow forcing the stub prelude for debugging via environment variable
           if ENV["CRYSTALV2_LSP_FORCE_STUB"]?
             try_load_prelude(PRELUDE_STUB_PATH, "LSP stub prelude")
+          elsif @config.background_indexing
+            # Start with stub prelude for fast startup, load real in background
+            load_prelude_background
           else
             load_prelude
           end
@@ -878,6 +892,9 @@ module CrystalV2
         # Main server loop
         def start
           loop do
+            # Check if background prelude loading is complete
+            check_background_prelude_ready if @prelude_loading
+
             message = read_message
             break if message.nil?
 
@@ -1266,6 +1283,131 @@ module CrystalV2
             debug("Unable to load stub prelude; continuing without built-in symbols")
             @prelude_state = nil
             @prelude_mtime = nil
+          end
+        end
+
+        # Background prelude loading: start with stub, load real prelude in background
+        private def load_prelude_background
+          # Phase 1: Immediately load stub prelude (fast, synchronous)
+          debug("Background indexing: loading stub prelude first")
+          unless try_load_prelude(PRELUDE_STUB_PATH, "LSP stub prelude")
+            debug("Unable to load stub prelude for background mode")
+            @prelude_state = nil
+            @prelude_mtime = nil
+          end
+
+          # Phase 2: Spawn background fiber to load real prelude
+          @prelude_loading = true
+          channel = Channel(PreludeState?).new
+          @prelude_load_channel = channel
+
+          spawn do
+            begin
+              state = load_prelude_in_background
+              channel.send(state)
+            rescue ex
+              debug("Background prelude load failed: #{ex.message}")
+              channel.send(nil)
+            end
+          end
+
+          debug("Background prelude loading started")
+        end
+
+        # Load prelude in background fiber (doesn't modify server state directly)
+        private def load_prelude_in_background : PreludeState?
+          start_time = Time.monotonic
+
+          # Try cache first
+          if File.exists?(PRELUDE_PATH)
+            stdlib_path = File.dirname(PRELUDE_PATH)
+            cache = PreludeCache.load(stdlib_path)
+
+            if cache
+              cache_ms = (Time.monotonic - start_time).total_milliseconds.round(2)
+              debug("Background: prelude cache loaded in #{cache_ms}ms (#{cache.symbols.size} symbols)")
+
+              table = SymbolReconstructor.rebuild_table(cache)
+              rebuild_ms = (Time.monotonic - start_time).total_milliseconds.round(2)
+              debug("Background: SymbolTable rebuilt in #{rebuild_ms}ms")
+
+              dummy_arena = Frontend::AstArena.new
+              dummy_program = Frontend::Program.new(dummy_arena, [] of Frontend::ExprId)
+
+              return PreludeState.new(
+                PRELUDE_PATH,
+                dummy_program,
+                table,
+                [] of Diagnostic,
+                false,  # not stub
+                {} of Semantic::Symbol => PreludeSymbolOrigin
+              )
+            end
+          end
+
+          # Parse prelude if no cache
+          return nil unless File.exists?(PRELUDE_PATH)
+
+          source = File.read(PRELUDE_PATH)
+          lexer = Frontend::Lexer.new(source)
+          parser = Frontend::Parser.new(lexer, recovery_mode: @config.parser_recovery_mode)
+          program = parser.parse_program
+          diagnostics = [] of Diagnostic
+          parser.diagnostics.each { |diag| diagnostics << Diagnostic.from_parser(diag) }
+
+          state = build_real_prelude_state(PRELUDE_PATH, program, source, diagnostics, symbol_only: @config.prelude_symbol_only)
+          return nil unless state
+
+          total_ms = (Time.monotonic - start_time).total_milliseconds.round(2)
+          debug("Background: prelude parsed in #{total_ms}ms")
+
+          state
+        rescue ex
+          debug("Background prelude parse error: #{ex.message}")
+          nil
+        end
+
+        # Check if background prelude loading is complete and apply it
+        private def check_background_prelude_ready
+          return unless @prelude_loading
+          channel = @prelude_load_channel
+          return unless channel
+
+          # Non-blocking check if result is ready
+          select
+          when state = channel.receive
+            apply_background_prelude(state)
+          else
+            # Not ready yet, continue
+          end
+        end
+
+        # Apply background-loaded prelude state
+        private def apply_background_prelude(state : PreludeState?)
+          @prelude_loading = false
+          @prelude_load_channel = nil
+
+          if state
+            debug("Applying background-loaded prelude")
+            @prelude_state = state
+            @prelude_mtime = File.info(state.path).modification_time rescue nil
+            @prelude_real_mtime = @prelude_mtime
+
+            # Re-register symbols
+            if cache = PreludeCache.load(File.dirname(state.path))
+              register_cached_symbols(cache)
+            else
+              register_prelude_symbols(state)
+            end
+
+            # Save to cache for next startup
+            save_prelude_to_cache
+
+            # Request client to refresh semantic tokens
+            request_semantic_tokens_refresh
+            debug("Background prelude applied and client notified")
+          else
+            debug("Background prelude loading failed, keeping stub")
           end
         end
 
