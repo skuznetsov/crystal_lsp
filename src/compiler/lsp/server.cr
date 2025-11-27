@@ -2823,6 +2823,12 @@ module CrystalV2
               yield entry.key
               yield entry.value
             end
+          when Frontend::StringInterpolationNode
+            node.pieces.each do |piece|
+              if expr = piece.expr
+                yield expr unless expr.invalid?
+              end
+            end
           when Frontend::BeginNode
             node.body.each { |expr| yield expr }
             if rescues = node.rescue_clauses
