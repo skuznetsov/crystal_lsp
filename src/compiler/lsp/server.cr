@@ -4559,8 +4559,13 @@ module CrystalV2
               if location = location_for_symbol(symbol)
                 return location
               end
-              return Location.from_symbol(symbol, doc_state.program, uri)
-            elsif name_slice
+              # Block/proc parameters have invalid node_id - fall through to parameter lookup
+              unless symbol.node_id.invalid?
+                return Location.from_symbol(symbol, doc_state.program, uri)
+              end
+            end
+
+            if name_slice
               name_str = String.new(name_slice)
               first_char = name_str[0]?
 
@@ -5065,6 +5070,19 @@ module CrystalV2
           builtin_enum_methods = {"value", "to_s", "to_i", "to_i32", "to_i64"}
           if receiver_symbol.is_a?(Semantic::ConstantSymbol) && builtin_enum_methods.includes?(method_name)
             return Location.from_symbol(receiver_symbol, doc_state.program, uri)
+          end
+
+          # If receiver is a path expression (like SymbolKind::Class) and method is a built-in
+          # enum method, navigate to the path definition instead of finding wrong method matches
+          if builtin_enum_methods.includes?(method_name)
+            object_node = arena[node.object]
+            if object_node.is_a?(Frontend::PathNode)
+              segments = collect_path_segments(arena, object_node)
+              # Paths with 2+ segments are likely enum members (Enum::Member)
+              if segments.size >= 2
+                return definition_from_path(object_node, doc_state, uri)
+              end
+            end
           end
 
           if member_selected
