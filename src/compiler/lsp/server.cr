@@ -5658,7 +5658,19 @@ module CrystalV2
             paths << current_path
           end
 
-          pattern = /^(module|class)\s+#{Regex.escape(constant_name)}\b/
+          # Also check stdlib path for common types (String, Int32, etc.)
+          stdlib_path = File.dirname(PRELUDE_PATH)
+          stdlib_file = File.join(stdlib_path, "#{constant_name.downcase}.cr")
+          paths << stdlib_file if File.file?(stdlib_file)
+
+          # Handle types with numbers (Int32 → int.cr, Float64 → float.cr)
+          base_name = constant_name.downcase.gsub(/\d+/, "")
+          if base_name != constant_name.downcase
+            stdlib_base_file = File.join(stdlib_path, "#{base_name}.cr")
+            paths << stdlib_base_file if File.file?(stdlib_base_file)
+          end
+
+          pattern = /^(module|class|struct|abstract class|abstract struct)\s+#{Regex.escape(constant_name)}\b/
           paths.each do |path|
             next unless File.file?(path)
             line_index = 0
