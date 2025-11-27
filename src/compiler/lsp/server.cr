@@ -5814,6 +5814,31 @@ module CrystalV2
             String.new(node.name)
           when Frontend::PathNode
             collect_path_segments(arena, node).last?
+          # Literal types for prelude method navigation
+          when Frontend::StringNode, Frontend::StringInterpolationNode
+            "String"
+          when Frontend::NumberNode
+            node.kind.to_s
+          when Frontend::ArrayLiteralNode
+            "Array"
+          when Frontend::HashLiteralNode
+            "Hash"
+          when Frontend::TupleLiteralNode
+            "Tuple"
+          when Frontend::NamedTupleLiteralNode
+            "NamedTuple"
+          when Frontend::RangeNode
+            "Range"
+          when Frontend::BoolNode
+            "Bool"
+          when Frontend::NilNode
+            "Nil"
+          when Frontend::SymbolNode
+            "Symbol"
+          when Frontend::RegexNode
+            "Regex"
+          when Frontend::CharNode
+            "Char"
           else
             nil
           end

@@ -52,6 +52,7 @@ module CrystalV2
           when U128 then "UInt128"
           when F32  then "Float32"
           when F64  then "Float64"
+          else      "Int32"  # Default fallback
           end
         end
       end
