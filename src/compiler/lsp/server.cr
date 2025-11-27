@@ -3041,10 +3041,14 @@ module CrystalV2
             ident ||= identifier_at(doc_state.text_document.text, offset - 1) if offset > 0
             debug("Fallback identifier_at='#{ident || "nil"}'")
             if ident
-              if loc = definition_from_parameters(ident, doc_state, offset)
-                location = loc
+              first_char = ident[0]?
+              is_local_var = first_char && (first_char.lowercase? || first_char == '_')
+
+              # Skip expensive lookups for local variables/parameters
+              # Only do constant lookup for uppercase identifiers (types, modules, etc.)
+              unless is_local_var
+                location = definition_from_constant(ident, doc_state)
               end
-              location = definition_from_constant(ident, doc_state)
             end
           end
           if location
@@ -4549,21 +4553,34 @@ module CrystalV2
               end
               return Location.from_symbol(symbol, doc_state.program, uri)
             elsif name_slice
+              name_str = String.new(name_slice)
+              first_char = name_str[0]?
+
+              # Local variables start with lowercase or underscore
+              is_local_var = first_char && (first_char.lowercase? || first_char == '_')
+
+              if is_local_var
+                # Local variables/parameters: skip expensive constant lookup
+                # The O(n) arena scans are too slow; just return nil quickly
+                # TODO: improve semantic analysis to track parameter references
+                return nil
+              end
+
               # Only fallback to parameter search if identifier_symbols doesn't exist
               # (meaning semantic analysis wasn't run or failed). If identifier_symbols exists
               # but doesn't have this ID, the identifier was analyzed and isn't a parameter.
               if identifier_symbols.nil?
                 if offset = target_offset
-                  if location = definition_from_parameters(String.new(name_slice), doc_state, offset)
+                  if location = definition_from_parameters(name_str, doc_state, offset)
                     return location
                   end
                   # Fallback: use identifier span start if click offset fails (e.g., past end_column)
-                  if location = definition_from_parameters(String.new(name_slice), doc_state, node.span.start_offset)
+                  if location = definition_from_parameters(name_str, doc_state, node.span.start_offset)
                     return location
                   end
                 end
               end
-              return definition_from_constant(String.new(name_slice), doc_state)
+              return definition_from_constant(name_str, doc_state)
             else
               nil
             end
@@ -4707,6 +4724,99 @@ module CrystalV2
           end
 
           nil
+        end
+
+        # Find local variable definition by searching for assignments in enclosing scope
+        # This is O(n) but bounded by LOCAL_VAR_SEARCH_MAX_ARENA to prevent hangs
+        LOCAL_VAR_SEARCH_MAX_ARENA = 10_000
+
+        private def definition_from_local_variable(name : String, doc_state : DocumentState, target_offset : Int32) : Location?
+          arena = doc_state.program.arena
+          path = doc_state.path
+
+          # Skip expensive O(n) scan for very large arenas
+          if arena.size > LOCAL_VAR_SEARCH_MAX_ARENA
+            debug("Skipping local var search: arena too large (#{arena.size} > #{LOCAL_VAR_SEARCH_MAX_ARENA})")
+            return nil
+          end
+
+          # First find the enclosing method/block
+          enclosing_span = nil
+          i = 0
+          while i < arena.size
+            expr_id = Frontend::ExprId.new(i)
+            node = arena[expr_id]
+            case node
+            when Frontend::DefNode, Frontend::BlockNode, Frontend::ProcLiteralNode
+              span = node.span
+              if span_contains_offset?(span, target_offset)
+                # Check file path for VirtualArena
+                if path
+                  if virtual = arena.as?(Frontend::VirtualArena)
+                    file = virtual.file_for_id(expr_id)
+                    if file && File.expand_path(file) != path
+                      i += 1
+                      next
+                    end
+                  end
+                end
+
+                size = span.end_offset - span.start_offset
+                if enclosing_span.nil? || size < (enclosing_span.end_offset - enclosing_span.start_offset)
+                  enclosing_span = span
+                end
+              end
+            end
+            i += 1
+          end
+
+          return nil unless enclosing_span
+
+          # Now search for assignments to this variable within the enclosing scope
+          # Find the first assignment that appears BEFORE the target offset
+          best_location = nil
+          best_offset = -1
+
+          i = 0
+          while i < arena.size
+            expr_id = Frontend::ExprId.new(i)
+            node = arena[expr_id]
+            if node.is_a?(Frontend::AssignNode)
+              span = node.span
+              # Must be within enclosing scope and before target
+              if span_contains_offset?(enclosing_span, span.start_offset) && span.start_offset < target_offset
+                # Check file path for VirtualArena
+                if path
+                  if virtual = arena.as?(Frontend::VirtualArena)
+                    file = virtual.file_for_id(expr_id)
+                    if file && File.expand_path(file) != path
+                      i += 1
+                      next
+                    end
+                  end
+                end
+
+                # Check if target is an identifier with matching name
+                target_node = arena[node.target]
+                if target_node.is_a?(Frontend::IdentifierNode)
+                  if target_name = target_node.name
+                    if String.new(target_name) == name
+                      # Use the closest assignment before target
+                      if span.start_offset > best_offset
+                        target_span = target_node.span
+                        range = Range.from_span(target_span)
+                        best_location = Location.new(uri: doc_state.text_document.uri, range: range)
+                        best_offset = span.start_offset
+                      end
+                    end
+                  end
+                end
+              end
+            end
+            i += 1
+          end
+
+          best_location
         end
 
         private def definition_from_member_access(
