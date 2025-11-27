@@ -5019,6 +5019,18 @@ module CrystalV2
 
           receiver_symbol = resolve_receiver_symbol(doc_state, node.object)
 
+          # For local variables, try to infer type from identifier_symbols
+          if receiver_symbol.nil?
+            receiver_symbol = resolve_receiver_type_from_identifier(doc_state, node.object)
+          end
+
+          # Get receiver name hint - prefer inferred type name over variable name
+          receiver_name_hint = if receiver_symbol.responds_to?(:name)
+                                 receiver_symbol.name
+                               else
+                                 receiver_name_for(arena, node.object)
+                               end
+
           if String.new(node.member) == "new" && receiver_symbol
             if init_location = constructor_location(receiver_symbol, doc_state)
               return init_location
@@ -5028,7 +5040,7 @@ module CrystalV2
           if method_symbol = resolve_member_access_method_symbol(node, doc_state)
             if location = location_for_symbol(method_symbol) || location_for_prelude_symbol(method_symbol)
               if location.uri.ends_with?("prelude_stub.cr")
-                if alt = find_prelude_method_location(receiver_symbol, String.new(node.member), receiver_name_for(arena, node.object))
+                if alt = find_prelude_method_location(receiver_symbol, String.new(node.member), receiver_name_hint)
                   return alt
                 end
               end
@@ -5037,7 +5049,7 @@ module CrystalV2
             return Location.from_symbol(method_symbol, doc_state.program, uri)
           end
 
-          if location = find_prelude_method_location(receiver_symbol, String.new(node.member), receiver_name_for(arena, node.object))
+          if location = find_prelude_method_location(receiver_symbol, String.new(node.member), receiver_name_hint)
             return location
           end
 
