@@ -4689,9 +4689,98 @@ module CrystalV2
             find_definition_location(node.target, doc_state, uri, depth + 1, target_offset)
           when Frontend::ExtendNode
             find_definition_location(node.target, doc_state, uri, depth + 1, target_offset)
+          when Frontend::MacroLiteralNode
+            # Inside macro literals, use text-based path extraction
+            definition_from_macro_literal(node, doc_state, uri, target_offset)
           else
             nil
           end
+        end
+
+        # Navigate to definition from within macro literal text
+        # Macro bodies are not parsed as AST, so we extract paths from raw text
+        private def definition_from_macro_literal(node : Frontend::MacroLiteralNode, doc_state : DocumentState, uri : String, target_offset : Int32?) : Location?
+          return nil unless target_offset
+
+          text = doc_state.text_document.text.to_slice
+          # Extract path at cursor position (e.g., ::JSON::ParseException)
+          path_at_cursor = extract_path_at_offset(text, target_offset)
+          return nil unless path_at_cursor
+
+          # Determine which segment the cursor is on
+          segments = path_at_cursor[:segments]
+          cursor_segment_index = path_at_cursor[:cursor_index]
+
+          # Use only segments up to and including cursor position
+          target_segments = segments[0..cursor_segment_index]
+          return nil if target_segments.empty?
+
+          # Try to find definition via text search
+          full_path = target_segments.join("::")
+          find_constant_location_by_text(doc_state, full_path)
+        end
+
+        # Extract namespace path at given offset from source text
+        # Returns segments and which segment the cursor is on
+        private def extract_path_at_offset(text : Bytes, offset : Int32) : {segments: Array(String), cursor_index: Int32}?
+          return nil if offset < 0 || offset >= text.size
+
+          # Find boundaries of the path expression
+          # Path can contain: letters, digits, underscore, ::
+          start_pos = offset
+          end_pos = offset
+
+          # Scan backwards to find start (skip leading ::)
+          while start_pos > 0
+            ch = text[start_pos - 1].chr
+            if ch.ascii_letter? || ch.ascii_number? || ch == '_' || ch == ':'
+              start_pos -= 1
+            else
+              break
+            end
+          end
+
+          # Scan forward to find end
+          while end_pos < text.size
+            ch = text[end_pos].chr
+            if ch.ascii_letter? || ch.ascii_number? || ch == '_' || ch == ':'
+              end_pos += 1
+            else
+              break
+            end
+          end
+
+          return nil if start_pos >= end_pos
+
+          path_str = String.new(text[start_pos, end_pos - start_pos])
+          # Clean up path - remove leading/trailing ::
+          path_str = path_str.strip.gsub(/^::/, "").gsub(/::$/, "")
+          return nil if path_str.empty?
+
+          segments = path_str.split("::")
+          return nil if segments.empty?
+
+          # Find which segment the cursor is on
+          cursor_in_path = offset - start_pos
+          current_pos = 0
+          cursor_segment_index = 0
+
+          # Account for leading :: if present
+          if text[start_pos, 2]? == "::".to_slice
+            current_pos = 2
+          end
+
+          segments.each_with_index do |seg, idx|
+            seg_end = current_pos + seg.size
+            if cursor_in_path >= current_pos && cursor_in_path < seg_end
+              cursor_segment_index = idx
+              break
+            end
+            current_pos = seg_end + 2  # +2 for ::
+            cursor_segment_index = idx  # Default to last
+          end
+
+          {segments: segments, cursor_index: cursor_segment_index}
         end
 
         # Fallback: resolve identifiers to enclosing def/block/proc parameters when no symbol info
@@ -5704,34 +5793,47 @@ module CrystalV2
 
         private def find_constant_location_by_text(doc_state : DocumentState, constant_name : String?) : Location?
           return nil unless constant_name
-          paths = doc_state.requires.dup
-          if current_path = uri_to_path(doc_state.text_document.uri)
-            paths << current_path
-          end
 
-          # Also check stdlib path for common types (String, Int32, etc.)
           stdlib_path = File.dirname(PRELUDE_PATH)
-          stdlib_file = File.join(stdlib_path, "#{constant_name.downcase}.cr")
-          paths << stdlib_file if File.file?(stdlib_file)
+          search_name = constant_name
 
-          # Handle types with numbers (Int32 → int.cr, Float64 → float.cr)
-          base_name = constant_name.downcase.gsub(/\d+/, "")
-          if base_name != constant_name.downcase
-            stdlib_base_file = File.join(stdlib_path, "#{base_name}.cr")
-            paths << stdlib_base_file if File.file?(stdlib_base_file)
-          end
+          # Build prioritized search paths
+          # Priority 1: Primary definition file (e.g., json.cr for JSON)
+          priority_paths = [] of String
 
           # Handle namespace paths (JSON::Serializable → json/*.cr searching for "module Serializable")
-          search_name = constant_name
           if constant_name.includes?("::")
             parts = constant_name.split("::")
             search_name = parts.last  # Search for last component (e.g., "Serializable")
-            # Add namespace subdirectory to search paths (e.g., json/*.cr for JSON::*)
+            # First check the main module file (e.g., json.cr for JSON::ParseException)
+            main_module_file = File.join(stdlib_path, "#{parts.first.downcase}.cr")
+            priority_paths << main_module_file if File.file?(main_module_file)
+            # Then check namespace subdirectory to search paths (e.g., json/*.cr for JSON::*)
             namespace_dir = File.join(stdlib_path, parts.first.downcase)
             if Dir.exists?(namespace_dir)
-              Dir.glob(File.join(namespace_dir, "*.cr")).each { |f| paths << f }
+              Dir.glob(File.join(namespace_dir, "*.cr")).each { |f| priority_paths << f }
+            end
+          else
+            # For top-level constants like JSON, prioritize the primary file (json.cr)
+            stdlib_file = File.join(stdlib_path, "#{constant_name.downcase}.cr")
+            priority_paths << stdlib_file if File.file?(stdlib_file)
+
+            # Handle types with numbers (Int32 → int.cr, Float64 → float.cr)
+            base_name = constant_name.downcase.gsub(/\d+/, "")
+            if base_name != constant_name.downcase
+              stdlib_base_file = File.join(stdlib_path, "#{base_name}.cr")
+              priority_paths << stdlib_base_file if File.file?(stdlib_base_file)
             end
           end
+
+          # Priority 2: Other paths (requires, current file)
+          other_paths = doc_state.requires.dup
+          if current_path = uri_to_path(doc_state.text_document.uri)
+            other_paths << current_path
+          end
+
+          # Combine: priority paths first, then other paths
+          paths = priority_paths + other_paths
 
           # Allow leading whitespace for nested definitions (e.g., "  module Serializable" inside JSON module)
           pattern = /^\s*(module|class|struct|abstract class|abstract struct)\s+#{Regex.escape(search_name)}\b/
