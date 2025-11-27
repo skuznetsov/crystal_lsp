@@ -6058,6 +6058,26 @@ module CrystalV2
           # Combine: priority paths first, then other paths
           paths = priority_paths + other_paths
 
+          # Priority 3: Project-wide search for namespaced types
+          # For Semantic::Symbol, search in <project>/**/semantic/*.cr and <project>/**/semantic/symbol.cr
+          if @project_root && constant_name.includes?("::")
+            parts = constant_name.split("::")
+            first_ns = parts.first.downcase
+            last_name = parts.last.downcase
+            # Search for namespace directory (e.g., semantic/)
+            Dir.glob(File.join(@project_root.not_nil!, "**", first_ns, "*.cr")).each do |path|
+              paths << path unless paths.includes?(path)
+            end
+            # Search for specific file by last component (e.g., symbol.cr)
+            Dir.glob(File.join(@project_root.not_nil!, "**", first_ns, "#{last_name}.cr")).each do |path|
+              paths << path unless paths.includes?(path)
+            end
+            # Also search for file named after first namespace (e.g., semantic.cr)
+            Dir.glob(File.join(@project_root.not_nil!, "**", "#{first_ns}.cr")).each do |path|
+              paths << path unless paths.includes?(path)
+            end
+          end
+
           # Build search patterns:
           # 1. For nested definitions (e.g., "module Serializable" inside JSON module)
           # 2. For fully qualified names (e.g., "struct JSON::Any")
