@@ -4672,7 +4672,7 @@ module CrystalV2
               end
               return Location.from_symbol(symbol, doc_state.program, uri)
             end
-            definition_from_path(node, doc_state, uri)
+            definition_from_path(node, doc_state, uri, target_offset)
           when Frontend::SafeNavigationNode
             definition_from_safe_navigation(node, doc_state, uri, depth, target_offset)
           when Frontend::CallNode
@@ -5105,7 +5105,7 @@ module CrystalV2
               segments = collect_path_segments(arena, object_node)
               # Paths with 2+ segments are likely enum members (Enum::Member)
               if segments.size >= 2
-                return definition_from_path(object_node, doc_state, uri)
+                return definition_from_path(object_node, doc_state, uri, target_offset)
               end
             end
           end
@@ -5257,9 +5257,26 @@ module CrystalV2
           end
         end
 
-        private def definition_from_path(node : Frontend::PathNode, doc_state : DocumentState, uri : String) : Location?
-          segments = collect_path_segments(doc_state.program.arena, node)
-          return nil if segments.empty?
+        private def definition_from_path(node : Frontend::PathNode, doc_state : DocumentState, uri : String, target_offset : Int32? = nil) : Location?
+          arena = doc_state.program.arena
+          all_segments = collect_path_segments(arena, node)
+          return nil if all_segments.empty?
+
+          # Determine which segment the cursor is on using spans
+          segments = all_segments
+          if target_offset
+            segments_with_spans = collect_path_segments_with_spans(arena, node)
+            # Find the segment containing the cursor
+            cursor_segment_index = segments_with_spans.size - 1  # Default to last
+            segments_with_spans.each_with_index do |(name, span), idx|
+              if span.start_offset <= target_offset && target_offset < span.end_offset
+                cursor_segment_index = idx
+                break
+              end
+            end
+            # Use only segments up to and including the cursor position
+            segments = all_segments[0..cursor_segment_index]
+          end
 
           # If path looks like Class.method, resolve class and then class method
           if segments.size >= 2
@@ -5372,6 +5389,37 @@ module CrystalV2
             segments << String.new(right_node.name)
           when Frontend::PathNode
             collect_path_segments_into(arena, right_node, segments)
+          end
+        end
+
+        # Collect path segments along with their spans for cursor position detection
+        private def collect_path_segments_with_spans(arena : Frontend::ArenaLike, node : Frontend::PathNode) : Array({String, Frontend::Span})
+          segments = [] of {String, Frontend::Span}
+          collect_path_segments_with_spans_into(arena, node, segments)
+          segments
+        end
+
+        private def collect_path_segments_with_spans_into(arena : Frontend::ArenaLike, node : Frontend::PathNode, segments : Array({String, Frontend::Span}))
+          if left = node.left
+            left_node = arena[left]
+            case left_node
+            when Frontend::PathNode
+              collect_path_segments_with_spans_into(arena, left_node, segments)
+            when Frontend::IdentifierNode
+              segments << {String.new(left_node.name), left_node.span}
+            when Frontend::ConstantNode
+              segments << {String.new(left_node.name), left_node.span}
+            end
+          end
+
+          right_node = arena[node.right]
+          case right_node
+          when Frontend::IdentifierNode
+            segments << {String.new(right_node.name), right_node.span}
+          when Frontend::ConstantNode
+            segments << {String.new(right_node.name), right_node.span}
+          when Frontend::PathNode
+            collect_path_segments_with_spans_into(arena, right_node, segments)
           end
         end
 
