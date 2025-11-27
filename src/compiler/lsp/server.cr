@@ -5060,20 +5060,20 @@ module CrystalV2
           end
 
           method_name = String.new(node.member)
-          # Skip fallback for built-in methods on constants (enum members have .value, .to_s, etc)
-          # to avoid finding wrong matches like MarkupContent#value for SymbolKind::Class.value
+          # For built-in methods on constants (enum members have .value, .to_s, etc),
+          # navigate to the constant/enum definition instead of finding wrong matches
           builtin_enum_methods = {"value", "to_s", "to_i", "to_i32", "to_i64"}
-          skip_fallback = receiver_symbol.is_a?(Semantic::ConstantSymbol) && builtin_enum_methods.includes?(method_name)
+          if receiver_symbol.is_a?(Semantic::ConstantSymbol) && builtin_enum_methods.includes?(method_name)
+            return Location.from_symbol(receiver_symbol, doc_state.program, uri)
+          end
 
-          if member_selected && !skip_fallback
+          if member_selected
             find_method_location_by_text(doc_state, method_name)
           elsif target_offset && member_range
             # Clicked outside member name (e.g., trailing space), fall back to object lookup
             find_definition_location(node.object, doc_state, uri, depth + 1, target_offset)
-          elsif !skip_fallback
-            find_method_location_by_text(doc_state, method_name)
           else
-            nil
+            find_method_location_by_text(doc_state, method_name)
           end
         end
 
