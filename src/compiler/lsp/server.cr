@@ -319,6 +319,49 @@ module CrystalV2
           symbol
         end
 
+        # Resolve symbol for type definition names (struct Foo, class Bar, module Baz)
+        # expr_id might point to the identifier node (ConstantNode) rather than the StructNode
+        private def resolve_type_definition_symbol(doc_state : DocumentState, expr_id : Frontend::ExprId) : Semantic::Symbol?
+          symbol_table = doc_state.symbol_table
+          return nil unless symbol_table
+
+          arena = doc_state.program.arena
+          node = arena[expr_id]
+
+          # Extract type name from struct/class/module/union node OR from their name identifier
+          type_name = case node
+                      when Frontend::StructNode
+                        String.new(node.name)
+                      when Frontend::ClassNode
+                        String.new(node.name)
+                      when Frontend::ModuleNode
+                        String.new(node.name)
+                      when Frontend::UnionNode
+                        String.new(node.name)
+                      when Frontend::ConstantNode
+                        # Could be the name of a struct/class/module definition
+                        String.new(node.name)
+                      when Frontend::IdentifierNode
+                        # Could be the name of a struct/class/module definition
+                        node.name.try { |n| String.new(n) }
+                      else
+                        return nil
+                      end
+
+          return nil unless type_name
+
+          # Look up the symbol in the symbol table
+          if symbol = symbol_table.lookup_local(type_name)
+            return symbol
+          end
+
+          if symbol = symbol_table.lookup(type_name)
+            return symbol
+          end
+
+          nil
+        end
+
         private def ensure_dependencies_loaded(doc_state : DocumentState, workspace : DependencyWorkspace? = nil)
           doc_state.requires.each do |path|
             load_dependency(path, workspace: workspace)
@@ -3445,10 +3488,17 @@ module CrystalV2
 
           # Get symbol for this expression
           identifier_symbols = doc_state.identifier_symbols
-          return send_response(id, "null") unless identifier_symbols
 
-          symbol = identifier_symbols[expr_id]?
-          debug("Symbol: #{symbol ? symbol.class : "nil"}")
+          symbol : Semantic::Symbol? = nil
+          if identifier_symbols
+            symbol = identifier_symbols[expr_id]?
+          end
+
+          # Fallback: if symbol is nil, check if cursor is on a struct/class/module definition name
+          unless symbol
+            symbol = resolve_type_definition_symbol(doc_state, expr_id)
+          end
+
           return send_response(id, "null") unless symbol
 
           # Find all references to this symbol
@@ -4695,6 +4745,9 @@ module CrystalV2
           when Frontend::GenericNode
             # Generic types like Hash(String, ::JSON::Any) - search type args for cursor position
             definition_from_generic(node, doc_state, uri, depth, target_offset)
+          when Frontend::AnnotationNode
+            # @[JSON::Field(key: "foo")] - resolve the annotation name
+            definition_from_annotation(node, doc_state, uri, depth, target_offset)
           else
             nil
           end
@@ -4746,6 +4799,57 @@ module CrystalV2
 
           # Fallback: try base type
           find_definition_location(node.base_type, doc_state, uri, depth + 1, target_offset)
+        end
+
+        # Navigate to definition from within annotation
+        # @[JSON::Field(key: "foo")] - resolve annotation name and arguments
+        private def definition_from_annotation(node : Frontend::AnnotationNode, doc_state : DocumentState, uri : String, depth : Int32, target_offset : Int32?) : Location?
+          arena = doc_state.program.arena
+
+          # First check if cursor is on the annotation name
+          name_id = node.name
+          return nil if name_id.invalid?
+
+          name_node = arena[name_id]
+          name_span = name_node.span
+
+          debug("definition_from_annotation: name kind=#{Frontend.node_kind(name_node)} span=#{name_span.start_offset}-#{name_span.end_offset}")
+
+          if target_offset
+            # Check if cursor is on the annotation name
+            if span_contains_offset?(name_span, target_offset)
+              debug("definition_from_annotation: cursor on annotation name")
+              return find_definition_location(name_id, doc_state, uri, depth + 1, target_offset)
+            end
+
+            # Check if cursor is on one of the arguments
+            node.args.each do |arg_id|
+              next if arg_id.invalid?
+              arg_node = arena[arg_id]
+              arg_span = arg_node.span
+              if span_contains_offset?(arg_span, target_offset)
+                debug("definition_from_annotation: cursor on arg")
+                return find_definition_location(arg_id, doc_state, uri, depth + 1, target_offset)
+              end
+            end
+
+            # Check named arguments
+            if named_args = node.named_args
+              named_args.each do |named_arg|
+                value_id = named_arg.value
+                next if value_id.invalid?
+                value_node = arena[value_id]
+                value_span = value_node.span
+                if span_contains_offset?(value_span, target_offset)
+                  debug("definition_from_annotation: cursor on named arg value")
+                  return find_definition_location(value_id, doc_state, uri, depth + 1, target_offset)
+                end
+              end
+            end
+          end
+
+          # Default: resolve the annotation name
+          find_definition_location(name_id, doc_state, uri, depth + 1, target_offset)
         end
 
         # Navigate to definition from IdentifierNode that contains namespace path (e.g., "::JSON::Any")
@@ -5452,20 +5556,30 @@ module CrystalV2
             segments = all_segments[0..cursor_segment_index]
           end
 
-          # If path looks like Class.method, resolve class and then class method
+          # If path looks like Namespace::NestedType or Class.method, resolve nested symbol
           if segments.size >= 2
             receiver_segments = segments[0...-1]
-            method_name = segments.last
+            member_name = segments.last
             if receiver_symbol = resolve_path_symbol(doc_state, receiver_segments)
+              # First check for nested types (modules, classes, structs/annotations)
+              if scope = get_symbol_scope(receiver_symbol)
+                if nested_type = find_nested_type_in_scope(scope, member_name)
+                  if location = location_for_symbol(nested_type)
+                    return location
+                  end
+                  return Location.from_symbol(nested_type, doc_state.program, uri)
+                end
+              end
+              # Then check for methods
               if receiver_symbol.is_a?(Semantic::ClassSymbol)
-                if method_symbol = find_class_method_in_hierarchy(receiver_symbol, method_name, doc_state.symbol_table)
+                if method_symbol = find_class_method_in_hierarchy(receiver_symbol, member_name, doc_state.symbol_table)
                   if location = location_for_symbol(method_symbol)
                     return location
                   end
                   return Location.from_symbol(method_symbol, doc_state.program, uri)
                 end
               elsif receiver_symbol.is_a?(Semantic::ModuleSymbol)
-                if method_symbol = find_method_in_scope(receiver_symbol.scope, method_name)
+                if method_symbol = find_method_in_scope(receiver_symbol.scope, member_name)
                   if location = location_for_symbol(method_symbol)
                     return location
                   end
@@ -5595,6 +5709,30 @@ module CrystalV2
           when Frontend::PathNode
             collect_path_segments_with_spans_into(arena, right_node, segments)
           end
+        end
+
+        # Get the scope from a type symbol (module/class/struct)
+        private def get_symbol_scope(symbol : Semantic::Symbol) : Semantic::SymbolTable?
+          case symbol
+          when Semantic::ModuleSymbol
+            symbol.scope
+          when Semantic::ClassSymbol
+            symbol.scope
+          else
+            nil
+          end
+        end
+
+        # Find a nested type (class, module, struct, annotation) in a scope
+        private def find_nested_type_in_scope(scope : Semantic::SymbolTable, name : String) : Semantic::Symbol?
+          # Use lookup_local to find symbols in this scope
+          if sym = scope.lookup_local(name)
+            case sym
+            when Semantic::ModuleSymbol, Semantic::ClassSymbol
+              return sym
+            end
+          end
+          nil
         end
 
         private def resolve_path_symbol(doc_state : DocumentState, segments : Array(String)) : Semantic::Symbol?
@@ -5923,8 +6061,9 @@ module CrystalV2
           # Build search patterns:
           # 1. For nested definitions (e.g., "module Serializable" inside JSON module)
           # 2. For fully qualified names (e.g., "struct JSON::Any")
-          pattern = /^\s*(module|class|struct|abstract class|abstract struct)\s+#{Regex.escape(search_name)}\b/
-          full_pattern = constant_name.includes?("::") ? /^\s*(module|class|struct|abstract class|abstract struct)\s+#{Regex.escape(constant_name)}\b/ : nil
+          # 3. For annotations (e.g., "annotation Field" inside JSON module)
+          pattern = /^\s*(module|class|struct|abstract class|abstract struct|annotation)\s+#{Regex.escape(search_name)}\b/
+          full_pattern = constant_name.includes?("::") ? /^\s*(module|class|struct|abstract class|abstract struct|annotation)\s+#{Regex.escape(constant_name)}\b/ : nil
 
           paths.each do |path|
             next unless File.file?(path)
