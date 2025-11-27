@@ -5,6 +5,7 @@ require "yaml"
 require "./protocol"
 require "./messages"
 require "./prelude_cache"
+require "./project_cache"
 require "./unified_project"
 require "./debouncer"
 require "../frontend/lexer"
@@ -96,6 +97,7 @@ module CrystalV2
         getter prelude_symbol_only : Bool
         getter debounce_ms : Int32
         getter background_indexing : Bool
+        getter project_cache : Bool
 
         def initialize(
           @debug_log_path : String? = nil,
@@ -103,7 +105,8 @@ module CrystalV2
           @best_effort_inference : Bool = true,
           @prelude_symbol_only : Bool = false,
           @debounce_ms : Int32 = 300,  # Default 300ms debounce
-          @background_indexing : Bool = true  # Default: load prelude in background
+          @background_indexing : Bool = true,  # Default: load prelude in background
+          @project_cache : Bool = true  # Default: cache project state to disk
         )
         end
 
@@ -115,6 +118,8 @@ module CrystalV2
           debounce_ms = ENV["LSP_DEBOUNCE_MS"]?.try(&.to_i?) || 300
           # Background indexing enabled by default, can be disabled via env or config
           background_indexing = ENV["LSP_BACKGROUND_INDEXING"]? != "0"
+          # Project cache enabled by default, can be disabled via env or config
+          project_cache = ENV["LSP_PROJECT_CACHE"]? != "0"
 
           if config_path = ENV["CRYSTALV2_LSP_CONFIG"]?
             begin
@@ -141,6 +146,9 @@ module CrystalV2
                 if value = hash["background_indexing"]?.try(&.as_bool?)
                   background_indexing = value
                 end
+                if value = hash["project_cache"]?.try(&.as_bool?)
+                  project_cache = value
+                end
               end
             rescue ex
               STDERR.puts("[LSP Config] Failed to load #{config_path}: #{ex.message}")
@@ -149,7 +157,7 @@ module CrystalV2
 
           debug_path = File.expand_path(debug_path) if debug_path
 
-          new(debug_path, recovery_mode, best_effort_inference, prelude_symbol_only, debounce_ms, background_indexing)
+          new(debug_path, recovery_mode, best_effort_inference, prelude_symbol_only, debounce_ms, background_indexing, project_cache)
         end
       end
 
@@ -240,6 +248,8 @@ module CrystalV2
         @prelude_method_index : Hash(String, Location)
         @prelude_loading : Bool = false
         @prelude_load_channel : Channel(PreludeState?)?
+        @project_root : String?
+        @project_cache_dirty : Bool = false
 
         def initialize(@input = STDIN, @output = STDOUT, config : ServerConfig = ServerConfig.load)
           @config = config
@@ -270,6 +280,8 @@ module CrystalV2
           @prelude_method_index = {} of String => Location
           @prelude_loading = false
           @prelude_load_channel = nil
+          @project_root = nil
+          @project_cache_dirty = false
           # Allow forcing the stub prelude for debugging via environment variable
           if ENV["CRYSTALV2_LSP_FORCE_STUB"]?
             try_load_prelude(PRELUDE_STUB_PATH, "LSP stub prelude")
@@ -1068,11 +1080,26 @@ module CrystalV2
           capabilities = ServerCapabilities.new # Use default capabilities with all features enabled
           result = InitializeResult.new(capabilities: capabilities)
 
+          # Extract project root from initialize params
+          if params
+            if root_uri = params["rootUri"]?.try(&.as_s?)
+              @project_root = uri_to_path(root_uri)
+              debug("Project root: #{@project_root}")
+              try_load_project_cache
+            elsif root_path = params["rootPath"]?.try(&.as_s?)
+              @project_root = root_path
+              debug("Project root (from rootPath): #{@project_root}")
+              try_load_project_cache
+            end
+          end
+
           send_response(id, result.to_json)
         end
 
         # Handle shutdown request
         private def handle_shutdown(id : JSON::Any)
+          # Save project cache before shutdown
+          save_project_cache
           send_response(id, "null")
         end
 
@@ -1587,6 +1614,42 @@ module CrystalV2
               @prelude_method_index[cache_key] = location
             end
           end
+        end
+
+        # Project cache methods - for caching per-file analysis state
+        private def try_load_project_cache
+          return unless root = @project_root
+          return unless @config.project_cache
+
+          load_start = Time.monotonic
+          result = ProjectCacheLoader.load_from_cache(@project, root)
+
+          if result[:valid_count] > 0
+            load_ms = (Time.monotonic - load_start).total_milliseconds.round(2)
+            debug("Project cache loaded: #{result[:valid_count]} valid files in #{load_ms}ms")
+
+            if result[:invalid_paths].size > 0
+              debug("  #{result[:invalid_paths].size} files need re-parsing")
+            end
+          else
+            debug("No valid project cache found")
+          end
+        rescue ex
+          debug("Failed to load project cache: #{ex.message}")
+        end
+
+        private def save_project_cache
+          return unless root = @project_root
+          return unless @config.project_cache
+          return if @project.files.empty?
+
+          save_start = Time.monotonic
+          ProjectCacheLoader.save_to_cache(@project, root)
+
+          save_ms = (Time.monotonic - save_start).total_milliseconds.round(2)
+          debug("Project cache saved: #{@project.files.size} files in #{save_ms}ms")
+        rescue ex
+          debug("Failed to save project cache: #{ex.message}")
         end
 
         private def try_load_prelude(path : String, label : String) : Bool
