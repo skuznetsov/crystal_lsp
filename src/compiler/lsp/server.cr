@@ -5311,7 +5311,9 @@ module CrystalV2
             end
           end
 
-          find_constant_location_by_text(doc_state, segments.last?)
+          # Pass full path to enable namespace directory lookup (e.g., JSON::Serializable → json/*.cr)
+          full_path = segments.empty? ? nil : segments.join("::")
+          find_constant_location_by_text(doc_state, full_path)
         end
 
         private def definition_from_safe_navigation(
@@ -5621,7 +5623,8 @@ module CrystalV2
         end
 
         private def definition_from_constant(name : String, doc_state : DocumentState) : Location?
-          segments = [name]
+          # Split path by :: (e.g., "JSON::Serializable" -> ["JSON", "Serializable"])
+          segments = name.includes?("::") ? name.split("::") : [name]
           if symbol = resolve_path_symbol(doc_state, segments)
             if location = location_for_symbol(symbol)
               return location
@@ -5670,16 +5673,29 @@ module CrystalV2
             paths << stdlib_base_file if File.file?(stdlib_base_file)
           end
 
-          pattern = /^(module|class|struct|abstract class|abstract struct)\s+#{Regex.escape(constant_name)}\b/
+          # Handle namespace paths (JSON::Serializable → json/*.cr searching for "module Serializable")
+          search_name = constant_name
+          if constant_name.includes?("::")
+            parts = constant_name.split("::")
+            search_name = parts.last  # Search for last component (e.g., "Serializable")
+            # Add namespace subdirectory to search paths (e.g., json/*.cr for JSON::*)
+            namespace_dir = File.join(stdlib_path, parts.first.downcase)
+            if Dir.exists?(namespace_dir)
+              Dir.glob(File.join(namespace_dir, "*.cr")).each { |f| paths << f }
+            end
+          end
+
+          # Allow leading whitespace for nested definitions (e.g., "  module Serializable" inside JSON module)
+          pattern = /^\s*(module|class|struct|abstract class|abstract struct)\s+#{Regex.escape(search_name)}\b/
           paths.each do |path|
             next unless File.file?(path)
             line_index = 0
             File.each_line(path) do |line|
               if match = pattern.match(line)
-                start_column = match.begin + match[0].rindex(constant_name).not_nil!
+                start_column = match.begin + match[0].rindex(search_name).not_nil!
                 range = Range.new(
                   Position.new(line_index, start_column),
-                  Position.new(line_index, start_column + constant_name.bytesize)
+                  Position.new(line_index, start_column + search_name.bytesize)
                 )
                 return Location.new(uri: file_uri(path), range: range)
               end
