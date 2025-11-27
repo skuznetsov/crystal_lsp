@@ -3044,9 +3044,11 @@ module CrystalV2
               first_char = ident[0]?
               is_local_var = first_char && (first_char.lowercase? || first_char == '_')
 
-              # Skip expensive lookups for local variables/parameters
-              # Only do constant lookup for uppercase identifiers (types, modules, etc.)
-              unless is_local_var
+              if is_local_var
+                # Try efficient parameter lookup for local variables
+                location = definition_from_parameters_fast(ident, doc_state, offset)
+              else
+                # Only do constant lookup for uppercase identifiers
                 location = definition_from_constant(ident, doc_state)
               end
             end
@@ -4560,9 +4562,14 @@ module CrystalV2
               is_local_var = first_char && (first_char.lowercase? || first_char == '_')
 
               if is_local_var
-                # Local variables/parameters: skip expensive constant lookup
-                # The O(n) arena scans are too slow; just return nil quickly
-                # TODO: improve semantic analysis to track parameter references
+                # Local variables/parameters: try efficient parameter lookup
+                # Uses find_enclosing_def which traverses from roots (not O(n) arena scan)
+                if offset = target_offset
+                  if location = definition_from_parameters_fast(name_str, doc_state, offset)
+                    return location
+                  end
+                end
+                # Skip expensive constant lookup for lowercase identifiers
                 return nil
               end
 
@@ -4721,6 +4728,178 @@ module CrystalV2
             span = param.name_span || param.span
             range = Range.from_span(span)
             return Location.new(uri: doc_state.text_document.uri, range: range)
+          end
+
+          nil
+        end
+
+        # Efficient parameter/local variable lookup - traverses from roots (not O(n) arena scan)
+        # Only processes roots from current file, skipping prelude entirely
+        private def definition_from_parameters_fast(name : String, doc_state : DocumentState, target_offset : Int32) : Location?
+          program = doc_state.program
+          arena = program.arena
+          target_path = doc_state.path
+
+          # Only traverse roots from current file (crucial optimization!)
+          program.roots.each do |root_id|
+            next unless expr_in_document?(program, root_id, target_path)
+
+            # Find enclosing callable and check params
+            if location = find_param_or_local_in_tree(arena, root_id, name, target_offset, doc_state.text_document.uri)
+              return location
+            end
+          end
+
+          nil
+        end
+
+        # Recursively search tree for enclosing callable containing target_offset
+        # Returns Location if param/local with matching name is found
+        private def find_param_or_local_in_tree(
+          arena : Frontend::ArenaLike,
+          expr_id : Frontend::ExprId,
+          name : String,
+          target_offset : Int32,
+          uri : String,
+          enclosing_callable : Frontend::TypedNode? = nil
+        ) : Location?
+          return nil if expr_id.invalid?
+          node = arena[expr_id]
+          span = node.span
+          return nil unless span_contains_offset?(span, target_offset)
+
+          # Track enclosing callable (def/block/proc)
+          current_callable = case node
+                             when Frontend::DefNode, Frontend::BlockNode, Frontend::ProcLiteralNode
+                               node
+                             else
+                               enclosing_callable
+                             end
+
+          # Recurse into children first (find most specific match)
+          each_child_expr(arena, expr_id) do |child_id|
+            if location = find_param_or_local_in_tree(arena, child_id, name, target_offset, uri, current_callable)
+              return location
+            end
+          end
+
+          # If this node is an identifier matching name, check enclosing callable's params
+          if current_callable
+            case node
+            when Frontend::IdentifierNode
+              name_slice = node.name
+              if name_slice && String.new(name_slice) == name
+                # Check params in enclosing callable
+                params = case current_callable
+                         when Frontend::DefNode then current_callable.params
+                         when Frontend::BlockNode then current_callable.params
+                         when Frontend::ProcLiteralNode then current_callable.params
+                         else nil
+                         end
+
+                if params
+                  params.each do |param|
+                    p_name = param.name
+                    next unless p_name
+                    next unless String.new(p_name) == name
+                    param_span = param.name_span || param.span
+                    range = Range.from_span(param_span)
+                    return Location.new(uri: uri, range: range)
+                  end
+                end
+
+                # Check for local variable assignment in enclosing scope
+                if location = find_local_assignment_in_callable(arena, current_callable, name, uri, target_offset)
+                  return location
+                end
+              end
+            end
+          end
+
+          nil
+        end
+
+        # Find local variable assignment in enclosing callable body
+        private def find_local_assignment_in_callable(
+          arena : Frontend::ArenaLike,
+          callable : Frontend::TypedNode,
+          name : String,
+          uri : String,
+          target_offset : Int32
+        ) : Location?
+          body = case callable
+                 when Frontend::DefNode then callable.body
+                 when Frontend::BlockNode then callable.body
+                 when Frontend::ProcLiteralNode then callable.body
+                 else nil
+                 end
+
+          return nil unless body
+
+          # Find first assignment to this variable that comes before target_offset
+          best_location : Location? = nil
+          body.each do |expr_id|
+            if loc = find_assignment_in_expr(arena, expr_id, name, uri, target_offset)
+              # Take the first (earliest) assignment
+              best_location ||= loc
+            end
+          end
+          best_location
+        end
+
+        # Recursively search for assignment to variable with given name
+        private def find_assignment_in_expr(
+          arena : Frontend::ArenaLike,
+          expr_id : Frontend::ExprId,
+          name : String,
+          uri : String,
+          target_offset : Int32
+        ) : Location?
+          return nil if expr_id.invalid?
+          node = arena[expr_id]
+
+          case node
+          when Frontend::AssignNode
+            target = arena[node.target]
+            case target
+            when Frontend::IdentifierNode
+              target_name = target.name
+              if target_name && String.new(target_name) == name
+                # Only return if assignment is before the reference
+                if node.span.start_offset < target_offset
+                  # IdentifierNode uses span directly (no name_span)
+                  range = Range.from_span(target.span)
+                  return Location.new(uri: uri, range: range)
+                end
+              end
+            end
+
+            # Check value side for nested assignments
+            if loc = find_assignment_in_expr(arena, node.value, name, uri, target_offset)
+              return loc
+            end
+          when Frontend::MultipleAssignNode
+            node.targets.each do |target_id|
+              target = arena[target_id]
+              case target
+              when Frontend::IdentifierNode
+                target_name = target.name
+                if target_name && String.new(target_name) == name
+                  if node.span.start_offset < target_offset
+                    # IdentifierNode uses span directly (no name_span)
+                    range = Range.from_span(target.span)
+                    return Location.new(uri: uri, range: range)
+                  end
+                end
+              end
+            end
+          else
+            # Recurse into children
+            each_child_expr(arena, expr_id) do |child_id|
+              if loc = find_assignment_in_expr(arena, child_id, name, uri, target_offset)
+                return loc
+              end
+            end
           end
 
           nil
