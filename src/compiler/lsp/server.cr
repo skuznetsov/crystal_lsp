@@ -3002,7 +3002,17 @@ module CrystalV2
 
           return send_response(id, "null") unless type_str
 
-          contents = MarkupContent.new("```crystal\n#{type_str}\n```", markdown: true)
+          # Count references for this symbol (exclude declaration)
+          # Skip for MethodSymbol - call sites (.new, method calls) aren't tracked in identifier_symbols
+          ref_info = ""
+          if symbol && !symbol.is_a?(Semantic::MethodSymbol)
+            refs = find_all_references(symbol, false)
+            if refs.size > 0
+              ref_info = "\n\n---\n\n📍 **#{refs.size} reference#{refs.size == 1 ? "" : "s"}**"
+            end
+          end
+
+          contents = MarkupContent.new("```crystal\n#{type_str}\n```#{ref_info}", markdown: true)
           hover = Hover.new(contents: contents)
 
           debug("Returning hover with type: #{type_str}")
