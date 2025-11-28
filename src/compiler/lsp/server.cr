@@ -1008,7 +1008,8 @@ module CrystalV2
 
         GUARD_WARN_MS  =  500 # log at debug level above this
         GUARD_ALERT_MS = 2000 # log at error level above this
-        REQUEST_WATCHDOG_MS = ENV["LSP_WATCHDOG_TIMEOUT_MS"]?.try(&.to_i) || 0
+        # Default 5 second watchdog for all LSP operations (can override via env)
+        REQUEST_WATCHDOG_MS = ENV["LSP_WATCHDOG_TIMEOUT_MS"]?.try(&.to_i) || 5000
 
         private def with_guard(label : String, &block)
           start = Time.monotonic
@@ -1100,20 +1101,22 @@ module CrystalV2
           params = message["params"]?
 
           with_guard("notification #{method}") do
-            case method
-            when "initialized"
-              # Client confirms initialization
-              @initialized = true
-            when "textDocument/didOpen"
-              handle_did_open(params) if params
-            when "textDocument/didChange"
-              handle_did_change(params) if params
-            when "textDocument/didClose"
-              handle_did_close(params) if params
-            when "exit"
-              exit(0)
-            else
-              log_error("Unknown notification: #{method}")
+            with_watchdog("notification #{method}") do
+              case method
+              when "initialized"
+                # Client confirms initialization
+                @initialized = true
+              when "textDocument/didOpen"
+                handle_did_open(params) if params
+              when "textDocument/didChange"
+                handle_did_change(params) if params
+              when "textDocument/didClose"
+                handle_did_close(params) if params
+              when "exit"
+                exit(0)
+              else
+                log_error("Unknown notification: #{method}")
+              end
             end
           end
         end
