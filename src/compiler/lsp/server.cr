@@ -5,6 +5,7 @@ require "yaml"
 require "./protocol"
 require "./messages"
 require "./prelude_cache"
+# require "./ast_cache"  # TODO: Re-enable once cache schema matches current AST
 require "./project_cache"
 require "./unified_project"
 require "./debouncer"
@@ -67,6 +68,7 @@ module CrystalV2
         getter diagnostics : Array(Diagnostic)
         getter stub : Bool
         getter symbol_origins : Hash(Semantic::Symbol, PreludeSymbolOrigin)
+        getter from_cache : Bool
 
         def initialize(
           @path : String,
@@ -75,6 +77,7 @@ module CrystalV2
           @diagnostics : Array(Diagnostic),
           @stub : Bool,
           @symbol_origins : Hash(Semantic::Symbol, PreludeSymbolOrigin),
+          @from_cache : Bool = false,
         )
         end
       end
@@ -952,11 +955,14 @@ module CrystalV2
 
         # Main server loop
         def start
+          STDERR.puts "[START] LSP server starting" if ENV["LSP_DEBUG"]?
           loop do
+            STDERR.puts "[LOOP] Waiting for message" if ENV["LSP_DEBUG"]?
             # Check if background prelude loading is complete
             check_background_prelude_ready if @prelude_loading
 
             message = read_message
+            STDERR.puts "[LOOP] Got message: #{message ? "yes" : "nil"}" if ENV["LSP_DEBUG"]?
             break if message.nil?
 
             handle_message(message)
@@ -1422,7 +1428,8 @@ module CrystalV2
                 table,
                 [] of Diagnostic,
                 false,  # not stub
-                {} of Semantic::Symbol => PreludeSymbolOrigin
+                {} of Semantic::Symbol => PreludeSymbolOrigin,
+                true  # from_cache
               )
             end
           end
@@ -1525,7 +1532,8 @@ module CrystalV2
             table,
             [] of Diagnostic,
             false,
-            {} of Semantic::Symbol => PreludeSymbolOrigin
+            {} of Semantic::Symbol => PreludeSymbolOrigin,
+            true  # from_cache
           )
           @prelude_mtime = File.info(PRELUDE_PATH).modification_time
           @prelude_real_mtime = @prelude_mtime
@@ -1541,6 +1549,7 @@ module CrystalV2
         private def save_prelude_to_cache
           return unless prelude = @prelude_state
           return if prelude.stub
+          return if prelude.from_cache  # Already loaded from cache, no need to re-save
 
           stdlib_path = File.dirname(PRELUDE_PATH)
           save_start = Time.monotonic
@@ -1919,6 +1928,8 @@ module CrystalV2
           source_cache : Hash(String, String),
           diagnostics : Array(Diagnostic),
         ) : Bool
+          # TODO: AST caching disabled until cache schema matches current AST structure
+          # Parse directly for now
           source = File.read(path)
           lexer = Frontend::Lexer.new(source)
           parser = Frontend::Parser.new(lexer, recovery_mode: @config.parser_recovery_mode)
@@ -1926,6 +1937,7 @@ module CrystalV2
           diag_count = parser.diagnostics.size
           debug("Prelude dependency #{path} produced #{diag_count} parser diagnostic(s)") if diag_count > 0
           parser.diagnostics.each { |diag| diagnostics << Diagnostic.from_parser(diag) }
+
           # Even with recovery diagnostics, keep the parsed program so we retain symbols
           # (especially important for stdlib where some files may emit warnings).
           program_cache[path] = program
@@ -2711,6 +2723,11 @@ module CrystalV2
           best_match = expr_id
           best_match_size = node.span.end_offset - node.span.start_offset
 
+          # Don't descend into PathNode children - PathNode handles segment resolution
+          # via target_offset in definition_from_path. This ensures clicking on any
+          # part of a path (e.g., M in M::A) returns the PathNode for proper resolution.
+          return best_match if node.is_a?(Frontend::PathNode)
+
           each_child_expr(arena, expr_id) do |child_id|
             next if child_id.invalid?
             if match = find_expr_in_tree(arena, child_id, offset)
@@ -2974,12 +2991,21 @@ module CrystalV2
           when Frontend::ExtendNode
             expr_id = node.target unless node.target.invalid?
             node = doc_state.program.arena[expr_id] unless expr_id.invalid?
+          when Frontend::PathNode
+            # For PathNode, resolve the specific segment under cursor
+            # e.g., hovering on M in M::A should show module M, not class A
+            target_offset = position_to_offset(doc_state.text_document.text, line, character)
+            if target_offset
+              symbol = resolve_path_segment_symbol(node, doc_state, target_offset)
+            end
           end
           span = node.span
           snippet = extract_snippet(doc_state.text_document.text, span)
           debug("Definition node class=#{node.class} span=#{span.start_line}:#{span.start_column}-#{span.end_line}:#{span.end_column} snippet='#{snippet}'")
 
-          symbol = doc_state.identifier_symbols.try(&.[expr_id]?)
+          # For PathNode, symbol was already resolved to the specific segment above.
+          # For other nodes, look up in identifier_symbols.
+          symbol ||= doc_state.identifier_symbols.try(&.[expr_id]?)
           if symbol.nil? && node.is_a?(Frontend::IdentifierNode)
             ident_name = String.new(node.name)
             if identifier_symbols = doc_state.identifier_symbols
@@ -3030,7 +3056,11 @@ module CrystalV2
             end
           end
 
-          if type_str.nil? && symbol
+          # For ModuleSymbol/ClassSymbol, prefer the symbol's formatted type
+          # over the expression's inferred type (which would be the final resolved type)
+          if symbol.is_a?(Semantic::ModuleSymbol) || symbol.is_a?(Semantic::ClassSymbol)
+            type_str = fallback_symbol_type(symbol, doc_state)
+          elsif type_str.nil? && symbol
             type_str = fallback_symbol_type(symbol, doc_state)
           end
 
@@ -4270,8 +4300,10 @@ module CrystalV2
         # Write LSP message to output (headers + JSON)
         private def write_message(json : String)
           content = "Content-Length: #{json.bytesize}\r\n\r\n#{json}"
+          STDERR.puts "[WRITE_MESSAGE] #{json.bytesize} bytes" if ENV["LSP_DEBUG"]?
           @output << content
           @output.flush
+          STDERR.puts "[WRITE_MESSAGE] flushed" if ENV["LSP_DEBUG"]?
         end
 
         # Request client to refresh semantic tokens
@@ -4726,14 +4758,10 @@ module CrystalV2
           when Frontend::MemberAccessNode
             definition_from_member_access(node, doc_state, uri, depth, target_offset)
           when Frontend::PathNode
-            symbol = doc_state.identifier_symbols.try(&.[expr_id]?)
-            debug("Path node: symbol=#{symbol ? symbol.class : "nil"}")
-            if symbol
-              if location = location_for_symbol(symbol)
-                return location
-              end
-              return Location.from_symbol(symbol, doc_state.program, uri)
-            end
+            # Always use definition_from_path which handles segment-aware resolution.
+            # For M::A, clicking on M should go to module M, not class A.
+            # The identifier_symbols lookup returns the final resolved symbol (A),
+            # which is only correct when cursor is on the last segment.
             definition_from_path(node, doc_state, uri, target_offset)
           when Frontend::SafeNavigationNode
             definition_from_safe_navigation(node, doc_state, uri, depth, target_offset)
@@ -5631,6 +5659,44 @@ module CrystalV2
           # Pass full path to enable namespace directory lookup (e.g., JSON::Serializable → json/*.cr)
           full_path = segments.empty? ? nil : segments.join("::")
           find_constant_location_by_text(doc_state, full_path)
+        end
+
+        # Resolve symbol for a specific segment of a PathNode based on cursor position.
+        # For M::A with cursor on M, returns the symbol for module M (not class A).
+        private def resolve_path_segment_symbol(node : Frontend::PathNode, doc_state : DocumentState, target_offset : Int32) : Semantic::Symbol?
+          arena = doc_state.program.arena
+          all_segments = collect_path_segments(arena, node)
+          return nil if all_segments.empty?
+
+          # Determine which segment the cursor is on using spans
+          segments_with_spans = collect_path_segments_with_spans(arena, node)
+          cursor_segment_index = segments_with_spans.size - 1  # Default to last
+          segments_with_spans.each_with_index do |(name, span), idx|
+            if span.start_offset <= target_offset && target_offset < span.end_offset
+              cursor_segment_index = idx
+              break
+            end
+          end
+
+          # Use only segments up to and including the cursor position
+          segments = all_segments[0..cursor_segment_index]
+
+          # Resolve symbol for these segments
+          if symbol = resolve_path_symbol(doc_state, segments)
+            return symbol
+          end
+
+          if symbol = find_symbol_by_segments(segments)
+            return symbol
+          end
+
+          if prelude = @prelude_state
+            if symbol = resolve_path_symbol_in_table(prelude.symbol_table, segments)
+              return symbol
+            end
+          end
+
+          nil
         end
 
         private def definition_from_safe_navigation(
