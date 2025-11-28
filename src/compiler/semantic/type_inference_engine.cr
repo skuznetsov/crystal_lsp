@@ -84,6 +84,9 @@ module CrystalV2
           stack << {expr_id, false}
           state[expr_id] = 1
           while frame = stack.pop?
+            # Check watchdog to prevent infinite loops in type inference
+            Frontend::Watchdog.check!
+
             id = frame[0]
             next if @context.get_type(id)
             node = @program.arena[id]

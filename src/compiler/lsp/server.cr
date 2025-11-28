@@ -369,6 +369,9 @@ module CrystalV2
         end
 
         private def load_dependency(path : String, recursive : Bool = true, workspace : DependencyWorkspace? = nil) : DocumentState?
+          # Check watchdog on each dependency load to prevent infinite loops
+          Watchdog.check!
+
           uri = file_uri(path)
 
           return @documents[uri]? if @documents.has_key?(uri)
@@ -405,6 +408,9 @@ module CrystalV2
           ensure_dependencies_loaded(dep_state, workspace: workspace) if recursive
 
           dep_state
+        rescue ex : Watchdog::TimeoutError
+          # Re-raise timeout to stop dependency loading
+          raise ex
         rescue ex
           debug("Failed to load dependency #{path}: #{ex.message}")
           nil
@@ -1318,6 +1324,9 @@ module CrystalV2
             else
               debug("Skipping type inference due to errors")
             end
+          rescue ex : Watchdog::TimeoutError
+            # Re-raise timeout to allow watchdog protection to work
+            raise ex
           rescue ex
             debug("Semantic analysis failed: #{ex.message}")
           end
