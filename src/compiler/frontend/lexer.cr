@@ -450,8 +450,12 @@ module CrystalV2
             )
           end
 
-          # Check if followed by identifier start
+          # Check if followed by identifier start or operator
           if @offset >= @rope.size || !identifier_start?(current_byte)
+            # Try to lex operator symbol (e.g., :<<, :>, :===, :=~, :!~, :^, :&**)
+            op_symbol = try_lex_operator_symbol(from, start_offset, start_line, start_column)
+            return op_symbol if op_symbol
+
             # Just a colon (for type annotations)
             return Token.new(
               Token::Kind::Colon,
@@ -473,6 +477,95 @@ module CrystalV2
           # Setter-style symbols can end with '=' (e.g., :foo=)
           if @offset < @rope.size && current_byte == '='.ord.to_u8
             advance
+          end
+
+          Token.new(
+            Token::Kind::Symbol,
+            @rope.bytes[from...@offset],
+            build_span(start_offset, start_line, start_column)
+          )
+        end
+
+        # Try to lex operator symbol (e.g., :<<, :>, :===, :=~, :!~, :^, :&**)
+        # Returns nil if no operator symbol found
+        private def try_lex_operator_symbol(from : Int32, start_offset : Int32, start_line : Int32, start_column : Int32) : Token?
+          return nil if @offset >= @rope.size
+
+          ch = current_byte
+          case ch
+          when '<'.ord.to_u8
+            # :< :<<  :<=
+            advance
+            if @offset < @rope.size
+              if current_byte == '<'.ord.to_u8
+                advance  # :<<
+              elsif current_byte == '='.ord.to_u8
+                advance  # :<=
+              end
+              # else just :<
+            end
+          when '>'.ord.to_u8
+            # :> :>>  :>=
+            advance
+            if @offset < @rope.size
+              if current_byte == '>'.ord.to_u8
+                advance  # :>>
+              elsif current_byte == '='.ord.to_u8
+                advance  # :>=
+              end
+              # else just :>
+            end
+          when '='.ord.to_u8
+            # :=== :=~
+            advance
+            if @offset < @rope.size
+              if current_byte == '='.ord.to_u8
+                advance
+                if @offset < @rope.size && current_byte == '='.ord.to_u8
+                  advance  # :===
+                else
+                  @offset -= 1  # Not valid, rewind
+                  return nil
+                end
+              elsif current_byte == '~'.ord.to_u8
+                advance  # :=~
+              else
+                @offset -= 1  # Not valid, rewind
+                return nil
+              end
+            else
+              @offset -= 1  # Not valid, rewind
+              return nil
+            end
+          when '!'.ord.to_u8
+            # :!~
+            advance
+            if @offset < @rope.size && current_byte == '~'.ord.to_u8
+              advance  # :!~
+            else
+              @offset -= 1  # Not valid, rewind
+              return nil
+            end
+          when '^'.ord.to_u8
+            # :^
+            advance
+          when '&'.ord.to_u8
+            # :&**
+            advance
+            if @offset < @rope.size && current_byte == '*'.ord.to_u8
+              advance
+              if @offset < @rope.size && current_byte == '*'.ord.to_u8
+                advance  # :&**
+              else
+                @offset -= 2  # Not valid, rewind
+                return nil
+              end
+            else
+              @offset -= 1  # Not valid, rewind
+              return nil
+            end
+          else
+            return nil
           end
 
           Token.new(

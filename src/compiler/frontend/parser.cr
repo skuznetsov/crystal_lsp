@@ -853,6 +853,10 @@ module CrystalV2
           @diagnostics
         end
 
+        def string_pool
+          @string_pool
+        end
+
         # Allow lexer to bubble-up lexical diagnostics (e.g. heredoc errors)
         def add_diagnostic(message : String, span : Span)
           @diagnostics << Diagnostic.new(message, span)
@@ -1660,8 +1664,8 @@ module CrystalV2
 
           receiver_present = false
 
-          case
-          when name_token.kind == Token::Kind::Identifier || is_keyword_identifier?(name_token)
+          # Handle identifier-like macro names (including keywords used as names)
+          if name_token.kind == Token::Kind::Identifier || is_keyword_identifier?(name_token)
             macro_name_slice = name_token.slice
             advance
 
@@ -1686,46 +1690,51 @@ module CrystalV2
               end
               macro_name_slice = @string_pool.intern(setter_name.to_slice)
             end
-          when name_token.kind == Token::Kind::LBracket
-            bracket_start = name_token
-            advance
-            skip_trivia
+          else
+            # Use case on token kind for non-identifier names
+            case name_token.kind
+            when Token::Kind::LBracket
+              bracket_start = name_token
+              advance
+              skip_trivia
 
-            unless current_token.kind == Token::Kind::RBracket
-              emit_unexpected(current_token)
+              unless current_token.kind == Token::Kind::RBracket
+                emit_unexpected(current_token)
+                return PREFIX_ERROR
+              end
+              bracket_end = current_token
+              advance
+              skip_trivia
+
+              if current_token.kind == Token::Kind::Eq
+                advance
+                macro_name_slice = @string_pool.intern("[]=".to_slice)
+              else
+                macro_name_slice = @string_pool.intern("[]".to_slice)
+              end
+
+              # For span calculations below keep original LBracket token
+              name_token = bracket_start
+            when Token::Kind::Do  # Dot token not emitted; treat unexpected receiver tokens similarly
+              # Macro can't have a receiver
+              @diagnostics << Diagnostic.new("macro can't have a receiver", name_token.span)
+              return PREFIX_ERROR
+            when Token::Kind::Semicolon,  # macro `;end
+                 Token::Kind::Plus, Token::Kind::Minus, Token::Kind::Star, Token::Kind::Slash,
+                 Token::Kind::FloorDiv, Token::Kind::Percent, Token::Kind::StarStar,
+                 Token::Kind::Less, Token::Kind::Greater, Token::Kind::LessEq, Token::Kind::GreaterEq,
+                 Token::Kind::EqEq, Token::Kind::EqEqEq, Token::Kind::NotEq, Token::Kind::Spaceship,
+                 Token::Kind::Match, Token::Kind::NotMatch,
+                 Token::Kind::Amp, Token::Kind::Pipe, Token::Kind::Caret, Token::Kind::Tilde,
+                 Token::Kind::LShift, Token::Kind::RShift,
+                 Token::Kind::DotDot, Token::Kind::DotDotDot,
+                 Token::Kind::AmpPlus, Token::Kind::AmpMinus, Token::Kind::AmpStar, Token::Kind::AmpStarStar
+              macro_name_slice = name_token.slice
+              advance
+            else
+              emit_unexpected(name_token)
               return PREFIX_ERROR
             end
-            bracket_end = current_token
-            advance
-            skip_trivia
-
-            if current_token.kind == Token::Kind::Eq
-              advance
-              macro_name_slice = @string_pool.intern("[]=".to_slice)
-            else
-              macro_name_slice = @string_pool.intern("[]".to_slice)
-            end
-
-            # For span calculations below keep original LBracket token
-            name_token = bracket_start
-          when Token::Kind::Do  # Dot token not emitted; treat unexpected receiver tokens similarly
-            # Macro can't have a receiver
-            @diagnostics << Diagnostic.new("macro can't have a receiver", name_token.span)
-            return PREFIX_ERROR
-          when Token::Kind::Plus, Token::Kind::Minus, Token::Kind::Star, Token::Kind::Slash,
-               Token::Kind::FloorDiv, Token::Kind::Percent, Token::Kind::StarStar,
-               Token::Kind::Less, Token::Kind::Greater, Token::Kind::LessEq, Token::Kind::GreaterEq,
-               Token::Kind::EqEq, Token::Kind::EqEqEq, Token::Kind::NotEq, Token::Kind::Spaceship,
-               Token::Kind::Match, Token::Kind::NotMatch,
-               Token::Kind::Amp, Token::Kind::Pipe, Token::Kind::Caret, Token::Kind::Tilde,
-               Token::Kind::LShift, Token::Kind::RShift,
-               Token::Kind::DotDot, Token::Kind::DotDotDot,
-               Token::Kind::AmpPlus, Token::Kind::AmpMinus, Token::Kind::AmpStar, Token::Kind::AmpStarStar
-            macro_name_slice = name_token.slice
-            advance
-          else
-            emit_unexpected(name_token)
-            return PREFIX_ERROR
           end
 
           skip_macro_parameters(macro_token, macro_name_slice)
@@ -2712,17 +2721,17 @@ module CrystalV2
         private def parse_case : ExprId
           case_token = current_token
           advance
-          consume_newlines  # Skip trivia AND newlines after 'case'
+          skip_statement_end  # Skip trivia, newlines AND semicolons after 'case'
 
           # Parse optional case value (bare case has no value)
           # If next token is 'when', it's bare case (no value)
           value : ExprId? = nil
-          if current_token.kind != Token::Kind::When
+          if current_token.kind != Token::Kind::When && current_token.kind != Token::Kind::End
             # Has value: case EXPR (can be assignment like: case x = foo())
             val = parse_op_assign
             return PREFIX_ERROR if val.invalid?
             value = val
-            consume_newlines
+            skip_statement_end
           end
 
           # Phase PERCENT_LITERALS: Parse when/in branches
@@ -2732,7 +2741,7 @@ module CrystalV2
 
           # Parse when branches
           loop do
-            consume_newlines
+            skip_statement_end
             token = current_token
             break unless token.kind == Token::Kind::When
 
@@ -2881,6 +2890,7 @@ module CrystalV2
             in_branches = in_branches_b.size > 0 ? in_branches_b.to_a : nil
 
           # Parse optional else body
+          skip_statement_end
           else_body_b = nil
           token = current_token
           if token.kind == Token::Kind::Else
@@ -5633,14 +5643,14 @@ module CrystalV2
             skip_trivia
           end
 
-          consume_newlines
+          skip_statement_end
 
           # Phase 103G: Parse enum members and methods
           members = [] of EnumMember
           method_bodies_b = SmallVec(ExprId, 4).new  # Store method/macro definitions
 
           loop do
-            skip_trivia
+            skip_statement_end  # Allow semicolons between members
             token = current_token
             break if token.kind == Token::Kind::End
             break if token.kind == Token::Kind::EOF
@@ -5649,7 +5659,7 @@ module CrystalV2
             if macro_control_start?
               macro_expr = parse_percent_macro_control
               method_bodies_b << macro_expr unless macro_expr.invalid?
-              consume_newlines
+              skip_statement_end
               next
             end
 
@@ -5672,7 +5682,7 @@ module CrystalV2
                 method_bodies_b << definition_expr
               end
 
-              consume_newlines
+              skip_statement_end
               next
             end
 
@@ -5709,12 +5719,12 @@ module CrystalV2
               member_value_span
             )
 
-            consume_newlines
+            skip_statement_end
           end
 
           expect_identifier("end")
           end_token = previous_token
-          consume_newlines
+          skip_statement_end
 
           enum_span = if end_token
             enum_token.span.cover(end_token.span)
