@@ -2686,7 +2686,8 @@ module CrystalV2
 
         private def file_uri(path : String) : String
           absolute = File.expand_path(path)
-          segments = absolute.split('/').map { |segment| URI.encode_www_form(segment) }
+          # Use encode_path_segment for RFC 3986 compliance (spaces → %20, not +)
+          segments = absolute.split('/').map { |segment| URI.encode_path_segment(segment) }
           segments.shift if segments.first? == ""  # drop leading empty due to absolute path
           "file:///#{segments.join('/')}"
         end
@@ -2696,7 +2697,8 @@ module CrystalV2
           return nil unless parsed.scheme == "file"
           path = parsed.path
           path = "/#{path.lstrip('/')}" if path.starts_with?("//")
-          path
+          # Decode percent-encoded characters (e.g., %20 → space)
+          URI.decode_www_form(path)
         rescue
           nil
         end
