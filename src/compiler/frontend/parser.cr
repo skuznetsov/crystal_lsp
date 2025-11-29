@@ -3804,7 +3804,7 @@ module CrystalV2
 
           # Non-parenthesized arguments: yield arg1, arg2, ...
           token = current_token
-          if token.kind.in?(Token::Kind::Newline, Token::Kind::EOF, Token::Kind::End, Token::Kind::Else, Token::Kind::Elsif, Token::Kind::If, Token::Kind::Unless, Token::Kind::While, Token::Kind::Until, Token::Kind::Do, Token::Kind::RBrace, Token::Kind::RParen)
+          if token.kind.in?(Token::Kind::Newline, Token::Kind::EOF, Token::Kind::End, Token::Kind::Else, Token::Kind::Elsif, Token::Kind::If, Token::Kind::Unless, Token::Kind::While, Token::Kind::Until, Token::Kind::Do, Token::Kind::RBrace, Token::Kind::RParen, Token::Kind::Semicolon)
             # Yield without args
             @arena.add_typed(YieldNode.new(yield_token.span, nil))
           else
@@ -6805,7 +6805,8 @@ module CrystalV2
                Token::Kind::LessEq, Token::Kind::GreaterEq,
                Token::Kind::Spaceship,  # <=>
                # Other binary operators that can't be prefix
-               Token::Kind::Pipe, Token::Kind::Caret, Token::Kind::Amp,
+               # Note: Amp is NOT listed here because &.method block shorthand is valid as argument
+               Token::Kind::Pipe, Token::Kind::Caret,
                Token::Kind::LShift, Token::Kind::RShift,
                Token::Kind::DotDot, Token::Kind::DotDotDot,
                Token::Kind::Match, Token::Kind::NotMatch,  # =~, !~
@@ -7920,9 +7921,25 @@ module CrystalV2
 
           # Parse array elements
           loop do
+            # Phase 150: Check for splat (*expr) in array literal
+            is_splat = false
+            splat_token : Token? = nil
+            if current_token.kind == Token::Kind::Star
+              is_splat = true
+              splat_token = current_token
+              advance
+              skip_whitespace_and_optional_newlines
+            end
+
             element = parse_expression(0)
             if element.invalid?
               return PREFIX_ERROR
+            end
+
+            # Wrap in SplatNode if needed
+            if is_splat && splat_token
+              splat_span = splat_token.span.cover(@arena[element].span)
+              element = @arena.add_typed(SplatNode.new(splat_span, element))
             end
 
             # Support typed elements used in internal DSLs like the VM
@@ -8354,6 +8371,30 @@ module CrystalV2
           if tok.kind == Token::Kind::Identifier
             debug("brace: first token is Identifier #{String.new(tok.slice)}")
             ident_token = tok
+            # Check for no-space named tuple form: `foo:a` where next is adjacent Symbol
+            if named_arg_no_space?
+              # No-space form: {foo:a, ...}
+              # Extract the first entry directly and call parse_named_tuple_no_space_continued
+              first_key_slice = ident_token.slice
+              first_key_span = ident_token.span
+              advance  # consume identifier
+              # Current token is now Symbol like `:a`
+              sym_token = current_token
+              value_slice = symbol_to_identifier_slice(sym_token)
+              value_span = Span.new(
+                sym_token.span.start_line,
+                sym_token.span.start_column + 1,  # skip the ':'
+                sym_token.span.start_offset + 1,
+                sym_token.span.end_line,
+                sym_token.span.end_column,
+                sym_token.span.end_offset
+              )
+              value_expr = @arena.add(IdentifierNode.new(value_span, value_slice))
+              advance  # consume Symbol
+              skip_whitespace_and_optional_newlines
+              # Create first entry and continue
+              return parse_named_tuple_no_space_continued(lbrace, first_key_slice, first_key_span, value_expr)
+            end
             # Peek next non-trivia for ':'
             nt = peek_next_non_trivia
             debug("brace: next after identifier is #{nt.kind}")
@@ -8767,6 +8808,117 @@ module CrystalV2
           ))
         end
 
+        # Parse named tuple literal with no-space form: {foo:a, bar:b}
+        # First entry already parsed, this handles remaining entries
+        private def parse_named_tuple_no_space_continued(
+          lbrace : Token,
+          first_key : Bytes,
+          first_key_span : Span,
+          first_value : ExprId
+        ) : ExprId
+          entries_b = SmallVec(NamedTupleEntry, 4).new
+
+          # Create first entry
+          first_value_span = @arena[first_value].span
+          entries_b << NamedTupleEntry.new(
+            first_key,
+            first_value,
+            first_key_span,
+            first_value_span
+          )
+
+          # Parse remaining entries
+          loop do
+            case current_token.kind
+            when Token::Kind::Comma
+              advance  # consume ,
+              skip_whitespace_and_optional_newlines
+
+              break if current_token.kind == Token::Kind::RBrace
+
+              # Parse key
+              key_token = current_token
+              unless key_token.kind == Token::Kind::Identifier
+                emit_unexpected(key_token)
+                return PREFIX_ERROR
+              end
+
+              # Check for no-space form (key:value where next token is Symbol)
+              if named_arg_no_space?
+                key_slice = key_token.slice
+                key_span = key_token.span
+                advance  # consume identifier
+
+                # Current token is Symbol like `:value`
+                sym_token = current_token
+                value_slice = symbol_to_identifier_slice(sym_token)
+                value_span = Span.new(
+                  sym_token.span.start_line,
+                  sym_token.span.start_column + 1,
+                  sym_token.span.start_offset + 1,
+                  sym_token.span.end_line,
+                  sym_token.span.end_column,
+                  sym_token.span.end_offset
+                )
+                value_expr = @arena.add(IdentifierNode.new(value_span, value_slice))
+                advance  # consume Symbol
+                skip_whitespace_and_optional_newlines
+
+                entries_b << NamedTupleEntry.new(
+                  key_slice,
+                  value_expr,
+                  key_span,
+                  value_span
+                )
+              else
+                # With-space form: key: value
+                key_slice = key_token.slice
+                key_span = key_token.span
+                advance
+                skip_whitespace_and_optional_newlines
+
+                unless current_token.kind == Token::Kind::Colon
+                  emit_unexpected(current_token)
+                  return PREFIX_ERROR
+                end
+                advance  # consume :
+                skip_whitespace_and_optional_newlines
+
+                value = parse_op_assign
+                return PREFIX_ERROR if value.invalid?
+                value_span = @arena[value].span
+                skip_whitespace_and_optional_newlines
+
+                entries_b << NamedTupleEntry.new(
+                  key_slice,
+                  value,
+                  key_span,
+                  value_span
+                )
+              end
+
+            when Token::Kind::RBrace
+              break
+            else
+              emit_unexpected(current_token)
+              return PREFIX_ERROR
+            end
+          end
+
+          # Expect closing brace
+          return PREFIX_ERROR unless current_token.kind == Token::Kind::RBrace
+          closing_brace = current_token
+          advance
+
+          @brace_depth -= 1 if @brace_depth > 0
+
+          named_tuple_span = lbrace.span.cover(closing_brace.span)
+          @arena.add_typed(NamedTupleLiteralNode.new(
+            named_tuple_span,
+            entries_b.to_a
+          ))
+        end
+
         # Phase 14: Parse empty hash literal
         private def parse_hash_literal_from_lbrace(lbrace : Token) : ExprId
           # Current token is RBrace
@@ -9168,28 +9320,53 @@ module CrystalV2
                 # Phase NAMED_ARGUMENTS: Check if this is named argument BEFORE parsing expression
                 # Pattern: identifier/keyword : value
                 # This handles keywords like 'of:' which wouldn't create Identifier nodes
+                # Also handles no-space form: `bar:a` where lexer produces Identifier + Symbol
                 if named_arg_start?
                   # Named argument detected
                   name_token = current_token
                   name_slice = name_token.slice
                   name_span = name_token.span
+
+                  # Check if this is the no-space form (bar:a) where next is Symbol
+                  no_space_form = named_arg_no_space?
+
                   advance  # consume name (identifier/keyword)
-                  skip_whitespace_and_optional_newlines
 
-                  # Expect colon
-                  unless current_token.kind == Token::Kind::Colon
-                    emit_unexpected(current_token)
-                    return PREFIX_ERROR
+                  if no_space_form
+                    # No-space form: current token is now Symbol like `:a`
+                    # The value identifier is embedded in the symbol slice (minus leading ':')
+                    sym_token = current_token
+                    value_slice = symbol_to_identifier_slice(sym_token)
+                    value_span = Span.new(
+                      sym_token.span.start_line,
+                      sym_token.span.start_column + 1,  # skip the ':'
+                      sym_token.span.start_offset + 1,
+                      sym_token.span.end_line,
+                      sym_token.span.end_column,
+                      sym_token.span.end_offset
+                    )
+                    # Create Identifier node for the value
+                    value_expr = @arena.add(IdentifierNode.new(value_span, value_slice))
+                    advance  # consume the Symbol
+                    skip_whitespace_and_optional_newlines
+                  else
+                    skip_whitespace_and_optional_newlines
+
+                    # Expect colon (with-space form)
+                    unless current_token.kind == Token::Kind::Colon
+                      emit_unexpected(current_token)
+                      return PREFIX_ERROR
+                    end
+                    advance  # consume ':'
+                    skip_whitespace_and_optional_newlines
+
+                    # Parse value expression (allow assignments inside args)
+                    @no_type_declaration += 1
+                    value_expr = with_pointer_suffix { parse_op_assign }
+                    @no_type_declaration -= 1
+                    return PREFIX_ERROR if value_expr.invalid?
+                    value_span = @arena[value_expr].span
                   end
-                  advance  # consume ':'
-                  skip_whitespace_and_optional_newlines
-
-                  # Parse value expression (allow assignments inside args)
-                  @no_type_declaration += 1
-                  value_expr = with_pointer_suffix { parse_op_assign }
-                  @no_type_declaration -= 1
-                  return PREFIX_ERROR if value_expr.invalid?
-                  value_span = @arena[value_expr].span
 
                   # Create NamedArgument (zero-copy)
                   named_b << NamedArgument.new(name_slice, value_expr, name_span, value_span)
@@ -9876,7 +10053,7 @@ module CrystalV2
                Token::Kind::RParen, Token::Kind::RBracket, Token::Kind::RBrace,
                Token::Kind::MacroExprEnd,
                Token::Kind::Comma,
-               Token::Kind::Amp,
+               # Note: Amp is NOT listed here because &.method block shorthand is valid as argument
                Token::Kind::LBrace, Token::Kind::Do,
                Token::Kind::Eq, Token::Kind::Colon,
                Token::Kind::OrOrEq, Token::Kind::AndAndEq,
@@ -10685,9 +10862,21 @@ module CrystalV2
 
         # Phase NAMED_ARGUMENTS: Check if current position is start of named argument
         # Pattern: (identifier or keyword) followed by ':' but not '::'
+        # Also handles the no-space case: identifier immediately followed by Symbol token (bar:a)
         private def named_arg_start? : Bool
           return false unless token_can_be_arg_name?(current_token)
 
+          next_token = peek_token
+          # Handle no-space named arg: `bar:a` where lexer produces Identifier + Symbol
+          # The identifier and symbol are adjacent (no whitespace between them)
+          if next_token.kind == Token::Kind::Symbol
+            # Check that they are truly adjacent (no whitespace gap)
+            curr_end = current_token.span.end_offset
+            sym_start = next_token.span.start_offset
+            return curr_end == sym_start
+          end
+
+          # Skip trivia to find next meaningful token
           next_token = peek_next_non_trivia
           return false unless next_token.kind == Token::Kind::Colon
 
@@ -10709,6 +10898,26 @@ module CrystalV2
             else
               return false
             end
+          end
+        end
+
+        # Check if we're in a no-space named arg form: `bar:a` (Identifier + Symbol adjacent)
+        # Returns true if peek_token is a Symbol adjacent to current token
+        private def named_arg_no_space? : Bool
+          next_token = peek_token
+          return false unless next_token.kind == Token::Kind::Symbol
+          current_token.span.end_offset == next_token.span.start_offset
+        end
+
+        # For no-space named args like `bar:a`, the symbol slice is `:a`.
+        # Extract the identifier part without the leading colon.
+        private def symbol_to_identifier_slice(sym_token : Token) : Bytes
+          slice = sym_token.slice
+          # Skip the leading ':' character
+          if slice.size > 1 && slice[0] == ':'.ord.to_u8
+            Slice.new(slice.to_unsafe + 1, slice.size - 1)
+          else
+            slice
           end
         end
 
@@ -12176,8 +12385,61 @@ module CrystalV2
             # After consuming dot, manually create MemberAccess (dot already consumed)
             # Same logic as AmpDot case
             if current_token.kind == Token::Kind::LBracket
-              # Indexing: &.[0]
-              call_expr = parse_index(temp_var)
+              # Check if this is method name [] or []= vs indexing [expr]
+              # Peek ahead: if next is ] or ]= then it's method name, else indexing
+              lbracket_token = current_token
+              advance  # consume [
+              if current_token.kind == Token::Kind::RBracket
+                # Method name [] or []=
+                advance  # consume ]
+                method_name = if current_token.kind == Token::Kind::Eq
+                  advance  # consume =
+                  @string_pool.intern(Slice(UInt8).new("[]=".to_unsafe, 3))
+                else
+                  @string_pool.intern(Slice(UInt8).new("[]".to_unsafe, 2))
+                end
+                member_span = location_start.cover(current_token.span)
+                call_expr = @arena.add_typed(MemberAccessNode.new(
+                  member_span,
+                  temp_var,
+                  method_name
+                ))
+              else
+                # Indexing: &.[0] - need to parse argument and create IndexNode/CallNode
+                skip_trivia
+                @bracket_depth += 1
+                indexes_b = SmallVec(ExprId, 3).new
+                named_b = SmallVec(NamedArgument, 2).new
+                unless current_token.kind == Token::Kind::RBracket
+                  loop do
+                    expr = parse_op_assign
+                    if expr.invalid?
+                      @bracket_depth -= 1
+                      return PREFIX_ERROR
+                    end
+                    indexes_b << expr
+                    skip_whitespace_and_optional_newlines
+                    break unless current_token.kind == Token::Kind::Comma
+                    advance
+                    skip_whitespace_and_optional_newlines
+                    break if current_token.kind == Token::Kind::RBracket
+                  end
+                end
+                @bracket_depth -= 1
+                expect_operator(Token::Kind::RBracket)
+
+                # Build IndexNode for temp_var[args]
+                acc_span = @arena[temp_var].span.cover(lbracket_token.span)
+                indexes_b.each { |idx| acc_span = acc_span.cover(@arena[idx].span) }
+                if closing_span = previous_token.try(&.span)
+                  acc_span = acc_span.cover(closing_span)
+                end
+                call_expr = @arena.add_typed(IndexNode.new(
+                  acc_span,
+                  temp_var,
+                  indexes_b.to_a
+                ))
+              end
             else
               # Everything else: identifier, keyword, or operator as method name
               method_name = current_token.slice
@@ -12218,8 +12480,62 @@ module CrystalV2
             # AmpDot is a single token, dot already consumed
             # Current token can be: identifier, keyword (select), operator (+), or [ for indexing
             if current_token.kind == Token::Kind::LBracket
-              # Indexing: &.[0]
-              call_expr = parse_index(temp_var)
+              # Check if this is a method name [] or []= vs indexing [expr]
+              # Peek ahead: if next is ] or ]= then it's method name, else indexing
+              lbracket_token = current_token
+              advance  # consume [
+              if current_token.kind == Token::Kind::RBracket
+                # Method name [] or []=
+                advance  # consume ]
+                method_name = if current_token.kind == Token::Kind::Eq
+                  advance  # consume =
+                  @string_pool.intern(Slice(UInt8).new("[]=".to_unsafe, 3))
+                else
+                  @string_pool.intern(Slice(UInt8).new("[]".to_unsafe, 2))
+                end
+                member_span = location_start.cover(current_token.span)
+                call_expr = @arena.add_typed(MemberAccessNode.new(
+                  member_span,
+                  temp_var,
+                  method_name
+                ))
+              else
+                # Indexing: &.[0] - reparse as index
+                # Create a call with method name [] and argument
+                skip_trivia
+                args_b = SmallVec(ExprId, 2).new
+                loop do
+                  arg = parse_expression(0)
+                  return PREFIX_ERROR if arg.invalid?
+                  args_b << arg
+                  skip_trivia
+                  break if current_token.kind != Token::Kind::Comma
+                  advance
+                  skip_trivia
+                end
+                unless current_token.kind == Token::Kind::RBracket
+                  emit_unexpected(current_token)
+                  return PREFIX_ERROR
+                end
+                rbracket_token = current_token
+                advance  # consume ]
+
+                # Create index call
+                method_name = @string_pool.intern(Slice(UInt8).new("[]".to_unsafe, 2))
+                call_span = lbracket_token.span.cover(rbracket_token.span)
+                call_expr = @arena.add_typed(MemberAccessNode.new(
+                  location_start.cover(rbracket_token.span),
+                  temp_var,
+                  method_name
+                ))
+                # Wrap in CallNode with the args
+                call_expr = @arena.add_typed(CallNode.new(
+                  location_start.cover(rbracket_token.span),
+                  call_expr,
+                  args_b.to_a,
+                  nil
+                ))
+              end
             else
               # Everything else: identifier, keyword, or operator as method name
               # In Crystal, keywords and operators can be method names after dot
