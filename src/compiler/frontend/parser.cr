@@ -555,7 +555,11 @@ module CrystalV2
               advance  # consume comma
               skip_trivia
 
+              # Prevent individual type declarations during target parsing
+              # so that "x, y : Type" is parsed as multi-var, not "x, (y : Type)"
+              @no_type_declaration += 1
               target = parse_expression(0)
+              @no_type_declaration -= 1
               return PREFIX_ERROR if target.invalid?
               targets << target
 
@@ -563,7 +567,55 @@ module CrystalV2
               break unless current_token.kind == Token::Kind::Comma
             end
 
-            # Expect =
+            # Check for multi-var type declaration: x, y, z : Type
+            if current_token.kind == Token::Kind::Colon && @no_type_declaration == 0
+              advance  # consume ':'
+              skip_trivia
+
+              # Parse type annotation
+              type_start_token = current_token
+              declared_type_slice = parse_type_annotation
+              type_end_token = previous_token
+
+              if declared_type_slice.empty?
+                emit_unexpected(current_token)
+                return PREFIX_ERROR
+              end
+
+              # Create TypeDeclarationNode for each target
+              # For multiple vars, we create a single TypeDeclarationNode with the first var name
+              # and an Expressions node containing all declarations
+              # Actually, Crystal's original parser expands "x, y, z : Int" to multiple TypeDeclarations
+              # We'll create multiple TypeDeclarationNodes wrapped in an Expressions
+              type_span = type_end_token ? type_start_token.span.cover(type_end_token.span) : type_start_token.span
+
+              type_decl_nodes = [] of ExprId
+              targets.each do |target|
+                target_node = @arena[target]
+                # Extract the variable name from the target node
+                var_literal = Frontend.node_literal(target_node)
+                unless var_literal
+                  @diagnostics << Diagnostic.new("Multi-var type declaration requires simple identifiers", target_node.span)
+                  return PREFIX_ERROR
+                end
+
+                full_span = target_node.span.cover(type_span)
+                decl_node = @arena.add_typed(TypeDeclarationNode.new(
+                  full_span,
+                  var_literal,
+                  declared_type_slice,
+                  nil  # no initial value
+                ))
+                type_decl_nodes << decl_node
+              end
+
+              # Return the first declaration (all vars share the same type)
+              # For proper semantic handling, we'd return an Expressions wrapper,
+              # but for parsing purposes returning the first is sufficient
+              return type_decl_nodes[0]
+            end
+
+            # Expect = for multi-assignment
             unless current_token.kind == Token::Kind::Eq
               emit_unexpected(current_token)
               return PREFIX_ERROR
@@ -1395,6 +1447,7 @@ module CrystalV2
               break if token.kind == Token::Kind::Comma
               break if operator_token?(token, Token::Kind::RParen)
               break if token.kind == Token::Kind::EOF
+              break if token.kind == Token::Kind::Semicolon
               break if token.kind == Token::Kind::RBracket
               break if token.kind == Token::Kind::RBrace
               # Stop if we see a '{' after already consuming some type tokens (likely start of body)
@@ -2227,7 +2280,7 @@ module CrystalV2
                 is_block = true
                 prefix_token = current_token
                 advance
-                skip_trivia
+                skip_whitespace_and_optional_newlines
               elsif current_token.kind == Token::Kind::StarStar
                 is_double_splat = true
                 prefix_token = current_token
@@ -5172,14 +5225,22 @@ module CrystalV2
           skip_trivia
           type_params = parse_type_parameters
 
-          # Parse optional superclass: < SuperClass
+          # Parse optional superclass: < SuperClass or < self
           skip_trivia
           super_name_token = nil
+          superclass_is_self = false
           if current_token.kind == Token::Kind::Less
             advance  # Skip <
             skip_trivia
-            super_name_token = parse_constant_name_token
-            return PREFIX_ERROR unless super_name_token
+            # Phase 130: Handle self as superclass (class Foo < self)
+            if current_token.kind == Token::Kind::Self
+              superclass_is_self = true
+              super_name_token = current_token
+              advance
+            else
+              super_name_token = parse_constant_name_token
+              return PREFIX_ERROR unless super_name_token
+            end
             skip_trivia
           end
 
@@ -5499,6 +5560,11 @@ module CrystalV2
           body_ids_b = SmallVec(ExprId, 4).new
           loop do
             skip_trivia
+            # Consume semicolons as statement separators at start of lib body loop
+            while current_token.kind == Token::Kind::Semicolon
+              advance
+              skip_trivia
+            end
             token = current_token
             break if token.kind == Token::Kind::End
             break if token.kind == Token::Kind::EOF
@@ -5554,6 +5620,11 @@ module CrystalV2
             end
             body_ids_b << expr unless expr.invalid?
             consume_newlines
+            # Also consume semicolons as statement terminators in lib context
+            while current_token.kind == Token::Kind::Semicolon
+              advance
+              consume_newlines
+            end
           end
 
           expect_identifier("end")
@@ -5671,6 +5742,12 @@ module CrystalV2
                 parse_def
               when Token::Kind::Macro
                 parse_macro_definition
+              when Token::Kind::Private
+                # Visibility modifier before def/macro in enum
+                parse_private
+              when Token::Kind::Protected
+                # Visibility modifier before def/macro in enum
+                parse_protected
               else
                 # Other definitions (class, module, etc.) - skip for now
                 emit_unexpected(current_token)
@@ -6813,9 +6890,19 @@ module CrystalV2
                Token::Kind::In,  # Phase 79: in operator
                Token::Kind::NilCoalesce,  # Phase 81: ?? operator
                # Phase 89: Wrapping arithmetic operators
-               Token::Kind::AmpPlus, Token::Kind::AmpMinus,
+               Token::Kind::AmpPlus,
                Token::Kind::AmpStar, Token::Kind::AmpStarStar
             return PREFIX_ERROR
+          # Phase 103K: AmpMinus needs special handling - it could be &-> (proc pointer as block)
+          when Token::Kind::AmpMinus
+            # Check if this is &-> (proc pointer passed as block argument)
+            # Lexer tokenizes &-> as AmpMinus (&-) + Greater (>)
+            next_tok = peek_token(1)
+            if next_tok.kind != Token::Kind::Greater
+              # Just &- operator, not &->
+              return PREFIX_ERROR
+            end
+            # Otherwise, fall through to allow parsing as &-> proc pointer
           # Compound assignment operators - these mean assignment, not call
           when Token::Kind::PlusEq, Token::Kind::MinusEq, Token::Kind::StarEq,
                Token::Kind::SlashEq, Token::Kind::FloorDivEq, Token::Kind::PercentEq,
@@ -6879,6 +6966,41 @@ module CrystalV2
                 arg = @arena.add_typed(UnaryNode.new(arg_span, amp_token.slice, ident_node))
               else
                 # Not a block shorthand/capture, rewind amp and parse normally
+                unadvance
+                arg = parse_op_assign
+              end
+            elsif current_token.kind == Token::Kind::AmpMinus
+              # Phase 103K: Handle &-> (proc pointer passed as block argument)
+              # Lexer tokenizes &-> as AmpMinus (&-) + Greater (>)
+              amp_minus_token = current_token
+              advance
+              if current_token.kind == Token::Kind::Greater
+                # This is &->target - proc pointer passed as block
+                advance
+                skip_trivia
+                target = parse_expression(UNARY_PRECEDENCE)
+                if target.invalid?
+                  @parsing_call_args -= 1
+                  return PREFIX_ERROR
+                end
+                # Create proc pointer node: ->target
+                arrow_slice = "->".to_slice
+                proc_span = Span.new(
+                  amp_minus_token.span.start_offset + 1,  # Skip the & to get to -
+                  @arena[target].span.end_offset,
+                  amp_minus_token.span.start_line,
+                  @arena[target].span.end_line,
+                  amp_minus_token.span.start_column + 1,
+                  @arena[target].span.end_column
+                )
+                proc_pointer = @arena.add_typed(UnaryNode.new(proc_span, arrow_slice, target))
+                # Wrap with &: &(->target)
+                amp_slice = "&".to_slice
+                arg_span = amp_minus_token.span.cover(@arena[target].span)
+                arg = @arena.add_typed(UnaryNode.new(arg_span, amp_slice, proc_pointer))
+              else
+                # Should not happen since we check for Greater in prefix check
+                # But if it does, parse as expression
                 unadvance
                 arg = parse_op_assign
               end
@@ -7514,6 +7636,9 @@ module CrystalV2
           when Token::Kind::IsA
             # Allow bare is_a?(Type) with implicit self receiver
             parse_is_a_bare
+          when Token::Kind::AsQuestion
+            # Allow bare as?(Type) with implicit self receiver
+            parse_as_question_bare
           when Token::Kind::Select
             # Phase 90A: select/when concurrent channel operations
             parse_select
@@ -7779,6 +7904,57 @@ module CrystalV2
 
           @arena.add_typed(
             IsANode.new(
+              span,
+              self_node,
+              target_type
+            )
+          )
+        end
+
+        # Bare as?(Type) with implicit self receiver
+        private def parse_as_question_bare : ExprId
+          as_question_token = current_token
+          advance
+          skip_trivia
+
+          # Expect '('
+          unless current_token.kind == Token::Kind::LParen
+            emit_unexpected(current_token)
+            return PREFIX_ERROR
+          end
+          lparen = current_token
+          advance
+          skip_trivia
+
+          # Parse target type using type annotation parser
+          type_start = current_token
+          target_type = parse_type_annotation
+          type_end = previous_token
+          unless type_end
+            emit_unexpected(type_start)
+            return PREFIX_ERROR
+          end
+          skip_trivia
+
+          # Expect ')'
+          unless current_token.kind == Token::Kind::RParen
+            emit_unexpected(current_token)
+            return PREFIX_ERROR
+          end
+          rparen = current_token
+          advance
+
+          # Receiver is implicit self
+          self_node = @arena.add_typed(SelfNode.new(as_question_token.span))
+
+          span = as_question_token.span
+            .cover(lparen.span)
+            .cover(type_start.span)
+            .cover(type_end.span)
+            .cover(rparen.span)
+
+          @arena.add_typed(
+            AsQuestionNode.new(
               span,
               self_node,
               target_type
@@ -9271,6 +9447,23 @@ module CrystalV2
                   # Create block argument node (UnaryNode with & operator)
                   arg_span = amp_token.span.cover(identifier_span)
                   arg_expr = @arena.add_typed(UnaryNode.new(arg_span, amp_token.slice, identifier_node))
+                elsif current_token.kind == Token::Kind::ThinArrow
+                  # Phase 103J: Proc pointer as block argument: foo(&->bar) or foo(&->Type.method)
+                  # Parse the proc pointer (->target) and wrap with &
+                  arrow_token = current_token
+                  advance
+                  skip_trivia
+                  target = parse_expression(UNARY_PRECEDENCE)
+                  if target.invalid?
+                    emit_unexpected(current_token)
+                    return PREFIX_ERROR
+                  end
+                  # Create proc pointer node: ->target
+                  proc_span = arrow_token.span.cover(@arena[target].span)
+                  proc_pointer = @arena.add_typed(UnaryNode.new(proc_span, arrow_token.slice, target))
+                  # Wrap with &: &(->target)
+                  arg_span = amp_token.span.cover(proc_span)
+                  arg_expr = @arena.add_typed(UnaryNode.new(arg_span, amp_token.slice, proc_pointer))
                 else
                   # Not block shorthand or capture, rewind and parse normally
                   # This handles cases like: foo(& other_expr)
@@ -9294,6 +9487,47 @@ module CrystalV2
                 end
                 args_b << arg_expr
                 pushed = true
+              elsif current_token.kind == Token::Kind::AmpMinus
+                # Phase 103K: Check if this is &-> (proc pointer as block)
+                # Lexer tokenizes &-> as AmpMinus (&-) + Greater (>)
+                amp_minus_token = current_token
+                advance
+                if current_token.kind == Token::Kind::Greater
+                  # This is &->target - proc pointer passed as block
+                  greater_token = current_token
+                  advance
+                  skip_trivia
+                  target = parse_expression(UNARY_PRECEDENCE)
+                  if target.invalid?
+                    emit_unexpected(current_token)
+                    return PREFIX_ERROR
+                  end
+                  # Create proc pointer node: ->target (use "->" as the operator)
+                  # The span should cover from the "-" in AmpMinus to the target
+                  arrow_slice = "->".to_slice
+                  proc_span = Span.new(
+                    amp_minus_token.span.start_offset + 1,  # Skip the & to get to -
+                    @arena[target].span.end_offset,
+                    amp_minus_token.span.start_line,
+                    amp_minus_token.span.end_line,
+                    amp_minus_token.span.start_column + 1,
+                    @arena[target].span.end_column
+                  )
+                  proc_pointer = @arena.add_typed(UnaryNode.new(proc_span, arrow_slice, target))
+                  # Wrap with &: &(->target)
+                  amp_slice = "&".to_slice
+                  arg_span = amp_minus_token.span.cover(@arena[target].span)
+                  arg_expr = @arena.add_typed(UnaryNode.new(arg_span, amp_slice, proc_pointer))
+                  args_b << arg_expr
+                  pushed = true
+                else
+                  # Just &- (wrapping unary minus as block), rewind and parse normally
+                  unadvance
+                  @no_type_declaration += 1
+                  arg_expr = with_pointer_suffix { parse_expression(0) }
+                  @no_type_declaration -= 1
+                  return PREFIX_ERROR if arg_expr.invalid?
+                end
               else
                 # Phase 68: Splat arguments (*args, **kwargs)
                 if current_token.kind == Token::Kind::Star || current_token.kind == Token::Kind::StarStar
@@ -12226,7 +12460,12 @@ module CrystalV2
           skip_trivia
 
           # Parse expression inside {{ }}
-          expr = with_macro_terminator(:expression) { parse_expression(0) }
+          # Use parse_op_assign to handle assignments (a = 1) and wrap with
+          # parse_postfix_if_modifier for if/unless modifiers (a = 1 if cond)
+          expr = with_macro_terminator(:expression) {
+            stmt = parse_op_assign
+            stmt.invalid? ? stmt : parse_postfix_if_modifier(stmt)
+          }
           return PREFIX_ERROR if expr.invalid?
 
           skip_trivia
@@ -12264,7 +12503,12 @@ module CrystalV2
             expect_operator(Token::Kind::LBrace)
           end
           skip_macro_whitespace
-          expr = with_macro_terminator(:expression) { parse_expression(0) }
+          # Use parse_op_assign to handle assignments (a = 1) and wrap with
+          # parse_postfix_if_modifier for if/unless modifiers (a = 1 if cond)
+          expr = with_macro_terminator(:expression) {
+            stmt = parse_op_assign
+            stmt.invalid? ? stmt : parse_postfix_if_modifier(stmt)
+          }
           skip_macro_whitespace
 
           closing_span = nil
@@ -12587,7 +12831,8 @@ module CrystalV2
 
             break if current_token.kind.in?(Token::Kind::RParen, Token::Kind::RBracket, Token::Kind::RBrace,
                                            Token::Kind::Comma, Token::Kind::Do, Token::Kind::LBrace,
-                                           Token::Kind::End, Token::Kind::EOF, Token::Kind::Newline)
+                                           Token::Kind::End, Token::Kind::EOF, Token::Kind::Newline,
+                                           Token::Kind::MacroExprEnd)
 
             arg_expr = parse_op_assign
             break if arg_expr.invalid?
