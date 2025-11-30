@@ -2579,6 +2579,9 @@ module CrystalV2
           best_match
         end
 
+        # Prevent LLVM from inlining this large pattern-matching function
+        # to reduce release build time (94-type union causes compile time explosion)
+        @[NoInline]
         private def refine_member_or_identifier(arena : Frontend::ArenaLike, expr_id : Frontend::ExprId, offset : Int32) : Frontend::ExprId?
           node = arena[expr_id]
           case node
@@ -2768,6 +2771,9 @@ module CrystalV2
           nil
         end
 
+        # Prevent LLVM from inlining - this is the largest pattern-matching function
+        # (~100 lines of case on 94-type union, called recursively for AST traversal)
+        @[NoInline]
         private def each_child_expr(arena : Frontend::ArenaLike, expr_id : Frontend::ExprId, &block : Frontend::ExprId ->)
           node = arena[expr_id]
 
@@ -4146,6 +4152,7 @@ module CrystalV2
           end
         end
 
+        @[NoInline]
         private def segments_from_expression(arena : Frontend::ArenaLike, expr_id : Frontend::ExprId) : Array(String)?
           node = arena[expr_id]
           case node
@@ -6193,6 +6200,7 @@ module CrystalV2
           nil
         end
 
+        @[NoInline]
         private def resolve_receiver_symbol(doc_state : DocumentState, expr_id : Frontend::ExprId) : Semantic::Symbol?
           arena = doc_state.program.arena
           node = arena[expr_id]
@@ -6351,6 +6359,7 @@ module CrystalV2
         end
 
         # Extract class name from constructor call pattern (ClassName.new)
+        @[NoInline]
         private def extract_type_from_constructor(arena : Frontend::ArenaLike, expr_id : Frontend::ExprId) : String?
           node = arena[expr_id]
           case node
@@ -6390,6 +6399,7 @@ module CrystalV2
           nil
         end
 
+        @[NoInline]
         private def receiver_name_for(arena : Frontend::ArenaLike, expr_id : Frontend::ExprId) : String?
           node = arena[expr_id]
           case node
