@@ -10,6 +10,8 @@ module CrystalV2
         @diagnostics : Array(CrystalV2::Compiler::Frontend::Diagnostic)?
         property diagnostics
         @last_token_kind : Token::Kind?  # Phase 57: for regex vs division disambiguation
+        @at_statement_start : Bool       # Phase 57: Track statement boundaries for regex disambiguation
+        @whitespace_before : Bool        # Track if whitespace preceded current token (for regex disambiguation)
         @macro_expr_depth : Int32        # Track nesting of {{ ... }} macro expressions
         @string_pool : StringPool  # String interning for memory optimization
         getter string_pool : StringPool  # Week 1 Day 2: expose for parser generic type interning
@@ -21,6 +23,8 @@ module CrystalV2
           @column = 1
           @processed_strings = [] of Bytes  # Phase 54: storage for escape-processed strings
           @last_token_kind = nil  # Phase 57: for regex vs division disambiguation
+          @at_statement_start = true  # Phase 57: Start of file is statement start
+          @whitespace_before = false  # Track if whitespace preceded current token
           @macro_expr_depth = 0
           @string_pool = StringPool.new  # String interning for memory optimization
           @diagnostics = diagnostics
@@ -109,9 +113,19 @@ module CrystalV2
           end
 
           # Phase 57: Track last significant token for regex vs division disambiguation
-          # Whitespace/Newline are not significant for this purpose
-          unless token.kind == Token::Kind::Whitespace || token.kind == Token::Kind::Newline
+          # Whitespace is not significant, but Newline/Semicolon mark statement boundaries
+          case token.kind
+          when Token::Kind::Whitespace
+            # Track whitespace for regex disambiguation (foo /;/ vs foo/bar)
+            @whitespace_before = true
+          when Token::Kind::Newline, Token::Kind::Semicolon
+            # Statement boundary - next slash could be regex
+            @at_statement_start = true
+            @whitespace_before = false
+          else
             @last_token_kind = token.kind
+            @at_statement_start = false
+            @whitespace_before = false
           end
 
           token
@@ -1364,6 +1378,17 @@ module CrystalV2
 
         # Phase 57: Check if '/' can be start of regex literal based on context
         private def can_be_regex? : Bool
+          # At statement start (after newline/semicolon), slash always begins regex
+          return true if @at_statement_start
+
+          # Key insight: whitespace before '/' changes interpretation
+          # `foo/bar` -> division (no whitespace)
+          # `foo /bar/` -> method call with regex argument (whitespace before /)
+          # So if whitespace precedes '/' after an identifier, it's a regex (method call arg)
+          if @whitespace_before && @last_token_kind == Token::Kind::Identifier
+            return true
+          end
+
           # Regex can appear after operators, keywords, delimiters, or at start
           # Regex CANNOT appear after identifiers, numbers, closing brackets, or literals
           case @last_token_kind
