@@ -382,45 +382,54 @@ Deduplication: 100% (0% duplicate parsing)
 
 ## Roadmap to Production
 
-### ✅ Completed (Current Status)
+### ✅ Completed (2025-11-30)
 
-- [x] Fast streaming lexer
-- [x] Pratt parser with error recovery
-- [x] Zero-copy VirtualArena
-- [x] Parallel FileLoader with deduplication
+**Parser (97.6% parity with Crystal)**
+- [x] Fast streaming lexer with string interning
+- [x] Pratt parser with comprehensive error recovery
+- [x] 2856 tests passing (1390 ported from Crystal's parser_spec.cr)
+- [x] AST class inheritance (94 node types migrated)
+- [x] All major constructs: heredocs, blocks, case/when, rescue/ensure
+- [x] `out` keyword, inline `asm`, annotations, macros
+
+**Infrastructure**
+- [x] Zero-copy VirtualArena for multi-file AST
+- [x] Parallel FileLoader with perfect deduplication
+- [x] Real-world validation (Kemal, compiler.cr, prelude.cr)
+
+**LSP Server (~70%)**
+- [x] 21 LSP methods implemented
+- [x] Definition, references, hover, completion
+- [x] Semantic tokens, inlay hints, folding
+- [x] Formatting (54% faster than original)
+
+**Semantic (~50%)**
 - [x] Basic type inference
 - [x] Symbol table and name resolution
-- [x] Comprehensive test suite
-- [x] Real-world validation (Kemal, spec, reply)
+- [x] MVP MacroExpander (`{{ }}`, `{% if/for %}`, `@type.*`)
 
-### 🎯 Next: LSP Server (Week 1-4)
+### 🎯 Current Focus: LSP Correctness
 
-- [ ] LSP protocol implementation
-- [ ] Real-time syntax diagnostics
-- [ ] Incremental updates
-- [ ] Hover, go-to-definition, completion
-- [ ] VS Code extension
+- [ ] Diagnostics parity (no false positives)
+- [ ] Type/hover accuracy matching original compiler
+- [ ] Navigation to stdlib and macro-generated methods
 
-### 🚧 In Progress: Type Inference (Week 5-7)
+### 🚧 In Progress: Rich Macro API
 
-- [ ] Generic type instantiation
-- [ ] Union type narrowing
+- [ ] Full `@type.*` API with type graph
+- [ ] Annotation objects (`.args`, `.named_args`)
+- [ ] Macro methods (`.stringify`, `.id`, `.class?`)
+
+### 🔮 Future: Full Type System
+
+- [ ] Generic instantiation and unification
+- [ ] Union type narrowing with flow analysis
 - [ ] Method overload resolution
-- [ ] Constraint solving
 
-### 🔒 Parallel: CrystalGuard (Week 1-6)
+### 🚀 Later: Codegen
 
-- [ ] Secrets detection
-- [ ] Injection vulnerability detection
-- [ ] Taint analysis
-- [ ] CI/CD integration
-
-### 🚀 Future: Codegen (Week 8-12)
-
+- [ ] SSA-style IR
 - [ ] LLVM IR generation
-- [ ] Memory management
-- [ ] Class compilation (vtables)
-- [ ] Closure compilation
 - [ ] Self-hosting test
 
 ---
