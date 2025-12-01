@@ -115,11 +115,68 @@ Goal: v2 LSP must report only real errors and match original compiler behavior.
 
 (After LSP correctness achieved)
 
-- [ ] SSA-style IR on top of typed AST
-- [ ] LLVM-friendly representation
-- [ ] Profile-guided optimization hooks
-- [ ] Lifetime/escape analysis for ARC/GRC modes
+### 5.1 Typed SSA IR
+- [ ] Crystal-specific typed SSA IR before LLVM lowering
+- [ ] Per-function IR with explicit control flow graph
+- [ ] Effect summaries for function boundaries
+- [ ] Region-based alias analysis in IR
+
+### 5.2 Memory Management: Lifetime Coloring (No Borrow Checker)
+
+**Vision:** Compile-time memory management via AST-based lifetime analysis,
+without Rust-style lifetime annotations. Developer writes code like Ruby/Go,
+compiler infers optimal memory strategy.
+
+**Inspiration:**
+- V lang: Compiler tracks allocations/deallocations automatically
+- Linux kernel slabs: Pre-allocated memory pools per context
+- Swift ARC: Reference counting without GC pauses
+
+**Analysis Pipeline:**
+```
+AST + Type Graph
+      │
+      ├─▶ Escape Analysis (does value leave scope?)
+      ├─▶ Alias Analysis (who else references this?)
+      └─▶ Lifetime Coloring (paint value's journey)
+              │
+              ▼
+      Memory Strategy Map (per allocation site)
+```
+
+**Strategy Selection:**
+| Condition | Strategy | Runtime Cost |
+|-----------|----------|--------------|
+| No escape, short-lived | Stack allocation | 0 |
+| No escape, large/dynamic | Arena/slab | ~0 |
+| Single owner, escapes | Move semantics | 0 |
+| Multiple owners, no cycles | ARC (ref counting) | ref ops |
+| Complex cycles | Fallback to GC | GC pause |
+
+**Fiber-local Arenas (slab idea):**
+- Pre-allocate arena per fiber/coroutine
+- All allocations within fiber go to its slab
+- On fiber completion, bulk-free entire slab (single dealloc)
+
+**TODO:**
+- [ ] Escape analysis pass in IR
+- [ ] Alias analysis (region-based)
+- [ ] Lifetime coloring algorithm
+- [ ] Strategy selector based on analysis results
+- [ ] Arena allocator integration
+- [ ] ARC codegen for multi-owner cases
+- [ ] Configurable GC fallback (Boehm baseline)
+
+### 5.3 LLVM Codegen
+- [ ] Per-thread LLVM module contexts
+- [ ] Batched optimization pass pipelines
+- [ ] Profile-guided optimization (PGO) hooks
+- [ ] LTO toggle for release builds
 - [ ] Fast LLVM codegen with competitive build times
+
+### 5.4 Alternative Backends (Experimental)
+- [ ] WASM emitter through same mid-end
+- [ ] eBPF emitter for kernel/tracing use cases
 
 ---
 
@@ -127,9 +184,8 @@ Goal: v2 LSP must report only real errors and match original compiler behavior.
 
 - [ ] Semantic service/API for agents (structured queries)
 - [ ] Structural patch layer (rename/extract/move with validation)
-- [ ] Lifetime "coloring" / memory modes
 - [ ] Zero-copy name handling (interning, span-based lookups)
-- [ ] JVM/alternative backends (experimental)
+- [ ] JVM backend (experimental)
 
 ---
 
