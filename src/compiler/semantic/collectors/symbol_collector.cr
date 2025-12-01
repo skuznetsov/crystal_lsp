@@ -249,6 +249,7 @@ module CrystalV2
           symbol = table.lookup_local(name)
           module_symbol = case symbol
           when ModuleSymbol
+            symbol.node_id = node_id
             symbol
           else
             new_scope = SymbolTable.new(table)

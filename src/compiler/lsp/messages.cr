@@ -88,11 +88,14 @@ module CrystalV2
         @[JSON::Field(key: "definitionProvider")]
         property definition_provider : Bool? = true
 
+        @[JSON::Field(key: "typeDefinitionProvider")]
+        property type_definition_provider : Bool? = true
+
         @[JSON::Field(key: "referencesProvider")]
         property references_provider : Bool? = true
 
         @[JSON::Field(key: "documentHighlightProvider")]
-        property document_highlight_provider : Bool? = false
+        property document_highlight_provider : Bool? = true
 
         @[JSON::Field(key: "documentSymbolProvider")]
         property document_symbol_provider : Bool? = true

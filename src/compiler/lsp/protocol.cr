@@ -166,6 +166,24 @@ module CrystalV2
         end
       end
 
+      # Document highlight kind (LSP 3.17)
+      enum DocumentHighlightKind
+        Text  = 1
+        Read  = 2
+        Write = 3
+      end
+
+      # Document highlight - highlights a specific range in a document
+      struct DocumentHighlight
+        include JSON::Serializable
+
+        property range : Range
+        property kind : Int32?
+
+        def initialize(@range : Range, @kind : Int32? = DocumentHighlightKind::Text.value)
+        end
+      end
+
       # Completion item kinds (LSP 3.17 subset)
       enum CompletionItemKind
         Text          =  1
@@ -392,7 +410,12 @@ module CrystalV2
         def self.from_symbol(symbol : Semantic::Symbol, program : Frontend::Program) : DocumentSymbol?
           return nil if symbol.node_id.invalid?
 
-          node = program.arena[symbol.node_id]
+          node_id = symbol.node_id
+          arena = program.arena
+          # Guard against stale/invalid node_id referencing past arena bounds
+          return nil if node_id.index >= arena.size
+
+          node = arena[node_id]
           range = Range.from_span(node.span)
           selection_range = range # MVP: same as range
 

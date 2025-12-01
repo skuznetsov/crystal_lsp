@@ -7,7 +7,7 @@ module CrystalV2
 
       abstract class Symbol
         getter name : String
-        getter node_id : ExprId
+        property node_id : ExprId
         getter file_path : String?
 
         def initialize(@name : String, @node_id : ExprId, file_path : String? = nil)
