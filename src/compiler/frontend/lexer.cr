@@ -1384,9 +1384,19 @@ module CrystalV2
           # Key insight: whitespace before '/' changes interpretation
           # `foo/bar` -> division (no whitespace)
           # `foo /bar/` -> method call with regex argument (whitespace before /)
-          # So if whitespace precedes '/' after an identifier, it's a regex (method call arg)
+          # `x / y` -> division (whitespace on BOTH sides)
+          # `b // c` -> floor division (next char is '/')
+          # So if whitespace precedes '/' after an identifier, check what follows
           if @whitespace_before && @last_token_kind == Token::Kind::Identifier
-            return true
+            # Peek at char after '/' to distinguish regex from division
+            next_byte = peek_byte(1)
+            # If next char is '/' -> floor division operator (//) or (//=), not regex
+            return false if next_byte == '/'.ord.to_u8
+            # Phase 103M: If next char is '=' -> /= compound assignment, not regex
+            return false if next_byte == '='.ord.to_u8
+            # If whitespace after '/' too -> division (balanced spacing)
+            # If no whitespace after '/' -> regex (method call arg)
+            return true unless next_byte && whitespace?(next_byte)
           end
 
           # Regex can appear after operators, keywords, delimiters, or at start

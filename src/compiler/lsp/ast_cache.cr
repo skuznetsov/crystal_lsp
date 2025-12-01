@@ -231,79 +231,109 @@ module CrystalV2
           table
         end
 
+        @[NoInline]
         private def collect_strings(node : Frontend::TypedNode, table : Hash(String, UInt32), &block : String ->)
-          case node
-          when Frontend::NumberNode
-            yield String.new(node.value)
-          when Frontend::IdentifierNode
-            yield String.new(node.name)
-          when Frontend::MacroVarNode
-            yield String.new(node.name)
-          when Frontend::BinaryNode
-            yield String.new(node.operator)
-          when Frontend::StringNode
-            yield String.new(node.value)
-          when Frontend::CharNode
-            yield String.new(node.value)
-          when Frontend::RegexNode
-            yield String.new(node.pattern)
-          when Frontend::SymbolNode
-            yield String.new(node.name)
-          when Frontend::InstanceVarNode
-            yield String.new(node.name)
-          when Frontend::ClassVarNode
-            yield String.new(node.name)
-          when Frontend::GlobalNode
-            yield String.new(node.name)
-          when Frontend::UnaryNode
-            yield String.new(node.operator)
-          when Frontend::ForNode
-            yield String.new(node.variable)
-          when Frontend::MemberAccessNode
-            yield String.new(node.member)
-          when Frontend::SafeNavigationNode
-            yield String.new(node.member)
-          when Frontend::DefNode
-            yield String.new(node.name)
-            node.return_type.try { |rt| yield String.new(rt) }
-            node.params.each do |p|
+          node_kind = Frontend.node_kind(node)
+          case node_kind
+          when Frontend::NodeKind::Number
+            num_node = node.as(Frontend::NumberNode)
+            yield String.new(num_node.value)
+          when Frontend::NodeKind::Identifier
+            ident_node = node.as(Frontend::IdentifierNode)
+            yield String.new(ident_node.name)
+          when Frontend::NodeKind::MacroVar
+            macro_var = node.as(Frontend::MacroVarNode)
+            yield String.new(macro_var.name)
+          when Frontend::NodeKind::Binary
+            bin_node = node.as(Frontend::BinaryNode)
+            yield String.new(bin_node.operator)
+          when Frontend::NodeKind::String
+            str_node = node.as(Frontend::StringNode)
+            yield String.new(str_node.value)
+          when Frontend::NodeKind::Char
+            char_node = node.as(Frontend::CharNode)
+            yield String.new(char_node.value)
+          when Frontend::NodeKind::Regex
+            regex_node = node.as(Frontend::RegexNode)
+            yield String.new(regex_node.pattern)
+          when Frontend::NodeKind::Symbol
+            sym_node = node.as(Frontend::SymbolNode)
+            yield String.new(sym_node.name)
+          when Frontend::NodeKind::InstanceVar
+            ivar_node = node.as(Frontend::InstanceVarNode)
+            yield String.new(ivar_node.name)
+          when Frontend::NodeKind::ClassVar
+            cvar_node = node.as(Frontend::ClassVarNode)
+            yield String.new(cvar_node.name)
+          when Frontend::NodeKind::Global
+            global_node = node.as(Frontend::GlobalNode)
+            yield String.new(global_node.name)
+          when Frontend::NodeKind::Unary
+            unary_node = node.as(Frontend::UnaryNode)
+            yield String.new(unary_node.operator)
+          when Frontend::NodeKind::For
+            for_node = node.as(Frontend::ForNode)
+            yield String.new(for_node.variable)
+          when Frontend::NodeKind::MemberAccess
+            mem_node = node.as(Frontend::MemberAccessNode)
+            yield String.new(mem_node.member)
+          when Frontend::NodeKind::SafeNavigation
+            safe_node = node.as(Frontend::SafeNavigationNode)
+            yield String.new(safe_node.member)
+          when Frontend::NodeKind::Def
+            def_node = node.as(Frontend::DefNode)
+            yield String.new(def_node.name)
+            def_node.return_type.try { |rt| yield String.new(rt) }
+            def_node.params.each do |p|
               p.name.try { |n| yield String.new(n) }
               p.external_name.try { |n| yield String.new(n) }
               p.type_annotation.try { |t| yield String.new(t) }
             end
-            node.type_params.try &.each { |tp| yield String.new(tp) }
-          when Frontend::ClassNode
-            yield String.new(node.name)
-            node.superclass.try { |s| yield String.new(s) }
-            node.type_params.try &.each { |tp| yield String.new(tp) }
-          when Frontend::ModuleNode
-            yield String.new(node.name)
-            node.type_params.try &.each { |tp| yield String.new(tp) }
-          when Frontend::StructNode
-            yield String.new(node.name)
-            node.type_params.try &.each { |tp| yield String.new(tp) }
-          when Frontend::EnumNode
-            yield String.new(node.name)
-            node.base_type.try { |bt| yield String.new(bt) }
-            node.members.each { |m| yield String.new(m.name) }
-          when Frontend::AliasNode
-            yield String.new(node.name)
-            yield String.new(node.aliased_type)
-          when Frontend::ConstantNode
-            yield String.new(node.name)
-          when Frontend::IncludeNode
-            yield String.new(node.module_path)
-          when Frontend::ExtendNode
-            yield String.new(node.module_path)
-          when Frontend::RequireNode
-            yield String.new(node.path)
-          when Frontend::LibNode
-            yield String.new(node.name)
-          when Frontend::FunNode
-            yield String.new(node.name)
-            node.return_type.try { |rt| yield String.new(rt) }
-          when Frontend::PathNode
-            node.parts.each { |p| yield String.new(p) }
+            def_node.type_params.try &.each { |tp| yield String.new(tp) }
+          when Frontend::NodeKind::Class
+            class_node = node.as(Frontend::ClassNode)
+            yield String.new(class_node.name)
+            class_node.superclass.try { |s| yield String.new(s) }
+            class_node.type_params.try &.each { |tp| yield String.new(tp) }
+          when Frontend::NodeKind::Module
+            mod_node = node.as(Frontend::ModuleNode)
+            yield String.new(mod_node.name)
+            mod_node.type_params.try &.each { |tp| yield String.new(tp) }
+          when Frontend::NodeKind::Struct
+            struct_node = node.as(Frontend::StructNode)
+            yield String.new(struct_node.name)
+            struct_node.type_params.try &.each { |tp| yield String.new(tp) }
+          when Frontend::NodeKind::Enum
+            enum_node = node.as(Frontend::EnumNode)
+            yield String.new(enum_node.name)
+            enum_node.base_type.try { |bt| yield String.new(bt) }
+            enum_node.members.each { |m| yield String.new(m.name) }
+          when Frontend::NodeKind::Alias
+            alias_node = node.as(Frontend::AliasNode)
+            yield String.new(alias_node.name)
+            yield String.new(alias_node.aliased_type)
+          when Frontend::NodeKind::Constant
+            const_node = node.as(Frontend::ConstantNode)
+            yield String.new(const_node.name)
+          when Frontend::NodeKind::Include
+            incl_node = node.as(Frontend::IncludeNode)
+            yield String.new(incl_node.module_path)
+          when Frontend::NodeKind::Extend
+            ext_node = node.as(Frontend::ExtendNode)
+            yield String.new(ext_node.module_path)
+          when Frontend::NodeKind::Require
+            req_node = node.as(Frontend::RequireNode)
+            yield String.new(req_node.path)
+          when Frontend::NodeKind::Lib
+            lib_node = node.as(Frontend::LibNode)
+            yield String.new(lib_node.name)
+          when Frontend::NodeKind::Fun
+            fun_node = node.as(Frontend::FunNode)
+            yield String.new(fun_node.name)
+            fun_node.return_type.try { |rt| yield String.new(rt) }
+          when Frontend::NodeKind::Path
+            path_node = node.as(Frontend::PathNode)
+            path_node.parts.each { |p| yield String.new(p) }
           else
             # Other nodes don't have string fields or are handled elsewhere
           end
@@ -332,567 +362,663 @@ module CrystalV2
           strings
         end
 
+@[NoInline]
         private def write_node(io : IO, node : Frontend::TypedNode, string_table : Hash(String, UInt32))
-          case node
-          when Frontend::NumberNode
+          node_kind = Frontend.node_kind(node)
+          case node_kind
+          when Frontend::NodeKind::Number
+            num_node = node.as(Frontend::NumberNode)
             io.write_byte(AstNodeTag::NumberNode.value)
-            write_span(io, node.span)
-            write_string_ref(io, String.new(node.value), string_table)
-            io.write_byte(node.kind.value)
+            write_span(io, num_node.span)
+            write_string_ref(io, String.new(num_node.value), string_table)
+            io.write_byte(num_node.kind.value)
 
-          when Frontend::IdentifierNode
+          when Frontend::NodeKind::Identifier
+            ident_node = node.as(Frontend::IdentifierNode)
             io.write_byte(AstNodeTag::IdentifierNode.value)
-            write_span(io, node.span)
-            write_string_ref(io, String.new(node.name), string_table)
+            write_span(io, ident_node.span)
+            write_string_ref(io, String.new(ident_node.name), string_table)
 
-          when Frontend::MacroVarNode
+          when Frontend::NodeKind::MacroVar
+            macro_var = node.as(Frontend::MacroVarNode)
             io.write_byte(AstNodeTag::MacroVarNode.value)
-            write_span(io, node.span)
-            write_string_ref(io, String.new(node.name), string_table)
+            write_span(io, macro_var.span)
+            write_string_ref(io, String.new(macro_var.name), string_table)
 
-          when Frontend::BinaryNode
+          when Frontend::NodeKind::Binary
+            bin_node = node.as(Frontend::BinaryNode)
             io.write_byte(AstNodeTag::BinaryNode.value)
-            write_span(io, node.span)
-            write_string_ref(io, String.new(node.operator), string_table)
-            write_expr_id(io, node.left)
-            write_expr_id(io, node.right)
+            write_span(io, bin_node.span)
+            write_string_ref(io, String.new(bin_node.operator), string_table)
+            write_expr_id(io, bin_node.left)
+            write_expr_id(io, bin_node.right)
 
-          when Frontend::CallNode
+          when Frontend::NodeKind::Call
+            call_node = node.as(Frontend::CallNode)
             io.write_byte(AstNodeTag::CallNode.value)
-            write_span(io, node.span)
-            write_expr_id(io, node.callee)
-            write_expr_id_array(io, node.args)
-            write_optional_expr_id(io, node.block)
-            write_named_args(io, node.named_args, string_table)
+            write_span(io, call_node.span)
+            write_expr_id(io, call_node.callee)
+            write_expr_id_array(io, call_node.args)
+            write_optional_expr_id(io, call_node.block)
+            write_named_args(io, call_node.named_args, string_table)
 
-          when Frontend::IfNode
+          when Frontend::NodeKind::If
+            if_node = node.as(Frontend::IfNode)
             io.write_byte(AstNodeTag::IfNode.value)
-            write_span(io, node.span)
-            write_expr_id(io, node.condition)
-            write_expr_id_array(io, node.then_body)
-            write_elsif_branches(io, node.elsifs, string_table)
-            write_optional_expr_id_array(io, node.else_body)
+            write_span(io, if_node.span)
+            write_expr_id(io, if_node.condition)
+            write_expr_id_array(io, if_node.then_body)
+            write_elsif_branches(io, if_node.elsifs, string_table)
+            write_optional_expr_id_array(io, if_node.else_body)
 
-          when Frontend::StringNode
+          when Frontend::NodeKind::String
+            str_node = node.as(Frontend::StringNode)
             io.write_byte(AstNodeTag::StringNode.value)
-            write_span(io, node.span)
-            write_string_ref(io, String.new(node.value), string_table)
+            write_span(io, str_node.span)
+            write_string_ref(io, String.new(str_node.value), string_table)
 
-          when Frontend::CharNode
+          when Frontend::NodeKind::Char
+            char_node = node.as(Frontend::CharNode)
             io.write_byte(AstNodeTag::CharNode.value)
-            write_span(io, node.span)
-            write_string_ref(io, String.new(node.value), string_table)
+            write_span(io, char_node.span)
+            write_string_ref(io, String.new(char_node.value), string_table)
 
-          when Frontend::RegexNode
+          when Frontend::NodeKind::Regex
+            regex_node = node.as(Frontend::RegexNode)
             io.write_byte(AstNodeTag::RegexNode.value)
-            write_span(io, node.span)
-            write_string_ref(io, String.new(node.pattern), string_table)
+            write_span(io, regex_node.span)
+            write_string_ref(io, String.new(regex_node.pattern), string_table)
 
-          when Frontend::BoolNode
+          when Frontend::NodeKind::Bool
+            bool_node = node.as(Frontend::BoolNode)
             io.write_byte(AstNodeTag::BoolNode.value)
-            write_span(io, node.span)
-            io.write_byte(node.value ? 1_u8 : 0_u8)
+            write_span(io, bool_node.span)
+            io.write_byte(bool_node.value ? 1_u8 : 0_u8)
 
-          when Frontend::NilNode
+          when Frontend::NodeKind::Nil
+            nil_node = node.as(Frontend::NilNode)
             io.write_byte(AstNodeTag::NilNode.value)
-            write_span(io, node.span)
+            write_span(io, nil_node.span)
 
-          when Frontend::SymbolNode
+          when Frontend::NodeKind::Symbol
+            sym_node = node.as(Frontend::SymbolNode)
             io.write_byte(AstNodeTag::SymbolNode.value)
-            write_span(io, node.span)
-            write_string_ref(io, String.new(node.name), string_table)
+            write_span(io, sym_node.span)
+            write_string_ref(io, String.new(sym_node.name), string_table)
 
-          when Frontend::ArrayLiteralNode
+          when Frontend::NodeKind::ArrayLiteral
+            arr_node = node.as(Frontend::ArrayLiteralNode)
             io.write_byte(AstNodeTag::ArrayLiteralNode.value)
-            write_span(io, node.span)
-            write_expr_id_array(io, node.elements)
-            write_optional_expr_id(io, node.of_type)
+            write_span(io, arr_node.span)
+            write_expr_id_array(io, arr_node.elements)
+            write_optional_expr_id(io, arr_node.of_type)
 
-          when Frontend::HashLiteralNode
+          when Frontend::NodeKind::HashLiteral
+            hash_node = node.as(Frontend::HashLiteralNode)
             io.write_byte(AstNodeTag::HashLiteralNode.value)
-            write_span(io, node.span)
-            write_hash_entries(io, node.entries, string_table)
-            write_optional_string_ref(io, node.of_key_type.try { |s| String.new(s) }, string_table)
-            write_optional_string_ref(io, node.of_value_type.try { |s| String.new(s) }, string_table)
+            write_span(io, hash_node.span)
+            write_hash_entries(io, hash_node.entries, string_table)
+            write_optional_string_ref(io, hash_node.of_key_type.try { |s| String.new(s) }, string_table)
+            write_optional_string_ref(io, hash_node.of_value_type.try { |s| String.new(s) }, string_table)
 
-          when Frontend::TupleLiteralNode
+          when Frontend::NodeKind::TupleLiteral
+            tuple_node = node.as(Frontend::TupleLiteralNode)
             io.write_byte(AstNodeTag::TupleLiteralNode.value)
-            write_span(io, node.span)
-            write_expr_id_array(io, node.elements)
+            write_span(io, tuple_node.span)
+            write_expr_id_array(io, tuple_node.elements)
 
-          when Frontend::NamedTupleLiteralNode
+          when Frontend::NodeKind::NamedTupleLiteral
+            named_tuple_node = node.as(Frontend::NamedTupleLiteralNode)
             io.write_byte(AstNodeTag::NamedTupleLiteralNode.value)
-            write_span(io, node.span)
-            write_named_tuple_entries(io, node.entries, string_table)
+            write_span(io, named_tuple_node.span)
+            write_named_tuple_entries(io, named_tuple_node.entries, string_table)
 
-          when Frontend::RangeNode
+          when Frontend::NodeKind::Range
+            range_node = node.as(Frontend::RangeNode)
             io.write_byte(AstNodeTag::RangeNode.value)
-            write_span(io, node.span)
-            write_expr_id(io, node.begin_expr)
-            write_expr_id(io, node.end_expr)
-            io.write_byte(node.exclusive ? 1_u8 : 0_u8)
+            write_span(io, range_node.span)
+            write_expr_id(io, range_node.begin_expr)
+            write_expr_id(io, range_node.end_expr)
+            io.write_byte(range_node.exclusive ? 1_u8 : 0_u8)
 
-          when Frontend::UnaryNode
+          when Frontend::NodeKind::Unary
+            unary_node = node.as(Frontend::UnaryNode)
             io.write_byte(AstNodeTag::UnaryNode.value)
-            write_span(io, node.span)
-            write_string_ref(io, String.new(node.operator), string_table)
-            write_expr_id(io, node.operand)
+            write_span(io, unary_node.span)
+            write_string_ref(io, String.new(unary_node.operator), string_table)
+            write_expr_id(io, unary_node.operand)
 
-          when Frontend::TernaryNode
+          when Frontend::NodeKind::Ternary
+            ternary_node = node.as(Frontend::TernaryNode)
             io.write_byte(AstNodeTag::TernaryNode.value)
-            write_span(io, node.span)
-            write_expr_id(io, node.condition)
-            write_expr_id(io, node.true_branch)
-            write_expr_id(io, node.false_branch)
+            write_span(io, ternary_node.span)
+            write_expr_id(io, ternary_node.condition)
+            write_expr_id(io, ternary_node.true_branch)
+            write_expr_id(io, ternary_node.false_branch)
 
-          when Frontend::InstanceVarNode
+          when Frontend::NodeKind::InstanceVar
+            ivar_node = node.as(Frontend::InstanceVarNode)
             io.write_byte(AstNodeTag::InstanceVarNode.value)
-            write_span(io, node.span)
-            write_string_ref(io, String.new(node.name), string_table)
+            write_span(io, ivar_node.span)
+            write_string_ref(io, String.new(ivar_node.name), string_table)
 
-          when Frontend::ClassVarNode
+          when Frontend::NodeKind::ClassVar
+            cvar_node = node.as(Frontend::ClassVarNode)
             io.write_byte(AstNodeTag::ClassVarNode.value)
-            write_span(io, node.span)
-            write_string_ref(io, String.new(node.name), string_table)
+            write_span(io, cvar_node.span)
+            write_string_ref(io, String.new(cvar_node.name), string_table)
 
-          when Frontend::GlobalNode
+          when Frontend::NodeKind::Global
+            global_node = node.as(Frontend::GlobalNode)
             io.write_byte(AstNodeTag::GlobalNode.value)
-            write_span(io, node.span)
-            write_string_ref(io, String.new(node.name), string_table)
+            write_span(io, global_node.span)
+            write_string_ref(io, String.new(global_node.name), string_table)
 
-          when Frontend::SelfNode
+          when Frontend::NodeKind::Self
+            self_node = node.as(Frontend::SelfNode)
             io.write_byte(AstNodeTag::SelfNode.value)
-            write_span(io, node.span)
+            write_span(io, self_node.span)
 
-          when Frontend::ImplicitObjNode
+          when Frontend::NodeKind::ImplicitObj
+            implicit_node = node.as(Frontend::ImplicitObjNode)
             io.write_byte(AstNodeTag::ImplicitObjNode.value)
-            write_span(io, node.span)
+            write_span(io, implicit_node.span)
 
-          when Frontend::UnlessNode
+          when Frontend::NodeKind::Unless
+            unless_node = node.as(Frontend::UnlessNode)
             io.write_byte(AstNodeTag::UnlessNode.value)
-            write_span(io, node.span)
-            write_expr_id(io, node.condition)
-            write_expr_id_array(io, node.then_branch)
-            write_optional_expr_id_array(io, node.else_branch)
+            write_span(io, unless_node.span)
+            write_expr_id(io, unless_node.condition)
+            write_expr_id_array(io, unless_node.then_branch)
+            write_optional_expr_id_array(io, unless_node.else_branch)
 
-          when Frontend::WhileNode
+          when Frontend::NodeKind::While
+            while_node = node.as(Frontend::WhileNode)
             io.write_byte(AstNodeTag::WhileNode.value)
-            write_span(io, node.span)
-            write_expr_id(io, node.condition)
-            write_expr_id_array(io, node.body)
+            write_span(io, while_node.span)
+            write_expr_id(io, while_node.condition)
+            write_expr_id_array(io, while_node.body)
 
-          when Frontend::UntilNode
+          when Frontend::NodeKind::Until
+            until_node = node.as(Frontend::UntilNode)
             io.write_byte(AstNodeTag::UntilNode.value)
-            write_span(io, node.span)
-            write_expr_id(io, node.condition)
-            write_expr_id_array(io, node.body)
+            write_span(io, until_node.span)
+            write_expr_id(io, until_node.condition)
+            write_expr_id_array(io, until_node.body)
 
-          when Frontend::ForNode
+          when Frontend::NodeKind::For
+            for_node = node.as(Frontend::ForNode)
             io.write_byte(AstNodeTag::ForNode.value)
-            write_span(io, node.span)
-            write_string_ref(io, String.new(node.variable), string_table)
-            write_expr_id(io, node.collection)
-            write_expr_id_array(io, node.body)
+            write_span(io, for_node.span)
+            write_string_ref(io, String.new(for_node.variable), string_table)
+            write_expr_id(io, for_node.collection)
+            write_expr_id_array(io, for_node.body)
 
-          when Frontend::LoopNode
+          when Frontend::NodeKind::Loop
+            loop_node = node.as(Frontend::LoopNode)
             io.write_byte(AstNodeTag::LoopNode.value)
-            write_span(io, node.span)
-            write_expr_id_array(io, node.body)
+            write_span(io, loop_node.span)
+            write_expr_id_array(io, loop_node.body)
 
-          when Frontend::CaseNode
+          when Frontend::NodeKind::Case
+            case_node = node.as(Frontend::CaseNode)
             io.write_byte(AstNodeTag::CaseNode.value)
-            write_span(io, node.span)
-            write_optional_expr_id(io, node.value)
-            write_when_branches(io, node.when_branches, string_table)
-            write_optional_when_branches(io, node.in_branches, string_table)
-            write_optional_expr_id_array(io, node.else_branch)
+            write_span(io, case_node.span)
+            write_optional_expr_id(io, case_node.value)
+            write_when_branches(io, case_node.when_branches, string_table)
+            write_optional_when_branches(io, case_node.in_branches, string_table)
+            write_optional_expr_id_array(io, case_node.else_branch)
 
-          when Frontend::BreakNode
+          when Frontend::NodeKind::Break
+            break_node = node.as(Frontend::BreakNode)
             io.write_byte(AstNodeTag::BreakNode.value)
-            write_span(io, node.span)
-            write_optional_expr_id(io, node.value)
+            write_span(io, break_node.span)
+            write_optional_expr_id(io, break_node.value)
 
-          when Frontend::NextNode
+          when Frontend::NodeKind::Next
+            next_node = node.as(Frontend::NextNode)
             io.write_byte(AstNodeTag::NextNode.value)
-            write_span(io, node.span)
+            write_span(io, next_node.span)
 
-          when Frontend::ReturnNode
+          when Frontend::NodeKind::Return
+            return_node = node.as(Frontend::ReturnNode)
             io.write_byte(AstNodeTag::ReturnNode.value)
-            write_span(io, node.span)
-            write_optional_expr_id(io, node.value)
+            write_span(io, return_node.span)
+            write_optional_expr_id(io, return_node.value)
 
-          when Frontend::YieldNode
+          when Frontend::NodeKind::Yield
+            yield_node = node.as(Frontend::YieldNode)
             io.write_byte(AstNodeTag::YieldNode.value)
-            write_span(io, node.span)
-            write_optional_expr_id_array(io, node.args)
+            write_span(io, yield_node.span)
+            write_optional_expr_id_array(io, yield_node.args)
 
-          when Frontend::SpawnNode
+          when Frontend::NodeKind::Spawn
+            spawn_node = node.as(Frontend::SpawnNode)
             io.write_byte(AstNodeTag::SpawnNode.value)
-            write_span(io, node.span)
-            write_optional_expr_id(io, node.expression)
-            write_optional_expr_id_array(io, node.body)
+            write_span(io, spawn_node.span)
+            write_optional_expr_id(io, spawn_node.expression)
+            write_optional_expr_id_array(io, spawn_node.body)
 
-          when Frontend::SplatNode
+          when Frontend::NodeKind::Splat
+            splat_node = node.as(Frontend::SplatNode)
             io.write_byte(AstNodeTag::SplatNode.value)
-            write_span(io, node.span)
-            write_expr_id(io, node.expr)
+            write_span(io, splat_node.span)
+            write_expr_id(io, splat_node.expr)
 
-          when Frontend::IndexNode
+          when Frontend::NodeKind::Index
+            index_node = node.as(Frontend::IndexNode)
             io.write_byte(AstNodeTag::IndexNode.value)
-            write_span(io, node.span)
-            write_expr_id(io, node.object)
-            write_expr_id_array(io, node.indexes)
+            write_span(io, index_node.span)
+            write_expr_id(io, index_node.object)
+            write_expr_id_array(io, index_node.indexes)
 
-          when Frontend::MemberAccessNode
+          when Frontend::NodeKind::MemberAccess
+            member_node = node.as(Frontend::MemberAccessNode)
             io.write_byte(AstNodeTag::MemberAccessNode.value)
-            write_span(io, node.span)
-            write_expr_id(io, node.object)
-            write_string_ref(io, String.new(node.member), string_table)
+            write_span(io, member_node.span)
+            write_expr_id(io, member_node.object)
+            write_string_ref(io, String.new(member_node.member), string_table)
 
-          when Frontend::SafeNavigationNode
+          when Frontend::NodeKind::SafeNavigation
+            safe_node = node.as(Frontend::SafeNavigationNode)
             io.write_byte(AstNodeTag::SafeNavigationNode.value)
-            write_span(io, node.span)
-            write_expr_id(io, node.object)
-            write_string_ref(io, String.new(node.member), string_table)
+            write_span(io, safe_node.span)
+            write_expr_id(io, safe_node.object)
+            write_string_ref(io, String.new(safe_node.member), string_table)
 
-          when Frontend::AssignNode
+          when Frontend::NodeKind::Assign
+            assign_node = node.as(Frontend::AssignNode)
             io.write_byte(AstNodeTag::AssignNode.value)
-            write_span(io, node.span)
-            write_expr_id(io, node.target)
-            write_expr_id(io, node.value)
+            write_span(io, assign_node.span)
+            write_expr_id(io, assign_node.target)
+            write_expr_id(io, assign_node.value)
 
-          when Frontend::MultipleAssignNode
+          when Frontend::NodeKind::MultipleAssign
+            multi_node = node.as(Frontend::MultipleAssignNode)
             io.write_byte(AstNodeTag::MultipleAssignNode.value)
-            write_span(io, node.span)
-            write_expr_id_array(io, node.targets)
-            write_expr_id(io, node.value)
+            write_span(io, multi_node.span)
+            write_expr_id_array(io, multi_node.targets)
+            write_expr_id(io, multi_node.value)
 
-          when Frontend::BlockNode
+          when Frontend::NodeKind::Block
+            block_node = node.as(Frontend::BlockNode)
             io.write_byte(AstNodeTag::BlockNode.value)
-            write_span(io, node.span)
-            write_parameters(io, node.params, string_table)
-            write_expr_id_array(io, node.body)
+            write_span(io, block_node.span)
+            write_parameters(io, block_node.params, string_table)
+            write_expr_id_array(io, block_node.body)
 
-          when Frontend::ProcLiteralNode
+          when Frontend::NodeKind::ProcLiteral
+            proc_node = node.as(Frontend::ProcLiteralNode)
             io.write_byte(AstNodeTag::ProcLiteralNode.value)
-            write_span(io, node.span)
-            write_parameters(io, node.params, string_table)
-            write_optional_string_ref(io, node.return_type.try { |rt| String.new(rt) }, string_table)
-            write_expr_id_array(io, node.body)
+            write_span(io, proc_node.span)
+            write_parameters(io, proc_node.params, string_table)
+            write_optional_string_ref(io, proc_node.return_type.try { |rt| String.new(rt) }, string_table)
+            write_expr_id_array(io, proc_node.body)
 
-          when Frontend::StringInterpolationNode
+          when Frontend::NodeKind::StringInterpolation
+            interp_node = node.as(Frontend::StringInterpolationNode)
             io.write_byte(AstNodeTag::StringInterpolationNode.value)
-            write_span(io, node.span)
-            write_string_pieces(io, node.pieces, string_table)
+            write_span(io, interp_node.span)
+            write_string_pieces(io, interp_node.pieces, string_table)
 
-          when Frontend::GroupingNode
+          when Frontend::NodeKind::Grouping
+            group_node = node.as(Frontend::GroupingNode)
             io.write_byte(AstNodeTag::GroupingNode.value)
-            write_span(io, node.span)
-            write_expr_id(io, node.expression)
+            write_span(io, group_node.span)
+            write_expr_id(io, group_node.expression)
 
-          when Frontend::DefNode
+          when Frontend::NodeKind::Def
+            def_node = node.as(Frontend::DefNode)
             io.write_byte(AstNodeTag::DefNode.value)
-            write_span(io, node.span)
-            write_string_ref(io, String.new(node.name), string_table)
-            write_parameters(io, node.params, string_table)
-            write_optional_string_ref(io, node.return_type.try { |rt| String.new(rt) }, string_table)
-            write_expr_id_array(io, node.body)
-            write_optional_string_array(io, node.type_params.try { |tp| tp.map { |t| String.new(t) } }, string_table)
-            io.write_byte(node.visibility.value)
-            io.write_byte(node.is_abstract ? 1_u8 : 0_u8)
-            io.write_byte(node.is_macro_def ? 1_u8 : 0_u8)
-            write_optional_expr_id(io, node.receiver)
+            write_span(io, def_node.span)
+            write_string_ref(io, String.new(def_node.name), string_table)
+            write_parameters(io, def_node.params, string_table)
+            write_optional_string_ref(io, def_node.return_type.try { |rt| String.new(rt) }, string_table)
+            write_expr_id_array(io, def_node.body)
+            write_optional_string_array(io, def_node.type_params.try { |tp| tp.map { |t| String.new(t) } }, string_table)
+            io.write_byte(def_node.visibility.value)
+            io.write_byte(def_node.is_abstract ? 1_u8 : 0_u8)
+            io.write_byte(def_node.is_macro_def ? 1_u8 : 0_u8)
+            write_optional_expr_id(io, def_node.receiver)
 
-          when Frontend::ClassNode
+          when Frontend::NodeKind::Class
+            class_node = node.as(Frontend::ClassNode)
             io.write_byte(AstNodeTag::ClassNode.value)
-            write_span(io, node.span)
-            write_string_ref(io, String.new(node.name), string_table)
-            write_optional_string_ref(io, node.superclass.try { |s| String.new(s) }, string_table)
-            write_expr_id_array(io, node.body)
-            write_optional_string_array(io, node.type_params.try { |tp| tp.map { |t| String.new(t) } }, string_table)
-            io.write_byte(node.is_abstract ? 1_u8 : 0_u8)
+            write_span(io, class_node.span)
+            write_string_ref(io, String.new(class_node.name), string_table)
+            write_optional_string_ref(io, class_node.superclass.try { |s| String.new(s) }, string_table)
+            write_expr_id_array(io, class_node.body)
+            write_optional_string_array(io, class_node.type_params.try { |tp| tp.map { |t| String.new(t) } }, string_table)
+            io.write_byte(class_node.is_abstract ? 1_u8 : 0_u8)
 
-          when Frontend::ModuleNode
+          when Frontend::NodeKind::Module
+            mod_node = node.as(Frontend::ModuleNode)
             io.write_byte(AstNodeTag::ModuleNode.value)
-            write_span(io, node.span)
-            write_string_ref(io, String.new(node.name), string_table)
-            write_expr_id_array(io, node.body)
-            write_optional_string_array(io, node.type_params.try { |tp| tp.map { |t| String.new(t) } }, string_table)
+            write_span(io, mod_node.span)
+            write_string_ref(io, String.new(mod_node.name), string_table)
+            write_expr_id_array(io, mod_node.body)
+            write_optional_string_array(io, mod_node.type_params.try { |tp| tp.map { |t| String.new(t) } }, string_table)
 
-          when Frontend::StructNode
+          when Frontend::NodeKind::Struct
+            struct_node = node.as(Frontend::StructNode)
             io.write_byte(AstNodeTag::StructNode.value)
-            write_span(io, node.span)
-            write_string_ref(io, String.new(node.name), string_table)
-            write_expr_id_array(io, node.body)
-            write_optional_string_array(io, node.type_params.try { |tp| tp.map { |t| String.new(t) } }, string_table)
-            io.write_byte(node.is_abstract ? 1_u8 : 0_u8)
+            write_span(io, struct_node.span)
+            write_string_ref(io, String.new(struct_node.name), string_table)
+            write_expr_id_array(io, struct_node.body)
+            write_optional_string_array(io, struct_node.type_params.try { |tp| tp.map { |t| String.new(t) } }, string_table)
+            io.write_byte(struct_node.is_abstract ? 1_u8 : 0_u8)
 
-          when Frontend::EnumNode
+          when Frontend::NodeKind::Enum
+            enum_node = node.as(Frontend::EnumNode)
             io.write_byte(AstNodeTag::EnumNode.value)
-            write_span(io, node.span)
-            write_string_ref(io, String.new(node.name), string_table)
-            write_enum_members(io, node.members, string_table)
-            write_optional_string_ref(io, node.base_type.try { |bt| String.new(bt) }, string_table)
-            write_expr_id_array(io, node.methods)
+            write_span(io, enum_node.span)
+            write_string_ref(io, String.new(enum_node.name), string_table)
+            write_enum_members(io, enum_node.members, string_table)
+            write_optional_string_ref(io, enum_node.base_type.try { |bt| String.new(bt) }, string_table)
+            write_expr_id_array(io, enum_node.methods)
 
-          when Frontend::AliasNode
+          when Frontend::NodeKind::Alias
+            alias_node = node.as(Frontend::AliasNode)
             io.write_byte(AstNodeTag::AliasNode.value)
-            write_span(io, node.span)
-            write_string_ref(io, String.new(node.name), string_table)
-            write_string_ref(io, String.new(node.aliased_type), string_table)
+            write_span(io, alias_node.span)
+            write_string_ref(io, String.new(alias_node.name), string_table)
+            write_string_ref(io, String.new(alias_node.aliased_type), string_table)
 
-          when Frontend::ConstantNode
+          when Frontend::NodeKind::Constant
+            const_node = node.as(Frontend::ConstantNode)
             io.write_byte(AstNodeTag::ConstantNode.value)
-            write_span(io, node.span)
-            write_string_ref(io, String.new(node.name), string_table)
-            write_expr_id(io, node.value)
+            write_span(io, const_node.span)
+            write_string_ref(io, String.new(const_node.name), string_table)
+            write_expr_id(io, const_node.value)
 
-          when Frontend::IncludeNode
+          when Frontend::NodeKind::Include
+            incl_node = node.as(Frontend::IncludeNode)
             io.write_byte(AstNodeTag::IncludeNode.value)
-            write_span(io, node.span)
-            write_string_ref(io, String.new(node.module_path), string_table)
+            write_span(io, incl_node.span)
+            write_string_ref(io, String.new(incl_node.module_path), string_table)
 
-          when Frontend::ExtendNode
+          when Frontend::NodeKind::Extend
+            ext_node = node.as(Frontend::ExtendNode)
             io.write_byte(AstNodeTag::ExtendNode.value)
-            write_span(io, node.span)
-            write_string_ref(io, String.new(node.module_path), string_table)
+            write_span(io, ext_node.span)
+            write_string_ref(io, String.new(ext_node.module_path), string_table)
 
-          when Frontend::GetterNode
+          when Frontend::NodeKind::Getter
+            getter_node = node.as(Frontend::GetterNode)
             io.write_byte(AstNodeTag::GetterNode.value)
-            write_span(io, node.span)
-            write_accessor_specs(io, node.specs, string_table)
+            write_span(io, getter_node.span)
+            write_accessor_specs(io, getter_node.specs, string_table)
 
-          when Frontend::SetterNode
+          when Frontend::NodeKind::Setter
+            setter_node = node.as(Frontend::SetterNode)
             io.write_byte(AstNodeTag::SetterNode.value)
-            write_span(io, node.span)
-            write_accessor_specs(io, node.specs, string_table)
+            write_span(io, setter_node.span)
+            write_accessor_specs(io, setter_node.specs, string_table)
 
-          when Frontend::PropertyNode
+          when Frontend::NodeKind::Property
+            prop_node = node.as(Frontend::PropertyNode)
             io.write_byte(AstNodeTag::PropertyNode.value)
-            write_span(io, node.span)
-            write_accessor_specs(io, node.specs, string_table)
+            write_span(io, prop_node.span)
+            write_accessor_specs(io, prop_node.specs, string_table)
 
-          when Frontend::RequireNode
+          when Frontend::NodeKind::Require
+            req_node = node.as(Frontend::RequireNode)
             io.write_byte(AstNodeTag::RequireNode.value)
-            write_span(io, node.span)
-            write_string_ref(io, String.new(node.path), string_table)
+            write_span(io, req_node.span)
+            write_string_ref(io, String.new(req_node.path), string_table)
 
-          when Frontend::LibNode
+          when Frontend::NodeKind::Lib
+            lib_node = node.as(Frontend::LibNode)
             io.write_byte(AstNodeTag::LibNode.value)
-            write_span(io, node.span)
-            write_string_ref(io, String.new(node.name), string_table)
-            write_expr_id_array(io, node.body)
+            write_span(io, lib_node.span)
+            write_string_ref(io, String.new(lib_node.name), string_table)
+            write_expr_id_array(io, lib_node.body)
 
-          when Frontend::FunNode
+          when Frontend::NodeKind::Fun
+            fun_node = node.as(Frontend::FunNode)
             io.write_byte(AstNodeTag::FunNode.value)
-            write_span(io, node.span)
-            write_string_ref(io, String.new(node.name), string_table)
-            write_parameters(io, node.params, string_table)
-            write_optional_string_ref(io, node.return_type.try { |rt| String.new(rt) }, string_table)
-            write_optional_expr_id_array(io, node.body)
-            io.write_byte(node.is_variadic ? 1_u8 : 0_u8)
+            write_span(io, fun_node.span)
+            write_string_ref(io, String.new(fun_node.name), string_table)
+            write_parameters(io, fun_node.params, string_table)
+            write_optional_string_ref(io, fun_node.return_type.try { |rt| String.new(rt) }, string_table)
+            write_optional_expr_id_array(io, fun_node.body)
+            io.write_byte(fun_node.is_variadic ? 1_u8 : 0_u8)
 
-          when Frontend::GenericNode
+          when Frontend::NodeKind::Generic
+            generic_node = node.as(Frontend::GenericNode)
             io.write_byte(AstNodeTag::GenericNode.value)
-            write_span(io, node.span)
-            write_expr_id(io, node.name)
-            write_expr_id_array(io, node.type_args)
+            write_span(io, generic_node.span)
+            write_expr_id(io, generic_node.name)
+            write_expr_id_array(io, generic_node.type_args)
 
-          when Frontend::PathNode
+          when Frontend::NodeKind::Path
+            path_node = node.as(Frontend::PathNode)
             io.write_byte(AstNodeTag::PathNode.value)
-            write_span(io, node.span)
-            io.write_bytes(node.parts.size.to_u32, IO::ByteFormat::LittleEndian)
-            node.parts.each { |p| write_string_ref(io, String.new(p), string_table) }
-            io.write_byte(node.is_global ? 1_u8 : 0_u8)
+            write_span(io, path_node.span)
+            io.write_bytes(path_node.parts.size.to_u32, IO::ByteFormat::LittleEndian)
+            path_node.parts.each { |p| write_string_ref(io, String.new(p), string_table) }
+            io.write_byte(path_node.is_global ? 1_u8 : 0_u8)
 
-          when Frontend::AsNode
+          when Frontend::NodeKind::As
+            as_node = node.as(Frontend::AsNode)
             io.write_byte(AstNodeTag::AsNode.value)
-            write_span(io, node.span)
-            write_expr_id(io, node.expression)
-            write_expr_id(io, node.type_expr)
+            write_span(io, as_node.span)
+            write_expr_id(io, as_node.expression)
+            write_expr_id(io, as_node.type_expr)
 
-          when Frontend::AsQuestionNode
+          when Frontend::NodeKind::AsQuestion
+            as_q_node = node.as(Frontend::AsQuestionNode)
             io.write_byte(AstNodeTag::AsQuestionNode.value)
-            write_span(io, node.span)
-            write_expr_id(io, node.expression)
-            write_expr_id(io, node.type_expr)
+            write_span(io, as_q_node.span)
+            write_expr_id(io, as_q_node.expression)
+            write_expr_id(io, as_q_node.type_expr)
 
-          when Frontend::IsANode
+          when Frontend::NodeKind::IsA
+            isa_node = node.as(Frontend::IsANode)
             io.write_byte(AstNodeTag::IsANode.value)
-            write_span(io, node.span)
-            write_expr_id(io, node.expression)
-            write_expr_id(io, node.type_expr)
+            write_span(io, isa_node.span)
+            write_expr_id(io, isa_node.expression)
+            write_expr_id(io, isa_node.type_expr)
 
-          when Frontend::RespondsToNode
+          when Frontend::NodeKind::RespondsTo
+            responds_node = node.as(Frontend::RespondsToNode)
             io.write_byte(AstNodeTag::RespondsToNode.value)
-            write_span(io, node.span)
-            write_expr_id(io, node.expression)
-            write_string_ref(io, String.new(node.method_name), string_table)
+            write_span(io, responds_node.span)
+            write_expr_id(io, responds_node.expression)
+            write_string_ref(io, String.new(responds_node.method_name), string_table)
 
-          when Frontend::TypeofNode
+          when Frontend::NodeKind::Typeof
+            typeof_node = node.as(Frontend::TypeofNode)
             io.write_byte(AstNodeTag::TypeofNode.value)
-            write_span(io, node.span)
-            write_expr_id(io, node.expression)
+            write_span(io, typeof_node.span)
+            write_expr_id(io, typeof_node.expression)
 
-          when Frontend::SizeofNode
+          when Frontend::NodeKind::Sizeof
+            sizeof_node = node.as(Frontend::SizeofNode)
             io.write_byte(AstNodeTag::SizeofNode.value)
-            write_span(io, node.span)
-            write_expr_id(io, node.type_expr)
+            write_span(io, sizeof_node.span)
+            write_expr_id(io, sizeof_node.type_expr)
 
-          when Frontend::PointerofNode
+          when Frontend::NodeKind::Pointerof
+            ptrof_node = node.as(Frontend::PointerofNode)
             io.write_byte(AstNodeTag::PointerofNode.value)
-            write_span(io, node.span)
-            write_expr_id(io, node.expression)
+            write_span(io, ptrof_node.span)
+            write_expr_id(io, ptrof_node.expression)
 
-          when Frontend::BeginNode
+          when Frontend::NodeKind::Begin
+            begin_node = node.as(Frontend::BeginNode)
             io.write_byte(AstNodeTag::BeginNode.value)
-            write_span(io, node.span)
-            write_expr_id_array(io, node.body)
-            write_rescue_clauses(io, node.rescue_clauses, string_table)
-            write_optional_expr_id_array(io, node.else_body)
-            write_optional_expr_id_array(io, node.ensure_body)
+            write_span(io, begin_node.span)
+            write_expr_id_array(io, begin_node.body)
+            write_rescue_clauses(io, begin_node.rescue_clauses, string_table)
+            write_optional_expr_id_array(io, begin_node.else_body)
+            write_optional_expr_id_array(io, begin_node.ensure_body)
 
-          when Frontend::RaiseNode
+          when Frontend::NodeKind::Raise
+            raise_node = node.as(Frontend::RaiseNode)
             io.write_byte(AstNodeTag::RaiseNode.value)
-            write_span(io, node.span)
-            write_optional_expr_id(io, node.expression)
+            write_span(io, raise_node.span)
+            write_optional_expr_id(io, raise_node.expression)
 
-          when Frontend::VisibilityModifierNode
+          when Frontend::NodeKind::VisibilityModifier
+            vis_node = node.as(Frontend::VisibilityModifierNode)
             io.write_byte(AstNodeTag::VisibilityModifierNode.value)
-            write_span(io, node.span)
-            io.write_byte(node.visibility.value)
-            write_expr_id(io, node.expression)
+            write_span(io, vis_node.span)
+            io.write_byte(vis_node.visibility.value)
+            write_expr_id(io, vis_node.expression)
 
-          when Frontend::SuperNode
+          when Frontend::NodeKind::Super
+            super_node = node.as(Frontend::SuperNode)
             io.write_byte(AstNodeTag::SuperNode.value)
-            write_span(io, node.span)
-            write_optional_expr_id_array(io, node.args)
+            write_span(io, super_node.span)
+            write_optional_expr_id_array(io, super_node.args)
 
-          when Frontend::PreviousDefNode
+          when Frontend::NodeKind::PreviousDef
+            prev_node = node.as(Frontend::PreviousDefNode)
             io.write_byte(AstNodeTag::PreviousDefNode.value)
-            write_span(io, node.span)
-            write_optional_expr_id_array(io, node.args)
+            write_span(io, prev_node.span)
+            write_optional_expr_id_array(io, prev_node.args)
 
-          when Frontend::UninitializedNode
+          when Frontend::NodeKind::Uninitialized
+            uninit_node = node.as(Frontend::UninitializedNode)
             io.write_byte(AstNodeTag::UninitializedNode.value)
-            write_span(io, node.span)
-            write_expr_id(io, node.type_expr)
+            write_span(io, uninit_node.span)
+            write_expr_id(io, uninit_node.type_expr)
 
-          when Frontend::OffsetofNode
+          when Frontend::NodeKind::Offsetof
+            offset_node = node.as(Frontend::OffsetofNode)
             io.write_byte(AstNodeTag::OffsetofNode.value)
-            write_span(io, node.span)
-            write_expr_id(io, node.type_expr)
-            write_expr_id(io, node.field)
+            write_span(io, offset_node.span)
+            write_expr_id(io, offset_node.type_expr)
+            write_expr_id(io, offset_node.field)
 
-          when Frontend::AlignofNode
+          when Frontend::NodeKind::Alignof
+            alignof_node = node.as(Frontend::AlignofNode)
             io.write_byte(AstNodeTag::AlignofNode.value)
-            write_span(io, node.span)
-            write_expr_id(io, node.type_expr)
+            write_span(io, alignof_node.span)
+            write_expr_id(io, alignof_node.type_expr)
 
-          when Frontend::InstanceAlignofNode
+          when Frontend::NodeKind::InstanceAlignof
+            inst_alignof_node = node.as(Frontend::InstanceAlignofNode)
             io.write_byte(AstNodeTag::InstanceAlignofNode.value)
-            write_span(io, node.span)
-            write_expr_id(io, node.type_expr)
+            write_span(io, inst_alignof_node.span)
+            write_expr_id(io, inst_alignof_node.type_expr)
 
-          when Frontend::OutNode
+          when Frontend::NodeKind::Out
+            out_node = node.as(Frontend::OutNode)
             io.write_byte(AstNodeTag::OutNode.value)
-            write_span(io, node.span)
-            write_expr_id(io, node.expression)
+            write_span(io, out_node.span)
+            write_expr_id(io, out_node.expression)
 
-          when Frontend::TypeDeclarationNode
+          when Frontend::NodeKind::TypeDeclaration
+            type_decl_node = node.as(Frontend::TypeDeclarationNode)
             io.write_byte(AstNodeTag::TypeDeclarationNode.value)
-            write_span(io, node.span)
-            write_expr_id(io, node.variable)
-            write_expr_id(io, node.type_expr)
-            write_optional_expr_id(io, node.value)
+            write_span(io, type_decl_node.span)
+            write_expr_id(io, type_decl_node.variable)
+            write_expr_id(io, type_decl_node.type_expr)
+            write_optional_expr_id(io, type_decl_node.value)
 
-          when Frontend::InstanceVarDeclNode
+          when Frontend::NodeKind::InstanceVarDecl
+            ivar_decl_node = node.as(Frontend::InstanceVarDeclNode)
             io.write_byte(AstNodeTag::InstanceVarDeclNode.value)
-            write_span(io, node.span)
-            write_string_ref(io, String.new(node.name), string_table)
-            write_expr_id(io, node.type_expr)
-            write_optional_expr_id(io, node.value)
+            write_span(io, ivar_decl_node.span)
+            write_string_ref(io, String.new(ivar_decl_node.name), string_table)
+            write_expr_id(io, ivar_decl_node.type_expr)
+            write_optional_expr_id(io, ivar_decl_node.value)
 
-          when Frontend::ClassVarDeclNode
+          when Frontend::NodeKind::ClassVarDecl
+            cvar_decl_node = node.as(Frontend::ClassVarDeclNode)
             io.write_byte(AstNodeTag::ClassVarDeclNode.value)
-            write_span(io, node.span)
-            write_string_ref(io, String.new(node.name), string_table)
-            write_expr_id(io, node.type_expr)
-            write_optional_expr_id(io, node.value)
+            write_span(io, cvar_decl_node.span)
+            write_string_ref(io, String.new(cvar_decl_node.name), string_table)
+            write_expr_id(io, cvar_decl_node.type_expr)
+            write_optional_expr_id(io, cvar_decl_node.value)
 
-          when Frontend::GlobalVarDeclNode
+          when Frontend::NodeKind::GlobalVarDecl
+            gvar_decl_node = node.as(Frontend::GlobalVarDeclNode)
             io.write_byte(AstNodeTag::GlobalVarDeclNode.value)
-            write_span(io, node.span)
-            write_string_ref(io, String.new(node.name), string_table)
-            write_expr_id(io, node.type_expr)
-            write_optional_expr_id(io, node.value)
+            write_span(io, gvar_decl_node.span)
+            write_string_ref(io, String.new(gvar_decl_node.name), string_table)
+            write_expr_id(io, gvar_decl_node.type_expr)
+            write_optional_expr_id(io, gvar_decl_node.value)
 
-          when Frontend::WithNode
+          when Frontend::NodeKind::With
+            with_node = node.as(Frontend::WithNode)
             io.write_byte(AstNodeTag::WithNode.value)
-            write_span(io, node.span)
-            write_expr_id(io, node.receiver)
-            write_expr_id_array(io, node.body)
+            write_span(io, with_node.span)
+            write_expr_id(io, with_node.receiver)
+            write_expr_id_array(io, with_node.body)
 
-          when Frontend::AnnotationDefNode
+          when Frontend::NodeKind::AnnotationDef
+            anno_def_node = node.as(Frontend::AnnotationDefNode)
             io.write_byte(AstNodeTag::AnnotationDefNode.value)
-            write_span(io, node.span)
-            write_string_ref(io, String.new(node.name), string_table)
+            write_span(io, anno_def_node.span)
+            write_string_ref(io, String.new(anno_def_node.name), string_table)
 
-          when Frontend::AnnotationNode
+          when Frontend::NodeKind::Annotation
+            anno_node = node.as(Frontend::AnnotationNode)
             io.write_byte(AstNodeTag::AnnotationNode.value)
-            write_span(io, node.span)
-            write_string_ref(io, String.new(node.name), string_table)
-            write_named_args(io, node.args, string_table)
+            write_span(io, anno_node.span)
+            write_string_ref(io, String.new(anno_node.name), string_table)
+            write_named_args(io, anno_node.args, string_table)
 
-          when Frontend::UnionNode
+          when Frontend::NodeKind::Union
+            union_node = node.as(Frontend::UnionNode)
             io.write_byte(AstNodeTag::UnionNode.value)
-            write_span(io, node.span)
-            write_string_ref(io, String.new(node.name), string_table)
-            write_expr_id_array(io, node.body)
+            write_span(io, union_node.span)
+            write_string_ref(io, String.new(union_node.name), string_table)
+            write_expr_id_array(io, union_node.body)
 
-          when Frontend::SelectNode
+          when Frontend::NodeKind::Select
+            select_node = node.as(Frontend::SelectNode)
             io.write_byte(AstNodeTag::SelectNode.value)
-            write_span(io, node.span)
-            write_select_branches(io, node.when_branches)
-            write_optional_expr_id_array(io, node.else_branch)
+            write_span(io, select_node.span)
+            write_select_branches(io, select_node.when_branches)
+            write_optional_expr_id_array(io, select_node.else_branch)
 
-          when Frontend::AsmNode
+          when Frontend::NodeKind::Asm
+            asm_node = node.as(Frontend::AsmNode)
             io.write_byte(AstNodeTag::AsmNode.value)
-            write_span(io, node.span)
-            write_string_ref(io, node.template, string_table)
-            io.write_byte(node.volatile ? 1_u8 : 0_u8)
+            write_span(io, asm_node.span)
+            write_string_ref(io, asm_node.template, string_table)
+            io.write_byte(asm_node.volatile ? 1_u8 : 0_u8)
 
-          when Frontend::MacroExpressionNode
+          when Frontend::NodeKind::MacroExpression
+            macro_expr_node = node.as(Frontend::MacroExpressionNode)
             io.write_byte(AstNodeTag::MacroExpressionNode.value)
-            write_span(io, node.span)
-            write_macro_pieces(io, node.pieces, string_table)
+            write_span(io, macro_expr_node.span)
+            write_macro_pieces(io, macro_expr_node.pieces, string_table)
 
-          when Frontend::MacroLiteralNode
+          when Frontend::NodeKind::MacroLiteral
+            macro_lit_node = node.as(Frontend::MacroLiteralNode)
             io.write_byte(AstNodeTag::MacroLiteralNode.value)
-            write_span(io, node.span)
-            write_string_ref(io, node.value, string_table)
+            write_span(io, macro_lit_node.span)
+            write_string_ref(io, macro_lit_node.value, string_table)
 
-          when Frontend::MacroDefNode
+          when Frontend::NodeKind::MacroDef
+            macro_def_node = node.as(Frontend::MacroDefNode)
             io.write_byte(AstNodeTag::MacroDefNode.value)
-            write_span(io, node.span)
-            write_string_ref(io, String.new(node.name), string_table)
-            write_parameters(io, node.params, string_table)
-            write_macro_pieces(io, node.body, string_table)
+            write_span(io, macro_def_node.span)
+            write_string_ref(io, String.new(macro_def_node.name), string_table)
+            write_parameters(io, macro_def_node.params, string_table)
+            write_macro_pieces(io, macro_def_node.body, string_table)
 
-          when Frontend::MacroIfNode
+          when Frontend::NodeKind::MacroIf
+            macro_if_node = node.as(Frontend::MacroIfNode)
             io.write_byte(AstNodeTag::MacroIfNode.value)
-            write_span(io, node.span)
-            write_expr_id(io, node.condition)
-            write_macro_pieces(io, node.then_branch, string_table)
-            write_optional_macro_pieces(io, node.else_branch, string_table)
+            write_span(io, macro_if_node.span)
+            write_expr_id(io, macro_if_node.condition)
+            write_macro_pieces(io, macro_if_node.then_branch, string_table)
+            write_optional_macro_pieces(io, macro_if_node.else_branch, string_table)
 
-          when Frontend::MacroForNode
+          when Frontend::NodeKind::MacroFor
+            macro_for_node = node.as(Frontend::MacroForNode)
             io.write_byte(AstNodeTag::MacroForNode.value)
-            write_span(io, node.span)
-            io.write_bytes(node.variables.size.to_u32, IO::ByteFormat::LittleEndian)
-            node.variables.each { |v| write_string_ref(io, v, string_table) }
-            write_expr_id(io, node.iterable)
-            write_macro_pieces(io, node.body, string_table)
+            write_span(io, macro_for_node.span)
+            io.write_bytes(macro_for_node.variables.size.to_u32, IO::ByteFormat::LittleEndian)
+            macro_for_node.variables.each { |v| write_string_ref(io, v, string_table) }
+            write_expr_id(io, macro_for_node.iterable)
+            write_macro_pieces(io, macro_for_node.body, string_table)
           end
         end
 

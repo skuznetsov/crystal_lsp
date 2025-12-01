@@ -546,9 +546,10 @@ bar")
     parser = CrystalV2::Compiler::Frontend::Parser.new(CrystalV2::Compiler::Frontend::Lexer.new(source))
     program = parser.parse_program
 
-    # Should not crash, should emit diagnostic
-    parser.diagnostics.size.should be >= 1
-    parser.diagnostics.any? { |d| d.message.includes?("unexpected") }.should be_true
+    # Crystal allows this - ( ) is an empty tuple (Nil), so -() is valid syntax
+    # The error comes later at semantic stage: "undefined method '-' for Nil"
+    parser.diagnostics.should be_empty
+    program.roots.size.should eq(1)
   end
 
   it "handles grouping with just unary operator without crashing" do

@@ -3,6 +3,14 @@ require "./span"
 module CrystalV2
   module Compiler
     module Frontend
+
+      # Abstract base class for all AST nodes
+      # Uses vtable dispatch instead of 94-type union
+      abstract class Node
+        abstract def span : Span
+        # Each subclass defines node_kind method returning its kind
+      end
+
       struct ExprId
         getter index : Int32
 
@@ -67,8 +75,12 @@ module CrystalV2
       # Phase 103J: Visibility modifier wrapper
       # Wraps an expression with visibility (private/protected)
       # Example: private CONST = 42 → VisibilityModifierNode(Private, Assign)
-      struct VisibilityModifierNode
+      class VisibilityModifierNode < Node
         getter span : Span
+        def node_kind : NodeKind
+          NodeKind::VisibilityModifier
+        end
+
         getter visibility : Visibility
         getter expression : ExprId
 
@@ -537,8 +549,12 @@ module CrystalV2
       # NumberNode: Integer and floating-point literals
       # Examples: 42, 3.14, 0x2A
       # Size: ~48 bytes
-      struct NumberNode
+      class NumberNode < Node
         getter span : Span
+        def node_kind : NodeKind
+          NodeKind::Number
+        end
+
         getter value : Slice(UInt8)
         getter kind : NumberKind
 
@@ -549,16 +565,24 @@ module CrystalV2
       # IdentifierNode: Variable and method names
       # Examples: foo, self, initialize
       # Size: ~40 bytes
-      struct IdentifierNode
+      class IdentifierNode < Node
         getter span : Span
+        def node_kind : NodeKind
+          NodeKind::Identifier
+        end
+
         getter name : Slice(UInt8)
 
         def initialize(@span : Span, @name : Slice(UInt8))
         end
       end
 
-      struct MacroVarNode
+      class MacroVarNode < Node
         getter span : Span
+        def node_kind : NodeKind
+          NodeKind::MacroVar
+        end
+
         getter name : Slice(UInt8)
 
         def initialize(@span : Span, @name : Slice(UInt8))
@@ -568,8 +592,12 @@ module CrystalV2
       # BinaryNode: Binary operations
       # Examples: a + b, x * y, foo == bar
       # Size: ~56 bytes
-      struct BinaryNode
+      class BinaryNode < Node
         getter span : Span
+        def node_kind : NodeKind
+          NodeKind::Binary
+        end
+
         getter operator : Slice(UInt8)
         getter left : ExprId
         getter right : ExprId
@@ -585,8 +613,12 @@ module CrystalV2
       # CallNode: Method and function calls
       # Examples: foo(a, b), obj.method, bar { |x| x + 1 }
       # Size: ~64 bytes
-      struct CallNode
+      class CallNode < Node
         getter span : Span
+        def node_kind : NodeKind
+          NodeKind::Call
+        end
+
         getter callee : ExprId
         getter args : Array(ExprId)
         getter block : ExprId?
@@ -599,8 +631,12 @@ module CrystalV2
       # SplatNode: Splat argument in calls/yield
       # Examples: foo(*args), yield *tuple
       # Size: ~40 bytes
-      struct SplatNode
+      class SplatNode < Node
         getter span : Span
+        def node_kind : NodeKind
+          NodeKind::Splat
+        end
+
         getter expr : ExprId
 
         def initialize(@span : Span, @expr : ExprId)
@@ -610,8 +646,12 @@ module CrystalV2
       # IfNode: Conditional expressions
       # Examples: if condition then body end
       # Size: ~88 bytes
-      struct IfNode
+      class IfNode < Node
         getter span : Span
+        def node_kind : NodeKind
+          NodeKind::If
+        end
+
         getter condition : ExprId
         getter then_body : Array(ExprId)
         getter elsifs : Array(ElsifBranch)?
@@ -634,8 +674,12 @@ module CrystalV2
       # StringNode: String literals
       # Examples: "hello", "world"
       # Size: ~40 bytes
-      struct StringNode
+      class StringNode < Node
         getter span : Span
+        def node_kind : NodeKind
+          NodeKind::String
+        end
+
         getter value : Slice(UInt8)
 
         def initialize(@span : Span, @value : Slice(UInt8))
@@ -645,8 +689,12 @@ module CrystalV2
       # CharNode: Character literals
       # Examples: 'a', 'z', '\n'
       # Size: ~40 bytes
-      struct CharNode
+      class CharNode < Node
         getter span : Span
+        def node_kind : NodeKind
+          NodeKind::Char
+        end
+
         getter value : Slice(UInt8)
 
         def initialize(@span : Span, @value : Slice(UInt8))
@@ -656,8 +704,12 @@ module CrystalV2
       # RegexNode: Regular expression literals
       # Examples: /pattern/, /test/i
       # Size: ~40 bytes
-      struct RegexNode
+      class RegexNode < Node
         getter span : Span
+        def node_kind : NodeKind
+          NodeKind::Regex
+        end
+
         getter pattern : Slice(UInt8)
 
         def initialize(@span : Span, @pattern : Slice(UInt8))
@@ -667,8 +719,12 @@ module CrystalV2
       # BoolNode: Boolean literals
       # Examples: true, false
       # Size: ~32 bytes
-      struct BoolNode
+      class BoolNode < Node
         getter span : Span
+        def node_kind : NodeKind
+          NodeKind::Bool
+        end
+
         getter value : Bool
 
         def initialize(@span : Span, @value : Bool)
@@ -678,8 +734,12 @@ module CrystalV2
       # NilNode: Nil literal
       # Example: nil
       # Size: ~24 bytes (just span)
-      struct NilNode
+      class NilNode < Node
         getter span : Span
+        def node_kind : NodeKind
+          NodeKind::Nil
+        end
+
 
         def initialize(@span : Span)
         end
@@ -688,8 +748,12 @@ module CrystalV2
       # SymbolNode: Symbol literals
       # Examples: :foo, :bar, :hello
       # Size: ~40 bytes
-      struct SymbolNode
+      class SymbolNode < Node
         getter span : Span
+        def node_kind : NodeKind
+          NodeKind::Symbol
+        end
+
         getter name : Slice(UInt8)
 
         def initialize(@span : Span, @name : Slice(UInt8))
@@ -699,8 +763,12 @@ module CrystalV2
       # ArrayLiteralNode: Array literals
       # Examples: [1, 2, 3], [] of Int32
       # Size: ~56 bytes
-      struct ArrayLiteralNode
+      class ArrayLiteralNode < Node
         getter span : Span
+        def node_kind : NodeKind
+          NodeKind::ArrayLiteral
+        end
+
         getter elements : Array(ExprId)
         getter of_type : ExprId?  # Phase 91: explicit type
 
@@ -711,8 +779,12 @@ module CrystalV2
       # HashLiteralNode: Hash literals
       # Examples: {"key" => value}, {} of String => Int32
       # Size: ~56 bytes
-      struct HashLiteralNode
+      class HashLiteralNode < Node
         getter span : Span
+        def node_kind : NodeKind
+          NodeKind::HashLiteral
+        end
+
         getter entries : Array(HashEntry)
         getter of_key_type : Slice(UInt8)?
         getter of_value_type : Slice(UInt8)?
@@ -729,8 +801,12 @@ module CrystalV2
       # TupleLiteralNode: Tuple literals
       # Examples: {1, 2, 3}, {1, "hello", true}
       # Size: ~48 bytes
-      struct TupleLiteralNode
+      class TupleLiteralNode < Node
         getter span : Span
+        def node_kind : NodeKind
+          NodeKind::TupleLiteral
+        end
+
         getter elements : Array(ExprId)
 
         def initialize(@span : Span, @elements : Array(ExprId))
@@ -740,8 +816,12 @@ module CrystalV2
       # NamedTupleLiteralNode: Named tuple literals
       # Examples: {name: "Alice", age: 30}
       # Size: ~48 bytes
-      struct NamedTupleLiteralNode
+      class NamedTupleLiteralNode < Node
         getter span : Span
+        def node_kind : NodeKind
+          NodeKind::NamedTupleLiteral
+        end
+
         getter entries : Array(NamedTupleEntry)
 
         def initialize(@span : Span, @entries : Array(NamedTupleEntry))
@@ -751,8 +831,12 @@ module CrystalV2
       # RangeNode: Range literals
       # Examples: 1..10, 1...10
       # Size: ~48 bytes
-      struct RangeNode
+      class RangeNode < Node
         getter span : Span
+        def node_kind : NodeKind
+          NodeKind::Range
+        end
+
         getter begin_expr : ExprId
         getter end_expr : ExprId
         getter exclusive : Bool
@@ -763,8 +847,12 @@ module CrystalV2
 
       # Week 1 Batch 2: Operators Group (completing with BinaryNode from Phase B)
 
-      struct UnaryNode
+      class UnaryNode < Node
         getter span : Span
+        def node_kind : NodeKind
+          NodeKind::Unary
+        end
+
         getter operator : Slice(UInt8)  # -, !, ~, +, etc.
         getter operand : ExprId
 
@@ -772,8 +860,12 @@ module CrystalV2
         end
       end
 
-      struct TernaryNode
+      class TernaryNode < Node
         getter span : Span
+        def node_kind : NodeKind
+          NodeKind::Ternary
+        end
+
         getter condition : ExprId
         getter true_branch : ExprId
         getter false_branch : ExprId
@@ -784,32 +876,48 @@ module CrystalV2
 
       # Week 1 Batch 3: Variables Group (completing with IdentifierNode from Phase B)
 
-      struct InstanceVarNode
+      class InstanceVarNode < Node
         getter span : Span
+        def node_kind : NodeKind
+          NodeKind::InstanceVar
+        end
+
         getter name : Slice(UInt8)  # @var
 
         def initialize(@span : Span, @name : Slice(UInt8))
         end
       end
 
-      struct ClassVarNode
+      class ClassVarNode < Node
         getter span : Span
+        def node_kind : NodeKind
+          NodeKind::ClassVar
+        end
+
         getter name : Slice(UInt8)  # @@var
 
         def initialize(@span : Span, @name : Slice(UInt8))
         end
       end
 
-      struct GlobalNode
+      class GlobalNode < Node
         getter span : Span
+        def node_kind : NodeKind
+          NodeKind::Global
+        end
+
         getter name : Slice(UInt8)  # $var
 
         def initialize(@span : Span, @name : Slice(UInt8))
         end
       end
 
-      struct SelfNode
+      class SelfNode < Node
         getter span : Span
+        def node_kind : NodeKind
+          NodeKind::Self
+        end
+
 
         def initialize(@span : Span)
         end
@@ -817,8 +925,12 @@ module CrystalV2
 
       # Phase IMPLICIT_RECEIVER: Implicit object for method calls without explicit receiver
       # Example: in .i8? (equivalent to self.i8?)
-      struct ImplicitObjNode
+      class ImplicitObjNode < Node
         getter span : Span
+        def node_kind : NodeKind
+          NodeKind::ImplicitObj
+        end
+
 
         def initialize(@span : Span)
         end
@@ -826,8 +938,12 @@ module CrystalV2
 
       # Week 1 Batch 4: Control Flow Group (completing with IfNode from Phase B)
 
-      struct UnlessNode
+      class UnlessNode < Node
         getter span : Span
+        def node_kind : NodeKind
+          NodeKind::Unless
+        end
+
         getter condition : ExprId
         getter then_branch : Array(ExprId)
         getter else_branch : Array(ExprId)?
@@ -836,8 +952,12 @@ module CrystalV2
         end
       end
 
-      struct WhileNode
+      class WhileNode < Node
         getter span : Span
+        def node_kind : NodeKind
+          NodeKind::While
+        end
+
         getter condition : ExprId
         getter body : Array(ExprId)
 
@@ -845,8 +965,12 @@ module CrystalV2
         end
       end
 
-      struct UntilNode
+      class UntilNode < Node
         getter span : Span
+        def node_kind : NodeKind
+          NodeKind::Until
+        end
+
         getter condition : ExprId
         getter body : Array(ExprId)
 
@@ -854,8 +978,12 @@ module CrystalV2
         end
       end
 
-      struct ForNode
+      class ForNode < Node
         getter span : Span
+        def node_kind : NodeKind
+          NodeKind::For
+        end
+
         getter variable : Slice(UInt8)
         getter collection : ExprId
         getter body : Array(ExprId)
@@ -864,16 +992,24 @@ module CrystalV2
         end
       end
 
-      struct LoopNode
+      class LoopNode < Node
         getter span : Span
+        def node_kind : NodeKind
+          NodeKind::Loop
+        end
+
         getter body : Array(ExprId)
 
         def initialize(@span : Span, @body : Array(ExprId))
         end
       end
 
-      struct CaseNode
+      class CaseNode < Node
         getter span : Span
+        def node_kind : NodeKind
+          NodeKind::Case
+        end
+
         getter value : ExprId?
         getter when_branches : Array(WhenBranch)
         getter in_branches : Array(WhenBranch)?  # Phase PERCENT_LITERALS: pattern matching (case...in)
@@ -884,39 +1020,59 @@ module CrystalV2
         end
       end
 
-      struct BreakNode
+      class BreakNode < Node
         getter span : Span
+        def node_kind : NodeKind
+          NodeKind::Break
+        end
+
         getter value : ExprId?
 
         def initialize(@span : Span, @value : ExprId? = nil)
         end
       end
 
-      struct NextNode
+      class NextNode < Node
         getter span : Span
+        def node_kind : NodeKind
+          NodeKind::Next
+        end
+
 
         def initialize(@span : Span)
         end
       end
 
-      struct ReturnNode
+      class ReturnNode < Node
         getter span : Span
+        def node_kind : NodeKind
+          NodeKind::Return
+        end
+
         getter value : ExprId?
 
         def initialize(@span : Span, @value : ExprId? = nil)
         end
       end
 
-      struct YieldNode
+      class YieldNode < Node
         getter span : Span
+        def node_kind : NodeKind
+          NodeKind::Yield
+        end
+
         getter args : Array(ExprId)?
 
         def initialize(@span : Span, @args : Array(ExprId)? = nil)
         end
       end
 
-      struct SpawnNode
+      class SpawnNode < Node
         getter span : Span
+        def node_kind : NodeKind
+          NodeKind::Spawn
+        end
+
         getter expression : ExprId?
         getter body : Array(ExprId)?
 
@@ -926,8 +1082,12 @@ module CrystalV2
 
       # Week 1 Batch 5: Calls Group (completing with CallNode from Phase B)
 
-      struct IndexNode
+      class IndexNode < Node
         getter span : Span
+        def node_kind : NodeKind
+          NodeKind::Index
+        end
+
         getter object : ExprId
         getter indexes : Array(ExprId)
 
@@ -935,8 +1095,12 @@ module CrystalV2
         end
       end
 
-      struct MemberAccessNode
+      class MemberAccessNode < Node
         getter span : Span
+        def node_kind : NodeKind
+          NodeKind::MemberAccess
+        end
+
         getter object : ExprId
         getter member : Slice(UInt8)
 
@@ -944,8 +1108,12 @@ module CrystalV2
         end
       end
 
-      struct SafeNavigationNode
+      class SafeNavigationNode < Node
         getter span : Span
+        def node_kind : NodeKind
+          NodeKind::SafeNavigation
+        end
+
         getter object : ExprId
         getter member : Slice(UInt8)
 
@@ -955,8 +1123,12 @@ module CrystalV2
 
       # Week 1 Batch 6: Assignment Group
 
-      struct AssignNode
+      class AssignNode < Node
         getter span : Span
+        def node_kind : NodeKind
+          NodeKind::Assign
+        end
+
         getter target : ExprId
         getter value : ExprId
 
@@ -964,8 +1136,12 @@ module CrystalV2
         end
       end
 
-      struct MultipleAssignNode
+      class MultipleAssignNode < Node
         getter span : Span
+        def node_kind : NodeKind
+          NodeKind::MultipleAssign
+        end
+
         getter targets : Array(ExprId)
         getter value : ExprId
 
@@ -975,8 +1151,12 @@ module CrystalV2
 
       # Week 1 Batch 7: Block/Proc and String Interpolation
 
-      struct BlockNode
+      class BlockNode < Node
         getter span : Span
+        def node_kind : NodeKind
+          NodeKind::Block
+        end
+
         getter params : Array(Parameter)?
         getter body : Array(ExprId)
 
@@ -984,8 +1164,12 @@ module CrystalV2
         end
       end
 
-      struct ProcLiteralNode
+      class ProcLiteralNode < Node
         getter span : Span
+        def node_kind : NodeKind
+          NodeKind::ProcLiteral
+        end
+
         getter params : Array(Parameter)?
         getter return_type : Slice(UInt8)?
         getter body : Array(ExprId)
@@ -994,16 +1178,24 @@ module CrystalV2
         end
       end
 
-      struct StringInterpolationNode
+      class StringInterpolationNode < Node
         getter span : Span
+        def node_kind : NodeKind
+          NodeKind::StringInterpolation
+        end
+
         getter pieces : Array(StringPiece)
 
         def initialize(@span : Span, @pieces : Array(StringPiece))
         end
       end
 
-      struct GroupingNode
+      class GroupingNode < Node
         getter span : Span
+        def node_kind : NodeKind
+          NodeKind::Grouping
+        end
+
         getter expression : ExprId
 
         def initialize(@span : Span, @expression : ExprId)
@@ -1012,8 +1204,12 @@ module CrystalV2
 
       # Week 1 Batch 8: Definition Nodes
 
-      struct DefNode
+      class DefNode < Node
         getter span : Span
+        def node_kind : NodeKind
+          NodeKind::Def
+        end
+
         getter name : Slice(UInt8)
         getter params : Array(Parameter)?
         getter return_type : Slice(UInt8)?
@@ -1029,8 +1225,12 @@ module CrystalV2
         end
       end
 
-      struct ClassNode
+      class ClassNode < Node
         getter span : Span
+        def node_kind : NodeKind
+          NodeKind::Class
+        end
+
         getter name : Slice(UInt8)
         getter super_name : Slice(UInt8)?
         getter body : Array(ExprId)?
@@ -1062,8 +1262,12 @@ module CrystalV2
         end
       end
 
-      struct ModuleNode
+      class ModuleNode < Node
         getter span : Span
+        def node_kind : NodeKind
+          NodeKind::Module
+        end
+
         getter name : Slice(UInt8)
         getter body : Array(ExprId)?
         getter type_params : Array(Slice(UInt8))?
@@ -1072,8 +1276,12 @@ module CrystalV2
         end
       end
 
-      struct StructNode
+      class StructNode < Node
         getter span : Span
+        def node_kind : NodeKind
+          NodeKind::Struct
+        end
+
         getter name : Slice(UInt8)
         getter body : Array(ExprId)?
 
@@ -1081,8 +1289,12 @@ module CrystalV2
         end
       end
 
-      struct UnionNode
+      class UnionNode < Node
         getter span : Span
+        def node_kind : NodeKind
+          NodeKind::Union
+        end
+
         getter name : Slice(UInt8)
         getter body : Array(ExprId)?
 
@@ -1090,8 +1302,12 @@ module CrystalV2
         end
       end
 
-      struct EnumNode
+      class EnumNode < Node
         getter span : Span
+        def node_kind : NodeKind
+          NodeKind::Enum
+        end
+
         getter name : Slice(UInt8)
         getter base_type : Slice(UInt8)?
         getter members : Array(EnumMember)
@@ -1100,8 +1316,12 @@ module CrystalV2
         end
       end
 
-      struct AliasNode
+      class AliasNode < Node
         getter span : Span
+        def node_kind : NodeKind
+          NodeKind::Alias
+        end
+
         getter name : Slice(UInt8)
         getter value : Slice(UInt8)
 
@@ -1109,8 +1329,12 @@ module CrystalV2
         end
       end
 
-      struct ConstantNode
+      class ConstantNode < Node
         getter span : Span
+        def node_kind : NodeKind
+          NodeKind::Constant
+        end
+
         getter name : Slice(UInt8)
         getter value : ExprId
 
@@ -1118,8 +1342,12 @@ module CrystalV2
         end
       end
 
-      struct IncludeNode
+      class IncludeNode < Node
         getter span : Span
+        def node_kind : NodeKind
+          NodeKind::Include
+        end
+
         getter name : Slice(UInt8)
         getter target : ExprId
 
@@ -1127,8 +1355,12 @@ module CrystalV2
         end
       end
 
-      struct ExtendNode
+      class ExtendNode < Node
         getter span : Span
+        def node_kind : NodeKind
+          NodeKind::Extend
+        end
+
         getter name : Slice(UInt8)
         getter target : ExprId
 
@@ -1136,24 +1368,36 @@ module CrystalV2
         end
       end
 
-      struct GetterNode
+      class GetterNode < Node
         getter span : Span
+        def node_kind : NodeKind
+          NodeKind::Getter
+        end
+
         getter specs : Array(AccessorSpec)
 
         def initialize(@span : Span, @specs : Array(AccessorSpec))
         end
       end
 
-      struct SetterNode
+      class SetterNode < Node
         getter span : Span
+        def node_kind : NodeKind
+          NodeKind::Setter
+        end
+
         getter specs : Array(AccessorSpec)
 
         def initialize(@span : Span, @specs : Array(AccessorSpec))
         end
       end
 
-      struct PropertyNode
+      class PropertyNode < Node
         getter span : Span
+        def node_kind : NodeKind
+          NodeKind::Property
+        end
+
         getter specs : Array(AccessorSpec)
 
         def initialize(@span : Span, @specs : Array(AccessorSpec))
@@ -1163,8 +1407,12 @@ module CrystalV2
       # AnnotationDefNode: Annotation definitions
       # Example: annotation MyAnnotation ... end
       # This is like a class definition for annotations
-      struct AnnotationDefNode
+      class AnnotationDefNode < Node
         getter span : Span
+        def node_kind : NodeKind
+          NodeKind::AnnotationDef
+        end
+
         getter name : Slice(UInt8)    # Simple identifier (like ClassNode, StructNode)
 
         def initialize(@span : Span, @name : Slice(UInt8))
@@ -1175,8 +1423,12 @@ module CrystalV2
       # Examples: @[Link], @[JSON::Field(key: "test")]
       # Annotations are standalone expressions that are linked to following declarations
       # during semantic analysis
-      struct AnnotationNode
+      class AnnotationNode < Node
         getter span : Span
+        def node_kind : NodeKind
+          NodeKind::Annotation
+        end
+
         getter name : ExprId          # Path or identifier (e.g., Link, JSON::Field)
         getter args : Array(ExprId)   # Positional arguments
         getter named_args : Array(NamedArgument)?  # Named arguments (e.g., key: "test")
@@ -1192,8 +1444,12 @@ module CrystalV2
 
       # Week 1 Batch 9: Special Operators
 
-      struct AsNode
+      class AsNode < Node
         getter span : Span
+        def node_kind : NodeKind
+          NodeKind::As
+        end
+
         getter expression : ExprId
         getter target_type : Slice(UInt8)
 
@@ -1201,8 +1457,12 @@ module CrystalV2
         end
       end
 
-      struct AsQuestionNode
+      class AsQuestionNode < Node
         getter span : Span
+        def node_kind : NodeKind
+          NodeKind::AsQuestion
+        end
+
         getter expression : ExprId
         getter target_type : Slice(UInt8)
 
@@ -1210,8 +1470,12 @@ module CrystalV2
         end
       end
 
-      struct IsANode
+      class IsANode < Node
         getter span : Span
+        def node_kind : NodeKind
+          NodeKind::IsA
+        end
+
         getter expression : ExprId
         getter target_type : Slice(UInt8)
 
@@ -1219,8 +1483,12 @@ module CrystalV2
         end
       end
 
-      struct RespondsToNode
+      class RespondsToNode < Node
         getter span : Span
+        def node_kind : NodeKind
+          NodeKind::RespondsTo
+        end
+
         getter expression : ExprId
         getter method_name : ExprId
 
@@ -1228,80 +1496,120 @@ module CrystalV2
         end
       end
 
-      struct TypeofNode
+      class TypeofNode < Node
         getter span : Span
+        def node_kind : NodeKind
+          NodeKind::Typeof
+        end
+
         getter args : Array(ExprId)
 
         def initialize(@span : Span, @args : Array(ExprId))
         end
       end
 
-      struct SizeofNode
+      class SizeofNode < Node
         getter span : Span
+        def node_kind : NodeKind
+          NodeKind::Sizeof
+        end
+
         getter args : Array(ExprId)
 
         def initialize(@span : Span, @args : Array(ExprId))
         end
       end
 
-      struct PointerofNode
+      class PointerofNode < Node
         getter span : Span
+        def node_kind : NodeKind
+          NodeKind::Pointerof
+        end
+
         getter args : Array(ExprId)
 
         def initialize(@span : Span, @args : Array(ExprId))
         end
       end
 
-      struct UninitializedNode
+      class UninitializedNode < Node
         getter span : Span
+        def node_kind : NodeKind
+          NodeKind::Uninitialized
+        end
+
         getter type : ExprId
 
         def initialize(@span : Span, @type : ExprId)
         end
       end
 
-      struct OffsetofNode
+      class OffsetofNode < Node
         getter span : Span
+        def node_kind : NodeKind
+          NodeKind::Offsetof
+        end
+
         getter args : Array(ExprId)
 
         def initialize(@span : Span, @args : Array(ExprId))
         end
       end
 
-      struct AlignofNode
+      class AlignofNode < Node
         getter span : Span
+        def node_kind : NodeKind
+          NodeKind::Alignof
+        end
+
         getter args : Array(ExprId)
 
         def initialize(@span : Span, @args : Array(ExprId))
         end
       end
 
-      struct InstanceAlignofNode
+      class InstanceAlignofNode < Node
         getter span : Span
+        def node_kind : NodeKind
+          NodeKind::InstanceAlignof
+        end
+
         getter args : Array(ExprId)
 
         def initialize(@span : Span, @args : Array(ExprId))
         end
       end
 
-      struct SuperNode
+      class SuperNode < Node
         getter span : Span
+        def node_kind : NodeKind
+          NodeKind::Super
+        end
+
         getter args : Array(ExprId)?
 
         def initialize(@span : Span, @args : Array(ExprId)? = nil)
         end
       end
 
-      struct PreviousDefNode
+      class PreviousDefNode < Node
         getter span : Span
+        def node_kind : NodeKind
+          NodeKind::PreviousDef
+        end
+
         getter args : Array(ExprId)?
 
         def initialize(@span : Span, @args : Array(ExprId)? = nil)
         end
       end
 
-      struct OutNode
+      class OutNode < Node
         getter span : Span
+        def node_kind : NodeKind
+          NodeKind::Out
+        end
+
         getter identifier : Slice(UInt8)
 
         def initialize(@span : Span, @identifier : Slice(UInt8))
@@ -1310,8 +1618,12 @@ module CrystalV2
 
       # Week 1 Batch 10: Advanced Nodes
 
-      struct BeginNode
+      class BeginNode < Node
         getter span : Span
+        def node_kind : NodeKind
+          NodeKind::Begin
+        end
+
         getter body : Array(ExprId)
         getter rescue_clauses : Array(RescueClause)?
         getter else_body : Array(ExprId)?
@@ -1321,24 +1633,36 @@ module CrystalV2
         end
       end
 
-      struct RaiseNode
+      class RaiseNode < Node
         getter span : Span
+        def node_kind : NodeKind
+          NodeKind::Raise
+        end
+
         getter value : ExprId?
 
         def initialize(@span : Span, @value : ExprId? = nil)
         end
       end
 
-      struct RequireNode
+      class RequireNode < Node
         getter span : Span
+        def node_kind : NodeKind
+          NodeKind::Require
+        end
+
         getter path : ExprId
 
         def initialize(@span : Span, @path : ExprId)
         end
       end
 
-      struct TypeDeclarationNode
+      class TypeDeclarationNode < Node
         getter span : Span
+        def node_kind : NodeKind
+          NodeKind::TypeDeclaration
+        end
+
         getter name : Slice(UInt8)  # Variable name (simple identifier)
         getter declared_type : Slice(UInt8)  # Type name (simple identifier like Int32, String)
         getter value : ExprId?  # Phase 103: Optional initial value for x : Type = value
@@ -1347,8 +1671,12 @@ module CrystalV2
         end
       end
 
-      struct InstanceVarDeclNode
+      class InstanceVarDeclNode < Node
         getter span : Span
+        def node_kind : NodeKind
+          NodeKind::InstanceVarDecl
+        end
+
         getter name : Slice(UInt8)
         getter type : Slice(UInt8)
         getter value : ExprId?
@@ -1357,8 +1685,12 @@ module CrystalV2
         end
       end
 
-      struct ClassVarDeclNode
+      class ClassVarDeclNode < Node
         getter span : Span
+        def node_kind : NodeKind
+          NodeKind::ClassVarDecl
+        end
+
         getter name : Slice(UInt8)
         getter type : Slice(UInt8)
         getter value : ExprId?
@@ -1367,8 +1699,12 @@ module CrystalV2
         end
       end
 
-      struct GlobalVarDeclNode
+      class GlobalVarDeclNode < Node
         getter span : Span
+        def node_kind : NodeKind
+          NodeKind::GlobalVarDecl
+        end
+
         getter name : Slice(UInt8)
         getter type : Slice(UInt8)
 
@@ -1381,8 +1717,12 @@ module CrystalV2
         end
       end
 
-      struct WithNode
+      class WithNode < Node
         getter span : Span
+        def node_kind : NodeKind
+          NodeKind::With
+        end
+
         getter receiver : ExprId
         getter body : Array(ExprId)
 
@@ -1390,8 +1730,12 @@ module CrystalV2
         end
       end
 
-      struct LibNode
+      class LibNode < Node
         getter span : Span
+        def node_kind : NodeKind
+          NodeKind::Lib
+        end
+
         getter name : Slice(UInt8)
         getter body : Array(ExprId)?
 
@@ -1399,8 +1743,12 @@ module CrystalV2
         end
       end
 
-      struct FunNode
+      class FunNode < Node
         getter span : Span
+        def node_kind : NodeKind
+          NodeKind::Fun
+        end
+
         getter name : Slice(UInt8)
         getter real_name : Slice(UInt8)?  # Actual C function name (if different from name)
         getter params : Array(Parameter)?
@@ -1411,8 +1759,12 @@ module CrystalV2
         end
       end
 
-      struct GenericNode
+      class GenericNode < Node
         getter span : Span
+        def node_kind : NodeKind
+          NodeKind::Generic
+        end
+
         getter base_type : ExprId
         getter type_args : Array(ExprId)
 
@@ -1420,8 +1772,12 @@ module CrystalV2
         end
       end
 
-      struct PathNode
+      class PathNode < Node
         getter span : Span
+        def node_kind : NodeKind
+          NodeKind::Path
+        end
+
         getter left : ExprId?
         getter right : ExprId
 
@@ -1429,16 +1785,24 @@ module CrystalV2
         end
       end
 
-      struct MacroExpressionNode
+      class MacroExpressionNode < Node
         getter span : Span
+        def node_kind : NodeKind
+          NodeKind::MacroExpression
+        end
+
         getter expression : ExprId
 
         def initialize(@span : Span, @expression : ExprId)
         end
       end
 
-      struct MacroLiteralNode
+      class MacroLiteralNode < Node
         getter span : Span
+        def node_kind : NodeKind
+          NodeKind::MacroLiteral
+        end
+
         getter pieces : Array(MacroPiece)
         getter trim_left : Bool
         getter trim_right : Bool
@@ -1456,8 +1820,12 @@ module CrystalV2
         end
       end
 
-      struct MacroDefNode
+      class MacroDefNode < Node
         getter span : Span
+        def node_kind : NodeKind
+          NodeKind::MacroDef
+        end
+
         getter name : Slice(UInt8)
         getter body : ExprId
 
@@ -1471,8 +1839,12 @@ module CrystalV2
       end
 
       # Phase 103B: Macro control flow in expression context
-      struct MacroIfNode
+      class MacroIfNode < Node
         getter span : Span
+        def node_kind : NodeKind
+          NodeKind::MacroIf
+        end
+
         getter condition : ExprId
         getter then_body : ExprId  # MacroLiteralNode
         getter else_body : ExprId? # MacroIfNode (elsif) or MacroLiteralNode (else) or nil
@@ -1481,8 +1853,12 @@ module CrystalV2
         end
       end
 
-      struct MacroForNode
+      class MacroForNode < Node
         getter span : Span
+        def node_kind : NodeKind
+          NodeKind::MacroFor
+        end
+
         getter iter_vars : Array(Slice(UInt8))  # Variable names
         getter iterable : ExprId   # Expression to iterate over
         getter body : ExprId       # MacroLiteralNode
@@ -1491,8 +1867,12 @@ module CrystalV2
         end
       end
 
-      struct SelectNode
+      class SelectNode < Node
         getter span : Span
+        def node_kind : NodeKind
+          NodeKind::Select
+        end
+
         getter branches : Array(SelectBranch)
         getter else_branch : Array(ExprId)?
 
@@ -1500,8 +1880,12 @@ module CrystalV2
         end
       end
 
-      struct AsmNode
+      class AsmNode < Node
         getter span : Span
+        def node_kind : NodeKind
+          NodeKind::Asm
+        end
+
         getter args : Array(ExprId)
 
         def initialize(@span : Span, @args : Array(ExprId))
@@ -1514,30 +1898,7 @@ module CrystalV2
       # Crystal adds a tag (4-8 bytes) to identify which type is stored.
       # Total size = tag + max(all structs) = 8 + 88 = 96 bytes worst case
       # Still 10x better than 1024-byte ExpressionNode!
-      alias TypedNode = NumberNode | IdentifierNode | MacroVarNode | BinaryNode | CallNode | IfNode |
-                        StringNode | CharNode | RegexNode | BoolNode | NilNode | SymbolNode |
-                        ArrayLiteralNode | HashLiteralNode | TupleLiteralNode | NamedTupleLiteralNode | RangeNode |
-                        UnaryNode | TernaryNode |
-                        InstanceVarNode | ClassVarNode | GlobalNode | SelfNode | ImplicitObjNode |
-                        UnlessNode | WhileNode | UntilNode | ForNode | LoopNode | CaseNode |
-                        BreakNode | NextNode | ReturnNode | YieldNode | SpawnNode |
-                        SplatNode |
-                        IndexNode | MemberAccessNode | SafeNavigationNode |
-                        AssignNode | MultipleAssignNode |
-                        BlockNode | ProcLiteralNode | StringInterpolationNode | GroupingNode |
-                        DefNode | ClassNode | ModuleNode | StructNode | UnionNode | EnumNode |
-                        AliasNode | ConstantNode | IncludeNode | ExtendNode |
-                        GetterNode | SetterNode | PropertyNode | AnnotationDefNode | AnnotationNode |
-                        AsNode | AsQuestionNode | IsANode | RespondsToNode |
-                        TypeofNode | SizeofNode | PointerofNode | UninitializedNode |
-                        OffsetofNode | AlignofNode | InstanceAlignofNode |
-                        SuperNode | PreviousDefNode | OutNode |
-                        BeginNode | RaiseNode | RequireNode | TypeDeclarationNode |
-                        InstanceVarDeclNode | ClassVarDeclNode | GlobalVarDeclNode |
-                        WithNode | LibNode | FunNode | GenericNode | PathNode |
-                        VisibilityModifierNode |
-                        MacroExpressionNode | MacroLiteralNode | MacroDefNode | MacroIfNode | MacroForNode |
-                        SelectNode | AsmNode
+      alias TypedNode = Node
 
       # ============================================================================
       # Helper: Get Kind for any node type (ExpressionNode or TypedNode)

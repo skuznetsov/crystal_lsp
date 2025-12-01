@@ -25,7 +25,10 @@ describe "CrystalV2::Compiler::Frontend::Parser" do
       String.new(template.value).should eq("nop")
     end
 
-    it "parses asm with multiple operands" do
+    # NOTE: This test uses invalid Crystal ASM syntax. Crystal ASM uses colons:
+    #   asm("template" : outputs : inputs : clobbers : options)
+    # Not comma-separated arguments like asm("add", 1, 2)
+    pending "parses asm with multiple operands (INVALID SYNTAX)" do
       source = %(asm("add", 1, 2))
       parser = CrystalV2::Compiler::Frontend::Parser.new(
         CrystalV2::Compiler::Frontend::Lexer.new(source)

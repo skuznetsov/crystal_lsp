@@ -145,28 +145,35 @@ describe "CrystalV2::Compiler::Frontend::Parser" do
       String.new(CrystalV2::Compiler::Frontend.node_out_identifier(arg3).not_nil!).should eq("error_code")
     end
 
-    it "emits error for out without identifier" do
+    it "parses out without identifier as an identifier (semantic error later)" do
+      # Crystal allows `out` as an identifier - error is semantic, not parser
+      # "undefined local variable or method 'out'"
       source = "out"
 
       parser = CrystalV2::Compiler::Frontend::Parser.new(CrystalV2::Compiler::Frontend::Lexer.new(source))
       program = parser.parse_program
 
-      # Parser should emit error
-      parser.diagnostics.size.should be > 0
-      diagnostic = parser.diagnostics.first
-      diagnostic.message.should contain("unexpected")
+      # No parser error - Crystal treats `out` as identifier
+      parser.diagnostics.should be_empty
+      program.roots.size.should eq(1)
+
+      arena = program.arena
+      node = arena[program.roots.first]
+      CrystalV2::Compiler::Frontend.node_kind(node).should eq(CrystalV2::Compiler::Frontend::NodeKind::Identifier)
     end
 
-    it "emits error for out followed by non-identifier" do
+    it "parses out followed by non-identifier as two expressions (semantic error later)" do
+      # Crystal allows `out 123` - parses as two expressions (identifier + number)
+      # Error is semantic: "undefined local variable or method 'out'"
       source = "out 123"
 
       parser = CrystalV2::Compiler::Frontend::Parser.new(CrystalV2::Compiler::Frontend::Lexer.new(source))
       program = parser.parse_program
 
-      # Parser should emit error
-      parser.diagnostics.size.should be > 0
-      diagnostic = parser.diagnostics.first
-      diagnostic.message.should contain("unexpected")
+      # No parser error - Crystal parses this successfully
+      parser.diagnostics.should be_empty
+      # Parses as two separate expressions: `out` and `123`
+      program.roots.size.should eq(2)
     end
   end
 end
