@@ -228,39 +228,13 @@ What we have now:
 - Comprehensive test coverage (30 regression tests, 93 spec files)
 - Ready for LSP integration
 
-### Phase 1: LSP Server (Week 1-4) 🎯 **NEXT PRIORITY**
+### LSP Server: Current Capabilities
 
-**Goal:** Real-time Crystal development experience
-
-**Architecture:** Built-in as `crystal tool lsp` (like `crystal tool format`)
-
-**Why built-in?**
-- ✅ Single installation (install Crystal → get LSP automatically)
-- ✅ Version compatibility guaranteed (LSP matches compiler version)
-- ✅ Direct code reuse (use same parser/semantic analysis)
-- ✅ Official support (part of Crystal itself)
-- ✅ Simpler for users (no separate shard installation)
-
-**Week 1-2: MVP**
-- Implement `crystal tool lsp` command
-- LSP protocol handling (`textDocument/didOpen`, `didChange`, `didClose`)
-- Syntax error diagnostics (using our parser)
-- Basic semantic errors
-- Incremental updates via VirtualArena
-
-**Week 3-4: Advanced Features**
-- Hover (show types)
-- Go-to-definition
-- Auto-completion
-- Find references
-
-**Expected Impact:**
-- **< 50ms response time** (vs 3-5s Crystalline)
-- **Real-time error feedback** (as you type)
-- **Zero setup** (works out of the box after Crystal installation)
-- **VS Code integration** (+ Vim, Emacs, etc.)
-
-**Why this matters:** Go developers take instant feedback for granted. Crystal developers should too.
+- Protocol: initialize, didOpen/didChange/didClose, hover, definition, references, rename, code actions (basic), folding ranges, semantic tokens, inlay hints, signature help, document symbols, call hierarchy.
+- Accuracy: segment-aware path resolution, macro call navigation, navigation into stdlib/prelude; rename is guarded for stdlib/prelude symbols.
+- Performance: stub-first prelude with background real load; project cache v2 (symbol summaries) merged on didOpen to avoid reloading requires; timing breakdown logs (parse/requires/symbols/resolve/infer) and indexing notifications (`Indexing…`/`Ready`) surfaced to UI.
+- VSCode: dedicated “Crystal V2 LSP Messages” output channel with request/response logging; status bar shows indexing state.
+- DX guardrails: hover/definition soft-fail while indexing; folding for begin/rescue/else/ensure without overfold; semantic tokens keep require strings as strings and symbol literals as full-span enumMember tokens.
 
 ### Phase 2: Complete Type Inference (Week 5-7)
 
