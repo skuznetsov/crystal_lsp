@@ -2368,6 +2368,14 @@ module CrystalV2
             when "to_a"
               return receiver_type
             end
+          elsif receiver_type.is_a?(PrimitiveType) && receiver_type.name == "Nil"
+            # Fallback heuristic: preserve collection shape even if receiver unknown
+            case method_name
+            when "map", "collect", "select", "reject", "filter", "to_a"
+              return ArrayType.new(@context.nil_type)
+            when "each", "each_with_index"
+              return ArrayType.new(@context.nil_type)
+            end
           end
 
           if receiver_type.is_a?(UnionType)
@@ -2391,6 +2399,10 @@ module CrystalV2
               @context.nil_type
             end
           else
+            # Fallback heuristic for unknown collection receivers
+            if {"map", "collect", "select", "reject", "filter", "to_a", "each", "each_with_index"}.includes?(method_name)
+              return ArrayType.new(@context.nil_type)
+            end
             emit_error("Method '#{method_name}' not found on #{receiver_type}", expr_id)
             @context.nil_type
           end
