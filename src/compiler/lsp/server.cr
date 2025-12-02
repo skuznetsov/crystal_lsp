@@ -2693,7 +2693,9 @@ module CrystalV2
               end
               # If requested column runs past end of line, clamp to end
               if character > char_index
+                # Clamp to the last character of the line (before newline, if present)
                 byte_index = line_text.bytesize
+                byte_index -= 1 if byte_index > 0
               end
               return offset + byte_index
             end
@@ -2755,6 +2757,28 @@ module CrystalV2
             current_line += 1
           end
           false
+        end
+
+        # Clamp a requested character to the length of the given line to avoid landing
+        # past the newline (which can cause definition/hover to hit the next expression).
+        private def clamp_character(text : String, line : Int32, character : Int32) : Int32
+          return character if character <= 0
+
+          current_line = 0
+          text.each_line(chomp: false) do |line_text|
+            if current_line == line
+              # Use character count (not bytes) to align with LSP columns
+              chars = line_text.each_char.to_a
+              max_col = chars.size > 0 ? chars.size - 1 : 0
+              if max_col > 0 && (chars.last == '\n' || chars.last == '\r')
+                max_col -= 1
+              end
+              return character <= max_col ? character : max_col
+            end
+            current_line += 1
+          end
+
+          character
         end
 
         @[AlwaysInline]
@@ -3056,11 +3080,13 @@ module CrystalV2
           line = position["line"].as_i
           character = position["character"].as_i
 
-          debug("Hover request: line=#{line}, char=#{character}")
-          debug("Prelude state: #{current_prelude_label}")
-
           doc_state = @documents[uri]?
           return send_response(id, "null") unless doc_state
+
+          character = clamp_character(doc_state.text_document.text, line, character)
+
+          debug("Hover request: line=#{line}, char=#{character}")
+          debug("Prelude state: #{current_prelude_label}")
 
           if indexing_in_progress?(doc_state)
             debug("Hover skipped: indexing in progress")
@@ -3069,6 +3095,9 @@ module CrystalV2
           end
 
           expr_id = find_expr_at_position(doc_state, line, character)
+          if expr_id.nil? && (alt_offset = position_to_offset(doc_state.text_document.text, line, character - 1))
+            expr_id = find_expr_at_position(doc_state, line, character - 1, alt_offset)
+          end
           debug("Found expr_id=#{expr_id.inspect}")
           return send_response(id, "null") unless expr_id
 
@@ -3220,11 +3249,13 @@ module CrystalV2
           line = position["line"].as_i
           character = position["character"].as_i
 
-          debug("Definition request: line=#{line}, char=#{character}")
-          debug("Prelude state: #{current_prelude_label}")
-
           doc_state = @documents[uri]?
           return send_response(id, "null") unless doc_state
+
+          character = clamp_character(doc_state.text_document.text, line, character)
+
+          debug("Definition request: line=#{line}, char=#{character}")
+          debug("Prelude state: #{current_prelude_label}")
 
           if indexing_in_progress?(doc_state)
             debug("Definition skipped: indexing in progress")
@@ -3241,6 +3272,9 @@ module CrystalV2
           # Return asap if we know this is a module/class path: hover and definition
           # both use the resolved symbol; we can short-circuit without walking expression tree.
           expr_id = find_expr_at_position(doc_state, line, character, offset)
+          if expr_id.nil? && offset > 0
+            expr_id = find_expr_at_position(doc_state, line, character, offset - 1)
+          end
           debug("Found expr_id=#{expr_id.inspect}")
           if expr_id && (node = doc_state.program.arena[expr_id]).is_a?(Frontend::PathNode)
             if symbol = resolve_path_segment_symbol(node, doc_state, offset)
