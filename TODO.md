@@ -114,9 +114,12 @@ Goal: v2 LSP must report only real errors and match original compiler behavior.
 - [x] Diagnostics spec with semantic diagnostics enabled (semantic error guard)
 - [x] Inlay hints end-to-end on a small program (positions/labels)
 - [x] Semantic tokens integration: require strings stay strings (no enumMember); symbol literals remain single full-span token
-- [ ] Integration specs for hover/definition covering stdlib/prelude and indexing-in-progress guard
-- [ ] Integration specs for rename via server across VirtualArena requires
+- [x] Integration specs for hover/definition covering stdlib/prelude and indexing-in-progress guard
+- [x] Integration specs for rename via server across VirtualArena requires
 - [x] Guard hover/definition when indexing in progress (soft-fail)
+- [x] Rename guard for stdlib/prelude symbols (no-op or error)
+- [x] VSCode extension: request/response log channel and “Indexing…” status indicator in UI
+- [x] Navigation to stdlib/prelude and macro-generated methods (tests + impl)
 
 ---
 

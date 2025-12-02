@@ -2,6 +2,8 @@ const vscode = require('vscode');
 const { LanguageClient, TransportKind, Trace, State } = require('vscode-languageclient/node');
 
 let client;
+let lspLogChannel;
+let statusItem;
 
 function activate(context) {
     console.log('Crystal V2 LSP extension is now active');
@@ -45,6 +47,7 @@ function activate(context) {
     };
 
     const traceChannel = vscode.window.createOutputChannel('Crystal V2 LSP Trace');
+    lspLogChannel = vscode.window.createOutputChannel('Crystal V2 LSP Messages');
     const traceSetting = config.get('lsp.trace.server') || 'off';
     const traceMap = {
         off: Trace.Off,
@@ -59,7 +62,19 @@ function activate(context) {
         synchronize: {
             fileEvents: vscode.workspace.createFileSystemWatcher('**/*.cr')
         },      
-        traceOutputChannel: traceChannel
+        traceOutputChannel: traceChannel,
+        middleware: {
+            didSendRequest: (data) => {
+                if (data && data.type === 1) { // RequestMessage
+                    try {
+                        const body = JSON.parse(data.message);
+                        lspLogChannel.appendLine(`--> ${body.method} (${body.id ?? "n/a"})`);
+                    } catch (err) {
+                        lspLogChannel.appendLine(`--> send (unparsed): ${String(data.message)}`);
+                    }
+                }
+            }
+        },
     };  
 
     // Create and start the language client
@@ -79,11 +94,38 @@ function activate(context) {
                     try { client.trace = traceLevel; } catch (_) { /* noop */ }
                 }
                 traceChannel.appendLine(`[client] LSP trace set to ${traceSetting} (state change)`);
+                if (statusItem) {
+                    statusItem.text = 'Crystal V2 LSP: Ready';
+                    statusItem.show();
+                }
             }
         });
     } else {
         traceChannel.appendLine('[client] onDidChangeState unavailable; trace channel active but trace level may remain default');
     }
+
+    client.onNotification('crystal/indexing', (params) => {
+        const message = params && params.message ? params.message : 'Indexing…';
+        if (!statusItem) {
+            statusItem = vscode.window.createStatusBarItem(vscode.StatusBarAlignment.Left, 10);
+            statusItem.command = undefined;
+        }
+        statusItem.text = `Crystal V2 LSP: ${message}`;
+        statusItem.show();
+    });
+
+    client.onNotification('crystal/indexed', () => {
+        if (!statusItem) {
+            statusItem = vscode.window.createStatusBarItem(vscode.StatusBarAlignment.Left, 10);
+        }
+        statusItem.text = 'Crystal V2 LSP: Ready';
+        statusItem.show();
+    });
+
+    client.onNotification((method, params) => {
+        // Log all incoming notifications to the message channel
+        lspLogChannel.appendLine(`<-- ${method}`);
+    });
 
     // Start the client (this will also launch the server)
     client.start();
@@ -92,6 +134,14 @@ function activate(context) {
 }
 
 function deactivate() {
+    if (statusItem) {
+        statusItem.dispose();
+        statusItem = undefined;
+    }
+    if (lspLogChannel) {
+        lspLogChannel.dispose();
+        lspLogChannel = undefined;
+    }
     if (!client) {
         return undefined;
     }

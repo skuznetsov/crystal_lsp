@@ -4301,11 +4301,21 @@ module CrystalV2
 
           # Get symbol for this expression
           identifier_symbols = doc_state.identifier_symbols
-          return send_response(id, "null") unless identifier_symbols
-
-          symbol = identifier_symbols[expr_id]?
+          symbol = identifier_symbols ? identifier_symbols[expr_id]? : nil
           symbol ||= node_symbol_for(doc_state.program, expr_id)
           return send_response(id, "null") unless symbol
+
+          if (uri_for_symbol = location_for_symbol(symbol).try(&.uri))
+            stdlib_dir = File.dirname(PRELUDE_PATH)
+            if uri_for_symbol.includes?(PRELUDE_PATH) || uri_for_symbol.starts_with?(stdlib_dir)
+              return send_error(id, -32600, "Cannot rename stdlib/prelude symbols")
+            end
+          elsif symbol.is_a?(Semantic::ModuleSymbol) || symbol.is_a?(Semantic::ClassSymbol) || symbol.is_a?(Semantic::MethodSymbol)
+            # If symbol has no location and we are in prelude-symbol-only mode, forbid rename
+            if @config.prelude_symbol_only || doc_state.path.try { |p| p.starts_with?(File.dirname(PRELUDE_PATH)) }
+              return send_error(id, -32600, "Cannot rename stdlib/prelude symbols")
+            end
+          end
 
           # Validate symbol can be renamed
           unless can_rename_symbol?(symbol)

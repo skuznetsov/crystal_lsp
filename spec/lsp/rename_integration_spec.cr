@@ -45,4 +45,18 @@ describe CrystalV2::Compiler::LSP::Server do
   ensure
     FileUtils.rm_rf(dir) if dir
   end
+
+  it "rejects rename on prelude/stdlib symbols" do
+    source = "Time.now\n"
+    server = CrystalV2::Compiler::LSP::Server.new(IO::Memory.new, IO::Memory.new, CrystalV2::Compiler::LSP::ServerConfig.new(background_indexing: false, project_cache: false, prelude_symbol_only: true))
+    uri = server.spec_store_document(source, nil, "/tmp/rename_stdlib.cr")
+
+    result = server.spec_rename(uri, 0, 0, "FooTime")
+    # Rename should be rejected for stdlib/prelude; either result nil or error present
+    if result["error"]?
+      result["error"]["message"].as_s.should contain("Cannot rename")
+    else
+      result["result"].should be_nil
+    end
+  end
 end

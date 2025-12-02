@@ -91,6 +91,10 @@ module CrystalV2::Compiler::LSP
       collect_folding_ranges(program)
     end
 
+    def spec_location_for_symbol(symbol : CrystalV2::Compiler::Semantic::Symbol)
+      location_for_symbol(symbol)
+    end
+
     def spec_set_document(doc_state : DocumentState)
       @documents[doc_state.text_document.uri] = doc_state
     end
