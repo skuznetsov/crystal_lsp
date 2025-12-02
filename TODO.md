@@ -26,6 +26,7 @@ about syntax or types and should match what the original compiler would report.
 - [x] Basic type inference engine
 - [x] Symbol table and name resolution
 - [x] MVP MacroExpander (`{{ }}`, `{% if/for %}`, `@type.name/instance_vars`)
+- [x] LSP semantic tokens: symbol literals emit full-span enumMember tokens (no overlaps)
 
 ### Pending (7 tests)
 - 6 macro whitespace trimming (`{%- -%}`, `{%~ ~%}`) - for web templates
@@ -108,6 +109,14 @@ Goal: v2 LSP must report only real errors and match original compiler behavior.
 ### Tests Needed
 - [ ] Structured LSP tests for stdlib symbols (`Time.monotonic`, `File.read`, etc.)
 - [ ] Diff v2 diagnostics against original compiler on representative files
+- [x] Integration specs for hover/definition sequences (single-file path regression)
+- [x] Integration specs for references via server across VirtualArena requires
+- [x] Diagnostics spec with semantic diagnostics enabled (semantic error guard)
+- [x] Inlay hints end-to-end on a small program (positions/labels)
+- [x] Semantic tokens integration: require strings stay strings (no enumMember); symbol literals remain single full-span token
+- [ ] Integration specs for hover/definition covering stdlib/prelude and indexing-in-progress guard
+- [ ] Integration specs for rename via server across VirtualArena requires
+- [x] Guard hover/definition when indexing in progress (soft-fail)
 
 ---
 

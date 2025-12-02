@@ -58,7 +58,7 @@ function activate(context) {
         documentSelector: [{ scheme: 'file', language: 'crystal' }],
         synchronize: {
             fileEvents: vscode.workspace.createFileSystemWatcher('**/*.cr')
-        },
+        },      
         traceOutputChannel: traceChannel
     };  
 

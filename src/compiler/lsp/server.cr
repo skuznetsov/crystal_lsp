@@ -7568,12 +7568,32 @@ module CrystalV2
           when Frontend::BeginNode
             start_line = node.span.start_line - 1
             end_line = node.span.end_line - 1
+            if rescues = node.rescue_clauses
+              if first = rescues.first?
+                rescue_line = first.span.start_line - 2
+                end_line = rescue_line if rescue_line >= start_line
+              end
+            end
             ranges << FoldingRange.new(start_line: start_line, end_line: end_line) if end_line > start_line
             node.body.each { |e| collect_folding_ranges_recursive(arena, e, ranges) }
             if rescues = node.rescue_clauses
-              rescues.each { |rc| rc.body.each { |e| collect_folding_ranges_recursive(arena, e, ranges) } }
+              rescues.each do |rc|
+                # Fold rescue body separately, stopping before next rescue/ensure
+                if rc.body.any?
+                  last_expr = rc.body.last
+                  rescue_start = rc.span.start_line - 1
+                  rescue_end = arena[last_expr].span.end_line - 1
+                  ranges << FoldingRange.new(start_line: rescue_start, end_line: rescue_end) if rescue_end > rescue_start
+                end
+                rc.body.each { |e| collect_folding_ranges_recursive(arena, e, ranges) }
+              end
             end
             if ensure_body = node.ensure_body
+              if ensure_body.any?
+                ensure_start = arena[ensure_body.first].span.start_line - 1
+                ensure_end = arena[ensure_body.last].span.end_line - 1
+                ranges << FoldingRange.new(start_line: ensure_start, end_line: ensure_end) if ensure_end > ensure_start
+              end
               ensure_body.each { |e| collect_folding_ranges_recursive(arena, e, ranges) }
             end
           when Frontend::BlockNode
@@ -7655,8 +7675,8 @@ module CrystalV2
           SemanticTokenType::Interface.value     => 6,
           SemanticTokenType::Namespace.value     => 5,
           SemanticTokenType::TypeParameter.value => 5,
+          SemanticTokenType::EnumMember.value    => 8, # ensure symbols win over lower-fidelity overlaps
           SemanticTokenType::Property.value      => 4,
-          SemanticTokenType::EnumMember.value    => 4,
           SemanticTokenType::Parameter.value     => 4,
           SemanticTokenType::Variable.value      => 3,
           SemanticTokenType::Keyword.value       => 3,
@@ -7874,7 +7894,8 @@ module CrystalV2
               collect_tokens_recursive(context, entry.value, tokens)
             end
           when Frontend::SymbolNode
-            emit_span_token(node.span, node.span.end_column - node.span.start_column, SemanticTokenType::EnumMember.value, tokens)
+            length = node.name.size + 1 # include leading colon
+            emit_span_token(node.span, length, SemanticTokenType::EnumMember.value, tokens)
           when Frontend::GenericNode
             collect_tokens_recursive(context, node.base_type, tokens)
             node.type_args.each { |arg| collect_tokens_recursive(context, arg, tokens) }
@@ -8663,17 +8684,23 @@ module CrystalV2
 
         private def deduplicate_tokens(tokens : Array(RawToken)) : Array(RawToken)
           return tokens if tokens.empty?
+
           deduped = [] of RawToken
           last_line = Int32::MIN
           last_start = Int32::MIN
-          last_length = Int32::MIN
+          last_end = Int32::MIN
 
           tokens.each do |token|
-            next if token.line == last_line && token.start_char == last_start && token.length == last_length
+            # Tokens are sorted by line/start/priority/length, so the first one wins.
+            if token.line == last_line
+              # Drop any overlapping token on the same line (same start or starting inside previous span).
+              next if token.start_char <= last_start || token.start_char < last_end
+            end
+
             deduped << token
             last_line = token.line
             last_start = token.start_char
-            last_length = token.length
+            last_end = token.start_char + token.length
           end
 
           deduped
