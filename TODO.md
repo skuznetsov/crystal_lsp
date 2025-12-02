@@ -120,6 +120,7 @@ Goal: v2 LSP must report only real errors and match original compiler behavior.
 - [x] Rename guard for stdlib/prelude symbols (no-op or error)
 - [x] VSCode extension: request/response log channel and “Indexing…” status indicator in UI
 - [x] Navigation to stdlib/prelude (tests + impl)
+- [x] Folding ranges for begin/rescue/else/ensure without overfolding; semantic tokens for symbol literals fixed
 
 ---
 
@@ -128,6 +129,7 @@ Goal: v2 LSP must report only real errors and match original compiler behavior.
 - [x] Background indexing of `root/src/**/*.cr` to populate cache automatically
 - [ ] Extend summaries with ivars/consts and richer type info (params/return types already stored)
 - [x] Restore symbol_table from cache for unchanged files; avoid re-parse/resolve when mtime matches (spans placeholder)
+- [x] Merge cached project symbols into analysis to avoid reloading requires on warm didOpen
 - [ ] Mark cached files (`from_cache`) and use summaries for hover/definition when AST is missing
 - [ ] Strict cache validation (version/root hash/mtime) with full reparse fallback (root hash/version done; add fallback wiring)
 

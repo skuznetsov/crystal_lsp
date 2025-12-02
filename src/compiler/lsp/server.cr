@@ -1330,6 +1330,7 @@ module CrystalV2
 
           diagnostics = [] of Diagnostic
           using_stub = @prelude_state.try(&.stub) || false
+          use_project_symbols = @project_cache_loaded && @project.symbol_table
           type_context = nil
           identifier_symbols = nil
           symbol_table = nil
@@ -1344,7 +1345,7 @@ module CrystalV2
           debug("[guard] parse took #{parse_ms.round(1)} ms") if parse_ms > GUARD_WARN_MS
           uses_compiler_module = includes_compiler_module?(program)
           dependency_states = [] of DocumentState
-          if load_requires
+          if load_requires && !use_project_symbols
             raw_requires = base_dir ? collect_require_paths(program, base_dir) : [] of String
             requires = filter_required_files(requirements: raw_requires, includes_compiler: uses_compiler_module)
             requires.each do |req_path|
@@ -1364,7 +1365,11 @@ module CrystalV2
 
           begin
             context = build_context_with_prelude
-            merge_dependency_symbol_tables(context.symbol_table, dependency_states) if dependency_states.any?
+            if use_project_symbols
+              merge_symbol_table(context.symbol_table, @project.symbol_table)
+            elsif dependency_states.any?
+              merge_dependency_symbol_tables(context.symbol_table, dependency_states)
+            end
 
             analyzer = Semantic::Analyzer.new(analysis_program, context)
             analyzer.collect_symbols
@@ -1499,17 +1504,17 @@ module CrystalV2
           channel = Channel(PreludeState?).new
           @prelude_load_channel = channel
 
-         spawn do
-           begin
-             state = load_prelude_in_background
-             channel.send(state)
-           rescue ex
-             debug("Background prelude load failed: #{ex.message}")
-             channel.send(nil)
+          spawn do
+            begin
+              state = load_prelude_in_background
+              channel.send(state)
+            rescue ex
+              debug("Background prelude load failed: #{ex.message}")
+              channel.send(nil)
             ensure
               notify_indexed
-           end
-         end
+            end
+          end
 
           debug("Background prelude loading started")
         end
@@ -2363,6 +2368,10 @@ module CrystalV2
             next unless dep_table = dep_state.symbol_table
             merge_symbol_table_into(target, dep_table)
           end
+        end
+
+        private def merge_symbol_table(target : Semantic::SymbolTable, source : Semantic::SymbolTable)
+          merge_symbol_table_into(target, source)
         end
 
         private def merge_symbol_table_into(target : Semantic::SymbolTable, source : Semantic::SymbolTable)
@@ -5283,6 +5292,30 @@ module CrystalV2
           end
         end
 
+        private def macro_definition_location(doc_state : DocumentState, callee_id : Frontend::ExprId) : Location?
+          identifier_symbols = doc_state.identifier_symbols
+          return nil unless identifier_symbols
+          if symbol = identifier_symbols[callee_id]?
+            return macro_symbol_location(symbol, doc_state) if symbol.is_a?(Semantic::MacroSymbol)
+          end
+          nil
+        end
+
+        private def macro_symbol_location(symbol : Semantic::MacroSymbol, doc_state : DocumentState) : Location?
+          if location = location_for_symbol(symbol)
+            return location
+          end
+          if location = location_for_prelude_symbol(symbol)
+            return location
+          end
+
+          if path = symbol.responds_to?(:file_path) ? symbol.file_path : nil
+            return cached_location_for(symbol) || Location.from_symbol(symbol, doc_state.program, file_uri(path))
+          end
+
+          cached_location_for(symbol) || Location.from_symbol(symbol, doc_state.program, doc_state.text_document.uri)
+        end
+
         private def find_definition_location(expr_id : Frontend::ExprId, doc_state : DocumentState, uri : String, depth : Int32 = 0, target_offset : Int32? = nil) : Location?
           return nil if expr_id.invalid?
           return nil if depth >= 8
@@ -7594,11 +7627,25 @@ module CrystalV2
           when Frontend::BeginNode
             start_line = node.span.start_line - 1
             end_line = node.span.end_line - 1
+            clause_stops = [] of Int32
             if rescues = node.rescue_clauses
               if first = rescues.first?
-                rescue_line = first.span.start_line - 2
-                end_line = rescue_line if rescue_line >= start_line
+                clause_stops << (first.span.start_line - 2)
               end
+            end
+            if else_body = node.else_body
+              if first_expr = else_body.first?
+                clause_stops << (arena[first_expr].span.start_line - 2)
+              end
+            end
+            if ensure_body = node.ensure_body
+              if first_expr = ensure_body.first?
+                clause_stops << (arena[first_expr].span.start_line - 2)
+              end
+            end
+            clause_stops.reject! { |line| line < start_line }
+            if stop = clause_stops.min?
+              end_line = stop
             end
             ranges << FoldingRange.new(start_line: start_line, end_line: end_line) if end_line > start_line
             node.body.each { |e| collect_folding_ranges_recursive(arena, e, ranges) }
@@ -7613,6 +7660,14 @@ module CrystalV2
                 end
                 rc.body.each { |e| collect_folding_ranges_recursive(arena, e, ranges) }
               end
+            end
+            if else_body = node.else_body
+              if else_body.any?
+                else_start = [arena[else_body.first].span.start_line - 1, 0].max
+                else_end = arena[else_body.last].span.end_line - 1
+                ranges << FoldingRange.new(start_line: else_start, end_line: else_end) if else_end > else_start
+              end
+              else_body.each { |e| collect_folding_ranges_recursive(arena, e, ranges) }
             end
             if ensure_body = node.ensure_body
               if ensure_body.any?
@@ -7920,7 +7975,7 @@ module CrystalV2
               collect_tokens_recursive(context, entry.value, tokens)
             end
           when Frontend::SymbolNode
-            length = node.name.size + 1 # include leading colon
+            length = node.name.size # name already includes leading colon
             emit_span_token(node.span, length, SemanticTokenType::EnumMember.value, tokens)
           when Frontend::GenericNode
             collect_tokens_recursive(context, node.base_type, tokens)
