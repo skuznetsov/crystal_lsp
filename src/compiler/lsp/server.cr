@@ -3364,7 +3364,9 @@ module CrystalV2
                              symbol.is_a?(Semantic::MethodSymbol)
 
           if method_signature
-            if type_str.nil? || prefer_signature
+            # If we have a method signature, prefer showing it for calls/member access
+            # even when the inferred type fell back to Nil/Unknown.
+            if type_str.nil? || prefer_signature || type_str == "Nil" || type_str == "Unknown"
               type_str = method_signature
             end
           end
@@ -6741,9 +6743,37 @@ module CrystalV2
             if method = extract_method_symbol(table.lookup(method_name))
               return method
             end
+
+            # Try current module/class scope for implicit self methods
+            current_scope = find_enclosing_scope_for_expr(doc_state, expr_id)
+            if current_scope && (sym = current_scope.lookup(method_name))
+              if method = extract_method_symbol(sym)
+                return method
+              end
+            end
           end
 
           fallback_method_by_name(method_name, doc_state)
+        end
+
+        # Find the nearest enclosing symbol table (module/class) that owns expr_id.
+        private def find_enclosing_scope_for_expr(doc_state : DocumentState, expr_id : Frontend::ExprId) : Semantic::SymbolTable?
+          # If the identifier already has a symbol, use its parent scope
+          if identifier_symbols = doc_state.identifier_symbols
+            if sym = identifier_symbols[expr_id]?
+              case sym
+              when Semantic::ClassSymbol
+                return sym.class_scope
+              when Semantic::ModuleSymbol
+                return sym.scope
+              when Semantic::MethodSymbol
+                return sym.scope
+              end
+            end
+          end
+
+          # Fallback: walk up from symbol_table root (best effort)
+          doc_state.symbol_table
         end
 
         private def extract_method_symbol(symbol : Semantic::Symbol?) : Semantic::MethodSymbol?
