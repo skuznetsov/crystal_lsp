@@ -148,7 +148,8 @@ module CrystalV2
           @files[path] = FileAnalysisState.new(
             path: path,
             version: version,
-            mtime: Time.utc,
+            # Persist the file's actual mtime so project cache validity checks work across sessions
+            mtime: File.info?(path).try(&.modification_time) || Time.utc,
             root_ids: program.roots,
             symbols: file_symbols.map(&.name),
             diagnostics: diagnostics,
