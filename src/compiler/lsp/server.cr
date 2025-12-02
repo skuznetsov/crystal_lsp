@@ -769,7 +769,7 @@ module CrystalV2
             next unless path_expr.is_a?(Frontend::StringNode)
 
             require_path = String.new(path_expr.value)
-            if absolute = resolve_require_path(base_dir, require_path)
+            resolve_require_paths(base_dir, require_path).each do |absolute|
               paths << absolute unless paths.includes?(absolute)
             end
           end
@@ -895,6 +895,43 @@ module CrystalV2
         rescue ex
           debug("Failed to load dependency #{dep_path}: #{ex.message}")
           offset
+        end
+
+        private def resolve_require_paths(base_dir : String, require_path : String) : Array(String)
+          # Handle wildcard requires (e.g., require "./json/*") by expanding to concrete files.
+          if require_path.includes?('*')
+            forms = normalize_require_forms(require_path)
+            candidates = [] of String
+
+            append_require_candidates(candidates, nil, forms)
+            append_require_candidates(candidates, base_dir, forms)
+
+            if project_root = find_project_root(base_dir)
+              append_require_candidates(candidates, project_root, forms)
+              append_require_candidates(candidates, File.join(project_root, "src"), forms)
+              Dir.glob(File.join(project_root, "lib", "*", "src")).each do |lib_src|
+                append_require_candidates(candidates, lib_src, forms)
+              end
+            end
+
+            stdlib_src = File.dirname(PRELUDE_PATH)
+            append_require_candidates(candidates, stdlib_src, forms)
+
+            expanded = [] of String
+            candidates.each do |candidate|
+              Dir.glob(candidate).each do |path|
+                next unless File.file?(path)
+                expanded << path unless expanded.includes?(path)
+              end
+            end
+            return expanded
+          end
+
+          if resolved = resolve_require_path(base_dir, require_path)
+            [resolved]
+          else
+            [] of String
+          end
         end
 
         private def resolve_require_path(base_dir : String, require_path : String) : String?
@@ -3227,8 +3264,20 @@ module CrystalV2
             if ident
               first_char = ident[0]?
               is_local_var = first_char && (first_char.lowercase? || first_char == '_')
+              # Heuristic: if the identifier is immediately after a '.', treat it as a method name.
+              text = doc_state.text_document.text
+              ident_start = offset
+              while ident_start > 0
+                byte = text.byte_at?(ident_start - 1)
+                break unless byte && identifier_char?(byte)
+                ident_start -= 1
+              end
+              prev_byte = ident_start > 0 ? text.byte_at?(ident_start - 1) : nil
+              method_style = prev_byte == '.'.ord
 
-              if is_local_var
+              if method_style
+                location = find_method_location_by_text(doc_state, ident)
+              elsif is_local_var
                 # Try efficient parameter lookup for local variables
                 location = definition_from_parameters_fast(ident, doc_state, offset)
               else
@@ -3275,6 +3324,30 @@ module CrystalV2
               @dependencies_warming.delete(doc_path)
             end
           end
+        end
+
+        # Resolve definition for a string literal used in a require call (e.g., require "json")
+        private def definition_from_require_string(expr_id : Frontend::ExprId, node : Frontend::StringNode, doc_state : DocumentState) : Location?
+          path_str = String.new(node.value)
+          base_dir = doc_state.path ? File.dirname(doc_state.path.not_nil!) : nil
+          return nil unless base_dir
+
+          arena = doc_state.program.arena
+          doc_state.program.roots.each do |root_id|
+            require_node = arena[root_id]
+            next unless require_node.is_a?(Frontend::RequireNode)
+            next if require_node.path.invalid?
+            next unless require_node.path == expr_id
+
+            resolve_require_paths(base_dir, path_str).each do |resolved|
+              uri = file_uri(resolved)
+              pos = Position.new(0, 0)
+              range = Range.new(pos, pos)
+              return Location.new(uri: uri, range: range)
+            end
+          end
+
+          nil
         end
 
         # Handle textDocument/typeDefinition request
@@ -5008,6 +5081,10 @@ module CrystalV2
           debug("Definition node kind: #{Frontend.node_kind(node)} span=#{span.start_line}:#{span.start_column}-#{span.end_line}:#{span.end_column} offs=#{span.start_offset}-#{span.end_offset}")
 
           case node
+          when Frontend::StringNode
+            if location = definition_from_require_string(expr_id, node, doc_state)
+              return location
+            end
           when Frontend::IdentifierNode
             name_slice = node.name
             debug("Identifier node: #{name_slice ? String.new(name_slice) : "<anon>"}")
@@ -6823,8 +6900,35 @@ module CrystalV2
           end
         end
 
+        # Collect all dependency file paths reachable from a document's requires (transitive, deduped).
+        private def collect_dependency_paths(doc_state : DocumentState) : Array(String)
+          visited = Set(String).new
+          queue = doc_state.requires.dup
+          results = [] of String
+
+          while (path = queue.shift?)
+            abs = File.expand_path(path)
+            next unless visited.add?(abs)
+            results << abs
+
+            uri = file_uri(abs)
+            if dep_state = (@dependency_documents[uri]? || @documents[uri]?)
+              dep_state.requires.each { |nested| queue << nested }
+            end
+          end
+
+          if doc_state.path
+            abs = File.expand_path(doc_state.path.not_nil!)
+            if visited.add?(abs)
+              results << abs
+            end
+          end
+
+          results
+        end
+
         private def find_method_location_by_text(doc_state : DocumentState, method_name : String) : Location?
-          (doc_state.requires || [] of String).each do |path|
+          collect_dependency_paths(doc_state).each do |path|
             next unless File.file?(path)
             if location = find_method_in_file(path, method_name)
               return location
