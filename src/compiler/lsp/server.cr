@@ -3092,6 +3092,12 @@ module CrystalV2
           snippet = extract_snippet(doc_state.text_document.text, span)
           debug("Definition node class=#{node.class} span=#{span.start_line}:#{span.start_column}-#{span.end_line}:#{span.end_column} snippet='#{snippet}'")
 
+          # Suppress hover type for require string literals (only navigate via definition)
+          if node.is_a?(Frontend::StringNode) && require_string_literal?(doc_state, expr_id)
+            debug("Hover suppressed for require string literal")
+            return send_response(id, "null")
+          end
+
           # For PathNode, symbol was already resolved to the specific segment above.
           # For other nodes, look up in identifier_symbols.
           symbol ||= doc_state.identifier_symbols.try(&.[expr_id]?)
@@ -3348,6 +3354,16 @@ module CrystalV2
           end
 
           nil
+        end
+
+        private def require_string_literal?(doc_state : DocumentState, expr_id : Frontend::ExprId) : Bool
+          arena = doc_state.program.arena
+          doc_state.program.roots.each do |root_id|
+            require_node = arena[root_id]
+            next unless require_node.is_a?(Frontend::RequireNode)
+            return true if require_node.path == expr_id
+          end
+          false
         end
 
         # Handle textDocument/typeDefinition request
