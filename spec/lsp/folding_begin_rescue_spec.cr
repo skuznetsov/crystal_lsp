@@ -99,4 +99,22 @@ describe CrystalV2::Compiler::LSP::Server do
     # ensure body with single line may not fold; just ensure no range overlaps else
     ranges.none? { |r| r.start_line <= 5 && r.end_line >= 8 }.should be_true
   end
+
+  it "folds begin before ensure when there is no rescue" do
+    source = <<-CR
+    begin
+      work
+    ensure
+      cleanup
+    end
+    CR
+
+    server = CrystalV2::Compiler::LSP::Server.new(IO::Memory.new, IO::Memory.new, CrystalV2::Compiler::LSP::ServerConfig.new(background_indexing: false, project_cache: false))
+    _diags, program, _tc, _ids, _symtab, _req = server.spec_analyze_document(source, nil, "/tmp/fold_ensure_only.cr")
+    ranges = server.spec_collect_folding_ranges(program)
+
+    begin_range = ranges.find { |r| r.start_line == 0 }
+    begin_range.should_not be_nil
+    begin_range.not_nil!.end_line.should eq(1) # stop before ensure line
+  end
 end

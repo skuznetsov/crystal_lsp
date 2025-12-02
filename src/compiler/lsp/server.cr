@@ -7654,7 +7654,8 @@ module CrystalV2
             end
             if ensure_body = node.ensure_body
               if first_expr = ensure_body.first?
-                clause_stops << (arena[first_expr].span.start_line - 2)
+                # stop before the ensure keyword (which precedes the first ensure expr)
+                clause_stops << (arena[first_expr].span.start_line - 3)
               end
             end
             clause_stops.reject! { |line| line < start_line }
