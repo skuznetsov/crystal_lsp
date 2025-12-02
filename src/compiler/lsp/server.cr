@@ -7873,6 +7873,8 @@ module CrystalV2
               collect_tokens_recursive(context, entry.key, tokens)
               collect_tokens_recursive(context, entry.value, tokens)
             end
+          when Frontend::SymbolNode
+            emit_span_token(node.span, node.span.end_column - node.span.start_column, SemanticTokenType::Property.value, tokens)
           when Frontend::GenericNode
             collect_tokens_recursive(context, node.base_type, tokens)
             node.type_args.each { |arg| collect_tokens_recursive(context, arg, tokens) }
@@ -8148,6 +8150,11 @@ module CrystalV2
                 length = slice.size
                 tokens << RawToken.new(line, col, length, SemanticTokenType::Type.value)
               end
+            when Frontend::Token::Kind::Symbol
+              line = tok.span.start_line - 1
+              col = tok.span.start_column - 1
+              length = tok.slice.size
+              tokens << RawToken.new(line, col, length, SemanticTokenType::Property.value)
             end
           end
         end
@@ -8160,7 +8167,8 @@ module CrystalV2
           when Frontend::Token::Kind::Identifier,
                Frontend::Token::Kind::InstanceVar,
                Frontend::Token::Kind::ClassVar,
-               Frontend::Token::Kind::GlobalVar
+               Frontend::Token::Kind::GlobalVar,
+               Frontend::Token::Kind::Symbol
             SemanticTokenType::Variable.value
           when Frontend::Token::Kind::Number
             SemanticTokenType::Number.value
