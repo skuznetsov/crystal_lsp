@@ -1326,6 +1326,7 @@ module CrystalV2
         private def analyze_document(source : String, base_dir : String? = nil, path : String? = nil, load_requires : Bool = true, workspace : DependencyWorkspace? = nil) : {Array(Diagnostic), Frontend::Program, Semantic::TypeContext?, Hash(Frontend::ExprId, Semantic::Symbol)?, Semantic::SymbolTable?, Array(String)}
           debug("Analyzing document: #{source.lines.size} lines, #{source.size} bytes")
           ensure_prelude_loaded
+          notify_indexing("Indexing… loading document") if @config.background_indexing
 
           diagnostics = [] of Diagnostic
           using_stub = @prelude_state.try(&.stub) || false
@@ -1447,6 +1448,7 @@ module CrystalV2
 
           debug("Analysis complete: #{diagnostics.size} total diagnostics (requires=#{requires.size})")
           requires.each { |req| debug("  require => #{req}") }
+          notify_indexed if @config.background_indexing
           {diagnostics, analysis_program, type_context, identifier_symbols, symbol_table, requires}
         end
 
@@ -1497,15 +1499,17 @@ module CrystalV2
           channel = Channel(PreludeState?).new
           @prelude_load_channel = channel
 
-          spawn do
-            begin
-              state = load_prelude_in_background
-              channel.send(state)
-            rescue ex
-              debug("Background prelude load failed: #{ex.message}")
-              channel.send(nil)
-            end
-          end
+         spawn do
+           begin
+             state = load_prelude_in_background
+             channel.send(state)
+           rescue ex
+             debug("Background prelude load failed: #{ex.message}")
+             channel.send(nil)
+            ensure
+              notify_indexed
+           end
+         end
 
           debug("Background prelude loading started")
         end
@@ -4903,6 +4907,15 @@ module CrystalV2
           params = PublishDiagnosticsParams.new(uri: uri, diagnostics: diagnostics, version: version)
           notification = NotificationMessage.new(method: "textDocument/publishDiagnostics", params: JSON.parse(params.to_json))
           send_notification(notification)
+        end
+
+        private def notify_indexing(message : String = "Indexing…")
+          payload = %({"message":#{message.to_json}})
+          write_message(%({"jsonrpc":"2.0","method":"crystal/indexing","params":#{payload}}))
+        end
+
+        private def notify_indexed
+          write_message(%({"jsonrpc":"2.0","method":"crystal/indexed","params":{}}))
         end
 
         # Send response message
