@@ -103,8 +103,8 @@ module SemanticTokensSpecHelper
     tokens = SemanticTokensSpecHelper.collect(program, source)
     decoded = SemanticTokensSpecHelper.decode(tokens, source)
 
-    property_kind = SemanticTokensSpecHelper.legend_index("property")
-    decoded.any? { |(_, _, _, kind, text)| kind == property_kind && text == ":accel_usage_log" }.should be_true
+    enum_member_kind = SemanticTokensSpecHelper.legend_index("enumMember")
+    decoded.any? { |(_, _, _, kind, text)| kind == enum_member_kind && text == ":accel_usage_log" }.should be_true
   end
 
   it "lexically marks symbol literals inside string interpolation" do
@@ -115,7 +115,6 @@ module SemanticTokensSpecHelper
     tokens = SemanticTokensSpecHelper.collect(program, source)
     decoded = SemanticTokensSpecHelper.decode(tokens, source)
 
-    # Interpolation path currently classifies symbol text as string content (lexical pass)
     string_kind = SemanticTokensSpecHelper.legend_index("string")
     decoded.any? { |(_, _, _, kind, text)| kind == string_kind && text.includes?("foo") }.should be_true
   end

@@ -7874,7 +7874,7 @@ module CrystalV2
               collect_tokens_recursive(context, entry.value, tokens)
             end
           when Frontend::SymbolNode
-            emit_span_token(node.span, node.span.end_column - node.span.start_column, SemanticTokenType::Property.value, tokens)
+            emit_span_token(node.span, node.span.end_column - node.span.start_column, SemanticTokenType::EnumMember.value, tokens)
           when Frontend::GenericNode
             collect_tokens_recursive(context, node.base_type, tokens)
             node.type_args.each { |arg| collect_tokens_recursive(context, arg, tokens) }
@@ -8154,7 +8154,7 @@ module CrystalV2
               line = tok.span.start_line - 1
               col = tok.span.start_column - 1
               length = tok.slice.size
-              tokens << RawToken.new(line, col, length, SemanticTokenType::Property.value)
+              tokens << RawToken.new(line, col, length, SemanticTokenType::EnumMember.value)
             end
           end
         end
@@ -8170,7 +8170,7 @@ module CrystalV2
                Frontend::Token::Kind::GlobalVar
             SemanticTokenType::Variable.value
           when Frontend::Token::Kind::Symbol
-            SemanticTokenType::Property.value
+            SemanticTokenType::EnumMember.value
           when Frontend::Token::Kind::Number
             SemanticTokenType::Number.value
           when Frontend::Token::Kind::String,
