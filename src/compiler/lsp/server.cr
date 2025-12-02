@@ -5400,6 +5400,9 @@ module CrystalV2
             return nil if callee_id.invalid?
             callee_node = doc_state.program.arena[callee_id]
             debug("Call callee node kind: #{Frontend.node_kind(callee_node)}")
+            if macro_location = macro_definition_location(doc_state, callee_id)
+              return macro_location
+            end
             if (location = find_definition_location(callee_id, doc_state, uri, depth + 1, target_offset))
               return location
             end
