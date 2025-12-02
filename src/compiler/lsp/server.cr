@@ -5949,6 +5949,7 @@ module CrystalV2
           prelude_state = @prelude_state
           receiver_type = doc_state.type_context.try(&.get_type(node.object))
           receiver_symbol = canonicalize_prelude_receiver(resolve_receiver_symbol(doc_state, node.object))
+          receiver_symbol ||= receiver_symbol_from_new_call(node.object, doc_state)
 
           method_symbol = nil
 
@@ -6035,6 +6036,32 @@ module CrystalV2
           method_symbol
         end
 
+        # If receiver is a CallNode ending with `.new`, resolve the callee path to a class symbol.
+        private def receiver_symbol_from_new_call(expr_id : Frontend::ExprId, doc_state : DocumentState) : Semantic::Symbol?
+          arena = doc_state.program.arena
+          node = arena[expr_id]
+          return nil unless node.is_a?(Frontend::CallNode)
+
+          method_name = method_name_for_call(node, arena)
+          return nil unless method_name == "new"
+
+          callee_id = node.callee
+          return nil if callee_id.invalid?
+          callee_node = arena[callee_id]
+          return nil unless callee_node.is_a?(Frontend::PathNode)
+
+          segments = collect_path_segments(arena, callee_node)
+          return nil if segments.empty?
+
+          if symbol = resolve_path_symbol(doc_state, segments)
+            if symbol.is_a?(Semantic::ClassSymbol)
+              return symbol
+            end
+          end
+
+          nil
+        end
+
         private def canonicalize_prelude_receiver(receiver_symbol : Semantic::Symbol?) : Semantic::Symbol?
           return receiver_symbol unless receiver_symbol
           name = receiver_symbol.responds_to?(:name) ? receiver_symbol.name : nil
@@ -6064,6 +6091,7 @@ module CrystalV2
           return nil unless stub
 
           receiver_symbol = resolve_receiver_symbol(doc_state, node.object)
+          receiver_symbol ||= receiver_symbol_from_new_call(node.object, doc_state)
           receiver_name = receiver_symbol.try(&.name) || receiver_name_for(doc_state.program.arena, node.object)
           return nil unless receiver_name
 
