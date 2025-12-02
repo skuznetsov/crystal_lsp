@@ -1064,8 +1064,8 @@ module CrystalV2
               end
             end
 
-            emit_error("Unknown type '#{name}'")
-            @context.nil_type
+            # As a fallback, create a nominal primitive type to avoid Nil/Unknown
+            PrimitiveType.new(name)
           end
         end
 
