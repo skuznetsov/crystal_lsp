@@ -8260,23 +8260,26 @@ module CrystalV2
 
             case tok.kind
             when Frontend::Token::Kind::String
-              # Simple strings: color content (excluding opening quote)
-              line = tok.span.start_line - 1
-              col = tok.span.start_column
-              length = tok.slice.size
+              # Simple strings: color full token including quotes
+              span = tok.span
+              line = span.start_line - 1
+              col = span.start_column - 1
+              length = span.end_column - span.start_column + 1
               tokens << RawToken.new(line, col, length, SemanticTokenType::String.value)
             when Frontend::Token::Kind::StringInterpolation
               # Interpolated strings: split without allocating full String
               collect_interpolated_string_tokens_zero_copy(source, tok, tokens)
             when Frontend::Token::Kind::Char
-              line = tok.span.start_line - 1
-              col = tok.span.start_column
-              length = tok.slice.size
+              span = tok.span
+              line = span.start_line - 1
+              col = span.start_column - 1
+              length = span.end_column - span.start_column + 1
               tokens << RawToken.new(line, col, length, SemanticTokenType::String.value)
             when Frontend::Token::Kind::Regex
-              line = tok.span.start_line - 1
-              col = tok.span.start_column
-              length = tok.slice.size
+              span = tok.span
+              line = span.start_line - 1
+              col = span.start_column - 1
+              length = span.end_column - span.start_column + 1
               tokens << RawToken.new(line, col, length, SemanticTokenType::Regexp.value)
             when Frontend::Token::Kind::Identifier
               # Heuristic: uppercase identifiers are constants/types; color even without semantics
