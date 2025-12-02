@@ -253,6 +253,8 @@ module CrystalV2
         @prelude_load_channel : Channel(PreludeState?)?
         @project_root : String?
         @project_cache_dirty : Bool = false
+        @project_cache_loaded : Bool = false
+        @project_cache_save_scheduled : Bool = false
         @dependencies_warming : Set(String)
 
         def initialize(@input = STDIN, @output = STDOUT, config : ServerConfig = ServerConfig.load)
@@ -286,6 +288,8 @@ module CrystalV2
           @prelude_load_channel = nil
           @project_root = nil
           @project_cache_dirty = false
+          @project_cache_loaded = false
+          @project_cache_save_scheduled = false
           @dependencies_warming = Set(String).new
           # Allow forcing the stub prelude for debugging via environment variable
           if ENV["CRYSTALV2_LSP_FORCE_STUB"]?
@@ -1231,6 +1235,14 @@ module CrystalV2
           doc_path = uri_to_path(uri)
           base_dir = doc_path ? File.dirname(doc_path) : nil
 
+          # If project cache not loaded (e.g., missing rootUri), infer root and load once
+          if @project_root.nil? && doc_path
+            if inferred_root = find_project_root(base_dir.not_nil!)
+              @project_root = inferred_root
+              try_load_project_cache
+            end
+          end
+
           # Update unified project state (new architecture) - async with watchdog
           if doc_path
             spawn do
@@ -1240,6 +1252,8 @@ module CrystalV2
                 project_diagnostics = @project.update_file(doc_path, text, version)
                 project_time = (Time.monotonic - project_start).total_milliseconds
                 debug("UnifiedProject update_file: #{project_time.round(2)}ms, #{project_diagnostics.size} diagnostics")
+                @project_cache_dirty = true
+                schedule_project_cache_save
               rescue ex : Frontend::Watchdog::TimeoutError
                 debug("UnifiedProject update_file TIMEOUT: #{ex.message}")
               ensure
@@ -1744,6 +1758,7 @@ module CrystalV2
         private def try_load_project_cache
           return unless root = @project_root
           return unless @config.project_cache
+          return if @project_cache_loaded
 
           load_start = Time.monotonic
           result = ProjectCacheLoader.load_from_cache(@project, root)
@@ -1755,6 +1770,7 @@ module CrystalV2
             if result[:invalid_paths].size > 0
               debug("  #{result[:invalid_paths].size} files need re-parsing")
             end
+            @project_cache_loaded = true
           else
             debug("No valid project cache found")
           end
@@ -1766,14 +1782,33 @@ module CrystalV2
           return unless root = @project_root
           return unless @config.project_cache
           return if @project.files.empty?
+          return unless @project_cache_dirty
 
           save_start = Time.monotonic
           ProjectCacheLoader.save_to_cache(@project, root)
 
           save_ms = (Time.monotonic - save_start).total_milliseconds.round(2)
           debug("Project cache saved: #{@project.files.size} files in #{save_ms}ms")
+          @project_cache_dirty = false
+          @project_cache_save_scheduled = false
         rescue ex
           debug("Failed to save project cache: #{ex.message}")
+        end
+
+        # Schedule a background save of the project cache (debounced).
+        private def schedule_project_cache_save
+          return unless @config.project_cache
+          return if @project_cache_save_scheduled
+
+          @project_cache_save_scheduled = true
+          spawn do
+            begin
+              sleep 0.5.seconds
+              save_project_cache
+            rescue ex
+              debug("Deferred project cache save failed: #{ex.message}")
+            end
+          end
         end
 
         private def try_load_prelude(path : String, label : String) : Bool
@@ -3254,6 +3289,12 @@ module CrystalV2
 
           character = clamp_character(doc_state.text_document.text, line, character)
 
+          if indexing_in_progress?(doc_state)
+            debug("Definition skipped: indexing in progress")
+            send_response(id, "null")
+            return
+          end
+
           debug("Definition request: line=#{line}, char=#{character}")
           debug("Prelude state: #{current_prelude_label}")
 
@@ -3813,7 +3854,12 @@ module CrystalV2
             fallback_range = Range.new(zero_pos, zero_pos)
             return DocumentSymbol.new(symbol.name, SymbolKind::Module.value, fallback_range, fallback_range)
           end
-          node = arena[symbol.node_id]
+          node = safe_node(arena, symbol.node_id)
+          unless node
+            zero_pos = Position.new(0, 0)
+            fallback_range = Range.new(zero_pos, zero_pos)
+            return DocumentSymbol.new(symbol.name, SymbolKind::Module.value, fallback_range, fallback_range)
+          end
           range = Range.from_span(node.span)
           children = collect_document_symbols(symbol.scope, program)
 
@@ -3825,6 +3871,12 @@ module CrystalV2
             nil,
             children.empty? ? nil : children
           )
+        end
+
+        private def safe_node(arena, node_id : Frontend::ExprId)
+          arena[node_id]
+        rescue IndexError
+          nil
         end
 
         # Handle workspace/symbol request (global symbol search)

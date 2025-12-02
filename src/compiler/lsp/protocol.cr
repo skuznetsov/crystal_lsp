@@ -411,13 +411,9 @@ module CrystalV2
           return nil if symbol.node_id.invalid?
 
           node_id = symbol.node_id
-          arena = program.arena
-          # Guard against stale/invalid node_id referencing past arena bounds
-          return nil if node_id.index >= arena.size
-
-          node = arena[node_id]
-          range = Range.from_span(node.span)
-          selection_range = range # MVP: same as range
+          range = safe_range(program, node_id)
+          return nil unless range
+          selection_range = range
 
           kind = case symbol
                  when Semantic::ClassSymbol
@@ -475,6 +471,23 @@ module CrystalV2
           )
         end
 
+        private def self.safe_range(program : Frontend::Program, node_id : Frontend::ExprId) : Range?
+          arena = program.arena
+          # Guard against stale/invalid node_id referencing past arena bounds
+          return nil if node_id.index >= arena.size
+
+          node = safe_node(arena, node_id)
+          return nil unless node
+
+          Range.from_span(node.span)
+        end
+
+        private def self.safe_node(arena, node_id : Frontend::ExprId)
+          arena[node_id]
+        rescue IndexError
+          nil
+        end
+
         # Collect children symbols from scope
         private def self.collect_children(table : Semantic::SymbolTable, program : Frontend::Program) : Array(DocumentSymbol)?
           children = [] of DocumentSymbol
@@ -521,7 +534,16 @@ module CrystalV2
         def self.from_symbol(symbol : Semantic::Symbol, program : Frontend::Program, uri : String, container : String? = nil) : SymbolInformation?
           return nil if symbol.node_id.invalid?
 
-          node = program.arena[symbol.node_id]
+          arena = program.arena
+          return nil if symbol.node_id.index >= arena.size
+
+          node = begin
+            arena[symbol.node_id]
+          rescue IndexError
+            nil
+          end
+          return nil unless node
+
           range = Range.from_span(node.span)
           location = Location.new(uri: uri, range: range)
 
