@@ -449,6 +449,9 @@ module CrystalV2
           @dependency_documents[uri] = dep_state
           workspace.cache[path] = dep_state if workspace
           register_document_symbols(uri, dep_state)
+          if symbol_table
+            merge_symbol_table_into(@project.symbol_table, symbol_table)
+          end
           ensure_dependencies_loaded(dep_state, workspace: workspace) if recursive
 
           dep_state
@@ -1351,7 +1354,9 @@ module CrystalV2
 
           diagnostics = [] of Diagnostic
           using_stub = @prelude_state.try(&.stub) || false
-          use_project_symbols = @project_cache_loaded && @project.symbol_table
+          within_root = path && @project_root && path.starts_with?(@project_root.not_nil!)
+          use_project_symbols = @project_cache_loaded && within_root && @project.files.has_key?(path) && @project.symbol_table
+          debug("project cache check: cache_loaded=#{@project_cache_loaded} within_root=#{within_root} in_cache=#{path && @project.files.has_key?(path)} symtable?=#{!!@project.symbol_table}") if ENV["LSP_DEBUG"]?
           type_context = nil
           identifier_symbols = nil
           symbol_table = nil
@@ -3312,7 +3317,11 @@ module CrystalV2
             end
           end
           type_context = doc_state.type_context
+          cached_type_str = nil
           type = type_context.try(&.get_type(expr_id))
+          if type.nil?
+            cached_type_str = cached_expr_type(doc_state, expr_id)
+          end
 
           if type.nil? && symbol && type_context && !symbol.node_id.invalid?
             type = type_context.get_type(symbol.node_id)
@@ -3339,6 +3348,7 @@ module CrystalV2
           method_signature = method_symbol ? method_signature_for(method_symbol, doc_state, display_name) : nil
 
           type_str = type.try(&.to_s)
+          type_str ||= cached_type_str
 
           prefer_signature = node.is_a?(Frontend::CallNode) ||
                              node.is_a?(Frontend::MemberAccessNode) ||

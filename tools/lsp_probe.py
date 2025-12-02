@@ -42,30 +42,34 @@ TOKEN_LEGEND = [
 
 
 def send(proc: subprocess.Popen, msg: Dict[str, Any]) -> None:
-    data = json.dumps(msg)
-    proc.stdin.write(f"Content-Length: {len(data)}\r\n\r\n{data}")
-    proc.stdin.flush()
+    data = json.dumps(msg).encode("utf-8")
+    header = f"Content-Length: {len(data)}\r\n\r\n".encode("utf-8")
+    stream = proc.stdin.buffer if hasattr(proc.stdin, "buffer") else proc.stdin
+    stream.write(header)
+    stream.write(data)
+    stream.flush()
 
 
 def read_message(proc: subprocess.Popen) -> Optional[Dict[str, Any]]:
     # Read headers until blank line
-    headers: Dict[str, str] = {}
+    headers: Dict[bytes, bytes] = {}
+    stream = proc.stdout.buffer if hasattr(proc.stdout, "buffer") else proc.stdout
     while True:
-        line = proc.stdout.readline()
+        line = stream.readline()
         if not line:
             return None
         line = line.strip()
         if not line:
             break
-        if b":" not in line.encode():
+        if b":" not in line:
             continue
-        name, value = line.split(":", 1)
+        name, value = line.split(b":", 1)
         headers[name.strip().lower()] = value.strip()
-    length = int(headers.get("content-length", "0"))
-    body = proc.stdout.read(length)
+    length = int(headers.get(b"content-length", b"0"))
+    body = stream.read(length)
     # Some servers may send multiple messages back-to-back in stdout buffer.
     # json.loads will choke on concatenated payloads; isolate the first JSON object.
-    body_str = body.decode() if isinstance(body, (bytes, bytearray)) else body
+    body_str = body.decode("utf-8", errors="replace")
     try:
         return json.loads(body_str)
     except json.JSONDecodeError:
@@ -187,7 +191,7 @@ def main() -> int:
         [str(SERVER_PATH)],
         stdin=subprocess.PIPE,
         stdout=subprocess.PIPE,
-        text=True,
+        text=False,
     )
 
     def pump(pending: dict, diagnostics: List[Dict[str, Any]]) -> Dict[str, Any]:

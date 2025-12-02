@@ -1041,7 +1041,20 @@ module CrystalV2
           when "Nil"     then @context.nil_type
           when "Char"    then @context.char_type
           else
-            # Try resolving scoped names (Time::Span) by the rightmost segment
+            # Try resolving scoped names (Time::Span) by full path
+            if symbol = resolve_scoped_symbol(name)
+              case symbol
+              when ClassSymbol
+                return InstanceType.new(symbol)
+              when ModuleSymbol
+                return PrimitiveType.new(name)
+              end
+            end
+            # Try finding class by last segment anywhere in global table
+            if symbol = find_class_symbol_by_suffix(name)
+              return InstanceType.new(symbol)
+            end
+
             base_name = name.includes?("::") ? name.split("::").last : name
 
             if prim = primitive_type_for(base_name)
@@ -1054,19 +1067,59 @@ module CrystalV2
                   return normalize_literal_type(type)
                 end
               end
-              # If scoped, try full name lookup as fallback
-              if name.includes?("::")
-                if symbol = table.lookup(name)
-                  if type = type_from_symbol(symbol)
-                    return normalize_literal_type(type)
-                  end
-                end
-              end
             end
 
             # As a fallback, create a nominal primitive type to avoid Nil/Unknown
             PrimitiveType.new(name)
           end
+        end
+
+        # Resolve a scoped name like Folding::Core::Protein against the global symbol table.
+        private def resolve_scoped_symbol(name : String) : Symbol?
+          return nil unless table = @global_table
+          segments = name.split("::")
+          return nil if segments.empty?
+          current_table = table
+          current_symbol : Symbol? = nil
+
+          segments.each do |seg|
+            sym = current_table.try(&.lookup(seg))
+            return nil unless sym
+            current_symbol = sym
+            case sym
+            when ModuleSymbol
+              current_table = sym.scope
+            when ClassSymbol
+              current_table = sym.scope
+            else
+              current_table = nil
+            end
+          end
+
+          current_symbol
+        end
+
+        # Find a class symbol by matching the rightmost segment across global table (fallback).
+        private def find_class_symbol_by_suffix(name : String) : ClassSymbol?
+          suffix = name.includes?("::") ? name.split("::").last : name
+          return nil unless suffix
+          return nil unless table = @global_table
+          queue = [table]
+          while current = queue.shift?
+            current.each_local_symbol do |_k, sym|
+              case sym
+              when ClassSymbol
+                return sym if sym.name == suffix
+                queue << sym.scope if sym.scope
+              when ModuleSymbol
+                queue << sym.scope if sym.scope
+              end
+            end
+            current.included_modules.each do |mod|
+              queue << mod.scope
+            end
+          end
+          nil
         end
 
         # ============================================================
@@ -2225,6 +2278,14 @@ module CrystalV2
           # MemberAccess without parens is a zero-argument method call in Crystal
           # obj.method → obj.method()
           receiver_type = infer_expression(node.object)
+          # If receiver is a nominal primitive (unknown class), try resolving to class type
+          if receiver_type.is_a?(PrimitiveType) && receiver_type.name.includes?("::")
+            if sym = resolve_scoped_symbol(receiver_type.name)
+              if sym.is_a?(ClassSymbol)
+                receiver_type = InstanceType.new(sym)
+              end
+            end
+          end
           method_name = String.new(node.member)
 
           debug("infer_member_access: receiver_type = #{receiver_type.class.name}: #{receiver_type}, method = #{method_name}")
@@ -2275,9 +2336,15 @@ module CrystalV2
                           end
                         else
                           emit_error("Method '#{method_name}' not found on #{receiver_type}", expr_id)
-                          @context.nil_type
+                          # Heuristic: for arrays, some methods are no-ops on type
+                          if receiver_type.is_a?(ArrayType) && {"to_a", "each", "each_with_index", "map", "collect", "select", "reject", "filter"}.includes?(method_name)
+                            receiver_type
+                          else
+                            @context.nil_type
+                          end
                         end
 
+          @context.set_type(expr_id, result_type)
           debug("  infer_member_access returning: #{result_type.class.name}: #{result_type}")
           result_type
         end
@@ -2315,6 +2382,16 @@ module CrystalV2
           end
 
           return @context.nil_type unless receiver_type && method_name
+
+          # If receiver is unknown (Nil placeholder), use heuristics and skip lookup
+          if receiver_type.is_a?(PrimitiveType) && receiver_type.name == "Nil"
+            case method_name
+            when "map", "collect", "select", "reject", "filter", "to_a", "each", "each_with_index"
+              return ArrayType.new(@context.nil_type)
+            else
+              return @context.nil_type
+            end
+          end
 
           # Week 1: Generic class instantiation with type inference
           # Box.new(42) → infer T=Int32 from argument
@@ -2554,6 +2631,22 @@ module CrystalV2
                 methods << symbol
               when OverloadSetSymbol
                 methods.concat(symbol.overloads)
+              end
+            end
+
+            # If class scope is empty (symbols not loaded), try global table using class name
+            if methods.empty? && (table = @global_table)
+              if global_sym = table.lookup(receiver_type.class_symbol.name)
+                if global_sym.is_a?(ClassSymbol)
+                  if sym = global_sym.scope.lookup(method_name)
+                    case sym
+                    when MethodSymbol
+                      methods << sym
+                    when OverloadSetSymbol
+                      methods.concat(sym.overloads)
+                    end
+                  end
+                end
               end
             end
 
