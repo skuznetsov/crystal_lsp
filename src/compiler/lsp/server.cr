@@ -1471,6 +1471,9 @@ module CrystalV2
               type_context = engine.context
               infer_ms = (Time.monotonic - infer_start).total_seconds * 1000
               debug("Type inference complete: #{analyzer.type_inference_diagnostics.size} diagnostics")
+              if ENV["LSP_DEBUG"]?
+                debug("Type context entries: #{type_context.expression_types.size}")
+              end
 
               if semantic_diagnostics_enabled? && !using_stub
                 analyzer.type_inference_diagnostics.each do |diag|
@@ -3321,6 +3324,11 @@ module CrystalV2
           type = type_context.try(&.get_type(expr_id))
           if type.nil?
             cached_type_str = cached_expr_type(doc_state, expr_id)
+          end
+
+          if type.nil? && node.is_a?(Frontend::IdentifierNode) && type_context
+            sym_node_id = symbol.try(&.node_id)
+            debug("Hover identifier missing type: expr_id=#{expr_id} sym_node_id=#{sym_node_id} has_cached=#{!!cached_type_str}")
           end
 
           if type.nil? && symbol && type_context && !symbol.node_id.invalid?

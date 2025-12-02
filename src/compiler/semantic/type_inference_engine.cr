@@ -37,6 +37,7 @@ module CrystalV2
         getter diagnostics : Array(Diagnostic)
 
         @current_class : ClassSymbol?          # Phase 5C: Track current class for instance var types
+        @current_module : ModuleSymbol?        # Track current module for resolving module (self) methods
         @receiver_type_context : InstanceType? # Week 1: Track receiver's instance type for generic method body inference
         @depth : Int32
         MAX_DEPTH = 512
@@ -54,6 +55,7 @@ module CrystalV2
           @instance_var_types = {} of String => Type # Phase 5A: Track instance variable types
           @flow_narrowings = {} of String => Type    # Phase 95: Flow typing - narrowed types in conditionals
           @current_class = nil
+          @current_module = nil
           @receiver_type_context = nil
           @depth = 0
           @debug_enabled = ENV["TYPE_INFERENCE_DEBUG"]? == "1"
@@ -663,7 +665,7 @@ module CrystalV2
         private def infer_identifier(node : Frontend::IdentifierNode, expr_id : ExprId) : Type
           identifier_name = String.new(node.name)
 
-          debug("infer_identifier: name = '#{identifier_name}' (object_id=#{identifier_name.object_id})")
+          debug("infer_identifier: name = '#{identifier_name}' (expr_id=#{expr_id} object_id=#{identifier_name.object_id})")
           debug("  @assignments has #{@assignments.size} entries: #{@assignments.keys.inspect}")
 
           # Week 1: Check for built-in type names used as type arguments
@@ -814,15 +816,27 @@ module CrystalV2
 
         # Phase 31: Type inference for module definition
         private def infer_module(node : Frontend::ModuleNode, expr_id : ExprId) : Type
-          # In a full implementation, we would:
-          # 1. Look up ModuleSymbol from symbol table
-          # 2. Save current module context
-          # 3. Process module body
-          # 4. Restore previous module context
-          # For now, just process the body
+          module_name = String.new(node.name)
+          previous_module = @current_module
+
+          # Prefer nested lookup inside current module, otherwise fall back to global table
+          if previous_module
+            if sym = previous_module.scope.lookup(module_name)
+              @current_module = sym if sym.is_a?(ModuleSymbol)
+            end
+          end
+          if @current_module.nil?
+            if sym = @global_table.try(&.lookup(module_name))
+              @current_module = sym if sym.is_a?(ModuleSymbol)
+            end
+          end
+
           (node.body || [] of ExprId).each do |body_expr_id|
             infer_expression(body_expr_id)
           end
+
+          # Restore previous module context
+          @current_module = previous_module
 
           # Module definitions don't have value types
           @context.nil_type
@@ -1627,8 +1641,10 @@ module CrystalV2
             target_name = String.new(target_node.name)
             clean_name = target_name.starts_with?("@") ? target_name[1..-1] : target_name
             @instance_var_types[clean_name] = value_type
+            @context.set_type(target_id, value_type)
           when Frontend::IdentifierNode
             @assignments[String.new(target_node.name)] = value_type
+            @context.set_type(target_id, value_type)
           end
           # Phase 14B: Index assignment (h["key"] = value) - no tracking needed,
           # just return value type
@@ -2374,6 +2390,65 @@ module CrystalV2
             # Infer argument types
             arg_types = Array(Type).new(node.args.size)
             node.args.each { |arg_id| arg_types << infer_expression(arg_id) }
+            # If resolver already bound this identifier to a method (incl. self/class methods), use it
+            if symbol = @identifier_symbols[node.callee]?
+              debug("  identifier_symbols hit: #{symbol.class.name}") if @debug_enabled
+              if @debug_enabled && method_name == "total_energy_breakdown"
+                debug("  identifier_symbols[callee]=#{symbol.class.name}")
+              end
+              if symbol.is_a?(MethodSymbol)
+                if ann = symbol.return_annotation
+                  return parse_type_name(ann)
+                end
+              elsif symbol.is_a?(ClassSymbol)
+                # Calling a class name without .new is likely a missing resolution; fall through
+              end
+            end
+            # Try current class/module scope for class methods (implicit self)
+            if current_class = @current_class
+              if sym = current_class.scope.lookup(method_name)
+                case sym
+                when MethodSymbol
+                  if ann = sym.return_annotation
+                    debug("  current_class scope hit for #{method_name}") if @debug_enabled
+                    return parse_type_name(ann)
+                  end
+                when OverloadSetSymbol
+                  if overload = sym.overloads.first?
+                    if ann = overload.return_annotation
+                      debug("  current_class overload hit for #{method_name}") if @debug_enabled
+                      return parse_type_name(ann)
+                    end
+                  end
+                end
+              end
+            end
+            # Try current module scope (def self.* inside a module)
+            if current_module = @current_module
+              if sym = current_module.scope.lookup(method_name)
+                case sym
+                when MethodSymbol
+                  if ann = sym.return_annotation
+                    debug("  current_module scope hit for #{method_name}") if @debug_enabled
+                    return parse_type_name(ann)
+                  end
+                when OverloadSetSymbol
+                  if overload = sym.overloads.first?
+                    if ann = overload.return_annotation
+                      debug("  current_module overload hit for #{method_name}") if @debug_enabled
+                      return parse_type_name(ann)
+                    end
+                  end
+                end
+              end
+            end
+            # Fallback: search global table for a module/class method with this name
+            if method = find_method_in_scope(@global_table, method_name)
+              debug("  find_method_in_scope hit for #{method_name}: #{method.class.name}") if @debug_enabled
+              if ann = method.return_annotation
+                return parse_type_name(ann)
+              end
+            end
             # Lookup method in global scope
             return infer_top_level_function_call(method_name, arg_types, expr_id)
           else
@@ -2574,6 +2649,28 @@ module CrystalV2
 
           # Return type arguments in the same order as type_params
           type_params.map { |param_name| binding[param_name]? || @context.nil_type }
+        end
+
+        # Depth-first search for a method name in the given scope (SymbolTable)
+        private def find_method_in_scope(scope : SymbolTable?, name : String) : MethodSymbol?
+          return nil unless scope
+          if sym = scope.lookup(name)
+            case sym
+            when MethodSymbol
+              return sym
+            when OverloadSetSymbol
+              return sym.overloads.first?
+            end
+          end
+          scope.each_local_symbol do |_sym_name, sym|
+            case sym
+            when ModuleSymbol, ClassSymbol
+              if found = find_method_in_scope(sym.scope, name)
+                return found
+              end
+            end
+          end
+          nil
         end
 
         # Phase 4B: Method lookup with overload resolution
