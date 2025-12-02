@@ -56,9 +56,22 @@ module CrystalV2
         property name : String
         property kind : String
         property detail : String?
+        property return_type : String?
+        property params : Array(String)?
+        property ivars : Array(String)?
+        property consts : Array(String)?
         property children : Array(SymbolSummary)?
 
-        def initialize(@name : String, @kind : String, @detail : String? = nil, @children : Array(SymbolSummary)? = nil)
+        def initialize(
+          @name : String,
+          @kind : String,
+          @detail : String? = nil,
+          @return_type : String? = nil,
+          @params : Array(String)? = nil,
+          @ivars : Array(String)? = nil,
+          @consts : Array(String)? = nil,
+          @children : Array(SymbolSummary)? = nil
+        )
         end
 
         def self.from_json_array(json : String) : Array(SymbolSummary)
@@ -110,6 +123,25 @@ module CrystalV2
           @file_identifier_symbols = {} of String => Hash(Frontend::ExprId, Semantic::Symbol)
 
           @dirty_files = Set(String).new
+        end
+
+        # Rehydrate symbol table from cached summaries (no AST) for unchanged files.
+        # This is lightweight and provides quick global lookup; spans remain invalid (ExprId = -1)
+        # so navigation falls back to zero-range until file is parsed.
+        def restore_symbols_from_cache(state : FileAnalysisState)
+          return if state.symbol_summaries.empty?
+          return if @symbol_table.nil?
+
+          state.symbol_summaries.each do |summary|
+            sym = build_symbol_from_summary(summary, state.path)
+            next unless sym
+            begin
+              @symbol_table.define(summary.name, sym)
+            rescue Semantic::SymbolRedefinitionError
+              @symbol_table.redefine(summary.name, sym)
+            end
+            @symbol_files[summary.name] = state.path
+          end
         end
 
         # Add prelude symbols (from cache or fresh parse)
@@ -338,17 +370,32 @@ module CrystalV2
           case symbol
           when Semantic::OverloadSetSymbol
             children = symbol.overloads.map { |ov| summarize_symbol(ov, program) }
-            SymbolSummary.new(symbol.name, "overload_set", nil, children)
+            SymbolSummary.new(symbol.name, "overload_set", nil, nil, nil, nil, nil, children)
           when Semantic::ClassSymbol
             children = summarize_scope(symbol.scope, program)
-            SymbolSummary.new(symbol.name, "class", nil, children)
+            SymbolSummary.new(symbol.name, "class", nil, nil, nil, nil, nil, children)
           when Semantic::ModuleSymbol
             children = summarize_scope(symbol.scope, program)
-            SymbolSummary.new(symbol.name, "module", nil, children)
+            SymbolSummary.new(symbol.name, "module", nil, nil, nil, nil, nil, children)
           when Semantic::MethodSymbol
-            SymbolSummary.new(symbol.name, "method", format_method_signature(symbol))
+            params = symbol.params.map do |p|
+              if p_name = p.name
+                type = p.type_annotation ? String.new(p.type_annotation.not_nil!) : "?"
+                "#{String.new(p_name)} : #{type}"
+              else
+                "&"
+              end
+            end
+            SymbolSummary.new(
+              symbol.name,
+              "method",
+              format_method_signature(symbol),
+              symbol.return_annotation || "?",
+              params
+            )
           when Semantic::VariableSymbol
-            SymbolSummary.new(symbol.name, "variable", symbol.declared_type)
+            kind = symbol.name.starts_with?("@") ? "ivar" : "variable"
+            SymbolSummary.new(symbol.name, kind, symbol.declared_type)
           when Semantic::MacroSymbol
             SymbolSummary.new(symbol.name, "macro", nil)
           else
@@ -376,6 +423,56 @@ module CrystalV2
           end.join(", ")
           ret = symbol.return_annotation || "?"
           "(#{params_str}) : #{ret}"
+        end
+
+        # Build lightweight Semantic symbols from cached summaries (ExprId = -1 placeholders)
+        private def build_symbol_from_summary(summary : SymbolSummary, file_path : String) : Semantic::Symbol?
+          node_id = Frontend::ExprId.new(-1)
+
+          case summary.kind
+          when "class"
+            scope = Semantic::SymbolTable.new
+            class_scope = Semantic::SymbolTable.new
+            (summary.children || [] of SymbolSummary).each do |child|
+              if child_sym = build_symbol_from_summary(child, file_path)
+                begin
+                  scope.define(child.name, child_sym)
+                rescue Semantic::SymbolRedefinitionError
+                  scope.redefine(child.name, child_sym)
+                end
+              end
+            end
+            Semantic::ClassSymbol.new(summary.name, node_id, scope: scope, class_scope: class_scope)
+          when "module", "overload_set"
+            scope = Semantic::SymbolTable.new
+            (summary.children || [] of SymbolSummary).each do |child|
+              if child_sym = build_symbol_from_summary(child, file_path)
+                begin
+                  scope.define(child.name, child_sym)
+                rescue Semantic::SymbolRedefinitionError
+                  scope.redefine(child.name, child_sym)
+                end
+              end
+            end
+            Semantic::ModuleSymbol.new(summary.name, node_id, scope: scope)
+          when "method"
+            Semantic::MethodSymbol.new(
+              summary.name,
+              node_id,
+              params: [] of Frontend::Parameter,
+              return_annotation: summary.return_type,
+              scope: Semantic::SymbolTable.new
+            )
+          when "ivar", "variable"
+            Semantic::VariableSymbol.new(summary.name, node_id, summary.detail)
+          when "macro"
+            # Body/params not stored; placeholder node_id
+            Semantic::MacroSymbol.new(summary.name, node_id, node_id)
+          else
+            Semantic::VariableSymbol.new(summary.name, node_id, summary.detail)
+          end
+        rescue
+          nil
         end
 
         private def analyze_file_semantics(program : Frontend::Program, path : String, symbols : Array(Semantic::Symbol)) : Array(Diagnostic)

@@ -111,6 +111,16 @@ Goal: v2 LSP must report only real errors and match original compiler behavior.
 
 ---
 
+## LSP Project Cache (New)
+- [x] Versioned project cache (v2) with symbol summaries (classes/modules/method signatures) + real mtime
+- [x] Background indexing of `root/src/**/*.cr` to populate cache automatically
+- [ ] Extend summaries with ivars/consts and richer type info (params/return types already stored)
+- [ ] Restore symbol_table from cache for unchanged files; avoid re-parse/resolve when mtime matches
+- [ ] Mark cached files (`from_cache`) and use summaries for hover/definition when AST is missing
+- [ ] Strict cache validation (version/root hash/mtime) with full reparse fallback (root hash/version done; add fallback wiring)
+
+---
+
 ## 5. Beyond Parity: IR & Codegen (Future)
 
 (After LSP correctness achieved)
