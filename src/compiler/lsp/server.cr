@@ -404,7 +404,10 @@ module CrystalV2
           # Fast path: use cached project state (symbols + ranges) when file is unchanged
           if @project_cache_loaded
             if cached = @project.files[path]?
-              if (mtime = File.info?(path).try(&.modification_time)) && mtime == cached.mtime && cached.symbol_summaries && !cached.symbol_summaries.empty?
+              file_info = File.info?(path)
+              cached_unix = cached.mtime.try(&.to_unix)
+              file_unix = file_info.try(&.modification_time.to_unix)
+              if file_unix && file_unix == cached_unix && cached.symbol_summaries && !cached.symbol_summaries.empty?
                 debug("Loading dependency #{path} from project cache")
                 source = File.read(path)
                 text_doc = TextDocumentItem.new(uri: uri, language_id: "crystal", version: 0, text: source)
@@ -419,6 +422,8 @@ module CrystalV2
                 workspace.try { |ws| ws.cache[path] = dep_state }
                 ensure_dependencies_loaded(dep_state, workspace: workspace) if recursive
                 return dep_state
+              else
+                debug("Cache miss for #{path} (file_unix=#{file_unix}, cached_unix=#{cached_unix}, summaries=#{cached.symbol_summaries.try(&.size)})")
               end
             end
           end
