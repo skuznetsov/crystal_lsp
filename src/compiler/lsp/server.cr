@@ -1337,7 +1337,8 @@ module CrystalV2
           requires = [] of String
 
           # Parse
-          parse_start = Time.monotonic
+          total_start = Time.monotonic
+          parse_start = total_start
           lexer = Frontend::Lexer.new(source)
           parser = Frontend::Parser.new(lexer, recovery_mode: @config.parser_recovery_mode)
           program = parser.parse_program
@@ -1345,6 +1346,7 @@ module CrystalV2
           debug("[guard] parse took #{parse_ms.round(1)} ms") if parse_ms > GUARD_WARN_MS
           uses_compiler_module = includes_compiler_module?(program)
           dependency_states = [] of DocumentState
+          requires_start = Time.monotonic
           if load_requires && !use_project_symbols
             raw_requires = base_dir ? collect_require_paths(program, base_dir) : [] of String
             requires = filter_required_files(requirements: raw_requires, includes_compiler: uses_compiler_module)
@@ -1355,6 +1357,7 @@ module CrystalV2
               end
             end
           end
+          requires_ms = (Time.monotonic - requires_start).total_seconds * 1000
           analysis_program = program
           analysis_program = wrap_program_with_file(program, path) if path
           # Convert parser diagnostics
@@ -1372,14 +1375,18 @@ module CrystalV2
             end
 
             analyzer = Semantic::Analyzer.new(analysis_program, context)
+            collect_start = Time.monotonic
             analyzer.collect_symbols
+            symbols_ms = (Time.monotonic - collect_start).total_seconds * 1000
             debug("Symbol collection complete")
 
             symbol_table = analyzer.global_context.symbol_table
             inject_compiler_alias_bindings(symbol_table) if uses_compiler_module
 
             # Run name resolution even if parser reported diagnostics; useful for navigation
+            resolve_start = Time.monotonic
             result = analyzer.resolve_names
+            resolve_ms = (Time.monotonic - resolve_start).total_seconds * 1000
             identifier_symbols = result.identifier_symbols
             debug("Name resolution complete: #{result.diagnostics.size} diagnostics, #{identifier_symbols.size} identifiers resolved")
 
@@ -1430,10 +1437,13 @@ module CrystalV2
               should_infer = true
             end
 
+            infer_ms = 0.0
             if should_infer
               debug("Starting type inference")
+              infer_start = Time.monotonic
               engine = analyzer.infer_types(result.identifier_symbols)
               type_context = engine.context
+              infer_ms = (Time.monotonic - infer_start).total_seconds * 1000
               debug("Type inference complete: #{analyzer.type_inference_diagnostics.size} diagnostics")
 
               if semantic_diagnostics_enabled? && !using_stub
@@ -1451,7 +1461,11 @@ module CrystalV2
             debug("Semantic analysis failed: #{ex.message}")
           end
 
-          debug("Analysis complete: #{diagnostics.size} total diagnostics (requires=#{requires.size})")
+          total_ms = (Time.monotonic - total_start).total_seconds * 1000
+          debug("Analysis complete: #{diagnostics.size} total diagnostics (requires=#{requires.size}, use_cache=#{!!use_project_symbols})")
+          if total_ms > GUARD_WARN_MS
+            debug("Timing: parse=#{parse_ms.round(1)}ms requires=#{requires_ms.round(1)}ms symbols=#{(symbols_ms || 0).round(1)}ms resolve=#{(resolve_ms || 0).round(1)}ms infer=#{(infer_ms || 0).round(1)}ms total=#{total_ms.round(1)}ms")
+          end
           requires.each { |req| debug("  require => #{req}") }
           notify_indexed if @config.background_indexing
           {diagnostics, analysis_program, type_context, identifier_symbols, symbol_table, requires}
