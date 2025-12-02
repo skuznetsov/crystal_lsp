@@ -8167,9 +8167,10 @@ module CrystalV2
           when Frontend::Token::Kind::Identifier,
                Frontend::Token::Kind::InstanceVar,
                Frontend::Token::Kind::ClassVar,
-               Frontend::Token::Kind::GlobalVar,
-               Frontend::Token::Kind::Symbol
+               Frontend::Token::Kind::GlobalVar
             SemanticTokenType::Variable.value
+          when Frontend::Token::Kind::Symbol
+            SemanticTokenType::Property.value
           when Frontend::Token::Kind::Number
             SemanticTokenType::Number.value
           when Frontend::Token::Kind::String,

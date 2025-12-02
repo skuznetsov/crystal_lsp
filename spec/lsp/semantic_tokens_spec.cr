@@ -93,4 +93,30 @@ module SemanticTokensSpecHelper
     decoded.any? { |(_, _, _, kind, text)| kind == SemanticTokensSpecHelper.legend_index("keyword") && text == "begin" }.should be_true
     decoded.count { |(_, _, _, kind, text)| kind == SemanticTokensSpecHelper.legend_index("keyword") && text == "end" }.should be >= 2
   end
+
+  it "highlights symbol literals in hash access" do
+    source = "options[:accel_usage_log] = true\n"
+    parser = CrystalV2::Compiler::Frontend::Parser.new(
+      CrystalV2::Compiler::Frontend::Lexer.new(source)
+    )
+    program = parser.parse_program
+    tokens = SemanticTokensSpecHelper.collect(program, source)
+    decoded = SemanticTokensSpecHelper.decode(tokens, source)
+
+    property_kind = SemanticTokensSpecHelper.legend_index("property")
+    decoded.any? { |(_, _, _, kind, text)| kind == property_kind && text == ":accel_usage_log" }.should be_true
+  end
+
+  it "lexically marks symbol literals inside string interpolation" do
+    source = %("#{ :foo }")
+    lexer = CrystalV2::Compiler::Frontend::Lexer.new(source)
+    parser = CrystalV2::Compiler::Frontend::Parser.new(lexer)
+    program = parser.parse_program
+    tokens = SemanticTokensSpecHelper.collect(program, source)
+    decoded = SemanticTokensSpecHelper.decode(tokens, source)
+
+    # Interpolation path currently classifies symbol text as string content (lexical pass)
+    string_kind = SemanticTokensSpecHelper.legend_index("string")
+    decoded.any? { |(_, _, _, kind, text)| kind == string_kind && text.includes?("foo") }.should be_true
+  end
 end
