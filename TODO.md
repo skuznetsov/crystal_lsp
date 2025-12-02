@@ -119,7 +119,7 @@ Goal: v2 LSP must report only real errors and match original compiler behavior.
 - [x] Guard hover/definition when indexing in progress (soft-fail)
 - [x] Rename guard for stdlib/prelude symbols (no-op or error)
 - [x] VSCode extension: request/response log channel and “Indexing…” status indicator in UI
-- [x] Navigation to stdlib/prelude and macro-generated methods (tests + impl)
+- [x] Navigation to stdlib/prelude (tests + impl)
 
 ---
 
