@@ -255,6 +255,7 @@ module CrystalV2
         @project_cache_dirty : Bool = false
         @project_cache_loaded : Bool = false
         @project_cache_save_scheduled : Bool = false
+        @project_indexing_started : Bool = false
         @dependencies_warming : Set(String)
 
         def initialize(@input = STDIN, @output = STDOUT, config : ServerConfig = ServerConfig.load)
@@ -290,6 +291,7 @@ module CrystalV2
           @project_cache_dirty = false
           @project_cache_loaded = false
           @project_cache_save_scheduled = false
+          @project_indexing_started = false
           @dependencies_warming = Set(String).new
           # Allow forcing the stub prelude for debugging via environment variable
           if ENV["CRYSTALV2_LSP_FORCE_STUB"]?
@@ -1207,10 +1209,12 @@ module CrystalV2
               @project_root = uri_to_path(root_uri)
               debug("Project root: #{@project_root}")
               try_load_project_cache
+              start_background_project_index
             elsif root_path = params["rootPath"]?.try(&.as_s?)
               @project_root = root_path
               debug("Project root (from rootPath): #{@project_root}")
               try_load_project_cache
+              start_background_project_index
             end
           end
 
@@ -1240,6 +1244,7 @@ module CrystalV2
             if inferred_root = find_project_root(base_dir.not_nil!)
               @project_root = inferred_root
               try_load_project_cache
+              start_background_project_index
             end
           end
 
@@ -1807,6 +1812,41 @@ module CrystalV2
               save_project_cache
             rescue ex
               debug("Deferred project cache save failed: #{ex.message}")
+            end
+          end
+        end
+
+        # Background indexing of project files to populate the project cache.
+        private def start_background_project_index
+          return unless root = @project_root
+          return unless @config.project_cache
+          return if @project_indexing_started
+
+          @project_indexing_started = true
+          spawn do
+            begin
+              paths = Dir.glob(File.join(root, "src", "**", "*.cr"))
+              indexed = 0
+
+              paths.each do |path|
+                next if @project.files.has_key?(path)
+                begin
+                  source = File.read(path)
+                  @project.update_file(path, source, 0)
+                  indexed += 1
+                rescue ex
+                  debug("Background index failed for #{path}: #{ex.message}")
+                end
+              end
+
+              if indexed > 0
+                @project_cache_dirty = true
+                schedule_project_cache_save
+              end
+
+              debug("Background project index complete: indexed #{indexed} files")
+            ensure
+              @project_indexing_started = false
             end
           end
         end

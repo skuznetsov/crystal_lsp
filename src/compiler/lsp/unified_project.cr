@@ -34,6 +34,7 @@ module CrystalV2
         getter symbols : Array(String)  # Top-level symbols defined in this file
         getter diagnostics : Array(Diagnostic)
         getter requires : Array(String)  # Files this file requires
+        getter symbol_summaries : Array(SymbolSummary)  # Structured export data for cache/UI
 
         def initialize(
           @path : String,
@@ -42,8 +43,33 @@ module CrystalV2
           @root_ids : Array(Frontend::ExprId) = [] of Frontend::ExprId,
           @symbols : Array(String) = [] of String,
           @diagnostics : Array(Diagnostic) = [] of Diagnostic,
-          @requires : Array(String) = [] of String
+          @requires : Array(String) = [] of String,
+          @symbol_summaries : Array(SymbolSummary) = [] of SymbolSummary
         )
+        end
+      end
+
+      # Lightweight summary for exposed symbols (for cache/UI)
+      struct SymbolSummary
+        include JSON::Serializable
+
+        property name : String
+        property kind : String
+        property detail : String?
+        property children : Array(SymbolSummary)?
+
+        def initialize(@name : String, @kind : String, @detail : String? = nil, @children : Array(SymbolSummary)? = nil)
+        end
+
+        def self.from_json_array(json : String) : Array(SymbolSummary)
+          return [] of SymbolSummary if json.empty?
+          Array(SymbolSummary).from_json(json)
+        rescue
+          [] of SymbolSummary
+        end
+
+        def self.to_json_array(summaries : Array(SymbolSummary)) : String
+          summaries.to_json
         end
       end
 
@@ -134,6 +160,7 @@ module CrystalV2
           # Phase 3: Collect symbols from this file
           symbol_start = Time.monotonic
           file_symbols = collect_file_symbols(program, path)
+          symbol_summaries = build_symbol_summaries(file_symbols, program)
           symbol_time = Time.monotonic - symbol_start
 
           # Phase 4: Run semantic analysis on this file
@@ -153,7 +180,8 @@ module CrystalV2
             root_ids: program.roots,
             symbols: file_symbols.map(&.name),
             diagnostics: diagnostics,
-            requires: requires
+            requires: requires,
+            symbol_summaries: symbol_summaries
           )
 
           # Mark dependents as dirty
@@ -300,6 +328,54 @@ module CrystalV2
           end
 
           symbols
+        end
+
+        private def build_symbol_summaries(symbols : Array(Semantic::Symbol), program : Frontend::Program) : Array(SymbolSummary)
+          symbols.map { |sym| summarize_symbol(sym, program) }
+        end
+
+        private def summarize_symbol(symbol : Semantic::Symbol, program : Frontend::Program) : SymbolSummary
+          case symbol
+          when Semantic::OverloadSetSymbol
+            children = symbol.overloads.map { |ov| summarize_symbol(ov, program) }
+            SymbolSummary.new(symbol.name, "overload_set", nil, children)
+          when Semantic::ClassSymbol
+            children = summarize_scope(symbol.scope, program)
+            SymbolSummary.new(symbol.name, "class", nil, children)
+          when Semantic::ModuleSymbol
+            children = summarize_scope(symbol.scope, program)
+            SymbolSummary.new(symbol.name, "module", nil, children)
+          when Semantic::MethodSymbol
+            SymbolSummary.new(symbol.name, "method", format_method_signature(symbol))
+          when Semantic::VariableSymbol
+            SymbolSummary.new(symbol.name, "variable", symbol.declared_type)
+          when Semantic::MacroSymbol
+            SymbolSummary.new(symbol.name, "macro", nil)
+          else
+            SymbolSummary.new(symbol.name, "symbol", nil)
+          end
+        end
+
+        private def summarize_scope(table : Semantic::SymbolTable, program : Frontend::Program) : Array(SymbolSummary)
+          summaries = [] of SymbolSummary
+          table.each_local_symbol do |_name, sym|
+            summaries << summarize_symbol(sym, program)
+          end
+          summaries
+        end
+
+        private def format_method_signature(symbol : Semantic::MethodSymbol) : String
+          params_str = symbol.params.map do |p|
+            if p_name = p.name
+              name = String.new(p_name)
+              type = p.type_annotation ? String.new(p.type_annotation.not_nil!) : "?"
+              "#{name} : #{type}"
+            else
+              "&"
+            end
+          end.join(", ")
+          ret = symbol.return_annotation || "?"
+          "(#{params_str}) : #{ret}"
         end
 
         private def analyze_file_semantics(program : Frontend::Program, path : String, symbols : Array(Semantic::Symbol)) : Array(Diagnostic)

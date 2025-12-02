@@ -20,13 +20,15 @@ module CrystalV2
         getter symbols : Array(String)  # Top-level symbol names
         getter requires : Array(String)  # Required file paths
         getter diagnostics_count : Int32  # Just count, not full diagnostics
+        getter summary_json : String      # JSON-encoded symbol summaries
 
         def initialize(
           @path : String,
           @mtime : Int64,
           @symbols : Array(String),
           @requires : Array(String),
-          @diagnostics_count : Int32 = 0
+          @diagnostics_count : Int32 = 0,
+          @summary_json : String = "[]"
         )
         end
 
@@ -37,6 +39,7 @@ module CrystalV2
           write_string_array(io, @symbols)
           write_string_array(io, @requires)
           io.write_bytes(@diagnostics_count, IO::ByteFormat::LittleEndian)
+          write_string(io, @summary_json)
         end
 
         def self.from_bytes(io : IO) : CachedFileState
@@ -45,8 +48,9 @@ module CrystalV2
           symbols = read_string_array(io)
           requires = read_string_array(io)
           diagnostics_count = io.read_bytes(Int32, IO::ByteFormat::LittleEndian)
+          summary_json = read_string(io)
 
-          new(path, mtime, symbols, requires, diagnostics_count)
+          new(path, mtime, symbols, requires, diagnostics_count, summary_json)
         end
 
         private def write_string(io : IO, str : String)
@@ -82,7 +86,7 @@ module CrystalV2
       # Project-level cache
       class ProjectCache
         MAGIC   = "CV2P"
-        VERSION = 1_u32
+        VERSION = 2_u32
 
         getter files : Array(CachedFileState)
         getter project_root : String
@@ -165,12 +169,14 @@ module CrystalV2
         def self.from_project(project : UnifiedProjectState, project_root : String) : ProjectCache
           files = project.files.map do |path, state|
             mtime = state.mtime.try(&.to_unix) || 0_i64
+            summary_json = SymbolSummary.to_json_array(state.symbol_summaries)
             CachedFileState.new(
               path: path,
               mtime: mtime,
               symbols: state.symbols,
               requires: state.requires,
-              diagnostics_count: state.diagnostics.size
+              diagnostics_count: state.diagnostics.size,
+              summary_json: summary_json
             )
           end
 
@@ -217,7 +223,8 @@ module CrystalV2
               root_ids: [] of Frontend::ExprId,  # No AST in cache
               symbols: cached.symbols,
               diagnostics: [] of Diagnostic,  # Will be regenerated if needed
-              requires: cached.requires
+              requires: cached.requires,
+              symbol_summaries: SymbolSummary.from_json_array(cached.summary_json)
             )
 
             # Register in project
