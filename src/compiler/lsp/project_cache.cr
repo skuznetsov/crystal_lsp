@@ -16,11 +16,12 @@ module CrystalV2
       # Cached state for a single file
       struct CachedFileState
         getter path : String
-        getter mtime : Int64  # Unix timestamp
-        getter symbols : Array(String)  # Top-level symbol names
+        getter mtime : Int64             # Unix timestamp
+        getter symbols : Array(String)   # Top-level symbol names
         getter requires : Array(String)  # Required file paths
-        getter diagnostics_count : Int32  # Just count, not full diagnostics
-        getter summary_json : String      # JSON-encoded symbol summaries
+        getter diagnostics_count : Int32 # Just count, not full diagnostics
+        getter summary_json : String     # JSON-encoded symbol summaries
+        getter expr_types_json : String  # JSON-encoded expression types (ExprId index -> type string)
 
         def initialize(
           @path : String,
@@ -28,7 +29,8 @@ module CrystalV2
           @symbols : Array(String),
           @requires : Array(String),
           @diagnostics_count : Int32 = 0,
-          @summary_json : String = "[]"
+          @summary_json : String = "[]",
+          @expr_types_json : String = "{}",
         )
         end
 
@@ -40,6 +42,7 @@ module CrystalV2
           write_string_array(io, @requires)
           io.write_bytes(@diagnostics_count, IO::ByteFormat::LittleEndian)
           write_string(io, @summary_json)
+          write_string(io, @expr_types_json)
         end
 
         def self.from_bytes(io : IO) : CachedFileState
@@ -49,8 +52,9 @@ module CrystalV2
           requires = read_string_array(io)
           diagnostics_count = io.read_bytes(Int32, IO::ByteFormat::LittleEndian)
           summary_json = read_string(io)
+          expr_types_json = read_string(io)
 
-          new(path, mtime, symbols, requires, diagnostics_count, summary_json)
+          new(path, mtime, symbols, requires, diagnostics_count, summary_json, expr_types_json)
         end
 
         private def write_string(io : IO, str : String)
@@ -170,13 +174,15 @@ module CrystalV2
           files = project.files.map do |path, state|
             mtime = state.mtime.try(&.to_unix) || 0_i64
             summary_json = SymbolSummary.to_json_array(state.symbol_summaries)
+            expr_types_json = project.cached_expr_types[path]?.try(&.to_json) || "{}"
             CachedFileState.new(
               path: path,
               mtime: mtime,
               symbols: state.symbols,
               requires: state.requires,
               diagnostics_count: state.diagnostics.size,
-              summary_json: summary_json
+              summary_json: summary_json,
+              expr_types_json: expr_types_json
             )
           end
 
@@ -202,7 +208,7 @@ module CrystalV2
         # Load project from cache, returns files that need re-parsing
         def self.load_from_cache(
           project : UnifiedProjectState,
-          project_root : String
+          project_root : String,
         ) : {valid_count: Int32, invalid_paths: Array(String)}
           cache = ProjectCache.load(project_root)
 
@@ -220,9 +226,9 @@ module CrystalV2
               path: cached.path,
               version: 0,
               mtime: Time.unix(cached.mtime),
-              root_ids: [] of Frontend::ExprId,  # No AST in cache
+              root_ids: [] of Frontend::ExprId, # No AST in cache
               symbols: cached.symbols,
-              diagnostics: [] of Diagnostic,  # Will be regenerated if needed
+              diagnostics: [] of Diagnostic, # Will be regenerated if needed
               requires: cached.requires,
               symbol_summaries: SymbolSummary.from_json_array(cached.summary_json)
             )
@@ -241,6 +247,14 @@ module CrystalV2
             cached.requires.each do |req|
               project.dependencies[cached.path] << req
               project.dependents[req] << cached.path
+            end
+
+            # Restore cached expression types (ExprId index -> type string)
+            begin
+              expr_map = Hash(Int32, String).from_json(cached.expr_types_json)
+              project.cached_expr_types[cached.path] = expr_map
+            rescue
+              # ignore malformed
             end
           end
 

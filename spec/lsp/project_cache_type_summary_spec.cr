@@ -28,6 +28,8 @@ describe CrystalV2::Compiler::LSP::UnifiedProjectState do
     summary.should_not be_nil
     summary.not_nil!.inferred_type.should_not be_nil
 
+    project.cached_expr_types[path].should_not be_empty
+
     # Save cache
     cache = CrystalV2::Compiler::LSP::ProjectCache.from_project(project, root)
     cache.save
@@ -37,6 +39,7 @@ describe CrystalV2::Compiler::LSP::UnifiedProjectState do
     result = CrystalV2::Compiler::LSP::ProjectCacheLoader.load_from_cache(fresh, root)
     result[:valid_count].should eq(1)
     fresh.cached_types[path]["M"].should_not be_nil
+    fresh.cached_expr_types[path].should_not be_empty
   ensure
     FileUtils.rm_rf(root) if root
   end

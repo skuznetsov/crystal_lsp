@@ -114,6 +114,7 @@ module CrystalV2
         getter symbol_files : Hash(String, String) # symbol name -> defining file
         getter cached_ranges : Hash(String, Hash(String, LSP::Range))
         getter cached_types : Hash(String, Hash(String, String))
+        getter cached_expr_types : Hash(String, Hash(Int32, String))
 
         # Per-file identifier → symbol mapping (for hover/definition)
         getter file_identifier_symbols : Hash(String, Hash(Frontend::ExprId, Semantic::Symbol))
@@ -134,6 +135,7 @@ module CrystalV2
           @symbol_files = {} of String => String
           @cached_ranges = Hash(String, Hash(String, LSP::Range)).new
           @cached_types = Hash(String, Hash(String, String)).new
+          @cached_expr_types = Hash(String, Hash(Int32, String)).new
           @file_identifier_symbols = {} of String => Hash(Frontend::ExprId, Semantic::Symbol)
 
           @dirty_files = Set(String).new
@@ -218,7 +220,7 @@ module CrystalV2
           symbol_summaries = build_symbol_summaries(file_symbols, program, @type_context)
           summaries_time = Time.monotonic - summaries_start
 
-          # Phase 5: Update file state
+          # Phase 6: Update file state
           requires = collect_requires(program, path)
           update_dependencies(path, requires)
 
@@ -233,6 +235,12 @@ module CrystalV2
             requires: requires,
             symbol_summaries: symbol_summaries
           )
+          # Capture expression types for cache (ExprId.index -> type string)
+          expr_types_snapshot = Hash(Int32, String).new
+          @type_context.expression_types.each do |expr_id, type|
+            expr_types_snapshot[expr_id.index] = type.to_s
+          end
+          @cached_expr_types[path] = expr_types_snapshot
 
           # Mark dependents as dirty
           @dependents[path]?.try &.each { |dep| @dirty_files << dep }

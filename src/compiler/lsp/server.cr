@@ -258,6 +258,7 @@ module CrystalV2
         @project_indexing_started : Bool = false
         @cached_symbol_ranges : Hash(String, Hash(String, Range))
         @cached_symbol_types : Hash(String, Hash(String, String))
+        @cached_expr_types : Hash(String, Hash(Int32, String))
         @dependencies_warming : Set(String)
 
         def initialize(@input = STDIN, @output = STDOUT, config : ServerConfig = ServerConfig.load)
@@ -296,6 +297,7 @@ module CrystalV2
           @project_indexing_started = false
           @cached_symbol_ranges = Hash(String, Hash(String, Range)).new
           @cached_symbol_types = Hash(String, Hash(String, String)).new
+          @cached_expr_types = Hash(String, Hash(Int32, String)).new
           @dependencies_warming = Set(String).new
           # Allow forcing the stub prelude for debugging via environment variable
           if ENV["CRYSTALV2_LSP_FORCE_STUB"]?
@@ -1849,6 +1851,7 @@ module CrystalV2
             @project_cache_loaded = true
             @cached_symbol_ranges = @project.cached_ranges
             @cached_symbol_types = @project.cached_types
+            @cached_expr_types = @project.cached_expr_types
           else
             debug("No valid project cache found")
           end
@@ -3633,6 +3636,9 @@ module CrystalV2
 
         # Resolve type name for an expression
         private def resolve_type_name_for_expr(doc_state : DocumentState, expr_id : Frontend::ExprId) : String?
+          if cached = cached_expr_type(doc_state, expr_id)
+            return cached
+          end
           # Try type context first
           if type_context = doc_state.type_context
             if type_obj = type_context.get_type(expr_id)
@@ -3655,6 +3661,15 @@ module CrystalV2
             end
           end
 
+          nil
+        end
+
+        private def cached_expr_type(doc_state : DocumentState, expr_id : Frontend::ExprId) : String?
+          path = doc_state.path
+          return nil unless path
+          if types = @cached_expr_types[path]?
+            return types[expr_id.index]?
+          end
           nil
         end
 

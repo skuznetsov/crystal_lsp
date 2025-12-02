@@ -2350,6 +2350,26 @@ module CrystalV2
             named_args.each { |named_arg| infer_expression(named_arg.value) }
           end
 
+          # Enumerable heuristics for Array element types
+          if receiver_type.is_a?(ArrayType)
+            elem_type = receiver_type.element_type
+            case method_name
+            when "map", "collect"
+              mapped = elem_type
+              if block_id = node.block
+                block = @program.arena[block_id].as(Frontend::BlockNode)
+                mapped = infer_block_result(block.body) || elem_type
+              end
+              return ArrayType.new(mapped)
+            when "select", "reject", "filter"
+              return ArrayType.new(elem_type)
+            when "each", "each_with_index"
+              return receiver_type
+            when "to_a"
+              return receiver_type
+            end
+          end
+
           if receiver_type.is_a?(UnionType)
             if return_type = compute_union_method_return_type(receiver_type, method_name, arg_types)
               return return_type
