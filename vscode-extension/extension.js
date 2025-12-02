@@ -60,7 +60,7 @@ function activate(context) {
             fileEvents: vscode.workspace.createFileSystemWatcher('**/*.cr')
         },
         traceOutputChannel: traceChannel
-    };
+    };  
 
     // Create and start the language client
     client = new LanguageClient(

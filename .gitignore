@@ -17,6 +17,7 @@ print_diags_tmp
 
 # MCP/Agent data
 .agents/
+.claude/
 
 # OS
 .DS_Store
