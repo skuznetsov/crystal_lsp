@@ -61,6 +61,10 @@ module CrystalV2
         property ivars : Array(String)?
         property consts : Array(String)?
         property children : Array(SymbolSummary)?
+        property start_line : Int32?
+        property start_col : Int32?
+        property end_line : Int32?
+        property end_col : Int32?
 
         def initialize(
           @name : String,
@@ -70,7 +74,11 @@ module CrystalV2
           @params : Array(String)? = nil,
           @ivars : Array(String)? = nil,
           @consts : Array(String)? = nil,
-          @children : Array(SymbolSummary)? = nil
+          @children : Array(SymbolSummary)? = nil,
+          @start_line : Int32? = nil,
+          @start_col : Int32? = nil,
+          @end_line : Int32? = nil,
+          @end_col : Int32? = nil
         )
         end
 
@@ -102,6 +110,7 @@ module CrystalV2
 
         # Symbol -> file mapping (for quick invalidation)
         getter symbol_files : Hash(String, String)  # symbol name -> defining file
+        getter cached_ranges : Hash(String, Hash(String, LSP::Range))
 
         # Per-file identifier → symbol mapping (for hover/definition)
         getter file_identifier_symbols : Hash(String, Hash(Frontend::ExprId, Semantic::Symbol))
@@ -120,6 +129,7 @@ module CrystalV2
           @dependencies = Hash(String, Set(String)).new { |h, k| h[k] = Set(String).new }
           @dependents = Hash(String, Set(String)).new { |h, k| h[k] = Set(String).new }
           @symbol_files = {} of String => String
+          @cached_ranges = Hash(String, Hash(String, LSP::Range)).new
           @file_identifier_symbols = {} of String => Hash(Frontend::ExprId, Semantic::Symbol)
 
           @dirty_files = Set(String).new
@@ -133,7 +143,7 @@ module CrystalV2
           return if @symbol_table.nil?
 
           state.symbol_summaries.each do |summary|
-            sym = build_symbol_from_summary(summary, state.path)
+            sym = build_symbol_from_summary(summary, state.path, "")
             next unless sym
             begin
               @symbol_table.define(summary.name, sym)
@@ -367,16 +377,29 @@ module CrystalV2
         end
 
         private def summarize_symbol(symbol : Semantic::Symbol, program : Frontend::Program) : SymbolSummary
+          span = begin
+            node = program.arena[symbol.node_id] rescue nil
+            node ? node.span : nil
+          rescue
+            nil
+          end
+
+          start_line = span ? span.start_line : nil
+          start_col = span ? span.start_column : nil
+          end_line = span ? span.end_line : nil
+          end_col = span ? span.end_column : nil
+
           case symbol
           when Semantic::OverloadSetSymbol
             children = symbol.overloads.map { |ov| summarize_symbol(ov, program) }
-            SymbolSummary.new(symbol.name, "overload_set", nil, nil, nil, nil, nil, children)
+            SymbolSummary.new(symbol.name, "overload_set", nil, nil, nil, nil, nil, children, start_line, start_col, end_line, end_col)
           when Semantic::ClassSymbol
             children = summarize_scope(symbol.scope, program)
-            SymbolSummary.new(symbol.name, "class", nil, nil, nil, nil, nil, children)
+            ivars = symbol.instance_vars.map { |name, type| "@#{name} : #{type || "?"}" }
+            SymbolSummary.new(symbol.name, "class", nil, nil, nil, ivars, nil, children, start_line, start_col, end_line, end_col)
           when Semantic::ModuleSymbol
             children = summarize_scope(symbol.scope, program)
-            SymbolSummary.new(symbol.name, "module", nil, nil, nil, nil, nil, children)
+            SymbolSummary.new(symbol.name, "module", nil, nil, nil, nil, nil, children, start_line, start_col, end_line, end_col)
           when Semantic::MethodSymbol
             params = symbol.params.map do |p|
               if p_name = p.name
@@ -391,11 +414,18 @@ module CrystalV2
               "method",
               format_method_signature(symbol),
               symbol.return_annotation || "?",
-              params
+              params,
+              nil,
+              nil,
+              nil,
+              start_line,
+              start_col,
+              end_line,
+              end_col
             )
           when Semantic::VariableSymbol
             kind = symbol.name.starts_with?("@") ? "ivar" : "variable"
-            SymbolSummary.new(symbol.name, kind, symbol.declared_type)
+            SymbolSummary.new(symbol.name, kind, symbol.declared_type, nil, nil, nil, nil, nil, start_line, start_col, end_line, end_col)
           when Semantic::MacroSymbol
             SymbolSummary.new(symbol.name, "macro", nil)
           else
@@ -426,15 +456,37 @@ module CrystalV2
         end
 
         # Build lightweight Semantic symbols from cached summaries (ExprId = -1 placeholders)
-        private def build_symbol_from_summary(summary : SymbolSummary, file_path : String) : Semantic::Symbol?
+        private def build_symbol_from_summary(summary : SymbolSummary, file_path : String, container : String) : Semantic::Symbol?
           node_id = Frontend::ExprId.new(-1)
+
+          range = if summary.start_line && summary.start_col && summary.end_line && summary.end_col
+                    start_pos = LSP::Position.new(summary.start_line.not_nil!, summary.start_col.not_nil!)
+                    end_pos = LSP::Position.new(summary.end_line.not_nil!, summary.end_col.not_nil!)
+                    LSP::Range.new(start_pos, end_pos)
+                  else
+                    nil
+                  end
+
+          key = if container.empty?
+                  summary.name
+                elsif summary.kind == "method"
+                  "#{container}##{summary.name}"
+                else
+                  "#{container}::#{summary.name}"
+                end
+          if range
+            ranges = @cached_ranges[file_path]? || ( @cached_ranges[file_path] = Hash(String, LSP::Range).new )
+            ranges[key] = range
+            # Also store a simplified key to allow lookups when the container is unknown
+            ranges[summary.name] ||= range
+          end
 
           case summary.kind
           when "class"
             scope = Semantic::SymbolTable.new
             class_scope = Semantic::SymbolTable.new
             (summary.children || [] of SymbolSummary).each do |child|
-              if child_sym = build_symbol_from_summary(child, file_path)
+              if child_sym = build_symbol_from_summary(child, file_path, key)
                 begin
                   scope.define(child.name, child_sym)
                 rescue Semantic::SymbolRedefinitionError
@@ -442,11 +494,21 @@ module CrystalV2
                 end
               end
             end
-            Semantic::ClassSymbol.new(summary.name, node_id, scope: scope, class_scope: class_scope)
+            class_sym = Semantic::ClassSymbol.new(summary.name, node_id, scope: scope, class_scope: class_scope)
+            class_sym.file_path = file_path
+            (summary.ivars || [] of String).each do |ivar_decl|
+              if ivar_decl.starts_with?("@")
+                parts = ivar_decl.split(":", 2)
+                name = parts[0]
+                type = parts[1]?.try(&.strip)
+                class_sym.add_instance_var(name.lstrip("@"), type && !type.empty? ? type : nil)
+              end
+            end
+            class_sym
           when "module", "overload_set"
             scope = Semantic::SymbolTable.new
             (summary.children || [] of SymbolSummary).each do |child|
-              if child_sym = build_symbol_from_summary(child, file_path)
+              if child_sym = build_symbol_from_summary(child, file_path, key)
                 begin
                   scope.define(child.name, child_sym)
                 rescue Semantic::SymbolRedefinitionError
@@ -454,22 +516,32 @@ module CrystalV2
                 end
               end
             end
-            Semantic::ModuleSymbol.new(summary.name, node_id, scope: scope)
+            mod_sym = Semantic::ModuleSymbol.new(summary.name, node_id, scope: scope)
+            mod_sym.file_path = file_path
+            mod_sym
           when "method"
-            Semantic::MethodSymbol.new(
+            method_sym = Semantic::MethodSymbol.new(
               summary.name,
               node_id,
               params: [] of Frontend::Parameter,
               return_annotation: summary.return_type,
               scope: Semantic::SymbolTable.new
             )
+            method_sym.file_path = file_path
+            method_sym
           when "ivar", "variable"
-            Semantic::VariableSymbol.new(summary.name, node_id, summary.detail)
+            var_sym = Semantic::VariableSymbol.new(summary.name, node_id, summary.detail)
+            var_sym.file_path = file_path
+            var_sym
           when "macro"
             # Body/params not stored; placeholder node_id
-            Semantic::MacroSymbol.new(summary.name, node_id, node_id)
+            macro_sym = Semantic::MacroSymbol.new(summary.name, node_id, node_id)
+            macro_sym.file_path = file_path
+            macro_sym
           else
-            Semantic::VariableSymbol.new(summary.name, node_id, summary.detail)
+            fallback_sym = Semantic::VariableSymbol.new(summary.name, node_id, summary.detail)
+            fallback_sym.file_path = file_path
+            fallback_sym
           end
         rescue
           nil

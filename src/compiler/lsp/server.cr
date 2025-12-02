@@ -256,6 +256,7 @@ module CrystalV2
         @project_cache_loaded : Bool = false
         @project_cache_save_scheduled : Bool = false
         @project_indexing_started : Bool = false
+        @cached_symbol_ranges : Hash(String, Hash(String, Range))
         @dependencies_warming : Set(String)
 
         def initialize(@input = STDIN, @output = STDOUT, config : ServerConfig = ServerConfig.load)
@@ -292,6 +293,7 @@ module CrystalV2
           @project_cache_loaded = false
           @project_cache_save_scheduled = false
           @project_indexing_started = false
+          @cached_symbol_ranges = Hash(String, Hash(String, Range)).new
           @dependencies_warming = Set(String).new
           # Allow forcing the stub prelude for debugging via environment variable
           if ENV["CRYSTALV2_LSP_FORCE_STUB"]?
@@ -1776,6 +1778,7 @@ module CrystalV2
               debug("  #{result[:invalid_paths].size} files need re-parsing")
             end
             @project_cache_loaded = true
+            @cached_symbol_ranges = @project.cached_ranges
           else
             debug("No valid project cache found")
           end
@@ -2571,19 +2574,19 @@ module CrystalV2
 
         private def location_for_symbol(symbol : Semantic::Symbol) : Location?
           if location = symbol_location_for(symbol)
-            Location.from_symbol(symbol, location.program, location.uri)
+            cached_location_for(symbol) || Location.from_symbol(symbol, location.program, location.uri)
           end
         end
 
         private def location_for_prelude_symbol(symbol : Semantic::Symbol) : Location?
           if prelude = @prelude_state
             if origin = prelude.symbol_origins[symbol]?
-              return Location.from_symbol(symbol, origin.program, origin.uri)
+              return cached_location_for(symbol) || Location.from_symbol(symbol, origin.program, origin.uri)
             end
           end
           if stub = stub_prelude_state
             if origin = stub.symbol_origins[symbol]?
-              return Location.from_symbol(symbol, origin.program, origin.uri)
+              return cached_location_for(symbol) || Location.from_symbol(symbol, origin.program, origin.uri)
             end
           end
           nil
@@ -2854,6 +2857,22 @@ module CrystalV2
           end
 
           character
+        end
+
+        private def cached_location_for(symbol : Semantic::Symbol) : Location?
+          path = symbol.responds_to?(:file_path) ? symbol.file_path : nil
+          return nil unless path
+          if ranges = @cached_symbol_ranges[path]?
+            if range = ranges[symbol.name]?
+              return Location.new(uri: file_uri(path), range: range)
+            end
+            ranges.each do |key, range|
+              if key.ends_with?("::#{symbol.name}") || key.ends_with?("##{symbol.name}") || key == symbol.name
+                return Location.new(uri: file_uri(path), range: range)
+              end
+            end
+          end
+          nil
         end
 
         @[AlwaysInline]
@@ -5252,7 +5271,7 @@ module CrystalV2
               end
               # Block/proc parameters have invalid node_id - fall through to parameter lookup
               unless symbol.node_id.invalid?
-                return Location.from_symbol(symbol, doc_state.program, uri)
+                return cached_location_for(symbol) || Location.from_symbol(symbol, doc_state.program, uri)
               end
             end
 
@@ -5300,7 +5319,7 @@ module CrystalV2
               if location = location_for_symbol(symbol)
                 return location
               end
-              return Location.from_symbol(symbol, doc_state.program, uri)
+              return cached_location_for(symbol) || Location.from_symbol(symbol, doc_state.program, uri)
             elsif name_slice
               name = String.new(name_slice)
               if symbol_table = doc_state.symbol_table
@@ -5308,7 +5327,7 @@ module CrystalV2
                   if location = location_for_symbol(sym)
                     return location
                   end
-                  return Location.from_symbol(sym, doc_state.program, uri)
+                  return cached_location_for(sym) || Location.from_symbol(sym, doc_state.program, uri)
                 end
               end
             end
@@ -5984,7 +6003,7 @@ module CrystalV2
               return location
             end
             # Fallback: point to the receiver symbol itself (e.g., class definition)
-            return Location.from_symbol(receiver_symbol, doc_state.program, uri)
+            return cached_location_for(receiver_symbol) || Location.from_symbol(receiver_symbol, doc_state.program, uri)
           end
 
           if method_symbol = resolve_member_access_method_symbol(node, doc_state)
@@ -5996,7 +6015,7 @@ module CrystalV2
               end
               return location
             end
-            return Location.from_symbol(method_symbol, doc_state.program, uri)
+            return cached_location_for(method_symbol) || Location.from_symbol(method_symbol, doc_state.program, uri)
           end
 
           if location = find_prelude_method_location(receiver_symbol, String.new(node.member), receiver_name_hint)
@@ -6008,7 +6027,7 @@ module CrystalV2
           # navigate to the constant/enum definition instead of finding wrong matches
           builtin_enum_methods = {"value", "to_s", "to_i", "to_i32", "to_i64"}
           if receiver_symbol.is_a?(Semantic::ConstantSymbol) && builtin_enum_methods.includes?(method_name)
-            return Location.from_symbol(receiver_symbol, doc_state.program, uri)
+            return cached_location_for(receiver_symbol) || Location.from_symbol(receiver_symbol, doc_state.program, uri)
           end
 
           # If receiver is a path expression (like SymbolKind::Class) and method is a built-in
@@ -6237,7 +6256,7 @@ module CrystalV2
                     if location = location_for_symbol(nested_type)
                       return location
                     end
-                    return Location.from_symbol(nested_type, doc_state.program, uri)
+                    return cached_location_for(nested_type) || Location.from_symbol(nested_type, doc_state.program, uri)
                   end
                 end
                 # Then check for methods
@@ -6246,14 +6265,14 @@ module CrystalV2
                     if location = location_for_symbol(method_symbol)
                       return location
                     end
-                    return Location.from_symbol(method_symbol, doc_state.program, uri)
+                    return cached_location_for(method_symbol) || Location.from_symbol(method_symbol, doc_state.program, uri)
                   end
                 elsif receiver_symbol.is_a?(Semantic::ModuleSymbol)
                   if method_symbol = find_method_in_scope(receiver_symbol.scope, member_name)
                     if location = location_for_symbol(method_symbol)
                       return location
                     end
-                    return Location.from_symbol(method_symbol, doc_state.program, uri)
+                    return cached_location_for(method_symbol) || Location.from_symbol(method_symbol, doc_state.program, uri)
                   end
                 end
               end
@@ -6263,14 +6282,14 @@ module CrystalV2
               if location = location_for_symbol(symbol)
                 return location
               end
-              return Location.from_symbol(symbol, doc_state.program, uri)
+              return cached_location_for(symbol) || Location.from_symbol(symbol, doc_state.program, uri)
             end
 
             if symbol = find_symbol_by_segments(segments)
               if location = location_for_symbol(symbol)
                 return location
               end
-              return Location.from_symbol(symbol, doc_state.program, uri)
+              return cached_location_for(symbol) || Location.from_symbol(symbol, doc_state.program, uri)
             end
 
             if location = find_location_in_dependencies(doc_state, segments)
@@ -6282,7 +6301,7 @@ module CrystalV2
                 if location = location_for_symbol(symbol)
                   return location
                 end
-                return Location.from_symbol(symbol, prelude.program, prelude.path)
+                return cached_location_for(symbol) || Location.from_symbol(symbol, prelude.program, prelude.path)
               end
             end
 
@@ -6360,7 +6379,7 @@ module CrystalV2
           if location = location_for_symbol(method_symbol)
             return location
           end
-          Location.from_symbol(method_symbol, doc_state.program, uri)
+          cached_location_for(method_symbol) || Location.from_symbol(method_symbol, doc_state.program, uri)
         end
 
         private def resolve_safe_navigation_method_symbol(node : Frontend::SafeNavigationNode, doc_state : DocumentState) : Semantic::MethodSymbol?
@@ -6492,7 +6511,7 @@ module CrystalV2
             if location = location_for_symbol(method_symbol)
               return location
             end
-            return Location.from_symbol(method_symbol, doc_state.program, uri)
+            return cached_location_for(method_symbol) || Location.from_symbol(method_symbol, doc_state.program, uri)
           end
 
           callee_id = node.callee
@@ -6707,14 +6726,14 @@ module CrystalV2
             if location = location_for_symbol(symbol)
               return location
             end
-            return Location.from_symbol(symbol, doc_state.program, doc_state.text_document.uri)
+            return cached_location_for(symbol) || Location.from_symbol(symbol, doc_state.program, doc_state.text_document.uri)
           end
 
           if symbol = find_symbol_by_segments(segments)
             if location = location_for_symbol(symbol)
               return location
             end
-            return Location.from_symbol(symbol, doc_state.program, doc_state.text_document.uri)
+            return cached_location_for(symbol) || Location.from_symbol(symbol, doc_state.program, doc_state.text_document.uri)
           end
 
           if prelude = @prelude_state
@@ -6723,7 +6742,7 @@ module CrystalV2
               if location = location_for_symbol(symbol)
                 return location
               end
-              return Location.from_symbol(symbol, prelude.program, prelude.path)
+              return cached_location_for(symbol) || Location.from_symbol(symbol, prelude.program, prelude.path)
             else
               debug("definition_from_constant: not in prelude #{segments.join("::")}") if ENV["LSP_DEBUG"]?
             end
@@ -7118,7 +7137,7 @@ module CrystalV2
             if location = location_for_symbol(method)
               return location
             end
-            return Location.from_symbol(method, doc_state.program, doc_state.text_document.uri)
+            return cached_location_for(method) || Location.from_symbol(method, doc_state.program, doc_state.text_document.uri)
           end
 
           # Fallback: search receiver's source file for an initialize definition
