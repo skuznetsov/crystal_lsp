@@ -1054,6 +1054,14 @@ module CrystalV2
                   return normalize_literal_type(type)
                 end
               end
+              # If scoped, try full name lookup as fallback
+              if name.includes?("::")
+                if symbol = table.lookup(name)
+                  if type = type_from_symbol(symbol)
+                    return normalize_literal_type(type)
+                  end
+                end
+              end
             end
 
             emit_error("Unknown type '#{name}'")
