@@ -257,6 +257,7 @@ module CrystalV2
         @project_cache_save_scheduled : Bool = false
         @project_indexing_started : Bool = false
         @cached_symbol_ranges : Hash(String, Hash(String, Range))
+        @cached_symbol_types : Hash(String, Hash(String, String))
         @dependencies_warming : Set(String)
 
         def initialize(@input = STDIN, @output = STDOUT, config : ServerConfig = ServerConfig.load)
@@ -294,6 +295,7 @@ module CrystalV2
           @project_cache_save_scheduled = false
           @project_indexing_started = false
           @cached_symbol_ranges = Hash(String, Hash(String, Range)).new
+          @cached_symbol_types = Hash(String, Hash(String, String)).new
           @dependencies_warming = Set(String).new
           # Allow forcing the stub prelude for debugging via environment variable
           if ENV["CRYSTALV2_LSP_FORCE_STUB"]?
@@ -635,6 +637,9 @@ module CrystalV2
         end
 
         private def fallback_symbol_type(symbol : Semantic::Symbol, doc_state : DocumentState? = nil) : String?
+          if cached = cached_type_for(symbol)
+            return cached
+          end
           case symbol
           when Semantic::VariableSymbol
             symbol.declared_type || "Unknown"
@@ -655,6 +660,20 @@ module CrystalV2
           else
             nil
           end
+        end
+
+        private def cached_type_for(symbol : Semantic::Symbol) : String?
+          path = symbol.responds_to?(:file_path) ? symbol.file_path : nil
+          return nil unless path
+          if types = @cached_symbol_types[path]?
+            if t = types[symbol.name]?
+              return t
+            end
+            types.each do |k, v|
+              return v if k.ends_with?("::#{symbol.name}") || k.ends_with?("##{symbol.name}")
+            end
+          end
+          nil
         end
 
         private def format_class_symbol(symbol : Semantic::ClassSymbol, doc_state : DocumentState) : String
@@ -1829,6 +1848,7 @@ module CrystalV2
             end
             @project_cache_loaded = true
             @cached_symbol_ranges = @project.cached_ranges
+            @cached_symbol_types = @project.cached_types
           else
             debug("No valid project cache found")
           end

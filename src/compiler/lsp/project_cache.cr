@@ -86,7 +86,7 @@ module CrystalV2
       # Project-level cache
       class ProjectCache
         MAGIC   = "CV2P"
-        VERSION = 2_u32
+        VERSION = 3_u32
 
         getter files : Array(CachedFileState)
         getter project_root : String

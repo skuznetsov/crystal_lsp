@@ -17,9 +17,9 @@ module CrystalV2
     module LSP
       # Tracks which symbols depend on which files
       struct DependencyEdge
-        getter from_file : String  # file that depends
-        getter to_file : String    # file being depended on
-        getter symbols : Array(String)  # symbol names involved
+        getter from_file : String      # file that depends
+        getter to_file : String        # file being depended on
+        getter symbols : Array(String) # symbol names involved
 
         def initialize(@from_file, @to_file, @symbols = [] of String)
         end
@@ -30,11 +30,11 @@ module CrystalV2
         getter path : String
         getter version : Int32
         getter mtime : Time?
-        getter root_ids : Array(Frontend::ExprId)  # Root expressions in this file
-        getter symbols : Array(String)  # Top-level symbols defined in this file
+        getter root_ids : Array(Frontend::ExprId) # Root expressions in this file
+        getter symbols : Array(String)            # Top-level symbols defined in this file
         getter diagnostics : Array(Diagnostic)
-        getter requires : Array(String)  # Files this file requires
-        getter symbol_summaries : Array(SymbolSummary)  # Structured export data for cache/UI
+        getter requires : Array(String)                # Files this file requires
+        getter symbol_summaries : Array(SymbolSummary) # Structured export data for cache/UI
 
         def initialize(
           @path : String,
@@ -44,7 +44,7 @@ module CrystalV2
           @symbols : Array(String) = [] of String,
           @diagnostics : Array(Diagnostic) = [] of Diagnostic,
           @requires : Array(String) = [] of String,
-          @symbol_summaries : Array(SymbolSummary) = [] of SymbolSummary
+          @symbol_summaries : Array(SymbolSummary) = [] of SymbolSummary,
         )
         end
       end
@@ -57,6 +57,7 @@ module CrystalV2
         property kind : String
         property detail : String?
         property return_type : String?
+        property inferred_type : String?
         property params : Array(String)?
         property ivars : Array(String)?
         property consts : Array(String)?
@@ -71,6 +72,7 @@ module CrystalV2
           @kind : String,
           @detail : String? = nil,
           @return_type : String? = nil,
+          @inferred_type : String? = nil,
           @params : Array(String)? = nil,
           @ivars : Array(String)? = nil,
           @consts : Array(String)? = nil,
@@ -78,7 +80,7 @@ module CrystalV2
           @start_line : Int32? = nil,
           @start_col : Int32? = nil,
           @end_line : Int32? = nil,
-          @end_col : Int32? = nil
+          @end_col : Int32? = nil,
         )
         end
 
@@ -102,15 +104,16 @@ module CrystalV2
 
         # Per-file tracking
         getter files : Hash(String, FileAnalysisState)
-        getter file_order : Array(String)  # Order files were added (for determinism)
+        getter file_order : Array(String) # Order files were added (for determinism)
 
         # Dependency tracking
-        getter dependencies : Hash(String, Set(String))  # file -> files it depends on
-        getter dependents : Hash(String, Set(String))    # file -> files that depend on it
+        getter dependencies : Hash(String, Set(String)) # file -> files it depends on
+        getter dependents : Hash(String, Set(String))   # file -> files that depend on it
 
         # Symbol -> file mapping (for quick invalidation)
-        getter symbol_files : Hash(String, String)  # symbol name -> defining file
+        getter symbol_files : Hash(String, String) # symbol name -> defining file
         getter cached_ranges : Hash(String, Hash(String, LSP::Range))
+        getter cached_types : Hash(String, Hash(String, String))
 
         # Per-file identifier → symbol mapping (for hover/definition)
         getter file_identifier_symbols : Hash(String, Hash(Frontend::ExprId, Semantic::Symbol))
@@ -130,6 +133,7 @@ module CrystalV2
           @dependents = Hash(String, Set(String)).new { |h, k| h[k] = Set(String).new }
           @symbol_files = {} of String => String
           @cached_ranges = Hash(String, Hash(String, LSP::Range)).new
+          @cached_types = Hash(String, Hash(String, String)).new
           @file_identifier_symbols = {} of String => Hash(Frontend::ExprId, Semantic::Symbol)
 
           @dirty_files = Set(String).new
@@ -175,7 +179,7 @@ module CrystalV2
         def update_file(
           path : String,
           source : String,
-          version : Int32 = 0
+          version : Int32 = 0,
         ) : Array(Diagnostic)
           # Phase 1: Parse the file
           parse_start = Time.monotonic
@@ -202,13 +206,17 @@ module CrystalV2
           # Phase 3: Collect symbols from this file
           symbol_start = Time.monotonic
           file_symbols = collect_file_symbols(program, path)
-          symbol_summaries = build_symbol_summaries(file_symbols, program)
           symbol_time = Time.monotonic - symbol_start
 
-          # Phase 4: Run semantic analysis on this file
+          # Phase 4: Run semantic analysis on this file (updates type_context)
           semantic_start = Time.monotonic
           diagnostics = analyze_file_semantics(program, path, file_symbols)
           semantic_time = Time.monotonic - semantic_start
+
+          # Phase 5: Build symbol summaries with inferred types (after inference)
+          summaries_start = Time.monotonic
+          symbol_summaries = build_symbol_summaries(file_symbols, program, @type_context)
+          summaries_time = Time.monotonic - summaries_start
 
           # Phase 5: Update file state
           requires = collect_requires(program, path)
@@ -372,11 +380,11 @@ module CrystalV2
           symbols
         end
 
-        private def build_symbol_summaries(symbols : Array(Semantic::Symbol), program : Frontend::Program) : Array(SymbolSummary)
-          symbols.map { |sym| summarize_symbol(sym, program) }
+        private def build_symbol_summaries(symbols : Array(Semantic::Symbol), program : Frontend::Program, type_context : Semantic::TypeContext? = nil) : Array(SymbolSummary)
+          symbols.map { |sym| summarize_symbol(sym, program, type_context) }
         end
 
-        private def summarize_symbol(symbol : Semantic::Symbol, program : Frontend::Program) : SymbolSummary
+        private def summarize_symbol(symbol : Semantic::Symbol, program : Frontend::Program, type_context : Semantic::TypeContext? = nil) : SymbolSummary
           span = begin
             node = program.arena[symbol.node_id] rescue nil
             node ? node.span : nil
@@ -389,17 +397,61 @@ module CrystalV2
           end_line = span ? span.end_line : nil
           end_col = span ? span.end_column : nil
 
+          inferred_type = type_context.try { |tc| tc.get_type(symbol.node_id).try(&.to_s) } rescue nil
+
           case symbol
           when Semantic::OverloadSetSymbol
-            children = symbol.overloads.map { |ov| summarize_symbol(ov, program) }
-            SymbolSummary.new(symbol.name, "overload_set", nil, nil, nil, nil, nil, children, start_line, start_col, end_line, end_col)
+            children = symbol.overloads.map { |ov| summarize_symbol(ov, program, type_context) }
+            SymbolSummary.new(
+              name: symbol.name,
+              kind: "overload_set",
+              detail: nil,
+              return_type: nil,
+              inferred_type: inferred_type,
+              params: nil,
+              ivars: nil,
+              consts: nil,
+              children: children,
+              start_line: start_line,
+              start_col: start_col,
+              end_line: end_line,
+              end_col: end_col
+            )
           when Semantic::ClassSymbol
-            children = summarize_scope(symbol.scope, program)
+            children = summarize_scope(symbol.scope, program, type_context)
             ivars = symbol.instance_vars.map { |name, type| "@#{name} : #{type || "?"}" }
-            SymbolSummary.new(symbol.name, "class", nil, nil, nil, ivars, nil, children, start_line, start_col, end_line, end_col)
+            SymbolSummary.new(
+              name: symbol.name,
+              kind: "class",
+              detail: nil,
+              return_type: nil,
+              inferred_type: inferred_type,
+              params: nil,
+              ivars: ivars,
+              consts: nil,
+              children: children,
+              start_line: start_line,
+              start_col: start_col,
+              end_line: end_line,
+              end_col: end_col
+            )
           when Semantic::ModuleSymbol
-            children = summarize_scope(symbol.scope, program)
-            SymbolSummary.new(symbol.name, "module", nil, nil, nil, nil, nil, children, start_line, start_col, end_line, end_col)
+            children = summarize_scope(symbol.scope, program, type_context)
+            SymbolSummary.new(
+              name: symbol.name,
+              kind: "module",
+              detail: nil,
+              return_type: nil,
+              inferred_type: inferred_type,
+              params: nil,
+              ivars: nil,
+              consts: nil,
+              children: children,
+              start_line: start_line,
+              start_col: start_col,
+              end_line: end_line,
+              end_col: end_col
+            )
           when Semantic::MethodSymbol
             params = symbol.params.map do |p|
               if p_name = p.name
@@ -410,33 +462,76 @@ module CrystalV2
               end
             end
             SymbolSummary.new(
-              symbol.name,
-              "method",
-              format_method_signature(symbol),
-              symbol.return_annotation || "?",
-              params,
-              nil,
-              nil,
-              nil,
-              start_line,
-              start_col,
-              end_line,
-              end_col
+              name: symbol.name,
+              kind: "method",
+              detail: format_method_signature(symbol),
+              return_type: symbol.return_annotation || "?",
+              inferred_type: inferred_type,
+              params: params,
+              ivars: nil,
+              consts: nil,
+              children: nil,
+              start_line: start_line,
+              start_col: start_col,
+              end_line: end_line,
+              end_col: end_col
             )
           when Semantic::VariableSymbol
             kind = symbol.name.starts_with?("@") ? "ivar" : "variable"
-            SymbolSummary.new(symbol.name, kind, symbol.declared_type, nil, nil, nil, nil, nil, start_line, start_col, end_line, end_col)
+            SymbolSummary.new(
+              name: symbol.name,
+              kind: kind,
+              detail: symbol.declared_type,
+              return_type: inferred_type,
+              inferred_type: inferred_type,
+              params: nil,
+              ivars: nil,
+              consts: nil,
+              children: nil,
+              start_line: start_line,
+              start_col: start_col,
+              end_line: end_line,
+              end_col: end_col
+            )
           when Semantic::MacroSymbol
-            SymbolSummary.new(symbol.name, "macro", nil)
+            SymbolSummary.new(
+              name: symbol.name,
+              kind: "macro",
+              detail: nil,
+              return_type: inferred_type,
+              inferred_type: inferred_type,
+              params: nil,
+              ivars: nil,
+              consts: nil,
+              children: nil,
+              start_line: start_line,
+              start_col: start_col,
+              end_line: end_line,
+              end_col: end_col
+            )
           else
-            SymbolSummary.new(symbol.name, "symbol", nil)
+            SymbolSummary.new(
+              name: symbol.name,
+              kind: "symbol",
+              detail: nil,
+              return_type: inferred_type,
+              inferred_type: inferred_type,
+              params: nil,
+              ivars: nil,
+              consts: nil,
+              children: nil,
+              start_line: start_line,
+              start_col: start_col,
+              end_line: end_line,
+              end_col: end_col
+            )
           end
         end
 
-        private def summarize_scope(table : Semantic::SymbolTable, program : Frontend::Program) : Array(SymbolSummary)
+        private def summarize_scope(table : Semantic::SymbolTable, program : Frontend::Program, type_context : Semantic::TypeContext?) : Array(SymbolSummary)
           summaries = [] of SymbolSummary
           table.each_local_symbol do |_name, sym|
-            summaries << summarize_symbol(sym, program)
+            summaries << summarize_symbol(sym, program, type_context)
           end
           summaries
         end
@@ -475,10 +570,15 @@ module CrystalV2
                   "#{container}::#{summary.name}"
                 end
           if range
-            ranges = @cached_ranges[file_path]? || ( @cached_ranges[file_path] = Hash(String, LSP::Range).new )
+            ranges = @cached_ranges[file_path]? || (@cached_ranges[file_path] = Hash(String, LSP::Range).new)
             ranges[key] = range
             # Also store a simplified key to allow lookups when the container is unknown
             ranges[summary.name] ||= range
+          end
+          if inferred = summary.inferred_type
+            types = @cached_types[file_path]? || (@cached_types[file_path] = Hash(String, String).new)
+            types[key] = inferred
+            types[summary.name] ||= inferred
           end
 
           case summary.kind

@@ -130,6 +130,7 @@ Goal: v2 LSP must report only real errors and match original compiler behavior.
 - [ ] Extend summaries with ivars/consts and richer type info (params/return types already stored)
 - [x] Restore symbol_table from cache for unchanged files; avoid re-parse/resolve when mtime matches (spans placeholder)
 - [x] Merge cached project symbols into analysis to avoid reloading requires on warm didOpen
+- [x] Cache and restore symbol spans and inferred types in summaries (cache version v3); expose cached types for hover/definition fallback
 - [ ] Mark cached files (`from_cache`) and use summaries for hover/definition when AST is missing
 - [ ] Strict cache validation (version/root hash/mtime) with full reparse fallback (root hash/version done; add fallback wiring)
 
