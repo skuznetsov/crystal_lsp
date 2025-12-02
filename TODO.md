@@ -8,7 +8,7 @@ about syntax or types and should match what the original compiler would report.
 
 ---
 
-## Current Status (2025-11-30)
+## Current Status (2025-12-02)
 
 ### Test Coverage
 - **2856 tests**, 0 failures, 7 pending
@@ -27,6 +27,8 @@ about syntax or types and should match what the original compiler would report.
 - [x] Symbol table and name resolution
 - [x] MVP MacroExpander (`{{ }}`, `{% if/for %}`, `@type.name/instance_vars`)
 - [x] LSP semantic tokens: symbol literals emit full-span enumMember tokens (no overlaps)
+- [x] Hover/definition fallback to cached expr types (scoped lookup fixes; e.g., `cas` → `Array(Atom)`)
+- [x] lsp_probe speaks correct binary Content-Length (no dropped responses)
 
 ### Pending (7 tests)
 - 6 macro whitespace trimming (`{%- -%}`, `{%~ ~%}`) - for web templates
@@ -109,6 +111,7 @@ Goal: v2 LSP must report only real errors and match original compiler behavior.
 ### Tests Needed
 - [ ] Structured LSP tests for stdlib symbols (`Time.monotonic`, `File.read`, etc.)
 - [ ] Diff v2 diagnostics against original compiler on representative files
+- [ ] Hover/definition regression spec covering cached types across required files
 - [x] Integration specs for hover/definition sequences (single-file path regression)
 - [x] Integration specs for references via server across VirtualArena requires
 - [x] Diagnostics spec with semantic diagnostics enabled (semantic error guard)
@@ -121,6 +124,7 @@ Goal: v2 LSP must report only real errors and match original compiler behavior.
 - [x] VSCode extension: request/response log channel and “Indexing…” status indicator in UI
 - [x] Navigation to stdlib/prelude (tests + impl)
 - [x] Folding ranges for begin/rescue/else/ensure without overfolding; semantic tokens for symbol literals fixed
+- [ ] Optional: detect external workspace roots for cache reuse when opening files outside @project_root
 
 ---
 

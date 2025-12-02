@@ -161,6 +161,13 @@ files.each { |f| virtual.add_file_arena(f.path, parse(f).arena) }
 
 **Status:** 🚧 **50% complete**
 
+### 6. LSP Server (Developer Experience First)
+
+- **Capabilities:** hover, definition/typeDefinition, references, rename (prepare), code actions, formatting, semantic tokens (full), folding ranges, inlay hints, call hierarchy.
+- **Caching:** project cache stores symbol summaries and inferred expression types; hover/definition can respond instantly from cache while indexing; background indexing keeps cache warm.
+- **Indexing guard:** soft-fails hover/definition when indexing; VS Code extension shows “Indexing…” and logs request/response traffic.
+- **Debugging:** `./build_lsp_debug.sh` builds the server; `tools/lsp_probe.py path.cr --position LINE:COL` sends hover/definition/tokens in one session (set `LSP_DEBUG=1` for verbose logs).
+
 ---
 
 ## What Makes V2 Different?
