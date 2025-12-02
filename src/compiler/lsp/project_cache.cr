@@ -230,6 +230,7 @@ module CrystalV2
             # Register in project
             project.files[cached.path] = state
             project.file_order << cached.path unless project.file_order.includes?(cached.path)
+            project.restore_symbols_from_cache(state)
 
             # Register symbols (placeholder - actual symbol objects need parsing)
             cached.symbols.each do |name|
