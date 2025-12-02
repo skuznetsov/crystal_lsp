@@ -401,6 +401,28 @@ module CrystalV2
             return nil
           end
 
+          # Fast path: use cached project state (symbols + ranges) when file is unchanged
+          if @project_cache_loaded
+            if cached = @project.files[path]?
+              if (mtime = File.info?(path).try(&.modification_time)) && mtime == cached.mtime && cached.symbol_summaries && !cached.symbol_summaries.empty?
+                debug("Loading dependency #{path} from project cache")
+                source = File.read(path)
+                text_doc = TextDocumentItem.new(uri: uri, language_id: "crystal", version: 0, text: source)
+                program = @project.program_for_file(path) || Frontend::Program.new(@project.arena, cached.root_ids)
+                symbol_table = @project.symbols_for_file(path)
+                type_context = Semantic::TypeContext.new
+                identifier_symbols = @project.identifier_symbols_for_file(path)
+                requires = cached.requires
+
+                dep_state = DocumentState.new(text_doc, program, type_context, identifier_symbols, symbol_table, requires, path)
+                @dependency_documents[uri] = dep_state
+                workspace.try { |ws| ws.cache[path] = dep_state }
+                ensure_dependencies_loaded(dep_state, workspace: workspace) if recursive
+                return dep_state
+              end
+            end
+          end
+
           debug("Loading dependency #{path}")
           source = File.read(path)
           absolute = File.expand_path(path)
