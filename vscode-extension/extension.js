@@ -19,7 +19,7 @@ function activate(context) {
     const debugLogPathRaw = config.get('lsp.debugLogPath');
 
     const env = { ...process.env };
-    if (debugLogPathRaw && debugLogPathRaw.trim().length > 0) {        
+    if (debugLogPathRaw && debugLogPathRaw.trim().length > 0) {         
         // Inline JSON config via env var; server already understands CRYSTALV2_LSP_CONFIG
         const tmpConfigPath = `/tmp/crystal_v2_lsp_config_${process.pid}.json`;
         const fs = require('fs');

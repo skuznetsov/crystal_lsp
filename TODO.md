@@ -106,7 +106,7 @@ Goal: v2 LSP must report only real errors and match original compiler behavior.
 - [ ] Diagnostics parity (no false positives)
 - [ ] Types & hover accuracy (match original compiler)
 - [ ] Navigation to stdlib/prelude and macro-generated methods
-- [ ] Prelude handling with cache + mtime tracking
+- [x] Prelude handling with cache + mtime tracking (cached summaries/types for warm start)
 
 ### Tests Needed
 - [ ] Structured LSP tests for stdlib symbols (`Time.monotonic`, `File.read`, etc.)

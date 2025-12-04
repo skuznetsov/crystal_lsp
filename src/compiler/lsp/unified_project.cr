@@ -96,6 +96,296 @@ module CrystalV2
         end
       end
 
+      # Shared helpers to summarize symbols and rebuild them from summaries.
+      module SymbolSummaryUtils
+        extend self
+
+        def summarize_symbol(symbol : Semantic::Symbol, program : Frontend::Program, type_context : Semantic::TypeContext? = nil) : SymbolSummary
+          span = begin
+            node = program.arena[symbol.node_id] rescue nil
+            node ? node.span : nil
+          rescue
+            nil
+          end
+
+          start_line = span ? span.start_line : nil
+          start_col = span ? span.start_column : nil
+          end_line = span ? span.end_line : nil
+          end_col = span ? span.end_column : nil
+
+          inferred_type = type_context.try { |tc| tc.get_type(symbol.node_id).try(&.to_s) } rescue nil
+
+          case symbol
+          when Semantic::OverloadSetSymbol
+            children = symbol.overloads.map { |ov| summarize_symbol(ov, program, type_context) }
+            SymbolSummary.new(
+              name: symbol.name,
+              kind: "overload_set",
+              detail: nil,
+              return_type: nil,
+              inferred_type: inferred_type,
+              params: nil,
+              ivars: nil,
+              consts: nil,
+              children: children,
+              start_line: start_line,
+              start_col: start_col,
+              end_line: end_line,
+              end_col: end_col
+            )
+          when Semantic::ClassSymbol
+            children = summarize_scope(symbol.scope, program, type_context)
+            ivars = symbol.instance_vars.map { |name, type| "@#{name} : #{type || "?"}" }
+            SymbolSummary.new(
+              name: symbol.name,
+              kind: "class",
+              detail: nil,
+              return_type: nil,
+              inferred_type: inferred_type,
+              params: nil,
+              ivars: ivars,
+              consts: nil,
+              children: children,
+              start_line: start_line,
+              start_col: start_col,
+              end_line: end_line,
+              end_col: end_col
+            )
+          when Semantic::ModuleSymbol
+            children = summarize_scope(symbol.scope, program, type_context)
+            SymbolSummary.new(
+              name: symbol.name,
+              kind: "module",
+              detail: nil,
+              return_type: nil,
+              inferred_type: inferred_type,
+              params: nil,
+              ivars: nil,
+              consts: nil,
+              children: children,
+              start_line: start_line,
+              start_col: start_col,
+              end_line: end_line,
+              end_col: end_col
+            )
+          when Semantic::MethodSymbol
+            params = symbol.params.map do |p|
+              if p_name = p.name
+                type = p.type_annotation ? String.new(p.type_annotation.not_nil!) : "?"
+                "#{String.new(p_name)} : #{type}"
+              else
+                "&"
+              end
+            end
+            SymbolSummary.new(
+              name: symbol.name,
+              kind: "method",
+              detail: format_method_signature(symbol),
+              return_type: symbol.return_annotation || "?",
+              inferred_type: inferred_type,
+              params: params,
+              ivars: nil,
+              consts: nil,
+              children: nil,
+              start_line: start_line,
+              start_col: start_col,
+              end_line: end_line,
+              end_col: end_col
+            )
+          when Semantic::VariableSymbol
+            kind = symbol.name.starts_with?("@") ? "ivar" : "variable"
+            SymbolSummary.new(
+              name: symbol.name,
+              kind: kind,
+              detail: symbol.declared_type,
+              return_type: inferred_type,
+              inferred_type: inferred_type,
+              params: nil,
+              ivars: nil,
+              consts: nil,
+              children: nil,
+              start_line: start_line,
+              start_col: start_col,
+              end_line: end_line,
+              end_col: end_col
+            )
+          when Semantic::MacroSymbol
+            SymbolSummary.new(
+              name: symbol.name,
+              kind: "macro",
+              detail: nil,
+              return_type: inferred_type,
+              inferred_type: inferred_type,
+              params: nil,
+              ivars: nil,
+              consts: nil,
+              children: nil,
+              start_line: start_line,
+              start_col: start_col,
+              end_line: end_line,
+              end_col: end_col
+            )
+          else
+            SymbolSummary.new(
+              name: symbol.name,
+              kind: "symbol",
+              detail: nil,
+              return_type: inferred_type,
+              inferred_type: inferred_type,
+              params: nil,
+              ivars: nil,
+              consts: nil,
+              children: nil,
+              start_line: start_line,
+              start_col: start_col,
+              end_line: end_line,
+              end_col: end_col
+            )
+          end
+        end
+
+        def summarize_scope(table : Semantic::SymbolTable, program : Frontend::Program, type_context : Semantic::TypeContext?) : Array(SymbolSummary)
+          summaries = [] of SymbolSummary
+          table.each_local_symbol do |_name, sym|
+            summaries << summarize_symbol(sym, program, type_context)
+          end
+          summaries
+        end
+
+        # Build lightweight Semantic symbols from cached summaries (ExprId = -1 placeholders)
+        def build_symbol_from_summary(
+          summary : SymbolSummary,
+          file_path : String,
+          container : String,
+          ranges_store : Hash(String, Hash(String, LSP::Range)),
+          types_store : Hash(String, Hash(String, String)),
+        ) : Semantic::Symbol?
+          node_id = Frontend::ExprId.new(-1)
+
+          range = if summary.start_line && summary.start_col && summary.end_line && summary.end_col
+                    start_pos = LSP::Position.new(summary.start_line.not_nil!, summary.start_col.not_nil!)
+                    end_pos = LSP::Position.new(summary.end_line.not_nil!, summary.end_col.not_nil!)
+                    LSP::Range.new(start_pos, end_pos)
+                  else
+                    nil
+                  end
+
+          key = if container.empty?
+                  summary.name
+                elsif summary.kind == "method"
+                  "#{container}##{summary.name}"
+                else
+                  "#{container}::#{summary.name}"
+                end
+          if range
+            ranges = ranges_store[file_path]? || (ranges_store[file_path] = Hash(String, LSP::Range).new)
+            ranges[key] = range
+            ranges[summary.name] ||= range
+          end
+          if inferred = summary.inferred_type
+            types = types_store[file_path]? || (types_store[file_path] = Hash(String, String).new)
+            types[key] = inferred
+            types[summary.name] ||= inferred
+          end
+
+          case summary.kind
+          when "class"
+            scope = Semantic::SymbolTable.new
+            class_scope = Semantic::SymbolTable.new
+            (summary.children || [] of SymbolSummary).each do |child|
+              if child_sym = build_symbol_from_summary(child, file_path, key, ranges_store, types_store)
+                begin
+                  scope.define(child.name, child_sym)
+                rescue Semantic::SymbolRedefinitionError
+                  scope.redefine(child.name, child_sym)
+                end
+              end
+            end
+            class_sym = Semantic::ClassSymbol.new(summary.name, node_id, scope: scope, class_scope: class_scope)
+            class_sym.file_path = file_path
+            (summary.ivars || [] of String).each do |ivar_decl|
+              if ivar_decl.starts_with?("@")
+                parts = ivar_decl.split(":", 2)
+                name = parts[0]
+                type = parts[1]?.try(&.strip)
+                class_sym.add_instance_var(name.lstrip("@"), type && !type.empty? ? type : nil)
+              end
+            end
+            class_sym
+          when "module", "overload_set"
+            scope = Semantic::SymbolTable.new
+            (summary.children || [] of SymbolSummary).each do |child|
+              if child_sym = build_symbol_from_summary(child, file_path, key, ranges_store, types_store)
+                begin
+                  scope.define(child.name, child_sym)
+                rescue Semantic::SymbolRedefinitionError
+                  scope.redefine(child.name, child_sym)
+                end
+              end
+            end
+            mod_sym = Semantic::ModuleSymbol.new(summary.name, node_id, scope: scope)
+            mod_sym.file_path = file_path
+            mod_sym
+          when "method"
+            method_sym = Semantic::MethodSymbol.new(
+              summary.name,
+              node_id,
+              params: [] of Frontend::Parameter,
+              return_annotation: summary.return_type,
+              scope: Semantic::SymbolTable.new
+            )
+            method_sym.file_path = file_path
+            method_sym
+          when "ivar", "variable"
+            var_sym = Semantic::VariableSymbol.new(summary.name, node_id, summary.detail)
+            var_sym.file_path = file_path
+            var_sym
+          when "macro"
+            macro_sym = Semantic::MacroSymbol.new(summary.name, node_id, node_id)
+            macro_sym.file_path = file_path
+            macro_sym
+          else
+            fallback_sym = Semantic::VariableSymbol.new(summary.name, node_id, summary.detail)
+            fallback_sym.file_path = file_path
+            fallback_sym
+          end
+        rescue
+          nil
+        end
+
+        def add_summaries_to_table(
+          table : Semantic::SymbolTable,
+          summaries : Array(SymbolSummary),
+          file_path : String,
+          ranges_store : Hash(String, Hash(String, LSP::Range)),
+          types_store : Hash(String, Hash(String, String)),
+          container : String = ""
+        )
+          summaries.each do |summary|
+            next unless sym = build_symbol_from_summary(summary, file_path, container, ranges_store, types_store)
+            begin
+              table.define(summary.name, sym)
+            rescue Semantic::SymbolRedefinitionError
+              table.redefine(summary.name, sym)
+            end
+          end
+        end
+
+        private def format_method_signature(symbol : Semantic::MethodSymbol) : String
+          params_str = symbol.params.map do |p|
+            if p_name = p.name
+              name = String.new(p_name)
+              type = p.type_annotation ? String.new(p.type_annotation.not_nil!) : "?"
+              "#{name} : #{type}"
+            else
+              "&"
+            end
+          end.join(", ")
+          ret = symbol.return_annotation || "?"
+          "(#{params_str}) : #{ret}"
+        end
+      end
+
       class UnifiedProjectState
         # Core state
         getter arena : Frontend::VirtualArena
@@ -389,270 +679,12 @@ module CrystalV2
         end
 
         private def build_symbol_summaries(symbols : Array(Semantic::Symbol), program : Frontend::Program, type_context : Semantic::TypeContext? = nil) : Array(SymbolSummary)
-          symbols.map { |sym| summarize_symbol(sym, program, type_context) }
-        end
-
-        private def summarize_symbol(symbol : Semantic::Symbol, program : Frontend::Program, type_context : Semantic::TypeContext? = nil) : SymbolSummary
-          span = begin
-            node = program.arena[symbol.node_id] rescue nil
-            node ? node.span : nil
-          rescue
-            nil
-          end
-
-          start_line = span ? span.start_line : nil
-          start_col = span ? span.start_column : nil
-          end_line = span ? span.end_line : nil
-          end_col = span ? span.end_column : nil
-
-          inferred_type = type_context.try { |tc| tc.get_type(symbol.node_id).try(&.to_s) } rescue nil
-
-          case symbol
-          when Semantic::OverloadSetSymbol
-            children = symbol.overloads.map { |ov| summarize_symbol(ov, program, type_context) }
-            SymbolSummary.new(
-              name: symbol.name,
-              kind: "overload_set",
-              detail: nil,
-              return_type: nil,
-              inferred_type: inferred_type,
-              params: nil,
-              ivars: nil,
-              consts: nil,
-              children: children,
-              start_line: start_line,
-              start_col: start_col,
-              end_line: end_line,
-              end_col: end_col
-            )
-          when Semantic::ClassSymbol
-            children = summarize_scope(symbol.scope, program, type_context)
-            ivars = symbol.instance_vars.map { |name, type| "@#{name} : #{type || "?"}" }
-            SymbolSummary.new(
-              name: symbol.name,
-              kind: "class",
-              detail: nil,
-              return_type: nil,
-              inferred_type: inferred_type,
-              params: nil,
-              ivars: ivars,
-              consts: nil,
-              children: children,
-              start_line: start_line,
-              start_col: start_col,
-              end_line: end_line,
-              end_col: end_col
-            )
-          when Semantic::ModuleSymbol
-            children = summarize_scope(symbol.scope, program, type_context)
-            SymbolSummary.new(
-              name: symbol.name,
-              kind: "module",
-              detail: nil,
-              return_type: nil,
-              inferred_type: inferred_type,
-              params: nil,
-              ivars: nil,
-              consts: nil,
-              children: children,
-              start_line: start_line,
-              start_col: start_col,
-              end_line: end_line,
-              end_col: end_col
-            )
-          when Semantic::MethodSymbol
-            params = symbol.params.map do |p|
-              if p_name = p.name
-                type = p.type_annotation ? String.new(p.type_annotation.not_nil!) : "?"
-                "#{String.new(p_name)} : #{type}"
-              else
-                "&"
-              end
-            end
-            SymbolSummary.new(
-              name: symbol.name,
-              kind: "method",
-              detail: format_method_signature(symbol),
-              return_type: symbol.return_annotation || "?",
-              inferred_type: inferred_type,
-              params: params,
-              ivars: nil,
-              consts: nil,
-              children: nil,
-              start_line: start_line,
-              start_col: start_col,
-              end_line: end_line,
-              end_col: end_col
-            )
-          when Semantic::VariableSymbol
-            kind = symbol.name.starts_with?("@") ? "ivar" : "variable"
-            SymbolSummary.new(
-              name: symbol.name,
-              kind: kind,
-              detail: symbol.declared_type,
-              return_type: inferred_type,
-              inferred_type: inferred_type,
-              params: nil,
-              ivars: nil,
-              consts: nil,
-              children: nil,
-              start_line: start_line,
-              start_col: start_col,
-              end_line: end_line,
-              end_col: end_col
-            )
-          when Semantic::MacroSymbol
-            SymbolSummary.new(
-              name: symbol.name,
-              kind: "macro",
-              detail: nil,
-              return_type: inferred_type,
-              inferred_type: inferred_type,
-              params: nil,
-              ivars: nil,
-              consts: nil,
-              children: nil,
-              start_line: start_line,
-              start_col: start_col,
-              end_line: end_line,
-              end_col: end_col
-            )
-          else
-            SymbolSummary.new(
-              name: symbol.name,
-              kind: "symbol",
-              detail: nil,
-              return_type: inferred_type,
-              inferred_type: inferred_type,
-              params: nil,
-              ivars: nil,
-              consts: nil,
-              children: nil,
-              start_line: start_line,
-              start_col: start_col,
-              end_line: end_line,
-              end_col: end_col
-            )
-          end
-        end
-
-        private def summarize_scope(table : Semantic::SymbolTable, program : Frontend::Program, type_context : Semantic::TypeContext?) : Array(SymbolSummary)
-          summaries = [] of SymbolSummary
-          table.each_local_symbol do |_name, sym|
-            summaries << summarize_symbol(sym, program, type_context)
-          end
-          summaries
-        end
-
-        private def format_method_signature(symbol : Semantic::MethodSymbol) : String
-          params_str = symbol.params.map do |p|
-            if p_name = p.name
-              name = String.new(p_name)
-              type = p.type_annotation ? String.new(p.type_annotation.not_nil!) : "?"
-              "#{name} : #{type}"
-            else
-              "&"
-            end
-          end.join(", ")
-          ret = symbol.return_annotation || "?"
-          "(#{params_str}) : #{ret}"
+          symbols.map { |sym| SymbolSummaryUtils.summarize_symbol(sym, program, type_context) }
         end
 
         # Build lightweight Semantic symbols from cached summaries (ExprId = -1 placeholders)
         private def build_symbol_from_summary(summary : SymbolSummary, file_path : String, container : String) : Semantic::Symbol?
-          node_id = Frontend::ExprId.new(-1)
-
-          range = if summary.start_line && summary.start_col && summary.end_line && summary.end_col
-                    start_pos = LSP::Position.new(summary.start_line.not_nil!, summary.start_col.not_nil!)
-                    end_pos = LSP::Position.new(summary.end_line.not_nil!, summary.end_col.not_nil!)
-                    LSP::Range.new(start_pos, end_pos)
-                  else
-                    nil
-                  end
-
-          key = if container.empty?
-                  summary.name
-                elsif summary.kind == "method"
-                  "#{container}##{summary.name}"
-                else
-                  "#{container}::#{summary.name}"
-                end
-          if range
-            ranges = @cached_ranges[file_path]? || (@cached_ranges[file_path] = Hash(String, LSP::Range).new)
-            ranges[key] = range
-            # Also store a simplified key to allow lookups when the container is unknown
-            ranges[summary.name] ||= range
-          end
-          if inferred = summary.inferred_type
-            types = @cached_types[file_path]? || (@cached_types[file_path] = Hash(String, String).new)
-            types[key] = inferred
-            types[summary.name] ||= inferred
-          end
-
-          case summary.kind
-          when "class"
-            scope = Semantic::SymbolTable.new
-            class_scope = Semantic::SymbolTable.new
-            (summary.children || [] of SymbolSummary).each do |child|
-              if child_sym = build_symbol_from_summary(child, file_path, key)
-                begin
-                  scope.define(child.name, child_sym)
-                rescue Semantic::SymbolRedefinitionError
-                  scope.redefine(child.name, child_sym)
-                end
-              end
-            end
-            class_sym = Semantic::ClassSymbol.new(summary.name, node_id, scope: scope, class_scope: class_scope)
-            class_sym.file_path = file_path
-            (summary.ivars || [] of String).each do |ivar_decl|
-              if ivar_decl.starts_with?("@")
-                parts = ivar_decl.split(":", 2)
-                name = parts[0]
-                type = parts[1]?.try(&.strip)
-                class_sym.add_instance_var(name.lstrip("@"), type && !type.empty? ? type : nil)
-              end
-            end
-            class_sym
-          when "module", "overload_set"
-            scope = Semantic::SymbolTable.new
-            (summary.children || [] of SymbolSummary).each do |child|
-              if child_sym = build_symbol_from_summary(child, file_path, key)
-                begin
-                  scope.define(child.name, child_sym)
-                rescue Semantic::SymbolRedefinitionError
-                  scope.redefine(child.name, child_sym)
-                end
-              end
-            end
-            mod_sym = Semantic::ModuleSymbol.new(summary.name, node_id, scope: scope)
-            mod_sym.file_path = file_path
-            mod_sym
-          when "method"
-            method_sym = Semantic::MethodSymbol.new(
-              summary.name,
-              node_id,
-              params: [] of Frontend::Parameter,
-              return_annotation: summary.return_type,
-              scope: Semantic::SymbolTable.new
-            )
-            method_sym.file_path = file_path
-            method_sym
-          when "ivar", "variable"
-            var_sym = Semantic::VariableSymbol.new(summary.name, node_id, summary.detail)
-            var_sym.file_path = file_path
-            var_sym
-          when "macro"
-            # Body/params not stored; placeholder node_id
-            macro_sym = Semantic::MacroSymbol.new(summary.name, node_id, node_id)
-            macro_sym.file_path = file_path
-            macro_sym
-          else
-            fallback_sym = Semantic::VariableSymbol.new(summary.name, node_id, summary.detail)
-            fallback_sym.file_path = file_path
-            fallback_sym
-          end
-        rescue
-          nil
+          SymbolSummaryUtils.build_symbol_from_summary(summary, file_path, container, @cached_ranges, @cached_types)
         end
 
         private def analyze_file_semantics(program : Frontend::Program, path : String, symbols : Array(Semantic::Symbol)) : Array(Diagnostic)

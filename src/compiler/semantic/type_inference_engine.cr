@@ -44,6 +44,10 @@ module CrystalV2
 
         @debug_enabled : Bool
 
+        # Cache method body return types to avoid repeated/recursive inference loops
+        @method_body_cache : Hash(MethodSymbol, Type) = {} of MethodSymbol => Type
+        @method_body_in_progress : Set(MethodSymbol) = Set(MethodSymbol).new
+
         def initialize(
           @program : Frontend::Program,
           @identifier_symbols : Hash(ExprId, Symbol),
@@ -66,6 +70,12 @@ module CrystalV2
           STDERR.puts "[TYPE_INFERENCE_DEBUG] #{msg}" if @debug_enabled
         end
 
+        # Centralized watchdog guard to ensure we don't miss deadlines inside
+        # long-running helper methods.
+        private def guard_watchdog!
+          Frontend::Watchdog.check!
+        end
+
         # Main entry point: Infer types for all root expressions
         def infer_types
           @program.roots.each do |root_id|
@@ -76,6 +86,9 @@ module CrystalV2
 
         # Recursive type inference for a single expression
         private def infer_expression(expr_id : ExprId) : Type
+          # Guard against runaway inference when watchdog is enabled
+          Frontend::Watchdog.check!
+
           # Iterative fast path to avoid deep recursion/stack overflows
           if t0 = @context.get_type(expr_id)
             return t0
@@ -148,7 +161,13 @@ module CrystalV2
           @depth += 1
           node = @program.arena[expr_id]
 
-          result_type = case Frontend.node_kind(node)
+          # Re-check inside the recursive path to catch long-running branches
+          Frontend::Watchdog.check!
+
+          result_type = if node.is_a?(Frontend::SplatNode)
+                          @context.nil_type
+                        else
+                          case Frontend.node_kind(node)
                         when .number?
                           infer_number(node.as(Frontend::NumberNode))
                         when .string?
@@ -183,9 +202,9 @@ module CrystalV2
                         when .global_var_decl?
                           # Phase 77: Global variable declaration ($var : Type)
                           infer_global_var_decl(node, expr_id)
-                        when .unary?
-                          # Phase 17: Unary operators (+x, -x, !x)
-                          infer_unary(node.as(Frontend::UnaryNode), expr_id)
+            when .unary?
+              # Phase 17: Unary operators (+x, -x, !x)
+              infer_unary(node.as(Frontend::UnaryNode), expr_id)
                         when .binary?
                           infer_binary(node.as(Frontend::BinaryNode), expr_id)
                         when .def?
@@ -388,12 +407,22 @@ module CrystalV2
                           @context.nil_type
                         end
 
+          end
+
           # Always set type for this expression (some infer_* methods already do this,
           # but this ensures ALL expressions have types set, even for nested calls)
           @context.set_type(expr_id, result_type)
           result_type
+        rescue OverflowError
+          debug("overflow while inferring expr #{expr_id}") if @debug_enabled
+          @context.nil_type
         ensure
           @depth -= 1
+        end
+
+        private def infer_splat(node : Frontend::SplatNode, expr_id : ExprId) : Type
+          # Placeholder until splat typing is implemented; keep inference total.
+          @context.nil_type
         end
 
         # Return direct child ExprIds of a node (used by iterative inference)
@@ -509,6 +538,9 @@ module CrystalV2
         # Compute node type using already computed children (no recursion)
         # Returns nil for complex nodes that need recursive inference
         private def compute_node_type_no_recurse(node, expr_id : ExprId) : Type?
+          # Ensure long-running per-node work still honors the watchdog
+          Frontend::Watchdog.check!
+
           case node
           when Frontend::NumberNode
             infer_number(node)
@@ -735,6 +767,8 @@ module CrystalV2
 
         # Phase 6: Process method definitions and their bodies
         private def infer_def(node : Frontend::DefNode, expr_id : ExprId) : Type
+          guard_watchdog!
+
           # Phase 71: Process default parameter values
           if params = node.params
             params.each do |param|
@@ -776,6 +810,8 @@ module CrystalV2
 
         # Phase 5C: Process class bodies and track current class context
         private def infer_class(node : Frontend::ClassNode, expr_id : ExprId) : Type
+          guard_watchdog!
+
           # Look up the ClassSymbol from the symbol table
           class_name = String.new(node.name)
 
@@ -799,6 +835,8 @@ module CrystalV2
         end
 
         private def infer_struct(node : Frontend::StructNode, expr_id : ExprId) : Type
+          guard_watchdog!
+
           (node.body || [] of ExprId).each do |body_expr_id|
             infer_expression(body_expr_id)
           end
@@ -1026,6 +1064,8 @@ module CrystalV2
         # Parse simple type name (e.g., "Int32", "String")
         # For Phase 1: Only built-in primitive types
         private def parse_type_name(name : String) : Type
+          guard_watchdog!
+
           # Check for generic type syntax: Array(T)
           if name.includes?('(') && name.includes?(')')
             # Extract base type and type argument
@@ -1090,6 +1130,8 @@ module CrystalV2
 
         # Resolve a scoped name like Folding::Core::Protein against the global symbol table.
         private def resolve_scoped_symbol(name : String) : Symbol?
+          guard_watchdog!
+
           return nil unless table = @global_table
           segments = name.split("::")
           return nil if segments.empty?
@@ -1115,11 +1157,22 @@ module CrystalV2
 
         # Find a class symbol by matching the rightmost segment across global table (fallback).
         private def find_class_symbol_by_suffix(name : String) : ClassSymbol?
+          guard_watchdog!
+
           suffix = name.includes?("::") ? name.split("::").last : name
           return nil unless suffix
           return nil unless table = @global_table
           queue = [table]
+          visited = Set(SymbolTable).new
+          max_nodes = 2000
+          nodes_seen = 0
           while current = queue.shift?
+            guard_watchdog!
+            next if visited.includes?(current)
+            visited << current
+            nodes_seen += 1
+            break if nodes_seen > max_nodes
+
             current.each_local_symbol do |_k, sym|
               case sym
               when ClassSymbol
@@ -1302,6 +1355,7 @@ module CrystalV2
         end
 
         private def infer_block_result(expressions : Array(ExprId)) : Type
+          guard_watchdog!
           return @context.nil_type if expressions.empty?
 
           result_type = @context.nil_type
@@ -1362,6 +1416,8 @@ module CrystalV2
         # ============================================================
 
         private def infer_if(node : Frontend::IfNode) : Type
+          guard_watchdog!
+
           condition_id = node.condition
           condition_type = infer_expression(condition_id)
 
@@ -1439,6 +1495,8 @@ module CrystalV2
 
         # Phase 24: Type inference for unless (similar to if but without elsif)
         private def infer_unless(node : Frontend::UnlessNode) : Type
+          guard_watchdog!
+
           condition_id = node.condition
           condition_type = infer_expression(condition_id)
 
@@ -1454,6 +1512,8 @@ module CrystalV2
 
         # Phase 25: Type inference for until loop (inverse of while)
         private def infer_until(node : Frontend::UntilNode) : Type
+          guard_watchdog!
+
           condition_id = node.condition
           condition_type = infer_expression(condition_id)
 
@@ -1471,6 +1531,8 @@ module CrystalV2
         # With rescue: union of begin body type and all rescue body types
         # Ensure doesn't affect type (always runs but doesn't change return value)
         private def infer_begin(node : Frontend::BeginNode) : Type
+          guard_watchdog!
+
           begin_type = infer_block_result(node.body)
 
           types = [begin_type]
@@ -1512,6 +1574,8 @@ module CrystalV2
 
         # Phase 66: Type inference for type declaration
         private def infer_type_declaration(node) : Type
+          guard_watchdog!
+
           # Type declarations like `x : Int32` declare a variable with an explicit type
           # but don't assign a value. They are compile-time type annotations.
           #
@@ -1526,6 +1590,8 @@ module CrystalV2
 
         # Phase 67: Type inference for with context block
         private def infer_with(node : Frontend::WithNode) : Type
+          guard_watchdog!
+
           infer_expression(node.receiver)
 
           result_type = @context.nil_type
@@ -1544,6 +1610,8 @@ module CrystalV2
         #   3. Generate setter method (def name=(@name : Type); end)
         # For now, we parse and type-check the structure only
         private def infer_accessor(node : Frontend::GetterNode | Frontend::SetterNode | Frontend::PropertyNode) : Type
+          guard_watchdog!
+
           node.specs.each do |spec|
             if default_value = spec.default_value
               infer_expression(default_value)
@@ -1554,6 +1622,8 @@ module CrystalV2
         end
 
         private def infer_while(node : Frontend::WhileNode) : Type
+          guard_watchdog!
+
           condition_id = node.condition
           condition_type = infer_expression(condition_id)
 
@@ -1568,6 +1638,8 @@ module CrystalV2
 
         # Phase 99: for loop
         private def infer_for(node : Frontend::ForNode) : Type
+          guard_watchdog!
+
           # Infer collection type
           collection_type = infer_expression(node.collection)
 
@@ -1588,6 +1660,8 @@ module CrystalV2
         end
 
         private def infer_loop(node : Frontend::LoopNode) : Type
+          guard_watchdog!
+
           # Phase 83: Infinite loop
           # loop do ... end - runs indefinitely until break/return
 
@@ -1602,6 +1676,8 @@ module CrystalV2
         end
 
         private def infer_spawn(node : Frontend::SpawnNode) : Type
+          guard_watchdog!
+
           # Phase 84: Spawn fiber (concurrency)
           # spawn do...end | spawn expression
           # Creates a new fiber to run code concurrently
@@ -1626,6 +1702,8 @@ module CrystalV2
         # ============================================================
 
         private def infer_assign(node : Frontend::AssignNode, expr_id : ExprId) : Type
+          guard_watchdog!
+
           target_id = node.target
           value_id = node.value
 
@@ -1656,6 +1734,8 @@ module CrystalV2
 
         # Phase 73: Multiple assignment (a, b = 1, 2)
         private def infer_multiple_assign(node : Frontend::MultipleAssignNode, expr_id : ExprId) : Type
+          guard_watchdog!
+
           targets = node.targets
           value_id = node.value
 
@@ -2366,6 +2446,8 @@ module CrystalV2
         end
 
         private def infer_call(node : Frontend::CallNode, expr_id : ExprId) : Type
+          guard_watchdog!
+
           if block_id = node.block
             infer_expression(block_id)
           end
@@ -2767,7 +2849,12 @@ module CrystalV2
         end
 
         # Phase 4B.2: Recursively search for method in superclass chain
-        private def find_in_superclass(class_symbol : ClassSymbol, method_name : String) : Array(MethodSymbol)
+        private def find_in_superclass(class_symbol : ClassSymbol, method_name : String, visited = Set(ClassSymbol).new) : Array(MethodSymbol)
+          guard_watchdog!
+
+          return [] of MethodSymbol if visited.includes?(class_symbol)
+          visited << class_symbol
+
           methods = [] of MethodSymbol
 
           # Get superclass name
@@ -2790,7 +2877,7 @@ module CrystalV2
 
           # Recursively search in superclass's superclass
           if methods.empty?
-            methods.concat(find_in_superclass(superclass_symbol, method_name))
+            methods.concat(find_in_superclass(superclass_symbol, method_name, visited))
           end
 
           methods
@@ -2884,6 +2971,8 @@ module CrystalV2
         # Normalizes the union (flattens, removes duplicates, sorts).
         # If only one type remains after normalization, returns that type directly.
         private def union_of(types : Array(Type)) : Type
+          guard_watchdog!
+
           normalized = UnionType.normalize(types)
           if normalized.size == 1
             normalized[0]
@@ -3044,6 +3133,8 @@ module CrystalV2
         # ============================================================
 
         private def infer_block(node : Frontend::BlockNode, expr_id : ExprId) : Type
+          guard_watchdog!
+
           infer_block_result(node.body)
         end
 
@@ -3061,6 +3152,8 @@ module CrystalV2
 
         # Phase 74: Proc literal type inference
         private def infer_proc_literal(node : Frontend::ProcLiteralNode, expr_id : ExprId) : Type
+          guard_watchdog!
+
           # Register proc parameters in @assignments BEFORE inferring body
           # This makes them available for type inference in body expressions
           if params = node.params
@@ -3111,6 +3204,8 @@ module CrystalV2
         # Week 1: Simple unification - T appears directly in parameter type
         # Future: Complex constraints (T < Number, etc.)
         private def infer_type_arguments(class_symbol : ClassSymbol, arg_types : Array(Type)) : Array(Type)?
+          guard_watchdog!
+
           type_params = class_symbol.type_parameters
           return nil unless type_params && !type_params.empty?
 
@@ -3160,6 +3255,20 @@ module CrystalV2
         # Week 1: Infer method body type when there's no return annotation
         # Used for generic methods like: def direct_value; @value; end
         private def infer_method_body_type(method : MethodSymbol, receiver_type : Type) : Type
+          guard_watchdog!
+
+          # If we've already inferred this method body, reuse it to prevent cycles
+          if cached = @method_body_cache[method]?
+            return cached
+          end
+
+          # Break recursive inference cycles gracefully
+          if @method_body_in_progress.includes?(method)
+            return @context.nil_type
+          end
+
+          @method_body_in_progress << method
+
           if ENV["DEBUG"]?
             puts "DEBUG infer_method_body_type:"
             puts "  method: #{method.name}"
@@ -3199,6 +3308,9 @@ module CrystalV2
           last_expr_id = body.last
           result_type = infer_expression(last_expr_id)
 
+          # Cache the result to avoid re-inferring on subsequent calls
+          @method_body_cache[method] = result_type
+
           if ENV["DEBUG"]?
             puts "  result_type: #{result_type.class} = #{result_type.inspect}"
           end
@@ -3208,6 +3320,8 @@ module CrystalV2
           @current_class = previous_class
 
           result_type
+        ensure
+          @method_body_in_progress.delete(method)
         end
 
         # ============================================================
@@ -3215,6 +3329,8 @@ module CrystalV2
         # ============================================================
 
         private def infer_case(node : Frontend::CaseNode, expr_id : ExprId) : Type
+          guard_watchdog!
+
           if value_id = node.value
             infer_expression(value_id)
           end

@@ -3,6 +3,9 @@
 # Caches parsed stdlib symbols to disk, reducing startup time from ~1s to ~50ms.
 # Cache is invalidated when stdlib files change.
 
+require "./project_cache"
+require "./unified_project"
+
 module CrystalV2
   module Compiler
     module LSP
@@ -130,12 +133,13 @@ module CrystalV2
       # - Symbols: [CachedSymbolInfo...]
       class PreludeCache
         MAGIC   = "CV2C"
-        VERSION = 2_u32  # Bumped for new hash format
+        VERSION = 3_u32  # Align with project cache richness
 
         getter symbols : Array(CachedSymbolInfo)
         getter stdlib_hash : UInt64
+        getter files : Array(CachedFileState)
 
-        def initialize(@symbols : Array(CachedSymbolInfo), @stdlib_hash : UInt64)
+        def initialize(@symbols : Array(CachedSymbolInfo), @stdlib_hash : UInt64, @files : Array(CachedFileState) = [] of CachedFileState)
         end
 
         def self.cache_path : String
@@ -171,7 +175,13 @@ module CrystalV2
               symbols << CachedSymbolInfo.from_bytes(io)
             end
 
-            new(symbols, stored_hash)
+            file_count = io.read_bytes(UInt32, IO::ByteFormat::LittleEndian)
+            files = Array(CachedFileState).new(file_count.to_i)
+            file_count.times do
+              files << CachedFileState.from_bytes(io)
+            end
+
+            new(symbols, stored_hash, files)
           end
         rescue ex
           nil
@@ -192,6 +202,9 @@ module CrystalV2
             # Write symbols
             io.write_bytes(@symbols.size.to_u32, IO::ByteFormat::LittleEndian)
             @symbols.each(&.to_bytes(io))
+
+            io.write_bytes(@files.size.to_u32, IO::ByteFormat::LittleEndian)
+            @files.each(&.to_bytes(io))
           end
         end
 
