@@ -20,6 +20,57 @@ module CrystalV2
       alias Frontend = CrystalV2::Compiler::Frontend
       alias Watchdog = Frontend::Watchdog
 
+      struct ScopedVarDecl
+        getter name : String
+        getter scope_span : Frontend::Span
+        getter decl_span : Frontend::Span
+
+        def initialize(@name : String, @scope_span : Frontend::Span, @decl_span : Frontend::Span)
+        end
+      end
+
+      struct DocumentIndex
+        getter scoped_vars : Array(ScopedVarDecl)
+        getter class_vars : Hash(String, Array(Frontend::Span))
+        getter instance_vars : Hash(String, Array(Frontend::Span))
+        getter global_vars : Hash(String, Array(Frontend::Span))
+        getter defs : Hash(String, Array(Frontend::Span))
+        getter constants : Hash(String, Array(Frontend::Span))
+
+        def initialize
+          @scoped_vars = [] of ScopedVarDecl
+          @class_vars = Hash(String, Array(Frontend::Span)).new { |h, k| h[k] = [] of Frontend::Span }
+          @instance_vars = Hash(String, Array(Frontend::Span)).new { |h, k| h[k] = [] of Frontend::Span }
+          @global_vars = Hash(String, Array(Frontend::Span)).new { |h, k| h[k] = [] of Frontend::Span }
+          @defs = Hash(String, Array(Frontend::Span)).new { |h, k| h[k] = [] of Frontend::Span }
+          @constants = Hash(String, Array(Frontend::Span)).new { |h, k| h[k] = [] of Frontend::Span }
+        end
+
+        def add_scoped_var(name : String, scope_span : Frontend::Span, decl_span : Frontend::Span)
+          @scoped_vars << ScopedVarDecl.new(name, scope_span, decl_span)
+        end
+
+        def add_class_var(name : String, span : Frontend::Span)
+          @class_vars[name] << span
+        end
+
+        def add_instance_var(name : String, span : Frontend::Span)
+          @instance_vars[name] << span
+        end
+
+        def add_global_var(name : String, span : Frontend::Span)
+          @global_vars[name] << span
+        end
+
+        def add_def(name : String, span : Frontend::Span)
+          @defs[name] << span
+        end
+
+        def add_constant(name : String, span : Frontend::Span)
+          @constants[name] << span
+        end
+      end
+
       # Document analysis state
       struct DocumentState
         getter text_document : TextDocumentItem
@@ -29,6 +80,7 @@ module CrystalV2
         getter symbol_table : Semantic::SymbolTable?
         getter requires : Array(String)
         getter path : String?
+        getter index : DocumentIndex?
 
         def initialize(
           @text_document : TextDocumentItem,
@@ -37,6 +89,7 @@ module CrystalV2
           @identifier_symbols : Hash(Frontend::ExprId, Semantic::Symbol)? = nil,
           @symbol_table : Semantic::SymbolTable? = nil,
           @requires : Array(String) = [] of String,
+          @index : DocumentIndex? = nil,
           path : String? = nil,
         )
           @path = path ? File.expand_path(path) : nil
@@ -98,6 +151,7 @@ module CrystalV2
         getter parser_recovery_mode : Bool
         getter best_effort_inference : Bool
         getter prelude_symbol_only : Bool
+        getter real_prelude : Bool
         getter debounce_ms : Int32
         getter background_indexing : Bool
         getter project_cache : Bool
@@ -107,6 +161,7 @@ module CrystalV2
           @parser_recovery_mode : Bool = true,
           @best_effort_inference : Bool = true,
           @prelude_symbol_only : Bool = false,
+          @real_prelude : Bool = true,
           @debounce_ms : Int32 = 300,         # Default 300ms debounce
           @background_indexing : Bool = true, # Default: load prelude in background
           @project_cache : Bool = true,       # Default: cache project state to disk
@@ -118,6 +173,7 @@ module CrystalV2
           recovery_mode = true
           best_effort_inference = true
           prelude_symbol_only = ENV["LSP_PRELUDE_SYMBOL_ONLY"]? == "1"
+          real_prelude = ENV["LSP_REAL_PRELUDE"]? != "0"
           debounce_ms = ENV["LSP_DEBOUNCE_MS"]?.try(&.to_i?) || 300
           # Background indexing enabled by default, can be disabled via env or config
           background_indexing = ENV["LSP_BACKGROUND_INDEXING"]? != "0"
@@ -143,6 +199,9 @@ module CrystalV2
                 if value = hash["prelude_symbol_only"]?.try(&.as_bool?)
                   prelude_symbol_only = value
                 end
+                if value = hash["real_prelude"]?.try(&.as_bool?)
+                  real_prelude = value
+                end
                 if value = hash["debounce_ms"]?.try(&.as_i?)
                   debounce_ms = value
                 end
@@ -160,7 +219,7 @@ module CrystalV2
 
           debug_path = File.expand_path(debug_path) if debug_path
 
-          new(debug_path, recovery_mode, best_effort_inference, prelude_symbol_only, debounce_ms, background_indexing, project_cache)
+          new(debug_path, recovery_mode, best_effort_inference, prelude_symbol_only, real_prelude, debounce_ms, background_indexing, project_cache)
         end
       end
 
@@ -251,6 +310,7 @@ module CrystalV2
         @prelude_method_index : Hash(String, Location)
         @prelude_loading : Bool = false
         @prelude_load_channel : Channel(PreludeState?)?
+        @prelude_guard_deadline : Time::Span?
         @project_root : String?
         @project_cache_dirty : Bool = false
         @project_cache_loaded : Bool = false
@@ -260,6 +320,7 @@ module CrystalV2
         @cached_symbol_types : Hash(String, Hash(String, String))
         @cached_expr_types : Hash(String, Hash(Int32, String))
         @dependencies_warming : Set(String)
+        @inference_timeouts : Set(String)
 
         def initialize(@input = STDIN, @output = STDOUT, config : ServerConfig = ServerConfig.load)
           @config = config
@@ -299,6 +360,7 @@ module CrystalV2
           @cached_symbol_types = Hash(String, Hash(String, String)).new
           @cached_expr_types = Hash(String, Hash(Int32, String)).new
           @dependencies_warming = Set(String).new
+          @inference_timeouts = Set(String).new
           # Allow forcing the stub prelude for debugging via environment variable
           if ENV["CRYSTALV2_LSP_FORCE_STUB"]?
             try_load_prelude(PRELUDE_STUB_PATH, "LSP stub prelude")
@@ -385,6 +447,28 @@ module CrystalV2
           end
         end
 
+        # Deep search for a symbol by name across nested scopes (class/module).
+        private def find_symbol_recursive(table : Semantic::SymbolTable, name : String) : Semantic::Symbol?
+          visited = Set(Semantic::SymbolTable).new
+          stack = [table] of Semantic::SymbolTable
+          while current = stack.pop?
+            next if visited.includes?(current)
+            visited << current
+
+            current.each_local_symbol do |_k, sym|
+              return sym if sym.name == name
+              case sym
+              when Semantic::ClassSymbol
+                stack << sym.scope if sym.scope
+                stack << sym.class_scope if sym.class_scope
+              when Semantic::ModuleSymbol
+                stack << sym.scope if sym.scope
+              end
+            end
+          end
+          nil
+        end
+
         private def load_dependency(path : String, recursive : Bool = true, workspace : DependencyWorkspace? = nil) : DocumentState?
           # Check watchdog on each dependency load to prevent infinite loops
           Watchdog.check!
@@ -420,8 +504,8 @@ module CrystalV2
                 type_context = Semantic::TypeContext.new
                 identifier_symbols = @project.identifier_symbols_for_file(path)
                 requires = cached.requires
-
-                dep_state = DocumentState.new(text_doc, program, type_context, identifier_symbols, symbol_table, requires, path)
+                index = build_document_index(program, path)
+                dep_state = DocumentState.new(text_doc, program, type_context, identifier_symbols, symbol_table, requires, index, path)
                 @dependency_documents[uri] = dep_state
                 workspace.try { |ws| ws.cache[path] = dep_state }
                 ensure_dependencies_loaded(dep_state, workspace: workspace) if recursive
@@ -441,10 +525,10 @@ module CrystalV2
           end
           base_dir = File.dirname(path)
           workspace ||= DependencyWorkspace.new
-          diagnostics, program, type_context, identifier_symbols, symbol_table, requires = analyze_document(source, base_dir, path, load_requires: recursive, workspace: workspace)
+          diagnostics, program, type_context, identifier_symbols, symbol_table, requires, index = analyze_document(source, base_dir, path, load_requires: recursive, workspace: workspace)
 
           text_doc = TextDocumentItem.new(uri: uri, language_id: "crystal", version: 0, text: source)
-          dep_state = DocumentState.new(text_doc, program, type_context, identifier_symbols, symbol_table, requires, path)
+          dep_state = DocumentState.new(text_doc, program, type_context, identifier_symbols, symbol_table, requires, index, path)
 
           @dependency_documents[uri] = dep_state
           workspace.cache[path] = dep_state if workspace
@@ -1322,10 +1406,10 @@ module CrystalV2
 
           # Legacy: Analyze and store document (will be removed after full migration)
           doc = TextDocumentItem.new(uri: uri, language_id: language_id, version: version, text: text)
-          diagnostics, program, type_context, identifier_symbols, symbol_table, requires = analyze_document(text, base_dir, doc_path, workspace: DependencyWorkspace.new)
+          diagnostics, program, type_context, identifier_symbols, symbol_table, requires, index = analyze_document(text, base_dir, doc_path, workspace: DependencyWorkspace.new)
 
           # Store document state (legacy)
-          @documents[uri] = DocumentState.new(doc, program, type_context, identifier_symbols, symbol_table, requires, doc_path)
+          @documents[uri] = DocumentState.new(doc, program, type_context, identifier_symbols, symbol_table, requires, index, doc_path)
           register_document_symbols(uri, @documents[uri])
           warm_dependencies(doc_path, @documents[uri]) if doc_path
 
@@ -1346,8 +1430,86 @@ module CrystalV2
           @documents.delete(uri)
         end
 
+        private def build_document_index(program : Frontend::Program, path : String?) : DocumentIndex
+          index = DocumentIndex.new
+          arena = program.arena
+          target_path = path
+          stack = [] of {Frontend::ExprId, Array(Frontend::Span)}
+
+          program.roots.each do |root_id|
+            next if root_id.invalid?
+            next unless expr_in_document?(program, root_id, target_path)
+            stack << {root_id, [] of Frontend::Span}
+          end
+
+          while item = stack.pop?
+            Watchdog.check!
+            expr_id, callables = item
+            next if expr_id.invalid?
+            next unless expr_in_document?(program, expr_id, target_path)
+
+            node = arena[expr_id]
+            current_callables = callables
+
+            case node
+            when Frontend::DefNode, Frontend::BlockNode, Frontend::ProcLiteralNode
+              current_callables = callables + [node.span]
+              node.params.try &.each do |param|
+                if pname = param.name
+                  p_span = param.name_span || param.span
+                  index.add_scoped_var(String.new(pname), node.span, p_span)
+                end
+              end
+            end
+
+            case node
+            when Frontend::AssignNode
+              target = arena[node.target]
+              if target.is_a?(Frontend::IdentifierNode)
+                if tname = target.name
+                  if scope_span = current_callables.last?
+                    index.add_scoped_var(String.new(tname), scope_span, target.span)
+                  end
+                end
+              end
+            when Frontend::ClassVarDeclNode
+              if cname = node.name
+                index.add_class_var(String.new(cname), node.span)
+              end
+            when Frontend::InstanceVarDeclNode
+              if iname = node.name
+                index.add_instance_var(String.new(iname), node.span)
+              end
+            when Frontend::GlobalNode
+              if gname = node.name
+                index.add_global_var(String.new(gname), node.span)
+              end
+            when Frontend::DefNode
+              if dname = node.name
+                index.add_def(String.new(dname), node.span)
+              end
+            when Frontend::ClassNode
+              index.add_constant(String.new(node.name), node.span)
+            when Frontend::ModuleNode
+              index.add_constant(String.new(node.name), node.span)
+            when Frontend::ConstantNode
+              if cname = node.name
+                index.add_constant(String.new(cname), node.span)
+              end
+            end
+
+            each_child_expr(arena, expr_id) do |child_id|
+              next if child_id.invalid?
+              next unless expr_in_document?(program, child_id, target_path)
+              stack << {child_id, current_callables}
+            end
+          end
+
+          index
+        end
+
         # Analyze document and return diagnostics, program, type context, identifier symbols, and symbol table
-        private def analyze_document(source : String, base_dir : String? = nil, path : String? = nil, load_requires : Bool = true, workspace : DependencyWorkspace? = nil) : {Array(Diagnostic), Frontend::Program, Semantic::TypeContext?, Hash(Frontend::ExprId, Semantic::Symbol)?, Semantic::SymbolTable?, Array(String)}
+        private def analyze_document(source : String, base_dir : String? = nil, path : String? = nil, load_requires : Bool = true, workspace : DependencyWorkspace? = nil) : {Array(Diagnostic), Frontend::Program, Semantic::TypeContext?, Hash(Frontend::ExprId, Semantic::Symbol)?, Semantic::SymbolTable?, Array(String), DocumentIndex?}
           debug("Analyzing document: #{source.lines.size} lines, #{source.size} bytes")
           ensure_prelude_loaded
           notify_indexing("Indexing… loading document") if @config.background_indexing
@@ -1497,7 +1659,8 @@ module CrystalV2
           end
           requires.each { |req| debug("  require => #{req}") }
           notify_indexed if @config.background_indexing
-          {diagnostics, analysis_program, type_context, identifier_symbols, symbol_table, requires}
+          index = build_document_index(analysis_program, path)
+          {diagnostics, analysis_program, type_context, identifier_symbols, symbol_table, requires, index}
         end
 
         # Debug helper: analyze a source string and return LSP diagnostics and semantic tokens
@@ -1505,13 +1668,16 @@ module CrystalV2
         def debug_analyze(source : String) : {Array(Diagnostic), SemanticTokens, Bool, String}
           ensure_prelude_loaded
           using_stub = @prelude_state.try(&.stub) || false
-          diagnostics, program, type_context, identifier_symbols, symbol_table, _req = analyze_document(source, workspace: DependencyWorkspace.new)
+          diagnostics, program, type_context, identifier_symbols, symbol_table, _req, _index = analyze_document(source, workspace: DependencyWorkspace.new)
           tokens = collect_semantic_tokens(program, source, identifier_symbols, type_context, symbol_table, nil)
           prelude_path = @prelude_state.try(&.path) || "(none)"
           {diagnostics, tokens, using_stub, prelude_path}
         end
 
         private def load_prelude
+          return if !@config.real_prelude && try_load_prelude(PRELUDE_STUB_PATH, "LSP stub prelude")
+
+          @prelude_guard_deadline = Time.monotonic + 20.seconds
           # Phase 1: Try loading from binary cache (fastest path)
           if try_load_prelude_from_cache
             debug("Prelude loaded from cache")
@@ -1542,10 +1708,13 @@ module CrystalV2
             @prelude_mtime = nil
           end
 
+          return unless @config.real_prelude
+
           # Phase 2: Spawn background fiber to load real prelude
           @prelude_loading = true
           channel = Channel(PreludeState?).new
           @prelude_load_channel = channel
+          @prelude_guard_deadline = Time.monotonic + 20.seconds
 
           spawn do
             begin
@@ -1604,7 +1773,7 @@ module CrystalV2
           diagnostics = [] of Diagnostic
           parser.diagnostics.each { |diag| diagnostics << Diagnostic.from_parser(diag) }
 
-          state = build_real_prelude_state(PRELUDE_PATH, program, source, diagnostics, symbol_only: @config.prelude_symbol_only)
+          state = build_real_prelude_state(PRELUDE_PATH, program, source, diagnostics, symbol_only: @config.prelude_symbol_only, deadline: @prelude_guard_deadline)
           return nil unless state
 
           total_ms = (Time.monotonic - start_time).total_milliseconds.round(2)
@@ -1677,7 +1846,11 @@ module CrystalV2
 
           # Reconstruct SymbolTable from cache
           rebuild_start = Time.monotonic
-          table = SymbolReconstructor.rebuild_table(cache)
+          table = if cache.files.empty?
+                    SymbolReconstructor.rebuild_table(cache)
+                  else
+                    rebuild_prelude_table_from_cache(cache)
+                  end
           rebuild_ms = (Time.monotonic - rebuild_start).total_milliseconds.round(2)
           debug("SymbolTable rebuilt in #{rebuild_ms}ms")
 
@@ -1704,6 +1877,30 @@ module CrystalV2
         rescue ex
           debug("Failed to load from cache: #{ex.message}")
           false
+        end
+
+        private def rebuild_prelude_table_from_cache(cache : PreludeCache) : Semantic::SymbolTable
+          table = Semantic::SymbolTable.new
+
+          cache.files.each do |file_state|
+            summaries = SymbolSummary.from_json_array(file_state.summary_json)
+            SymbolSummaryUtils.add_summaries_to_table(
+              table,
+              summaries,
+              file_state.path,
+              @cached_symbol_ranges,
+              @cached_symbol_types
+            )
+
+            begin
+              expr_map = Hash(Int32, String).from_json(file_state.expr_types_json)
+              @cached_expr_types[file_state.path] = expr_map unless expr_map.empty?
+            rescue
+              # ignore malformed cache entries
+            end
+          end
+
+          table
         end
 
         private def save_prelude_to_cache
@@ -1745,13 +1942,53 @@ module CrystalV2
           end
 
           stdlib_hash = PreludeCache.compute_stdlib_hash(stdlib_path)
-          cache = PreludeCache.new(unique_symbols, stdlib_hash)
+          cached_files = build_prelude_cached_files(prelude)
+          cache = PreludeCache.new(unique_symbols, stdlib_hash, cached_files)
           cache.save
 
           save_ms = (Time.monotonic - save_start).total_milliseconds.round(2)
           debug("Prelude cache saved in #{save_ms}ms (#{unique_symbols.size} symbols)")
         rescue ex
           debug("Failed to save prelude cache: #{ex.message}")
+        end
+
+        private def build_prelude_cached_files(prelude : PreludeState) : Array(CachedFileState)
+          grouped = Hash(String, Array(SymbolSummary)).new { |h, k| h[k] = [] of SymbolSummary }
+          program_map = Hash(String, Frontend::Program).new
+
+          prelude.symbol_table.each_local_symbol do |_name, symbol|
+            origin = prelude.symbol_origins[symbol]?
+            path = origin.try { |o| uri_to_path(o.uri) }
+            if path.nil? && symbol.responds_to?(:file_path)
+              begin
+                path = symbol.file_path
+              rescue
+              end
+            end
+            path ||= prelude.path
+
+            program = origin.try(&.program) || prelude.program
+            program_map[path] ||= program
+
+            grouped[path] << SymbolSummaryUtils.summarize_symbol(symbol, program, nil)
+          end
+
+          grouped.map do |path, summaries|
+            program = program_map[path]? || prelude.program
+            requires = collect_require_paths(program, File.dirname(path))
+            mtime = File.info?(path).try(&.modification_time.to_unix) || 0_i64
+            expr_json = @cached_expr_types[path]?.try(&.to_json) || "{}"
+
+            CachedFileState.new(
+              path: path,
+              mtime: mtime,
+              symbols: summaries.map(&.name),
+              requires: requires,
+              diagnostics_count: 0,
+              summary_json: SymbolSummary.to_json_array(summaries),
+              expr_types_json: expr_json
+            )
+          end
         end
 
         private def extract_cached_symbol_info(symbol : Semantic::Symbol, origin : PreludeSymbolOrigin) : CachedSymbolInfo?
@@ -1817,26 +2054,55 @@ module CrystalV2
         end
 
         private def register_cached_symbols(cache : PreludeCache)
-          cache.symbols.each do |info|
-            # Create Location for each cached symbol
-            uri = file_uri(info.file_path)
-            location = Location.new(
-              uri,
-              Range.new(
-                Position.new(info.line, info.column),
-                Position.new(info.line, info.column + info.name.size)
-              )
-            )
-
-            # Register in method index for quick lookup
-            if info.kind.method?
-              cache_key = if parent = info.parent_scope
-                            "#{parent}.#{info.name}"
-                          else
-                            info.name
-                          end
-              @prelude_method_index[cache_key] = location
+          if cache.files.any?
+            cache.files.each do |file_state|
+              summaries = SymbolSummary.from_json_array(file_state.summary_json)
+              register_cached_summary_methods(summaries, file_state.path, "")
             end
+          else
+            cache.symbols.each do |info|
+              uri = file_uri(info.file_path)
+              location = Location.new(
+                uri,
+                Range.new(
+                  Position.new(info.line, info.column),
+                  Position.new(info.line, info.column + info.name.size)
+                )
+              )
+
+              if info.kind.method?
+                cache_key = if parent = info.parent_scope
+                              "#{parent}.#{info.name}"
+                            else
+                              info.name
+                            end
+                @prelude_method_index[cache_key] = location
+              end
+            end
+          end
+        end
+
+        private def register_cached_summary_methods(
+          summaries : Array(SymbolSummary),
+          path : String,
+          container : String,
+        )
+          summaries.each do |summary|
+            if summary.kind == "method" && summary.start_line && summary.start_col
+              uri = file_uri(path)
+              start_pos = Position.new(summary.start_line.not_nil!, summary.start_col.not_nil!)
+              finish_col = summary.start_col.not_nil! + summary.name.size
+              end_pos = Position.new(summary.start_line.not_nil!, finish_col)
+              cache_key = container.empty? ? summary.name : "#{container}.#{summary.name}"
+              @prelude_method_index[cache_key] = Location.new(uri, Range.new(start_pos, end_pos))
+            end
+
+            next unless children = summary.children
+            next_container = container
+            unless summary.kind == "method"
+              next_container = container.empty? ? summary.name : "#{container}::#{summary.name}"
+            end
+            register_cached_summary_methods(children, path, next_container)
           end
         end
 
@@ -1956,7 +2222,7 @@ module CrystalV2
 
           STDERR.puts("[LSP] Trying real prelude branch? #{path == PRELUDE_PATH}") if ENV["LSP_DEBUG"]?
           prelude_state = if path == PRELUDE_PATH
-                            build_real_prelude_state(path, program, source, diagnostics, symbol_only: @config.prelude_symbol_only)
+                            build_real_prelude_state(path, program, source, diagnostics, symbol_only: @config.prelude_symbol_only, deadline: @prelude_guard_deadline)
                           else
                             build_single_file_prelude_state(path, program, source, diagnostics)
                           end
@@ -2057,6 +2323,7 @@ module CrystalV2
           source : String,
           diagnostics : Array(Diagnostic),
           symbol_only : Bool = false,
+          deadline : Time::Span? = nil,
         ) : PreludeState?
           # debug("Starting real prelude build for #{path} (symbol_only=#{symbol_only})")
           context = Semantic::Context.new(Semantic::SymbolTable.new)
@@ -2065,7 +2332,7 @@ module CrystalV2
           program_cache = {path => program}
           source_cache = {path => source}
 
-          unless process_prelude_dependency(path, context, origins, visited, diagnostics, program_cache, source_cache, symbol_only)
+          unless process_prelude_dependency(path, context, origins, visited, diagnostics, program_cache, source_cache, symbol_only, deadline)
             debug("Prelude dependency processing reported failure; continuing with partial context")
           end
 
@@ -2081,7 +2348,12 @@ module CrystalV2
           program_cache : Hash(String, Frontend::Program),
           source_cache : Hash(String, String),
           symbol_only : Bool,
+          deadline : Time::Span? = nil,
         ) : Bool
+          if deadline && Time.monotonic > deadline
+            debug("Prelude guard deadline hit at #{path}; skipping further inference")
+            return true
+          end
           return true if visited.includes?(path)
           visited << path
 
@@ -2113,28 +2385,67 @@ module CrystalV2
                 next
               end
             end
-            unless process_prelude_dependency(req, context, origins, visited, diagnostics, program_cache, source_cache, symbol_only)
+            unless process_prelude_dependency(req, context, origins, visited, diagnostics, program_cache, source_cache, symbol_only, deadline)
               return false
             end
           end
 
           analyzer = Semantic::Analyzer.new(program, context)
           analyzer.collect_symbols
-          unless symbol_only
+          inference_ran = false
+
+          guard_remaining = deadline ? deadline - Time.monotonic : nil
+          skip_infer = path.ends_with?("/io/byte_format.cr") ||
+                       path.ends_with?("/io/stapled.cr") ||
+                       path.ends_with?("/io/delimited.cr") ||
+                       path.ends_with?("/io.cr") ||
+                       path.includes?("/io.cr") ||
+                       path.ends_with?("/string/builder.cr") ||
+                       path.includes?("/string/grapheme")
+          debug("Prelude #{path}: skip_infer=#{skip_infer} deadline_ms=#{guard_remaining.try(&.total_milliseconds)}")
+
+          if symbol_only
+            debug("Symbol-only prelude: skipping name resolution/type inference for #{path}")
+          elsif skip_infer
+            debug("Prelude inference skipped for #{path} (guarded to avoid hang)")
+          elsif guard_remaining && guard_remaining <= Time::Span.zero
+            debug("Prelude guard deadline reached before resolve/infer for #{path}; skipping inference")
+          else
+            timeout = guard_remaining || 10.seconds
+            phase_start = Time.monotonic
+            Frontend::Watchdog.enable!("Prelude inference #{path}", timeout)
             begin
+              debug("Prelude #{path}: resolve_names/type_inference start (timeout=#{timeout.total_milliseconds.round(1)}ms)")
               analyzer.semantic_diagnostics.each { |diag| diagnostics << Diagnostic.from_semantic(diag, source) }
               result = analyzer.resolve_names
+              resolve_ms = (Time.monotonic - phase_start).total_milliseconds
+              debug("Prelude #{path}: resolve_names done in #{resolve_ms.round(1)}ms")
               result.diagnostics.each { |diag| diagnostics << Diagnostic.from_parser(diag) }
+
+              inference_start = Time.monotonic
+              engine = Semantic::TypeInferenceEngine.new(program, result.identifier_symbols, context.symbol_table)
+              engine.infer_types
+              engine.context.expression_types.each do |expr_id, type|
+                (@cached_expr_types[path] ||= Hash(Int32, String).new)[expr_id.index] = type.to_s
+              end
+              infer_ms = (Time.monotonic - inference_start).total_milliseconds
+              debug("Prelude #{path}: type_inference done in #{infer_ms.round(1)}ms")
+              inference_ran = true
+            rescue ex : Frontend::Watchdog::TimeoutError
+              debug("Prelude resolve/infer watchdog timeout for #{path}: #{ex.message}")
+              diagnostics << Diagnostic.new(Range.new(Position.new(0, 0), Position.new(0, 0)), "Prelude inference timeout in #{path}", severity: DiagnosticSeverity::Warning.value)
+              @inference_timeouts << path
             rescue ex
-              debug("Name resolution failed for #{path}: #{ex.message}")
+              debug("Prelude type inference failed for #{path}: #{ex.message}")
+              @inference_timeouts << path
+            ensure
+              Frontend::Watchdog.disable!
             end
-          else
-            debug("Symbol-only prelude: skipping name resolution/type inference for #{path}")
           end
 
           uri = file_uri(path)
           record_prelude_symbol_origins_from_program(program, context.symbol_table, origins, uri)
-          debug("  registered symbols for #{path}")
+          debug("  registered symbols for #{path} (inference=#{inference_ran})")
           true
         rescue ex
           debug("Failed to process prelude file #{path}: #{ex.message}")
@@ -2355,7 +2666,8 @@ module CrystalV2
 
         private def ensure_prelude_loaded
           unless prelude = @prelude_state
-            load_prelude
+            debug("Prelude missing; loading stub + background real prelude")
+            load_prelude_background
             return
           end
 
@@ -2380,7 +2692,12 @@ module CrystalV2
             real_mtime = File.info(PRELUDE_PATH).modification_time
             if @prelude_real_mtime.nil? || real_mtime != @prelude_real_mtime
               debug("Real Crystal prelude changed; attempting reload")
-              load_prelude
+              if @config.real_prelude
+                load_prelude
+              else
+                # Stay on stub-only mode
+                debug("Real prelude reload skipped (real_prelude disabled)")
+              end
             end
           end
         end
@@ -2761,10 +3078,10 @@ module CrystalV2
           end
 
           # Legacy analysis (will be removed)
-          diagnostics, program, type_context, identifier_symbols, symbol_table, requires = analyze_document(new_text, base_dir, doc_path, workspace: DependencyWorkspace.new)
+          diagnostics, program, type_context, identifier_symbols, symbol_table, requires, index = analyze_document(new_text, base_dir, doc_path, workspace: DependencyWorkspace.new)
 
           doc = TextDocumentItem.new(uri: uri, language_id: language_id, version: version, text: new_text)
-          @documents[uri] = DocumentState.new(doc, program, type_context, identifier_symbols, symbol_table, requires, doc_path)
+          @documents[uri] = DocumentState.new(doc, program, type_context, identifier_symbols, symbol_table, requires, index, doc_path)
           register_document_symbols(uri, @documents[uri])
 
           publish_diagnostics(uri, diagnostics, version)
@@ -5386,6 +5703,7 @@ module CrystalV2
         end
 
         private def find_definition_location(expr_id : Frontend::ExprId, doc_state : DocumentState, uri : String, depth : Int32 = 0, target_offset : Int32? = nil) : Location?
+          Watchdog.check!
           return nil if expr_id.invalid?
           return nil if depth >= 8
 
@@ -5433,24 +5751,30 @@ module CrystalV2
 
               # Local variables start with lowercase or underscore
               is_local_var = first_char && (first_char.lowercase? || first_char == '_')
+              offset = target_offset || span.start_offset
 
               if is_local_var
+                if location = indexed_scoped_var_location(doc_state, name_str, offset)
+                  return location
+                end
                 # Local variables/parameters: try efficient parameter lookup
                 # Uses find_enclosing_def which traverses from roots (not O(n) arena scan)
-                if offset = target_offset
-                  if location = definition_from_parameters_fast(name_str, doc_state, offset)
-                    return location
-                  end
+                if location = definition_from_parameters_fast(name_str, doc_state, offset)
+                  return location
                 end
                 # Skip expensive constant lookup for lowercase identifiers
                 return nil
+              end
+
+              if location = indexed_constant_location(doc_state, name_str)
+                return location
               end
 
               # Only fallback to parameter search if identifier_symbols doesn't exist
               # (meaning semantic analysis wasn't run or failed). If identifier_symbols exists
               # but doesn't have this ID, the identifier was analyzed and isn't a parameter.
               if identifier_symbols.nil?
-                if offset = target_offset
+                if offset = target_offset || span.start_offset
                   if location = definition_from_parameters(name_str, doc_state, offset)
                     return location
                   end
@@ -5474,12 +5798,40 @@ module CrystalV2
               return cached_location_for(symbol) || Location.from_symbol(symbol, doc_state.program, uri)
             elsif name_slice
               name = String.new(name_slice)
+              if index = doc_state.index
+                case node
+                when Frontend::InstanceVarNode
+                  if location = indexed_decl_location(index.instance_vars, name, uri)
+                    return location
+                  end
+                when Frontend::ClassVarNode
+                  if location = indexed_decl_location(index.class_vars, name, uri)
+                    return location
+                  end
+                when Frontend::GlobalNode
+                  if location = indexed_decl_location(index.global_vars, name, uri)
+                    return location
+                  end
+                end
+              end
               if symbol_table = doc_state.symbol_table
                 if sym = symbol_table.lookup(name)
                   if location = location_for_symbol(sym)
                     return location
                   end
                   return cached_location_for(sym) || Location.from_symbol(sym, doc_state.program, uri)
+                end
+                if sym = find_symbol_recursive(symbol_table, name)
+                  if location = location_for_symbol(sym)
+                    return location
+                  end
+                  return cached_location_for(sym) || Location.from_symbol(sym, doc_state.program, uri)
+                end
+              end
+              # Fallback: scan AST for a matching class/global var declaration in this file
+              if node.is_a?(Frontend::ClassVarNode)
+                if location = definition_from_class_var_decl(doc_state, name, uri)
+                  return location
                 end
               end
             end
@@ -6100,6 +6452,52 @@ module CrystalV2
           best_location
         end
 
+        private def indexed_scoped_var_location(doc_state : DocumentState, name : String, target_offset : Int32?) : Location?
+          index = doc_state.index
+          return nil unless index && target_offset
+
+          best = nil
+          best_size = Int32::MAX
+
+          index.scoped_vars.each do |entry|
+            next unless entry.name == name
+            span = entry.scope_span
+            next unless span_contains_offset?(span, target_offset)
+            size = span.end_offset - span.start_offset
+            if size < best_size
+              best_size = size
+              best = entry
+            end
+          end
+
+          if best
+            return Location.new(uri: doc_state.text_document.uri, range: Range.from_span(best.decl_span))
+          end
+
+          nil
+        end
+
+        private def indexed_decl_location(map : Hash(String, Array(Frontend::Span)), name : String, uri : String) : Location?
+          if spans = map[name]?
+            if span = spans.first?
+              return Location.new(uri: uri, range: Range.from_span(span))
+            end
+          end
+          nil
+        end
+
+        private def indexed_constant_location(doc_state : DocumentState, name : String) : Location?
+          index = doc_state.index
+          return nil unless index
+          indexed_decl_location(index.constants, name, doc_state.text_document.uri)
+        end
+
+        private def indexed_def_location(doc_state : DocumentState, name : String) : Location?
+          index = doc_state.index
+          return nil unless index
+          indexed_decl_location(index.defs, name, doc_state.text_document.uri)
+        end
+
         private def definition_from_member_access(
           node : Frontend::MemberAccessNode,
           doc_state : DocumentState,
@@ -6107,10 +6505,12 @@ module CrystalV2
           depth : Int32,
           target_offset : Int32?,
         ) : Location?
+          Watchdog.check!
           arena = doc_state.program.arena
           member_range = target_offset ? member_name_offsets(node, arena, doc_state.text_document.text) : nil
           member_selected = target_offset && member_range &&
                             target_offset >= member_range[0] && target_offset < member_range[1]
+          method_name = String.new(node.member)
 
           if target_offset
             object_span = arena[node.object].span
@@ -6133,7 +6533,7 @@ module CrystalV2
                                  receiver_name_for(arena, node.object)
                                end
 
-          if String.new(node.member) == "new" && receiver_symbol
+          if method_name == "new" && receiver_symbol
             if path = receiver_symbol.file_path
               if ctor = find_method_in_file(path, "initialize")
                 return ctor
@@ -6173,11 +6573,16 @@ module CrystalV2
             return cached_location_for(method_symbol) || Location.from_symbol(method_symbol, doc_state.program, uri)
           end
 
-          if location = find_prelude_method_location(receiver_symbol, String.new(node.member), receiver_name_hint)
+          if method_symbol.nil? && receiver_symbol.nil?
+            if location = indexed_def_location(doc_state, method_name)
+              return location
+            end
+          end
+
+          if location = find_prelude_method_location(receiver_symbol, method_name, receiver_name_hint)
             return location
           end
 
-          method_name = String.new(node.member)
           # For built-in methods on constants (enum members have .value, .to_s, etc),
           # navigate to the constant/enum definition instead of finding wrong matches
           builtin_enum_methods = {"value", "to_s", "to_i", "to_i32", "to_i64"}
@@ -6206,6 +6611,49 @@ module CrystalV2
           else
             find_method_location_by_text(doc_state, method_name)
           end
+        end
+
+        # Fallback AST scan for class var declarations when symbol lookup fails
+        private def definition_from_class_var_decl(doc_state : DocumentState, name : String, uri : String) : Location?
+          program = doc_state.program
+          stack = program.roots.dup
+          while expr_id = stack.pop?
+            Watchdog.check!
+            next if expr_id.invalid?
+            node = program.arena[expr_id]
+            if node.is_a?(Frontend::ClassVarDeclNode)
+              if slice = node.name
+                decl_name = String.new(slice)
+                if decl_name == name || ("@@#{decl_name}" == name) || (decl_name == "@@#{name}")
+                  return Location.new(uri: uri, range: Range.from_span(node.span))
+                end
+              end
+            end
+            # Traverse child expressions
+            case node
+            when Frontend::ClassNode, Frontend::ModuleNode
+              (node.body || [] of Frontend::ExprId).each { |child| stack << child unless child.invalid? }
+            when Frontend::DefNode
+              (node.body || [] of Frontend::ExprId).each { |child| stack << child unless child.invalid? }
+            when Frontend::BeginNode
+              node.body.each { |child| stack << child unless child.invalid? }
+              node.rescue_clauses.try &.each do |rc|
+                rc.body.each { |child| stack << child unless child.invalid? }
+              end
+              node.ensure_body.try &.each { |child| stack << child unless child.invalid? }
+            when Frontend::BlockNode
+              node.body.each { |child| stack << child unless child.invalid? }
+            when Frontend::IfNode
+              stack << node.condition unless node.condition.invalid?
+              node.then_body.each { |child| stack << child unless child.invalid? }
+              node.elsifs.try &.each do |elsif_branch|
+                stack << elsif_branch.condition unless elsif_branch.condition.invalid?
+                elsif_branch.body.each { |child| stack << child unless child.invalid? }
+              end
+              node.else_body.try &.each { |child| stack << child unless child.invalid? }
+            end
+          end
+          nil
         end
 
         private def resolve_member_access_method_symbol(node : Frontend::MemberAccessNode, doc_state : DocumentState) : Semantic::MethodSymbol?
