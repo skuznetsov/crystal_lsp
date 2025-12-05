@@ -61,6 +61,7 @@ module CrystalV2
         property params : Array(String)?
         property ivars : Array(String)?
         property consts : Array(String)?
+        property class_children : Array(SymbolSummary)?
         property children : Array(SymbolSummary)?
         property start_line : Int32?
         property start_col : Int32?
@@ -76,6 +77,7 @@ module CrystalV2
           @params : Array(String)? = nil,
           @ivars : Array(String)? = nil,
           @consts : Array(String)? = nil,
+          @class_children : Array(SymbolSummary)? = nil,
           @children : Array(SymbolSummary)? = nil,
           @start_line : Int32? = nil,
           @start_col : Int32? = nil,
@@ -135,6 +137,7 @@ module CrystalV2
             )
           when Semantic::ClassSymbol
             children = summarize_scope(symbol.scope, program, type_context)
+            class_children = summarize_scope(symbol.class_scope, program, type_context)
             ivars = symbol.instance_vars.map { |name, type| "@#{name} : #{type || "?"}" }
             SymbolSummary.new(
               name: symbol.name,
@@ -145,6 +148,7 @@ module CrystalV2
               params: nil,
               ivars: ivars,
               consts: nil,
+              class_children: class_children,
               children: children,
               start_line: start_line,
               start_col: start_col,
@@ -162,6 +166,7 @@ module CrystalV2
               params: nil,
               ivars: nil,
               consts: nil,
+              class_children: nil,
               children: children,
               start_line: start_line,
               start_col: start_col,
@@ -186,6 +191,7 @@ module CrystalV2
               params: params,
               ivars: nil,
               consts: nil,
+              class_children: nil,
               children: nil,
               start_line: start_line,
               start_col: start_col,
@@ -203,6 +209,58 @@ module CrystalV2
               params: nil,
               ivars: nil,
               consts: nil,
+              class_children: nil,
+              children: nil,
+              start_line: start_line,
+              start_col: start_col,
+              end_line: end_line,
+              end_col: end_col
+            )
+          when Semantic::ClassVarSymbol
+            SymbolSummary.new(
+              name: symbol.name,
+              kind: "class_var",
+              detail: symbol.declared_type,
+              return_type: inferred_type,
+              inferred_type: inferred_type,
+              params: nil,
+              ivars: nil,
+              consts: nil,
+              class_children: nil,
+              children: nil,
+              start_line: start_line,
+              start_col: start_col,
+              end_line: end_line,
+              end_col: end_col
+            )
+          when Semantic::ConstantSymbol
+            SymbolSummary.new(
+              name: symbol.name,
+              kind: "const",
+              detail: nil,
+              return_type: inferred_type,
+              inferred_type: inferred_type,
+              params: nil,
+              ivars: nil,
+              consts: nil,
+              class_children: nil,
+              children: nil,
+              start_line: start_line,
+              start_col: start_col,
+              end_line: end_line,
+              end_col: end_col
+            )
+          when Semantic::GlobalVarSymbol
+            SymbolSummary.new(
+              name: symbol.name,
+              kind: "global_var",
+              detail: symbol.declared_type,
+              return_type: inferred_type,
+              inferred_type: inferred_type,
+              params: nil,
+              ivars: nil,
+              consts: nil,
+              class_children: nil,
               children: nil,
               start_line: start_line,
               start_col: start_col,
@@ -219,6 +277,7 @@ module CrystalV2
               params: nil,
               ivars: nil,
               consts: nil,
+              class_children: nil,
               children: nil,
               start_line: start_line,
               start_col: start_col,
@@ -235,6 +294,7 @@ module CrystalV2
               params: nil,
               ivars: nil,
               consts: nil,
+              class_children: nil,
               children: nil,
               start_line: start_line,
               start_col: start_col,
@@ -301,6 +361,15 @@ module CrystalV2
                 end
               end
             end
+            (summary.class_children || [] of SymbolSummary).each do |child|
+              if child_sym = build_symbol_from_summary(child, file_path, key, ranges_store, types_store)
+                begin
+                  class_scope.define(child.name, child_sym)
+                rescue Semantic::SymbolRedefinitionError
+                  class_scope.redefine(child.name, child_sym)
+                end
+              end
+            end
             class_sym = Semantic::ClassSymbol.new(summary.name, node_id, scope: scope, class_scope: class_scope)
             class_sym.file_path = file_path
             (summary.ivars || [] of String).each do |ivar_decl|
@@ -340,6 +409,16 @@ module CrystalV2
             var_sym = Semantic::VariableSymbol.new(summary.name, node_id, summary.detail)
             var_sym.file_path = file_path
             var_sym
+          when "class_var"
+            cvar_sym = Semantic::ClassVarSymbol.new(summary.name, node_id, summary.detail, file_path)
+            cvar_sym
+          when "const"
+            const_sym = Semantic::ConstantSymbol.new(summary.name, node_id, node_id)
+            const_sym.file_path = file_path
+            const_sym
+          when "global_var"
+            gvar_sym = Semantic::GlobalVarSymbol.new(summary.name, node_id, summary.detail, file_path)
+            gvar_sym
           when "macro"
             macro_sym = Semantic::MacroSymbol.new(summary.name, node_id, node_id)
             macro_sym.file_path = file_path
