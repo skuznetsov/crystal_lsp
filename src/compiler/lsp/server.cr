@@ -29,8 +29,18 @@ module CrystalV2
         end
       end
 
+      struct ScopedConstDecl
+        getter name : String
+        getter scope_span : Frontend::Span?
+        getter decl_span : Frontend::Span
+
+        def initialize(@name : String, @scope_span : Frontend::Span?, @decl_span : Frontend::Span)
+        end
+      end
+
       struct DocumentIndex
         getter scoped_vars : Array(ScopedVarDecl)
+        getter scoped_consts : Array(ScopedConstDecl)
         getter class_vars : Hash(String, Array(Frontend::Span))
         getter instance_vars : Hash(String, Array(Frontend::Span))
         getter global_vars : Hash(String, Array(Frontend::Span))
@@ -39,6 +49,7 @@ module CrystalV2
 
         def initialize
           @scoped_vars = [] of ScopedVarDecl
+          @scoped_consts = [] of ScopedConstDecl
           @class_vars = Hash(String, Array(Frontend::Span)).new { |h, k| h[k] = [] of Frontend::Span }
           @instance_vars = Hash(String, Array(Frontend::Span)).new { |h, k| h[k] = [] of Frontend::Span }
           @global_vars = Hash(String, Array(Frontend::Span)).new { |h, k| h[k] = [] of Frontend::Span }
@@ -68,6 +79,11 @@ module CrystalV2
 
         def add_constant(name : String, span : Frontend::Span)
           @constants[name] << span
+        end
+
+        def add_scoped_const(name : String, scope_span : Frontend::Span?, decl_span : Frontend::Span)
+          @scoped_consts << ScopedConstDecl.new(name, scope_span, decl_span)
+          add_constant(name, decl_span)
         end
       end
 
@@ -1434,22 +1450,23 @@ module CrystalV2
           index = DocumentIndex.new
           arena = program.arena
           target_path = path
-          stack = [] of {Frontend::ExprId, Array(Frontend::Span)}
+          stack = [] of {Frontend::ExprId, Array(Frontend::Span), Array(Frontend::Span)}
 
           program.roots.each do |root_id|
             next if root_id.invalid?
             next unless expr_in_document?(program, root_id, target_path)
-            stack << {root_id, [] of Frontend::Span}
+            stack << {root_id, [] of Frontend::Span, [] of Frontend::Span}
           end
 
           while item = stack.pop?
             Watchdog.check!
-            expr_id, callables = item
+            expr_id, callables, const_scopes = item
             next if expr_id.invalid?
             next unless expr_in_document?(program, expr_id, target_path)
 
             node = arena[expr_id]
             current_callables = callables
+            current_scopes = const_scopes
 
             case node
             when Frontend::DefNode, Frontend::BlockNode, Frontend::ProcLiteralNode
@@ -1489,19 +1506,27 @@ module CrystalV2
                 index.add_def(String.new(dname), node.span)
               end
             when Frontend::ClassNode
-              index.add_constant(String.new(node.name), node.span)
+              index.add_scoped_const(String.new(node.name), current_scopes.last?, node.span)
+              current_scopes = current_scopes + [node.span]
             when Frontend::ModuleNode
-              index.add_constant(String.new(node.name), node.span)
+              index.add_scoped_const(String.new(node.name), current_scopes.last?, node.span)
+              current_scopes = current_scopes + [node.span]
+            when Frontend::StructNode
+              index.add_scoped_const(String.new(node.name), current_scopes.last?, node.span)
+              current_scopes = current_scopes + [node.span]
+            when Frontend::EnumNode
+              index.add_scoped_const(String.new(node.name), current_scopes.last?, node.span)
+              current_scopes = current_scopes + [node.span]
             when Frontend::ConstantNode
               if cname = node.name
-                index.add_constant(String.new(cname), node.span)
+                index.add_scoped_const(String.new(cname), current_scopes.last?, node.span)
               end
             end
 
             each_child_expr(arena, expr_id) do |child_id|
               next if child_id.invalid?
               next unless expr_in_document?(program, child_id, target_path)
-              stack << {child_id, current_callables}
+              stack << {child_id, current_callables, current_scopes}
             end
           end
 
@@ -5766,7 +5791,7 @@ module CrystalV2
                 return nil
               end
 
-              if location = indexed_constant_location(doc_state, name_str)
+              if location = indexed_constant_location(doc_state, name_str, offset)
                 return location
               end
 
@@ -5888,6 +5913,8 @@ module CrystalV2
           when Frontend::AnnotationNode
             # @[JSON::Field(key: "foo")] - resolve the annotation name
             definition_from_annotation(node, doc_state, uri, depth, target_offset)
+          when Frontend::ClassNode, Frontend::ModuleNode, Frontend::StructNode, Frontend::EnumNode
+            Location.new(uri: doc_state.text_document.uri, range: Range.from_span(node.span))
           else
             nil
           end
@@ -6486,9 +6513,30 @@ module CrystalV2
           nil
         end
 
-        private def indexed_constant_location(doc_state : DocumentState, name : String) : Location?
+        private def indexed_constant_location(doc_state : DocumentState, name : String, target_offset : Int32? = nil) : Location?
           index = doc_state.index
           return nil unless index
+
+          if target_offset
+            best = nil
+            best_size = Int32::MAX
+            index.scoped_consts.each do |entry|
+              next unless entry.name == name
+              scope = entry.scope_span
+              if scope
+                next unless span_contains_offset?(scope, target_offset)
+                size = scope.end_offset - scope.start_offset
+                if size < best_size
+                  best_size = size
+                  best = entry
+                end
+              end
+            end
+            if best
+              return Location.new(uri: doc_state.text_document.uri, range: Range.from_span(best.decl_span))
+            end
+          end
+
           indexed_decl_location(index.constants, name, doc_state.text_document.uri)
         end
 
