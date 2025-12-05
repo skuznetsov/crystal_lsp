@@ -67,8 +67,9 @@ module CrystalV2
             (@cached_expr_types[task.path] ||= Hash(Int32, String).new)[expr_id.index] = type.to_s
           end
 
-          # Update live DocumentState if loaded
-          if ds = @documents[task.path]?
+          # Update live DocumentState if loaded (URI-keyed)
+          uri = file_uri(task.path)
+          if ds = @documents[uri]?
             new_state = DocumentState.new(
               ds.text_document,
               task.program,
@@ -79,8 +80,8 @@ module CrystalV2
               ds.index,
               path: task.path
             )
-            @documents[task.path] = new_state
-          elsif ds = @dependency_documents[file_uri(task.path)]?
+            @documents[uri] = new_state
+          elsif ds = @dependency_documents[uri]?
             new_state = DocumentState.new(
               ds.text_document,
               task.program,
@@ -91,7 +92,7 @@ module CrystalV2
               ds.index,
               path: task.path
             )
-            @dependency_documents[file_uri(task.path)] = new_state
+            @dependency_documents[uri] = new_state
           end
 
           # If prelude, update cached expr types to be saved on next cache write
