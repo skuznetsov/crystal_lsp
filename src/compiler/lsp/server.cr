@@ -2019,14 +2019,16 @@ module CrystalV2
           end
 
           cache_ms = (Time.monotonic - cache_start).total_milliseconds.round(2)
-          debug("Prelude cache loaded in #{cache_ms}ms (#{cache.symbols.size} symbols)")
+          debug("Prelude cache loaded in #{cache_ms}ms (#{cache.symbols.size} symbols, #{cache.files.size} files)")
 
           # Reconstruct SymbolTable from cache
           rebuild_start = Time.monotonic
-          table = if cache.files.empty?
+          table = if cache.files.any?
+                    rebuild_prelude_table_from_cache(cache)
+                  elsif cache.symbols.any?
                     SymbolReconstructor.rebuild_table(cache)
                   else
-                    rebuild_prelude_table_from_cache(cache)
+                    Semantic::SymbolTable.new
                   end
           rebuild_ms = (Time.monotonic - rebuild_start).total_milliseconds.round(2)
           debug("SymbolTable rebuilt in #{rebuild_ms}ms")
