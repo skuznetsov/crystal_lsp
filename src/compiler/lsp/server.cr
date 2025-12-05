@@ -337,6 +337,8 @@ module CrystalV2
         @cached_expr_types : Hash(String, Hash(Int32, String))
         @dependencies_warming : Set(String)
         @inference_timeouts : Set(String)
+        @const_text_cache : Hash(String, Location?)
+        @method_file_cache : Hash(String, Location?)
 
         def initialize(@input = STDIN, @output = STDOUT, config : ServerConfig = ServerConfig.load)
           @config = config
@@ -377,6 +379,8 @@ module CrystalV2
           @cached_expr_types = Hash(String, Hash(Int32, String)).new
           @dependencies_warming = Set(String).new
           @inference_timeouts = Set(String).new
+          @const_text_cache = Hash(String, Location?).new
+          @method_file_cache = Hash(String, Location?).new
           # Allow forcing the stub prelude for debugging via environment variable
           if ENV["CRYSTALV2_LSP_FORCE_STUB"]?
             try_load_prelude(PRELUDE_STUB_PATH, "LSP stub prelude")
@@ -468,6 +472,7 @@ module CrystalV2
           visited = Set(Semantic::SymbolTable).new
           stack = [table] of Semantic::SymbolTable
           while current = stack.pop?
+            Watchdog.check!
             next if visited.includes?(current)
             visited << current
 
@@ -3342,6 +3347,7 @@ module CrystalV2
 
         # Recursively search for expression at position in AST
         private def find_expr_in_tree(arena : Frontend::ArenaLike, expr_id : Frontend::ExprId, offset : Int32) : Frontend::ExprId?
+          Watchdog.check!
           node = arena[expr_id]
           return nil unless span_contains_offset?(node.span, offset)
 
@@ -3354,6 +3360,7 @@ module CrystalV2
           return best_match if node.is_a?(Frontend::PathNode)
 
           each_child_expr(arena, expr_id) do |child_id|
+            Watchdog.check!
             next if child_id.invalid?
             if match = find_expr_in_tree(arena, child_id, offset)
               match_node = arena[match]
@@ -6242,6 +6249,7 @@ module CrystalV2
           uri : String,
           enclosing_callables : Array(Frontend::TypedNode) = [] of Frontend::TypedNode,
         ) : Location?
+          Watchdog.check!
           return nil if expr_id.invalid?
           node = arena[expr_id]
           span = node.span
@@ -6336,6 +6344,7 @@ module CrystalV2
           uri : String,
           target_offset : Int32,
         ) : Location?
+          Watchdog.check!
           return nil if expr_id.invalid?
           node = arena[expr_id]
 
@@ -6404,6 +6413,7 @@ module CrystalV2
           enclosing_span = nil
           i = 0
           while i < arena.size
+            Watchdog.check!
             expr_id = Frontend::ExprId.new(i)
             node = arena[expr_id]
             case node
@@ -6439,6 +6449,7 @@ module CrystalV2
 
           i = 0
           while i < arena.size
+            Watchdog.check!
             expr_id = Frontend::ExprId.new(i)
             node = arena[expr_id]
             if node.is_a?(Frontend::AssignNode)
@@ -7432,6 +7443,9 @@ module CrystalV2
 
         private def find_constant_location_by_text(doc_state : DocumentState, constant_name : String?) : Location?
           return nil unless constant_name
+          if cached = @const_text_cache[constant_name]?
+            return cached
+          end
 
           stdlib_path = File.dirname(PRELUDE_PATH)
           search_name = constant_name
@@ -7501,10 +7515,16 @@ module CrystalV2
           pattern = /^\s*(module|class|struct|abstract class|abstract struct|annotation)\s+#{Regex.escape(search_name)}\b/
           full_pattern = constant_name.includes?("::") ? /^\s*(module|class|struct|abstract class|abstract struct|annotation)\s+#{Regex.escape(constant_name)}\b/ : nil
 
+          deadline = Time.monotonic + 100.milliseconds
+          break_search = false
+
           paths.each do |path|
+            Watchdog.check!
+            break if Time.monotonic > deadline
             next unless File.file?(path)
             line_index = 0
             File.each_line(path) do |line|
+              Watchdog.check!
               # First try fully qualified name (e.g., "struct JSON::Any")
               if full_pattern && (match = full_pattern.match(line))
                 start_column = match.begin + match[0].rindex(constant_name).not_nil!
@@ -7512,7 +7532,9 @@ module CrystalV2
                   Position.new(line_index, start_column),
                   Position.new(line_index, start_column + constant_name.bytesize)
                 )
-                return Location.new(uri: file_uri(path), range: range)
+                loc = Location.new(uri: file_uri(path), range: range)
+                @const_text_cache[constant_name] = loc
+                return loc
               end
               # Then try short name (e.g., "module Serializable")
               if match = pattern.match(line)
@@ -7521,11 +7543,18 @@ module CrystalV2
                   Position.new(line_index, start_column),
                   Position.new(line_index, start_column + search_name.bytesize)
                 )
-                return Location.new(uri: file_uri(path), range: range)
+                loc = Location.new(uri: file_uri(path), range: range)
+                @const_text_cache[constant_name] = loc
+                return loc
               end
               line_index += 1
             end
+          rescue ex
+            debug("find_constant_location_by_text: failed to read #{path}: #{ex.message}") if ENV["LSP_DEBUG"]?
+            next
           end
+
+          @const_text_cache[constant_name] = nil unless break_search
           nil
         end
 
@@ -7890,10 +7919,17 @@ module CrystalV2
         end
 
         private def find_method_in_file(path : String, method_name : String) : Location?
+          cache_key = "#{path}::#{method_name}"
+          if cached = @method_file_cache[cache_key]?
+            return cached
+          end
+          deadline = Time.monotonic + 100.milliseconds
           text = File.read(path)
           pattern = /def\s+(?:self\.|[A-Za-z0-9_:]+\.)?#{Regex.escape(method_name)}/
           line_index = 0
           text.each_line do |line|
+            Watchdog.check!
+            break if Time.monotonic > deadline
             stripped = line.lstrip
             if stripped.starts_with?('#')
               line_index += 1
@@ -7907,10 +7943,13 @@ module CrystalV2
                 Position.new(line_index, start_column),
                 Position.new(line_index, start_column + method_name.bytesize)
               )
-              return Location.new(uri: uri, range: range)
+              loc = Location.new(uri: uri, range: range)
+              @method_file_cache[cache_key] = loc
+              return loc
             end
             line_index += 1
           end
+          @method_file_cache[cache_key] = nil
           nil
         end
 
