@@ -463,6 +463,8 @@ module CrystalV2
         @inference_timeouts : Set(String)
         @const_text_cache : Hash(String, Location?)
         @method_file_cache : Hash(String, Location?)
+        @indexing_active : Bool
+        @indexing_message : String?
 
         def initialize(@input = STDIN, @output = STDOUT, config : ServerConfig = ServerConfig.load)
           @config = config
@@ -506,6 +508,8 @@ module CrystalV2
           @inference_timeouts = Set(String).new
           @const_text_cache = Hash(String, Location?).new
           @method_file_cache = Hash(String, Location?).new
+          @indexing_active = false
+          @indexing_message = nil
           # Allow forcing the stub prelude for debugging via environment variable
           if ENV["CRYSTALV2_LSP_FORCE_STUB"]?
             try_load_prelude(PRELUDE_STUB_PATH, "LSP stub prelude")
@@ -5516,11 +5520,17 @@ module CrystalV2
         end
 
         private def notify_indexing(message : String = "Indexing…")
+          return if @indexing_active && @indexing_message == message
+          @indexing_active = true
+          @indexing_message = message
           payload = %({"message":#{message.to_json}})
           write_message(%({"jsonrpc":"2.0","method":"crystal/indexing","params":#{payload}}))
         end
 
         private def notify_indexed
+          return unless @indexing_active
+          @indexing_active = false
+          @indexing_message = nil
           write_message(%({"jsonrpc":"2.0","method":"crystal/indexed","params":{}}))
         end
 
