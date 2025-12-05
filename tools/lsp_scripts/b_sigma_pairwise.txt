@@ -1,0 +1,4 @@
+# b_sigma navigation regression
+open /Users/sergey/Projects/Crystal/folding/src/folding/energy/basic.cr
+hover 121:33
+definition 121:33

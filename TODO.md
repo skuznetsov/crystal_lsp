@@ -124,6 +124,8 @@ Goal: v2 LSP must report only real errors and match original compiler behavior.
 - [x] VSCode extension: request/response log channel and “Indexing…” status indicator in UI
 - [x] Navigation to stdlib/prelude (tests + impl)
 - [x] Folding ranges for begin/rescue/else/ensure without overfolding; semantic tokens for symbol literals fixed
+- [ ] Regression scenarios via `tools/lsp_scripts` (rename, stdlib, hover→definition chains; nested consts A/M::A; class/instance vars)
+- [ ] LSP spec coverage for member access typed via locals/arrays (`cas`, `a.sigma`, class vars) to avoid Nil/Unknown hovers/definitions
 - [ ] Optional: detect external workspace roots for cache reuse when opening files outside @project_root
 
 ---
@@ -137,6 +139,8 @@ Goal: v2 LSP must report only real errors and match original compiler behavior.
 - [x] Cache and restore symbol spans and inferred types in summaries (cache version v3); expose cached types for hover/definition fallback
 - [ ] Mark cached files (`from_cache`) and use summaries for hover/definition when AST is missing
 - [ ] Strict cache validation (version/root hash/mtime) with full reparse fallback (root hash/version done; add fallback wiring)
+- [ ] Extend summaries with ivars/class vars/consts and richer type info; reuse same pipeline for prelude
+- [ ] Make cache/inference idempotent: if infer times out, resume later and backfill tables in background fibers
 
 ---
 

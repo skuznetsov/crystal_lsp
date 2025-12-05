@@ -6638,6 +6638,23 @@ module CrystalV2
             end
           end
 
+          # If we know the receiver symbol, try the defining file first to avoid
+          # jumping to unrelated methods with the same name in other requires.
+          if method_symbol.nil? && receiver_symbol.responds_to?(:file_path)
+            if path = receiver_symbol.file_path
+              if location = find_method_in_file(path, method_name)
+                return location
+              end
+            end
+          end
+
+          doc_state.requires.each do |req_path|
+            Watchdog.check!
+            if location = find_method_in_file(req_path, method_name)
+              return location
+            end
+          end
+
           if location = find_prelude_method_location(receiver_symbol, method_name, receiver_name_hint)
             return location
           end
@@ -7804,6 +7821,7 @@ module CrystalV2
           results = [] of String
 
           while (path = queue.shift?)
+            Watchdog.check!
             abs = File.expand_path(path)
             next unless visited.add?(abs)
             results << abs
@@ -7817,6 +7835,16 @@ module CrystalV2
           if doc_state.path
             abs = File.expand_path(doc_state.path.not_nil!)
             if visited.add?(abs)
+              results << abs
+            end
+          end
+
+          # Also include already loaded dependency documents (best-effort)
+          @dependency_documents.keys.each do |uri|
+            Watchdog.check!
+            if path = uri_to_path(uri)
+              abs = File.expand_path(path)
+              next unless visited.add?(abs)
               results << abs
             end
           end
@@ -7926,6 +7954,7 @@ module CrystalV2
           deadline = Time.monotonic + 100.milliseconds
           text = File.read(path)
           pattern = /def\s+(?:self\.|[A-Za-z0-9_:]+\.)?#{Regex.escape(method_name)}/
+          getter_pattern = /^\s*(getter|property)\s+#{Regex.escape(method_name)}\b/
           line_index = 0
           text.each_line do |line|
             Watchdog.check!
@@ -7938,6 +7967,17 @@ module CrystalV2
             if match = pattern.match(line)
               prefix = match[0]
               start_column = match.begin + prefix.rindex(method_name).not_nil!
+              uri = file_uri(path)
+              range = Range.new(
+                Position.new(line_index, start_column),
+                Position.new(line_index, start_column + method_name.bytesize)
+              )
+              loc = Location.new(uri: uri, range: range)
+              @method_file_cache[cache_key] = loc
+              return loc
+            end
+            if match = getter_pattern.match(line)
+              start_column = match.begin + match[0].rindex(method_name).not_nil!
               uri = file_uri(path)
               range = Range.new(
                 Position.new(line_index, start_column),
