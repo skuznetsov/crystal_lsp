@@ -141,6 +141,7 @@ Goal: v2 LSP must report only real errors and match original compiler behavior.
 - [ ] Strict cache validation (version/root hash/mtime) with full reparse fallback (root hash/version done; add fallback wiring)
 - [ ] Extend summaries with ivars/class vars/consts and richer type info; reuse same pipeline for prelude
 - [ ] Make cache/inference idempotent: if infer times out, resume later and backfill tables in background fibers
+- [ ] Apply rich cache pipeline to prelude: spans/types/ivars/class vars, rebuild prelude symbol_table from cache without full parse when unchanged
 
 ---
 
