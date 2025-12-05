@@ -29,6 +29,82 @@ module CrystalV2
         end
       end
 
+      # Start a single background worker that processes deferred inference tasks
+      private def start_inference_worker
+        spawn do
+          loop do
+            begin
+              task = @pending_inference.receive
+            rescue Channel::ClosedError
+              break
+            end
+
+            next unless task
+            begin
+              run_deferred_inference(task)
+            rescue ex
+              debug("Deferred inference failed for #{task.path}: #{ex.message}")
+            end
+          end
+        end
+      end
+
+      private def run_deferred_inference(task : DeferredInference)
+        Watchdog.enable!("Deferred inference #{task.path}", BACKGROUND_INFER_TIMEOUT)
+        diagnostics = [] of Diagnostic
+        context = build_context_with_prelude
+        # Merge existing symbol table from task if provided
+        if task.symbol_table
+          merge_symbol_table(context.symbol_table, task.symbol_table)
+        end
+        analyzer = Semantic::Analyzer.new(task.program, context)
+        analyzer.collect_symbols
+        begin
+          result = analyzer.resolve_names
+          engine = analyzer.infer_types(result.identifier_symbols)
+          expr_types = engine.context.expression_types
+          expr_types.each do |expr_id, type|
+            (@cached_expr_types[task.path] ||= Hash(Int32, String).new)[expr_id.index] = type.to_s
+          end
+
+          # Update live DocumentState if loaded
+          if ds = @documents[task.path]?
+            new_state = DocumentState.new(
+              ds.text_document,
+              task.program,
+              engine.context,
+              result.identifier_symbols,
+              context.symbol_table,
+              task.requires,
+              ds.index,
+              path: task.path
+            )
+            @documents[task.path] = new_state
+          elsif ds = @dependency_documents[file_uri(task.path)]?
+            new_state = DocumentState.new(
+              ds.text_document,
+              task.program,
+              engine.context,
+              result.identifier_symbols,
+              context.symbol_table,
+              task.requires,
+              ds.index,
+              path: task.path
+            )
+            @dependency_documents[file_uri(task.path)] = new_state
+          end
+
+          # If prelude, update cached expr types to be saved on next cache write
+          if task.from_prelude
+            @cached_expr_types[task.path] ||= Hash(Int32, String).new
+          end
+        ensure
+          Watchdog.disable
+        end
+      rescue ex : Frontend::Watchdog::TimeoutError
+        debug("Deferred inference timeout for #{task.path}")
+      end
+
       struct ScopedConstDecl
         getter name : String
         getter scope_span : Frontend::Span?
@@ -280,6 +356,52 @@ module CrystalV2
           File.expand_path("frontend/parser.cr", COMPILER_ROOT),
         ]
 
+        # Work item for deferred type inference after timeout/skip
+        record DeferredInference,
+          path : String,
+          source : String,
+          base_dir : String?,
+          program : Frontend::Program,
+          identifier_symbols : Hash(Frontend::ExprId, Semantic::Symbol)?,
+          symbol_table : Semantic::SymbolTable?,
+          requires : Array(String),
+          from_prelude : Bool = false
+
+        # Soft timeout for background inference tasks
+        BACKGROUND_INFER_TIMEOUT = 10.seconds
+
+        private def schedule_deferred_inference(
+          path : String,
+          source : String,
+          base_dir : String?,
+          program : Frontend::Program,
+          identifier_symbols : Hash(Frontend::ExprId, Semantic::Symbol)?,
+          symbol_table : Semantic::SymbolTable?,
+          requires : Array(String),
+          from_prelude : Bool
+        )
+          # Avoid infinite requeue if a path already timed out twice
+          if @inference_timeouts.includes?(path)
+            return
+          end
+          begin
+            @pending_inference.send(
+              DeferredInference.new(
+                path: path,
+                source: source,
+                base_dir: base_dir,
+                program: program,
+                identifier_symbols: identifier_symbols,
+                symbol_table: symbol_table,
+                requires: requires,
+                from_prelude: from_prelude
+              )
+            )
+          rescue Channel::ClosedError
+            debug("Deferred inference channel closed; skipping enqueue for #{path}")
+          end
+        end
+
         private def self.prelude_from_crystal_path(path_str : String) : String?
           path_str.split(':').each do |base|
             candidate = File.expand_path("prelude.cr", base)
@@ -335,6 +457,7 @@ module CrystalV2
         @cached_symbol_ranges : Hash(String, Hash(String, Range))
         @cached_symbol_types : Hash(String, Hash(String, String))
         @cached_expr_types : Hash(String, Hash(Int32, String))
+        @pending_inference : Channel(DeferredInference)
         @dependencies_warming : Set(String)
         @inference_timeouts : Set(String)
         @const_text_cache : Hash(String, Location?)
@@ -377,6 +500,7 @@ module CrystalV2
           @cached_symbol_ranges = Hash(String, Hash(String, Range)).new
           @cached_symbol_types = Hash(String, Hash(String, String)).new
           @cached_expr_types = Hash(String, Hash(Int32, String)).new
+          @pending_inference = Channel(DeferredInference).new
           @dependencies_warming = Set(String).new
           @inference_timeouts = Set(String).new
           @const_text_cache = Hash(String, Location?).new
@@ -390,6 +514,8 @@ module CrystalV2
           else
             load_prelude
           end
+
+          start_inference_worker
         end
 
         private def resolve_path_symbol_in_table(table : Semantic::SymbolTable?, segments : Array(String)) : Semantic::Symbol?
@@ -1673,13 +1799,33 @@ module CrystalV2
                 end
               end
             else
-              debug("Skipping type inference due to errors")
+              debug("Skipping type inference due to errors or guard; scheduling deferred inference")
+              schedule_deferred_inference(
+                path: path || "(unknown)",
+                source: source,
+                base_dir: base_dir,
+                program: analysis_program,
+                identifier_symbols: result.identifier_symbols,
+                symbol_table: symbol_table,
+                requires: requires,
+                from_prelude: false
+              )
             end
           rescue ex : Watchdog::TimeoutError
             # Re-raise timeout to allow watchdog protection to work
             raise ex
           rescue ex
             debug("Semantic analysis failed: #{ex.message}")
+            schedule_deferred_inference(
+              path: path || "(unknown)",
+              source: source,
+              base_dir: base_dir,
+              program: analysis_program,
+              identifier_symbols: identifier_symbols,
+              symbol_table: symbol_table,
+              requires: requires,
+              from_prelude: false
+            )
           end
 
           total_ms = (Time.monotonic - total_start).total_seconds * 1000
@@ -2437,9 +2583,29 @@ module CrystalV2
           if symbol_only
             debug("Symbol-only prelude: skipping name resolution/type inference for #{path}")
           elsif skip_infer
-            debug("Prelude inference skipped for #{path} (guarded to avoid hang)")
+            debug("Prelude inference skipped for #{path} (guarded to avoid hang); scheduling deferred inference")
+            schedule_deferred_inference(
+              path: path,
+              source: source,
+              base_dir: base_dir,
+              program: program,
+              identifier_symbols: nil,
+              symbol_table: context.symbol_table,
+              requires: requires,
+              from_prelude: true
+            )
           elsif guard_remaining && guard_remaining <= Time::Span.zero
-            debug("Prelude guard deadline reached before resolve/infer for #{path}; skipping inference")
+            debug("Prelude guard deadline reached before resolve/infer for #{path}; scheduling deferred inference")
+            schedule_deferred_inference(
+              path: path,
+              source: source,
+              base_dir: base_dir,
+              program: program,
+              identifier_symbols: nil,
+              symbol_table: context.symbol_table,
+              requires: requires,
+              from_prelude: true
+            )
           else
             timeout = guard_remaining || 10.seconds
             phase_start = Time.monotonic
@@ -2465,6 +2631,16 @@ module CrystalV2
               debug("Prelude resolve/infer watchdog timeout for #{path}: #{ex.message}")
               diagnostics << Diagnostic.new(Range.new(Position.new(0, 0), Position.new(0, 0)), "Prelude inference timeout in #{path}", severity: DiagnosticSeverity::Warning.value)
               @inference_timeouts << path
+              schedule_deferred_inference(
+                path: path,
+                source: source,
+                base_dir: base_dir,
+                program: program,
+                identifier_symbols: result.identifier_symbols,
+                symbol_table: context.symbol_table,
+                requires: requires,
+                from_prelude: true
+              )
             rescue ex
               debug("Prelude type inference failed for #{path}: #{ex.message}")
               @inference_timeouts << path
