@@ -107,12 +107,12 @@ Goal: v2 LSP must report only real errors and match original compiler behavior.
   - Fixed `&.[expr]?` block shorthand pattern
   - Fixed `h ? h[x]? : nil` ([]? inside ternary then-branch)
   - Fixed `ENV["X"]? ? 25 : 0` ([]? followed by ternary)
-- [ ] Types & hover accuracy (match original compiler)
-- [ ] Navigation to stdlib/prelude and macro-generated methods
+- [x] Types & hover accuracy: stdlib types (Array, String, Hash, Int32, Float64), array element access (arr[0] → Atom)
+- [x] Navigation to stdlib/prelude symbols (Time, File, etc.)
 - [x] Prelude handling with cache + mtime tracking (cached summaries/types for warm start)
 
 ### Tests Needed
-- [ ] Structured LSP tests for stdlib symbols (`Time.monotonic`, `File.read`, etc.)
+- [x] Structured LSP tests for stdlib symbols (`Time.now`, `File.basename`, array types, etc.) - see `stdlib_hover_spec.cr`, `stdlib_navigation_spec.cr`
 - [ ] Diff v2 diagnostics against original compiler on representative files
 - [ ] Hover/definition regression spec covering cached types across required files
 - [x] Integration specs for hover/definition sequences (single-file path regression)
@@ -128,7 +128,7 @@ Goal: v2 LSP must report only real errors and match original compiler behavior.
 - [x] Navigation to stdlib/prelude (tests + impl)
 - [x] Folding ranges for begin/rescue/else/ensure without overfolding; semantic tokens for symbol literals fixed
 - [ ] Regression scenarios via `tools/lsp_scripts` (rename, stdlib, hover→definition chains; nested consts A/M::A; class/instance vars)
-- [ ] LSP spec coverage for member access typed via locals/arrays (`cas`, `a.sigma`, class vars) to avoid Nil/Unknown hovers/definitions
+- [x] LSP spec coverage for member access typed via locals/arrays (`cas`, `a.sigma`, class vars) - see `stdlib_hover_spec.cr`
 - [ ] Optional: detect external workspace roots for cache reuse when opening files outside @project_root
 
 ---
