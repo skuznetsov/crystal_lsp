@@ -13726,9 +13726,10 @@ module CrystalV2
             return Slice.new(start_ptr, end_ptr - start_ptr)
           end
 
-          # Parse first type
+          # Parse first type (use simple union type to support A | B -> C)
+          # Phase 103S: Use parse_union_type_simple to avoid recursion with proc types
           first_type_start = current_token
-          type = parse_atomic_type_with_suffix_for_annotation
+          type = parse_union_type_simple_for_annotation
           return nil if type.nil?
 
           skip_trivia
@@ -13743,11 +13744,12 @@ module CrystalV2
           # This is a proc type - collect all input types
           if current_token.kind == Token::Kind::Comma
             # Multiple input types: Type1, Type2, ... -> ReturnType
+            # Phase 103S: Use parse_union_type_simple to support unions per input type
             loop do
               advance  # consume comma
               skip_trivia
 
-              next_type = parse_atomic_type_with_suffix_for_annotation
+              next_type = parse_union_type_simple_for_annotation
               return nil if next_type.nil?
 
               skip_trivia
@@ -13946,6 +13948,42 @@ module CrystalV2
             skip_trivia
 
             next_type = parse_bare_proc_type
+            return nil if next_type.nil?
+
+            skip_trivia
+            break unless current_token.kind == Token::Kind::Pipe
+          end
+
+          # Build full union type as zero-copy slice
+          end_token = previous_token.not_nil!
+          start_ptr = start_token.slice.to_unsafe
+          end_ptr = end_token.slice.to_unsafe + end_token.slice.size
+          Slice.new(start_ptr, end_ptr - start_ptr)
+        end
+
+        # Phase 103S: Parse union type without proc types (for use inside parse_bare_proc_type)
+        # This is similar to parse_union_type_for_annotation but doesn't call parse_bare_proc_type
+        # to avoid infinite recursion
+        private def parse_union_type_simple_for_annotation : Slice(UInt8)?
+          start_token = current_token
+
+          # Parse first atomic type
+          type = parse_atomic_type_with_suffix_for_annotation
+          return nil if type.nil?
+
+          skip_trivia
+
+          # Check for union operator |
+          unless current_token.kind == Token::Kind::Pipe
+            return type
+          end
+
+          # Parse additional types in union
+          loop do
+            advance  # consume |
+            skip_trivia
+
+            next_type = parse_atomic_type_with_suffix_for_annotation
             return nil if next_type.nil?
 
             skip_trivia
