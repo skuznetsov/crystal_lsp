@@ -7162,11 +7162,13 @@ module CrystalV2
             # Otherwise, allow as unary prefix in argument (foo +1)
           # Don't parse as call if followed by binary/logical operators that can't start an argument
           # Phase 103K: Slash and FloorDiv can't be unary, always return error
+          # Phase 103Q: ThinArrow is proc type notation, not call argument
           when Token::Kind::Slash, Token::Kind::FloorDiv,
                Token::Kind::Percent,  # Percent literal uses different token
                Token::Kind::OrOr, Token::Kind::AndAnd,
                Token::Kind::Question,  # ternary operator
                Token::Kind::Arrow,     # hash arrow =>
+               Token::Kind::ThinArrow, # proc type -> (Phase 103Q)
                # Comparison operators
                Token::Kind::EqEq, Token::Kind::EqEqEq, Token::Kind::NotEq,  # Phase 50: === case equality
                Token::Kind::Less, Token::Kind::Greater,
@@ -8411,6 +8413,32 @@ module CrystalV2
               else
                 of_type_expr = parse_expression(0)
                 return PREFIX_ERROR if of_type_expr.invalid?
+
+                # Phase 103Q: Handle proc type with input types: `A ->` or `A::B -> ReturnType`
+                skip_trivia
+                if current_token.kind == Token::Kind::ThinArrow
+                  arrow_token = current_token
+                  advance
+                  skip_trivia
+
+                  # Check for optional return type
+                  if current_token.kind.in?(Token::Kind::Identifier, Token::Kind::Self,
+                                            Token::Kind::Typeof, Token::Kind::LParen,
+                                            Token::Kind::LBrace, Token::Kind::ColonColon)
+                    return_type_expr = parse_expression(0)
+                    return PREFIX_ERROR if return_type_expr.invalid?
+                    end_span = @arena[return_type_expr].span
+                    proc_span = @arena[of_type_expr].span.cover(end_span)
+                    # Create GenericNode with input type, ->, and return type
+                    arrow_id = @arena.add_typed(IdentifierNode.new(arrow_token.span, arrow_token.slice))
+                    of_type_expr = @arena.add_typed(GenericNode.new(proc_span, arrow_id, [of_type_expr, return_type_expr]))
+                  else
+                    # No return type: `A ->`
+                    proc_span = @arena[of_type_expr].span.cover(arrow_token.span)
+                    arrow_id = @arena.add_typed(IdentifierNode.new(arrow_token.span, arrow_token.slice))
+                    of_type_expr = @arena.add_typed(GenericNode.new(proc_span, arrow_id, [of_type_expr]))
+                  end
+                end
               end
             end
 
