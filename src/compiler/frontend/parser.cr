@@ -6280,7 +6280,9 @@ module CrystalV2
             # Check for comma to continue
             if current_token.kind == Token::Kind::Comma
               advance  # consume ','
-              skip_whitespace_and_optional_newlines
+              # Phase 103R: Use consume_newlines to allow multi-line accessor declarations
+              # skip_whitespace_and_optional_newlines only skips newlines inside delimiters
+              consume_newlines
             else
               break
             end
