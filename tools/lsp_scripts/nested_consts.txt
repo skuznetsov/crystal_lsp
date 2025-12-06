@@ -1,0 +1,11 @@
+# nested const/class var navigation regression
+open /Users/sergey/Projects/Crystal/crystal_v2_repo/tools/lsp_scripts/samples/nested_consts.cr
+# top-level A.cv
+hover 20:3
+definition 20:3
+# nested M::A.cv
+hover 21:3
+definition 21:3
+# inner class A within M
+hover 10:5
+definition 10:5

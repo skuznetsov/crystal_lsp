@@ -7197,7 +7197,7 @@ module CrystalV2
           # Phase 103L: Amp needs special handling - it could be block shorthand OR binary operator
           when Token::Kind::Amp
             # Block shorthand: &.method (AmpDot) or &block (no space)
-            # Binary operator: x & y (space after &)
+            # Binary operator: x & y (space after &) OR x &~y (unary operator after &)
             # Check for gap between & and next token using span positions
             amp_tok = current_token
             next_tok = peek_token(1)
@@ -7205,6 +7205,14 @@ module CrystalV2
             # Block args are &block (adjacent), not & block (with space)
             if amp_tok.span.end_column < next_tok.span.start_column
               # Space after & means binary bitwise AND, not block argument
+              return PREFIX_ERROR
+            end
+            # Phase 103M: If next token is a unary operator prefix, treat as binary &
+            # Example: x & ~15 - the ~ is unary NOT, not part of block shorthand
+            # Block shorthand can only be &.method, &block, or &[idx]
+            if next_tok.kind.in?(Token::Kind::Tilde, Token::Kind::Not, Token::Kind::Plus,
+                                 Token::Kind::Minus, Token::Kind::LParen, Token::Kind::Number)
+              # Unary operator or literal after & - this is binary bitwise AND
               return PREFIX_ERROR
             end
             # Otherwise, fall through to allow parsing as block shorthand (&block or &.method)
@@ -7605,6 +7613,7 @@ module CrystalV2
 
               if (left_kind == Frontend::NodeKind::MemberAccess || left_kind == Frontend::NodeKind::Call)
                 amp_token = current_token
+                saved_index = @index  # Save position before lookahead
                 advance
                 skip_trivia
 
@@ -7633,8 +7642,8 @@ module CrystalV2
                   )
                   next
                 else
-                  # Not block shorthand, rewind
-                  unadvance
+                  # Not block shorthand, restore position to & token
+                  @index = saved_index
                 end
               end
 
@@ -10398,6 +10407,7 @@ module CrystalV2
                   # 2) Block shorthand / capture: &.method or &ident
                   elsif current_token.kind == Token::Kind::Amp
                     amp_token = current_token
+                    saved_index = @index  # Phase 103P: Save position for proper restore
                     advance
                     skip_trivia
                     if current_token.kind == Token::Kind::Operator
@@ -10416,15 +10426,11 @@ module CrystalV2
                       arg_span = amp_token.span.cover(ident_span)
                       arg = @arena.add_typed(UnaryNode.new(arg_span, amp_token.slice, ident_node))
                     else
-                      # Rewind one token and parse normally
-                      unadvance
-                      @no_type_declaration += 1
-                      arg = parse_op_assign
-                      @no_type_declaration -= 1
-                    end
-                    if arg.invalid?
-                      @parsing_call_args -= 1
-                      return PREFIX_ERROR
+                      # Phase 103P: Not block shorthand or capture - & is a binary operator
+                      # This handles cases like `x.y & ~15` where & is binary AND
+                      # Restore position and break out of arg parsing; let caller handle &
+                      @index = saved_index
+                      break
                     end
                   elsif current_token.kind == Token::Kind::AmpDot
                     # &.method with no parentheses
@@ -10549,7 +10555,41 @@ module CrystalV2
                   break if current_token.kind == Token::Kind::Do
 
                   # Parse one argument
-                  arg = parse_op_assign
+                  # Phase 103P: Special handling for & (block shorthand/capture)
+                  arg = if current_token.kind == Token::Kind::Amp
+                    amp_token = current_token
+                    saved_index = @index
+                    advance
+                    skip_trivia
+                    if current_token.kind == Token::Kind::Operator
+                      # &.method — block shorthand
+                      parse_block_shorthand(amp_token)
+                    elsif current_token.kind == Token::Kind::Identifier || current_token.kind == Token::Kind::InstanceVar
+                      # &block — block capture argument
+                      ident = current_token
+                      advance
+                      ident_span = ident.span
+                      ident_node = if ident.kind == Token::Kind::Identifier
+                        @arena.add_typed(IdentifierNode.new(ident_span, @string_pool.intern(ident.slice)))
+                      else
+                        @arena.add_typed(InstanceVarNode.new(ident_span, ident.slice))
+                      end
+                      arg_span = amp_token.span.cover(ident_span)
+                      @arena.add_typed(UnaryNode.new(arg_span, amp_token.slice, ident_node))
+                    else
+                      # Not block shorthand or capture - & is binary operator; stop arg parsing
+                      @index = saved_index
+                      break
+                    end
+                  elsif current_token.kind == Token::Kind::AmpDot
+                    # &.method with no parentheses
+                    amp_token = current_token
+                    advance
+                    skip_trivia
+                    parse_block_shorthand(amp_token)
+                  else
+                    parse_op_assign
+                  end
                   if arg.invalid?
                     @parsing_call_args -= 1
                     return PREFIX_ERROR
