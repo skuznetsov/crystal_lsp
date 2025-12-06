@@ -8,7 +8,7 @@ about syntax or types and should match what the original compiler would report.
 
 ---
 
-## Current Status (2025-12-02)
+## Current Status (2025-12-06)
 
 ### Test Coverage
 - **2856 tests**, 0 failures, 7 pending
@@ -103,7 +103,10 @@ about syntax or types and should match what the original compiler would report.
 Goal: v2 LSP must report only real errors and match original compiler behavior.
 
 - [x] Wired to v2 parser and symbol collector
-- [ ] Diagnostics parity (no false positives)
+- [x] Diagnostics parity: fixed []? vs ternary disambiguation (no false positives on server.cr)
+  - Fixed `&.[expr]?` block shorthand pattern
+  - Fixed `h ? h[x]? : nil` ([]? inside ternary then-branch)
+  - Fixed `ENV["X"]? ? 25 : 0` ([]? followed by ternary)
 - [ ] Types & hover accuracy (match original compiler)
 - [ ] Navigation to stdlib/prelude and macro-generated methods
 - [x] Prelude handling with cache + mtime tracking (cached summaries/types for warm start)
