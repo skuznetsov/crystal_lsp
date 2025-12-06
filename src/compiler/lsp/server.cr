@@ -29,83 +29,6 @@ module CrystalV2
         end
       end
 
-      # Start a single background worker that processes deferred inference tasks
-      private def start_inference_worker
-        spawn do
-          loop do
-            begin
-              task = @pending_inference.receive
-            rescue Channel::ClosedError
-              break
-            end
-
-            next unless task
-            begin
-              run_deferred_inference(task)
-            rescue ex
-              debug("Deferred inference failed for #{task.path}: #{ex.message}")
-            end
-          end
-        end
-      end
-
-      private def run_deferred_inference(task : DeferredInference)
-        Watchdog.enable!("Deferred inference #{task.path}", BACKGROUND_INFER_TIMEOUT)
-        diagnostics = [] of Diagnostic
-        context = build_context_with_prelude
-        # Merge existing symbol table from task if provided
-        if task.symbol_table
-          merge_symbol_table(context.symbol_table, task.symbol_table)
-        end
-        analyzer = Semantic::Analyzer.new(task.program, context)
-        analyzer.collect_symbols
-        begin
-          result = analyzer.resolve_names
-          engine = analyzer.infer_types(result.identifier_symbols)
-          expr_types = engine.context.expression_types
-          expr_types.each do |expr_id, type|
-            (@cached_expr_types[task.path] ||= Hash(Int32, String).new)[expr_id.index] = type.to_s
-          end
-
-          # Update live DocumentState if loaded (URI-keyed)
-          uri = file_uri(task.path)
-          if ds = @documents[uri]?
-            new_state = DocumentState.new(
-              ds.text_document,
-              task.program,
-              engine.context,
-              result.identifier_symbols,
-              context.symbol_table,
-              task.requires,
-              ds.index,
-              path: task.path
-            )
-            @documents[uri] = new_state
-          elsif ds = @dependency_documents[uri]?
-            new_state = DocumentState.new(
-              ds.text_document,
-              task.program,
-              engine.context,
-              result.identifier_symbols,
-              context.symbol_table,
-              task.requires,
-              ds.index,
-              path: task.path
-            )
-            @dependency_documents[uri] = new_state
-          end
-
-          # If prelude, update cached expr types to be saved on next cache write
-          if task.from_prelude
-            @cached_expr_types[task.path] ||= Hash(Int32, String).new
-          end
-        ensure
-          Watchdog.disable
-        end
-      rescue ex : Frontend::Watchdog::TimeoutError
-        debug("Deferred inference timeout for #{task.path}")
-      end
-
       struct ScopedConstDecl
         getter name : String
         getter scope_span : Frontend::Span?
@@ -401,6 +324,83 @@ module CrystalV2
           rescue Channel::ClosedError
             debug("Deferred inference channel closed; skipping enqueue for #{path}")
           end
+        end
+
+        # Start a single background worker that processes deferred inference tasks
+        private def start_inference_worker
+          spawn do
+            loop do
+              begin
+                task = @pending_inference.receive
+              rescue Channel::ClosedError
+                break
+              end
+
+              next unless task
+              begin
+                run_deferred_inference(task)
+              rescue ex
+                debug("Deferred inference failed for #{task.path}: #{ex.message}")
+              end
+            end
+          end
+        end
+
+        private def run_deferred_inference(task : DeferredInference)
+          Watchdog.enable!("Deferred inference #{task.path}", BACKGROUND_INFER_TIMEOUT)
+          diagnostics = [] of Diagnostic
+          context = build_context_with_prelude
+          # Merge existing symbol table from task if provided
+          if st = task.symbol_table
+            merge_symbol_table(context.symbol_table, st)
+          end
+          analyzer = Semantic::Analyzer.new(task.program, context)
+          analyzer.collect_symbols
+          begin
+            result = analyzer.resolve_names
+            engine = analyzer.infer_types(result.identifier_symbols)
+            expr_types = engine.context.expression_types
+            expr_types.each do |expr_id, type|
+              (@cached_expr_types[task.path] ||= Hash(Int32, String).new)[expr_id.index] = type.to_s
+            end
+
+            # Update live DocumentState if loaded (URI-keyed)
+            uri = file_uri(task.path)
+            if ds = @documents[uri]?
+              new_state = DocumentState.new(
+                ds.text_document,
+                task.program,
+                engine.context,
+                result.identifier_symbols,
+                context.symbol_table,
+                task.requires,
+                ds.index,
+                path: task.path
+              )
+              @documents[uri] = new_state
+            elsif ds = @dependency_documents[uri]?
+              new_state = DocumentState.new(
+                ds.text_document,
+                task.program,
+                engine.context,
+                result.identifier_symbols,
+                context.symbol_table,
+                task.requires,
+                ds.index,
+                path: task.path
+              )
+              @dependency_documents[uri] = new_state
+            end
+
+            # If prelude, update cached expr types to be saved on next cache write
+            if task.from_prelude
+              @cached_expr_types[task.path] ||= Hash(Int32, String).new
+            end
+          ensure
+            Watchdog.disable!
+          end
+        rescue ex : Frontend::Watchdog::TimeoutError
+          debug("Deferred inference timeout for #{task.path}")
         end
 
         private def self.prelude_from_crystal_path(path_str : String) : String?
@@ -2645,7 +2645,7 @@ module CrystalV2
                 source: source,
                 base_dir: base_dir,
                 program: program,
-                identifier_symbols: result.identifier_symbols,
+                identifier_symbols: result.try(&.identifier_symbols),
                 symbol_table: context.symbol_table,
                 requires: requires,
                 from_prelude: true
@@ -7280,12 +7280,16 @@ module CrystalV2
               collect_path_segments_into(arena, left_node, segments)
             when Frontend::IdentifierNode
               segments << String.new(left_node.name)
+            when Frontend::ConstantNode
+              segments << String.new(left_node.name)
             end
           end
 
           right_node = arena[node.right]
           case right_node
           when Frontend::IdentifierNode
+            segments << String.new(right_node.name)
+          when Frontend::ConstantNode
             segments << String.new(right_node.name)
           when Frontend::PathNode
             collect_path_segments_into(arena, right_node, segments)
