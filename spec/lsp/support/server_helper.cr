@@ -20,6 +20,7 @@ module CrystalV2::Compiler::LSP
         identifier_symbols,
         symbol_table,
         requires,
+        nil,  # index
         path
       )
       @documents[text_doc.uri] = doc_state
