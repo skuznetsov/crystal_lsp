@@ -10175,18 +10175,38 @@ module CrystalV2
           # If named args present, or '[]?' variant, lower to CallNode target.[](args..., named:)
           question_follows = false
           if current_token.kind == Token::Kind::Question
-            # Look ahead: if a ':' appears before any delimiter, treat as ternary.
+            # Look ahead: if a ':' appears before any delimiter at depth 0, treat as ternary.
+            # Track depth: if we encounter ':' at depth 0, it could be outer ternary's else branch.
             scan_idx = @index + 1
             colon_before_delim = false
+            scan_paren_depth = 0
+            scan_bracket_depth = 0
+            scan_brace_depth = 0
             while scan_idx < @tokens.size
               tok = @tokens[scan_idx]
-              if tok.kind == Token::Kind::Colon
-                colon_before_delim = true
+              case tok.kind
+              when Token::Kind::LParen then scan_paren_depth += 1
+              when Token::Kind::RParen then scan_paren_depth -= 1
+              when Token::Kind::LBracket then scan_bracket_depth += 1
+              when Token::Kind::RBracket then scan_bracket_depth -= 1
+              when Token::Kind::LBrace then scan_brace_depth += 1
+              when Token::Kind::RBrace then scan_brace_depth -= 1
+              when Token::Kind::Colon
+                # Only treat ':' as ternary if we're at depth 0 AND not already inside an outer ternary
+                if scan_paren_depth == 0 && scan_bracket_depth == 0 && scan_brace_depth == 0
+                  # Check if there's something substantial between ? and : (more than just whitespace)
+                  # If scan_idx == @index + 1, it's just `? :` - unlikely to be ternary with []?
+                  has_content = (scan_idx > @index + 1)
+                  colon_before_delim = has_content
+                end
                 break
-              elsif tok.kind.in?(Token::Kind::Comma, Token::Kind::RParen, Token::Kind::RBracket,
-                                 Token::Kind::Newline, Token::Kind::Semicolon, Token::Kind::End, Token::Kind::EOF)
-                break
+              when Token::Kind::Comma, Token::Kind::Newline, Token::Kind::Semicolon, Token::Kind::End, Token::Kind::EOF,
+                   Token::Kind::Question
+                # Delimiters at depth 0 stop scanning
+                break if scan_paren_depth == 0 && scan_bracket_depth == 0 && scan_brace_depth == 0
               end
+              # Stop if depth goes negative (unbalanced)
+              break if scan_paren_depth < 0 || scan_bracket_depth < 0 || scan_brace_depth < 0
               scan_idx += 1
             end
             question_follows = !colon_before_delim
@@ -10227,18 +10247,33 @@ module CrystalV2
         # to a CallNode for method name "[]?" preserving positional args.
         private def handle_index_question_postfix(left : ExprId) : ExprId
           return left unless current_token.kind == Token::Kind::Question
-          # Look ahead: if a ':' appears before a delimiter, this is ternary.
+          # Look ahead: if a ':' appears before a delimiter at depth 0 with content, this is ternary.
+          # Track depth to handle nested brackets/parens correctly.
           scan_idx = @index + 1
           colon_before_delim = false
+          scan_paren_depth = 0
+          scan_bracket_depth = 0
+          scan_brace_depth = 0
           while scan_idx < @tokens.size
             tok = @tokens[scan_idx]
-            if tok.kind == Token::Kind::Colon
-              colon_before_delim = true
+            case tok.kind
+            when Token::Kind::LParen then scan_paren_depth += 1
+            when Token::Kind::RParen then scan_paren_depth -= 1
+            when Token::Kind::LBracket then scan_bracket_depth += 1
+            when Token::Kind::RBracket then scan_bracket_depth -= 1
+            when Token::Kind::LBrace then scan_brace_depth += 1
+            when Token::Kind::RBrace then scan_brace_depth -= 1
+            when Token::Kind::Colon
+              if scan_paren_depth == 0 && scan_bracket_depth == 0 && scan_brace_depth == 0
+                has_content = (scan_idx > @index + 1)
+                colon_before_delim = has_content
+              end
               break
-            elsif tok.kind.in?(Token::Kind::Comma, Token::Kind::RParen, Token::Kind::RBracket,
-                                Token::Kind::Newline, Token::Kind::Semicolon, Token::Kind::End, Token::Kind::EOF)
-              break
+            when Token::Kind::Comma, Token::Kind::Newline, Token::Kind::Semicolon, Token::Kind::End, Token::Kind::EOF,
+                 Token::Kind::Question
+              break if scan_paren_depth == 0 && scan_bracket_depth == 0 && scan_brace_depth == 0
             end
+            break if scan_paren_depth < 0 || scan_bracket_depth < 0 || scan_brace_depth < 0
             scan_idx += 1
           end
           return left if colon_before_delim
@@ -13180,17 +13215,24 @@ module CrystalV2
                 rbracket_token = current_token
                 advance  # consume ]
 
-                # Create index call
-                method_name = @string_pool.intern(Slice(UInt8).new("[]".to_unsafe, 2))
-                call_span = lbracket_token.span.cover(rbracket_token.span)
+                # Check for nilable index: &.[expr]?
+                final_span = rbracket_token.span
+                method_name = if current_token.kind == Token::Kind::Question
+                  final_span = current_token.span
+                  advance  # consume ?
+                  @string_pool.intern(Slice(UInt8).new("[]?".to_unsafe, 3))
+                else
+                  @string_pool.intern(Slice(UInt8).new("[]".to_unsafe, 2))
+                end
+                call_span = lbracket_token.span.cover(final_span)
                 call_expr = @arena.add_typed(MemberAccessNode.new(
-                  location_start.cover(rbracket_token.span),
+                  location_start.cover(final_span),
                   temp_var,
                   method_name
                 ))
                 # Wrap in CallNode with the args
                 call_expr = @arena.add_typed(CallNode.new(
-                  location_start.cover(rbracket_token.span),
+                  location_start.cover(final_span),
                   call_expr,
                   args_b.to_a,
                   nil
