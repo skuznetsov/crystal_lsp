@@ -13122,17 +13122,33 @@ module CrystalV2
                 end
                 @bracket_depth -= 1
                 expect_operator(Token::Kind::RBracket)
+                rbracket_span = previous_token.try(&.span) || lbracket_token.span
 
-                # Build IndexNode for temp_var[args]
-                acc_span = @arena[temp_var].span.cover(lbracket_token.span)
-                indexes_b.each { |idx| acc_span = acc_span.cover(@arena[idx].span) }
-                if closing_span = previous_token.try(&.span)
-                  acc_span = acc_span.cover(closing_span)
+                # Check for nilable index: &.[expr]?
+                final_span = rbracket_span
+                is_nilable = current_token.kind == Token::Kind::Question
+                if is_nilable
+                  final_span = current_token.span
+                  advance  # consume ?
                 end
-                call_expr = @arena.add_typed(IndexNode.new(
+
+                # Build CallNode with [] or []? method
+                method_name = if is_nilable
+                  @string_pool.intern(Slice(UInt8).new("[]?".to_unsafe, 3))
+                else
+                  @string_pool.intern(Slice(UInt8).new("[]".to_unsafe, 2))
+                end
+                acc_span = location_start.cover(final_span)
+                member_access = @arena.add_typed(MemberAccessNode.new(
                   acc_span,
                   temp_var,
-                  indexes_b.to_a
+                  method_name
+                ))
+                call_expr = @arena.add_typed(CallNode.new(
+                  acc_span,
+                  member_access,
+                  indexes_b.to_a,
+                  nil
                 ))
               end
             else
