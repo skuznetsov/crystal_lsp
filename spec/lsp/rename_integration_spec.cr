@@ -56,7 +56,8 @@ describe CrystalV2::Compiler::LSP::Server do
     if result["error"]?
       result["error"]["message"].as_s.should contain("Cannot rename")
     else
-      result["result"].should be_nil
+      # JSON null parses as JSON::Any with raw == nil
+      result["result"].raw.should be_nil
     end
   end
 end
