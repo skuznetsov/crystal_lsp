@@ -135,7 +135,6 @@ module CrystalV2
         getter program : Frontend::Program
         getter symbol_table : Semantic::SymbolTable
         getter diagnostics : Array(Diagnostic)
-        getter stub : Bool
         getter symbol_origins : Hash(Semantic::Symbol, PreludeSymbolOrigin)
         getter from_cache : Bool
 
@@ -144,7 +143,6 @@ module CrystalV2
           @program : Frontend::Program,
           @symbol_table : Semantic::SymbolTable,
           @diagnostics : Array(Diagnostic),
-          @stub : Bool,
           @symbol_origins : Hash(Semantic::Symbol, PreludeSymbolOrigin),
           @from_cache : Bool = false,
         )
@@ -267,7 +265,6 @@ module CrystalV2
             end
           end
         end
-        PRELUDE_STUB_PATH        = File.expand_path("prelude_stub.cr", __DIR__)
         COMPILER_MODULE_SEGMENTS = ["CrystalV2", "Compiler"]
         COMPILER_ALIAS_SEGMENTS  = {
           "Lexer"  => ["CrystalV2", "Compiler", "Frontend", "Lexer"],
@@ -444,8 +441,6 @@ module CrystalV2
         @node_symbol_index : Hash(Tuple(UInt64, Int32), Semantic::Symbol)
         @program_methods : Hash(UInt64, Array(Semantic::MethodSymbol))
         @dependency_documents : Hash(String, DocumentState)
-        @stub_prelude_state_loaded : Bool = false
-        @stub_prelude_state : PreludeState?
         @prelude_method_index : Hash(String, Location)
         @prelude_loading : Bool = false
         @prelude_load_channel : Channel(PreludeState?)?
@@ -491,8 +486,6 @@ module CrystalV2
           @node_symbol_index = {} of Tuple(UInt64, Int32) => Semantic::Symbol
           @program_methods = Hash(UInt64, Array(Semantic::MethodSymbol)).new { |hash, key| hash[key] = [] of Semantic::MethodSymbol }
           @dependency_documents = {} of String => DocumentState
-          @stub_prelude_state_loaded = false
-          @stub_prelude_state = nil
           @prelude_method_index = {} of String => Location
           @prelude_loading = false
           @prelude_load_channel = nil
@@ -512,11 +505,7 @@ module CrystalV2
           @indexing_active = false
           @indexing_message = nil
           @indexing_last_sent = Time.monotonic
-          # Allow forcing the stub prelude for debugging via environment variable
-          if ENV["CRYSTALV2_LSP_FORCE_STUB"]?
-            try_load_prelude(PRELUDE_STUB_PATH, "LSP stub prelude")
-          elsif @config.background_indexing
-            # Start with stub prelude for fast startup, load real in background
+          if @config.background_indexing
             load_prelude_background
           else
             load_prelude
@@ -1678,7 +1667,6 @@ module CrystalV2
           notify_indexing("Indexing… loading document") if @config.background_indexing
 
           diagnostics = [] of Diagnostic
-          using_stub = @prelude_state.try(&.stub) || false
           within_root = path && @project_root && path.starts_with?(@project_root.not_nil!)
           use_project_symbols = @project_cache_loaded && within_root && @project.files.has_key?(path) && @project.symbol_table
           debug("project cache check: cache_loaded=#{@project_cache_loaded} within_root=#{within_root} in_cache=#{path && @project.files.has_key?(path)} symtable?=#{!!@project.symbol_table}") if ENV["LSP_DEBUG"]?
@@ -1759,20 +1747,16 @@ module CrystalV2
             end
 
             if semantic_diagnostics_enabled?
-              unless using_stub
-                if parser.diagnostics.empty?
-                  analyzer.semantic_diagnostics.each do |diag|
-                    diagnostics << Diagnostic.from_semantic(diag, source)
-                  end
+              if parser.diagnostics.empty?
+                analyzer.semantic_diagnostics.each do |diag|
+                  diagnostics << Diagnostic.from_semantic(diag, source)
+                end
 
-                  result.diagnostics.each do |diag|
-                    diagnostics << Diagnostic.from_parser(diag)
-                  end
-                else
-                  debug("Skipping semantic diagnostics due to #{parser.diagnostics.size} parser diagnostics")
+                result.diagnostics.each do |diag|
+                  diagnostics << Diagnostic.from_parser(diag)
                 end
               else
-                debug("Stub prelude active; suppressing semantic diagnostics output")
+                debug("Skipping semantic diagnostics due to #{parser.diagnostics.size} parser diagnostics")
               end
             else
               debug("Semantic diagnostics disabled via configuration")
@@ -1781,10 +1765,6 @@ module CrystalV2
             should_infer = !analyzer.semantic_errors? && result.diagnostics.empty?
             if @config.best_effort_inference
               # Prefer to offer hover/definition even if semantic errors remain or parser produced recoverable diagnostics.
-              should_infer = true
-            end
-            if using_stub && parser.diagnostics.empty?
-              debug("Stub prelude active; forcing type inference despite semantic errors")
               should_infer = true
             end
 
@@ -1800,7 +1780,7 @@ module CrystalV2
                 debug("Type context entries: #{type_context.expression_types.size}")
               end
 
-              if semantic_diagnostics_enabled? && !using_stub
+              if semantic_diagnostics_enabled?
                 analyzer.type_inference_diagnostics.each do |diag|
                   diagnostics << Diagnostic.from_semantic(diag, source)
                 end
@@ -1848,17 +1828,15 @@ module CrystalV2
 
         # Debug helper: analyze a source string and return LSP diagnostics and semantic tokens
         # This bypasses JSON-RPC and is intended for debug_tests/* scripts.
-        def debug_analyze(source : String) : {Array(Diagnostic), SemanticTokens, Bool, String}
+        def debug_analyze(source : String) : {Array(Diagnostic), SemanticTokens, String}
           ensure_prelude_loaded
-          using_stub = @prelude_state.try(&.stub) || false
           diagnostics, program, type_context, identifier_symbols, symbol_table, _req, _index = analyze_document(source, workspace: DependencyWorkspace.new)
           tokens = collect_semantic_tokens(program, source, identifier_symbols, type_context, symbol_table, nil)
           prelude_path = @prelude_state.try(&.path) || "(none)"
-          {diagnostics, tokens, using_stub, prelude_path}
+          {diagnostics, tokens, prelude_path}
         end
 
         private def load_prelude
-          return if !@config.real_prelude && try_load_prelude(PRELUDE_STUB_PATH, "LSP stub prelude")
 
           @prelude_guard_deadline = Time.monotonic + 20.seconds
           # Phase 1: Try loading from binary cache (fastest path)
@@ -1873,27 +1851,14 @@ module CrystalV2
             return
           end
 
-          debug("Falling back to LSP stub prelude definitions")
-          unless try_load_prelude(PRELUDE_STUB_PATH, "LSP stub prelude")
-            debug("Unable to load stub prelude; continuing without built-in symbols")
-            @prelude_state = nil
-            @prelude_mtime = nil
-          end
+          debug("Unable to load prelude; continuing without built-in symbols")
+          @prelude_state = nil
+          @prelude_mtime = nil
         end
 
-        # Background prelude loading: start with stub, load real prelude in background
+        # Background prelude loading
         private def load_prelude_background
-          # Phase 1: Immediately load stub prelude (fast, synchronous)
-          debug("Background indexing: loading stub prelude first")
-          unless try_load_prelude(PRELUDE_STUB_PATH, "LSP stub prelude")
-            debug("Unable to load stub prelude for background mode")
-            @prelude_state = nil
-            @prelude_mtime = nil
-          end
-
-          return unless @config.real_prelude
-
-          # Phase 2: Spawn background fiber to load real prelude
+          # Spawn background fiber to load prelude
           @prelude_loading = true
           channel = Channel(PreludeState?).new
           @prelude_load_channel = channel
@@ -1939,7 +1904,6 @@ module CrystalV2
                 dummy_program,
                 table,
                 [] of Diagnostic,
-                false, # not stub
                 {} of Semantic::Symbol => PreludeSymbolOrigin,
                 true # from_cache
               )
@@ -2008,7 +1972,7 @@ module CrystalV2
             request_semantic_tokens_refresh
             debug("Background prelude applied and client notified")
           else
-            debug("Background prelude loading failed, keeping stub")
+            debug("Background prelude loading failed")
           end
         end
 
@@ -2049,7 +2013,6 @@ module CrystalV2
             dummy_program,
             table,
             [] of Diagnostic,
-            false,
             {} of Semantic::Symbol => PreludeSymbolOrigin,
             true # from_cache
           )
@@ -2085,7 +2048,6 @@ module CrystalV2
 
         private def save_prelude_to_cache
           return unless prelude = @prelude_state
-          return if prelude.stub
           return if prelude.from_cache # Already loaded from cache, no need to re-save
 
           stdlib_path = File.dirname(PRELUDE_PATH)
@@ -2406,8 +2368,6 @@ module CrystalV2
                             build_single_file_prelude_state(path, program, source, diagnostics)
                           end
 
-          stub = path == PRELUDE_STUB_PATH
-
           if prelude_state.nil?
             log_prelude_diagnostics(label, diagnostics)
             STDERR.puts("[LSP] #{label} produced #{diagnostics.size} diagnostics; ignoring") if ENV["LSP_DEBUG"]?
@@ -2420,8 +2380,8 @@ module CrystalV2
           prelude_state = prelude_state.not_nil!
           table = prelude_state.symbol_table
 
-          # Sanity check: ensure basic builtins exist; otherwise prefer stub
-          unless stub || prelude_sanity_ok?(table)
+          # Sanity check: ensure basic builtins exist
+          unless prelude_sanity_ok?(table)
             STDERR.puts("[LSP] #{label} appears incomplete (missing Kernel.puts/Dir.glob); continuing with partial prelude") if ENV["LSP_DEBUG"]?
           end
 
@@ -2451,22 +2411,6 @@ module CrystalV2
           end
         end
 
-        private def stub_prelude_state : PreludeState?
-          return @stub_prelude_state if @stub_prelude_state_loaded
-          @stub_prelude_state_loaded = true
-
-          source = File.read(PRELUDE_STUB_PATH)
-          lexer = Frontend::Lexer.new(source)
-          parser = Frontend::Parser.new(lexer, recovery_mode: @config.parser_recovery_mode)
-          program = parser.parse_program
-          diagnostics = [] of Diagnostic
-          parser.diagnostics.each { |diag| diagnostics << Diagnostic.from_parser(diag) }
-          @stub_prelude_state = build_single_file_prelude_state(PRELUDE_STUB_PATH, program, source, diagnostics)
-        rescue ex
-          STDERR.puts("[LSP] Failed to load stub prelude fallback: #{ex.message}") if ENV["LSP_DEBUG"]?
-          @stub_prelude_state = nil
-        end
-
         private def build_single_file_prelude_state(
           path : String,
           program : Frontend::Program,
@@ -2492,8 +2436,7 @@ module CrystalV2
 
           uri = file_uri(path)
           origins = build_full_symbol_origin_map(analyzer.global_context.symbol_table, program, uri)
-          stub = path == PRELUDE_STUB_PATH
-          PreludeState.new(path, program, analyzer.global_context.symbol_table, diagnostics, stub, origins)
+          PreludeState.new(path, program, analyzer.global_context.symbol_table, diagnostics, origins)
         end
 
         private def build_real_prelude_state(
@@ -2515,7 +2458,7 @@ module CrystalV2
             debug("Prelude dependency processing reported failure; continuing with partial context")
           end
 
-          PreludeState.new(path, program, context.symbol_table, diagnostics, false, origins)
+          PreludeState.new(path, program, context.symbol_table, diagnostics, origins)
         end
 
         private def process_prelude_dependency(
@@ -2875,7 +2818,7 @@ module CrystalV2
 
         private def ensure_prelude_loaded
           unless prelude = @prelude_state
-            debug("Prelude missing; loading stub + background real prelude")
+            debug("Prelude missing; loading in background")
             load_prelude_background
             return
           end
@@ -2885,12 +2828,12 @@ module CrystalV2
           if File.exists?(active_path)
             mtime = File.info(active_path).modification_time
             if @prelude_mtime.nil? || mtime != @prelude_mtime
-              debug("Active prelude changed on disk; reloading")
+              debug("Prelude changed on disk; reloading")
               load_prelude
               return
             end
           else
-            debug("Active prelude file missing at #{active_path}; clearing cached state")
+            debug("Prelude file missing at #{active_path}; clearing cached state")
             @prelude_state = nil
             @prelude_mtime = nil
             load_prelude
@@ -2900,13 +2843,8 @@ module CrystalV2
           if prelude.path != PRELUDE_PATH && File.exists?(PRELUDE_PATH)
             real_mtime = File.info(PRELUDE_PATH).modification_time
             if @prelude_real_mtime.nil? || real_mtime != @prelude_real_mtime
-              debug("Real Crystal prelude changed; attempting reload")
-              if @config.real_prelude
-                load_prelude
-              else
-                # Stay on stub-only mode
-                debug("Real prelude reload skipped (real_prelude disabled)")
-              end
+              debug("Crystal prelude changed; reloading")
+              load_prelude
             end
           end
         end
@@ -3192,11 +3130,6 @@ module CrystalV2
         private def location_for_prelude_symbol(symbol : Semantic::Symbol) : Location?
           if prelude = @prelude_state
             if origin = prelude.symbol_origins[symbol]?
-              return cached_location_for(symbol) || Location.from_symbol(symbol, origin.program, origin.uri)
-            end
-          end
-          if stub = stub_prelude_state
-            if origin = stub.symbol_origins[symbol]?
               return cached_location_for(symbol) || Location.from_symbol(symbol, origin.program, origin.uri)
             end
           end
@@ -3874,7 +3807,6 @@ module CrystalV2
             display_name = method_name_for_call(node, doc_state.program.arena)
           when Frontend::MemberAccessNode
             method_symbol ||= resolve_member_access_method_symbol(node, doc_state)
-            method_symbol ||= resolve_member_access_method_symbol_stub(node, doc_state, String.new(node.member))
             display_name = String.new(node.member)
           when Frontend::SafeNavigationNode
             method_symbol ||= resolve_safe_navigation_method_symbol(node, doc_state)
@@ -4294,8 +4226,7 @@ module CrystalV2
 
         private def current_prelude_label : String
           if prelude = @prelude_state
-            stub = prelude.stub ? "(stub)" : "(real)"
-            "#{prelude.path} #{stub}"
+            "#{prelude.path}"
           else
             "none"
           end
@@ -6814,11 +6745,6 @@ module CrystalV2
 
           if method_symbol = resolve_member_access_method_symbol(node, doc_state)
             if location = location_for_symbol(method_symbol) || location_for_prelude_symbol(method_symbol)
-              if location.uri.ends_with?("prelude_stub.cr")
-                if alt = find_prelude_method_location(receiver_symbol, String.new(node.member), receiver_name_hint)
-                  return alt
-                end
-              end
               return location
             end
             return cached_location_for(method_symbol) || Location.from_symbol(method_symbol, doc_state.program, uri)
@@ -7004,8 +6930,6 @@ module CrystalV2
                             find_constructor_symbol(receiver_symbol, prelude_table)
           end
 
-          method_symbol ||= resolve_member_access_method_symbol_stub(node, doc_state, method_name)
-
           if method_symbol.nil? && receiver_symbol && ENV["LSP_DEBUG"]?
             if origin = prelude_state.try(&.symbol_origins[receiver_symbol]?)
               debug("MemberAccess fallback missed: receiver=#{receiver_symbol.class} origin=#{origin.uri} candidates=#{@methods_by_name[method_name]?.try(&.size) || 0}")
@@ -7055,38 +6979,7 @@ module CrystalV2
             end
           end
 
-          if stub = stub_prelude_state
-            if alt = stub.symbol_table.lookup(name)
-              return alt if alt.is_a?(Semantic::ClassSymbol)
-            end
-          end
-
           receiver_symbol
-        end
-
-        private def resolve_member_access_method_symbol_stub(
-          node : Frontend::MemberAccessNode,
-          doc_state : DocumentState,
-          method_name : String,
-        ) : Semantic::MethodSymbol?
-          stub = stub_prelude_state
-          return nil unless stub
-
-          receiver_symbol = resolve_receiver_symbol(doc_state, node.object)
-          receiver_symbol ||= receiver_symbol_from_new_call(node.object, doc_state)
-          receiver_name = receiver_symbol.try(&.name) || receiver_name_for(doc_state.program.arena, node.object)
-          return nil unless receiver_name
-
-          stub_receiver = resolve_path_symbol_in_table(stub.symbol_table, [receiver_name])
-          case stub_receiver
-          when Semantic::ClassSymbol
-            find_class_method_in_hierarchy(stub_receiver, method_name, stub.symbol_table) ||
-              find_method_in_class_hierarchy(stub_receiver, method_name, stub.symbol_table)
-          when Semantic::ModuleSymbol
-            find_method_in_scope(stub_receiver.scope, method_name)
-          else
-            nil
-          end
         end
 
         private def definition_from_path(node : Frontend::PathNode, doc_state : DocumentState, uri : String, target_offset : Int32? = nil) : Location?
@@ -8116,24 +8009,13 @@ module CrystalV2
           if receiver_name
             cache_key = "#{receiver_name}.#{method_name}"
             cached = @prelude_method_index[cache_key]?
-            # If cached points to stub, keep searching for a real definition
-            if cached && !cached.uri.ends_with?("prelude_stub.cr")
-              return cached
-            end
+            return cached if cached
 
             base_dir = File.dirname(PRELUDE_PATH)
             candidate = File.join(base_dir, "#{receiver_name.downcase}.cr")
             if File.file?(candidate)
               if location = find_method_in_file(candidate, method_name)
                 @prelude_method_index[cache_key] = location
-                return location
-              end
-            end
-          end
-
-          if stub = stub_prelude_state
-            if File.file?(stub.path)
-              if location = find_method_in_file(stub.path, method_name)
                 return location
               end
             end
