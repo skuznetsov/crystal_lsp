@@ -79,6 +79,7 @@ module CrystalV2
         when Frontend::DefNode
           handle_def(node_id, node)
         when Frontend::ClassNode
+          # Note: Structs are also parsed as ClassNode with is_struct=true
           handle_class(node_id, node)
         when Frontend::ModuleNode
           handle_module(node_id, node)
@@ -202,10 +203,23 @@ module CrystalV2
 
           table = current_table
           existing = table.lookup_local(name)
-          instance_scope = existing.is_a?(ClassSymbol) ? existing.scope : SymbolTable.new(table)
+          # Reuse existing scope if available (from ClassSymbol or ModuleSymbol)
+          # This handles reopening scenarios and parser quirks with path-based module names
+          instance_scope = case existing
+                           when ClassSymbol
+                             existing.scope
+                           when ModuleSymbol
+                             existing.scope  # Reuse module scope when class/struct overwrites module
+                           else
+                             SymbolTable.new(table)
+                           end
           meta_scope = existing.is_a?(ClassSymbol) ? existing.class_scope : SymbolTable.new(table)
 
-          class_symbol = ClassSymbol.new(name, node_id, scope: instance_scope, class_scope: meta_scope, superclass_name: super_name, type_parameters: type_params)
+          # Check if this is a struct (is_struct flag set by parser for `struct X` syntax)
+          is_struct = node.is_struct == true
+          # For structs without explicit superclass, default to "Struct"
+          effective_super = is_struct && super_name.nil? ? "Struct" : super_name
+          class_symbol = ClassSymbol.new(name, node_id, scope: instance_scope, class_scope: meta_scope, superclass_name: effective_super, type_parameters: type_params, is_struct: is_struct)
           assign_symbol_file(class_symbol, node_id)
 
           if existing
@@ -249,6 +263,17 @@ module CrystalV2
           table = current_table
 
           symbol = table.lookup_local(name)
+
+          # If there's already a ClassSymbol (e.g., from struct Time), reuse its scope
+          # This handles reopening scenarios where `module Foo` appears after `class Foo`
+          if symbol.is_a?(ClassSymbol)
+            # Reuse the existing class symbol's scope for module-style reopening
+            push_table(symbol.scope)
+            (node.body || [] of Frontend::ExprId).each { |expr_id| visit(expr_id) }
+            pop_table
+            return
+          end
+
           module_symbol = case symbol
           when ModuleSymbol
             symbol.node_id = node_id
@@ -818,8 +843,16 @@ module CrystalV2
               scope: existing.scope,
               class_scope: existing.class_scope,
               superclass_name: new_symbol.superclass_name || existing.superclass_name,
-              type_parameters: new_symbol.type_parameters || existing.type_parameters
+              type_parameters: new_symbol.type_parameters || existing.type_parameters,
+              is_struct: new_symbol.is_struct? || existing.is_struct?
             )
+            assign_symbol_file(new_symbol, new_symbol.node_id)
+            table.redefine(name, new_symbol)
+          when ModuleSymbol
+            # Handle the case where a class/struct definition replaces a module
+            # This happens when parser creates `module X` for `module A::B::X`
+            # (losing the path prefix), and later `struct X` is properly defined.
+            # Reuse the module's scope as the class's instance scope.
             assign_symbol_file(new_symbol, new_symbol.node_id)
             table.redefine(name, new_symbol)
           when MethodSymbol, MacroSymbol, VariableSymbol

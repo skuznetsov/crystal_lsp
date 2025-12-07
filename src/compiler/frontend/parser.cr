@@ -5491,15 +5491,56 @@ module CrystalV2
           last_token
         end
 
+        # Parse a constant name path (A::B::C) and return all segments as tokens.
+        # Returns array of tokens for each segment, or nil on error.
+        # Used for creating nested module/class structures.
+        private def parse_constant_name_segments : Array(Token)?
+          segments = [] of Token
+          token = current_token
+
+          # Handle optional leading ::
+          if token.kind == Token::Kind::ColonColon
+            advance
+            skip_trivia
+            token = current_token
+          end
+
+          unless token.kind == Token::Kind::Identifier
+            emit_unexpected(token)
+            return nil
+          end
+
+          segments << token
+          advance
+
+          while current_token.kind == Token::Kind::ColonColon
+            advance
+            skip_trivia
+
+            token = current_token
+            unless token.kind == Token::Kind::Identifier
+              emit_unexpected(token)
+              return nil
+            end
+
+            segments << token
+            advance
+          end
+
+          segments
+        end
+
         # Phase 32: Modified to support both class and struct
         # Phase 36: Modified to support abstract modifier
+        # For class A::B::C, creates nested structure: module A { module B { class C { ... } } }
         private def parse_class(is_struct : Bool = false, is_union : Bool = false, is_abstract : Bool = false) : ExprId
           class_token = current_token
           advance
           skip_trivia
 
-          name_token = parse_constant_name_token
-          return PREFIX_ERROR unless name_token
+          # Parse all path segments (e.g., [A, B, C] for class A::B::C)
+          name_segments = parse_constant_name_segments
+          return PREFIX_ERROR unless name_segments
           skip_trivia
 
           # Phase 61: Parse optional type parameters: (T, K, V)
@@ -5660,13 +5701,17 @@ module CrystalV2
             class_token.span
           end
 
-          # Phase 32: Choose kind based on is_struct flag
-          # Phase 97: Choose kind based on is_union flag
-          # Note: kind preserved in ClassNode via is_struct/is_union flags
-          @arena.add_typed(
+          # Build nested structure for path-based class names
+          # For class A::B::C, we create:
+          # ModuleNode(A, body: [ModuleNode(B, body: [ClassNode(C, ...)])])
+          innermost_idx = name_segments.size - 1
+          innermost_token = name_segments[innermost_idx]
+
+          # Phase 32: Create the innermost ClassNode
+          result_id = @arena.add_typed(
             ClassNode.new(
               class_span,
-              name_token.slice,
+              innermost_token.slice,
               super_name_token.try(&.slice),
               body_ids_b.to_a,
               is_abstract,
@@ -5675,6 +5720,21 @@ module CrystalV2
               type_params
             )
           )
+
+          # Wrap with outer modules (from inside out) for namespace segments
+          (innermost_idx - 1).downto(0) do |i|
+            segment_token = name_segments[i]
+            result_id = @arena.add_typed(
+              ModuleNode.new(
+                class_span,
+                segment_token.slice,
+                [result_id],
+                nil  # Namespace modules don't have type params
+              )
+            )
+          end
+
+          result_id
         end
 
         # Phase 32: Parse struct definition
@@ -6353,16 +6413,19 @@ module CrystalV2
 
         # Phase 31: Parse module definition
         # Grammar: module Name ... end
+        # For module A::B::C, creates nested structure: module A { module B { module C { ... } } }
         private def parse_module : ExprId
           module_token = current_token
           advance
           skip_trivia
 
-          name_token = parse_constant_name_token
-          return PREFIX_ERROR unless name_token
+          # Parse all path segments (e.g., [A, B, C] for module A::B::C)
+          name_segments = parse_constant_name_segments
+          return PREFIX_ERROR unless name_segments
           skip_trivia
 
           # Phase 61: Parse optional type parameters: (T, K, V)
+          # Type parameters only apply to the innermost module
           type_params = parse_type_parameters
 
           consume_newlines
@@ -6449,14 +6512,37 @@ module CrystalV2
             module_token.span
           end
 
-          @arena.add_typed(
+          # Build nested module structure from inside out
+          # For module A::B::C with body, we create:
+          # ModuleNode(A, body: [ModuleNode(B, body: [ModuleNode(C, body: original_body)])])
+          body = body_ids_b.to_a
+
+          # Start with innermost module (last segment)
+          innermost_idx = name_segments.size - 1
+          innermost_token = name_segments[innermost_idx]
+          result_id = @arena.add_typed(
             ModuleNode.new(
               module_span,
-              name_token.slice,
-              body_ids_b.to_a,
-              type_params
+              innermost_token.slice,
+              body,
+              type_params  # Type params only on innermost
             )
           )
+
+          # Wrap with outer modules (from inside out)
+          (innermost_idx - 1).downto(0) do |i|
+            segment_token = name_segments[i]
+            result_id = @arena.add_typed(
+              ModuleNode.new(
+                module_span,
+                segment_token.slice,
+                [result_id],
+                nil  # Outer modules don't have type params
+              )
+            )
+          end
+
+          result_id
         end
 
         # Phase 31: Parse include statement

@@ -55,8 +55,10 @@ module CrystalV2
         getter annotations : Array(AnnotationInfo)
         # Collected annotations per instance variable name (without leading "@")
         getter ivar_annotations : Hash(String, Array(AnnotationInfo))
+        # True if this is a struct (value type) rather than a class (reference type)
+        getter? is_struct : Bool
 
-        def initialize(name : String, node_id : ExprId, *, scope : SymbolTable, class_scope : SymbolTable, superclass_name : String? = nil, type_parameters : Array(String)? = nil)
+        def initialize(name : String, node_id : ExprId, *, scope : SymbolTable, class_scope : SymbolTable, superclass_name : String? = nil, type_parameters : Array(String)? = nil, is_struct : Bool = false)
           super(name, node_id)
           @scope = scope
           @class_scope = class_scope
@@ -65,6 +67,7 @@ module CrystalV2
           @type_parameters = type_parameters
           @annotations = [] of AnnotationInfo
           @ivar_annotations = {} of String => Array(AnnotationInfo)
+          @is_struct = is_struct
         end
 
         # Phase 5A: Track instance variable declarations
