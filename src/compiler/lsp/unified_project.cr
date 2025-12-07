@@ -12,6 +12,14 @@
 # 3. Invalidate affected symbols
 # 4. Re-analyze only dependent code
 
+require "./protocol"
+require "../semantic/symbol_table"
+require "../semantic/types/type_context"
+require "../semantic/analyzer"
+require "../frontend/ast"
+require "../frontend/lexer"
+require "../frontend/parser"
+
 module CrystalV2
   module Compiler
     module LSP

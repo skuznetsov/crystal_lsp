@@ -125,21 +125,31 @@ module CrystalV2
         end
       end
 
-      # Cache file format:
+      # Cache file format (v4):
       # - Magic: "CV2C" (4 bytes)
       # - Version: UInt32
       # - Hash of stdlib mtimes (UInt64, 8 bytes)
       # - Symbol count: UInt32
       # - Symbols: [CachedSymbolInfo...]
+      # - File count: UInt32
+      # - Files: [CachedFileState...]
+      # - TypeIndex data size: UInt32 (0 if none)
+      # - TypeIndex data: Bytes (binary serialized TypeIndex)
       class PreludeCache
         MAGIC   = "CV2C"
-        VERSION = 3_u32  # Align with project cache richness
+        VERSION = 4_u32  # Bumped for TypeIndex support
 
         getter symbols : Array(CachedSymbolInfo)
         getter stdlib_hash : UInt64
         getter files : Array(CachedFileState)
+        getter type_index : Semantic::TypeIndex?
 
-        def initialize(@symbols : Array(CachedSymbolInfo), @stdlib_hash : UInt64, @files : Array(CachedFileState) = [] of CachedFileState)
+        def initialize(
+          @symbols : Array(CachedSymbolInfo),
+          @stdlib_hash : UInt64,
+          @files : Array(CachedFileState) = [] of CachedFileState,
+          @type_index : Semantic::TypeIndex? = nil
+        )
         end
 
         def self.cache_path : String
@@ -181,7 +191,20 @@ module CrystalV2
               files << CachedFileState.from_bytes(io)
             end
 
-            new(symbols, stored_hash, files)
+            # Read TypeIndex (v4+)
+            type_index : Semantic::TypeIndex? = nil
+            begin
+              type_index_size = io.read_bytes(UInt32, IO::ByteFormat::LittleEndian)
+              if type_index_size > 0
+                type_index_data = Bytes.new(type_index_size)
+                io.read_fully(type_index_data)
+                type_index = Semantic::TypeIndex.read(IO::Memory.new(type_index_data))
+              end
+            rescue IO::EOFError
+              # Old cache without TypeIndex - that's fine
+            end
+
+            new(symbols, stored_hash, files, type_index)
           end
         rescue ex
           nil
@@ -205,6 +228,20 @@ module CrystalV2
 
             io.write_bytes(@files.size.to_u32, IO::ByteFormat::LittleEndian)
             @files.each(&.to_bytes(io))
+
+            # Write TypeIndex
+            if type_idx = @type_index
+              # Serialize to memory first to get size
+              type_index_io = IO::Memory.new
+              type_idx.write(type_index_io)
+              type_index_data = type_index_io.to_slice
+
+              io.write_bytes(type_index_data.size.to_u32, IO::ByteFormat::LittleEndian)
+              io.write(type_index_data)
+            else
+              # No TypeIndex
+              io.write_bytes(0_u32, IO::ByteFormat::LittleEndian)
+            end
           end
         end
 

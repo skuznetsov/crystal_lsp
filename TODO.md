@@ -148,6 +148,59 @@ Goal: v2 LSP must report only real errors and match original compiler behavior.
 
 ---
 
+## TypeIndex Integration (Phase 1-3)
+
+**Goal:** Replace JSON-based `expr_types_json` with binary TypeIndex for 40-60% storage reduction and faster loads.
+
+**Architecture (Quadrumvirate-analyzed 2025-12-06):**
+- TypeArena: Interned type storage with O(1) lookup via TypeId
+- ExprTypeIndex: Dense array + sparse hash hybrid for ExprId→TypeId
+- Binary serialization with magic bytes + version header
+- File range tracking for incremental invalidation
+
+### Phase 1: Parallel Storage (Complete)
+- [x] TypeIndex core implementation (type_index.cr)
+- [x] TypeArena with interning (14 tests pass)
+- [x] Binary serialization with symbol fallback
+- [x] Add TypeIndex to ProjectCache (v4)
+- [x] Add TypeIndex to PreludeCache (v4)
+- [x] Write both formats during save (JSON for backwards compat)
+- [x] Read TypeIndex when available, fallback on EOF
+
+### Phase 2: Validation (Complete)
+- [x] Add validation logging to load_from_cache
+- [x] Track metrics: matches, mismatches, json_only, typeindex_only
+- [x] Add reset_validation_metrics and validation_metrics accessors
+- [x] 4 validation spec tests passing
+- [x] Fixed ExprId collision via per-file TypeIndex partitioning
+
+**Phase 2 Implementation:**
+- TypeIndex now stores per-file ExprTypeIndex maps: `@file_expr_types : Hash(String, ExprTypeIndex)`
+- `set_type(path, expr_id, type)` and `get_type(path, expr_id)` for file-scoped access
+- TypeIndex serialization version bumped to v2 (per-file format)
+- Validation confirms 0 mismatches across multi-file scenarios
+
+**Phase 2 Benchmark Results:**
+- JSON parse: 0.166s for 1000 types × 100 iterations
+- Binary (TypeIndex): 0.029s for same workload
+- **Speedup: 5.6x faster** than JSON parsing
+- Storage: ~18KB JSON → ~8KB binary (estimated 40-55% reduction)
+
+### Phase 3: Migration (Complete)
+- [x] Deprecate expr_types_json (bump cache version to v5)
+- [x] TypeIndex becomes primary storage
+- [x] Remove JSON fallback code
+- [x] Update server.cr to use TypeIndex-only loading
+- [x] 199 LSP tests pass, 4 cache validation tests pass
+
+**Critical vulnerabilities (ADVERSARY analysis):**
+1. ExprId instability on file edit → must invalidate on change
+2. Symbol table load order → graceful PrimitiveType fallback
+3. Truncated file handling → robust EOF detection
+4. ~~ExprId collision across files~~ → **FIXED** via per-file partitioning
+
+---
+
 ## 5. Beyond Parity: IR & Codegen (Future)
 
 (After LSP correctness achieved)

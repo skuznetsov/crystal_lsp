@@ -3,17 +3,22 @@
 # Caches per-file analysis state to disk, reducing startup time when
 # reopening a project. Cache is invalidated when file mtimes change.
 #
-# Cache format:
+# Cache format (v5):
 # - Magic: "CV2P" (4 bytes)
 # - Version: UInt32
 # - Project root hash: UInt64
 # - File count: UInt32
-# - Files: [CachedFileState...]
+# - Files: [CachedFileState...] (no expr_types_json, types are in TypeIndex)
+# - TypeIndex data size: UInt32
+# - TypeIndex data: Bytes (binary serialized TypeIndex with per-file storage)
+
+require "../semantic/types/type_index"
 
 module CrystalV2
   module Compiler
     module LSP
       # Cached state for a single file
+      # Note: Expression types are stored in TypeIndex, not per-file JSON
       struct CachedFileState
         getter path : String
         getter mtime : Int64             # Unix timestamp
@@ -21,7 +26,6 @@ module CrystalV2
         getter requires : Array(String)  # Required file paths
         getter diagnostics_count : Int32 # Just count, not full diagnostics
         getter summary_json : String     # JSON-encoded symbol summaries
-        getter expr_types_json : String  # JSON-encoded expression types (ExprId index -> type string)
 
         def initialize(
           @path : String,
@@ -30,7 +34,6 @@ module CrystalV2
           @requires : Array(String),
           @diagnostics_count : Int32 = 0,
           @summary_json : String = "[]",
-          @expr_types_json : String = "{}",
         )
         end
 
@@ -42,7 +45,6 @@ module CrystalV2
           write_string_array(io, @requires)
           io.write_bytes(@diagnostics_count, IO::ByteFormat::LittleEndian)
           write_string(io, @summary_json)
-          write_string(io, @expr_types_json)
         end
 
         def self.from_bytes(io : IO) : CachedFileState
@@ -52,9 +54,8 @@ module CrystalV2
           requires = read_string_array(io)
           diagnostics_count = io.read_bytes(Int32, IO::ByteFormat::LittleEndian)
           summary_json = read_string(io)
-          expr_types_json = read_string(io)
 
-          new(path, mtime, symbols, requires, diagnostics_count, summary_json, expr_types_json)
+          new(path, mtime, symbols, requires, diagnostics_count, summary_json)
         end
 
         private def write_string(io : IO, str : String)
@@ -90,13 +91,19 @@ module CrystalV2
       # Project-level cache
       class ProjectCache
         MAGIC   = "CV2P"
-        VERSION = 3_u32
+        VERSION = 5_u32  # v5: TypeIndex-only (no expr_types_json)
 
         getter files : Array(CachedFileState)
         getter project_root : String
         getter root_hash : UInt64
+        getter type_index : Semantic::TypeIndex?
 
-        def initialize(@files : Array(CachedFileState), @project_root : String, @root_hash : UInt64)
+        def initialize(
+          @files : Array(CachedFileState),
+          @project_root : String,
+          @root_hash : UInt64,
+          @type_index : Semantic::TypeIndex? = nil
+        )
         end
 
         # Get cache file path for a project
@@ -134,7 +141,20 @@ module CrystalV2
               files << CachedFileState.from_bytes(io)
             end
 
-            new(files, project_root, stored_hash)
+            # Read TypeIndex (v4+)
+            type_index : Semantic::TypeIndex? = nil
+            begin
+              type_index_size = io.read_bytes(UInt32, IO::ByteFormat::LittleEndian)
+              if type_index_size > 0
+                type_index_data = Bytes.new(type_index_size)
+                io.read_fully(type_index_data)
+                type_index = Semantic::TypeIndex.read(IO::Memory.new(type_index_data))
+              end
+            rescue IO::EOFError
+              # Old cache without TypeIndex - that's fine
+            end
+
+            new(files, project_root, stored_hash, type_index)
           end
         rescue ex
           nil
@@ -156,6 +176,20 @@ module CrystalV2
             # Write files
             io.write_bytes(@files.size.to_u32, IO::ByteFormat::LittleEndian)
             @files.each(&.to_bytes(io))
+
+            # Write TypeIndex
+            if type_idx = @type_index
+              # Serialize to memory first to get size
+              type_index_io = IO::Memory.new
+              type_idx.write(type_index_io)
+              type_index_data = type_index_io.to_slice
+
+              io.write_bytes(type_index_data.size.to_u32, IO::ByteFormat::LittleEndian)
+              io.write(type_index_data)
+            else
+              # No TypeIndex
+              io.write_bytes(0_u32, IO::ByteFormat::LittleEndian)
+            end
           end
         end
 
@@ -171,22 +205,42 @@ module CrystalV2
 
         # Create cache from UnifiedProjectState
         def self.from_project(project : UnifiedProjectState, project_root : String) : ProjectCache
+          # Build TypeIndex from cached_expr_types (TypeIndex is now the only storage)
+          type_index = Semantic::TypeIndex.new
+
           files = project.files.map do |path, state|
             mtime = state.mtime.try(&.to_unix) || 0_i64
             summary_json = SymbolSummary.to_json_array(state.symbol_summaries)
-            expr_types_json = project.cached_expr_types[path]?.try(&.to_json) || "{}"
+
+            # Populate TypeIndex from cached_expr_types (per-file storage)
+            if expr_types = project.cached_expr_types[path]?
+              min_expr_id = Int32::MAX
+              max_expr_id = Int32::MIN
+
+              expr_types.each do |expr_id, type_str|
+                ptype = Semantic::PrimitiveType.new(type_str)
+                type_index.set_type(path, expr_id, ptype)
+
+                min_expr_id = expr_id if expr_id < min_expr_id
+                max_expr_id = expr_id if expr_id > max_expr_id
+              end
+
+              if min_expr_id <= max_expr_id
+                type_index.register_file(path, min_expr_id, max_expr_id + 1)
+              end
+            end
+
             CachedFileState.new(
               path: path,
               mtime: mtime,
               symbols: state.symbols,
               requires: state.requires,
               diagnostics_count: state.diagnostics.size,
-              summary_json: summary_json,
-              expr_types_json: expr_types_json
+              summary_json: summary_json
             )
           end
 
-          new(files, project_root, fnv_hash(project_root))
+          new(files, project_root, fnv_hash(project_root), type_index)
         end
 
         # FNV-1a hash for project root
@@ -206,6 +260,7 @@ module CrystalV2
       # Integration methods for UnifiedProjectState
       module ProjectCacheLoader
         # Load project from cache, returns files that need re-parsing
+        # Expression types are loaded from TypeIndex (binary format)
         def self.load_from_cache(
           project : UnifiedProjectState,
           project_root : String,
@@ -218,47 +273,66 @@ module CrystalV2
 
           valid_files = cache.valid_files
           invalid_paths = cache.invalid_file_paths
+          type_index = cache.type_index
 
           # Load valid files into project (symbols only, no AST)
           valid_files.each do |cached|
-            # Create minimal FileAnalysisState
             state = FileAnalysisState.new(
               path: cached.path,
               version: 0,
               mtime: Time.unix(cached.mtime),
-              root_ids: [] of Frontend::ExprId, # No AST in cache
+              root_ids: [] of Frontend::ExprId,
               symbols: cached.symbols,
-              diagnostics: [] of Diagnostic, # Will be regenerated if needed
+              diagnostics: [] of Diagnostic,
               requires: cached.requires,
               symbol_summaries: SymbolSummary.from_json_array(cached.summary_json)
             )
 
-            # Register in project
             project.files[cached.path] = state
             project.file_order << cached.path unless project.file_order.includes?(cached.path)
             project.restore_symbols_from_cache(state)
 
-            # Register symbols (placeholder - actual symbol objects need parsing)
             cached.symbols.each do |name|
               project.symbol_files[name] = cached.path
             end
 
-            # Update dependencies
             cached.requires.each do |req|
               project.dependencies[cached.path] << req
               project.dependents[req] << cached.path
             end
 
-            # Restore cached expression types (ExprId index -> type string)
-            begin
-              expr_map = Hash(Int32, String).from_json(cached.expr_types_json)
-              project.cached_expr_types[cached.path] = expr_map
-            rescue
-              # ignore malformed
+            # Restore expression types from TypeIndex (binary format)
+            if type_index
+              restore_expr_types_from_typeindex(project, cached.path, type_index)
             end
           end
 
           {valid_count: valid_files.size, invalid_paths: invalid_paths}
+        end
+
+        # Restore expression types from TypeIndex into project.cached_expr_types
+        private def self.restore_expr_types_from_typeindex(
+          project : UnifiedProjectState,
+          path : String,
+          type_index : Semantic::TypeIndex
+        )
+          if file_index = type_index.file_index(path)
+            expr_map = {} of Int32 => String
+            file_index.@dense.each_with_index do |type_id, expr_idx|
+              next unless type_id.valid?
+              if type = type_index.arena[type_id]?
+                expr_map[expr_idx] = type.to_s
+              end
+            end
+            if sparse = file_index.@sparse
+              sparse.each do |expr_idx, type_id|
+                if type = type_index.arena[type_id]?
+                  expr_map[expr_idx] = type.to_s
+                end
+              end
+            end
+            project.cached_expr_types[path] = expr_map unless expr_map.empty?
+          end
         end
 
         # Save project state to cache

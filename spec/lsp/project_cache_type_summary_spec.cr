@@ -1,4 +1,5 @@
 require "spec"
+require "json"
 require "file_utils"
 require "random/secure"
 

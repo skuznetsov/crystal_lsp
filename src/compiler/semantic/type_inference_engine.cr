@@ -1,4 +1,5 @@
 require "./types/type_context"
+require "./types/type_index"
 require "./types/type"
 require "./types/primitive_type"
 require "./types/class_type"

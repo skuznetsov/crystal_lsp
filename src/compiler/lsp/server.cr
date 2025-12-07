@@ -2077,12 +2077,7 @@ module CrystalV2
               @cached_symbol_types
             )
 
-            begin
-              expr_map = Hash(Int32, String).from_json(file_state.expr_types_json)
-              @cached_expr_types[file_state.path] = expr_map unless expr_map.empty?
-            rescue
-              # ignore malformed cache entries
-            end
+            # Expression types are loaded from TypeIndex (handled in ProjectCacheLoader)
           end
 
           table
@@ -2162,7 +2157,6 @@ module CrystalV2
             program = program_map[path]? || prelude.program
             requires = collect_require_paths(program, File.dirname(path))
             mtime = File.info?(path).try(&.modification_time.to_unix) || 0_i64
-            expr_json = @cached_expr_types[path]?.try(&.to_json) || "{}"
 
             CachedFileState.new(
               path: path,
@@ -2170,8 +2164,7 @@ module CrystalV2
               symbols: summaries.map(&.name),
               requires: requires,
               diagnostics_count: 0,
-              summary_json: SymbolSummary.to_json_array(summaries),
-              expr_types_json: expr_json
+              summary_json: SymbolSummary.to_json_array(summaries)
             )
           end
         end
