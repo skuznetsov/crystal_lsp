@@ -33,13 +33,15 @@ module CrystalV2
         getter return_annotation : String?
         getter scope : SymbolTable
         getter type_parameters : Array(String)? # Week 1 Day 2: Generic method type params ["T", "U"]
+        property? is_class_method : Bool = false # def self.* vs def *
 
-        def initialize(name : String, node_id : ExprId, *, params : Array(Frontend::Parameter) = [] of Frontend::Parameter, return_annotation : String? = nil, scope : SymbolTable, type_parameters : Array(String)? = nil)
+        def initialize(name : String, node_id : ExprId, *, params : Array(Frontend::Parameter) = [] of Frontend::Parameter, return_annotation : String? = nil, scope : SymbolTable, type_parameters : Array(String)? = nil, is_class_method : Bool = false)
           super(name, node_id)
           @params = params
           @return_annotation = return_annotation
           @scope = scope
           @type_parameters = type_parameters
+          @is_class_method = is_class_method
         end
       end
 

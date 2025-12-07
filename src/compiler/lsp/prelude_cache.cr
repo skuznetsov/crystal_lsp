@@ -22,6 +22,7 @@ module CrystalV2
         getter return_type : String?          # for methods
         getter superclass : String?           # for classes
         getter type_params : Array(String)?   # for generic classes/methods
+        getter? is_class_method : Bool        # for methods: def self.* vs def *
 
         enum SymbolKind : UInt8
           Class
@@ -46,7 +47,8 @@ module CrystalV2
           @params : Array(String)? = nil,
           @return_type : String? = nil,
           @superclass : String? = nil,
-          @type_params : Array(String)? = nil
+          @type_params : Array(String)? = nil,
+          @is_class_method : Bool = false
         )
         end
 
@@ -63,6 +65,7 @@ module CrystalV2
           write_optional_string(io, @return_type)
           write_optional_string(io, @superclass)
           write_optional_string_array(io, @type_params)
+          io.write_byte(@is_class_method ? 1_u8 : 0_u8)
         end
 
         def self.from_bytes(io : IO) : CachedSymbolInfo
@@ -77,8 +80,9 @@ module CrystalV2
           return_type = read_optional_string(io)
           superclass = read_optional_string(io)
           type_params = read_optional_string_array(io)
+          is_class_method = io.read_byte.not_nil! == 1_u8
 
-          new(name, kind, file_path, line, column, type_annotation, parent_scope, params, return_type, superclass, type_params)
+          new(name, kind, file_path, line, column, type_annotation, parent_scope, params, return_type, superclass, type_params, is_class_method)
         end
 
         private def write_string(io : IO, str : String)
@@ -125,7 +129,7 @@ module CrystalV2
         end
       end
 
-      # Cache file format (v4):
+      # Cache file format (v5):
       # - Magic: "CV2C" (4 bytes)
       # - Version: UInt32
       # - Hash of stdlib mtimes (UInt64, 8 bytes)
@@ -137,7 +141,7 @@ module CrystalV2
       # - TypeIndex data: Bytes (binary serialized TypeIndex)
       class PreludeCache
         MAGIC   = "CV2C"
-        VERSION = 4_u32  # Bumped for TypeIndex support
+        VERSION = 5_u32  # Bumped for is_class_method support (class methods in class_scope)
 
         getter symbols : Array(CachedSymbolInfo)
         getter stdlib_hash : UInt64
@@ -305,8 +309,12 @@ module CrystalV2
             # Recurse into nested scopes
             case symbol
             when Semantic::ClassSymbol
+              # Extract instance methods from scope
               nested = extract_symbols(symbol.scope, program, symbol.file_path || file_path, name)
               result.concat(nested)
+              # Extract class methods from class_scope (def self.*)
+              class_nested = extract_symbols(symbol.class_scope, program, symbol.file_path || file_path, name)
+              result.concat(class_nested)
             when Semantic::ModuleSymbol
               nested = extract_symbols(symbol.scope, program, symbol.file_path || file_path, name)
               result.concat(nested)
@@ -362,7 +370,8 @@ module CrystalV2
               parent_scope: parent_scope,
               params: params,
               return_type: symbol.return_annotation,
-              type_params: symbol.type_parameters
+              type_params: symbol.type_parameters,
+              is_class_method: symbol.is_class_method?
             )
           when Semantic::MacroSymbol
             CachedSymbolInfo.new(
@@ -434,6 +443,7 @@ module CrystalV2
         def self.rebuild_table(cache : PreludeCache) : Semantic::SymbolTable
           table = Semantic::SymbolTable.new
           scope_cache = {} of String => Semantic::SymbolTable
+          class_scope_cache = {} of String => Semantic::SymbolTable # for def self.* methods
 
           # First pass: create all top-level symbols and scopes
           cache.symbols.each do |info|
@@ -446,6 +456,7 @@ module CrystalV2
               table.define(info.name, symbol)
               if symbol.is_a?(Semantic::ClassSymbol)
                 scope_cache[info.name] = symbol.scope
+                class_scope_cache[info.name] = symbol.class_scope
               elsif symbol.is_a?(Semantic::ModuleSymbol)
                 scope_cache[info.name] = symbol.scope
               end
@@ -458,7 +469,12 @@ module CrystalV2
           cache.symbols.each do |info|
             next unless parent = info.parent_scope
 
-            scope = scope_cache[parent]?
+            # For class methods (def self.*), use class_scope; otherwise use instance scope
+            scope = if info.is_class_method? && info.kind.method?
+                      class_scope_cache[parent]?
+                    else
+                      scope_cache[parent]?
+                    end
             next unless scope
 
             symbol = create_symbol(info)
@@ -468,6 +484,7 @@ module CrystalV2
               scope.define(info.name, symbol)
               if symbol.is_a?(Semantic::ClassSymbol)
                 scope_cache["#{parent}::#{info.name}"] = symbol.scope
+                class_scope_cache["#{parent}::#{info.name}"] = symbol.class_scope
               elsif symbol.is_a?(Semantic::ModuleSymbol)
                 scope_cache["#{parent}::#{info.name}"] = symbol.scope
               end
@@ -513,7 +530,8 @@ module CrystalV2
               params: params,
               return_annotation: info.return_type,
               scope: scope,
-              type_parameters: info.type_params
+              type_parameters: info.type_params,
+              is_class_method: info.is_class_method?
             )
             symbol.file_path = info.file_path
             symbol

@@ -138,12 +138,14 @@ module CrystalV2
 
           receiver = node.receiver
           target_table = current_table
+          is_class_method = false
           if receiver && receiver == "self"
             target_table = @class_stack.last?.try(&.class_scope) || current_table
+            is_class_method = true
           end
 
           method_scope = SymbolTable.new(target_table)
-          method_symbol = MethodSymbol.new(name, node_id, params: params, return_annotation: return_annotation, scope: method_scope, type_parameters: type_params)
+          method_symbol = MethodSymbol.new(name, node_id, params: params, return_annotation: return_annotation, scope: method_scope, type_parameters: type_params, is_class_method: is_class_method)
           assign_symbol_file(method_symbol, node_id)
 
           table = target_table

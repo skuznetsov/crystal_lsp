@@ -2207,7 +2207,8 @@ module CrystalV2
               column: column,
               params: params,
               return_type: symbol.return_annotation,
-              type_params: symbol.type_parameters
+              type_params: symbol.type_parameters,
+              is_class_method: symbol.is_class_method?
             )
           when Semantic::MacroSymbol
             CachedSymbolInfo.new(
@@ -3880,7 +3881,9 @@ module CrystalV2
             display_name = String.new(node.member)
           end
 
+          debug("Hover method_symbol=#{method_symbol ? "#{method_symbol.name}(#{method_symbol.return_annotation.inspect})" : "nil"}")
           method_signature = method_symbol ? method_signature_for(method_symbol, doc_state, display_name) : nil
+          debug("Hover method_signature=#{method_signature.inspect}")
 
           type_str = type.try(&.to_s)
           type_str ||= cached_type_str

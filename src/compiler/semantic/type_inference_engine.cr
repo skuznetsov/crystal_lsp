@@ -2787,8 +2787,8 @@ module CrystalV2
 
           case receiver_type
           when ClassType
-            # Look in class scope
-            if symbol = receiver_type.symbol.scope.lookup(method_name)
+            # Look in class_scope for class methods (def self.*)
+            if symbol = receiver_type.symbol.class_scope.lookup(method_name)
               case symbol
               when MethodSymbol
                 # Single method
@@ -2799,9 +2799,9 @@ module CrystalV2
               end
             end
 
-            # Phase 4B.2: Inheritance search - look in superclass
+            # Phase 4B.2: Inheritance search - look in superclass class_scope
             if methods.empty?
-              methods.concat(find_in_superclass(receiver_type.symbol, method_name))
+              methods.concat(find_in_superclass(receiver_type.symbol, method_name, class_methods: true))
             end
           when InstanceType
             # Phase 4B.2: Look for instance methods in class scope
@@ -2850,7 +2850,8 @@ module CrystalV2
         end
 
         # Phase 4B.2: Recursively search for method in superclass chain
-        private def find_in_superclass(class_symbol : ClassSymbol, method_name : String, visited = Set(ClassSymbol).new) : Array(MethodSymbol)
+        # class_methods: true searches in class_scope (for def self.*), false searches in scope (for instance methods)
+        private def find_in_superclass(class_symbol : ClassSymbol, method_name : String, *, class_methods : Bool = false, visited = Set(ClassSymbol).new) : Array(MethodSymbol)
           guard_watchdog!
 
           return [] of MethodSymbol if visited.includes?(class_symbol)
@@ -2866,8 +2867,9 @@ module CrystalV2
           superclass_symbol = @global_table.try(&.lookup(superclass_name))
           return methods unless superclass_symbol.is_a?(ClassSymbol)
 
-          # Look for method in superclass scope
-          if symbol = superclass_symbol.scope.lookup(method_name)
+          # Look for method in superclass scope (class_scope for class methods, scope for instance methods)
+          target_scope = class_methods ? superclass_symbol.class_scope : superclass_symbol.scope
+          if symbol = target_scope.lookup(method_name)
             case symbol
             when MethodSymbol
               methods << symbol
@@ -2878,7 +2880,7 @@ module CrystalV2
 
           # Recursively search in superclass's superclass
           if methods.empty?
-            methods.concat(find_in_superclass(superclass_symbol, method_name, visited))
+            methods.concat(find_in_superclass(superclass_symbol, method_name, class_methods: class_methods, visited: visited))
           end
 
           methods
