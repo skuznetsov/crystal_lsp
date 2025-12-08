@@ -183,7 +183,7 @@ Goal: v2 LSP must report only real errors and match original compiler behavior.
 
 ### Tests Needed
 - [x] Structured LSP tests for stdlib symbols (`Time.now`, `File.basename`, array types, etc.) - see `stdlib_hover_spec.cr`, `stdlib_navigation_spec.cr`
-- [ ] Diff v2 diagnostics against original compiler on representative files
+- [x] Diff v2 diagnostics against original compiler on representative files (0 false positives on 30 files)
 - [ ] Hover/definition regression spec covering cached types across required files
 - [x] Integration specs for hover/definition sequences (single-file path regression)
 - [x] Integration specs for references via server across VirtualArena requires
@@ -206,13 +206,13 @@ Goal: v2 LSP must report only real errors and match original compiler behavior.
 ## LSP Project Cache (New)
 - [x] Versioned project cache (v2) with symbol summaries (classes/modules/method signatures) + real mtime
 - [x] Background indexing of `root/src/**/*.cr` to populate cache automatically
-- [ ] Extend summaries with ivars/consts and richer type info (params/return types already stored)
+- [x] Extend summaries with ivars/class vars/consts (class vars and constants now collected from class_scope)
 - [x] Restore symbol_table from cache for unchanged files; avoid re-parse/resolve when mtime matches (spans placeholder)
 - [x] Merge cached project symbols into analysis to avoid reloading requires on warm didOpen
 - [x] Cache and restore symbol spans and inferred types in summaries (cache version v3); expose cached types for hover/definition fallback
 - [ ] Mark cached files (`from_cache`) and use summaries for hover/definition when AST is missing
 - [ ] Strict cache validation (version/root hash/mtime) with full reparse fallback (root hash/version done; add fallback wiring)
-- [ ] Extend summaries with ivars/class vars/consts and richer type info; reuse same pipeline for prelude
+- [x] Extend summaries with ivars/class vars/consts and richer type info; reuse same pipeline for prelude
 - [ ] Make cache/inference idempotent: if infer times out, resume later and backfill tables in background fibers
 - [ ] Apply rich cache pipeline to prelude: spans/types/ivars/class vars, rebuild prelude symbol_table from cache without full parse when unchanged
 
