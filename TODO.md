@@ -94,7 +94,7 @@ about syntax or types and should match what the original compiler would report.
 
 ---
 
-## 3. Semantic & Type Inference - IN PROGRESS (~70%)
+## 3. Semantic & Type Inference - IN PROGRESS (~75%)
 
 - [x] Basic type inference (literals, variables, simple methods)
 - [x] Symbol table with scope tracking
@@ -117,8 +117,16 @@ about syntax or types and should match what the original compiler would report.
 - [x] Transitive include support (C includes B includes A)
 - [x] extend adds to class_scope for class methods
 
+### Completed Flow Typing
+- [x] Union type narrowing with flow-sensitive analysis (Phase 96)
+- [x] Nil check narrowing: `if x` where x : T? narrows to T
+- [x] is_a? narrowing: `if x.is_a?(T)` narrows to T
+- [x] Negative narrowing in else branch (remaining types)
+- [x] T? syntax parsing as T | Nil union
+- [x] T | U | V union syntax parsing
+
 ### TODO: Advanced Type System
-- [ ] Union type narrowing with flow-sensitive analysis (`if var`, `is_a?`, `case`)
+- [ ] Case/when type narrowing
 - [ ] Method overload resolution based on argument types
 - [ ] Virtual types (inheritance-aware method dispatch)
 - [ ] Integrate macro expansion into semantic phase
@@ -314,6 +322,6 @@ AST + Type Graph
 | Lexer | Complete | Part of parser tests |
 | AST | Complete | Class inheritance done |
 | MacroExpander | ~90% | MVP + ann[:key] + typeof/sizeof + @type.name(generic_args) |
-| Type Inference | ~70% | Full type graph + ProcType + NamedTupleType + include/extend |
+| Type Inference | ~75% | Full type graph + ProcType + NamedTupleType + include/extend + flow typing |
 | LSP Server | ~70% | 21 methods implemented |
 | Codegen | 0% | Future phase |
