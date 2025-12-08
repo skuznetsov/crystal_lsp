@@ -2852,7 +2852,7 @@ module CrystalV2
           methods
         end
 
-        # Phase 4B.2: Recursively search for method in superclass chain
+        # Phase 4B.2: Recursively search for method in superclass chain and included modules
         # class_methods: true searches in class_scope (for def self.*), false searches in scope (for instance methods)
         private def find_in_superclass(class_symbol : ClassSymbol, method_name : String, *, class_methods : Bool = false, visited = Set(ClassSymbol).new) : Array(MethodSymbol)
           guard_watchdog!
@@ -2861,6 +2861,22 @@ module CrystalV2
           visited << class_symbol
 
           methods = [] of MethodSymbol
+
+          # First, search in included modules (MRO: included modules come before superclass)
+          target_scope = class_methods ? class_symbol.class_scope : class_symbol.scope
+          target_scope.included_modules.each do |mod_symbol|
+            if symbol = mod_symbol.scope.lookup_local(method_name)
+              case symbol
+              when MethodSymbol
+                methods << symbol
+              when OverloadSetSymbol
+                methods.concat(symbol.overloads)
+              end
+            end
+          end
+
+          # If found in modules, return early
+          return methods unless methods.empty?
 
           # Get superclass name
           superclass_name = class_symbol.superclass_name
@@ -2871,8 +2887,8 @@ module CrystalV2
           return methods unless superclass_symbol.is_a?(ClassSymbol)
 
           # Look for method in superclass scope (class_scope for class methods, scope for instance methods)
-          target_scope = class_methods ? superclass_symbol.class_scope : superclass_symbol.scope
-          if symbol = target_scope.lookup(method_name)
+          super_target_scope = class_methods ? superclass_symbol.class_scope : superclass_symbol.scope
+          if symbol = super_target_scope.lookup(method_name)
             case symbol
             when MethodSymbol
               methods << symbol
@@ -2881,7 +2897,7 @@ module CrystalV2
             end
           end
 
-          # Recursively search in superclass's superclass
+          # Recursively search in superclass's superclass (and its included modules)
           if methods.empty?
             methods.concat(find_in_superclass(superclass_symbol, method_name, class_methods: class_methods, visited: visited))
           end

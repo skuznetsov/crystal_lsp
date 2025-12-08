@@ -702,6 +702,14 @@ module CrystalV2
               pending_annotations.clear
               handle_potential_macro_call(expr_id, node)
 
+            when Frontend::IncludeNode
+              pending_annotations.clear
+              handle_include(node)
+
+            when Frontend::ExtendNode
+              pending_annotations.clear
+              handle_extend(node)
+
             else
               # Any other node breaks the annotation chain
               pending_annotations.clear

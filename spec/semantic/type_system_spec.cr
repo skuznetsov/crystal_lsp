@@ -190,4 +190,74 @@ describe "Type System" do
       type.not_nil!.to_s.should eq("NamedTuple(x: Int32, y: Int32, z: Int32)")
     end
   end
+
+  # ==================================================================
+  # Module Include/Extend
+  # ==================================================================
+
+  describe "include/extend module support" do
+    it "finds method from included module" do
+      source = <<-CRYSTAL
+        module Greetable
+          def greet : String
+            "hello"
+          end
+        end
+
+        class Person
+          include Greetable
+        end
+
+        Person.new.greet
+        CRYSTAL
+
+      program, engine = infer_types(source)
+      # Should not have errors about missing method
+      engine.diagnostics.select(&.level.error?).each do |diag|
+        diag.message.should_not contain("not found")
+      end
+    end
+
+    it "handles module inheritance chain" do
+      source = <<-CRYSTAL
+        module A
+          def a_method : Int32
+            1
+          end
+        end
+
+        module B
+          include A
+        end
+
+        class C
+          include B
+        end
+
+        C.new.a_method
+        CRYSTAL
+
+      program, engine = infer_types(source)
+      engine.diagnostics.select { |d| d.level.error? && d.message.includes?("not found") }.should be_empty
+    end
+
+    it "extend adds class methods" do
+      source = <<-CRYSTAL
+        module ClassMethods
+          def create : String
+            "created"
+          end
+        end
+
+        class Factory
+          extend ClassMethods
+        end
+
+        Factory.create
+        CRYSTAL
+
+      program, engine = infer_types(source)
+      engine.diagnostics.select { |d| d.level.error? && d.message.includes?("not found") }.should be_empty
+    end
+  end
 end
