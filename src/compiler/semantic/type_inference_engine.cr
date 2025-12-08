@@ -2912,9 +2912,14 @@ module CrystalV2
             parameters_match?(method, arg_types)
           end
 
-          # Return best match (for now: first match)
-          # TODO: Add specificity ranking (prefer more specific types)
-          matches.first?
+          return nil if matches.empty?
+          return matches.first if matches.size == 1
+
+          # Phase 98: Specificity ranking - prefer more specific overload
+          #
+          # Sort by specificity score (highest first) and return best match
+          # Ties are resolved by order of definition (first defined wins)
+          matches.max_by { |m| specificity_score(m, arg_types) }
         end
 
         # Find all methods with given name on receiver type
@@ -3110,11 +3115,97 @@ module CrystalV2
 
         # Check if actual_type is compatible with expected_type
         #
-        # Phase 4B: Simple exact match for now
-        # TODO: Add subtyping, union types, nilable types
+        # Phase 98: Enhanced type matching with subtyping and union support
+        #
+        # Matching rules:
+        # 1. Exact match (Int32 matches Int32)
+        # 2. Subtype match (Child matches Parent)
+        # 3. Union member match (String matches String | Int32)
+        # 4. Nil matches nilable type (Nil matches T?)
         private def type_matches?(actual : Type, expected : Type) : Bool
           # Exact type match
-          actual.to_s == expected.to_s
+          return true if actual.to_s == expected.to_s
+
+          # If expected is a union, actual must match at least one member
+          if expected.is_a?(UnionType)
+            return expected.types.any? { |t| type_matches?(actual, t) }
+          end
+
+          # If actual is a union, all members must match expected
+          if actual.is_a?(UnionType)
+            return actual.types.all? { |t| type_matches?(t, expected) }
+          end
+
+          # Subtype check: actual is subtype of expected
+          is_subtype?(actual, expected)
+        end
+
+        # Check if child_type is a subtype of parent_type (class inheritance)
+        private def is_subtype?(child : Type, parent : Type) : Bool
+          child_name = case child
+                       when InstanceType then child.class_symbol.name
+                       when ClassType    then child.symbol.name
+                       when PrimitiveType then child.name
+                       else return false
+                       end
+
+          parent_name = case parent
+                        when InstanceType then parent.class_symbol.name
+                        when ClassType    then parent.symbol.name
+                        when PrimitiveType then parent.name
+                        else return false
+                        end
+
+          # Walk the inheritance chain
+          current_name = child_name
+          visited = Set(String).new
+
+          while current_name && !visited.includes?(current_name)
+            return true if current_name == parent_name
+            visited << current_name
+
+            # Look up class in global table to find superclass
+            if (table = @global_table) && (sym = table.lookup(current_name))
+              if sym.is_a?(ClassSymbol)
+                current_name = sym.superclass_name
+              else
+                break
+              end
+            else
+              break
+            end
+          end
+
+          false
+        end
+
+        # Calculate specificity score for a method match
+        #
+        # Higher score = more specific match
+        # Used to select the best overload when multiple match
+        #
+        # Scoring:
+        # - Exact type match: 2 points per parameter
+        # - Subtype match: 1 point per parameter
+        # - Union/generic match: 0 points per parameter
+        private def specificity_score(method : MethodSymbol, arg_types : Array(Type)) : Int32
+          score = 0
+          method.params.zip(arg_types) do |param, arg_type|
+            type_ann = param.type_annotation
+            next unless type_ann
+
+            param_type = parse_type_name(String.new(type_ann))
+
+            if arg_type.to_s == param_type.to_s
+              # Exact match: highest score
+              score += 2
+            elsif is_subtype?(arg_type, param_type)
+              # Subtype match: medium score
+              score += 1
+            end
+            # Union/generic: 0 points
+          end
+          score
         end
 
         # ============================================================

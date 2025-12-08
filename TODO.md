@@ -94,7 +94,7 @@ about syntax or types and should match what the original compiler would report.
 
 ---
 
-## 3. Semantic & Type Inference - IN PROGRESS (~75%)
+## 3. Semantic & Type Inference - IN PROGRESS (~80%)
 
 - [x] Basic type inference (literals, variables, simple methods)
 - [x] Symbol table with scope tracking
@@ -124,10 +124,16 @@ about syntax or types and should match what the original compiler would report.
 - [x] Negative narrowing in else branch (remaining types)
 - [x] T? syntax parsing as T | Nil union
 - [x] T | U | V union syntax parsing
+- [x] Case/when type narrowing (Phase 97)
+
+### Completed Overload Resolution
+- [x] Method overload resolution based on argument types (Phase 98)
+- [x] Subtype matching: Child matches Parent parameter
+- [x] Union type matching: Int32 matches Int32 | String
+- [x] Specificity ranking: prefers exact match over subtype/union
+- [x] Inheritance chain walking for subtype check
 
 ### TODO: Advanced Type System
-- [ ] Case/when type narrowing
-- [ ] Method overload resolution based on argument types
 - [ ] Virtual types (inheritance-aware method dispatch)
 - [ ] Integrate macro expansion into semantic phase
 
