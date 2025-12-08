@@ -237,30 +237,32 @@ describe Semantic::TypeInferenceEngine do
       type.as(PrimitiveType).name.should eq("Nil")
     end
 
-    it "emits error for non-Bool if condition" do
+    it "allows truthy check on any type (Crystal semantics)" do
+      # Crystal allows any type as condition - nil and false are falsy, everything else is truthy
       source = <<-CRYSTAL
         if 42
-          "oops"
+          "truthy"
         end
       CRYSTAL
 
       program, analyzer, engine = infer_types(source)
 
-      engine.diagnostics.size.should eq(1)
-      engine.diagnostics[0].message.should contain("If condition must be Bool")
+      # No errors - truthy checks are valid
+      engine.diagnostics.select(&.level.error?).should be_empty
     end
 
-    it "emits error for non-Bool while condition" do
+    it "allows truthy check in while (Crystal semantics)" do
+      # Crystal allows any type as while condition
       source = <<-CRYSTAL
-        while "not bool"
+        while "truthy"
           42
         end
       CRYSTAL
 
       program, analyzer, engine = infer_types(source)
 
-      engine.diagnostics.size.should eq(1)
-      engine.diagnostics[0].message.should contain("While condition must be Bool")
+      # No errors - truthy checks are valid
+      engine.diagnostics.select(&.level.error?).should be_empty
     end
 
     it "infers union type for if with single elsif" do
@@ -314,7 +316,8 @@ describe Semantic::TypeInferenceEngine do
       type_names.should eq(["Int32", "String"])
     end
 
-    it "emits error for non-Bool elsif condition" do
+    it "allows truthy check in elsif (Crystal semantics)" do
+      # Crystal allows any type as elsif condition too
       source = <<-CRYSTAL
         if true
           1
@@ -325,8 +328,8 @@ describe Semantic::TypeInferenceEngine do
 
       program, analyzer, engine = infer_types(source)
 
-      engine.diagnostics.size.should eq(1)
-      engine.diagnostics[0].message.should contain("Elsif condition must be Bool")
+      # No errors - truthy checks are valid in elsif
+      engine.diagnostics.select(&.level.error?).should be_empty
     end
   end
 
@@ -842,21 +845,18 @@ describe Semantic::TypeInferenceEngine do
       diagnostic.primary_span.start_column.should_not eq(0)
     end
 
-    it "reports correct location for boolean type error" do
+    it "allows truthy check without error (Crystal semantics)" do
+      # Crystal allows any type as condition - this is not an error
       source = <<-CRYSTAL
         if 42
-          "oops"
+          "truthy"
         end
       CRYSTAL
 
       program, analyzer, engine = infer_types(source)
 
-      engine.diagnostics.size.should eq(1)
-      diagnostic = engine.diagnostics[0]
-
-      # Error should point to condition location
-      diagnostic.primary_span.start_line.should eq(1)
-      diagnostic.primary_span.start_line.should_not eq(0)
+      # No errors - truthy checks are valid
+      engine.diagnostics.select(&.level.error?).should be_empty
     end
   end
 

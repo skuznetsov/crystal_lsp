@@ -1070,6 +1070,20 @@ module CrystalV2
         private def parse_type_name(name : String) : Type
           guard_watchdog!
 
+          # Handle nilable syntax: T? = T | Nil
+          if name.ends_with?("?") && name.size > 1
+            base_name = name[0...-1]  # Remove trailing ?
+            base_type = parse_type_name(base_name)
+            return union_of([base_type, @context.nil_type])
+          end
+
+          # Handle union syntax: T | U | V
+          if name.includes?(" | ")
+            parts = name.split(" | ").map(&.strip)
+            types = parts.map { |p| parse_type_name(p) }
+            return union_of(types)
+          end
+
           # Check for generic type syntax: Array(T)
           if name.includes?('(') && name.includes?(')')
             # Extract base type and type argument
@@ -1425,16 +1439,21 @@ module CrystalV2
           condition_id = node.condition
           condition_type = infer_expression(condition_id)
 
-          unless bool_type?(condition_type)
-            emit_error("If condition must be Bool, got #{condition_type}", condition_id)
-          end
+          # Crystal allows any type as condition (truthy check: nil and false are falsy)
+          # No need to require Bool type
 
           # Phase 95: Extract flow narrowing from is_a? condition
           narrowing = extract_is_a_narrowing(condition_id)
 
+          # Phase 96: Extract nil narrowing from truthy check (if x where x : T | Nil)
+          nil_narrowing = narrowing.nil? ? extract_nil_narrowing(condition_id, condition_type) : nil
+
           # Apply narrowing for then-branch
           if narrowing
             var_name, narrowed_type = narrowing
+            @flow_narrowings[var_name] = narrowed_type
+          elsif nil_narrowing
+            var_name, narrowed_type = nil_narrowing
             @flow_narrowings[var_name] = narrowed_type
           end
 
@@ -1443,6 +1462,8 @@ module CrystalV2
           # Remove narrowing after then-branch
           if narrowing
             @flow_narrowings.delete(narrowing[0])
+          elsif nil_narrowing
+            @flow_narrowings.delete(nil_narrowing[0])
           end
 
           elsif_types = [] of Type
@@ -1450,9 +1471,6 @@ module CrystalV2
             elsifs.each do |elsif_branch|
               branch_condition = elsif_branch.condition
               branch_condition_type = infer_expression(branch_condition)
-              unless bool_type?(branch_condition_type)
-                emit_error("Elsif condition must be Bool, got #{branch_condition_type}", branch_condition)
-              end
 
               # Phase 95: Extract flow narrowing for elsif branch
               elsif_narrowing = extract_is_a_narrowing(branch_condition)
@@ -1468,7 +1486,19 @@ module CrystalV2
             end
           end
 
+          # Phase 96: Apply negative narrowing for else branch
+          else_narrowing = compute_else_narrowing(narrowing, nil_narrowing, condition_type)
+          if else_narrowing
+            var_name, narrowed_type = else_narrowing
+            @flow_narrowings[var_name] = narrowed_type
+          end
+
           else_type = node.else_body ? infer_block_result(node.else_body.not_nil!) : @context.nil_type
+
+          # Remove else narrowing
+          if else_narrowing
+            @flow_narrowings.delete(else_narrowing[0])
+          end
 
           union_of([then_type] + elsif_types + [else_type])
         end
@@ -1497,6 +1527,112 @@ module CrystalV2
           {var_name, narrowed_type}
         end
 
+        # Phase 96: Extract nil narrowing from truthy check
+        # If condition is a simple identifier with nilable type, narrow to non-nil in then branch
+        # Returns {variable_name, narrowed_type} or nil if not applicable
+        private def extract_nil_narrowing(condition_id : ExprId, condition_type : Type) : {String, Type}?
+          condition_node = @program.arena[condition_id]
+
+          # Only narrow if condition is a simple variable (identifier)
+          return nil unless condition_node.is_a?(Frontend::IdentifierNode)
+
+          var_name = String.new(condition_node.name)
+
+          # Check if type includes Nil
+          narrowed = remove_nil_from_type(condition_type)
+          return nil if narrowed == condition_type  # No nil to remove
+
+          {var_name, narrowed}
+        end
+
+        # Phase 96: Remove Nil from a type, returning the narrowed type
+        private def remove_nil_from_type(type : Type) : Type
+          case type
+          when UnionType
+            non_nil_types = type.types.reject { |t| t.to_s == "Nil" }
+            if non_nil_types.empty?
+              type  # All types were Nil, keep as is
+            elsif non_nil_types.size == 1
+              non_nil_types.first
+            else
+              UnionType.new(non_nil_types)
+            end
+          else
+            type  # Not a union, no narrowing possible
+          end
+        end
+
+        # Phase 96: Compute negative narrowing for else branch
+        # After is_a? check, else branch has remaining types
+        # After truthy check, else branch has Nil (or false for Bool)
+        private def compute_else_narrowing(
+          is_a_narrowing : {String, Type}?,
+          nil_narrowing : {String, Type}?,
+          condition_type : Type
+        ) : {String, Type}?
+          # Case 1: is_a? check - else branch gets remaining types
+          if is_a_narrowing
+            var_name, matched_type = is_a_narrowing
+            # Get original type of variable (before narrowing)
+            original_type = lookup_variable_type(var_name)
+            return nil unless original_type
+
+            remaining = subtract_type_from_union(original_type, matched_type)
+            return nil if remaining == original_type  # No change
+            return {var_name, remaining}
+          end
+
+          # Case 2: truthy check - else branch gets Nil
+          if nil_narrowing
+            var_name, _ = nil_narrowing
+            return {var_name, @context.nil_type}
+          end
+
+          nil
+        end
+
+        # Phase 96: Subtract a type from a union, returning remaining types
+        private def subtract_type_from_union(original : Type, to_remove : Type) : Type
+          case original
+          when UnionType
+            remaining = original.types.reject { |t| t == to_remove || t.to_s == to_remove.to_s }
+            if remaining.empty?
+              original  # Can't remove all types
+            elsif remaining.size == 1
+              remaining.first
+            else
+              UnionType.new(remaining)
+            end
+          else
+            original  # Not a union, can't subtract
+          end
+        end
+
+        # Phase 96: Lookup original variable type (before any narrowing)
+        private def lookup_variable_type(var_name : String) : Type?
+          # Check identifier symbols for local variable or method parameters
+          @identifier_symbols.each do |expr_id, symbol|
+            case symbol
+            when VariableSymbol
+              if symbol.name == var_name
+                # Try to get inferred type from the type context
+                if type = @context.get_type(expr_id)
+                  return type
+                end
+              end
+            when MethodSymbol
+              # Check method parameters
+              symbol.params.each do |param|
+                if (param_name = param.name) && String.new(param_name) == var_name && (param_type = param.type_annotation)
+                  return parse_type_name(String.new(param_type))
+                end
+              end
+            end
+          end
+
+          nil
+        end
+
         # Phase 24: Type inference for unless (similar to if but without elsif)
         private def infer_unless(node : Frontend::UnlessNode) : Type
           guard_watchdog!
@@ -1504,9 +1640,8 @@ module CrystalV2
           condition_id = node.condition
           condition_type = infer_expression(condition_id)
 
-          unless bool_type?(condition_type)
-            emit_error("Unless condition must be Bool, got #{condition_type}", condition_id)
-          end
+          # Crystal allows any type as condition (truthy check)
+          # No need to require Bool type
 
           then_type = infer_block_result(node.then_branch)
           else_type = node.else_branch ? infer_block_result(node.else_branch.not_nil!) : @context.nil_type
@@ -1521,9 +1656,8 @@ module CrystalV2
           condition_id = node.condition
           condition_type = infer_expression(condition_id)
 
-          unless bool_type?(condition_type)
-            emit_error("Until condition must be Bool, got #{condition_type}", condition_id)
-          end
+          # Crystal allows any type as condition (truthy check)
+          # No need to require Bool type
 
           node.body.each { |expr_id| infer_expression(expr_id) }
 
@@ -1631,9 +1765,8 @@ module CrystalV2
           condition_id = node.condition
           condition_type = infer_expression(condition_id)
 
-          unless bool_type?(condition_type)
-            emit_error("While condition must be Bool, got #{condition_type}", condition_id)
-          end
+          # Crystal allows any type as condition (truthy check)
+          # No need to require Bool type
 
           node.body.each { |expr_id| infer_expression(expr_id) }
 

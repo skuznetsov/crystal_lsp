@@ -152,4 +152,114 @@ describe "Phase 95: Flow Typing (is_a? narrowing)" do
       collector.diagnostics.select(&.level.error?).should be_empty
     end
   end
+
+  # ==================================================================
+  # Category 5: Nil check narrowing (if x where x : T | Nil)
+  # ==================================================================
+
+  describe "nil check narrowing" do
+    it "narrows nilable type to non-nil in then branch" do
+      source = <<-CRYSTAL
+        def test(x : String?)
+          if x
+            x.size  # x is String here, not String | Nil
+          end
+        end
+        CRYSTAL
+
+      lexer = Frontend::Lexer.new(source)
+      parser = Frontend::Parser.new(lexer)
+      program = parser.parse_program
+
+      analyzer = Semantic::Analyzer.new(program)
+      analyzer.collect_symbols
+      name_result = analyzer.resolve_names
+
+      engine = Semantic::TypeInferenceEngine.new(program, name_result.identifier_symbols, analyzer.global_context.symbol_table)
+      engine.infer_types
+
+      # Should not have "method not found" errors
+      engine.diagnostics.select { |d| d.level.error? && d.message.includes?("not found") }.should be_empty
+    end
+
+    it "narrows union with nil to remaining types" do
+      source = <<-CRYSTAL
+        def test(x : Int32 | String | Nil)
+          if x
+            x  # x is Int32 | String here
+          end
+        end
+        CRYSTAL
+
+      lexer = Frontend::Lexer.new(source)
+      parser = Frontend::Parser.new(lexer)
+      program = parser.parse_program
+
+      analyzer = Semantic::Analyzer.new(program)
+      analyzer.collect_symbols
+      name_result = analyzer.resolve_names
+
+      engine = Semantic::TypeInferenceEngine.new(program, name_result.identifier_symbols, analyzer.global_context.symbol_table)
+      engine.infer_types
+
+      # Check that x inside if has narrowed type (no Nil)
+      engine.diagnostics.select(&.level.error?).should be_empty
+    end
+  end
+
+  # ==================================================================
+  # Category 6: Negative narrowing in else branch
+  # ==================================================================
+
+  describe "negative narrowing (else branch)" do
+    it "narrows to non-matched type in else branch after is_a?" do
+      source = <<-CRYSTAL
+        def test(x : Int32 | String)
+          if x.is_a?(Int32)
+            x + 1
+          else
+            x.size  # x is String here (the remaining type)
+          end
+        end
+        CRYSTAL
+
+      lexer = Frontend::Lexer.new(source)
+      parser = Frontend::Parser.new(lexer)
+      program = parser.parse_program
+
+      analyzer = Semantic::Analyzer.new(program)
+      analyzer.collect_symbols
+      name_result = analyzer.resolve_names
+
+      engine = Semantic::TypeInferenceEngine.new(program, name_result.identifier_symbols, analyzer.global_context.symbol_table)
+      engine.infer_types
+
+      engine.diagnostics.select { |d| d.level.error? && d.message.includes?("not found") }.should be_empty
+    end
+
+    it "narrows to Nil in else branch after truthy check" do
+      source = <<-CRYSTAL
+        def test(x : String?)
+          if x
+            x.size
+          else
+            nil  # x is Nil here
+          end
+        end
+        CRYSTAL
+
+      lexer = Frontend::Lexer.new(source)
+      parser = Frontend::Parser.new(lexer)
+      program = parser.parse_program
+
+      analyzer = Semantic::Analyzer.new(program)
+      analyzer.collect_symbols
+      name_result = analyzer.resolve_names
+
+      engine = Semantic::TypeInferenceEngine.new(program, name_result.identifier_symbols, analyzer.global_context.symbol_table)
+      engine.infer_types
+
+      engine.diagnostics.select(&.level.error?).should be_empty
+    end
+  end
 end
