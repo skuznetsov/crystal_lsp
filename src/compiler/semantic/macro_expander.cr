@@ -527,6 +527,18 @@ module CrystalV2
             elsif node.is_a?(Frontend::IndexNode)
               # Handle ann[:key] index access
               evaluate_index_expression(node, context)
+            elsif node.is_a?(Frontend::TypeofNode)
+              # typeof(expr) - return type name as string for macro output
+              evaluate_typeof_expression(node, context)
+            elsif node.is_a?(Frontend::SizeofNode)
+              # sizeof(Type) - return size placeholder for macro output
+              evaluate_sizeof_expression(node, context)
+            elsif node.is_a?(Frontend::AlignofNode)
+              # alignof(Type) - return alignment placeholder
+              evaluate_alignof_expression(node, context)
+            elsif node.is_a?(Frontend::InstanceAlignofNode)
+              # instance_alignof(Type) - return instance alignment placeholder
+              evaluate_instance_alignof_expression(node, context)
             else
               # Unsupported expression type for Phase 87B-2
               # Return empty string (graceful degradation)
@@ -1553,6 +1565,198 @@ module CrystalV2
             message,
             span
           )
+        end
+
+        # Evaluate typeof(expr) - returns the type of an expression as a string
+        # In macro context, we attempt to infer the type. For complex cases,
+        # we emit a placeholder that the user can replace.
+        private def evaluate_typeof_expression(node : Frontend::TypeofNode, context : Context) : String
+          return "" if node.args.empty?
+
+          # Get the first argument expression
+          arg_id = node.args.first
+          arg_node = @arena[arg_id]
+
+          # Try to infer the type from the expression
+          inferred_type = infer_expression_type(arg_node, context)
+
+          if inferred_type
+            # Return the inferred type name
+            inferred_type
+          else
+            # Return typeof(...) as a placeholder - will be resolved at compile time
+            "typeof(...)"
+          end
+        end
+
+        # Evaluate sizeof(Type) - returns the size of a type
+        # In macro context, we can return known sizes for primitive types,
+        # or emit a placeholder for complex types.
+        private def evaluate_sizeof_expression(node : Frontend::SizeofNode, context : Context) : String
+          return "0" if node.args.empty?
+
+          # Get the type argument
+          arg_id = node.args.first
+          arg_node = @arena[arg_id]
+
+          # Try to get the type name
+          type_name = get_type_name_from_node(arg_node)
+
+          if type_name
+            # Return known sizes for primitive types
+            size = primitive_type_size(type_name)
+            return size.to_s if size
+          end
+
+          # For unknown types, return placeholder
+          "sizeof(...)"
+        end
+
+        # Evaluate alignof(Type) - returns the alignment of a type
+        private def evaluate_alignof_expression(node : Frontend::AlignofNode, context : Context) : String
+          return "0" if node.args.empty?
+
+          # Get the type argument
+          arg_id = node.args.first
+          arg_node = @arena[arg_id]
+
+          # Try to get the type name
+          type_name = get_type_name_from_node(arg_node)
+
+          if type_name
+            # Return known alignments for primitive types (typically same as size for primitives)
+            align = primitive_type_alignment(type_name)
+            return align.to_s if align
+          end
+
+          # For unknown types, return placeholder
+          "alignof(...)"
+        end
+
+        # Evaluate instance_alignof(Type) - returns alignment for instance of class type
+        private def evaluate_instance_alignof_expression(node : Frontend::InstanceAlignofNode, context : Context) : String
+          return "0" if node.args.empty?
+
+          # Get the type argument
+          arg_id = node.args.first
+          arg_node = @arena[arg_id]
+
+          # Try to get the type name
+          type_name = get_type_name_from_node(arg_node)
+
+          # Instance alignment is typically pointer alignment (8 bytes on 64-bit)
+          if type_name
+            # For class instances, return pointer alignment
+            "8"
+          else
+            "instance_alignof(...)"
+          end
+        end
+
+        # Attempt to infer the type of an expression for typeof()
+        private def infer_expression_type(node, context : Context) : String?
+          case node
+          when Frontend::NumberNode
+            # Infer numeric type from literal
+            literal = Frontend.node_literal_string(node)
+            return nil unless literal
+
+            if literal.includes?(".")
+              "Float64"
+            elsif literal.ends_with?("_i8") || literal.ends_with?("i8")
+              "Int8"
+            elsif literal.ends_with?("_i16") || literal.ends_with?("i16")
+              "Int16"
+            elsif literal.ends_with?("_i32") || literal.ends_with?("i32")
+              "Int32"
+            elsif literal.ends_with?("_i64") || literal.ends_with?("i64")
+              "Int64"
+            elsif literal.ends_with?("_u8") || literal.ends_with?("u8")
+              "UInt8"
+            elsif literal.ends_with?("_u16") || literal.ends_with?("u16")
+              "UInt16"
+            elsif literal.ends_with?("_u32") || literal.ends_with?("u32")
+              "UInt32"
+            elsif literal.ends_with?("_u64") || literal.ends_with?("u64")
+              "UInt64"
+            elsif literal.ends_with?("_f32") || literal.ends_with?("f32")
+              "Float32"
+            elsif literal.ends_with?("_f64") || literal.ends_with?("f64")
+              "Float64"
+            else
+              "Int32" # Default integer type
+            end
+          when Frontend::StringNode
+            "String"
+          when Frontend::SymbolNode
+            "Symbol"
+          when Frontend::BoolNode
+            "Bool"
+          when Frontend::NilNode
+            "Nil"
+          when Frontend::CharNode
+            "Char"
+          when Frontend::ArrayLiteralNode
+            "Array"
+          when Frontend::HashLiteralNode
+            "Hash"
+          when Frontend::TupleLiteralNode
+            "Tuple"
+          when Frontend::RangeNode
+            "Range"
+          when Frontend::RegexNode
+            "Regex"
+          when Frontend::IdentifierNode
+            # Look up variable type from context
+            name = Frontend.node_literal_string(node)
+            if name && (macro_val = context.variables[name]?)
+              macro_val.type_name
+            else
+              nil
+            end
+          else
+            nil
+          end
+        end
+
+        # Get type name from a node (for sizeof/alignof)
+        private def get_type_name_from_node(node) : String?
+          case node
+          when Frontend::IdentifierNode
+            Frontend.node_literal_string(node)
+          when Frontend::PathNode
+            path_to_string(node)
+          else
+            nil
+          end
+        end
+
+        # Return known sizes for primitive types (in bytes)
+        private def primitive_type_size(type_name : String) : Int32?
+          case type_name
+          when "Int8", "UInt8", "Bool"
+            1
+          when "Int16", "UInt16"
+            2
+          when "Int32", "UInt32", "Float32", "Char"
+            4
+          when "Int64", "UInt64", "Float64"
+            8
+          when "Int128", "UInt128"
+            16
+          when "Pointer", "Reference", "String", "Array", "Hash", "Class"
+            8 # Pointer size on 64-bit
+          else
+            nil
+          end
+        end
+
+        # Return known alignments for primitive types
+        private def primitive_type_alignment(type_name : String) : Int32?
+          # For primitive types, alignment typically equals size (up to pointer size)
+          size = primitive_type_size(type_name)
+          return nil unless size
+          {size, 8}.min # Max alignment is pointer size
         end
 
         private def emit_warning(message : String, location : ExprId? = nil)

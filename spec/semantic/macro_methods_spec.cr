@@ -308,4 +308,166 @@ describe "Phase 87B-6: Macro Methods (.stringify, .id, .class_name)" do
       collector.diagnostics.select(&.level.error?).should be_empty
     end
   end
+
+  # ==================================================================
+  # Category 5: typeof() compile-time operator
+  # ==================================================================
+
+  describe "typeof()" do
+    it "infers type of integer literal" do
+      source = <<-CRYSTAL
+        macro test
+          {{ typeof(42) }}
+        end
+        CRYSTAL
+
+      lexer = Frontend::Lexer.new(source)
+      parser = Frontend::Parser.new(lexer)
+      program = parser.parse_program
+
+      context = Semantic::Context.new(Semantic::SymbolTable.new)
+      collector = Semantic::SymbolCollector.new(program, context)
+      collector.collect
+
+      collector.diagnostics.select(&.level.error?).should be_empty
+    end
+
+    it "infers type of string literal" do
+      source = <<-CRYSTAL
+        macro test
+          {{ typeof("hello") }}
+        end
+        CRYSTAL
+
+      lexer = Frontend::Lexer.new(source)
+      parser = Frontend::Parser.new(lexer)
+      program = parser.parse_program
+
+      context = Semantic::Context.new(Semantic::SymbolTable.new)
+      collector = Semantic::SymbolCollector.new(program, context)
+      collector.collect
+
+      collector.diagnostics.select(&.level.error?).should be_empty
+    end
+
+    it "infers type of float literal" do
+      source = <<-CRYSTAL
+        macro test
+          {{ typeof(3.14) }}
+        end
+        CRYSTAL
+
+      lexer = Frontend::Lexer.new(source)
+      parser = Frontend::Parser.new(lexer)
+      program = parser.parse_program
+
+      context = Semantic::Context.new(Semantic::SymbolTable.new)
+      collector = Semantic::SymbolCollector.new(program, context)
+      collector.collect
+
+      collector.diagnostics.select(&.level.error?).should be_empty
+    end
+  end
+
+  # ==================================================================
+  # Category 6: sizeof() compile-time operator
+  # ==================================================================
+
+  describe "sizeof()" do
+    it "returns size of Int32" do
+      source = <<-CRYSTAL
+        macro test
+          {{ sizeof(Int32) }}
+        end
+        CRYSTAL
+
+      lexer = Frontend::Lexer.new(source)
+      parser = Frontend::Parser.new(lexer)
+      program = parser.parse_program
+
+      context = Semantic::Context.new(Semantic::SymbolTable.new)
+      collector = Semantic::SymbolCollector.new(program, context)
+      collector.collect
+
+      collector.diagnostics.select(&.level.error?).should be_empty
+    end
+
+    it "returns size of Int64" do
+      source = <<-CRYSTAL
+        macro test
+          {{ sizeof(Int64) }}
+        end
+        CRYSTAL
+
+      lexer = Frontend::Lexer.new(source)
+      parser = Frontend::Parser.new(lexer)
+      program = parser.parse_program
+
+      context = Semantic::Context.new(Semantic::SymbolTable.new)
+      collector = Semantic::SymbolCollector.new(program, context)
+      collector.collect
+
+      collector.diagnostics.select(&.level.error?).should be_empty
+    end
+
+    it "returns size of Float64" do
+      source = <<-CRYSTAL
+        macro test
+          {{ sizeof(Float64) }}
+        end
+        CRYSTAL
+
+      lexer = Frontend::Lexer.new(source)
+      parser = Frontend::Parser.new(lexer)
+      program = parser.parse_program
+
+      context = Semantic::Context.new(Semantic::SymbolTable.new)
+      collector = Semantic::SymbolCollector.new(program, context)
+      collector.collect
+
+      collector.diagnostics.select(&.level.error?).should be_empty
+    end
+  end
+
+  # ==================================================================
+  # Category 7: alignof() compile-time operator
+  # ==================================================================
+
+  describe "alignof()" do
+    it "returns alignment of Int32" do
+      source = <<-CRYSTAL
+        macro test
+          {{ alignof(Int32) }}
+        end
+        CRYSTAL
+
+      lexer = Frontend::Lexer.new(source)
+      parser = Frontend::Parser.new(lexer)
+      program = parser.parse_program
+
+      context = Semantic::Context.new(Semantic::SymbolTable.new)
+      collector = Semantic::SymbolCollector.new(program, context)
+      collector.collect
+
+      collector.diagnostics.select(&.level.error?).should be_empty
+    end
+
+    it "returns alignment of Int64" do
+      source = <<-CRYSTAL
+        macro test
+          {{ alignof(Int64) }}
+        end
+        CRYSTAL
+
+      lexer = Frontend::Lexer.new(source)
+      parser = Frontend::Parser.new(lexer)
+      program = parser.parse_program
+
+      context = Semantic::Context.new(Semantic::SymbolTable.new)
+      collector = Semantic::SymbolCollector.new(program, context)
+      collector.collect
+
+      collector.diagnostics.select(&.level.error?).should be_empty
+    end
+  end
 end

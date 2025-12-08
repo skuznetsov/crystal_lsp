@@ -48,6 +48,13 @@ module CrystalV2
 
         # Get the macro type name (for .class_name)
         abstract def class_name : String
+
+        # Get the Crystal type name (for typeof())
+        # Returns the actual Crystal type of the value
+        def type_name : String
+          # Default to class_name, subclasses override for specific types
+          class_name
+        end
       end
 
       # Nil value
@@ -62,6 +69,10 @@ module CrystalV2
 
         def class_name : String
           "NilLiteral"
+        end
+
+        def type_name : String
+          "Nil"
         end
       end
 
@@ -82,6 +93,10 @@ module CrystalV2
 
         def class_name : String
           "BoolLiteral"
+        end
+
+        def type_name : String
+          "Bool"
         end
       end
 
@@ -107,6 +122,10 @@ module CrystalV2
 
         def class_name : String
           "NumberLiteral"
+        end
+
+        def type_name : String
+          @value.is_a?(Float64) ? "Float64" : "Int64"
         end
 
         def call_method(name : String, args : Array(MacroValue), named_args : Hash(String, MacroValue)?) : MacroValue
@@ -182,6 +201,10 @@ module CrystalV2
 
         def class_name : String
           "StringLiteral"
+        end
+
+        def type_name : String
+          "String"
         end
 
         def call_method(name : String, args : Array(MacroValue), named_args : Hash(String, MacroValue)?) : MacroValue
@@ -263,6 +286,10 @@ module CrystalV2
 
         def class_name : String
           "SymbolLiteral"
+        end
+
+        def type_name : String
+          "Symbol"
         end
       end
 
