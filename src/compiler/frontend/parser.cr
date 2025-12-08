@@ -469,18 +469,23 @@ module CrystalV2
               saved_prev = @previous_token
               saved_brace = @brace_depth
               node = parse_hash_or_tuple
-              return node unless node.invalid?
+              unless node.invalid?
+                # Phase 103B: Handle postfix operations like {hash}[key]
+                return parse_brace_literal_postfix(node)
+              end
               @index = saved_index
               @previous_token = saved_prev
               @brace_depth = saved_brace
               # Try tolerant tuple, then tolerant named tuple
               tuple_try = parse_brace_tuple_fallback
-              return tuple_try unless tuple_try.invalid?
+              unless tuple_try.invalid?
+                return parse_brace_literal_postfix(tuple_try)
+              end
               @index = saved_index
               @previous_token = saved_prev
               @brace_depth = saved_brace
               named_try = parse_brace_named_tuple_fallback
-              return named_try
+              return parse_brace_literal_postfix(named_try)
             end
           end
 
@@ -10198,6 +10203,31 @@ module CrystalV2
           ensure
             @parsing_call_args -= 1
           end
+        end
+
+        # Phase 103B: Handle postfix operations after brace literal
+        # This handles: {hash}[key], {tuple}[0], {named: tuple}[:key]
+        # as well as member access like {tuple}.first
+        private def parse_brace_literal_postfix(node : ExprId) : ExprId
+          skip_trivia
+          loop do
+            case current_token.kind
+            when Token::Kind::LBracket
+              node = parse_index(node)
+              node = handle_index_question_postfix(node)
+            when Token::Kind::Operator
+              # Check for '.' (member access)
+              if slice_eq?(current_token.slice, ".")
+                node = parse_member_access(node)
+              else
+                break
+              end
+            else
+              break
+            end
+            skip_trivia
+          end
+          node
         end
 
         # Phase 103: Updated to support multi-line indexing and named arguments

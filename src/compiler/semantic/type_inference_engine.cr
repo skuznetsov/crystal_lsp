@@ -586,6 +586,10 @@ module CrystalV2
             infer_bool(node)
           when Frontend::NilNode
             infer_nil(node)
+          when Frontend::CharNode
+            @context.char_type
+          when Frontend::RegexNode
+            @context.regex_type
           when Frontend::SymbolNode
             infer_symbol(node)
           when Frontend::ArrayLiteralNode
@@ -1890,12 +1894,24 @@ module CrystalV2
           # Infer value type (typically a tuple)
           value_type = infer_expression(value_id)
 
-          # For each target, store the value type
-          # Future: Extract individual types from tuple
-          targets.each do |target_id|
+          # Phase 103B: Extract individual types from tuple for each target
+          targets.each_with_index do |target_id, idx|
             target_node = @program.arena[target_id]
             if target_node.is_a?(Frontend::IdentifierNode)
-              @assignments[String.new(target_node.name)] = value_type
+              # Extract type for this position
+              element_type = case value_type
+                             when TupleType
+                               # Get type at this index from tuple
+                               value_type.element_types[idx]? || @context.nil_type
+                             when ArrayType
+                               # All elements have same type
+                               value_type.element_type
+                             else
+                               # Fallback to the whole type if not destructurable
+                               value_type
+                             end
+              @assignments[String.new(target_node.name)] = element_type
+              @context.set_type(target_id, element_type)
             end
           end
 
@@ -2452,8 +2468,13 @@ module CrystalV2
 
           # Case 1: Explicit "of Type" syntax ([] of Int32)
           if of_type_expr_id = node.of_type
-            # Phase 91A: parser-only pass — use Nil placeholder until full type extraction
-            element_type = @context.nil_type
+            # Phase 103B: Resolve the type expression
+            if resolved_type = type_from_type_expr(of_type_expr_id)
+              element_type = resolved_type
+            else
+              # Fallback to Nil if type resolution fails
+              element_type = @context.nil_type
+            end
             # Case 2: Infer from elements
           elsif elements = node.elements
             if elements.empty?

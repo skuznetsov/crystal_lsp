@@ -1893,9 +1893,8 @@ describe Semantic::TypeInferenceEngine do
       array_type = engine.context.get_type(array_id)
 
       array_type.should be_a(ArrayType)
-      # Phase 91A: Parser only - type inference returns Nil placeholder
-      # Phase 91B will implement full type extraction and validation
-      array_type.as(ArrayType).element_type.as(PrimitiveType).name.should eq("Nil")
+      # Phase 103B: type_from_type_expr resolves the of_type annotation
+      array_type.as(ArrayType).element_type.as(PrimitiveType).name.should eq("Int32")
     end
 
     it "infers element type from array indexing" do

@@ -29,6 +29,7 @@ module CrystalV2
         getter char_type : PrimitiveType
         getter symbol_type : PrimitiveType  # Phase 16
         getter proc_type : PrimitiveType  # Phase 74
+        getter regex_type : PrimitiveType  # Phase 103B
 
         def initialize
           @expression_types = {} of ExprId => Type
@@ -43,6 +44,7 @@ module CrystalV2
           @char_type = PrimitiveType.new("Char")
           @symbol_type = PrimitiveType.new("Symbol")  # Phase 16
           @proc_type = PrimitiveType.new("Proc")  # Phase 74
+          @regex_type = PrimitiveType.new("Regex")  # Phase 103B
         end
 
         # Records the inferred type for an expression
