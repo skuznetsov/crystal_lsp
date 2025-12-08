@@ -474,7 +474,11 @@ module CrystalV2
           when Frontend::LoopNode
             node.body.each { |e| children << e }
           when Frontend::BlockNode
-            node.body.each { |e| children << e }
+            # DO NOT process block body as children in iterative phase!
+            # Block parameters need to be set up by the caller (e.g., try, map, each)
+            # before the body can be correctly typed. Processing here would infer
+            # block param identifiers as Nil before they're properly bound.
+            # The recursive infer_block path handles this correctly.
           when Frontend::ProcLiteralNode
             node.body.each { |e| children << e }
           when Frontend::CaseNode
@@ -669,12 +673,30 @@ module CrystalV2
         # ============================================================
 
         private def infer_number(node : Frontend::NumberNode) : Type
-          # Use NumberKind from lexer/parser
+          # Use NumberKind from lexer/parser - Phase 103C: full numeric type support
           case node.kind
+          when Frontend::NumberKind::I8
+            @context.int8_type
+          when Frontend::NumberKind::I16
+            @context.int16_type
           when Frontend::NumberKind::I32
             @context.int32_type
           when Frontend::NumberKind::I64
             @context.int64_type
+          when Frontend::NumberKind::I128
+            @context.int128_type
+          when Frontend::NumberKind::U8
+            @context.uint8_type
+          when Frontend::NumberKind::U16
+            @context.uint16_type
+          when Frontend::NumberKind::U32
+            @context.uint32_type
+          when Frontend::NumberKind::U64
+            @context.uint64_type
+          when Frontend::NumberKind::U128
+            @context.uint128_type
+          when Frontend::NumberKind::F32
+            @context.float32_type
           when Frontend::NumberKind::F64
             @context.float64_type
           else
@@ -1725,19 +1747,27 @@ module CrystalV2
           @context.nil_type
         end
 
-        # Phase 66: Type inference for type declaration
+        # Phase 66/103C: Type inference for type declaration
+        # Handles: x : Type and x : Type = value
         private def infer_type_declaration(node) : Type
           guard_watchdog!
 
-          # Type declarations like `x : Int32` declare a variable with an explicit type
-          # but don't assign a value. They are compile-time type annotations.
-          #
-          # In a full implementation:
-          # - Register the variable name with its declared type in the scope
-          # - Use this type for subsequent references to the variable
-          # - Verify assignments match the declared type
-          #
-          # For now, type declarations have no runtime value (they're declarations)
+          decl = node.as(Frontend::TypeDeclarationNode)
+          var_name = String.new(decl.name)
+          type_name = String.new(decl.declared_type)
+
+          # Resolve the declared type
+          declared_type = lookup_type_by_name(type_name) || PrimitiveType.new(type_name)
+
+          # If there's an initial value, infer its type (for verification)
+          if value_id = decl.value
+            infer_expression(value_id)
+          end
+
+          # Register variable with declared type for subsequent references
+          @assignments[var_name] = declared_type
+
+          # The declaration itself returns Nil (it's a statement, not an expression)
           @context.nil_type
         end
 
@@ -2024,16 +2054,15 @@ module CrystalV2
         # Phase 42: pointerof (pointer to variable/expression)
         private def infer_pointerof(node : Frontend::PointerofNode, expr_id : ExprId) : Type
           # pointerof returns a pointer to a variable or expression
-          # In a full implementation:
-          # - pointerof(x) returns Pointer(T) where T is the type of x
-          # - pointerof(@ivar) returns pointer to instance variable
-          # - pointerof(expr) returns pointer to expression's result
+          # pointerof(x) returns Pointer(T) where T is the type of x
 
-          # For now, infer types of arguments and return nil as placeholder
-          node.args.each { |arg_expr_id| infer_expression(arg_expr_id) }
-
-          # Return nil_type as placeholder (full implementation would return Pointer(T))
-          @context.nil_type
+          # Phase 103C: Infer pointed-to type and return Pointer(T)
+          if arg_id = node.args.first?
+            pointed_type = infer_expression(arg_id)
+            PointerType.new(pointed_type)
+          else
+            @context.nil_type
+          end
         end
 
         private def infer_uninitialized(node : Frontend::UninitializedNode, expr_id : ExprId) : Type
@@ -2141,34 +2170,39 @@ module CrystalV2
         # Phase 44: as keyword (type cast)
         private def infer_as(node : Frontend::AsNode, expr_id : ExprId) : Type
           # Type cast: value.as(Type)
-          # In a full implementation:
-          # - Infer type of value being cast
-          # - Look up target type in type registry
-          # - Verify cast is valid (runtime or compile-time)
-          # - Return target type
+          # Returns the target type
 
-          # For now, infer type of value and return nil as placeholder
+          # Phase 103C: Resolve target type from type name
           infer_expression(node.expression)
+          target_type_name = String.new(node.target_type)
 
-          # Return nil_type as placeholder (full implementation would return target type)
-          @context.nil_type
+          # Try to resolve the target type
+          if target_type = lookup_type_by_name(target_type_name)
+            target_type
+          else
+            # If can't resolve, create a primitive type placeholder
+            PrimitiveType.new(target_type_name)
+          end
         end
 
         # Phase 45: as? keyword (safe cast - nilable)
         private def infer_as_question(node : Frontend::AsQuestionNode, expr_id : ExprId) : Type
           # Safe cast: value.as?(Type)
-          # Returns Type? (nilable) instead of Type
-          # In a full implementation:
-          # - Infer type of value being cast
-          # - Look up target type in type registry
-          # - Return Union(target_type, Nil) - nilable version
-          # - Unlike .as, this doesn't panic on invalid cast, returns nil
+          # Returns Type | Nil (nilable)
 
-          # For now, infer type of value and return nil as placeholder
+          # Phase 103C: Resolve target type and make nilable
           infer_expression(node.expression)
+          target_type_name = String.new(node.target_type)
 
-          # Return nil_type as placeholder (full implementation would return target_type | Nil)
-          @context.nil_type
+          # Try to resolve the target type
+          target_type = if resolved = lookup_type_by_name(target_type_name)
+            resolved
+          else
+            PrimitiveType.new(target_type_name)
+          end
+
+          # Return nilable version (target_type | Nil)
+          @context.union_of([target_type, @context.nil_type])
         end
 
         # Phase 93: is_a? keyword (type check - returns Bool)
@@ -2364,16 +2398,42 @@ module CrystalV2
           # Returns member_type | Nil (nilable)
           # If receiver is nil, returns nil without calling method
           # Otherwise, calls method and returns its result
-          # In a full implementation:
-          # - Infer type of receiver
-          # - Look up member in receiver's type
-          # - Return Union(member_type, Nil) - nilable version
 
-          # For now, infer receiver type and return nil as placeholder
-          infer_expression(node.object)
+          # Phase 103C: Infer receiver and method, return nilable result
+          receiver_type = infer_expression(node.object)
+          method_name = String.new(node.member)
 
-          # Return nil_type as placeholder (full implementation would return member_type | Nil)
-          @context.nil_type
+          # Strip Nil from receiver for method lookup (since we're safe-navigating)
+          non_nil_type = case receiver_type
+                         when UnionType
+                           # Remove Nil from union for method lookup
+                           non_nil_types = receiver_type.types.reject { |t| t.is_a?(PrimitiveType) && t.name == "Nil" }
+                           if non_nil_types.size == 1
+                             non_nil_types.first
+                           elsif non_nil_types.empty?
+                             @context.nil_type
+                           else
+                             UnionType.new(non_nil_types)
+                           end
+                         else
+                           receiver_type
+                         end
+
+          # Find method on non-nil type
+          methods = find_all_methods(non_nil_type, method_name)
+
+          if method = methods.first?
+            result_type = if return_annotation = method.return_annotation
+              lookup_type_by_name(return_annotation) || @context.nil_type
+            else
+              @context.nil_type
+            end
+            # Return nilable result
+            @context.union_of([result_type, @context.nil_type])
+          else
+            # Method not found - return Nil
+            @context.nil_type
+          end
         end
 
         private def resolve_path_symbol(node : Frontend::PathNode) : Symbol?
@@ -2608,8 +2668,17 @@ module CrystalV2
               emit_error("NamedTuple has no key '#{key_name}'", expr_id)
               @context.nil_type
             end
+          elsif target_type.is_a?(PrimitiveType) && target_type.name == "String"
+            # Phase 103C: String indexing
+            # String[Int32] → Char, String[Range] → String
+            index_type = infer_expression(index_id)
+            if index_type.is_a?(RangeType)
+              @context.string_type  # String range slice returns String
+            else
+              @context.char_type  # String[Int32] returns Char
+            end
           else
-            # Not an array, hash, tuple, or named tuple - emit error
+            # Not an array, hash, tuple, named tuple, or string - emit error
             emit_error("Cannot index type #{target_type}", expr_id)
             @context.nil_type
           end
@@ -2646,6 +2715,29 @@ module CrystalV2
 
           # Phase 4B: Zero-argument method call
           arg_types = [] of Type
+
+          # Phase 103C: Special handling for universal methods on union types
+          # These methods need to see the full union, not be computed per-member
+          if receiver_type.is_a?(UnionType)
+            case method_name
+            when "not_nil!"
+              # Strip Nil from union
+              non_nil = receiver_type.types.reject { |t| t.is_a?(PrimitiveType) && t.name == "Nil" }
+              result = if non_nil.size == 1
+                         non_nil.first
+                       elsif non_nil.empty?
+                         @context.nil_type
+                       else
+                         UnionType.new(non_nil)
+                       end
+              @context.set_type(expr_id, result)
+              return result
+            when "nil?"
+              result = @context.bool_type
+              @context.set_type(expr_id, result)
+              return result
+            end
+          end
 
           # Phase 4B.4: Special case for union types - compute union return type
           if receiver_type.is_a?(UnionType)
@@ -2697,9 +2789,8 @@ module CrystalV2
         private def infer_call(node : Frontend::CallNode, expr_id : ExprId) : Type
           guard_watchdog!
 
-          if block_id = node.block
-            infer_expression(block_id)
-          end
+          # NOTE: Block inference is deferred for methods that need special handling
+          # (like `try` on union types) where the block parameter type depends on receiver
 
           callee_node = @program.arena[node.callee]
 
@@ -2721,6 +2812,15 @@ module CrystalV2
             # Infer argument types
             arg_types = Array(Type).new(node.args.size)
             node.args.each { |arg_id| arg_types << infer_expression(arg_id) }
+
+            # Helper to ensure block is inferred before returning
+            infer_block_if_present = ->(result : Type) {
+              if block_id = node.block
+                infer_expression(block_id)
+              end
+              result
+            }
+
             # If resolver already bound this identifier to a method (incl. self/class methods), use it
             if symbol = @identifier_symbols[node.callee]?
               debug("  identifier_symbols hit: #{symbol.class.name}") if @debug_enabled
@@ -2732,10 +2832,10 @@ module CrystalV2
                 if type_params = symbol.type_parameters
                   type_args = infer_method_type_arguments(symbol, arg_types)
                   if ret_ann = symbol.return_annotation
-                    return substitute_type_parameters(ret_ann, type_args, type_params)
+                    return infer_block_if_present.call(substitute_type_parameters(ret_ann, type_args, type_params))
                   end
                 elsif ann = symbol.return_annotation
-                  return parse_type_name(ann)
+                  return infer_block_if_present.call(parse_type_name(ann))
                 end
               elsif symbol.is_a?(ClassSymbol)
                 # Calling a class name without .new is likely a missing resolution; fall through
@@ -2748,13 +2848,13 @@ module CrystalV2
                 when MethodSymbol
                   if ann = sym.return_annotation
                     debug("  current_class scope hit for #{method_name}") if @debug_enabled
-                    return parse_type_name(ann)
+                    return infer_block_if_present.call(parse_type_name(ann))
                   end
                 when OverloadSetSymbol
                   if overload = sym.overloads.first?
                     if ann = overload.return_annotation
                       debug("  current_class overload hit for #{method_name}") if @debug_enabled
-                      return parse_type_name(ann)
+                      return infer_block_if_present.call(parse_type_name(ann))
                     end
                   end
                 end
@@ -2767,13 +2867,13 @@ module CrystalV2
                 when MethodSymbol
                   if ann = sym.return_annotation
                     debug("  current_module scope hit for #{method_name}") if @debug_enabled
-                    return parse_type_name(ann)
+                    return infer_block_if_present.call(parse_type_name(ann))
                   end
                 when OverloadSetSymbol
                   if overload = sym.overloads.first?
                     if ann = overload.return_annotation
                       debug("  current_module overload hit for #{method_name}") if @debug_enabled
-                      return parse_type_name(ann)
+                      return infer_block_if_present.call(parse_type_name(ann))
                     end
                   end
                 end
@@ -2783,11 +2883,12 @@ module CrystalV2
             if method = find_method_in_scope(@global_table, method_name)
               debug("  find_method_in_scope hit for #{method_name}: #{method.class.name}") if @debug_enabled
               if ann = method.return_annotation
-                return parse_type_name(ann)
+                return infer_block_if_present.call(parse_type_name(ann))
               end
             end
             # Lookup method in global scope
-            return infer_top_level_function_call(method_name, arg_types, expr_id)
+            result = infer_top_level_function_call(method_name, arg_types, expr_id)
+            return infer_block_if_present.call(result)
           else
             debug("  UNKNOWN callee type - returning Nil!")
             return @context.nil_type
@@ -2853,9 +2954,42 @@ module CrystalV2
             case method_name
             when "map", "collect"
               mapped = elem_type
-              if block_id = node.block
-                block = @program.arena[block_id].as(Frontend::BlockNode)
-                mapped = infer_block_result(block.body) || elem_type
+              # Find block - can be in node.block or node.args
+              map_block_node : Frontend::BlockNode? = nil
+              if blk_id = node.block
+                map_block_node = @program.arena[blk_id].as(Frontend::BlockNode)
+              elsif node.args.first?
+                arg_node = @program.arena[node.args.first]
+                if arg_node.is_a?(Frontend::BlockNode)
+                  map_block_node = arg_node
+                end
+              end
+
+              if block = map_block_node
+                # Set up block parameter with element type
+                if (params = block.params) && (first_param = params.first?) && (name_slice = first_param.name)
+                  param_name = String.new(name_slice)
+                  old_assignment = @assignments[param_name]?
+                  @assignments[param_name] = elem_type
+                  # Clear cached types
+                  block.body.each do |body_id|
+                    @context.expression_types.delete(body_id)
+                    body_node = @program.arena[body_id]
+                    case body_node
+                    when Frontend::BinaryNode
+                      @context.expression_types.delete(body_node.left)
+                      @context.expression_types.delete(body_node.right)
+                    when Frontend::MemberAccessNode
+                      @context.expression_types.delete(body_node.object)
+                    end
+                  end
+                  mapped = infer_block_result(block.body) || elem_type
+                  if old_assignment
+                    @assignments[param_name] = old_assignment
+                  else
+                    @assignments.delete(param_name)
+                  end
+                end
               end
               return ArrayType.new(mapped)
             when "select", "reject", "filter"
@@ -2875,7 +3009,84 @@ module CrystalV2
             end
           end
 
+          # Phase 103C: Special handling for universal methods on union types in calls
           if receiver_type.is_a?(UnionType)
+            case method_name
+            when "try"
+              # try(&block) on nilable: call block with non-nil value, return block_result | Nil
+              non_nil = receiver_type.types.reject { |t| t.is_a?(PrimitiveType) && t.name == "Nil" }
+              non_nil_type = if non_nil.size == 1
+                               non_nil.first
+                             elsif non_nil.empty?
+                               @context.nil_type
+                             else
+                               UnionType.new(non_nil)
+                             end
+              # Try to infer block result type
+              block_result = @context.nil_type
+              # Short block form &.method is passed as first arg (BlockNode), not via node.block
+              block_node : Frontend::BlockNode? = nil
+              if blk_id = node.block
+                block_node = @program.arena[blk_id].as(Frontend::BlockNode)
+              elsif node.args.first?
+                arg_node = @program.arena[node.args.first]
+                if arg_node.is_a?(Frontend::BlockNode)
+                  block_node = arg_node
+                end
+              end
+
+              if block = block_node
+                # Block receives the non-nil type as implicit parameter
+                if (params = block.params) && (first_param = params.first?) && (name_slice = first_param.name)
+                  param_name = String.new(name_slice)
+                  old_assignment = @assignments[param_name]?
+                  @assignments[param_name] = non_nil_type
+                  # Clear any cached types for the param identifier
+                  block.body.each do |body_id|
+                    @context.expression_types.delete(body_id)
+                    # Also clear nested expressions that might reference the param
+                    inner_node = @program.arena[body_id]
+                    if inner_node.is_a?(Frontend::MemberAccessNode)
+                      @context.expression_types.delete(inner_node.object)
+                    end
+                  end
+                  block_result = infer_block_result(block.body) || @context.nil_type
+                  if old_assignment
+                    @assignments[param_name] = old_assignment
+                  else
+                    @assignments.delete(param_name)
+                  end
+                else
+                  # Short block form &.method without explicit param
+                  if body_id = block.body.first?
+                    body_node = @program.arena[body_id]
+                    if body_node.is_a?(Frontend::MemberAccessNode)
+                      member_name = String.new(body_node.member)
+                      if method = lookup_method(non_nil_type, member_name, [] of Type)
+                        if ann = method.return_annotation
+                          block_result = parse_type_name(ann)
+                        end
+                      end
+                    end
+                  end
+                end
+              end
+              return @context.union_of([block_result, @context.nil_type])
+            when "not_nil!"
+              # Strip Nil from union
+              non_nil = receiver_type.types.reject { |t| t.is_a?(PrimitiveType) && t.name == "Nil" }
+              result = if non_nil.size == 1
+                         non_nil.first
+                       elsif non_nil.empty?
+                         @context.nil_type
+                       else
+                         UnionType.new(non_nil)
+                       end
+              return result
+            when "nil?"
+              return @context.bool_type
+            end
+
             if return_type = compute_union_method_return_type(receiver_type, method_name, arg_types)
               return return_type
             else
@@ -2901,7 +3112,18 @@ module CrystalV2
               return ArrayType.new(@context.nil_type)
             end
             emit_error("Method '#{method_name}' not found on #{receiver_type}", expr_id)
+            # Ensure block type is inferred even for unknown methods
+            if block_id = node.block
+              infer_expression(block_id)
+            end
             @context.nil_type
+          end
+        end
+
+        # Helper: Ensure block is inferred for call with block
+        private def ensure_block_inferred(node : Frontend::CallNode)
+          if block_id = node.block
+            infer_expression(block_id)
           end
         end
 
@@ -3126,6 +3348,9 @@ module CrystalV2
           when ArrayType
             # Phase 9: Built-in methods for arrays
             methods.concat(get_array_builtin_methods(receiver_type, method_name))
+          when HashType
+            # Phase 103C: Built-in methods for hashes
+            methods.concat(get_hash_builtin_methods(receiver_type, method_name))
           when UnionType
             # Phase 4B.4: Find common method in all union members
             # Method can only be called on union if it exists in ALL constituent types
@@ -3137,6 +3362,57 @@ module CrystalV2
           when ProcType
             # Phase 101: Built-in methods for procs
             methods.concat(get_proc_builtin_methods(receiver_type, method_name))
+          end
+
+          # Phase 103C: Universal methods available on all types
+          if methods.empty?
+            methods.concat(get_universal_methods(receiver_type, method_name))
+          end
+
+          methods
+        end
+
+        # Phase 103C: Universal methods available on all types (Object methods)
+        private def get_universal_methods(receiver_type : Type, method_name : String) : Array(MethodSymbol)
+          methods = [] of MethodSymbol
+          dummy_node_id = ExprId.new(0)
+          dummy_scope = SymbolTable.new(nil)
+
+          case method_name
+          when "nil?"
+            # T#nil? : Bool - returns true only if receiver is Nil
+            methods << MethodSymbol.new(method_name, dummy_node_id, params: [] of Frontend::Parameter, return_annotation: "Bool", scope: dummy_scope)
+          when "not_nil!"
+            # T#not_nil! : T - returns receiver with Nil stripped from union, or same type
+            # For union types with Nil, return the non-nil part
+            return_type = case receiver_type
+                          when UnionType
+                            non_nil = receiver_type.types.reject { |t| t.is_a?(PrimitiveType) && t.name == "Nil" }
+                            if non_nil.size == 1
+                              non_nil.first.to_s
+                            elsif non_nil.empty?
+                              "Nil"
+                            else
+                              non_nil.map(&.to_s).join(" | ")
+                            end
+                          else
+                            receiver_type.to_s
+                          end
+            methods << MethodSymbol.new(method_name, dummy_node_id, params: [] of Frontend::Parameter, return_annotation: return_type, scope: dummy_scope)
+          when "to_s"
+            methods << MethodSymbol.new(method_name, dummy_node_id, params: [] of Frontend::Parameter, return_annotation: "String", scope: dummy_scope)
+          when "hash"
+            methods << MethodSymbol.new(method_name, dummy_node_id, params: [] of Frontend::Parameter, return_annotation: "UInt64", scope: dummy_scope)
+          when "class"
+            methods << MethodSymbol.new(method_name, dummy_node_id, params: [] of Frontend::Parameter, return_annotation: "Class", scope: dummy_scope)
+          when "=~"
+            # Pattern matching operator
+            param = Frontend::Parameter.new(name: "pattern".to_slice, type_annotation: "Regex".to_slice)
+            methods << MethodSymbol.new(method_name, dummy_node_id, params: [param], return_annotation: "Bool", scope: dummy_scope)
+          when "try"
+            # T#try(&block) : U | Nil - calls block with self, returns result or nil
+            # For nilable types, returns nil if receiver is nil
+            methods << MethodSymbol.new(method_name, dummy_node_id, params: [] of Frontend::Parameter, return_annotation: "Nil", scope: dummy_scope)
           end
 
           methods
@@ -3526,13 +3802,59 @@ module CrystalV2
             end
           when "String"
             case method_name
-            when "size"
-              # String#size : Int32
+            when "size", "bytesize"
+              # String#size : Int32, String#bytesize : Int32
               methods << MethodSymbol.new(
                 method_name,
                 dummy_node_id,
                 params: [] of Frontend::Parameter,
                 return_annotation: "Int32",
+                scope: dummy_scope
+              )
+            when "empty?", "blank?", "ascii_only?"
+              # String#empty? : Bool
+              methods << MethodSymbol.new(
+                method_name,
+                dummy_node_id,
+                params: [] of Frontend::Parameter,
+                return_annotation: "Bool",
+                scope: dummy_scope
+              )
+            when "upcase", "downcase", "capitalize", "strip", "chomp", "reverse", "to_s"
+              # String#upcase : String
+              methods << MethodSymbol.new(
+                method_name,
+                dummy_node_id,
+                params: [] of Frontend::Parameter,
+                return_annotation: "String",
+                scope: dummy_scope
+              )
+            when "chars"
+              # String#chars : Array(Char)
+              methods << MethodSymbol.new(
+                method_name,
+                dummy_node_id,
+                params: [] of Frontend::Parameter,
+                return_annotation: "Array(Char)",
+                scope: dummy_scope
+              )
+            when "bytes"
+              # String#bytes : Array(UInt8)
+              methods << MethodSymbol.new(
+                method_name,
+                dummy_node_id,
+                params: [] of Frontend::Parameter,
+                return_annotation: "Array(UInt8)",
+                scope: dummy_scope
+              )
+            when "split"
+              # String#split(String) : Array(String)
+              param = Frontend::Parameter.new(name: "separator".to_slice, type_annotation: "String".to_slice)
+              methods << MethodSymbol.new(
+                method_name,
+                dummy_node_id,
+                params: [param],
+                return_annotation: "Array(String)",
                 scope: dummy_scope
               )
             when "+"
@@ -3545,6 +3867,26 @@ module CrystalV2
                 return_annotation: "String",
                 scope: dummy_scope
               )
+            when "*"
+              # String#*(Int32) : String
+              param = Frontend::Parameter.new(name: "times".to_slice, type_annotation: "Int32".to_slice)
+              methods << MethodSymbol.new(
+                method_name,
+                dummy_node_id,
+                params: [param],
+                return_annotation: "String",
+                scope: dummy_scope
+              )
+            when "includes?", "starts_with?", "ends_with?"
+              # String#includes?(String) : Bool
+              param = Frontend::Parameter.new(name: "str".to_slice, type_annotation: "String".to_slice)
+              methods << MethodSymbol.new(
+                method_name,
+                dummy_node_id,
+                params: [param],
+                return_annotation: "Bool",
+                scope: dummy_scope
+              )
             when "==", "!="
               # String#==(String) : Bool
               param = Frontend::Parameter.new(name: "other".to_slice, type_annotation: "String".to_slice)
@@ -3555,6 +3897,26 @@ module CrystalV2
                 return_annotation: "Bool",
                 scope: dummy_scope
               )
+            when "to_i", "to_i32"
+              methods << MethodSymbol.new(method_name, dummy_node_id, params: [] of Frontend::Parameter, return_annotation: "Int32", scope: dummy_scope)
+            when "to_i64"
+              methods << MethodSymbol.new(method_name, dummy_node_id, params: [] of Frontend::Parameter, return_annotation: "Int64", scope: dummy_scope)
+            when "to_f", "to_f64"
+              methods << MethodSymbol.new(method_name, dummy_node_id, params: [] of Frontend::Parameter, return_annotation: "Float64", scope: dummy_scope)
+            end
+          when "Nil"
+            case method_name
+            when "nil?"
+              # Nil#nil? : Bool (always true)
+              methods << MethodSymbol.new(
+                method_name,
+                dummy_node_id,
+                params: [] of Frontend::Parameter,
+                return_annotation: "Bool",
+                scope: dummy_scope
+              )
+            when "to_s"
+              methods << MethodSymbol.new(method_name, dummy_node_id, params: [] of Frontend::Parameter, return_annotation: "String", scope: dummy_scope)
             end
           when "Bool"
             case method_name
@@ -3625,6 +3987,193 @@ module CrystalV2
               return_annotation: "Array(#{element_type_name})",
               scope: dummy_scope
             )
+          when "+"
+            # Array(T)#+(Array(T)) : Array(T)
+            param = Frontend::Parameter.new(name: "other".to_slice, type_annotation: "Array(#{element_type_name})".to_slice)
+            methods << MethodSymbol.new(
+              method_name,
+              dummy_node_id,
+              params: [param],
+              return_annotation: "Array(#{element_type_name})",
+              scope: dummy_scope
+            )
+          when "includes?"
+            # Array(T)#includes?(T) : Bool
+            param = Frontend::Parameter.new(name: "value".to_slice, type_annotation: element_type_name.to_slice)
+            methods << MethodSymbol.new(
+              method_name,
+              dummy_node_id,
+              params: [param],
+              return_annotation: "Bool",
+              scope: dummy_scope
+            )
+          when "compact"
+            # Array(T | Nil)#compact : Array(T)
+            # Strip Nil from element type
+            compacted_type = case array_type.element_type
+                             when UnionType
+                               non_nil = array_type.element_type.as(UnionType).types.reject { |t|
+                                 t.is_a?(PrimitiveType) && t.name == "Nil"
+                               }
+                               if non_nil.size == 1
+                                 non_nil.first.to_s
+                               elsif non_nil.empty?
+                                 "Nil"
+                               else
+                                 non_nil.map(&.to_s).join(" | ")
+                               end
+                             else
+                               element_type_name
+                             end
+            methods << MethodSymbol.new(
+              method_name,
+              dummy_node_id,
+              params: [] of Frontend::Parameter,
+              return_annotation: "Array(#{compacted_type})",
+              scope: dummy_scope
+            )
+          when "flatten"
+            # Array(Array(T))#flatten : Array(T)
+            # Extract inner element type
+            flattened_type = case array_type.element_type
+                             when ArrayType
+                               array_type.element_type.as(ArrayType).element_type.to_s
+                             else
+                               element_type_name  # Already flat
+                             end
+            methods << MethodSymbol.new(
+              method_name,
+              dummy_node_id,
+              params: [] of Frontend::Parameter,
+              return_annotation: "Array(#{flattened_type})",
+              scope: dummy_scope
+            )
+          when "map"
+            # Array(T)#map(&block) : Array(U) - returns Array based on block
+            # Simplified: we need block type inference, handled elsewhere
+            methods << MethodSymbol.new(
+              method_name,
+              dummy_node_id,
+              params: [] of Frontend::Parameter,
+              return_annotation: "Array(#{element_type_name})",
+              scope: dummy_scope
+            )
+          when "select", "reject"
+            # Array(T)#select(&block) : Array(T)
+            methods << MethodSymbol.new(
+              method_name,
+              dummy_node_id,
+              params: [] of Frontend::Parameter,
+              return_annotation: "Array(#{element_type_name})",
+              scope: dummy_scope
+            )
+          when "each"
+            # Array(T)#each(&block) : Array(T)
+            methods << MethodSymbol.new(
+              method_name,
+              dummy_node_id,
+              params: [] of Frontend::Parameter,
+              return_annotation: "Array(#{element_type_name})",
+              scope: dummy_scope
+            )
+          when "join"
+            # Array(T)#join(String) : String
+            param = Frontend::Parameter.new(name: "separator".to_slice, type_annotation: "String".to_slice)
+            methods << MethodSymbol.new(
+              method_name,
+              dummy_node_id,
+              params: [param],
+              return_annotation: "String",
+              scope: dummy_scope
+            )
+          when "reverse", "sort", "uniq", "shuffle"
+            # Array(T)#reverse : Array(T)
+            methods << MethodSymbol.new(
+              method_name,
+              dummy_node_id,
+              params: [] of Frontend::Parameter,
+              return_annotation: "Array(#{element_type_name})",
+              scope: dummy_scope
+            )
+          when "pop", "shift"
+            # Array(T)#pop : T
+            methods << MethodSymbol.new(
+              method_name,
+              dummy_node_id,
+              params: [] of Frontend::Parameter,
+              return_annotation: element_type_name,
+              scope: dummy_scope
+            )
+          when "any?", "all?", "none?"
+            # Array(T)#any? : Bool
+            methods << MethodSymbol.new(
+              method_name,
+              dummy_node_id,
+              params: [] of Frontend::Parameter,
+              return_annotation: "Bool",
+              scope: dummy_scope
+            )
+          when "index"
+            # Array(T)#index(T) : Int32 | Nil
+            param = Frontend::Parameter.new(name: "value".to_slice, type_annotation: element_type_name.to_slice)
+            methods << MethodSymbol.new(
+              method_name,
+              dummy_node_id,
+              params: [param],
+              return_annotation: "Int32 | Nil",
+              scope: dummy_scope
+            )
+          end
+
+          methods
+        end
+
+        # Phase 103C: Built-in methods for Hash(K, V)
+        private def get_hash_builtin_methods(hash_type : HashType, method_name : String) : Array(MethodSymbol)
+          methods = [] of MethodSymbol
+          dummy_node_id = ExprId.new(0)
+          dummy_scope = SymbolTable.new(nil)
+
+          key_type_name = hash_type.key_type.to_s
+          value_type_name = hash_type.value_type.to_s
+
+          case method_name
+          when "size"
+            methods << MethodSymbol.new(method_name, dummy_node_id, params: [] of Frontend::Parameter, return_annotation: "Int32", scope: dummy_scope)
+          when "empty?"
+            methods << MethodSymbol.new(method_name, dummy_node_id, params: [] of Frontend::Parameter, return_annotation: "Bool", scope: dummy_scope)
+          when "keys"
+            methods << MethodSymbol.new(method_name, dummy_node_id, params: [] of Frontend::Parameter, return_annotation: "Array(#{key_type_name})", scope: dummy_scope)
+          when "values"
+            methods << MethodSymbol.new(method_name, dummy_node_id, params: [] of Frontend::Parameter, return_annotation: "Array(#{value_type_name})", scope: dummy_scope)
+          when "has_key?"
+            param = Frontend::Parameter.new(name: "key".to_slice, type_annotation: key_type_name.to_slice)
+            methods << MethodSymbol.new(method_name, dummy_node_id, params: [param], return_annotation: "Bool", scope: dummy_scope)
+          when "has_value?"
+            param = Frontend::Parameter.new(name: "value".to_slice, type_annotation: value_type_name.to_slice)
+            methods << MethodSymbol.new(method_name, dummy_node_id, params: [param], return_annotation: "Bool", scope: dummy_scope)
+          when "[]?"
+            param = Frontend::Parameter.new(name: "key".to_slice, type_annotation: key_type_name.to_slice)
+            methods << MethodSymbol.new(method_name, dummy_node_id, params: [param], return_annotation: "#{value_type_name} | Nil", scope: dummy_scope)
+          when "fetch"
+            param = Frontend::Parameter.new(name: "key".to_slice, type_annotation: key_type_name.to_slice)
+            methods << MethodSymbol.new(method_name, dummy_node_id, params: [param], return_annotation: value_type_name, scope: dummy_scope)
+          when "delete"
+            param = Frontend::Parameter.new(name: "key".to_slice, type_annotation: key_type_name.to_slice)
+            methods << MethodSymbol.new(method_name, dummy_node_id, params: [param], return_annotation: "#{value_type_name} | Nil", scope: dummy_scope)
+          when "clear"
+            methods << MethodSymbol.new(method_name, dummy_node_id, params: [] of Frontend::Parameter, return_annotation: "Hash(#{key_type_name}, #{value_type_name})", scope: dummy_scope)
+          when "each"
+            methods << MethodSymbol.new(method_name, dummy_node_id, params: [] of Frontend::Parameter, return_annotation: "Hash(#{key_type_name}, #{value_type_name})", scope: dummy_scope)
+          when "each_key"
+            methods << MethodSymbol.new(method_name, dummy_node_id, params: [] of Frontend::Parameter, return_annotation: "Hash(#{key_type_name}, #{value_type_name})", scope: dummy_scope)
+          when "each_value"
+            methods << MethodSymbol.new(method_name, dummy_node_id, params: [] of Frontend::Parameter, return_annotation: "Hash(#{key_type_name}, #{value_type_name})", scope: dummy_scope)
+          when "merge"
+            param = Frontend::Parameter.new(name: "other".to_slice, type_annotation: "Hash(#{key_type_name}, #{value_type_name})".to_slice)
+            methods << MethodSymbol.new(method_name, dummy_node_id, params: [param], return_annotation: "Hash(#{key_type_name}, #{value_type_name})", scope: dummy_scope)
+          when "to_a"
+            methods << MethodSymbol.new(method_name, dummy_node_id, params: [] of Frontend::Parameter, return_annotation: "Array(Tuple(#{key_type_name}, #{value_type_name}))", scope: dummy_scope)
           end
 
           methods
@@ -3674,6 +4223,21 @@ module CrystalV2
         private def infer_block(node : Frontend::BlockNode, expr_id : ExprId) : Type
           guard_watchdog!
 
+          # Check if block has untyped parameters that need caller context
+          # (e.g., short block form &.method with synthesized __arg0 param)
+          if (params = node.params)
+            params.each do |param|
+              if (name_slice = param.name)
+                param_name = String.new(name_slice)
+                # If param is synthesized (__arg0) and not in assignments, defer to caller
+                if param_name.starts_with?("__arg") && !@assignments.has_key?(param_name)
+                  return @context.nil_type
+                end
+              end
+            end
+          end
+
+          # Regular block - infer body expressions
           infer_block_result(node.body)
         end
 
@@ -4155,8 +4719,8 @@ module CrystalV2
           if entries.empty?
             if key_type_slice = node.of_key_type
               value_type_slice = node.of_value_type.not_nil!
-              key_type = lookup_type_by_name(String.new(key_type_slice))
-              value_type = lookup_type_by_name(String.new(value_type_slice))
+              key_type = lookup_type_by_name(String.new(key_type_slice)) || @context.nil_type
+              value_type = lookup_type_by_name(String.new(value_type_slice)) || @context.nil_type
               return HashType.new(key_type, value_type)
             else
               return HashType.new(@context.nil_type, @context.nil_type)
@@ -4242,12 +4806,39 @@ module CrystalV2
         # Helper Methods
         # ============================================================
 
-        private def lookup_type_by_name(name : String) : Type
+        private def lookup_type_by_name(name : String) : Type?
+          # Handle nilable shorthand: T? → T | Nil
+          if name.ends_with?("?")
+            base_name = name[0..-2]
+            if base_type = lookup_type_by_name(base_name)
+              return @context.union_of([base_type, @context.nil_type])
+            end
+            return nil
+          end
+
           case name
+          when "Int8"
+            @context.int8_type
+          when "Int16"
+            @context.int16_type
           when "Int32"
             @context.int32_type
           when "Int64"
             @context.int64_type
+          when "Int128"
+            @context.int128_type
+          when "UInt8"
+            @context.uint8_type
+          when "UInt16"
+            @context.uint16_type
+          when "UInt32"
+            @context.uint32_type
+          when "UInt64"
+            @context.uint64_type
+          when "UInt128"
+            @context.uint128_type
+          when "Float32"
+            @context.float32_type
           when "Float64"
             @context.float64_type
           when "String"
@@ -4258,9 +4849,13 @@ module CrystalV2
             @context.nil_type
           when "Char"
             @context.char_type
+          when "Symbol"
+            @context.symbol_type
+          when "Regex"
+            @context.regex_type
           else
-            # Unknown type, default to Nil
-            @context.nil_type
+            # Unknown type - return nil to let caller decide
+            nil
           end
         end
 

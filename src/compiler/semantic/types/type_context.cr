@@ -20,8 +20,17 @@ module CrystalV2
         getter expression_types : Hash(ExprId, Type)
 
         # Built-in primitive types
+        getter int8_type : PrimitiveType
+        getter int16_type : PrimitiveType
         getter int32_type : PrimitiveType
         getter int64_type : PrimitiveType
+        getter int128_type : PrimitiveType
+        getter uint8_type : PrimitiveType
+        getter uint16_type : PrimitiveType
+        getter uint32_type : PrimitiveType
+        getter uint64_type : PrimitiveType
+        getter uint128_type : PrimitiveType
+        getter float32_type : PrimitiveType
         getter float64_type : PrimitiveType
         getter string_type : PrimitiveType
         getter bool_type : PrimitiveType
@@ -35,8 +44,17 @@ module CrystalV2
           @expression_types = {} of ExprId => Type
 
           # Initialize built-in primitive types
+          @int8_type = PrimitiveType.new("Int8")
+          @int16_type = PrimitiveType.new("Int16")
           @int32_type = PrimitiveType.new("Int32")
           @int64_type = PrimitiveType.new("Int64")
+          @int128_type = PrimitiveType.new("Int128")
+          @uint8_type = PrimitiveType.new("UInt8")
+          @uint16_type = PrimitiveType.new("UInt16")
+          @uint32_type = PrimitiveType.new("UInt32")
+          @uint64_type = PrimitiveType.new("UInt64")
+          @uint128_type = PrimitiveType.new("UInt128")
+          @float32_type = PrimitiveType.new("Float32")
           @float64_type = PrimitiveType.new("Float64")
           @string_type = PrimitiveType.new("String")
           @bool_type = PrimitiveType.new("Bool")
