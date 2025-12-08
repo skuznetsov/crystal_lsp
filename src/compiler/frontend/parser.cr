@@ -13274,11 +13274,14 @@ module CrystalV2
               lbracket_token = current_token
               advance  # consume [
               if current_token.kind == Token::Kind::RBracket
-                # Method name [] or []=
+                # Method name [], []=, or []?
                 advance  # consume ]
                 method_name = if current_token.kind == Token::Kind::Eq
                   advance  # consume =
                   @string_pool.intern(Slice(UInt8).new("[]=".to_unsafe, 3))
+                elsif current_token.kind == Token::Kind::Question
+                  advance  # consume ?
+                  @string_pool.intern(Slice(UInt8).new("[]?".to_unsafe, 3))
                 else
                   @string_pool.intern(Slice(UInt8).new("[]".to_unsafe, 2))
                 end
@@ -13385,11 +13388,14 @@ module CrystalV2
               lbracket_token = current_token
               advance  # consume [
               if current_token.kind == Token::Kind::RBracket
-                # Method name [] or []=
+                # Method name [], []=, or []?
                 advance  # consume ]
                 method_name = if current_token.kind == Token::Kind::Eq
                   advance  # consume =
                   @string_pool.intern(Slice(UInt8).new("[]=".to_unsafe, 3))
+                elsif current_token.kind == Token::Kind::Question
+                  advance  # consume ?
+                  @string_pool.intern(Slice(UInt8).new("[]?".to_unsafe, 3))
                 else
                   @string_pool.intern(Slice(UInt8).new("[]".to_unsafe, 2))
                 end
