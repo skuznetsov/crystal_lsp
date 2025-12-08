@@ -470,4 +470,114 @@ describe "Phase 87B-6: Macro Methods (.stringify, .id, .class_name)" do
       collector.diagnostics.select(&.level.error?).should be_empty
     end
   end
+
+  # ==================================================================
+  # Category 8: @type.name with generic_args parameter
+  # ==================================================================
+
+  describe "@type.name(generic_args:)" do
+    it "returns full name with type parameters for generic class" do
+      source = <<-CRYSTAL
+        class Box(T)
+          macro type_name
+            {{ @type.name }}
+          end
+        end
+        CRYSTAL
+
+      lexer = Frontend::Lexer.new(source)
+      parser = Frontend::Parser.new(lexer)
+      program = parser.parse_program
+
+      context = Semantic::Context.new(Semantic::SymbolTable.new)
+      collector = Semantic::SymbolCollector.new(program, context)
+      collector.collect
+
+      collector.diagnostics.select(&.level.error?).should be_empty
+    end
+
+    it "strips type parameters when generic_args: false" do
+      source = <<-CRYSTAL
+        class Container(T, U)
+          macro base_name
+            {{ @type.name(generic_args: false) }}
+          end
+        end
+        CRYSTAL
+
+      lexer = Frontend::Lexer.new(source)
+      parser = Frontend::Parser.new(lexer)
+      program = parser.parse_program
+
+      context = Semantic::Context.new(Semantic::SymbolTable.new)
+      collector = Semantic::SymbolCollector.new(program, context)
+      collector.collect
+
+      collector.diagnostics.select(&.level.error?).should be_empty
+    end
+
+    it "includes type parameters when generic_args: true" do
+      source = <<-CRYSTAL
+        class Pair(K, V)
+          macro full_name
+            {{ @type.name(generic_args: true) }}
+          end
+        end
+        CRYSTAL
+
+      lexer = Frontend::Lexer.new(source)
+      parser = Frontend::Parser.new(lexer)
+      program = parser.parse_program
+
+      context = Semantic::Context.new(Semantic::SymbolTable.new)
+      collector = Semantic::SymbolCollector.new(program, context)
+      collector.collect
+
+      collector.diagnostics.select(&.level.error?).should be_empty
+    end
+
+    it "returns simple name for non-generic class" do
+      source = <<-CRYSTAL
+        class SimpleClass
+          macro type_name
+            {{ @type.name }}
+          end
+        end
+        CRYSTAL
+
+      lexer = Frontend::Lexer.new(source)
+      parser = Frontend::Parser.new(lexer)
+      program = parser.parse_program
+
+      context = Semantic::Context.new(Semantic::SymbolTable.new)
+      collector = Semantic::SymbolCollector.new(program, context)
+      collector.collect
+
+      collector.diagnostics.select(&.level.error?).should be_empty
+    end
+
+    it "works with single type parameter" do
+      source = <<-CRYSTAL
+        class Wrapper(T)
+          macro get_type_name
+            {{ @type.name }}
+          end
+
+          macro get_base_name
+            {{ @type.name(generic_args: false) }}
+          end
+        end
+        CRYSTAL
+
+      lexer = Frontend::Lexer.new(source)
+      parser = Frontend::Parser.new(lexer)
+      program = parser.parse_program
+
+      context = Semantic::Context.new(Semantic::SymbolTable.new)
+      collector = Semantic::SymbolCollector.new(program, context)
+      collector.collect
+
+      collector.diagnostics.select(&.level.error?).should be_empty
+    end
+  end
 end

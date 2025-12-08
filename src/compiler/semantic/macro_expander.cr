@@ -620,7 +620,14 @@ module CrystalV2
               when "abstract?"
                 return class_symbol.is_abstract? ? "true" : ""
               when "name"
-                return class_symbol.name
+                # @type.name returns full name with generic parameters by default
+                base_name = class_symbol.name
+                type_params = class_symbol.type_parameters
+                if type_params && !type_params.empty?
+                  return "#{base_name}(#{type_params.join(", ")})"
+                else
+                  return base_name
+                end
               when "superclass"
                 return class_symbol.superclass_name || ""
               end
@@ -875,28 +882,34 @@ module CrystalV2
 
                 case member
                 when "name"
-                  # In Crystal, @type.name(generic_args: false) strips generic
-                  # arguments from the printed name. We approximate this by
-                  # string processing on the class symbol name.
-                  generic_args_false = false
+                  # @type.name returns the full type name with generic parameters by default.
+                  # @type.name(generic_args: false) strips generic parameters.
+                  #
+                  # Example: for `class Foo(T, U)`:
+                  #   @type.name                      → "Foo(T, U)"
+                  #   @type.name(generic_args: true)  → "Foo(T, U)"
+                  #   @type.name(generic_args: false) → "Foo"
+                  include_generic_args = true
                   if named_args = node.named_args
                     named_args.each do |named_arg|
                       arg_name = String.new(named_arg.name)
                       next unless arg_name == "generic_args"
 
                       value_str = evaluate_expression(named_arg.value, context)
-                      generic_args_false = (value_str == "false")
+                      include_generic_args = (value_str != "false")
                     end
                   end
 
-                  full_name = class_symbol.name
-                  if generic_args_false
-                    # Strip trailing generic arguments: Foo(T, U) → Foo
-                    if idx = full_name.index('(')
-                      return full_name[0, idx]
-                    end
+                  base_name = class_symbol.name
+                  type_params = class_symbol.type_parameters
+
+                  if include_generic_args && type_params && !type_params.empty?
+                    # Construct full name with type parameters: Foo(T, U)
+                    return "#{base_name}(#{type_params.join(", ")})"
+                  else
+                    # Return base name without generic parameters
+                    return base_name
                   end
-                  return full_name
                 when "size"
                   # Approximate @type.size as the number of generic type
                   # parameters declared on the owning class.

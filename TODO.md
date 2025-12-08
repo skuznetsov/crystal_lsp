@@ -11,7 +11,7 @@ about syntax or types and should match what the original compiler would report.
 ## Current Status (2025-12-07)
 
 ### Test Coverage
-- **2910 tests**, 0 failures, 12 pending
+- **2915 tests**, 0 failures, 12 pending
 - **1390 test cases** ported from Crystal's original `parser_spec.cr`
 - **97.6% parser compatibility** with original Crystal
 
@@ -51,7 +51,7 @@ about syntax or types and should match what the original compiler would report.
 
 ---
 
-## 2. MacroExpander Parity - IN PROGRESS (~85%)
+## 2. MacroExpander Parity - IN PROGRESS (~90%)
 
 - [x] MVP macro engine:
   - [x] `{{ ... }}` expansion for basic literals/paths
@@ -86,8 +86,11 @@ about syntax or types and should match what the original compiler would report.
 - [x] `alignof(...)` - returns alignment of primitive types
 - [x] `instance_alignof(...)` - returns instance alignment (pointer alignment)
 
+### Completed Rich Type Introspection
+- [x] `@type.name(generic_args: true/false)` - returns type name with/without generic params
+
 ### TODO: Rich Macro API
-- [ ] Rich `@type.name(generic_args: ...)` with full type graph
+- [ ] Full type graph integration (instantiated generic types)
 
 ---
 
@@ -297,7 +300,7 @@ AST + Type Graph
 | Parser | ~97.6% | 1390+1466 |
 | Lexer | Complete | Part of parser tests |
 | AST | Complete | Class inheritance done |
-| MacroExpander | ~85% | MVP + ann[:key] + abstract + typeof/sizeof/alignof |
+| MacroExpander | ~90% | MVP + ann[:key] + typeof/sizeof + @type.name(generic_args) |
 | Type Inference | ~50% | Basic working |
 | LSP Server | ~70% | 21 methods implemented |
 | Codegen | 0% | Future phase |
