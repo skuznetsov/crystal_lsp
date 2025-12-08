@@ -262,4 +262,90 @@ describe "Phase 95: Flow Typing (is_a? narrowing)" do
       engine.diagnostics.select(&.level.error?).should be_empty
     end
   end
+
+  # ==================================================================
+  # Category 7: Case/when type narrowing (Phase 97)
+  # ==================================================================
+
+  describe "case/when type narrowing" do
+    it "narrows type in when branch with type literal" do
+      source = <<-CRYSTAL
+        def test(x : Int32 | String)
+          case x
+          when Int32
+            x + 1  # x is Int32 here
+          when String
+            x.size  # x is String here
+          end
+        end
+        CRYSTAL
+
+      lexer = Frontend::Lexer.new(source)
+      parser = Frontend::Parser.new(lexer)
+      program = parser.parse_program
+
+      analyzer = Semantic::Analyzer.new(program)
+      analyzer.collect_symbols
+      name_result = analyzer.resolve_names
+
+      engine = Semantic::TypeInferenceEngine.new(program, name_result.identifier_symbols, analyzer.global_context.symbol_table)
+      engine.infer_types
+
+      engine.diagnostics.select { |d| d.level.error? && d.message.includes?("not found") }.should be_empty
+    end
+
+    it "narrows Nil type in when Nil branch" do
+      source = <<-CRYSTAL
+        def test(x : String?)
+          case x
+          when Nil
+            nil  # x is Nil here
+          when String
+            x.size  # x is String here
+          end
+        end
+        CRYSTAL
+
+      lexer = Frontend::Lexer.new(source)
+      parser = Frontend::Parser.new(lexer)
+      program = parser.parse_program
+
+      analyzer = Semantic::Analyzer.new(program)
+      analyzer.collect_symbols
+      name_result = analyzer.resolve_names
+
+      engine = Semantic::TypeInferenceEngine.new(program, name_result.identifier_symbols, analyzer.global_context.symbol_table)
+      engine.infer_types
+
+      engine.diagnostics.select { |d| d.level.error? && d.message.includes?("not found") }.should be_empty
+    end
+
+    it "narrows to remaining type in else branch" do
+      source = <<-CRYSTAL
+        def test(x : Int32 | String | Float64)
+          case x
+          when Int32
+            x + 1
+          when String
+            x.size
+          else
+            x + 0.0  # x is Float64 here (remaining type)
+          end
+        end
+        CRYSTAL
+
+      lexer = Frontend::Lexer.new(source)
+      parser = Frontend::Parser.new(lexer)
+      program = parser.parse_program
+
+      analyzer = Semantic::Analyzer.new(program)
+      analyzer.collect_symbols
+      name_result = analyzer.resolve_names
+
+      engine = Semantic::TypeInferenceEngine.new(program, name_result.identifier_symbols, analyzer.global_context.symbol_table)
+      engine.infer_types
+
+      engine.diagnostics.select { |d| d.level.error? && d.message.includes?("not found") }.should be_empty
+    end
+  end
 end

@@ -3497,25 +3497,200 @@ module CrystalV2
         private def infer_case(node : Frontend::CaseNode, expr_id : ExprId) : Type
           guard_watchdog!
 
-          if value_id = node.value
-            infer_expression(value_id)
+          # Phase 97: Case/when type narrowing
+          # Get the case value and its type for narrowing
+          case_value_id = node.value
+          case_value_type : Type? = nil
+          case_var_name : String? = nil
+
+          if case_value_id
+            case_value_type = infer_expression(case_value_id)
+            # Check if case value is a simple identifier (for narrowing)
+            case_value_node = @program.arena[case_value_id]
+            if case_value_node.is_a?(Frontend::IdentifierNode)
+              case_var_name = String.new(case_value_node.name)
+            end
           end
 
           branch_types = [] of Type
+          matched_types = [] of Type  # Track types matched by when branches
 
           node.when_branches.each do |branch|
+            # Extract type from when condition for narrowing
+            narrowed_type = extract_when_narrowing(branch.conditions, case_value_type)
+
+            # Apply narrowing for this branch
+            if case_var_name && narrowed_type
+              @flow_narrowings[case_var_name] = narrowed_type
+              matched_types << narrowed_type
+            end
+
             branch.conditions.each { |cond_id| infer_expression(cond_id) }
             branch_types << infer_block_result(branch.body)
+
+            # Remove narrowing after branch
+            if case_var_name && narrowed_type
+              @flow_narrowings.delete(case_var_name)
+            end
           end
 
+          # Else branch gets remaining types (if any)
           if else_body = node.else_branch
+            if case_var_name && case_value_type && !matched_types.empty?
+              remaining = compute_remaining_types(case_value_type, matched_types)
+              if remaining
+                @flow_narrowings[case_var_name] = remaining
+              end
+            end
+
             branch_types << infer_block_result(else_body)
+
+            if case_var_name
+              @flow_narrowings.delete(case_var_name)
+            end
           else
             branch_types << @context.nil_type
           end
 
           case_type = branch_types.size == 1 ? branch_types[0] : @context.union_of(branch_types)
           case_type
+        end
+
+        # Phase 97: Extract narrowed type from when condition
+        # Returns the type to narrow to, or nil if not applicable
+        private def extract_when_narrowing(conditions : Array(ExprId), case_type : Type?) : Type?
+          return nil unless case_type
+
+          # Check each condition - any type literal narrows the case value
+          conditions.each do |cond_id|
+            cond_node = @program.arena[cond_id]
+
+            case cond_node
+            when Frontend::IdentifierNode
+              # when String, when Int32, etc. (type as identifier)
+              type_name = String.new(cond_node.name)
+              if is_type_name?(type_name)
+                return parse_type_name(type_name)
+              end
+            when Frontend::PathNode
+              # when Foo::Bar (namespaced type)
+              if type = resolve_path_as_type(cond_node)
+                return type
+              end
+            when Frontend::IsANode
+              # when .is_a?(Type) - rarely used in case but possible
+              type_name = String.new(cond_node.target_type)
+              return parse_type_name(type_name)
+            when Frontend::MemberAccessNode
+              # when .class (check if it's a .class call on type)
+              if member_name = extract_member_name(cond_node)
+                if member_name == "class"
+                  # This is x.class - the object is the type
+                  object_type = infer_expression(cond_node.object)
+                  if object_type.is_a?(ClassType)
+                    return InstanceType.new(object_type.symbol)
+                  end
+                end
+              end
+            end
+          end
+
+          nil
+        end
+
+        # Phase 97: Check if a name is a type name (capitalized)
+        private def is_type_name?(name : String) : Bool
+          return false if name.empty?
+          first_char = name[0]
+          first_char.uppercase? || name == "Nil"
+        end
+
+        # Phase 97: Resolve a path node as a type
+        private def resolve_path_as_type(node : Frontend::PathNode) : Type?
+          segments = [] of String
+          collect_path_segments_for_type(node, segments)
+          return nil if segments.empty?
+
+          # Try to find the type in global table
+          full_name = segments.join("::")
+          if symbol = @global_table.try(&.lookup(full_name))
+            case symbol
+            when ClassSymbol
+              return InstanceType.new(symbol)
+            end
+          end
+
+          # Try segment by segment lookup
+          if @global_table
+            current : Symbol? = nil
+            segments.each_with_index do |seg, idx|
+              if idx == 0
+                current = @global_table.not_nil!.lookup(seg)
+              else
+                case current
+                when ClassSymbol
+                  current = current.scope.lookup(seg)
+                when ModuleSymbol
+                  current = current.scope.lookup(seg)
+                else
+                  return nil
+                end
+              end
+              return nil unless current
+            end
+
+            if current.is_a?(ClassSymbol)
+              return InstanceType.new(current)
+            end
+          end
+
+          nil
+        end
+
+        # Phase 97: Collect path segments from PathNode
+        private def collect_path_segments_for_type(node : Frontend::PathNode, segments : Array(String))
+          if left_id = node.left
+            left_node = @program.arena[left_id]
+            case left_node
+            when Frontend::PathNode
+              collect_path_segments_for_type(left_node, segments)
+            when Frontend::IdentifierNode
+              segments << String.new(left_node.name)
+            end
+          end
+
+          right_node = @program.arena[node.right]
+          case right_node
+          when Frontend::IdentifierNode
+            segments << String.new(right_node.name)
+          when Frontend::PathNode
+            collect_path_segments_for_type(right_node, segments)
+          end
+        end
+
+        # Phase 97: Compute remaining types after matching some types
+        private def compute_remaining_types(original : Type, matched : Array(Type)) : Type?
+          case original
+          when UnionType
+            remaining = original.types.reject do |t|
+              matched.any? { |m| t == m || t.to_s == m.to_s }
+            end
+            return nil if remaining.empty?
+            return remaining.first if remaining.size == 1
+            UnionType.new(remaining)
+          else
+            # Non-union type - if matched, nothing remains
+            matched.any? { |m| original == m || original.to_s == m.to_s } ? nil : original
+          end
+        end
+
+        # Phase 97: Extract member name from MemberAccessNode
+        private def extract_member_name(node : Frontend::MemberAccessNode) : String?
+          if member_slice = node.member
+            String.new(member_slice)
+          else
+            nil
+          end
         end
 
         # ============================================================
