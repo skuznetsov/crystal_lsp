@@ -147,6 +147,17 @@ module CrystalV2
             children = summarize_scope(symbol.scope, program, type_context)
             class_children = summarize_scope(symbol.class_scope, program, type_context)
             ivars = symbol.instance_vars.map { |name, type| "@#{name} : #{type || "?"}" }
+            # Collect class vars and constants from class_scope
+            class_vars = [] of String
+            consts = [] of String
+            symbol.class_scope.each_local_symbol do |name, sym|
+              case sym
+              when Semantic::ClassVarSymbol
+                class_vars << "@@#{name} : #{sym.declared_type || "?"}"
+              when Semantic::ConstantSymbol
+                consts << name
+              end
+            end
             SymbolSummary.new(
               name: symbol.name,
               kind: "class",
@@ -154,8 +165,8 @@ module CrystalV2
               return_type: nil,
               inferred_type: inferred_type,
               params: nil,
-              ivars: ivars,
-              consts: nil,
+              ivars: ivars + class_vars,  # Include class vars with ivars
+              consts: consts.empty? ? nil : consts,
               class_children: class_children,
               children: children,
               start_line: start_line,
