@@ -13,6 +13,7 @@ require "../frontend/lexer"
 require "../frontend/parser"
 require "../semantic/analyzer"
 require "../formatter"
+require "../../runtime"
 
 module CrystalV2
   module Compiler
@@ -169,6 +170,7 @@ module CrystalV2
         getter debounce_ms : Int32
         getter background_indexing : Bool
         getter project_cache : Bool
+        getter compiler_flags : Set(String)
 
         def initialize(
           @debug_log_path : String? = nil,
@@ -179,6 +181,7 @@ module CrystalV2
           @debounce_ms : Int32 = 300,         # Default 300ms debounce
           @background_indexing : Bool = true, # Default: load prelude in background
           @project_cache : Bool = true,       # Default: cache project state to disk
+          @compiler_flags : Set(String) = Set(String).new, # Additional -D flags
         )
         end
 
@@ -193,6 +196,11 @@ module CrystalV2
           background_indexing = ENV["LSP_BACKGROUND_INDEXING"]? != "0"
           # Project cache enabled by default, can be disabled via env or config
           project_cache = ENV["LSP_PROJECT_CACHE"]? != "0"
+          # Compiler flags from environment (comma-separated) or config
+          compiler_flags = Set(String).new
+          if env_flags = ENV["LSP_COMPILER_FLAGS"]?
+            env_flags.split(",").each { |f| compiler_flags << f.strip unless f.strip.empty? }
+          end
 
           if config_path = ENV["CRYSTALV2_LSP_CONFIG"]?
             begin
@@ -225,6 +233,14 @@ module CrystalV2
                 if value = hash["project_cache"]?.try(&.as_bool?)
                   project_cache = value
                 end
+                # Parse compiler_flags as array of strings
+                if flags_arr = hash["compiler_flags"]?.try(&.as_a?)
+                  flags_arr.each do |flag|
+                    if flag_str = flag.as_s?
+                      compiler_flags << flag_str unless flag_str.empty?
+                    end
+                  end
+                end
               end
             rescue ex
               STDERR.puts("[LSP Config] Failed to load #{config_path}: #{ex.message}")
@@ -233,7 +249,7 @@ module CrystalV2
 
           debug_path = File.expand_path(debug_path) if debug_path
 
-          new(debug_path, recovery_mode, best_effort_inference, prelude_symbol_only, real_prelude, debounce_ms, background_indexing, project_cache)
+          new(debug_path, recovery_mode, best_effort_inference, prelude_symbol_only, real_prelude, debounce_ms, background_indexing, project_cache, compiler_flags)
         end
       end
 
@@ -2859,10 +2875,14 @@ module CrystalV2
         end
 
         private def build_context_with_prelude : Semantic::Context
+          # Merge runtime target flags with user-configured flags
+          flags = Runtime.target_flags.dup
+          @config.compiler_flags.each { |f| flags << f }
+
           if prelude = @prelude_state
-            Semantic::Context.new(Semantic::SymbolTable.new(prelude.symbol_table))
+            Semantic::Context.new(Semantic::SymbolTable.new(prelude.symbol_table), flags)
           else
-            Semantic::Context.new(Semantic::SymbolTable.new)
+            Semantic::Context.new(Semantic::SymbolTable.new, flags)
           end
         end
 

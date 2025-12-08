@@ -139,8 +139,14 @@ about syntax or types and should match what the original compiler would report.
 - [x] Subtype matching with VirtualType
 - [x] Deep inheritance chain method resolution
 
+### Completed Macro Integration
+- [x] Macro expansion in semantic phase (already working via SymbolCollector)
+- [x] Compiler flags support in LSP (`LSP_COMPILER_FLAGS` env, `compiler_flags` config)
+- [x] Custom flags propagation to MacroExpander via Context
+- [x] Runtime.target_flags for platform detection (darwin, linux, x86_64, etc.)
+
 ### TODO: Advanced Type System
-- [ ] Integrate macro expansion into semantic phase
+- [ ] Full type graph integration for instantiated generic types
 
 ---
 
