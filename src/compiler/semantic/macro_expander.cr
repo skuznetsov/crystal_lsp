@@ -4,6 +4,7 @@ require "../frontend/lexer"
 require "../frontend/parser"
 require "./symbol"
 require "./diagnostic"
+require "./macro_value"
 
 module CrystalV2
   module Compiler
@@ -49,7 +50,7 @@ module CrystalV2
 
         # Expansion context for macro evaluation
         class Context
-          getter variables : Hash(String, String)
+          getter variables : Hash(String, MacroValue)
           getter macro_vars : Hash(String, String)
           # Optional owner type for @type reflection macros
           getter owner_type : ClassSymbol?
@@ -57,7 +58,7 @@ module CrystalV2
           getter flags : Set(String)
 
           def initialize(
-            @variables = {} of String => String,
+            @variables = {} of String => MacroValue,
             @macro_vars = {} of String => String,
             @owner_type : ClassSymbol? = nil,
             @depth = 0,
@@ -69,7 +70,7 @@ module CrystalV2
             Context.new(@variables, @macro_vars, @owner_type, new_depth, @flags)
           end
 
-          def with_variable(name : String, value : String) : Context
+          def with_variable(name : String, value : MacroValue) : Context
             new_vars = @variables.dup
             new_vars[name] = value
             Context.new(new_vars, @macro_vars, @owner_type, @depth, @flags)
@@ -90,12 +91,16 @@ module CrystalV2
           def flag?(name : String) : Bool
             @flags.includes?(name)
           end
-        end
 
-        # Simple value representation during evaluation
-        # For Phase 87B-2: Just use String (empty string = undefined)
-        # Future: Richer type system with numbers, bools, arrays
-        alias Value = String
+          # Get variable as string (for backwards compat in some places)
+          def variable_string(name : String) : String
+            if v = @variables[name]?
+              v.to_macro_output
+            else
+              ""
+            end
+          end
+        end
 
         # Main expansion entry point
         #
@@ -128,25 +133,25 @@ module CrystalV2
         end
 
         private def build_context(macro_symbol : MacroSymbol, args : Array(ExprId), owner_type : ClassSymbol?) : Context
-          variables = {} of String => String
+          variables = {} of String => MacroValue
           params = macro_symbol.params || [] of String
 
           # Bind each parameter to its argument value
           params.each_with_index do |param_name, index|
             if index < args.size
-              # Evaluate argument to string
-              arg_value = stringify_expr(args[index])
+              # Evaluate argument to MacroValue
+              arg_value = expr_to_macro_value(args[index])
               variables[param_name] = arg_value
             else
-              # Missing argument - leave undefined (empty string)
-              variables[param_name] = ""
+              # Missing argument - nil value
+              variables[param_name] = MACRO_NIL
             end
           end
 
           Context.new(variables, {} of String => String, owner_type, @depth, @flags)
         end
 
-        # Convert expression to string representation (for parameter binding)
+        # Convert expression to string representation (for legacy/simple use)
         private def stringify_expr(expr_id : ExprId) : String
           node = @arena[expr_id]
 
@@ -157,8 +162,39 @@ module CrystalV2
             "nil"
           else
             # Complex expression - return source representation
-            # For Phase 87B-2: Just return identifier or empty
             Frontend.node_literal_string(node) || ""
+          end
+        end
+
+        # Convert AST expression to MacroValue
+        private def expr_to_macro_value(expr_id : ExprId) : MacroValue
+          node = @arena[expr_id]
+
+          case Frontend.node_kind(node)
+          when .number?
+            literal = Frontend.node_literal_string(node) || "0"
+            if literal.includes?(".")
+              MacroNumberValue.new(literal.to_f64? || 0.0)
+            else
+              MacroNumberValue.new(literal.to_i64? || 0_i64)
+            end
+          when .string?
+            MacroStringValue.new(Frontend.node_literal_string(node) || "")
+          when .symbol?
+            MacroSymbolValue.new(Frontend.node_literal_string(node) || "")
+          when .char?
+            literal = Frontend.node_literal_string(node) || ""
+            MacroStringValue.new(literal) # Treat char as string for simplicity
+          when .bool?
+            literal = Frontend.node_literal_string(node)
+            MacroBoolValue.new(literal == "true")
+          when .nil?
+            MACRO_NIL
+          when .identifier?
+            MacroIdValue.new(Frontend.node_literal_string(node) || "")
+          else
+            # Complex expressions - return as MacroId
+            MacroIdValue.new(Frontend.node_literal_string(node) || "")
           end
         end
 
@@ -252,7 +288,7 @@ module CrystalV2
           end
         end
 
-        private def evaluate_expression(expr_id : ExprId, context : Context) : Value
+        private def evaluate_expression(expr_id : ExprId, context : Context) : String
           node = @arena[expr_id]
 
           # Unwrap MacroExpressionNode ({{ expr }}) to get inner expression
@@ -290,7 +326,11 @@ module CrystalV2
           when .identifier?
             # Variable reference: look up in context
             if name = Frontend.node_literal_string(node)
-              context.variables[name]? || ""
+              if macro_val = context.variables[name]?
+                macro_val.to_macro_output
+              else
+                ""
+              end
             else
               ""
             end
@@ -320,7 +360,7 @@ module CrystalV2
 
         # Evaluate instance variable expressions used in macros
         # Currently only supports @type for type-reflection macros.
-        private def evaluate_instance_var_expression(node, context : Context) : Value
+        private def evaluate_instance_var_expression(node, context : Context) : String
           name_slice = node.name
           name = String.new(name_slice)
           if name == "@type"
@@ -337,7 +377,7 @@ module CrystalV2
         #   ivar.id
         #   ivar.type
         #   ivar.has_default_value?
-        private def evaluate_member_access_expression(node, context : Context) : Value
+        private def evaluate_member_access_expression(node, context : Context) : String
           obj = @arena[node.object]
           member = String.new(node.member)
 
@@ -369,18 +409,22 @@ module CrystalV2
             end
           end
 
-          # Resolve base value
-          base_value = case obj
-                       when Frontend::InstanceVarNode
-                         evaluate_instance_var_expression(obj, context)
-                       when Frontend::IdentifierNode
-                         var_name = Frontend.node_literal_string(obj) || ""
-                         context.variables[var_name]? || ""
-                       when Frontend::MemberAccessNode
-                         evaluate_member_access_expression(obj, context)
-                       else
-                         ""
-                       end
+          # Resolve base value (string or MacroValue)
+          base_value, base_macro_value = case obj
+                                         when Frontend::InstanceVarNode
+                                           {evaluate_instance_var_expression(obj, context), nil}
+                                         when Frontend::IdentifierNode
+                                           var_name = Frontend.node_literal_string(obj) || ""
+                                           if mv = context.variables[var_name]?
+                                             {mv.to_macro_output, mv}
+                                           else
+                                             {"", nil}
+                                           end
+                                         when Frontend::MemberAccessNode
+                                           {evaluate_member_access_expression(obj, context), nil}
+                                         else
+                                           {"", nil}
+                                         end
 
           # For @type.name and chained calls, just return the type name
           if base_value != "" && context.owner_type && member == "name"
@@ -402,27 +446,32 @@ module CrystalV2
             return base_value
           end
 
-          # Handle ivar metadata access when base_value is an instance var name
-          # and we have an owner_type context
+          # Handle ivar metadata access via MacroMetaVarValue
+          if base_macro_value.is_a?(MacroMetaVarValue)
+            meta_var = base_macro_value.as(MacroMetaVarValue)
+            result = meta_var.call_method(member, [] of MacroValue, nil)
+            return result.to_macro_output
+          end
+
+          # Legacy: Handle ivar metadata access when base_value is an instance var name
           if context.owner_type && obj.is_a?(Frontend::IdentifierNode)
             var_name = Frontend.node_literal_string(obj) || ""
-            ivar_name = context.variables[var_name]? || ""
-            if !ivar_name.empty?
-              class_symbol = context.owner_type.not_nil!
-              if ivar_info = class_symbol.get_instance_var_info(ivar_name)
-                case member
-                when "type"
-                  # ivar.type → returns the type annotation or empty
-                  return ivar_info.type_annotation || ""
-                when "has_default_value?"
-                  # ivar.has_default_value? → returns "true" or ""
-                  return ivar_info.has_default? ? "true" : ""
-                when "default_value"
-                  # ivar.default_value → stringified default value
-                  if default_id = ivar_info.default_value
-                    return stringify_expr(default_id)
+            if mv = context.variables[var_name]?
+              ivar_name = mv.to_macro_output
+              if !ivar_name.empty?
+                class_symbol = context.owner_type.not_nil!
+                if ivar_info = class_symbol.get_instance_var_info(ivar_name)
+                  case member
+                  when "type"
+                    return ivar_info.type_annotation || ""
+                  when "has_default_value?"
+                    return ivar_info.has_default? ? "true" : ""
+                  when "default_value"
+                    if default_id = ivar_info.default_value
+                      return stringify_expr(default_id)
+                    end
+                    return ""
                   end
-                  return ""
                 end
               end
             end
@@ -493,7 +542,7 @@ module CrystalV2
         #   @type.size
         #   @type.annotation(Foo)
         #   ivar.id.stringify
-        private def evaluate_call_expression(node, context : Context) : Value
+        private def evaluate_call_expression(node, context : Context) : String
           callee_id = node.callee
           return "" unless callee_id
           callee = @arena[callee_id]
@@ -541,7 +590,8 @@ module CrystalV2
               # инстанс-поля (взятым из @type.instance_vars).
               if obj.is_a?(Frontend::IdentifierNode) && context.owner_type
                 id_name = Frontend.node_literal_string(obj) || ""
-                base_name = context.variables[id_name]? || ""
+                macro_val = context.variables[id_name]?
+                base_name = macro_val ? macro_val.to_macro_output : ""
                 if base_name.empty?
                   return ""
                 end
@@ -680,11 +730,13 @@ module CrystalV2
                 inner_member = String.new(obj.member)
                 if inner_member == "type" && inner_obj.is_a?(Frontend::IdentifierNode)
                   var_name = Frontend.node_literal_string(inner_obj) || ""
-                  ivar_name = context.variables[var_name]? || ""
-                  if !ivar_name.empty? && context.owner_type
-                    class_symbol = context.owner_type.not_nil!
-                    if ivar_info = class_symbol.get_instance_var_info(ivar_name)
-                      return ivar_info.nilable? ? "true" : ""
+                  if macro_val = context.variables[var_name]?
+                    ivar_name = macro_val.to_macro_output
+                    if !ivar_name.empty? && context.owner_type
+                      class_symbol = context.owner_type.not_nil!
+                      if ivar_info = class_symbol.get_instance_var_info(ivar_name)
+                        return ivar_info.nilable? ? "true" : ""
+                      end
                     end
                   end
                 end
@@ -703,7 +755,7 @@ module CrystalV2
           ""
         end
 
-        private def evaluate_flag_call(node : Frontend::CallNode, context : Context) : Value
+        private def evaluate_flag_call(node : Frontend::CallNode, context : Context) : String
           arg_id = node.args.first?
           return "" unless arg_id
 
@@ -834,10 +886,9 @@ module CrystalV2
           # so constructs like `if ann` or `if flag` behave reasonably.
           if node.is_a?(Frontend::IdentifierNode)
             name = Frontend.node_literal_string(node)
-            if name && (value = context.variables[name]?)
-              # Consider empty string, "false", and "nil" as falsy.
-              return false if value.empty? || value == "false" || value == "nil"
-              return true
+            if name && (macro_val = context.variables[name]?)
+              # Use MacroValue.truthy? for proper Crystal truthiness
+              return macro_val.truthy?
             else
               # Unbound macro variable is treated as falsy.
               return false
@@ -1094,47 +1145,10 @@ module CrystalV2
             return {"", end_index + 1}
           end
 
-          # Evaluate iterable → get element strings
+          # Evaluate iterable → get MacroValue elements
           iterable_node = @arena[iterable_expr]
 
-          elem_values = case iterable_node
-                        when Frontend::ArrayLiteralNode
-                          # Phase 87B-3: Array path
-                          iterable_node.elements.map { |elem_id| stringify_expr(elem_id) }
-                        when Frontend::RangeNode
-                          # Phase 87B-4A: Range path
-                          expand_range_to_strings(iterable_node)
-                        when Frontend::MemberAccessNode
-                          # Support for @type.instance_vars and @type.methods in type-reflection macros
-                          if context.owner_type && iterable_node.object.is_a?(Frontend::InstanceVarNode)
-                            ivar_obj = iterable_node.object.as(Frontend::InstanceVarNode)
-                            name = String.new(ivar_obj.name)
-                            member = String.new(iterable_node.member)
-                            if name == "@type" && context.owner_type
-                              class_symbol = context.owner_type.not_nil!
-                              case member
-                              when "instance_vars"
-                                # Phase 87B-4A: Use collected instance variable names
-                                class_symbol.instance_vars.keys.sort
-                              when "methods"
-                                # Phase 87B-4B: Use collected method names
-                                class_symbol.methods
-                              else
-                                emit_error("Unsupported @type member in for-loop: #{member}")
-                                nil
-                              end
-                            else
-                              emit_error("Unsupported member access in for-loop iterable: #{name}.#{member}")
-                              nil
-                            end
-                          else
-                            emit_error("For loop iterable must be Array, Range, @type.instance_vars or @type.methods")
-                            nil
-                          end
-                        else
-                          emit_error("For loop requires ArrayLiteral or Range (Phase 87B-4A)")
-                          nil
-                        end
+          elem_values = evaluate_iterable_to_macro_values(iterable_node, context)
 
           # Handle error case
           unless elem_values
@@ -1147,12 +1161,12 @@ module CrystalV2
           body_start = start_index + 1
           body_end = end_index - 1
 
-          # Iterate over element values (same for arrays, ranges, and instance_vars)
+          # Iterate over MacroValue elements
           output = String.build do |str|
             elem_values.each_with_index do |elem_value, idx|
               loop_context = context.with_variable(value_var, elem_value)
               if index_var
-                loop_context = loop_context.with_variable(index_var, idx.to_s)
+                loop_context = loop_context.with_variable(index_var, MacroNumberValue.new(idx.to_i64))
               end
               body_output = evaluate_pieces_range(pieces, body_start, body_end, loop_context)
               str << body_output
@@ -1160,6 +1174,97 @@ module CrystalV2
           end
 
           return {output, end_index + 1}
+        end
+
+        # Evaluate an iterable expression to an array of MacroValue
+        private def evaluate_iterable_to_macro_values(iterable_node, context : Context) : Array(MacroValue)?
+          case iterable_node
+          when Frontend::ArrayLiteralNode
+            # Array literal: [1, 2, 3]
+            iterable_node.elements.map { |elem_id| expr_to_macro_value(elem_id) }
+          when Frontend::RangeNode
+            # Range: 1..10
+            expand_range_to_macro_values(iterable_node)
+          when Frontend::MemberAccessNode
+            # Support for @type.instance_vars and @type.methods
+            evaluate_member_iterable(iterable_node, context)
+          else
+            emit_error("For loop requires ArrayLiteral, Range, or @type.instance_vars/@type.methods")
+            nil
+          end
+        end
+
+        # Evaluate @type.instance_vars or @type.methods to array of MacroValue
+        private def evaluate_member_iterable(node : Frontend::MemberAccessNode, context : Context) : Array(MacroValue)?
+          obj = node.object
+          unless obj.is_a?(Frontend::InstanceVarNode)
+            emit_error("For loop member access must be on @type")
+            return nil
+          end
+
+          ivar_name = String.new(obj.name)
+          unless ivar_name == "@type" && context.owner_type
+            emit_error("For loop member access requires @type with owner context")
+            return nil
+          end
+
+          class_symbol = context.owner_type.not_nil!
+          member = String.new(node.member)
+
+          case member
+          when "instance_vars"
+            # Return MacroMetaVarValue for each instance variable
+            class_symbol.instance_var_infos.map do |ivar_name, info|
+              MacroMetaVarValue.new(ivar_name, info, class_symbol).as(MacroValue)
+            end
+          when "methods"
+            # Return MacroIdValue for each method name
+            class_symbol.methods.map { |m| MacroIdValue.new(m).as(MacroValue) }
+          else
+            emit_error("Unsupported @type member in for-loop: #{member}")
+            nil
+          end
+        end
+
+        # Expand range to array of MacroNumberValue
+        private def expand_range_to_macro_values(range_node : Frontend::RangeNode) : Array(MacroValue)?
+          range_begin = range_node.begin_expr
+          range_end = range_node.end_expr
+
+          # Evaluate bounds
+          empty_context = Context.new(flags: @flags)
+          start_str = evaluate_expression(range_begin, empty_context)
+          end_str = evaluate_expression(range_end, empty_context)
+
+          start_val = start_str.to_i?
+          end_val = end_str.to_i?
+
+          unless start_val && end_val
+            emit_error("Range bounds must be integers (got: #{start_str}..#{end_str})")
+            return nil
+          end
+
+          # Handle reverse ranges (Crystal behavior: empty)
+          if start_val > end_val
+            return [] of MacroValue
+          end
+
+          exclusive = range_node.exclusive
+          size = exclusive ? (end_val - start_val) : (end_val - start_val + 1)
+
+          if size > MAX_RANGE_SIZE
+            emit_error("Range too large: #{size} elements (max #{MAX_RANGE_SIZE})")
+            return nil
+          end
+
+          result = [] of MacroValue
+          current = start_val
+          while current < end_val || (!exclusive && current == end_val)
+            result << MacroNumberValue.new(current.to_i64)
+            current += 1
+          end
+
+          result
         end
 
         # Phase 87B-4A: Expand range to array of string values
