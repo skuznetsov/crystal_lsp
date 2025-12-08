@@ -255,6 +255,11 @@ module CrystalV2
         private def evaluate_expression(expr_id : ExprId, context : Context) : Value
           node = @arena[expr_id]
 
+          # Unwrap MacroExpressionNode ({{ expr }}) to get inner expression
+          if node.is_a?(Frontend::MacroExpressionNode)
+            return evaluate_expression(node.expression, context)
+          end
+
           case Frontend.node_kind(node)
           when .number?
             # Number literal: 42, 3.14
@@ -340,6 +345,28 @@ module CrystalV2
           # Need to know the AST node type, not the evaluated value
           if member == "class_name"
             return macro_class_name(obj, context)
+          end
+
+          # Handle @type.* type introspection methods directly
+          if obj.is_a?(Frontend::InstanceVarNode)
+            ivar_name = String.new(obj.name)
+            if ivar_name == "@type" && context.owner_type
+              class_symbol = context.owner_type.not_nil!
+              case member
+              when "class?"
+                return class_symbol.is_struct? ? "" : "true"
+              when "struct?"
+                return class_symbol.is_struct? ? "true" : ""
+              when "module?"
+                return ""  # ClassSymbol is not a module
+              when "abstract?"
+                return ""  # TODO: track abstract flag
+              when "name"
+                return class_symbol.name
+              when "superclass"
+                return class_symbol.superclass_name || ""
+              end
+            end
           end
 
           # Resolve base value
@@ -627,6 +654,19 @@ module CrystalV2
                   if sc = class_symbol.superclass_name
                     return sc
                   end
+                  return ""
+                when "class?"
+                  # @type.class? - true if this is a class (not struct/module/enum)
+                  return class_symbol.is_struct? ? "" : "true"
+                when "struct?"
+                  # @type.struct? - true if this is a struct
+                  return class_symbol.is_struct? ? "true" : ""
+                when "module?"
+                  # @type.module? - false for ClassSymbol (would be true for ModuleSymbol)
+                  return ""
+                when "abstract?"
+                  # @type.abstract? - check if class is abstract
+                  # TODO: track abstract flag in ClassSymbol
                   return ""
                 end
               end
