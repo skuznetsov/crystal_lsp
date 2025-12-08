@@ -212,4 +212,100 @@ describe "Phase 87B-6: Macro Methods (.stringify, .id, .class_name)" do
       collector.diagnostics.select(&.level.error?).should be_empty
     end
   end
+
+  # ==================================================================
+  # Category 4: Annotation access (ann[:key])
+  # ==================================================================
+
+  describe "annotation access" do
+    it "supports {% if ann = @type.annotation(Foo) %} pattern" do
+      source = <<-CRYSTAL
+        annotation MyAnnotation
+        end
+
+        @[MyAnnotation]
+        class Foo
+          macro check_annotation
+            {% if ann = @type.annotation(MyAnnotation) %}
+              true
+            {% else %}
+              false
+            {% end %}
+          end
+        end
+        CRYSTAL
+
+      lexer = Frontend::Lexer.new(source)
+      parser = Frontend::Parser.new(lexer)
+      program = parser.parse_program
+
+      context = Semantic::Context.new(Semantic::SymbolTable.new)
+      collector = Semantic::SymbolCollector.new(program, context)
+      collector.collect
+
+      collector.diagnostics.select(&.level.error?).should be_empty
+    end
+
+    it "supports ann[:key] access for named arguments" do
+      source = <<-CRYSTAL
+        annotation JSON::Field
+        end
+
+        class Person
+          @[JSON::Field(key: "full_name")]
+          getter name : String = ""
+
+          macro field_key(ivar)
+            {% if ann = ivar.annotation(JSON::Field) %}
+              {{ ann[:key] }}
+            {% end %}
+          end
+        end
+        CRYSTAL
+
+      lexer = Frontend::Lexer.new(source)
+      parser = Frontend::Parser.new(lexer)
+      program = parser.parse_program
+
+      context = Semantic::Context.new(Semantic::SymbolTable.new)
+      collector = Semantic::SymbolCollector.new(program, context)
+      collector.collect
+
+      collector.diagnostics.select(&.level.error?).should be_empty
+    end
+
+    it "supports iterating over ivar annotations" do
+      source = <<-CRYSTAL
+        annotation Serializable
+        end
+
+        @[Serializable]
+        class Config
+          @[Serializable]
+          getter host : String = ""
+
+          @[Serializable]
+          getter port : Int32 = 0
+
+          macro list_serializable_fields
+            {% for ivar in @type.instance_vars %}
+              {% if ivar.annotation(Serializable) %}
+                {{ ivar.name }}
+              {% end %}
+            {% end %}
+          end
+        end
+        CRYSTAL
+
+      lexer = Frontend::Lexer.new(source)
+      parser = Frontend::Parser.new(lexer)
+      program = parser.parse_program
+
+      context = Semantic::Context.new(Semantic::SymbolTable.new)
+      collector = Semantic::SymbolCollector.new(program, context)
+      collector.collect
+
+      collector.diagnostics.select(&.level.error?).should be_empty
+    end
+  end
 end

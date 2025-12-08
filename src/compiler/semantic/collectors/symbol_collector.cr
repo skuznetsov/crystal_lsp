@@ -217,9 +217,11 @@ module CrystalV2
 
           # Check if this is a struct (is_struct flag set by parser for `struct X` syntax)
           is_struct = node.is_struct == true
+          # Check if this is an abstract class
+          is_abstract = node.is_abstract == true
           # For structs without explicit superclass, default to "Struct"
           effective_super = is_struct && super_name.nil? ? "Struct" : super_name
-          class_symbol = ClassSymbol.new(name, node_id, scope: instance_scope, class_scope: meta_scope, superclass_name: effective_super, type_parameters: type_params, is_struct: is_struct)
+          class_symbol = ClassSymbol.new(name, node_id, scope: instance_scope, class_scope: meta_scope, superclass_name: effective_super, type_parameters: type_params, is_struct: is_struct, is_abstract: is_abstract)
           assign_symbol_file(class_symbol, node_id)
 
           if existing
@@ -849,7 +851,8 @@ module CrystalV2
               class_scope: existing.class_scope,
               superclass_name: new_symbol.superclass_name || existing.superclass_name,
               type_parameters: new_symbol.type_parameters || existing.type_parameters,
-              is_struct: new_symbol.is_struct? || existing.is_struct?
+              is_struct: new_symbol.is_struct? || existing.is_struct?,
+              is_abstract: new_symbol.is_abstract? || existing.is_abstract?
             )
             assign_symbol_file(new_symbol, new_symbol.node_id)
             table.redefine(name, new_symbol)

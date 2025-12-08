@@ -166,7 +166,7 @@ module CrystalV2
           end
         end
 
-        # Convert AST expression to MacroValue
+        # Convert AST expression to MacroValue (for simple literals only)
         private def expr_to_macro_value(expr_id : ExprId) : MacroValue
           node = @arena[expr_id]
 
@@ -196,6 +196,180 @@ module CrystalV2
             # Complex expressions - return as MacroId
             MacroIdValue.new(Frontend.node_literal_string(node) || "")
           end
+        end
+
+        # Evaluate expression and return MacroValue (supports complex expressions)
+        # Used for annotation access: {% if ann = @type.annotation(Foo) %}
+        private def evaluate_to_macro_value(expr_id : ExprId, context : Context) : MacroValue
+          node = @arena[expr_id]
+
+          # Unwrap MacroExpressionNode
+          if node.is_a?(Frontend::MacroExpressionNode)
+            return evaluate_to_macro_value(node.expression, context)
+          end
+
+          case Frontend.node_kind(node)
+          when .number?
+            literal = Frontend.node_literal_string(node) || "0"
+            if literal.includes?(".")
+              MacroNumberValue.new(literal.to_f64? || 0.0)
+            else
+              MacroNumberValue.new(literal.to_i64? || 0_i64)
+            end
+          when .string?
+            MacroStringValue.new(Frontend.node_literal_string(node) || "")
+          when .symbol?
+            MacroSymbolValue.new(Frontend.node_literal_string(node) || "")
+          when .char?
+            MacroStringValue.new(Frontend.node_literal_string(node) || "")
+          when .bool?
+            literal = Frontend.node_literal_string(node)
+            MacroBoolValue.new(literal == "true")
+          when .nil?
+            MACRO_NIL
+          when .identifier?
+            name = Frontend.node_literal_string(node)
+            if name && (macro_val = context.variables[name]?)
+              macro_val
+            else
+              MacroIdValue.new(name || "")
+            end
+          else
+            # Handle CallNode for annotation queries
+            if node.is_a?(Frontend::CallNode)
+              return evaluate_call_to_macro_value(node, context)
+            end
+            # Fallback to string evaluation wrapped as MacroId
+            str_val = evaluate_expression(expr_id, context)
+            if str_val.empty?
+              MACRO_NIL
+            else
+              MacroIdValue.new(str_val)
+            end
+          end
+        end
+
+        # Evaluate call expression and return MacroValue
+        # Supports annotation() calls returning MacroAnnotationValue
+        private def evaluate_call_to_macro_value(node : Frontend::CallNode, context : Context) : MacroValue
+          callee_id = node.callee
+          return MACRO_NIL unless callee_id
+          callee = @arena[callee_id]
+
+          if callee.is_a?(Frontend::MemberAccessNode)
+            obj = callee.object
+            member = String.new(callee.member)
+
+            # Handle annotation/annotations returning MacroAnnotationValue
+            if member == "annotation" || member == "annotations"
+              return evaluate_annotation_to_macro_value(obj, node, member, context)
+            end
+          end
+
+          # Fallback: evaluate as string and wrap
+          str_val = evaluate_call_expression(node, context)
+          if str_val.empty?
+            MACRO_NIL
+          else
+            MacroIdValue.new(str_val)
+          end
+        end
+
+        # Evaluate annotation() call and return MacroAnnotationValue or MacroArrayValue
+        private def evaluate_annotation_to_macro_value(
+          obj,
+          node : Frontend::CallNode,
+          member : String,
+          context : Context
+        ) : MacroValue
+          # @type.annotation(Foo)
+          if obj.is_a?(Frontend::InstanceVarNode)
+            ivar_name = String.new(obj.name)
+            if ivar_name == "@type" && context.owner_type
+              class_symbol = context.owner_type.as(ClassSymbol)
+
+              filter_name = nil
+              if arg0_id = node.args[0]?
+                filter_name = annotation_type_full_name(arg0_id)
+              end
+
+              matching = if filter_name
+                           class_symbol.annotations.select { |info| info.full_name == filter_name }
+                         else
+                           class_symbol.annotations
+                         end
+
+              if member == "annotation"
+                if ann = matching.first?
+                  ann_val = MacroAnnotationValue.new(ann)
+                  ann_val.arena = @arena
+                  return ann_val
+                end
+                return MACRO_NIL
+              else # annotations
+                arr = matching.map do |ann|
+                  ann_val = MacroAnnotationValue.new(ann)
+                  ann_val.arena = @arena
+                  ann_val.as(MacroValue)
+                end
+                return MacroArrayValue.new(arr)
+              end
+            end
+            return MACRO_NIL
+          end
+
+          # ivar.annotation(Foo) where ivar is a macro variable
+          if obj.is_a?(Frontend::IdentifierNode) && context.owner_type
+            id_name = Frontend.node_literal_string(obj) || ""
+            macro_val = context.variables[id_name]?
+
+            # If it's a MacroMetaVarValue, use its annotation method
+            if macro_val.is_a?(MacroMetaVarValue)
+              filter_name = nil
+              if arg0_id = node.args[0]?
+                filter_name = annotation_type_full_name(arg0_id)
+              end
+              filter_arg = filter_name ? MacroIdValue.new(filter_name) : nil
+              args = filter_arg ? [filter_arg.as(MacroValue)] : [] of MacroValue
+              return macro_val.call_method(member, args, nil)
+            end
+
+            # Legacy: base_name is ivar name string
+            base_name = macro_val ? macro_val.to_macro_output : ""
+            if !base_name.empty?
+              class_symbol = context.owner_type.as(ClassSymbol)
+
+              filter_name = nil
+              if arg0_id = node.args[0]?
+                filter_name = annotation_type_full_name(arg0_id)
+              end
+
+              infos = class_symbol.ivar_annotations[base_name]? || [] of AnnotationInfo
+              matching = if filter_name
+                           infos.select { |info| info.full_name == filter_name }
+                         else
+                           infos
+                         end
+
+              if member == "annotation"
+                if ann = matching.first?
+                  ann_val = MacroAnnotationValue.new(ann)
+                  ann_val.arena = @arena
+                  return ann_val
+                end
+                return MACRO_NIL
+              else # annotations
+                arr = matching.map do |ann|
+                  ann_val = MacroAnnotationValue.new(ann)
+                  ann_val.arena = @arena
+                  ann_val.as(MacroValue)
+                end
+                return MacroArrayValue.new(arr)
+              end
+            end
+          end
+
+          MACRO_NIL
         end
 
         private def evaluate_macro_body(body_id : ExprId, context : Context) : String
@@ -350,12 +524,44 @@ module CrystalV2
               evaluate_call_expression(node, context)
             elsif node.is_a?(Frontend::PathNode)
               path_to_string(node)
+            elsif node.is_a?(Frontend::IndexNode)
+              # Handle ann[:key] index access
+              evaluate_index_expression(node, context)
             else
               # Unsupported expression type for Phase 87B-2
               # Return empty string (graceful degradation)
               ""
             end
           end
+        end
+
+        # Evaluate index expression: ann[:key] or ann[0]
+        private def evaluate_index_expression(node : Frontend::IndexNode, context : Context) : String
+          obj = @arena[node.object]
+
+          # Get base object as MacroValue
+          base_value : MacroValue? = nil
+          if obj.is_a?(Frontend::IdentifierNode)
+            name = Frontend.node_literal_string(obj)
+            if name
+              base_value = context.variables[name]?
+            end
+          end
+
+          unless base_value
+            return ""
+          end
+
+          # Get first index (we only support single index for now)
+          index_expr_id = node.indexes.first?
+          return "" unless index_expr_id
+
+          # Get index as MacroValue
+          index_value = expr_to_macro_value(index_expr_id)
+
+          # Call [] method on MacroValue
+          result = base_value.call_method("[]", [index_value], nil)
+          result.to_macro_output
         end
 
         # Evaluate instance variable expressions used in macros
@@ -400,7 +606,7 @@ module CrystalV2
               when "module?"
                 return ""  # ClassSymbol is not a module
               when "abstract?"
-                return ""  # TODO: track abstract flag
+                return class_symbol.is_abstract? ? "true" : ""
               when "name"
                 return class_symbol.name
               when "superclass"
@@ -836,13 +1042,31 @@ module CrystalV2
         # ====================================
 
         # Evaluate condition expression to boolean (Crystal truthiness)
+        # Returns {Bool, Context} where Context may have new bindings from assignment
         # CRITICAL: false/nil/Nop are falsy. For other expressions we fall back
         # to evaluating them to a string and treating empty string, "false" and
         # "nil" as falsy; everything else is truthy. This keeps semantics close
         # to Crystal while allowing graceful degradation when we cannot fully
         # interpret an expression.
-        private def evaluate_condition(expr_id : ExprId, context : Context) : Bool
+        private def evaluate_condition(expr_id : ExprId, context : Context) : {Bool, Context}
           node = @arena[expr_id]
+
+          # Handle assignment in condition: {% if ann = expr %}
+          # This binds the variable and checks truthiness of the assigned value
+          if node.is_a?(Frontend::AssignNode)
+            target = @arena[node.target]
+            if target.is_a?(Frontend::IdentifierNode)
+              var_name = Frontend.node_literal_string(target)
+              if var_name
+                # Evaluate value as MacroValue
+                value = evaluate_to_macro_value(node.value, context)
+                # Bind variable in new context
+                new_context = context.with_variable(var_name, value)
+                # Return truthiness and new context
+                return {value.truthy?, new_context}
+              end
+            end
+          end
 
           # Handle boolean connectives && / || at the AST level so we can
           # compose more precise conditions from simpler ones.
@@ -851,12 +1075,12 @@ module CrystalV2
 
             case op
             when "&&"
-              left_cond = evaluate_condition(node.left, context)
-              return false unless left_cond
-              return evaluate_condition(node.right, context)
+              left_result, left_ctx = evaluate_condition(node.left, context)
+              return {false, context} unless left_result
+              return evaluate_condition(node.right, left_ctx)
             when "||"
-              left_cond = evaluate_condition(node.left, context)
-              return true if left_cond
+              left_result, left_ctx = evaluate_condition(node.left, context)
+              return {true, left_ctx} if left_result
               return evaluate_condition(node.right, context)
             else
               # Lightweight numeric comparison support (i > 0, i == 0, etc.).
@@ -864,20 +1088,16 @@ module CrystalV2
               right_val = evaluate_expression(node.right, context)
 
               if (left_int = left_val.to_i?) && (right_int = right_val.to_i?)
-                case op
-                when ">"
-                  return left_int > right_int
-                when ">="
-                  return left_int >= right_int
-                when "<"
-                  return left_int < right_int
-                when "<="
-                  return left_int <= right_int
-                when "=="
-                  return left_int == right_int
-                when "!="
-                  return left_int != right_int
-                end
+                result = case op
+                         when ">"  then left_int > right_int
+                         when ">=" then left_int >= right_int
+                         when "<"  then left_int < right_int
+                         when "<=" then left_int <= right_int
+                         when "==" then left_int == right_int
+                         when "!=" then left_int != right_int
+                         else           false
+                         end
+                return {result, context}
               end
             end
           end
@@ -888,10 +1108,10 @@ module CrystalV2
             name = Frontend.node_literal_string(node)
             if name && (macro_val = context.variables[name]?)
               # Use MacroValue.truthy? for proper Crystal truthiness
-              return macro_val.truthy?
+              return {macro_val.truthy?, context}
             else
               # Unbound macro variable is treated as falsy.
-              return false
+              return {false, context}
             end
           end
 
@@ -900,21 +1120,21 @@ module CrystalV2
             # Parse "true" or "false"
             literal = Frontend.node_literal_string(node)
             if literal
-              return false if literal == "false"
-              return true # "true"
+              return {false, context} if literal == "false"
+              return {true, context} # "true"
             end
             # Default to true if it's a bool node without literal (shouldn't happen)
-            return true
+            return {true, context}
           when .nil?
             # nil is falsy
-            return false
+            return {false, context}
           else
             # Fallback: evaluate expression to a string and apply Crystal-like
             # truthiness. Unsupported expressions tend to evaluate to empty
             # string, which we treat as falsy, avoiding spurious "true".
             value = evaluate_expression(expr_id, context)
-            return false if value.empty? || value == "false" || value == "nil"
-            return true
+            result = !(value.empty? || value == "false" || value == "nil")
+            return {result, context}
           end
         end
 
@@ -1068,18 +1288,18 @@ module CrystalV2
             return {"", end_index + 1}
           end
 
-          # Evaluate condition
-          condition_result = evaluate_condition(condition_expr, context)
+          # Evaluate condition (may bind new variables via assignment)
+          condition_result, body_context = evaluate_condition(condition_expr, context)
 
           # Find matching end
           end_index = find_matching_end(pieces, start_index)
 
           if condition_result
-            # Condition is true - evaluate if body
+            # Condition is true - evaluate if body with potentially updated context
             next_branch = find_next_branch_or_end(pieces, start_index + 1, end_index)
 
-            # Evaluate range [start_index+1, next_branch-1]
-            output = evaluate_pieces_range(pieces, start_index + 1, next_branch - 1, context)
+            # Evaluate range [start_index+1, next_branch-1] with body_context
+            output = evaluate_pieces_range(pieces, start_index + 1, next_branch - 1, body_context)
 
             return {output, end_index + 1}
           else
@@ -1093,11 +1313,14 @@ module CrystalV2
                 # Evaluate elsif condition
                 elsif_cond = piece.expr
 
-                if elsif_cond && evaluate_condition(elsif_cond, context)
-                  # Found true branch
-                  next_branch = find_next_branch_or_end(pieces, current + 1, end_index)
-                  output = evaluate_pieces_range(pieces, current + 1, next_branch - 1, context)
-                  return {output, end_index + 1}
+                if elsif_cond
+                  elsif_result, elsif_ctx = evaluate_condition(elsif_cond, context)
+                  if elsif_result
+                    # Found true branch
+                    next_branch = find_next_branch_or_end(pieces, current + 1, end_index)
+                    output = evaluate_pieces_range(pieces, current + 1, next_branch - 1, elsif_ctx)
+                    return {output, end_index + 1}
+                  end
                 end
 
                 current += 1
