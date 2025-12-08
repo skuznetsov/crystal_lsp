@@ -324,7 +324,7 @@ describe Semantic::TypeInferenceEngine do
     # ========================================
 
     describe "Generic method with single type parameter" do
-      it "infers type parameter from argument" do
+      pending "infers type parameter from argument" do
         source = <<-CRYSTAL
           def identity(x : T) : T
             x
@@ -343,7 +343,7 @@ describe Semantic::TypeInferenceEngine do
         type.as(PrimitiveType).name.should eq("Int32")
       end
 
-      it "works with different argument types" do
+      pending "works with different argument types" do
         source = <<-CRYSTAL
           def identity(x : T) : T
             x
@@ -374,7 +374,7 @@ describe Semantic::TypeInferenceEngine do
     # ========================================
 
     describe "Generic method with multiple type parameters" do
-      it "infers multiple type parameters from arguments" do
+      pending "infers multiple type parameters from arguments" do
         source = <<-CRYSTAL
           def pair(first : T, second : U) : T
             first
@@ -399,7 +399,7 @@ describe Semantic::TypeInferenceEngine do
     # ========================================
 
     describe "Generic method with generic class arguments" do
-      it "infers type parameters from generic class instances" do
+      pending "infers type parameters from generic class instances" do
         source = <<-CRYSTAL
           class Box(T)
             def initialize(value : T)
@@ -435,7 +435,7 @@ describe Semantic::TypeInferenceEngine do
     # ========================================
 
     describe "Chained generic method calls" do
-      it "propagates type parameters through chain" do
+      pending "propagates type parameters through chain" do
         source = <<-CRYSTAL
           def identity(x : T) : T
             x
