@@ -2617,7 +2617,13 @@ module CrystalV2
                 debug("  identifier_symbols[callee]=#{symbol.class.name}")
               end
               if symbol.is_a?(MethodSymbol)
-                if ann = symbol.return_annotation
+                # Phase 100: Handle generic methods
+                if type_params = symbol.type_parameters
+                  type_args = infer_method_type_arguments(symbol, arg_types)
+                  if ret_ann = symbol.return_annotation
+                    return substitute_type_parameters(ret_ann, type_args, type_params)
+                  end
+                elsif ann = symbol.return_annotation
                   return parse_type_name(ann)
                 end
               elsif symbol.is_a?(ClassSymbol)

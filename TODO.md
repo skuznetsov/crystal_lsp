@@ -94,7 +94,7 @@ about syntax or types and should match what the original compiler would report.
 
 ---
 
-## 3. Semantic & Type Inference - IN PROGRESS (~85%)
+## 3. Semantic & Type Inference - IN PROGRESS (~90%)
 
 - [x] Basic type inference (literals, variables, simple methods)
 - [x] Symbol table with scope tracking
@@ -145,8 +145,16 @@ about syntax or types and should match what the original compiler would report.
 - [x] Custom flags propagation to MacroExpander via Context
 - [x] Runtime.target_flags for platform detection (darwin, linux, x86_64, etc.)
 
+### Completed Generic Type System
+- [x] Generic class instantiation (Box(T) → Box(Int32))
+- [x] Generic method type inference (def identity(x : T) : T)
+- [x] Multiple type parameters (def pair(a : T, b : U) : T)
+- [x] Generic class arguments (def unwrap(box : Box(T)) : T)
+- [x] Chained generic method calls
+- [x] Type parameter substitution in return types
+
 ### TODO: Advanced Type System
-- [ ] Full type graph integration for instantiated generic types
+- [ ] Full type graph integration for complex nested generics
 
 ---
 
