@@ -2496,7 +2496,10 @@ module CrystalV2
 
           base_dir = File.dirname(path)
           requires = collect_require_paths(program, base_dir)
-          STDERR.puts("[LSP]   discovered #{requires.size} require(s)") if ENV["LSP_DEBUG"]?
+          if ENV["LSP_DEBUG"]?
+            STDERR.puts("[LSP]   discovered #{requires.size} require(s)")
+            requires.each { |r| STDERR.puts("[LSP]     - #{r}") } if path.ends_with?("prelude.cr")
+          end
 
           requires.each do |req|
             next if visited.includes?(req)
@@ -2507,8 +2510,12 @@ module CrystalV2
                 next
               end
             end
+            # Continue processing other dependencies even if one fails
+            # This ensures that errors in individual prelude files don't block
+            # loading of subsequent files (e.g., time.cr after file/tempfile.cr)
             unless process_prelude_dependency(req, context, origins, visited, diagnostics, program_cache, source_cache, symbol_only, deadline)
-              return false
+              STDERR.puts("[LSP DEBUG] Failed to process prelude file #{req}; continuing with other dependencies") if ENV["LSP_DEBUG"]?
+              next
             end
           end
 
@@ -2600,8 +2607,10 @@ module CrystalV2
           debug("  registered symbols for #{path} (inference=#{inference_ran})")
           true
         rescue ex
-          debug("Failed to process prelude file #{path}: #{ex.message}")
-          false
+          # Log the error but continue processing other prelude files
+          # This ensures that a single file failure doesn't block the entire prelude
+          STDERR.puts("[LSP DEBUG] Failed to process prelude file #{path}: #{ex.message}") if ENV["LSP_DEBUG"]?
+          true # Return true to continue processing other dependencies
         end
 
         private def load_prelude_program(
