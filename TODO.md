@@ -8,10 +8,10 @@ about syntax or types and should match what the original compiler would report.
 
 ---
 
-## Current Status (2025-12-06)
+## Current Status (2025-12-07)
 
 ### Test Coverage
-- **2856 tests**, 0 failures, 7 pending
+- **2902 tests**, 0 failures, 12 pending
 - **1390 test cases** ported from Crystal's original `parser_spec.cr`
 - **97.6% parser compatibility** with original Crystal
 
@@ -51,7 +51,7 @@ about syntax or types and should match what the original compiler would report.
 
 ---
 
-## 2. MacroExpander Parity - IN PROGRESS (~60%)
+## 2. MacroExpander Parity - IN PROGRESS (~75%)
 
 - [x] MVP macro engine:
   - [x] `{{ ... }}` expansion for basic literals/paths
@@ -76,11 +76,13 @@ about syntax or types and should match what the original compiler would report.
 - [x] Type predicates: `@type.class?`, `@type.struct?`, `@type.module?`
 - [x] Complex condition evaluation (`&&`, `||`, numeric comparisons)
 
+### Completed Rich Macro API (continued)
+- [x] Annotation objects with `.args`, `.named_args`, `[]` access (`ann[:key]` pattern)
+- [x] `@type.abstract?` with abstract flag tracking
+
 ### TODO: Rich Macro API
 - [ ] Rich `@type.name(generic_args: ...)` with full type graph
-- [ ] Annotation objects with `.args`, `.named_args`, `[]` access
 - [ ] `typeof(...)`, `sizeof(...)`, `alignof(...)` in macros
-- [ ] `@type.abstract?` (needs abstract flag tracking)
 
 ---
 
@@ -290,7 +292,7 @@ AST + Type Graph
 | Parser | ~97.6% | 1390+1466 |
 | Lexer | Complete | Part of parser tests |
 | AST | Complete | Class inheritance done |
-| MacroExpander | ~60% | MVP working |
+| MacroExpander | ~75% | MVP + ann[:key] + abstract |
 | Type Inference | ~50% | Basic working |
 | LSP Server | ~70% | 21 methods implemented |
 | Codegen | 0% | Future phase |
