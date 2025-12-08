@@ -8,10 +8,10 @@ about syntax or types and should match what the original compiler would report.
 
 ---
 
-## Current Status (2025-12-07)
+## Current Status (2025-12-08)
 
 ### Test Coverage
-- **2928 tests**, 0 failures, 12 pending
+- **2958 tests**, 0 failures, 7 pending
 - **1390 test cases** ported from Crystal's original `parser_spec.cr`
 - **97.6% parser compatibility** with original Crystal
 
@@ -23,12 +23,13 @@ about syntax or types and should match what the original compiler would report.
 - [x] Inline `asm` basic syntax
 - [x] VirtualArena zero-copy multi-file AST
 - [x] Parallel FileLoader with deduplication
-- [x] Basic type inference engine
+- [x] Full type inference engine (Phase 103A-C)
 - [x] Symbol table and name resolution
-- [x] MVP MacroExpander (`{{ }}`, `{% if/for %}`, `@type.name/instance_vars`)
+- [x] Full MacroExpander with @type API
 - [x] LSP semantic tokens: symbol literals emit full-span enumMember tokens (no overlaps)
 - [x] Hover/definition fallback to cached expr types (scoped lookup fixes; e.g., `cas` → `Array(Atom)`)
 - [x] lsp_probe speaks correct binary Content-Length (no dropped responses)
+- [x] TypeIndex binary storage (5.6x faster than JSON)
 
 ### Pending (7 tests)
 - 6 macro whitespace trimming (`{%- -%}`, `{%~ ~%}`) - for web templates
@@ -51,7 +52,7 @@ about syntax or types and should match what the original compiler would report.
 
 ---
 
-## 2. MacroExpander Parity - IN PROGRESS (~90%)
+## 2. MacroExpander Parity - COMPLETE (~99%)
 
 - [x] MVP macro engine:
   - [x] `{{ ... }}` expansion for basic literals/paths
@@ -75,10 +76,10 @@ about syntax or types and should match what the original compiler would report.
 - [x] Macro methods: `.stringify`, `.id`, `.class_name`
 - [x] Type predicates: `@type.class?`, `@type.struct?`, `@type.module?`
 - [x] Complex condition evaluation (`&&`, `||`, numeric comparisons)
-
-### Completed Rich Macro API (continued)
 - [x] Annotation objects with `.args`, `.named_args`, `[]` access (`ann[:key]` pattern)
 - [x] `@type.abstract?` with abstract flag tracking
+- [x] `@type.type_vars` for generic type parameters
+- [x] Full generic class support (@type.* works on Box(T), Pair(K,V), etc.)
 
 ### Completed Compile-Time Operators
 - [x] `typeof(...)` - infers type of expressions (literals, variables)
@@ -89,12 +90,12 @@ about syntax or types and should match what the original compiler would report.
 ### Completed Rich Type Introspection
 - [x] `@type.name(generic_args: true/false)` - returns type name with/without generic params
 
-### TODO: Rich Macro API
-- [ ] Full type graph integration (instantiated generic types)
+### Low Priority (Codegen-only)
+- [ ] Runtime instantiated generic type resolution (e.g., T=Int32 at call site in macro) - requires full codegen
 
 ---
 
-## 3. Semantic & Type Inference - IN PROGRESS (~90%)
+## 3. Semantic & Type Inference - COMPLETE (~99%)
 
 - [x] Basic type inference (literals, variables, simple methods)
 - [x] Symbol table with scope tracking
@@ -109,7 +110,7 @@ about syntax or types and should match what the original compiler would report.
 - [x] PointerType for C interop
 - [x] ArrayType, HashType, RangeType
 - [x] TypeParameter for generic types
-- [x] Generic type instantiation and unification (basic)
+- [x] Generic type instantiation and unification
 
 ### Completed Module System
 - [x] include/extend module mixins (modules added to scope.included_modules)
@@ -152,9 +153,18 @@ about syntax or types and should match what the original compiler would report.
 - [x] Generic class arguments (def unwrap(box : Box(T)) : T)
 - [x] Chained generic method calls
 - [x] Type parameter substitution in return types
+- [x] Nested generics: Container(Box(Array(Int32))) fully supported
+- [x] Array/Hash of generic types: Array(Box(Int32)), Hash(String, Box(T))
 
-### TODO: Advanced Type System
-- [ ] Full type graph integration for complex nested generics
+### Completed Extended Type Inference (Phase 103A-C)
+- [x] TypeDeclarationNode handling (x : Type = value)
+- [x] All numeric types (Int8-128, UInt8-128, Float32/64)
+- [x] Nilable type syntax (T? → T | Nil)
+- [x] Union type methods: not_nil!, nil?, try with blocks
+- [x] Block inference for map/collect/each with element types
+- [x] Smart compact: Array(T | Nil) → Array(T)
+- [x] Smart flatten: Array(Array(T)) → Array(T)
+- [x] Short block form (&.method) proper handling
 
 ---
 
@@ -346,7 +356,8 @@ AST + Type Graph
 | Parser | ~97.6% | 1390+1466 |
 | Lexer | Complete | Part of parser tests |
 | AST | Complete | Class inheritance done |
-| MacroExpander | ~90% | MVP + ann[:key] + typeof/sizeof + @type.name(generic_args) |
-| Type Inference | ~75% | Full type graph + ProcType + NamedTupleType + include/extend + flow typing |
+| MacroExpander | ~99% | Full @type API + annotations + typeof/sizeof/alignof |
+| Type Inference | ~99% | Full generics + flow typing + blocks + unions (Phase 103A-C) |
 | LSP Server | ~70% | 21 methods implemented |
+| TypeIndex | Complete | 5.6x faster than JSON, per-file partitioning |
 | Codegen | 0% | Future phase |
