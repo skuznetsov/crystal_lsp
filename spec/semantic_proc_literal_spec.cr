@@ -51,7 +51,8 @@ describe Semantic::TypeInferenceEngine do
       proc_expr = program.roots[0]
       proc_type = engine.context.get_type(proc_expr)
       proc_type.should_not be_nil
-      proc_type.not_nil!.to_s.should eq("Proc")
+      # Parameterless proc returning Int32: Proc(Int32)
+      proc_type.not_nil!.to_s.should eq("Proc(Int32)")
     end
 
     it "infers Proc type for proc with parameters" do
@@ -62,7 +63,8 @@ describe Semantic::TypeInferenceEngine do
       proc_expr = program.roots[0]
       proc_type = engine.context.get_type(proc_expr)
       proc_type.should_not be_nil
-      proc_type.not_nil!.to_s.should eq("Proc")
+      # Proc with two Int32 params returning Int32: Proc(Int32, Int32, Int32)
+      proc_type.not_nil!.to_s.should eq("Proc(Int32, Int32, Int32)")
     end
 
     it "infers Proc type for proc with return type annotation" do
@@ -73,7 +75,8 @@ describe Semantic::TypeInferenceEngine do
       proc_expr = program.roots[0]
       proc_type = engine.context.get_type(proc_expr)
       proc_type.should_not be_nil
-      proc_type.not_nil!.to_s.should eq("Proc")
+      # Proc with Int32 param and Int32 return: Proc(Int32, Int32)
+      proc_type.not_nil!.to_s.should eq("Proc(Int32, Int32)")
     end
 
     it "infers types for proc body expressions" do

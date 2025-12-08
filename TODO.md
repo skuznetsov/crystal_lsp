@@ -11,7 +11,7 @@ about syntax or types and should match what the original compiler would report.
 ## Current Status (2025-12-07)
 
 ### Test Coverage
-- **2915 tests**, 0 failures, 12 pending
+- **2928 tests**, 0 failures, 12 pending
 - **1390 test cases** ported from Crystal's original `parser_spec.cr`
 - **97.6% parser compatibility** with original Crystal
 
@@ -94,7 +94,7 @@ about syntax or types and should match what the original compiler would report.
 
 ---
 
-## 3. Semantic & Type Inference - IN PROGRESS (~50%)
+## 3. Semantic & Type Inference - IN PROGRESS (~65%)
 
 - [x] Basic type inference (literals, variables, simple methods)
 - [x] Symbol table with scope tracking
@@ -102,9 +102,16 @@ about syntax or types and should match what the original compiler would report.
 - [x] Name resolver (finds definitions)
 - [x] Diagnostic formatter
 
-### TODO: Full Type System
-- [ ] Full type graph: ClassType, ModuleType, UnionType, TupleType, ProcType, etc.
-- [ ] Generic type instantiation and unification
+### Completed Type Graph
+- [x] Full type graph: ClassType, ModuleType, UnionType, TupleType, InstanceType
+- [x] ProcType for proc literals with parameter and return types
+- [x] NamedTupleType for named tuple literals
+- [x] PointerType for C interop
+- [x] ArrayType, HashType, RangeType
+- [x] TypeParameter for generic types
+- [x] Generic type instantiation and unification (basic)
+
+### TODO: Advanced Type System
 - [ ] Union type narrowing with flow-sensitive analysis (`if var`, `is_a?`, `case`)
 - [ ] Method overload resolution based on argument types
 - [ ] include/extend, inheritance, virtual types
@@ -301,6 +308,6 @@ AST + Type Graph
 | Lexer | Complete | Part of parser tests |
 | AST | Complete | Class inheritance done |
 | MacroExpander | ~90% | MVP + ann[:key] + typeof/sizeof + @type.name(generic_args) |
-| Type Inference | ~50% | Basic working |
+| Type Inference | ~65% | Full type graph + ProcType + NamedTupleType |
 | LSP Server | ~70% | 21 methods implemented |
 | Codegen | 0% | Future phase |

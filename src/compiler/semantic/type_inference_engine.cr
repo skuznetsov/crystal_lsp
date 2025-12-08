@@ -9,6 +9,9 @@ require "./types/array_type"
 require "./types/range_type"
 require "./types/hash_type"
 require "./types/tuple_type"
+require "./types/named_tuple_type"
+require "./types/proc_type"
+require "./types/pointer_type"
 require "./types/module_type"
 require "./analyzer"
 require "../frontend/ast"
@@ -3154,8 +3157,12 @@ module CrystalV2
         end
 
         # Phase 74: Proc literal type inference
+        # Returns ProcType(param_types..., return_type)
         private def infer_proc_literal(node : Frontend::ProcLiteralNode, expr_id : ExprId) : Type
           guard_watchdog!
+
+          # Collect parameter types
+          param_types = [] of Type
 
           # Register proc parameters in @assignments BEFORE inferring body
           # This makes them available for type inference in body expressions
@@ -3168,6 +3175,7 @@ module CrystalV2
                                @context.nil_type
                              end
                 @assignments[String.new(param_name)] = param_type
+                param_types << param_type
               end
             end
           end
@@ -3184,14 +3192,20 @@ module CrystalV2
             end
           end
 
-          # If return type is annotated, use it
-          # Otherwise use inferred body type
-          # For now, we return a simple Proc type
-          # TODO: Full implementation should create Proc(Arg1, Arg2, ... -> ReturnType)
+          # Determine return type:
+          # 1. Use explicit return type annotation if present
+          # 2. Otherwise use inferred body type
+          # 3. Default to Nil for empty body
+          return_type = if rt = node.return_type
+                          parse_type_name(String.new(rt))
+                        elsif body_type
+                          body_type
+                        else
+                          @context.nil_type
+                        end
 
-          # Return a generic Proc type
-          # In a full implementation, this would be Proc(T1, T2 -> R)
-          @context.proc_type
+          # Return proper ProcType with parameter and return types
+          ProcType.new(param_types, return_type)
         end
 
         # ============================================================
@@ -3473,23 +3487,20 @@ module CrystalV2
           # Type: NamedTuple(name: String, age: Int32)
           entries = node.entries
 
-          # Empty named tuple (shouldn't happen with current parser, but handle)
+          # Empty named tuple is valid in Crystal
           if entries.empty?
-            # Empty named tuple is valid in Crystal
-            return @context.nil_type # Placeholder for future NamedTupleType with no fields
+            return NamedTupleType.new([] of {String, Type})
           end
 
-          # Infer type of each value
-          # For full type system, we'd create:
-          # NamedTupleType with fields: [(key, value_type), ...]
-          # For now, just infer all values
+          # Infer type of each value and build NamedTupleType
+          type_entries = [] of {String, Type}
           entries.each do |entry|
-            infer_expression(entry.value)
+            key = String.new(entry.key)
+            value_type = infer_expression(entry.value)
+            type_entries << {key, value_type}
           end
 
-          # Return placeholder type
-          # Future: return NamedTupleType.new(entries.map { |e| {e.key, infer_expression(e.value)} })
-          @context.nil_type
+          NamedTupleType.new(type_entries)
         end
 
         # Phase 23: Infer type of ternary operator
