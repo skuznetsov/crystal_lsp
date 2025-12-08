@@ -83,6 +83,8 @@ module CrystalV2
           handle_class(node_id, node)
         when Frontend::ModuleNode
           handle_module(node_id, node)
+        when Frontend::EnumNode
+          handle_enum(node_id, node)
         when Frontend::ConstantNode
           handle_constant(node_id, node)
         when Frontend::IncludeNode
@@ -295,6 +297,53 @@ module CrystalV2
           push_table(module_symbol.scope)
           (node.body || [] of Frontend::ExprId).each { |expr_id| visit(expr_id) }
           pop_table
+        end
+
+        # Phase 102: Handle enum definitions
+        private def handle_enum(node_id : Frontend::ExprId, node : Frontend::EnumNode)
+          name_slice = node.name
+          return unless name_slice
+
+          name = String.new(name_slice)
+          table = current_table
+
+          # Parse base type if specified
+          base_type = if bt = node.base_type
+            String.new(bt)
+          else
+            "Int32"
+          end
+
+          # Collect enum members with their values
+          members = {} of String => Int64
+          next_value = 0i64
+          node.members.each do |member|
+            member_name = String.new(member.name)
+            if val_id = member.value
+              # Member has explicit value - try to evaluate it
+              val_node = @program.arena[val_id]
+              if val_node.is_a?(Frontend::NumberNode)
+                members[member_name] = String.new(val_node.value).to_i64? || next_value
+                next_value = members[member_name] + 1
+              else
+                members[member_name] = next_value
+                next_value += 1
+              end
+            else
+              members[member_name] = next_value
+              next_value += 1
+            end
+          end
+
+          enum_scope = SymbolTable.new(table)
+          enum_symbol = EnumSymbol.new(name, node_id, scope: enum_scope, members: members, base_type: base_type)
+          assign_symbol_file(enum_symbol, node_id)
+
+          if existing = table.lookup_local(name)
+            table.redefine(name, enum_symbol)
+          else
+            table.define(name, enum_symbol)
+          end
         end
 
         private def handle_constant(node_id : Frontend::ExprId, node : Frontend::ConstantNode)

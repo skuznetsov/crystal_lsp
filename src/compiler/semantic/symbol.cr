@@ -136,6 +136,20 @@ module CrystalV2
         end
       end
 
+      # Phase 102: Enum symbol with member name → value mapping
+      class EnumSymbol < Symbol
+        getter scope : SymbolTable                  # Scope for methods defined in enum
+        getter members : Hash(String, Int64)        # Member name → integer value
+        getter base_type : String                   # Base type (Int32, etc.)
+
+        def initialize(name : String, node_id : ExprId, *, scope : SymbolTable, members : Hash(String, Int64) = {} of String => Int64, base_type : String = "Int32")
+          super(name, node_id)
+          @scope = scope
+          @members = members
+          @base_type = base_type
+        end
+      end
+
       class ConstantSymbol < Symbol
         getter value : ExprId
 

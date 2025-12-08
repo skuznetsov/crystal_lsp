@@ -13,6 +13,7 @@ require "./types/named_tuple_type"
 require "./types/proc_type"
 require "./types/pointer_type"
 require "./types/module_type"
+require "./types/enum_type"
 require "./types/virtual_type"
 require "./analyzer"
 require "../frontend/ast"
@@ -755,6 +756,13 @@ module CrystalV2
             # Reference to class → ClassType
             # Class itself is a value (for calling class methods like Dog.new)
             ClassType.new(symbol)
+          when ModuleSymbol
+            # Reference to module → ModuleType
+            # Module itself is a value (for calling module methods like Utils.helper)
+            ModuleType.new(symbol)
+          when EnumSymbol
+            # Reference to enum → EnumType
+            EnumType.new(symbol)
           when ConstantSymbol
             infer_expression(symbol.value)
           when MethodSymbol
@@ -1165,6 +1173,8 @@ module CrystalV2
             when ModuleSymbol
               current_table = sym.scope
             when ClassSymbol
+              current_table = sym.scope
+            when EnumSymbol
               current_table = sym.scope
             else
               current_table = nil
@@ -2264,6 +2274,11 @@ module CrystalV2
           end
           infer_expression(node.right)
 
+          # Phase 102: Check for enum member access (Color::Red)
+          if enum_type = resolve_enum_member_access(node)
+            return enum_type
+          end
+
           if symbol = resolve_path_symbol(node)
             debug("  resolved symbol: #{symbol.class.name}")
             if type = type_from_symbol(symbol)
@@ -2274,6 +2289,57 @@ module CrystalV2
 
           debug("  resolve_path_symbol failed") if @debug_enabled
           @context.nil_type
+        end
+
+        # Phase 102: Resolve enum member access like Color::Red → EnumType(Color)
+        private def resolve_enum_member_access(node : Frontend::PathNode) : Type?
+          return nil unless @global_table
+
+          segments = [] of String
+          collect_path_segments(node, segments)
+          return nil if segments.size < 2
+
+          # Try to find an enum in the path (e.g., Color in Color::Red)
+          # Check all prefixes to find enum
+          (1...(segments.size)).each do |split|
+            prefix = segments[0...split]
+            suffix = segments[split..-1]
+
+            # Look up prefix as symbol path
+            current_table = @global_table
+            enum_symbol : EnumSymbol? = nil
+
+            prefix.each_with_index do |seg, idx|
+              return nil unless current_table
+              symbol = current_table.lookup(seg)
+              return nil unless symbol
+
+              if idx == prefix.size - 1
+                # Last segment - check if it's an enum
+                if symbol.is_a?(EnumSymbol)
+                  enum_symbol = symbol
+                end
+              else
+                # Intermediate - navigate scope
+                current_table = case symbol
+                when ModuleSymbol then symbol.scope
+                when ClassSymbol then symbol.scope
+                else nil
+                end
+              end
+            end
+
+            # If we found an enum and suffix is a single member name
+            if enum_symbol && suffix.size == 1
+              member_name = suffix[0]
+              if enum_symbol.members.has_key?(member_name)
+                # Return the EnumType (value is an instance of the enum)
+                return EnumType.new(enum_symbol)
+              end
+            end
+          end
+
+          nil
         end
 
         # Phase 47: &. safe navigation operator (returns nilable)
@@ -2317,6 +2383,9 @@ module CrystalV2
                               when ClassSymbol
                                 symbol.scope
                               when ModuleSymbol
+                                symbol.scope
+                              when EnumSymbol
+                                # Phase 102: For enum, return scope but last segment will be member lookup
                                 symbol.scope
                               else
                                 return nil
@@ -2497,8 +2566,29 @@ module CrystalV2
               emit_error("Tuple index #{index_value} out of bounds (size: #{target_type.size})", expr_id)
               @context.nil_type
             end
+          elsif target_type.is_a?(NamedTupleType)
+            # Phase 102: Named tuple symbol access - nt[:key]
+            index_node = @program.arena[index_id]
+            key_name = case index_node
+            when Frontend::SymbolNode
+              # Symbol name may include leading colon, strip it
+              sym_name = String.new(index_node.name)
+              sym_name.lstrip(':')
+            when Frontend::StringNode
+              String.new(index_node.value)
+            else
+              emit_error("NamedTuple indexing requires symbol or string key", expr_id)
+              return @context.nil_type
+            end
+
+            if value_type = target_type.type_for(key_name)
+              value_type
+            else
+              emit_error("NamedTuple has no key '#{key_name}'", expr_id)
+              @context.nil_type
+            end
           else
-            # Not an array, hash, or tuple - emit error
+            # Not an array, hash, tuple, or named tuple - emit error
             emit_error("Cannot index type #{target_type}", expr_id)
             @context.nil_type
           end
@@ -2804,10 +2894,11 @@ module CrystalV2
             return @context.nil_type
           end
 
-          # Check parameter count (accounting for default values)
+          # Check parameter count (accounting for default values, splat, double_splat)
           actual_count = arg_types.size
           required_count = count_required_params(method.params)
-          max_count = method.params.size
+          has_splat = method.params.any? { |p| p.is_splat || p.is_double_splat }
+          max_count = has_splat ? Int32::MAX : method.params.count { |p| !p.is_block }
 
           unless actual_count >= required_count && actual_count <= max_count
             if required_count == max_count
@@ -2919,11 +3010,12 @@ module CrystalV2
           candidates = find_all_methods(receiver_type, method_name)
           return nil if candidates.empty?
 
-          # Filter by parameter count (accounting for default values)
+          # Filter by parameter count (accounting for default values, splat, double_splat)
           actual_count = arg_types.size
           matching_count = candidates.select do |m|
             required = count_required_params(m.params)
-            max = m.params.size
+            has_splat = m.params.any? { |p| p.is_splat || p.is_double_splat }
+            max = has_splat ? Int32::MAX : m.params.count { |p| !p.is_block }
             actual_count >= required && actual_count <= max
           end
           return nil if matching_count.empty?
@@ -2964,6 +3056,17 @@ module CrystalV2
             # Phase 4B.2: Inheritance search - look in superclass class_scope
             if methods.empty?
               methods.concat(find_in_superclass(receiver_type.symbol, method_name, class_methods: true))
+            end
+          when ModuleType
+            # Phase 102: Look for module methods (def self.* inside module)
+            # Module methods are stored in the module's scope
+            if symbol = receiver_type.symbol.scope.lookup(method_name)
+              case symbol
+              when MethodSymbol
+                methods << symbol
+              when OverloadSetSymbol
+                methods.concat(symbol.overloads)
+              end
             end
           when InstanceType
             # Phase 4B.2: Look for instance methods in class scope
@@ -3667,9 +3770,9 @@ module CrystalV2
         # Example: "T" with binding {"T" => Int32} → Int32
         # Example: "Array(T)" with binding → needs parsing (future)
         #
-        # Count required parameters (those without default values)
+        # Count required parameters (those without default values, splat, or double splat)
         private def count_required_params(params : Array(Frontend::Parameter)) : Int32
-          params.count { |p| p.default_value.nil? }
+          params.count { |p| p.default_value.nil? && !p.is_splat && !p.is_double_splat && !p.is_block }
         end
 
         # Week 1: Simple substitution for direct type parameter references
