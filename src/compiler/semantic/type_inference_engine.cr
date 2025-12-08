@@ -2804,11 +2804,17 @@ module CrystalV2
             return @context.nil_type
           end
 
-          # Check parameter count
-          expected_count = method.params.size
+          # Check parameter count (accounting for default values)
           actual_count = arg_types.size
-          unless expected_count == actual_count
-            emit_error("Wrong number of arguments for '#{method_name}' (given #{actual_count}, expected #{expected_count})", expr_id)
+          required_count = count_required_params(method.params)
+          max_count = method.params.size
+
+          unless actual_count >= required_count && actual_count <= max_count
+            if required_count == max_count
+              emit_error("Wrong number of arguments for '#{method_name}' (given #{actual_count}, expected #{required_count})", expr_id)
+            else
+              emit_error("Wrong number of arguments for '#{method_name}' (given #{actual_count}, expected #{required_count}..#{max_count})", expr_id)
+            end
             return @context.nil_type
           end
 
@@ -2840,11 +2846,14 @@ module CrystalV2
           return [] of Type unless type_params && !type_params.empty?
 
           params = method.params
-          return [] of Type if params.size != arg_types.size
+          required_count = count_required_params(params)
+          # Allow fewer args than params if defaults exist
+          return [] of Type if arg_types.size < required_count || arg_types.size > params.size
 
           # Build binding map: type parameter name → inferred type
           binding = {} of String => Type
-          params.zip(arg_types).each do |param, arg_type|
+          arg_types.each_with_index do |arg_type, i|
+            param = params[i]
             if type_ann = param.type_annotation
               type_name = String.new(type_ann)
 
@@ -2910,8 +2919,13 @@ module CrystalV2
           candidates = find_all_methods(receiver_type, method_name)
           return nil if candidates.empty?
 
-          # Filter by parameter count
-          matching_count = candidates.select { |m| m.params.size == arg_types.size }
+          # Filter by parameter count (accounting for default values)
+          actual_count = arg_types.size
+          matching_count = candidates.select do |m|
+            required = count_required_params(m.params)
+            max = m.params.size
+            actual_count >= required && actual_count <= max
+          end
           return nil if matching_count.empty?
 
           # Filter by parameter types (for typed parameters)
@@ -2996,6 +3010,9 @@ module CrystalV2
             # Phase 99: Virtual type method dispatch
             # Find method in base class and all known subclasses
             methods.concat(find_methods_in_virtual(receiver_type, method_name))
+          when ProcType
+            # Phase 101: Built-in methods for procs
+            methods.concat(get_proc_builtin_methods(receiver_type, method_name))
           end
 
           methods
@@ -3204,17 +3221,26 @@ module CrystalV2
         end
 
         # Check if method parameters match argument types
+        # Accounts for default parameter values
         private def parameters_match?(method : MethodSymbol, arg_types : Array(Type)) : Bool
-          method.params.zip(arg_types).all? do |param, arg_type|
-            # If parameter has no type annotation, it matches any argument type
-            type_ann = param.type_annotation
-            return true unless type_ann
+          params = method.params
+          required_count = count_required_params(params)
 
-            # TIER 2.1: Convert Slice(UInt8) to String for type parsing
-            # If parameter has type annotation, check if argument type matches
+          # Check argument count (allow fewer args if defaults exist)
+          return false if arg_types.size < required_count
+          return false if arg_types.size > params.size
+
+          # Check each provided argument matches its parameter
+          arg_types.each_with_index do |arg_type, i|
+            param = params[i]
+            type_ann = param.type_annotation
+            next unless type_ann  # No annotation means any type matches
+
             param_type = parse_type_name(String.new(type_ann))
-            type_matches?(arg_type, param_type)
+            return false unless type_matches?(arg_type, param_type)
           end
+
+          true
         end
 
         # Check if actual_type is compatible with expected_type
@@ -3480,6 +3506,43 @@ module CrystalV2
           methods
         end
 
+        # Phase 101: Built-in methods for Proc types
+        private def get_proc_builtin_methods(proc_type : ProcType, method_name : String) : Array(MethodSymbol)
+          methods = [] of MethodSymbol
+
+          dummy_node_id = ExprId.new(0)
+          dummy_scope = SymbolTable.new(nil)
+
+          case method_name
+          when "call"
+            # Proc(T1, T2, ..., R)#call(T1, T2, ...) : R
+            # Build params from proc parameter types
+            params = proc_type.param_types.map_with_index do |ptype, i|
+              Frontend::Parameter.new(name: "arg#{i}".to_slice, type_annotation: ptype.to_s.to_slice)
+            end
+            return_type_name = proc_type.return_type.to_s
+
+            methods << MethodSymbol.new(
+              method_name,
+              dummy_node_id,
+              params: params,
+              return_annotation: return_type_name,
+              scope: dummy_scope
+            )
+          when "arity"
+            # Proc#arity : Int32
+            methods << MethodSymbol.new(
+              method_name,
+              dummy_node_id,
+              params: [] of Frontend::Parameter,
+              return_annotation: "Int32",
+              scope: dummy_scope
+            )
+          end
+
+          methods
+        end
+
         # ============================================================
         # PHASE 10: Blocks and Yield
         # ============================================================
@@ -3604,6 +3667,11 @@ module CrystalV2
         # Example: "T" with binding {"T" => Int32} → Int32
         # Example: "Array(T)" with binding → needs parsing (future)
         #
+        # Count required parameters (those without default values)
+        private def count_required_params(params : Array(Frontend::Parameter)) : Int32
+          params.count { |p| p.default_value.nil? }
+        end
+
         # Week 1: Simple substitution for direct type parameter references
         private def substitute_type_parameters(type_name : String, type_args : Array(Type), type_params : Array(String)) : Type
           # Check if type_name is a type parameter

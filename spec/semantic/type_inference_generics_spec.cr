@@ -460,3 +460,70 @@ describe Semantic::TypeInferenceEngine do
     end
   end
 end
+
+  describe "Default Parameter Values" do
+    it "accepts fewer arguments when defaults are provided" do
+      source = <<-CRYSTAL
+        def greet(name : String, greeting : String = "Hello") : String
+          greeting + " " + name
+        end
+
+        greet("World")
+      CRYSTAL
+
+      program, analyzer, engine = infer_types(source)
+
+      call_id = program.roots.last
+      type = engine.context.get_type(call_id)
+
+      type.should be_a(PrimitiveType)
+      type.as(PrimitiveType).name.should eq("String")
+
+      engine.diagnostics.select(&.level.error?).should be_empty
+    end
+
+    it "accepts full arguments with defaults" do
+      source = <<-CRYSTAL
+        def greet(name : String, greeting : String = "Hello") : String
+          greeting + " " + name
+        end
+
+        greet("World", "Hi")
+      CRYSTAL
+
+      program, analyzer, engine = infer_types(source)
+
+      call_id = program.roots.last
+      type = engine.context.get_type(call_id)
+
+      type.should be_a(PrimitiveType)
+      type.as(PrimitiveType).name.should eq("String")
+
+      engine.diagnostics.select(&.level.error?).should be_empty
+    end
+
+    it "handles multiple default parameters" do
+      source = <<-CRYSTAL
+        def config(host : String = "localhost", port : Int32 = 8080, ssl : Bool = false) : String
+          host
+        end
+
+        config()
+        config("example.com")
+        config("example.com", 443)
+        config("example.com", 443, true)
+      CRYSTAL
+
+      program, analyzer, engine = infer_types(source)
+
+      # All calls should return String
+      [-4, -3, -2, -1].each do |offset|
+        call_id = program.roots[offset]
+        type = engine.context.get_type(call_id)
+        type.should be_a(PrimitiveType)
+        type.as(PrimitiveType).name.should eq("String")
+      end
+
+      engine.diagnostics.select(&.level.error?).should be_empty
+    end
+  end

@@ -140,7 +140,7 @@ module CrystalV2
           receiver = node.receiver
           target_table = current_table
           is_class_method = false
-          if receiver && receiver == "self"
+          if receiver && String.new(receiver) == "self"
             target_table = @class_stack.last?.try(&.class_scope) || current_table
             is_class_method = true
           end
