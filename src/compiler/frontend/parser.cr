@@ -10207,7 +10207,7 @@ module CrystalV2
 
         # Phase 103B: Handle postfix operations after brace literal
         # This handles: {hash}[key], {tuple}[0], {named: tuple}[:key]
-        # as well as member access like {tuple}.first
+        # as well as member access like {tuple}.first and method calls {hash}.has_key?("a")
         private def parse_brace_literal_postfix(node : ExprId) : ExprId
           skip_trivia
           loop do
@@ -10215,6 +10215,9 @@ module CrystalV2
             when Token::Kind::LBracket
               node = parse_index(node)
               node = handle_index_question_postfix(node)
+            when Token::Kind::LParen
+              # Method call with args: {hash}.method(args) - convert MemberAccess to Call
+              node = parse_parenthesized_call(node)
             when Token::Kind::Operator
               # Check for '.' (member access)
               if slice_eq?(current_token.slice, ".")
