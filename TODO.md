@@ -69,14 +69,18 @@ about syntax or types and should match what the original compiler would report.
   - [x] Collect annotations in SymbolCollector
   - [x] Truthiness-style `ivar.annotation(Foo)` checks
 
+### Completed Rich Macro API
+- [x] `@type.instance_vars` with full metadata (`ivar.type`, `ivar.has_default_value?`, `ivar.default_value`, `ivar.type.nilable?`)
+- [x] `@type.methods`, `@type.superclass`, `@type.has_method?("name")`
+- [x] Macro methods: `.stringify`, `.id`, `.class_name`
+- [x] Type predicates: `@type.class?`, `@type.struct?`, `@type.module?`
+- [x] Complex condition evaluation (`&&`, `||`, numeric comparisons)
+
 ### TODO: Rich Macro API
 - [ ] Rich `@type.name(generic_args: ...)` with full type graph
-- [ ] `@type.instance_vars` with full metadata (type, default_value, nilable?, etc.)
-- [ ] `@type.methods`, `@type.annotations`, `@type.superclass`
-- [ ] Annotation objects with `.args`, `.named_args`, `[]`
-- [ ] Macro methods: `.stringify`, `.id`, `.class_name`, `.class?`, `.struct?`, etc.
+- [ ] Annotation objects with `.args`, `.named_args`, `[]` access
 - [ ] `typeof(...)`, `sizeof(...)`, `alignof(...)` in macros
-- [ ] Complex condition evaluation (`&&`, `||`, `!`, arithmetic)
+- [ ] `@type.abstract?` (needs abstract flag tracking)
 
 ---
 
