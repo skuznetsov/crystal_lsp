@@ -713,11 +713,13 @@ module CrystalV2
 
           case node
           when Frontend::InstanceVarDeclNode
-            # Phase 5C: Handle explicit type annotations (@var : Type)
+            # Phase 5C: Handle explicit type annotations (@var : Type = default)
             var_name = String.new(node.name)
             var_name = var_name[1..-1] if var_name.starts_with?("@")
             type_annotation = node.type.try { |slice| String.new(slice) }
-            class_symbol.add_instance_var(var_name, type_annotation)
+            default_value = node.value
+            has_default = !default_value.nil?
+            class_symbol.add_instance_var(var_name, type_annotation, default_value, has_default)
             define_instance_var_symbol(class_symbol, var_name, type_annotation, expr_id)
           when Frontend::AssignNode
             # Check if assignment target is instance variable
@@ -729,7 +731,10 @@ module CrystalV2
               unless class_symbol.get_instance_var_type(var_name)
                 # Week 1: Try to infer type from RHS if it's a parameter reference
                 type_annotation = infer_ivar_type_from_assignment(node.value, current_method)
-                class_symbol.add_instance_var(var_name, type_annotation)
+                # Assignment in initialize is a form of default value
+                default_value = node.value
+                has_default = current_method.try { |m| String.new(m.name.not_nil!) == "initialize" } || false
+                class_symbol.add_instance_var(var_name, type_annotation, default_value, has_default)
               end
               define_instance_var_symbol(class_symbol, var_name, nil, target_id)
             end

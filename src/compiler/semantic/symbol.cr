@@ -49,7 +49,7 @@ module CrystalV2
         getter scope : SymbolTable
         getter class_scope : SymbolTable
         getter superclass_name : String?
-        getter instance_vars : Hash(String, String?) # name → type annotation
+        getter instance_var_infos : Hash(String, InstanceVarInfo) # name → full metadata
         getter type_parameters : Array(String)?      # Week 1: Generic type params ["T", "U"]
         # Collected annotations attached to this class (e.g., @[JSON::Serializable::Options])
         getter annotations : Array(AnnotationInfo)
@@ -63,20 +63,32 @@ module CrystalV2
           @scope = scope
           @class_scope = class_scope
           @superclass_name = superclass_name
-          @instance_vars = {} of String => String?
+          @instance_var_infos = {} of String => InstanceVarInfo
           @type_parameters = type_parameters
           @annotations = [] of AnnotationInfo
           @ivar_annotations = {} of String => Array(AnnotationInfo)
           @is_struct = is_struct
         end
 
-        # Phase 5A: Track instance variable declarations
-        def add_instance_var(name : String, type_annotation : String? = nil)
-          @instance_vars[name] = type_annotation
+        # Phase 5A: Track instance variable declarations with full metadata
+        def add_instance_var(name : String, type_annotation : String? = nil, default_value : ExprId? = nil, has_default : Bool = false)
+          @instance_var_infos[name] = InstanceVarInfo.new(name, type_annotation, default_value, has_default)
         end
 
         def get_instance_var_type(name : String) : String?
-          @instance_vars[name]?
+          @instance_var_infos[name]?.try(&.type_annotation)
+        end
+
+        # Legacy accessor for backwards compatibility (returns name → type hash)
+        def instance_vars : Hash(String, String?)
+          result = {} of String => String?
+          @instance_var_infos.each { |name, info| result[name] = info.type_annotation }
+          result
+        end
+
+        # Get full instance var info
+        def get_instance_var_info(name : String) : InstanceVarInfo?
+          @instance_var_infos[name]?
         end
 
         # Attach a class-level annotation
@@ -178,6 +190,25 @@ module CrystalV2
         getter named_args : Hash(String, ExprId)
 
         def initialize(@full_name : String, @args : Array(ExprId), @named_args : Hash(String, ExprId))
+        end
+      end
+
+      # Metadata for instance variables, used by @type.instance_vars in macros.
+      # Provides access to ivar.name, ivar.type, ivar.has_default_value?, etc.
+      struct InstanceVarInfo
+        getter name : String
+        getter type_annotation : String?
+        getter default_value : ExprId?
+        getter? has_default : Bool
+
+        def initialize(@name : String, @type_annotation : String? = nil, @default_value : ExprId? = nil, @has_default : Bool = false)
+        end
+
+        # Is the type nilable? (ends with ? or is Nil or union containing Nil)
+        def nilable? : Bool
+          return false unless type_annotation
+          t = type_annotation.not_nil!
+          t.ends_with?("?") || t == "Nil" || t.includes?("| Nil") || t.includes?("Nil |")
         end
       end
 

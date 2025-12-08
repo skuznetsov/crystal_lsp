@@ -330,6 +330,8 @@ module CrystalV2
         #   @type.name
         #   @type.name.id.stringify
         #   ivar.id
+        #   ivar.type
+        #   ivar.has_default_value?
         private def evaluate_member_access_expression(node, context : Context) : Value
           obj = @arena[node.object]
           member = String.new(node.member)
@@ -368,9 +370,35 @@ module CrystalV2
             return macro_id(base_value)
           end
 
-          # For .name, just return base value
+          # For .name, just return base value (ivar name or type name)
           if member == "name"
             return base_value
+          end
+
+          # Handle ivar metadata access when base_value is an instance var name
+          # and we have an owner_type context
+          if context.owner_type && obj.is_a?(Frontend::IdentifierNode)
+            var_name = Frontend.node_literal_string(obj) || ""
+            ivar_name = context.variables[var_name]? || ""
+            if !ivar_name.empty?
+              class_symbol = context.owner_type.not_nil!
+              if ivar_info = class_symbol.get_instance_var_info(ivar_name)
+                case member
+                when "type"
+                  # ivar.type → returns the type annotation or empty
+                  return ivar_info.type_annotation || ""
+                when "has_default_value?"
+                  # ivar.has_default_value? → returns "true" or ""
+                  return ivar_info.has_default? ? "true" : ""
+                when "default_value"
+                  # ivar.default_value → stringified default value
+                  if default_id = ivar_info.default_value
+                    return stringify_expr(default_id)
+                  end
+                  return ""
+                end
+              end
+            end
           end
 
           base_value
@@ -600,6 +628,25 @@ module CrystalV2
                     return sc
                   end
                   return ""
+                end
+              end
+            end
+
+            # Handle ivar.type.nilable?() - check if type is nilable
+            if member == "nilable?"
+              # Check if obj is itself a member access (ivar.type)
+              if obj.is_a?(Frontend::MemberAccessNode)
+                inner_obj = @arena[obj.object]
+                inner_member = String.new(obj.member)
+                if inner_member == "type" && inner_obj.is_a?(Frontend::IdentifierNode)
+                  var_name = Frontend.node_literal_string(inner_obj) || ""
+                  ivar_name = context.variables[var_name]? || ""
+                  if !ivar_name.empty? && context.owner_type
+                    class_symbol = context.owner_type.not_nil!
+                    if ivar_info = class_symbol.get_instance_var_info(ivar_name)
+                      return ivar_info.nilable? ? "true" : ""
+                    end
+                  end
                 end
               end
             end
