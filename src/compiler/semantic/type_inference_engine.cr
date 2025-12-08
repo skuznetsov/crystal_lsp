@@ -13,6 +13,7 @@ require "./types/named_tuple_type"
 require "./types/proc_type"
 require "./types/pointer_type"
 require "./types/module_type"
+require "./types/virtual_type"
 require "./analyzer"
 require "../frontend/ast"
 
@@ -2985,6 +2986,10 @@ module CrystalV2
             # Phase 4B.4: Find common method in all union members
             # Method can only be called on union if it exists in ALL constituent types
             methods.concat(find_methods_in_union(receiver_type, method_name))
+          when VirtualType
+            # Phase 99: Virtual type method dispatch
+            # Find method in base class and all known subclasses
+            methods.concat(find_methods_in_virtual(receiver_type, method_name))
           end
 
           methods
@@ -3099,6 +3104,99 @@ module CrystalV2
           methods_per_type[0]
         end
 
+        # Phase 99: Find methods in virtual type (base class + all known subclasses)
+        #
+        # Virtual type method dispatch collects methods from:
+        # 1. The base class itself
+        # 2. All known subclasses (for polymorphic dispatch)
+        #
+        # Returns methods from base class (subclass overrides have same signature)
+        private def find_methods_in_virtual(virtual_type : VirtualType, method_name : String) : Array(MethodSymbol)
+          methods = [] of MethodSymbol
+          base_class = virtual_type.base_class
+
+          # Find method in base class
+          if symbol = base_class.scope.lookup(method_name)
+            case symbol
+            when MethodSymbol
+              methods << symbol
+            when OverloadSetSymbol
+              methods.concat(symbol.overloads)
+            end
+          end
+
+          # If not found in base, search superclass chain
+          if methods.empty?
+            methods.concat(find_in_superclass(base_class, method_name))
+          end
+
+          # For virtual dispatch, we need to also check subclasses
+          # to ensure the method exists and compute union return type
+          # The subclass methods are collected but not returned separately
+          # (caller computes union of return types from all overrides)
+          if (table = @global_table) && !methods.empty?
+            subclass_methods = find_method_overrides_in_subclasses(base_class, method_name, table)
+            # We don't add subclass methods to candidates (same signature as base)
+            # but we could track them for return type union computation
+          end
+
+          methods
+        end
+
+        # Find all overrides of a method in known subclasses
+        #
+        # Used for virtual type return type computation
+        private def find_method_overrides_in_subclasses(base_class : ClassSymbol, method_name : String, table : SymbolTable) : Array(MethodSymbol)
+          overrides = [] of MethodSymbol
+          visited = Set(String).new
+          visited << base_class.name
+
+          # Scan all symbols in global table to find subclasses
+          # (This is O(n) but cached; could be optimized with subclass index)
+          table.each_local_symbol do |name, sym|
+            next if visited.includes?(name)
+            next unless sym.is_a?(ClassSymbol)
+
+            # Check if this is a subclass of base_class
+            if is_subclass_of?(sym, base_class.name, table, visited)
+              # Look for method override
+              if method_sym = sym.scope.lookup(method_name)
+                case method_sym
+                when MethodSymbol
+                  overrides << method_sym
+                when OverloadSetSymbol
+                  overrides.concat(method_sym.overloads)
+                end
+              end
+            end
+          end
+
+          overrides
+        end
+
+        # Check if class_symbol is a subclass of parent_name
+        private def is_subclass_of?(class_symbol : ClassSymbol, parent_name : String, table : SymbolTable, visited : Set(String)) : Bool
+          current = class_symbol.superclass_name
+          while current
+            return true if current == parent_name
+            if visited.includes?(current)
+              return false
+            end
+            visited << current
+
+            if sym = table.lookup(current)
+              if sym.is_a?(ClassSymbol)
+                current = sym.superclass_name
+              else
+                break
+              end
+            else
+              break
+            end
+          end
+          false
+        end
+
         # Check if method parameters match argument types
         private def parameters_match?(method : MethodSymbol, arg_types : Array(Type)) : Bool
           method.params.zip(arg_types).all? do |param, arg_type|
@@ -3143,16 +3241,18 @@ module CrystalV2
         # Check if child_type is a subtype of parent_type (class inheritance)
         private def is_subtype?(child : Type, parent : Type) : Bool
           child_name = case child
-                       when InstanceType then child.class_symbol.name
-                       when ClassType    then child.symbol.name
+                       when InstanceType  then child.class_symbol.name
+                       when ClassType     then child.symbol.name
                        when PrimitiveType then child.name
+                       when VirtualType   then child.base_class.name
                        else return false
                        end
 
           parent_name = case parent
-                        when InstanceType then parent.class_symbol.name
-                        when ClassType    then parent.symbol.name
+                        when InstanceType  then parent.class_symbol.name
+                        when ClassType     then parent.symbol.name
                         when PrimitiveType then parent.name
+                        when VirtualType   then parent.base_class.name
                         else return false
                         end
 

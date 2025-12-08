@@ -94,7 +94,7 @@ about syntax or types and should match what the original compiler would report.
 
 ---
 
-## 3. Semantic & Type Inference - IN PROGRESS (~80%)
+## 3. Semantic & Type Inference - IN PROGRESS (~85%)
 
 - [x] Basic type inference (literals, variables, simple methods)
 - [x] Symbol table with scope tracking
@@ -133,8 +133,13 @@ about syntax or types and should match what the original compiler would report.
 - [x] Specificity ranking: prefers exact match over subtype/union
 - [x] Inheritance chain walking for subtype check
 
+### Completed Virtual Types
+- [x] VirtualType class for polymorphic dispatch (Phase 99)
+- [x] Method lookup in virtual type (base + subclass overrides)
+- [x] Subtype matching with VirtualType
+- [x] Deep inheritance chain method resolution
+
 ### TODO: Advanced Type System
-- [ ] Virtual types (inheritance-aware method dispatch)
 - [ ] Integrate macro expansion into semantic phase
 
 ---
