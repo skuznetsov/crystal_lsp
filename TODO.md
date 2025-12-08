@@ -94,7 +94,7 @@ about syntax or types and should match what the original compiler would report.
 
 ---
 
-## 3. Semantic & Type Inference - IN PROGRESS (~65%)
+## 3. Semantic & Type Inference - IN PROGRESS (~70%)
 
 - [x] Basic type inference (literals, variables, simple methods)
 - [x] Symbol table with scope tracking
@@ -111,10 +111,16 @@ about syntax or types and should match what the original compiler would report.
 - [x] TypeParameter for generic types
 - [x] Generic type instantiation and unification (basic)
 
+### Completed Module System
+- [x] include/extend module mixins (modules added to scope.included_modules)
+- [x] Method resolution through included modules (MRO search)
+- [x] Transitive include support (C includes B includes A)
+- [x] extend adds to class_scope for class methods
+
 ### TODO: Advanced Type System
 - [ ] Union type narrowing with flow-sensitive analysis (`if var`, `is_a?`, `case`)
 - [ ] Method overload resolution based on argument types
-- [ ] include/extend, inheritance, virtual types
+- [ ] Virtual types (inheritance-aware method dispatch)
 - [ ] Integrate macro expansion into semantic phase
 
 ---
@@ -308,6 +314,6 @@ AST + Type Graph
 | Lexer | Complete | Part of parser tests |
 | AST | Complete | Class inheritance done |
 | MacroExpander | ~90% | MVP + ann[:key] + typeof/sizeof + @type.name(generic_args) |
-| Type Inference | ~65% | Full type graph + ProcType + NamedTupleType |
+| Type Inference | ~70% | Full type graph + ProcType + NamedTupleType + include/extend |
 | LSP Server | ~70% | 21 methods implemented |
 | Codegen | 0% | Future phase |
