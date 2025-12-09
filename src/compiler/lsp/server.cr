@@ -1930,6 +1930,9 @@ module CrystalV2
               # Restore expression types from TypeIndex (for hover fallback)
               if type_index = cache.type_index
                 restore_prelude_expr_types(type_index, cache.files)
+                debug("Background: restored #{@cached_expr_types.size} files with expr types from TypeIndex")
+              else
+                debug("Background: no TypeIndex in cache")
               end
 
               # Register symbols for LSP lookups
