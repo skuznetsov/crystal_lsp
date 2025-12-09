@@ -106,6 +106,129 @@ module CrystalV2
         def self.to_json_array(summaries : Array(SymbolSummary)) : String
           summaries.to_json
         end
+
+        # Binary serialization for fast cache loading
+        def to_bytes(io : IO) : Nil
+          write_string(io, @name)
+          write_string(io, @kind)
+          write_optional_string(io, @detail)
+          write_optional_string(io, @return_type)
+          write_optional_string(io, @inferred_type)
+          write_optional_string_array(io, @params)
+          write_optional_string_array(io, @ivars)
+          write_optional_string_array(io, @consts)
+          write_optional_summary_array(io, @class_children)
+          write_optional_summary_array(io, @children)
+          write_optional_int32(io, @start_line)
+          write_optional_int32(io, @start_col)
+          write_optional_int32(io, @end_line)
+          write_optional_int32(io, @end_col)
+        end
+
+        def self.from_bytes(io : IO) : SymbolSummary
+          name = read_string(io)
+          kind = read_string(io)
+          detail = read_optional_string(io)
+          return_type = read_optional_string(io)
+          inferred_type = read_optional_string(io)
+          params = read_optional_string_array(io)
+          ivars = read_optional_string_array(io)
+          consts = read_optional_string_array(io)
+          class_children = read_optional_summary_array(io)
+          children = read_optional_summary_array(io)
+          start_line = read_optional_int32(io)
+          start_col = read_optional_int32(io)
+          end_line = read_optional_int32(io)
+          end_col = read_optional_int32(io)
+
+          new(name, kind, detail, return_type, inferred_type, params, ivars, consts,
+              class_children, children, start_line, start_col, end_line, end_col)
+        end
+
+        def self.to_bytes_array(io : IO, summaries : Array(SymbolSummary)) : Nil
+          io.write_bytes(summaries.size.to_u32, IO::ByteFormat::LittleEndian)
+          summaries.each(&.to_bytes(io))
+        end
+
+        def self.from_bytes_array(io : IO) : Array(SymbolSummary)
+          count = io.read_bytes(UInt32, IO::ByteFormat::LittleEndian)
+          Array(SymbolSummary).new(count.to_i) { from_bytes(io) }
+        end
+
+        # Binary helpers
+        private def write_string(io : IO, str : String) : Nil
+          io.write_bytes(str.bytesize.to_u32, IO::ByteFormat::LittleEndian)
+          io.write(str.to_slice)
+        end
+
+        private def write_optional_string(io : IO, str : String?) : Nil
+          if str
+            io.write_byte(1_u8)
+            write_string(io, str)
+          else
+            io.write_byte(0_u8)
+          end
+        end
+
+        private def write_optional_int32(io : IO, val : Int32?) : Nil
+          if val
+            io.write_byte(1_u8)
+            io.write_bytes(val, IO::ByteFormat::LittleEndian)
+          else
+            io.write_byte(0_u8)
+          end
+        end
+
+        private def write_optional_string_array(io : IO, arr : Array(String)?) : Nil
+          if arr
+            io.write_byte(1_u8)
+            io.write_bytes(arr.size.to_u32, IO::ByteFormat::LittleEndian)
+            arr.each { |s| write_string(io, s) }
+          else
+            io.write_byte(0_u8)
+          end
+        end
+
+        private def write_optional_summary_array(io : IO, arr : Array(SymbolSummary)?) : Nil
+          if arr
+            io.write_byte(1_u8)
+            io.write_bytes(arr.size.to_u32, IO::ByteFormat::LittleEndian)
+            arr.each(&.to_bytes(io))
+          else
+            io.write_byte(0_u8)
+          end
+        end
+
+        private def self.read_string(io : IO) : String
+          size = io.read_bytes(UInt32, IO::ByteFormat::LittleEndian)
+          slice = Bytes.new(size)
+          io.read_fully(slice)
+          String.new(slice)
+        end
+
+        private def self.read_optional_string(io : IO) : String?
+          flag = io.read_byte.not_nil!
+          flag == 1_u8 ? read_string(io) : nil
+        end
+
+        private def self.read_optional_int32(io : IO) : Int32?
+          flag = io.read_byte.not_nil!
+          flag == 1_u8 ? io.read_bytes(Int32, IO::ByteFormat::LittleEndian) : nil
+        end
+
+        private def self.read_optional_string_array(io : IO) : Array(String)?
+          flag = io.read_byte.not_nil!
+          return nil if flag == 0_u8
+          size = io.read_bytes(UInt32, IO::ByteFormat::LittleEndian)
+          Array(String).new(size.to_i) { read_string(io) }
+        end
+
+        private def self.read_optional_summary_array(io : IO) : Array(SymbolSummary)?
+          flag = io.read_byte.not_nil!
+          return nil if flag == 0_u8
+          size = io.read_bytes(UInt32, IO::ByteFormat::LittleEndian)
+          Array(SymbolSummary).new(size.to_i) { from_bytes(io) }
+        end
       end
 
       # Shared helpers to summarize symbols and rebuild them from summaries.

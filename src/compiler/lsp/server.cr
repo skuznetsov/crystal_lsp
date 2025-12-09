@@ -2075,7 +2075,7 @@ module CrystalV2
           table = Semantic::SymbolTable.new
 
           cache.files.each do |file_state|
-            summaries = SymbolSummary.from_json_array(file_state.summary_json)
+            summaries = file_state.summaries  # Binary parsing, cached
             SymbolSummaryUtils.add_summaries_to_table(
               table,
               summaries,
@@ -2185,13 +2185,13 @@ module CrystalV2
             requires = collect_require_paths(program, File.dirname(path))
             mtime = File.info?(path).try(&.modification_time.to_unix) || 0_i64
 
-            CachedFileState.new(
+            CachedFileState.from_summaries(
               path: path,
               mtime: mtime,
               symbols: summaries.map(&.name),
               requires: requires,
-              diagnostics_count: 0,
-              summary_json: SymbolSummary.to_json_array(summaries)
+              summaries: summaries,
+              diagnostics_count: 0
             )
           end
         end
@@ -2279,7 +2279,7 @@ module CrystalV2
         private def register_cached_symbols(cache : PreludeCache)
           if cache.files.any?
             cache.files.each do |file_state|
-              summaries = SymbolSummary.from_json_array(file_state.summary_json)
+              summaries = file_state.summaries  # Binary parsing, cached
               register_cached_summary_methods(summaries, file_state.path, "")
             end
           else

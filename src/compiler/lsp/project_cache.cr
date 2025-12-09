@@ -3,12 +3,12 @@
 # Caches per-file analysis state to disk, reducing startup time when
 # reopening a project. Cache is invalidated when file mtimes change.
 #
-# Cache format (v5):
+# Cache format (v6):
 # - Magic: "CV2P" (4 bytes)
 # - Version: UInt32
 # - Project root hash: UInt64
 # - File count: UInt32
-# - Files: [CachedFileState...] (no expr_types_json, types are in TypeIndex)
+# - Files: [CachedFileState...] with binary summaries (not JSON)
 # - TypeIndex data size: UInt32
 # - TypeIndex data: Bytes (binary serialized TypeIndex with per-file storage)
 
@@ -25,7 +25,8 @@ module CrystalV2
         getter symbols : Array(String)   # Top-level symbol names
         getter requires : Array(String)  # Required file paths
         getter diagnostics_count : Int32 # Just count, not full diagnostics
-        getter summary_json : String     # JSON-encoded symbol summaries
+        @summary_bytes : Bytes           # Binary-encoded symbol summaries
+        @cached_summaries : Array(SymbolSummary)?  # Lazy-loaded summaries
 
         def initialize(
           @path : String,
@@ -33,18 +34,51 @@ module CrystalV2
           @symbols : Array(String),
           @requires : Array(String),
           @diagnostics_count : Int32 = 0,
-          @summary_json : String = "[]",
+          @summary_bytes : Bytes = Bytes.empty,
         )
+          @cached_summaries = nil
         end
 
-        # Binary serialization
+        # Create from summaries array (converts to binary)
+        def self.from_summaries(
+          path : String,
+          mtime : Int64,
+          symbols : Array(String),
+          requires : Array(String),
+          summaries : Array(SymbolSummary),
+          diagnostics_count : Int32 = 0,
+        ) : CachedFileState
+          io = IO::Memory.new
+          SymbolSummary.to_bytes_array(io, summaries)
+          new(path, mtime, symbols, requires, diagnostics_count, io.to_slice.dup)
+        end
+
+        # Get summaries (lazy parsing from binary)
+        def summaries : Array(SymbolSummary)
+          @cached_summaries ||= begin
+            return [] of SymbolSummary if @summary_bytes.empty?
+            io = IO::Memory.new(@summary_bytes)
+            SymbolSummary.from_bytes_array(io)
+          rescue
+            [] of SymbolSummary
+          end
+        end
+
+        # Legacy compatibility: return JSON string
+        def summary_json : String
+          summaries.to_json
+        end
+
+        # Binary serialization (v6 format)
         def to_bytes(io : IO)
           write_string(io, @path)
           io.write_bytes(@mtime, IO::ByteFormat::LittleEndian)
           write_string_array(io, @symbols)
           write_string_array(io, @requires)
           io.write_bytes(@diagnostics_count, IO::ByteFormat::LittleEndian)
-          write_string(io, @summary_json)
+          # Write binary summaries
+          io.write_bytes(@summary_bytes.size.to_u32, IO::ByteFormat::LittleEndian)
+          io.write(@summary_bytes)
         end
 
         def self.from_bytes(io : IO) : CachedFileState
@@ -53,9 +87,12 @@ module CrystalV2
           symbols = read_string_array(io)
           requires = read_string_array(io)
           diagnostics_count = io.read_bytes(Int32, IO::ByteFormat::LittleEndian)
-          summary_json = read_string(io)
+          # Read binary summaries
+          summary_size = io.read_bytes(UInt32, IO::ByteFormat::LittleEndian)
+          summary_bytes = Bytes.new(summary_size)
+          io.read_fully(summary_bytes) if summary_size > 0
 
-          new(path, mtime, symbols, requires, diagnostics_count, summary_json)
+          new(path, mtime, symbols, requires, diagnostics_count, summary_bytes)
         end
 
         private def write_string(io : IO, str : String)
@@ -91,7 +128,7 @@ module CrystalV2
       # Project-level cache
       class ProjectCache
         MAGIC   = "CV2P"
-        VERSION = 5_u32  # v5: TypeIndex-only (no expr_types_json)
+        VERSION = 6_u32  # v6: Binary summaries instead of JSON
 
         getter files : Array(CachedFileState)
         getter project_root : String
@@ -210,7 +247,6 @@ module CrystalV2
 
           files = project.files.map do |path, state|
             mtime = state.mtime.try(&.to_unix) || 0_i64
-            summary_json = SymbolSummary.to_json_array(state.symbol_summaries)
 
             # Populate TypeIndex from cached_expr_types (per-file storage)
             if expr_types = project.cached_expr_types[path]?
@@ -230,13 +266,13 @@ module CrystalV2
               end
             end
 
-            CachedFileState.new(
+            CachedFileState.from_summaries(
               path: path,
               mtime: mtime,
               symbols: state.symbols,
               requires: state.requires,
-              diagnostics_count: state.diagnostics.size,
-              summary_json: summary_json
+              summaries: state.symbol_summaries,
+              diagnostics_count: state.diagnostics.size
             )
           end
 
@@ -285,7 +321,7 @@ module CrystalV2
               symbols: cached.symbols,
               diagnostics: [] of Diagnostic,
               requires: cached.requires,
-              symbol_summaries: SymbolSummary.from_json_array(cached.summary_json),
+              symbol_summaries: cached.summaries,  # Binary parsing, cached
               from_cache: true # No AST available, only summaries
             )
 

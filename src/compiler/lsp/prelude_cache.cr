@@ -141,7 +141,7 @@ module CrystalV2
       # - TypeIndex data: Bytes (binary serialized TypeIndex)
       class PreludeCache
         MAGIC   = "CV2C"
-        VERSION = 5_u32  # Bumped for is_class_method support (class methods in class_scope)
+        VERSION = 6_u32  # v6: Binary summaries instead of JSON in CachedFileState
 
         getter symbols : Array(CachedSymbolInfo)
         getter stdlib_hash : UInt64
