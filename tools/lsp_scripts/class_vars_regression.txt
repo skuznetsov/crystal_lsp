@@ -1,0 +1,29 @@
+# Class/instance variable regression test
+open tools/lsp_scripts/samples/class_instance_vars.cr
+
+# @@total class var declaration
+hover 2:3
+
+# @value instance var declaration
+hover 3:3
+
+# @value usage in increment
+hover 10:5
+
+# @@total usage in increment
+hover 11:5
+
+# Definition of @value from method
+definition 15:5
+
+# c1 should be Counter
+hover 23:1
+
+# val should be Int32
+hover 27:1
+
+# total should be Int32
+hover 28:1
+
+# Definition of Counter.total
+definition 28:9

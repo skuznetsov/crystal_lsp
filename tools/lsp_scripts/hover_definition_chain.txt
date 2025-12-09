@@ -1,0 +1,19 @@
+# Hover → Definition chain regression
+# Tests that hovering shows type, then definition navigates correctly
+open tools/lsp_scripts/samples/rename_scenario.cr
+
+# Chain 1: user variable → User class
+hover 18:1
+definition 18:1
+
+# Chain 2: create_user call → function def
+hover 18:8
+definition 18:8
+
+# Chain 3: user.display → method def
+hover 19:6
+definition 19:6
+
+# Chain 4: User.new → class
+hover 14:3
+definition 14:3

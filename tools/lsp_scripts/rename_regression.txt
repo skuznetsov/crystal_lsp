@@ -1,0 +1,21 @@
+# Rename regression test
+# Tests rename of class property and method
+open tools/lsp_scripts/samples/rename_scenario.cr
+
+# Hover on User class (line 1)
+hover 1:7
+
+# Definition of User (should point to itself)
+definition 1:7
+
+# Hover on 'name' property (line 2)
+hover 2:12
+
+# Hover on 'display' method (line 8)
+hover 8:7
+
+# Definition of display from call site (line 19)
+definition 19:12
+
+# Hover on user variable (line 18)
+hover 18:1

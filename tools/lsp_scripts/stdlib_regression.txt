@@ -1,0 +1,33 @@
+# Stdlib types regression test
+# Tests hover shows correct types for stdlib methods
+open tools/lsp_scripts/samples/stdlib_types.cr
+
+# arr should be Array(Int32)
+hover 4:1
+
+# mapped should be Array(Int32)
+hover 8:1
+
+# first should be Int32
+hover 9:1
+
+# str should be String
+hover 5:1
+
+# upcase should be String
+hover 13:1
+
+# chars should be Array(Char)
+hover 14:1
+
+# hash should be Hash(String, Int32)
+hover 6:1
+
+# keys should be Array(String)
+hover 18:1
+
+# now should be Time
+hover 22:1
+
+# Definition of Time.utc
+definition 22:7
