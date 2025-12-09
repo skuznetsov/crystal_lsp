@@ -6093,6 +6093,10 @@ module CrystalV2
                 if location = definition_from_parameters_fast(name_str, doc_state, offset)
                   return location
                 end
+                # Might be a method call without receiver (implicit self) - check before giving up
+                if location = find_method_location_by_text(doc_state, name_str)
+                  return location
+                end
                 # Skip expensive constant lookup for lowercase identifiers
                 return nil
               end
