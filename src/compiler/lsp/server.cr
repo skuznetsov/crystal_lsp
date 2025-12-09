@@ -5331,12 +5331,35 @@ module CrystalV2
         )
           case type
           when Semantic::InstanceType
+            # Instance: obj.method - use instance methods from scope
             collect_methods_from_class_symbol(type.class_symbol, doc_state, items, visited)
           when Semantic::ClassType
-            collect_methods_from_class_symbol(type.symbol, doc_state, items, visited)
+            # Class: MyClass.method - use class methods from class_scope
+            collect_class_methods_from_class_symbol(type.symbol, doc_state, items, visited)
           when Semantic::UnionType
             type.types.each do |member|
               collect_methods_for_type(member, doc_state, items, visited)
+            end
+          end
+        end
+
+        # Collect class methods (def self.foo) for class-level completion (MyClass.)
+        private def collect_class_methods_from_class_symbol(
+          class_symbol : Semantic::ClassSymbol,
+          doc_state : DocumentState,
+          items : Array(CompletionItem),
+          visited : Set(Semantic::MethodSymbol),
+        )
+          # Use class_scope for class methods (def self.foo)
+          add_methods_from_scope(class_symbol.class_scope, items, visited)
+
+          # Also check superclass class methods
+          symbol_table = doc_state.symbol_table || @prelude_state.try(&.symbol_table)
+          if symbol_table && (super_name = class_symbol.superclass_name)
+            if super_symbol = symbol_table.lookup(super_name)
+              if super_symbol.is_a?(Semantic::ClassSymbol)
+                collect_class_methods_from_class_symbol(super_symbol, doc_state, items, visited)
+              end
             end
           end
         end

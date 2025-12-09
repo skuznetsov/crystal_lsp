@@ -290,7 +290,7 @@ def main() -> int:
                 uri = ensure_open(current_file)
                 print(f"[open] {current_file} -> {uri}")
                 continue
-            elif action in ("hover", "definition", "tokens"):
+            elif action in ("hover", "definition", "tokens", "completion"):
                 if current_file is None:
                     print(f"no file open for line: {raw_line}", file=sys.stderr)
                     continue
@@ -351,6 +351,22 @@ def main() -> int:
                     )
                     actions.append((label, action, parts[0]))
                     next_id += 1
+                elif action == "completion":
+                    pending[next_id] = label
+                    send(
+                        proc,
+                        {
+                            "jsonrpc": "2.0",
+                            "id": next_id,
+                            "method": "textDocument/completion",
+                            "params": {
+                                "textDocument": {"uri": uri},
+                                "position": {"line": line0, "character": col0},
+                            },
+                        },
+                    )
+                    actions.append((label, action, parts[0]))
+                    next_id += 1
         responses = pump(pending, diagnostics)
         for label, action, pos in actions:
             result = responses.get(label)
@@ -365,6 +381,10 @@ def main() -> int:
             elif action == "tokens":
                 tokens = result or {}
                 display_tokens(tokens.get("data", []), None)
+            elif action == "completion":
+                items = result if isinstance(result, list) else []
+                labels = [item.get("label", "?") for item in items]
+                print(f"[completion {pos}] {labels}")
         proc.terminate()
         return 0
 
