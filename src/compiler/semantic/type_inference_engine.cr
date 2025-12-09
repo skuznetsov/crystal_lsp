@@ -505,8 +505,16 @@ module CrystalV2
           when Frontend::TupleLiteralNode
             node.elements.each { |e| children << e }
           when Frontend::ArrayLiteralNode
+            # OPTIMIZATION: For large arrays, only add sample elements to stack
+            # Full array inference will be done in infer_array_literal with sampling
             if elems = node.elements
-              elems.each { |e| children << e }
+              if elems.size > 10
+                # Large array - only sample first 3 elements for stack processing
+                3.times { |i| children << elems[i] if i < elems.size }
+              else
+                # Small array - process all elements
+                elems.each { |e| children << e }
+              end
             end
           when Frontend::HashLiteralNode
             node.entries.each { |entry| children << entry.key; children << entry.value }
@@ -2527,6 +2535,7 @@ module CrystalV2
           element_type : Type
 
           # Case 1: Explicit "of Type" syntax ([] of Int32)
+          # FAST PATH: Skip element inference entirely when type is explicit
           if of_type_expr_id = node.of_type
             # Phase 103B: Resolve the type expression
             if resolved_type = type_from_type_expr(of_type_expr_id)
@@ -2542,11 +2551,35 @@ module CrystalV2
               # (In real Crystal this would be an error, but we'll allow it for now)
               element_type = @context.nil_type
             else
-              # Infer type of each element
-              tmp = Array(Type).new(elements.size)
-              elements.each { |elem_id| tmp << infer_expression(elem_id) }
-              # Union all element types
-              element_type = @context.union_of(tmp)
+              # OPTIMIZATION: For large arrays of uniform literals, sample first few elements
+              # This handles cases like CACHE = [0x81ceb32c..._u64, ...] with 600+ elements
+              if elements.size > 10
+                # Sample first 3 elements
+                sample_types = Array(Type).new(3)
+                3.times do |i|
+                  break if i >= elements.size
+                  sample_types << infer_expression(elements[i])
+                end
+
+                # Check if all samples are the same primitive type
+                first_type = sample_types.first?
+                if first_type && sample_types.all? { |t| t == first_type } && first_type.is_a?(PrimitiveType)
+                  # All samples are same primitive - assume entire array is uniform
+                  STDERR.puts("[TI DEBUG] Large array (#{elements.size} elements) - sampled 3, all #{first_type}") if @debug_enabled
+                  element_type = first_type
+                else
+                  # Mixed types - fall back to full inference
+                  STDERR.puts("[TI DEBUG] Large array (#{elements.size} elements) - mixed types, full inference") if @debug_enabled
+                  tmp = Array(Type).new(elements.size)
+                  elements.each { |elem_id| tmp << infer_expression(elem_id) }
+                  element_type = @context.union_of(tmp)
+                end
+              else
+                # Small array - infer all elements
+                tmp = Array(Type).new(elements.size)
+                elements.each { |elem_id| tmp << infer_expression(elem_id) }
+                element_type = @context.union_of(tmp)
+              end
             end
           else
             # Empty array without elements or type - shouldn't happen
