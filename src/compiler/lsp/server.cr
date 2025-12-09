@@ -6007,6 +6007,16 @@ module CrystalV2
             debug("Identifier node: #{name_slice ? String.new(name_slice) : "<anon>"}")
             identifier_symbols = doc_state.identifier_symbols
             symbol = identifier_symbols ? identifier_symbols[expr_id]? : nil
+            # Fallback: search by name if not found by expr_id (e.g., inside ternary if)
+            if symbol.nil? && name_slice && identifier_symbols
+              ident_name = String.new(name_slice)
+              identifier_symbols.each_value do |candidate|
+                next unless candidate.is_a?(Semantic::VariableSymbol)
+                next unless candidate.name == ident_name
+                symbol = candidate
+                break
+              end
+            end
             debug("Identifier symbol: #{symbol ? symbol.class : "nil"} (identifier_symbols nil?=#{identifier_symbols.nil?})")
             if symbol
               if location = location_for_symbol(symbol)
@@ -6176,9 +6186,212 @@ module CrystalV2
             definition_from_annotation(node, doc_state, uri, depth, target_offset)
           when Frontend::ClassNode, Frontend::ModuleNode, Frontend::StructNode, Frontend::EnumNode
             Location.new(uri: doc_state.text_document.uri, range: Range.from_span(node.span))
+          when Frontend::IfNode
+            # Regular if - find cursor position in condition/then/else
+            definition_from_if(node, doc_state, uri, depth, target_offset)
+          when Frontend::TernaryNode
+            # Ternary (a ? b : c) - find cursor in condition/true/false branch
+            definition_from_ternary(node, doc_state, uri, depth, target_offset)
+          when Frontend::WhileNode
+            # while loops - condition and body
+            definition_from_while(node, doc_state, uri, depth, target_offset)
+          when Frontend::UntilNode
+            # until loops - condition and body
+            definition_from_until(node, doc_state, uri, depth, target_offset)
+          when Frontend::CaseNode
+            # case/when - find cursor in condition or branches
+            definition_from_case(node, doc_state, uri, depth, target_offset)
+          when Frontend::UnaryNode
+            # Unary ops like !foo - recurse into operand
+            find_definition_location(node.operand, doc_state, uri, depth + 1, target_offset)
+          when Frontend::BinaryNode
+            # Binary ops like a > b - find cursor in left or right
+            definition_from_binary(node, doc_state, uri, depth, target_offset)
           else
             nil
           end
+        end
+
+        # Navigate to definition from within TernaryNode (a ? b : c)
+        private def definition_from_ternary(node : Frontend::TernaryNode, doc_state : DocumentState, uri : String, depth : Int32, target_offset : Int32?) : Location?
+          arena = doc_state.program.arena
+          offset = target_offset || return nil
+
+          # Check condition
+          cond_span = arena[node.condition].span
+          if span_contains_offset?(cond_span, offset)
+            return find_definition_location(node.condition, doc_state, uri, depth + 1, target_offset)
+          end
+
+          # Check true branch
+          true_span = arena[node.true_branch].span
+          if span_contains_offset?(true_span, offset)
+            return find_definition_location(node.true_branch, doc_state, uri, depth + 1, target_offset)
+          end
+
+          # Check false branch
+          false_span = arena[node.false_branch].span
+          if span_contains_offset?(false_span, offset)
+            return find_definition_location(node.false_branch, doc_state, uri, depth + 1, target_offset)
+          end
+
+          nil
+        end
+
+        # Navigate to definition from within IfNode (regular if/elsif/else)
+        private def definition_from_if(node : Frontend::IfNode, doc_state : DocumentState, uri : String, depth : Int32, target_offset : Int32?) : Location?
+          arena = doc_state.program.arena
+          offset = target_offset || return nil
+
+          # Check condition
+          cond_span = arena[node.condition].span
+          if span_contains_offset?(cond_span, offset)
+            return find_definition_location(node.condition, doc_state, uri, depth + 1, target_offset)
+          end
+
+          # Check then_body
+          node.then_body.each do |expr_id|
+            expr_span = arena[expr_id].span
+            if span_contains_offset?(expr_span, offset)
+              return find_definition_location(expr_id, doc_state, uri, depth + 1, target_offset)
+            end
+          end
+
+          # Check elsifs
+          if elsifs = node.elsifs
+            elsifs.each do |elsif_branch|
+              cond_span = arena[elsif_branch.condition].span
+              if span_contains_offset?(cond_span, offset)
+                return find_definition_location(elsif_branch.condition, doc_state, uri, depth + 1, target_offset)
+              end
+              elsif_branch.body.each do |expr_id|
+                expr_span = arena[expr_id].span
+                if span_contains_offset?(expr_span, offset)
+                  return find_definition_location(expr_id, doc_state, uri, depth + 1, target_offset)
+                end
+              end
+            end
+          end
+
+          # Check else_body
+          if else_body = node.else_body
+            else_body.each do |expr_id|
+              expr_span = arena[expr_id].span
+              if span_contains_offset?(expr_span, offset)
+                return find_definition_location(expr_id, doc_state, uri, depth + 1, target_offset)
+              end
+            end
+          end
+
+          nil
+        end
+
+        # Navigate to definition from within WhileNode
+        private def definition_from_while(node : Frontend::WhileNode, doc_state : DocumentState, uri : String, depth : Int32, target_offset : Int32?) : Location?
+          arena = doc_state.program.arena
+          offset = target_offset || return nil
+
+          # Check condition
+          cond_span = arena[node.condition].span
+          if span_contains_offset?(cond_span, offset)
+            return find_definition_location(node.condition, doc_state, uri, depth + 1, target_offset)
+          end
+
+          # Check body
+          node.body.each do |expr_id|
+            expr_span = arena[expr_id].span
+            if span_contains_offset?(expr_span, offset)
+              return find_definition_location(expr_id, doc_state, uri, depth + 1, target_offset)
+            end
+          end
+
+          nil
+        end
+
+        # Navigate to definition from within UntilNode
+        private def definition_from_until(node : Frontend::UntilNode, doc_state : DocumentState, uri : String, depth : Int32, target_offset : Int32?) : Location?
+          arena = doc_state.program.arena
+          offset = target_offset || return nil
+
+          # Check condition
+          cond_span = arena[node.condition].span
+          if span_contains_offset?(cond_span, offset)
+            return find_definition_location(node.condition, doc_state, uri, depth + 1, target_offset)
+          end
+
+          # Check body
+          node.body.each do |expr_id|
+            expr_span = arena[expr_id].span
+            if span_contains_offset?(expr_span, offset)
+              return find_definition_location(expr_id, doc_state, uri, depth + 1, target_offset)
+            end
+          end
+
+          nil
+        end
+
+        # Navigate to definition from within CaseNode
+        private def definition_from_case(node : Frontend::CaseNode, doc_state : DocumentState, uri : String, depth : Int32, target_offset : Int32?) : Location?
+          arena = doc_state.program.arena
+          offset = target_offset || return nil
+
+          # Check value if present
+          if value_id = node.value
+            value_span = arena[value_id].span
+            if span_contains_offset?(value_span, offset)
+              return find_definition_location(value_id, doc_state, uri, depth + 1, target_offset)
+            end
+          end
+
+          # Check when branches
+          node.when_branches.each do |when_branch|
+            # Check conditions
+            when_branch.conditions.each do |cond_id|
+              cond_span = arena[cond_id].span
+              if span_contains_offset?(cond_span, offset)
+                return find_definition_location(cond_id, doc_state, uri, depth + 1, target_offset)
+              end
+            end
+            # Check body
+            when_branch.body.each do |expr_id|
+              expr_span = arena[expr_id].span
+              if span_contains_offset?(expr_span, offset)
+                return find_definition_location(expr_id, doc_state, uri, depth + 1, target_offset)
+              end
+            end
+          end
+
+          # Check else branch
+          if else_branch = node.else_branch
+            else_branch.each do |expr_id|
+              expr_span = arena[expr_id].span
+              if span_contains_offset?(expr_span, offset)
+                return find_definition_location(expr_id, doc_state, uri, depth + 1, target_offset)
+              end
+            end
+          end
+
+          nil
+        end
+
+        # Navigate to definition from within BinaryNode
+        private def definition_from_binary(node : Frontend::BinaryNode, doc_state : DocumentState, uri : String, depth : Int32, target_offset : Int32?) : Location?
+          arena = doc_state.program.arena
+          offset = target_offset || return nil
+
+          # Check left operand
+          left_span = arena[node.left].span
+          if span_contains_offset?(left_span, offset)
+            return find_definition_location(node.left, doc_state, uri, depth + 1, target_offset)
+          end
+
+          # Check right operand
+          right_span = arena[node.right].span
+          if span_contains_offset?(right_span, offset)
+            return find_definition_location(node.right, doc_state, uri, depth + 1, target_offset)
+          end
+
+          nil
         end
 
         # Navigate to definition from within generic type node
