@@ -2170,18 +2170,11 @@ module CrystalV2
           grouped = Hash(String, Array(SymbolSummary)).new { |h, k| h[k] = [] of SymbolSummary }
           program_map = Hash(String, Frontend::Program).new
 
-          prelude.symbol_table.each_local_symbol do |_name, symbol|
-            origin = prelude.symbol_origins[symbol]?
-            path = origin.try { |o| uri_to_path(o.uri) }
-            if path.nil? && symbol.responds_to?(:file_path)
-              begin
-                path = symbol.file_path
-              rescue
-              end
-            end
-            path ||= prelude.path
-
-            program = origin.try(&.program) || prelude.program
+          # Use symbol_origins which contains ALL symbols from ALL recursively processed files
+          # (not just toplevel symbols from symbol_table.each_local_symbol)
+          prelude.symbol_origins.each do |symbol, origin|
+            path = uri_to_path(origin.uri) || prelude.path
+            program = origin.program
             program_map[path] ||= program
 
             grouped[path] << SymbolSummaryUtils.summarize_symbol(symbol, program, nil)
