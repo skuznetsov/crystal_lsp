@@ -333,72 +333,234 @@ Goal: v2 LSP must report only real errors and match original compiler behavior.
 
 ---
 
-## 5. Beyond Parity: IR & Codegen (Next Phase)
+## 5. Codegen: Multi-Stage Compilation with Hybrid Memory Management
 
-Ready to begin after LSP correctness achieved.
+**Status:** Active development on `codegen` branch (2025-12-09)
 
-### 5.1 Typed SSA IR
-- [ ] Crystal-specific typed SSA IR before LLVM lowering
-- [ ] Per-function IR with explicit control flow graph
-- [ ] Effect summaries for function boundaries
-- [ ] Region-based alias analysis in IR
-
-### 5.2 Memory Management: Lifetime Coloring (No Borrow Checker)
-
-**Vision:** Compile-time memory management via AST-based lifetime analysis,
-without Rust-style lifetime annotations. Developer writes code like Ruby/Go,
-compiler infers optimal memory strategy.
-
-**Inspiration:**
-- V lang: Compiler tracks allocations/deallocations automatically
-- Linux kernel slabs: Pre-allocated memory pools per context
-- Swift ARC: Reference counting without GC pauses
-
-**Analysis Pipeline:**
+**Architecture (Quadrumvirate-analyzed):**
 ```
-AST + Type Graph
-      │
-      ├─▶ Escape Analysis (does value leave scope?)
-      ├─▶ Alias Analysis (who else references this?)
-      └─▶ Lifetime Coloring (paint value's journey)
-              │
-              ▼
-      Memory Strategy Map (per allocation site)
+┌─────────────────────────────────────────────────────────────────────┐
+│                    MULTI-STAGE COMPILATION                          │
+├─────────────────────────────────────────────────────────────────────┤
+│                                                                     │
+│  Phase 1: AST → Extended IR                                         │
+│  ┌─────────────────────────────────────────────────────────────┐   │
+│  │  • Escape analysis (does value leave scope?)                │   │
+│  │  • Alias analysis (who else references this?)               │   │
+│  │  • Taint propagation:                                       │   │
+│  │    - thread-shared (needs atomic ops)                       │   │
+│  │    - ffi-exposed (C code may hold reference)                │   │
+│  │    - cyclic (participates in reference cycle)               │   │
+│  │  • Lifetime annotations on IR nodes                         │   │
+│  └─────────────────────────────────────────────────────────────┘   │
+│                              │                                      │
+│                              ▼                                      │
+│  Phase 2: IR Optimization + MM Assignment                           │
+│  ┌─────────────────────────────────────────────────────────────┐   │
+│  │  Per-object memory strategy assignment:                     │   │
+│  │  • Stack: no escape, small, known size                      │   │
+│  │  • Slab/Arena: no escape, dynamic size, fiber-local         │   │
+│  │  • ARC: escapes, single/few owners, no cycles               │   │
+│  │  • GC: cycles detected, FFI boundary, fallback              │   │
+│  │                                                             │   │
+│  │  Cycle detection → automatic GC marking                     │   │
+│  │  Profile-guided hints (optional)                            │   │
+│  └─────────────────────────────────────────────────────────────┘   │
+│                              │                                      │
+│                              ▼                                      │
+│  Phase 3: IR → LLVM BC → Machine Code                               │
+│  ┌─────────────────────────────────────────────────────────────┐   │
+│  │  • Generate LLVM IR with appropriate alloc/dealloc calls    │   │
+│  │  • LLVM handles low-level optimizations                     │   │
+│  │  • Output: native binary for target platform                │   │
+│  └─────────────────────────────────────────────────────────────┘   │
+│                                                                     │
+└─────────────────────────────────────────────────────────────────────┘
 ```
 
-**Strategy Selection:**
-| Condition | Strategy | Runtime Cost |
-|-----------|----------|--------------|
-| No escape, short-lived | Stack allocation | 0 |
-| No escape, large/dynamic | Arena/slab | ~0 |
-| Single owner, escapes | Move semantics | 0 |
-| Multiple owners, no cycles | ARC (ref counting) | ref ops |
-| Complex cycles | Fallback to GC | GC pause |
+**Compiler Flags (MM mode hints):**
+- `--mm=conservative` → prefer GC, maximize safety
+- `--mm=balanced` → auto-infer optimal strategy (default)
+- `--mm=aggressive` → prefer stack/ARC, maximize speed
+- `--mm=profile` → use runtime profile data for decisions
 
-**Fiber-local Arenas (slab idea):**
-- Pre-allocate arena per fiber/coroutine
-- All allocations within fiber go to its slab
-- On fiber completion, bulk-free entire slab (single dealloc)
+**Reference Implementations:**
+| Compiler | Approach | What We Learn |
+|----------|----------|---------------|
+| Swift | ARC + escape analysis on SIL | ARC works, but overhead exists |
+| Rust | Borrow checker on MIR | Too complex for Crystal's goals |
+| V lang | Autofree on AST | Works 80%, leaks on graphs |
+| Lobster | Compile-time RC | Good for games, limited scope |
+| Koka | Perceus reuse analysis | Academic, elegant, complex |
+| Zig | Manual + comptime | Fast compile, good reference |
 
-**TODO:**
-- [ ] Escape analysis pass in IR
-- [ ] Alias analysis (region-based)
-- [ ] Lifetime coloring algorithm
-- [ ] Strategy selector based on analysis results
-- [ ] Arena allocator integration
-- [ ] ARC codegen for multi-owner cases
-- [ ] Configurable GC fallback (Boehm baseline)
+---
 
-### 5.3 LLVM Codegen
-- [ ] Per-thread LLVM module contexts
-- [ ] Batched optimization pass pipelines
-- [ ] Profile-guided optimization (PGO) hooks
-- [ ] LTO toggle for release builds
-- [ ] Fast LLVM codegen with competitive build times
+### 5.1 Phase 1: Extended IR with Lifetime Annotations
 
-### 5.4 Alternative Backends (Experimental)
-- [ ] WASM emitter through same mid-end
-- [ ] eBPF emitter for kernel/tracing use cases
+**Goal:** Transform AST into IR that carries lifetime and ownership information.
+
+#### 5.1.1 IR Design
+- [ ] Define Extended IR node types (EIR)
+- [ ] Map AST nodes to EIR nodes
+- [ ] Add lifetime annotation slots to EIR
+- [ ] Control flow graph (CFG) construction
+- [ ] SSA form conversion (optional, evaluate need)
+
+#### 5.1.2 Escape Analysis
+- [ ] Intra-procedural escape analysis
+- [ ] Track: stack-local, heap-escape, argument-escape, return-escape
+- [ ] Handle closures (captured variables escape)
+- [ ] Handle `array << obj` (container escape)
+- [ ] Handle virtual dispatch (conservative for polymorphic calls)
+
+**Critical cases (from ADVERSARY):**
+```crystal
+# Case 1: Closure capture
+def make_counter
+  x = 0
+  -> { x += 1 }  # x escapes via closure!
+end
+
+# Case 2: Container escape
+arr = [] of Foo
+arr << Foo.new  # Foo lifetime tied to arr
+
+# Case 3: Return escape
+def create
+  Foo.new  # escapes to caller
+end
+```
+
+#### 5.1.3 Alias Analysis
+- [ ] Region-based alias analysis
+- [ ] Track pointer aliasing
+- [ ] Handle instance variables (@ivar may alias)
+- [ ] Handle array/hash element aliasing
+
+#### 5.1.4 Taint Propagation
+- [ ] `thread-shared` taint (needs atomic RC or GC)
+- [ ] `ffi-exposed` taint (C may hold reference)
+- [ ] `cyclic` taint (participates in reference cycle)
+- [ ] Propagate taints through assignments and calls
+
+---
+
+### 5.2 Phase 2: Memory Management Assignment
+
+**Goal:** Assign optimal MM strategy per allocation site.
+
+#### 5.2.1 Strategy Selector
+- [ ] Implement decision tree based on analysis results
+- [ ] Stack: !escapes && size_known && size < threshold
+- [ ] Slab: !escapes && fiber_local && dynamic_size
+- [ ] ARC: escapes && !cyclic && !thread_shared
+- [ ] GC: cyclic || thread_shared || ffi_exposed || fallback
+
+#### 5.2.2 Cycle Detection
+- [ ] Static cycle detection in type graph (recursive types)
+- [ ] Mark types that CAN form cycles
+- [ ] Conservative: if cycle possible → GC or weak refs
+- [ ] Annotation: `@[Acyclic]` for user override
+
+**Cyclic type example:**
+```crystal
+class Node
+  property next : Node?  # Can form cycle!
+end
+```
+
+#### 5.2.3 ARC Implementation
+- [ ] Reference count field layout
+- [ ] Atomic vs non-atomic RC (based on thread_shared taint)
+- [ ] RC increment/decrement insertion
+- [ ] Weak reference support for breaking cycles
+
+#### 5.2.4 Slab/Arena Allocator
+- [ ] Fiber-local arena design
+- [ ] Bulk deallocation on fiber exit
+- [ ] Arena size heuristics
+- [ ] Overflow to heap fallback
+
+#### 5.2.5 Profile-Guided Optimization (Optional)
+- [ ] Runtime profiling instrumentation
+- [ ] Collect allocation hotspots
+- [ ] Feed profile back to strategy selector
+- [ ] `--mm=profile` mode
+
+---
+
+### 5.3 Phase 3: LLVM Backend
+
+**Goal:** Generate LLVM IR from optimized EIR, produce native code.
+
+#### 5.3.1 LLVM IR Generation
+- [ ] Basic LLVM IR emitter
+- [ ] Type mapping (Crystal types → LLVM types)
+- [ ] Function codegen
+- [ ] Control flow translation
+- [ ] Memory operation codegen (alloc/free/RC ops)
+
+#### 5.3.2 Runtime Support
+- [ ] Minimal runtime library
+- [ ] GC integration (Boehm as baseline)
+- [ ] ARC runtime functions
+- [ ] Arena allocator runtime
+
+#### 5.3.3 Optimization Pipeline
+- [ ] LLVM optimization passes (O0/O1/O2/O3)
+- [ ] LTO support for release builds
+- [ ] PGO hooks (profile-guided LLVM opts)
+
+#### 5.3.4 Platform Support
+- [ ] macOS (arm64, x86_64)
+- [ ] Linux (arm64, x86_64)
+- [ ] Windows (x86_64)
+- [ ] Cross-compilation support
+
+---
+
+### 5.4 Alternative Backends (Future)
+
+- [ ] **WebAssembly**: Direct WASM emitter (no LLVM)
+- [ ] **eBPF**: Kernel/tracing use cases
+- [ ] **Cranelift**: Fast debug builds (like Rust)
+
+---
+
+### 5.5 Backward Compatibility
+
+**Principle:** Existing Crystal code must work without changes.
+
+- [ ] GC as default for `--mm=conservative`
+- [ ] Gradual opt-in to aggressive MM
+- [ ] Stdlib compatibility (written for GC)
+- [ ] No required lifetime annotations (unlike Rust)
+
+---
+
+### Critical Risks (ADVERSARY Analysis)
+
+| Risk | Impact | Mitigation |
+|------|--------|------------|
+| Closure escape not detected | Use-after-free | Conservative: closures → GC |
+| Cycle not detected | Memory leak | Type graph analysis + weak refs |
+| FFI boundary | Dangling pointer | `@[FFI]` annotation → GC |
+| Thread safety | Data race | thread_shared taint → atomic RC |
+| ABI between MM modes | Crashes | Unified object header layout |
+
+---
+
+### Milestones
+
+| Milestone | Description | Deliverable |
+|-----------|-------------|-------------|
+| M1 | Basic IR + escape analysis | Can classify allocations |
+| M2 | Stack allocation working | Simple programs compile |
+| M3 | ARC working | Objects with single owner |
+| M4 | GC integration | Full Crystal programs work |
+| M5 | Slab allocator | Fiber-local arenas |
+| M6 | Profile-guided | Runtime feedback loop |
 
 ---
 
