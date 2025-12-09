@@ -679,6 +679,30 @@ module CrystalV2
             # The iterative path correctly identifies children (line 478-483)
             # but we need the recursive infer_string_interpolation to run
             nil
+          # ============================================================
+          # FAST PATH: Statements that always return Nil
+          # These are definitions/declarations - they don't produce values.
+          # Return Nil immediately without recursive fallback.
+          # ============================================================
+          when Frontend::MacroDefNode,
+               Frontend::EnumNode,
+               Frontend::LibNode,
+               Frontend::AliasNode,
+               Frontend::RequireNode,
+               Frontend::IncludeNode,
+               Frontend::ExtendNode,
+               Frontend::AnnotationNode,
+               Frontend::AnnotationDefNode,
+               Frontend::UnionNode,
+               Frontend::MacroLiteralNode,
+               Frontend::GlobalVarDeclNode,
+               Frontend::MacroIfNode,
+               Frontend::MacroForNode,
+               Frontend::MacroExpressionNode
+            # Pure statements that don't need body processing
+            @context.nil_type
+          # Note: DefNode, ClassNode, ModuleNode, StructNode need recursive path
+          # because they have special body processing (infer_def, infer_class, etc.)
           else
             # Unknown/complex node - return nil to trigger recursive fallback
             nil
