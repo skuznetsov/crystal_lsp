@@ -43,6 +43,7 @@ module CrystalV2
         getter diagnostics : Array(Diagnostic)
         getter requires : Array(String)                # Files this file requires
         getter symbol_summaries : Array(SymbolSummary) # Structured export data for cache/UI
+        getter from_cache : Bool                       # True if loaded from cache (no AST available)
 
         def initialize(
           @path : String,
@@ -53,6 +54,7 @@ module CrystalV2
           @diagnostics : Array(Diagnostic) = [] of Diagnostic,
           @requires : Array(String) = [] of String,
           @symbol_summaries : Array(SymbolSummary) = [] of SymbolSummary,
+          @from_cache : Bool = false,
         )
         end
       end

@@ -285,7 +285,8 @@ module CrystalV2
               symbols: cached.symbols,
               diagnostics: [] of Diagnostic,
               requires: cached.requires,
-              symbol_summaries: SymbolSummary.from_json_array(cached.summary_json)
+              symbol_summaries: SymbolSummary.from_json_array(cached.summary_json),
+              from_cache: true # No AST available, only summaries
             )
 
             project.files[cached.path] = state

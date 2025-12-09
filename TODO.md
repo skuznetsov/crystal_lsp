@@ -168,9 +168,24 @@ about syntax or types and should match what the original compiler would report.
 
 ---
 
-## 4. LSP Server Correctness - NEXT FOCUS
+## 4. LSP Server Correctness - ~85% COMPLETE
 
 Goal: v2 LSP must report only real errors and match original compiler behavior.
+
+**26 LSP Methods Implemented:**
+- General: initialize, shutdown
+- Sync: didOpen, didChange, didClose, didChangeWatchedFiles
+- Language: hover, definition, typeDefinition, completion, signatureHelp, documentSymbol, references, documentHighlight, rename, prepareRename, codeAction, formatting, rangeFormatting, foldingRange, semanticTokens/full, inlayHint
+- Workspace: symbol
+- Call Hierarchy: prepare, incomingCalls, outgoingCalls
+
+**Not Yet Implemented (lower priority):**
+- textDocument/declaration, textDocument/implementation
+- textDocument/codeLens, codeLens/resolve
+- textDocument/documentLink
+- textDocument/onTypeFormatting
+- textDocument/selectionRange
+- workspace/executeCommand
 
 - [x] Wired to v2 parser and symbol collector
 - [x] Diagnostics parity: fixed []? vs ternary disambiguation (no false positives on server.cr)
@@ -203,18 +218,18 @@ Goal: v2 LSP must report only real errors and match original compiler behavior.
 
 ---
 
-## LSP Project Cache (New)
+## LSP Project Cache (Complete)
 - [x] Versioned project cache (v2) with symbol summaries (classes/modules/method signatures) + real mtime
 - [x] Background indexing of `root/src/**/*.cr` to populate cache automatically
 - [x] Extend summaries with ivars/class vars/consts (class vars and constants now collected from class_scope)
 - [x] Restore symbol_table from cache for unchanged files; avoid re-parse/resolve when mtime matches (spans placeholder)
 - [x] Merge cached project symbols into analysis to avoid reloading requires on warm didOpen
 - [x] Cache and restore symbol spans and inferred types in summaries (cache version v3); expose cached types for hover/definition fallback
-- [ ] Mark cached files (`from_cache`) and use summaries for hover/definition when AST is missing
-- [ ] Strict cache validation (version/root hash/mtime) with full reparse fallback (root hash/version done; add fallback wiring)
+- [x] Mark cached files (`from_cache`) and use summaries for hover/definition when AST is missing
+- [x] Strict cache validation (version/root hash/mtime) with full reparse fallback
 - [x] Extend summaries with ivars/class vars/consts and richer type info; reuse same pipeline for prelude
-- [ ] Make cache/inference idempotent: if infer times out, resume later and backfill tables in background fibers
-- [ ] Apply rich cache pipeline to prelude: spans/types/ivars/class vars, rebuild prelude symbol_table from cache without full parse when unchanged
+- [x] Make cache/inference idempotent: if infer times out, resume later and backfill tables in background fibers
+- [x] Apply rich cache pipeline to prelude: spans/types/ivars/class vars, rebuild prelude symbol_table from cache without full parse when unchanged
 
 ---
 
@@ -358,6 +373,6 @@ AST + Type Graph
 | AST | Complete | Class inheritance done |
 | MacroExpander | ~99% | Full @type API + annotations + typeof/sizeof/alignof |
 | Type Inference | ~99% | Full generics + flow typing + blocks + unions (Phase 103A-C) |
-| LSP Server | ~70% | 21 methods implemented |
+| LSP Server | ~85% | 26 methods implemented |
 | TypeIndex | Complete | 5.6x faster than JSON, per-file partitioning |
 | Codegen | 0% | Future phase |

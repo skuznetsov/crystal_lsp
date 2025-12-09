@@ -369,15 +369,25 @@ module CrystalV2
           end
           analyzer = Semantic::Analyzer.new(task.program, context)
           analyzer.collect_symbols
+          engine : Semantic::TypeInferenceEngine? = nil
+          result : Semantic::NameResolver::Result? = nil
           begin
             result = analyzer.resolve_names
             engine = analyzer.infer_types(result.identifier_symbols)
-            expr_types = engine.context.expression_types
-            expr_types.each do |expr_id, type|
-              (@cached_expr_types[task.path] ||= Hash(Int32, String).new)[expr_id.index] = type.to_s
+          ensure
+            Watchdog.disable!
+            # Save partial results even on timeout (idempotent inference)
+            # This allows hover/completion to use whatever types were inferred
+            if eng = engine
+              expr_types = eng.context.expression_types
+              expr_types.each do |expr_id, type|
+                (@cached_expr_types[task.path] ||= Hash(Int32, String).new)[expr_id.index] = type.to_s
+              end
             end
+          end
 
-            # Update live DocumentState if loaded (URI-keyed)
+          # Update live DocumentState if loaded (URI-keyed)
+          if engine && result
             uri = file_uri(task.path)
             if ds = @documents[uri]?
               new_state = DocumentState.new(
@@ -409,11 +419,9 @@ module CrystalV2
             if task.from_prelude
               @cached_expr_types[task.path] ||= Hash(Int32, String).new
             end
-          ensure
-            Watchdog.disable!
           end
         rescue ex : Frontend::Watchdog::TimeoutError
-          debug("Deferred inference timeout for #{task.path}")
+          debug("Deferred inference timeout for #{task.path} (partial results saved)")
         end
 
         private def self.prelude_from_crystal_path(path_str : String) : String?
@@ -2035,6 +2043,11 @@ module CrystalV2
           @prelude_mtime = File.info(PRELUDE_PATH).modification_time
           @prelude_real_mtime = @prelude_mtime
 
+          # Restore expression types from TypeIndex (for hover fallback)
+          if type_index = cache.type_index
+            restore_prelude_expr_types(type_index, cache.files)
+          end
+
           # Register symbols for LSP lookups
           register_cached_symbols(cache)
           true
@@ -2060,6 +2073,30 @@ module CrystalV2
           end
 
           table
+        end
+
+        # Restore expression types from prelude TypeIndex into @cached_expr_types
+        private def restore_prelude_expr_types(type_index : Semantic::TypeIndex, files : Array(CachedFileState))
+          files.each do |file_state|
+            path = file_state.path
+            if file_index = type_index.file_index(path)
+              expr_map = {} of Int32 => String
+              file_index.@dense.each_with_index do |type_id, expr_idx|
+                next unless type_id.valid?
+                if type = type_index.arena[type_id]?
+                  expr_map[expr_idx] = type.to_s
+                end
+              end
+              if sparse = file_index.@sparse
+                sparse.each do |expr_idx, type_id|
+                  if type = type_index.arena[type_id]?
+                    expr_map[expr_idx] = type.to_s
+                  end
+                end
+              end
+              @cached_expr_types[path] = expr_map unless expr_map.empty?
+            end
+          end
         end
 
         private def save_prelude_to_cache
@@ -2101,7 +2138,11 @@ module CrystalV2
 
           stdlib_hash = PreludeCache.compute_stdlib_hash(stdlib_path)
           cached_files = build_prelude_cached_files(prelude)
-          cache = PreludeCache.new(unique_symbols, stdlib_hash, cached_files)
+
+          # Build TypeIndex from cached expr types for prelude files
+          type_index = build_prelude_type_index(cached_files)
+
+          cache = PreludeCache.new(unique_symbols, stdlib_hash, cached_files, type_index)
           cache.save
 
           save_ms = (Time.monotonic - save_start).total_milliseconds.round(2)
@@ -2145,6 +2186,23 @@ module CrystalV2
               summary_json: SymbolSummary.to_json_array(summaries)
             )
           end
+        end
+
+        # Build TypeIndex from cached expression types for prelude files
+        private def build_prelude_type_index(files : Array(CachedFileState)) : Semantic::TypeIndex
+          type_index = Semantic::TypeIndex.new
+          files.each do |file_state|
+            path = file_state.path
+            if expr_types = @cached_expr_types[path]?
+              expr_types.each do |expr_idx, type_str|
+                # Create a PrimitiveType as a placeholder for the cached type string
+                # The actual Type isn't needed for cache - just the string representation
+                type = Semantic::PrimitiveType.new(type_str)
+                type_index.set_type(path, expr_idx, type)
+              end
+            end
+          end
+          type_index
         end
 
         private def extract_cached_symbol_info(symbol : Semantic::Symbol, origin : PreludeSymbolOrigin) : CachedSymbolInfo?
@@ -2278,6 +2336,8 @@ module CrystalV2
 
             if result[:invalid_paths].size > 0
               debug("  #{result[:invalid_paths].size} files need re-parsing")
+              # Queue invalid files for background re-parsing
+              schedule_reparse_invalid_files(result[:invalid_paths])
             end
             @project_cache_loaded = true
             @cached_symbol_ranges = @project.cached_ranges
@@ -2354,6 +2414,37 @@ module CrystalV2
               debug("Background project index complete: indexed #{indexed} files")
             ensure
               @project_indexing_started = false
+            end
+          end
+        end
+
+        # Schedule background re-parsing of files that were invalidated (mtime changed since cache)
+        private def schedule_reparse_invalid_files(invalid_paths : Array(String))
+          return if invalid_paths.empty?
+
+          spawn do
+            begin
+              reparsed = 0
+              invalid_paths.each do |path|
+                next unless File.exists?(path)
+                begin
+                  source = File.read(path)
+                  @project.update_file(path, source, 0)
+                  reparsed += 1
+                rescue ex
+                  debug("Reparse failed for #{path}: #{ex.message}")
+                end
+              end
+
+              if reparsed > 0
+                @project_cache_dirty = true
+                # Update cached tables after re-parsing
+                @cached_symbol_ranges = @project.cached_ranges
+                @cached_symbol_types = @project.cached_types
+                @cached_expr_types = @project.cached_expr_types
+                schedule_project_cache_save
+                debug("Reparsed #{reparsed} invalid cached files")
+              end
             end
           end
         end
