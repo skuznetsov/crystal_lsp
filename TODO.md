@@ -364,6 +364,65 @@ AST + Type Graph
 
 ---
 
+---
+
+## Type Inference Performance Optimizations
+
+### Completed (2025-12-08)
+- [x] **Large array sampling**: For arrays >10 elements, sample first 3 and use uniform type if all same PrimitiveType
+- [x] **Large hash sampling**: Same optimization for Hash literals >10 entries
+- [x] **Lazy debug evaluation**: Wrap debug() with @debug_enabled check to avoid string allocations in hot paths
+- [x] **Binary SymbolSummary**: Replace JSON with binary serialization (52% faster cache rebuild)
+
+**Results:**
+| File | Before | After | Improvement |
+|------|--------|-------|-------------|
+| dragonbox_cache.cr | 70ms | 51ms | 27% |
+| enumerable.cr | 16ms | 13ms | 19% |
+| SymbolTable rebuild | 240ms | 115ms | 52% |
+
+### Experiments & Findings (2025-12-08)
+- [x] **Wave-based parallel parsing**: Tested parsing files in parallel using fibers
+  - Crystal fibers = cooperative concurrency (single-threaded), NOT parallel threads
+  - Fiber spawn overhead negates any benefit
+  - Result: ~11% slower than sequential (2860ms vs 2577ms)
+  - **Conclusion**: True parallelism requires `-Dpreview_mt` or external multi-processing
+
+### Planned Optimizations
+
+#### High Priority
+- [ ] **MT parallel parsing**: Use `-Dpreview_mt` for true multi-threaded file parsing
+  - Requires thread-safe AST arena allocation
+
+- [ ] **Stdlib precompilation**: Pre-compute stdlib types at build time
+  - Stdlib rarely changes, cache can be shipped with LSP binary
+  - Estimate: Near-instant stdlib type lookup
+
+- [ ] **Incremental inference**: Only re-infer changed files and their dependents
+  - Track file dependencies graph
+  - Invalidate only affected cached types on edit
+  - Estimate: 10-100x speedup for single-file edits
+
+#### Medium Priority
+- [ ] **Arena pre-allocation**: Pre-allocate memory for common type structures
+  - Reduce allocation pressure during inference
+  - Use object pools for frequently created types
+
+- [ ] **Method body lazy inference**: Defer method body inference until called
+  - Already partially implemented (DefNode not in children_of)
+  - Extend to skip entire class bodies until needed
+
+- [ ] **Type cache warming**: Background-load common types on LSP start
+  - Pre-populate Int32, String, Array, Hash, etc.
+  - Reduces first-request latency
+
+#### Lower Priority
+- [ ] **String interning in types**: Intern type names to reduce memory
+- [ ] **Batch watchdog checks**: Check every N iterations instead of every node
+- [ ] **SIMD type comparison**: Vectorize type equality checks for unions
+
+---
+
 ## Quick Reference
 
 | Component | Status | Tests |
