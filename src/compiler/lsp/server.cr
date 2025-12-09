@@ -1914,11 +1914,26 @@ module CrystalV2
 
             if cache
               cache_ms = (Time.monotonic - start_time).total_milliseconds.round(2)
-              debug("Background: prelude cache loaded in #{cache_ms}ms (#{cache.symbols.size} symbols)")
+              debug("Background: prelude cache loaded in #{cache_ms}ms (#{cache.symbols.size} symbols, #{cache.files.size} files)")
 
-              table = SymbolReconstructor.rebuild_table(cache)
+              # Use files with full summaries if available, otherwise fall back to legacy symbols
+              table = if cache.files.any?
+                        rebuild_prelude_table_from_cache(cache)
+                      elsif cache.symbols.any?
+                        SymbolReconstructor.rebuild_table(cache)
+                      else
+                        Semantic::SymbolTable.new
+                      end
               rebuild_ms = (Time.monotonic - start_time).total_milliseconds.round(2)
               debug("Background: SymbolTable rebuilt in #{rebuild_ms}ms")
+
+              # Restore expression types from TypeIndex (for hover fallback)
+              if type_index = cache.type_index
+                restore_prelude_expr_types(type_index, cache.files)
+              end
+
+              # Register symbols for LSP lookups
+              register_cached_symbols(cache)
 
               dummy_arena = Frontend::AstArena.new
               dummy_program = Frontend::Program.new(dummy_arena, [] of Frontend::ExprId)
