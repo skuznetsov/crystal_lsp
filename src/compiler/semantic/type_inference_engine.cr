@@ -135,12 +135,16 @@ module CrystalV2
               # Try to compute type for simple nodes
               if t = compute_node_type_no_recurse(node, id)
                 # Successfully computed - mark as done
-                debug("ITERATIVE: #{node.class.name.split("::").last} computed type #{t}")
+                if @debug_enabled
+                  debug("ITERATIVE: #{node.class.name.split("::").last} computed type #{t}")
+                end
                 @context.set_type(id, t)
                 state[id] = 2
               else
                 # Complex node - skip in iterative path, leave for recursive fallback
-                debug("ITERATIVE: #{node.class.name.split("::").last} returned nil, will use recursive")
+                if @debug_enabled
+                  debug("ITERATIVE: #{node.class.name.split("::").last} returned nil, will use recursive")
+                end
                 # IMPORTANT: Clear any type that might have been set by cycle detection (line 97)
                 # Otherwise line 86 will skip this node even though it needs recursive processing
                 @context.expression_types.delete(id)
@@ -161,7 +165,7 @@ module CrystalV2
             debug("FALLBACK TO RECURSIVE: #{node.class.name.split("::").last}")
           end
           if @depth > MAX_DEPTH
-            debug("max recursion depth reached at expr #{expr_id}")
+            debug("max recursion depth reached at expr #{expr_id}") if @debug_enabled
             return @context.nil_type
           end
           @depth += 1
@@ -517,7 +521,18 @@ module CrystalV2
               end
             end
           when Frontend::HashLiteralNode
-            node.entries.each { |entry| children << entry.key; children << entry.value }
+            # OPTIMIZATION: For large hashes, only add sample entries to stack
+            entries = node.entries
+            if entries.size > 10
+              # Large hash - only sample first 3 key-value pairs
+              3.times do |i|
+                break if i >= entries.size
+                children << entries[i].key
+                children << entries[i].value
+              end
+            else
+              entries.each { |entry| children << entry.key; children << entry.value }
+            end
           when Frontend::DefNode
             # DO NOT process method body as children!
             # Method bodies should only be type-inferred when the method is called
@@ -612,13 +627,7 @@ module CrystalV2
             elems.each { |e| types << infer_expression(e) }
             TupleType.new(types)
           when Frontend::HashLiteralNode
-            kt = Array(Type).new(node.entries.size)
-            vt = Array(Type).new(node.entries.size)
-            node.entries.each do |entry|
-              kt << infer_expression(entry.key)
-              vt << infer_expression(entry.value)
-            end
-            HashType.new(@context.union_of(kt), @context.union_of(vt))
+            infer_hash_literal(node, expr_id)
           when Frontend::AssignNode
             # Assignment needs to infer child expression - too complex for iterative path
             # Return nil to trigger recursive fallback
@@ -4760,8 +4769,30 @@ module CrystalV2
             end
           end
 
-          key_types = [] of Type
-          value_types = [] of Type
+          # OPTIMIZATION: For large hashes of uniform types, sample first few entries
+          if entries.size > 10
+            sample_key_types = Array(Type).new(3)
+            sample_value_types = Array(Type).new(3)
+            3.times do |i|
+              break if i >= entries.size
+              sample_key_types << infer_expression(entries[i].key)
+              sample_value_types << infer_expression(entries[i].value)
+            end
+
+            # Check if all samples are same types
+            first_key = sample_key_types.first?
+            first_value = sample_value_types.first?
+            if first_key && first_value &&
+               sample_key_types.all? { |t| t == first_key } && first_key.is_a?(PrimitiveType) &&
+               sample_value_types.all? { |t| t == first_value } && first_value.is_a?(PrimitiveType)
+              # Uniform types - use sampled types
+              return HashType.new(first_key, first_value)
+            end
+            # Mixed types - fall back to full inference
+          end
+
+          key_types = Array(Type).new(entries.size)
+          value_types = Array(Type).new(entries.size)
 
           entries.each do |entry|
             key_types << infer_expression(entry.key)
