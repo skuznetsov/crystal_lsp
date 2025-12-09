@@ -156,13 +156,74 @@ module CrystalV2
         end
 
         # Create Location from Symbol's node span
+        # For definitions (def, class, module, etc.), returns only the name span
+        # to allow F12 looping through references (issue #2)
         def self.from_symbol(symbol : Semantic::Symbol, program : Frontend::Program, uri : String) : Location
           node_id = symbol.node_id
           return Location.new(uri: uri, range: Range.new(Position.new(0, 0), Position.new(0, 1))) if node_id.invalid?
 
           node = program.arena[node_id]
-          range = Range.from_span(node.span)
+          range = name_range_for_definition(node, symbol) || Range.from_span(node.span)
           new(uri: uri, range: range)
+        end
+
+        # Get the range for just the name part of a definition node
+        # This enables F12 looping: Go to Definition -> Go to References
+        private def self.name_range_for_definition(node : Frontend::Node, symbol : Semantic::Symbol) : Range?
+          span = node.span
+          case node
+          when Frontend::DefNode
+            # "def foo" -> name starts at column + 4 ("def ".size)
+            name_slice = node.name
+            return nil unless name_slice
+            name_len = name_slice.size
+            # Handle "def self.foo" - receiver adds to offset
+            if receiver = node.receiver
+              # "def self.foo" -> "def " (4) + "self" + "." (receiver.size + 1)
+              name_col = span.start_column + 4 + receiver.size + 1
+            else
+              name_col = span.start_column + 4
+            end
+            name_col -= 1  # Convert to 0-indexed
+            Range.new(
+              Position.new(span.start_line - 1, name_col),
+              Position.new(span.start_line - 1, name_col + name_len)
+            )
+          when Frontend::ClassNode
+            # "class Foo" -> name starts at column + 6 ("class ".size)
+            name = symbol.name
+            name_col = span.start_column + 6 - 1
+            Range.new(
+              Position.new(span.start_line - 1, name_col),
+              Position.new(span.start_line - 1, name_col + name.size)
+            )
+          when Frontend::ModuleNode
+            # "module Foo" -> name starts at column + 7 ("module ".size)
+            name = symbol.name
+            name_col = span.start_column + 7 - 1
+            Range.new(
+              Position.new(span.start_line - 1, name_col),
+              Position.new(span.start_line - 1, name_col + name.size)
+            )
+          when Frontend::StructNode
+            # "struct Foo" -> name starts at column + 7 ("struct ".size)
+            name = symbol.name
+            name_col = span.start_column + 7 - 1
+            Range.new(
+              Position.new(span.start_line - 1, name_col),
+              Position.new(span.start_line - 1, name_col + name.size)
+            )
+          when Frontend::EnumNode
+            # "enum Foo" -> name starts at column + 5 ("enum ".size)
+            name = symbol.name
+            name_col = span.start_column + 5 - 1
+            Range.new(
+              Position.new(span.start_line - 1, name_col),
+              Position.new(span.start_line - 1, name_col + name.size)
+            )
+          else
+            nil
+          end
         end
       end
 
