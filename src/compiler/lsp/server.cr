@@ -3501,11 +3501,40 @@ module CrystalV2
               stripped = line_text.lstrip
               return false if stripped.empty?
               leading = line_text.size - stripped.size
+
+              # Check if line starts with comment
               if stripped.starts_with?('#')
                 return character >= leading
-              else
-                return false
               end
+
+              # Check for inline comment (# after code)
+              # Need to be careful about # inside strings
+              in_string = false
+              escape_next = false
+              string_char = '\0'
+              line_text.each_char_with_index do |ch, idx|
+                if escape_next
+                  escape_next = false
+                  next
+                end
+
+                if ch == '\\'
+                  escape_next = true
+                  next
+                end
+
+                if !in_string && (ch == '"' || ch == '\'')
+                  in_string = true
+                  string_char = ch
+                elsif in_string && ch == string_char
+                  in_string = false
+                elsif !in_string && ch == '#'
+                  # Found comment start outside string
+                  return character >= idx
+                end
+              end
+
+              return false
             end
             current_line += 1
           end
@@ -3863,6 +3892,12 @@ module CrystalV2
             debug("Hover skipped: indexing in progress")
             placeholder = Hover.new(contents: MarkupContent.new("Indexing…", markdown: true))
             return send_response(id, placeholder.to_json)
+          end
+
+          # Skip hover if cursor is in a comment
+          if comment_position?(doc_state.text_document.text, line, character)
+            debug("Hover skipped: cursor in comment")
+            return send_response(id, "null")
           end
 
           expr_id = find_expr_at_position(doc_state, line, character)
