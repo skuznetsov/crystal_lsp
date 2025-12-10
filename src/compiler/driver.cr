@@ -140,6 +140,17 @@ module Crystal::V2
       # Step 4: Lower to MIR
       log "\n[4/5] Lowering to MIR..."
       mir_lowering = MIR::HIRToMIRLowering.new(hir_module)
+
+      # Collect class variables as globals
+      globals = [] of Tuple(String, HIR::TypeRef, Int64?)
+      hir_converter.class_info.each do |class_name, info|
+        info.class_vars.each do |cvar|
+          global_name = "#{class_name}_#{cvar.name}"
+          globals << {global_name, cvar.type, cvar.initial_value}
+        end
+      end
+      mir_lowering.register_globals(globals)
+
       mir_module = mir_lowering.lower
       log "  Functions: #{mir_module.functions.size}"
 

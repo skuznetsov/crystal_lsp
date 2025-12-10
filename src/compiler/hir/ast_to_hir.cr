@@ -162,8 +162,11 @@ module Crystal::HIR
   # Instance variable info for class layout
   record IVarInfo, name : String, type : TypeRef, offset : Int32
 
+  # Class variable info
+  record ClassVarInfo, name : String, type : TypeRef, initial_value : Int64?
+
   # Class type info
-  record ClassInfo, name : String, type_ref : TypeRef, ivars : Array(IVarInfo), size : Int32
+  record ClassInfo, name : String, type_ref : TypeRef, ivars : Array(IVarInfo), class_vars : Array(ClassVarInfo), size : Int32
 
   # Main AST to HIR converter
   class AstToHir
@@ -177,7 +180,7 @@ module Crystal::HIR
     @function_types : Hash(String, TypeRef)
 
     # Class type information
-    @class_info : Hash(String, ClassInfo)
+    getter class_info : Hash(String, ClassInfo)
 
     # Initialize parameters for each class (for new() generation)
     @init_params : Hash(String, Array({String, TypeRef}))
@@ -204,6 +207,7 @@ module Crystal::HIR
 
       # Collect instance variables and their types
       ivars = [] of IVarInfo
+      class_vars = [] of ClassVarInfo
       offset = 8  # Start at 8 to leave room for type_id header
 
       # Also find initialize to get constructor parameters
@@ -219,6 +223,24 @@ module Crystal::HIR
             ivar_type = type_ref_for_name(String.new(member.type))
             ivars << IVarInfo.new(ivar_name, ivar_type, offset)
             offset += type_size(ivar_type)
+
+          when CrystalV2::Compiler::Frontend::ClassVarDeclNode
+            # Class variable declaration: @@total : Int32 = 0
+            # Name includes @@ prefix, strip it
+            raw_name = String.new(member.name)
+            cvar_name = raw_name.lstrip('@')
+            cvar_type = type_ref_for_name(String.new(member.type))
+            # Get initial value if present (only supporting literal integers for now)
+            initial_value : Int64? = nil
+            if val_id = member.value
+              val_node = @arena[val_id]
+              if val_node.is_a?(CrystalV2::Compiler::Frontend::NumberNode)
+                # Parse the number from its text representation
+                num_str = String.new(val_node.value)
+                initial_value = num_str.to_i64?
+              end
+            end
+            class_vars << ClassVarInfo.new(cvar_name, cvar_type, initial_value)
 
           when CrystalV2::Compiler::Frontend::DefNode
             # Register method signature
@@ -251,7 +273,7 @@ module Crystal::HIR
 
       # Create class type
       type_ref = @module.intern_type(TypeDescriptor.new(TypeKind::Class, class_name))
-      @class_info[class_name] = ClassInfo.new(class_name, type_ref, ivars, offset)
+      @class_info[class_name] = ClassInfo.new(class_name, type_ref, ivars, class_vars, offset)
 
       # Store initialize params for allocator generation
       @init_params ||= {} of String => Array({String, TypeRef})
@@ -427,6 +449,18 @@ module Crystal::HIR
         end
       end
       0  # Default offset
+    end
+
+    # Get class variable type from current class
+    private def get_class_var_type(name : String) : TypeRef
+      if class_name = @current_class
+        if class_info = @class_info[class_name]?
+          class_info.class_vars.each do |cvar|
+            return cvar.type if cvar.name == name
+          end
+        end
+      end
+      TypeRef::VOID
     end
 
     # Lower a function definition
@@ -771,9 +805,14 @@ module Crystal::HIR
     end
 
     private def lower_class_var(ctx : LoweringContext, node : CrystalV2::Compiler::Frontend::ClassVarNode) : ValueId
-      name = String.new(node.name)
-      class_var_get = ClassVarGet.new(ctx.next_id, TypeRef::VOID, "", name)  # class_name filled later
+      # Name includes @@ prefix, strip it
+      raw_name = String.new(node.name)
+      name = raw_name.lstrip('@')
+      cvar_type = get_class_var_type(name)
+      class_name = @current_class || ""
+      class_var_get = ClassVarGet.new(ctx.next_id, cvar_type, class_name, name)
       ctx.emit(class_var_get)
+      ctx.register_type(class_var_get.id, cvar_type)
       class_var_get.id
     end
 
@@ -1548,8 +1587,12 @@ module Crystal::HIR
         field_set.id
 
       when CrystalV2::Compiler::Frontend::ClassVarNode
-        name = String.new(target_node.name)
-        class_var_set = ClassVarSet.new(ctx.next_id, TypeRef::VOID, "", name, value_id)
+        # Name includes @@ prefix, strip it
+        raw_name = String.new(target_node.name)
+        name = raw_name.lstrip('@')
+        cvar_type = get_class_var_type(name)
+        class_name = @current_class || ""
+        class_var_set = ClassVarSet.new(ctx.next_id, cvar_type, class_name, name, value_id)
         ctx.emit(class_var_set)
         class_var_set.id
 

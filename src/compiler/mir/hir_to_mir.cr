@@ -68,6 +68,15 @@ module Crystal
       @mir_module
     end
 
+    # Register class variables as globals
+    # Takes array of (global_name, hir_type, initial_value?)
+    def register_globals(globals : Array(Tuple(String, HIR::TypeRef, Int64?)))
+      globals.each do |global_name, hir_type, initial_value|
+        mir_type = convert_type(hir_type)
+        @mir_module.add_global(global_name, mir_type, initial_value)
+      end
+    end
+
     # Create function stub with params and return type (no body)
     private def create_function_stub(hir_func : HIR::Function)
       mir_func = @mir_module.create_function(
@@ -542,16 +551,17 @@ module Crystal
 
     private def lower_classvar_get(cv : HIR::ClassVarGet) : ValueId
       builder = @builder.not_nil!
-      # Class vars are global addresses
-      # Would need global symbol table
-      builder.const_nil  # Placeholder
+      # Generate global name: ClassName_varname
+      global_name = "#{cv.class_name}_#{cv.var_name}"
+      builder.global_load(global_name, convert_type(cv.type))
     end
 
     private def lower_classvar_set(cv : HIR::ClassVarSet) : ValueId
       builder = @builder.not_nil!
       value = get_value(cv.value)
-      # Store to global address
-      builder.const_nil  # Placeholder
+      # Generate global name: ClassName_varname
+      global_name = "#{cv.class_name}_#{cv.var_name}"
+      builder.global_store(global_name, value, convert_type(cv.type))
     end
 
     # ─────────────────────────────────────────────────────────────────────────

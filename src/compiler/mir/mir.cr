@@ -733,6 +733,45 @@ module Crystal::MIR
   end
 
   # ═══════════════════════════════════════════════════════════════════════════
+  # GLOBAL VARIABLE ACCESS
+  # ═══════════════════════════════════════════════════════════════════════════
+
+  # Load from global variable (class var)
+  class GlobalLoad < Value
+    getter global_name : String
+
+    def initialize(id : ValueId, type : TypeRef, @global_name : String)
+      super(id, type)
+    end
+
+    def operands : Array(ValueId)
+      [] of ValueId
+    end
+
+    def to_s(io : IO) : Nil
+      io << "%" << @id << " = global_load @" << @global_name << " : " << @type
+    end
+  end
+
+  # Store to global variable (class var)
+  class GlobalStore < Value
+    getter global_name : String
+    getter value : ValueId
+
+    def initialize(id : ValueId, type : TypeRef, @global_name : String, @value : ValueId)
+      super(id, type)
+    end
+
+    def operands : Array(ValueId)
+      [@value]
+    end
+
+    def to_s(io : IO) : Nil
+      io << "%" << @id << " = global_store @" << @global_name << ", %" << @value
+    end
+  end
+
+  # ═══════════════════════════════════════════════════════════════════════════
   # FUNCTION CALLS
   # ═══════════════════════════════════════════════════════════════════════════
 
@@ -1074,10 +1113,14 @@ module Crystal::MIR
   # MODULE
   # ═══════════════════════════════════════════════════════════════════════════
 
+  # Global variable info
+  record GlobalVar, name : String, type : TypeRef, initial_value : Int64?
+
   class Module
     getter name : String
     getter functions : Array(Function)
     getter type_registry : TypeRegistry
+    getter globals : Array(GlobalVar)
     property source_file : String?
 
     @next_function_id : FunctionId = 0_u32
@@ -1087,6 +1130,11 @@ module Crystal::MIR
       @functions = [] of Function
       @function_map = {} of String => Function
       @type_registry = TypeRegistry.new
+      @globals = [] of GlobalVar
+    end
+
+    def add_global(name : String, type : TypeRef, initial_value : Int64? = nil)
+      @globals << GlobalVar.new(name, type, initial_value)
     end
 
     def types : Array(Type)
@@ -1189,6 +1237,14 @@ module Crystal::MIR
 
     def store(ptr : ValueId, value : ValueId) : ValueId
       emit(Store.new(@function.next_value_id, ptr, value))
+    end
+
+    def global_load(global_name : String, type : TypeRef) : ValueId
+      emit(GlobalLoad.new(@function.next_value_id, type, global_name))
+    end
+
+    def global_store(global_name : String, value : ValueId, type : TypeRef) : ValueId
+      emit(GlobalStore.new(@function.next_value_id, type, global_name, value))
     end
 
     def gep(base : ValueId, indices : Array(UInt32), result_type : TypeRef) : ValueId

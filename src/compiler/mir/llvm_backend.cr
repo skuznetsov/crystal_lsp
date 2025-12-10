@@ -229,6 +229,7 @@ module Crystal::MIR
       emit_header
       emit_type_definitions
       emit_runtime_declarations
+      emit_global_variables
 
       if @emit_type_metadata
         collect_type_metadata
@@ -243,6 +244,17 @@ module Crystal::MIR
       end
 
       @output.to_s
+    end
+
+    private def emit_global_variables
+      return if @module.globals.empty?
+
+      @module.globals.each do |global|
+        llvm_type = @type_mapper.llvm_type(global.type)
+        initial = global.initial_value || 0_i64
+        emit_raw "@#{global.name} = global #{llvm_type} #{initial}\n"
+      end
+      emit_raw "\n"
     end
 
     private def emit(s : String)
@@ -417,6 +429,10 @@ module Crystal::MIR
         emit_indirect_call(inst, name)
       when ExternCall
         emit_extern_call(inst, name)
+      when GlobalLoad
+        emit_global_load(inst, name)
+      when GlobalStore
+        emit_global_store(inst, name)
       end
     end
 
@@ -657,6 +673,18 @@ module Crystal::MIR
       else
         emit "#{name} = call #{return_type} @#{inst.extern_name}(#{args})"
       end
+    end
+
+    private def emit_global_load(inst : GlobalLoad, name : String)
+      llvm_type = @type_mapper.llvm_type(inst.type)
+      emit "#{name} = load #{llvm_type}, ptr @#{inst.global_name}"
+    end
+
+    private def emit_global_store(inst : GlobalStore, name : String)
+      # Get value type from the stored value
+      val = value_ref(inst.value)
+      llvm_type = @type_mapper.llvm_type(inst.type)
+      emit "store #{llvm_type} #{val}, ptr @#{inst.global_name}"
     end
 
     private def emit_terminator(term : Terminator)
