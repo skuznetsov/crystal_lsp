@@ -192,6 +192,12 @@ module Crystal::HIR
     # Union type descriptors for debug info (keyed by MIR::TypeRef)
     getter union_descriptors : Hash(MIR::TypeRef, MIR::UnionDescriptor)
 
+    # AST of function definitions for inline expansion
+    @function_defs : Hash(String, CrystalV2::Compiler::Frontend::DefNode)
+
+    # Functions that contain yield (candidates for inline)
+    @yield_functions : Set(String)
+
     def initialize(@arena, module_name : String = "main")
       @module = Module.new(module_name)
       @function_types = {} of String => TypeRef
@@ -199,6 +205,8 @@ module Crystal::HIR
       @init_params = {} of String => Array({String, TypeRef})
       @current_class = nil
       @union_descriptors = {} of MIR::TypeRef => MIR::UnionDescriptor
+      @function_defs = {} of String => CrystalV2::Compiler::Frontend::DefNode
+      @yield_functions = Set(String).new
     end
 
     # Get class info by name
@@ -446,6 +454,41 @@ module Crystal::HIR
                       TypeRef::VOID
                     end
       @function_types[name] = return_type
+
+      # Store AST for potential inline expansion
+      @function_defs[name] = node
+
+      # Check if function contains yield
+      if body = node.body
+        if contains_yield?(body)
+          @yield_functions.add(name)
+        end
+      end
+    end
+
+    # Check if expression list contains yield
+    private def contains_yield?(body : Array(ExprId)) : Bool
+      body.any? { |expr_id| contains_yield_in_expr?(expr_id) }
+    end
+
+    private def contains_yield_in_expr?(expr_id : ExprId) : Bool
+      node = @arena[expr_id]
+      case node
+      when CrystalV2::Compiler::Frontend::YieldNode
+        true
+      when CrystalV2::Compiler::Frontend::IfNode
+        contains_yield?(node.then_body) ||
+          (node.else_body ? contains_yield?(node.else_body.not_nil!) : false)
+      when CrystalV2::Compiler::Frontend::WhileNode
+        contains_yield?(node.body)
+      when CrystalV2::Compiler::Frontend::BlockNode
+        contains_yield?(node.body)
+      when CrystalV2::Compiler::Frontend::CaseNode
+        node.when_branches.any? { |w| contains_yield?(w.body) } ||
+          (node.else_branch ? contains_yield?(node.else_branch.not_nil!) : false)
+      else
+        false
+      end
     end
 
     # Look up return type of a function by name
@@ -1577,9 +1620,16 @@ module Crystal::HIR
              else
                [] of ValueId
              end
-      yield_val = Yield.new(ctx.next_id, TypeRef::VOID, args)
-      ctx.emit(yield_val)
-      yield_val.id
+
+      # For standalone yield (not inlined), just return the first argument
+      # This is a fallback - properly inlined yields don't reach here
+      if args.size > 0
+        args.first
+      else
+        nil_lit = Literal.new(ctx.next_id, TypeRef::NIL, nil)
+        ctx.emit(nil_lit)
+        nil_lit.id
+      end
     end
 
     private def lower_break(ctx : LoweringContext, node : CrystalV2::Compiler::Frontend::BreakNode) : ValueId
@@ -1680,7 +1730,20 @@ module Crystal::HIR
         end
       end
 
-      # Check for block (ExprId -> must lower to BlockNode)
+      # Handle yield-functions with inline expansion
+      if blk_expr = node.block
+        blk_node = @arena[blk_expr]
+        if blk_node.is_a?(CrystalV2::Compiler::Frontend::BlockNode)
+          # Check if this is a call to a yield-function
+          if @yield_functions.includes?(method_name)
+            if func_def = @function_defs[method_name]?
+              return inline_yield_function(ctx, func_def, args, blk_node)
+            end
+          end
+        end
+      end
+
+      # Check for block (ExprId -> must lower to BlockNode) - fallback for non-inline
       block_id = if blk_expr = node.block
                    blk_node = @arena[blk_expr]
                    if blk_node.is_a?(CrystalV2::Compiler::Frontend::BlockNode)
@@ -1847,6 +1910,106 @@ module Crystal::HIR
         ctx.register_local(var_name, phi.id)
       end
 
+      nil_lit = Literal.new(ctx.next_id, TypeRef::NIL, nil)
+      ctx.emit(nil_lit)
+      nil_lit.id
+    end
+
+    # Inline a yield-function call with block
+    # Transforms: func(args) { |params| block_body }
+    # Into: inline func body, replacing yield with block_body
+    private def inline_yield_function(
+      ctx : LoweringContext,
+      func_def : CrystalV2::Compiler::Frontend::DefNode,
+      call_args : Array(ValueId),
+      block : CrystalV2::Compiler::Frontend::BlockNode
+    ) : ValueId
+      ctx.push_scope(ScopeKind::Block)
+
+      # Bind function parameters to call arguments
+      if params = func_def.params
+        params.each_with_index do |param, idx|
+          if pname = param.name
+            param_name = String.new(pname)
+            if idx < call_args.size
+              ctx.register_local(param_name, call_args[idx])
+            end
+          end
+        end
+      end
+
+      # Lower function body with yield substitution
+      result_value = nil_value(ctx)
+      if body = func_def.body
+        result_value = lower_body_with_yield_substitution(ctx, body, block)
+      end
+
+      ctx.pop_scope
+      result_value
+    end
+
+    # Lower body expressions, substituting yield with block body
+    private def lower_body_with_yield_substitution(
+      ctx : LoweringContext,
+      body : Array(ExprId),
+      block : CrystalV2::Compiler::Frontend::BlockNode
+    ) : ValueId
+      last_value = nil_value(ctx)
+      body.each do |expr_id|
+        last_value = lower_expr_with_yield_substitution(ctx, expr_id, block)
+      end
+      last_value
+    end
+
+    # Lower single expression, substituting yield
+    private def lower_expr_with_yield_substitution(
+      ctx : LoweringContext,
+      expr_id : ExprId,
+      block : CrystalV2::Compiler::Frontend::BlockNode
+    ) : ValueId
+      node = @arena[expr_id]
+
+      case node
+      when CrystalV2::Compiler::Frontend::YieldNode
+        # YIELD SUBSTITUTION: Replace yield with block body
+        inline_block_body(ctx, node, block)
+      else
+        # Regular lowering
+        lower_node(ctx, node)
+      end
+    end
+
+    # Inline block body in place of yield
+    private def inline_block_body(
+      ctx : LoweringContext,
+      yield_node : CrystalV2::Compiler::Frontend::YieldNode,
+      block : CrystalV2::Compiler::Frontend::BlockNode
+    ) : ValueId
+      # Lower yield arguments
+      yield_args = if args = yield_node.args
+                     args.map { |arg| lower_expr(ctx, arg) }
+                   else
+                     [] of ValueId
+                   end
+
+      # Bind block parameters to yield arguments
+      if params = block.params
+        params.each_with_index do |param, idx|
+          if pname = param.name
+            param_name = String.new(pname)
+            if idx < yield_args.size
+              ctx.register_local(param_name, yield_args[idx])
+            end
+          end
+        end
+      end
+
+      # Lower block body
+      lower_body(ctx, block.body)
+    end
+
+    # Helper to create nil value
+    private def nil_value(ctx : LoweringContext) : ValueId
       nil_lit = Literal.new(ctx.next_id, TypeRef::NIL, nil)
       ctx.emit(nil_lit)
       nil_lit.id
