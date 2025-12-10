@@ -593,8 +593,14 @@ The key insight is: **Don't compete with LLVM, complement it.**
 - [x] __crystal_field_info global array generation
 - [x] __crystal_type_strings string table
 - [x] Design doc: docs/debug_dx_design.md
-- [ ] LLDB Python formatters (crystal_formatters.py)
-- [ ] DAP server integration
+- [x] LLDB Python formatters (tools/lldb/crystal_formatters.py)
+  - CrystalObjectProvider, CrystalClosureProvider, CrystalUnionProvider
+  - `crystal types` and `crystal type` commands
+  - 13 unit tests
+- [x] DAP server integration (tools/lldb/crystal_dap.py)
+  - CrystalDAPExtension for enhanced variable display
+  - VS Code launch.json generator
+  - .lldbinit generator
 
 #### 5.3.2 Runtime Support
 - [ ] Minimal runtime library
@@ -662,6 +668,7 @@ The key insight is: **Don't compete with LLVM, complement it.**
 | M3.3 | Profile-Guided Optimizations | ✅ Complete | 26 |
 | M4.1 | LLVM IR generation | ✅ Complete | 24 |
 | M4.1b | Debug DX (type metadata) | ✅ Complete | 24 |
+| M4.1c | LLDB/DAP tooling | ✅ Complete | 13 (py) |
 | M4.2 | Runtime library | 🔲 Pending | - |
 | M4.3 | End-to-end compile | 🔲 Pending | - |
 

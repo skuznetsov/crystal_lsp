@@ -27,4 +27,4 @@ tmp/
 test_*.cr
 *.db
 
-logs/
+logs/__pycache__/

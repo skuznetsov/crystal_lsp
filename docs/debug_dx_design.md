@@ -314,14 +314,38 @@ end
 5. **IDE integration** - works with VS Code, CLion, any DAP-compatible IDE
 6. **Progressive enhancement** - DWARF still works, Python scripts add richness
 
-## Implementation Plan
+## Implementation Status
 
-1. **M4.1**: Add type_id to object headers during LLVM codegen
-2. **M4.2**: Emit `__crystal_type_info` global array
-3. **M4.3**: Create basic LLDB Python formatter
-4. **M4.4**: Add closure-specific formatters
-5. **M4.5**: DAP server integration
-6. **M4.6**: VS Code extension with rich debugging
+| Step | Description | Status | Files |
+|------|-------------|--------|-------|
+| M4.1 | Type metadata in LLVM IR | ✅ Complete | `src/compiler/mir/llvm_backend.cr` |
+| M4.2 | Type info global array | ✅ Complete | `__crystal_type_info`, `__crystal_type_count` |
+| M4.3 | LLDB Python formatters | ✅ Complete | `tools/lldb/crystal_formatters.py` |
+| M4.4 | Closure formatters | ✅ Complete | `CrystalClosureProvider` class |
+| M4.5 | DAP extensions | ✅ Complete | `tools/lldb/crystal_dap.py` |
+| M4.6 | VS Code integration | ✅ Config ready | `crystal_dap.py --vscode` |
+
+### Files
+
+- `src/compiler/mir/llvm_backend.cr` - LLVM IR generation with type metadata
+- `tools/lldb/crystal_formatters.py` - LLDB synthetic type providers
+- `tools/lldb/crystal_dap.py` - DAP extensions and config generators
+- `tools/lldb/test_formatters.py` - Unit tests for formatters
+
+### Usage
+
+```bash
+# Generate .lldbinit
+python3 tools/lldb/crystal_dap.py --lldbinit > .lldbinit
+
+# Generate VS Code launch.json
+python3 tools/lldb/crystal_dap.py --vscode > .vscode/launch.json
+
+# In LLDB
+(lldb) command script import tools/lldb/crystal_formatters.py
+(lldb) crystal types    # List all types
+(lldb) crystal type Int32   # Show type details
+```
 
 ## Future Extensions
 
