@@ -733,6 +733,116 @@ module Crystal::MIR
   end
 
   # ═══════════════════════════════════════════════════════════════════════════
+  # DISCRIMINATED UNION OPERATIONS
+  # ═══════════════════════════════════════════════════════════════════════════
+
+  # Union variant descriptor for MIR-level union metadata
+  record UnionVariantDescriptor,
+    type_id : Int32,         # Discriminator value
+    type_ref : TypeRef,      # Type of this variant
+    full_name : String,      # Qualified type name
+    size : Int32,            # Size in bytes
+    alignment : Int32,       # Alignment requirement
+    field_offsets : Hash(String, Int32)?  # For struct variants
+
+  # Full union type descriptor
+  record UnionDescriptor,
+    name : String,                           # e.g., "Int32 | String | Nil"
+    variants : Array(UnionVariantDescriptor),
+    total_size : Int32,
+    alignment : Int32,
+    source_file : String? = nil,
+    source_line : Int32? = nil do
+
+    def header_size : Int32
+      4  # i32 type_id discriminator
+    end
+
+    def payload_offset : Int32
+      max_align = variants.map(&.alignment).max? || 8
+      ((header_size + max_align - 1) // max_align) * max_align
+    end
+
+    def max_payload_size : Int32
+      variants.map(&.size).max? || 0
+    end
+  end
+
+  # Wrap value into union (sets discriminator + stores payload)
+  class UnionWrap < Value
+    getter value : ValueId          # Value to wrap
+    getter variant_type_id : Int32  # Discriminator for this variant
+    getter union_type : TypeRef     # Type of the resulting union
+
+    def initialize(id : ValueId, type : TypeRef, @value : ValueId, @variant_type_id : Int32, @union_type : TypeRef)
+      super(id, type)
+    end
+
+    def operands : Array(ValueId)
+      [@value]
+    end
+
+    def to_s(io : IO) : Nil
+      io << "%" << @id << " = union_wrap %" << @value << " as variant " << @variant_type_id << " : " << @type
+    end
+  end
+
+  # Unwrap value from union (extracts payload)
+  class UnionUnwrap < Value
+    getter union_value : ValueId    # Union to unwrap
+    getter variant_type_id : Int32  # Expected discriminator
+    getter safe : Bool              # true = return nil on mismatch; false = UB/trap
+
+    def initialize(id : ValueId, type : TypeRef, @union_value : ValueId, @variant_type_id : Int32, @safe : Bool = false)
+      super(id, type)
+    end
+
+    def operands : Array(ValueId)
+      [@union_value]
+    end
+
+    def to_s(io : IO) : Nil
+      op = @safe ? "union_unwrap_safe" : "union_unwrap"
+      io << "%" << @id << " = " << op << " %" << @union_value << " as variant " << @variant_type_id << " : " << @type
+    end
+  end
+
+  # Get discriminator (type_id) from union
+  class UnionTypeIdGet < Value
+    getter union_value : ValueId
+
+    def initialize(id : ValueId, @union_value : ValueId)
+      super(id, TypeRef::INT32)
+    end
+
+    def operands : Array(ValueId)
+      [@union_value]
+    end
+
+    def to_s(io : IO) : Nil
+      io << "%" << @id << " = union_type_id %" << @union_value << " : i32"
+    end
+  end
+
+  # Check if union is specific variant
+  class UnionIs < Value
+    getter union_value : ValueId
+    getter variant_type_id : Int32
+
+    def initialize(id : ValueId, @union_value : ValueId, @variant_type_id : Int32)
+      super(id, TypeRef::BOOL)
+    end
+
+    def operands : Array(ValueId)
+      [@union_value]
+    end
+
+    def to_s(io : IO) : Nil
+      io << "%" << @id << " = union_is %" << @union_value << ", " << @variant_type_id << " : i1"
+    end
+  end
+
+  # ═══════════════════════════════════════════════════════════════════════════
   # GLOBAL VARIABLE ACCESS
   # ═══════════════════════════════════════════════════════════════════════════
 
@@ -1121,6 +1231,7 @@ module Crystal::MIR
     getter functions : Array(Function)
     getter type_registry : TypeRegistry
     getter globals : Array(GlobalVar)
+    getter union_descriptors : Hash(TypeRef, UnionDescriptor)
     property source_file : String?
 
     @next_function_id : FunctionId = 0_u32
@@ -1131,6 +1242,17 @@ module Crystal::MIR
       @function_map = {} of String => Function
       @type_registry = TypeRegistry.new
       @globals = [] of GlobalVar
+      @union_descriptors = {} of TypeRef => UnionDescriptor
+    end
+
+    # Register a union type with full descriptor for debug info
+    def register_union(type_ref : TypeRef, descriptor : UnionDescriptor)
+      @union_descriptors[type_ref] = descriptor
+    end
+
+    # Get union descriptor by type ref
+    def get_union_descriptor(type_ref : TypeRef) : UnionDescriptor?
+      @union_descriptors[type_ref]?
     end
 
     def add_global(name : String, type : TypeRef, initial_value : Int64? = nil)

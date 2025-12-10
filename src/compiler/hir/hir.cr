@@ -572,6 +572,77 @@ module Crystal::HIR
     end
   end
 
+  # ─────────────────────────────────────────────────────────────────────────────
+  # Discriminated Union Operations
+  # ─────────────────────────────────────────────────────────────────────────────
+
+  # Wrap a value into a union (box operation)
+  # Creates a union value with the given discriminator and payload
+  class UnionWrap < Value
+    getter value : ValueId           # The value to wrap
+    getter variant_type_id : Int32   # Discriminator for this variant
+    getter union_descriptor : UnionTypeDescriptor?  # Optional full descriptor
+
+    def initialize(id : ValueId, type : TypeRef, @value : ValueId, @variant_type_id : Int32,
+                   @union_descriptor : UnionTypeDescriptor? = nil)
+      super(id, type)
+    end
+
+    def to_s(io : IO) : Nil
+      io << "%" << @id << " = union_wrap %" << @value << " as variant " << @variant_type_id
+      io << " : " << @type.id
+    end
+  end
+
+  # Unwrap a value from a union (unbox operation)
+  # Extracts the payload assuming it's the specified variant
+  class UnionUnwrap < Value
+    getter union_value : ValueId     # The union to unwrap
+    getter variant_type_id : Int32   # Expected discriminator
+    getter safe : Bool               # If true, returns nil on mismatch; if false, raises
+
+    def initialize(id : ValueId, type : TypeRef, @union_value : ValueId, @variant_type_id : Int32,
+                   @safe : Bool = false)
+      super(id, type)
+    end
+
+    def to_s(io : IO) : Nil
+      io << "%" << @id << " = union_unwrap"
+      io << "?" if @safe
+      io << " %" << @union_value << " as variant " << @variant_type_id
+      io << " : " << @type.id
+    end
+  end
+
+  # Get the type_id discriminator from a union value
+  class UnionTypeId < Value
+    getter union_value : ValueId
+
+    def initialize(id : ValueId, @union_value : ValueId)
+      super(id, TypeRef::INT32)
+      @lifetime = LifetimeTag::StackLocal
+    end
+
+    def to_s(io : IO) : Nil
+      io << "%" << @id << " = union_type_id %" << @union_value << " : Int32"
+    end
+  end
+
+  # Check if union value is a specific variant (used for is_a? on unions)
+  class UnionIs < Value
+    getter union_value : ValueId
+    getter variant_type_id : Int32
+
+    def initialize(id : ValueId, @union_value : ValueId, @variant_type_id : Int32)
+      super(id, TypeRef::BOOL)
+      @lifetime = LifetimeTag::StackLocal
+    end
+
+    def to_s(io : IO) : Nil
+      io << "%" << @id << " = union_is %" << @union_value << ", variant " << @variant_type_id << " : Bool"
+    end
+  end
+
   # ═══════════════════════════════════════════════════════════════════════════
   # TERMINATORS (End a basic block)
   # ═══════════════════════════════════════════════════════════════════════════
@@ -924,6 +995,63 @@ module Crystal::HIR
     Hash
     Pointer
     Generic
+  end
+
+  # ═══════════════════════════════════════════════════════════════════════════
+  # DISCRIMINATED UNION SUPPORT
+  # ═══════════════════════════════════════════════════════════════════════════
+
+  # Information about a single variant in a discriminated union
+  # Used for debug info and runtime type checking
+  record UnionVariantInfo,
+    type_id : Int32,           # Discriminator value for this variant
+    type_ref : TypeRef,        # Reference to the actual type
+    full_name : String,        # Full qualified name (e.g., "MyModule::MyClass")
+    size : Int32,              # Size of this variant's payload in bytes
+    alignment : Int32,         # Alignment requirement for this variant
+    field_offsets : Hash(String, Int32)? = nil  # Field offsets for struct variants
+
+  # Complete descriptor for a discriminated union type
+  # Provides all information needed for debug info and runtime operations
+  record UnionTypeDescriptor,
+    name : String,                        # Display name (e.g., "Int32 | String | Nil")
+    variants : Array(UnionVariantInfo),   # All possible variants
+    total_size : Int32,                   # Total size: header + max(variant sizes)
+    alignment : Int32,                    # Alignment of the union
+    source_file : String? = nil,          # Source location for debug info
+    source_line : Int32? = nil do
+
+    # Header size (type_id discriminator)
+    def header_size : Int32
+      4  # i32 for type_id
+    end
+
+    # Payload offset (after header, aligned)
+    def payload_offset : Int32
+      # Align payload to max variant alignment
+      max_align = variants.map(&.alignment).max? || 8
+      ((header_size + max_align - 1) // max_align) * max_align
+    end
+
+    # Max payload size among all variants
+    def max_payload_size : Int32
+      variants.map(&.size).max? || 0
+    end
+
+    # Get variant by type_id
+    def variant_for_type_id(type_id : Int32) : UnionVariantInfo?
+      variants.find { |v| v.type_id == type_id }
+    end
+
+    # Get variant by type_ref
+    def variant_for_type(type_ref : TypeRef) : UnionVariantInfo?
+      variants.find { |v| v.type_ref == type_ref }
+    end
+
+    # Generate debug-friendly variant list string
+    def variants_string : String
+      variants.map(&.full_name).join(" | ")
+    end
   end
 
   class TypeDescriptor

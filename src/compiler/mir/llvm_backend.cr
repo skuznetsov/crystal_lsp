@@ -61,6 +61,33 @@ module Crystal::MIR
     end
   end
 
+  # Union variant info - embedded as __crystal_union_variant_info global array
+  struct UnionVariantInfoEntry
+    property union_type_id : UInt32      # Which union this variant belongs to
+    property variant_type_id : UInt32    # Discriminator value for this variant
+    property variant_type_ref : UInt32   # Type ID of the variant's actual type
+    property name_offset : UInt32        # Full name offset in string table
+    property size : UInt32               # Size of this variant in bytes
+    property alignment : UInt32          # Alignment requirement
+
+    def initialize(@union_type_id, @variant_type_id, @variant_type_ref, @name_offset, @size, @alignment)
+    end
+  end
+
+  # Union descriptor - embedded as __crystal_union_info global array
+  struct UnionInfoEntry
+    property type_id : UInt32            # Type ID of this union
+    property name_offset : UInt32        # Display name (e.g., "Int32 | String | Nil")
+    property variant_count : UInt32      # Number of variants
+    property variants_offset : UInt32    # Offset into variant info array
+    property total_size : UInt32         # Total union size (header + payload)
+    property alignment : UInt32          # Alignment requirement
+    property payload_offset : UInt32     # Offset to payload from start
+
+    def initialize(@type_id, @name_offset, @variant_count, @variants_offset, @total_size, @alignment, @payload_offset)
+    end
+  end
+
   # Closure capture info - embedded as __crystal_closure_info
   struct ClosureInfoEntry
     property closure_type_id : UInt32
@@ -194,6 +221,8 @@ module Crystal::MIR
     # Type metadata for debug DX
     @type_info_entries : Array(TypeInfoEntry)
     @field_info_entries : Array(FieldInfoEntry)
+    @union_info_entries : Array(UnionInfoEntry)
+    @union_variant_entries : Array(UnionVariantInfoEntry)
     @string_table : IO::Memory
     @string_offsets : Hash(String, UInt32)
 
@@ -221,6 +250,8 @@ module Crystal::MIR
       # Type metadata
       @type_info_entries = [] of TypeInfoEntry
       @field_info_entries = [] of FieldInfoEntry
+      @union_info_entries = [] of UnionInfoEntry
+      @union_variant_entries = [] of UnionVariantInfoEntry
       @string_table = IO::Memory.new
       @string_offsets = {} of String => UInt32
     end
@@ -229,10 +260,12 @@ module Crystal::MIR
       emit_header
       emit_type_definitions
       emit_runtime_declarations
+      emit_union_debug_helpers
       emit_global_variables
 
       if @emit_type_metadata
         collect_type_metadata
+        collect_union_metadata
       end
 
       @module.functions.each do |func|
@@ -241,6 +274,7 @@ module Crystal::MIR
 
       if @emit_type_metadata
         emit_type_metadata_globals
+        emit_union_metadata_globals
       end
 
       @output.to_s
@@ -345,6 +379,18 @@ module Crystal::MIR
       emit_raw "\n"
     end
 
+    # Union debug helper function declarations
+    private def emit_union_debug_helpers
+      emit_raw "; Union debug helper functions\n"
+      # Debug print: prints union value with type name
+      emit_raw "declare void @__crystal_v2_union_debug_print(ptr, ptr)\n"
+      # Type check with error: verifies type_id, traps on mismatch
+      emit_raw "declare void @__crystal_v2_union_type_check(i32, i32, ptr)\n"
+      # Get type name from union descriptor
+      emit_raw "declare ptr @__crystal_v2_union_type_name(i32, ptr)\n"
+      emit_raw "\n"
+    end
+
     private def emit_function(func : Function)
       reset_value_names(func)
 
@@ -433,6 +479,14 @@ module Crystal::MIR
         emit_global_load(inst, name)
       when GlobalStore
         emit_global_store(inst, name)
+      when UnionWrap
+        emit_union_wrap(inst, name)
+      when UnionUnwrap
+        emit_union_unwrap(inst, name)
+      when UnionTypeIdGet
+        emit_union_type_id_get(inst, name)
+      when UnionIs
+        emit_union_is(inst, name)
       end
     end
 
@@ -687,6 +741,72 @@ module Crystal::MIR
       emit "store #{llvm_type} #{val}, ptr @#{inst.global_name}"
     end
 
+    # ═══════════════════════════════════════════════════════════════════════
+    # UNION OPERATIONS
+    # ═══════════════════════════════════════════════════════════════════════
+
+    private def emit_union_wrap(inst : UnionWrap, name : String)
+      # Union layout: { i32 type_id, [N x i8] payload }
+      # 1. Allocate union on stack
+      union_type = @type_mapper.llvm_type(inst.union_type)
+      emit "#{name} = alloca #{union_type}, align 8"
+
+      # 2. Store type_id discriminator
+      emit "%#{name}.type_id_ptr = getelementptr #{union_type}, ptr #{name}, i32 0, i32 0"
+      emit "store i32 #{inst.variant_type_id}, ptr %#{name}.type_id_ptr"
+
+      # 3. Store value in payload
+      val = value_ref(inst.value)
+      val_type = @value_types[inst.value]? || TypeRef::POINTER
+      val_type_str = @type_mapper.llvm_type(val_type)
+      emit "%#{name}.payload_ptr = getelementptr #{union_type}, ptr #{name}, i32 0, i32 1"
+      emit "store #{val_type_str} #{val}, ptr %#{name}.payload_ptr"
+    end
+
+    private def emit_union_unwrap(inst : UnionUnwrap, name : String)
+      # Get payload from union, assuming type_id matches
+      union_val = value_ref(inst.union_value)
+      union_type_ref = @value_types[inst.union_value]? || TypeRef::POINTER
+      union_type = @type_mapper.llvm_type(union_type_ref)
+      result_type = @type_mapper.llvm_type(inst.type)
+
+      if inst.safe
+        # Safe unwrap: check type_id first, return null/zero on mismatch
+        emit "%#{name}.type_id_ptr = getelementptr #{union_type}, ptr #{union_val}, i32 0, i32 0"
+        emit "%#{name}.actual_type_id = load i32, ptr %#{name}.type_id_ptr"
+        emit "%#{name}.type_match = icmp eq i32 %#{name}.actual_type_id, #{inst.variant_type_id}"
+        emit "%#{name}.payload_ptr = getelementptr #{union_type}, ptr #{union_val}, i32 0, i32 1"
+        emit "%#{name}.payload = load #{result_type}, ptr %#{name}.payload_ptr"
+        # Select null/zero if type doesn't match
+        emit "#{name} = select i1 %#{name}.type_match, #{result_type} %#{name}.payload, #{result_type} zeroinitializer"
+      else
+        # Unsafe unwrap: just load payload (UB if type_id doesn't match)
+        emit "%#{name}.payload_ptr = getelementptr #{union_type}, ptr #{union_val}, i32 0, i32 1"
+        emit "#{name} = load #{result_type}, ptr %#{name}.payload_ptr"
+      end
+    end
+
+    private def emit_union_type_id_get(inst : UnionTypeIdGet, name : String)
+      # Load type_id from union
+      union_val = value_ref(inst.union_value)
+      union_type_ref = @value_types[inst.union_value]? || TypeRef::POINTER
+      union_type = @type_mapper.llvm_type(union_type_ref)
+
+      emit "%#{name}.type_id_ptr = getelementptr #{union_type}, ptr #{union_val}, i32 0, i32 0"
+      emit "#{name} = load i32, ptr %#{name}.type_id_ptr"
+    end
+
+    private def emit_union_is(inst : UnionIs, name : String)
+      # Check if union is specific variant
+      union_val = value_ref(inst.union_value)
+      union_type_ref = @value_types[inst.union_value]? || TypeRef::POINTER
+      union_type = @type_mapper.llvm_type(union_type_ref)
+
+      emit "%#{name}.type_id_ptr = getelementptr #{union_type}, ptr #{union_val}, i32 0, i32 0"
+      emit "%#{name}.actual_type_id = load i32, ptr %#{name}.type_id_ptr"
+      emit "#{name} = icmp eq i32 %#{name}.actual_type_id, #{inst.variant_type_id}"
+    end
+
     private def emit_terminator(term : Terminator)
       case term
       when Return
@@ -840,6 +960,86 @@ module Crystal::MIR
           emit_raw "i32 #{entry.type_id}, "
           emit_raw "i32 #{entry.offset}, "
           emit_raw "i32 #{entry.flags}"
+          emit_raw " }#{comma}\n"
+        end
+        emit_raw "]\n"
+      end
+
+      emit_raw "\n"
+    end
+
+    # ═══════════════════════════════════════════════════════════════════════
+    # UNION METADATA GENERATION (for enhanced debug DX)
+    # ═══════════════════════════════════════════════════════════════════════
+
+    private def collect_union_metadata
+      @module.union_descriptors.each do |type_ref, descriptor|
+        name_offset = add_string(descriptor.name)
+        variants_offset = @union_variant_entries.size.to_u32
+
+        # Add variant entries
+        descriptor.variants.each do |variant|
+          variant_name_offset = add_string(variant.full_name)
+          @union_variant_entries << UnionVariantInfoEntry.new(
+            type_ref.id,
+            variant.type_id.to_u32,
+            variant.type_ref.id,
+            variant_name_offset,
+            variant.size.to_u32,
+            variant.alignment.to_u32
+          )
+        end
+
+        @union_info_entries << UnionInfoEntry.new(
+          type_ref.id,
+          name_offset,
+          descriptor.variants.size.to_u32,
+          variants_offset,
+          descriptor.total_size.to_u32,
+          descriptor.alignment.to_u32,
+          descriptor.payload_offset.to_u32
+        )
+      end
+    end
+
+    private def emit_union_metadata_globals
+      return if @union_info_entries.empty?
+
+      emit_raw "; Union metadata for enhanced debug DX\n"
+
+      # __crystal_union_count
+      emit_raw "@__crystal_union_count = constant i32 #{@union_info_entries.size}\n"
+
+      # __crystal_union_info array
+      emit_raw "%__crystal_union_info_entry = type { i32, i32, i32, i32, i32, i32, i32 }\n"
+      emit_raw "@__crystal_union_info = constant [#{@union_info_entries.size} x %__crystal_union_info_entry] [\n"
+      @union_info_entries.each_with_index do |entry, idx|
+        comma = idx < @union_info_entries.size - 1 ? "," : ""
+        emit_raw "  %__crystal_union_info_entry { "
+        emit_raw "i32 #{entry.type_id}, "
+        emit_raw "i32 #{entry.name_offset}, "
+        emit_raw "i32 #{entry.variant_count}, "
+        emit_raw "i32 #{entry.variants_offset}, "
+        emit_raw "i32 #{entry.total_size}, "
+        emit_raw "i32 #{entry.alignment}, "
+        emit_raw "i32 #{entry.payload_offset}"
+        emit_raw " }#{comma}\n"
+      end
+      emit_raw "]\n"
+
+      # __crystal_union_variant_info array
+      unless @union_variant_entries.empty?
+        emit_raw "%__crystal_union_variant_entry = type { i32, i32, i32, i32, i32, i32 }\n"
+        emit_raw "@__crystal_union_variant_info = constant [#{@union_variant_entries.size} x %__crystal_union_variant_entry] [\n"
+        @union_variant_entries.each_with_index do |entry, idx|
+          comma = idx < @union_variant_entries.size - 1 ? "," : ""
+          emit_raw "  %__crystal_union_variant_entry { "
+          emit_raw "i32 #{entry.union_type_id}, "
+          emit_raw "i32 #{entry.variant_type_id}, "
+          emit_raw "i32 #{entry.variant_type_ref}, "
+          emit_raw "i32 #{entry.name_offset}, "
+          emit_raw "i32 #{entry.size}, "
+          emit_raw "i32 #{entry.alignment}"
           emit_raw " }#{comma}\n"
         end
         emit_raw "]\n"
