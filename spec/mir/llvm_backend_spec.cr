@@ -77,10 +77,10 @@ describe Crystal::MIR::LLVMIRGenerator do
       gen.emit_type_metadata = false
       output = gen.generate
 
-      output.should contain("declare ptr @__crystal_malloc64(i64)")
-      output.should contain("declare void @__crystal_rc_inc(ptr)")
-      output.should contain("declare void @__crystal_rc_dec(ptr, ptr)")
-      output.should contain("declare ptr @__crystal_slab_alloc(i32)")
+      output.should contain("declare ptr @__crystal_v2_malloc64(i64)")
+      output.should contain("declare void @__crystal_v2_rc_inc(ptr)")
+      output.should contain("declare void @__crystal_v2_rc_dec(ptr, ptr)")
+      output.should contain("declare ptr @__crystal_v2_slab_alloc(i32)")
     end
 
     it "generates simple function" do
@@ -130,7 +130,7 @@ describe Crystal::MIR::LLVMIRGenerator do
       gen.emit_type_metadata = false
       output = gen.generate
 
-      output.should contain("call ptr @__crystal_malloc64(i64 40)")  # 32 + 8 for RC
+      output.should contain("call ptr @__crystal_v2_malloc64(i64 40)")  # 32 + 8 for RC
       output.should contain("store i64 1")  # Initialize RC to 1
       output.should contain("getelementptr i8")  # Skip RC to get object pointer
     end
@@ -147,7 +147,7 @@ describe Crystal::MIR::LLVMIRGenerator do
       gen.emit_type_metadata = false
       output = gen.generate
 
-      output.should contain("call ptr @__crystal_slab_alloc(i32 0)")  # Size class 0 for <=16 bytes
+      output.should contain("call ptr @__crystal_v2_slab_alloc(i32 0)")  # Size class 0 for <=16 bytes
     end
 
     it "generates RC increment and decrement" do
@@ -165,8 +165,8 @@ describe Crystal::MIR::LLVMIRGenerator do
       output = gen.generate
 
       # Note: value_ref uses value ID, so %r0 instead of %ptr
-      output.should contain("call void @__crystal_rc_inc(ptr %r0)")
-      output.should contain("call void @__crystal_rc_dec(ptr %r0, ptr null)")
+      output.should contain("call void @__crystal_v2_rc_inc(ptr %r0)")
+      output.should contain("call void @__crystal_v2_rc_dec(ptr %r0, ptr null)")
     end
 
     it "generates binary operations" do

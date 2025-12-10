@@ -295,20 +295,20 @@ module Crystal::MIR
 
     private def emit_runtime_declarations
       # Memory allocation
-      emit_raw "declare ptr @__crystal_malloc64(i64)\n"
+      emit_raw "declare ptr @__crystal_v2_malloc64(i64)\n"
       emit_raw "declare ptr @__crystal_malloc_atomic64(i64)\n"
       emit_raw "declare ptr @__crystal_realloc64(ptr, i64)\n"
       emit_raw "declare void @free(ptr)\n"
       emit_raw "\n"
 
       # ARC runtime
-      emit_raw "declare void @__crystal_rc_inc(ptr)\n"
-      emit_raw "declare void @__crystal_rc_dec(ptr, ptr)\n"
+      emit_raw "declare void @__crystal_v2_rc_inc(ptr)\n"
+      emit_raw "declare void @__crystal_v2_rc_dec(ptr, ptr)\n"
       emit_raw "\n"
 
       # Slab allocator
-      emit_raw "declare ptr @__crystal_slab_alloc(i32)\n"
-      emit_raw "declare void @__crystal_slab_free(ptr, i32)\n"
+      emit_raw "declare ptr @__crystal_v2_slab_alloc(i32)\n"
+      emit_raw "declare void @__crystal_v2_slab_free(ptr, i32)\n"
       emit_raw "\n"
     end
 
@@ -413,15 +413,15 @@ module Crystal::MIR
         emit "#{name} = alloca #{type}, align #{inst.align}"
       when MemoryStrategy::Slab
         size_class = compute_size_class(inst.size)
-        emit "#{name} = call ptr @__crystal_slab_alloc(i32 #{size_class})"
+        emit "#{name} = call ptr @__crystal_v2_slab_alloc(i32 #{size_class})"
       when MemoryStrategy::ARC, MemoryStrategy::AtomicARC
         # ARC: allocate extra 8 bytes for RC, initialize to 1
         total_size = inst.size + 8
-        emit "%raw#{inst.id} = call ptr @__crystal_malloc64(i64 #{total_size})"
+        emit "%raw#{inst.id} = call ptr @__crystal_v2_malloc64(i64 #{total_size})"
         emit "store i64 1, ptr %raw#{inst.id}, align 8"
         emit "#{name} = getelementptr i8, ptr %raw#{inst.id}, i64 8"
       when MemoryStrategy::GC
-        emit "#{name} = call ptr @__crystal_malloc64(i64 #{inst.size})"
+        emit "#{name} = call ptr @__crystal_v2_malloc64(i64 #{inst.size})"
       end
     end
 
@@ -448,13 +448,13 @@ module Crystal::MIR
 
     private def emit_rc_inc(inst : RCIncrement)
       ptr = value_ref(inst.ptr)
-      emit "call void @__crystal_rc_inc(ptr #{ptr})"
+      emit "call void @__crystal_v2_rc_inc(ptr #{ptr})"
     end
 
     private def emit_rc_dec(inst : RCDecrement)
       ptr = value_ref(inst.ptr)
       destructor = "null"  # TODO: function pointer for destructor
-      emit "call void @__crystal_rc_dec(ptr #{ptr}, ptr #{destructor})"
+      emit "call void @__crystal_v2_rc_dec(ptr #{ptr}, ptr #{destructor})"
     end
 
     private def emit_load(inst : Load, name : String)

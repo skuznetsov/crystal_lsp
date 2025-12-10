@@ -602,11 +602,15 @@ The key insight is: **Don't compete with LLVM, complement it.**
   - VS Code launch.json generator
   - .lldbinit generator
 
-#### 5.3.2 Runtime Support
-- [ ] Minimal runtime library
+#### 5.3.3 Runtime Support
+- [x] Minimal runtime library (src/runtime/)
+  - memory.cr: malloc/realloc/free wrappers with stats
+  - arc.cr: Reference counting (rc_inc, rc_dec, arc_alloc)
+  - slab.cr: Size-class based allocator (malloc fallback for now)
+  - 43 runtime specs
 - [ ] GC integration (Boehm as baseline)
-- [ ] ARC runtime functions
 - [ ] Arena allocator runtime
+- [ ] Full slab allocator (with actual slab pooling)
 
 #### 5.3.3 Optimization Pipeline
 - [ ] LLVM optimization passes (O0/O1/O2/O3)
@@ -669,7 +673,7 @@ The key insight is: **Don't compete with LLVM, complement it.**
 | M4.1 | LLVM IR generation | ✅ Complete | 24 |
 | M4.1b | Debug DX (type metadata) | ✅ Complete | 24 |
 | M4.1c | LLDB/DAP tooling | ✅ Complete | 13 (py) |
-| M4.2 | Runtime library | 🔲 Pending | - |
+| M4.2 | Runtime library | ✅ Complete | 43 |
 | M4.3 | End-to-end compile | 🔲 Pending | - |
 
 ---
