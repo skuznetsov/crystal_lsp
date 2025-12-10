@@ -337,6 +337,20 @@ Goal: v2 LSP must report only real errors and match original compiler behavior.
 
 **Status:** Active development on `codegen` branch (2025-12-09)
 
+### Completed Milestones (2025-12-09)
+- [x] **M1.1** HIR data structures (`src/compiler/hir/hir.cr`) - 87 tests
+- [x] **M1.2** AST → HIR lowering (`src/compiler/hir/ast_to_hir.cr`) - 87 tests
+- [x] **M2.1** Basic escape analysis (`src/compiler/hir/escape_analysis.cr`) - 16 tests
+- [x] **M2.3** Taint propagation (`src/compiler/hir/taint_analysis.cr`) - 17 tests
+- [x] **M2.4** Memory strategy integration (`src/compiler/hir/memory_strategy.cr`) - 15 tests
+- [x] **M3.1** MIR data structures (`src/compiler/mir/mir.cr`) - 20 tests
+- [x] **M3.1b** MIR optimizations (`src/compiler/mir/optimizations.cr`) - 17 tests
+  - RC elision (remove redundant rc_inc/rc_dec pairs)
+  - Dead code elimination
+  - Constant folding
+
+**Test Coverage:** 192 new tests (155 HIR + 37 MIR)
+
 **Architecture (Quadrumvirate-analyzed):**
 ```
 ┌─────────────────────────────────────────────────────────────────────┐
@@ -553,14 +567,19 @@ end
 
 ### Milestones
 
-| Milestone | Description | Deliverable |
-|-----------|-------------|-------------|
-| M1 | Basic IR + escape analysis | Can classify allocations |
-| M2 | Stack allocation working | Simple programs compile |
-| M3 | ARC working | Objects with single owner |
-| M4 | GC integration | Full Crystal programs work |
-| M5 | Slab allocator | Fiber-local arenas |
-| M6 | Profile-guided | Runtime feedback loop |
+| Milestone | Description | Status | Tests |
+|-----------|-------------|--------|-------|
+| M1.1 | HIR data structures | ✅ Complete | 87 |
+| M1.2 | AST → HIR lowering | ✅ Complete | 87 |
+| M2.1 | Escape analysis | ✅ Complete | 16 |
+| M2.3 | Taint propagation | ✅ Complete | 17 |
+| M2.4 | Memory strategy | ✅ Complete | 15 |
+| M3.1 | MIR data structures | ✅ Complete | 20 |
+| M3.1b | MIR optimizations | ✅ Complete | 17 |
+| M3.2 | HIR → MIR lowering | 🔲 Pending | - |
+| M4.1 | LLVM IR generation | 🔲 Pending | - |
+| M4.2 | Runtime library | 🔲 Pending | - |
+| M4.3 | End-to-end compile | 🔲 Pending | - |
 
 ---
 
@@ -585,4 +604,6 @@ end
 | LSP Server | Complete | 26 methods, 4 GitHub issues fixed |
 | TypeIndex | Complete | 5.6x faster than JSON, per-file partitioning |
 | Performance | Complete | Incremental inference, lazy method bodies, cache warming |
-| Codegen | 0% | Next phase |
+| HIR | Complete | 155 tests (data structures, lowering, escape, taint, memory strategy) |
+| MIR | Complete | 37 tests (SSA form, memory ops, optimizations) |
+| Codegen | 40% | M1-M3.1b done, HIR→MIR and LLVM pending |

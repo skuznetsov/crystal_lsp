@@ -1,0 +1,1080 @@
+# Mid-Level IR (MIR) for Crystal v2
+#
+# SSA form with explicit memory operations, ready for LLVM lowering.
+# Key differences from HIR:
+#   - SSA: each value assigned exactly once
+#   - Explicit control flow: basic blocks, phi nodes
+#   - Explicit memory: alloc, free, rc_inc, rc_dec
+#   - Closures lowered to struct + function pointer
+#
+# See docs/codegen_architecture.md Section 4 for specification.
+
+module Crystal::MIR
+  # ═══════════════════════════════════════════════════════════════════════════
+  # TYPE ALIASES
+  # ═══════════════════════════════════════════════════════════════════════════
+
+  alias ValueId = UInt32
+  alias BlockId = UInt32
+  alias FunctionId = UInt32
+  alias TypeId = UInt32
+
+  # ═══════════════════════════════════════════════════════════════════════════
+  # MEMORY STRATEGY (assigned during HIR → MIR lowering)
+  # ═══════════════════════════════════════════════════════════════════════════
+
+  enum MemoryStrategy
+    Stack       # LLVM alloca, automatic cleanup
+    Slab        # Fiber-local arena, bump allocation
+    ARC         # Reference counting (non-atomic)
+    AtomicARC   # Reference counting (atomic, thread-safe)
+    GC          # Garbage collected (Boehm GC)
+
+    def to_s : String
+      case self
+      when Stack     then "stack"
+      when Slab      then "slab"
+      when ARC       then "arc"
+      when AtomicARC then "atomic_arc"
+      else                "gc"  # GC
+      end
+    end
+  end
+
+  # ═══════════════════════════════════════════════════════════════════════════
+  # TYPE REFERENCES (simplified for MIR - full types resolved)
+  # ═══════════════════════════════════════════════════════════════════════════
+
+  struct TypeRef
+    getter id : TypeId
+
+    def initialize(@id : TypeId)
+    end
+
+    # Primitive types (well-known IDs)
+    VOID    = new(0_u32)
+    NIL     = new(1_u32)
+    BOOL    = new(2_u32)
+    INT8    = new(3_u32)
+    INT16   = new(4_u32)
+    INT32   = new(5_u32)
+    INT64   = new(6_u32)
+    INT128  = new(7_u32)
+    UINT8   = new(8_u32)
+    UINT16  = new(9_u32)
+    UINT32  = new(10_u32)
+    UINT64  = new(11_u32)
+    UINT128 = new(12_u32)
+    FLOAT32 = new(13_u32)
+    FLOAT64 = new(14_u32)
+    CHAR    = new(15_u32)
+    STRING  = new(16_u32)
+    SYMBOL  = new(17_u32)
+    POINTER = new(18_u32)  # Generic pointer type
+
+    def ==(other : TypeRef) : Bool
+      @id == other.id
+    end
+
+    def hash(hasher)
+      hasher = @id.hash(hasher)
+      hasher
+    end
+
+    def to_s(io : IO) : Nil
+      case self
+      when VOID    then io << "void"
+      when NIL     then io << "Nil"
+      when BOOL    then io << "Bool"
+      when INT8    then io << "Int8"
+      when INT16   then io << "Int16"
+      when INT32   then io << "Int32"
+      when INT64   then io << "Int64"
+      when INT128  then io << "Int128"
+      when UINT8   then io << "UInt8"
+      when UINT16  then io << "UInt16"
+      when UINT32  then io << "UInt32"
+      when UINT64  then io << "UInt64"
+      when UINT128 then io << "UInt128"
+      when FLOAT32 then io << "Float32"
+      when FLOAT64 then io << "Float64"
+      when CHAR    then io << "Char"
+      when STRING  then io << "String"
+      when SYMBOL  then io << "Symbol"
+      when POINTER then io << "Pointer"
+      else              io << "Type#" << @id
+      end
+    end
+
+    def inspect(io : IO) : Nil
+      to_s(io)
+    end
+  end
+
+  # ═══════════════════════════════════════════════════════════════════════════
+  # VALUES - SSA Values (single assignment)
+  # ═══════════════════════════════════════════════════════════════════════════
+
+  abstract class Value
+    getter id : ValueId
+    getter type : TypeRef
+
+    def initialize(@id : ValueId, @type : TypeRef)
+    end
+
+    abstract def to_s(io : IO) : Nil
+
+    def inspect(io : IO) : Nil
+      to_s(io)
+    end
+
+    # All operand value IDs this instruction uses
+    def operands : Array(ValueId)
+      [] of ValueId
+    end
+  end
+
+  # ═══════════════════════════════════════════════════════════════════════════
+  # CONSTANTS
+  # ═══════════════════════════════════════════════════════════════════════════
+
+  # Compile-time constant
+  class Constant < Value
+    getter value : Int64 | UInt64 | Float64 | Bool | Nil | String
+
+    def initialize(id : ValueId, type : TypeRef, @value)
+      super(id, type)
+    end
+
+    def to_s(io : IO) : Nil
+      io << "%" << @id << " = const "
+      case v = @value
+      when String then io << v.inspect
+      when Bool   then io << (v ? "true" : "false")
+      when Nil    then io << "nil"
+      else             io << v
+      end
+      io << " : " << @type
+    end
+  end
+
+  # Reference to undefined value (for phi incoming from unreachable blocks)
+  class Undef < Value
+    def initialize(id : ValueId, type : TypeRef)
+      super(id, type)
+    end
+
+    def to_s(io : IO) : Nil
+      io << "%" << @id << " = undef : " << @type
+    end
+  end
+
+  # ═══════════════════════════════════════════════════════════════════════════
+  # MEMORY OPERATIONS
+  # ═══════════════════════════════════════════════════════════════════════════
+
+  # Allocate memory with specific strategy
+  class Alloc < Value
+    getter strategy : MemoryStrategy
+    getter alloc_type : TypeRef
+    getter size : UInt64  # Static size in bytes (0 = compute from type)
+    getter align : UInt32 # Alignment in bytes
+
+    def initialize(
+      id : ValueId,
+      type : TypeRef,
+      @strategy : MemoryStrategy,
+      @alloc_type : TypeRef,
+      @size : UInt64 = 0_u64,
+      @align : UInt32 = 8_u32
+    )
+      super(id, type)
+    end
+
+    def to_s(io : IO) : Nil
+      io << "%" << @id << " = alloc " << @strategy
+      io << " " << @alloc_type
+      io << ", size=" << @size if @size > 0
+      io << ", align=" << @align
+      io << " : " << @type
+    end
+  end
+
+  # Free memory (for Slab strategy; no-op for others typically)
+  class Free < Value
+    getter ptr : ValueId
+    getter strategy : MemoryStrategy
+
+    def initialize(id : ValueId, @ptr : ValueId, @strategy : MemoryStrategy)
+      super(id, TypeRef::VOID)
+    end
+
+    def operands : Array(ValueId)
+      [@ptr]
+    end
+
+    def to_s(io : IO) : Nil
+      io << "%" << @id << " = free %" << @ptr << " (" << @strategy << ")"
+    end
+  end
+
+  # Increment reference count (ARC)
+  class RCIncrement < Value
+    getter ptr : ValueId
+    getter atomic : Bool
+
+    def initialize(id : ValueId, @ptr : ValueId, @atomic : Bool = false)
+      super(id, TypeRef::VOID)
+    end
+
+    def operands : Array(ValueId)
+      [@ptr]
+    end
+
+    def to_s(io : IO) : Nil
+      io << "%" << @id << " = rc_inc"
+      io << "_atomic" if @atomic
+      io << " %" << @ptr
+    end
+  end
+
+  # Decrement reference count (ARC) - may trigger destructor
+  class RCDecrement < Value
+    getter ptr : ValueId
+    getter atomic : Bool
+    getter destructor : FunctionId?
+
+    def initialize(
+      id : ValueId,
+      @ptr : ValueId,
+      @atomic : Bool = false,
+      @destructor : FunctionId? = nil
+    )
+      super(id, TypeRef::VOID)
+    end
+
+    def operands : Array(ValueId)
+      [@ptr]
+    end
+
+    def to_s(io : IO) : Nil
+      io << "%" << @id << " = rc_dec"
+      io << "_atomic" if @atomic
+      io << " %" << @ptr
+      if d = @destructor
+        io << ", destructor=@" << d
+      end
+    end
+  end
+
+  # Load from memory
+  class Load < Value
+    getter ptr : ValueId
+
+    def initialize(id : ValueId, type : TypeRef, @ptr : ValueId)
+      super(id, type)
+    end
+
+    def operands : Array(ValueId)
+      [@ptr]
+    end
+
+    def to_s(io : IO) : Nil
+      io << "%" << @id << " = load %" << @ptr << " : " << @type
+    end
+  end
+
+  # Store to memory
+  class Store < Value
+    getter ptr : ValueId
+    getter value : ValueId
+
+    def initialize(id : ValueId, @ptr : ValueId, @value : ValueId)
+      super(id, TypeRef::VOID)
+    end
+
+    def operands : Array(ValueId)
+      [@ptr, @value]
+    end
+
+    def to_s(io : IO) : Nil
+      io << "%" << @id << " = store %" << @ptr << ", %" << @value
+    end
+  end
+
+  # Get element pointer (GEP) - compute address of field/element
+  class GetElementPtr < Value
+    getter base : ValueId
+    getter indices : Array(UInt32)  # Field indices / array offsets
+
+    def initialize(id : ValueId, type : TypeRef, @base : ValueId, @indices : Array(UInt32))
+      super(id, type)
+    end
+
+    def operands : Array(ValueId)
+      [@base]
+    end
+
+    def to_s(io : IO) : Nil
+      io << "%" << @id << " = gep %" << @base
+      @indices.each { |idx| io << ", " << idx }
+      io << " : " << @type
+    end
+  end
+
+  # ═══════════════════════════════════════════════════════════════════════════
+  # ARITHMETIC AND LOGIC
+  # ═══════════════════════════════════════════════════════════════════════════
+
+  enum BinOp
+    Add
+    Sub
+    Mul
+    Div
+    Rem
+    Shl
+    Shr
+    And
+    Or
+    Xor
+    Eq
+    Ne
+    Lt
+    Le
+    Gt
+    Ge
+
+    def to_s : String
+      case self
+      when Add then "add"
+      when Sub then "sub"
+      when Mul then "mul"
+      when Div then "div"
+      when Rem then "rem"
+      when Shl then "shl"
+      when Shr then "shr"
+      when And then "and"
+      when Or  then "or"
+      when Xor then "xor"
+      when Eq  then "eq"
+      when Ne  then "ne"
+      when Lt  then "lt"
+      when Le  then "le"
+      when Gt  then "gt"
+      else          "ge"  # Ge
+      end
+    end
+  end
+
+  class BinaryOp < Value
+    getter op : BinOp
+    getter left : ValueId
+    getter right : ValueId
+
+    def initialize(id : ValueId, type : TypeRef, @op : BinOp, @left : ValueId, @right : ValueId)
+      super(id, type)
+    end
+
+    def operands : Array(ValueId)
+      [@left, @right]
+    end
+
+    def to_s(io : IO) : Nil
+      io << "%" << @id << " = " << @op << " %" << @left << ", %" << @right << " : " << @type
+    end
+  end
+
+  enum UnOp
+    Neg
+    Not
+    BitNot
+
+    def to_s : String
+      case self
+      when Neg then "neg"
+      when Not then "not"
+      else          "bitnot"  # BitNot
+      end
+    end
+  end
+
+  class UnaryOp < Value
+    getter op : UnOp
+    getter operand : ValueId
+
+    def initialize(id : ValueId, type : TypeRef, @op : UnOp, @operand : ValueId)
+      super(id, type)
+    end
+
+    def operands : Array(ValueId)
+      [@operand]
+    end
+
+    def to_s(io : IO) : Nil
+      io << "%" << @id << " = " << @op << " %" << @operand << " : " << @type
+    end
+  end
+
+  # ═══════════════════════════════════════════════════════════════════════════
+  # CONVERSIONS
+  # ═══════════════════════════════════════════════════════════════════════════
+
+  enum CastKind
+    Bitcast     # Same size, different type interpretation
+    Trunc       # Integer truncation
+    ZExt        # Zero extension
+    SExt        # Sign extension
+    FPToSI      # Float to signed int
+    FPToUI      # Float to unsigned int
+    SIToFP      # Signed int to float
+    UIToFP      # Unsigned int to float
+    FPTrunc     # Float truncation (double → float)
+    FPExt       # Float extension (float → double)
+    PtrToInt    # Pointer to integer
+    IntToPtr    # Integer to pointer
+
+    def to_s : String
+      case self
+      when Bitcast  then "bitcast"
+      when Trunc    then "trunc"
+      when ZExt     then "zext"
+      when SExt     then "sext"
+      when FPToSI   then "fptosi"
+      when FPToUI   then "fptoui"
+      when SIToFP   then "sitofp"
+      when UIToFP   then "uitofp"
+      when FPTrunc  then "fptrunc"
+      when FPExt    then "fpext"
+      when PtrToInt then "ptrtoint"
+      else               "inttoptr"  # IntToPtr
+      end
+    end
+  end
+
+  class Cast < Value
+    getter kind : CastKind
+    getter value : ValueId
+
+    def initialize(id : ValueId, type : TypeRef, @kind : CastKind, @value : ValueId)
+      super(id, type)
+    end
+
+    def operands : Array(ValueId)
+      [@value]
+    end
+
+    def to_s(io : IO) : Nil
+      io << "%" << @id << " = " << @kind << " %" << @value << " : " << @type
+    end
+  end
+
+  # ═══════════════════════════════════════════════════════════════════════════
+  # CONTROL FLOW (within block)
+  # ═══════════════════════════════════════════════════════════════════════════
+
+  # SSA Phi node - merges values from different control flow paths
+  class Phi < Value
+    # (BlockId, ValueId) - which value comes from which predecessor block
+    getter incoming : Array(Tuple(BlockId, ValueId))
+
+    def initialize(id : ValueId, type : TypeRef)
+      super(id, type)
+      @incoming = [] of Tuple(BlockId, ValueId)
+    end
+
+    def add_incoming(block : BlockId, value : ValueId)
+      @incoming << {block, value}
+    end
+
+    def operands : Array(ValueId)
+      @incoming.map { |(_, v)| v }
+    end
+
+    def to_s(io : IO) : Nil
+      io << "%" << @id << " = phi "
+      @incoming.each_with_index do |(block, val), idx|
+        io << ", " if idx > 0
+        io << "[block." << block << ": %" << val << "]"
+      end
+      io << " : " << @type
+    end
+  end
+
+  # Select instruction (ternary: cond ? a : b)
+  class Select < Value
+    getter condition : ValueId
+    getter then_value : ValueId
+    getter else_value : ValueId
+
+    def initialize(
+      id : ValueId,
+      type : TypeRef,
+      @condition : ValueId,
+      @then_value : ValueId,
+      @else_value : ValueId
+    )
+      super(id, type)
+    end
+
+    def operands : Array(ValueId)
+      [@condition, @then_value, @else_value]
+    end
+
+    def to_s(io : IO) : Nil
+      io << "%" << @id << " = select %" << @condition
+      io << ", %" << @then_value << ", %" << @else_value
+      io << " : " << @type
+    end
+  end
+
+  # ═══════════════════════════════════════════════════════════════════════════
+  # FUNCTION CALLS
+  # ═══════════════════════════════════════════════════════════════════════════
+
+  # Direct function call
+  class Call < Value
+    getter callee : FunctionId
+    getter args : Array(ValueId)
+
+    def initialize(id : ValueId, type : TypeRef, @callee : FunctionId, @args : Array(ValueId))
+      super(id, type)
+    end
+
+    def operands : Array(ValueId)
+      @args.dup
+    end
+
+    def to_s(io : IO) : Nil
+      io << "%" << @id << " = call @" << @callee << "("
+      @args.each_with_index do |arg, idx|
+        io << ", " if idx > 0
+        io << "%" << arg
+      end
+      io << ") : " << @type
+    end
+  end
+
+  # Indirect call through function pointer
+  class IndirectCall < Value
+    getter callee_ptr : ValueId
+    getter args : Array(ValueId)
+
+    def initialize(id : ValueId, type : TypeRef, @callee_ptr : ValueId, @args : Array(ValueId))
+      super(id, type)
+    end
+
+    def operands : Array(ValueId)
+      [@callee_ptr] + @args
+    end
+
+    def to_s(io : IO) : Nil
+      io << "%" << @id << " = call_indirect %" << @callee_ptr << "("
+      @args.each_with_index do |arg, idx|
+        io << ", " if idx > 0
+        io << "%" << arg
+      end
+      io << ") : " << @type
+    end
+  end
+
+  # ═══════════════════════════════════════════════════════════════════════════
+  # TERMINATORS - End a basic block
+  # ═══════════════════════════════════════════════════════════════════════════
+
+  abstract class Terminator
+    abstract def to_s(io : IO) : Nil
+    abstract def successors : Array(BlockId)
+
+    def inspect(io : IO) : Nil
+      to_s(io)
+    end
+  end
+
+  # Return from function
+  class Return < Terminator
+    getter value : ValueId?
+
+    def initialize(@value : ValueId? = nil)
+    end
+
+    def successors : Array(BlockId)
+      [] of BlockId
+    end
+
+    def to_s(io : IO) : Nil
+      io << "ret"
+      if v = @value
+        io << " %" << v
+      end
+    end
+  end
+
+  # Unconditional jump
+  class Jump < Terminator
+    getter target : BlockId
+
+    def initialize(@target : BlockId)
+    end
+
+    def successors : Array(BlockId)
+      [@target]
+    end
+
+    def to_s(io : IO) : Nil
+      io << "jump block." << @target
+    end
+  end
+
+  # Conditional branch
+  class Branch < Terminator
+    getter condition : ValueId
+    getter then_block : BlockId
+    getter else_block : BlockId
+
+    def initialize(@condition : ValueId, @then_block : BlockId, @else_block : BlockId)
+    end
+
+    def successors : Array(BlockId)
+      [@then_block, @else_block]
+    end
+
+    def to_s(io : IO) : Nil
+      io << "br %" << @condition
+      io << ", block." << @then_block
+      io << ", block." << @else_block
+    end
+  end
+
+  # Multi-way branch (switch)
+  class Switch < Terminator
+    getter value : ValueId
+    getter cases : Array(Tuple(Int64, BlockId))  # value → block
+    getter default_block : BlockId
+
+    def initialize(@value : ValueId, @cases : Array(Tuple(Int64, BlockId)), @default_block : BlockId)
+    end
+
+    def successors : Array(BlockId)
+      @cases.map { |(_, b)| b } << @default_block
+    end
+
+    def to_s(io : IO) : Nil
+      io << "switch %" << @value << " ["
+      @cases.each_with_index do |(val, block), idx|
+        io << ", " if idx > 0
+        io << val << " → block." << block
+      end
+      io << "] default block." << @default_block
+    end
+  end
+
+  # Unreachable (after noreturn calls like raise)
+  class Unreachable < Terminator
+    def successors : Array(BlockId)
+      [] of BlockId
+    end
+
+    def to_s(io : IO) : Nil
+      io << "unreachable"
+    end
+  end
+
+  # ═══════════════════════════════════════════════════════════════════════════
+  # BASIC BLOCK
+  # ═══════════════════════════════════════════════════════════════════════════
+
+  class BasicBlock
+    getter id : BlockId
+    getter instructions : Array(Value)
+    property terminator : Terminator
+
+    # Predecessor blocks (computed)
+    property predecessors : Array(BlockId)
+
+    def initialize(@id : BlockId)
+      @instructions = [] of Value
+      @terminator = Unreachable.new
+      @predecessors = [] of BlockId
+    end
+
+    def add(instruction : Value)
+      @instructions << instruction
+    end
+
+    # Insert phi node at beginning
+    def add_phi(phi : Phi)
+      # Phi nodes must come first
+      phi_count = @instructions.count { |i| i.is_a?(Phi) }
+      @instructions.insert(phi_count, phi)
+    end
+
+    def to_s(io : IO) : Nil
+      io << "block." << @id << ":"
+      if !@predecessors.empty?
+        io << "  ; preds: "
+        @predecessors.each_with_index do |pred, idx|
+          io << ", " if idx > 0
+          io << "block." << pred
+        end
+      end
+      io << "\n"
+      @instructions.each do |inst|
+        io << "  "
+        inst.to_s(io)
+        io << "\n"
+      end
+      io << "  "
+      @terminator.to_s(io)
+      io << "\n"
+    end
+
+    def inspect(io : IO) : Nil
+      to_s(io)
+    end
+  end
+
+  # ═══════════════════════════════════════════════════════════════════════════
+  # FUNCTION
+  # ═══════════════════════════════════════════════════════════════════════════
+
+  struct Parameter
+    getter index : UInt32
+    getter name : String
+    getter type : TypeRef
+
+    def initialize(@index : UInt32, @name : String, @type : TypeRef)
+    end
+  end
+
+  class Function
+    getter id : FunctionId
+    getter name : String
+    getter params : Array(Parameter)
+    getter return_type : TypeRef
+    getter blocks : Array(BasicBlock)
+    getter entry_block : BlockId
+
+    @next_value_id : ValueId = 0_u32
+    @next_block_id : BlockId = 0_u32
+    @block_map : Hash(BlockId, BasicBlock)
+
+    def initialize(@id : FunctionId, @name : String, @return_type : TypeRef)
+      @params = [] of Parameter
+      @blocks = [] of BasicBlock
+      @block_map = {} of BlockId => BasicBlock
+
+      # Create entry block
+      @entry_block = create_block
+    end
+
+    def add_param(name : String, type : TypeRef) : UInt32
+      idx = @params.size.to_u32
+      @params << Parameter.new(idx, name, type)
+      idx
+    end
+
+    def next_value_id : ValueId
+      id = @next_value_id
+      @next_value_id += 1
+      id
+    end
+
+    def create_block : BlockId
+      id = @next_block_id
+      @next_block_id += 1
+      block = BasicBlock.new(id)
+      @blocks << block
+      @block_map[id] = block
+      id
+    end
+
+    def get_block(id : BlockId) : BasicBlock
+      @block_map[id]
+    end
+
+    def get_block?(id : BlockId) : BasicBlock?
+      @block_map[id]?
+    end
+
+    # Compute predecessor information for all blocks
+    def compute_predecessors
+      @blocks.each { |b| b.predecessors.clear }
+
+      @blocks.each do |block|
+        block.terminator.successors.each do |succ_id|
+          if succ = @block_map[succ_id]?
+            succ.predecessors << block.id unless succ.predecessors.includes?(block.id)
+          end
+        end
+      end
+    end
+
+    def to_s(io : IO) : Nil
+      io << "func @" << @name << "("
+      @params.each_with_index do |param, idx|
+        io << ", " if idx > 0
+        io << "%" << param.index << ": " << param.type
+      end
+      io << ") -> " << @return_type << " {\n"
+
+      @blocks.each do |block|
+        block.to_s(io)
+      end
+
+      io << "}\n"
+    end
+
+    def inspect(io : IO) : Nil
+      to_s(io)
+    end
+  end
+
+  # ═══════════════════════════════════════════════════════════════════════════
+  # MODULE
+  # ═══════════════════════════════════════════════════════════════════════════
+
+  class Module
+    getter name : String
+    getter functions : Array(Function)
+
+    @next_function_id : FunctionId = 0_u32
+    @function_map : Hash(String, Function)
+
+    def initialize(@name : String = "main")
+      @functions = [] of Function
+      @function_map = {} of String => Function
+    end
+
+    def create_function(name : String, return_type : TypeRef) : Function
+      id = @next_function_id
+      @next_function_id += 1
+      func = Function.new(id, name, return_type)
+      @functions << func
+      @function_map[name] = func
+      func
+    end
+
+    def get_function(name : String) : Function?
+      @function_map[name]?
+    end
+
+    def to_s(io : IO) : Nil
+      io << "; MIR Module: " << @name << "\n\n"
+      @functions.each do |func|
+        func.to_s(io)
+        io << "\n"
+      end
+    end
+
+    def inspect(io : IO) : Nil
+      to_s(io)
+    end
+  end
+
+  # ═══════════════════════════════════════════════════════════════════════════
+  # BUILDER - Helper for constructing MIR
+  # ═══════════════════════════════════════════════════════════════════════════
+
+  class Builder
+    getter function : Function
+    property current_block : BlockId
+
+    def initialize(@function : Function)
+      @current_block = @function.entry_block
+    end
+
+    private def block : BasicBlock
+      @function.get_block(@current_block)
+    end
+
+    private def emit(value : Value) : ValueId
+      block.add(value)
+      value.id
+    end
+
+    # Constants
+    def const_int(value : Int64, type : TypeRef = TypeRef::INT64) : ValueId
+      emit(Constant.new(@function.next_value_id, type, value))
+    end
+
+    def const_uint(value : UInt64, type : TypeRef = TypeRef::UINT64) : ValueId
+      emit(Constant.new(@function.next_value_id, type, value))
+    end
+
+    def const_float(value : Float64, type : TypeRef = TypeRef::FLOAT64) : ValueId
+      emit(Constant.new(@function.next_value_id, type, value))
+    end
+
+    def const_bool(value : Bool) : ValueId
+      emit(Constant.new(@function.next_value_id, TypeRef::BOOL, value))
+    end
+
+    def const_nil : ValueId
+      emit(Constant.new(@function.next_value_id, TypeRef::NIL, nil))
+    end
+
+    def const_string(value : String) : ValueId
+      emit(Constant.new(@function.next_value_id, TypeRef::STRING, value))
+    end
+
+    # Memory operations
+    def alloc(strategy : MemoryStrategy, alloc_type : TypeRef, size : UInt64 = 0_u64, align : UInt32 = 8_u32) : ValueId
+      # Result type is pointer to alloc_type
+      emit(Alloc.new(@function.next_value_id, TypeRef::POINTER, strategy, alloc_type, size, align))
+    end
+
+    def free(ptr : ValueId, strategy : MemoryStrategy) : ValueId
+      emit(Free.new(@function.next_value_id, ptr, strategy))
+    end
+
+    def rc_inc(ptr : ValueId, atomic : Bool = false) : ValueId
+      emit(RCIncrement.new(@function.next_value_id, ptr, atomic))
+    end
+
+    def rc_dec(ptr : ValueId, atomic : Bool = false, destructor : FunctionId? = nil) : ValueId
+      emit(RCDecrement.new(@function.next_value_id, ptr, atomic, destructor))
+    end
+
+    def load(ptr : ValueId, type : TypeRef) : ValueId
+      emit(Load.new(@function.next_value_id, type, ptr))
+    end
+
+    def store(ptr : ValueId, value : ValueId) : ValueId
+      emit(Store.new(@function.next_value_id, ptr, value))
+    end
+
+    def gep(base : ValueId, indices : Array(UInt32), result_type : TypeRef) : ValueId
+      emit(GetElementPtr.new(@function.next_value_id, result_type, base, indices))
+    end
+
+    # Arithmetic
+    def add(left : ValueId, right : ValueId, type : TypeRef) : ValueId
+      emit(BinaryOp.new(@function.next_value_id, type, BinOp::Add, left, right))
+    end
+
+    def sub(left : ValueId, right : ValueId, type : TypeRef) : ValueId
+      emit(BinaryOp.new(@function.next_value_id, type, BinOp::Sub, left, right))
+    end
+
+    def mul(left : ValueId, right : ValueId, type : TypeRef) : ValueId
+      emit(BinaryOp.new(@function.next_value_id, type, BinOp::Mul, left, right))
+    end
+
+    def div(left : ValueId, right : ValueId, type : TypeRef) : ValueId
+      emit(BinaryOp.new(@function.next_value_id, type, BinOp::Div, left, right))
+    end
+
+    def rem(left : ValueId, right : ValueId, type : TypeRef) : ValueId
+      emit(BinaryOp.new(@function.next_value_id, type, BinOp::Rem, left, right))
+    end
+
+    # Comparisons
+    def eq(left : ValueId, right : ValueId) : ValueId
+      emit(BinaryOp.new(@function.next_value_id, TypeRef::BOOL, BinOp::Eq, left, right))
+    end
+
+    def ne(left : ValueId, right : ValueId) : ValueId
+      emit(BinaryOp.new(@function.next_value_id, TypeRef::BOOL, BinOp::Ne, left, right))
+    end
+
+    def lt(left : ValueId, right : ValueId) : ValueId
+      emit(BinaryOp.new(@function.next_value_id, TypeRef::BOOL, BinOp::Lt, left, right))
+    end
+
+    def le(left : ValueId, right : ValueId) : ValueId
+      emit(BinaryOp.new(@function.next_value_id, TypeRef::BOOL, BinOp::Le, left, right))
+    end
+
+    def gt(left : ValueId, right : ValueId) : ValueId
+      emit(BinaryOp.new(@function.next_value_id, TypeRef::BOOL, BinOp::Gt, left, right))
+    end
+
+    def ge(left : ValueId, right : ValueId) : ValueId
+      emit(BinaryOp.new(@function.next_value_id, TypeRef::BOOL, BinOp::Ge, left, right))
+    end
+
+    # Bitwise
+    def bit_and(left : ValueId, right : ValueId, type : TypeRef) : ValueId
+      emit(BinaryOp.new(@function.next_value_id, type, BinOp::And, left, right))
+    end
+
+    def bit_or(left : ValueId, right : ValueId, type : TypeRef) : ValueId
+      emit(BinaryOp.new(@function.next_value_id, type, BinOp::Or, left, right))
+    end
+
+    def bit_xor(left : ValueId, right : ValueId, type : TypeRef) : ValueId
+      emit(BinaryOp.new(@function.next_value_id, type, BinOp::Xor, left, right))
+    end
+
+    def shl(left : ValueId, right : ValueId, type : TypeRef) : ValueId
+      emit(BinaryOp.new(@function.next_value_id, type, BinOp::Shl, left, right))
+    end
+
+    def shr(left : ValueId, right : ValueId, type : TypeRef) : ValueId
+      emit(BinaryOp.new(@function.next_value_id, type, BinOp::Shr, left, right))
+    end
+
+    # Unary
+    def neg(operand : ValueId, type : TypeRef) : ValueId
+      emit(UnaryOp.new(@function.next_value_id, type, UnOp::Neg, operand))
+    end
+
+    def not(operand : ValueId) : ValueId
+      emit(UnaryOp.new(@function.next_value_id, TypeRef::BOOL, UnOp::Not, operand))
+    end
+
+    def bit_not(operand : ValueId, type : TypeRef) : ValueId
+      emit(UnaryOp.new(@function.next_value_id, type, UnOp::BitNot, operand))
+    end
+
+    # Casts
+    def cast(kind : CastKind, value : ValueId, target_type : TypeRef) : ValueId
+      emit(Cast.new(@function.next_value_id, target_type, kind, value))
+    end
+
+    def bitcast(value : ValueId, target_type : TypeRef) : ValueId
+      cast(CastKind::Bitcast, value, target_type)
+    end
+
+    # Control flow values
+    def phi(type : TypeRef) : Phi
+      phi = Phi.new(@function.next_value_id, type)
+      block.add_phi(phi)
+      phi
+    end
+
+    def select(condition : ValueId, then_value : ValueId, else_value : ValueId, type : TypeRef) : ValueId
+      emit(Select.new(@function.next_value_id, type, condition, then_value, else_value))
+    end
+
+    # Calls
+    def call(callee : FunctionId, args : Array(ValueId), return_type : TypeRef) : ValueId
+      emit(Call.new(@function.next_value_id, return_type, callee, args))
+    end
+
+    def call_indirect(callee_ptr : ValueId, args : Array(ValueId), return_type : TypeRef) : ValueId
+      emit(IndirectCall.new(@function.next_value_id, return_type, callee_ptr, args))
+    end
+
+    # Terminators
+    def ret(value : ValueId? = nil)
+      block.terminator = Return.new(value)
+    end
+
+    def jump(target : BlockId)
+      block.terminator = Jump.new(target)
+    end
+
+    def branch(condition : ValueId, then_block : BlockId, else_block : BlockId)
+      block.terminator = Branch.new(condition, then_block, else_block)
+    end
+
+    def switch(value : ValueId, cases : Array(Tuple(Int64, BlockId)), default_block : BlockId)
+      block.terminator = Switch.new(value, cases, default_block)
+    end
+
+    def unreachable
+      block.terminator = Unreachable.new
+    end
+  end
+end
