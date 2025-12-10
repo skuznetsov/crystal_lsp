@@ -986,6 +986,8 @@ module Crystal::MIR
     def add_param(name : String, type : TypeRef) : UInt32
       idx = @params.size.to_u32
       @params << Parameter.new(idx, name, type)
+      # Reserve value IDs so instruction IDs don't clash with param indices
+      @next_value_id = @params.size.to_u32
       idx
     end
 

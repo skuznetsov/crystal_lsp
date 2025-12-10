@@ -187,6 +187,8 @@ module Crystal::MIR
     @indent : Int32
     @value_names : Hash(ValueId, String)
     @block_names : Hash(BlockId, String)
+    @current_return_type : String = "void"
+    @constant_values : Hash(ValueId, String)  # For inlining constants
 
     # Type metadata for debug DX
     @type_info_entries : Array(TypeInfoEntry)
@@ -196,7 +198,15 @@ module Crystal::MIR
 
     property emit_debug_info : Bool = true
     property emit_type_metadata : Bool = true
-    property target_triple : String = "x86_64-unknown-linux-gnu"
+    property target_triple : String = {% if flag?(:darwin) %}
+                                        {% if flag?(:aarch64) %}
+                                          "arm64-apple-macosx"
+                                        {% else %}
+                                          "x86_64-apple-macosx"
+                                        {% end %}
+                                      {% else %}
+                                        "x86_64-unknown-linux-gnu"
+                                      {% end %}
 
     def initialize(@module : Module)
       @type_mapper = LLVMTypeMapper.new(@module.type_registry)
@@ -204,6 +214,7 @@ module Crystal::MIR
       @indent = 0
       @value_names = {} of ValueId => String
       @block_names = {} of BlockId => String
+      @constant_values = {} of ValueId => String
 
       # Type metadata
       @type_info_entries = [] of TypeInfoEntry
@@ -318,6 +329,7 @@ module Crystal::MIR
       # Function signature
       param_types = func.params.map { |p| "#{@type_mapper.llvm_type(p.type)} %#{p.name}" }
       return_type = @type_mapper.llvm_type(func.return_type)
+      @current_return_type = return_type  # Store for terminator emission
 
       emit_raw "define #{return_type} @#{func.name}(#{param_types.join(", ")}) {\n"
 
@@ -331,6 +343,7 @@ module Crystal::MIR
     private def reset_value_names(func : Function)
       @value_names.clear
       @block_names.clear
+      @constant_values.clear
 
       func.params.each do |param|
         @value_names[param.index] = param.name
@@ -402,7 +415,9 @@ module Crystal::MIR
               when String  then "TODO_string"  # String constants need special handling
               else              "0"
               end
-      # Constants are typically inlined; emit as comment
+      # Store constant for inlining at use sites
+      @constant_values[inst.id] = value
+      # Emit as comment for readability
       emit "; #{name} = #{type} #{value}"
     end
 
@@ -562,9 +577,21 @@ module Crystal::MIR
 
     private def emit_call(inst : Call, name : String, func : Function)
       return_type = @type_mapper.llvm_type(inst.type)
-      args = inst.args.map { |a| "ptr #{value_ref(a)}" }.join(", ")  # Simplified
-      # Need to look up function name from ID
-      callee_name = "func#{inst.callee}"  # TODO: proper function lookup
+
+      # Look up callee function for name and param types
+      callee_func = @module.functions.find { |f| f.id == inst.callee }
+      callee_name = callee_func ? callee_func.name : "func#{inst.callee}"
+
+      # Format arguments with proper types
+      args = if callee_func
+               inst.args.map_with_index { |a, i|
+                 param_type = callee_func.params[i]?.try(&.type) || TypeRef::POINTER
+                 "#{@type_mapper.llvm_type(param_type)} #{value_ref(a)}"
+               }.join(", ")
+             else
+               inst.args.map { |a| "ptr #{value_ref(a)}" }.join(", ")
+             end
+
       if return_type == "void"
         emit "call void @#{callee_name}(#{args})"
       else
@@ -586,8 +613,10 @@ module Crystal::MIR
     private def emit_terminator(term : Terminator)
       case term
       when Return
-        if val = term.value
-          emit "ret ptr %#{@value_names[val]}"  # Simplified
+        if @current_return_type == "void"
+          emit "ret void"
+        elsif val = term.value
+          emit "ret #{@current_return_type} %#{@value_names[val]}"
         else
           emit "ret void"
         end
@@ -614,6 +643,11 @@ module Crystal::MIR
     end
 
     private def value_ref(id : ValueId) : String
+      # Check if it's a constant (inline the value)
+      if const_val = @constant_values[id]?
+        return const_val
+      end
+      # Otherwise reference by name
       if name = @value_names[id]?
         "%#{name}"
       else

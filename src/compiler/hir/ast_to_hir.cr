@@ -37,11 +37,15 @@ module Crystal::HIR
     # Type cache
     @type_cache : Hash(String, TypeRef)
 
+    # Value → Type mapping for type inference
+    @value_types : Hash(ValueId, TypeRef)
+
     def initialize(@function : Function, @module : Module, @arena)
       @current_block = @function.entry_block
       @locals = {} of String => ValueId
       @scope_stack = [@function.scopes[0].id]  # Function scope
       @type_cache = {} of String => TypeRef
+      @value_types = {} of ValueId => TypeRef
     end
 
     # Get current scope
@@ -74,7 +78,18 @@ module Crystal::HIR
     # Add instruction to current block
     def emit(value : Value) : Value
       get_block(@current_block).add(value)
+      @value_types[value.id] = value.type  # Track type for inference
       value
+    end
+
+    # Look up the type of a value by ID
+    def type_of(id : ValueId) : TypeRef
+      @value_types[id]? || TypeRef::VOID
+    end
+
+    # Register type for a value (used for params not emitted via emit)
+    def register_type(id : ValueId, type : TypeRef)
+      @value_types[id] = type
     end
 
     # Set terminator for current block
@@ -141,6 +156,14 @@ module Crystal::HIR
       @module = Module.new(module_name)
     end
 
+    # Look up return type of a function by name
+    private def get_function_return_type(name : String) : TypeRef
+      @module.functions.each do |func|
+        return func.return_type if func.name == name
+      end
+      TypeRef::VOID
+    end
+
     # Lower a function definition
     def lower_def(node : CrystalV2::Compiler::Frontend::DefNode) : Function
       name = String.new(node.name)
@@ -167,6 +190,7 @@ module Crystal::HIR
 
           hir_param = func.add_param(param_name, param_type)
           ctx.register_local(param_name, hir_param.id)
+          ctx.register_type(hir_param.id, param_type)  # Track param type for inference
         end
       end
 
@@ -444,7 +468,7 @@ module Crystal::HIR
       # Check if it's a local variable
       if local_id = ctx.lookup_local(name)
         # Return a copy/reference to the local
-        copy = Copy.new(ctx.next_id, TypeRef::VOID, local_id)  # Type will be refined
+        copy = Copy.new(ctx.next_id, ctx.type_of(local_id), local_id)
         ctx.emit(copy)
         return copy.id
       end
@@ -533,7 +557,8 @@ module Crystal::HIR
       result_type = if op.eq? || op.ne? || op.lt? || op.le? || op.gt? || op.ge? || op.and? || op.or?
                       TypeRef::BOOL
                     else
-                      TypeRef::VOID  # Will be refined by type inference
+                      # For arithmetic ops, infer type from left operand
+                      ctx.type_of(left_id)
                     end
 
       binop = BinaryOperation.new(ctx.next_id, result_type, op, left_id, right_id)
@@ -939,7 +964,14 @@ module Crystal::HIR
                    nil
                  end
 
-      call = Call.new(ctx.next_id, TypeRef::VOID, receiver_id, method_name, args, block_id)
+      # Try to infer return type for simple function calls
+      return_type = if receiver_id.nil?
+                      get_function_return_type(method_name)
+                    else
+                      TypeRef::VOID  # Method call - needs type inference
+                    end
+
+      call = Call.new(ctx.next_id, return_type, receiver_id, method_name, args, block_id)
       ctx.emit(call)
       call.id
     end
@@ -984,19 +1016,20 @@ module Crystal::HIR
       case target_node
       when CrystalV2::Compiler::Frontend::IdentifierNode
         name = String.new(target_node.name)
+        value_type = ctx.type_of(value_id)
         if existing = ctx.lookup_local(name)
           # Reassignment
-          copy = Copy.new(ctx.next_id, TypeRef::VOID, value_id)
+          copy = Copy.new(ctx.next_id, value_type, value_id)
           ctx.emit(copy)
           ctx.register_local(name, copy.id)
           copy.id
         else
           # New variable
-          local = Local.new(ctx.next_id, TypeRef::VOID, name, ctx.current_scope)
+          local = Local.new(ctx.next_id, value_type, name, ctx.current_scope)
           ctx.emit(local)
           ctx.register_local(name, value_id)
           # Also emit copy
-          copy = Copy.new(ctx.next_id, TypeRef::VOID, value_id)
+          copy = Copy.new(ctx.next_id, value_type, value_id)
           ctx.emit(copy)
           ctx.register_local(name, copy.id)
           copy.id

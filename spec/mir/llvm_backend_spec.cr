@@ -164,9 +164,9 @@ describe Crystal::MIR::LLVMIRGenerator do
       gen.emit_type_metadata = false
       output = gen.generate
 
-      # Note: value_ref uses value ID, so %r0 instead of %ptr
-      output.should contain("call void @__crystal_v2_rc_inc(ptr %r0)")
-      output.should contain("call void @__crystal_v2_rc_dec(ptr %r0, ptr null)")
+      # Parameters use their name directly
+      output.should contain("call void @__crystal_v2_rc_inc(ptr %ptr)")
+      output.should contain("call void @__crystal_v2_rc_dec(ptr %ptr, ptr null)")
     end
 
     it "generates binary operations" do
