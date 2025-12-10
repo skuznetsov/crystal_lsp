@@ -86,23 +86,36 @@ module Crystal::V2
       log "\n[2/5] Lowering to HIR..."
       hir_converter = HIR::AstToHir.new(arena, @input_file)
 
-      # Collect all DefNodes
+      # Collect all DefNodes and ClassNodes
       def_nodes = [] of CrystalV2::Compiler::Frontend::DefNode
+      class_nodes = [] of CrystalV2::Compiler::Frontend::ClassNode
       exprs.each do |expr_id|
         node = arena[expr_id]
-        if node.is_a?(CrystalV2::Compiler::Frontend::DefNode)
+        case node
+        when CrystalV2::Compiler::Frontend::DefNode
           def_nodes << node
+        when CrystalV2::Compiler::Frontend::ClassNode
+          class_nodes << node
         end
       end
 
-      # Two-pass approach for forward references:
-      # Pass 1: Register all function signatures
+      # Three-pass approach:
+      # Pass 1: Register all class types and their methods
+      class_nodes.each do |class_node|
+        hir_converter.register_class(class_node)
+      end
+
+      # Pass 2: Register all top-level function signatures
       def_nodes.each do |node|
         hir_converter.register_function(node)
       end
 
-      # Pass 2: Lower function bodies
+      # Pass 3: Lower all function and method bodies
       func_count = 0
+      class_nodes.each do |class_node|
+        hir_converter.lower_class(class_node)
+        func_count += 1
+      end
       def_nodes.each do |node|
         hir_converter.lower_def(node)
         func_count += 1
@@ -184,8 +197,22 @@ module Crystal::V2
         exit 1
       end
 
-      # Link with system linker
-      link_cmd = "cc -o #{@output_file} #{obj_file} 2>&1"
+      # Link with system linker and runtime
+      # Find runtime stub relative to driver location
+      runtime_dir = File.dirname(File.dirname(__FILE__))
+      runtime_stub = File.join(runtime_dir, "..", "runtime_stub.o")
+
+      # Compile runtime stub if needed
+      runtime_src = runtime_stub.gsub(/\.o$/, ".c")
+      if File.exists?(runtime_src) && (!File.exists?(runtime_stub) ||
+         File.info(runtime_src).modification_time > File.info(runtime_stub).modification_time)
+        `cc -c #{runtime_src} -o #{runtime_stub} 2>&1`
+      end
+
+      link_objs = [obj_file]
+      link_objs << runtime_stub if File.exists?(runtime_stub)
+
+      link_cmd = "cc -o #{@output_file} #{link_objs.join(" ")} 2>&1"
       log "  $ #{link_cmd}"
       link_result = `#{link_cmd}`
       unless $?.success?

@@ -159,6 +159,12 @@ module Crystal::HIR
     end
   end
 
+  # Instance variable info for class layout
+  record IVarInfo, name : String, type : TypeRef, offset : Int32
+
+  # Class type info
+  record ClassInfo, name : String, type_ref : TypeRef, ivars : Array(IVarInfo), size : Int32
+
   # Main AST to HIR converter
   class AstToHir
     alias AstNode = CrystalV2::Compiler::Frontend::Node
@@ -170,9 +176,182 @@ module Crystal::HIR
     # Pre-registered function signatures for forward reference support
     @function_types : Hash(String, TypeRef)
 
+    # Class type information
+    @class_info : Hash(String, ClassInfo)
+
+    # Current class being lowered (for ivar access)
+    @current_class : String?
+
     def initialize(@arena, module_name : String = "main")
       @module = Module.new(module_name)
       @function_types = {} of String => TypeRef
+      @class_info = {} of String => ClassInfo
+      @current_class = nil
+    end
+
+    # Get class info by name
+    def get_class_info(name : String) : ClassInfo?
+      @class_info[name]?
+    end
+
+    # Register a class type and its methods (pass 1)
+    def register_class(node : CrystalV2::Compiler::Frontend::ClassNode)
+      class_name = String.new(node.name)
+
+      # Collect instance variables and their types
+      ivars = [] of IVarInfo
+      offset = 8  # Start at 8 to leave room for type_id header
+
+      if body = node.body
+        body.each do |expr_id|
+          member = @arena[expr_id]
+          case member
+          when CrystalV2::Compiler::Frontend::InstanceVarDeclNode
+            # Instance variable declaration: @value : Int32
+            ivar_name = String.new(member.name)
+            ivar_type = type_ref_for_name(String.new(member.type))
+            ivars << IVarInfo.new(ivar_name, ivar_type, offset)
+            offset += type_size(ivar_type)
+
+          when CrystalV2::Compiler::Frontend::DefNode
+            # Register method signature
+            method_name = String.new(member.name)
+            full_name = "#{class_name}##{method_name}"
+            return_type = if rt = member.return_type
+                            type_ref_for_name(String.new(rt))
+                          else
+                            TypeRef::VOID
+                          end
+            @function_types[full_name] = return_type
+          end
+        end
+      end
+
+      # Create class type
+      type_ref = @module.intern_type(TypeDescriptor.new(TypeKind::Class, class_name))
+      @class_info[class_name] = ClassInfo.new(class_name, type_ref, ivars, offset)
+
+      # Register "new" allocator function
+      @function_types["#{class_name}.new"] = type_ref
+    end
+
+    # Lower a class and all its methods (pass 3)
+    def lower_class(node : CrystalV2::Compiler::Frontend::ClassNode)
+      class_name = String.new(node.name)
+      class_info = @class_info[class_name]
+      @current_class = class_name
+
+      # Generate allocator function: ClassName.new
+      generate_allocator(class_name, class_info)
+
+      # Lower each method
+      if body = node.body
+        body.each do |expr_id|
+          member = @arena[expr_id]
+          if member.is_a?(CrystalV2::Compiler::Frontend::DefNode)
+            lower_method(class_name, class_info, member)
+          end
+        end
+      end
+
+      @current_class = nil
+    end
+
+    # Generate allocator: ClassName.new() -> allocates and returns pointer
+    private def generate_allocator(class_name : String, class_info : ClassInfo)
+      func_name = "#{class_name}.new"
+      func = @module.create_function(func_name, class_info.type_ref)
+      ctx = LoweringContext.new(func, @module, @arena)
+
+      # Allocate object (memory strategy determined by escape analysis)
+      alloc = Allocate.new(ctx.next_id, class_info.type_ref, [] of ValueId)
+      ctx.emit(alloc)
+      ctx.register_type(alloc.id, class_info.type_ref)
+
+      # Initialize instance variables to zero/default
+      class_info.ivars.each do |ivar|
+        default_val = Literal.new(ctx.next_id, ivar.type, 0_i64)
+        ctx.emit(default_val)
+        ivar_store = FieldSet.new(ctx.next_id, TypeRef::VOID, alloc.id, ivar.name, default_val.id)
+        ctx.emit(ivar_store)
+      end
+
+      # Call initialize if it exists
+      init_name = "#{class_name}#initialize"
+      if @function_types.has_key?(init_name)
+        init_call = Call.new(ctx.next_id, TypeRef::VOID, alloc.id, init_name, [] of ValueId)
+        ctx.emit(init_call)
+      end
+
+      # Return allocated object
+      ctx.terminate(Return.new(alloc.id))
+    end
+
+    # Lower a method within a class
+    private def lower_method(class_name : String, class_info : ClassInfo, node : CrystalV2::Compiler::Frontend::DefNode)
+      method_name = String.new(node.name)
+      full_name = "#{class_name}##{method_name}"
+
+      return_type = if rt = node.return_type
+                      type_ref_for_name(String.new(rt))
+                    else
+                      TypeRef::VOID
+                    end
+
+      func = @module.create_function(full_name, return_type)
+      ctx = LoweringContext.new(func, @module, @arena)
+
+      # Add implicit 'self' parameter first
+      self_param = func.add_param("self", class_info.type_ref)
+      ctx.register_local("self", self_param.id)
+      ctx.register_type(self_param.id, class_info.type_ref)
+
+      # Lower explicit parameters
+      if params = node.params
+        params.each do |param|
+          param_name = param.name.nil? ? "_" : String.new(param.name.not_nil!)
+          param_type = if ta = param.type_annotation
+                         type_ref_for_name(String.new(ta))
+                       else
+                         TypeRef::VOID
+                       end
+          hir_param = func.add_param(param_name, param_type)
+          ctx.register_local(param_name, hir_param.id)
+          ctx.register_type(hir_param.id, param_type)
+        end
+      end
+
+      # Lower body
+      last_value : ValueId? = nil
+      if body = node.body
+        body.each do |expr_id|
+          last_value = lower_expr(ctx, expr_id)
+        end
+      end
+
+      # Add implicit return if not already terminated
+      block = ctx.get_block(ctx.current_block)
+      if block.terminator.is_a?(Unreachable)
+        block.terminator = Return.new(last_value)
+      end
+    end
+
+    # Helper to get type size in bytes
+    private def type_size(type : TypeRef) : Int32
+      case type
+      when TypeRef::BOOL, TypeRef::INT8, TypeRef::UINT8
+        1
+      when TypeRef::INT16, TypeRef::UINT16
+        2
+      when TypeRef::INT32, TypeRef::UINT32, TypeRef::FLOAT32, TypeRef::CHAR
+        4
+      when TypeRef::INT64, TypeRef::UINT64, TypeRef::FLOAT64
+        8
+      when TypeRef::INT128, TypeRef::UINT128
+        16
+      else
+        8  # Pointer size for reference types
+      end
     end
 
     # Register a function signature (for forward reference support)
@@ -518,9 +697,23 @@ module Crystal::HIR
 
     private def lower_instance_var(ctx : LoweringContext, node : CrystalV2::Compiler::Frontend::InstanceVarNode) : ValueId
       name = String.new(node.name)
+
+      # Get the type of the instance variable from current class
+      ivar_type = TypeRef::VOID
+      if class_name = @current_class
+        if class_info = @class_info[class_name]?
+          class_info.ivars.each do |ivar|
+            if ivar.name == name
+              ivar_type = ivar.type
+              break
+            end
+          end
+        end
+      end
+
       # Instance var access is a field get on self
       self_id = emit_self(ctx)
-      field_get = FieldGet.new(ctx.next_id, TypeRef::VOID, self_id, name)
+      field_get = FieldGet.new(ctx.next_id, ivar_type, self_id, name)
       ctx.emit(field_get)
       field_get.id
     end
@@ -1119,7 +1312,7 @@ module Crystal::HIR
 
     private def lower_call(ctx : LoweringContext, node : CrystalV2::Compiler::Frontend::CallNode) : ValueId
       # CallNode has callee (ExprId) which can be:
-      # - IdentifierNode: simple function call like foo()
+      # - IdentifierNode: simple function call like foo() or ClassName.new()
       # - MemberAccessNode: method call like obj.method()
       # - Other: chained/complex calls
 
@@ -1127,6 +1320,7 @@ module Crystal::HIR
 
       receiver_id : ValueId? = nil
       method_name : String
+      full_method_name : String? = nil
 
       case callee_node
       when CrystalV2::Compiler::Frontend::IdentifierNode
@@ -1135,9 +1329,43 @@ module Crystal::HIR
         receiver_id = nil
 
       when CrystalV2::Compiler::Frontend::MemberAccessNode
-        # Method call: obj.method()
-        receiver_id = lower_expr(ctx, callee_node.object)
+        # Could be method call: obj.method() or class method: ClassName.new()
+        obj_node = @arena[callee_node.object]
         method_name = String.new(callee_node.member)
+
+        # Check if it's a class method call (ClassName.new())
+        # Can be ConstantNode OR IdentifierNode starting with uppercase
+        class_name_str : String? = nil
+        if obj_node.is_a?(CrystalV2::Compiler::Frontend::ConstantNode)
+          class_name_str = String.new(obj_node.name)
+        elsif obj_node.is_a?(CrystalV2::Compiler::Frontend::IdentifierNode)
+          name = String.new(obj_node.name)
+          # Check if it's a class name (starts with uppercase and is known class)
+          if name[0].uppercase? && @class_info.has_key?(name)
+            class_name_str = name
+          end
+        end
+
+        if class_name_str
+          # Class method call like Counter.new()
+          full_method_name = "#{class_name_str}.#{method_name}"
+          receiver_id = nil  # Static call, no receiver
+        else
+          # Instance method call like c.increment()
+          receiver_id = lower_expr(ctx, callee_node.object)
+
+          # Try to determine the class from receiver's type
+          receiver_type = ctx.type_of(receiver_id)
+          if receiver_type.id > 0
+            # Look up class name from type
+            @class_info.each do |name, info|
+              if info.type_ref.id == receiver_type.id
+                full_method_name = "#{name}##{method_name}"
+                break
+              end
+            end
+          end
+        end
 
       else
         # Complex callee (e.g., another call result being called)
@@ -1161,14 +1389,29 @@ module Crystal::HIR
                    nil
                  end
 
-      # Try to infer return type for simple function calls
-      return_type = if receiver_id.nil?
+      # Try to infer return type
+      return_type = if full_name = full_method_name
+                      get_function_return_type(full_name)
+                    elsif receiver_id.nil?
                       get_function_return_type(method_name)
                     else
-                      TypeRef::VOID  # Method call - needs type inference
+                      # Try to find method in any class (fallback)
+                      found_type = TypeRef::VOID
+                      @class_info.each do |class_name, info|
+                        test_name = "#{class_name}##{method_name}"
+                        if type = @function_types[test_name]?
+                          found_type = type
+                          full_method_name = test_name
+                          break
+                        end
+                      end
+                      found_type
                     end
 
-      call = Call.new(ctx.next_id, return_type, receiver_id, method_name, args, block_id)
+      # Use full method name if resolved, otherwise use simple name
+      actual_method_name = full_method_name || method_name
+
+      call = Call.new(ctx.next_id, return_type, receiver_id, actual_method_name, args, block_id)
       ctx.emit(call)
       call.id
     end

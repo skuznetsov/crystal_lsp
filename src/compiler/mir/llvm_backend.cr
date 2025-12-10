@@ -333,7 +333,8 @@ module Crystal::MIR
       return_type = @type_mapper.llvm_type(func.return_type)
       @current_return_type = return_type  # Store for terminator emission
 
-      emit_raw "define #{return_type} @#{func.name}(#{param_types.join(", ")}) {\n"
+      mangled_name = @type_mapper.mangle_name(func.name)
+      emit_raw "define #{return_type} @#{mangled_name}(#{param_types.join(", ")}) {\n"
 
       func.blocks.each do |block|
         emit_block(block, func)
@@ -486,7 +487,10 @@ module Crystal::MIR
     private def emit_store(inst : Store)
       ptr = value_ref(inst.ptr)
       val = value_ref(inst.value)
-      emit "store ptr #{val}, ptr #{ptr}"  # Type needs refinement
+      # Look up the type of the value being stored
+      val_type = @value_types[inst.value]? || TypeRef::POINTER
+      val_type_str = @type_mapper.llvm_type(val_type)
+      emit "store #{val_type_str} #{val}, ptr #{ptr}"
     end
 
     private def emit_gep(inst : GetElementPtr, name : String)
@@ -592,7 +596,11 @@ module Crystal::MIR
 
       # Look up callee function for name and param types
       callee_func = @module.functions.find { |f| f.id == inst.callee }
-      callee_name = callee_func ? callee_func.name : "func#{inst.callee}"
+      callee_name = if callee_func
+                      @type_mapper.mangle_name(callee_func.name)
+                    else
+                      "func#{inst.callee}"
+                    end
 
       # Format arguments with proper types
       args = if callee_func
