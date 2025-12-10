@@ -1,0 +1,632 @@
+# HIR → MIR Lowering
+#
+# Transforms High-Level IR (HIR) into Mid-Level IR (MIR):
+# - Converts HIR values to MIR SSA values
+# - Makes memory operations explicit (alloc, load, store)
+# - Assigns memory strategy based on escape/taint analysis
+# - Lowers closures to struct + function pointer
+# - Inserts RC operations for ARC-managed allocations
+#
+# See docs/codegen_architecture.md Section 4 for specification.
+
+require "./mir"
+require "../hir/hir"
+require "../hir/memory_strategy"
+
+module Crystal
+  module MIR
+  # ═══════════════════════════════════════════════════════════════════════════
+  # HIR TO MIR LOWERING
+  # ═══════════════════════════════════════════════════════════════════════════
+
+  class HIRToMIRLowering
+    getter hir_module : HIR::Module
+    getter mir_module : Module
+
+    # Mapping from HIR ValueId to MIR ValueId per function
+    @value_map : Hash(HIR::ValueId, ValueId)
+
+    # Mapping from HIR BlockId to MIR BlockId
+    @block_map : Hash(HIR::BlockId, BlockId)
+
+    # Current function being lowered
+    @current_hir_func : HIR::Function?
+    @current_mir_func : Function?
+    @builder : Builder?
+
+    # Memory strategy (note: we use inline selection, not global assigner)
+
+    # Statistics
+    getter stats : LoweringStats = LoweringStats.new
+
+    def initialize(@hir_module : HIR::Module)
+      @mir_module = Module.new(@hir_module.name)
+      @value_map = {} of HIR::ValueId => ValueId
+      @block_map = {} of HIR::BlockId => BlockId
+    end
+
+    # ─────────────────────────────────────────────────────────────────────────
+    # Main Entry Point
+    # ─────────────────────────────────────────────────────────────────────────
+
+    def lower : Module
+      @hir_module.functions.each do |hir_func|
+        lower_function(hir_func)
+      end
+
+      @mir_module
+    end
+
+    # ─────────────────────────────────────────────────────────────────────────
+    # Function Lowering
+    # ─────────────────────────────────────────────────────────────────────────
+
+    private def lower_function(hir_func : HIR::Function)
+      # Create MIR function
+      mir_func = @mir_module.create_function(
+        hir_func.name,
+        convert_type(hir_func.return_type)
+      )
+
+      @current_hir_func = hir_func
+      @current_mir_func = mir_func
+      @value_map.clear
+      @block_map.clear
+      @builder = Builder.new(mir_func)
+
+      # Add parameters
+      hir_func.params.each do |param|
+        mir_idx = mir_func.add_param(param.name, convert_type(param.type))
+        @value_map[param.id] = mir_idx
+      end
+
+      # Create all blocks first (for forward references)
+      hir_func.blocks.each do |hir_block|
+        mir_block_id = mir_func.create_block
+        @block_map[hir_block.id] = mir_block_id
+      end
+
+      # Fix entry block mapping
+      @block_map[hir_func.entry_block] = mir_func.entry_block
+
+      # Lower each block
+      hir_func.blocks.each do |hir_block|
+        lower_block(hir_block)
+      end
+
+      # Compute predecessors for phi resolution
+      mir_func.compute_predecessors
+
+      @stats.functions_lowered += 1
+    end
+
+    # ─────────────────────────────────────────────────────────────────────────
+    # Block Lowering
+    # ─────────────────────────────────────────────────────────────────────────
+
+    private def lower_block(hir_block : HIR::Block)
+      builder = @builder.not_nil!
+      mir_block_id = @block_map[hir_block.id]
+      builder.current_block = mir_block_id
+
+      # Lower each instruction
+      hir_block.instructions.each do |inst|
+        lower_value(inst)
+      end
+
+      # Lower terminator
+      lower_terminator(hir_block.terminator)
+
+      @stats.blocks_lowered += 1
+    end
+
+    # ─────────────────────────────────────────────────────────────────────────
+    # Value Lowering
+    # ─────────────────────────────────────────────────────────────────────────
+
+    private def lower_value(hir_value : HIR::Value)
+      mir_id = case hir_value
+               when HIR::Literal
+                 lower_literal(hir_value)
+               when HIR::Local
+                 lower_local(hir_value)
+               when HIR::Parameter
+                 # Parameters already mapped
+                 @value_map[hir_value.id]
+               when HIR::Allocate
+                 lower_allocate(hir_value)
+               when HIR::FieldGet
+                 lower_field_get(hir_value)
+               when HIR::FieldSet
+                 lower_field_set(hir_value)
+               when HIR::IndexGet
+                 lower_index_get(hir_value)
+               when HIR::IndexSet
+                 lower_index_set(hir_value)
+               when HIR::Call
+                 lower_call(hir_value)
+               when Crystal::HIR::BinaryOperation
+                 lower_binary_op(hir_value)
+               when Crystal::HIR::UnaryOperation
+                 lower_unary_op(hir_value)
+               when HIR::Cast
+                 lower_cast(hir_value)
+               when HIR::IsA
+                 lower_is_a(hir_value)
+               when HIR::Phi
+                 lower_phi(hir_value)
+               when HIR::Copy
+                 lower_copy(hir_value)
+               when HIR::MakeClosure
+                 lower_closure(hir_value)
+               when HIR::Yield
+                 lower_yield(hir_value)
+               when HIR::ClassVarGet
+                 lower_classvar_get(hir_value)
+               when HIR::ClassVarSet
+                 lower_classvar_set(hir_value)
+               else
+                 raise "Unsupported HIR value: #{hir_value.class}"
+               end
+
+      @value_map[hir_value.id] = mir_id if mir_id
+      @stats.values_lowered += 1
+    end
+
+    # ─────────────────────────────────────────────────────────────────────────
+    # Literal Lowering
+    # ─────────────────────────────────────────────────────────────────────────
+
+    private def lower_literal(lit : HIR::Literal) : ValueId
+      builder = @builder.not_nil!
+      case v = lit.value
+      when Int64
+        builder.const_int(v, convert_type(lit.type))
+      when UInt64
+        builder.const_uint(v, convert_type(lit.type))
+      when Float64
+        builder.const_float(v, convert_type(lit.type))
+      when Bool
+        builder.const_bool(v)
+      when String
+        builder.const_string(v)
+      when Char
+        # Char as i32
+        builder.const_int(v.ord.to_i64, TypeRef::CHAR)
+      when Nil
+        builder.const_nil
+      else
+        builder.const_nil
+      end
+    end
+
+    # ─────────────────────────────────────────────────────────────────────────
+    # Local Variable Lowering
+    # ─────────────────────────────────────────────────────────────────────────
+
+    private def lower_local(local : HIR::Local) : ValueId
+      # In SSA, locals are represented as values
+      # If mutable, we allocate on stack and use load/store
+      builder = @builder.not_nil!
+
+      if local.mutable
+        # Allocate space on stack
+        ptr = builder.alloc(MemoryStrategy::Stack, convert_type(local.type))
+        @stats.stack_allocations += 1
+        ptr
+      else
+        # Immutable locals are just values - return placeholder
+        # (actual value will come from assignment)
+        builder.const_nil  # Placeholder, will be replaced
+      end
+    end
+
+    # ─────────────────────────────────────────────────────────────────────────
+    # Allocation Lowering (with Memory Strategy)
+    # ─────────────────────────────────────────────────────────────────────────
+
+    private def lower_allocate(alloc : HIR::Allocate) : ValueId
+      builder = @builder.not_nil!
+
+      # Determine memory strategy based on escape/taint analysis
+      strategy = select_memory_strategy(alloc)
+
+      # Create allocation
+      ptr = builder.alloc(strategy, convert_type(alloc.type))
+
+      # Insert RC increment for ARC allocations
+      case strategy
+      when MemoryStrategy::ARC
+        builder.rc_inc(ptr)
+        @stats.arc_allocations += 1
+      when MemoryStrategy::AtomicARC
+        builder.rc_inc(ptr, atomic: true)
+        @stats.arc_allocations += 1
+      when MemoryStrategy::Stack
+        @stats.stack_allocations += 1
+      when MemoryStrategy::Slab
+        @stats.slab_allocations += 1
+      when MemoryStrategy::GC
+        @stats.gc_allocations += 1
+      end
+
+      ptr
+    end
+
+    private def select_memory_strategy(alloc : HIR::Allocate) : MemoryStrategy
+      # Determine strategy based on lifetime and taints
+      lifetime = alloc.lifetime
+      taints = alloc.taints
+
+      # Cyclic types must use GC
+      if taints.cyclic?
+        return MemoryStrategy::GC
+      end
+
+      # Thread-shared requires atomic operations
+      if taints.thread_shared?
+        return MemoryStrategy::AtomicARC
+      end
+
+      # FFI-exposed uses GC for safety
+      if taints.ffi_exposed?
+        return MemoryStrategy::GC
+      end
+
+      # Strategy based on lifetime
+      case lifetime
+      when HIR::LifetimeTag::StackLocal
+        MemoryStrategy::Stack
+      when HIR::LifetimeTag::ArgEscape
+        MemoryStrategy::Slab
+      when HIR::LifetimeTag::HeapEscape
+        MemoryStrategy::ARC
+      when HIR::LifetimeTag::GlobalEscape
+        MemoryStrategy::AtomicARC
+      else
+        # Unknown/conservative: GC
+        MemoryStrategy::GC
+      end
+    end
+
+    # ─────────────────────────────────────────────────────────────────────────
+    # Field Access Lowering
+    # ─────────────────────────────────────────────────────────────────────────
+
+    private def lower_field_get(field : HIR::FieldGet) : ValueId
+      builder = @builder.not_nil!
+      obj_ptr = get_value(field.object)
+
+      # GEP to field address + load
+      # Field index would come from type info - using 0 as placeholder
+      field_ptr = builder.gep(obj_ptr, [0_u32], TypeRef::POINTER)
+      builder.load(field_ptr, convert_type(field.type))
+    end
+
+    private def lower_field_set(field : HIR::FieldSet) : ValueId
+      builder = @builder.not_nil!
+      obj_ptr = get_value(field.object)
+      value = get_value(field.value)
+
+      # GEP to field address + store
+      field_ptr = builder.gep(obj_ptr, [0_u32], TypeRef::POINTER)
+      builder.store(field_ptr, value)
+    end
+
+    # ─────────────────────────────────────────────────────────────────────────
+    # Index Access Lowering
+    # ─────────────────────────────────────────────────────────────────────────
+
+    private def lower_index_get(idx : HIR::IndexGet) : ValueId
+      builder = @builder.not_nil!
+      obj_ptr = get_value(idx.object)
+      index = get_value(idx.index)
+
+      # For now, emit as a call to [] method
+      # In real impl, would lower to GEP for arrays
+      builder.const_nil  # Placeholder
+    end
+
+    private def lower_index_set(idx : HIR::IndexSet) : ValueId
+      builder = @builder.not_nil!
+      obj_ptr = get_value(idx.object)
+      index = get_value(idx.index)
+      value = get_value(idx.value)
+
+      # For now, emit as a call to []= method
+      builder.const_nil  # Placeholder
+    end
+
+    # ─────────────────────────────────────────────────────────────────────────
+    # Call Lowering
+    # ─────────────────────────────────────────────────────────────────────────
+
+    private def lower_call(call : HIR::Call) : ValueId
+      builder = @builder.not_nil!
+
+      # Get arguments
+      args = call.args.map { |arg| get_value(arg) }
+
+      # Add receiver as first arg if present
+      if recv = call.receiver
+        args.unshift(get_value(recv))
+      end
+
+      # For now, use function ID 0 - would be resolved by function lookup
+      builder.call(0_u32, args, convert_type(call.type))
+    end
+
+    # ─────────────────────────────────────────────────────────────────────────
+    # Binary/Unary Operation Lowering
+    # ─────────────────────────────────────────────────────────────────────────
+
+    private def lower_binary_op(binop : HIR::BinaryOperation) : ValueId
+      builder = @builder.not_nil!
+      left = get_value(binop.left)
+      right = get_value(binop.right)
+      result_type = convert_type(binop.type)
+
+      case binop.op
+      when HIR::BinaryOp::Add then builder.add(left, right, result_type)
+      when HIR::BinaryOp::Sub then builder.sub(left, right, result_type)
+      when HIR::BinaryOp::Mul then builder.mul(left, right, result_type)
+      when HIR::BinaryOp::Div then builder.div(left, right, result_type)
+      when HIR::BinaryOp::Mod then builder.rem(left, right, result_type)
+      when HIR::BinaryOp::Eq  then builder.eq(left, right)
+      when HIR::BinaryOp::Ne  then builder.ne(left, right)
+      when HIR::BinaryOp::Lt  then builder.lt(left, right)
+      when HIR::BinaryOp::Le  then builder.le(left, right)
+      when HIR::BinaryOp::Gt  then builder.gt(left, right)
+      when HIR::BinaryOp::Ge  then builder.ge(left, right)
+      when HIR::BinaryOp::BitAnd then builder.bit_and(left, right, result_type)
+      when HIR::BinaryOp::BitOr  then builder.bit_or(left, right, result_type)
+      when HIR::BinaryOp::BitXor then builder.bit_xor(left, right, result_type)
+      when HIR::BinaryOp::Shl then builder.shl(left, right, result_type)
+      when HIR::BinaryOp::Shr then builder.shr(left, right, result_type)
+      when HIR::BinaryOp::And
+        # Logical AND
+        builder.bit_and(left, right, TypeRef::BOOL)
+      when HIR::BinaryOp::Or
+        # Logical OR
+        builder.bit_or(left, right, TypeRef::BOOL)
+      else
+        builder.const_nil  # Fallback
+      end
+    end
+
+    private def lower_unary_op(unop : HIR::UnaryOperation) : ValueId
+      builder = @builder.not_nil!
+      operand = get_value(unop.operand)
+      result_type = convert_type(unop.type)
+
+      case unop.op
+      when HIR::UnaryOp::Neg    then builder.neg(operand, result_type)
+      when HIR::UnaryOp::Not    then builder.not(operand)
+      when HIR::UnaryOp::BitNot then builder.bit_not(operand, result_type)
+      else
+        builder.const_nil
+      end
+    end
+
+    # ─────────────────────────────────────────────────────────────────────────
+    # Cast Lowering
+    # ─────────────────────────────────────────────────────────────────────────
+
+    private def lower_cast(cast : HIR::Cast) : ValueId
+      builder = @builder.not_nil!
+      value = get_value(cast.value)
+      target = convert_type(cast.target_type)
+
+      # Determine cast kind based on source/target types
+      # For now, use bitcast as default
+      builder.bitcast(value, target)
+    end
+
+    private def lower_is_a(isa : HIR::IsA) : ValueId
+      builder = @builder.not_nil!
+      # Type check would involve runtime type info
+      # For now, return bool constant
+      builder.const_bool(true)
+    end
+
+    # ─────────────────────────────────────────────────────────────────────────
+    # Phi Lowering
+    # ─────────────────────────────────────────────────────────────────────────
+
+    private def lower_phi(hir_phi : HIR::Phi) : ValueId
+      builder = @builder.not_nil!
+      mir_phi = builder.phi(convert_type(hir_phi.type))
+
+      hir_phi.incoming.each do |(hir_block, hir_value)|
+        mir_block = @block_map[hir_block]
+        mir_value = get_value(hir_value)
+        mir_phi.add_incoming(mir_block, mir_value)
+      end
+
+      mir_phi.id
+    end
+
+    # ─────────────────────────────────────────────────────────────────────────
+    # Copy/Assignment Lowering
+    # ─────────────────────────────────────────────────────────────────────────
+
+    private def lower_copy(copy : HIR::Copy) : ValueId
+      # In SSA, copy is just value forwarding
+      get_value(copy.source)
+    end
+
+    # ─────────────────────────────────────────────────────────────────────────
+    # Closure Lowering
+    # ─────────────────────────────────────────────────────────────────────────
+
+    private def lower_closure(closure : HIR::MakeClosure) : ValueId
+      builder = @builder.not_nil!
+
+      # Closures become:
+      # 1. Struct containing captured variables
+      # 2. Function pointer to closure body
+      # For now, allocate environment struct
+      env_ptr = builder.alloc(MemoryStrategy::ARC, TypeRef::POINTER)
+
+      # Store captured values in environment
+      closure.captures.each_with_index do |cap, idx|
+        cap_value = get_value(cap.value_id)
+        field_ptr = builder.gep(env_ptr, [idx.to_u32], TypeRef::POINTER)
+        builder.store(field_ptr, cap_value)
+      end
+
+      @stats.closures_lowered += 1
+      env_ptr
+    end
+
+    # ─────────────────────────────────────────────────────────────────────────
+    # Yield Lowering
+    # ─────────────────────────────────────────────────────────────────────────
+
+    private def lower_yield(yld : HIR::Yield) : ValueId
+      builder = @builder.not_nil!
+      # Yield becomes indirect call through block parameter
+      args = yld.args.map { |arg| get_value(arg) }
+      # Block pointer would be passed as hidden parameter
+      builder.const_nil  # Placeholder
+    end
+
+    # ─────────────────────────────────────────────────────────────────────────
+    # Class Variable Lowering
+    # ─────────────────────────────────────────────────────────────────────────
+
+    private def lower_classvar_get(cv : HIR::ClassVarGet) : ValueId
+      builder = @builder.not_nil!
+      # Class vars are global addresses
+      # Would need global symbol table
+      builder.const_nil  # Placeholder
+    end
+
+    private def lower_classvar_set(cv : HIR::ClassVarSet) : ValueId
+      builder = @builder.not_nil!
+      value = get_value(cv.value)
+      # Store to global address
+      builder.const_nil  # Placeholder
+    end
+
+    # ─────────────────────────────────────────────────────────────────────────
+    # Terminator Lowering
+    # ─────────────────────────────────────────────────────────────────────────
+
+    private def lower_terminator(term : HIR::Terminator)
+      builder = @builder.not_nil!
+
+      case term
+      when HIR::Return
+        if v = term.value
+          builder.ret(get_value(v))
+        else
+          builder.ret
+        end
+      when HIR::Branch
+        cond = get_value(term.condition)
+        then_block = @block_map[term.then_block]
+        else_block = @block_map[term.else_block]
+        builder.branch(cond, then_block, else_block)
+      when HIR::Jump
+        target = @block_map[term.target]
+        builder.jump(target)
+      when HIR::Switch
+        value = get_value(term.value)
+        cases = term.cases.map do |(val_id, block_id)|
+          val = get_value(val_id)
+          mir_block = @block_map[block_id]
+          {0_i64, mir_block}  # Would need to extract actual constant value
+        end
+        default_block = @block_map[term.default]
+        builder.switch(value, cases, default_block)
+      when HIR::Unreachable
+        builder.unreachable
+      end
+    end
+
+    # ─────────────────────────────────────────────────────────────────────────
+    # Helpers
+    # ─────────────────────────────────────────────────────────────────────────
+
+    private def get_value(hir_id : HIR::ValueId) : ValueId
+      @value_map[hir_id]? || 0_u32
+    end
+
+    private def convert_type(hir_type : HIR::TypeRef) : TypeRef
+      # Map HIR type IDs to MIR type IDs
+      # Primitives have same IDs in both
+      case hir_type
+      when HIR::TypeRef::VOID    then TypeRef::VOID
+      when HIR::TypeRef::BOOL    then TypeRef::BOOL
+      when HIR::TypeRef::INT8    then TypeRef::INT8
+      when HIR::TypeRef::INT16   then TypeRef::INT16
+      when HIR::TypeRef::INT32   then TypeRef::INT32
+      when HIR::TypeRef::INT64   then TypeRef::INT64
+      when HIR::TypeRef::INT128  then TypeRef::INT128
+      when HIR::TypeRef::UINT8   then TypeRef::UINT8
+      when HIR::TypeRef::UINT16  then TypeRef::UINT16
+      when HIR::TypeRef::UINT32  then TypeRef::UINT32
+      when HIR::TypeRef::UINT64  then TypeRef::UINT64
+      when HIR::TypeRef::UINT128 then TypeRef::UINT128
+      when HIR::TypeRef::FLOAT32 then TypeRef::FLOAT32
+      when HIR::TypeRef::FLOAT64 then TypeRef::FLOAT64
+      when HIR::TypeRef::CHAR    then TypeRef::CHAR
+      when HIR::TypeRef::STRING  then TypeRef::STRING
+      when HIR::TypeRef::NIL     then TypeRef::NIL
+      when HIR::TypeRef::SYMBOL  then TypeRef::SYMBOL
+      else
+        # User-defined types: offset by primitive count
+        TypeRef.new(hir_type.id + 20_u32)
+      end
+    end
+  end
+
+  # ═══════════════════════════════════════════════════════════════════════════
+  # LOWERING STATISTICS
+  # ═══════════════════════════════════════════════════════════════════════════
+
+  class LoweringStats
+    property functions_lowered : Int32 = 0
+    property blocks_lowered : Int32 = 0
+    property values_lowered : Int32 = 0
+    property closures_lowered : Int32 = 0
+
+    # Memory strategy counts
+    property stack_allocations : Int32 = 0
+    property slab_allocations : Int32 = 0
+    property arc_allocations : Int32 = 0
+    property gc_allocations : Int32 = 0
+
+    def total_allocations : Int32
+      stack_allocations + slab_allocations + arc_allocations + gc_allocations
+    end
+
+    def to_s(io : IO) : Nil
+      io << "Lowering Statistics:\n"
+      io << "  Functions: " << functions_lowered << "\n"
+      io << "  Blocks: " << blocks_lowered << "\n"
+      io << "  Values: " << values_lowered << "\n"
+      io << "  Closures: " << closures_lowered << "\n"
+      io << "  Memory allocations:\n"
+      io << "    Stack: " << stack_allocations << "\n"
+      io << "    Slab: " << slab_allocations << "\n"
+      io << "    ARC: " << arc_allocations << "\n"
+      io << "    GC: " << gc_allocations << "\n"
+      io << "    Total: " << total_allocations << "\n"
+    end
+  end
+
+  # ═══════════════════════════════════════════════════════════════════════════
+  # CONVENIENCE METHOD ON HIR MODULE
+  # ═══════════════════════════════════════════════════════════════════════════
+
+  end  # module MIR
+
+  class HIR::Module
+    def lower_to_mir : MIR::Module
+      lowering = MIR::HIRToMIRLowering.new(self)
+      lowering.lower
+    end
+  end
+end  # module Crystal
