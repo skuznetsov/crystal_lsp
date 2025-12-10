@@ -189,6 +189,7 @@ module Crystal::MIR
     @block_names : Hash(BlockId, String)
     @current_return_type : String = "void"
     @constant_values : Hash(ValueId, String)  # For inlining constants
+    @value_types : Hash(ValueId, TypeRef)     # For tracking operand types
 
     # Type metadata for debug DX
     @type_info_entries : Array(TypeInfoEntry)
@@ -215,6 +216,7 @@ module Crystal::MIR
       @value_names = {} of ValueId => String
       @block_names = {} of BlockId => String
       @constant_values = {} of ValueId => String
+      @value_types = {} of ValueId => TypeRef
 
       # Type metadata
       @type_info_entries = [] of TypeInfoEntry
@@ -344,9 +346,11 @@ module Crystal::MIR
       @value_names.clear
       @block_names.clear
       @constant_values.clear
+      @value_types.clear
 
       func.params.each do |param|
         @value_names[param.index] = param.name
+        @value_types[param.index] = param.type
       end
 
       func.blocks.each do |block|
@@ -369,6 +373,7 @@ module Crystal::MIR
     private def emit_instruction(inst : Value, func : Function)
       name = "%r#{inst.id}"
       @value_names[inst.id] = "r#{inst.id}"
+      @value_types[inst.id] = inst.type
 
       case inst
       when Constant
@@ -492,34 +497,41 @@ module Crystal::MIR
     end
 
     private def emit_binary_op(inst : BinaryOp, name : String)
-      type = @type_mapper.llvm_type(inst.type)
+      result_type = @type_mapper.llvm_type(inst.type)
       left = value_ref(inst.left)
       right = value_ref(inst.right)
+
+      # For comparisons, use operand type; for others, use result type
+      operand_type = @value_types[inst.left]? || TypeRef::INT32
+      operand_type_str = @type_mapper.llvm_type(operand_type)
+
+      is_signed = operand_type.id <= TypeRef::INT128.id
 
       op = case inst.op
            when .add? then "add"
            when .sub? then "sub"
            when .mul? then "mul"
-           when .div? then inst.type.id <= TypeRef::INT128.id ? "sdiv" : "udiv"
-           when .rem? then inst.type.id <= TypeRef::INT128.id ? "srem" : "urem"
+           when .div? then is_signed ? "sdiv" : "udiv"
+           when .rem? then is_signed ? "srem" : "urem"
            when .shl? then "shl"
-           when .shr? then inst.type.id <= TypeRef::INT128.id ? "ashr" : "lshr"
+           when .shr? then is_signed ? "ashr" : "lshr"
            when .and? then "and"
            when .or?  then "or"
            when .xor? then "xor"
            when .eq?  then "icmp eq"
            when .ne?  then "icmp ne"
-           when .lt?  then inst.type.id <= TypeRef::INT128.id ? "icmp slt" : "icmp ult"
-           when .le?  then inst.type.id <= TypeRef::INT128.id ? "icmp sle" : "icmp ule"
-           when .gt?  then inst.type.id <= TypeRef::INT128.id ? "icmp sgt" : "icmp ugt"
-           when .ge?  then inst.type.id <= TypeRef::INT128.id ? "icmp sge" : "icmp uge"
+           when .lt?  then is_signed ? "icmp slt" : "icmp ult"
+           when .le?  then is_signed ? "icmp sle" : "icmp ule"
+           when .gt?  then is_signed ? "icmp sgt" : "icmp ugt"
+           when .ge?  then is_signed ? "icmp sge" : "icmp uge"
            else            "add"
            end
 
       if op.starts_with?("icmp")
-        emit "#{name} = #{op} #{type} #{left}, #{right}"
+        # Comparisons use operand type
+        emit "#{name} = #{op} #{operand_type_str} #{left}, #{right}"
       else
-        emit "#{name} = #{op} #{type} #{left}, #{right}"
+        emit "#{name} = #{op} #{result_type} #{left}, #{right}"
       end
     end
 
@@ -616,7 +628,7 @@ module Crystal::MIR
         if @current_return_type == "void"
           emit "ret void"
         elsif val = term.value
-          emit "ret #{@current_return_type} %#{@value_names[val]}"
+          emit "ret #{@current_return_type} #{value_ref(val)}"
         else
           emit "ret void"
         end

@@ -86,14 +86,26 @@ module Crystal::V2
       log "\n[2/5] Lowering to HIR..."
       hir_converter = HIR::AstToHir.new(arena, @input_file)
 
-      # Find and lower all function definitions
-      func_count = 0
+      # Collect all DefNodes
+      def_nodes = [] of CrystalV2::Compiler::Frontend::DefNode
       exprs.each do |expr_id|
         node = arena[expr_id]
         if node.is_a?(CrystalV2::Compiler::Frontend::DefNode)
-          hir_converter.lower_def(node)
-          func_count += 1
+          def_nodes << node
         end
+      end
+
+      # Two-pass approach for forward references:
+      # Pass 1: Register all function signatures
+      def_nodes.each do |node|
+        hir_converter.register_function(node)
+      end
+
+      # Pass 2: Lower function bodies
+      func_count = 0
+      def_nodes.each do |node|
+        hir_converter.lower_def(node)
+        func_count += 1
       end
 
       hir_module = hir_converter.module

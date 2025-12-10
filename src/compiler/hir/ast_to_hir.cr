@@ -113,6 +113,21 @@ module Crystal::HIR
       @locals[name]?
     end
 
+    # Save current locals state (for branching)
+    def save_locals : Hash(String, ValueId)
+      @locals.dup
+    end
+
+    # Restore locals state (for else branch)
+    def restore_locals(saved : Hash(String, ValueId))
+      @locals = saved.dup
+    end
+
+    # Get all current locals
+    def all_locals : Hash(String, ValueId)
+      @locals
+    end
+
     # Get or create type ref
     def get_type(name : String) : TypeRef
       @type_cache[name]? || begin
@@ -152,12 +167,33 @@ module Crystal::HIR
     getter module : Module
     @arena : CrystalV2::Compiler::Frontend::ArenaLike
 
+    # Pre-registered function signatures for forward reference support
+    @function_types : Hash(String, TypeRef)
+
     def initialize(@arena, module_name : String = "main")
       @module = Module.new(module_name)
+      @function_types = {} of String => TypeRef
+    end
+
+    # Register a function signature (for forward reference support)
+    # Call this for all functions before lowering any function bodies
+    def register_function(node : CrystalV2::Compiler::Frontend::DefNode)
+      name = String.new(node.name)
+      return_type = if rt = node.return_type
+                      type_ref_for_name(String.new(rt))
+                    else
+                      TypeRef::VOID
+                    end
+      @function_types[name] = return_type
     end
 
     # Look up return type of a function by name
     private def get_function_return_type(name : String) : TypeRef
+      # First check pre-registered signatures (for forward references)
+      if type = @function_types[name]?
+        return type
+      end
+      # Fall back to already-lowered functions
       @module.functions.each do |func|
         return func.return_type if func.name == name
       end
@@ -604,6 +640,9 @@ module Crystal::HIR
       else_block = ctx.create_block
       merge_block = ctx.create_block
 
+      # Save locals state before branching
+      pre_branch_locals = ctx.save_locals
+
       # Branch on condition
       ctx.terminate(Branch.new(cond_id, then_block, else_block))
 
@@ -612,12 +651,17 @@ module Crystal::HIR
       ctx.push_scope(ScopeKind::Block)
       then_value = lower_body(ctx, node.then_body)
       then_exit_block = ctx.current_block
+      then_locals = ctx.save_locals
       ctx.pop_scope
 
-      # Only jump if block isn't already terminated
-      if ctx.get_block(ctx.current_block).terminator.is_a?(Unreachable)
+      # Only jump if block isn't already terminated (e.g., by return)
+      then_flows_to_merge = ctx.get_block(ctx.current_block).terminator.is_a?(Unreachable)
+      if then_flows_to_merge
         ctx.terminate(Jump.new(merge_block))
       end
+
+      # Restore locals for else branch (else branch sees pre-branch state)
+      ctx.restore_locals(pre_branch_locals)
 
       # Else branch
       ctx.current_block = else_block
@@ -637,19 +681,80 @@ module Crystal::HIR
                      nil_lit.id
                    end
       else_exit_block = ctx.current_block
+      else_locals = ctx.save_locals
       ctx.pop_scope
 
-      if ctx.get_block(ctx.current_block).terminator.is_a?(Unreachable)
+      else_flows_to_merge = ctx.get_block(ctx.current_block).terminator.is_a?(Unreachable)
+      if else_flows_to_merge
         ctx.terminate(Jump.new(merge_block))
       end
 
-      # Merge block with phi
+      # Merge block with phi for the if expression value
       ctx.current_block = merge_block
-      phi = Phi.new(ctx.next_id, TypeRef::VOID)
-      phi.add_incoming(then_exit_block, then_value)
-      phi.add_incoming(else_exit_block, else_value)
-      ctx.emit(phi)
-      phi.id
+
+      # Only create phi if at least one branch flows to merge
+      if then_flows_to_merge || else_flows_to_merge
+        if then_flows_to_merge && else_flows_to_merge
+          # Both branches flow to merge - need phi
+          phi_type = ctx.type_of(then_value)
+          phi = Phi.new(ctx.next_id, phi_type)
+          phi.add_incoming(then_exit_block, then_value)
+          phi.add_incoming(else_exit_block, else_value)
+          ctx.emit(phi)
+
+          # Merge locals from both branches
+          merge_branch_locals(ctx, pre_branch_locals, then_locals, else_locals,
+                              then_exit_block, else_exit_block)
+          return phi.id
+        elsif then_flows_to_merge
+          # Only then flows - use then_value, then_locals
+          then_locals.each { |name, val| ctx.register_local(name, val) }
+          return then_value
+        else
+          # Only else flows - use else_value, else_locals
+          else_locals.each { |name, val| ctx.register_local(name, val) }
+          return else_value
+        end
+      end
+
+      # Neither branch flows to merge (both return) - emit nil as placeholder
+      nil_lit = Literal.new(ctx.next_id, TypeRef::NIL, nil)
+      ctx.emit(nil_lit)
+      nil_lit.id
+    end
+
+    # Merge locals from two branches, creating phi nodes where needed
+    private def merge_branch_locals(ctx : LoweringContext,
+                                    pre_locals : Hash(String, ValueId),
+                                    then_locals : Hash(String, ValueId),
+                                    else_locals : Hash(String, ValueId),
+                                    then_block : BlockId,
+                                    else_block : BlockId)
+      # Find all variables that exist in either branch
+      all_vars = (then_locals.keys + else_locals.keys).uniq
+
+      all_vars.each do |var_name|
+        then_val = then_locals[var_name]?
+        else_val = else_locals[var_name]?
+        pre_val = pre_locals[var_name]?
+
+        # Skip if variable didn't exist before and doesn't exist in both branches
+        next unless then_val && else_val
+
+        # If both branches have the same value, no phi needed
+        if then_val == else_val
+          ctx.register_local(var_name, then_val)
+          next
+        end
+
+        # Create phi to merge the values
+        var_type = ctx.type_of(then_val)
+        merge_phi = Phi.new(ctx.next_id, var_type)
+        merge_phi.add_incoming(then_block, then_val)
+        merge_phi.add_incoming(else_block, else_val)
+        ctx.emit(merge_phi)
+        ctx.register_local(var_name, merge_phi.id)
+      end
     end
 
     private def lower_unless(ctx : LoweringContext, node : CrystalV2::Compiler::Frontend::UnlessNode) : ValueId
@@ -691,7 +796,8 @@ module Crystal::HIR
 
       # Merge
       ctx.current_block = merge_block
-      phi = Phi.new(ctx.next_id, TypeRef::VOID)
+      phi_type = ctx.type_of(then_value)  # Infer type from incoming value
+      phi = Phi.new(ctx.next_id, phi_type)
       phi.add_incoming(then_exit, then_value)
       phi.add_incoming(else_exit, else_value)
       ctx.emit(phi)
@@ -699,6 +805,19 @@ module Crystal::HIR
     end
 
     private def lower_while(ctx : LoweringContext, node : CrystalV2::Compiler::Frontend::WhileNode) : ValueId
+      # Collect variables that might be assigned in the loop body
+      # We need phi nodes at the loop header for these
+      assigned_vars = collect_assigned_vars(node.body)
+
+      # Save the initial values of variables before the loop
+      pre_loop_block = ctx.current_block
+      initial_values = {} of String => ValueId
+      assigned_vars.each do |var_name|
+        if val = ctx.lookup_local(var_name)
+          initial_values[var_name] = val
+        end
+      end
+
       cond_block = ctx.create_block
       body_block = ctx.create_block
       exit_block = ctx.create_block
@@ -706,8 +825,22 @@ module Crystal::HIR
       # Jump to condition check
       ctx.terminate(Jump.new(cond_block))
 
-      # Condition block
+      # Condition block - create phi nodes for mutable variables
       ctx.current_block = cond_block
+      phi_nodes = {} of String => Phi
+      assigned_vars.each do |var_name|
+        if initial_val = initial_values[var_name]?
+          var_type = ctx.type_of(initial_val)
+          phi = Phi.new(ctx.next_id, var_type)
+          # Add incoming from pre-loop block
+          phi.add_incoming(pre_loop_block, initial_val)
+          ctx.emit(phi)
+          phi_nodes[var_name] = phi
+          # Update local to point to phi
+          ctx.register_local(var_name, phi.id)
+        end
+      end
+
       cond_id = lower_expr(ctx, node.condition)
       ctx.terminate(Branch.new(cond_id, body_block, exit_block))
 
@@ -715,17 +848,79 @@ module Crystal::HIR
       ctx.current_block = body_block
       ctx.push_scope(ScopeKind::Loop)
       lower_body(ctx, node.body)
+      body_exit_block = ctx.current_block
       ctx.pop_scope
+
+      # After body execution, get updated values and patch phi nodes
+      assigned_vars.each do |var_name|
+        if phi = phi_nodes[var_name]?
+          if updated_val = ctx.lookup_local(var_name)
+            # Add incoming from body block (the updated value)
+            phi.add_incoming(body_exit_block, updated_val)
+            # Reset local to point back to phi for next iteration
+            ctx.register_local(var_name, phi.id)
+          end
+        end
+      end
 
       if ctx.get_block(ctx.current_block).terminator.is_a?(Unreachable)
         ctx.terminate(Jump.new(cond_block))  # Loop back
       end
 
-      # Exit block
+      # Exit block - locals should still point to phi nodes
       ctx.current_block = exit_block
+
+      # Restore phi values for use after the loop
+      phi_nodes.each do |var_name, phi|
+        ctx.register_local(var_name, phi.id)
+      end
+
       nil_lit = Literal.new(ctx.next_id, TypeRef::NIL, nil)
       ctx.emit(nil_lit)
       nil_lit.id
+    end
+
+    # Collect variable names that are assigned in a list of expressions
+    private def collect_assigned_vars(body : Array(ExprId)) : Array(String)
+      vars = [] of String
+      body.each do |expr_id|
+        collect_assigned_vars_in_expr(expr_id, vars)
+      end
+      vars.uniq
+    end
+
+    private def collect_assigned_vars_in_expr(expr_id : ExprId, vars : Array(String))
+      node = @arena[expr_id]
+      case node
+      when CrystalV2::Compiler::Frontend::AssignNode
+        target = @arena[node.target]
+        if target.is_a?(CrystalV2::Compiler::Frontend::IdentifierNode)
+          vars << String.new(target.name)
+        end
+        # Also check the value side for nested assignments
+        collect_assigned_vars_in_expr(node.value, vars)
+
+      when CrystalV2::Compiler::Frontend::WhileNode
+        # Nested while - check its body
+        collect_assigned_vars(node.body).each { |v| vars << v }
+
+      when CrystalV2::Compiler::Frontend::IfNode
+        # Check all branches
+        collect_assigned_vars(node.then_body).each { |v| vars << v }
+        if else_body = node.else_body
+          collect_assigned_vars(else_body).each { |v| vars << v }
+        end
+
+      when CrystalV2::Compiler::Frontend::BinaryNode
+        collect_assigned_vars_in_expr(node.left, vars)
+        collect_assigned_vars_in_expr(node.right, vars)
+
+      when CrystalV2::Compiler::Frontend::CallNode
+        node.args.each { |arg| collect_assigned_vars_in_expr(arg, vars) }
+
+      when CrystalV2::Compiler::Frontend::GroupingNode
+        collect_assigned_vars_in_expr(node.expression, vars)
+      end
     end
 
     private def lower_until(ctx : LoweringContext, node : CrystalV2::Compiler::Frontend::UntilNode) : ValueId
@@ -778,7 +973,8 @@ module Crystal::HIR
       ctx.terminate(Jump.new(merge_block))
 
       ctx.current_block = merge_block
-      phi = Phi.new(ctx.next_id, TypeRef::VOID)
+      phi_type = ctx.type_of(then_value)  # Infer type from incoming value
+      phi = Phi.new(ctx.next_id, phi_type)
       phi.add_incoming(then_exit, then_value)
       phi.add_incoming(else_exit, else_value)
       ctx.emit(phi)
@@ -862,7 +1058,8 @@ module Crystal::HIR
 
       # Merge
       ctx.current_block = merge_block
-      phi = Phi.new(ctx.next_id, TypeRef::VOID)
+      phi_type = incoming.first?.try { |(_, val)| ctx.type_of(val) } || TypeRef::VOID
+      phi = Phi.new(ctx.next_id, phi_type)
       incoming.each { |(blk, val)| phi.add_incoming(blk, val) }
       ctx.emit(phi)
       phi.id

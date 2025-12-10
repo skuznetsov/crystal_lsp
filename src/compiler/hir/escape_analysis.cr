@@ -338,7 +338,12 @@ module Crystal::HIR
       end
     end
 
-    private def check_return_aliases(value_id : ValueId)
+    private def check_return_aliases(value_id : ValueId, visited : Set(ValueId)? = nil)
+      # Track visited nodes to prevent infinite recursion on phi cycles
+      visited ||= Set(ValueId).new
+      return if visited.includes?(value_id)
+      visited.add(value_id)
+
       # Check if value is directly a parameter
       @function.params.each_with_index do |param, idx|
         if param.id == value_id
@@ -353,13 +358,13 @@ module Crystal::HIR
 
       case value
       when Copy
-        check_return_aliases(value.source)
+        check_return_aliases(value.source, visited)
       when Phi
-        value.incoming.each { |(_, val)| check_return_aliases(val) }
+        value.incoming.each { |(_, val)| check_return_aliases(val, visited) }
       when FieldGet
-        check_return_aliases(value.object)
+        check_return_aliases(value.object, visited)
       when IndexGet
-        check_return_aliases(value.object)
+        check_return_aliases(value.object, visited)
       end
     end
 

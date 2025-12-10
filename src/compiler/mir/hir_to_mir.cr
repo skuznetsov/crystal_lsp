@@ -29,6 +29,9 @@ module Crystal
     # Mapping from HIR BlockId to MIR BlockId
     @block_map : Hash(HIR::BlockId, BlockId)
 
+    # Pending phi nodes that need incoming resolution after all blocks are lowered
+    @pending_phis : Array(Tuple(Phi, HIR::Phi))
+
     # Current function being lowered
     @current_hir_func : HIR::Function?
     @current_mir_func : Function?
@@ -43,6 +46,7 @@ module Crystal
       @mir_module = Module.new(@hir_module.name)
       @value_map = {} of HIR::ValueId => ValueId
       @block_map = {} of HIR::BlockId => BlockId
+      @pending_phis = [] of Tuple(Phi, HIR::Phi)
     end
 
     # ─────────────────────────────────────────────────────────────────────────
@@ -50,34 +54,52 @@ module Crystal
     # ─────────────────────────────────────────────────────────────────────────
 
     def lower : Module
+      # Two-pass approach for forward references:
+      # Pass 1: Create all function stubs (for call resolution)
       @hir_module.functions.each do |hir_func|
-        lower_function(hir_func)
+        create_function_stub(hir_func)
+      end
+
+      # Pass 2: Lower function bodies
+      @hir_module.functions.each do |hir_func|
+        lower_function_body(hir_func)
       end
 
       @mir_module
+    end
+
+    # Create function stub with params and return type (no body)
+    private def create_function_stub(hir_func : HIR::Function)
+      mir_func = @mir_module.create_function(
+        hir_func.name,
+        convert_type(hir_func.return_type)
+      )
+
+      # Add parameter types (needed for call site type checking)
+      hir_func.params.each do |param|
+        mir_func.add_param(param.name, convert_type(param.type))
+      end
     end
 
     # ─────────────────────────────────────────────────────────────────────────
     # Function Lowering
     # ─────────────────────────────────────────────────────────────────────────
 
-    private def lower_function(hir_func : HIR::Function)
-      # Create MIR function
-      mir_func = @mir_module.create_function(
-        hir_func.name,
-        convert_type(hir_func.return_type)
-      )
+    private def lower_function_body(hir_func : HIR::Function)
+      # Get the pre-created function stub
+      mir_func = @mir_module.get_function(hir_func.name).not_nil!
 
       @current_hir_func = hir_func
       @current_mir_func = mir_func
       @value_map.clear
       @block_map.clear
+      @pending_phis.clear
       @builder = Builder.new(mir_func)
 
-      # Add parameters
-      hir_func.params.each do |param|
-        mir_idx = mir_func.add_param(param.name, convert_type(param.type))
-        @value_map[param.id] = mir_idx
+      # Map HIR params to MIR params (already added in stub)
+      hir_func.params.each_with_index do |param, idx|
+        # MIR params are value IDs starting from 0
+        @value_map[param.id] = idx.to_u32
       end
 
       # Create all blocks first (for forward references)
@@ -89,15 +111,29 @@ module Crystal
       # Fix entry block mapping
       @block_map[hir_func.entry_block] = mir_func.entry_block
 
-      # Lower each block
+      # Lower each block (phi incoming resolution is deferred)
       hir_func.blocks.each do |hir_block|
         lower_block(hir_block)
       end
+
+      # Now resolve all phi incoming values (after all blocks are lowered)
+      resolve_pending_phis
 
       # Compute predecessors for phi resolution
       mir_func.compute_predecessors
 
       @stats.functions_lowered += 1
+    end
+
+    # Resolve phi incoming values after all blocks are lowered
+    private def resolve_pending_phis
+      @pending_phis.each do |(mir_phi, hir_phi)|
+        hir_phi.incoming.each do |(hir_block, hir_value)|
+          mir_block = @block_map[hir_block]
+          mir_value = get_value(hir_value)
+          mir_phi.add_incoming(mir_block, mir_value)
+        end
+      end
     end
 
     # ─────────────────────────────────────────────────────────────────────────
@@ -352,8 +388,14 @@ module Crystal
         args.unshift(get_value(recv))
       end
 
-      # For now, use function ID 0 - would be resolved by function lookup
-      builder.call(0_u32, args, convert_type(call.type))
+      # Look up function by name
+      callee_id = if func = @mir_module.get_function(call.method_name)
+                    func.id
+                  else
+                    0_u32  # Fallback (should not happen for valid code)
+                  end
+
+      builder.call(callee_id, args, convert_type(call.type))
     end
 
     # ─────────────────────────────────────────────────────────────────────────
@@ -437,11 +479,9 @@ module Crystal
       builder = @builder.not_nil!
       mir_phi = builder.phi(convert_type(hir_phi.type))
 
-      hir_phi.incoming.each do |(hir_block, hir_value)|
-        mir_block = @block_map[hir_block]
-        mir_value = get_value(hir_value)
-        mir_phi.add_incoming(mir_block, mir_value)
-      end
+      # Defer incoming resolution until all blocks are lowered
+      # This handles forward references from loop bodies
+      @pending_phis << {mir_phi, hir_phi}
 
       mir_phi.id
     end
