@@ -503,8 +503,13 @@ module Crystal::MIR
               end
       # Store constant for inlining at use sites
       @constant_values[inst.id] = value
-      # Emit as comment for readability
-      emit "; #{name} = #{type} #{value}"
+      # Generate real instruction so phi nodes can reference it
+      # Using add 0, X is a common LLVM idiom for materializing constants
+      if type == "void" || value == "null"
+        emit "; #{name} = #{type} #{value}"
+      else
+        emit "#{name} = add #{type} 0, #{value}"
+      end
     end
 
     private def emit_alloc(inst : Alloc, name : String)
