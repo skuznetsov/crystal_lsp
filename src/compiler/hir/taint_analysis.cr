@@ -1,0 +1,409 @@
+# Taint Analysis for HIR
+#
+# Propagates taint information (ThreadShared, FFIExposed, Cyclic, Mutable)
+# through the HIR graph. Can optionally use type information from semantic analysis.
+#
+# See docs/codegen_architecture.md Section 7 for full specification.
+
+require "./hir"
+
+module Crystal::HIR
+  # Abstract interface for type information (to avoid circular deps)
+  module TypeInfoProvider
+    abstract def class_names : Array(String)
+    abstract def instance_var_types(class_name : String) : Hash(String, String)
+  end
+
+  # Taint analyzer using worklist algorithm
+  class TaintAnalyzer
+
+    # Known FFI methods that expose values to C
+    FFI_METHODS = Set{
+      "to_unsafe", "pointer", "as_pointer",
+    }
+
+    # Methods that indicate thread sharing
+    SPAWN_METHODS = Set{
+      "spawn", "send", "receive",
+    }
+
+    # Channel-related type names
+    CHANNEL_TYPES = Set{
+      "Channel", "Fiber", "Mutex", "Atomic",
+    }
+
+    getter function : Function
+    getter cyclic_types : Set(String)
+
+    @worklist : Deque(ValueId)
+    @definitions : Hash(ValueId, Value)
+    @users : Hash(ValueId, Array(ValueId))
+
+    # Optional: type info provider for cycle detection
+    @type_info : TypeInfoProvider?
+
+    def initialize(@function : Function, @type_info : TypeInfoProvider? = nil)
+      @cyclic_types = Set(String).new
+      @worklist = Deque(ValueId).new
+      @definitions = Hash(ValueId, Value).new
+      @users = Hash(ValueId, Array(ValueId)).new { |h, k| h[k] = [] of ValueId }
+
+      # Pre-compute cyclic types if we have type info
+      if ti = @type_info
+        detect_cyclic_types(ti)
+      end
+    end
+
+    # Alternative: initialize with explicit cyclic types (for testing)
+    def initialize(@function : Function, @cyclic_types : Set(String))
+      @type_info = nil
+      @worklist = Deque(ValueId).new
+      @definitions = Hash(ValueId, Value).new
+      @users = Hash(ValueId, Array(ValueId)).new { |h, k| h[k] = [] of ValueId }
+    end
+
+    # Run taint analysis
+    def analyze
+      # Phase 1: Build dependency graph
+      build_dependency_graph
+
+      # Phase 2: Seed taints from known sources
+      seed_taints
+
+      # Phase 3: Propagate taints
+      propagate_taints
+    end
+
+    # =========================================================================
+    # CYCLE DETECTION
+    # =========================================================================
+
+    # Detect types with cyclic references using DFS on type graph
+    private def detect_cyclic_types(type_info : TypeInfoProvider)
+      visited = Set(String).new
+      in_stack = Set(String).new
+
+      # Build type graph: class_name → field types
+      type_graph = {} of String => Array(String)
+      type_info.class_names.each do |class_name|
+        field_types = type_info.instance_var_types(class_name).values.compact.map do |type_ann|
+          extract_base_type(type_ann)
+        end
+        type_graph[class_name] = field_types
+      end
+
+      type_graph.each_key do |name|
+        unless visited.includes?(name)
+          dfs_find_cycles(name, type_graph, visited, in_stack)
+        end
+      end
+    end
+
+    private def dfs_find_cycles(
+      type_name : String,
+      type_graph : Hash(String, Array(String)),
+      visited : Set(String),
+      in_stack : Set(String)
+    )
+      visited.add(type_name)
+      in_stack.add(type_name)
+
+      # Check field types for cycles
+      if field_types = type_graph[type_name]?
+        field_types.each do |field_type|
+          if in_stack.includes?(field_type)
+            # Found cycle!
+            @cyclic_types.add(type_name)
+            @cyclic_types.add(field_type)
+          elsif !visited.includes?(field_type) && type_graph.has_key?(field_type)
+            dfs_find_cycles(field_type, type_graph, visited, in_stack)
+          end
+        end
+      end
+
+      in_stack.delete(type_name)
+    end
+
+    # Extract base type name from annotation like "Array(Node)?" → "Array"
+    private def extract_base_type(type_ann : String) : String
+      # Remove nilable suffix
+      name = type_ann.rchop("?")
+
+      # Remove generic parameters
+      if paren_idx = name.index('(')
+        name = name[0...paren_idx]
+      end
+
+      name
+    end
+
+    # =========================================================================
+    # DEPENDENCY GRAPH
+    # =========================================================================
+
+    private def build_dependency_graph
+      @function.blocks.each do |block|
+        block.instructions.each do |value|
+          @definitions[value.id] = value
+          record_uses(value)
+        end
+      end
+    end
+
+    private def record_uses(value : Value)
+      case value
+      when Copy
+        @users[value.source] << value.id
+      when BinaryOperation
+        @users[value.left] << value.id
+        @users[value.right] << value.id
+      when UnaryOperation
+        @users[value.operand] << value.id
+      when Call
+        if recv = value.receiver
+          @users[recv] << value.id
+        end
+        value.args.each { |arg| @users[arg] << value.id }
+      when FieldGet
+        @users[value.object] << value.id
+      when FieldSet
+        @users[value.object] << value.id
+        @users[value.value] << value.id
+      when IndexGet
+        @users[value.object] << value.id
+        @users[value.index] << value.id
+      when IndexSet
+        @users[value.object] << value.id
+        @users[value.index] << value.id
+        @users[value.value] << value.id
+      when MakeClosure
+        value.captures.each { |cap| @users[cap.value_id] << value.id }
+      when Yield
+        value.args.each { |arg| @users[arg] << value.id }
+      when Phi
+        value.incoming.each { |(_, val)| @users[val] << value.id }
+      when Cast
+        @users[value.value] << value.id
+      when IsA
+        @users[value.value] << value.id
+      when Allocate
+        value.constructor_args.each { |arg| @users[arg] << value.id }
+      end
+    end
+
+    # =========================================================================
+    # TAINT SEEDING
+    # =========================================================================
+
+    private def seed_taints
+      @definitions.each_value do |value|
+        case value
+        # Allocations of cyclic types get Cyclic taint
+        when Allocate
+          type_name = get_type_name(value.type)
+          if @cyclic_types.includes?(type_name)
+            mark_taint(value.id, Taint::Cyclic)
+          end
+
+        # Calls that might expose to FFI or spawn
+        when Call
+          if is_ffi_method?(value.method_name)
+            # Arguments exposed to FFI
+            value.args.each { |arg| mark_taint(arg, Taint::FFIExposed) }
+            if recv = value.receiver
+              mark_taint(recv, Taint::FFIExposed)
+            end
+          end
+
+          if is_spawn_method?(value.method_name)
+            # Arguments shared with other fiber
+            value.args.each { |arg| mark_taint(arg, Taint::ThreadShared) }
+          end
+
+          if is_channel_type?(value.method_name)
+            # Value passed through channel is thread-shared
+            value.args.each { |arg| mark_taint(arg, Taint::ThreadShared) }
+          end
+
+        # Class variables are implicitly thread-shared
+        when ClassVarGet, ClassVarSet
+          # The class var value is potentially shared
+          if value.is_a?(ClassVarSet)
+            mark_taint(value.value, Taint::ThreadShared)
+          end
+          mark_taint(value.id, Taint::ThreadShared)
+
+        # Closures capture mutable state
+        when MakeClosure
+          value.captures.each do |cap|
+            if cap.by_reference
+              mark_taint(cap.value_id, Taint::Mutable)
+            end
+          end
+        end
+      end
+
+      # All allocations start as potentially mutable
+      @definitions.each_value do |value|
+        if value.is_a?(Allocate)
+          mark_taint(value.id, Taint::Mutable)
+        end
+      end
+    end
+
+    # =========================================================================
+    # TAINT PROPAGATION
+    # =========================================================================
+
+    private def propagate_taints
+      while val_id = @worklist.shift?
+        value = @definitions[val_id]?
+        next unless value
+
+        current_taints = value.taints
+
+        # Propagate to users
+        @users[val_id].each do |user_id|
+          user = @definitions[user_id]?
+          next unless user
+
+          propagate_to_user(value, user, current_taints)
+        end
+      end
+    end
+
+    private def propagate_to_user(source : Value, user : Value, taints : Taint)
+      case user
+      when Copy
+        # Copy inherits all taints
+        merge_taints(user.id, taints)
+
+      when Phi
+        # Phi merges taints from all incoming
+        merge_taints(user.id, taints)
+
+      when FieldSet
+        # If value is tainted, the containing object gets tainted
+        if source.id == user.value
+          merge_taints(user.object, taints)
+        end
+
+      when IndexSet
+        # Value taints propagate to container
+        if source.id == user.value
+          merge_taints(user.object, taints)
+        end
+
+      when Call
+        # If receiver is thread-shared, result might be too
+        if recv = user.receiver
+          if recv == source.id && taints.thread_shared?
+            merge_taints(user.id, Taint::ThreadShared)
+          end
+        end
+
+      when MakeClosure
+        # Captured values taint the closure
+        if source.taints != Taint::None
+          merge_taints(user.id, source.taints)
+        end
+      end
+    end
+
+    private def mark_taint(value_id : ValueId, taint : Taint)
+      value = @definitions[value_id]?
+      return unless value
+
+      unless value.taints.includes?(taint)
+        value.taints |= taint
+        @worklist << value_id
+      end
+    end
+
+    private def merge_taints(value_id : ValueId, taints : Taint)
+      value = @definitions[value_id]?
+      return unless value
+
+      new_taints = value.taints | taints
+      if new_taints != value.taints
+        value.taints = new_taints
+        @worklist << value_id
+      end
+    end
+
+    # =========================================================================
+    # TYPE HELPERS
+    # =========================================================================
+
+    private def get_type_name(type_ref : TypeRef) : String
+      # For now, use simple mapping from TypeRef ID
+      # In full implementation, would look up in type table
+      case type_ref
+      when TypeRef::STRING then "String"
+      when TypeRef::INT32  then "Int32"
+      when TypeRef::INT64  then "Int64"
+      when TypeRef::BOOL   then "Bool"
+      else
+        "Type#{type_ref.id}"
+      end
+    end
+
+    private def is_ffi_method?(name : String) : Bool
+      FFI_METHODS.includes?(name) || name.starts_with?("__")
+    end
+
+    private def is_spawn_method?(name : String) : Bool
+      SPAWN_METHODS.includes?(name)
+    end
+
+    private def is_channel_type?(name : String) : Bool
+      CHANNEL_TYPES.any? { |t| name.includes?(t) }
+    end
+
+    # =========================================================================
+    # PUBLIC HELPERS
+    # =========================================================================
+
+    # Check if a type is cyclic
+    def cyclic?(type_name : String) : Bool
+      @cyclic_types.includes?(type_name)
+    end
+
+    # Get all values with a specific taint
+    def values_with_taint(taint : Taint) : Array(ValueId)
+      result = [] of ValueId
+      @definitions.each do |id, value|
+        if value.taints.includes?(taint)
+          result << id
+        end
+      end
+      result
+    end
+
+    # Get taint summary for the function
+    def taint_summary : Hash(String, Int32)
+      {
+        "cyclic_types"   => @cyclic_types.size,
+        "thread_shared"  => values_with_taint(Taint::ThreadShared).size,
+        "ffi_exposed"    => values_with_taint(Taint::FFIExposed).size,
+        "mutable"        => values_with_taint(Taint::Mutable).size,
+        "cyclic_values"  => values_with_taint(Taint::Cyclic).size,
+      }
+    end
+  end
+
+  # Convenience method on Function
+  class Function
+    def analyze_taints(type_info : TypeInfoProvider? = nil)
+      analyzer = TaintAnalyzer.new(self, type_info)
+      analyzer.analyze
+      analyzer
+    end
+
+    def analyze_taints(cyclic_types : Set(String))
+      analyzer = TaintAnalyzer.new(self, cyclic_types)
+      analyzer.analyze
+      analyzer
+    end
+  end
+end
