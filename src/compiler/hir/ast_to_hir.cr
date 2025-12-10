@@ -1670,6 +1670,16 @@ module Crystal::HIR
 
       args = node.args.map { |arg| lower_expr(ctx, arg) }
 
+      # Handle .times { |i| body } intrinsic BEFORE lowering block
+      if method_name == "times" && receiver_id
+        if blk_expr = node.block
+          blk_node = @arena[blk_expr]
+          if blk_node.is_a?(CrystalV2::Compiler::Frontend::BlockNode)
+            return lower_times_intrinsic(ctx, receiver_id, blk_node)
+          end
+        end
+      end
+
       # Check for block (ExprId -> must lower to BlockNode)
       block_id = if blk_expr = node.block
                    blk_node = @arena[blk_expr]
@@ -1720,6 +1730,87 @@ module Crystal::HIR
       call = Call.new(ctx.next_id, return_type, receiver_id, actual_method_name, args, block_id)
       ctx.emit(call)
       call.id
+    end
+
+    # Intrinsic: n.times { |i| body }
+    # Expands to: i = 0; while i < n { body; i += 1 }
+    # Uses phi nodes for loop variable
+    private def lower_times_intrinsic(ctx : LoweringContext, count_id : ValueId, block : CrystalV2::Compiler::Frontend::BlockNode) : ValueId
+      # Get block param name (default to "i" if not specified)
+      param_name = if params = block.params
+                     if first_param = params.first?
+                       if pname = first_param.name
+                         String.new(pname)
+                       else
+                         "__times_i"
+                       end
+                     else
+                       "__times_i"
+                     end
+                   else
+                     "__times_i"
+                   end
+
+      # Initial counter value
+      zero = Literal.new(ctx.next_id, TypeRef::INT32, 0_i64)
+      ctx.emit(zero)
+
+      entry_block = ctx.current_block
+
+      # Create blocks
+      cond_block = ctx.create_block
+      body_block = ctx.create_block
+      incr_block = ctx.create_block
+      exit_block = ctx.create_block
+
+      # Jump to condition
+      ctx.terminate(Jump.new(cond_block))
+
+      # Condition block with phi for counter
+      ctx.current_block = cond_block
+      counter_phi = Phi.new(ctx.next_id, TypeRef::INT32)
+      counter_phi.add_incoming(entry_block, zero.id)
+      # Note: incr_block incoming will be added after we know the incremented value
+      ctx.emit(counter_phi)
+
+      # Register counter for use in body
+      ctx.register_local(param_name, counter_phi.id)
+      ctx.register_type(counter_phi.id, TypeRef::INT32)
+
+      # Compare: i < n
+      cmp = BinaryOperation.new(ctx.next_id, TypeRef::BOOL, BinaryOp::Lt, counter_phi.id, count_id)
+      ctx.emit(cmp)
+      ctx.terminate(Branch.new(cmp.id, body_block, exit_block))
+
+      # Body block
+      ctx.current_block = body_block
+      ctx.push_scope(ScopeKind::Block)
+
+      # Lower block body
+      lower_body(ctx, block.body)
+      ctx.pop_scope
+
+      # Jump to increment
+      ctx.terminate(Jump.new(incr_block))
+
+      # Increment block: i + 1
+      ctx.current_block = incr_block
+      one = Literal.new(ctx.next_id, TypeRef::INT32, 1_i64)
+      ctx.emit(one)
+      new_i = BinaryOperation.new(ctx.next_id, TypeRef::INT32, BinaryOp::Add, counter_phi.id, one.id)
+      ctx.emit(new_i)
+
+      # Add incoming to phi from increment block
+      counter_phi.add_incoming(incr_block, new_i.id)
+
+      # Jump back to condition
+      ctx.terminate(Jump.new(cond_block))
+
+      # Exit block - return nil
+      ctx.current_block = exit_block
+      nil_lit = Literal.new(ctx.next_id, TypeRef::NIL, nil)
+      ctx.emit(nil_lit)
+      nil_lit.id
     end
 
     private def lower_index(ctx : LoweringContext, node : CrystalV2::Compiler::Frontend::IndexNode) : ValueId

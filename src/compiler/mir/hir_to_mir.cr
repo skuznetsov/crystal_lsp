@@ -215,8 +215,18 @@ module Crystal
                when HIR::Local
                  lower_local(hir_value)
                when HIR::Parameter
-                 # Parameters already mapped
-                 @value_map[hir_value.id]
+                 # Function parameters are pre-mapped, block parameters need allocation
+                 if existing = @value_map[hir_value.id]?
+                   existing
+                 else
+                   # Block parameter - allocate stack slot for it
+                   builder = @builder.not_nil!
+                   param_type = convert_type(hir_value.type)
+                   alloc = MIR::Alloc.new(builder.next_id, param_type, MIR::MemoryStrategy::Stack, param_type, 0_u64, 8_u32)
+                   builder.emit(alloc)
+                   @value_map[hir_value.id] = alloc.id
+                   alloc.id
+                 end
                when HIR::Allocate
                  lower_allocate(hir_value)
                when HIR::FieldGet
