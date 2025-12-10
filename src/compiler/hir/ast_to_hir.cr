@@ -179,6 +179,9 @@ module Crystal::HIR
     # Class type information
     @class_info : Hash(String, ClassInfo)
 
+    # Initialize parameters for each class (for new() generation)
+    @init_params : Hash(String, Array({String, TypeRef}))
+
     # Current class being lowered (for ivar access)
     @current_class : String?
 
@@ -186,6 +189,7 @@ module Crystal::HIR
       @module = Module.new(module_name)
       @function_types = {} of String => TypeRef
       @class_info = {} of String => ClassInfo
+      @init_params = {} of String => Array({String, TypeRef})
       @current_class = nil
     end
 
@@ -201,6 +205,9 @@ module Crystal::HIR
       # Collect instance variables and their types
       ivars = [] of IVarInfo
       offset = 8  # Start at 8 to leave room for type_id header
+
+      # Also find initialize to get constructor parameters
+      init_params = [] of {String, TypeRef}
 
       if body = node.body
         body.each do |expr_id|
@@ -223,6 +230,21 @@ module Crystal::HIR
                             TypeRef::VOID
                           end
             @function_types[full_name] = return_type
+
+            # Capture initialize parameters for new()
+            if method_name == "initialize"
+              if params = member.params
+                params.each do |param|
+                  param_name = param.name.nil? ? "_" : String.new(param.name.not_nil!)
+                  param_type = if ta = param.type_annotation
+                                 type_ref_for_name(String.new(ta))
+                               else
+                                 TypeRef::VOID
+                               end
+                  init_params << {param_name, param_type}
+                end
+              end
+            end
           end
         end
       end
@@ -230,6 +252,10 @@ module Crystal::HIR
       # Create class type
       type_ref = @module.intern_type(TypeDescriptor.new(TypeKind::Class, class_name))
       @class_info[class_name] = ClassInfo.new(class_name, type_ref, ivars, offset)
+
+      # Store initialize params for allocator generation
+      @init_params ||= {} of String => Array({String, TypeRef})
+      @init_params.not_nil![class_name] = init_params
 
       # Register "new" allocator function
       @function_types["#{class_name}.new"] = type_ref
@@ -257,11 +283,23 @@ module Crystal::HIR
       @current_class = nil
     end
 
-    # Generate allocator: ClassName.new() -> allocates and returns pointer
+    # Generate allocator: ClassName.new(...) -> allocates and returns pointer
     private def generate_allocator(class_name : String, class_info : ClassInfo)
       func_name = "#{class_name}.new"
       func = @module.create_function(func_name, class_info.type_ref)
       ctx = LoweringContext.new(func, @module, @arena)
+
+      # Get initialize parameters for this class
+      init_params = @init_params[class_name]? || [] of {String, TypeRef}
+
+      # Add parameters to new() that match initialize()
+      param_ids = [] of ValueId
+      init_params.each do |param_name, param_type|
+        hir_param = func.add_param(param_name, param_type)
+        ctx.register_local(param_name, hir_param.id)
+        ctx.register_type(hir_param.id, param_type)
+        param_ids << hir_param.id
+      end
 
       # Allocate object (memory strategy determined by escape analysis)
       alloc = Allocate.new(ctx.next_id, class_info.type_ref, [] of ValueId)
@@ -272,14 +310,14 @@ module Crystal::HIR
       class_info.ivars.each do |ivar|
         default_val = Literal.new(ctx.next_id, ivar.type, 0_i64)
         ctx.emit(default_val)
-        ivar_store = FieldSet.new(ctx.next_id, TypeRef::VOID, alloc.id, ivar.name, default_val.id)
+        ivar_store = FieldSet.new(ctx.next_id, TypeRef::VOID, alloc.id, ivar.name, default_val.id, ivar.offset)
         ctx.emit(ivar_store)
       end
 
-      # Call initialize if it exists
+      # Call initialize if it exists, passing through the parameters
       init_name = "#{class_name}#initialize"
       if @function_types.has_key?(init_name)
-        init_call = Call.new(ctx.next_id, TypeRef::VOID, alloc.id, init_name, [] of ValueId)
+        init_call = Call.new(ctx.next_id, TypeRef::VOID, alloc.id, init_name, param_ids)
         ctx.emit(init_call)
       end
 
@@ -377,6 +415,18 @@ module Crystal::HIR
         return func.return_type if func.name == name
       end
       TypeRef::VOID
+    end
+
+    # Get instance variable offset from current class
+    private def get_ivar_offset(name : String) : Int32
+      if class_name = @current_class
+        if class_info = @class_info[class_name]?
+          class_info.ivars.each do |ivar|
+            return ivar.offset if ivar.name == name
+          end
+        end
+      end
+      0  # Default offset
     end
 
     # Lower a function definition
@@ -698,13 +748,15 @@ module Crystal::HIR
     private def lower_instance_var(ctx : LoweringContext, node : CrystalV2::Compiler::Frontend::InstanceVarNode) : ValueId
       name = String.new(node.name)
 
-      # Get the type of the instance variable from current class
+      # Get the type and offset of the instance variable from current class
       ivar_type = TypeRef::VOID
+      ivar_offset = 0
       if class_name = @current_class
         if class_info = @class_info[class_name]?
           class_info.ivars.each do |ivar|
             if ivar.name == name
               ivar_type = ivar.type
+              ivar_offset = ivar.offset
               break
             end
           end
@@ -713,7 +765,7 @@ module Crystal::HIR
 
       # Instance var access is a field get on self
       self_id = emit_self(ctx)
-      field_get = FieldGet.new(ctx.next_id, ivar_type, self_id, name)
+      field_get = FieldGet.new(ctx.next_id, ivar_type, self_id, name, ivar_offset)
       ctx.emit(field_get)
       field_get.id
     end
@@ -1411,6 +1463,18 @@ module Crystal::HIR
       # Use full method name if resolved, otherwise use simple name
       actual_method_name = full_method_name || method_name
 
+      # Handle intrinsic functions
+      if actual_method_name == "puts" && args.size == 1
+        # puts(int) -> __crystal_v2_print_int32_ln (or int64 for larger types)
+        arg_type = ctx.type_of(args[0])
+        if arg_type.id == TypeRef::INT64.id
+          actual_method_name = "__crystal_v2_print_int64_ln"
+        else
+          actual_method_name = "__crystal_v2_print_int32_ln"
+        end
+        return_type = TypeRef::VOID
+      end
+
       call = Call.new(ctx.next_id, return_type, receiver_id, actual_method_name, args, block_id)
       ctx.emit(call)
       call.id
@@ -1477,8 +1541,9 @@ module Crystal::HIR
 
       when CrystalV2::Compiler::Frontend::InstanceVarNode
         name = String.new(target_node.name)
+        ivar_offset = get_ivar_offset(name)
         self_id = emit_self(ctx)
-        field_set = FieldSet.new(ctx.next_id, TypeRef::VOID, self_id, name, value_id)
+        field_set = FieldSet.new(ctx.next_id, TypeRef::VOID, self_id, name, value_id, ivar_offset)
         ctx.emit(field_set)
         field_set.id
 
@@ -1531,8 +1596,9 @@ module Crystal::HIR
 
         when CrystalV2::Compiler::Frontend::InstanceVarNode
           name = String.new(target_node.name)
+          ivar_offset = get_ivar_offset(name)
           self_id = emit_self(ctx)
-          field_set = FieldSet.new(ctx.next_id, TypeRef::VOID, self_id, name, element_id.id)
+          field_set = FieldSet.new(ctx.next_id, TypeRef::VOID, self_id, name, element_id.id, ivar_offset)
           ctx.emit(field_set)
 
         else

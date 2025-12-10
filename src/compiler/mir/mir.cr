@@ -759,6 +759,29 @@ module Crystal::MIR
     end
   end
 
+  # External/runtime function call by name
+  class ExternCall < Value
+    getter extern_name : String
+    getter args : Array(ValueId)
+
+    def initialize(id : ValueId, type : TypeRef, @extern_name : String, @args : Array(ValueId))
+      super(id, type)
+    end
+
+    def operands : Array(ValueId)
+      @args.dup
+    end
+
+    def to_s(io : IO) : Nil
+      io << "%" << @id << " = extern_call @" << @extern_name << "("
+      @args.each_with_index do |arg, idx|
+        io << ", " if idx > 0
+        io << "%" << arg
+      end
+      io << ") : " << @type
+    end
+  end
+
   # Indirect call through function pointer
   class IndirectCall < Value
     getter callee_ptr : ValueId
@@ -1279,6 +1302,10 @@ module Crystal::MIR
 
     def call_indirect(callee_ptr : ValueId, args : Array(ValueId), return_type : TypeRef) : ValueId
       emit(IndirectCall.new(@function.next_value_id, return_type, callee_ptr, args))
+    end
+
+    def extern_call(extern_name : String, args : Array(ValueId), return_type : TypeRef) : ValueId
+      emit(ExternCall.new(@function.next_value_id, return_type, extern_name, args))
     end
 
     # Terminators

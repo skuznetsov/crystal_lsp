@@ -255,8 +255,9 @@ module Crystal::HIR
   class FieldGet < Value
     getter object : ValueId
     getter field_name : String
+    getter field_offset : Int32
 
-    def initialize(id : ValueId, type : TypeRef, @object : ValueId, @field_name : String)
+    def initialize(id : ValueId, type : TypeRef, @object : ValueId, @field_name : String, @field_offset : Int32 = 0)
       super(id, type)
     end
 
@@ -270,8 +271,9 @@ module Crystal::HIR
     getter object : ValueId
     getter field_name : String
     getter value : ValueId
+    getter field_offset : Int32
 
-    def initialize(id : ValueId, type : TypeRef, @object : ValueId, @field_name : String, @value : ValueId)
+    def initialize(id : ValueId, type : TypeRef, @object : ValueId, @field_name : String, @value : ValueId, @field_offset : Int32 = 0)
       super(id, type)
     end
 

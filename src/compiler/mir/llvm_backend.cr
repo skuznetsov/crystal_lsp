@@ -323,6 +323,14 @@ module Crystal::MIR
       emit_raw "declare ptr @__crystal_v2_slab_alloc(i32)\n"
       emit_raw "declare void @__crystal_v2_slab_free(ptr, i32)\n"
       emit_raw "\n"
+
+      # IO functions
+      emit_raw "declare void @__crystal_v2_puts(ptr)\n"
+      emit_raw "declare void @__crystal_v2_print_int32(i32)\n"
+      emit_raw "declare void @__crystal_v2_print_int32_ln(i32)\n"
+      emit_raw "declare void @__crystal_v2_print_int64(i64)\n"
+      emit_raw "declare void @__crystal_v2_print_int64_ln(i64)\n"
+      emit_raw "\n"
     end
 
     private def emit_function(func : Function)
@@ -407,6 +415,8 @@ module Crystal::MIR
         emit_call(inst, name, func)
       when IndirectCall
         emit_indirect_call(inst, name)
+      when ExternCall
+        emit_extern_call(inst, name)
       end
     end
 
@@ -627,6 +637,25 @@ module Crystal::MIR
         emit "call void #{callee}(#{args})"
       else
         emit "#{name} = call #{return_type} #{callee}(#{args})"
+      end
+    end
+
+    private def emit_extern_call(inst : ExternCall, name : String)
+      return_type = @type_mapper.llvm_type(inst.type)
+
+      # Format arguments based on function name
+      args = if inst.extern_name.includes?("print_int64")
+               inst.args.map { |a| "i64 #{value_ref(a)}" }.join(", ")
+             elsif inst.extern_name.includes?("print_int32")
+               inst.args.map { |a| "i32 #{value_ref(a)}" }.join(", ")
+             else
+               inst.args.map { |a| "ptr #{value_ref(a)}" }.join(", ")
+             end
+
+      if return_type == "void"
+        emit "call void @#{inst.extern_name}(#{args})"
+      else
+        emit "#{name} = call #{return_type} @#{inst.extern_name}(#{args})"
       end
     end
 

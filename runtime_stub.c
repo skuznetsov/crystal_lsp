@@ -3,6 +3,7 @@
 #include <stdlib.h>
 #include <stdint.h>
 #include <string.h>
+#include <stdio.h>
 
 // Memory allocation
 void* __crystal_v2_malloc64(int64_t size) {
@@ -33,4 +34,25 @@ void* __crystal_v2_slab_alloc(int32_t size_class) {
 
 void __crystal_v2_slab_free(void* ptr, int32_t size_class) {
     free(ptr);
+}
+
+// IO functions
+void __crystal_v2_puts(const char* str) {
+    puts(str);
+}
+
+void __crystal_v2_print_int32(int32_t value) {
+    printf("%d", value);
+}
+
+void __crystal_v2_print_int32_ln(int32_t value) {
+    printf("%d\n", value);
+}
+
+void __crystal_v2_print_int64(int64_t value) {
+    printf("%lld", value);
+}
+
+void __crystal_v2_print_int64_ln(int64_t value) {
+    printf("%lld\n", value);
 }

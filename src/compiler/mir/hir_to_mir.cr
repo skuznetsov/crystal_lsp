@@ -334,8 +334,8 @@ module Crystal
       obj_ptr = get_value(field.object)
 
       # GEP to field address + load
-      # Field index would come from type info - using 0 as placeholder
-      field_ptr = builder.gep(obj_ptr, [0_u32], TypeRef::POINTER)
+      # field_offset is byte offset from object start
+      field_ptr = builder.gep(obj_ptr, [field.field_offset.to_u32], TypeRef::POINTER)
       builder.load(field_ptr, convert_type(field.type))
     end
 
@@ -345,7 +345,7 @@ module Crystal
       value = get_value(field.value)
 
       # GEP to field address + store
-      field_ptr = builder.gep(obj_ptr, [0_u32], TypeRef::POINTER)
+      field_ptr = builder.gep(obj_ptr, [field.field_offset.to_u32], TypeRef::POINTER)
       builder.store(field_ptr, value)
     end
 
@@ -386,6 +386,11 @@ module Crystal
       # Add receiver as first arg if present
       if recv = call.receiver
         args.unshift(get_value(recv))
+      end
+
+      # Check if this is an external/runtime call
+      if call.method_name.starts_with?("__crystal_v2_")
+        return builder.extern_call(call.method_name, args, convert_type(call.type))
       end
 
       # Look up function by name
