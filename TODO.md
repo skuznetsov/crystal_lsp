@@ -348,8 +348,21 @@ Goal: v2 LSP must report only real errors and match original compiler behavior.
   - RC elision (remove redundant rc_inc/rc_dec pairs)
   - Dead code elimination
   - Constant folding
+- [x] **M3.2** HIR → MIR lowering (`src/compiler/mir/hir_to_mir.cr`) - 19 tests
+  - Full HIR to MIR SSA transformation
+  - Memory strategy assignment based on escape/taint analysis
+  - Automatic RC insertion for ARC allocations
+- [x] **M3.2b** Profile infrastructure (`src/compiler/mir/profile.cr`) - 46 tests
+  - AllocationSiteStats, BranchStats, LoopStats, CallSiteStats, BlockStats
+  - Binary serialization (CRPF v3 format)
+  - ProfileGuidedOptimizer, CompilerFlags (--mm=profile-gen/use)
+- [x] **M3.3** Profile-Guided Optimizations (`src/compiler/mir/pgo_passes.cr`) - 26 tests
+  - DevirtualizationPass: converts hot virtual calls to guarded direct calls
+  - CrossFunctionRCElisionPass: elides RC ops across function boundaries
+  - MemoryStrategyRefinementPass: adjusts memory strategies based on profile
+  - PGOPipeline: coordinates all passes with aggregated statistics
 
-**Test Coverage:** 192 new tests (155 HIR + 37 MIR)
+**Test Coverage:** 283 new tests (155 HIR + 128 MIR)
 
 **Architecture (Quadrumvirate-analyzed):**
 ```
@@ -496,11 +509,65 @@ end
 - [ ] Arena size heuristics
 - [ ] Overflow to heap fallback
 
-#### 5.2.5 Profile-Guided Optimization (Optional)
-- [ ] Runtime profiling instrumentation
-- [ ] Collect allocation hotspots
-- [ ] Feed profile back to strategy selector
-- [ ] `--mm=profile` mode
+#### 5.2.5 Profile-Guided Optimization (M3.3)
+
+**Quadrumvirate Analysis (2025-12-09):**
+
+The key insight is: **Don't compete with LLVM, complement it.**
+- LLVM already handles: branch layout, loop unrolling, basic inlining
+- Crystal should focus on: ARC semantics, type-based devirtualization, memory strategy
+
+**Crystal-Specific PGO Stack:**
+```
+┌─────────────────────────────────────────────────────────────┐
+│                    CRYSTAL PGO (M3.3)                       │
+├─────────────────────────────────────────────────────────────┤
+│  1. Profile-Guided Devirtualization                         │
+│     - dominant_target → guarded direct call                 │
+│     - Enables inlining of hot virtual calls                 │
+│                                                             │
+│  2. Profile-Guided ARC Optimization                         │
+│     - Cross-function RC elision based on call patterns      │
+│     - Owned/borrowed inference from escape frequency        │
+│     - Elide RC for "always escapes" or "never escapes"      │
+│                                                             │
+│  3. Profile-Guided Memory Strategy                          │
+│     - Refine Stack/Slab/ARC/GC based on actual lifetime     │
+│     - Slab pool sizing from allocation patterns             │
+│     - Arena reset points from deallocation clustering       │
+│                                                             │
+│  4. Profile-Guided Specialization (future)                  │
+│     - Clone hot functions for dominant type combinations    │
+│     - Monomorphize generics that are 95%+ one type          │
+│                                                             │
+└─────────────────────────────────────────────────────────────┘
+                           ↓
+┌─────────────────────────────────────────────────────────────┐
+│                    LLVM PGO (EXISTING)                      │
+├─────────────────────────────────────────────────────────────┤
+│  - Branch probability → block layout                        │
+│  - Loop trip counts → unrolling                             │
+│  - Call counts → inlining decisions                         │
+│  - Hot/cold → function splitting                            │
+└─────────────────────────────────────────────────────────────┘
+```
+
+**Implementation Status:**
+- [x] Profile data structures (AllocationSiteStats, BranchStats, LoopStats, CallSiteStats, BlockStats)
+- [x] Binary serialization (CRPF v3)
+- [x] ProfileInstrumentationPass
+- [x] CompilerFlags (--mm=profile-gen/use)
+- [x] **M3.3a** DevirtualizationPass - guarded direct calls from dominant_target (26 tests)
+- [x] **M3.3b** CrossFunctionRCElisionPass - elide RC across call boundaries (26 tests)
+- [x] **M3.3c** MemoryStrategyRefinementPass - update strategy from profile data (26 tests)
+- [x] PGOPipeline - coordinates all passes, aggregates statistics
+
+**Priority (Impact × Uniqueness):**
+| # | Pass | Impact | Uniqueness | Status |
+|---|------|--------|------------|--------|
+| 1 | Devirtualization | HIGH | HIGH | ✅ |
+| 2 | ARC Cross-function | HIGH | UNIQUE | ✅ |
+| 3 | Memory Strategy Refinement | MED | HIGH | ✅ |
 
 ---
 
@@ -576,7 +643,9 @@ end
 | M2.4 | Memory strategy | ✅ Complete | 15 |
 | M3.1 | MIR data structures | ✅ Complete | 20 |
 | M3.1b | MIR optimizations | ✅ Complete | 17 |
-| M3.2 | HIR → MIR lowering | 🔲 Pending | - |
+| M3.2 | HIR → MIR lowering | ✅ Complete | 19 |
+| M3.2b | Profile infrastructure | ✅ Complete | 46 |
+| M3.3 | Profile-Guided Optimizations | ✅ Complete | 26 |
 | M4.1 | LLVM IR generation | 🔲 Pending | - |
 | M4.2 | Runtime library | 🔲 Pending | - |
 | M4.3 | End-to-end compile | 🔲 Pending | - |
@@ -605,5 +674,5 @@ end
 | TypeIndex | Complete | 5.6x faster than JSON, per-file partitioning |
 | Performance | Complete | Incremental inference, lazy method bodies, cache warming |
 | HIR | Complete | 155 tests (data structures, lowering, escape, taint, memory strategy) |
-| MIR | Complete | 37 tests (SSA form, memory ops, optimizations) |
-| Codegen | 40% | M1-M3.1b done, HIR→MIR and LLVM pending |
+| MIR | Complete | 128 tests (SSA form, memory ops, optimizations, PGO passes) |
+| Codegen | 55% | M1-M3.3 done, LLVM backend pending |

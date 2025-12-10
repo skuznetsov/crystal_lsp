@@ -284,7 +284,7 @@ module Crystal::MIR
       max_target = target_distribution.max_by { |_, count| count }
       probability = max_target[1].to_f64 / total.to_f64
 
-      {max_target[0], probability} if probability > 0.9
+      {max_target[0], probability} if probability >= 0.8
     end
 
     def confidence : Float64
