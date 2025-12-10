@@ -859,6 +859,7 @@ module Crystal::HIR
       self_id = emit_self(ctx)
       field_get = FieldGet.new(ctx.next_id, ivar_type, self_id, name, ivar_offset)
       ctx.emit(field_get)
+      ctx.register_type(field_get.id, ivar_type)  # Register type for is_a?/case checks
       field_get.id
     end
 
@@ -1350,6 +1351,118 @@ module Crystal::HIR
       phi.id
     end
 
+    # Emit comparison for case/when using appropriate === semantics
+    # Returns ValueId of boolean result
+    private def emit_case_comparison(ctx : LoweringContext, subject_id : ValueId, cond_expr : ExprId) : ValueId
+      cond_node = @arena[cond_expr]
+
+      case cond_node
+      when CrystalV2::Compiler::Frontend::NumberNode,
+           CrystalV2::Compiler::Frontend::BoolNode,
+           CrystalV2::Compiler::Frontend::NilNode,
+           CrystalV2::Compiler::Frontend::CharNode
+        # Primitive literals: direct equality comparison (optimized)
+        cond_val = lower_expr(ctx, cond_expr)
+        eq = BinaryOperation.new(ctx.next_id, TypeRef::BOOL, BinaryOp::Eq, subject_id, cond_val)
+        ctx.emit(eq)
+        eq.id
+
+      when CrystalV2::Compiler::Frontend::ConstantNode
+        # Could be a type name (Int32, String) → is_a? check
+        # Or a constant value → equality
+        const_name = String.new(cond_node.name)
+        if is_type_name?(const_name)
+          # Type check: subject.is_a?(ConstName)
+          check_type = type_ref_for_name(const_name)
+          subject_type = ctx.type_of(subject_id)
+
+          # If subject is union type, use UnionIs
+          if is_union_type?(subject_type)
+            variant_id = get_union_variant_id(subject_type, check_type)
+            if variant_id >= 0
+              union_is = UnionIs.new(ctx.next_id, subject_id, variant_id)
+              ctx.emit(union_is)
+              return union_is.id
+            end
+          end
+
+          # Regular is_a? check
+          is_a = IsA.new(ctx.next_id, subject_id, check_type)
+          ctx.emit(is_a)
+          is_a.id
+        else
+          # Constant value - equality
+          cond_val = lower_expr(ctx, cond_expr)
+          eq = BinaryOperation.new(ctx.next_id, TypeRef::BOOL, BinaryOp::Eq, subject_id, cond_val)
+          ctx.emit(eq)
+          eq.id
+        end
+
+      when CrystalV2::Compiler::Frontend::RangeNode
+        # Range: call Range#=== or Range#includes?
+        # For now, expand to: subject >= begin && subject <= end (or < for exclusive)
+        range_begin = lower_expr(ctx, cond_node.begin_expr)
+        range_end = lower_expr(ctx, cond_node.end_expr)
+
+        gte = BinaryOperation.new(ctx.next_id, TypeRef::BOOL, BinaryOp::Ge, subject_id, range_begin)
+        ctx.emit(gte)
+
+        cmp_op = cond_node.exclusive ? BinaryOp::Lt : BinaryOp::Le
+        lte = BinaryOperation.new(ctx.next_id, TypeRef::BOOL, cmp_op, subject_id, range_end)
+        ctx.emit(lte)
+
+        and_op = BinaryOperation.new(ctx.next_id, TypeRef::BOOL, BinaryOp::And, gte.id, lte.id)
+        ctx.emit(and_op)
+        and_op.id
+
+      when CrystalV2::Compiler::Frontend::IdentifierNode
+        # Could be a type name (Int32, String) or variable
+        ident_name = String.new(cond_node.name)
+        if is_type_name?(ident_name)
+          # Type check: subject.is_a?(IdentName)
+          check_type = type_ref_for_name(ident_name)
+          subject_type = ctx.type_of(subject_id)
+
+          # If subject is union type, use UnionIs
+          if is_union_type?(subject_type)
+            variant_id = get_union_variant_id(subject_type, check_type)
+            if variant_id >= 0
+              union_is = UnionIs.new(ctx.next_id, subject_id, variant_id)
+              ctx.emit(union_is)
+              return union_is.id
+            end
+          end
+
+          # Regular is_a? check
+          is_a = IsA.new(ctx.next_id, subject_id, check_type)
+          ctx.emit(is_a)
+          is_a.id
+        else
+          # Variable - equality
+          cond_val = lower_expr(ctx, cond_expr)
+          eq = BinaryOperation.new(ctx.next_id, TypeRef::BOOL, BinaryOp::Eq, subject_id, cond_val)
+          ctx.emit(eq)
+          eq.id
+        end
+
+      else
+        # Default: call === method (when we have method calls working)
+        # For now, fall back to equality
+        cond_val = lower_expr(ctx, cond_expr)
+        eq = BinaryOperation.new(ctx.next_id, TypeRef::BOOL, BinaryOp::Eq, subject_id, cond_val)
+        ctx.emit(eq)
+        eq.id
+      end
+    end
+
+    # Check if a name refers to a type (starts with uppercase)
+    private def is_type_name?(name : String) : Bool
+      return false if name.empty?
+      first_char = name[0]
+      first_char.uppercase? && @class_info.has_key?(name) ||
+        ["Int32", "Int64", "String", "Bool", "Nil", "Float64"].includes?(name)
+    end
+
     private def lower_case(ctx : LoweringContext, node : CrystalV2::Compiler::Frontend::CaseNode) : ValueId
       # Lower case subject
       subject_id = if subj = node.value
@@ -1368,12 +1481,9 @@ module Crystal::HIR
 
         # Build condition (any match)
         if subject_id
-          # Match subject against when values
+          # Match subject against when values using appropriate === semantics
           conds = when_branch.conditions.map do |cond_expr|
-            cond_val = lower_expr(ctx, cond_expr)
-            eq = BinaryOperation.new(ctx.next_id, TypeRef::BOOL, BinaryOp::Eq, subject_id.not_nil!, cond_val)
-            ctx.emit(eq)
-            eq.id
+            emit_case_comparison(ctx, subject_id.not_nil!, cond_expr)
           end
 
           # Combine with OR
