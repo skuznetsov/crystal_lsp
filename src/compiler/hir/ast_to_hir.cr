@@ -473,6 +473,42 @@ module Crystal::HIR
       0  # Default offset
     end
 
+    # Get instance variable type from current class
+    private def get_ivar_type(name : String) : TypeRef?
+      if class_name = @current_class
+        if class_info = @class_info[class_name]?
+          class_info.ivars.each do |ivar|
+            return ivar.type if ivar.name == name
+          end
+        end
+      end
+      nil
+    end
+
+    # Check if a type is a union type
+    private def is_union_type?(type_ref : TypeRef) : Bool
+      if type_desc = @module.get_type_descriptor(type_ref)
+        type_desc.kind == TypeKind::Union
+      else
+        false
+      end
+    end
+
+    # Get variant type_id for a value being assigned to union
+    # Returns the index of the matching variant, or -1 if not found
+    private def get_union_variant_id(union_type : TypeRef, value_type : TypeRef) : Int32
+      mir_union_ref = hir_to_mir_type_ref(union_type)
+      if descriptor = @union_descriptors[mir_union_ref]?
+        mir_value_ref = hir_to_mir_type_ref(value_type)
+        descriptor.variants.each_with_index do |variant, idx|
+          if variant.type_ref == mir_value_ref
+            return idx
+          end
+        end
+      end
+      -1
+    end
+
     # Get class variable type from current class
     private def get_class_var_type(name : String) : TypeRef
       if class_name = @current_class
@@ -1638,7 +1674,29 @@ module Crystal::HIR
       when CrystalV2::Compiler::Frontend::InstanceVarNode
         name = String.new(target_node.name)
         ivar_offset = get_ivar_offset(name)
+        ivar_type = get_ivar_type(name)
         self_id = emit_self(ctx)
+
+        # Check if ivar is a union type - need to wrap the value
+        if ivar_type && is_union_type?(ivar_type)
+          # Get the type of the value being assigned
+          value_type = ctx.type_of(value_id)
+          variant_id = get_union_variant_id(ivar_type, value_type)
+
+          if variant_id >= 0
+            # Wrap value into union with type_id
+            union_wrap = UnionWrap.new(ctx.next_id, ivar_type, value_id, variant_id)
+            ctx.emit(union_wrap)
+            ctx.register_type(union_wrap.id, ivar_type)
+
+            # Store the wrapped union value
+            field_set = FieldSet.new(ctx.next_id, TypeRef::VOID, self_id, name, union_wrap.id, ivar_offset)
+            ctx.emit(field_set)
+            return field_set.id
+          end
+        end
+
+        # Regular (non-union) field assignment
         field_set = FieldSet.new(ctx.next_id, TypeRef::VOID, self_id, name, value_id, ivar_offset)
         ctx.emit(field_set)
         field_set.id
@@ -1861,6 +1919,19 @@ module Crystal::HIR
       # target_type is Slice(UInt8) - type name as bytes
       target_type = type_ref_for_name(String.new(node.target_type))
 
+      # Check if value is union type - use UnionUnwrap instead of Cast
+      value_type = ctx.type_of(value_id)
+      if is_union_type?(value_type)
+        variant_id = get_union_variant_id(value_type, target_type)
+        if variant_id >= 0
+          # Unsafe unwrap - assumes type_id matches (caller should have checked with is_a?)
+          unwrap = UnionUnwrap.new(ctx.next_id, target_type, value_id, variant_id, safe: false)
+          ctx.emit(unwrap)
+          return unwrap.id
+        end
+      end
+
+      # Regular cast for non-union types
       cast = Cast.new(ctx.next_id, target_type, value_id, target_type, safe: false)
       ctx.emit(cast)
       cast.id
@@ -1881,6 +1952,19 @@ module Crystal::HIR
       # target_type is Slice(UInt8) - type name as bytes
       check_type = type_ref_for_name(String.new(node.target_type))
 
+      # Check if value is a union type - use UnionIs for runtime type check
+      value_type = ctx.type_of(value_id)
+      if is_union_type?(value_type)
+        # Get the variant_type_id for the check_type within this union
+        variant_id = get_union_variant_id(value_type, check_type)
+        if variant_id >= 0
+          union_is = UnionIs.new(ctx.next_id, value_id, variant_id)
+          ctx.emit(union_is)
+          return union_is.id
+        end
+      end
+
+      # Regular is_a check for non-union types
       is_a = IsA.new(ctx.next_id, value_id, check_type)
       ctx.emit(is_a)
       is_a.id

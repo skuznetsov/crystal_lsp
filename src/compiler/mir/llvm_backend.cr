@@ -747,64 +747,89 @@ module Crystal::MIR
 
     private def emit_union_wrap(inst : UnionWrap, name : String)
       # Union layout: { i32 type_id, [N x i8] payload }
+      # name already has % prefix, use base name for temps
+      base_name = name.lstrip('%')
+
       # 1. Allocate union on stack
       union_type = @type_mapper.llvm_type(inst.union_type)
-      emit "#{name} = alloca #{union_type}, align 8"
+      emit "%#{base_name}.ptr = alloca #{union_type}, align 8"
 
       # 2. Store type_id discriminator
-      emit "%#{name}.type_id_ptr = getelementptr #{union_type}, ptr #{name}, i32 0, i32 0"
-      emit "store i32 #{inst.variant_type_id}, ptr %#{name}.type_id_ptr"
+      emit "%#{base_name}.type_id_ptr = getelementptr #{union_type}, ptr %#{base_name}.ptr, i32 0, i32 0"
+      emit "store i32 #{inst.variant_type_id}, ptr %#{base_name}.type_id_ptr"
 
       # 3. Store value in payload
       val = value_ref(inst.value)
       val_type = @value_types[inst.value]? || TypeRef::POINTER
       val_type_str = @type_mapper.llvm_type(val_type)
-      emit "%#{name}.payload_ptr = getelementptr #{union_type}, ptr #{name}, i32 0, i32 1"
-      emit "store #{val_type_str} #{val}, ptr %#{name}.payload_ptr"
+      emit "%#{base_name}.payload_ptr = getelementptr #{union_type}, ptr %#{base_name}.ptr, i32 0, i32 1"
+      emit "store #{val_type_str} #{val}, ptr %#{base_name}.payload_ptr"
+
+      # 4. Load the completed union value from stack
+      emit "#{name} = load #{union_type}, ptr %#{base_name}.ptr"
     end
 
     private def emit_union_unwrap(inst : UnionUnwrap, name : String)
       # Get payload from union, assuming type_id matches
+      # Union may be passed by value - need to store to stack first
       union_val = value_ref(inst.union_value)
       union_type_ref = @value_types[inst.union_value]? || TypeRef::POINTER
       union_type = @type_mapper.llvm_type(union_type_ref)
       result_type = @type_mapper.llvm_type(inst.type)
+      base_name = name.lstrip('%')
+
+      # Store union value to stack to get pointer for GEP
+      emit "%#{base_name}.union_ptr = alloca #{union_type}, align 8"
+      emit "store #{union_type} #{union_val}, ptr %#{base_name}.union_ptr"
 
       if inst.safe
         # Safe unwrap: check type_id first, return null/zero on mismatch
-        emit "%#{name}.type_id_ptr = getelementptr #{union_type}, ptr #{union_val}, i32 0, i32 0"
-        emit "%#{name}.actual_type_id = load i32, ptr %#{name}.type_id_ptr"
-        emit "%#{name}.type_match = icmp eq i32 %#{name}.actual_type_id, #{inst.variant_type_id}"
-        emit "%#{name}.payload_ptr = getelementptr #{union_type}, ptr #{union_val}, i32 0, i32 1"
-        emit "%#{name}.payload = load #{result_type}, ptr %#{name}.payload_ptr"
+        emit "%#{base_name}.type_id_ptr = getelementptr #{union_type}, ptr %#{base_name}.union_ptr, i32 0, i32 0"
+        emit "%#{base_name}.actual_type_id = load i32, ptr %#{base_name}.type_id_ptr"
+        emit "%#{base_name}.type_match = icmp eq i32 %#{base_name}.actual_type_id, #{inst.variant_type_id}"
+        emit "%#{base_name}.payload_ptr = getelementptr #{union_type}, ptr %#{base_name}.union_ptr, i32 0, i32 1"
+        emit "%#{base_name}.payload = load #{result_type}, ptr %#{base_name}.payload_ptr"
         # Select null/zero if type doesn't match
-        emit "#{name} = select i1 %#{name}.type_match, #{result_type} %#{name}.payload, #{result_type} zeroinitializer"
+        emit "#{name} = select i1 %#{base_name}.type_match, #{result_type} %#{base_name}.payload, #{result_type} zeroinitializer"
       else
         # Unsafe unwrap: just load payload (UB if type_id doesn't match)
-        emit "%#{name}.payload_ptr = getelementptr #{union_type}, ptr #{union_val}, i32 0, i32 1"
-        emit "#{name} = load #{result_type}, ptr %#{name}.payload_ptr"
+        emit "%#{base_name}.payload_ptr = getelementptr #{union_type}, ptr %#{base_name}.union_ptr, i32 0, i32 1"
+        emit "#{name} = load #{result_type}, ptr %#{base_name}.payload_ptr"
       end
     end
 
     private def emit_union_type_id_get(inst : UnionTypeIdGet, name : String)
       # Load type_id from union
+      # Union may be passed by value - need to store to stack first
       union_val = value_ref(inst.union_value)
       union_type_ref = @value_types[inst.union_value]? || TypeRef::POINTER
       union_type = @type_mapper.llvm_type(union_type_ref)
+      base_name = name.lstrip('%')
 
-      emit "%#{name}.type_id_ptr = getelementptr #{union_type}, ptr #{union_val}, i32 0, i32 0"
-      emit "#{name} = load i32, ptr %#{name}.type_id_ptr"
+      # Store union value to stack to get pointer for GEP
+      emit "%#{base_name}.union_ptr = alloca #{union_type}, align 8"
+      emit "store #{union_type} #{union_val}, ptr %#{base_name}.union_ptr"
+
+      emit "%#{base_name}.type_id_ptr = getelementptr #{union_type}, ptr %#{base_name}.union_ptr, i32 0, i32 0"
+      emit "#{name} = load i32, ptr %#{base_name}.type_id_ptr"
     end
 
     private def emit_union_is(inst : UnionIs, name : String)
       # Check if union is specific variant
+      # Union may be passed by value (from load) - need to store to stack first
       union_val = value_ref(inst.union_value)
       union_type_ref = @value_types[inst.union_value]? || TypeRef::POINTER
       union_type = @type_mapper.llvm_type(union_type_ref)
+      base_name = name.lstrip('%')
 
-      emit "%#{name}.type_id_ptr = getelementptr #{union_type}, ptr #{union_val}, i32 0, i32 0"
-      emit "%#{name}.actual_type_id = load i32, ptr %#{name}.type_id_ptr"
-      emit "#{name} = icmp eq i32 %#{name}.actual_type_id, #{inst.variant_type_id}"
+      # Store union value to stack to get pointer for GEP
+      emit "%#{base_name}.union_ptr = alloca #{union_type}, align 8"
+      emit "store #{union_type} #{union_val}, ptr %#{base_name}.union_ptr"
+
+      # Get type_id from stored union
+      emit "%#{base_name}.type_id_ptr = getelementptr #{union_type}, ptr %#{base_name}.union_ptr, i32 0, i32 0"
+      emit "%#{base_name}.actual_type_id = load i32, ptr %#{base_name}.type_id_ptr"
+      emit "#{name} = icmp eq i32 %#{base_name}.actual_type_id, #{inst.variant_type_id}"
     end
 
     private def emit_terminator(term : Terminator)

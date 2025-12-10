@@ -92,8 +92,10 @@ module Crystal
         payload_offset = ((4 + alignment - 1) // alignment) * alignment
         total_size = payload_offset + max_variant_size
 
-        # Create union type in TypeRegistry
-        union_type = @mir_module.type_registry.create_type(
+        # Create union type in TypeRegistry with the SAME TypeRef id
+        # so that llvm_type lookup finds it
+        union_type = @mir_module.type_registry.create_type_with_id(
+          mir_type_ref.id,
           TypeKind::Union,
           descriptor.name,
           total_size.to_u64,
@@ -247,6 +249,14 @@ module Crystal
                  lower_classvar_get(hir_value)
                when HIR::ClassVarSet
                  lower_classvar_set(hir_value)
+               when HIR::UnionWrap
+                 lower_union_wrap(hir_value)
+               when HIR::UnionUnwrap
+                 lower_union_unwrap(hir_value)
+               when HIR::UnionTypeId
+                 lower_union_type_id(hir_value)
+               when HIR::UnionIs
+                 lower_union_is(hir_value)
                else
                  raise "Unsupported HIR value: #{hir_value.class}"
                end
@@ -599,6 +609,68 @@ module Crystal
       # Generate global name: ClassName_varname
       global_name = "#{cv.class_name}_#{cv.var_name}"
       builder.global_store(global_name, value, convert_type(cv.type))
+    end
+
+    # ─────────────────────────────────────────────────────────────────────────
+    # Union Lowering
+    # ─────────────────────────────────────────────────────────────────────────
+
+    private def lower_union_wrap(wrap : HIR::UnionWrap) : ValueId
+      builder = @builder.not_nil!
+      value = get_value(wrap.value)
+      union_type = convert_type(wrap.type)
+      variant_type_id = wrap.variant_type_id
+
+      # Create MIR UnionWrap instruction
+      mir_wrap = MIR::UnionWrap.new(
+        builder.next_id,
+        union_type,
+        value,
+        variant_type_id,
+        union_type  # union_type parameter
+      )
+      builder.emit(mir_wrap)
+    end
+
+    private def lower_union_unwrap(unwrap : HIR::UnionUnwrap) : ValueId
+      builder = @builder.not_nil!
+      union_value = get_value(unwrap.union_value)
+      result_type = convert_type(unwrap.type)
+
+      # Create MIR UnionUnwrap instruction
+      mir_unwrap = MIR::UnionUnwrap.new(
+        builder.next_id,
+        result_type,
+        union_value,
+        unwrap.variant_type_id,
+        unwrap.safe
+      )
+      builder.emit(mir_unwrap)
+    end
+
+    private def lower_union_type_id(type_id : HIR::UnionTypeId) : ValueId
+      builder = @builder.not_nil!
+      union_value = get_value(type_id.union_value)
+
+      # Create MIR UnionTypeIdGet instruction (type is hardcoded to INT32)
+      mir_type_id = MIR::UnionTypeIdGet.new(
+        builder.next_id,
+        union_value
+      )
+      builder.emit(mir_type_id)
+    end
+
+    private def lower_union_is(is : HIR::UnionIs) : ValueId
+      builder = @builder.not_nil!
+      union_value = get_value(is.union_value)
+
+      # Create MIR UnionIs instruction (type is hardcoded to BOOL)
+      mir_is = MIR::UnionIs.new(
+        builder.next_id,
+        union_value,
+        is.variant_type_id
+      )
+      builder.emit(mir_is)
     end
 
     # ─────────────────────────────────────────────────────────────────────────

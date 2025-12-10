@@ -233,6 +233,15 @@ module Crystal::MIR
       type
     end
 
+    # Create type with explicit id (for mapping HIR TypeRef to MIR Type)
+    def create_type_with_id(id : TypeId, kind : TypeKind, name : String, size : UInt64, alignment : UInt32) : Type
+      type = Type.new(id, kind, name, size, alignment)
+      @types << type
+      @type_map[id] = type
+      @name_map[name] = type
+      type
+    end
+
     def get(id : TypeId) : Type?
       @type_map[id]?
     end
@@ -1305,9 +1314,13 @@ module Crystal::MIR
       @function.get_block(@current_block)
     end
 
-    private def emit(value : Value) : ValueId
+    def emit(value : Value) : ValueId
       block.add(value)
       value.id
+    end
+
+    def next_id : ValueId
+      @function.next_value_id
     end
 
     # Constants
