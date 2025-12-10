@@ -956,6 +956,13 @@ module Crystal::HIR
       TypeRef.new(id)
     end
 
+    # Get TypeDescriptor for a TypeRef
+    def get_type_descriptor(type_ref : TypeRef) : TypeDescriptor?
+      return nil if type_ref.id < TypeRef::FIRST_USER_TYPE
+      idx = (type_ref.id - TypeRef::FIRST_USER_TYPE).to_i32
+      @types[idx]?
+    end
+
     def to_s(io : IO) : Nil
       io << "module " << @name << "\n\n"
 

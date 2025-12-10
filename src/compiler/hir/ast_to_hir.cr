@@ -7,6 +7,7 @@
 
 require "./hir"
 require "../frontend/ast"
+require "../mir/mir"
 
 module Crystal::HIR
   # Error raised during AST to HIR conversion
@@ -188,12 +189,16 @@ module Crystal::HIR
     # Current class being lowered (for ivar access)
     @current_class : String?
 
+    # Union type descriptors for debug info (keyed by MIR::TypeRef)
+    getter union_descriptors : Hash(MIR::TypeRef, MIR::UnionDescriptor)
+
     def initialize(@arena, module_name : String = "main")
       @module = Module.new(module_name)
       @function_types = {} of String => TypeRef
       @class_info = {} of String => ClassInfo
       @init_params = {} of String => Array({String, TypeRef})
       @current_class = nil
+      @union_descriptors = {} of MIR::TypeRef => MIR::UnionDescriptor
     end
 
     # Get class info by name
@@ -330,6 +335,15 @@ module Crystal::HIR
 
       # Initialize instance variables to zero/default
       class_info.ivars.each do |ivar|
+        # Check if this is a union type by looking up the type descriptor
+        if type_desc = @module.get_type_descriptor(ivar.type)
+          if type_desc.kind == TypeKind::Union
+            # Union types will be initialized in initialize()
+            # We can't create a simple zero literal for unions
+            next
+          end
+        end
+
         default_val = Literal.new(ctx.next_id, ivar.type, 0_i64)
         ctx.emit(default_val)
         ivar_store = FieldSet.new(ctx.next_id, TypeRef::VOID, alloc.id, ivar.name, default_val.id, ivar.offset)
@@ -409,8 +423,16 @@ module Crystal::HIR
         8
       when TypeRef::INT128, TypeRef::UINT128
         16
+      when TypeRef::VOID, TypeRef::NIL
+        0  # Nil/Void has no storage size
       else
-        8  # Pointer size for reference types
+        # Check if it's a union type we've registered
+        mir_type_ref = MIR::TypeRef.new(type.id)
+        if descriptor = @union_descriptors[mir_type_ref]?
+          descriptor.total_size
+        else
+          8  # Pointer size for reference types
+        end
       end
     end
 
@@ -979,8 +1001,19 @@ module Crystal::HIR
       # Only create phi if at least one branch flows to merge
       if then_flows_to_merge || else_flows_to_merge
         if then_flows_to_merge && else_flows_to_merge
-          # Both branches flow to merge - need phi
+          # Both branches flow to merge - need phi (unless void type)
           phi_type = ctx.type_of(then_value)
+
+          # Don't create phi for void types - LLVM doesn't allow phi void
+          if phi_type == TypeRef::VOID || phi_type == TypeRef::NIL
+            merge_branch_locals(ctx, pre_branch_locals, then_locals, else_locals,
+                                then_exit_block, else_exit_block)
+            # Return nil literal as the result of void if-expression
+            nil_lit = Literal.new(ctx.next_id, TypeRef::NIL, nil)
+            ctx.emit(nil_lit)
+            return nil_lit.id
+          end
+
           phi = Phi.new(ctx.next_id, phi_type)
           phi.add_incoming(then_exit_block, then_value)
           phi.add_incoming(else_exit_block, else_value)
@@ -1081,6 +1114,14 @@ module Crystal::HIR
       # Merge
       ctx.current_block = merge_block
       phi_type = ctx.type_of(then_value)  # Infer type from incoming value
+
+      # Don't create phi for void types - LLVM doesn't allow phi void
+      if phi_type == TypeRef::VOID || phi_type == TypeRef::NIL
+        nil_lit = Literal.new(ctx.next_id, TypeRef::NIL, nil)
+        ctx.emit(nil_lit)
+        return nil_lit.id
+      end
+
       phi = Phi.new(ctx.next_id, phi_type)
       phi.add_incoming(then_exit, then_value)
       phi.add_incoming(else_exit, else_value)
@@ -1258,6 +1299,14 @@ module Crystal::HIR
 
       ctx.current_block = merge_block
       phi_type = ctx.type_of(then_value)  # Infer type from incoming value
+
+      # Don't create phi for void types - LLVM doesn't allow phi void
+      if phi_type == TypeRef::VOID || phi_type == TypeRef::NIL
+        nil_lit = Literal.new(ctx.next_id, TypeRef::NIL, nil)
+        ctx.emit(nil_lit)
+        return nil_lit.id
+      end
+
       phi = Phi.new(ctx.next_id, phi_type)
       phi.add_incoming(then_exit, then_value)
       phi.add_incoming(else_exit, else_value)
@@ -1343,6 +1392,14 @@ module Crystal::HIR
       # Merge
       ctx.current_block = merge_block
       phi_type = incoming.first?.try { |(_, val)| ctx.type_of(val) } || TypeRef::VOID
+
+      # Don't create phi for void types - LLVM doesn't allow phi void
+      if phi_type == TypeRef::VOID || phi_type == TypeRef::NIL
+        nil_lit = Literal.new(ctx.next_id, TypeRef::NIL, nil)
+        ctx.emit(nil_lit)
+        return nil_lit.id
+      end
+
       phi = Phi.new(ctx.next_id, phi_type)
       incoming.each { |(blk, val)| phi.add_incoming(blk, val) }
       ctx.emit(phi)
@@ -1861,6 +1918,11 @@ module Crystal::HIR
     end
 
     private def type_ref_for_name(name : String) : TypeRef
+      # Check for union type syntax: "Type1 | Type2" or "Type1|Type2" (parser may not add spaces)
+      if name.includes?("|")
+        return create_union_type(name)
+      end
+
       case name
       when "Void", "Nil"    then TypeRef::VOID
       when "Bool"           then TypeRef::BOOL
@@ -1881,6 +1943,108 @@ module Crystal::HIR
       when "Symbol"         then TypeRef::SYMBOL
       else
         @module.intern_type(TypeDescriptor.new(TypeKind::Class, name))
+      end
+    end
+
+    # Create a union type from "Type1 | Type2 | Type3" syntax
+    private def create_union_type(name : String) : TypeRef
+      # Parse variant type names (handle both "Type1 | Type2" and "Type1|Type2")
+      variant_names = name.split("|").map(&.strip)
+
+      # Get TypeRefs for each variant (recursive to handle nested unions)
+      variant_refs = variant_names.map { |vn| type_ref_for_name(vn) }
+
+      # Calculate union layout
+      variants = [] of MIR::UnionVariantDescriptor
+      max_size = 0
+      max_align = 4  # Minimum alignment for type_id
+
+      variant_refs.each_with_index do |vref, idx|
+        vsize = type_size(vref)
+        valign = type_alignment(vref)
+        max_size = {max_size, vsize}.max
+        max_align = {max_align, valign}.max
+
+        # Convert HIR::TypeRef to MIR::TypeRef using proper ID mapping
+        mir_type_ref = hir_to_mir_type_ref(vref)
+
+        variants << MIR::UnionVariantDescriptor.new(
+          type_id: idx,
+          type_ref: mir_type_ref,
+          full_name: variant_names[idx],
+          size: vsize,
+          alignment: valign,
+          field_offsets: nil
+        )
+      end
+
+      # Total size: header (4 bytes for type_id) + padding + max payload
+      payload_offset = ((4 + max_align - 1) // max_align) * max_align
+      total_size = payload_offset + max_size
+
+      # Create union type and register descriptor
+      type_ref = @module.intern_type(TypeDescriptor.new(TypeKind::Union, name))
+
+      # Convert to MIR::TypeRef for the descriptor key
+      mir_union_type_ref = hir_to_mir_type_ref(type_ref)
+
+      # Create union descriptor
+      descriptor = MIR::UnionDescriptor.new(
+        name: name,
+        variants: variants,
+        total_size: total_size,
+        alignment: max_align
+      )
+
+      # Store descriptor for LLVM backend
+      @union_descriptors[mir_union_type_ref] = descriptor
+
+      type_ref
+    end
+
+    # Convert HIR::TypeRef to MIR::TypeRef with proper ID mapping
+    # HIR and MIR have different primitive type IDs
+    private def hir_to_mir_type_ref(hir_type : TypeRef) : MIR::TypeRef
+      case hir_type
+      when TypeRef::VOID    then MIR::TypeRef::VOID
+      when TypeRef::BOOL    then MIR::TypeRef::BOOL
+      when TypeRef::INT8    then MIR::TypeRef::INT8
+      when TypeRef::INT16   then MIR::TypeRef::INT16
+      when TypeRef::INT32   then MIR::TypeRef::INT32
+      when TypeRef::INT64   then MIR::TypeRef::INT64
+      when TypeRef::INT128  then MIR::TypeRef::INT128
+      when TypeRef::UINT8   then MIR::TypeRef::UINT8
+      when TypeRef::UINT16  then MIR::TypeRef::UINT16
+      when TypeRef::UINT32  then MIR::TypeRef::UINT32
+      when TypeRef::UINT64  then MIR::TypeRef::UINT64
+      when TypeRef::UINT128 then MIR::TypeRef::UINT128
+      when TypeRef::FLOAT32 then MIR::TypeRef::FLOAT32
+      when TypeRef::FLOAT64 then MIR::TypeRef::FLOAT64
+      when TypeRef::CHAR    then MIR::TypeRef::CHAR
+      when TypeRef::STRING  then MIR::TypeRef::STRING
+      when TypeRef::NIL     then MIR::TypeRef::NIL
+      when TypeRef::SYMBOL  then MIR::TypeRef::SYMBOL
+      else
+        # User-defined types: offset by 20 (matching hir_to_mir.cr convert_type)
+        MIR::TypeRef.new(hir_type.id + 20_u32)
+      end
+    end
+
+    # Get type alignment in bytes
+    private def type_alignment(type : TypeRef) : Int32
+      case type
+      when TypeRef::BOOL, TypeRef::INT8, TypeRef::UINT8
+        1
+      when TypeRef::INT16, TypeRef::UINT16
+        2
+      when TypeRef::INT32, TypeRef::UINT32, TypeRef::FLOAT32, TypeRef::CHAR
+        4
+      when TypeRef::INT64, TypeRef::UINT64, TypeRef::FLOAT64
+        8
+      when TypeRef::INT128, TypeRef::UINT128
+        16
+      else
+        8  # Pointer alignment for reference types
       end
     end
 

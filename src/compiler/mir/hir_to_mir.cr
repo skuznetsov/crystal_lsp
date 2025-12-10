@@ -77,6 +77,43 @@ module Crystal
       end
     end
 
+    # Register union types from AstToHir
+    # Creates union types in MIR TypeRegistry and stores descriptors for debug info
+    def register_union_types(union_descriptors : Hash(MIR::TypeRef, UnionDescriptor))
+      union_descriptors.each do |mir_type_ref, descriptor|
+        # Register descriptor in MIR module (for debug info / LLVM metadata)
+        @mir_module.register_union(mir_type_ref, descriptor)
+
+        # Calculate union size and alignment
+        max_variant_size = descriptor.variants.map(&.size).max? || 0
+        alignment = descriptor.alignment.to_u32
+
+        # Total size: 4 bytes for type_id + padding + max payload
+        payload_offset = ((4 + alignment - 1) // alignment) * alignment
+        total_size = payload_offset + max_variant_size
+
+        # Create union type in TypeRegistry
+        union_type = @mir_module.type_registry.create_type(
+          TypeKind::Union,
+          descriptor.name,
+          total_size.to_u64,
+          alignment
+        )
+
+        # Add each variant as a sub-type
+        descriptor.variants.each do |v|
+          # Get or create variant type from TypeRegistry
+          if variant_type = @mir_module.type_registry.get(v.type_ref)
+            union_type.add_variant(variant_type)
+          else
+            # Variant is a primitive type - create temporary Type for it
+            prim_type = Type.new(v.type_ref.id, TypeKind::Struct, v.full_name, v.size.to_u64, v.alignment.to_u32)
+            union_type.add_variant(prim_type)
+          end
+        end
+      end
+    end
+
     # Create function stub with params and return type (no body)
     private def create_function_stub(hir_func : HIR::Function)
       mir_func = @mir_module.create_function(

@@ -151,6 +151,9 @@ module Crystal::V2
       end
       mir_lowering.register_globals(globals)
 
+      # Register union types from AST conversion
+      mir_lowering.register_union_types(hir_converter.union_descriptors)
+
       mir_module = mir_lowering.lower
       log "  Functions: #{mir_module.functions.size}"
 
