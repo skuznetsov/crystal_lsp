@@ -1734,7 +1734,7 @@ module Crystal::HIR
 
     # Intrinsic: n.times { |i| body }
     # Expands to: i = 0; while i < n { body; i += 1 }
-    # Uses phi nodes for loop variable
+    # Uses phi nodes for loop variable AND mutable external variables
     private def lower_times_intrinsic(ctx : LoweringContext, count_id : ValueId, block : CrystalV2::Compiler::Frontend::BlockNode) : ValueId
       # Get block param name (default to "i" if not specified)
       param_name = if params = block.params
@@ -1751,11 +1751,23 @@ module Crystal::HIR
                      "__times_i"
                    end
 
+      # Collect variables that might be assigned in the block body (same as while loop)
+      assigned_vars = collect_assigned_vars(block.body)
+      # Remove the block parameter from assigned vars - it's handled separately
+      assigned_vars = assigned_vars.reject { |v| v == param_name }
+
+      # Save initial values of mutable variables before the loop
+      entry_block = ctx.current_block
+      initial_values = {} of String => ValueId
+      assigned_vars.each do |var_name|
+        if val = ctx.lookup_local(var_name)
+          initial_values[var_name] = val
+        end
+      end
+
       # Initial counter value
       zero = Literal.new(ctx.next_id, TypeRef::INT32, 0_i64)
       ctx.emit(zero)
-
-      entry_block = ctx.current_block
 
       # Create blocks
       cond_block = ctx.create_block
@@ -1770,8 +1782,20 @@ module Crystal::HIR
       ctx.current_block = cond_block
       counter_phi = Phi.new(ctx.next_id, TypeRef::INT32)
       counter_phi.add_incoming(entry_block, zero.id)
-      # Note: incr_block incoming will be added after we know the incremented value
       ctx.emit(counter_phi)
+
+      # Create phi nodes for mutable external variables (same pattern as lower_while)
+      phi_nodes = {} of String => Phi
+      assigned_vars.each do |var_name|
+        if initial_val = initial_values[var_name]?
+          var_type = ctx.type_of(initial_val)
+          phi = Phi.new(ctx.next_id, var_type)
+          phi.add_incoming(entry_block, initial_val)
+          ctx.emit(phi)
+          phi_nodes[var_name] = phi
+          ctx.register_local(var_name, phi.id)
+        end
+      end
 
       # Register counter for use in body
       ctx.register_local(param_name, counter_phi.id)
@@ -1788,9 +1812,10 @@ module Crystal::HIR
 
       # Lower block body
       lower_body(ctx, block.body)
+      body_exit_block = ctx.current_block
       ctx.pop_scope
 
-      # Jump to increment
+      # Jump to increment block
       ctx.terminate(Jump.new(incr_block))
 
       # Increment block: i + 1
@@ -1800,14 +1825,28 @@ module Crystal::HIR
       new_i = BinaryOperation.new(ctx.next_id, TypeRef::INT32, BinaryOp::Add, counter_phi.id, one.id)
       ctx.emit(new_i)
 
-      # Add incoming to phi from increment block
+      # Add incoming to counter phi from increment block
       counter_phi.add_incoming(incr_block, new_i.id)
+
+      # Patch mutable variable phi nodes - incoming from incr_block (the actual predecessor of cond_block)
+      assigned_vars.each do |var_name|
+        if phi = phi_nodes[var_name]?
+          if updated_val = ctx.lookup_local(var_name)
+            # Add incoming from incr_block (not body_block!)
+            phi.add_incoming(incr_block, updated_val)
+          end
+        end
+      end
 
       # Jump back to condition
       ctx.terminate(Jump.new(cond_block))
 
-      # Exit block - return nil
+      # Exit block - restore phi values for use after the loop
       ctx.current_block = exit_block
+      phi_nodes.each do |var_name, phi|
+        ctx.register_local(var_name, phi.id)
+      end
+
       nil_lit = Literal.new(ctx.next_id, TypeRef::NIL, nil)
       ctx.emit(nil_lit)
       nil_lit.id
