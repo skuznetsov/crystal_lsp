@@ -145,13 +145,45 @@ module Crystal::HIR
     def to_s(io : IO) : Nil
       io << "%" << @id << " = literal "
       case v = @value
-      when Int64   then io << v << " : Int64"
-      when Float64 then io << v << " : Float64"
-      when String  then io << v.inspect << " : String"
-      when Bool    then io << v << " : Bool"
-      when Char    then io << "'" << v << "' : Char"
+      when Int64   then io << v
+      when Float64 then io << v
+      when String
+        # Check if this is a symbol (type = SYMBOL)
+        if @type == TypeRef::SYMBOL
+          io << ":" << v
+        else
+          io << v.inspect
+        end
+      when Bool    then io << v
+      when Char    then io << "'" << v << "'"
       when Nil     then io << "nil"
       else              io << v.inspect
+      end
+      # Use actual type from TypeRef
+      io << " : " << type_name
+    end
+
+    private def type_name : String
+      case @type
+      when TypeRef::VOID    then "Void"
+      when TypeRef::NIL     then "Nil"
+      when TypeRef::BOOL    then "Bool"
+      when TypeRef::INT8    then "Int8"
+      when TypeRef::INT16   then "Int16"
+      when TypeRef::INT32   then "Int32"
+      when TypeRef::INT64   then "Int64"
+      when TypeRef::INT128  then "Int128"
+      when TypeRef::UINT8   then "UInt8"
+      when TypeRef::UINT16  then "UInt16"
+      when TypeRef::UINT32  then "UInt32"
+      when TypeRef::UINT64  then "UInt64"
+      when TypeRef::UINT128 then "UInt128"
+      when TypeRef::FLOAT32 then "Float32"
+      when TypeRef::FLOAT64 then "Float64"
+      when TypeRef::CHAR    then "Char"
+      when TypeRef::STRING  then "String"
+      when TypeRef::SYMBOL  then "Symbol"
+      else                       "Type(#{@type.id})"
       end
     end
   end

@@ -357,7 +357,7 @@ module Crystal::HIR
 
       when CrystalV2::Compiler::Frontend::SplatNode
         # Lower the inner expression (splat semantics handled at call site)
-        lower_expr(ctx, node.expression)
+        lower_expr(ctx, node.expr)
 
       else
         raise LoweringError.new("Unsupported AST node type: #{node.class}", node)
@@ -385,7 +385,10 @@ module Crystal::HIR
              else             TypeRef::INT32
              end
 
-      value_str = String.new(node.value)
+      # Remove underscores and type suffixes (42_000i64 -> 42000)
+      value_str = String.new(node.value).gsub('_', "")
+      # Strip type suffix (i8, i16, i32, i64, i128, u8, u16, u32, u64, u128, f32, f64)
+      value_str = value_str.gsub(/[iuf]\d+$/, "")
       value = if node.kind.f32? || node.kind.f64?
                 value_str.to_f64
               else
@@ -893,18 +896,45 @@ module Crystal::HIR
     # ═══════════════════════════════════════════════════════════════════════
 
     private def lower_call(ctx : LoweringContext, node : CrystalV2::Compiler::Frontend::CallNode) : ValueId
-      receiver_id = if recv = node.receiver
-                      lower_expr(ctx, recv)
-                    else
-                      nil
-                    end
+      # CallNode has callee (ExprId) which can be:
+      # - IdentifierNode: simple function call like foo()
+      # - MemberAccessNode: method call like obj.method()
+      # - Other: chained/complex calls
+
+      callee_node = @arena[node.callee]
+
+      receiver_id : ValueId? = nil
+      method_name : String
+
+      case callee_node
+      when CrystalV2::Compiler::Frontend::IdentifierNode
+        # Simple function call: foo()
+        method_name = String.new(callee_node.name)
+        receiver_id = nil
+
+      when CrystalV2::Compiler::Frontend::MemberAccessNode
+        # Method call: obj.method()
+        receiver_id = lower_expr(ctx, callee_node.object)
+        method_name = String.new(callee_node.member)
+
+      else
+        # Complex callee (e.g., another call result being called)
+        # Lower callee as receiver and use "call" as synthetic method name
+        receiver_id = lower_node(ctx, callee_node)
+        method_name = "call"
+      end
 
       args = node.args.map { |arg| lower_expr(ctx, arg) }
-      method_name = String.new(node.name)
 
-      # Check for block
-      block_id = if blk = node.block
-                   lower_block_to_block_id(ctx, blk)
+      # Check for block (ExprId -> must lower to BlockNode)
+      block_id = if blk_expr = node.block
+                   blk_node = @arena[blk_expr]
+                   if blk_node.is_a?(CrystalV2::Compiler::Frontend::BlockNode)
+                     lower_block_to_block_id(ctx, blk_node)
+                   else
+                     # Block is some other expression - should not happen in well-formed AST
+                     nil
+                   end
                  else
                    nil
                  end
@@ -916,11 +946,21 @@ module Crystal::HIR
 
     private def lower_index(ctx : LoweringContext, node : CrystalV2::Compiler::Frontend::IndexNode) : ValueId
       object_id = lower_expr(ctx, node.object)
-      index_id = lower_expr(ctx, node.index)
+      # IndexNode has indexes (Array) - can be multi-dimensional like arr[1, 2]
+      index_ids = node.indexes.map { |idx| lower_expr(ctx, idx) }
 
-      index_get = IndexGet.new(ctx.next_id, TypeRef::VOID, object_id, index_id)
-      ctx.emit(index_get)
-      index_get.id
+      # For single index, use IndexGet directly
+      # For multiple indexes, chain them or use as tuple
+      if index_ids.size == 1
+        index_get = IndexGet.new(ctx.next_id, TypeRef::VOID, object_id, index_ids.first)
+        ctx.emit(index_get)
+        index_get.id
+      else
+        # Multi-dimensional: emit as call to []
+        call = Call.new(ctx.next_id, TypeRef::VOID, object_id, "[]", index_ids)
+        ctx.emit(call)
+        call.id
+      end
     end
 
     private def lower_member_access(ctx : LoweringContext, node : CrystalV2::Compiler::Frontend::MemberAccessNode) : ValueId
@@ -977,10 +1017,17 @@ module Crystal::HIR
 
       when CrystalV2::Compiler::Frontend::IndexNode
         object_id = lower_expr(ctx, target_node.object)
-        index_id = lower_expr(ctx, target_node.index)
-        index_set = IndexSet.new(ctx.next_id, TypeRef::VOID, object_id, index_id, value_id)
-        ctx.emit(index_set)
-        index_set.id
+        index_ids = target_node.indexes.map { |idx| lower_expr(ctx, idx) }
+        if index_ids.size == 1
+          index_set = IndexSet.new(ctx.next_id, TypeRef::VOID, object_id, index_ids.first, value_id)
+          ctx.emit(index_set)
+          index_set.id
+        else
+          # Multi-index assignment: emit as call to []=
+          call = Call.new(ctx.next_id, TypeRef::VOID, object_id, "[]=", index_ids + [value_id])
+          ctx.emit(call)
+          call.id
+        end
 
       else
         raise LoweringError.new("Unsupported assignment target: #{target_node.class}", target_node)
@@ -988,31 +1035,39 @@ module Crystal::HIR
     end
 
     private def lower_multiple_assign(ctx : LoweringContext, node : CrystalV2::Compiler::Frontend::MultipleAssignNode) : ValueId
-      # Lower all values first
-      values = node.values.map { |v| lower_expr(ctx, v) }
+      # MultipleAssignNode has a single value (destructured)
+      # e.g., a, b, c = expr  where expr is a tuple/array
+      rhs_id = lower_expr(ctx, node.value)
 
-      # Assign to each target
+      # For each target, emit index operation to destructure
       node.targets.each_with_index do |target_expr, idx|
         target_node = @arena[target_expr]
-        value_id = values[idx]? || values.last  # Splat handling
+
+        # Index into the RHS to get this element
+        index_lit = Literal.new(ctx.next_id, TypeRef::INT32, idx.to_i64)
+        ctx.emit(index_lit)
+        element_id = IndexGet.new(ctx.next_id, TypeRef::VOID, rhs_id, index_lit.id)
+        ctx.emit(element_id)
 
         case target_node
         when CrystalV2::Compiler::Frontend::IdentifierNode
           name = String.new(target_node.name)
           local = Local.new(ctx.next_id, TypeRef::VOID, name, ctx.current_scope)
           ctx.emit(local)
-          ctx.register_local(name, value_id)
+          ctx.register_local(name, element_id.id)
+
+        when CrystalV2::Compiler::Frontend::InstanceVarNode
+          name = String.new(target_node.name)
+          self_id = emit_self(ctx)
+          field_set = FieldSet.new(ctx.next_id, TypeRef::VOID, self_id, name, element_id.id)
+          ctx.emit(field_set)
+
         else
-          # Handle other target types
+          # Other target types can be added as needed
         end
       end
 
-      # Return last value
-      values.last? || begin
-        nil_lit = Literal.new(ctx.next_id, TypeRef::NIL, nil)
-        ctx.emit(nil_lit)
-        nil_lit.id
-      end
+      rhs_id
     end
 
     # ═══════════════════════════════════════════════════════════════════════
@@ -1038,13 +1093,15 @@ module Crystal::HIR
       ctx.current_block = body_block
       ctx.push_scope(ScopeKind::Closure)
 
-      # Add block parameters
-      node.params.each do |param|
-        if param_name = param.name
-          name = String.new(param_name)
-          param_val = Parameter.new(ctx.next_id, TypeRef::VOID, 0, name)
-          ctx.emit(param_val)
-          ctx.register_local(name, param_val.id)
+      # Add block parameters (params can be nil)
+      if params = node.params
+        params.each_with_index do |param, idx|
+          if param_name = param.name
+            name = String.new(param_name)
+            param_val = Parameter.new(ctx.next_id, TypeRef::VOID, idx, name)
+            ctx.emit(param_val)
+            ctx.register_local(name, param_val.id)
+          end
         end
       end
 
@@ -1068,18 +1125,20 @@ module Crystal::HIR
       ctx.current_block = body_block
       ctx.push_scope(ScopeKind::Closure)
 
-      # Add proc parameters
-      node.params.each_with_index do |param, idx|
-        if param_name = param.name
-          name = String.new(param_name)
-          param_type = if ta = param.type_annotation
-                         type_ref_for_name(String.new(ta))
-                       else
-                         TypeRef::VOID
-                       end
-          param_val = Parameter.new(ctx.next_id, param_type, idx, name)
-          ctx.emit(param_val)
-          ctx.register_local(name, param_val.id)
+      # Add proc parameters (params can be nil)
+      if params = node.params
+        params.each_with_index do |param, idx|
+          if param_name = param.name
+            name = String.new(param_name)
+            param_type = if ta = param.type_annotation
+                           type_ref_for_name(String.new(ta))
+                         else
+                           TypeRef::VOID
+                         end
+            param_val = Parameter.new(ctx.next_id, param_type, idx, name)
+            ctx.emit(param_val)
+            ctx.register_local(name, param_val.id)
+          end
         end
       end
 
@@ -1141,11 +1200,15 @@ module Crystal::HIR
     end
 
     private def lower_range(ctx : LoweringContext, node : CrystalV2::Compiler::Frontend::RangeNode) : ValueId
-      from_id = lower_expr(ctx, node.from)
-      to_id = lower_expr(ctx, node.to)
+      begin_id = lower_expr(ctx, node.begin_expr)
+      end_id = lower_expr(ctx, node.end_expr)
+
+      # Include exclusive flag as third argument
+      excl_lit = Literal.new(ctx.next_id, TypeRef::BOOL, node.exclusive)
+      ctx.emit(excl_lit)
 
       range_type = ctx.get_type("Range")
-      alloc = Allocate.new(ctx.next_id, range_type, [from_id, to_id])
+      alloc = Allocate.new(ctx.next_id, range_type, [begin_id, end_id, excl_lit.id])
       ctx.emit(alloc)
       alloc.id
     end
@@ -1156,7 +1219,8 @@ module Crystal::HIR
 
     private def lower_as(ctx : LoweringContext, node : CrystalV2::Compiler::Frontend::AsNode) : ValueId
       value_id = lower_expr(ctx, node.expression)
-      target_type = type_ref_for_expr(ctx, node.type_node)
+      # target_type is Slice(UInt8) - type name as bytes
+      target_type = type_ref_for_name(String.new(node.target_type))
 
       cast = Cast.new(ctx.next_id, target_type, value_id, target_type, safe: false)
       ctx.emit(cast)
@@ -1165,7 +1229,8 @@ module Crystal::HIR
 
     private def lower_as_question(ctx : LoweringContext, node : CrystalV2::Compiler::Frontend::AsQuestionNode) : ValueId
       value_id = lower_expr(ctx, node.expression)
-      target_type = type_ref_for_expr(ctx, node.type_node)
+      # target_type is Slice(UInt8) - type name as bytes
+      target_type = type_ref_for_name(String.new(node.target_type))
 
       cast = Cast.new(ctx.next_id, target_type, value_id, target_type, safe: true)
       ctx.emit(cast)
@@ -1174,7 +1239,8 @@ module Crystal::HIR
 
     private def lower_is_a(ctx : LoweringContext, node : CrystalV2::Compiler::Frontend::IsANode) : ValueId
       value_id = lower_expr(ctx, node.expression)
-      check_type = type_ref_for_expr(ctx, node.type_node)
+      # target_type is Slice(UInt8) - type name as bytes
+      check_type = type_ref_for_name(String.new(node.target_type))
 
       is_a = IsA.new(ctx.next_id, value_id, check_type)
       ctx.emit(is_a)
