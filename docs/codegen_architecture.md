@@ -1077,6 +1077,200 @@ x : Foo | Bar = condition ? Foo.new : Bar.new
 
 ---
 
+## 13. Profile-Guided Optimizations (Crystal-Specific)
+
+### 13.1 Design Philosophy
+
+**Key Insight (Quadrumvirate 2025-12-09):** Don't compete with LLVM, complement it.
+
+LLVM already handles:
+- Branch probability → block layout
+- Loop trip counts → unrolling
+- Call counts → inlining decisions
+- Hot/cold → function splitting
+
+Crystal should focus on **semantic optimizations** that LLVM cannot do:
+- ARC semantics (reference counting patterns)
+- Type-based devirtualization (Crystal type system knowledge)
+- Memory strategy refinement (escape analysis + runtime data)
+
+### 13.2 Crystal PGO Architecture
+
+```
+┌─────────────────────────────────────────────────────────────────────┐
+│                        CRYSTAL PGO STACK                            │
+├─────────────────────────────────────────────────────────────────────┤
+│                                                                     │
+│  Compiler Mode: --mm=profile-gen                                    │
+│  ┌───────────────────────────────────────────────────────────────┐ │
+│  │ ProfileInstrumentationPass                                    │ │
+│  │  • Insert ProfileInstrument instructions at:                  │ │
+│  │    - Allocation sites (site_id, type, size)                   │ │
+│  │    - Branch points (taken/not_taken counters)                 │ │
+│  │    - Loop headers (entry, iteration, exit counters)           │ │
+│  │    - Call sites (callee, is_virtual, target_distribution)     │ │
+│  │    - Block entries (execution_count)                          │ │
+│  └───────────────────────────────────────────────────────────────┘ │
+│                               │                                     │
+│                               ▼                                     │
+│  Runtime: Execute Instrumented Binary                               │
+│  ┌───────────────────────────────────────────────────────────────┐ │
+│  │ ProfileData Collection                                        │ │
+│  │  • AllocationSiteStats: count, lifetime, escape_rate, RC ops  │ │
+│  │  • BranchStats: taken_prob, bias detection                    │ │
+│  │  • LoopStats: avg_trip_count, unroll recommendations          │ │
+│  │  • CallSiteStats: call_count, dominant_target (for devirt)    │ │
+│  │  • BlockStats: execution_count, hot/cold classification       │ │
+│  └───────────────────────────────────────────────────────────────┘ │
+│                               │                                     │
+│                               ▼                                     │
+│  Serialization: .crystal_profile (CRPF v3 binary format)            │
+│                               │                                     │
+│                               ▼                                     │
+│  Compiler Mode: --mm=profile-use                                    │
+│  ┌───────────────────────────────────────────────────────────────┐ │
+│  │ Profile-Guided Optimization Passes                            │ │
+│  │                                                               │ │
+│  │  M3.3a: DevirtualizationPass                                  │ │
+│  │  ┌─────────────────────────────────────────────────────────┐ │ │
+│  │  │ • Find virtual calls with dominant_target > 80%          │ │ │
+│  │  │ • Transform:                                              │ │ │
+│  │  │   call_virtual(x, "method")                               │ │ │
+│  │  │   →                                                        │ │ │
+│  │  │   if x.type == DominantType then                          │ │ │
+│  │  │     call_direct(DominantType#method, x)  // inlinable!    │ │ │
+│  │  │   else                                                     │ │ │
+│  │  │     call_virtual(x, "method")  // fallback                │ │ │
+│  │  │ • Enables LLVM to inline the hot path                     │ │ │
+│  │  └─────────────────────────────────────────────────────────┘ │ │
+│  │                                                               │ │
+│  │  M3.3b: CrossFunctionRCElisionPass                            │ │
+│  │  ┌─────────────────────────────────────────────────────────┐ │ │
+│  │  │ • Analyze call graph for RC flow patterns:               │ │ │
+│  │  │   - Caller does rc_inc, callee does rc_dec → elide both  │ │ │
+│  │  │   - Value always escapes → skip local rc_inc             │ │ │
+│  │  │   - Value never escapes → skip rc_inc/dec entirely       │ │ │
+│  │  │ • Use profile data to confirm escape patterns            │ │ │
+│  │  │ • UNIQUE to Crystal: LLVM cannot see ARC semantics       │ │ │
+│  │  └─────────────────────────────────────────────────────────┘ │ │
+│  │                                                               │ │
+│  │  M3.3c: MemoryStrategyRefinementPass                          │ │
+│  │  ┌─────────────────────────────────────────────────────────┐ │ │
+│  │  │ • Compare static analysis vs runtime profile:            │ │ │
+│  │  │   - Static says "may escape" but profile shows 0% → Stack│ │ │
+│  │  │   - Static says "no threads" but profile shows sharing   │ │ │
+│  │  │     → AtomicARC                                           │ │ │
+│  │  │ • Slab pool sizing from allocation frequency             │ │ │
+│  │  │ • Arena reset point optimization from dealloc clustering │ │ │
+│  │  └─────────────────────────────────────────────────────────┘ │ │
+│  └───────────────────────────────────────────────────────────────┘ │
+│                                                                     │
+└─────────────────────────────────────────────────────────────────────┘
+                               │
+                               ▼
+┌─────────────────────────────────────────────────────────────────────┐
+│                          LLVM PGO                                   │
+├─────────────────────────────────────────────────────────────────────┤
+│  • Pass profile data to LLVM via -fprofile-use                      │
+│  • LLVM handles: branch layout, loop unroll, inline decisions       │
+│  • Crystal handles: type semantics, ARC, memory strategy            │
+└─────────────────────────────────────────────────────────────────────┘
+```
+
+### 13.3 Profile Data Structures
+
+```crystal
+# Allocation site statistics
+class AllocationSiteStats
+  property site_id : UInt64
+  property alloc_count : UInt64
+  property escape_count : UInt64
+  property total_lifetime : UInt64
+  property thread_share_count : UInt64
+  property total_rc_inc, total_rc_dec : UInt64
+
+  def escape_rate : Float64
+  def recommended_strategy : MemoryStrategy
+  def confidence : Float64  # based on sample count
+end
+
+# Branch statistics
+class BranchStats
+  property taken_count, not_taken_count : UInt64
+
+  def taken_probability : Float64
+  def biased? : Bool          # > 80% one way
+  def hot_path_is_taken? : Bool
+end
+
+# Loop statistics
+class LoopStats
+  property entry_count, iteration_count, exit_count : UInt64
+  property min_trip_count, max_trip_count : UInt64
+  property trip_counts : Hash(UInt64, UInt64)  # distribution
+
+  def avg_trip_count : Float64
+  def should_unroll? : Bool
+  def suggested_unroll_factor : Int32
+end
+
+# Call site statistics (critical for devirtualization)
+class CallSiteStats
+  property caller_function : String
+  property callee_function : String
+  property is_virtual : Bool
+  property call_count : UInt64
+  property target_distribution : Hash(String, UInt64)  # type → count
+
+  def dominant_target : {String, Float64}?  # type, probability
+  def should_inline? : Bool
+  def hot? : Bool
+end
+```
+
+### 13.4 Devirtualization Example
+
+**Before (virtual call):**
+```crystal
+def process(items : Array(Animal))
+  items.each do |animal|
+    animal.speak  # virtual call - 95% Dog, 5% Cat at runtime
+  end
+end
+```
+
+**After DevirtualizationPass:**
+```llvm
+; Guarded devirtualization from profile data
+%type = load %animal.type_id
+%is_dog = icmp eq %type, DOG_TYPE_ID
+br %is_dog, %dog_path, %virtual_path
+
+dog_path:
+  ; Direct call - LLVM can inline this!
+  call @Dog_speak(%animal)
+  br %continue
+
+virtual_path:
+  ; Fallback for rare cases
+  %method = lookup_virtual(%animal, "speak")
+  call_indirect %method(%animal)
+  br %continue
+
+continue:
+  ...
+```
+
+### 13.5 Implementation Status
+
+| Pass | Description | Uses Profile Data | Status |
+|------|-------------|-------------------|--------|
+| **M3.3a** | DevirtualizationPass | `CallSiteStats.dominant_target` | 🔲 Pending |
+| **M3.3b** | CrossFunctionRCElisionPass | `AllocationSiteStats.escape_rate` | 🔲 Pending |
+| **M3.3c** | MemoryStrategyRefinementPass | `AllocationSiteStats.*` | 🔲 Pending |
+
+---
+
 ## Appendix A: Glossary
 
 | Term | Definition |

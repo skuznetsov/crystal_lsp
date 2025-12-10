@@ -42,6 +42,211 @@ module Crystal::MIR
   end
 
   # ═══════════════════════════════════════════════════════════════════════════
+  # TYPE KIND - What kind of type this is
+  # ═══════════════════════════════════════════════════════════════════════════
+
+  enum TypeKind
+    Void
+    Bool
+    Int8
+    Int16
+    Int32
+    Int64
+    Int128
+    UInt8
+    UInt16
+    UInt32
+    UInt64
+    UInt128
+    Float32
+    Float64
+    Char
+    Symbol
+    Pointer
+    Reference
+    Struct
+    Union
+    Proc
+    Tuple
+    Array
+
+    def primitive?
+      case self
+      when Void, Bool, Int8, Int16, Int32, Int64, Int128,
+           UInt8, UInt16, UInt32, UInt64, UInt128,
+           Float32, Float64, Char, Symbol
+        true
+      else
+        false
+      end
+    end
+
+    def integer?
+      case self
+      when Int8, Int16, Int32, Int64, Int128,
+           UInt8, UInt16, UInt32, UInt64, UInt128
+        true
+      else
+        false
+      end
+    end
+
+    def signed_integer?
+      case self
+      when Int8, Int16, Int32, Int64, Int128 then true
+      else                                        false
+      end
+    end
+
+    def floating?
+      self == Float32 || self == Float64
+    end
+  end
+
+  # ═══════════════════════════════════════════════════════════════════════════
+  # FIELD - Struct/class field definition
+  # ═══════════════════════════════════════════════════════════════════════════
+
+  struct Field
+    getter name : String
+    getter type_ref : TypeRef
+    getter offset : UInt32
+    getter flags : UInt32
+
+    FLAG_NILABLE  = 0x0001_u32
+    FLAG_CAPTURED = 0x0002_u32  # Captured in closure
+
+    def initialize(@name, @type_ref, @offset, @flags = 0_u32)
+    end
+
+    def nilable? : Bool
+      (@flags & FLAG_NILABLE) != 0
+    end
+
+    def captured? : Bool
+      (@flags & FLAG_CAPTURED) != 0
+    end
+  end
+
+  # ═══════════════════════════════════════════════════════════════════════════
+  # TYPE - Full type definition with metadata
+  # ═══════════════════════════════════════════════════════════════════════════
+
+  class Type
+    getter id : TypeId
+    getter kind : TypeKind
+    getter name : String
+    getter size : UInt64
+    getter alignment : UInt32
+    getter fields : Array(Field)?
+    getter variants : Array(Type)?     # For union types
+    getter element_types : Array(Type)? # For tuples
+    getter element_type : Type?         # For arrays/pointers
+    getter parent_type_id : TypeId?
+    property is_closure : Bool = false
+
+    def initialize(@id, @kind, @name, @size, @alignment)
+    end
+
+    def is_value_type? : Bool
+      @kind == TypeKind::Struct
+    end
+
+    def signed? : Bool
+      @kind.signed_integer?
+    end
+
+    def add_field(name : String, type_ref : TypeRef, offset : UInt32, flags : UInt32 = 0_u32)
+      @fields ||= [] of Field
+      @fields.not_nil! << Field.new(name, type_ref, offset, flags)
+    end
+
+    def add_variant(variant : Type)
+      @variants ||= [] of Type
+      @variants.not_nil! << variant
+    end
+
+    def add_element_type(element : Type)
+      @element_types ||= [] of Type
+      @element_types.not_nil! << element
+    end
+
+    def set_element_type(@element_type : Type)
+    end
+
+    def set_parent_type_id(@parent_type_id : TypeId)
+    end
+  end
+
+  # ═══════════════════════════════════════════════════════════════════════════
+  # TYPE REGISTRY - Stores all type definitions
+  # ═══════════════════════════════════════════════════════════════════════════
+
+  class TypeRegistry
+    getter types : Array(Type)
+    @type_map : Hash(TypeId, Type)
+    @name_map : Hash(String, Type)
+    @next_type_id : TypeId
+
+    def initialize
+      @types = [] of Type
+      @type_map = {} of TypeId => Type
+      @name_map = {} of String => Type
+      @next_type_id = 100_u32  # Reserve 0-99 for primitive types
+
+      # Register primitive types
+      register_primitive(TypeRef::VOID, TypeKind::Void, "Void", 0, 1)
+      register_primitive(TypeRef::NIL, TypeKind::Void, "Nil", 0, 1)
+      register_primitive(TypeRef::BOOL, TypeKind::Bool, "Bool", 1, 1)
+      register_primitive(TypeRef::INT8, TypeKind::Int8, "Int8", 1, 1)
+      register_primitive(TypeRef::INT16, TypeKind::Int16, "Int16", 2, 2)
+      register_primitive(TypeRef::INT32, TypeKind::Int32, "Int32", 4, 4)
+      register_primitive(TypeRef::INT64, TypeKind::Int64, "Int64", 8, 8)
+      register_primitive(TypeRef::INT128, TypeKind::Int128, "Int128", 16, 16)
+      register_primitive(TypeRef::UINT8, TypeKind::UInt8, "UInt8", 1, 1)
+      register_primitive(TypeRef::UINT16, TypeKind::UInt16, "UInt16", 2, 2)
+      register_primitive(TypeRef::UINT32, TypeKind::UInt32, "UInt32", 4, 4)
+      register_primitive(TypeRef::UINT64, TypeKind::UInt64, "UInt64", 8, 8)
+      register_primitive(TypeRef::UINT128, TypeKind::UInt128, "UInt128", 16, 16)
+      register_primitive(TypeRef::FLOAT32, TypeKind::Float32, "Float32", 4, 4)
+      register_primitive(TypeRef::FLOAT64, TypeKind::Float64, "Float64", 8, 8)
+      register_primitive(TypeRef::CHAR, TypeKind::Char, "Char", 4, 4)
+      register_primitive(TypeRef::STRING, TypeKind::Reference, "String", 8, 8)
+      register_primitive(TypeRef::SYMBOL, TypeKind::Symbol, "Symbol", 4, 4)
+      register_primitive(TypeRef::POINTER, TypeKind::Pointer, "Pointer", 8, 8)
+    end
+
+    private def register_primitive(ref : TypeRef, kind : TypeKind, name : String, size : UInt64, alignment : UInt32)
+      type = Type.new(ref.id, kind, name, size, alignment)
+      @types << type
+      @type_map[ref.id] = type
+      @name_map[name] = type
+    end
+
+    def create_type(kind : TypeKind, name : String, size : UInt64, alignment : UInt32) : Type
+      id = @next_type_id
+      @next_type_id += 1
+      type = Type.new(id, kind, name, size, alignment)
+      @types << type
+      @type_map[id] = type
+      @name_map[name] = type
+      type
+    end
+
+    def get(id : TypeId) : Type?
+      @type_map[id]?
+    end
+
+    def get(ref : TypeRef) : Type?
+      @type_map[ref.id]?
+    end
+
+    def get_by_name(name : String) : Type?
+      @name_map[name]?
+    end
+  end
+
+  # ═══════════════════════════════════════════════════════════════════════════
   # TYPE REFERENCES (simplified for MIR - full types resolved)
   # ═══════════════════════════════════════════════════════════════════════════
 
@@ -746,6 +951,16 @@ module Crystal::MIR
     end
   end
 
+  # Source location for debug info
+  struct SourceLocation
+    getter file : String
+    getter line : Int32
+    getter column : Int32
+
+    def initialize(@file, @line, @column = 0)
+    end
+  end
+
   class Function
     getter id : FunctionId
     getter name : String
@@ -753,6 +968,7 @@ module Crystal::MIR
     getter return_type : TypeRef
     getter blocks : Array(BasicBlock)
     getter entry_block : BlockId
+    property source_location : SourceLocation?
 
     @next_value_id : ValueId = 0_u32
     @next_block_id : BlockId = 0_u32
@@ -836,6 +1052,8 @@ module Crystal::MIR
   class Module
     getter name : String
     getter functions : Array(Function)
+    getter type_registry : TypeRegistry
+    property source_file : String?
 
     @next_function_id : FunctionId = 0_u32
     @function_map : Hash(String, Function)
@@ -843,6 +1061,11 @@ module Crystal::MIR
     def initialize(@name : String = "main")
       @functions = [] of Function
       @function_map = {} of String => Function
+      @type_registry = TypeRegistry.new
+    end
+
+    def types : Array(Type)
+      @type_registry.types
     end
 
     def create_function(name : String, return_type : TypeRef) : Function

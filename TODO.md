@@ -362,7 +362,7 @@ Goal: v2 LSP must report only real errors and match original compiler behavior.
   - MemoryStrategyRefinementPass: adjusts memory strategies based on profile
   - PGOPipeline: coordinates all passes with aggregated statistics
 
-**Test Coverage:** 283 new tests (155 HIR + 128 MIR)
+**Test Coverage:** 307 new tests (155 HIR + 152 MIR)
 
 **Architecture (Quadrumvirate-analyzed):**
 ```
@@ -573,14 +573,28 @@ The key insight is: **Don't compete with LLVM, complement it.**
 
 ### 5.3 Phase 3: LLVM Backend
 
-**Goal:** Generate LLVM IR from optimized EIR, produce native code.
+**Goal:** Generate LLVM IR from optimized MIR, produce native code.
 
-#### 5.3.1 LLVM IR Generation
-- [ ] Basic LLVM IR emitter
-- [ ] Type mapping (Crystal types → LLVM types)
-- [ ] Function codegen
-- [ ] Control flow translation
-- [ ] Memory operation codegen (alloc/free/RC ops)
+#### 5.3.1 LLVM IR Generation (M4.1)
+- [x] MIR Type system (TypeKind, Type, Field, TypeRegistry)
+- [x] LLVMTypeMapper (MIR types → LLVM IR type names)
+- [x] LLVMIRGenerator (text-based LLVM IR output)
+- [x] Function codegen (params, blocks, instructions, terminators)
+- [x] Control flow translation (branch, jump, switch, phi)
+- [x] Memory operation codegen (alloc, free, load, store, gep)
+- [x] Memory strategy support (Stack, Slab, ARC, AtomicARC, GC)
+- [x] RC operations (rc_inc, rc_dec with destructor)
+- [x] Binary/unary ops, casts, calls
+- [x] 24 spec tests passing
+
+#### 5.3.2 Debug DX: Type Metadata for LLDB/DAP
+- [x] TypeInfoEntry, FieldInfoEntry structures
+- [x] __crystal_type_info global array generation
+- [x] __crystal_field_info global array generation
+- [x] __crystal_type_strings string table
+- [x] Design doc: docs/debug_dx_design.md
+- [ ] LLDB Python formatters (crystal_formatters.py)
+- [ ] DAP server integration
 
 #### 5.3.2 Runtime Support
 - [ ] Minimal runtime library
@@ -646,7 +660,8 @@ The key insight is: **Don't compete with LLVM, complement it.**
 | M3.2 | HIR → MIR lowering | ✅ Complete | 19 |
 | M3.2b | Profile infrastructure | ✅ Complete | 46 |
 | M3.3 | Profile-Guided Optimizations | ✅ Complete | 26 |
-| M4.1 | LLVM IR generation | 🔲 Pending | - |
+| M4.1 | LLVM IR generation | ✅ Complete | 24 |
+| M4.1b | Debug DX (type metadata) | ✅ Complete | 24 |
 | M4.2 | Runtime library | 🔲 Pending | - |
 | M4.3 | End-to-end compile | 🔲 Pending | - |
 
