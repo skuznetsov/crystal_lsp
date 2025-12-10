@@ -1730,6 +1730,26 @@ module Crystal::HIR
         end
       end
 
+      # Handle Range#each { |i| body } intrinsic
+      if method_name == "each"
+        # Check if callee is (range).each - MemberAccessNode on RangeNode
+        if callee_node.is_a?(CrystalV2::Compiler::Frontend::MemberAccessNode)
+          range_obj = @arena[callee_node.object]
+          # Unwrap GroupingNode: (1..3) creates GroupingNode around RangeNode
+          if range_obj.is_a?(CrystalV2::Compiler::Frontend::GroupingNode)
+            range_obj = @arena[range_obj.expression]
+          end
+          if range_obj.is_a?(CrystalV2::Compiler::Frontend::RangeNode)
+            if blk_expr = node.block
+              blk_node = @arena[blk_expr]
+              if blk_node.is_a?(CrystalV2::Compiler::Frontend::BlockNode)
+                return lower_range_each_intrinsic(ctx, range_obj, blk_node)
+              end
+            end
+          end
+        end
+      end
+
       # Handle yield-functions with inline expansion
       if blk_expr = node.block
         blk_node = @arena[blk_expr]
@@ -1905,6 +1925,118 @@ module Crystal::HIR
       ctx.terminate(Jump.new(cond_block))
 
       # Exit block - restore phi values for use after the loop
+      ctx.current_block = exit_block
+      phi_nodes.each do |var_name, phi|
+        ctx.register_local(var_name, phi.id)
+      end
+
+      nil_lit = Literal.new(ctx.next_id, TypeRef::NIL, nil)
+      ctx.emit(nil_lit)
+      nil_lit.id
+    end
+
+    # Intrinsic: (begin..end).each { |i| body } or (begin...end).each { |i| body }
+    # Expands to: i = begin; while i <= end (or < for exclusive) { body; i += 1 }
+    private def lower_range_each_intrinsic(
+      ctx : LoweringContext,
+      range : CrystalV2::Compiler::Frontend::RangeNode,
+      block : CrystalV2::Compiler::Frontend::BlockNode
+    ) : ValueId
+      # Get block param name
+      param_name = if params = block.params
+                     if first_param = params.first?
+                       if pname = first_param.name
+                         String.new(pname)
+                       else
+                         "__range_i"
+                       end
+                     else
+                       "__range_i"
+                     end
+                   else
+                     "__range_i"
+                   end
+
+      # Lower range bounds
+      begin_id = lower_expr(ctx, range.begin_expr)
+      end_id = lower_expr(ctx, range.end_expr)
+
+      # Collect mutable vars (same as times)
+      assigned_vars = collect_assigned_vars(block.body)
+      assigned_vars = assigned_vars.reject { |v| v == param_name }
+
+      entry_block = ctx.current_block
+      initial_values = {} of String => ValueId
+      assigned_vars.each do |var_name|
+        if val = ctx.lookup_local(var_name)
+          initial_values[var_name] = val
+        end
+      end
+
+      # Create blocks
+      cond_block = ctx.create_block
+      body_block = ctx.create_block
+      incr_block = ctx.create_block
+      exit_block = ctx.create_block
+
+      ctx.terminate(Jump.new(cond_block))
+
+      # Condition block with phi
+      ctx.current_block = cond_block
+      counter_phi = Phi.new(ctx.next_id, TypeRef::INT32)
+      counter_phi.add_incoming(entry_block, begin_id)
+      ctx.emit(counter_phi)
+
+      # Phi for mutable vars
+      phi_nodes = {} of String => Phi
+      assigned_vars.each do |var_name|
+        if initial_val = initial_values[var_name]?
+          var_type = ctx.type_of(initial_val)
+          phi = Phi.new(ctx.next_id, var_type)
+          phi.add_incoming(entry_block, initial_val)
+          ctx.emit(phi)
+          phi_nodes[var_name] = phi
+          ctx.register_local(var_name, phi.id)
+        end
+      end
+
+      ctx.register_local(param_name, counter_phi.id)
+      ctx.register_type(counter_phi.id, TypeRef::INT32)
+
+      # Compare: i <= end (inclusive) or i < end (exclusive)
+      cmp_op = range.exclusive ? BinaryOp::Lt : BinaryOp::Le
+      cmp = BinaryOperation.new(ctx.next_id, TypeRef::BOOL, cmp_op, counter_phi.id, end_id)
+      ctx.emit(cmp)
+      ctx.terminate(Branch.new(cmp.id, body_block, exit_block))
+
+      # Body block
+      ctx.current_block = body_block
+      ctx.push_scope(ScopeKind::Block)
+      lower_body(ctx, block.body)
+      ctx.pop_scope
+      ctx.terminate(Jump.new(incr_block))
+
+      # Increment block
+      ctx.current_block = incr_block
+      one = Literal.new(ctx.next_id, TypeRef::INT32, 1_i64)
+      ctx.emit(one)
+      new_i = BinaryOperation.new(ctx.next_id, TypeRef::INT32, BinaryOp::Add, counter_phi.id, one.id)
+      ctx.emit(new_i)
+
+      counter_phi.add_incoming(incr_block, new_i.id)
+
+      # Patch mutable var phis
+      assigned_vars.each do |var_name|
+        if phi = phi_nodes[var_name]?
+          if updated_val = ctx.lookup_local(var_name)
+            phi.add_incoming(incr_block, updated_val)
+          end
+        end
+      end
+
+      ctx.terminate(Jump.new(cond_block))
+
+      # Exit block
       ctx.current_block = exit_block
       phi_nodes.each do |var_name, phi|
         ctx.register_local(var_name, phi.id)
