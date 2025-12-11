@@ -186,7 +186,7 @@ module Crystal::MIR
       when .symbol?                     then "i32"
       when .pointer?                    then "ptr"
       when .reference?                  then "ptr"
-      when .struct?                     then "%#{mangle_name(type.name)}"
+      when .struct?                     then "ptr"  # Structs passed by pointer in our ABI
       when .union?                      then "%#{mangle_name(type.name)}.union"
       when .proc?                       then "%__crystal_proc"  # { ptr, ptr }
       when .tuple?                      then compute_tuple_type(type)
@@ -772,14 +772,19 @@ module Crystal::MIR
     end
 
     private def emit_call(inst : Call, name : String, func : Function)
-      return_type = @type_mapper.llvm_type(inst.type)
-
       # Look up callee function for name and param types
       callee_func = @module.functions.find { |f| f.id == inst.callee }
       callee_name = if callee_func
                       @type_mapper.mangle_name(callee_func.name)
                     else
                       "func#{inst.callee}"
+                    end
+
+      # Use callee's return type instead of inst.type for correct ABI
+      return_type = if callee_func
+                      @type_mapper.llvm_type(callee_func.return_type)
+                    else
+                      @type_mapper.llvm_type(inst.type)
                     end
 
       # Format arguments with proper types

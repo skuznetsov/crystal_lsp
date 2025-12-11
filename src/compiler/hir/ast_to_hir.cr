@@ -321,9 +321,11 @@ module Crystal::HIR
       @current_class = nil
     end
 
-    # Generate allocator: ClassName.new(...) -> allocates and returns pointer
+    # Generate allocator: ClassName.new(...) -> allocates and returns instance
     private def generate_allocator(class_name : String, class_info : ClassInfo)
       func_name = "#{class_name}.new"
+      # Return type is the class type (semantically)
+      # LLVM backend converts to ptr for ABI
       func = @module.create_function(func_name, class_info.type_ref)
       ctx = LoweringContext.new(func, @module, @arena)
 
@@ -387,11 +389,15 @@ module Crystal::HIR
       ctx = LoweringContext.new(func, @module, @arena)
 
       # Add implicit 'self' parameter first
+      # Type is class/struct type; LLVM backend converts to ptr for ABI
       self_param = func.add_param("self", class_info.type_ref)
       ctx.register_local("self", self_param.id)
       ctx.register_type(self_param.id, class_info.type_ref)
 
       # Lower explicit parameters
+      # Track @param style for auto-assignment
+      auto_assign_params = [] of Tuple(String, ValueId, Int32)  # (ivar_name, param_value_id, offset)
+
       if params = node.params
         params.each do |param|
           param_name = param.name.nil? ? "_" : String.new(param.name.not_nil!)
@@ -400,10 +406,26 @@ module Crystal::HIR
                        else
                          TypeRef::VOID
                        end
+
           hir_param = func.add_param(param_name, param_type)
           ctx.register_local(param_name, hir_param.id)
           ctx.register_type(hir_param.id, param_type)
+
+          # Check for @param syntax (auto-assignment to ivar via is_instance_var flag)
+          if param.is_instance_var
+            ivar_name = "@#{param_name}"  # Add @ prefix for ivar lookup
+            ivar_offset = get_ivar_offset(ivar_name)
+            auto_assign_params << {ivar_name, hir_param.id, ivar_offset}
+          end
         end
+      end
+
+      # Emit auto-assignments for @param style parameters
+      auto_assign_params.each do |(ivar_name, param_id, offset)|
+        self_id = emit_self(ctx)
+        param_type = ctx.type_of(param_id)
+        field_set = FieldSet.new(ctx.next_id, TypeRef::VOID, self_id, ivar_name, param_id, offset)
+        ctx.emit(field_set)
       end
 
       # Lower body
@@ -2440,8 +2462,39 @@ module Crystal::HIR
       object_id = lower_expr(ctx, node.object)
       member_name = String.new(node.member)
 
-      # Member access is a call without arguments
-      call = Call.new(ctx.next_id, TypeRef::VOID, object_id, member_name, [] of ValueId)
+      # Determine receiver type to find the correct method
+      receiver_type = ctx.type_of(object_id)
+      full_method_name : String? = nil
+      return_type = TypeRef::VOID
+
+      # Try to find method by receiver type
+      if receiver_type.id > 0
+        @class_info.each do |class_name, info|
+          if info.type_ref.id == receiver_type.id
+            test_name = "#{class_name}##{member_name}"
+            if type = @function_types[test_name]?
+              full_method_name = test_name
+              return_type = type
+            end
+            break
+          end
+        end
+      end
+
+      # Fallback: search all classes for this method
+      if full_method_name.nil?
+        @class_info.each do |class_name, info|
+          test_name = "#{class_name}##{member_name}"
+          if type = @function_types[test_name]?
+            full_method_name = test_name
+            return_type = type
+            break
+          end
+        end
+      end
+
+      actual_name = full_method_name || member_name
+      call = Call.new(ctx.next_id, return_type, object_id, actual_name, [] of ValueId)
       ctx.emit(call)
       call.id
     end
@@ -2922,6 +2975,7 @@ module Crystal::HIR
       when TypeRef::STRING  then MIR::TypeRef::STRING
       when TypeRef::NIL     then MIR::TypeRef::NIL
       when TypeRef::SYMBOL  then MIR::TypeRef::SYMBOL
+      when TypeRef::POINTER then MIR::TypeRef::POINTER
       else
         # User-defined types: offset by 20 (matching hir_to_mir.cr convert_type)
         MIR::TypeRef.new(hir_type.id + 20_u32)

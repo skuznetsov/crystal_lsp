@@ -93,6 +93,7 @@ module Crystal::HIR
     STRING  = new(15_u32)
     NIL     = new(16_u32)
     SYMBOL  = new(17_u32)
+    POINTER = new(18_u32)  # Generic pointer type (for self params, etc.)
 
     FIRST_USER_TYPE = 32_u32
 
@@ -184,6 +185,7 @@ module Crystal::HIR
       when TypeRef::CHAR    then "Char"
       when TypeRef::STRING  then "String"
       when TypeRef::SYMBOL  then "Symbol"
+      when TypeRef::POINTER then "Pointer"
       else                       "Type(#{@type.id})"
       end
     end

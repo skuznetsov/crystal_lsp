@@ -430,6 +430,8 @@ module Crystal::MIR
     rc_ops : Int32,
     instructions : Int32,
     unsafe_sites : Int32 do
+    include Comparable(PotentialMetrics)
+
     def <=>(other : PotentialMetrics)
       return rc_ops <=> other.rc_ops if rc_ops != other.rc_ops
       return instructions <=> other.instructions if instructions != other.instructions
