@@ -1822,9 +1822,11 @@ module Crystal::HIR
 
       # Handle intrinsic functions
       if actual_method_name == "puts" && args.size == 1
-        # puts(int) -> __crystal_v2_print_int32_ln (or int64 for larger types)
         arg_type = ctx.type_of(args[0])
-        if arg_type.id == TypeRef::INT64.id
+        if arg_type.id == TypeRef::STRING.id
+          # puts(string) -> __crystal_v2_puts
+          actual_method_name = "__crystal_v2_puts"
+        elsif arg_type.id == TypeRef::INT64.id
           actual_method_name = "__crystal_v2_print_int64_ln"
         else
           actual_method_name = "__crystal_v2_print_int32_ln"

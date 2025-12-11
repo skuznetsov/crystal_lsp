@@ -218,6 +218,8 @@ module Crystal::MIR
     @constant_values : Hash(ValueId, String)  # For inlining constants
     @value_types : Hash(ValueId, TypeRef)     # For tracking operand types
     @array_info : Hash(ValueId, {String, Int32})  # Array element_type and size
+    @string_constants : Hash(String, String)  # String value -> global name
+    @string_counter : Int32 = 0
 
     # Type metadata for debug DX
     @type_info_entries : Array(TypeInfoEntry)
@@ -248,6 +250,7 @@ module Crystal::MIR
       @constant_values = {} of ValueId => String
       @value_types = {} of ValueId => TypeRef
       @array_info = {} of ValueId => {String, Int32}
+      @string_constants = {} of String => String
 
       # Type metadata
       @type_info_entries = [] of TypeInfoEntry
@@ -274,12 +277,31 @@ module Crystal::MIR
         emit_function(func)
       end
 
+      # Emit string constants at end (LLVM allows globals anywhere)
+      emit_string_constants
+
       if @emit_type_metadata
         emit_type_metadata_globals
         emit_union_metadata_globals
       end
 
       @output.to_s
+    end
+
+    private def emit_string_constants
+      return if @string_constants.empty?
+
+      emit_raw "\n; String constants\n"
+      @string_constants.each do |str, global_name|
+        # Escape string for LLVM: replace special chars
+        escaped = str.gsub("\\", "\\\\")
+                    .gsub("\n", "\\0A")
+                    .gsub("\r", "\\0D")
+                    .gsub("\t", "\\09")
+                    .gsub("\"", "\\22")
+        len = str.bytesize + 1  # +1 for null terminator
+        emit_raw "#{global_name} = private unnamed_addr constant [#{len} x i8] c\"#{escaped}\\00\", align 1\n"
+      end
     end
 
     private def emit_global_variables
@@ -501,13 +523,22 @@ module Crystal::MIR
 
     private def emit_constant(inst : Constant, name : String)
       type = @type_mapper.llvm_type(inst.type)
+
+      # Handle string constants specially
+      if v = inst.value.as?(String)
+        global_name = get_or_create_string_global(v)
+        # String constant is a pointer to the global
+        @constant_values[inst.id] = global_name
+        emit "#{name} = bitcast ptr #{global_name} to ptr"
+        return
+      end
+
       value = case v = inst.value
               when Int64   then v.to_s
               when UInt64  then v.to_s
               when Float64 then v.to_s
               when Bool    then v ? "1" : "0"
               when Nil     then "null"
-              when String  then "TODO_string"  # String constants need special handling
               else              "0"
               end
       # Store constant for inlining at use sites
@@ -519,6 +550,17 @@ module Crystal::MIR
       else
         emit "#{name} = add #{type} 0, #{value}"
       end
+    end
+
+    private def get_or_create_string_global(str : String) : String
+      if existing = @string_constants[str]?
+        return existing
+      end
+
+      global_name = "@.str.#{@string_counter}"
+      @string_counter += 1
+      @string_constants[str] = global_name
+      global_name
     end
 
     private def emit_alloc(inst : Alloc, name : String)
