@@ -186,7 +186,7 @@ module Crystal::MIR
       when .symbol?                     then "i32"
       when .pointer?                    then "ptr"
       when .reference?                  then "ptr"
-      when .struct?                     then "ptr"  # Struct returns ptr (stack allocated)
+      when .struct?                     then "%#{mangle_name(type.name)}"
       when .union?                      then "%#{mangle_name(type.name)}.union"
       when .proc?                       then "%__crystal_proc"  # { ptr, ptr }
       when .tuple?                      then compute_tuple_type(type)
