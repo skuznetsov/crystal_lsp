@@ -313,9 +313,10 @@ module Crystal::MIR
     property rc_eliminated : Int32 = 0
     property dead_eliminated : Int32 = 0
     property constants_folded : Int32 = 0
+    property copies_propagated : Int32 = 0
 
     def total : Int32
-      rc_eliminated + dead_eliminated + constants_folded
+      rc_eliminated + dead_eliminated + constants_folded + copies_propagated
     end
 
     def to_s(io : IO)
@@ -343,6 +344,10 @@ module Crystal::MIR
       # Pass 2: RC elision (Crystal-specific)
       rc = RCElisionPass.new(@function)
       @stats.rc_eliminated = rc.run
+
+      # Pass 2.5: Copy propagation (light)
+      cp = CopyPropagationPass.new(@function)
+      @stats.copies_propagated = cp.run
 
       # Pass 3: Dead code elimination
       dce = DeadCodeEliminationPass.new(@function)
