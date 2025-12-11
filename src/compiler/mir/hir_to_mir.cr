@@ -164,6 +164,14 @@ module Crystal
     # ─────────────────────────────────────────────────────────────────────────
 
     private def lower_function_body(hir_func : HIR::Function)
+      # Skip functions that contain yield - they are always inlined
+      # and should not be generated as standalone functions
+      if function_contains_yield?(hir_func)
+        # Remove the stub from module since this function is inline-only
+        @mir_module.remove_function(hir_func.name)
+        return
+      end
+
       # Get the pre-created function stub
       mir_func = @mir_module.get_function(hir_func.name).not_nil!
 
@@ -526,14 +534,72 @@ module Crystal
         return builder.extern_call(call.method_name, args, convert_type(call.type))
       end
 
+      # Handle built-in print functions
+      if call.method_name == "puts"
+        # Determine the actual extern based on argument type
+        if args.size == 1
+          arg_type = get_arg_type(call.args[0])
+          extern_name = case arg_type
+                        when TypeRef::INT32, TypeRef::UINT32, TypeRef::CHAR
+                          "__crystal_v2_print_int32_ln"
+                        when TypeRef::INT64, TypeRef::UINT64
+                          "__crystal_v2_print_int64_ln"
+                        when TypeRef::STRING, TypeRef::POINTER
+                          "__crystal_v2_puts"
+                        else
+                          # Default to int32 for unknown numeric types
+                          "__crystal_v2_print_int32_ln"
+                        end
+          return builder.extern_call(extern_name, args, TypeRef::VOID)
+        end
+      end
+
+      # Handle print (without newline)
+      if call.method_name == "print"
+        if args.size == 1
+          arg_type = get_arg_type(call.args[0])
+          extern_name = case arg_type
+                        when TypeRef::INT32, TypeRef::UINT32, TypeRef::CHAR
+                          "__crystal_v2_print_int32"
+                        when TypeRef::INT64, TypeRef::UINT64
+                          "__crystal_v2_print_int64"
+                        else
+                          "__crystal_v2_print_int32"
+                        end
+          return builder.extern_call(extern_name, args, TypeRef::VOID)
+        end
+      end
+
       # Look up function by name
       callee_id = if func = @mir_module.get_function(call.method_name)
                     func.id
                   else
-                    0_u32  # Fallback (should not happen for valid code)
+                    # Unknown function - emit as extern call
+                    return builder.extern_call(call.method_name, args, convert_type(call.type))
                   end
 
       builder.call(callee_id, args, convert_type(call.type))
+    end
+
+    # Helper to get the MIR type of a HIR value by finding it in the function
+    private def get_arg_type(hir_id : HIR::ValueId) : TypeRef
+      if hir_func = @current_hir_func
+        # Search through all blocks for the value with this ID
+        hir_func.blocks.each do |block|
+          block.instructions.each do |inst|
+            if inst.id == hir_id
+              return convert_type(inst.type)
+            end
+          end
+        end
+        # Also check parameters
+        hir_func.params.each_with_index do |param, idx|
+          if idx.to_u32 == hir_id
+            return convert_type(param.type)
+          end
+        end
+      end
+      TypeRef::INT32  # Default fallback
     end
 
     # ─────────────────────────────────────────────────────────────────────────
@@ -684,6 +750,16 @@ module Crystal
       args = yld.args.map { |arg| get_value(arg) }
       # Block pointer would be passed as hidden parameter
       builder.const_nil  # Placeholder
+    end
+
+    # Check if a function contains yield instructions (inline-only function)
+    private def function_contains_yield?(hir_func : HIR::Function) : Bool
+      hir_func.blocks.each do |block|
+        block.instructions.each do |inst|
+          return true if inst.is_a?(HIR::Yield)
+        end
+      end
+      false
     end
 
     # ─────────────────────────────────────────────────────────────────────────

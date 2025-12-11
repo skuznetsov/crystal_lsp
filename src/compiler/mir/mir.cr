@@ -1685,6 +1685,13 @@ module Crystal::MIR
       @function_map[name]?
     end
 
+    def remove_function(name : String)
+      if func = @function_map[name]?
+        @functions.delete(func)
+        @function_map.delete(name)
+      end
+    end
+
     def to_s(io : IO) : Nil
       io << "; MIR Module: " << @name << "\n\n"
       @functions.each do |func|

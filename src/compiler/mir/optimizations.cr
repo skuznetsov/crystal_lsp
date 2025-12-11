@@ -329,8 +329,14 @@ module Crystal::MIR
       case inst
       when Store, Free, RCDecrement
         true
-      when Call, IndirectCall
+      when Call, IndirectCall, ExternCall
         # Calls always have potential side effects
+        true
+      when MutexLock, MutexUnlock, MutexTryLock
+        true
+      when ChannelSend, ChannelReceive, ChannelClose
+        true
+      when AtomicStore, AtomicRMW, AtomicCAS, Fence
         true
       else
         false
