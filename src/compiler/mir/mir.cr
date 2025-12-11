@@ -428,7 +428,7 @@ module Crystal::MIR
     getter alloc_type : TypeRef
     getter size : UInt64  # Static size in bytes (0 = compute from type)
     getter align : UInt32 # Alignment in bytes
-    property no_alias : Bool = false
+    property no_alias : Bool = true
 
     def initialize(
       id : ValueId,
@@ -446,6 +446,7 @@ module Crystal::MIR
       io << " " << @alloc_type
       io << ", size=" << @size if @size > 0
       io << ", align=" << @align
+      io << " [noalias]" if @no_alias
       io << " : " << @type
     end
   end
@@ -1454,7 +1455,9 @@ module Crystal::MIR
     # Memory operations
     def alloc(strategy : MemoryStrategy, alloc_type : TypeRef, size : UInt64 = 0_u64, align : UInt32 = 8_u32) : ValueId
       # Result type is pointer to alloc_type
-      emit(Alloc.new(@function.next_value_id, TypeRef::POINTER, strategy, alloc_type, size, align))
+      alloc = Alloc.new(@function.next_value_id, TypeRef::POINTER, strategy, alloc_type, size, align)
+      alloc.no_alias = true
+      emit(alloc)
     end
 
     def free(ptr : ValueId, strategy : MemoryStrategy) : ValueId
