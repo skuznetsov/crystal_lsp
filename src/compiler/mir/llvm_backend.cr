@@ -217,6 +217,7 @@ module Crystal::MIR
     @current_return_type : String = "void"
     @constant_values : Hash(ValueId, String)  # For inlining constants
     @value_types : Hash(ValueId, TypeRef)     # For tracking operand types
+    @array_info : Hash(ValueId, {String, Int32})  # Array element_type and size
 
     # Type metadata for debug DX
     @type_info_entries : Array(TypeInfoEntry)
@@ -246,6 +247,7 @@ module Crystal::MIR
       @block_names = {} of BlockId => String
       @constant_values = {} of ValueId => String
       @value_types = {} of ValueId => TypeRef
+      @array_info = {} of ValueId => {String, Int32}
 
       # Type metadata
       @type_info_entries = [] of TypeInfoEntry
@@ -414,6 +416,7 @@ module Crystal::MIR
       @block_names.clear
       @constant_values.clear
       @value_types.clear
+      @array_info.clear
 
       func.params.each do |param|
         @value_names[param.index] = param.name
@@ -487,6 +490,12 @@ module Crystal::MIR
         emit_union_type_id_get(inst, name)
       when UnionIs
         emit_union_is(inst, name)
+      when ArrayLiteral
+        emit_array_literal(inst, name)
+      when ArraySize
+        emit_array_size(inst, name)
+      when ArrayGet
+        emit_array_get(inst, name)
       end
     end
 
@@ -835,6 +844,59 @@ module Crystal::MIR
       emit "%#{base_name}.type_id_ptr = getelementptr #{union_type}, ptr %#{base_name}.union_ptr, i32 0, i32 0"
       emit "%#{base_name}.actual_type_id = load i32, ptr %#{base_name}.type_id_ptr"
       emit "#{name} = icmp eq i32 %#{base_name}.actual_type_id, #{inst.variant_type_id}"
+    end
+
+    # ─────────────────────────────────────────────────────────────────────────
+    # Array Operations
+    # ─────────────────────────────────────────────────────────────────────────
+
+    private def emit_array_literal(inst : ArrayLiteral, name : String)
+      base_name = name.lstrip('%')
+      element_type = @type_mapper.llvm_type(inst.element_type)
+      size = inst.size
+
+      # Array struct type: { i32 size, [N x T] data }
+      array_type = "{ i32, [#{size} x #{element_type}] }"
+
+      # Allocate array struct on stack
+      emit "%#{base_name}.ptr = alloca #{array_type}, align 8"
+
+      # Store size
+      emit "%#{base_name}.size_ptr = getelementptr #{array_type}, ptr %#{base_name}.ptr, i32 0, i32 0"
+      emit "store i32 #{size}, ptr %#{base_name}.size_ptr"
+
+      # Store elements
+      inst.elements.each_with_index do |elem_id, idx|
+        elem_val = value_ref(elem_id)
+        emit "%#{base_name}.elem#{idx}_ptr = getelementptr #{array_type}, ptr %#{base_name}.ptr, i32 0, i32 1, i32 #{idx}"
+        emit "store #{element_type} #{elem_val}, ptr %#{base_name}.elem#{idx}_ptr"
+      end
+
+      # Return pointer to array struct
+      emit "#{name} = bitcast ptr %#{base_name}.ptr to ptr"
+
+      # Remember array info for later use
+      @array_info[inst.id] = {element_type, size}
+    end
+
+    private def emit_array_size(inst : ArraySize, name : String)
+      base_name = name.lstrip('%')
+      array_ptr = value_ref(inst.array_value)
+
+      # Get size from array struct (first field)
+      emit "%#{base_name}.size_ptr = getelementptr { i32, [0 x i32] }, ptr #{array_ptr}, i32 0, i32 0"
+      emit "#{name} = load i32, ptr %#{base_name}.size_ptr"
+    end
+
+    private def emit_array_get(inst : ArrayGet, name : String)
+      base_name = name.lstrip('%')
+      array_ptr = value_ref(inst.array_value)
+      index = value_ref(inst.index_value)
+      element_type = @type_mapper.llvm_type(inst.element_type)
+
+      # Get element from data array (second field)
+      emit "%#{base_name}.elem_ptr = getelementptr { i32, [0 x #{element_type}] }, ptr #{array_ptr}, i32 0, i32 1, i32 #{index}"
+      emit "#{name} = load #{element_type}, ptr %#{base_name}.elem_ptr"
     end
 
     private def emit_terminator(term : Terminator)

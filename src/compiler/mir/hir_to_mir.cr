@@ -267,6 +267,10 @@ module Crystal
                  lower_union_type_id(hir_value)
                when HIR::UnionIs
                  lower_union_is(hir_value)
+               when HIR::ArrayLiteral
+                 lower_array_literal(hir_value)
+               when HIR::ArraySize
+                 lower_array_size(hir_value)
                else
                  raise "Unsupported HIR value: #{hir_value.class}"
                end
@@ -424,9 +428,20 @@ module Crystal
       obj_ptr = get_value(idx.object)
       index = get_value(idx.index)
 
-      # For now, emit as a call to [] method
-      # In real impl, would lower to GEP for arrays
-      builder.const_nil  # Placeholder
+      # Get element type from context (default to INT32 for now)
+      element_type = convert_type(idx.type)
+      if element_type.id == MIR::TypeRef::VOID.id
+        element_type = MIR::TypeRef::INT32
+      end
+
+      # Emit ArrayGet instruction
+      arr_get = MIR::ArrayGet.new(
+        builder.next_id,
+        element_type,
+        obj_ptr,
+        index
+      )
+      builder.emit(arr_get)
     end
 
     private def lower_index_set(idx : HIR::IndexSet) : ValueId
@@ -681,6 +696,34 @@ module Crystal
         is.variant_type_id
       )
       builder.emit(mir_is)
+    end
+
+    private def lower_array_literal(arr : HIR::ArrayLiteral) : ValueId
+      builder = @builder.not_nil!
+
+      # Convert element values
+      elements = arr.elements.map { |e| get_value(e) }
+      element_type = convert_type(arr.element_type)
+
+      # Create MIR ArrayLiteral instruction
+      mir_arr = MIR::ArrayLiteral.new(
+        builder.next_id,
+        element_type,
+        elements
+      )
+      builder.emit(mir_arr)
+    end
+
+    private def lower_array_size(arr_size : HIR::ArraySize) : ValueId
+      builder = @builder.not_nil!
+      array_val = get_value(arr_size.array_value)
+
+      # Create MIR ArraySize instruction
+      mir_size = MIR::ArraySize.new(
+        builder.next_id,
+        array_val
+      )
+      builder.emit(mir_size)
     end
 
     # ─────────────────────────────────────────────────────────────────────────

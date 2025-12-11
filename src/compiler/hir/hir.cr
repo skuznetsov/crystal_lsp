@@ -188,6 +188,28 @@ module Crystal::HIR
     end
   end
 
+  # Static array literal [1, 2, 3]
+  # Element type stored in @type, size = elements.size
+  class ArrayLiteral < Value
+    getter elements : Array(ValueId)
+    getter element_type : TypeRef
+
+    def initialize(id : ValueId, @element_type : TypeRef, @elements : Array(ValueId))
+      super(id, TypeRef::VOID)  # Array itself has special type handling
+      @lifetime = LifetimeTag::StackLocal
+    end
+
+    def size : Int32
+      @elements.size
+    end
+
+    def to_s(io : IO) : Nil
+      io << "%" << @id << " = array_literal ["
+      @elements.join(io, ", ") { |e, o| o << "%" << e }
+      io << "] : " << @element_type.id
+    end
+  end
+
   alias LiteralValue = Int64 | UInt64 | Float64 | String | Bool | Char | Nil
 
   # ─────────────────────────────────────────────────────────────────────────────
@@ -339,6 +361,19 @@ module Crystal::HIR
 
     def to_s(io : IO) : Nil
       io << "%" << @id << " = index_set %" << @object << "[%" << @index << "] = %" << @value
+    end
+  end
+
+  # Get array size
+  class ArraySize < Value
+    getter array_value : ValueId
+
+    def initialize(id : ValueId, type : TypeRef, @array_value : ValueId)
+      super(id, type)
+    end
+
+    def to_s(io : IO) : Nil
+      io << "%" << @id << " = array_size %" << @array_value << " : i32"
     end
   end
 

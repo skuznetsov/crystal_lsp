@@ -851,6 +851,71 @@ module Crystal::MIR
     end
   end
 
+  # ─────────────────────────────────────────────────────────────────────────────
+  # Array Operations
+  # ─────────────────────────────────────────────────────────────────────────────
+
+  # Static array literal [1, 2, 3]
+  # Creates stack-allocated array struct { i32 size, [N x T] data }
+  class ArrayLiteral < Value
+    getter element_type : TypeRef
+    getter elements : Array(ValueId)
+
+    def initialize(id : ValueId, @element_type : TypeRef, @elements : Array(ValueId))
+      super(id, TypeRef::VOID)  # Returns ptr to array struct
+    end
+
+    def size : Int32
+      @elements.size
+    end
+
+    def operands : Array(ValueId)
+      @elements
+    end
+
+    def to_s(io : IO) : Nil
+      io << "%" << @id << " = array_literal ["
+      @elements.join(io, ", ") { |e, o| o << "%" << e }
+      io << "] : " << @element_type.id
+    end
+  end
+
+  # Get array size
+  class ArraySize < Value
+    getter array_value : ValueId
+
+    def initialize(id : ValueId, @array_value : ValueId)
+      super(id, TypeRef::INT32)
+    end
+
+    def operands : Array(ValueId)
+      [@array_value]
+    end
+
+    def to_s(io : IO) : Nil
+      io << "%" << @id << " = array_size %" << @array_value << " : i32"
+    end
+  end
+
+  # Get array element by index
+  class ArrayGet < Value
+    getter array_value : ValueId
+    getter index_value : ValueId
+    getter element_type : TypeRef
+
+    def initialize(id : ValueId, @element_type : TypeRef, @array_value : ValueId, @index_value : ValueId)
+      super(id, @element_type)
+    end
+
+    def operands : Array(ValueId)
+      [@array_value, @index_value]
+    end
+
+    def to_s(io : IO) : Nil
+      io << "%" << @id << " = array_get %" << @array_value << "[%" << @index_value << "] : " << @element_type.id
+    end
+  end
+
   # ═══════════════════════════════════════════════════════════════════════════
   # GLOBAL VARIABLE ACCESS
   # ═══════════════════════════════════════════════════════════════════════════

@@ -1730,21 +1730,43 @@ module Crystal::HIR
         end
       end
 
-      # Handle Range#each { |i| body } intrinsic
+      # Handle Range#each { |i| body } and Array#each { |x| body } intrinsics
       if method_name == "each"
         # Check if callee is (range).each - MemberAccessNode on RangeNode
         if callee_node.is_a?(CrystalV2::Compiler::Frontend::MemberAccessNode)
-          range_obj = @arena[callee_node.object]
+          inner_obj = @arena[callee_node.object]
           # Unwrap GroupingNode: (1..3) creates GroupingNode around RangeNode
-          if range_obj.is_a?(CrystalV2::Compiler::Frontend::GroupingNode)
-            range_obj = @arena[range_obj.expression]
+          if inner_obj.is_a?(CrystalV2::Compiler::Frontend::GroupingNode)
+            inner_obj = @arena[inner_obj.expression]
           end
-          if range_obj.is_a?(CrystalV2::Compiler::Frontend::RangeNode)
+          if inner_obj.is_a?(CrystalV2::Compiler::Frontend::RangeNode)
             if blk_expr = node.block
               blk_node = @arena[blk_expr]
               if blk_node.is_a?(CrystalV2::Compiler::Frontend::BlockNode)
-                return lower_range_each_intrinsic(ctx, range_obj, blk_node)
+                return lower_range_each_intrinsic(ctx, inner_obj, blk_node)
               end
+            end
+          end
+          # Array#each intrinsic - check if inner_obj is ArrayLiteralNode or identifier
+          if inner_obj.is_a?(CrystalV2::Compiler::Frontend::ArrayLiteralNode)
+            if blk_expr = node.block
+              blk_node = @arena[blk_expr]
+              if blk_node.is_a?(CrystalV2::Compiler::Frontend::BlockNode)
+                # Lower array first, then call array_each
+                array_id = lower_array_literal(ctx, inner_obj)
+                return lower_array_each_intrinsic(ctx, array_id, inner_obj.elements.size, blk_node)
+              end
+            end
+          end
+        end
+        # arr.each where arr is a variable (receiver_id set)
+        if receiver_id
+          if blk_expr = node.block
+            blk_node = @arena[blk_expr]
+            if blk_node.is_a?(CrystalV2::Compiler::Frontend::BlockNode)
+              # Check if receiver has known array size (from register_type)
+              # For now, use dynamic size via ArraySize
+              return lower_array_each_dynamic(ctx, receiver_id, blk_node)
             end
           end
         end
@@ -2047,6 +2069,249 @@ module Crystal::HIR
       nil_lit.id
     end
 
+    # Intrinsic: arr.each { |x| body } for static array with known size
+    private def lower_array_each_intrinsic(
+      ctx : LoweringContext,
+      array_id : ValueId,
+      array_size : Int32,
+      block : CrystalV2::Compiler::Frontend::BlockNode
+    ) : ValueId
+      # Get block param name
+      param_name = if params = block.params
+                     if first_param = params.first?
+                       if pname = first_param.name
+                         String.new(pname)
+                       else
+                         "__arr_elem"
+                       end
+                     else
+                       "__arr_elem"
+                     end
+                   else
+                     "__arr_elem"
+                   end
+
+      # Collect mutable vars
+      assigned_vars = collect_assigned_vars(block.body)
+      assigned_vars = assigned_vars.reject { |v| v == param_name }
+
+      entry_block = ctx.current_block
+      initial_values = {} of String => ValueId
+      assigned_vars.each do |var_name|
+        if val = ctx.lookup_local(var_name)
+          initial_values[var_name] = val
+        end
+      end
+
+      # Emit zero in entry block BEFORE jump (required for phi SSA)
+      zero = Literal.new(ctx.next_id, TypeRef::INT32, 0_i64)
+      ctx.emit(zero)
+
+      # Create blocks
+      cond_block = ctx.create_block
+      body_block = ctx.create_block
+      incr_block = ctx.create_block
+      exit_block = ctx.create_block
+
+      ctx.terminate(Jump.new(cond_block))
+
+      # Condition block with index phi
+      ctx.current_block = cond_block
+      index_phi = Phi.new(ctx.next_id, TypeRef::INT32)
+      index_phi.add_incoming(entry_block, zero.id)
+      ctx.emit(index_phi)
+
+      # Phi for mutable vars
+      phi_nodes = {} of String => Phi
+      assigned_vars.each do |var_name|
+        if initial_val = initial_values[var_name]?
+          var_type = ctx.type_of(initial_val)
+          phi = Phi.new(ctx.next_id, var_type)
+          phi.add_incoming(entry_block, initial_val)
+          ctx.emit(phi)
+          phi_nodes[var_name] = phi
+          ctx.register_local(var_name, phi.id)
+        end
+      end
+
+      # Compare: i < size
+      size_lit = Literal.new(ctx.next_id, TypeRef::INT32, array_size.to_i64)
+      ctx.emit(size_lit)
+      cmp = BinaryOperation.new(ctx.next_id, TypeRef::BOOL, BinaryOp::Lt, index_phi.id, size_lit.id)
+      ctx.emit(cmp)
+      ctx.terminate(Branch.new(cmp.id, body_block, exit_block))
+
+      # Body block
+      ctx.current_block = body_block
+      ctx.push_scope(ScopeKind::Block)
+
+      # Get element: arr[i]
+      element_type = ctx.type_of(array_id)
+      if element_type == TypeRef::VOID
+        element_type = TypeRef::INT32
+      end
+      index_get = IndexGet.new(ctx.next_id, element_type, array_id, index_phi.id)
+      ctx.emit(index_get)
+      ctx.register_type(index_get.id, element_type)
+      ctx.register_local(param_name, index_get.id)
+
+      lower_body(ctx, block.body)
+      ctx.pop_scope
+      ctx.terminate(Jump.new(incr_block))
+
+      # Increment block
+      ctx.current_block = incr_block
+      one = Literal.new(ctx.next_id, TypeRef::INT32, 1_i64)
+      ctx.emit(one)
+      new_i = BinaryOperation.new(ctx.next_id, TypeRef::INT32, BinaryOp::Add, index_phi.id, one.id)
+      ctx.emit(new_i)
+
+      index_phi.add_incoming(incr_block, new_i.id)
+
+      # Patch mutable var phis
+      assigned_vars.each do |var_name|
+        if phi = phi_nodes[var_name]?
+          if updated_val = ctx.lookup_local(var_name)
+            phi.add_incoming(incr_block, updated_val)
+          end
+        end
+      end
+
+      ctx.terminate(Jump.new(cond_block))
+
+      # Exit block
+      ctx.current_block = exit_block
+      phi_nodes.each do |var_name, phi|
+        ctx.register_local(var_name, phi.id)
+      end
+
+      nil_lit = Literal.new(ctx.next_id, TypeRef::NIL, nil)
+      ctx.emit(nil_lit)
+      nil_lit.id
+    end
+
+    # Dynamic array each - gets size at runtime via ArraySize
+    private def lower_array_each_dynamic(
+      ctx : LoweringContext,
+      array_id : ValueId,
+      block : CrystalV2::Compiler::Frontend::BlockNode
+    ) : ValueId
+      # Get block param name
+      param_name = if params = block.params
+                     if first_param = params.first?
+                       if pname = first_param.name
+                         String.new(pname)
+                       else
+                         "__arr_elem"
+                       end
+                     else
+                       "__arr_elem"
+                     end
+                   else
+                     "__arr_elem"
+                   end
+
+      # Collect mutable vars
+      assigned_vars = collect_assigned_vars(block.body)
+      assigned_vars = assigned_vars.reject { |v| v == param_name }
+
+      entry_block = ctx.current_block
+      initial_values = {} of String => ValueId
+      assigned_vars.each do |var_name|
+        if val = ctx.lookup_local(var_name)
+          initial_values[var_name] = val
+        end
+      end
+
+      # Emit zero in entry block BEFORE jump (required for phi SSA)
+      zero = Literal.new(ctx.next_id, TypeRef::INT32, 0_i64)
+      ctx.emit(zero)
+
+      # Create blocks
+      cond_block = ctx.create_block
+      body_block = ctx.create_block
+      incr_block = ctx.create_block
+      exit_block = ctx.create_block
+
+      ctx.terminate(Jump.new(cond_block))
+
+      # Condition block with index phi
+      ctx.current_block = cond_block
+      index_phi = Phi.new(ctx.next_id, TypeRef::INT32)
+      index_phi.add_incoming(entry_block, zero.id)
+      ctx.emit(index_phi)
+
+      # Phi for mutable vars
+      phi_nodes = {} of String => Phi
+      assigned_vars.each do |var_name|
+        if initial_val = initial_values[var_name]?
+          var_type = ctx.type_of(initial_val)
+          phi = Phi.new(ctx.next_id, var_type)
+          phi.add_incoming(entry_block, initial_val)
+          ctx.emit(phi)
+          phi_nodes[var_name] = phi
+          ctx.register_local(var_name, phi.id)
+        end
+      end
+
+      # Get array size dynamically
+      size_val = ArraySize.new(ctx.next_id, TypeRef::INT32, array_id)
+      ctx.emit(size_val)
+
+      # Compare: i < size
+      cmp = BinaryOperation.new(ctx.next_id, TypeRef::BOOL, BinaryOp::Lt, index_phi.id, size_val.id)
+      ctx.emit(cmp)
+      ctx.terminate(Branch.new(cmp.id, body_block, exit_block))
+
+      # Body block
+      ctx.current_block = body_block
+      ctx.push_scope(ScopeKind::Block)
+
+      # Get element: arr[i]
+      element_type = ctx.type_of(array_id)
+      if element_type == TypeRef::VOID
+        element_type = TypeRef::INT32
+      end
+      index_get = IndexGet.new(ctx.next_id, element_type, array_id, index_phi.id)
+      ctx.emit(index_get)
+      ctx.register_type(index_get.id, element_type)
+      ctx.register_local(param_name, index_get.id)
+
+      lower_body(ctx, block.body)
+      ctx.pop_scope
+      ctx.terminate(Jump.new(incr_block))
+
+      # Increment block
+      ctx.current_block = incr_block
+      one = Literal.new(ctx.next_id, TypeRef::INT32, 1_i64)
+      ctx.emit(one)
+      new_i = BinaryOperation.new(ctx.next_id, TypeRef::INT32, BinaryOp::Add, index_phi.id, one.id)
+      ctx.emit(new_i)
+
+      index_phi.add_incoming(incr_block, new_i.id)
+
+      # Patch mutable var phis
+      assigned_vars.each do |var_name|
+        if phi = phi_nodes[var_name]?
+          if updated_val = ctx.lookup_local(var_name)
+            phi.add_incoming(incr_block, updated_val)
+          end
+        end
+      end
+
+      ctx.terminate(Jump.new(cond_block))
+
+      # Exit block
+      ctx.current_block = exit_block
+      phi_nodes.each do |var_name, phi|
+        ctx.register_local(var_name, phi.id)
+      end
+
+      nil_lit = Literal.new(ctx.next_id, TypeRef::NIL, nil)
+      ctx.emit(nil_lit)
+      nil_lit.id
+    end
+
     # Inline a yield-function call with block
     # Transforms: func(args) { |params| block_body }
     # Into: inline func body, replacing yield with block_body
@@ -2155,8 +2420,15 @@ module Crystal::HIR
       # For single index, use IndexGet directly
       # For multiple indexes, chain them or use as tuple
       if index_ids.size == 1
-        index_get = IndexGet.new(ctx.next_id, TypeRef::VOID, object_id, index_ids.first)
+        # Get element type from array if tracked
+        element_type = ctx.type_of(object_id)
+        if element_type == TypeRef::VOID
+          element_type = TypeRef::INT32  # Default for untyped arrays
+        end
+
+        index_get = IndexGet.new(ctx.next_id, element_type, object_id, index_ids.first)
         ctx.emit(index_get)
+        ctx.register_type(index_get.id, element_type)
         index_get.id
       else
         # Multi-dimensional: emit as call to []
@@ -2399,11 +2671,18 @@ module Crystal::HIR
     private def lower_array_literal(ctx : LoweringContext, node : CrystalV2::Compiler::Frontend::ArrayLiteralNode) : ValueId
       element_ids = node.elements.map { |e| lower_expr(ctx, e) }
 
-      # Allocate array
-      array_type = ctx.get_type("Array")
-      alloc = Allocate.new(ctx.next_id, array_type, element_ids)
-      ctx.emit(alloc)
-      alloc.id
+      # Determine element type from first element (or Int32 default)
+      element_type = if element_ids.size > 0
+                       ctx.type_of(element_ids.first)
+                     else
+                       TypeRef::INT32
+                     end
+
+      # Create ArrayLiteral instruction with elements
+      array_lit = ArrayLiteral.new(ctx.next_id, element_type, element_ids)
+      ctx.emit(array_lit)
+      ctx.register_type(array_lit.id, element_type)  # Store element type for .each
+      array_lit.id
     end
 
     private def lower_hash_literal(ctx : LoweringContext, node : CrystalV2::Compiler::Frontend::HashLiteralNode) : ValueId
