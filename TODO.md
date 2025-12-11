@@ -634,6 +634,7 @@ The key insight is: **Don't compete with LLVM, complement it.**
 - [ ] LTP/WBA-style local optimization loop: define trigger/transport/potential for RC/CFG size; ensure monotone potential decrease with fallback (dual frame) for stalled optimizations.
 - [x] **Tests green after recent hardening** (2025-12-10): all specs passing (9 pending intentional) after fixing yield/puts/array/lifetime, empty hash inference, struct LLVM type mapping, and stabilizing pipeline.
 - [ ] **Next:** finish alias/region (MustAlias/NoAlias), ABI harness (offset/align/union), RC/taint inline audit, ThreadShared→atomic/GC enforcement.
+- [ ] Region-style alias propagation: track loads/stores/copies to propagate alias (ptr→value), use to safely elide rc_inc/rc_dec across aliases.
 
 ---
 
