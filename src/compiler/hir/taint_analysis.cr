@@ -350,9 +350,91 @@ module Crystal::HIR
 
     private def cyclic_type_name?(name : String) : Bool
       return true if @cyclic_types.includes?(name)
-      # Heuristic for collections/optionals that can store self-references.
-      name.includes?("Array(") || name.includes?("Hash(") || name.includes?("Tuple(") || name.ends_with?("?")
+
+      # Check if it's a collection type - only cyclic if element type is cyclic
+      if name.starts_with?("Array(") || name.starts_with?("Hash(") || name.starts_with?("Tuple(")
+        # Extract element type(s) and check if any could form cycles
+        element_types = extract_generic_params(name)
+        return element_types.any? { |elem| could_be_cyclic?(elem) }
+      end
+
+      # Nilable types: T? is cyclic only if T is cyclic
+      if name.ends_with?("?")
+        base = name.rchop("?")
+        return could_be_cyclic?(base)
+      end
+
+      false
     end
+
+    # Extract generic type parameters from "Array(T)" → ["T"]
+    # or "Hash(K, V)" → ["K", "V"]
+    private def extract_generic_params(name : String) : Array(String)
+      paren_start = name.index('(')
+      return [] of String unless paren_start
+
+      paren_end = name.rindex(')')
+      return [] of String unless paren_end
+
+      inner = name[(paren_start + 1)...paren_end]
+
+      # Simple split by comma (doesn't handle nested generics perfectly, but good enough)
+      # For nested like Array(Hash(K,V)), we'd need proper parsing
+      params = [] of String
+      depth = 0
+      current = ""
+
+      inner.each_char do |c|
+        case c
+        when '('
+          depth += 1
+          current += c
+        when ')'
+          depth -= 1
+          current += c
+        when ','
+          if depth == 0
+            params << current.strip
+            current = ""
+          else
+            current += c
+          end
+        else
+          current += c
+        end
+      end
+      params << current.strip unless current.empty?
+
+      params
+    end
+
+    # Check if a type could potentially form reference cycles
+    private def could_be_cyclic?(type_name : String) : Bool
+      # Already known cyclic
+      return true if @cyclic_types.includes?(type_name)
+
+      # Primitive types cannot form cycles
+      return false if primitive_type?(type_name)
+
+      # User-defined reference types COULD form cycles (conservative for unknown types)
+      # But only if they have fields that reference back
+      # For now, check if it's in our cyclic_types set
+      @cyclic_types.includes?(type_name)
+    end
+
+    # Check if a type name represents a primitive (non-reference) type
+    private def primitive_type?(name : String) : Bool
+      PRIMITIVE_TYPES.includes?(name)
+    end
+
+    # Primitive types that cannot form reference cycles
+    PRIMITIVE_TYPES = Set{
+      "Int8", "Int16", "Int32", "Int64", "Int128",
+      "UInt8", "UInt16", "UInt32", "UInt64", "UInt128",
+      "Float32", "Float64",
+      "Bool", "Char", "Symbol", "Nil", "Void",
+      "Pointer", # Raw pointers don't participate in RC
+    }
 
     private def is_ffi_method?(name : String) : Bool
       FFI_METHODS.includes?(name) || name.starts_with?("__")
