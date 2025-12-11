@@ -2401,13 +2401,26 @@ module Crystal::HIR
             param_name = String.new(pname)
             if idx < yield_args.size
               ctx.register_local(param_name, yield_args[idx])
+              # Propagate taints/lifetime for inline block params to support RC/ThreadShared decisions
+              arg_id = yield_args[idx]
+              ctx.register_type(arg_id, ctx.type_of(arg_id))
             end
           end
         end
       end
 
       # Lower block body
-      lower_body(ctx, block.body)
+      result = lower_body(ctx, block.body)
+
+      # Propagate taints from arguments to result if result is present
+      if result
+        yield_args.each do |arg_id|
+          arg_type = ctx.type_of(arg_id)
+          ctx.register_type(result, arg_type) if arg_type && arg_type != TypeRef::VOID
+        end
+      end
+
+      result
     end
 
     # Helper to create nil value
