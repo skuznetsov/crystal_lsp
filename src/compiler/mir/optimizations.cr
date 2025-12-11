@@ -83,8 +83,8 @@ module Crystal::MIR
           end
 
         when Store
-          # Stores may transfer ownership
-          pending_incs.delete(inst.value)
+          # Stores may clobber aliases; be conservative and clear tracked incs
+          pending_incs.clear
 
         when Load
           # Loaded value aliases its source pointer
