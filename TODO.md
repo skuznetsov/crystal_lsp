@@ -696,6 +696,7 @@ The key insight is: **Don't compete with LLVM, complement it.**
 - [ ] Structural patch layer (rename/extract/move with validation)
 - [ ] Zero-copy name handling (interning, span-based lookups)
 - [ ] JVM backend (experimental)
+- [ ] Alias/region pass integrated into RC elision/stack/ARC decisions
 
 ---
 
