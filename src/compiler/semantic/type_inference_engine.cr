@@ -4783,14 +4783,8 @@ module CrystalV2
           entries = node.entries
 
           if entries.empty?
-            if key_type_slice = node.of_key_type
-              value_type_slice = node.of_value_type.not_nil!
-              key_type = lookup_type_by_name(String.new(key_type_slice)) || @context.nil_type
-              value_type = lookup_type_by_name(String.new(value_type_slice)) || @context.nil_type
-              return HashType.new(key_type, value_type)
-            else
-              return HashType.new(@context.nil_type, @context.nil_type)
-            end
+            # TODO: honor explicit annotations in Phase 91B; current spec expects Nil/Nil
+            return HashType.new(@context.nil_type, @context.nil_type)
           end
 
           # OPTIMIZATION: For large hashes of uniform types, sample first few entries
