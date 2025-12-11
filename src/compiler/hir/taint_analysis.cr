@@ -201,7 +201,7 @@ module Crystal::HIR
         # Allocations of cyclic types get Cyclic taint
         when Allocate
           type_name = get_type_name(value.type)
-          if @cyclic_types.includes?(type_name)
+          if cyclic_type_name?(type_name)
             mark_taint(value.id, Taint::Cyclic)
           end
 
@@ -346,6 +346,12 @@ module Crystal::HIR
       else
         "Type#{type_ref.id}"
       end
+    end
+
+    private def cyclic_type_name?(name : String) : Bool
+      return true if @cyclic_types.includes?(name)
+      # Heuristic for collections/optionals that can store self-references.
+      name.includes?("Array(") || name.includes?("Hash(") || name.includes?("Tuple(") || name.ends_with?("?")
     end
 
     private def is_ffi_method?(name : String) : Bool
