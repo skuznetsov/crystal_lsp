@@ -2729,13 +2729,12 @@ module Crystal::HIR
                        TypeRef::INT32
                      end
 
-      # Allocate array container (lifetime unknown until analysis)
-      array_type = ctx.get_type("Array")
-      alloc = Allocate.new(ctx.next_id, array_type, element_ids)
-      alloc.lifetime = LifetimeTag::Unknown
-      ctx.emit(alloc)
-      ctx.register_type(alloc.id, element_type)  # element type for .each
-      alloc.id
+      # Create ArrayLiteral instruction (not generic Allocate)
+      arr = ArrayLiteral.new(ctx.next_id, element_type, element_ids)
+      arr.lifetime = LifetimeTag::StackLocal  # Default to stack until escape analysis
+      ctx.emit(arr)
+      ctx.register_type(arr.id, element_type)  # element type for .each
+      arr.id
     end
 
     private def lower_hash_literal(ctx : LoweringContext, node : CrystalV2::Compiler::Frontend::HashLiteralNode) : ValueId

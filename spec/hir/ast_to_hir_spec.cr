@@ -519,14 +519,14 @@ describe Crystal::HIR::AstToHir do
       func = lower_function("def foo; [] of Int32; end")
       text = hir_text(func)
 
-      text.should contain("allocate")
+      text.should contain("array_literal")
     end
 
     it "lowers array literal" do
       func = lower_function("def foo; [1, 2, 3]; end")
       text = hir_text(func)
 
-      text.should contain("allocate")
+      text.should contain("array_literal")
     end
 
     it "lowers hash literal" do
@@ -692,12 +692,12 @@ describe Crystal::HIR::AstToHir do
       func.params[0].lifetime.should eq(Crystal::HIR::LifetimeTag::HeapEscape)
     end
 
-    it "marks allocations as Unknown initially" do
+    it "marks array literals as StackLocal initially" do
       func = lower_function("def foo; [1, 2, 3]; end")
 
-      alloc = func.blocks.flat_map(&.instructions).find { |i| i.is_a?(Crystal::HIR::Allocate) }
-      alloc.should_not be_nil
-      alloc.not_nil!.lifetime.should eq(Crystal::HIR::LifetimeTag::Unknown)
+      arr = func.blocks.flat_map(&.instructions).find { |i| i.is_a?(Crystal::HIR::ArrayLiteral) }
+      arr.should_not be_nil
+      arr.not_nil!.lifetime.should eq(Crystal::HIR::LifetimeTag::StackLocal)
     end
 
     it "marks class var access as GlobalEscape" do
