@@ -257,7 +257,6 @@ module Crystal::HIR
   class Allocate < Value
     getter constructor_args : Array(ValueId)
     getter is_value_type : Bool  # true for struct (stack), false for class (heap)
-    property memory_strategy : MemoryStrategy? = nil
 
     def initialize(id : ValueId, type : TypeRef, @constructor_args : Array(ValueId) = [] of ValueId, @is_value_type : Bool = false)
       super(id, type)

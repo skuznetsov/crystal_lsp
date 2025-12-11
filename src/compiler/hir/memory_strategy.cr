@@ -10,6 +10,11 @@ require "./escape_analysis"
 require "./taint_analysis"
 
 module Crystal::HIR
+  # Extend Allocate with strategy slot (only when memory_strategy is loaded)
+  class Allocate
+    property memory_strategy : MemoryStrategy? = nil
+  end
+
   # Memory management strategy for an allocation
   enum MemoryStrategy
     Stack       # LLVM alloca, automatic cleanup
