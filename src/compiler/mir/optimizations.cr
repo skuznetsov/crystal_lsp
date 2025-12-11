@@ -45,6 +45,7 @@ module Crystal::MIR
     private def optimize_block(block : BasicBlock)
       # Track rc_inc operations by pointer
       pending_incs = {} of ValueId => Array(Int32)  # ptr → instruction indices
+      alias_map = {} of ValueId => ValueId          # simple copy-based alias map
 
       instructions = block.instructions
       to_remove = Set(Int32).new
@@ -53,13 +54,15 @@ module Crystal::MIR
         case inst
         when RCIncrement
           # Track this inc
-          (pending_incs[inst.ptr] ||= [] of Int32) << idx
+          ptr = canonical_ptr(inst.ptr, alias_map)
+          (pending_incs[ptr] ||= [] of Int32) << idx
           # Add a conservative MustAlias marker for identical ptrs within block
-          @must_alias << {inst.ptr, inst.ptr}
+          @must_alias << {ptr, ptr}
 
         when RCDecrement
           # Check if we can elide with a pending inc
-          if incs = pending_incs[inst.ptr]?
+          ptr = canonical_ptr(inst.ptr, alias_map)
+          if incs = pending_incs[ptr]?
             if !incs.empty?
               # Found a matching inc - elide both
               inc_idx = incs.pop
@@ -68,6 +71,10 @@ module Crystal::MIR
               @eliminated += 2
             end
           end
+
+        when Copy
+          # copy %a → %b means %b aliases %a
+          alias_map[inst.id] = canonical_ptr(inst.source, alias_map)
 
         when Call, IndirectCall
           # Calls may consume the reference - don't elide across them
@@ -90,6 +97,15 @@ module Crystal::MIR
       to_remove.to_a.sort.reverse_each do |idx|
         instructions.delete_at(idx)
       end
+    end
+
+    # Simple canonicalization using copy-based aliases
+    private def canonical_ptr(ptr : ValueId, alias_map : Hash(ValueId, ValueId)) : ValueId
+      current = ptr
+      while (aliased = alias_map[current]?)
+        current = aliased
+      end
+      current
     end
   end
 
