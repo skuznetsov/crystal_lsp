@@ -9,6 +9,6 @@ describe Crystal::MIR::LLVMTypeMapper do
 
     mapper = Crystal::MIR::LLVMTypeMapper.new(registry)
     mapper.llvm_type(t).should eq("%Foo")
-    mapper.llvm_alloca_type(t).should eq("%Foo")
+    mapper.llvm_alloca_type(Crystal::MIR::TypeRef.new(t.id)).should eq("%Foo")
   end
 end
