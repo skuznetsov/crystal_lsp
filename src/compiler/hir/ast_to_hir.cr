@@ -169,6 +169,13 @@ module Crystal::HIR
   # Class type info (is_struct=true for value types)
   record ClassInfo, name : String, type_ref : TypeRef, ivars : Array(IVarInfo), class_vars : Array(ClassVarInfo), size : Int32, is_struct : Bool = false
 
+  # Generic class template (not yet specialized)
+  record GenericClassTemplate,
+    name : String,                                    # Base name like "Box"
+    type_params : Array(String),                      # ["T"] or ["K", "V"]
+    node : CrystalV2::Compiler::Frontend::ClassNode,  # Original AST node for re-lowering
+    is_struct : Bool = false
+
   # Main AST to HIR converter
   class AstToHir
     alias AstNode = CrystalV2::Compiler::Frontend::Node
@@ -198,6 +205,15 @@ module Crystal::HIR
     # Functions that contain yield (candidates for inline)
     @yield_functions : Set(String)
 
+    # Generic class templates (base name -> template)
+    @generic_templates : Hash(String, GenericClassTemplate)
+
+    # Already monomorphized generic classes (specialized name -> true)
+    @monomorphized : Set(String)
+
+    # Current type parameter substitutions for generic lowering
+    @type_param_map : Hash(String, String)
+
     def initialize(@arena, module_name : String = "main")
       @module = Module.new(module_name)
       @function_types = {} of String => TypeRef
@@ -207,6 +223,9 @@ module Crystal::HIR
       @union_descriptors = {} of MIR::TypeRef => MIR::UnionDescriptor
       @function_defs = {} of String => CrystalV2::Compiler::Frontend::DefNode
       @yield_functions = Set(String).new
+      @generic_templates = {} of String => GenericClassTemplate
+      @monomorphized = Set(String).new
+      @type_param_map = {} of String => String
     end
 
     # Get class info by name
@@ -219,6 +238,24 @@ module Crystal::HIR
       class_name = String.new(node.name)
       is_struct = node.is_struct == true
 
+      # Check if this is a generic class (has type parameters)
+      if type_params = node.type_params
+        if type_params.size > 0
+          # Store as generic template - don't create ClassInfo yet
+          param_names = type_params.map { |p| String.new(p) }
+          @generic_templates[class_name] = GenericClassTemplate.new(
+            class_name, param_names, node, is_struct
+          )
+          return  # Don't register as concrete class
+        end
+      end
+
+      # Non-generic class - proceed with normal registration
+      register_concrete_class(node, class_name, is_struct)
+    end
+
+    # Register a concrete (non-generic or specialized) class
+    private def register_concrete_class(node : CrystalV2::Compiler::Frontend::ClassNode, class_name : String, is_struct : Bool)
       # Collect instance variables and their types
       ivars = [] of IVarInfo
       class_vars = [] of ClassVarInfo
@@ -269,6 +306,7 @@ module Crystal::HIR
             @function_types[full_name] = return_type
 
             # Capture initialize parameters for new()
+            # Also extract ivars from shorthand: def initialize(@value : T)
             if method_name == "initialize"
               if params = member.params
                 params.each do |param|
@@ -278,7 +316,21 @@ module Crystal::HIR
                                else
                                  TypeRef::VOID
                                end
-                  init_params << {param_name, param_type}
+
+                  # Handle instance variable shorthand: @value : T
+                  # Note: parser stores name WITHOUT @ prefix when is_instance_var=true
+                  if param.is_instance_var
+                    ivar_name = "@#{param_name}"  # Add @ prefix for ivar storage
+                    # Check if ivar already declared
+                    unless ivars.any? { |iv| iv.name == ivar_name }
+                      ivars << IVarInfo.new(ivar_name, param_type, offset)
+                      offset += type_size(param_type)
+                    end
+                    # For new() params, use name without @
+                    init_params << {param_name, param_type}
+                  else
+                    init_params << {param_name, param_type}
+                  end
                 end
               end
             end
@@ -299,10 +351,62 @@ module Crystal::HIR
       @function_types["#{class_name}.new"] = type_ref
     end
 
+    # Monomorphize a generic class: create specialized version with concrete types
+    private def monomorphize_generic_class(base_name : String, type_args : Array(String), specialized_name : String)
+      template = @generic_templates[base_name]?
+      return unless template
+
+      # Check arity matches
+      if template.type_params.size != type_args.size
+        raise "Generic #{base_name} expects #{template.type_params.size} type args, got #{type_args.size}"
+      end
+
+      # Set up type parameter substitutions: T => Int32, etc.
+      old_map = @type_param_map.dup
+      template.type_params.each_with_index do |param, i|
+        @type_param_map[param] = type_args[i]
+      end
+
+      # Register the specialized class using the template's AST node
+      # The type_ref_for_name calls will now substitute T => Int32
+      register_concrete_class(template.node, specialized_name, template.is_struct)
+
+      # Generate allocator and methods for the specialized class
+      if class_info = @class_info[specialized_name]?
+        # Set current class for ivar lookup
+        old_class = @current_class
+        @current_class = specialized_name
+
+        generate_allocator(specialized_name, class_info)
+
+        # Lower methods with type substitutions
+        if body = template.node.body
+          body.each do |expr_id|
+            member = @arena[expr_id]
+            if member.is_a?(CrystalV2::Compiler::Frontend::DefNode)
+              lower_method(specialized_name, class_info, member)
+            end
+          end
+        end
+
+        @current_class = old_class
+      end
+
+      # Restore old type param map
+      @type_param_map = old_map
+      @monomorphized.add(specialized_name)
+    end
+
     # Lower a class and all its methods (pass 3)
     def lower_class(node : CrystalV2::Compiler::Frontend::ClassNode)
       class_name = String.new(node.name)
-      class_info = @class_info[class_name]
+
+      # Skip generic class templates - they're lowered on-demand during monomorphization
+      if @generic_templates.has_key?(class_name)
+        return
+      end
+
+      class_info = @class_info[class_name]? || return
       @current_class = class_name
 
       # Generate allocator function: ClassName.new
@@ -1751,7 +1855,7 @@ module Crystal::HIR
           end
         elsif obj_node.is_a?(CrystalV2::Compiler::Frontend::GenericNode)
           # Generic type like Box(Int32).new()
-          # Extract base type name and create specialized class name
+          # Extract base type name and type arguments
           base_node = @arena[obj_node.base_type]
           base_name = case base_node
                       when CrystalV2::Compiler::Frontend::ConstantNode
@@ -1762,7 +1866,7 @@ module Crystal::HIR
                         nil
                       end
           if base_name
-            # Create monomorphized class name like Box(Int32)
+            # Extract type argument names
             type_args = obj_node.type_args.map do |arg_id|
               arg_node = @arena[arg_id]
               case arg_node
@@ -1774,7 +1878,14 @@ module Crystal::HIR
                 "Unknown"
               end
             end
+
+            # Create specialized class name like Box(Int32)
             class_name_str = "#{base_name}(#{type_args.join(", ")})"
+
+            # Monomorphize generic class if not already done
+            if !@monomorphized.includes?(class_name_str)
+              monomorphize_generic_class(base_name, type_args, class_name_str)
+            end
           end
         end
 
@@ -2940,6 +3051,11 @@ module Crystal::HIR
       # Check for union type syntax: "Type1 | Type2" or "Type1|Type2" (parser may not add spaces)
       if name.includes?("|")
         return create_union_type(name)
+      end
+
+      # Check if this is a type parameter that should be substituted
+      if substitution = @type_param_map[name]?
+        return type_ref_for_name(substitution)
       end
 
       case name
