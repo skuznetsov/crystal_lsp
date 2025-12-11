@@ -25,6 +25,8 @@ module Crystal::MIR
   class RCElisionPass
     getter function : Function
     getter eliminated : Int32 = 0
+    # Track must-alias relationships (ptr1, ptr2) within a block
+    getter must_alias : Set(Tuple(ValueId, ValueId))
 
     def initialize(@function : Function)
       @must_alias = Set(Tuple(ValueId, ValueId)).new
