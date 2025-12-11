@@ -392,7 +392,7 @@ module Crystal
     private def select_memory_strategy(alloc : HIR::Allocate) : MemoryStrategy
       # If HIR already carries a chosen strategy, honor it.
       if strat = alloc.memory_strategy
-        return strat
+        return map_hir_strategy(strat)
       end
 
       # Struct (value type) always uses stack allocation
@@ -431,8 +431,20 @@ module Crystal
         MemoryStrategy::AtomicARC
       else
         # Unknown/conservative: GC
+      MemoryStrategy::GC
+    end
+
+    private def map_hir_strategy(strat : HIR::MemoryStrategy) : MemoryStrategy
+      case strat
+      when HIR::MemoryStrategy::Stack then MemoryStrategy::Stack
+      when HIR::MemoryStrategy::Slab then MemoryStrategy::Slab
+      when HIR::MemoryStrategy::ARC then MemoryStrategy::ARC
+      when HIR::MemoryStrategy::AtomicARC then MemoryStrategy::AtomicARC
+      when HIR::MemoryStrategy::GC then MemoryStrategy::GC
+      else
         MemoryStrategy::GC
       end
+    end
     end
 
     # ─────────────────────────────────────────────────────────────────────────
