@@ -446,7 +446,6 @@ module Crystal
         MemoryStrategy::GC
       end
     end
-    end
 
     # ─────────────────────────────────────────────────────────────────────────
     # Field Access Lowering
