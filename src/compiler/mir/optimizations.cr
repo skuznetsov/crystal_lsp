@@ -369,11 +369,72 @@ module Crystal::MIR
     end
   end
 
+  # Lexicographic potential for LTP-style local optimization.
+  # Lower is better. Order: RC ops → instruction count → unsafe sites.
+  record PotentialMetrics,
+    rc_ops : Int32,
+    instructions : Int32,
+    unsafe_sites : Int32 do
+    def <=>(other : PotentialMetrics)
+      return rc_ops <=> other.rc_ops if rc_ops != other.rc_ops
+      return instructions <=> other.instructions if instructions != other.instructions
+      unsafe_sites <=> other.unsafe_sites
+    end
+
+    def to_s(io : IO)
+      io << "{rc_ops=" << rc_ops << ", insts=" << instructions << ", unsafe=" << unsafe_sites << "}"
+    end
+  end
+
   # Convenience method on Function
   class Function
     def optimize : OptimizationStats
       pipeline = OptimizationPipeline.new(self)
       pipeline.run
+    end
+
+    # LTP/WBA-inspired local optimization loop with monotone potential.
+    # Runs a small pipeline repeatedly while the potential decreases.
+    def optimize_with_potential(max_iters : Int32 = 4) : Tuple(OptimizationStats, PotentialMetrics)
+      aggregate = OptimizationStats.new
+      last_potential = compute_potential
+      iter = 0
+
+      while iter < max_iters
+        stats = optimize
+        aggregate.rc_eliminated += stats.rc_eliminated
+        aggregate.dead_eliminated += stats.dead_eliminated
+        aggregate.constants_folded += stats.constants_folded
+
+        current = compute_potential
+        break unless current < last_potential
+
+        last_potential = current
+        iter += 1
+      end
+
+      {aggregate, last_potential}
+    end
+
+    private def compute_potential : PotentialMetrics
+      rc_ops = 0
+      insts = 0
+      unsafe = 0
+
+      blocks.each do |block|
+        insts += block.instructions.size
+        block.instructions.each do |inst|
+          case inst
+          when RCIncrement, RCDecrement
+            rc_ops += 1
+          when IndirectCall
+            unsafe += 1
+          end
+        end
+        # Terminators do not contribute to rc_ops, but can add unsafe if indirect jumps were used; none yet.
+      end
+
+      PotentialMetrics.new(rc_ops, insts, unsafe)
     end
   end
 end

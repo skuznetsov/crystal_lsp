@@ -11,6 +11,7 @@ require "./hir/hir"
 require "./hir/ast_to_hir"
 require "./hir/escape_analysis"
 require "./mir/mir"
+require "./mir/optimizations"
 require "./mir/hir_to_mir"
 require "./mir/llvm_backend"
 
@@ -159,6 +160,13 @@ module Crystal::V2
 
       mir_module = mir_lowering.lower
       log "  Functions: #{mir_module.functions.size}"
+
+      # Step 4.1: Local MIR optimizations with monotone potential
+      log "  Optimizing MIR (local LTP loop)..."
+      mir_module.functions.each do |func|
+        stats, potential = func.optimize_with_potential
+        log "    #{@verbose ? "#{func.name} -> #{stats.total} changes, potential #{potential}" : "optimized #{func.name}"}" if @verbose
+      end
 
       if @emit_mir
         mir_file = @output_file.gsub(/\.[^.]+$/, ".mir")
