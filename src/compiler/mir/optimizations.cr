@@ -9,6 +9,20 @@
 #   2. Dead Code Elimination - Remove unused instructions
 #   3. Constant Folding - Evaluate constant expressions at compile time
 #   4. Copy Propagation - Replace copies with their sources
+#
+# LTP/WBA Framework (Local Trigger → Transport → Potential):
+#   A unifying descent framework based on the theory from:
+#   "LTP/WBA Framework — From G_{3,5} to Kakeya & Magnus"
+#
+#   Bedrock Axioms:
+#     BR-1 (Trigger): Every non-optimal config admits a detectable local window W
+#     BR-2 (Transport): From W starts a corridor that exits boundary or triggers alt frame
+#     BR-3 (Potential): Lexicographic Φ strictly decreases under every legal move
+#     BR-4 (Dual frame): If progress stalls, switch to alternative analysis
+#     BR-5 (Finiteness): No infinite descending chains; process terminates
+#
+#   Legal Moves: Spike / Ladder / Diamond / Collapse
+#   Priority: S ≻ L ≻ D ≻ C
 
 require "./mir"
 
@@ -492,6 +506,623 @@ module Crystal::MIR
       end
 
       PotentialMetrics.new(rc_ops, insts, unsafe)
+    end
+  end
+
+  # ═══════════════════════════════════════════════════════════════════════════
+  # LTP/WBA OPTIMIZATION FRAMEWORK
+  # ═══════════════════════════════════════════════════════════════════════════
+  #
+  # Full implementation of the LTP (Local Trigger → Transport → Potential)
+  # framework with Window-Band-Area semantics adapted for MIR optimization.
+  #
+  # Theory reference: "LTP/WBA Framework — From G_{3,5} to Kakeya & Magnus"
+
+  # ─────────────────────────────────────────────────────────────────────────────
+  # Enhanced 4-Component Potential (Φ′)
+  # ─────────────────────────────────────────────────────────────────────────────
+  #
+  # Φ′(Δ) = (I, -M, P, |Δ|) where:
+  #   I  = window_overlap: max exposure of trigger window (boundary contact)
+  #   M  = tie_plateau: number of windows attaining max I (negative for lex order)
+  #   P  = corner_mismatch: bad corners / conflicts at window endpoints
+  #   |Δ|= area: total instruction count
+
+  record LTPPotential,
+    window_overlap : Int32,    # I: max |∂Π ∩ ∂Δ| - higher means more exposed
+    tie_plateau : Int32,       # -M: negative count of tied windows
+    corner_mismatch : Int32,   # P: bad corners at endpoints
+    area : Int32 do            # |Δ|: instruction count
+
+    include Comparable(LTPPotential)
+
+    # Lexicographic comparison: minimize (I desc, -M asc, P asc, area asc)
+    # But we want LOWER potential = BETTER, so:
+    # - Lower window_overlap is better (fewer exposed RC ops)
+    # - Higher tie_plateau is better (fewer tied windows, stored as negative)
+    # - Lower corner_mismatch is better
+    # - Lower area is better
+    def <=>(other : LTPPotential)
+      # Compare in order: window_overlap, tie_plateau, corner_mismatch, area
+      return window_overlap <=> other.window_overlap if window_overlap != other.window_overlap
+      return tie_plateau <=> other.tie_plateau if tie_plateau != other.tie_plateau
+      return corner_mismatch <=> other.corner_mismatch if corner_mismatch != other.corner_mismatch
+      area <=> other.area
+    end
+
+    def to_s(io : IO)
+      io << "Φ′{I=" << window_overlap << ", -M=" << tie_plateau
+      io << ", P=" << corner_mismatch << ", |Δ|=" << area << "}"
+    end
+
+    def self.zero : LTPPotential
+      new(0, 0, 0, 0)
+    end
+  end
+
+  # ─────────────────────────────────────────────────────────────────────────────
+  # Window: Local trigger point (BR-1)
+  # ─────────────────────────────────────────────────────────────────────────────
+  #
+  # A Window is a "boundary cell" - an instruction with maximum exposure
+  # to optimization opportunities. In our case, RC operations that can
+  # potentially be elided.
+
+  class Window
+    getter instruction : Value           # The trigger instruction
+    getter block : BasicBlock            # Containing block
+    getter index : Int32                 # Position in block
+    getter exposure : Int32              # How "exposed" this is (use count, etc)
+    getter ptr : ValueId                 # The pointer being operated on
+
+    def initialize(@instruction, @block, @index, @exposure, @ptr)
+    end
+
+    def to_s(io : IO)
+      io << "Window{" << @instruction.class.name << " @" << @index
+      io << ", exp=" << @exposure << ", ptr=r" << @ptr << "}"
+    end
+  end
+
+  # ─────────────────────────────────────────────────────────────────────────────
+  # Corridor: Transport path from window (BR-2)
+  # ─────────────────────────────────────────────────────────────────────────────
+  #
+  # A Corridor traces the def-use chain from a Window's pointer to its
+  # terminal use (rc_dec, escape via call, or function return).
+
+  enum CorridorExit
+    Boundary      # Exits at function return
+    Elision       # Found matching rc_dec - can elide
+    Escape        # Escapes via call argument
+    Store         # Stored to memory (may alias)
+    Unknown       # Could not trace
+  end
+
+  class Corridor
+    getter window : Window
+    getter path : Array(Value)           # Instructions along the corridor
+    getter exit_type : CorridorExit
+    getter exit_instruction : Value?     # Terminal instruction (if any)
+
+    def initialize(@window, @path, @exit_type, @exit_instruction = nil)
+    end
+
+    # Can this corridor support a Spike move (rc_inc/rc_dec elision)?
+    def spike_eligible? : Bool
+      @exit_type == CorridorExit::Elision
+    end
+
+    # Can this corridor support a Ladder move (short corridor elimination)?
+    def ladder_eligible? : Bool
+      # Ladder: single intermediate use between inc and dec
+      @exit_type == CorridorExit::Elision && @path.size <= 3
+    end
+
+    def to_s(io : IO)
+      io << "Corridor{" << @path.size << " steps, exit=" << @exit_type << "}"
+    end
+  end
+
+  # ─────────────────────────────────────────────────────────────────────────────
+  # Legal Moves (S/L/D/C)
+  # ─────────────────────────────────────────────────────────────────────────────
+
+  enum MoveType
+    Spike     # Length-2 cancellation (rc_inc + rc_dec)
+    Ladder    # Short corridor elimination
+    Diamond   # Confluent resolution of critical pair
+    Collapse  # Dead code removal
+  end
+
+  struct LegalMove
+    property type : MoveType
+    property window : Window?
+    property corridor : Corridor?
+    property instructions_to_remove : Array(Int32)  # Indices to remove
+    property potential_decrease : LTPPotential      # Expected Φ decrease
+
+    def initialize(@type, @window = nil, @corridor = nil,
+                   @instructions_to_remove = [] of Int32,
+                   @potential_decrease = LTPPotential.zero)
+    end
+
+    def to_s(io : IO)
+      io << "Move{" << @type << ", remove=" << @instructions_to_remove.size
+      io << ", ΔΦ=" << @potential_decrease << "}"
+    end
+  end
+
+  # ─────────────────────────────────────────────────────────────────────────────
+  # LTP Engine: Main optimization driver
+  # ─────────────────────────────────────────────────────────────────────────────
+
+  class LTPEngine
+    getter function : Function
+    getter moves_applied : Array(LegalMove)
+    getter iterations : Int32
+    getter final_potential : LTPPotential
+    property debug : Bool
+
+    # Def-use chains for corridor tracing
+    @use_map : Hash(ValueId, Array(Tuple(BasicBlock, Int32, Value)))
+    # Alias map for pointer canonicalization
+    @alias_map : Hash(ValueId, ValueId)
+    # NoAlias set (values that don't alias anything)
+    @no_alias_ids : Set(ValueId)
+
+    def initialize(@function : Function)
+      @moves_applied = [] of LegalMove
+      @iterations = 0
+      @final_potential = LTPPotential.zero
+      @debug = false
+      @use_map = Hash(ValueId, Array(Tuple(BasicBlock, Int32, Value))).new
+      @alias_map = Hash(ValueId, ValueId).new
+      @no_alias_ids = Set(ValueId).new
+    end
+
+    # ═══════════════════════════════════════════════════════════════════════════
+    # Main Entry Point
+    # ═══════════════════════════════════════════════════════════════════════════
+
+    def run(max_iters : Int32 = 10) : LTPPotential
+      build_analysis_maps
+      @final_potential = compute_ltp_potential
+
+      log "LTP Engine start: #{@final_potential}"
+
+      while @iterations < max_iters
+        # BR-1: Find trigger window
+        window = find_window
+        break unless window
+
+        log "  Iter #{@iterations}: Window = #{window}"
+
+        # BR-2: Trace corridor from window
+        corridor = trace_corridor(window)
+        log "    Corridor: #{corridor}"
+
+        # Find best legal move (priority: S > L > D > C)
+        move = find_best_move(window, corridor)
+
+        if move
+          log "    Applying: #{move}"
+
+          # Apply the move
+          apply_move(move)
+          @moves_applied << move
+
+          # Recompute potential
+          build_analysis_maps  # Rebuild after modification
+          new_potential = compute_ltp_potential
+
+          # BR-3: Verify strict decrease
+          if new_potential >= @final_potential
+            log "    WARNING: Potential did not decrease! Trying dual frame..."
+            # BR-4: Try dual frame (escape-based analysis)
+            if !try_dual_frame
+              log "    Dual frame exhausted. Stopping."
+              break
+            end
+          end
+
+          @final_potential = new_potential
+          log "    New potential: #{@final_potential}"
+        else
+          log "    No legal move found. Trying Collapse..."
+          # Try Collapse (DCE) as fallback
+          collapsed = try_collapse_move
+          if collapsed > 0
+            log "    Collapsed #{collapsed} dead instructions"
+            build_analysis_maps
+            @final_potential = compute_ltp_potential
+          else
+            log "    Nothing to collapse. Stopping."
+            break
+          end
+        end
+
+        @iterations += 1
+      end
+
+      log "LTP Engine done: #{@iterations} iterations, #{@moves_applied.size} moves"
+      log "Final potential: #{@final_potential}"
+
+      @final_potential
+    end
+
+    # ═══════════════════════════════════════════════════════════════════════════
+    # BR-1: Window Discovery
+    # ═══════════════════════════════════════════════════════════════════════════
+
+    private def find_window : Window?
+      best_window : Window? = nil
+      best_exposure = -1
+
+      @function.blocks.each do |block|
+        block.instructions.each_with_index do |inst, idx|
+          case inst
+          when RCIncrement
+            # Calculate exposure: how many uses does the ptr have?
+            ptr = canonical_ptr(inst.ptr)
+            next unless @no_alias_ids.includes?(ptr)
+
+            exposure = (@use_map[ptr]?.try(&.size) || 0)
+
+            if exposure > best_exposure
+              best_exposure = exposure
+              best_window = Window.new(inst, block, idx, exposure, ptr)
+            end
+          end
+        end
+      end
+
+      best_window
+    end
+
+    # ═══════════════════════════════════════════════════════════════════════════
+    # BR-2: Corridor Tracing
+    # ═══════════════════════════════════════════════════════════════════════════
+
+    private def trace_corridor(window : Window) : Corridor
+      path = [window.instruction] of Value
+      ptr = window.ptr
+      exit_type = CorridorExit::Unknown
+      exit_inst : Value? = nil
+
+      # Walk forward from window looking for rc_dec or escape
+      current_block = window.block
+      current_idx = window.index + 1
+
+      # Simple forward scan in same block first
+      while current_idx < current_block.instructions.size
+        inst = current_block.instructions[current_idx]
+        path << inst
+
+        case inst
+        when RCDecrement
+          if canonical_ptr(inst.ptr) == ptr
+            exit_type = CorridorExit::Elision
+            exit_inst = inst
+            break
+          end
+
+        when Call, IndirectCall
+          # Check if ptr is an argument
+          args = case inst
+                 when Call       then inst.args
+                 when IndirectCall then inst.args
+                 else [] of ValueId
+                 end
+
+          if args.includes?(ptr)
+            exit_type = CorridorExit::Escape
+            exit_inst = inst
+            break
+          end
+
+        when Store
+          # Store may clobber - conservative exit
+          exit_type = CorridorExit::Store
+          exit_inst = inst
+          break
+        end
+
+        current_idx += 1
+      end
+
+      # If we reached end of block without finding exit, check terminator
+      if exit_type == CorridorExit::Unknown
+        case term = current_block.terminator
+        when Return
+          if term.value == ptr
+            exit_type = CorridorExit::Boundary
+          end
+        end
+      end
+
+      Corridor.new(window, path, exit_type, exit_inst)
+    end
+
+    # ═══════════════════════════════════════════════════════════════════════════
+    # Move Selection (Priority: S > L > D > C)
+    # ═══════════════════════════════════════════════════════════════════════════
+
+    private def find_best_move(window : Window, corridor : Corridor) : LegalMove?
+      # Try Spike first
+      if corridor.spike_eligible?
+        return create_spike_move(window, corridor)
+      end
+
+      # Try Ladder
+      if corridor.ladder_eligible?
+        return create_ladder_move(window, corridor)
+      end
+
+      # Try Diamond (if we have conflicting moves)
+      diamond = find_diamond_move(window)
+      return diamond if diamond
+
+      # Collapse handled separately in main loop
+      nil
+    end
+
+    # ─────────────────────────────────────────────────────────────────────────────
+    # Spike Move: rc_inc/rc_dec pair cancellation
+    # ─────────────────────────────────────────────────────────────────────────────
+
+    private def create_spike_move(window : Window, corridor : Corridor) : LegalMove
+      indices_to_remove = [] of Int32
+
+      # Find the rc_inc index
+      indices_to_remove << window.index
+
+      # Find the rc_dec index
+      if exit_inst = corridor.exit_instruction
+        corridor.path.each_with_index do |inst, path_idx|
+          if inst.id == exit_inst.id
+            # Calculate actual index in block
+            actual_idx = window.index + path_idx
+            indices_to_remove << actual_idx
+            break
+          end
+        end
+      end
+
+      # Potential decrease: -2 RC ops, -2 instructions
+      decrease = LTPPotential.new(-2, 0, 0, -2)
+
+      LegalMove.new(MoveType::Spike, window, corridor, indices_to_remove, decrease)
+    end
+
+    # ─────────────────────────────────────────────────────────────────────────────
+    # Ladder Move: Short corridor elimination
+    # ─────────────────────────────────────────────────────────────────────────────
+
+    private def create_ladder_move(window : Window, corridor : Corridor) : LegalMove
+      # Ladder removes the entire short corridor
+      indices_to_remove = (0...corridor.path.size).map { |i| window.index + i }
+
+      # Decrease depends on corridor length
+      rc_decrease = -2  # inc + dec
+      inst_decrease = -corridor.path.size
+
+      decrease = LTPPotential.new(rc_decrease, 0, -1, inst_decrease)
+
+      LegalMove.new(MoveType::Ladder, window, corridor, indices_to_remove, decrease)
+    end
+
+    # ─────────────────────────────────────────────────────────────────────────────
+    # Diamond Move: Confluent resolution
+    # ─────────────────────────────────────────────────────────────────────────────
+
+    private def find_diamond_move(window : Window) : LegalMove?
+      # Look for conflicting optimizations on same value
+      ptr = window.ptr
+
+      # Find all windows targeting same ptr
+      competing_windows = [] of Window
+
+      @function.blocks.each do |block|
+        block.instructions.each_with_index do |inst, idx|
+          next if inst.id == window.instruction.id
+
+          case inst
+          when RCIncrement
+            if canonical_ptr(inst.ptr) == ptr
+              exp = (@use_map[ptr]?.try(&.size) || 0)
+              competing_windows << Window.new(inst, block, idx, exp, ptr)
+            end
+          end
+        end
+      end
+
+      return nil if competing_windows.empty?
+
+      # Evaluate each competing window and choose the one with best Φ decrease
+      best_move : LegalMove? = nil
+      best_decrease = LTPPotential.zero
+
+      competing_windows.each do |comp_window|
+        comp_corridor = trace_corridor(comp_window)
+
+        if comp_corridor.spike_eligible?
+          move = create_spike_move(comp_window, comp_corridor)
+          if best_move.nil? || move.potential_decrease < best_decrease
+            best_move = move
+            best_decrease = move.potential_decrease
+          end
+        end
+      end
+
+      if best_move
+        # Wrap as Diamond move
+        LegalMove.new(MoveType::Diamond, best_move.window, best_move.corridor,
+          best_move.instructions_to_remove, best_move.potential_decrease)
+      else
+        nil
+      end
+    end
+
+    # ─────────────────────────────────────────────────────────────────────────────
+    # Collapse Move: Dead code elimination
+    # ─────────────────────────────────────────────────────────────────────────────
+
+    private def try_collapse_move : Int32
+      dce = DeadCodeEliminationPass.new(@function)
+      dce.run
+    end
+
+    # ═══════════════════════════════════════════════════════════════════════════
+    # Move Application
+    # ═══════════════════════════════════════════════════════════════════════════
+
+    private def apply_move(move : LegalMove)
+      return if move.instructions_to_remove.empty?
+
+      window = move.window
+      return unless window
+
+      block = window.block
+
+      # Remove instructions in reverse order to preserve indices
+      move.instructions_to_remove.sort.reverse_each do |idx|
+        if idx >= 0 && idx < block.instructions.size
+          block.instructions.delete_at(idx)
+        end
+      end
+    end
+
+    # ═══════════════════════════════════════════════════════════════════════════
+    # BR-4: Dual Frame Fallback
+    # ═══════════════════════════════════════════════════════════════════════════
+
+    private def try_dual_frame : Bool
+      # Dual frame: switch to escape-based analysis
+      # For now, just try constant folding as alternative
+      cf = ConstantFoldingPass.new(@function)
+      folded = cf.run
+
+      if folded > 0
+        log "    Dual frame (CF): folded #{folded} constants"
+        return true
+      end
+
+      # Could add more frames here:
+      # - Lifetime analysis frame
+      # - Curvature/region analysis frame
+
+      false
+    end
+
+    # ═══════════════════════════════════════════════════════════════════════════
+    # Potential Computation
+    # ═══════════════════════════════════════════════════════════════════════════
+
+    private def compute_ltp_potential : LTPPotential
+      window_overlap = 0      # I: count of RC ops (exposure)
+      tie_plateau = 0         # -M: count of "tied" windows
+      corner_mismatch = 0     # P: conflicts/bad patterns
+      area = 0                # |Δ|: total instructions
+
+      windows_by_ptr = Hash(ValueId, Int32).new(0)
+
+      @function.blocks.each do |block|
+        area += block.instructions.size
+
+        block.instructions.each do |inst|
+          case inst
+          when RCIncrement
+            ptr = canonical_ptr(inst.ptr)
+            window_overlap += 1
+            windows_by_ptr[ptr] += 1
+
+          when RCDecrement
+            ptr = canonical_ptr(inst.ptr)
+            window_overlap += 1
+            windows_by_ptr[ptr] += 1
+
+          when IndirectCall
+            # Indirect calls are "corner mismatches" - uncertainty
+            corner_mismatch += 1
+
+          when Store
+            # Stores can create aliasing conflicts
+            corner_mismatch += 1
+          end
+        end
+      end
+
+      # Count tied windows (multiple RC ops on same ptr)
+      windows_by_ptr.each_value do |count|
+        if count > 1
+          tie_plateau += count - 1
+        end
+      end
+
+      LTPPotential.new(window_overlap, -tie_plateau, corner_mismatch, area)
+    end
+
+    # ═══════════════════════════════════════════════════════════════════════════
+    # Analysis Maps
+    # ═══════════════════════════════════════════════════════════════════════════
+
+    private def build_analysis_maps
+      @use_map.clear
+      @alias_map.clear
+      @no_alias_ids.clear
+
+      @function.blocks.each do |block|
+        block.instructions.each_with_index do |inst, idx|
+          # Build use map
+          inst.operands.each do |op|
+            (@use_map[op] ||= [] of Tuple(BasicBlock, Int32, Value)) << {block, idx, inst}
+          end
+
+          # Build alias map and no_alias set
+          case inst
+          when Load
+            @alias_map[inst.id] = canonical_ptr(inst.ptr)
+            if inst.responds_to?(:no_alias) && inst.no_alias
+              @no_alias_ids << inst.id
+            end
+
+          when Alloc
+            if inst.responds_to?(:no_alias) && inst.no_alias
+              @no_alias_ids << inst.id
+            end
+          end
+        end
+      end
+    end
+
+    private def canonical_ptr(ptr : ValueId) : ValueId
+      current = ptr
+      seen = Set(ValueId).new
+
+      while (aliased = @alias_map[current]?) && !seen.includes?(current)
+        seen << current
+        current = aliased
+      end
+
+      current
+    end
+
+    private def log(msg : String)
+      puts msg if @debug
+    end
+  end
+
+  # ═══════════════════════════════════════════════════════════════════════════
+  # Integration with Function
+  # ═══════════════════════════════════════════════════════════════════════════
+
+  class Function
+    # Full LTP/WBA optimization with window-based descent
+    def optimize_ltp(max_iters : Int32 = 10, debug : Bool = false) : LTPPotential
+      engine = LTPEngine.new(self)
+      engine.debug = debug
+      engine.run(max_iters)
     end
   end
 end

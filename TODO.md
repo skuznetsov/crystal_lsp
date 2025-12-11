@@ -639,6 +639,86 @@ The key insight is: **Don't compete with LLVM, complement it.**
 
 ---
 
+### 5.3.6 LTP/WBA Optimization Framework
+
+**Status:** 🔧 WIP (2025-12-11)
+
+**Theory:** LTP (Local Trigger → Transport → Potential) is a unifying descent framework where:
+- **Trigger (BR-1):** Every non-optimal configuration admits a detectable local window W
+- **Transport (BR-2):** From W starts a corridor that exits boundary or triggers alternative frame
+- **Potential (BR-3):** Well-founded lexicographic Φ strictly decreases under every legal move
+- **Dual Frame (BR-4):** If progress stalls, switch to certified alternative analysis
+- **Finiteness (BR-5):** No infinite descending chains; process terminates
+
+**Legal Moves:**
+- **Spike:** Length-2 cancellation (rc_inc + rc_dec pair elision)
+- **Ladder:** Short corridor elimination (single-use intermediates)
+- **Diamond:** Confluent resolution of critical pairs (choose better Φ decrease)
+- **Collapse:** Removal of redundant instruction while lowering Φ (DCE)
+
+**Current vs Target:**
+
+| Component | Current | Target |
+|-----------|---------|--------|
+| Potential | `(rc_ops, insts, unsafe)` | `(I, -M, P, area)` 4-component |
+| Window/Trigger | Implicit (any rc_inc) | Explicit max-exposure window |
+| Transport | Primitive Load alias | Def-use corridor tracing |
+| Dual Frame | None | Escape analysis fallback |
+| Moves | Spike + Collapse | Spike + Ladder + Diamond + Collapse |
+
+#### Implementation Tasks:
+
+**Phase 1: Enhanced Potential (Φ′)**
+- [ ] Add `WindowMetrics` struct with overlap/tie-plateau/corner-mismatch
+- [ ] Implement `find_window()` to select max-exposure trigger instruction
+- [ ] Update `PotentialMetrics` to 4-component `(I, -M, P, area)`
+- [ ] Implement lexicographic comparison for new potential
+
+**Phase 2: Window & Corridor (BR-1, BR-2)**
+- [ ] Implement `Window` struct representing a boundary cell (instruction + context)
+- [ ] Implement `Corridor` struct for def-use chain from trigger to terminator
+- [ ] Add `trace_corridor(window)` to follow value through uses
+- [ ] Corridor exits: boundary (func return), escape (call arg), or alternative frame
+
+**Phase 3: Legal Moves Library**
+- [ ] **Spike move:** rc_inc/rc_dec pair cancellation (existing, enhance)
+  - Track must-alias for safe elision
+  - Decrease: ΔI or Δ(-M) if tie-breaker
+- [ ] **Ladder move:** Short corridor elimination
+  - If rc_inc → single_use → rc_dec, remove middle
+  - Decrease: ΔP (corner mismatch)
+- [ ] **Diamond move:** Confluent critical pair resolution
+  - When two moves conflict, compute Φ for both, choose lower
+  - Decrease: ΔP or Δarea
+- [ ] **Collapse move:** Redundant instruction removal (DCE)
+  - Decrease: Δarea only (I, M, P fixed)
+
+**Phase 4: Dual Frame Fallback (BR-4)**
+- [ ] Detect "stuck" state: no legal move decreases Φ
+- [ ] Switch to escape analysis frame
+- [ ] If escape frame also stuck, switch to curvature/lifetime frame
+- [ ] Unified potential across frames (Φ_esc compatible with Φ_primary)
+
+**Phase 5: L2-Engine Scheduler**
+- [ ] Priority: S ≻ L ≻ D ≻ C (Spike > Ladder > Diamond > Collapse)
+- [ ] Main loop: find window → trace corridor → apply best move → recompute Φ
+- [ ] Termination: Φ stops decreasing or area = 0
+- [ ] Logging: emit move sequence for debugging
+
+**Phase 6: Integration & Testing**
+- [ ] Replace `optimize_with_potential` with LTP engine
+- [ ] Add specs for each move type
+- [ ] Add specs for dual-frame fallback
+- [ ] Benchmark: compare old vs new on bootstrap examples
+- [ ] Verify monotone descent property
+
+**Files to modify:**
+- `src/compiler/mir/optimizations.cr` - Main LTP implementation
+- `src/compiler/mir/mir.cr` - Add Window/Corridor types if needed
+- `spec/compiler/mir/ltp_wba_spec.cr` - New test file
+
+---
+
 ### 5.4 Alternative Backends (Future)
 
 - [ ] **WebAssembly**: Direct WASM emitter (no LLVM)
