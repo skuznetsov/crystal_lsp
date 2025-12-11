@@ -440,6 +440,16 @@ module Crystal::MIR
         emit_raw "declare void @__tsan_release(ptr)\n"
         emit_raw "\n"
       end
+
+      # Synchronization primitives runtime
+      emit_raw "; Synchronization runtime functions\n"
+      emit_raw "declare void @__crystal_v2_mutex_lock(ptr)\n"
+      emit_raw "declare void @__crystal_v2_mutex_unlock(ptr)\n"
+      emit_raw "declare i1 @__crystal_v2_mutex_trylock(ptr)\n"
+      emit_raw "declare void @__crystal_v2_channel_send(ptr, ptr)\n"
+      emit_raw "declare ptr @__crystal_v2_channel_receive(ptr)\n"
+      emit_raw "declare void @__crystal_v2_channel_close(ptr)\n"
+      emit_raw "\n"
     end
 
     # Union debug helper function declarations
@@ -572,6 +582,29 @@ module Crystal::MIR
         emit_array_size(inst, name)
       when ArrayGet
         emit_array_get(inst, name)
+      # Synchronization primitives
+      when AtomicLoad
+        emit_atomic_load(inst, name)
+      when AtomicStore
+        emit_atomic_store(inst, name)
+      when AtomicCAS
+        emit_atomic_cas(inst, name)
+      when AtomicRMW
+        emit_atomic_rmw(inst, name)
+      when Fence
+        emit_fence(inst, name)
+      when MutexLock
+        emit_mutex_lock(inst, name)
+      when MutexUnlock
+        emit_mutex_unlock(inst, name)
+      when MutexTryLock
+        emit_mutex_trylock(inst, name)
+      when ChannelSend
+        emit_channel_send(inst, name)
+      when ChannelReceive
+        emit_channel_receive(inst, name)
+      when ChannelClose
+        emit_channel_close(inst, name)
       end
     end
 
@@ -1090,6 +1123,187 @@ module Crystal::MIR
       # Get element from data array (second field)
       emit "%#{base_name}.elem_ptr = getelementptr { i32, [0 x #{element_type}] }, ptr #{array_ptr}, i32 0, i32 1, i32 #{index}"
       emit "#{name} = load #{element_type}, ptr %#{base_name}.elem_ptr"
+    end
+
+    # ═══════════════════════════════════════════════════════════════════════════
+    # SYNCHRONIZATION PRIMITIVES
+    # ═══════════════════════════════════════════════════════════════════════════
+
+    private def llvm_ordering(ordering : MemoryOrdering) : String
+      case ordering
+      when .relaxed? then "monotonic"
+      when .acquire? then "acquire"
+      when .release? then "release"
+      when .acq_rel? then "acq_rel"
+      else                "seq_cst"
+      end
+    end
+
+    private def emit_atomic_load(inst : AtomicLoad, name : String)
+      ptr = value_ref(inst.ptr)
+      type = @type_mapper.llvm_type(inst.type)
+      ordering = llvm_ordering(inst.ordering)
+
+      if @emit_tsan
+        tsan_size = tsan_access_size(inst.type)
+        emit "call void @__tsan_read#{tsan_size}(ptr #{ptr})"
+      end
+
+      emit "#{name} = load atomic #{type}, ptr #{ptr} #{ordering}, align 8"
+
+      if @emit_tsan && inst.ordering.acquire? || inst.ordering.acq_rel? || inst.ordering.seq_cst?
+        emit "call void @__tsan_acquire(ptr #{ptr})"
+      end
+    end
+
+    private def emit_atomic_store(inst : AtomicStore, name : String)
+      ptr = value_ref(inst.ptr)
+      val = value_ref(inst.value)
+      type = @value_types[inst.value]? || "i64"
+      ordering = llvm_ordering(inst.ordering)
+
+      if @emit_tsan && inst.ordering.release? || inst.ordering.acq_rel? || inst.ordering.seq_cst?
+        emit "call void @__tsan_release(ptr #{ptr})"
+      end
+
+      if @emit_tsan
+        tsan_size = case type
+                    when "i8" then 1
+                    when "i16" then 2
+                    when "i32" then 4
+                    else 8
+                    end
+        emit "call void @__tsan_write#{tsan_size}(ptr #{ptr})"
+      end
+
+      emit "store atomic #{type} #{val}, ptr #{ptr} #{ordering}, align 8"
+    end
+
+    private def emit_atomic_cas(inst : AtomicCAS, name : String)
+      base_name = name.lstrip('%')
+      ptr = value_ref(inst.ptr)
+      expected = value_ref(inst.expected)
+      desired = value_ref(inst.desired)
+      type = @type_mapper.llvm_type(inst.type)
+      success_ord = llvm_ordering(inst.success_ordering)
+      failure_ord = llvm_ordering(inst.failure_ordering)
+
+      if @emit_tsan
+        emit "call void @__tsan_release(ptr #{ptr})"
+      end
+
+      # LLVM cmpxchg returns { T, i1 } - the old value and success flag
+      emit "%#{base_name}.result = cmpxchg ptr #{ptr}, #{type} #{expected}, #{type} #{desired} #{success_ord} #{failure_ord}"
+      # Extract old value
+      emit "#{name} = extractvalue { #{type}, i1 } %#{base_name}.result, 0"
+
+      if @emit_tsan
+        emit "call void @__tsan_acquire(ptr #{ptr})"
+      end
+    end
+
+    private def emit_atomic_rmw(inst : AtomicRMW, name : String)
+      ptr = value_ref(inst.ptr)
+      val = value_ref(inst.value)
+      type = @type_mapper.llvm_type(inst.type)
+      ordering = llvm_ordering(inst.ordering)
+
+      op = case inst.op
+           when .xchg? then "xchg"
+           when .add?  then "add"
+           when .sub?  then "sub"
+           when .and?  then "and"
+           when .or?   then "or"
+           when .xor?  then "xor"
+           when .max?  then "max"
+           when .min?  then "min"
+           when .u_max? then "umax"
+           when .u_min? then "umin"
+           else              "xchg"
+           end
+
+      if @emit_tsan && (inst.ordering.release? || inst.ordering.acq_rel? || inst.ordering.seq_cst?)
+        emit "call void @__tsan_release(ptr #{ptr})"
+      end
+
+      emit "#{name} = atomicrmw #{op} ptr #{ptr}, #{type} #{val} #{ordering}"
+
+      if @emit_tsan && (inst.ordering.acquire? || inst.ordering.acq_rel? || inst.ordering.seq_cst?)
+        emit "call void @__tsan_acquire(ptr #{ptr})"
+      end
+    end
+
+    private def emit_fence(inst : Fence, name : String)
+      ordering = llvm_ordering(inst.ordering)
+      emit "fence #{ordering}"
+    end
+
+    private def emit_mutex_lock(inst : MutexLock, name : String)
+      ptr = value_ref(inst.mutex_ptr)
+
+      emit "call void @__crystal_v2_mutex_lock(ptr #{ptr})"
+
+      if @emit_tsan
+        emit "call void @__tsan_acquire(ptr #{ptr})"
+      end
+    end
+
+    private def emit_mutex_unlock(inst : MutexUnlock, name : String)
+      ptr = value_ref(inst.mutex_ptr)
+
+      if @emit_tsan
+        emit "call void @__tsan_release(ptr #{ptr})"
+      end
+
+      emit "call void @__crystal_v2_mutex_unlock(ptr #{ptr})"
+    end
+
+    private def emit_mutex_trylock(inst : MutexTryLock, name : String)
+      ptr = value_ref(inst.mutex_ptr)
+
+      emit "#{name} = call i1 @__crystal_v2_mutex_trylock(ptr #{ptr})"
+
+      if @emit_tsan
+        # TSan acquire only on successful lock
+        emit "br i1 #{name}, label %#{name.lstrip('%')}.tsan_acquire, label %#{name.lstrip('%')}.tsan_done"
+        emit "#{name.lstrip('%')}.tsan_acquire:"
+        @indent += 1
+        emit "call void @__tsan_acquire(ptr #{ptr})"
+        emit "br label %#{name.lstrip('%')}.tsan_done"
+        @indent -= 1
+        emit "#{name.lstrip('%')}.tsan_done:"
+      end
+    end
+
+    private def emit_channel_send(inst : ChannelSend, name : String)
+      channel = value_ref(inst.channel_ptr)
+      val = value_ref(inst.value)
+
+      if @emit_tsan
+        emit "call void @__tsan_release(ptr #{channel})"
+      end
+
+      emit "call void @__crystal_v2_channel_send(ptr #{channel}, ptr #{val})"
+    end
+
+    private def emit_channel_receive(inst : ChannelReceive, name : String)
+      channel = value_ref(inst.channel_ptr)
+
+      emit "#{name} = call ptr @__crystal_v2_channel_receive(ptr #{channel})"
+
+      if @emit_tsan
+        emit "call void @__tsan_acquire(ptr #{channel})"
+      end
+    end
+
+    private def emit_channel_close(inst : ChannelClose, name : String)
+      channel = value_ref(inst.channel_ptr)
+
+      if @emit_tsan
+        emit "call void @__tsan_release(ptr #{channel})"
+      end
+
+      emit "call void @__crystal_v2_channel_close(ptr #{channel})"
     end
 
     private def emit_terminator(term : Terminator)

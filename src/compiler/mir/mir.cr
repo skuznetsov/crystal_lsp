@@ -570,6 +570,250 @@ module Crystal::MIR
     end
   end
 
+  # ═══════════════════════════════════════════════════════════════════════════
+  # SYNCHRONIZATION PRIMITIVES
+  # ═══════════════════════════════════════════════════════════════════════════
+
+  # Memory ordering for atomic operations
+  enum MemoryOrdering
+    Relaxed    # No ordering constraints
+    Acquire    # Loads after this see stores before matching Release
+    Release    # Stores before this are visible after matching Acquire
+    AcqRel     # Both Acquire and Release
+    SeqCst     # Sequentially consistent (strongest)
+  end
+
+  # Atomic load
+  class AtomicLoad < Value
+    getter ptr : ValueId
+    getter ordering : MemoryOrdering
+
+    def initialize(id : ValueId, type : TypeRef, @ptr : ValueId, @ordering : MemoryOrdering = MemoryOrdering::SeqCst)
+      super(id, type)
+    end
+
+    def operands : Array(ValueId)
+      [@ptr]
+    end
+
+    def to_s(io : IO) : Nil
+      io << "%" << @id << " = atomic_load %" << @ptr << " " << @ordering << " : " << @type
+    end
+  end
+
+  # Atomic store
+  class AtomicStore < Value
+    getter ptr : ValueId
+    getter value : ValueId
+    getter ordering : MemoryOrdering
+
+    def initialize(id : ValueId, @ptr : ValueId, @value : ValueId, @ordering : MemoryOrdering = MemoryOrdering::SeqCst)
+      super(id, TypeRef::VOID)
+    end
+
+    def operands : Array(ValueId)
+      [@ptr, @value]
+    end
+
+    def to_s(io : IO) : Nil
+      io << "%" << @id << " = atomic_store %" << @ptr << ", %" << @value << " " << @ordering
+    end
+  end
+
+  # Atomic compare-and-swap (CAS)
+  class AtomicCAS < Value
+    getter ptr : ValueId
+    getter expected : ValueId
+    getter desired : ValueId
+    getter success_ordering : MemoryOrdering
+    getter failure_ordering : MemoryOrdering
+
+    def initialize(
+      id : ValueId,
+      type : TypeRef,
+      @ptr : ValueId,
+      @expected : ValueId,
+      @desired : ValueId,
+      @success_ordering : MemoryOrdering = MemoryOrdering::SeqCst,
+      @failure_ordering : MemoryOrdering = MemoryOrdering::SeqCst
+    )
+      super(id, type)  # Returns {old_value, success_bool}
+    end
+
+    def operands : Array(ValueId)
+      [@ptr, @expected, @desired]
+    end
+
+    def to_s(io : IO) : Nil
+      io << "%" << @id << " = cmpxchg %" << @ptr << ", %" << @expected << ", %" << @desired
+      io << " " << @success_ordering << " " << @failure_ordering
+    end
+  end
+
+  # Atomic read-modify-write operations
+  enum AtomicRMWOp
+    Xchg  # Exchange
+    Add   # Add
+    Sub   # Subtract
+    And   # Bitwise AND
+    Or    # Bitwise OR
+    Xor   # Bitwise XOR
+    Max   # Signed max
+    Min   # Signed min
+    UMax  # Unsigned max
+    UMin  # Unsigned min
+  end
+
+  class AtomicRMW < Value
+    getter op : AtomicRMWOp
+    getter ptr : ValueId
+    getter value : ValueId
+    getter ordering : MemoryOrdering
+
+    def initialize(
+      id : ValueId,
+      type : TypeRef,
+      @op : AtomicRMWOp,
+      @ptr : ValueId,
+      @value : ValueId,
+      @ordering : MemoryOrdering = MemoryOrdering::SeqCst
+    )
+      super(id, type)  # Returns old value
+    end
+
+    def operands : Array(ValueId)
+      [@ptr, @value]
+    end
+
+    def to_s(io : IO) : Nil
+      io << "%" << @id << " = atomicrmw " << @op << " %" << @ptr << ", %" << @value << " " << @ordering
+    end
+  end
+
+  # Memory fence (barrier)
+  class Fence < Value
+    getter ordering : MemoryOrdering
+
+    def initialize(id : ValueId, @ordering : MemoryOrdering = MemoryOrdering::SeqCst)
+      super(id, TypeRef::VOID)
+    end
+
+    def operands : Array(ValueId)
+      [] of ValueId
+    end
+
+    def to_s(io : IO) : Nil
+      io << "%" << @id << " = fence " << @ordering
+    end
+  end
+
+  # Mutex lock (runtime call)
+  class MutexLock < Value
+    getter mutex_ptr : ValueId
+
+    def initialize(id : ValueId, @mutex_ptr : ValueId)
+      super(id, TypeRef::VOID)
+    end
+
+    def operands : Array(ValueId)
+      [@mutex_ptr]
+    end
+
+    def to_s(io : IO) : Nil
+      io << "%" << @id << " = mutex_lock %" << @mutex_ptr
+    end
+  end
+
+  # Mutex unlock (runtime call)
+  class MutexUnlock < Value
+    getter mutex_ptr : ValueId
+
+    def initialize(id : ValueId, @mutex_ptr : ValueId)
+      super(id, TypeRef::VOID)
+    end
+
+    def operands : Array(ValueId)
+      [@mutex_ptr]
+    end
+
+    def to_s(io : IO) : Nil
+      io << "%" << @id << " = mutex_unlock %" << @mutex_ptr
+    end
+  end
+
+  # Mutex trylock (returns bool)
+  class MutexTryLock < Value
+    getter mutex_ptr : ValueId
+
+    def initialize(id : ValueId, @mutex_ptr : ValueId)
+      super(id, TypeRef::BOOL)
+    end
+
+    def operands : Array(ValueId)
+      [@mutex_ptr]
+    end
+
+    def to_s(io : IO) : Nil
+      io << "%" << @id << " = mutex_trylock %" << @mutex_ptr
+    end
+  end
+
+  # Channel send
+  class ChannelSend < Value
+    getter channel_ptr : ValueId
+    getter value : ValueId
+
+    def initialize(id : ValueId, @channel_ptr : ValueId, @value : ValueId)
+      super(id, TypeRef::VOID)
+    end
+
+    def operands : Array(ValueId)
+      [@channel_ptr, @value]
+    end
+
+    def to_s(io : IO) : Nil
+      io << "%" << @id << " = channel_send %" << @channel_ptr << ", %" << @value
+    end
+  end
+
+  # Channel receive
+  class ChannelReceive < Value
+    getter channel_ptr : ValueId
+
+    def initialize(id : ValueId, type : TypeRef, @channel_ptr : ValueId)
+      super(id, type)
+    end
+
+    def operands : Array(ValueId)
+      [@channel_ptr]
+    end
+
+    def to_s(io : IO) : Nil
+      io << "%" << @id << " = channel_receive %" << @channel_ptr << " : " << @type
+    end
+  end
+
+  # Channel close
+  class ChannelClose < Value
+    getter channel_ptr : ValueId
+
+    def initialize(id : ValueId, @channel_ptr : ValueId)
+      super(id, TypeRef::VOID)
+    end
+
+    def operands : Array(ValueId)
+      [@channel_ptr]
+    end
+
+    def to_s(io : IO) : Nil
+      io << "%" << @id << " = channel_close %" << @channel_ptr
+    end
+  end
+
+  # ═══════════════════════════════════════════════════════════════════════════
+  # MEMORY ACCESS
+  # ═══════════════════════════════════════════════════════════════════════════
+
   # Load from memory
   class Load < Value
     getter ptr : ValueId
@@ -1522,6 +1766,54 @@ module Crystal::MIR
 
     def rc_dec(ptr : ValueId, atomic : Bool = false, destructor : FunctionId? = nil) : ValueId
       emit(RCDecrement.new(@function.next_value_id, ptr, atomic, destructor))
+    end
+
+    # Synchronization primitives
+    def atomic_load(ptr : ValueId, type : TypeRef, ordering : MemoryOrdering = MemoryOrdering::SeqCst) : ValueId
+      emit(AtomicLoad.new(@function.next_value_id, type, ptr, ordering))
+    end
+
+    def atomic_store(ptr : ValueId, value : ValueId, ordering : MemoryOrdering = MemoryOrdering::SeqCst) : ValueId
+      emit(AtomicStore.new(@function.next_value_id, ptr, value, ordering))
+    end
+
+    def atomic_cas(ptr : ValueId, expected : ValueId, desired : ValueId, type : TypeRef,
+                   success_ordering : MemoryOrdering = MemoryOrdering::SeqCst,
+                   failure_ordering : MemoryOrdering = MemoryOrdering::SeqCst) : ValueId
+      emit(AtomicCAS.new(@function.next_value_id, type, ptr, expected, desired, success_ordering, failure_ordering))
+    end
+
+    def atomic_rmw(op : AtomicRMWOp, ptr : ValueId, value : ValueId, type : TypeRef,
+                   ordering : MemoryOrdering = MemoryOrdering::SeqCst) : ValueId
+      emit(AtomicRMW.new(@function.next_value_id, type, op, ptr, value, ordering))
+    end
+
+    def fence(ordering : MemoryOrdering = MemoryOrdering::SeqCst) : ValueId
+      emit(Fence.new(@function.next_value_id, ordering))
+    end
+
+    def mutex_lock(mutex_ptr : ValueId) : ValueId
+      emit(MutexLock.new(@function.next_value_id, mutex_ptr))
+    end
+
+    def mutex_unlock(mutex_ptr : ValueId) : ValueId
+      emit(MutexUnlock.new(@function.next_value_id, mutex_ptr))
+    end
+
+    def mutex_trylock(mutex_ptr : ValueId) : ValueId
+      emit(MutexTryLock.new(@function.next_value_id, mutex_ptr))
+    end
+
+    def channel_send(channel_ptr : ValueId, value : ValueId) : ValueId
+      emit(ChannelSend.new(@function.next_value_id, channel_ptr, value))
+    end
+
+    def channel_receive(channel_ptr : ValueId, type : TypeRef) : ValueId
+      emit(ChannelReceive.new(@function.next_value_id, type, channel_ptr))
+    end
+
+    def channel_close(channel_ptr : ValueId) : ValueId
+      emit(ChannelClose.new(@function.next_value_id, channel_ptr))
     end
 
     def load(ptr : ValueId, type : TypeRef) : ValueId

@@ -414,6 +414,191 @@ describe Crystal::MIR::LLVMIRGenerator do
       output.should contain("%__crystal_field_info_entry = type { i32, i32, i32, i32 }")
     end
   end
+
+  describe "synchronization primitives" do
+    it "generates atomic load with memory ordering" do
+      mod = Crystal::MIR::Module.new("test")
+      func = mod.create_function("atomic_load_test", Crystal::MIR::TypeRef::INT64)
+      func.add_param("ptr", Crystal::MIR::TypeRef::POINTER)
+
+      builder = Crystal::MIR::Builder.new(func)
+      result = builder.atomic_load(0_u32, Crystal::MIR::TypeRef::INT64, Crystal::MIR::MemoryOrdering::Acquire)
+      builder.ret(result)
+
+      gen = Crystal::MIR::LLVMIRGenerator.new(mod)
+      gen.emit_type_metadata = false
+      output = gen.generate
+
+      output.should contain("load atomic i64")
+      output.should contain("acquire")
+    end
+
+    it "generates atomic store with memory ordering" do
+      mod = Crystal::MIR::Module.new("test")
+      func = mod.create_function("atomic_store_test", Crystal::MIR::TypeRef::VOID)
+      func.add_param("ptr", Crystal::MIR::TypeRef::POINTER)
+      func.add_param("val", Crystal::MIR::TypeRef::INT64)
+
+      builder = Crystal::MIR::Builder.new(func)
+      builder.atomic_store(0_u32, 1_u32, Crystal::MIR::MemoryOrdering::Release)
+      builder.ret
+
+      gen = Crystal::MIR::LLVMIRGenerator.new(mod)
+      gen.emit_type_metadata = false
+      output = gen.generate
+
+      output.should contain("store atomic")
+      output.should contain("release")
+    end
+
+    it "generates atomic compare-and-swap" do
+      mod = Crystal::MIR::Module.new("test")
+      func = mod.create_function("atomic_cas_test", Crystal::MIR::TypeRef::INT64)
+      func.add_param("ptr", Crystal::MIR::TypeRef::POINTER)
+      func.add_param("expected", Crystal::MIR::TypeRef::INT64)
+      func.add_param("desired", Crystal::MIR::TypeRef::INT64)
+
+      builder = Crystal::MIR::Builder.new(func)
+      result = builder.atomic_cas(0_u32, 1_u32, 2_u32, Crystal::MIR::TypeRef::INT64)
+      builder.ret(result)
+
+      gen = Crystal::MIR::LLVMIRGenerator.new(mod)
+      gen.emit_type_metadata = false
+      output = gen.generate
+
+      output.should contain("cmpxchg")
+      output.should contain("seq_cst")
+      output.should contain("extractvalue")
+    end
+
+    it "generates atomic read-modify-write operations" do
+      mod = Crystal::MIR::Module.new("test")
+      func = mod.create_function("atomic_rmw_test", Crystal::MIR::TypeRef::INT64)
+      func.add_param("ptr", Crystal::MIR::TypeRef::POINTER)
+      func.add_param("val", Crystal::MIR::TypeRef::INT64)
+
+      builder = Crystal::MIR::Builder.new(func)
+      result = builder.atomic_rmw(Crystal::MIR::AtomicRMWOp::Add, 0_u32, 1_u32, Crystal::MIR::TypeRef::INT64)
+      builder.ret(result)
+
+      gen = Crystal::MIR::LLVMIRGenerator.new(mod)
+      gen.emit_type_metadata = false
+      output = gen.generate
+
+      output.should contain("atomicrmw add")
+      output.should contain("seq_cst")
+    end
+
+    it "generates memory fence" do
+      mod = Crystal::MIR::Module.new("test")
+      func = mod.create_function("fence_test", Crystal::MIR::TypeRef::VOID)
+
+      builder = Crystal::MIR::Builder.new(func)
+      builder.fence(Crystal::MIR::MemoryOrdering::AcqRel)
+      builder.ret
+
+      gen = Crystal::MIR::LLVMIRGenerator.new(mod)
+      gen.emit_type_metadata = false
+      output = gen.generate
+
+      output.should contain("fence acq_rel")
+    end
+
+    it "generates mutex lock/unlock calls" do
+      mod = Crystal::MIR::Module.new("test")
+      func = mod.create_function("mutex_test", Crystal::MIR::TypeRef::VOID)
+      func.add_param("mutex", Crystal::MIR::TypeRef::POINTER)
+
+      builder = Crystal::MIR::Builder.new(func)
+      builder.mutex_lock(0_u32)
+      builder.mutex_unlock(0_u32)
+      builder.ret
+
+      gen = Crystal::MIR::LLVMIRGenerator.new(mod)
+      gen.emit_type_metadata = false
+      output = gen.generate
+
+      output.should contain("call void @__crystal_v2_mutex_lock")
+      output.should contain("call void @__crystal_v2_mutex_unlock")
+    end
+
+    it "generates mutex trylock call" do
+      mod = Crystal::MIR::Module.new("test")
+      func = mod.create_function("trylock_test", Crystal::MIR::TypeRef::BOOL)
+      func.add_param("mutex", Crystal::MIR::TypeRef::POINTER)
+
+      builder = Crystal::MIR::Builder.new(func)
+      result = builder.mutex_trylock(0_u32)
+      builder.ret(result)
+
+      gen = Crystal::MIR::LLVMIRGenerator.new(mod)
+      gen.emit_type_metadata = false
+      output = gen.generate
+
+      output.should contain("call i1 @__crystal_v2_mutex_trylock")
+    end
+
+    it "generates channel send/receive/close calls" do
+      mod = Crystal::MIR::Module.new("test")
+      func = mod.create_function("channel_test", Crystal::MIR::TypeRef::POINTER)
+      func.add_param("channel", Crystal::MIR::TypeRef::POINTER)
+      func.add_param("data", Crystal::MIR::TypeRef::POINTER)
+
+      builder = Crystal::MIR::Builder.new(func)
+      builder.channel_send(0_u32, 1_u32)
+      result = builder.channel_receive(0_u32, Crystal::MIR::TypeRef::POINTER)
+      builder.channel_close(0_u32)
+      builder.ret(result)
+
+      gen = Crystal::MIR::LLVMIRGenerator.new(mod)
+      gen.emit_type_metadata = false
+      output = gen.generate
+
+      output.should contain("call void @__crystal_v2_channel_send")
+      output.should contain("call ptr @__crystal_v2_channel_receive")
+      output.should contain("call void @__crystal_v2_channel_close")
+    end
+
+    it "generates TSan annotations for mutex operations" do
+      mod = Crystal::MIR::Module.new("test")
+      func = mod.create_function("mutex_tsan_test", Crystal::MIR::TypeRef::VOID)
+      func.add_param("mutex", Crystal::MIR::TypeRef::POINTER)
+
+      builder = Crystal::MIR::Builder.new(func)
+      builder.mutex_lock(0_u32)
+      builder.mutex_unlock(0_u32)
+      builder.ret
+
+      gen = Crystal::MIR::LLVMIRGenerator.new(mod)
+      gen.emit_type_metadata = false
+      gen.emit_tsan = true
+      output = gen.generate
+
+      output.should contain("@__tsan_acquire")
+      output.should contain("@__tsan_release")
+    end
+
+    it "generates TSan annotations for channel operations" do
+      mod = Crystal::MIR::Module.new("test")
+      func = mod.create_function("channel_tsan_test", Crystal::MIR::TypeRef::POINTER)
+      func.add_param("channel", Crystal::MIR::TypeRef::POINTER)
+      func.add_param("data", Crystal::MIR::TypeRef::POINTER)
+
+      builder = Crystal::MIR::Builder.new(func)
+      builder.channel_send(0_u32, 1_u32)
+      result = builder.channel_receive(0_u32, Crystal::MIR::TypeRef::POINTER)
+      builder.ret(result)
+
+      gen = Crystal::MIR::LLVMIRGenerator.new(mod)
+      gen.emit_type_metadata = false
+      gen.emit_tsan = true
+      output = gen.generate
+
+      # Send releases, receive acquires
+      output.should contain("@__tsan_release")
+      output.should contain("@__tsan_acquire")
+    end
+  end
 end
 
 describe Crystal::MIR::TypeRegistry do
