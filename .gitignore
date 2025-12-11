@@ -28,3 +28,14 @@ test_*.cr
 *.db
 
 logs/__pycache__/
+
+# Local build artifacts (outputs from driver/examples)
+a.hir
+a.ll
+a.mir
+a.out
+bin/
+logs/
+runtime_stub.o
+tools/lldb/__pycache__/
+examples/bootstrap_struct.cr
