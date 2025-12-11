@@ -625,6 +625,7 @@ The key insight is: **Don't compete with LLVM, complement it.**
 
 #### 5.3.5 Immediate Validation & Hardening
 - [ ] Lightweight alias/region analysis (MustAlias/NoAlias) to tighten stack/ARC decisions and RC elision.
+- [ ] Alias scaffolding WIP: HIR Value carries `must_alias_with`; RC elision canonicalizes loads. Next: region/NoAlias + integration with stack/ARC.
 - [ ] Refined cycle detection for collections (Array/Hash/Tuple/Union, optionals/self refs) with “may_cycle” vs “acyclic” flags.
 - [ ] Guarded devirtualization safety specs: ensure fallback when profile misses a type (switch/if coverage).
 - [ ] ABI sanity harness: golden tests for class/struct/union layout (offset/align/payload), union header, vtable layout (if present).
