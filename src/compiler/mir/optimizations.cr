@@ -85,6 +85,10 @@ module Crystal::MIR
         when Store
           # Stores may transfer ownership
           pending_incs.delete(inst.value)
+
+        when Load
+          # Loaded value aliases its source pointer
+          alias_map[inst.id] = canonical_ptr(inst.ptr, alias_map)
         end
       end
 
