@@ -634,7 +634,12 @@ The key insight is: **Don't compete with LLVM, complement it.**
   - TypeRef: primitive?, reference?, numeric?, may_alias_type?
   - Int32* cannot alias MyClass* → enables RC elision across incompatible stores
   - 6 new tests, 28 total optimization tests passing
-- [ ] Refined cycle detection for collections (Array/Hash/Tuple/Union, optionals/self refs) with "may_cycle" vs "acyclic" flags.
+- [x] **Refined Cycle Detection** (2025-12-11): Collections only cyclic if element type is cyclic.
+  - Array(Int32) → NOT cyclic (was: all Arrays marked cyclic)
+  - Array(Node) → cyclic only if Node is cyclic
+  - extract_generic_params() parses generic type parameters
+  - PRIMITIVE_TYPES set for types that cannot form cycles
+  - 6 new tests, 23 total taint analysis tests
 - [ ] Guarded devirtualization safety specs: ensure fallback when profile misses a type (switch/if coverage).
 - [ ] ABI sanity harness: golden tests for class/struct/union layout (offset/align/payload), union header, vtable layout (if present).
 - [ ] Inline intrinsics RC/taint audit: propagate lifetime/taints through inlined .times/.each/Range; re-evaluate captured vars post-inline.
