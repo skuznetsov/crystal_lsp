@@ -253,6 +253,36 @@ module Crystal::MIR
     def get_by_name(name : String) : Type?
       @name_map[name]?
     end
+
+    # Human-readable layout snapshot for ABI sanity checks.
+    # Includes size/alignment and field offsets for non-primitive types,
+    # plus variant info for unions and element info for tuples/arrays.
+    def layout_snapshot : String
+      String.build do |io|
+        @types.each do |type|
+          next if type.kind.primitive?
+          io << type.name << " (" << type.kind << "): size=" << type.size << " align=" << type.alignment << "\n"
+          if fields = type.fields
+            fields.each do |f|
+              io << "  @" << f.name << " : type#" << f.type_ref.id << " @offset " << f.offset << "\n"
+            end
+          end
+          if variants = type.variants
+            variants.each do |v|
+              io << "  variant " << v.name << " size=" << v.size << " align=" << v.alignment << "\n"
+            end
+          end
+          if elem = type.element_type
+            io << "  element " << elem.name << "\n"
+          end
+          if elems = type.element_types
+            elems.each_with_index do |e, idx|
+              io << "  element[" << idx << "] " << e.name << "\n"
+            end
+          end
+        end
+      end
+    end
   end
 
   # ═══════════════════════════════════════════════════════════════════════════
