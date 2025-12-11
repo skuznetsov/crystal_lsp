@@ -180,6 +180,51 @@ describe Crystal::MIR::LLVMIRGenerator do
       output.should contain("call void @__crystal_v2_rc_dec(ptr %ptr, ptr null)")
     end
 
+    it "generates atomic RC increment with atomicrmw" do
+      mod = Crystal::MIR::Module.new("test")
+      func = mod.create_function("atomic_rc_inc", Crystal::MIR::TypeRef::VOID)
+      func.add_param("ptr", Crystal::MIR::TypeRef::POINTER)
+
+      builder = Crystal::MIR::Builder.new(func)
+      builder.rc_inc(0_u32, atomic: true)
+      builder.ret
+
+      gen = Crystal::MIR::LLVMIRGenerator.new(mod)
+      gen.emit_type_metadata = false
+      output = gen.generate
+
+      # Should use inline atomicrmw instead of function call
+      output.should contain("getelementptr i8, ptr %ptr, i64 -8")
+      output.should contain("atomicrmw add")
+      output.should contain("seq_cst")
+      # Should NOT call external function
+      output.should_not contain("call void @__crystal_v2_rc_inc_atomic")
+    end
+
+    it "generates atomic RC decrement with conditional free" do
+      mod = Crystal::MIR::Module.new("test")
+      func = mod.create_function("atomic_rc_dec", Crystal::MIR::TypeRef::VOID)
+      func.add_param("ptr", Crystal::MIR::TypeRef::POINTER)
+
+      builder = Crystal::MIR::Builder.new(func)
+      builder.rc_dec(0_u32, atomic: true)
+      builder.ret
+
+      gen = Crystal::MIR::LLVMIRGenerator.new(mod)
+      gen.emit_type_metadata = false
+      output = gen.generate
+
+      # Should use inline atomicrmw sub
+      output.should contain("atomicrmw sub")
+      output.should contain("acq_rel")
+      # Should check if RC reached zero
+      output.should contain("icmp eq i64")
+      # Should have conditional branch to free block
+      output.should contain("do_free")
+      output.should contain("skip_free")
+      output.should contain("call void @free")
+    end
+
     it "generates binary operations" do
       mod = Crystal::MIR::Module.new("test")
       func = mod.create_function("binop_test", Crystal::MIR::TypeRef::INT32)

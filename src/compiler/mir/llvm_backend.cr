@@ -626,18 +626,37 @@ module Crystal::MIR
     private def emit_rc_inc(inst : RCIncrement)
       ptr = value_ref(inst.ptr)
       if inst.atomic
-        emit "call void @__crystal_v2_rc_inc_atomic(ptr #{ptr})"
+        # Inline atomic increment for thread-safe RC
+        # RC is stored at ptr - 8 (object layout: [RC:i64][data...])
+        emit "%rc_ptr.#{inst.id} = getelementptr i8, ptr #{ptr}, i64 -8"
+        # atomicrmw add with seq_cst ordering for full thread safety
+        emit "%old_rc.#{inst.id} = atomicrmw add ptr %rc_ptr.#{inst.id}, i64 1 seq_cst"
       else
+        # Non-atomic: simple load/add/store (faster for single-threaded)
         emit "call void @__crystal_v2_rc_inc(ptr #{ptr})"
       end
     end
 
     private def emit_rc_dec(inst : RCDecrement)
       ptr = value_ref(inst.ptr)
-      destructor = "null"  # TODO: function pointer for destructor
       if inst.atomic
-        emit "call void @__crystal_v2_rc_dec_atomic(ptr #{ptr}, ptr #{destructor})"
+        # Inline atomic decrement with conditional deallocation
+        # RC is stored at ptr - 8
+        emit "%rc_ptr.#{inst.id} = getelementptr i8, ptr #{ptr}, i64 -8"
+        # atomicrmw sub with acq_rel ordering (release on dec, acquire on read for dealloc check)
+        emit "%old_rc.#{inst.id} = atomicrmw sub ptr %rc_ptr.#{inst.id}, i64 1 acq_rel"
+        # Check if old RC was 1 (meaning new RC is 0 → deallocate)
+        emit "%should_free.#{inst.id} = icmp eq i64 %old_rc.#{inst.id}, 1"
+        emit "br i1 %should_free.#{inst.id}, label %do_free.#{inst.id}, label %skip_free.#{inst.id}"
+        emit_raw "do_free.#{inst.id}:\n"
+        @indent = 1
+        # Free the raw allocation (ptr - 8 is start of allocation)
+        emit "call void @free(ptr %rc_ptr.#{inst.id})"
+        emit "br label %skip_free.#{inst.id}"
+        emit_raw "skip_free.#{inst.id}:\n"
       else
+        # Non-atomic: call runtime function
+        destructor = "null"  # TODO: function pointer for destructor
         emit "call void @__crystal_v2_rc_dec(ptr #{ptr}, ptr #{destructor})"
       end
     end
