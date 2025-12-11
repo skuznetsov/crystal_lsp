@@ -225,6 +225,77 @@ describe Crystal::MIR::LLVMIRGenerator do
       output.should contain("call void @free")
     end
 
+    it "generates TSan instrumentation for load/store when enabled" do
+      mod = Crystal::MIR::Module.new("test")
+      func = mod.create_function("tsan_test", Crystal::MIR::TypeRef::VOID)
+      func.add_param("ptr", Crystal::MIR::TypeRef::POINTER)
+
+      builder = Crystal::MIR::Builder.new(func)
+      loaded = builder.load(0_u32, Crystal::MIR::TypeRef::INT32)
+      builder.store(0_u32, loaded)
+      builder.ret
+
+      gen = Crystal::MIR::LLVMIRGenerator.new(mod)
+      gen.emit_type_metadata = false
+      gen.emit_tsan = true
+      output = gen.generate
+
+      # Should declare TSan functions
+      output.should contain("declare void @__tsan_read4(ptr)")
+      output.should contain("declare void @__tsan_write4(ptr)")
+      output.should contain("declare void @__tsan_func_entry(ptr)")
+      output.should contain("declare void @__tsan_func_exit()")
+
+      # Should instrument load and store
+      output.should contain("call void @__tsan_read4(ptr %ptr)")
+      output.should contain("call void @__tsan_write4(ptr %ptr)")
+
+      # Should have function entry/exit
+      output.should contain("call void @__tsan_func_entry")
+      output.should contain("call void @__tsan_func_exit()")
+    end
+
+    it "does not generate TSan instrumentation when disabled" do
+      mod = Crystal::MIR::Module.new("test")
+      func = mod.create_function("no_tsan", Crystal::MIR::TypeRef::VOID)
+      func.add_param("ptr", Crystal::MIR::TypeRef::POINTER)
+
+      builder = Crystal::MIR::Builder.new(func)
+      loaded = builder.load(0_u32, Crystal::MIR::TypeRef::INT32)
+      builder.store(0_u32, loaded)
+      builder.ret
+
+      gen = Crystal::MIR::LLVMIRGenerator.new(mod)
+      gen.emit_type_metadata = false
+      gen.emit_tsan = false
+      output = gen.generate
+
+      # Should NOT have TSan instrumentation
+      output.should_not contain("@__tsan_read")
+      output.should_not contain("@__tsan_write")
+      output.should_not contain("@__tsan_func_entry")
+    end
+
+    it "generates TSan acquire/release for atomic RC" do
+      mod = Crystal::MIR::Module.new("test")
+      func = mod.create_function("tsan_atomic_rc", Crystal::MIR::TypeRef::VOID)
+      func.add_param("ptr", Crystal::MIR::TypeRef::POINTER)
+
+      builder = Crystal::MIR::Builder.new(func)
+      builder.rc_inc(0_u32, atomic: true)
+      builder.rc_dec(0_u32, atomic: true)
+      builder.ret
+
+      gen = Crystal::MIR::LLVMIRGenerator.new(mod)
+      gen.emit_type_metadata = false
+      gen.emit_tsan = true
+      output = gen.generate
+
+      # Should have acquire/release annotations for TSan
+      output.should contain("call void @__tsan_release(ptr %ptr)")
+      output.should contain("call void @__tsan_acquire(ptr %ptr)")
+    end
+
     it "generates binary operations" do
       mod = Crystal::MIR::Module.new("test")
       func = mod.create_function("binop_test", Crystal::MIR::TypeRef::INT32)

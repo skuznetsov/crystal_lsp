@@ -229,6 +229,8 @@ module Crystal::MIR
     @value_names : Hash(ValueId, String)
     @block_names : Hash(BlockId, String)
     @current_return_type : String = "void"
+    @current_func_name : String = ""
+    @tsan_needs_func_entry : Bool = false
     @constant_values : Hash(ValueId, String)  # For inlining constants
     @value_types : Hash(ValueId, TypeRef)     # For tracking operand types
     @array_info : Hash(ValueId, {String, Int32})  # Array element_type and size
@@ -245,6 +247,7 @@ module Crystal::MIR
 
     property emit_debug_info : Bool = true
     property emit_type_metadata : Bool = true
+    property emit_tsan : Bool = false  # Thread Sanitizer instrumentation
     property target_triple : String = {% if flag?(:darwin) %}
                                         {% if flag?(:aarch64) %}
                                           "arm64-apple-macosx"
@@ -417,6 +420,26 @@ module Crystal::MIR
       emit_raw "declare void @__crystal_v2_print_int64(i64)\n"
       emit_raw "declare void @__crystal_v2_print_int64_ln(i64)\n"
       emit_raw "\n"
+
+      # Thread Sanitizer (TSan) instrumentation
+      if @emit_tsan
+        emit_raw "; Thread Sanitizer runtime functions\n"
+        emit_raw "declare void @__tsan_read1(ptr)\n"
+        emit_raw "declare void @__tsan_read2(ptr)\n"
+        emit_raw "declare void @__tsan_read4(ptr)\n"
+        emit_raw "declare void @__tsan_read8(ptr)\n"
+        emit_raw "declare void @__tsan_read16(ptr)\n"
+        emit_raw "declare void @__tsan_write1(ptr)\n"
+        emit_raw "declare void @__tsan_write2(ptr)\n"
+        emit_raw "declare void @__tsan_write4(ptr)\n"
+        emit_raw "declare void @__tsan_write8(ptr)\n"
+        emit_raw "declare void @__tsan_write16(ptr)\n"
+        emit_raw "declare void @__tsan_func_entry(ptr)\n"
+        emit_raw "declare void @__tsan_func_exit()\n"
+        emit_raw "declare void @__tsan_acquire(ptr)\n"
+        emit_raw "declare void @__tsan_release(ptr)\n"
+        emit_raw "\n"
+      end
     end
 
     # Union debug helper function declarations
@@ -438,9 +461,13 @@ module Crystal::MIR
       param_types = func.params.map { |p| "#{@type_mapper.llvm_type(p.type)} %#{p.name}" }
       return_type = @type_mapper.llvm_type(func.return_type)
       @current_return_type = return_type  # Store for terminator emission
+      @current_func_name = @type_mapper.mangle_name(func.name)
 
-      mangled_name = @type_mapper.mangle_name(func.name)
+      mangled_name = @current_func_name
       emit_raw "define #{return_type} @#{mangled_name}(#{param_types.join(", ")}) {\n"
+
+      # TSan: emit function entry in first block
+      @tsan_needs_func_entry = @emit_tsan
 
       func.blocks.each do |block|
         emit_block(block, func)
@@ -469,6 +496,14 @@ module Crystal::MIR
     private def emit_block(block : BasicBlock, func : Function)
       emit_raw "#{@block_names[block.id]}:\n"
       @indent = 1
+
+      # TSan: emit function entry at start of first block
+      if @tsan_needs_func_entry
+        emit "; TSan function entry"
+        emit "%__tsan_func_ptr = bitcast ptr @#{@current_func_name} to ptr"
+        emit "call void @__tsan_func_entry(ptr %__tsan_func_ptr)"
+        @tsan_needs_func_entry = false
+      end
 
       block.instructions.each do |inst|
         emit_instruction(inst, func)
@@ -631,6 +666,12 @@ module Crystal::MIR
         emit "%rc_ptr.#{inst.id} = getelementptr i8, ptr #{ptr}, i64 -8"
         # atomicrmw add with seq_cst ordering for full thread safety
         emit "%old_rc.#{inst.id} = atomicrmw add ptr %rc_ptr.#{inst.id}, i64 1 seq_cst"
+
+        # TSan: release semantics - this thread "releases" the object
+        # Other threads that later acquire this object will see our writes
+        if @emit_tsan
+          emit "call void @__tsan_release(ptr #{ptr})"
+        end
       else
         # Non-atomic: simple load/add/store (faster for single-threaded)
         emit "call void @__crystal_v2_rc_inc(ptr #{ptr})"
@@ -640,6 +681,12 @@ module Crystal::MIR
     private def emit_rc_dec(inst : RCDecrement)
       ptr = value_ref(inst.ptr)
       if inst.atomic
+        # TSan: acquire semantics before decrement
+        # This thread "acquires" all writes from threads that released this object
+        if @emit_tsan
+          emit "call void @__tsan_acquire(ptr #{ptr})"
+        end
+
         # Inline atomic decrement with conditional deallocation
         # RC is stored at ptr - 8
         emit "%rc_ptr.#{inst.id} = getelementptr i8, ptr #{ptr}, i64 -8"
@@ -664,6 +711,13 @@ module Crystal::MIR
     private def emit_load(inst : Load, name : String)
       type = @type_mapper.llvm_type(inst.type)
       ptr = value_ref(inst.ptr)
+
+      # TSan instrumentation: report read before load
+      if @emit_tsan
+        tsan_size = tsan_access_size(inst.type)
+        emit "call void @__tsan_read#{tsan_size}(ptr #{ptr})"
+      end
+
       emit "#{name} = load #{type}, ptr #{ptr}"
     end
 
@@ -673,7 +727,36 @@ module Crystal::MIR
       # Look up the type of the value being stored
       val_type = @value_types[inst.value]? || TypeRef::POINTER
       val_type_str = @type_mapper.llvm_type(val_type)
+
+      # TSan instrumentation: report write before store
+      if @emit_tsan
+        tsan_size = tsan_access_size(val_type)
+        emit "call void @__tsan_write#{tsan_size}(ptr #{ptr})"
+      end
+
       emit "store #{val_type_str} #{val}, ptr #{ptr}"
+    end
+
+    # Get TSan access size (1, 2, 4, 8, or 16 bytes)
+    private def tsan_access_size(type : TypeRef) : Int32
+      case type
+      when TypeRef::BOOL, TypeRef::INT8, TypeRef::UINT8
+        1
+      when TypeRef::INT16, TypeRef::UINT16
+        2
+      when TypeRef::INT32, TypeRef::UINT32, TypeRef::CHAR, TypeRef::SYMBOL
+        4
+      when TypeRef::INT64, TypeRef::UINT64, TypeRef::POINTER, TypeRef::STRING
+        8
+      when TypeRef::INT128, TypeRef::UINT128
+        16
+      when TypeRef::FLOAT32
+        4
+      when TypeRef::FLOAT64
+        8
+      else
+        8  # Default to pointer size for unknown types
+      end
     end
 
     private def emit_gep(inst : GetElementPtr, name : String)
@@ -1012,6 +1095,11 @@ module Crystal::MIR
     private def emit_terminator(term : Terminator)
       case term
       when Return
+        # TSan: emit function exit before return
+        if @emit_tsan
+          emit "call void @__tsan_func_exit()"
+        end
+
         if @current_return_type == "void"
           emit "ret void"
         elsif val = term.value
