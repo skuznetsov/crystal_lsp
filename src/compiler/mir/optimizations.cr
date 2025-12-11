@@ -28,12 +28,9 @@ module Crystal::MIR
     # Track must-alias relationships (ptr1, ptr2) within a block
     getter must_alias : Set(Tuple(ValueId, ValueId))
 
-    def initialize(@function : Function)
-      @must_alias = Set(Tuple(ValueId, ValueId)).new
-    end
-
     def run : Int32
       @eliminated = 0
+      @must_alias = Set(Tuple(ValueId, ValueId)).new
 
       @function.blocks.each do |block|
         optimize_block(block)

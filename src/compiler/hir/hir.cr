@@ -120,6 +120,7 @@ module Crystal::HIR
     getter type : TypeRef
     property lifetime : LifetimeTag = LifetimeTag::Unknown
     property taints : Taint = Taint::None
+    property must_alias_with : ValueId? = nil
 
     def initialize(@id : ValueId, @type : TypeRef)
     end
