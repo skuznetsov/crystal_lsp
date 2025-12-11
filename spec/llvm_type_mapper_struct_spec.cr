@@ -1,4 +1,4 @@
-require "./spec_helper"
+require "../spec_helper"
 
 describe Crystal::MIR::LLVMTypeMapper do
   it "maps struct with fields to named type" do
