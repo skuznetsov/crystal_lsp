@@ -486,6 +486,118 @@ describe Crystal::MIR do
   end
 
   # ═══════════════════════════════════════════════════════════════════════════
+  # TBAA (Type-Based Alias Analysis)
+  # ═══════════════════════════════════════════════════════════════════════════
+
+  describe "TBAA" do
+    it "TypeRef.primitive? identifies primitive types" do
+      Crystal::MIR::TypeRef::INT32.primitive?.should be_true
+      Crystal::MIR::TypeRef::FLOAT64.primitive?.should be_true
+      Crystal::MIR::TypeRef::BOOL.primitive?.should be_true
+      Crystal::MIR::TypeRef::CHAR.primitive?.should be_true
+      Crystal::MIR::TypeRef::SYMBOL.primitive?.should be_true
+
+      # STRING is a reference type
+      Crystal::MIR::TypeRef::STRING.primitive?.should be_false
+
+      # User-defined types (id >= 100) are not primitive
+      Crystal::MIR::TypeRef.new(100_u32).primitive?.should be_false
+      Crystal::MIR::TypeRef.new(200_u32).primitive?.should be_false
+    end
+
+    it "TypeRef.reference? identifies reference types" do
+      Crystal::MIR::TypeRef::STRING.reference?.should be_true
+      Crystal::MIR::TypeRef.new(100_u32).reference?.should be_true
+      Crystal::MIR::TypeRef.new(200_u32).reference?.should be_true
+
+      # Primitives are not references
+      Crystal::MIR::TypeRef::INT32.reference?.should be_false
+      Crystal::MIR::TypeRef::FLOAT64.reference?.should be_false
+    end
+
+    it "TypeRef.may_alias_type? returns false for primitive vs reference" do
+      int_type = Crystal::MIR::TypeRef::INT32
+      class_type = Crystal::MIR::TypeRef.new(100_u32)  # MyClass
+
+      # Primitive cannot alias reference
+      int_type.may_alias_type?(class_type).should be_false
+      class_type.may_alias_type?(int_type).should be_false
+
+      # Same type may alias
+      int_type.may_alias_type?(int_type).should be_true
+      class_type.may_alias_type?(class_type).should be_true
+    end
+
+    it "TypeRef.may_alias_type? is conservative for POINTER" do
+      ptr_type = Crystal::MIR::TypeRef::POINTER
+      int_type = Crystal::MIR::TypeRef::INT32
+      class_type = Crystal::MIR::TypeRef.new(100_u32)
+
+      # POINTER (void*) can alias anything
+      ptr_type.may_alias_type?(int_type).should be_true
+      ptr_type.may_alias_type?(class_type).should be_true
+      int_type.may_alias_type?(ptr_type).should be_true
+    end
+
+    it "elides RC when store is to incompatible type (TBAA)" do
+      # This is the key TBAA optimization: store to Int32* cannot affect MyClass*
+      mod = Crystal::MIR::Module.new
+      func = mod.create_function("test", Crystal::MIR::TypeRef::VOID)
+      builder = Crystal::MIR::Builder.new(func)
+
+      # Allocate a MyClass (reference type, id=100)
+      my_class_type = Crystal::MIR::TypeRef.new(100_u32)
+      obj = builder.alloc(Crystal::MIR::MemoryStrategy::ARC, my_class_type)
+
+      # Allocate an Int32 (primitive type)
+      int_ptr = builder.alloc(Crystal::MIR::MemoryStrategy::Stack, Crystal::MIR::TypeRef::INT32)
+
+      builder.rc_inc(obj)
+
+      # Store to int_ptr - this is Int32* which cannot alias MyClass*
+      val = builder.const_int(42, Crystal::MIR::TypeRef::INT32)
+      builder.store(int_ptr, val)
+
+      builder.rc_dec(obj)
+
+      builder.ret(nil)
+
+      pass = Crystal::MIR::RCElisionPass.new(func)
+      eliminated = pass.run
+
+      # Should elide because Int32* cannot alias MyClass*
+      eliminated.should eq(2)
+    end
+
+    it "blocks RC elision when store type could alias (same type family)" do
+      # Store to MyClass* could affect another MyClass*
+      mod = Crystal::MIR::Module.new
+      func = mod.create_function("test", Crystal::MIR::TypeRef::VOID)
+      builder = Crystal::MIR::Builder.new(func)
+
+      # Two allocations of same type
+      my_class_type = Crystal::MIR::TypeRef.new(100_u32)
+      obj1 = builder.alloc(Crystal::MIR::MemoryStrategy::ARC, my_class_type)
+      obj2 = builder.alloc(Crystal::MIR::MemoryStrategy::ARC, my_class_type)
+
+      builder.rc_inc(obj1)
+
+      # Store obj1 to obj2's field - obj1 escapes
+      builder.store(obj2, obj1)
+
+      builder.rc_dec(obj1)
+
+      builder.ret(nil)
+
+      pass = Crystal::MIR::RCElisionPass.new(func)
+      eliminated = pass.run
+
+      # Should NOT elide - obj1 was stored (escaped)
+      eliminated.should eq(0)
+    end
+  end
+
+  # ═══════════════════════════════════════════════════════════════════════════
   # EDGE CASES
   # ═══════════════════════════════════════════════════════════════════════════
 

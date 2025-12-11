@@ -358,6 +358,58 @@ module Crystal::MIR
     def inspect(io : IO) : Nil
       to_s(io)
     end
+
+    # TBAA: Type-Based Alias Analysis helpers
+    # Primitive types never alias reference/struct types
+
+    def primitive? : Bool
+      case @id
+      when 0_u32..17_u32  # VOID through SYMBOL
+        # Note: STRING (16) and SYMBOL (17) are reference types in Crystal
+        # but at MIR level they're primitives for TBAA purposes
+        @id <= 15_u32 || @id == 17_u32  # Excludes STRING (16)
+      else
+        false
+      end
+    end
+
+    def reference? : Bool
+      # User-defined types (id >= 100) are typically reference types
+      # STRING is a reference type
+      @id == 16_u32 || @id >= 100_u32
+    end
+
+    def numeric? : Bool
+      case @id
+      when 3_u32..14_u32  # INT8 through FLOAT64
+        true
+      else
+        false
+      end
+    end
+
+    # Two types can alias if they're compatible for memory access
+    # This is a conservative check - returns true if MAY alias
+    def may_alias_type?(other : TypeRef) : Bool
+      # Same type always may alias
+      return true if @id == other.id
+
+      # POINTER is the universal aliaser (like void* in C)
+      return true if @id == 18_u32 || other.id == 18_u32
+
+      # Primitives vs references: cannot alias
+      # Int32* cannot point to the same memory as MyClass*
+      if self.primitive? && other.reference?
+        return false
+      end
+      if self.reference? && other.primitive?
+        return false
+      end
+
+      # Different numeric types might alias through unions
+      # Be conservative here
+      true
+    end
   end
 
   # ═══════════════════════════════════════════════════════════════════════════

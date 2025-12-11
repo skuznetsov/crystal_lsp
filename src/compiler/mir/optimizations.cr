@@ -76,6 +76,8 @@ module Crystal::MIR
       escaped_allocs = Set(ValueId).new
       # Track allocation site for each pointer (for structural noalias)
       alloc_site = {} of ValueId => ValueId  # ptr → original alloc id
+      # TBAA: Track alloc_type for each allocation site
+      alloc_type = {} of ValueId => TypeRef  # alloc_site → type of allocated object
 
       instructions = block.instructions
       to_remove = Set(Int32).new
@@ -87,6 +89,7 @@ module Crystal::MIR
           if inst.no_alias
             no_alias_ids << inst.id
             alloc_site[inst.id] = inst.id  # Alloc is its own allocation site
+            alloc_type[inst.id] = inst.alloc_type  # TBAA: track allocated type
           end
         when Load
           if inst.responds_to?(:no_alias) && inst.no_alias
@@ -159,13 +162,29 @@ module Crystal::MIR
           # For stores through unknown pointers (not from a known noalias alloc),
           # we must be conservative - they might modify any memory
           store_site = alloc_site[store_ptr]?
+          store_type = store_site ? alloc_type[store_site]? : nil
+
           if store_site.nil? || !no_alias_ids.includes?(store_site)
             # Unknown store target - could alias anything, be conservative
-            # But only clear pending incs for non-noalias or escaped allocations
+            # But use TBAA: keep pending incs for types that CANNOT alias
             pending_incs.reject! do |pending_ptr, _|
               pending_site = alloc_site[pending_ptr]?
-              # Keep if pending_ptr is from a known noalias alloc that hasn't escaped
-              !(pending_site && no_alias_ids.includes?(pending_site) && !escaped_allocs.includes?(pending_ptr))
+              next true unless pending_site  # No site info → conservative reject
+
+              # Keep if from known noalias alloc that hasn't escaped
+              next false if no_alias_ids.includes?(pending_site) && !escaped_allocs.includes?(pending_ptr)
+
+              # TBAA: If we know the store type, check type compatibility
+              if store_type
+                pending_type = alloc_type[pending_site]?
+                if pending_type && !store_type.may_alias_type?(pending_type)
+                  # Types cannot alias (e.g., Int32* vs MyClass*) → keep pending inc
+                  next false
+                end
+              end
+
+              # Conservative: reject (may alias)
+              true
             end
           end
           # If store is to a known noalias allocation, it only affects that allocation's
