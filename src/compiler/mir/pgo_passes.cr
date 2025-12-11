@@ -105,6 +105,9 @@ module Crystal::MIR
       target_func = @mir_module.get_function(target_name)
       return unless target_func
 
+      # If the call is not virtual or has no receiver type info, keep the slow path.
+      return unless call.receiver_type?
+
       # Create the devirtualized code structure:
       #
       # Original block (up to call):
@@ -191,6 +194,9 @@ module Crystal::MIR
 
         # Rewrite uses of original call result to phi result
         rewrite_uses(instructions_after, call.id, phi.id)
+      else
+        # For void calls, we still need to carry through uses of the original call ID (if any)
+        rewrite_uses(instructions_after, call.id, slow_result.id)
       end
 
       # Add remaining instructions to merge block
@@ -217,10 +223,16 @@ module Crystal::MIR
     private def rewrite_instruction_operands(inst : Value, old_id : ValueId, new_id : ValueId)
       case inst
       when BinaryOp
-        # BinaryOp uses @left and @right directly - would need setter methods
-        # For now, mark this as a limitation
+        if inst.responds_to?(:left=) && inst.left == old_id
+          inst.left = new_id
+        end
+        if inst.responds_to?(:right=) && inst.right == old_id
+          inst.right = new_id
+        end
       when UnaryOp
-        # Similar limitation
+        if inst.responds_to?(:operand=) && inst.operand == old_id
+          inst.operand = new_id
+        end
       when Phi
         inst.incoming.each_with_index do |(block_id, val_id), idx|
           if val_id == old_id
