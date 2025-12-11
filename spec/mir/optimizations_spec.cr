@@ -646,4 +646,158 @@ describe Crystal::MIR do
       eliminated.should eq(0)
     end
   end
+
+  # ═══════════════════════════════════════════════════════════════════════════
+  # LOCK ELISION
+  # ═══════════════════════════════════════════════════════════════════════════
+
+  describe "LockElisionPass" do
+    it "elides locks on thread-local mutex" do
+      mod = Crystal::MIR::Module.new
+      func = mod.create_function("test", Crystal::MIR::TypeRef::VOID)
+      builder = Crystal::MIR::Builder.new(func)
+
+      # Allocate a mutex with AtomicARC (treated as mutex candidate)
+      mutex = builder.alloc(Crystal::MIR::MemoryStrategy::AtomicARC, Crystal::MIR::TypeRef.new(100_u32))
+      builder.mutex_lock(mutex)
+      builder.mutex_unlock(mutex)
+      builder.ret
+
+      # Before: alloc, lock, unlock (3 instructions)
+      func.get_block(func.entry_block).instructions.size.should eq(3)
+
+      pass = Crystal::MIR::LockElisionPass.new(func)
+      elided = pass.run
+
+      # Both lock and unlock should be elided (thread-local, no escape)
+      elided.should eq(2)
+      func.get_block(func.entry_block).instructions.size.should eq(1)  # Only alloc remains
+    end
+
+    it "keeps locks on escaped mutex" do
+      mod = Crystal::MIR::Module.new
+      func = mod.create_function("test", Crystal::MIR::TypeRef::VOID)
+      builder = Crystal::MIR::Builder.new(func)
+
+      # Allocate a mutex
+      mutex = builder.alloc(Crystal::MIR::MemoryStrategy::AtomicARC, Crystal::MIR::TypeRef.new(100_u32))
+      # Escape via store
+      field = builder.alloc(Crystal::MIR::MemoryStrategy::Stack, Crystal::MIR::TypeRef::POINTER)
+      builder.store(field, mutex)
+
+      builder.mutex_lock(mutex)
+      builder.mutex_unlock(mutex)
+      builder.ret
+
+      # Before: 2 allocs, store, lock, unlock = 5 instructions
+      func.get_block(func.entry_block).instructions.size.should eq(5)
+
+      pass = Crystal::MIR::LockElisionPass.new(func)
+      elided = pass.run
+
+      # Locks should NOT be elided (mutex escaped)
+      elided.should eq(0)
+      func.get_block(func.entry_block).instructions.size.should eq(5)
+    end
+
+    it "elides redundant nested locks" do
+      mod = Crystal::MIR::Module.new
+      func = mod.create_function("test", Crystal::MIR::TypeRef::VOID)
+      func.add_param("mutex", Crystal::MIR::TypeRef::POINTER)
+      builder = Crystal::MIR::Builder.new(func)
+
+      # param 0 is the mutex pointer (externally provided, can't elide entirely)
+      mutex_ptr = 0_u32
+
+      # Nested locks on same mutex: lock; lock; unlock; unlock
+      builder.mutex_lock(mutex_ptr)
+      builder.mutex_lock(mutex_ptr)  # Redundant
+      builder.mutex_unlock(mutex_ptr)  # Corresponds to redundant lock
+      builder.mutex_unlock(mutex_ptr)
+      builder.ret
+
+      func.get_block(func.entry_block).instructions.size.should eq(4)
+
+      pass = Crystal::MIR::LockElisionPass.new(func)
+      elided = pass.run
+
+      # Inner lock/unlock pair should be elided
+      elided.should eq(2)
+      func.get_block(func.entry_block).instructions.size.should eq(2)
+    end
+
+    it "coarsens adjacent critical sections" do
+      mod = Crystal::MIR::Module.new
+      func = mod.create_function("test", Crystal::MIR::TypeRef::VOID)
+      func.add_param("mutex", Crystal::MIR::TypeRef::POINTER)
+      func.add_param("x", Crystal::MIR::TypeRef::INT32)
+      builder = Crystal::MIR::Builder.new(func)
+
+      mutex_ptr = 0_u32
+
+      # Pattern: lock; unlock; lock; unlock → should coarsen to: lock; unlock
+      builder.mutex_lock(mutex_ptr)
+      builder.mutex_unlock(mutex_ptr)
+      # Only safe operations between (add doesn't prevent coarsening)
+      result = builder.add(1_u32, 1_u32, Crystal::MIR::TypeRef::INT32)
+      builder.mutex_lock(mutex_ptr)
+      builder.mutex_unlock(mutex_ptr)
+      builder.ret
+
+      # Before: lock, unlock, add, lock, unlock = 5 instructions
+      func.get_block(func.entry_block).instructions.size.should eq(5)
+
+      pass = Crystal::MIR::LockElisionPass.new(func)
+      elided = pass.run
+
+      # Should coarsen: remove unlock-lock pair in the middle
+      elided.should eq(2)
+      func.get_block(func.entry_block).instructions.size.should eq(3)  # lock, add, unlock
+    end
+
+    it "does not coarsen when call is between unlock/lock" do
+      mod = Crystal::MIR::Module.new
+      func = mod.create_function("test", Crystal::MIR::TypeRef::VOID)
+      func.add_param("mutex", Crystal::MIR::TypeRef::POINTER)
+      builder = Crystal::MIR::Builder.new(func)
+
+      mutex_ptr = 0_u32
+
+      builder.mutex_lock(mutex_ptr)
+      builder.mutex_unlock(mutex_ptr)
+      # External call between - prevents coarsening
+      other_func = mod.create_function("other", Crystal::MIR::TypeRef::VOID)
+      empty_args = [] of Crystal::MIR::ValueId
+      builder.call(other_func.id, empty_args, Crystal::MIR::TypeRef::VOID)
+      builder.mutex_lock(mutex_ptr)
+      builder.mutex_unlock(mutex_ptr)
+      builder.ret
+
+      # Before: lock, unlock, call, lock, unlock = 5 instructions
+      func.get_block(func.entry_block).instructions.size.should eq(5)
+
+      pass = Crystal::MIR::LockElisionPass.new(func)
+      elided = pass.run
+
+      # No coarsening due to call
+      elided.should eq(0)
+      func.get_block(func.entry_block).instructions.size.should eq(5)
+    end
+
+    it "tracks locks_elided in OptimizationStats" do
+      mod = Crystal::MIR::Module.new
+      func = mod.create_function("test", Crystal::MIR::TypeRef::VOID)
+      builder = Crystal::MIR::Builder.new(func)
+
+      mutex = builder.alloc(Crystal::MIR::MemoryStrategy::AtomicARC, Crystal::MIR::TypeRef.new(100_u32))
+      builder.mutex_lock(mutex)
+      builder.mutex_unlock(mutex)
+      builder.ret
+
+      pipeline = Crystal::MIR::OptimizationPipeline.new(func)
+      stats = pipeline.run
+
+      stats.locks_elided.should eq(2)
+    end
+  end
 end

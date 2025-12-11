@@ -479,6 +479,242 @@ module Crystal::MIR
   end
 
   # ═══════════════════════════════════════════════════════════════════════════
+  # LOCK ELISION
+  # ═══════════════════════════════════════════════════════════════════════════
+  #
+  # Removes unnecessary synchronization operations:
+  #   1. Thread-local elision: Remove locks on objects that don't escape to other threads
+  #   2. Redundant lock elision: Remove nested locks on the same mutex
+  #   3. Lock coarsening: Merge adjacent lock/unlock pairs
+  #
+  # This pass relies on escape analysis and ThreadShared taint tracking.
+  # A mutex can be elided if:
+  #   - The protected data doesn't have ThreadShared taint
+  #   - The mutex allocation doesn't escape to spawn/channel/shared-memory
+  #
+  # Safety: Lock elision is conservative. We only elide when we can PROVE
+  # that no other thread can observe the protected data.
+
+  class LockElisionPass
+    getter function : Function
+    getter eliminated : Int32 = 0
+    getter coarsened : Int32 = 0
+
+    def initialize(@function : Function)
+    end
+
+    def run : Int32
+      @eliminated = 0
+      @coarsened = 0
+
+      # Track allocation sites and their escape status
+      escaped_allocs = Set(ValueId).new
+      thread_shared = Set(ValueId).new  # Allocations passed to spawn/channel
+      mutex_allocs = Set(ValueId).new   # Known mutex allocations
+
+      # First pass: identify escapes and thread-shared allocations
+      @function.blocks.each do |block|
+        block.instructions.each do |inst|
+          case inst
+          when Alloc
+            # Could be a mutex if strategy suggests synchronization
+            if inst.strategy == MemoryStrategy::AtomicARC
+              mutex_allocs << inst.id
+            end
+
+          when Store
+            # Storing to a field = escape
+            escaped_allocs << inst.value
+
+          when Call
+            # Internal calls - mark args as escaped but not necessarily thread-shared
+            # (we'd need function analysis to determine if it spawns threads)
+            inst.args.each do |arg|
+              escaped_allocs << arg
+            end
+
+          when ExternCall
+            # Check extern names for thread-related functions
+            inst.args.each do |arg|
+              escaped_allocs << arg
+              # If function name suggests threading, mark as thread-shared
+              if inst.extern_name.includes?("spawn") ||
+                 inst.extern_name.includes?("fiber") ||
+                 inst.extern_name.includes?("thread") ||
+                 inst.extern_name.includes?("channel") ||
+                 inst.extern_name.includes?("pthread")
+                thread_shared << arg
+              end
+            end
+
+          when ChannelSend
+            # Data sent to channel is thread-shared
+            thread_shared << inst.value
+
+          when IndirectCall
+            # Indirect calls = conservative escape for all args
+            inst.args.each do |arg|
+              escaped_allocs << arg
+              thread_shared << arg  # Conservative: assume potential threading
+            end
+          end
+        end
+      end
+
+      # Second pass: elide locks on thread-local objects
+      @function.blocks.each do |block|
+        elide_thread_local_locks(block, escaped_allocs, thread_shared, mutex_allocs)
+      end
+
+      # Third pass: redundant lock elision (nested locks on same mutex)
+      @function.blocks.each do |block|
+        elide_redundant_locks(block)
+      end
+
+      # Fourth pass: lock coarsening (merge adjacent critical sections)
+      @function.blocks.each do |block|
+        coarsen_locks(block)
+      end
+
+      @eliminated + @coarsened
+    end
+
+    # Remove locks on objects that are provably thread-local
+    private def elide_thread_local_locks(
+      block : BasicBlock,
+      escaped_allocs : Set(ValueId),
+      thread_shared : Set(ValueId),
+      mutex_allocs : Set(ValueId)
+    )
+      to_remove = [] of Int32
+
+      block.instructions.each_with_index do |inst, idx|
+        case inst
+        when MutexLock, MutexUnlock, MutexTryLock
+          mutex_ptr = case inst
+                      when MutexLock   then inst.mutex_ptr
+                      when MutexUnlock then inst.mutex_ptr
+                      when MutexTryLock then inst.mutex_ptr
+                      else 0_u32
+                      end
+
+          # Can elide if mutex is:
+          # 1. Known allocation that hasn't escaped to thread-shared context
+          # 2. Not protecting thread-shared data
+          if mutex_allocs.includes?(mutex_ptr) && !thread_shared.includes?(mutex_ptr)
+            # Additional check: the mutex shouldn't have escaped at all
+            # for thread-local elision (more conservative)
+            if !escaped_allocs.includes?(mutex_ptr)
+              to_remove << idx
+              @eliminated += 1
+            end
+          end
+        end
+      end
+
+      # Remove in reverse order
+      to_remove.reverse_each do |idx|
+        block.instructions.delete_at(idx)
+      end
+    end
+
+    # Remove nested locks on the same mutex within a single block
+    # Pattern: lock(m); lock(m); unlock(m); unlock(m) → lock(m); unlock(m)
+    # Only the inner lock/unlock pair is redundant
+    private def elide_redundant_locks(block : BasicBlock)
+      # Track lock depth per mutex: depth > 1 means nested
+      lock_depth = Hash(ValueId, Int32).new(0)
+      to_remove = [] of Int32
+
+      block.instructions.each_with_index do |inst, idx|
+        case inst
+        when MutexLock
+          lock_depth[inst.mutex_ptr] += 1
+          if lock_depth[inst.mutex_ptr] > 1
+            # Nested lock - mark for removal
+            to_remove << idx
+            @eliminated += 1
+          end
+
+        when MutexUnlock
+          if lock_depth[inst.mutex_ptr] > 1
+            # Unlock of a nested lock - mark for removal
+            to_remove << idx
+            @eliminated += 1
+          end
+          lock_depth[inst.mutex_ptr] = {lock_depth[inst.mutex_ptr] - 1, 0}.max
+        end
+      end
+
+      # Remove in reverse order
+      to_remove.reverse_each do |idx|
+        block.instructions.delete_at(idx)
+      end
+    end
+
+    # Merge adjacent critical sections on same mutex
+    # Pattern: lock(m); ...; unlock(m); lock(m); ...; unlock(m)
+    #       → lock(m); ...; ...; unlock(m)
+    private def coarsen_locks(block : BasicBlock)
+      # Find unlock/lock pairs on same mutex with only safe operations between
+      i = 0
+      while i < block.instructions.size - 1
+        inst = block.instructions[i]
+
+        if inst.is_a?(MutexUnlock)
+          # Look for immediately following or nearby MutexLock on same mutex
+          next_idx = i + 1
+          can_coarsen = true
+          lock_idx : Int32? = nil
+
+          while next_idx < block.instructions.size && can_coarsen
+            next_inst = block.instructions[next_idx]
+
+            case next_inst
+            when MutexLock
+              if next_inst.mutex_ptr == inst.mutex_ptr
+                lock_idx = next_idx
+                break
+              else
+                # Different mutex - can't coarsen through this
+                can_coarsen = false
+              end
+
+            when Call, IndirectCall, ExternCall, ChannelSend, ChannelReceive
+              # Calls between unlock/lock prevent coarsening (side effects)
+              can_coarsen = false
+
+            when Store
+              # Stores to potentially shared memory prevent coarsening
+              can_coarsen = false
+
+            when MutexUnlock, MutexTryLock
+              # Other mutex ops prevent coarsening
+              can_coarsen = false
+
+            else
+              # Safe instruction - can look further
+              next_idx += 1
+            end
+          end
+
+          if lock_idx && can_coarsen
+            # Remove the unlock at i and lock at lock_idx
+            # Must remove from higher index first
+            block.instructions.delete_at(lock_idx)
+            block.instructions.delete_at(i)
+            @coarsened += 2
+            # Don't increment i - we shifted indices
+            next
+          end
+        end
+
+        i += 1
+      end
+    end
+  end
+
+  # ═══════════════════════════════════════════════════════════════════════════
   # COPY PROPAGATION (light stub)
   # ═══════════════════════════════════════════════════════════════════════════
   #
@@ -507,16 +743,18 @@ module Crystal::MIR
     property dead_eliminated : Int32 = 0
     property constants_folded : Int32 = 0
     property copies_propagated : Int32 = 0
+    property locks_elided : Int32 = 0
 
     def total : Int32
-      rc_eliminated + dead_eliminated + constants_folded + copies_propagated
+      rc_eliminated + dead_eliminated + constants_folded + copies_propagated + locks_elided
     end
 
     def to_s(io : IO)
       io << "Optimizations: "
       io << rc_eliminated << " RC ops, "
       io << dead_eliminated << " dead insts, "
-      io << constants_folded << " constants folded"
+      io << constants_folded << " constants folded, "
+      io << locks_elided << " locks elided"
     end
   end
 
@@ -542,11 +780,15 @@ module Crystal::MIR
       cp = CopyPropagationPass.new(@function)
       @stats.copies_propagated = cp.run
 
-      # Pass 3: Dead code elimination
+      # Pass 3: Lock elision (thread-safety optimization)
+      le = LockElisionPass.new(@function)
+      @stats.locks_elided = le.run
+
+      # Pass 4: Dead code elimination
       dce = DeadCodeEliminationPass.new(@function)
       @stats.dead_eliminated = dce.run
 
-      # Pass 4: DCE again (RC elision may have created more dead code)
+      # Pass 5: DCE again (RC/lock elision may have created more dead code)
       dce2 = DeadCodeEliminationPass.new(@function)
       @stats.dead_eliminated += dce2.run
 
@@ -564,6 +806,10 @@ module Crystal::MIR
 
     def run_constant_folding : Int32
       ConstantFoldingPass.new(@function).run
+    end
+
+    def run_lock_elision : Int32
+      LockElisionPass.new(@function).run
     end
   end
 
