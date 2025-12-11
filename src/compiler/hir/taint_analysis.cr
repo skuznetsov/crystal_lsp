@@ -307,6 +307,15 @@ module Crystal::HIR
         if source.taints != Taint::None
           merge_taints(user.id, source.taints)
         end
+
+        # REVERSE PROPAGATION: If the closure itself is ThreadShared,
+        # all captured values become ThreadShared too (they'll be accessed
+        # from another fiber/thread via the closure)
+        if user.taints.thread_shared?
+          user.captures.each do |cap|
+            merge_taints(cap.value_id, Taint::ThreadShared)
+          end
+        end
       end
     end
 

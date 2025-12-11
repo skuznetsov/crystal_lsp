@@ -335,6 +335,113 @@ describe Crystal::MIR::HIRToMIRLowering do
 
       lowering.stats.closures_lowered.should eq(1)
     end
+
+    it "emits non-atomic RC for normal closures" do
+      hir_mod = Crystal::HIR::Module.new("test")
+      hir_func = hir_mod.create_function("normal_closure", Crystal::HIR::TypeRef.new(200_u32))
+      block = hir_func.get_block(hir_func.entry_block)
+
+      # Create captured variable
+      cap_var = Crystal::HIR::Literal.new(hir_func.next_value_id, Crystal::HIR::TypeRef::INT32, 42_i64)
+      block.add(cap_var)
+
+      # Create closure WITHOUT ThreadShared taint
+      closure_block = hir_func.create_block(0_u32)
+      captures = [Crystal::HIR::CapturedVar.new(cap_var.id, "x", by_reference: false)]
+      closure = Crystal::HIR::MakeClosure.new(
+        hir_func.next_value_id,
+        Crystal::HIR::TypeRef.new(200_u32),
+        closure_block,
+        captures
+      )
+      # NOT marking as ThreadShared
+      block.add(closure)
+      block.terminator = Crystal::HIR::Return.new(closure.id)
+
+      hir_func.get_block(closure_block).terminator = Crystal::HIR::Return.new
+
+      mir_mod = hir_mod.lower_to_mir
+
+      mir_block = mir_mod.functions[0].get_block(mir_mod.functions[0].entry_block)
+      rc_inc = mir_block.instructions.find { |i| i.is_a?(Crystal::MIR::RCIncrement) }
+      rc_inc.should_not be_nil
+      rc_inc.as(Crystal::MIR::RCIncrement).atomic.should be_false
+    end
+
+    it "emits atomic RC for ThreadShared closures" do
+      hir_mod = Crystal::HIR::Module.new("test")
+      hir_func = hir_mod.create_function("shared_closure", Crystal::HIR::TypeRef.new(200_u32))
+      block = hir_func.get_block(hir_func.entry_block)
+
+      # Create captured variable
+      cap_var = Crystal::HIR::Literal.new(hir_func.next_value_id, Crystal::HIR::TypeRef::INT32, 42_i64)
+      block.add(cap_var)
+
+      # Create closure WITH ThreadShared taint (as if passed to spawn)
+      closure_block = hir_func.create_block(0_u32)
+      captures = [Crystal::HIR::CapturedVar.new(cap_var.id, "x", by_reference: false)]
+      closure = Crystal::HIR::MakeClosure.new(
+        hir_func.next_value_id,
+        Crystal::HIR::TypeRef.new(200_u32),
+        closure_block,
+        captures
+      )
+      # Mark as ThreadShared (would be set by taint analysis when passed to spawn)
+      closure.taints = Crystal::HIR::Taint::ThreadShared
+      block.add(closure)
+      block.terminator = Crystal::HIR::Return.new(closure.id)
+
+      hir_func.get_block(closure_block).terminator = Crystal::HIR::Return.new
+
+      mir_mod = hir_mod.lower_to_mir
+
+      mir_block = mir_mod.functions[0].get_block(mir_mod.functions[0].entry_block)
+      rc_inc = mir_block.instructions.find { |i| i.is_a?(Crystal::MIR::RCIncrement) }
+      rc_inc.should_not be_nil
+      rc_inc.as(Crystal::MIR::RCIncrement).atomic.should be_true
+
+      # Also check that Alloc uses AtomicARC strategy
+      alloc = mir_block.instructions.find { |i| i.is_a?(Crystal::MIR::Alloc) }
+      alloc.should_not be_nil
+      alloc.as(Crystal::MIR::Alloc).strategy.should eq(Crystal::MIR::MemoryStrategy::AtomicARC)
+    end
+
+    it "emits AtomicARC for closure with mutable by-ref capture when ThreadShared" do
+      hir_mod = Crystal::HIR::Module.new("test")
+      hir_func = hir_mod.create_function("byref_shared", Crystal::HIR::TypeRef.new(200_u32))
+      block = hir_func.get_block(hir_func.entry_block)
+
+      # Create captured mutable variable
+      cap_var = Crystal::HIR::Allocate.new(hir_func.next_value_id, Crystal::HIR::TypeRef.new(100_u32))
+      block.add(cap_var)
+
+      # Create closure with by-reference capture AND ThreadShared taint
+      closure_block = hir_func.create_block(0_u32)
+      captures = [Crystal::HIR::CapturedVar.new(cap_var.id, "state", by_reference: true)]
+      closure = Crystal::HIR::MakeClosure.new(
+        hir_func.next_value_id,
+        Crystal::HIR::TypeRef.new(200_u32),
+        closure_block,
+        captures
+      )
+      closure.taints = Crystal::HIR::Taint::ThreadShared | Crystal::HIR::Taint::Mutable
+      block.add(closure)
+      block.terminator = Crystal::HIR::Return.new(closure.id)
+
+      hir_func.get_block(closure_block).terminator = Crystal::HIR::Return.new
+
+      mir_mod = hir_mod.lower_to_mir
+
+      mir_block = mir_mod.functions[0].get_block(mir_mod.functions[0].entry_block)
+
+      # Find all Allocs - should have 2: one for captured var, one for closure env
+      allocs = mir_block.instructions.select { |i| i.is_a?(Crystal::MIR::Alloc) }
+      allocs.size.should be >= 1
+
+      # Closure env alloc should use AtomicARC
+      env_alloc = allocs.find { |a| a.as(Crystal::MIR::Alloc).strategy == Crystal::MIR::MemoryStrategy::AtomicARC }
+      env_alloc.should_not be_nil
+    end
   end
 
   # ═══════════════════════════════════════════════════════════════════════════

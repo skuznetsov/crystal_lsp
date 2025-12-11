@@ -313,6 +313,72 @@ describe Crystal::HIR::TaintAnalyzer do
 
       data.taints.thread_shared?.should be_true
     end
+
+    it "propagates ThreadShared from closure to captured values" do
+      mod, func = create_function
+
+      entry = func.get_block(func.entry_block)
+
+      # %0 = allocate Data (captured in closure)
+      data = Crystal::HIR::Allocate.new(func.next_value_id, Crystal::HIR::TypeRef.new(100_u32))
+      entry.add(data)
+
+      closure_block = func.create_block(func.scopes[0].id)
+      func.get_block(closure_block).terminator = Crystal::HIR::Return.new(nil)
+
+      # %1 = make_closure capturing data
+      captures = [Crystal::HIR::CapturedVar.new(data.id, "data", by_reference: false)]
+      closure = Crystal::HIR::MakeClosure.new(func.next_value_id, Crystal::HIR::TypeRef.new(50_u32), closure_block, captures)
+      entry.add(closure)
+
+      # %2 = spawn(closure) - closure becomes ThreadShared
+      spawn_call = Crystal::HIR::Call.new(func.next_value_id, Crystal::HIR::TypeRef::VOID, nil, "spawn", [closure.id])
+      entry.add(spawn_call)
+
+      entry.terminator = Crystal::HIR::Return.new(nil)
+
+      analyzer = Crystal::HIR::TaintAnalyzer.new(func)
+      analyzer.analyze
+
+      # Closure is passed to spawn → ThreadShared
+      closure.taints.thread_shared?.should be_true
+      # Captured data should ALSO become ThreadShared (reverse propagation)
+      data.taints.thread_shared?.should be_true
+    end
+
+    it "propagates ThreadShared to by-reference captures" do
+      mod, func = create_function
+
+      entry = func.get_block(func.entry_block)
+
+      # %0 = allocate MutableState (captured by reference)
+      state = Crystal::HIR::Allocate.new(func.next_value_id, Crystal::HIR::TypeRef.new(100_u32))
+      entry.add(state)
+
+      closure_block = func.create_block(func.scopes[0].id)
+      func.get_block(closure_block).terminator = Crystal::HIR::Return.new(nil)
+
+      # Capture by reference - even more dangerous for thread sharing
+      captures = [Crystal::HIR::CapturedVar.new(state.id, "state", by_reference: true)]
+      closure = Crystal::HIR::MakeClosure.new(func.next_value_id, Crystal::HIR::TypeRef.new(50_u32), closure_block, captures)
+      entry.add(closure)
+
+      # Pass closure through channel (also triggers ThreadShared)
+      channel = Crystal::HIR::Allocate.new(func.next_value_id, Crystal::HIR::TypeRef.new(101_u32))
+      entry.add(channel)
+      send_call = Crystal::HIR::Call.new(func.next_value_id, Crystal::HIR::TypeRef::VOID, channel.id, "send", [closure.id])
+      entry.add(send_call)
+
+      entry.terminator = Crystal::HIR::Return.new(nil)
+
+      analyzer = Crystal::HIR::TaintAnalyzer.new(func)
+      analyzer.analyze
+
+      closure.taints.thread_shared?.should be_true
+      # By-reference capture should be ThreadShared AND Mutable
+      state.taints.thread_shared?.should be_true
+      state.taints.mutable?.should be_true
+    end
   end
 
   describe "mutable taint" do

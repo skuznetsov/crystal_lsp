@@ -643,8 +643,25 @@ module Crystal
       # Closures become:
       # 1. Struct containing captured variables
       # 2. Function pointer to closure body
-      # For now, allocate environment struct
-      env_ptr = builder.alloc(MemoryStrategy::ARC, TypeRef::POINTER)
+
+      # Determine memory strategy based on taints:
+      # - ThreadShared closure → AtomicARC (for thread-safe RC)
+      # - Normal closure → ARC (non-atomic, faster)
+      strategy = if closure.taints.thread_shared?
+                   MemoryStrategy::AtomicARC
+                 else
+                   MemoryStrategy::ARC
+                 end
+
+      # Allocate environment struct
+      env_ptr = builder.alloc(strategy, TypeRef::POINTER)
+
+      # Insert RC increment based on strategy
+      if strategy == MemoryStrategy::AtomicARC
+        builder.rc_inc(env_ptr, atomic: true)
+      else
+        builder.rc_inc(env_ptr)
+      end
 
       # Store captured values in environment
       closure.captures.each_with_index do |cap, idx|
