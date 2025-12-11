@@ -1739,7 +1739,7 @@ module Crystal::HIR
         method_name = String.new(callee_node.member)
 
         # Check if it's a class method call (ClassName.new())
-        # Can be ConstantNode OR IdentifierNode starting with uppercase
+        # Can be ConstantNode, IdentifierNode starting with uppercase, or GenericNode
         class_name_str : String? = nil
         if obj_node.is_a?(CrystalV2::Compiler::Frontend::ConstantNode)
           class_name_str = String.new(obj_node.name)
@@ -1748,6 +1748,33 @@ module Crystal::HIR
           # Check if it's a class name (starts with uppercase and is known class)
           if name[0].uppercase? && @class_info.has_key?(name)
             class_name_str = name
+          end
+        elsif obj_node.is_a?(CrystalV2::Compiler::Frontend::GenericNode)
+          # Generic type like Box(Int32).new()
+          # Extract base type name and create specialized class name
+          base_node = @arena[obj_node.base_type]
+          base_name = case base_node
+                      when CrystalV2::Compiler::Frontend::ConstantNode
+                        String.new(base_node.name)
+                      when CrystalV2::Compiler::Frontend::IdentifierNode
+                        String.new(base_node.name)
+                      else
+                        nil
+                      end
+          if base_name
+            # Create monomorphized class name like Box(Int32)
+            type_args = obj_node.type_args.map do |arg_id|
+              arg_node = @arena[arg_id]
+              case arg_node
+              when CrystalV2::Compiler::Frontend::ConstantNode
+                String.new(arg_node.name)
+              when CrystalV2::Compiler::Frontend::IdentifierNode
+                String.new(arg_node.name)
+              else
+                "Unknown"
+              end
+            end
+            class_name_str = "#{base_name}(#{type_args.join(", ")})"
           end
         end
 
