@@ -340,6 +340,152 @@ describe Crystal::MIR do
   end
 
   # ═══════════════════════════════════════════════════════════════════════════
+  # STRUCTURAL NOALIAS (Enhanced Alias Analysis)
+  # ═══════════════════════════════════════════════════════════════════════════
+
+  describe "Structural NoAlias" do
+    it "elides RC across unrelated stores (different allocation sites)" do
+      # This tests the key improvement: stores to one allocation
+      # should not invalidate pending incs for different allocation
+      mod = Crystal::MIR::Module.new
+      func = mod.create_function("test", Crystal::MIR::TypeRef::VOID)
+      builder = Crystal::MIR::Builder.new(func)
+
+      # Two separate allocations - different allocation sites
+      ptr1 = builder.alloc(Crystal::MIR::MemoryStrategy::ARC, Crystal::MIR::TypeRef.new(100_u32))
+      ptr2 = builder.alloc(Crystal::MIR::MemoryStrategy::ARC, Crystal::MIR::TypeRef.new(101_u32))
+
+      # RC inc on ptr1
+      builder.rc_inc(ptr1)
+
+      # Store to ptr2 - should NOT affect ptr1's pending inc
+      val = builder.const_int(42, Crystal::MIR::TypeRef::INT32)
+      builder.store(ptr2, val)
+
+      # RC dec on ptr1 - should elide with above inc since ptr1 ≠ ptr2
+      builder.rc_dec(ptr1)
+
+      builder.ret(nil)
+
+      pass = Crystal::MIR::RCElisionPass.new(func)
+      eliminated = pass.run
+
+      # Should elide the rc_inc/rc_dec pair for ptr1
+      # because store to ptr2 doesn't alias ptr1
+      eliminated.should eq(2)
+    end
+
+    it "blocks RC elision when value escapes to field" do
+      # When we store a value to a field, it escapes and we can't elide
+      mod = Crystal::MIR::Module.new
+      func = mod.create_function("test", Crystal::MIR::TypeRef::VOID)
+      builder = Crystal::MIR::Builder.new(func)
+
+      # Object with a field
+      obj = builder.alloc(Crystal::MIR::MemoryStrategy::ARC, Crystal::MIR::TypeRef.new(100_u32))
+      # Value we're storing
+      val = builder.alloc(Crystal::MIR::MemoryStrategy::ARC, Crystal::MIR::TypeRef.new(101_u32))
+
+      # RC inc on val
+      builder.rc_inc(val)
+
+      # Store val to obj's field - val escapes!
+      builder.store(obj, val)
+
+      # RC dec on val - should NOT elide because val escaped
+      builder.rc_dec(val)
+
+      builder.ret(nil)
+
+      pass = Crystal::MIR::RCElisionPass.new(func)
+      eliminated = pass.run
+
+      # Should NOT elide because val was stored (escaped)
+      eliminated.should eq(0)
+    end
+
+    it "tracks allocation sites through loads" do
+      # Test that allocation site tracking works through load chains
+      mod = Crystal::MIR::Module.new
+      func = mod.create_function("test", Crystal::MIR::TypeRef::VOID)
+      builder = Crystal::MIR::Builder.new(func)
+
+      # Two separate allocations
+      ptr1 = builder.alloc(Crystal::MIR::MemoryStrategy::ARC, Crystal::MIR::TypeRef.new(100_u32))
+      ptr2 = builder.alloc(Crystal::MIR::MemoryStrategy::ARC, Crystal::MIR::TypeRef.new(101_u32))
+
+      builder.rc_inc(ptr1)
+
+      # Load from ptr2 - creates a derived pointer
+      loaded = builder.load(ptr2, Crystal::MIR::TypeRef::INT32)
+
+      # Use the loaded value (doesn't affect aliasing)
+      _unused = builder.add(loaded, loaded, Crystal::MIR::TypeRef::INT32)
+
+      builder.rc_dec(ptr1)
+
+      builder.ret(nil)
+
+      pass = Crystal::MIR::RCElisionPass.new(func)
+      eliminated = pass.run
+
+      # Should elide - load from ptr2 doesn't affect ptr1
+      eliminated.should eq(2)
+    end
+
+    it "handles self-referential store conservatively" do
+      # Storing to the same allocation we're tracking RC for
+      mod = Crystal::MIR::Module.new
+      func = mod.create_function("test", Crystal::MIR::TypeRef::VOID)
+      builder = Crystal::MIR::Builder.new(func)
+
+      ptr = builder.alloc(Crystal::MIR::MemoryStrategy::ARC, Crystal::MIR::TypeRef.new(100_u32))
+
+      builder.rc_inc(ptr)
+
+      # Store value TO the tracked pointer itself
+      val = builder.const_int(42, Crystal::MIR::TypeRef::INT32)
+      builder.store(ptr, val)
+
+      builder.rc_dec(ptr)
+
+      builder.ret(nil)
+
+      pass = Crystal::MIR::RCElisionPass.new(func)
+      eliminated = pass.run
+
+      # The store IS to ptr, but the stored VALUE (val) is not ptr
+      # So ptr itself hasn't escaped - elision should work
+      eliminated.should eq(2)
+    end
+
+    it "blocks elision when storing tracked value" do
+      # Storing the tracked pointer as a value escapes it
+      mod = Crystal::MIR::Module.new
+      func = mod.create_function("test", Crystal::MIR::TypeRef::VOID)
+      builder = Crystal::MIR::Builder.new(func)
+
+      dest = builder.alloc(Crystal::MIR::MemoryStrategy::Stack, Crystal::MIR::TypeRef::POINTER)
+      ptr = builder.alloc(Crystal::MIR::MemoryStrategy::ARC, Crystal::MIR::TypeRef.new(100_u32))
+
+      builder.rc_inc(ptr)
+
+      # Store ptr to dest - ptr escapes as a VALUE
+      builder.store(dest, ptr)
+
+      builder.rc_dec(ptr)
+
+      builder.ret(nil)
+
+      pass = Crystal::MIR::RCElisionPass.new(func)
+      eliminated = pass.run
+
+      # Should NOT elide - ptr was stored somewhere
+      eliminated.should eq(0)
+    end
+  end
+
+  # ═══════════════════════════════════════════════════════════════════════════
   # EDGE CASES
   # ═══════════════════════════════════════════════════════════════════════════
 

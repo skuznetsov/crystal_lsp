@@ -23,6 +23,18 @@
 #
 #   Legal Moves: Spike / Ladder / Diamond / Collapse
 #   Priority: S ≻ L ≻ D ≻ C
+#
+# Structural NoAlias Analysis:
+#   Instead of computing "may alias", we track "provably no-alias" conditions:
+#
+#   NoAlias(a, b) :=
+#     different_allocation_site(a, b) ∧
+#     ¬escaped_to_field(a) ∧ ¬escaped_to_field(b) ∧
+#     ¬escaped_to_container(a) ∧ ¬escaped_to_container(b)
+#
+#   Key insight: In Crystal ARC patterns, most allocations are used locally,
+#   have single owners, and are distinct types. Track these properties
+#   POSITIVELY (no_alias = true) and INVALIDATE on escape.
 
 require "./mir"
 
@@ -60,14 +72,26 @@ module Crystal::MIR
       pending_incs = {} of ValueId => Array(Int32)  # ptr → instruction indices
       alias_map = {} of ValueId => ValueId          # simple copy-based alias map
       no_alias_ids = Set(ValueId).new
+      # Track which allocation sites have "escaped" (stored to field/container)
+      escaped_allocs = Set(ValueId).new
+      # Track allocation site for each pointer (for structural noalias)
+      alloc_site = {} of ValueId => ValueId  # ptr → original alloc id
 
       instructions = block.instructions
       to_remove = Set(Int32).new
 
-      # Pre-scan for noalias-producing instructions
+      # Pre-scan for noalias-producing instructions and build alloc_site map
       instructions.each do |inst|
-        if inst.responds_to?(:no_alias) && inst.no_alias
-          no_alias_ids << inst.id
+        case inst
+        when Alloc
+          if inst.no_alias
+            no_alias_ids << inst.id
+            alloc_site[inst.id] = inst.id  # Alloc is its own allocation site
+          end
+        when Load
+          if inst.responds_to?(:no_alias) && inst.no_alias
+            no_alias_ids << inst.id
+          end
         end
       end
 
@@ -77,6 +101,8 @@ module Crystal::MIR
           # Track this inc
           ptr = canonical_ptr(inst.ptr, alias_map)
           next unless no_alias_ids.includes?(ptr)
+          # Skip if this allocation has escaped (stored to field/container)
+          next if escaped_allocs.includes?(ptr)
           (pending_incs[ptr] ||= [] of Int32) << idx
           # Add a conservative MustAlias marker for identical ptrs within block
           @must_alias << {ptr, ptr}
@@ -100,19 +126,66 @@ module Crystal::MIR
           # Conservative: clear all pending incs for args
           case inst
           when Call
-            inst.args.each { |arg| pending_incs.delete(arg) }
+            inst.args.each { |arg| pending_incs.delete(canonical_ptr(arg, alias_map)) }
           when IndirectCall
-            inst.args.each { |arg| pending_incs.delete(arg) }
-            pending_incs.delete(inst.callee_ptr)
+            inst.args.each { |arg| pending_incs.delete(canonical_ptr(arg, alias_map)) }
+            pending_incs.delete(canonical_ptr(inst.callee_ptr, alias_map))
           end
 
         when Store
-          # Stores may clobber aliases; be conservative and clear tracked incs
-          pending_incs.clear
+          # Structural NoAlias: Handle stores carefully
+          #
+          # A store affects RC elision safety in two ways:
+          # 1. If we store a noalias value → it escapes, others may hold reference
+          # 2. If we store THROUGH a pointer that could modify tracked object's memory
+          #
+          # Key insight: For different allocation sites, storing TO one allocation
+          # cannot affect the reference count of another allocation. The RC header
+          # is separate from the object content.
+          #
+          # The escape check (storing a value) handles case 1.
+          # For case 2, we only need to worry about stores through unknown pointers
+          # that might alias our tracked allocation's RC header.
+          store_value = canonical_ptr(inst.value, alias_map)
+          store_ptr = canonical_ptr(inst.ptr, alias_map)
+
+          # If we're storing a noalias value to a field, mark it as escaped
+          # This is the KEY safety check: the stored value now lives elsewhere
+          if no_alias_ids.includes?(store_value)
+            escaped_allocs << store_value
+            pending_incs.delete(store_value)
+          end
+
+          # For stores through unknown pointers (not from a known noalias alloc),
+          # we must be conservative - they might modify any memory
+          store_site = alloc_site[store_ptr]?
+          if store_site.nil? || !no_alias_ids.includes?(store_site)
+            # Unknown store target - could alias anything, be conservative
+            # But only clear pending incs for non-noalias or escaped allocations
+            pending_incs.reject! do |pending_ptr, _|
+              pending_site = alloc_site[pending_ptr]?
+              # Keep if pending_ptr is from a known noalias alloc that hasn't escaped
+              !(pending_site && no_alias_ids.includes?(pending_site) && !escaped_allocs.includes?(pending_ptr))
+            end
+          end
+          # If store is to a known noalias allocation, it only affects that allocation's
+          # memory, not any other allocation's RC state - no need to clear anything
 
         when Load
           # Loaded value aliases its source pointer
-          alias_map[inst.id] = canonical_ptr(inst.ptr, alias_map)
+          src = canonical_ptr(inst.ptr, alias_map)
+          alias_map[inst.id] = src
+          # Propagate allocation site through loads
+          if site = alloc_site[src]?
+            alloc_site[inst.id] = site
+          end
+
+        when GetElementPtr
+          # GEP derives from its base - propagate allocation site
+          base = canonical_ptr(inst.base, alias_map)
+          if site = alloc_site[base]?
+            alloc_site[inst.id] = site
+          end
         end
       end
 
@@ -129,6 +202,43 @@ module Crystal::MIR
         current = aliased
       end
       current
+    end
+
+    # Structural NoAlias query: Returns true if ptr_a MAY alias with ptr_b
+    # Returns false (no alias) only when we can PROVE they don't alias
+    private def may_alias?(
+      ptr_a : ValueId,
+      ptr_b : ValueId,
+      alias_map : Hash(ValueId, ValueId),
+      no_alias_ids : Set(ValueId),
+      escaped_allocs : Set(ValueId),
+      alloc_site : Hash(ValueId, ValueId)
+    ) : Bool
+      # Canonicalize both pointers
+      canon_a = canonical_ptr(ptr_a, alias_map)
+      canon_b = canonical_ptr(ptr_b, alias_map)
+
+      # Same pointer = must alias
+      return true if canon_a == canon_b
+
+      # If either has escaped, be conservative
+      return true if escaped_allocs.includes?(canon_a) || escaped_allocs.includes?(canon_b)
+
+      # If both are from different allocation sites AND both are noalias → no alias
+      site_a = alloc_site[canon_a]?
+      site_b = alloc_site[canon_b]?
+
+      if site_a && site_b && site_a != site_b
+        # Different allocation sites
+        if no_alias_ids.includes?(site_a) && no_alias_ids.includes?(site_b)
+          # Both allocations are noalias and from different sites → cannot alias
+          return false
+        end
+      end
+
+      # If one is a known noalias alloc and the other is from unknown source
+      # We can't prove they don't alias, be conservative
+      true
     end
   end
 
