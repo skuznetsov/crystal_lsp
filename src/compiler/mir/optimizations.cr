@@ -72,10 +72,6 @@ module Crystal::MIR
             end
           end
 
-        when Copy
-          # copy %a → %b means %b aliases %a
-          alias_map[inst.id] = canonical_ptr(inst.source, alias_map)
-
         when Call, IndirectCall
           # Calls may consume the reference - don't elide across them
           # Conservative: clear all pending incs for args
