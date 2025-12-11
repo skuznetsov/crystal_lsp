@@ -428,6 +428,7 @@ module Crystal::MIR
     getter alloc_type : TypeRef
     getter size : UInt64  # Static size in bytes (0 = compute from type)
     getter align : UInt32 # Alignment in bytes
+    property no_alias : Bool = false
 
     def initialize(
       id : ValueId,
@@ -519,6 +520,7 @@ module Crystal::MIR
   # Load from memory
   class Load < Value
     getter ptr : ValueId
+    property no_alias : Bool = false
 
     def initialize(id : ValueId, type : TypeRef, @ptr : ValueId)
       super(id, type)
