@@ -52,7 +52,7 @@ describe "Cyclic taint heuristics" do
       end
       Node.new
     CR
-    expect(analyzer.values_with_taint(Crystal::HIR::Taint::Cyclic)).not_to be_empty
+    analyzer.values_with_taint(Crystal::HIR::Taint::Cyclic).should_not be_empty
   end
 
   it "marks optional self reference as cyclic" do
@@ -62,6 +62,6 @@ describe "Cyclic taint heuristics" do
       end
       Node.new
     CR
-    expect(analyzer.values_with_taint(Crystal::HIR::Taint::Cyclic)).not_to be_empty
+    analyzer.values_with_taint(Crystal::HIR::Taint::Cyclic).should_not be_empty
   end
 end
