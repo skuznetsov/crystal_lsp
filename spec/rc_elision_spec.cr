@@ -19,8 +19,8 @@ module RCElisionSpec
       expect(eliminated).to be > 0
       # Ensure instructions were removed
       remaining = func.blocks.first.instructions
-      expect(remaining).not_to include(inc)
-      expect(remaining).not_to include(dec)
+      expect(remaining.includes?(inc)).to be_false
+      expect(remaining.includes?(dec)).to be_false
     end
   end
 end
