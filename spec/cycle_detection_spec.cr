@@ -5,7 +5,7 @@ require "../src/compiler/hir/escape_analysis"
 require "../src/compiler/hir/taint_analysis"
 
 module CycleDetectionSpec
-  private def analyze(source : String)
+  def self.analyze(source : String)
     lexer = CrystalV2::Compiler::Frontend::Lexer.new(source)
     parser = CrystalV2::Compiler::Frontend::Parser.new(lexer)
     result = parser.parse_program
@@ -47,7 +47,7 @@ module CycleDetectionSpec
 
   describe "Cyclic taint heuristics" do
     it "marks Array of self as cyclic" do
-      analyzer = analyze(<<-CR)
+      analyzer = CycleDetectionSpec.analyze(<<-CR)
         class Node
           property children : Array(Node)
         end
@@ -57,7 +57,7 @@ module CycleDetectionSpec
     end
 
     it "marks optional self reference as cyclic" do
-      analyzer = analyze(<<-CR)
+      analyzer = CycleDetectionSpec.analyze(<<-CR)
         class Node
           property next : Node?
         end
