@@ -10,6 +10,7 @@ require "./frontend/parser"
 require "./hir/hir"
 require "./hir/ast_to_hir"
 require "./hir/escape_analysis"
+require "./hir/memory_strategy"
 require "./mir/mir"
 require "./mir/optimizations"
 require "./mir/hir_to_mir"
@@ -136,6 +137,9 @@ module Crystal::V2
       hir_module.functions.each do |func|
         escape = HIR::EscapeAnalyzer.new(func)
         escape.analyze
+        # Memory strategy (includes taint/thread_shared)
+        ms = HIR::MemoryStrategyAssigner.new(func)
+        ms.assign
       end
 
       # Step 4: Lower to MIR

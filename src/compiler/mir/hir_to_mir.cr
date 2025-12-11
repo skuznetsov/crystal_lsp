@@ -390,6 +390,11 @@ module Crystal
     end
 
     private def select_memory_strategy(alloc : HIR::Allocate) : MemoryStrategy
+      # If HIR already carries a chosen strategy, honor it.
+      if strat = alloc.memory_strategy
+        return strat
+      end
+
       # Struct (value type) always uses stack allocation
       if alloc.is_value_type
         return MemoryStrategy::Stack

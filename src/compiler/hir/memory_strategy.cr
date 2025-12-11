@@ -174,6 +174,8 @@ module Crystal::HIR
           if value.is_a?(Allocate)
             strategy = determine_strategy(value)
             @result.add(value.id, strategy)
+            # Propagate strategy to value for downstream lowering
+            value.memory_strategy = strategy if value.responds_to?(:memory_strategy=)
           end
         end
       end
