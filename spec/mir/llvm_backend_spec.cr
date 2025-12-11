@@ -22,12 +22,23 @@ describe Crystal::MIR::LLVMTypeMapper do
       mapper.llvm_type(Crystal::MIR::TypeRef::POINTER).should eq("ptr")
     end
 
-    it "maps struct types to named types" do
+    it "maps struct types to ptr (structs passed by pointer in ABI)" do
       registry = Crystal::MIR::TypeRegistry.new
       struct_type = registry.create_type(Crystal::MIR::TypeKind::Struct, "MyStruct", 16, 8)
       mapper = Crystal::MIR::LLVMTypeMapper.new(registry)
 
-      mapper.llvm_type(struct_type).should eq("%MyStruct")
+      # Structs are passed by pointer in our ABI for consistency
+      mapper.llvm_type(struct_type).should eq("ptr")
+    end
+
+    it "maps struct types to named types for alloca" do
+      registry = Crystal::MIR::TypeRegistry.new
+      struct_type = registry.create_type(Crystal::MIR::TypeKind::Struct, "MyStruct", 16, 8)
+      mapper = Crystal::MIR::LLVMTypeMapper.new(registry)
+
+      # For alloca, we need the actual struct type (via TypeRef)
+      struct_type_ref = Crystal::MIR::TypeRef.new(struct_type.id)
+      mapper.llvm_alloca_type(struct_type_ref).should eq("%MyStruct")
     end
 
     it "maps reference types to ptr" do
