@@ -27,6 +27,7 @@ module Crystal::MIR
     getter eliminated : Int32 = 0
 
     def initialize(@function : Function)
+      @must_alias = Set(Tuple(ValueId, ValueId)).new
     end
 
     def run : Int32
@@ -51,6 +52,8 @@ module Crystal::MIR
         when RCIncrement
           # Track this inc
           (pending_incs[inst.ptr] ||= [] of Int32) << idx
+          # Add a conservative MustAlias marker for identical ptrs within block
+          @must_alias << {inst.ptr, inst.ptr}
 
         when RCDecrement
           # Check if we can elide with a pending inc
