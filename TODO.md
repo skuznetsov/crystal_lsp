@@ -624,18 +624,21 @@ The key insight is: **Don't compete with LLVM, complement it.**
 - [ ] Cross-compilation support
 
 #### 5.3.5 Immediate Validation & Hardening
-- [ ] Lightweight alias/region analysis (MustAlias/NoAlias) to tighten stack/ARC decisions and RC elision.
-- [ ] Alias scaffolding WIP: HIR Value carries `must_alias_with`; RC elision canonicalizes loads. Next: region/NoAlias + integration with stack/ARC.
-- [ ] Refined cycle detection for collections (Array/Hash/Tuple/Union, optionals/self refs) with “may_cycle” vs “acyclic” flags.
+- [x] **Structural NoAlias Analysis** (2025-12-11): Paradigm shift from ultra-conservative to allocation-site based.
+  - Track allocation sites through Load/GEP chains
+  - Track escaped allocations (stored to field/container)
+  - Replace "Store clears ALL" with targeted may_alias query
+  - NoAlias(a,b) := different_alloc_site ∧ ¬escaped(a) ∧ ¬escaped(b)
+  - 5 new tests, 40 total optimization tests passing
+- [ ] Refined cycle detection for collections (Array/Hash/Tuple/Union, optionals/self refs) with "may_cycle" vs "acyclic" flags.
 - [ ] Guarded devirtualization safety specs: ensure fallback when profile misses a type (switch/if coverage).
 - [ ] ABI sanity harness: golden tests for class/struct/union layout (offset/align/payload), union header, vtable layout (if present).
 - [ ] Inline intrinsics RC/taint audit: propagate lifetime/taints through inlined .times/.each/Range; re-evaluate captured vars post-inline.
 - [ ] ThreadShared propagation → atomic RC or GC fallback for closures/objects crossing fiber boundaries; add spec.
 - [ ] Arena/slab frame experiment: prolog/epilog frame for no-escape functions (behind flag).
-- [ ] LTP/WBA-style local optimization loop: define trigger/transport/potential for RC/CFG size; ensure monotone potential decrease with fallback (dual frame) for stalled optimizations.
+- [x] LTP/WBA optimization framework implemented (2025-12-11): 4-component potential, Window/Corridor tracking, legal moves.
 - [x] **Tests green after recent hardening** (2025-12-10): all specs passing (9 pending intentional) after fixing yield/puts/array/lifetime, empty hash inference, struct LLVM type mapping, and stabilizing pipeline.
-- [ ] **Next:** finish alias/region (MustAlias/NoAlias), ABI harness (offset/align/union), RC/taint inline audit, ThreadShared→atomic/GC enforcement.
-- [ ] Region-style alias propagation: track loads/stores/copies to propagate alias (ptr→value), use to safely elide rc_inc/rc_dec across aliases.
+- [ ] **Next:** cycle detection, ABI harness (offset/align/union), RC/taint inline audit, ThreadShared→atomic/GC enforcement.
 
 ---
 
