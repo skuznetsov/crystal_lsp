@@ -323,6 +323,26 @@ module Crystal::MIR
   end
 
   # ═══════════════════════════════════════════════════════════════════════════
+  # COPY PROPAGATION (light stub)
+  # ═══════════════════════════════════════════════════════════════════════════
+  #
+  # Currently a stub to keep stats/pipeline consistent; real implementation
+  # would replace copies with sources using def-use chains.
+  class CopyPropagationPass
+    getter function : Function
+    getter propagated : Int32 = 0
+
+    def initialize(@function : Function)
+    end
+
+    def run : Int32
+      @propagated = 0
+      # TODO: implement use-def based copy propagation when Copy instruction exists
+      0
+    end
+  end
+
+  # ═══════════════════════════════════════════════════════════════════════════
   # OPTIMIZATION PIPELINE
   # ═══════════════════════════════════════════════════════════════════════════
 
