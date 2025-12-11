@@ -270,6 +270,11 @@ module Crystal::MIR
           if variants = type.variants
             variants.each do |v|
               io << "  variant " << v.name << " size=" << v.size << " align=" << v.alignment << "\n"
+              if vf = v.fields
+                vf.each do |f|
+                  io << "    @" << f.name << " : type#" << f.type_ref.id << " @offset " << f.offset << "\n"
+                end
+              end
             end
           end
           if elem = type.element_type
