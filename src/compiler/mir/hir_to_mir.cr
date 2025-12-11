@@ -431,7 +431,8 @@ module Crystal
         MemoryStrategy::AtomicARC
       else
         # Unknown/conservative: GC
-      MemoryStrategy::GC
+        MemoryStrategy::GC
+      end
     end
 
     private def map_hir_strategy(strat : HIR::MemoryStrategy) : MemoryStrategy
