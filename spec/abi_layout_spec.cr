@@ -75,5 +75,18 @@ module AbiLayoutSpec
       expect(union.kind).to eq Crystal::MIR::TypeKind::Union
       expect(snapshot).to contain("variant")
     end
+
+    it "shows class ivar offsets" do
+      mir = build_mir(<<-CR)
+        class Foo
+          def initialize(@a : Int32, @b : Int64); end
+        end
+      CR
+
+      snapshot = mir.type_registry.layout_snapshot
+      expect(snapshot).to contain("Foo")
+      expect(snapshot).to contain("@a")
+      expect(snapshot).to contain("@b")
+    end
   end
 end
