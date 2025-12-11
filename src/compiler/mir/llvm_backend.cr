@@ -127,6 +127,20 @@ module Crystal::MIR
       compute_llvm_type_for_type(type)
     end
 
+    # For alloca - returns actual struct type (not ptr)
+    def llvm_alloca_type(type_ref : TypeRef) : String
+      if type = @type_registry.get(type_ref)
+        if type.kind.struct?
+          # Struct needs actual type for alloca, not ptr
+          "%#{mangle_name(type.name)}"
+        else
+          compute_llvm_type_for_type(type)
+        end
+      else
+        compute_llvm_type(type_ref)
+      end
+    end
+
     private def compute_llvm_type(type_ref : TypeRef) : String
       if type = @type_registry.get(type_ref)
         compute_llvm_type_for_type(type)
@@ -172,7 +186,7 @@ module Crystal::MIR
       when .symbol?                     then "i32"
       when .pointer?                    then "ptr"
       when .reference?                  then "ptr"
-      when .struct?                     then "%#{mangle_name(type.name)}"
+      when .struct?                     then "ptr"  # Struct returns ptr (stack allocated)
       when .union?                      then "%#{mangle_name(type.name)}.union"
       when .proc?                       then "%__crystal_proc"  # { ptr, ptr }
       when .tuple?                      then compute_tuple_type(type)
@@ -471,6 +485,9 @@ module Crystal::MIR
       when Constant
         emit_constant(inst, name)
       when Alloc
+        # For Alloc, store the alloc_type (the actual type being allocated)
+        # so GEP can use proper struct type
+        @value_types[inst.id] = inst.alloc_type
         emit_alloc(inst, name)
       when Free
         emit_free(inst)
@@ -566,7 +583,8 @@ module Crystal::MIR
     private def emit_alloc(inst : Alloc, name : String)
       case inst.strategy
       when MemoryStrategy::Stack
-        type = @type_mapper.llvm_type(inst.alloc_type)
+        # Use llvm_alloca_type to get actual struct type (not ptr)
+        type = @type_mapper.llvm_alloca_type(inst.alloc_type)
         emit "#{name} = alloca #{type}, align #{inst.align}"
       when MemoryStrategy::Slab
         size_class = compute_size_class(inst.size)
@@ -630,8 +648,24 @@ module Crystal::MIR
     end
 
     private def emit_gep(inst : GetElementPtr, name : String)
-      type = @type_mapper.llvm_type(inst.type)
       base = value_ref(inst.base)
+
+      # Check if base is a struct type (from registered types)
+      base_value_type = @value_types[inst.base]?
+      if base_value_type && (mir_type = @module.type_registry.get(base_value_type))
+        if mir_type.kind.struct?
+          # Struct GEP: use actual struct type and field index
+          struct_type = "%#{@type_mapper.mangle_name(mir_type.name)}"
+          # Convert byte offset to field index (assuming 4-byte fields for now)
+          field_idx = inst.indices.first? || 0_u32
+          field_index = field_idx // 4  # Simple heuristic for i32 fields
+          emit "#{name} = getelementptr #{struct_type}, ptr #{base}, i32 0, i32 #{field_index}"
+          return
+        end
+      end
+
+      # Default: pointer arithmetic GEP
+      type = @type_mapper.llvm_type(inst.type)
       indices = inst.indices.map { |i| "i32 #{i}" }.join(", ")
       emit "#{name} = getelementptr #{type}, ptr #{base}, #{indices}"
     end

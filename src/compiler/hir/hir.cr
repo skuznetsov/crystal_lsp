@@ -253,18 +253,21 @@ module Crystal::HIR
   # Memory Operations
   # ─────────────────────────────────────────────────────────────────────────────
 
-  # Heap allocation (new object)
+  # Heap allocation (new object) or stack allocation (struct)
   class Allocate < Value
     getter constructor_args : Array(ValueId)
+    getter is_value_type : Bool  # true for struct (stack), false for class (heap)
 
-    def initialize(id : ValueId, type : TypeRef, @constructor_args : Array(ValueId) = [] of ValueId)
+    def initialize(id : ValueId, type : TypeRef, @constructor_args : Array(ValueId) = [] of ValueId, @is_value_type : Bool = false)
       super(id, type)
       # Default: may escape, will be refined by analysis
-      @lifetime = LifetimeTag::Unknown
+      @lifetime = @is_value_type ? LifetimeTag::StackLocal : LifetimeTag::Unknown
     end
 
     def to_s(io : IO) : Nil
-      io << "%" << @id << " = allocate " << @type.id
+      io << "%" << @id << " = allocate"
+      io << " (struct)" if @is_value_type
+      io << " " << @type.id
       unless @constructor_args.empty?
         io << "("
         @constructor_args.join(io, ", ") { |arg, o| o << "%" << arg }

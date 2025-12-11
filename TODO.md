@@ -623,6 +623,16 @@ The key insight is: **Don't compete with LLVM, complement it.**
 - [ ] Windows (x86_64)
 - [ ] Cross-compilation support
 
+#### 5.3.5 Immediate Validation & Hardening
+- [ ] Lightweight alias/region analysis (MustAlias/NoAlias) to tighten stack/ARC decisions and RC elision.
+- [ ] Refined cycle detection for collections (Array/Hash/Tuple/Union, optionals/self refs) with “may_cycle” vs “acyclic” flags.
+- [ ] Guarded devirtualization safety specs: ensure fallback when profile misses a type (switch/if coverage).
+- [ ] ABI sanity harness: golden tests for class/struct/union layout (offset/align/payload), union header, vtable layout (if present).
+- [ ] Inline intrinsics RC/taint audit: propagate lifetime/taints through inlined .times/.each/Range; re-evaluate captured vars post-inline.
+- [ ] ThreadShared propagation → atomic RC or GC fallback for closures/objects crossing fiber boundaries; add spec.
+- [ ] Arena/slab frame experiment: prolog/epilog frame for no-escape functions (behind flag).
+- [ ] LTP/WBA-style local optimization loop: define trigger/transport/potential for RC/CFG size; ensure monotone potential decrease with fallback (dual frame) for stalled optimizations.
+
 ---
 
 ### 5.4 Alternative Backends (Future)
@@ -702,3 +712,70 @@ The key insight is: **Don't compete with LLVM, complement it.**
 | HIR | Complete | 155 tests (data structures, lowering, escape, taint, memory strategy) |
 | MIR | Complete | 128 tests (SSA form, memory ops, optimizations, PGO passes) |
 | Codegen | 55% | M1-M3.3 done, LLVM backend pending |
+
+---
+
+## 7. Bootstrap Compiler (Self-Hosting Path)
+
+**Status:** Active development on `codegen` branch (2025-12-10)
+
+**Strategy:** Original Crystal compiles v2 compiler. Add features one by one until v2 can compile itself.
+
+### 7.1 Completed Features (28 bootstrap tests passing)
+
+| Feature | Tests | Notes |
+|---------|-------|-------|
+| Basic class with @ivars | ✅ | bootstrap_test1/2.cr |
+| Constructor (initialize, .new) | ✅ | Parameter forwarding |
+| Class variables (@@var) | ✅ | bootstrap_classvar.cr |
+| Union types (Int32 \| Nil) | ✅ | 5 union tests |
+| is_a?, .as() for unions | ✅ | Type checking + extraction |
+| If/else/unless/while | ✅ | Control flow |
+| Binary/unary operations | ✅ | Arithmetic, comparison |
+| puts for debugging | ✅ | Int32, Int64, String |
+| **case/when** | ✅ | All variants (value, range, type, else) |
+| **Blocks + yield** | ✅ | Variant C inline expansion |
+| **.times intrinsic** | ✅ | Mutable vars in blocks |
+| **Range#each** | ✅ | (1..3).each { \|i\| } |
+| **Array literal** | ✅ | [1, 2, 3] stack-allocated |
+| **Array indexing** | ✅ | arr[i] |
+| **Array#each** | ✅ | arr.each { \|x\| } |
+| **String literal** | ✅ | puts "hello" |
+
+### 7.2 In Progress
+
+| Feature | Status | Notes |
+|---------|--------|-------|
+| **struct** | 🔧 WIP | Value type, stack allocation - needs type registry with fields |
+
+**Struct issue details:**
+- HIR: is_struct flag added, ClassInfo tracks is_struct
+- MIR: select_memory_strategy returns Stack for is_value_type
+- **BLOCKED**: Type fields not registered in MIR TypeRegistry
+- **FIX NEEDED**: Register struct/class ivars as Type.fields in MIR
+
+### 7.3 Pending (by priority)
+
+| Feature | Uses in v2 | Priority |
+|---------|------------|----------|
+| struct | 169 | HIGH - WIP |
+| require | 167 | HIGH - multi-file |
+| module | 65 | MEDIUM - namespace |
+| enum | 64 | MEDIUM |
+| abstract | 53 | LOW |
+| inheritance | - | LOW |
+
+### 7.4 Self-Hosting Target Constructs (grep of v2 codebase)
+
+```
+.each:    846  ← ✅ DONE
+class:    491  ← ✅ basic working
+case:     471  ← ✅ DONE
+yield:    182  ← ✅ DONE
+struct:   169  ← 🔧 WIP
+require:  167  ← pending
+macro:    133  ← defer (metaprogramming)
+.map:      90  ← needs blocks
+module:    65  ← pending
+enum:      64  ← pending
+```

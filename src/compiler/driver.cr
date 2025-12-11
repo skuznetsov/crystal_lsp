@@ -154,6 +154,9 @@ module Crystal::V2
       # Register union types from AST conversion
       mir_lowering.register_union_types(hir_converter.union_descriptors)
 
+      # Register class/struct types with their fields
+      mir_lowering.register_class_types(hir_converter.class_info)
+
       mir_module = mir_lowering.lower
       log "  Functions: #{mir_module.functions.size}"
 

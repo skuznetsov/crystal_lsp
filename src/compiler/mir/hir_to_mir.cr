@@ -116,6 +116,36 @@ module Crystal
       end
     end
 
+    # Register class/struct types with their fields
+    # This allows LLVM backend to generate proper struct types
+    def register_class_types(class_infos : Hash(String, Crystal::HIR::ClassInfo))
+      class_infos.each do |class_name, info|
+        # Convert HIR TypeRef to MIR TypeRef
+        mir_type_ref = convert_type(info.type_ref)
+
+        # Determine TypeKind (class = reference type, struct = value type)
+        type_kind = info.is_struct ? TypeKind::Struct : TypeKind::Reference
+
+        # Calculate total size (struct: just ivars, class: 8-byte header + ivars)
+        total_size = info.size.to_u64
+
+        # Create type in registry
+        mir_type = @mir_module.type_registry.create_type_with_id(
+          mir_type_ref.id,
+          type_kind,
+          class_name,
+          total_size,
+          8_u32  # alignment
+        )
+
+        # Add fields (ivars)
+        info.ivars.each do |ivar|
+          field_type = convert_type(ivar.type)
+          mir_type.add_field(ivar.name, field_type, ivar.offset.to_u32)
+        end
+      end
+    end
+
     # Create function stub with params and return type (no body)
     private def create_function_stub(hir_func : HIR::Function)
       mir_func = @mir_module.create_function(
@@ -360,6 +390,11 @@ module Crystal
     end
 
     private def select_memory_strategy(alloc : HIR::Allocate) : MemoryStrategy
+      # Struct (value type) always uses stack allocation
+      if alloc.is_value_type
+        return MemoryStrategy::Stack
+      end
+
       # Determine strategy based on lifetime and taints
       lifetime = alloc.lifetime
       taints = alloc.taints

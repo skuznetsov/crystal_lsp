@@ -166,8 +166,8 @@ module Crystal::HIR
   # Class variable info
   record ClassVarInfo, name : String, type : TypeRef, initial_value : Int64?
 
-  # Class type info
-  record ClassInfo, name : String, type_ref : TypeRef, ivars : Array(IVarInfo), class_vars : Array(ClassVarInfo), size : Int32
+  # Class type info (is_struct=true for value types)
+  record ClassInfo, name : String, type_ref : TypeRef, ivars : Array(IVarInfo), class_vars : Array(ClassVarInfo), size : Int32, is_struct : Bool = false
 
   # Main AST to HIR converter
   class AstToHir
@@ -217,11 +217,13 @@ module Crystal::HIR
     # Register a class type and its methods (pass 1)
     def register_class(node : CrystalV2::Compiler::Frontend::ClassNode)
       class_name = String.new(node.name)
+      is_struct = node.is_struct == true
 
       # Collect instance variables and their types
       ivars = [] of IVarInfo
       class_vars = [] of ClassVarInfo
-      offset = 8  # Start at 8 to leave room for type_id header
+      # Struct has no type_id header (value type), class starts at 8 for header
+      offset = is_struct ? 0 : 8
 
       # Also find initialize to get constructor parameters
       init_params = [] of {String, TypeRef}
@@ -284,9 +286,10 @@ module Crystal::HIR
         end
       end
 
-      # Create class type
-      type_ref = @module.intern_type(TypeDescriptor.new(TypeKind::Class, class_name))
-      @class_info[class_name] = ClassInfo.new(class_name, type_ref, ivars, class_vars, offset)
+      # Create class/struct type
+      type_kind = is_struct ? TypeKind::Struct : TypeKind::Class
+      type_ref = @module.intern_type(TypeDescriptor.new(type_kind, class_name))
+      @class_info[class_name] = ClassInfo.new(class_name, type_ref, ivars, class_vars, offset, is_struct)
 
       # Store initialize params for allocator generation
       @init_params ||= {} of String => Array({String, TypeRef})
@@ -336,8 +339,8 @@ module Crystal::HIR
         param_ids << hir_param.id
       end
 
-      # Allocate object (memory strategy determined by escape analysis)
-      alloc = Allocate.new(ctx.next_id, class_info.type_ref, [] of ValueId)
+      # Allocate object (struct=stack, class=heap determined by escape analysis)
+      alloc = Allocate.new(ctx.next_id, class_info.type_ref, [] of ValueId, class_info.is_struct)
       ctx.emit(alloc)
       ctx.register_type(alloc.id, class_info.type_ref)
 

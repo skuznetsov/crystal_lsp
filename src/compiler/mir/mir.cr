@@ -520,8 +520,9 @@ module Crystal::MIR
   class GetElementPtr < Value
     getter base : ValueId
     getter indices : Array(UInt32)  # Field indices / array offsets
+    getter base_type : TypeRef  # Type of base pointer (for struct GEP)
 
-    def initialize(id : ValueId, type : TypeRef, @base : ValueId, @indices : Array(UInt32))
+    def initialize(id : ValueId, type : TypeRef, @base : ValueId, @indices : Array(UInt32), @base_type : TypeRef = TypeRef::POINTER)
       super(id, type)
     end
 
@@ -1447,8 +1448,8 @@ module Crystal::MIR
       emit(GlobalStore.new(@function.next_value_id, type, global_name, value))
     end
 
-    def gep(base : ValueId, indices : Array(UInt32), result_type : TypeRef) : ValueId
-      emit(GetElementPtr.new(@function.next_value_id, result_type, base, indices))
+    def gep(base : ValueId, indices : Array(UInt32), result_type : TypeRef, base_type : TypeRef = TypeRef::POINTER) : ValueId
+      emit(GetElementPtr.new(@function.next_value_id, result_type, base, indices, base_type))
     end
 
     # Arithmetic
