@@ -1624,15 +1624,9 @@ module Crystal::HIR
                [] of ValueId
              end
 
-      # For standalone yield (not inlined), just return the first argument
-      # This is a fallback - properly inlined yields don't reach here
-      if args.size > 0
-        args.first
-      else
-        nil_lit = Literal.new(ctx.next_id, TypeRef::NIL, nil)
-        ctx.emit(nil_lit)
-        nil_lit.id
-      end
+      y = Yield.new(ctx.next_id, TypeRef::VOID, args)
+      ctx.emit(y)
+      y.id
     end
 
     private def lower_break(ctx : LoweringContext, node : CrystalV2::Compiler::Frontend::BreakNode) : ValueId
