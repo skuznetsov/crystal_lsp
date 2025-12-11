@@ -56,3 +56,25 @@ void __crystal_v2_print_int64(int64_t value) {
 void __crystal_v2_print_int64_ln(int64_t value) {
     printf("%lld\n", value);
 }
+
+// String functions
+char* __crystal_v2_string_concat(const char* a, const char* b) {
+    size_t len_a = strlen(a);
+    size_t len_b = strlen(b);
+    char* result = (char*)malloc(len_a + len_b + 1);
+    memcpy(result, a, len_a);
+    memcpy(result + len_a, b, len_b + 1);
+    return result;
+}
+
+char* __crystal_v2_int_to_string(int32_t value) {
+    char* result = (char*)malloc(32);  // Enough for any int32
+    snprintf(result, 32, "%d", value);
+    return result;
+}
+
+char* __crystal_v2_int64_to_string(int64_t value) {
+    char* result = (char*)malloc(32);  // Enough for any int64
+    snprintf(result, 32, "%lld", value);
+    return result;
+}

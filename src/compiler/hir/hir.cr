@@ -213,6 +213,23 @@ module Crystal::HIR
     end
   end
 
+  # String interpolation "Hello #{x}!"
+  # Parts can be string literals or expressions to convert
+  class StringInterpolation < Value
+    getter parts : Array(ValueId)
+
+    def initialize(id : ValueId, @parts : Array(ValueId))
+      super(id, TypeRef::STRING)
+      @lifetime = LifetimeTag::HeapEscape  # Interpolated strings need heap allocation
+    end
+
+    def to_s(io : IO) : Nil
+      io << "%" << @id << " = string_interpolation ["
+      @parts.join(io, ", ") { |p, o| o << "%" << p }
+      io << "]"
+    end
+  end
+
   alias LiteralValue = Int64 | UInt64 | Float64 | String | Bool | Char | Nil
 
   # ─────────────────────────────────────────────────────────────────────────────

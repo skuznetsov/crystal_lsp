@@ -421,6 +421,12 @@ module Crystal::MIR
       emit_raw "declare void @__crystal_v2_print_int64_ln(i64)\n"
       emit_raw "\n"
 
+      # String functions
+      emit_raw "declare ptr @__crystal_v2_string_concat(ptr, ptr)\n"
+      emit_raw "declare ptr @__crystal_v2_int_to_string(i32)\n"
+      emit_raw "declare ptr @__crystal_v2_int64_to_string(i64)\n"
+      emit_raw "\n"
+
       # Thread Sanitizer (TSan) instrumentation
       if @emit_tsan
         emit_raw "; Thread Sanitizer runtime functions\n"
@@ -582,6 +588,8 @@ module Crystal::MIR
         emit_array_size(inst, name)
       when ArrayGet
         emit_array_get(inst, name)
+      when StringInterpolation
+        emit_string_interpolation(inst, name)
       # Synchronization primitives
       when AtomicLoad
         emit_atomic_load(inst, name)
@@ -1123,6 +1131,52 @@ module Crystal::MIR
       # Get element from data array (second field)
       emit "%#{base_name}.elem_ptr = getelementptr { i32, [0 x #{element_type}] }, ptr #{array_ptr}, i32 0, i32 1, i32 #{index}"
       emit "#{name} = load #{element_type}, ptr %#{base_name}.elem_ptr"
+    end
+
+    private def emit_string_interpolation(inst : StringInterpolation, name : String)
+      base_name = name.lstrip('%')
+
+      # Convert each part to string ptr, handling type conversion
+      string_parts = [] of String
+      inst.parts.each_with_index do |part_id, idx|
+        part_ref = value_ref(part_id)
+        part_type = @value_types[part_id]?
+
+        # Check if part is already a string (ptr type from string literal)
+        if part_type == TypeRef::STRING || part_type == TypeRef::POINTER || part_type.nil?
+          string_parts << part_ref
+        elsif part_type == TypeRef::INT32 || part_type == TypeRef::UINT32 || part_type == TypeRef::CHAR
+          # Convert int32 to string
+          emit "%#{base_name}.conv#{idx} = call ptr @__crystal_v2_int_to_string(i32 #{part_ref})"
+          string_parts << "%#{base_name}.conv#{idx}"
+        elsif part_type == TypeRef::INT64 || part_type == TypeRef::UINT64
+          # Convert int64 to string
+          emit "%#{base_name}.conv#{idx} = call ptr @__crystal_v2_int64_to_string(i64 #{part_ref})"
+          string_parts << "%#{base_name}.conv#{idx}"
+        else
+          # Fallback - treat as ptr
+          string_parts << part_ref
+        end
+      end
+
+      if string_parts.size == 1
+        # Single part - just use it directly
+        emit "#{name} = bitcast ptr #{string_parts[0]} to ptr"
+      elsif string_parts.size == 2
+        # Two parts - call __crystal_v2_string_concat
+        emit "#{name} = call ptr @__crystal_v2_string_concat(ptr #{string_parts[0]}, ptr #{string_parts[1]})"
+      else
+        # Multiple parts - chain concatenation
+        emit "%#{base_name}.tmp0 = bitcast ptr #{string_parts[0]} to ptr"
+        (1...string_parts.size).each do |i|
+          prev = i == 1 ? "%#{base_name}.tmp0" : "%#{base_name}.tmp#{i-1}"
+          if i == string_parts.size - 1
+            emit "#{name} = call ptr @__crystal_v2_string_concat(ptr #{prev}, ptr #{string_parts[i]})"
+          else
+            emit "%#{base_name}.tmp#{i} = call ptr @__crystal_v2_string_concat(ptr #{prev}, ptr #{string_parts[i]})"
+          end
+        end
+      end
     end
 
     # ═══════════════════════════════════════════════════════════════════════════

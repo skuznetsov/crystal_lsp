@@ -1251,6 +1251,25 @@ module Crystal::MIR
     end
   end
 
+  # String interpolation "Hello #{x}!"
+  class StringInterpolation < Value
+    getter parts : Array(ValueId)
+
+    def initialize(id : ValueId, @parts : Array(ValueId))
+      super(id, TypeRef::STRING)
+    end
+
+    def operands : Array(ValueId)
+      @parts
+    end
+
+    def to_s(io : IO) : Nil
+      io << "%" << @id << " = string_interpolation ["
+      @parts.join(io, ", ") { |p, o| o << "%" << p }
+      io << "]"
+    end
+  end
+
   # ═══════════════════════════════════════════════════════════════════════════
   # GLOBAL VARIABLE ACCESS
   # ═══════════════════════════════════════════════════════════════════════════

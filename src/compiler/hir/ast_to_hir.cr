@@ -655,6 +655,9 @@ module Crystal::HIR
       when CrystalV2::Compiler::Frontend::StringNode
         lower_string(ctx, node)
 
+      when CrystalV2::Compiler::Frontend::StringInterpolationNode
+        lower_string_interpolation(ctx, node)
+
       when CrystalV2::Compiler::Frontend::CharNode
         lower_char(ctx, node)
 
@@ -854,6 +857,45 @@ module Crystal::HIR
       lit = Literal.new(ctx.next_id, TypeRef::STRING, str)
       ctx.emit(lit)
       lit.id
+    end
+
+    private def lower_string_interpolation(ctx : LoweringContext, node : CrystalV2::Compiler::Frontend::StringInterpolationNode) : ValueId
+      # String interpolation "Hello #{x}!" becomes:
+      # 1. Build string by concatenating parts
+      # 2. For each Text piece: create string literal
+      # 3. For each Expression piece: convert to string and concat
+      #
+      # For now, implement simple version that calls __crystal_v2_string_interpolate
+      # with all parts as arguments
+
+      parts = [] of ValueId
+
+      node.pieces.each do |piece|
+        case piece.kind
+        when .text?
+          # Simple text piece - create string literal
+          text = piece.text || ""
+          lit = Literal.new(ctx.next_id, TypeRef::STRING, text)
+          ctx.emit(lit)
+          parts << lit.id
+        when .expression?
+          # Expression piece - lower the expression
+          if expr_id = piece.expr
+            val_id = lower_expr(ctx, expr_id)
+            parts << val_id
+          end
+        end
+      end
+
+      # For simple case with one text part, return it directly
+      if parts.size == 1 && node.pieces.first?.try(&.kind.text?)
+        return parts.first
+      end
+
+      # Create StringInterpolation HIR instruction
+      interp = StringInterpolation.new(ctx.next_id, parts)
+      ctx.emit(interp)
+      interp.id
     end
 
     private def lower_char(ctx : LoweringContext, node : CrystalV2::Compiler::Frontend::CharNode) : ValueId

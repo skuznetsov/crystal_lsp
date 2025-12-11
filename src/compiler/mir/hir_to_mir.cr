@@ -309,6 +309,8 @@ module Crystal
                  lower_array_literal(hir_value)
                when HIR::ArraySize
                  lower_array_size(hir_value)
+               when HIR::StringInterpolation
+                 lower_string_interpolation(hir_value)
                else
                  raise "Unsupported HIR value: #{hir_value.class}"
                end
@@ -869,6 +871,20 @@ module Crystal
         array_val
       )
       builder.emit(mir_size)
+    end
+
+    private def lower_string_interpolation(interp : HIR::StringInterpolation) : ValueId
+      builder = @builder.not_nil!
+
+      # Convert part values
+      parts = interp.parts.map { |p| get_value(p) }
+
+      # Create MIR StringInterpolation instruction
+      mir_interp = MIR::StringInterpolation.new(
+        builder.next_id,
+        parts
+      )
+      builder.emit(mir_interp)
     end
 
     # ─────────────────────────────────────────────────────────────────────────
