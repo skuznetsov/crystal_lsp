@@ -401,6 +401,8 @@ module Crystal::MIR
       # ARC runtime
       emit_raw "declare void @__crystal_v2_rc_inc(ptr)\n"
       emit_raw "declare void @__crystal_v2_rc_dec(ptr, ptr)\n"
+      emit_raw "declare void @__crystal_v2_rc_inc_atomic(ptr)\n"
+      emit_raw "declare void @__crystal_v2_rc_dec_atomic(ptr, ptr)\n"
       emit_raw "\n"
 
       # Slab allocator
@@ -623,13 +625,21 @@ module Crystal::MIR
 
     private def emit_rc_inc(inst : RCIncrement)
       ptr = value_ref(inst.ptr)
-      emit "call void @__crystal_v2_rc_inc(ptr #{ptr})"
+      if inst.atomic
+        emit "call void @__crystal_v2_rc_inc_atomic(ptr #{ptr})"
+      else
+        emit "call void @__crystal_v2_rc_inc(ptr #{ptr})"
+      end
     end
 
     private def emit_rc_dec(inst : RCDecrement)
       ptr = value_ref(inst.ptr)
       destructor = "null"  # TODO: function pointer for destructor
-      emit "call void @__crystal_v2_rc_dec(ptr #{ptr}, ptr #{destructor})"
+      if inst.atomic
+        emit "call void @__crystal_v2_rc_dec_atomic(ptr #{ptr}, ptr #{destructor})"
+      else
+        emit "call void @__crystal_v2_rc_dec(ptr #{ptr}, ptr #{destructor})"
+      end
     end
 
     private def emit_load(inst : Load, name : String)

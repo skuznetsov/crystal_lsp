@@ -109,6 +109,13 @@ module Crystal::Runtime
     new_count
   end
 
+  # Atomic increment for thread-shared values.
+  # Currently delegates to rc_inc; replace with real atomic ops in production.
+  @[AlwaysInline]
+  def self.rc_inc_atomic(ptr : Pointer(Void)) : RefCount
+    rc_inc(ptr)
+  end
+
   # Decrement reference count.
   # If count reaches zero, calls destructor (if provided) and frees memory.
   # Returns true if object was freed.
@@ -161,6 +168,13 @@ module Crystal::Runtime
     false
   end
 
+  # Atomic decrement for thread-shared values.
+  # Currently delegates to rc_dec; replace with real atomic ops in production.
+  @[AlwaysInline]
+  def self.rc_dec_atomic(ptr : Pointer(Void), destructor : Pointer(Void)) : Bool
+    rc_dec(ptr, destructor)
+  end
+
   # Allocate an ARC-managed object.
   # Returns pointer to object data (after header).
   def self.arc_alloc(size : UInt64, type_id : UInt32) : Pointer(Void)
@@ -209,9 +223,19 @@ fun __crystal_v2_rc_inc(ptr : Void*) : Void
   Crystal::Runtime.rc_inc(ptr)
 end
 
+# Atomic increment
+fun __crystal_v2_rc_inc_atomic(ptr : Void*) : Void
+  Crystal::Runtime.rc_inc_atomic(ptr)
+end
+
 # Decrement reference count, optionally call destructor
 fun __crystal_v2_rc_dec(ptr : Void*, destructor : Void*) : Void
   Crystal::Runtime.rc_dec(ptr, destructor)
+end
+
+# Atomic decrement
+fun __crystal_v2_rc_dec_atomic(ptr : Void*, destructor : Void*) : Void
+  Crystal::Runtime.rc_dec_atomic(ptr, destructor)
 end
 
 # Allocate ARC-managed object
