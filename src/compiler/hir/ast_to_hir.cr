@@ -1817,20 +1817,6 @@ module Crystal::HIR
       # Use full method name if resolved, otherwise use simple name
       actual_method_name = full_method_name || method_name
 
-      # Handle intrinsic functions
-      if actual_method_name == "puts" && args.size == 1
-        arg_type = ctx.type_of(args[0])
-        if arg_type.id == TypeRef::STRING.id
-          # puts(string) -> __crystal_v2_puts
-          actual_method_name = "__crystal_v2_puts"
-        elsif arg_type.id == TypeRef::INT64.id
-          actual_method_name = "__crystal_v2_print_int64_ln"
-        else
-          actual_method_name = "__crystal_v2_print_int32_ln"
-        end
-        return_type = TypeRef::VOID
-      end
-
       call = Call.new(ctx.next_id, return_type, receiver_id, actual_method_name, args, block_id)
       ctx.emit(call)
       call.id
@@ -2690,11 +2676,13 @@ module Crystal::HIR
                        TypeRef::INT32
                      end
 
-      # Create ArrayLiteral instruction with elements
-      array_lit = ArrayLiteral.new(ctx.next_id, element_type, element_ids)
-      ctx.emit(array_lit)
-      ctx.register_type(array_lit.id, element_type)  # Store element type for .each
-      array_lit.id
+      # Allocate array container (lifetime unknown until analysis)
+      array_type = ctx.get_type("Array")
+      alloc = Allocate.new(ctx.next_id, array_type, element_ids)
+      alloc.lifetime = LifetimeTag::Unknown
+      ctx.emit(alloc)
+      ctx.register_type(alloc.id, element_type)  # element type for .each
+      alloc.id
     end
 
     private def lower_hash_literal(ctx : LoweringContext, node : CrystalV2::Compiler::Frontend::HashLiteralNode) : ValueId
