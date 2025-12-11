@@ -105,9 +105,6 @@ module Crystal::MIR
       target_func = @mir_module.get_function(target_name)
       return unless target_func
 
-      # If the call is not virtual or has no receiver type info, keep the slow path.
-      return unless call.receiver_type?
-
       # Create the devirtualized code structure:
       #
       # Original block (up to call):
