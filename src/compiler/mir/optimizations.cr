@@ -45,15 +45,24 @@ module Crystal::MIR
       # Track rc_inc operations by pointer
       pending_incs = {} of ValueId => Array(Int32)  # ptr → instruction indices
       alias_map = {} of ValueId => ValueId          # simple copy-based alias map
+      no_alias_ids = Set(ValueId).new
 
       instructions = block.instructions
       to_remove = Set(Int32).new
+
+      # Pre-scan for noalias-producing instructions
+      instructions.each do |inst|
+        if inst.responds_to?(:no_alias) && inst.no_alias
+          no_alias_ids << inst.id
+        end
+      end
 
       instructions.each_with_index do |inst, idx|
         case inst
         when RCIncrement
           # Track this inc
           ptr = canonical_ptr(inst.ptr, alias_map)
+          next unless no_alias_ids.includes?(ptr)
           (pending_incs[ptr] ||= [] of Int32) << idx
           # Add a conservative MustAlias marker for identical ptrs within block
           @must_alias << {ptr, ptr}
@@ -61,6 +70,7 @@ module Crystal::MIR
         when RCDecrement
           # Check if we can elide with a pending inc
           ptr = canonical_ptr(inst.ptr, alias_map)
+          next unless no_alias_ids.includes?(ptr)
           if incs = pending_incs[ptr]?
             if !incs.empty?
               # Found a matching inc - elide both
