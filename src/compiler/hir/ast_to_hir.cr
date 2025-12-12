@@ -797,10 +797,12 @@ module Crystal::HIR
       ctx = LoweringContext.new(func, @module, @arena)
 
       # Add implicit 'self' parameter first
-      # Type is class/struct type; LLVM backend converts to ptr for ABI
-      self_param = func.add_param("self", class_info.type_ref)
+      # For primitive types (Int32, Bool, etc.), use primitive TypeRef so LLVM passes by value
+      # For structs with fields, use class_info.type_ref (passed as pointer)
+      self_type = primitive_self_type(class_name) || class_info.type_ref
+      self_param = func.add_param("self", self_type)
       ctx.register_local("self", self_param.id)
-      ctx.register_type(self_param.id, class_info.type_ref)
+      ctx.register_type(self_param.id, self_type)
 
       # Lower explicit parameters
       # Track @param style for auto-assignment
@@ -852,6 +854,28 @@ module Crystal::HIR
 
       # Restore previous method context
       @current_method = old_method
+    end
+
+    # Get primitive TypeRef for self if class_name is a primitive type
+    # Returns nil if class_name is not a primitive (use class_info.type_ref instead)
+    private def primitive_self_type(class_name : String) : TypeRef?
+      case class_name
+      when "Bool"    then TypeRef::BOOL
+      when "Int8"    then TypeRef::INT8
+      when "Int16"   then TypeRef::INT16
+      when "Int32"   then TypeRef::INT32
+      when "Int64"   then TypeRef::INT64
+      when "Int128"  then TypeRef::INT128
+      when "UInt8"   then TypeRef::UINT8
+      when "UInt16"  then TypeRef::UINT16
+      when "UInt32"  then TypeRef::UINT32
+      when "UInt64"  then TypeRef::UINT64
+      when "UInt128" then TypeRef::UINT128
+      when "Float32" then TypeRef::FLOAT32
+      when "Float64" then TypeRef::FLOAT64
+      when "Char"    then TypeRef::CHAR
+      else                nil
+      end
     end
 
     # Helper to get type size in bytes
