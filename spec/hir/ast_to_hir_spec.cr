@@ -455,14 +455,20 @@ describe Crystal::HIR::AstToHir do
       func = lower_function("def foo; arr[0]; end")
       text = hir_text(func)
 
-      text.should contain("index_get")
+      # For unknown types, index access becomes a method call to []
+      # (IndexGet is only used for known array types and pointer types)
+      text.should contain("call")
+      text.should contain("[]")
     end
 
     it "lowers index assignment" do
       func = lower_function("def foo; arr[0] = 1; end")
       text = hir_text(func)
 
-      text.should contain("index_set")
+      # For unknown types, index assignment becomes a method call to []=
+      # (IndexSet is only used for known array types)
+      text.should contain("call")
+      text.should contain("[]=")
     end
 
     it "lowers chained calls" do

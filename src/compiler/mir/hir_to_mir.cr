@@ -358,7 +358,10 @@ module Crystal
         # Char as i32
         builder.const_int(v.ord.to_i64, TypeRef::CHAR)
       when Nil
-        builder.const_nil
+        # Preserve original type for nil pointers
+        const_type = convert_type(lit.type)
+        const_type = TypeRef::NIL if const_type == TypeRef::VOID
+        builder.const_nil_typed(const_type)
       else
         builder.const_nil
       end
@@ -395,8 +398,15 @@ module Crystal
       # Determine memory strategy based on escape/taint analysis
       strategy = select_memory_strategy(alloc)
 
-      # Create allocation
-      ptr = builder.alloc(strategy, convert_type(alloc.type))
+      # Get the MIR type reference and look up size from type registry
+      mir_type_ref = convert_type(alloc.type)
+      alloc_size = 8_u64  # Default pointer size
+      if mir_type = @mir_module.type_registry.get(mir_type_ref)
+        alloc_size = mir_type.size
+      end
+
+      # Create allocation with proper size
+      ptr = builder.alloc(strategy, mir_type_ref, alloc_size)
 
       # Insert RC increment for ARC allocations
       case strategy

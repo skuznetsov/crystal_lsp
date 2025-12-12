@@ -93,6 +93,13 @@ module Crystal::HIR
       value
     end
 
+    # Add instruction to a specific block (used for inserting before phi nodes)
+    def emit_to_block(block_id : BlockId, value : Value) : Value
+      get_block(block_id).add(value)
+      @value_types[value.id] = value.type
+      value
+    end
+
     # Look up the type of a value by ID
     def type_of(id : ValueId) : TypeRef
       @value_types[id]? || TypeRef::VOID
@@ -184,6 +191,7 @@ module Crystal::HIR
     name : String,                                    # Base name like "Box"
     type_params : Array(String),                      # ["T"] or ["K", "V"]
     node : CrystalV2::Compiler::Frontend::ClassNode,  # Original AST node for re-lowering
+    arena : CrystalV2::Compiler::Frontend::ArenaLike, # Arena for looking up body ExprIds
     is_struct : Bool = false
 
   # Main AST to HIR converter
@@ -233,6 +241,9 @@ module Crystal::HIR
     # Type aliases (alias_name -> target_type_name)
     @type_aliases : Hash(String, String)
 
+    # Track which allocators have been generated (to avoid duplicates for reopened classes)
+    @generated_allocators : Set(String)
+
     def initialize(@arena, module_name : String = "main")
       @module = Module.new(module_name)
       @function_types = {} of String => TypeRef
@@ -248,6 +259,7 @@ module Crystal::HIR
       @type_param_map = {} of String => String
       @macro_defs = {} of String => CrystalV2::Compiler::Frontend::MacroDefNode
       @type_aliases = {} of String => String
+      @generated_allocators = Set(String).new
     end
 
     # Get class info by name
@@ -540,9 +552,11 @@ module Crystal::HIR
         end
       end
 
-      # Add implicit return
+      # Add implicit return if not already terminated
+      # BUT don't add return after raise (which sets Unreachable terminator)
       block = ctx.get_block(ctx.current_block)
-      if block.terminator.is_a?(Unreachable)
+      block_has_raise = block.instructions.any? { |inst| inst.is_a?(Raise) }
+      if block.terminator.is_a?(Unreachable) && !block_has_raise
         block.terminator = Return.new(last_value)
       end
     end
@@ -558,7 +572,7 @@ module Crystal::HIR
           # Store as generic template - don't create ClassInfo yet
           param_names = type_params.map { |p| String.new(p) }
           @generic_templates[class_name] = GenericClassTemplate.new(
-            class_name, param_names, node, is_struct
+            class_name, param_names, node, @arena, is_struct
           )
           return  # Don't register as concrete class
         end
@@ -714,6 +728,10 @@ module Crystal::HIR
         @type_param_map[param] = type_args[i]
       end
 
+      # Switch to the template's arena for AST node lookup
+      old_arena = @arena
+      @arena = template.arena
+
       # Register the specialized class using the template's AST node
       # The type_ref_for_name calls will now substitute T => Int32
       register_concrete_class(template.node, specialized_name, template.is_struct)
@@ -739,7 +757,8 @@ module Crystal::HIR
         @current_class = old_class
       end
 
-      # Restore old type param map
+      # Restore arena and type param map
+      @arena = old_arena
       @type_param_map = old_map
       @monomorphized.add(specialized_name)
     end
@@ -775,6 +794,16 @@ module Crystal::HIR
     # Generate allocator: ClassName.new(...) -> allocates and returns instance
     private def generate_allocator(class_name : String, class_info : ClassInfo)
       func_name = "#{class_name}.new"
+
+      # Skip Pointer types - they're primitive types with no allocator
+      if class_name.starts_with?("Pointer(") || class_name.starts_with?("Pointer_")
+        return
+      end
+
+      # Skip if allocator already generated (for reopened classes)
+      return if @generated_allocators.includes?(class_name)
+      @generated_allocators.add(class_name)
+
       # Return type is the class type (semantically)
       # LLVM backend converts to ptr for ABI
       func = @module.create_function(func_name, class_info.type_ref)
@@ -800,15 +829,24 @@ module Crystal::HIR
       # Initialize instance variables to zero/default
       class_info.ivars.each do |ivar|
         # Check if this is a union type by looking up the type descriptor
-        if type_desc = @module.get_type_descriptor(ivar.type)
-          if type_desc.kind == TypeKind::Union
-            # Union types will be initialized in initialize()
-            # We can't create a simple zero literal for unions
-            next
-          end
+        type_desc = @module.get_type_descriptor(ivar.type)
+        if type_desc && type_desc.kind == TypeKind::Union
+          # Union types will be initialized in initialize()
+          # We can't create a simple zero literal for unions
+          next
         end
 
-        default_val = Literal.new(ctx.next_id, ivar.type, 0_i64)
+        # Use nil for pointer types, 0 for others
+        # Note: Pointer types might be registered as Class kind but with name starting with "Pointer"
+        is_pointer = ivar.type == TypeRef::POINTER ||
+                     (type_desc && type_desc.kind == TypeKind::Pointer) ||
+                     (type_desc && type_desc.name.starts_with?("Pointer"))
+        default_value : (Int64 | Nil) = if is_pointer
+                                          nil
+                                        else
+                                          0_i64
+                                        end
+        default_val = Literal.new(ctx.next_id, ivar.type, default_value)
         ctx.emit(default_val)
         ivar_store = FieldSet.new(ctx.next_id, TypeRef::VOID, alloc.id, ivar.name, default_val.id, ivar.offset)
         ctx.emit(ivar_store)
@@ -833,6 +871,11 @@ module Crystal::HIR
     private def lower_method(class_name : String, class_info : ClassInfo, node : CrystalV2::Compiler::Frontend::DefNode)
       method_name = String.new(node.name)
       base_name = "#{class_name}##{method_name}"
+
+      # Skip methods for Pointer types - they're all primitives handled at call sites
+      if class_name.starts_with?("Pointer(") || class_name.starts_with?("Pointer_")
+        return
+      end
 
       # Track current method for super calls
       old_method = @current_method
@@ -907,8 +950,10 @@ module Crystal::HIR
       end
 
       # Add implicit return if not already terminated
+      # BUT don't add return after raise (which sets Unreachable terminator)
       block = ctx.get_block(ctx.current_block)
-      if block.terminator.is_a?(Unreachable)
+      block_has_raise = block.instructions.any? { |inst| inst.is_a?(Raise) }
+      if block.terminator.is_a?(Unreachable) && !block_has_raise
         block.terminator = Return.new(last_value)
       end
 
@@ -1050,6 +1095,49 @@ module Crystal::HIR
       return base_name if param_types.empty?
       type_suffix = param_types.map { |t| type_name_for_mangling(t) }.join(",")
       "#{base_name}:#{type_suffix}"
+    end
+
+    # Resolve method call for a receiver type and method name
+    # Returns the properly mangled method name that should be used in the Call node
+    private def resolve_method_call(ctx : LoweringContext, receiver_id : ValueId, method_name : String, arg_types : Array(TypeRef)) : String
+      receiver_type = ctx.type_of(receiver_id)
+      type_desc = @module.get_type_descriptor(receiver_type)
+
+      # Get the class name from the type descriptor
+      class_name = type_desc.try(&.name) || ""
+
+      # Build the base method name as ClassName#method
+      base_method_name = class_name.empty? ? method_name : "#{class_name}##{method_name}"
+
+      # Mangle with argument types
+      mangled_name = mangle_function_name(base_method_name, arg_types)
+
+      # Try to find the function in the module
+      # First try the mangled name, then try variations
+      return_type = get_function_return_type(mangled_name)
+      if return_type != TypeRef::VOID
+        return mangled_name
+      end
+
+      # Try base method name without mangling
+      return_type = get_function_return_type(base_method_name)
+      if return_type != TypeRef::VOID
+        return base_method_name
+      end
+
+      # Search through all class info for matching method
+      @class_info.each do |klass_name, info|
+        test_base = "#{klass_name}##{method_name}"
+        test_mangled = mangle_function_name(test_base, arg_types)
+        if @function_types[test_mangled]?
+          return test_mangled
+        elsif @function_types[test_base]?
+          return test_base
+        end
+      end
+
+      # Fallback to mangled name
+      mangled_name
     end
 
     # Helper to get type size in bytes
@@ -1289,8 +1377,10 @@ module Crystal::HIR
       end
 
       # Add implicit return if not already terminated
+      # BUT don't add return after raise (which sets Unreachable terminator)
       block = ctx.get_block(ctx.current_block)
-      if block.terminator.is_a?(Unreachable)
+      block_has_raise = block.instructions.any? { |inst| inst.is_a?(Raise) }
+      if block.terminator.is_a?(Unreachable) && !block_has_raise
         block.terminator = Return.new(last_value)
       end
 
@@ -1832,17 +1922,19 @@ module Crystal::HIR
                     "Unknown"
                   end
 
-      # Extract type arguments
+      # Extract type arguments, substituting any type parameters
       type_args = node.type_args.map do |arg_id|
         arg_node = @arena[arg_id]
-        case arg_node
-        when CrystalV2::Compiler::Frontend::ConstantNode
-          String.new(arg_node.name)
-        when CrystalV2::Compiler::Frontend::IdentifierNode
-          String.new(arg_node.name)
-        else
-          "Unknown"
-        end
+        arg_name = case arg_node
+                   when CrystalV2::Compiler::Frontend::ConstantNode
+                     String.new(arg_node.name)
+                   when CrystalV2::Compiler::Frontend::IdentifierNode
+                     String.new(arg_node.name)
+                   else
+                     "Unknown"
+                   end
+        # Substitute type parameter if applicable
+        @type_param_map[arg_name]? || arg_name
       end
 
       # Create specialized class name like Array(Int32)
@@ -1958,7 +2050,16 @@ module Crystal::HIR
              return call.id
            end
 
-      result_type = op.not? ? TypeRef::BOOL : TypeRef::VOID
+      # Determine result type based on operation
+      result_type = case op
+                    when UnaryOp::Not
+                      TypeRef::BOOL
+                    when UnaryOp::Neg, UnaryOp::BitNot
+                      # Negation and bitwise not preserve operand type
+                      ctx.type_of(operand_id)
+                    else
+                      ctx.type_of(operand_id)
+                    end
       unop = UnaryOperation.new(ctx.next_id, result_type, op, operand_id)
       ctx.emit(unop)
       unop.id
@@ -1989,8 +2090,11 @@ module Crystal::HIR
       then_locals = ctx.save_locals
       ctx.pop_scope
 
-      # Only jump if block isn't already terminated (e.g., by return)
-      then_flows_to_merge = ctx.get_block(ctx.current_block).terminator.is_a?(Unreachable)
+      # Only jump if block isn't already terminated (e.g., by return or raise)
+      # Check if block ends with a noreturn instruction (Raise, Return, etc.)
+      then_block_data = ctx.get_block(ctx.current_block)
+      then_has_noreturn = then_block_data.instructions.any? { |inst| inst.is_a?(Raise) || inst.is_a?(Return) }
+      then_flows_to_merge = then_block_data.terminator.is_a?(Unreachable) && !then_has_noreturn
       if then_flows_to_merge
         ctx.terminate(Jump.new(merge_block))
       end
@@ -2019,7 +2123,10 @@ module Crystal::HIR
       else_locals = ctx.save_locals
       ctx.pop_scope
 
-      else_flows_to_merge = ctx.get_block(ctx.current_block).terminator.is_a?(Unreachable)
+      # Check if else block has noreturn instruction
+      else_block_data = ctx.get_block(ctx.current_block)
+      else_has_noreturn = else_block_data.instructions.any? { |inst| inst.is_a?(Raise) || inst.is_a?(Return) }
+      else_flows_to_merge = else_block_data.terminator.is_a?(Unreachable) && !else_has_noreturn
       if else_flows_to_merge
         ctx.terminate(Jump.new(merge_block))
       end
@@ -2031,7 +2138,56 @@ module Crystal::HIR
       if then_flows_to_merge || else_flows_to_merge
         if then_flows_to_merge && else_flows_to_merge
           # Both branches flow to merge - need phi (unless void type)
-          phi_type = ctx.type_of(then_value)
+          then_type = ctx.type_of(then_value)
+          else_type = ctx.type_of(else_value)
+
+          # Determine phi type - handle type unification
+          phi_type : TypeRef
+          actual_then_value = then_value
+          actual_else_value = else_value
+
+          if then_type == else_type
+            # Same types - simple case
+            phi_type = then_type
+          elsif else_type == TypeRef::NIL && then_type != TypeRef::VOID
+            # Else is nil, then is concrete type -> create union T | Nil
+            phi_type = create_union_type_for_nullable(then_type)
+
+            # Wrap then value in union (variant 0 = concrete type)
+            then_wrap = UnionWrap.new(ctx.next_id, phi_type, then_value, 0)
+            ctx.emit_to_block(then_exit_block, then_wrap)
+            ctx.register_type(then_wrap.id, phi_type)
+            actual_then_value = then_wrap.id
+
+            # Wrap nil in union (variant 1 = Nil)
+            nil_lit = Literal.new(ctx.next_id, TypeRef::NIL, nil)
+            ctx.emit_to_block(else_exit_block, nil_lit)
+            nil_wrap = UnionWrap.new(ctx.next_id, phi_type, nil_lit.id, 1)
+            ctx.emit_to_block(else_exit_block, nil_wrap)
+            ctx.register_type(nil_wrap.id, phi_type)
+            actual_else_value = nil_wrap.id
+          elsif then_type == TypeRef::NIL && else_type != TypeRef::VOID
+            # Then is nil, else is concrete type -> create union T | Nil
+            phi_type = create_union_type_for_nullable(else_type)
+
+            # Wrap nil in union (variant 1 = Nil)
+            nil_lit = Literal.new(ctx.next_id, TypeRef::NIL, nil)
+            ctx.emit_to_block(then_exit_block, nil_lit)
+            nil_wrap = UnionWrap.new(ctx.next_id, phi_type, nil_lit.id, 1)
+            ctx.emit_to_block(then_exit_block, nil_wrap)
+            ctx.register_type(nil_wrap.id, phi_type)
+            actual_then_value = nil_wrap.id
+
+            # Wrap else value in union (variant 0 = concrete type)
+            else_wrap = UnionWrap.new(ctx.next_id, phi_type, else_value, 0)
+            ctx.emit_to_block(else_exit_block, else_wrap)
+            ctx.register_type(else_wrap.id, phi_type)
+            actual_else_value = else_wrap.id
+          else
+            # Different non-nil types - just use then_type for now
+            # TODO: proper type unification
+            phi_type = then_type
+          end
 
           # Don't create phi for void types - LLVM doesn't allow phi void
           if phi_type == TypeRef::VOID || phi_type == TypeRef::NIL
@@ -2044,8 +2200,8 @@ module Crystal::HIR
           end
 
           phi = Phi.new(ctx.next_id, phi_type)
-          phi.add_incoming(then_exit_block, then_value)
-          phi.add_incoming(else_exit_block, else_value)
+          phi.add_incoming(then_exit_block, actual_then_value)
+          phi.add_incoming(else_exit_block, actual_else_value)
           ctx.emit(phi)
 
           # Merge locals from both branches
@@ -2786,11 +2942,26 @@ module Crystal::HIR
       when CrystalV2::Compiler::Frontend::IdentifierNode
         # Simple function call: foo()
         method_name = String.new(callee_node.name)
-        receiver_id = nil
 
         # Check if this is a macro call - expand inline instead of generating Call
         if macro_def = @macro_defs[method_name]?
           return expand_macro(ctx, macro_def, node.args)
+        end
+
+        # If inside a class, check if this is a method call on self
+        if current = @current_class
+          # Check if method exists in current class
+          class_method_name = "#{current}##{method_name}"
+          has_class_method = @function_types.keys.any? { |k| k.starts_with?(class_method_name) }
+          if has_class_method
+            # This is a method call on self - set receiver to self
+            receiver_id = emit_self(ctx)
+            full_method_name = class_method_name
+          else
+            receiver_id = nil
+          end
+        else
+          receiver_id = nil
         end
 
       when CrystalV2::Compiler::Frontend::MemberAccessNode
@@ -2832,17 +3003,19 @@ module Crystal::HIR
                         nil
                       end
           if base_name
-            # Extract type argument names
+            # Extract type argument names, substituting type parameters
             type_args = obj_node.type_args.map do |arg_id|
               arg_node = @arena[arg_id]
-              case arg_node
-              when CrystalV2::Compiler::Frontend::ConstantNode
-                String.new(arg_node.name)
-              when CrystalV2::Compiler::Frontend::IdentifierNode
-                String.new(arg_node.name)
-              else
-                "Unknown"
-              end
+              arg_name = case arg_node
+                         when CrystalV2::Compiler::Frontend::ConstantNode
+                           String.new(arg_node.name)
+                         when CrystalV2::Compiler::Frontend::IdentifierNode
+                           String.new(arg_node.name)
+                         else
+                           "Unknown"
+                         end
+              # Substitute type parameter if applicable
+              @type_param_map[arg_name]? || arg_name
             end
 
             # Create specialized class name like Box(Int32)
@@ -2974,7 +3147,16 @@ module Crystal::HIR
       arg_types = args.map { |arg_id| ctx.type_of(arg_id) }
 
       # Compute mangled name based on base name + argument types
-      base_method_name = full_method_name || method_name
+      # If no explicit receiver and we're inside a class, try class#method first
+      base_method_name = if full_method_name
+                           full_method_name
+                         elsif receiver_id.nil? && (current = @current_class)
+                           # Bare method call inside a class - could be self.method()
+                           # Try current class first
+                           "#{current}##{method_name}"
+                         else
+                           method_name
+                         end
       mangled_method_name = mangle_function_name(base_method_name, arg_types)
 
       # Try to infer return type using mangled name first, fallback to base name
@@ -3796,20 +3978,32 @@ module Crystal::HIR
 
       # Check if this is pointer indexing (ptr[i])
       object_type = ctx.type_of(object_id)
-      if object_type == TypeRef::POINTER && index_ids.size == 1
+      type_desc = @module.get_type_descriptor(object_type)
+      is_pointer_type = object_type == TypeRef::POINTER ||
+                        (type_desc && type_desc.kind == TypeKind::Pointer) ||
+                        (type_desc && type_desc.name.starts_with?("Pointer"))
+      if is_pointer_type && index_ids.size == 1
         # Pointer indexing: ptr[i] -> PointerLoad with index
-        # TODO: track actual element type from Pointer(T)
-        deref_type = TypeRef::INT32
+        # Extract element type from Pointer(T) if available
+        deref_type = if type_desc && type_desc.name.starts_with?("Pointer(")
+                       elem_name = type_desc.name[8, type_desc.name.size - 9]
+                       type_ref_for_name(elem_name)
+                     else
+                       TypeRef::INT32
+                     end
         load_node = PointerLoad.new(ctx.next_id, deref_type, object_id, index_ids.first)
         ctx.emit(load_node)
         ctx.register_type(load_node.id, deref_type)
         return load_node.id
       end
 
-      # For single index, use IndexGet directly
-      # For multiple indexes, chain them or use as tuple
-      if index_ids.size == 1
-        # Get element type from array if tracked
+      # Check if this is an array type (which uses IndexGet for element access)
+      is_array_type = type_desc && (type_desc.kind == TypeKind::Array ||
+                                     type_desc.name.starts_with?("Array") ||
+                                     type_desc.name.starts_with?("StaticArray"))
+
+      if is_array_type && index_ids.size == 1
+        # Array element access: arr[i] -> IndexGet
         element_type = object_type
         if element_type == TypeRef::VOID
           element_type = TypeRef::INT32  # Default for untyped arrays
@@ -3820,9 +4014,14 @@ module Crystal::HIR
         ctx.register_type(index_get.id, element_type)
         index_get.id
       else
-        # Multi-dimensional: emit as call to []
-        call = Call.new(ctx.next_id, TypeRef::VOID, object_id, "[]", index_ids)
+        # Everything else (classes like Hash, custom types): call [] method
+        # Resolve the method name properly (with class name and mangling)
+        arg_types = index_ids.map { |idx| ctx.type_of(idx) }
+        method_name = resolve_method_call(ctx, object_id, "[]", arg_types)
+        return_type = get_function_return_type(method_name)
+        call = Call.new(ctx.next_id, return_type, object_id, method_name, index_ids)
         ctx.emit(call)
+        ctx.register_type(call.id, return_type)
         call.id
       end
     end
@@ -3846,6 +4045,39 @@ module Crystal::HIR
         resolved_name = @type_aliases[name]? || name
         if resolved_name[0].uppercase? && @class_info.has_key?(resolved_name)
           class_name_str = resolved_name
+        end
+      elsif obj_node.is_a?(CrystalV2::Compiler::Frontend::GenericNode)
+        # Generic type like Hash(Int32, Int32).new
+        base_node = @arena[obj_node.base_type]
+        base_name = case base_node
+                    when CrystalV2::Compiler::Frontend::ConstantNode
+                      String.new(base_node.name)
+                    when CrystalV2::Compiler::Frontend::IdentifierNode
+                      String.new(base_node.name)
+                    else
+                      nil
+                    end
+        if base_name
+          # Extract type argument names, substituting type parameters
+          type_args = obj_node.type_args.map do |arg_id|
+            arg_node = @arena[arg_id]
+            arg_name = case arg_node
+                       when CrystalV2::Compiler::Frontend::ConstantNode
+                         String.new(arg_node.name)
+                       when CrystalV2::Compiler::Frontend::IdentifierNode
+                         String.new(arg_node.name)
+                       else
+                         "Unknown"
+                       end
+            # Substitute type parameter if applicable
+            @type_param_map[arg_name]? || arg_name
+          end
+          # Create specialized class name like Hash(Int32, Int32)
+          class_name_str = "#{base_name}(#{type_args.join(", ")})"
+          # Monomorphize generic class if not already done
+          if !@monomorphized.includes?(class_name_str)
+            monomorphize_generic_class(base_name, type_args, class_name_str)
+          end
         end
       end
 
@@ -3990,20 +4222,36 @@ module Crystal::HIR
 
         # Check if this is pointer indexing (ptr[i] = val)
         object_type = ctx.type_of(object_id)
-        if object_type == TypeRef::POINTER && index_ids.size == 1
+        type_desc = @module.get_type_descriptor(object_type)
+        is_pointer_type = object_type == TypeRef::POINTER ||
+                          (type_desc && type_desc.kind == TypeKind::Pointer) ||
+                          (type_desc && type_desc.name.starts_with?("Pointer"))
+
+        if is_pointer_type && index_ids.size == 1
           # Pointer store: ptr[i] = val -> PointerStore with index
           store_node = PointerStore.new(ctx.next_id, TypeRef::VOID, object_id, value_id, index_ids.first)
           ctx.emit(store_node)
           return store_node.id
         end
 
-        if index_ids.size == 1
+        # Check if this is an array type (which uses IndexSet for element assignment)
+        is_array_type = type_desc && (type_desc.kind == TypeKind::Array ||
+                                       type_desc.name.starts_with?("Array") ||
+                                       type_desc.name.starts_with?("StaticArray"))
+
+        if is_array_type && index_ids.size == 1
+          # Array element assignment: arr[i] = val -> IndexSet
           index_set = IndexSet.new(ctx.next_id, TypeRef::VOID, object_id, index_ids.first, value_id)
           ctx.emit(index_set)
           index_set.id
         else
-          # Multi-index assignment: emit as call to []=
-          call = Call.new(ctx.next_id, TypeRef::VOID, object_id, "[]=", index_ids + [value_id])
+          # Everything else (classes like Hash, custom types): call []= method
+          # Resolve the method name properly (with class name and mangling)
+          all_args = index_ids + [value_id]
+          arg_types = all_args.map { |arg| ctx.type_of(arg) }
+          method_name = resolve_method_call(ctx, object_id, "[]=", arg_types)
+          return_type = get_function_return_type(method_name)
+          call = Call.new(ctx.next_id, return_type, object_id, method_name, all_args)
           ctx.emit(call)
           call.id
         end
@@ -4298,6 +4546,14 @@ module Crystal::HIR
         return create_union_type(name)
       end
 
+      # Handle nullable type suffix: "T?" means "T | Nil"
+      if name.ends_with?("?")
+        base_name = name[0, name.size - 1]
+        # Substitute type parameter if present
+        base_name = @type_param_map[base_name]? || base_name
+        return create_union_type("#{base_name} | Nil")
+      end
+
       # Check if this is a type parameter that should be substituted
       if substitution = @type_param_map[name]?
         return type_ref_for_name(substitution)
@@ -4306,6 +4562,27 @@ module Crystal::HIR
       # Check if this is a type alias
       if alias_target = @type_aliases[name]?
         return type_ref_for_name(alias_target)
+      end
+
+      # Handle generic types like Pointer(K), Array(T) - substitute type parameters
+      if name.includes?("(") && name.includes?(")")
+        # Parse generic: "Pointer(K)" -> base="Pointer", params=["K"]
+        paren_start = name.index('(').not_nil!
+        base_name = name[0, paren_start]
+        params_str = name[paren_start + 1, name.size - paren_start - 2]
+
+        # Substitute each type parameter
+        substituted_params = params_str.split(",").map do |param|
+          param = param.strip
+          @type_param_map[param]? || param
+        end
+
+        # Reconstruct with substituted params
+        substituted_name = "#{base_name}(#{substituted_params.join(", ")})"
+        if substituted_name != name
+          # Types changed - recurse with new name
+          return type_ref_for_name(substituted_name)
+        end
       end
 
       case name
@@ -4385,6 +4662,48 @@ module Crystal::HIR
       @union_descriptors[mir_union_type_ref] = descriptor
 
       type_ref
+    end
+
+    # Create a nullable union type (T | Nil) from a concrete type
+    private def create_union_type_for_nullable(concrete_type : TypeRef) : TypeRef
+      # Get the name of the concrete type
+      type_name = get_type_name_from_ref(concrete_type)
+      union_name = "#{type_name} | Nil"
+
+      # Create the union type via the string-based method
+      create_union_type(union_name)
+    end
+
+    # Get the type name from a TypeRef
+    private def get_type_name_from_ref(type_ref : TypeRef) : String
+      case type_ref
+      when TypeRef::VOID    then "Void"
+      when TypeRef::BOOL    then "Bool"
+      when TypeRef::INT8    then "Int8"
+      when TypeRef::INT16   then "Int16"
+      when TypeRef::INT32   then "Int32"
+      when TypeRef::INT64   then "Int64"
+      when TypeRef::INT128  then "Int128"
+      when TypeRef::UINT8   then "UInt8"
+      when TypeRef::UINT16  then "UInt16"
+      when TypeRef::UINT32  then "UInt32"
+      when TypeRef::UINT64  then "UInt64"
+      when TypeRef::UINT128 then "UInt128"
+      when TypeRef::FLOAT32 then "Float32"
+      when TypeRef::FLOAT64 then "Float64"
+      when TypeRef::CHAR    then "Char"
+      when TypeRef::STRING  then "String"
+      when TypeRef::NIL     then "Nil"
+      when TypeRef::SYMBOL  then "Symbol"
+      when TypeRef::POINTER then "Pointer"
+      else
+        # Look up in type registry
+        if desc = @module.get_type_descriptor(type_ref)
+          desc.name
+        else
+          "Unknown"
+        end
+      end
     end
 
     # Convert HIR::TypeRef to MIR::TypeRef with proper ID mapping

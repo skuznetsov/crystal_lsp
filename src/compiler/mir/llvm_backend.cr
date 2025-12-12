@@ -352,12 +352,20 @@ module Crystal::MIR
       # Emit proc type
       emit_raw "%__crystal_proc = type { ptr, ptr }\n"
 
+      # Track emitted types to avoid duplicates
+      emitted_types = Set(String).new
+
       # Emit struct types from registry
       @module.type_registry.types.each do |type|
-        if type.kind.struct? && !type.kind.primitive?
+        type_name = @type_mapper.mangle_name(type.name)
+        next if emitted_types.includes?(type_name)
+
+        if (type.kind.struct? || type.kind.reference?) && !type.kind.primitive?
           emit_struct_type(type)
+          emitted_types << type_name
         elsif type.kind.union?
           emit_union_type(type)
+          emitted_types << "#{type_name}.union"
         end
       end
 
@@ -371,9 +379,9 @@ module Crystal::MIR
       if fields && !fields.empty?
         field_types = [] of String
 
-        # Add type_id as first field for class types (not value types)
-        unless type.is_value_type?
-          field_types << "i32"  # type_id
+        # Add vtable ptr as first field for class types (not value types)
+        if type.kind.reference?
+          field_types << "ptr"  # vtable pointer for classes
         end
 
         fields.each do |field|
@@ -382,7 +390,12 @@ module Crystal::MIR
 
         emit_raw "%#{name} = type { #{field_types.join(", ")} }\n"
       else
-        emit_raw "%#{name} = type {}\n"
+        # For types without fields, still emit proper layout for classes
+        if type.kind.reference?
+          emit_raw "%#{name} = type { ptr }\n"  # just vtable
+        else
+          emit_raw "%#{name} = type {}\n"
+        end
       end
     end
 
@@ -853,6 +866,9 @@ module Crystal::MIR
       # Using add 0, X is a common LLVM idiom for materializing constants
       if type == "void" || value == "null"
         emit "; #{name} = #{type} #{value}"
+      elsif type == "ptr"
+        # Pointer types can't use add - use inttoptr
+        emit "#{name} = inttoptr i64 0 to ptr"
       else
         emit "#{name} = add #{type} 0, #{value}"
       end
@@ -1014,31 +1030,88 @@ module Crystal::MIR
     private def emit_gep(inst : GetElementPtr, name : String)
       base = value_ref(inst.base)
 
-      # Check if base is a struct type (from registered types)
+      # Check if base is a struct or reference type (from registered types)
       base_value_type = @value_types[inst.base]?
       if base_value_type && (mir_type = @module.type_registry.get(base_value_type))
-        if mir_type.kind.struct?
-          # Struct GEP: use actual struct type and field index
+        if mir_type.kind.struct? || mir_type.kind.reference?
+          # Struct/Class GEP: use actual struct type and field index
           struct_type = "%#{@type_mapper.mangle_name(mir_type.name)}"
-          # Convert byte offset to field index (assuming 4-byte fields for now)
-          field_idx = inst.indices.first? || 0_u32
-          field_index = field_idx // 4  # Simple heuristic for i32 fields
+          # Convert byte offset to field index
+          # We need to lookup the field layout of the struct to get correct index
+          field_byte_offset = inst.indices.first? || 0_u32
+          field_index = compute_field_index(mir_type, field_byte_offset)
           emit "#{name} = getelementptr #{struct_type}, ptr #{base}, i32 0, i32 #{field_index}"
           return
         end
       end
 
-      # Default: pointer arithmetic GEP
-      type = @type_mapper.llvm_type(inst.type)
-      indices = inst.indices.map { |i| "i32 #{i}" }.join(", ")
-      emit "#{name} = getelementptr #{type}, ptr #{base}, #{indices}"
+      # Default: byte-level pointer arithmetic GEP
+      byte_offset = inst.indices.first? || 0_u32
+      emit "#{name} = getelementptr i8, ptr #{base}, i32 #{byte_offset}"
+    end
+
+    # Compute field index from byte offset by examining the type's field layout
+    private def compute_field_index(mir_type : Type, byte_offset : UInt32) : Int32
+      # Class layout: vtable ptr (8 bytes) + fields
+      # Struct layout: just fields
+      base_offset = mir_type.kind.reference? ? 8_u32 : 0_u32
+
+      if byte_offset < base_offset
+        return 0  # Accessing vtable or pre-field area
+      end
+
+      fields = mir_type.fields
+      return 0 unless fields
+
+      adjusted_offset = byte_offset - base_offset
+      current_offset = 0_u32
+      field_idx = 0
+
+      fields.each_with_index do |field, idx|
+        if current_offset >= adjusted_offset
+          return mir_type.kind.reference? ? idx + 1 : idx  # +1 for vtable in classes
+        end
+        # Compute field size (8 for pointers, 4 for i32, etc.)
+        field_size = compute_type_size(field.type_ref)
+        current_offset += field_size
+        field_idx = idx
+      end
+
+      # If we're at or past the offset, return the last matching field index
+      # +1 for classes to account for vtable at index 0
+      mir_type.kind.reference? ? field_idx + 1 : field_idx
+    end
+
+    private def compute_type_size(type_ref : TypeRef) : UInt32
+      case type_ref
+      when TypeRef::BOOL then 1_u32
+      when TypeRef::INT8, TypeRef::UINT8 then 1_u32
+      when TypeRef::INT16, TypeRef::UINT16 then 2_u32
+      when TypeRef::INT32, TypeRef::UINT32, TypeRef::FLOAT32 then 4_u32
+      when TypeRef::INT64, TypeRef::UINT64, TypeRef::FLOAT64 then 8_u32
+      when TypeRef::INT128, TypeRef::UINT128 then 16_u32
+      else
+        # Pointers, references, etc. - 8 bytes on 64-bit
+        8_u32
+      end
     end
 
     private def emit_gep_dynamic(inst : GetElementPtrDynamic, name : String)
       base = value_ref(inst.base)
       index = value_ref(inst.index)
       element_type = @type_mapper.llvm_type(inst.element_type)
-      emit "#{name} = getelementptr #{element_type}, ptr #{base}, i64 #{index}"
+
+      # Check if index needs to be converted to i64 for GEP
+      index_type = @value_types[inst.index]? || TypeRef::INT32
+      index_type_str = @type_mapper.llvm_type(index_type)
+      if index_type_str == "i64"
+        emit "#{name} = getelementptr #{element_type}, ptr #{base}, i64 #{index}"
+      else
+        # Convert i32 to i64 with sign extension
+        ext_name = "#{name}.idx64"
+        emit "#{ext_name} = sext #{index_type_str} #{index} to i64"
+        emit "#{name} = getelementptr #{element_type}, ptr #{base}, i64 #{ext_name}"
+      end
     end
 
     private def emit_binary_op(inst : BinaryOp, name : String)
@@ -1224,12 +1297,14 @@ module Crystal::MIR
       emit "%#{base_name}.type_id_ptr = getelementptr #{union_type}, ptr %#{base_name}.ptr, i32 0, i32 0"
       emit "store i32 #{inst.variant_type_id}, ptr %#{base_name}.type_id_ptr"
 
-      # 3. Store value in payload
-      val = value_ref(inst.value)
+      # 3. Store value in payload (skip for void/nil types - they have no payload)
       val_type = @value_types[inst.value]? || TypeRef::POINTER
       val_type_str = @type_mapper.llvm_type(val_type)
-      emit "%#{base_name}.payload_ptr = getelementptr #{union_type}, ptr %#{base_name}.ptr, i32 0, i32 1"
-      emit "store #{val_type_str} #{val}, ptr %#{base_name}.payload_ptr"
+      unless val_type_str == "void"
+        val = value_ref(inst.value)
+        emit "%#{base_name}.payload_ptr = getelementptr #{union_type}, ptr %#{base_name}.ptr, i32 0, i32 1"
+        emit "store #{val_type_str} #{val}, ptr %#{base_name}.payload_ptr"
+      end
 
       # 4. Load the completed union value from stack
       emit "#{name} = load #{union_type}, ptr %#{base_name}.ptr"
