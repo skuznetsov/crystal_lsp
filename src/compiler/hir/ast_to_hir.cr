@@ -442,12 +442,25 @@ module Crystal::HIR
           if member.is_a?(CrystalV2::Compiler::Frontend::DefNode)
             method_name = String.new(member.name)
             # Module methods are always class methods: Module.method
-            full_name = "#{module_name}.#{method_name}"
+            base_name = "#{module_name}.#{method_name}"
             return_type = if rt = member.return_type
                             type_ref_for_name(String.new(rt))
                           else
                             TypeRef::VOID
                           end
+            # Collect parameter types for mangling
+            param_types = [] of TypeRef
+            if params = member.params
+              params.each do |param|
+                param_type = if ta = param.type_annotation
+                               type_ref_for_name(String.new(ta))
+                             else
+                               TypeRef::VOID
+                             end
+                param_types << param_type
+              end
+            end
+            full_name = mangle_function_name(base_name, param_types)
             @function_types[full_name] = return_type
           end
         end
@@ -471,7 +484,7 @@ module Crystal::HIR
     # Lower a module method (static function)
     private def lower_module_method(module_name : String, node : CrystalV2::Compiler::Frontend::DefNode)
       method_name = String.new(node.name)
-      full_name = "#{module_name}.#{method_name}"
+      base_name = "#{module_name}.#{method_name}"
 
       return_type = if rt = node.return_type
                       type_ref_for_name(String.new(rt))
@@ -479,10 +492,8 @@ module Crystal::HIR
                       TypeRef::VOID
                     end
 
-      func = @module.create_function(full_name, return_type)
-      ctx = LoweringContext.new(func, @module, @arena)
-
-      # Lower parameters (no self for module methods)
+      # Collect parameter types for name mangling
+      param_infos = [] of Tuple(String, TypeRef)
       if params = node.params
         params.each do |param|
           param_name = param.name.nil? ? "_" : String.new(param.name.not_nil!)
@@ -491,10 +502,22 @@ module Crystal::HIR
                        else
                          TypeRef::VOID
                        end
-          hir_param = func.add_param(param_name, param_type)
-          ctx.register_local(param_name, hir_param.id)
-          ctx.register_type(hir_param.id, param_type)
+          param_infos << {param_name, param_type}
         end
+      end
+
+      # Mangle function name with parameter types
+      param_types = param_infos.map { |_, t| t }
+      full_name = mangle_function_name(base_name, param_types)
+
+      func = @module.create_function(full_name, return_type)
+      ctx = LoweringContext.new(func, @module, @arena)
+
+      # Lower parameters (no self for module methods)
+      param_infos.each do |(param_name, param_type)|
+        hir_param = func.add_param(param_name, param_type)
+        ctx.register_local(param_name, hir_param.id)
+        ctx.register_type(hir_param.id, param_type)
       end
 
       # Lower body
@@ -590,12 +613,25 @@ module Crystal::HIR
           when CrystalV2::Compiler::Frontend::DefNode
             # Register method signature
             method_name = String.new(member.name)
-            full_name = "#{class_name}##{method_name}"
+            base_name = "#{class_name}##{method_name}"
             return_type = if rt = member.return_type
                             type_ref_for_name(String.new(rt))
                           else
                             TypeRef::VOID
                           end
+            # Collect parameter types for mangling
+            method_param_types = [] of TypeRef
+            if params = member.params
+              params.each do |param|
+                param_type = if ta = param.type_annotation
+                               type_ref_for_name(String.new(ta))
+                             else
+                               TypeRef::VOID
+                             end
+                method_param_types << param_type
+              end
+            end
+            full_name = mangle_function_name(base_name, method_param_types)
             @function_types[full_name] = return_type
 
             # Capture initialize parameters for new()
@@ -768,8 +804,11 @@ module Crystal::HIR
 
       # Call initialize if it exists, passing through the parameters
       # Use inheritance-aware resolution to find initialize in parent classes
-      init_name = resolve_method_with_inheritance(class_name, "initialize")
-      if init_name
+      init_base_name = resolve_method_with_inheritance(class_name, "initialize")
+      if init_base_name
+        # Mangle the initialize call with parameter types
+        init_param_types = init_params.map { |_, t| t }
+        init_name = mangle_function_name(init_base_name, init_param_types)
         init_call = Call.new(ctx.next_id, TypeRef::VOID, alloc.id, init_name, param_ids)
         ctx.emit(init_call)
       end
@@ -781,7 +820,7 @@ module Crystal::HIR
     # Lower a method within a class
     private def lower_method(class_name : String, class_info : ClassInfo, node : CrystalV2::Compiler::Frontend::DefNode)
       method_name = String.new(node.name)
-      full_name = "#{class_name}##{method_name}"
+      base_name = "#{class_name}##{method_name}"
 
       # Track current method for super calls
       old_method = @current_method
@@ -792,6 +831,24 @@ module Crystal::HIR
                     else
                       TypeRef::VOID
                     end
+
+      # Collect parameter types first for name mangling
+      param_infos = [] of Tuple(String, TypeRef, Bool)  # (name, type, is_instance_var)
+      if params = node.params
+        params.each do |param|
+          param_name = param.name.nil? ? "_" : String.new(param.name.not_nil!)
+          param_type = if ta = param.type_annotation
+                         type_ref_for_name(String.new(ta))
+                       else
+                         TypeRef::VOID
+                       end
+          param_infos << {param_name, param_type, param.is_instance_var}
+        end
+      end
+
+      # Mangle function name with parameter types for overloading
+      param_types = param_infos.map { |_, t, _| t }
+      full_name = mangle_function_name(base_name, param_types)
 
       func = @module.create_function(full_name, return_type)
       ctx = LoweringContext.new(func, @module, @arena)
@@ -808,25 +865,16 @@ module Crystal::HIR
       # Track @param style for auto-assignment
       auto_assign_params = [] of Tuple(String, ValueId, Int32)  # (ivar_name, param_value_id, offset)
 
-      if params = node.params
-        params.each do |param|
-          param_name = param.name.nil? ? "_" : String.new(param.name.not_nil!)
-          param_type = if ta = param.type_annotation
-                         type_ref_for_name(String.new(ta))
-                       else
-                         TypeRef::VOID
-                       end
+      param_infos.each do |(param_name, param_type, is_instance_var)|
+        hir_param = func.add_param(param_name, param_type)
+        ctx.register_local(param_name, hir_param.id)
+        ctx.register_type(hir_param.id, param_type)
 
-          hir_param = func.add_param(param_name, param_type)
-          ctx.register_local(param_name, hir_param.id)
-          ctx.register_type(hir_param.id, param_type)
-
-          # Check for @param syntax (auto-assignment to ivar via is_instance_var flag)
-          if param.is_instance_var
-            ivar_name = "@#{param_name}"  # Add @ prefix for ivar lookup
-            ivar_offset = get_ivar_offset(ivar_name)
-            auto_assign_params << {ivar_name, hir_param.id, ivar_offset}
-          end
+        # Check for @param syntax (auto-assignment to ivar via is_instance_var flag)
+        if is_instance_var
+          ivar_name = "@#{param_name}"  # Add @ prefix for ivar lookup
+          ivar_offset = get_ivar_offset(ivar_name)
+          auto_assign_params << {ivar_name, hir_param.id, ivar_offset}
         end
       end
 
@@ -878,6 +926,47 @@ module Crystal::HIR
       end
     end
 
+    # Get type name for mangling (converts TypeRef to short string)
+    private def type_name_for_mangling(type : TypeRef) : String
+      case type
+      when TypeRef::VOID    then "Void"
+      when TypeRef::NIL     then "Nil"
+      when TypeRef::BOOL    then "Bool"
+      when TypeRef::INT8    then "Int8"
+      when TypeRef::INT16   then "Int16"
+      when TypeRef::INT32   then "Int32"
+      when TypeRef::INT64   then "Int64"
+      when TypeRef::INT128  then "Int128"
+      when TypeRef::UINT8   then "UInt8"
+      when TypeRef::UINT16  then "UInt16"
+      when TypeRef::UINT32  then "UInt32"
+      when TypeRef::UINT64  then "UInt64"
+      when TypeRef::UINT128 then "UInt128"
+      when TypeRef::FLOAT32 then "Float32"
+      when TypeRef::FLOAT64 then "Float64"
+      when TypeRef::CHAR    then "Char"
+      when TypeRef::STRING  then "String"
+      when TypeRef::SYMBOL  then "Symbol"
+      when TypeRef::POINTER then "Pointer"
+      else
+        # User-defined type - look up name from module's type descriptors
+        if desc = @module.get_type_descriptor(type)
+          desc.name
+        else
+          "T#{type.id}"  # Fallback to type ID
+        end
+      end
+    end
+
+    # Mangle function name with parameter types for overloading
+    # Example: "IO.print" + [String] -> "IO.print:String"
+    # Example: "Int32#++" + [Int32] -> "Int32#+:Int32"
+    private def mangle_function_name(base_name : String, param_types : Array(TypeRef)) : String
+      return base_name if param_types.empty?
+      type_suffix = param_types.map { |t| type_name_for_mangling(t) }.join(",")
+      "#{base_name}:#{type_suffix}"
+    end
+
     # Helper to get type size in bytes
     private def type_size(type : TypeRef) : Int32
       case type
@@ -907,21 +996,37 @@ module Crystal::HIR
     # Register a function signature (for forward reference support)
     # Call this for all functions before lowering any function bodies
     def register_function(node : CrystalV2::Compiler::Frontend::DefNode)
-      name = String.new(node.name)
+      base_name = String.new(node.name)
       return_type = if rt = node.return_type
                       type_ref_for_name(String.new(rt))
                     else
                       TypeRef::VOID
                     end
-      @function_types[name] = return_type
 
-      # Store AST for potential inline expansion
-      @function_defs[name] = node
+      # Collect parameter types for name mangling
+      param_types = [] of TypeRef
+      if params = node.params
+        params.each do |param|
+          param_type = if ta = param.type_annotation
+                         type_ref_for_name(String.new(ta))
+                       else
+                         TypeRef::VOID
+                       end
+          param_types << param_type
+        end
+      end
+
+      # Register with mangled name
+      full_name = mangle_function_name(base_name, param_types)
+      @function_types[full_name] = return_type
+
+      # Store AST for potential inline expansion (use mangled name)
+      @function_defs[full_name] = node
 
       # Check if function contains yield
       if body = node.body
         if contains_yield?(body)
-          @yield_functions.add(name)
+          @yield_functions.add(full_name)
         end
       end
     end
@@ -949,6 +1054,12 @@ module Crystal::HIR
       else
         false
       end
+    end
+
+    # Check if a module method exists (with any signature - for module detection)
+    private def is_module_method?(module_name : String, method_name : String) : Bool
+      prefix = "#{module_name}.#{method_name}"
+      @function_types.keys.any? { |key| key.starts_with?(prefix) }
     end
 
     # Look up return type of a function by name
@@ -989,13 +1100,16 @@ module Crystal::HIR
     end
 
     # Resolve method name with inheritance: look in class and all parent classes
-    # Returns the fully qualified method name (e.g., "Animal#age") or nil if not found
+    # Returns the fully qualified method name (e.g., "Animal#age" or "Animal#age:Int32") or nil if not found
+    # Note: Returns the base name without mangling - caller should mangle with actual arg types
     private def resolve_method_with_inheritance(class_name : String, method_name : String) : String?
       current = class_name
       while true
         test_name = "#{current}##{method_name}"
-        if @function_types.has_key?(test_name)
-          return test_name
+        # Check for any function with this prefix (handles mangled names)
+        found = @function_types.keys.find { |key| key.starts_with?(test_name) }
+        if found
+          return test_name  # Return base name - caller will mangle
         end
         # Try parent class
         if info = @class_info[current]?
@@ -2458,7 +2572,7 @@ module Crystal::HIR
           if name[0].uppercase?
             if @class_info.has_key?(name)
               class_name_str = name
-            elsif @function_types.has_key?("#{name}.#{method_name}")
+            elsif is_module_method?(name, method_name)
               # It's a module method call
               class_name_str = name
             end
@@ -2614,29 +2728,42 @@ module Crystal::HIR
                    nil
                  end
 
-      # Try to infer return type
-      return_type = if full_name = full_method_name
-                      get_function_return_type(full_name)
-                    elsif receiver_id.nil?
-                      get_function_return_type(method_name)
-                    else
-                      # Try to find method in any class (fallback)
-                      found_type = TypeRef::VOID
-                      @class_info.each do |class_name, info|
-                        test_name = "#{class_name}##{method_name}"
-                        if type = @function_types[test_name]?
-                          found_type = type
-                          full_method_name = test_name
-                          break
-                        end
-                      end
-                      found_type
-                    end
+      # Collect argument types for name mangling (overloading support)
+      arg_types = args.map { |arg_id| ctx.type_of(arg_id) }
 
-      # Use full method name if resolved, otherwise use simple name
-      actual_method_name = full_method_name || method_name
+      # Compute mangled name based on base name + argument types
+      base_method_name = full_method_name || method_name
+      mangled_method_name = mangle_function_name(base_method_name, arg_types)
 
-      call = Call.new(ctx.next_id, return_type, receiver_id, actual_method_name, args, block_id)
+      # Try to infer return type using mangled name first, fallback to base name
+      return_type = get_function_return_type(mangled_method_name)
+      if return_type == TypeRef::VOID && mangled_method_name != base_method_name
+        # Try unmangled name as fallback (for non-overloaded functions)
+        return_type = get_function_return_type(base_method_name)
+        if return_type != TypeRef::VOID
+          # Function exists without mangling - use unmangled name
+          mangled_method_name = base_method_name
+        end
+      end
+
+      # If still not found and receiver_id is set, try to find method in any class
+      if return_type == TypeRef::VOID && receiver_id
+        @class_info.each do |class_name, info|
+          test_base = "#{class_name}##{method_name}"
+          test_mangled = mangle_function_name(test_base, arg_types)
+          if type = @function_types[test_mangled]?
+            return_type = type
+            mangled_method_name = test_mangled
+            break
+          elsif type = @function_types[test_base]?
+            return_type = type
+            mangled_method_name = test_base
+            break
+          end
+        end
+      end
+
+      call = Call.new(ctx.next_id, return_type, receiver_id, mangled_method_name, args, block_id)
       ctx.emit(call)
       call.id
     end
