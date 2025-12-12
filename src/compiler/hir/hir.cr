@@ -827,6 +827,30 @@ module Crystal::HIR
     end
   end
 
+  # Try block begin - calls setjmp, returns 0 for normal path, non-zero for exception
+  class TryBegin < Value
+    def initialize(id : ValueId)
+      super(id, TypeRef::INT32)
+      @lifetime = LifetimeTag::StackLocal
+    end
+
+    def to_s(io : IO) : Nil
+      io << "%" << @id << " = try_begin : i32"
+    end
+  end
+
+  # Try block end - clears exception handler
+  class TryEnd < Value
+    def initialize(id : ValueId)
+      super(id, TypeRef::VOID)
+      @lifetime = LifetimeTag::StackLocal
+    end
+
+    def to_s(io : IO) : Nil
+      io << "%" << @id << " = try_end"
+    end
+  end
+
   # ═══════════════════════════════════════════════════════════════════════════
   # TERMINATORS (End a basic block)
   # ═══════════════════════════════════════════════════════════════════════════

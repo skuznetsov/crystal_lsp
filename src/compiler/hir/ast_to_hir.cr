@@ -2609,21 +2609,47 @@ module Crystal::HIR
     #     cleanup...
     #   end
     private def lower_begin(ctx : LoweringContext, node : CrystalV2::Compiler::Frontend::BeginNode) : ValueId
-      # For now, we implement a simplified version using control flow:
-      # 1. Execute body
-      # 2. If raise was called, jump to rescue block
-      # 3. Execute ensure block (always)
-      # 4. Return result
+      # Exception handling using setjmp/longjmp:
+      # 1. Call TryBegin (setjmp) - returns 0 for normal, non-zero for exception
+      # 2. Branch based on result
+      # 3. Body path: execute body, call TryEnd
+      # 4. Rescue path: execute rescue handlers, call TryEnd
+      # 5. Ensure path: always executed
+
+      has_rescue = !node.rescue_clauses.nil? && !node.rescue_clauses.not_nil!.empty?
+      has_else = !node.else_body.nil? && !node.else_body.not_nil!.empty?
+      has_ensure = !node.ensure_body.nil? && !node.ensure_body.not_nil!.empty?
 
       # Create blocks
       body_block = ctx.create_block
-      rescue_block = ctx.create_block if node.rescue_clauses
-      else_block = ctx.create_block if node.else_body
-      ensure_block = ctx.create_block if node.ensure_body
+      rescue_block = ctx.create_block if has_rescue
+      else_block = ctx.create_block if has_else
+      ensure_block = ctx.create_block if has_ensure
       exit_block = ctx.create_block
 
-      # Jump to body
-      ctx.terminate(Jump.new(body_block))
+      # If we have rescue clauses, set up exception handling
+      if has_rescue
+        # Call TryBegin - returns 0 for normal path, non-zero for exception
+        try_begin = TryBegin.new(ctx.next_id)
+        ctx.emit(try_begin)
+        ctx.register_type(try_begin.id, TypeRef::INT32)
+
+        # Compare with 0
+        zero = Literal.new(ctx.next_id, TypeRef::INT32, 0_i64)
+        ctx.emit(zero)
+        ctx.register_type(zero.id, TypeRef::INT32)
+
+        cmp = BinaryOperation.new(ctx.next_id, TypeRef::BOOL, BinaryOp::Eq, try_begin.id, zero.id)
+        ctx.emit(cmp)
+        ctx.register_type(cmp.id, TypeRef::BOOL)
+
+        # Branch: if result == 0, normal path (body); else exception path (rescue)
+        ctx.terminate(Branch.new(cmp.id, body_block, rescue_block.not_nil!))
+      else
+        # No rescue - just jump to body
+        ctx.terminate(Jump.new(body_block))
+      end
+
       ctx.switch_to_block(body_block)
 
       # Lower body
@@ -2632,12 +2658,19 @@ module Crystal::HIR
         result_id = lower_expr(ctx, expr_id)
       end
 
+      # After body, call TryEnd if we have rescue handlers
+      if has_rescue
+        try_end = TryEnd.new(ctx.next_id)
+        ctx.emit(try_end)
+      end
+
       # After body, jump to else (if exists) or ensure (if exists) or exit
       after_body_target = else_block || ensure_block || exit_block
       ctx.terminate(Jump.new(after_body_target))
 
       # Lower rescue clauses if any
-      if rescue_clauses = node.rescue_clauses
+      if has_rescue
+        rescue_clauses = node.rescue_clauses.not_nil!
         ctx.switch_to_block(rescue_block.not_nil!)
 
         # For now, just execute the first rescue clause's body
@@ -2646,14 +2679,20 @@ module Crystal::HIR
         rescue_clauses.each_with_index do |clause, idx|
           # If clause has variable name, create local for exception
           if var_name = clause.variable_name
-            exc_var = Local.new(ctx.next_id, TypeRef::VOID, String.new(var_name), ctx.current_scope, true)
+            exc_var = Local.new(ctx.next_id, TypeRef::POINTER, String.new(var_name), ctx.current_scope, true)
             ctx.emit(exc_var)
+            ctx.register_local(String.new(var_name), exc_var.id)
+            ctx.register_type(exc_var.id, TypeRef::POINTER)
+
             # Get exception value
-            get_exc = GetException.new(ctx.next_id, TypeRef::VOID)
+            get_exc = GetException.new(ctx.next_id, TypeRef::POINTER)
             ctx.emit(get_exc)
+            ctx.register_type(get_exc.id, TypeRef::POINTER)
+
             # Copy to variable
-            copy = Copy.new(ctx.next_id, TypeRef::VOID, get_exc.id)
+            copy = Copy.new(ctx.next_id, TypeRef::POINTER, get_exc.id)
             ctx.emit(copy)
+            ctx.register_type(copy.id, TypeRef::POINTER)
           end
 
           # Lower rescue body
@@ -2665,13 +2704,18 @@ module Crystal::HIR
           break
         end
 
+        # Call TryEnd after rescue
+        try_end = TryEnd.new(ctx.next_id)
+        ctx.emit(try_end)
+
         # After rescue, jump to ensure or exit
         after_rescue_target = ensure_block || exit_block
         ctx.terminate(Jump.new(after_rescue_target))
       end
 
       # Lower else block if any
-      if else_body = node.else_body
+      if has_else
+        else_body = node.else_body.not_nil!
         ctx.switch_to_block(else_block.not_nil!)
         else_body.each do |expr_id|
           result_id = lower_expr(ctx, expr_id)
@@ -2681,7 +2725,8 @@ module Crystal::HIR
       end
 
       # Lower ensure block if any
-      if ensure_body = node.ensure_body
+      if has_ensure
+        ensure_body = node.ensure_body.not_nil!
         ctx.switch_to_block(ensure_block.not_nil!)
         ensure_body.each do |expr_id|
           lower_expr(ctx, expr_id)  # ensure result is discarded

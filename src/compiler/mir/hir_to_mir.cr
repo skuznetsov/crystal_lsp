@@ -315,6 +315,10 @@ module Crystal
                  lower_raise(hir_value)
                when HIR::GetException
                  lower_get_exception(hir_value)
+               when HIR::TryBegin
+                 lower_try_begin(hir_value)
+               when HIR::TryEnd
+                 lower_try_end(hir_value)
                when HIR::PointerMalloc
                  lower_pointer_malloc(hir_value)
                when HIR::PointerLoad
@@ -945,6 +949,24 @@ module Crystal
       # Get current exception from runtime
       empty_args = Array(ValueId).new
       builder.extern_call("__crystal_v2_get_exception", empty_args, TypeRef::POINTER)
+    end
+
+    private def lower_try_begin(try_begin : HIR::TryBegin) : ValueId
+      builder = @builder.not_nil!
+
+      # Emit MIR TryBegin which will emit inline setjmp in LLVM IR
+      mir_try = TryBegin.new(builder.function.next_value_id)
+      builder.emit(mir_try)
+      mir_try.id
+    end
+
+    private def lower_try_end(try_end : HIR::TryEnd) : ValueId
+      builder = @builder.not_nil!
+
+      # Emit MIR TryEnd which will clear exception handler
+      mir_try_end = TryEnd.new(builder.function.next_value_id)
+      builder.emit(mir_try_end)
+      mir_try_end.id
     end
 
     # ─────────────────────────────────────────────────────────────────────────

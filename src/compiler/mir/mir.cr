@@ -1421,6 +1421,37 @@ module Crystal::MIR
     end
   end
 
+  # Exception handling - try block begin (inline setjmp)
+  # Returns 0 for normal path, non-zero for exception path
+  class TryBegin < Value
+    def initialize(id : ValueId)
+      super(id, TypeRef::INT32)
+    end
+
+    def operands : Array(ValueId)
+      [] of ValueId
+    end
+
+    def to_s(io : IO) : Nil
+      io << "%" << @id << " = try_begin : i32"
+    end
+  end
+
+  # Exception handling - try block end (clear exception handler)
+  class TryEnd < Value
+    def initialize(id : ValueId)
+      super(id, TypeRef::VOID)
+    end
+
+    def operands : Array(ValueId)
+      [] of ValueId
+    end
+
+    def to_s(io : IO) : Nil
+      io << "%" << @id << " = try_end"
+    end
+  end
+
   # ═══════════════════════════════════════════════════════════════════════════
   # TERMINATORS - End a basic block
   # ═══════════════════════════════════════════════════════════════════════════

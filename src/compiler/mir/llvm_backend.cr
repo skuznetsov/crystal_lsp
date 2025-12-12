@@ -595,28 +595,81 @@ module Crystal::MIR
       emit_raw "  ret ptr null\n"
       emit_raw "}\n\n"
 
-      # Exception handling runtime functions - stubs that abort
+      # Exception handling runtime functions using setjmp/longjmp
       emit_raw "; Exception handling runtime functions\n"
       emit_raw "declare void @abort()\n"
       emit_raw "\n"
 
+      # jmp_buf is platform-specific; macOS ARM64 is 192 bytes = 24 i64s
+      emit_raw "; jmp_buf type and setjmp/longjmp declarations\n"
+      emit_raw "%jmp_buf = type [24 x i64]\n"
+      emit_raw "declare i32 @setjmp(ptr) nounwind returns_twice\n"
+      emit_raw "declare void @longjmp(ptr, i32) noreturn nounwind\n"
+      emit_raw "\n"
+
+      # Global exception state
+      emit_raw "; Global exception handling state\n"
+      emit_raw "@__crystal_exc_jmpbuf = global %jmp_buf zeroinitializer\n"
+      emit_raw "@__crystal_exc_ptr = global ptr null\n"
+      emit_raw "@__crystal_exc_handler_active = global i1 false\n"
+      emit_raw "\n"
+
+      # Note: __crystal_v2_try_begin is NOT a wrapper for setjmp because setjmp
+      # cannot work correctly when called from a wrapper (stack frame issues).
+      # Instead, callers should inline the setjmp call directly.
+      # This is just a placeholder that sets up the handler flag.
+      emit_raw "define void @__crystal_v2_try_begin_setup() {\n"
+      emit_raw "  store i1 true, ptr @__crystal_exc_handler_active\n"
+      emit_raw "  ret void\n"
+      emit_raw "}\n\n"
+
+      # End exception handler scope
+      emit_raw "define void @__crystal_v2_try_end() {\n"
+      emit_raw "  store i1 false, ptr @__crystal_exc_handler_active\n"
+      emit_raw "  store ptr null, ptr @__crystal_exc_ptr\n"
+      emit_raw "  ret void\n"
+      emit_raw "}\n\n"
+
       emit_raw "define void @__crystal_v2_raise(ptr %exc) {\n"
+      emit_raw "  store ptr %exc, ptr @__crystal_exc_ptr\n"
+      emit_raw "  %active = load i1, ptr @__crystal_exc_handler_active\n"
+      emit_raw "  br i1 %active, label %do_longjmp, label %no_handler\n"
+      emit_raw "do_longjmp:\n"
+      emit_raw "  call void @longjmp(ptr @__crystal_exc_jmpbuf, i32 1)\n"
+      emit_raw "  unreachable\n"
+      emit_raw "no_handler:\n"
       emit_raw "  call void @abort()\n"
       emit_raw "  unreachable\n"
       emit_raw "}\n\n"
 
       emit_raw "define void @__crystal_v2_raise_msg(ptr %msg) {\n"
+      emit_raw "  ; For now, treat message as exception pointer\n"
+      emit_raw "  store ptr %msg, ptr @__crystal_exc_ptr\n"
+      emit_raw "  %active = load i1, ptr @__crystal_exc_handler_active\n"
+      emit_raw "  br i1 %active, label %do_longjmp, label %no_handler\n"
+      emit_raw "do_longjmp:\n"
+      emit_raw "  call void @longjmp(ptr @__crystal_exc_jmpbuf, i32 1)\n"
+      emit_raw "  unreachable\n"
+      emit_raw "no_handler:\n"
       emit_raw "  call void @abort()\n"
       emit_raw "  unreachable\n"
       emit_raw "}\n\n"
 
       emit_raw "define void @__crystal_v2_reraise() {\n"
+      emit_raw "  %exc = load ptr, ptr @__crystal_exc_ptr\n"
+      emit_raw "  %active = load i1, ptr @__crystal_exc_handler_active\n"
+      emit_raw "  br i1 %active, label %do_longjmp, label %no_handler\n"
+      emit_raw "do_longjmp:\n"
+      emit_raw "  call void @longjmp(ptr @__crystal_exc_jmpbuf, i32 1)\n"
+      emit_raw "  unreachable\n"
+      emit_raw "no_handler:\n"
       emit_raw "  call void @abort()\n"
       emit_raw "  unreachable\n"
       emit_raw "}\n\n"
 
       emit_raw "define ptr @__crystal_v2_get_exception() {\n"
-      emit_raw "  ret ptr null\n"
+      emit_raw "  %exc = load ptr, ptr @__crystal_exc_ptr\n"
+      emit_raw "  ret ptr %exc\n"
       emit_raw "}\n\n"
     end
 
@@ -767,6 +820,10 @@ module Crystal::MIR
         emit_channel_receive(inst, name)
       when ChannelClose
         emit_channel_close(inst, name)
+      when TryBegin
+        emit_try_begin(inst, name)
+      when TryEnd
+        emit_try_end(inst, name)
       end
     end
 
@@ -1531,6 +1588,20 @@ module Crystal::MIR
       end
 
       emit "call void @__crystal_v2_channel_close(ptr #{channel})"
+    end
+
+    # Exception handling - inline setjmp call
+    private def emit_try_begin(inst : TryBegin, name : String)
+      # Set handler active flag
+      emit "store i1 true, ptr @__crystal_exc_handler_active"
+      # Call setjmp inline (critical: must be inline, not in a wrapper function)
+      emit "#{name} = call i32 @setjmp(ptr @__crystal_exc_jmpbuf)"
+    end
+
+    # Exception handling - clear exception handler
+    private def emit_try_end(inst : TryEnd, name : String)
+      emit "store i1 false, ptr @__crystal_exc_handler_active"
+      emit "store ptr null, ptr @__crystal_exc_ptr"
     end
 
     private def emit_terminator(term : Terminator)
