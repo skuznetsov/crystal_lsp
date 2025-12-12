@@ -482,17 +482,52 @@ module Crystal::MIR
       emit_raw "  ret void\n"
       emit_raw "}\n\n"
 
-      # String functions - stubs for bootstrap
-      emit_raw "define ptr @__crystal_v2_string_concat(ptr %a, ptr %b) {\n"
-      emit_raw "  ret ptr %a\n"
-      emit_raw "}\n\n"
+      # String functions - implemented using C library
+      emit_raw "declare i64 @strlen(ptr)\n"
+      emit_raw "declare ptr @strcpy(ptr, ptr)\n"
+      emit_raw "declare ptr @strcat(ptr, ptr)\n"
+      emit_raw "declare i32 @sprintf(ptr, ptr, ...)\n"
+      emit_raw "\n"
 
+      # int_to_string: allocate buffer and sprintf
       emit_raw "define ptr @__crystal_v2_int_to_string(i32 %val) {\n"
-      emit_raw "  ret ptr null\n"
+      emit_raw "  %buf = call ptr @malloc(i64 16)\n"
+      emit_raw "  call i32 (ptr, ptr, ...) @sprintf(ptr %buf, ptr @.int_fmt_no_nl, i32 %val)\n"
+      emit_raw "  ret ptr %buf\n"
       emit_raw "}\n\n"
 
       emit_raw "define ptr @__crystal_v2_int64_to_string(i64 %val) {\n"
+      emit_raw "  %buf = call ptr @malloc(i64 24)\n"
+      emit_raw "  call i32 (ptr, ptr, ...) @sprintf(ptr %buf, ptr @.long_fmt_no_nl, i64 %val)\n"
+      emit_raw "  ret ptr %buf\n"
+      emit_raw "}\n\n"
+
+      # string_concat: allocate new buffer and concatenate
+      emit_raw "define ptr @__crystal_v2_string_concat(ptr %a, ptr %b) {\n"
+      emit_raw "entry:\n"
+      emit_raw "  %a_null = icmp eq ptr %a, null\n"
+      emit_raw "  br i1 %a_null, label %a_is_null, label %a_not_null\n"
+      emit_raw "a_is_null:\n"
+      emit_raw "  %b_null_1 = icmp eq ptr %b, null\n"
+      emit_raw "  br i1 %b_null_1, label %both_null, label %ret_b\n"
+      emit_raw "both_null:\n"
       emit_raw "  ret ptr null\n"
+      emit_raw "ret_b:\n"
+      emit_raw "  ret ptr %b\n"
+      emit_raw "a_not_null:\n"
+      emit_raw "  %b_null_2 = icmp eq ptr %b, null\n"
+      emit_raw "  br i1 %b_null_2, label %ret_a, label %do_concat\n"
+      emit_raw "ret_a:\n"
+      emit_raw "  ret ptr %a\n"
+      emit_raw "do_concat:\n"
+      emit_raw "  %len_a = call i64 @strlen(ptr %a)\n"
+      emit_raw "  %len_b = call i64 @strlen(ptr %b)\n"
+      emit_raw "  %total = add i64 %len_a, %len_b\n"
+      emit_raw "  %total_plus_1 = add i64 %total, 1\n"
+      emit_raw "  %buf = call ptr @malloc(i64 %total_plus_1)\n"
+      emit_raw "  call ptr @strcpy(ptr %buf, ptr %a)\n"
+      emit_raw "  call ptr @strcat(ptr %buf, ptr %b)\n"
+      emit_raw "  ret ptr %buf\n"
       emit_raw "}\n\n"
 
       # Thread Sanitizer (TSan) instrumentation

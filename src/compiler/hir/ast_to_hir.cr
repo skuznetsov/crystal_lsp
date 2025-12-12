@@ -1851,6 +1851,15 @@ module Crystal::HIR
         return add_node.id
       end
 
+      # Check for string concatenation: String + String -> StringConcat
+      left_type = ctx.type_of(left_id)
+      if left_type == TypeRef::STRING && op_str == "+"
+        # String concatenation - emit as StringInterpolation with two parts
+        interp = StringInterpolation.new(ctx.next_id, [left_id, right_id])
+        ctx.emit(interp)
+        return interp.id
+      end
+
       op = case op_str
            when "+"   then BinaryOp::Add
            when "-"   then BinaryOp::Sub
