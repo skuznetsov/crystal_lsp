@@ -958,6 +958,44 @@ module Crystal::HIR
       end
     end
 
+    # Map operator method name to BinaryOp for primitive inlining
+    # Returns nil if the method is not a binary operator
+    private def binary_op_for_method(method_name : String) : BinaryOp?
+      case method_name
+      when "+"   then BinaryOp::Add
+      when "-"   then BinaryOp::Sub
+      when "*"   then BinaryOp::Mul
+      when "/"   then BinaryOp::Div
+      when "%"   then BinaryOp::Mod
+      when "&"   then BinaryOp::BitAnd
+      when "|"   then BinaryOp::BitOr
+      when "^"   then BinaryOp::BitXor
+      when "<<"  then BinaryOp::Shl
+      when ">>"  then BinaryOp::Shr
+      when "=="  then BinaryOp::Eq
+      when "!="  then BinaryOp::Ne
+      when "<"   then BinaryOp::Lt
+      when "<="  then BinaryOp::Le
+      when ">"   then BinaryOp::Gt
+      when ">="  then BinaryOp::Ge
+      when "&&"  then BinaryOp::And
+      when "||"  then BinaryOp::Or
+      else            nil
+      end
+    end
+
+    # Check if a TypeRef is a numeric primitive type (supports binary ops)
+    private def numeric_primitive?(type : TypeRef) : Bool
+      case type
+      when TypeRef::INT8, TypeRef::INT16, TypeRef::INT32, TypeRef::INT64, TypeRef::INT128,
+           TypeRef::UINT8, TypeRef::UINT16, TypeRef::UINT32, TypeRef::UINT64, TypeRef::UINT128,
+           TypeRef::FLOAT32, TypeRef::FLOAT64, TypeRef::CHAR
+        true
+      else
+        false
+      end
+    end
+
     # Mangle function name with parameter types for overloading
     # Example: "IO.print" + [String] -> "IO.print:String"
     # Example: "Int32#++" + [Int32] -> "Int32#+:Int32"
@@ -2759,6 +2797,28 @@ module Crystal::HIR
             return_type = type
             mangled_method_name = test_base
             break
+          end
+        end
+      end
+
+      # Check for primitive binary operator inlining
+      # When calling methods like Int32#+ on primitive types, emit BinaryOperation instead of Call
+      if receiver_id && args.size == 1
+        receiver_type = ctx.type_of(receiver_id)
+        if numeric_primitive?(receiver_type)
+          if bin_op = binary_op_for_method(method_name)
+            # Emit native binary operation instead of method call
+            # Return type is same as receiver type for arithmetic, bool for comparisons
+            result_type = case bin_op
+                          when BinaryOp::Eq, BinaryOp::Ne, BinaryOp::Lt, BinaryOp::Le,
+                               BinaryOp::Gt, BinaryOp::Ge, BinaryOp::And, BinaryOp::Or
+                            TypeRef::BOOL
+                          else
+                            receiver_type
+                          end
+            bin_node = BinaryOperation.new(ctx.next_id, result_type, bin_op, receiver_id, args[0])
+            ctx.emit(bin_node)
+            return bin_node.id
           end
         end
       end
