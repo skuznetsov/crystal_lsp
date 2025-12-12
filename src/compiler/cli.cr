@@ -231,6 +231,7 @@ module CrystalV2
         module_nodes = [] of Tuple(Frontend::ModuleNode, Frontend::ArenaLike)
         enum_nodes = [] of Tuple(Frontend::EnumNode, Frontend::ArenaLike)
         macro_nodes = [] of Tuple(Frontend::MacroDefNode, Frontend::ArenaLike)
+        alias_nodes = [] of Tuple(Frontend::AliasNode, Frontend::ArenaLike)
         main_exprs = [] of Tuple(Frontend::ExprId, Frontend::ArenaLike)
 
         all_arenas.each do |arena, exprs, file_path|
@@ -247,6 +248,8 @@ module CrystalV2
               enum_nodes << {node, arena}
             when Frontend::MacroDefNode
               macro_nodes << {node, arena}
+            when Frontend::AliasNode
+              alias_nodes << {node, arena}
             when Frontend::RequireNode
               # Skip - already processed
             else
@@ -260,6 +263,7 @@ module CrystalV2
         module_nodes.each { |n, a| hir_converter.arena = a; hir_converter.register_module(n) }
         class_nodes.each { |n, a| hir_converter.arena = a; hir_converter.register_class(n) }
         macro_nodes.each { |n, a| hir_converter.arena = a; hir_converter.register_macro(n) }
+        alias_nodes.each { |n, a| hir_converter.arena = a; hir_converter.register_alias(n) }
 
         # Pass 2: Register function signatures
         def_nodes.each { |n, a| hir_converter.arena = a; hir_converter.register_function(n) }

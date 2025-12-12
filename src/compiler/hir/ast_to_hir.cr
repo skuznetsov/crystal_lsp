@@ -230,6 +230,9 @@ module Crystal::HIR
     # Macro definitions (name -> MacroDefNode)
     @macro_defs : Hash(String, CrystalV2::Compiler::Frontend::MacroDefNode)
 
+    # Type aliases (alias_name -> target_type_name)
+    @type_aliases : Hash(String, String)
+
     def initialize(@arena, module_name : String = "main")
       @module = Module.new(module_name)
       @function_types = {} of String => TypeRef
@@ -244,6 +247,7 @@ module Crystal::HIR
       @monomorphized = Set(String).new
       @type_param_map = {} of String => String
       @macro_defs = {} of String => CrystalV2::Compiler::Frontend::MacroDefNode
+      @type_aliases = {} of String => String
     end
 
     # Get class info by name
@@ -282,6 +286,14 @@ module Crystal::HIR
     def register_macro(node : CrystalV2::Compiler::Frontend::MacroDefNode)
       macro_name = String.new(node.name)
       @macro_defs[macro_name] = node
+    end
+
+    # Register a type alias (pass 1)
+    # e.g., alias HIR = Crystal::HIR
+    def register_alias(node : CrystalV2::Compiler::Frontend::AliasNode)
+      alias_name = String.new(node.name)
+      target_name = String.new(node.value)
+      @type_aliases[alias_name] = target_name
     end
 
     # Expand a macro call inline
@@ -2745,17 +2757,21 @@ module Crystal::HIR
         # Can be ConstantNode, IdentifierNode starting with uppercase, or GenericNode
         class_name_str : String? = nil
         if obj_node.is_a?(CrystalV2::Compiler::Frontend::ConstantNode)
-          class_name_str = String.new(obj_node.name)
+          name = String.new(obj_node.name)
+          # Resolve type alias if exists
+          class_name_str = @type_aliases[name]? || name
         elsif obj_node.is_a?(CrystalV2::Compiler::Frontend::IdentifierNode)
           name = String.new(obj_node.name)
+          # Resolve type alias if exists
+          resolved_name = @type_aliases[name]? || name
           # Check if it's a class name (starts with uppercase and is known class)
           # OR a module name (check if Module.method exists in function_types)
-          if name[0].uppercase?
-            if @class_info.has_key?(name)
-              class_name_str = name
-            elsif is_module_method?(name, method_name)
+          if resolved_name[0].uppercase?
+            if @class_info.has_key?(resolved_name)
+              class_name_str = resolved_name
+            elsif is_module_method?(resolved_name, method_name)
               # It's a module method call
-              class_name_str = name
+              class_name_str = resolved_name
             end
           end
         elsif obj_node.is_a?(CrystalV2::Compiler::Frontend::GenericNode)
@@ -3775,11 +3791,16 @@ module Crystal::HIR
       class_name_str : String? = nil
 
       if obj_node.is_a?(CrystalV2::Compiler::Frontend::ConstantNode)
-        class_name_str = String.new(obj_node.name)
+        name = String.new(obj_node.name)
+        # Resolve type alias if exists
+        resolved_name = @type_aliases[name]? || name
+        class_name_str = resolved_name
       elsif obj_node.is_a?(CrystalV2::Compiler::Frontend::IdentifierNode)
         name = String.new(obj_node.name)
-        if name[0].uppercase? && @class_info.has_key?(name)
-          class_name_str = name
+        # Resolve type alias if exists
+        resolved_name = @type_aliases[name]? || name
+        if resolved_name[0].uppercase? && @class_info.has_key?(resolved_name)
+          class_name_str = resolved_name
         end
       end
 
@@ -4235,6 +4256,11 @@ module Crystal::HIR
       # Check if this is a type parameter that should be substituted
       if substitution = @type_param_map[name]?
         return type_ref_for_name(substitution)
+      end
+
+      # Check if this is a type alias
+      if alias_target = @type_aliases[name]?
+        return type_ref_for_name(alias_target)
       end
 
       case name
