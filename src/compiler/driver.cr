@@ -351,28 +351,28 @@ module Crystal::V2
       # Handle relative paths
       if req_path.starts_with?("./") || req_path.starts_with?("../")
         full_path = File.expand_path(req_path, base_dir)
-        # Try with .cr extension
-        if File.exists?(full_path)
-          return full_path
-        elsif File.exists?(full_path + ".cr")
+        # Try with .cr extension first (most common case)
+        if File.exists?(full_path + ".cr") && File.file?(full_path + ".cr")
           return full_path + ".cr"
+        elsif File.exists?(full_path) && File.file?(full_path)
+          return full_path
         end
       else
         # Try relative to current file first
         rel_path = File.expand_path(req_path, base_dir)
-        if File.exists?(rel_path)
-          return rel_path
-        elsif File.exists?(rel_path + ".cr")
+        if File.exists?(rel_path + ".cr") && File.file?(rel_path + ".cr")
           return rel_path + ".cr"
+        elsif File.exists?(rel_path) && File.file?(rel_path)
+          return rel_path
         end
 
         # Try relative to input file's directory
         input_dir = File.dirname(File.expand_path(@input_file))
         input_rel_path = File.expand_path(req_path, input_dir)
-        if File.exists?(input_rel_path)
-          return input_rel_path
-        elsif File.exists?(input_rel_path + ".cr")
+        if File.exists?(input_rel_path + ".cr") && File.file?(input_rel_path + ".cr")
           return input_rel_path + ".cr"
+        elsif File.exists?(input_rel_path) && File.file?(input_rel_path)
+          return input_rel_path
         end
       end
 
