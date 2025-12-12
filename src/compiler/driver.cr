@@ -73,68 +73,83 @@ module Crystal::V2
       log "Input: #{@input_file}"
       log "Output: #{@output_file}"
 
-      # Step 1: Parse source
+      # Step 1: Parse source (with require support)
       log "\n[1/5] Parsing..."
-      source = File.read(@input_file)
-      lexer = CrystalV2::Compiler::Frontend::Lexer.new(source)
-      parser = CrystalV2::Compiler::Frontend::Parser.new(lexer)
-      result = parser.parse_program
-      arena = result.arena
-      exprs = result.roots
 
-      log "  Expressions: #{exprs.size}"
+      # Track loaded files to avoid duplicates
+      loaded_files = Set(String).new
+
+      # Parse all files recursively (require support)
+      all_arenas = [] of Tuple(CrystalV2::Compiler::Frontend::ArenaLike, Array(CrystalV2::Compiler::Frontend::ExprId), String)
+      parse_file_recursive(@input_file, all_arenas, loaded_files)
+
+      total_exprs = all_arenas.sum { |t| t[1].size }
+      log "  Files: #{all_arenas.size}, Expressions: #{total_exprs}"
 
       # Step 2: Lower to HIR
       log "\n[2/5] Lowering to HIR..."
-      hir_converter = HIR::AstToHir.new(arena, @input_file)
 
-      # Collect all DefNodes, ClassNodes, ModuleNodes, and EnumNodes
-      def_nodes = [] of CrystalV2::Compiler::Frontend::DefNode
-      class_nodes = [] of CrystalV2::Compiler::Frontend::ClassNode
-      module_nodes = [] of CrystalV2::Compiler::Frontend::ModuleNode
-      enum_nodes = [] of CrystalV2::Compiler::Frontend::EnumNode
-      exprs.each do |expr_id|
-        node = arena[expr_id]
-        case node
-        when CrystalV2::Compiler::Frontend::DefNode
-          def_nodes << node
-        when CrystalV2::Compiler::Frontend::ClassNode
-          class_nodes << node
-        when CrystalV2::Compiler::Frontend::ModuleNode
-          module_nodes << node
-        when CrystalV2::Compiler::Frontend::EnumNode
-          enum_nodes << node
+      # Use first file's arena for the converter (it merges all)
+      first_arena = all_arenas[0][0]
+      hir_converter = HIR::AstToHir.new(first_arena, @input_file)
+
+      # Collect all DefNodes, ClassNodes, ModuleNodes, and EnumNodes with their arenas
+      def_nodes = [] of Tuple(CrystalV2::Compiler::Frontend::DefNode, CrystalV2::Compiler::Frontend::ArenaLike)
+      class_nodes = [] of Tuple(CrystalV2::Compiler::Frontend::ClassNode, CrystalV2::Compiler::Frontend::ArenaLike)
+      module_nodes = [] of Tuple(CrystalV2::Compiler::Frontend::ModuleNode, CrystalV2::Compiler::Frontend::ArenaLike)
+      enum_nodes = [] of Tuple(CrystalV2::Compiler::Frontend::EnumNode, CrystalV2::Compiler::Frontend::ArenaLike)
+
+      all_arenas.each do |arena, exprs, file_path|
+        exprs.each do |expr_id|
+          node = arena[expr_id]
+          case node
+          when CrystalV2::Compiler::Frontend::DefNode
+            def_nodes << {node, arena}
+          when CrystalV2::Compiler::Frontend::ClassNode
+            class_nodes << {node, arena}
+          when CrystalV2::Compiler::Frontend::ModuleNode
+            module_nodes << {node, arena}
+          when CrystalV2::Compiler::Frontend::EnumNode
+            enum_nodes << {node, arena}
+          end
         end
       end
 
       # Three-pass approach:
       # Pass 1: Register all enums, modules, class types and their methods
-      enum_nodes.each do |enum_node|
+      enum_nodes.each do |enum_node, arena|
+        hir_converter.arena = arena
         hir_converter.register_enum(enum_node)
       end
-      module_nodes.each do |module_node|
+      module_nodes.each do |module_node, arena|
+        hir_converter.arena = arena
         hir_converter.register_module(module_node)
       end
-      class_nodes.each do |class_node|
+      class_nodes.each do |class_node, arena|
+        hir_converter.arena = arena
         hir_converter.register_class(class_node)
       end
 
       # Pass 2: Register all top-level function signatures
-      def_nodes.each do |node|
+      def_nodes.each do |node, arena|
+        hir_converter.arena = arena
         hir_converter.register_function(node)
       end
 
       # Pass 3: Lower all function and method bodies
       func_count = 0
-      module_nodes.each do |module_node|
+      module_nodes.each do |module_node, arena|
+        hir_converter.arena = arena
         hir_converter.lower_module(module_node)
         func_count += 1
       end
-      class_nodes.each do |class_node|
+      class_nodes.each do |class_node, arena|
+        hir_converter.arena = arena
         hir_converter.lower_class(class_node)
         func_count += 1
       end
-      def_nodes.each do |node|
+      def_nodes.each do |node, arena|
+        hir_converter.arena = arena
         hir_converter.lower_def(node)
         func_count += 1
       end
@@ -272,6 +287,89 @@ module Crystal::V2
 
     private def log(msg : String)
       puts msg if @verbose
+    end
+
+    # Recursively parse files, handling require statements
+    private def parse_file_recursive(
+      file_path : String,
+      results : Array(Tuple(CrystalV2::Compiler::Frontend::ArenaLike, Array(CrystalV2::Compiler::Frontend::ExprId), String)),
+      loaded : Set(String)
+    )
+      # Normalize and resolve path
+      abs_path = File.expand_path(file_path)
+
+      # Skip if already loaded
+      return if loaded.includes?(abs_path)
+      loaded << abs_path
+
+      unless File.exists?(abs_path)
+        STDERR.puts "File not found: #{abs_path}"
+        return
+      end
+
+      # Parse the file
+      source = File.read(abs_path)
+      lexer = CrystalV2::Compiler::Frontend::Lexer.new(source)
+      parser = CrystalV2::Compiler::Frontend::Parser.new(lexer)
+      program = parser.parse_program
+      arena = program.arena
+      exprs = program.roots
+
+      # Extract require paths and process them first (dependencies before dependents)
+      base_dir = File.dirname(abs_path)
+      exprs.each do |expr_id|
+        node = arena[expr_id]
+        if node.is_a?(CrystalV2::Compiler::Frontend::RequireNode)
+          path_node = arena[node.path]
+          if path_node.is_a?(CrystalV2::Compiler::Frontend::StringNode)
+            req_path = String.new(path_node.value)
+
+            # Resolve the require path
+            resolved = resolve_require_path(req_path, base_dir)
+            if resolved
+              parse_file_recursive(resolved, results, loaded)
+            else
+              log "  Warning: Could not resolve require '#{req_path}'"
+            end
+          end
+        end
+      end
+
+      # Add this file's results (after dependencies)
+      results << {arena, exprs, abs_path}
+    end
+
+    # Resolve require path to absolute file path
+    private def resolve_require_path(req_path : String, base_dir : String) : String?
+      # Handle relative paths
+      if req_path.starts_with?("./") || req_path.starts_with?("../")
+        full_path = File.expand_path(req_path, base_dir)
+        # Try with .cr extension
+        if File.exists?(full_path)
+          return full_path
+        elsif File.exists?(full_path + ".cr")
+          return full_path + ".cr"
+        end
+      else
+        # Try relative to current file first
+        rel_path = File.expand_path(req_path, base_dir)
+        if File.exists?(rel_path)
+          return rel_path
+        elsif File.exists?(rel_path + ".cr")
+          return rel_path + ".cr"
+        end
+
+        # Try relative to input file's directory
+        input_dir = File.dirname(File.expand_path(@input_file))
+        input_rel_path = File.expand_path(req_path, input_dir)
+        if File.exists?(input_rel_path)
+          return input_rel_path
+        elsif File.exists?(input_rel_path + ".cr")
+          return input_rel_path + ".cr"
+        end
+      end
+
+      nil
     end
   end
 end

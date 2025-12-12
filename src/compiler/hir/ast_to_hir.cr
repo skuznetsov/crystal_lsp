@@ -192,7 +192,7 @@ module Crystal::HIR
     alias ExprId = CrystalV2::Compiler::Frontend::ExprId
 
     getter module : Module
-    @arena : CrystalV2::Compiler::Frontend::ArenaLike
+    property arena : CrystalV2::Compiler::Frontend::ArenaLike
 
     # Pre-registered function signatures for forward reference support
     @function_types : Hash(String, TypeRef)
