@@ -227,6 +227,9 @@ module Crystal::HIR
     # Current method name being lowered (for super calls)
     @current_method : String?
 
+    # Macro definitions (name -> MacroDefNode)
+    @macro_defs : Hash(String, CrystalV2::Compiler::Frontend::MacroDefNode)
+
     def initialize(@arena, module_name : String = "main")
       @module = Module.new(module_name)
       @function_types = {} of String => TypeRef
@@ -240,6 +243,7 @@ module Crystal::HIR
       @generic_templates = {} of String => GenericClassTemplate
       @monomorphized = Set(String).new
       @type_param_map = {} of String => String
+      @macro_defs = {} of String => CrystalV2::Compiler::Frontend::MacroDefNode
     end
 
     # Get class info by name
@@ -272,6 +276,158 @@ module Crystal::HIR
       end
 
       @enum_info.not_nil![enum_name] = members
+    end
+
+    # Register a macro definition (pass 1)
+    def register_macro(node : CrystalV2::Compiler::Frontend::MacroDefNode)
+      macro_name = String.new(node.name)
+      @macro_defs[macro_name] = node
+    end
+
+    # Expand a macro call inline
+    # For simple macros, parse the body text as Crystal code and lower it
+    private def expand_macro(ctx : LoweringContext, macro_def : CrystalV2::Compiler::Frontend::MacroDefNode, args : Array(ExprId)) : ValueId
+      body_node = @arena[macro_def.body]
+
+      case body_node
+      when CrystalV2::Compiler::Frontend::MacroLiteralNode
+        # First pass: collect macro parameter names from Expression pieces
+        # In order of first appearance (first unique identifier = first param)
+        param_names = [] of String
+        body_node.pieces.each do |piece|
+          if piece.kind == CrystalV2::Compiler::Frontend::MacroPiece::Kind::Expression
+            if expr_id = piece.expr
+              param_name = extract_macro_param_name(@arena[expr_id])
+              if param_name && !param_names.includes?(param_name)
+                param_names << param_name
+              end
+            end
+          end
+        end
+
+        # Build parameter -> argument value mapping
+        param_values = {} of String => String
+        param_names.each_with_index do |name, idx|
+          if idx < args.size
+            # Stringify the argument node
+            arg_node = @arena[args[idx]]
+            param_values[name] = stringify_ast_node(arg_node)
+          end
+        end
+
+        # Second pass: expand pieces with parameter substitution
+        expanded_text = String.build do |io|
+          body_node.pieces.each do |piece|
+            case piece.kind
+            when CrystalV2::Compiler::Frontend::MacroPiece::Kind::Text
+              if text = piece.text
+                io << text
+              end
+            when CrystalV2::Compiler::Frontend::MacroPiece::Kind::Expression
+              # {{ expr }} - substitute parameter or evaluate expression
+              if expr_id = piece.expr
+                expr_node = @arena[expr_id]
+                param_name = extract_macro_param_name(expr_node)
+                if param_name && (value = param_values[param_name]?)
+                  io << value
+                else
+                  # Not a parameter - try to stringify the expression
+                  io << stringify_ast_node(expr_node)
+                end
+              end
+            else
+              # Control structures - handle in future
+            end
+          end
+        end
+
+        # Parse the expanded text as Crystal code
+        expanded_text = expanded_text.strip
+        if expanded_text.empty?
+          # Empty macro - return void
+          noop = Literal.new(ctx.next_id, TypeRef::VOID, nil)
+          ctx.emit(noop)
+          return noop.id
+        end
+
+        lexer = CrystalV2::Compiler::Frontend::Lexer.new(expanded_text)
+        parser = CrystalV2::Compiler::Frontend::Parser.new(lexer)
+        program = parser.parse_program
+
+        if program.roots.empty?
+          noop = Literal.new(ctx.next_id, TypeRef::VOID, nil)
+          ctx.emit(noop)
+          return noop.id
+        end
+
+        # Lower the parsed expression using the macro's arena
+        old_arena = @arena
+        @arena = program.arena
+        begin
+          # Lower all expressions, return last one
+          last_id : ValueId? = nil
+          program.roots.each do |expr_id|
+            last_id = lower_expr(ctx, expr_id)
+          end
+          last_id || begin
+            noop = Literal.new(ctx.next_id, TypeRef::VOID, nil)
+            ctx.emit(noop)
+            noop.id
+          end
+        ensure
+          @arena = old_arena
+        end
+      else
+        # Unsupported macro body type
+        noop = Literal.new(ctx.next_id, TypeRef::VOID, nil)
+        ctx.emit(noop)
+        noop.id
+      end
+    end
+
+    # Extract parameter name from macro expression node
+    private def extract_macro_param_name(node) : String?
+      case node
+      when CrystalV2::Compiler::Frontend::MacroExpressionNode
+        inner = @arena[node.expression]
+        extract_macro_param_name(inner)
+      when CrystalV2::Compiler::Frontend::IdentifierNode
+        String.new(node.name)
+      else
+        nil
+      end
+    end
+
+    # Stringify an AST node for macro expansion
+    private def stringify_ast_node(node) : String
+      case node
+      when CrystalV2::Compiler::Frontend::NumberNode
+        String.new(node.value)
+      when CrystalV2::Compiler::Frontend::StringNode
+        # Return with quotes for string literals
+        "\"#{String.new(node.value)}\""
+      when CrystalV2::Compiler::Frontend::IdentifierNode
+        String.new(node.name)
+      when CrystalV2::Compiler::Frontend::MacroExpressionNode
+        stringify_ast_node(@arena[node.expression])
+      when CrystalV2::Compiler::Frontend::BinaryNode
+        left = stringify_ast_node(@arena[node.left])
+        right = stringify_ast_node(@arena[node.right])
+        "#{left} #{String.new(node.operator)} #{right}"
+      when CrystalV2::Compiler::Frontend::CallNode
+        # Simple call stringify
+        callee = @arena[node.callee]
+        name = case callee
+               when CrystalV2::Compiler::Frontend::IdentifierNode
+                 String.new(callee.name)
+               else
+                 "?"
+               end
+        args_str = node.args.map { |arg| stringify_ast_node(@arena[arg]) }.join(", ")
+        "#{name}(#{args_str})"
+      else
+        ""
+      end
     end
 
     # Register a module and its methods (pass 1)
@@ -2255,6 +2411,11 @@ module Crystal::HIR
         # Simple function call: foo()
         method_name = String.new(callee_node.name)
         receiver_id = nil
+
+        # Check if this is a macro call - expand inline instead of generating Call
+        if macro_def = @macro_defs[method_name]?
+          return expand_macro(ctx, macro_def, node.args)
+        end
 
       when CrystalV2::Compiler::Frontend::MemberAccessNode
         # Could be method call: obj.method() or class method: ClassName.new()

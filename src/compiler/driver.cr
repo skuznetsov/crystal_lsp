@@ -93,11 +93,12 @@ module Crystal::V2
       first_arena = all_arenas[0][0]
       hir_converter = HIR::AstToHir.new(first_arena, @input_file)
 
-      # Collect all DefNodes, ClassNodes, ModuleNodes, and EnumNodes with their arenas
+      # Collect all DefNodes, ClassNodes, ModuleNodes, EnumNodes, and MacroDefNodes with their arenas
       def_nodes = [] of Tuple(CrystalV2::Compiler::Frontend::DefNode, CrystalV2::Compiler::Frontend::ArenaLike)
       class_nodes = [] of Tuple(CrystalV2::Compiler::Frontend::ClassNode, CrystalV2::Compiler::Frontend::ArenaLike)
       module_nodes = [] of Tuple(CrystalV2::Compiler::Frontend::ModuleNode, CrystalV2::Compiler::Frontend::ArenaLike)
       enum_nodes = [] of Tuple(CrystalV2::Compiler::Frontend::EnumNode, CrystalV2::Compiler::Frontend::ArenaLike)
+      macro_nodes = [] of Tuple(CrystalV2::Compiler::Frontend::MacroDefNode, CrystalV2::Compiler::Frontend::ArenaLike)
 
       all_arenas.each do |arena, exprs, file_path|
         exprs.each do |expr_id|
@@ -111,6 +112,8 @@ module Crystal::V2
             module_nodes << {node, arena}
           when CrystalV2::Compiler::Frontend::EnumNode
             enum_nodes << {node, arena}
+          when CrystalV2::Compiler::Frontend::MacroDefNode
+            macro_nodes << {node, arena}
           end
         end
       end
@@ -128,6 +131,10 @@ module Crystal::V2
       class_nodes.each do |class_node, arena|
         hir_converter.arena = arena
         hir_converter.register_class(class_node)
+      end
+      macro_nodes.each do |macro_node, arena|
+        hir_converter.arena = arena
+        hir_converter.register_macro(macro_node)
       end
 
       # Pass 2: Register all top-level function signatures
