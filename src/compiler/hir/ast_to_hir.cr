@@ -76,6 +76,16 @@ module Crystal::HIR
       @function.get_block(id)
     end
 
+    # Switch to a different block
+    def switch_to_block(id : BlockId)
+      @current_block = id
+    end
+
+    # Get current block ID
+    def current_block_id : BlockId
+      @current_block
+    end
+
     # Add instruction to current block
     def emit(value : Value) : Value
       get_block(@current_block).add(value)
@@ -1007,6 +1017,12 @@ module Crystal::HIR
 
       when CrystalV2::Compiler::Frontend::NextNode
         lower_next(ctx, node)
+
+      when CrystalV2::Compiler::Frontend::BeginNode
+        lower_begin(ctx, node)
+
+      when CrystalV2::Compiler::Frontend::RaiseNode
+        lower_raise(ctx, node)
 
       # ═══════════════════════════════════════════════════════════════════
       # CALLS
@@ -2088,6 +2104,134 @@ module Crystal::HIR
       nil_lit = Literal.new(ctx.next_id, TypeRef::NIL, nil)
       ctx.emit(nil_lit)
       nil_lit.id
+    end
+
+    # ═══════════════════════════════════════════════════════════════════════
+    # EXCEPTION HANDLING
+    # ═══════════════════════════════════════════════════════════════════════
+
+    # Lower begin/rescue/ensure block
+    # Structure:
+    #   begin
+    #     body...
+    #   rescue ex : ExceptionType
+    #     handler...
+    #   else
+    #     else_body...
+    #   ensure
+    #     cleanup...
+    #   end
+    private def lower_begin(ctx : LoweringContext, node : CrystalV2::Compiler::Frontend::BeginNode) : ValueId
+      # For now, we implement a simplified version using control flow:
+      # 1. Execute body
+      # 2. If raise was called, jump to rescue block
+      # 3. Execute ensure block (always)
+      # 4. Return result
+
+      # Create blocks
+      body_block = ctx.create_block
+      rescue_block = ctx.create_block if node.rescue_clauses
+      else_block = ctx.create_block if node.else_body
+      ensure_block = ctx.create_block if node.ensure_body
+      exit_block = ctx.create_block
+
+      # Jump to body
+      ctx.terminate(Jump.new(body_block))
+      ctx.switch_to_block(body_block)
+
+      # Lower body
+      result_id : ValueId = ctx.next_id
+      node.body.each do |expr_id|
+        result_id = lower_expr(ctx, expr_id)
+      end
+
+      # After body, jump to else (if exists) or ensure (if exists) or exit
+      after_body_target = else_block || ensure_block || exit_block
+      ctx.terminate(Jump.new(after_body_target))
+
+      # Lower rescue clauses if any
+      if rescue_clauses = node.rescue_clauses
+        ctx.switch_to_block(rescue_block.not_nil!)
+
+        # For now, just execute the first rescue clause's body
+        # TODO: proper exception type matching
+        rescue_result : ValueId = ctx.next_id
+        rescue_clauses.each_with_index do |clause, idx|
+          # If clause has variable name, create local for exception
+          if var_name = clause.variable_name
+            exc_var = Local.new(ctx.next_id, TypeRef::VOID, String.new(var_name), ctx.current_scope, true)
+            ctx.emit(exc_var)
+            # Get exception value
+            get_exc = GetException.new(ctx.next_id, TypeRef::VOID)
+            ctx.emit(get_exc)
+            # Copy to variable
+            copy = Copy.new(ctx.next_id, TypeRef::VOID, get_exc.id)
+            ctx.emit(copy)
+          end
+
+          # Lower rescue body
+          clause.body.each do |expr_id|
+            rescue_result = lower_expr(ctx, expr_id)
+          end
+
+          # Only handle first clause for now
+          break
+        end
+
+        # After rescue, jump to ensure or exit
+        after_rescue_target = ensure_block || exit_block
+        ctx.terminate(Jump.new(after_rescue_target))
+      end
+
+      # Lower else block if any
+      if else_body = node.else_body
+        ctx.switch_to_block(else_block.not_nil!)
+        else_body.each do |expr_id|
+          result_id = lower_expr(ctx, expr_id)
+        end
+        after_else_target = ensure_block || exit_block
+        ctx.terminate(Jump.new(after_else_target))
+      end
+
+      # Lower ensure block if any
+      if ensure_body = node.ensure_body
+        ctx.switch_to_block(ensure_block.not_nil!)
+        ensure_body.each do |expr_id|
+          lower_expr(ctx, expr_id)  # ensure result is discarded
+        end
+        ctx.terminate(Jump.new(exit_block))
+      end
+
+      # Continue from exit block
+      ctx.switch_to_block(exit_block)
+
+      result_id
+    end
+
+    # Lower raise statement
+    private def lower_raise(ctx : LoweringContext, node : CrystalV2::Compiler::Frontend::RaiseNode) : ValueId
+      exc_value : ValueId? = nil
+      exc_message : String? = nil
+
+      if val_id = node.value
+        val_node = @arena[val_id]
+        # Check if it's a string literal for simple raise "message"
+        if val_node.is_a?(CrystalV2::Compiler::Frontend::StringNode)
+          exc_message = String.new(val_node.value)
+        else
+          # Lower the exception value
+          exc_value = lower_expr(ctx, val_id)
+        end
+      end
+
+      # Emit raise instruction
+      raise_inst = Raise.new(ctx.next_id, exc_value, exc_message)
+      ctx.emit(raise_inst)
+
+      # Raise is a terminator - nothing executes after
+      ctx.terminate(Unreachable.new)
+
+      raise_inst.id
     end
 
     # ═══════════════════════════════════════════════════════════════════════

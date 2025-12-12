@@ -468,6 +468,14 @@ module Crystal::MIR
       # Get type name from union descriptor
       emit_raw "declare ptr @__crystal_v2_union_type_name(i32, ptr)\n"
       emit_raw "\n"
+
+      # Exception handling runtime functions
+      emit_raw "; Exception handling runtime functions\n"
+      emit_raw "declare void @__crystal_v2_raise(ptr)\n"
+      emit_raw "declare void @__crystal_v2_raise_msg(ptr)\n"
+      emit_raw "declare void @__crystal_v2_reraise()\n"
+      emit_raw "declare ptr @__crystal_v2_get_exception()\n"
+      emit_raw "\n"
     end
 
     private def emit_function(func : Function)

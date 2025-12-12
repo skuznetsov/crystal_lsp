@@ -702,6 +702,42 @@ module Crystal::HIR
   end
 
   # ═══════════════════════════════════════════════════════════════════════════
+  # EXCEPTION HANDLING
+  # ═══════════════════════════════════════════════════════════════════════════
+
+  # Raise an exception - terminates normal control flow
+  class Raise < Value
+    getter exception : ValueId?    # Optional exception value (nil = re-raise current)
+    getter message : String?       # Optional message for simple raises
+
+    def initialize(id : ValueId, @exception : ValueId? = nil, @message : String? = nil)
+      super(id, TypeRef::VOID)
+      @lifetime = LifetimeTag::Unknown
+    end
+
+    def to_s(io : IO) : Nil
+      io << "%" << @id << " = raise"
+      if exc = @exception
+        io << " %" << exc
+      elsif msg = @message
+        io << " " << msg.inspect
+      end
+    end
+  end
+
+  # Get the current exception (in a rescue block)
+  class GetException < Value
+    def initialize(id : ValueId, type : TypeRef)
+      super(id, type)
+      @lifetime = LifetimeTag::StackLocal
+    end
+
+    def to_s(io : IO) : Nil
+      io << "%" << @id << " = get_exception : " << @type.id
+    end
+  end
+
+  # ═══════════════════════════════════════════════════════════════════════════
   # TERMINATORS (End a basic block)
   # ═══════════════════════════════════════════════════════════════════════════
 

@@ -311,6 +311,10 @@ module Crystal
                  lower_array_size(hir_value)
                when HIR::StringInterpolation
                  lower_string_interpolation(hir_value)
+               when HIR::Raise
+                 lower_raise(hir_value)
+               when HIR::GetException
+                 lower_get_exception(hir_value)
                else
                  raise "Unsupported HIR value: #{hir_value.class}"
                end
@@ -885,6 +889,36 @@ module Crystal
         parts
       )
       builder.emit(mir_interp)
+    end
+
+    # ─────────────────────────────────────────────────────────────────────────
+    # Exception Handling
+    # ─────────────────────────────────────────────────────────────────────────
+
+    private def lower_raise(raise_inst : HIR::Raise) : ValueId
+      builder = @builder.not_nil!
+
+      # Lower raise as a call to runtime raise function
+      if exc = raise_inst.exception
+        exc_val = get_value(exc)
+        builder.extern_call("__crystal_v2_raise", [exc_val], TypeRef::VOID)
+      elsif msg = raise_inst.message
+        # Raise with message string
+        msg_val = builder.const_string(msg)
+        builder.extern_call("__crystal_v2_raise_msg", [msg_val], TypeRef::VOID)
+      else
+        # Re-raise current exception
+        empty_args = Array(ValueId).new
+        builder.extern_call("__crystal_v2_reraise", empty_args, TypeRef::VOID)
+      end
+    end
+
+    private def lower_get_exception(get_exc : HIR::GetException) : ValueId
+      builder = @builder.not_nil!
+
+      # Get current exception from runtime
+      empty_args = Array(ValueId).new
+      builder.extern_call("__crystal_v2_get_exception", empty_args, TypeRef::POINTER)
     end
 
     # ─────────────────────────────────────────────────────────────────────────

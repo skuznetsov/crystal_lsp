@@ -78,3 +78,44 @@ char* __crystal_v2_int64_to_string(int64_t value) {
     snprintf(result, 32, "%lld", value);
     return result;
 }
+
+// Exception handling (simple stub using setjmp/longjmp)
+#include <setjmp.h>
+
+static jmp_buf* __crystal_exception_handler = NULL;
+static void* __crystal_current_exception = NULL;
+static const char* __crystal_exception_msg = NULL;
+
+void __crystal_v2_raise(void* exception) {
+    __crystal_current_exception = exception;
+    if (__crystal_exception_handler) {
+        longjmp(*__crystal_exception_handler, 1);
+    } else {
+        fprintf(stderr, "Unhandled exception\n");
+        abort();
+    }
+}
+
+void __crystal_v2_raise_msg(const char* msg) {
+    __crystal_exception_msg = msg;
+    __crystal_current_exception = (void*)msg;
+    if (__crystal_exception_handler) {
+        longjmp(*__crystal_exception_handler, 1);
+    } else {
+        fprintf(stderr, "Unhandled exception: %s\n", msg);
+        abort();
+    }
+}
+
+void __crystal_v2_reraise(void) {
+    if (__crystal_current_exception && __crystal_exception_handler) {
+        longjmp(*__crystal_exception_handler, 1);
+    } else {
+        fprintf(stderr, "No exception to re-raise\n");
+        abort();
+    }
+}
+
+void* __crystal_v2_get_exception(void) {
+    return __crystal_current_exception;
+}
