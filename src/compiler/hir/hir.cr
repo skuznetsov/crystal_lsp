@@ -358,6 +358,96 @@ module Crystal::HIR
     end
   end
 
+  # ═══════════════════════════════════════════════════════════════════
+  # POINTER OPERATIONS
+  # ═══════════════════════════════════════════════════════════════════
+
+  # Pointer malloc - allocate raw memory
+  # Pointer(T).malloc(count) -> ptr
+  class PointerMalloc < Value
+    getter element_type : TypeRef
+    getter count : ValueId
+
+    def initialize(id : ValueId, type : TypeRef, @element_type : TypeRef, @count : ValueId)
+      super(id, type)
+    end
+
+    def to_s(io : IO) : Nil
+      io << "%" << @id << " = ptr_malloc " << @element_type.id << " x %" << @count
+    end
+  end
+
+  # Pointer load - read value at pointer
+  # pointer.value / pointer[index]
+  class PointerLoad < Value
+    getter pointer : ValueId
+    getter index : ValueId?  # nil means index 0
+
+    def initialize(id : ValueId, type : TypeRef, @pointer : ValueId, @index : ValueId? = nil)
+      super(id, type)
+    end
+
+    def to_s(io : IO) : Nil
+      io << "%" << @id << " = ptr_load %" << @pointer
+      if idx = @index
+        io << "[%" << idx << "]"
+      end
+      io << " : " << @type.id
+    end
+  end
+
+  # Pointer store - write value at pointer
+  # pointer.value = val / pointer[index] = val
+  class PointerStore < Value
+    getter pointer : ValueId
+    getter value : ValueId
+    getter index : ValueId?  # nil means index 0
+
+    def initialize(id : ValueId, type : TypeRef, @pointer : ValueId, @value : ValueId, @index : ValueId? = nil)
+      super(id, type)
+    end
+
+    def to_s(io : IO) : Nil
+      io << "%" << @id << " = ptr_store %" << @pointer
+      if idx = @index
+        io << "[%" << idx << "]"
+      end
+      io << " = %" << @value
+    end
+  end
+
+  # Pointer arithmetic - offset pointer by count
+  # pointer + n / pointer - n
+  class PointerAdd < Value
+    getter pointer : ValueId
+    getter offset : ValueId
+    getter element_type : TypeRef
+
+    def initialize(id : ValueId, type : TypeRef, @pointer : ValueId, @offset : ValueId, @element_type : TypeRef)
+      super(id, type)
+    end
+
+    def to_s(io : IO) : Nil
+      io << "%" << @id << " = ptr_add %" << @pointer << " + %" << @offset << " (elem=" << @element_type.id << ")"
+    end
+  end
+
+  # Pointer realloc - resize allocated memory
+  class PointerRealloc < Value
+    getter pointer : ValueId
+    getter new_size : ValueId
+
+    def initialize(id : ValueId, type : TypeRef, @pointer : ValueId, @new_size : ValueId)
+      super(id, type)
+    end
+
+    def to_s(io : IO) : Nil
+      io << "%" << @id << " = ptr_realloc %" << @pointer << " to %" << @new_size
+    end
+  end
+
+  # ═══════════════════════════════════════════════════════════════════
+
   # Array/Hash indexing: obj[key]
   class IndexGet < Value
     getter object : ValueId

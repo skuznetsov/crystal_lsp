@@ -996,6 +996,41 @@ module Crystal::HIR
       end
     end
 
+    # Extract element type from Pointer(T) class name or method name
+    # "Pointer(Int32)" or "Pointer(Int32).malloc" -> TypeRef::INT32
+    private def pointer_element_type(class_name : String) : TypeRef
+      # Extract type argument from "Pointer(T)" format (may have .method suffix)
+      if match = class_name.match(/^Pointer\(([^)]+)\)/)
+        type_arg = match[1]
+        case type_arg
+        when "Int8"    then TypeRef::INT8
+        when "Int16"   then TypeRef::INT16
+        when "Int32"   then TypeRef::INT32
+        when "Int64"   then TypeRef::INT64
+        when "Int128"  then TypeRef::INT128
+        when "UInt8"   then TypeRef::UINT8
+        when "UInt16"  then TypeRef::UINT16
+        when "UInt32"  then TypeRef::UINT32
+        when "UInt64"  then TypeRef::UINT64
+        when "UInt128" then TypeRef::UINT128
+        when "Float32" then TypeRef::FLOAT32
+        when "Float64" then TypeRef::FLOAT64
+        when "Bool"    then TypeRef::BOOL
+        when "Char"    then TypeRef::CHAR
+        when "Pointer" then TypeRef::POINTER
+        else
+          # User-defined type - look it up in class_info
+          if info = @class_info[type_arg]?
+            info.type_ref
+          else
+            TypeRef::VOID  # Unknown type
+          end
+        end
+      else
+        TypeRef::VOID
+      end
+    end
+
     # Mangle function name with parameter types for overloading
     # Example: "IO.print" + [String] -> "IO.print:String"
     # Example: "Int32#++" + [Int32] -> "Int32#+:Int32"
@@ -1746,7 +1781,29 @@ module Crystal::HIR
       left_id = lower_expr(ctx, node.left)
       right_id = lower_expr(ctx, node.right)
 
-      op = case node.operator_string
+      # Check for pointer arithmetic: ptr + n or ptr - n
+      left_type = ctx.type_of(left_id)
+      op_str = node.operator_string
+      if left_type == TypeRef::POINTER && (op_str == "+" || op_str == "-")
+        offset_id = right_id
+        # For subtraction, negate the offset
+        if op_str == "-"
+          neg_one = Literal.new(ctx.next_id, TypeRef::INT32, -1_i64)
+          ctx.emit(neg_one)
+          ctx.register_type(neg_one.id, TypeRef::INT32)
+          neg_offset = BinaryOperation.new(ctx.next_id, TypeRef::INT32, BinaryOp::Mul, offset_id, neg_one.id)
+          ctx.emit(neg_offset)
+          ctx.register_type(neg_offset.id, TypeRef::INT32)
+          offset_id = neg_offset.id
+        end
+        element_type = TypeRef::INT32  # TODO: track pointer element type
+        add_node = PointerAdd.new(ctx.next_id, TypeRef::POINTER, left_id, offset_id, element_type)
+        ctx.emit(add_node)
+        ctx.register_type(add_node.id, TypeRef::POINTER)
+        return add_node.id
+      end
+
+      op = case op_str
            when "+"   then BinaryOp::Add
            when "-"   then BinaryOp::Sub
            when "*"   then BinaryOp::Mul
@@ -1767,7 +1824,7 @@ module Crystal::HIR
            when "||"  then BinaryOp::Or
            else
              # Unknown operator - emit as method call
-             return emit_binary_call(ctx, left_id, node.operator_string, right_id)
+             return emit_binary_call(ctx, left_id, op_str, right_id)
            end
 
       result_type = if op.eq? || op.ne? || op.lt? || op.le? || op.gt? || op.ge? || op.and? || op.or?
@@ -2823,6 +2880,84 @@ module Crystal::HIR
         end
       end
 
+      # Check for pointer primitive operations
+      # Pointer(T).malloc(count) -> PointerMalloc
+      if full_method_name && full_method_name.starts_with?("Pointer(") && method_name == "malloc" && args.size == 1
+        element_type = pointer_element_type(full_method_name)
+        malloc_node = PointerMalloc.new(ctx.next_id, TypeRef::POINTER, element_type, args[0])
+        ctx.emit(malloc_node)
+        ctx.register_type(malloc_node.id, TypeRef::POINTER)
+        return malloc_node.id
+      end
+
+      # ptr.value or ptr[index] -> PointerLoad
+      if receiver_id && (method_name == "value" || method_name == "[]")
+        receiver_type = ctx.type_of(receiver_id)
+        if receiver_type == TypeRef::POINTER
+          index_id = if method_name == "[]" && args.size == 1
+                       args[0]
+                     else
+                       nil
+                     end
+          # Return the dereferenced type (we use INT32 as default for untyped pointers)
+          deref_type = TypeRef::INT32  # TODO: track pointer element type
+          load_node = PointerLoad.new(ctx.next_id, deref_type, receiver_id, index_id)
+          ctx.emit(load_node)
+          ctx.register_type(load_node.id, deref_type)
+          return load_node.id
+        end
+      end
+
+      # ptr.value= or ptr[index]= -> PointerStore
+      if receiver_id && (method_name == "value=" || method_name == "[]=")
+        receiver_type = ctx.type_of(receiver_id)
+        if receiver_type == TypeRef::POINTER
+          if method_name == "value=" && args.size == 1
+            store_node = PointerStore.new(ctx.next_id, TypeRef::VOID, receiver_id, args[0], nil)
+            ctx.emit(store_node)
+            return store_node.id
+          elsif method_name == "[]=" && args.size == 2
+            store_node = PointerStore.new(ctx.next_id, TypeRef::VOID, receiver_id, args[1], args[0])
+            ctx.emit(store_node)
+            return store_node.id
+          end
+        end
+      end
+
+      # ptr + offset or ptr - offset -> PointerAdd
+      if receiver_id && (method_name == "+" || method_name == "-") && args.size == 1
+        receiver_type = ctx.type_of(receiver_id)
+        if receiver_type == TypeRef::POINTER
+          offset_id = args[0]
+          # For subtraction, negate the offset
+          if method_name == "-"
+            neg_one = Literal.new(ctx.next_id, TypeRef::INT32, -1_i64)
+            ctx.emit(neg_one)
+            ctx.register_type(neg_one.id, TypeRef::INT32)
+            neg_offset = BinaryOperation.new(ctx.next_id, TypeRef::INT32, BinaryOp::Mul, offset_id, neg_one.id)
+            ctx.emit(neg_offset)
+            ctx.register_type(neg_offset.id, TypeRef::INT32)
+            offset_id = neg_offset.id
+          end
+          element_type = TypeRef::INT32  # TODO: track pointer element type
+          add_node = PointerAdd.new(ctx.next_id, TypeRef::POINTER, receiver_id, offset_id, element_type)
+          ctx.emit(add_node)
+          ctx.register_type(add_node.id, TypeRef::POINTER)
+          return add_node.id
+        end
+      end
+
+      # ptr.realloc(new_count) -> PointerRealloc
+      if receiver_id && method_name == "realloc" && args.size == 1
+        receiver_type = ctx.type_of(receiver_id)
+        if receiver_type == TypeRef::POINTER
+          realloc_node = PointerRealloc.new(ctx.next_id, TypeRef::POINTER, receiver_id, args[0])
+          ctx.emit(realloc_node)
+          ctx.register_type(realloc_node.id, TypeRef::POINTER)
+          return realloc_node.id
+        end
+      end
+
       call = Call.new(ctx.next_id, return_type, receiver_id, mangled_method_name, args, block_id)
       ctx.emit(call)
       call.id
@@ -3504,11 +3639,23 @@ module Crystal::HIR
       # IndexNode has indexes (Array) - can be multi-dimensional like arr[1, 2]
       index_ids = node.indexes.map { |idx| lower_expr(ctx, idx) }
 
+      # Check if this is pointer indexing (ptr[i])
+      object_type = ctx.type_of(object_id)
+      if object_type == TypeRef::POINTER && index_ids.size == 1
+        # Pointer indexing: ptr[i] -> PointerLoad with index
+        # TODO: track actual element type from Pointer(T)
+        deref_type = TypeRef::INT32
+        load_node = PointerLoad.new(ctx.next_id, deref_type, object_id, index_ids.first)
+        ctx.emit(load_node)
+        ctx.register_type(load_node.id, deref_type)
+        return load_node.id
+      end
+
       # For single index, use IndexGet directly
       # For multiple indexes, chain them or use as tuple
       if index_ids.size == 1
         # Get element type from array if tracked
-        element_type = ctx.type_of(object_id)
+        element_type = object_type
         if element_type == TypeRef::VOID
           element_type = TypeRef::INT32  # Default for untyped arrays
         end
@@ -3529,8 +3676,17 @@ module Crystal::HIR
       object_id = lower_expr(ctx, node.object)
       member_name = String.new(node.member)
 
-      # Determine receiver type to find the correct method
+      # Check for pointer.value -> PointerLoad
       receiver_type = ctx.type_of(object_id)
+      if receiver_type == TypeRef::POINTER && member_name == "value"
+        deref_type = TypeRef::INT32  # TODO: track actual element type
+        load_node = PointerLoad.new(ctx.next_id, deref_type, object_id, nil)
+        ctx.emit(load_node)
+        ctx.register_type(load_node.id, deref_type)
+        return load_node.id
+      end
+
+      # Determine receiver type to find the correct method
       full_method_name : String? = nil
       return_type = TypeRef::VOID
 
@@ -3639,6 +3795,16 @@ module Crystal::HIR
       when CrystalV2::Compiler::Frontend::IndexNode
         object_id = lower_expr(ctx, target_node.object)
         index_ids = target_node.indexes.map { |idx| lower_expr(ctx, idx) }
+
+        # Check if this is pointer indexing (ptr[i] = val)
+        object_type = ctx.type_of(object_id)
+        if object_type == TypeRef::POINTER && index_ids.size == 1
+          # Pointer store: ptr[i] = val -> PointerStore with index
+          store_node = PointerStore.new(ctx.next_id, TypeRef::VOID, object_id, value_id, index_ids.first)
+          ctx.emit(store_node)
+          return store_node.id
+        end
+
         if index_ids.size == 1
           index_set = IndexSet.new(ctx.next_id, TypeRef::VOID, object_id, index_ids.first, value_id)
           ctx.emit(index_set)

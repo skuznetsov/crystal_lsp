@@ -315,6 +315,16 @@ module Crystal
                  lower_raise(hir_value)
                when HIR::GetException
                  lower_get_exception(hir_value)
+               when HIR::PointerMalloc
+                 lower_pointer_malloc(hir_value)
+               when HIR::PointerLoad
+                 lower_pointer_load(hir_value)
+               when HIR::PointerStore
+                 lower_pointer_store(hir_value)
+               when HIR::PointerAdd
+                 lower_pointer_add(hir_value)
+               when HIR::PointerRealloc
+                 lower_pointer_realloc(hir_value)
                else
                  raise "Unsupported HIR value: #{hir_value.class}"
                end
@@ -919,6 +929,111 @@ module Crystal
       # Get current exception from runtime
       empty_args = Array(ValueId).new
       builder.extern_call("__crystal_v2_get_exception", empty_args, TypeRef::POINTER)
+    end
+
+    # ─────────────────────────────────────────────────────────────────────────
+    # Pointer Operations Lowering
+    # ─────────────────────────────────────────────────────────────────────────
+
+    private def lower_pointer_malloc(malloc : HIR::PointerMalloc) : ValueId
+      builder = @builder.not_nil!
+
+      count = get_value(malloc.count)
+      elem_size = type_size(malloc.element_type)
+
+      # Compute total size = count * element_size
+      size_const = builder.const_int(elem_size.to_i64, TypeRef::INT64)
+      # Cast count to i64 if needed
+      count_i64 = builder.cast(CastKind::SExt, count, TypeRef::INT64)
+      total_size = builder.mul(count_i64, size_const, TypeRef::INT64)
+
+      # Call malloc
+      args = [total_size]
+      builder.extern_call("__crystal_v2_malloc64", args, TypeRef::POINTER)
+    end
+
+    private def lower_pointer_load(load : HIR::PointerLoad) : ValueId
+      builder = @builder.not_nil!
+
+      ptr = get_value(load.pointer)
+      result_type = convert_type(load.type)
+
+      if idx = load.index
+        # ptr[idx] - need GEP then load
+        index = get_value(idx)
+        elem_type = convert_type(load.type)
+        gep = builder.gep_dynamic(ptr, index, elem_type)
+        builder.load(gep, result_type)
+      else
+        # ptr.value - direct load
+        builder.load(ptr, result_type)
+      end
+    end
+
+    private def lower_pointer_store(store : HIR::PointerStore) : ValueId
+      builder = @builder.not_nil!
+
+      ptr = get_value(store.pointer)
+      val = get_value(store.value)
+
+      # Get the element type from the value being stored
+      elem_type = get_arg_type(store.value)
+
+      if idx = store.index
+        # ptr[idx] = val - need GEP then store
+        index = get_value(idx)
+        gep = builder.gep_dynamic(ptr, index, elem_type)
+        builder.store(gep, val)
+      else
+        # ptr.value = val - direct store
+        builder.store(ptr, val)
+      end
+
+      val  # Return stored value
+    end
+
+    private def lower_pointer_add(add : HIR::PointerAdd) : ValueId
+      builder = @builder.not_nil!
+
+      ptr = get_value(add.pointer)
+      offset = get_value(add.offset)
+      elem_type = convert_type(add.element_type)
+
+      # GEP with dynamic offset computes ptr + offset * sizeof(elem)
+      builder.gep_dynamic(ptr, offset, elem_type)
+    end
+
+    private def lower_pointer_realloc(realloc : HIR::PointerRealloc) : ValueId
+      builder = @builder.not_nil!
+
+      ptr = get_value(realloc.pointer)
+      new_size = get_value(realloc.new_size)
+
+      args = [ptr, new_size]
+      builder.extern_call("__crystal_v2_realloc64", args, TypeRef::POINTER)
+    end
+
+    # Get size of a type in bytes
+    private def type_size(type : HIR::TypeRef) : Int32
+      case type
+      when HIR::TypeRef::VOID    then 0
+      when HIR::TypeRef::BOOL    then 1
+      when HIR::TypeRef::INT8    then 1
+      when HIR::TypeRef::INT16   then 2
+      when HIR::TypeRef::INT32   then 4
+      when HIR::TypeRef::INT64   then 8
+      when HIR::TypeRef::INT128  then 16
+      when HIR::TypeRef::UINT8   then 1
+      when HIR::TypeRef::UINT16  then 2
+      when HIR::TypeRef::UINT32  then 4
+      when HIR::TypeRef::UINT64  then 8
+      when HIR::TypeRef::UINT128 then 16
+      when HIR::TypeRef::FLOAT32 then 4
+      when HIR::TypeRef::FLOAT64 then 8
+      when HIR::TypeRef::CHAR    then 4
+      when HIR::TypeRef::POINTER then 8
+      else                            8  # Default pointer size for user types
+      end
     end
 
     # ─────────────────────────────────────────────────────────────────────────

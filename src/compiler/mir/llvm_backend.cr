@@ -562,6 +562,8 @@ module Crystal::MIR
         emit_store(inst)
       when GetElementPtr
         emit_gep(inst, name)
+      when GetElementPtrDynamic
+        emit_gep_dynamic(inst, name)
       when BinaryOp
         emit_binary_op(inst, name)
       when UnaryOp
@@ -831,6 +833,13 @@ module Crystal::MIR
       emit "#{name} = getelementptr #{type}, ptr #{base}, #{indices}"
     end
 
+    private def emit_gep_dynamic(inst : GetElementPtrDynamic, name : String)
+      base = value_ref(inst.base)
+      index = value_ref(inst.index)
+      element_type = @type_mapper.llvm_type(inst.element_type)
+      emit "#{name} = getelementptr #{element_type}, ptr #{base}, i64 #{index}"
+    end
+
     private def emit_binary_op(inst : BinaryOp, name : String)
       result_type = @type_mapper.llvm_type(inst.type)
       left = value_ref(inst.left)
@@ -885,7 +894,9 @@ module Crystal::MIR
     end
 
     private def emit_cast(inst : Cast, name : String)
-      src_type = "ptr"  # Simplified; real impl needs source type
+      # Get source type from value_types registry
+      src_type_ref = @value_types[inst.value]? || TypeRef::POINTER
+      src_type = @type_mapper.llvm_type(src_type_ref)
       dst_type = @type_mapper.llvm_type(inst.type)
       value = value_ref(inst.value)
 
@@ -969,14 +980,12 @@ module Crystal::MIR
     private def emit_extern_call(inst : ExternCall, name : String)
       return_type = @type_mapper.llvm_type(inst.type)
 
-      # Format arguments based on function name
-      args = if inst.extern_name.includes?("print_int64")
-               inst.args.map { |a| "i64 #{value_ref(a)}" }.join(", ")
-             elsif inst.extern_name.includes?("print_int32")
-               inst.args.map { |a| "i32 #{value_ref(a)}" }.join(", ")
-             else
-               inst.args.map { |a| "ptr #{value_ref(a)}" }.join(", ")
-             end
+      # Format arguments using actual types from value_types registry
+      args = inst.args.map do |a|
+        arg_type_ref = @value_types[a]? || TypeRef::POINTER
+        arg_type = @type_mapper.llvm_type(arg_type_ref)
+        "#{arg_type} #{value_ref(a)}"
+      end.join(", ")
 
       if return_type == "void"
         emit "call void @#{inst.extern_name}(#{args})"

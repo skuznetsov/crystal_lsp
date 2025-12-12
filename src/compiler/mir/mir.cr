@@ -871,6 +871,25 @@ module Crystal::MIR
     end
   end
 
+  # GEP with dynamic index - for pointer arithmetic with runtime offsets
+  class GetElementPtrDynamic < Value
+    getter base : ValueId
+    getter index : ValueId  # Dynamic index (ValueId instead of UInt32)
+    getter element_type : TypeRef  # Type of elements being indexed
+
+    def initialize(id : ValueId, type : TypeRef, @base : ValueId, @index : ValueId, @element_type : TypeRef)
+      super(id, type)
+    end
+
+    def operands : Array(ValueId)
+      [@base, @index]
+    end
+
+    def to_s(io : IO) : Nil
+      io << "%" << @id << " = gep_dyn %" << @base << ", %" << @index << " : " << @type
+    end
+  end
+
   # ═══════════════════════════════════════════════════════════════════════════
   # ARITHMETIC AND LOGIC
   # ═══════════════════════════════════════════════════════════════════════════
@@ -1860,6 +1879,11 @@ module Crystal::MIR
 
     def gep(base : ValueId, indices : Array(UInt32), result_type : TypeRef, base_type : TypeRef = TypeRef::POINTER) : ValueId
       emit(GetElementPtr.new(@function.next_value_id, result_type, base, indices, base_type))
+    end
+
+    # GEP with dynamic index for pointer arithmetic
+    def gep_dynamic(base : ValueId, index : ValueId, element_type : TypeRef) : ValueId
+      emit(GetElementPtrDynamic.new(@function.next_value_id, TypeRef::POINTER, base, index, element_type))
     end
 
     # Arithmetic
