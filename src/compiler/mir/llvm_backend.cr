@@ -740,6 +740,8 @@ module Crystal::MIR
         emit_array_size(inst, name)
       when ArrayGet
         emit_array_get(inst, name)
+      when ArraySet
+        emit_array_set(inst, name)
       when StringInterpolation
         emit_string_interpolation(inst, name)
       # Synchronization primitives
@@ -1290,6 +1292,18 @@ module Crystal::MIR
       # Get element from data array (second field)
       emit "%#{base_name}.elem_ptr = getelementptr { i32, [0 x #{element_type}] }, ptr #{array_ptr}, i32 0, i32 1, i32 #{index}"
       emit "#{name} = load #{element_type}, ptr %#{base_name}.elem_ptr"
+    end
+
+    private def emit_array_set(inst : ArraySet, name : String)
+      base_name = name.lstrip('%')
+      array_ptr = value_ref(inst.array_value)
+      index = value_ref(inst.index_value)
+      value = value_ref(inst.value_id)
+      element_type = @type_mapper.llvm_type(inst.element_type)
+
+      # Get element pointer from data array (second field) and store
+      emit "%#{base_name}.elem_ptr = getelementptr { i32, [0 x #{element_type}] }, ptr #{array_ptr}, i32 0, i32 1, i32 #{index}"
+      emit "store #{element_type} #{value}, ptr %#{base_name}.elem_ptr"
     end
 
     private def emit_string_interpolation(inst : StringInterpolation, name : String)

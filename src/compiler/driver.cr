@@ -110,12 +110,14 @@ module Crystal::V2
       first_arena = all_arenas[0][0]
       hir_converter = HIR::AstToHir.new(first_arena, @input_file)
 
-      # Collect all DefNodes, ClassNodes, ModuleNodes, EnumNodes, and MacroDefNodes with their arenas
+      # Collect all DefNodes, ClassNodes, ModuleNodes, EnumNodes, MacroDefNodes, and top-level expressions
       def_nodes = [] of Tuple(CrystalV2::Compiler::Frontend::DefNode, CrystalV2::Compiler::Frontend::ArenaLike)
       class_nodes = [] of Tuple(CrystalV2::Compiler::Frontend::ClassNode, CrystalV2::Compiler::Frontend::ArenaLike)
       module_nodes = [] of Tuple(CrystalV2::Compiler::Frontend::ModuleNode, CrystalV2::Compiler::Frontend::ArenaLike)
       enum_nodes = [] of Tuple(CrystalV2::Compiler::Frontend::EnumNode, CrystalV2::Compiler::Frontend::ArenaLike)
       macro_nodes = [] of Tuple(CrystalV2::Compiler::Frontend::MacroDefNode, CrystalV2::Compiler::Frontend::ArenaLike)
+      # Top-level expressions that form the main function
+      main_exprs = [] of Tuple(CrystalV2::Compiler::Frontend::ExprId, CrystalV2::Compiler::Frontend::ArenaLike)
 
       all_arenas.each do |arena, exprs, file_path|
         exprs.each do |expr_id|
@@ -131,6 +133,11 @@ module Crystal::V2
             enum_nodes << {node, arena}
           when CrystalV2::Compiler::Frontend::MacroDefNode
             macro_nodes << {node, arena}
+          when CrystalV2::Compiler::Frontend::RequireNode
+            # Skip require nodes - already processed
+          else
+            # Top-level expression: collect for main function
+            main_exprs << {expr_id, arena}
           end
         end
       end
@@ -175,6 +182,12 @@ module Crystal::V2
       def_nodes.each do |node, arena|
         hir_converter.arena = arena
         hir_converter.lower_def(node)
+        func_count += 1
+      end
+
+      # Create synthetic main function from top-level expressions
+      if main_exprs.size > 0
+        hir_converter.lower_main(main_exprs)
         func_count += 1
       end
 

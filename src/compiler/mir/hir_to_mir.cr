@@ -526,8 +526,22 @@ module Crystal
       index = get_value(idx.index)
       value = get_value(idx.value)
 
-      # For now, emit as a call to []= method
-      builder.const_nil  # Placeholder
+      # Get element type - use type from HIR IndexSet.type or default to INT32
+      element_type = convert_type(idx.type)
+      if element_type.id == MIR::TypeRef::VOID.id
+        element_type = MIR::TypeRef::INT32
+      end
+
+      # Emit ArraySet instruction
+      arr_set = MIR::ArraySet.new(
+        builder.next_id,
+        element_type,
+        obj_ptr,
+        index,
+        value
+      )
+      builder.emit(arr_set)
+      arr_set.id
     end
 
     # ─────────────────────────────────────────────────────────────────────────

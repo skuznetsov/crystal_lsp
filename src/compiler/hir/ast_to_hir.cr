@@ -1281,6 +1281,31 @@ module Crystal::HIR
       func
     end
 
+    # Lower top-level expressions into a synthetic main function
+    def lower_main(main_exprs : Array(Tuple(CrystalV2::Compiler::Frontend::ExprId, CrystalV2::Compiler::Frontend::ArenaLike))) : Function
+      # Create main function with Int32 return type (standard C main)
+      func = @module.create_function("main", TypeRef::INT32)
+      ctx = LoweringContext.new(func, @module, @arena)
+
+      # Lower each top-level expression in order
+      last_value : ValueId? = nil
+      main_exprs.each do |expr_id, arena|
+        # Switch arena context for this expression
+        @arena = arena
+        last_value = lower_expr(ctx, expr_id)
+      end
+
+      # Return 0 for success (main returns int)
+      block = ctx.get_block(ctx.current_block)
+      if block.terminator.is_a?(Unreachable)
+        zero = Literal.new(ctx.next_id, TypeRef::INT32, 0_i64)
+        ctx.emit(zero)
+        block.terminator = Return.new(zero.id)
+      end
+
+      func
+    end
+
     # Lower a single expression, returns ValueId of result
     def lower_expr(ctx : LoweringContext, expr_id : ExprId) : ValueId
       node = @arena[expr_id]

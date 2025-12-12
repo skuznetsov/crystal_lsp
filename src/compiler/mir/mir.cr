@@ -1270,6 +1270,26 @@ module Crystal::MIR
     end
   end
 
+  # Array element store: arr[index] = value
+  class ArraySet < Value
+    getter array_value : ValueId
+    getter index_value : ValueId
+    getter value_id : ValueId
+    getter element_type : TypeRef
+
+    def initialize(id : ValueId, @element_type : TypeRef, @array_value : ValueId, @index_value : ValueId, @value_id : ValueId)
+      super(id, TypeRef::VOID)
+    end
+
+    def operands : Array(ValueId)
+      [@array_value, @index_value, @value_id]
+    end
+
+    def to_s(io : IO) : Nil
+      io << "%" << @id << " = array_set %" << @array_value << "[%" << @index_value << "] = %" << @value_id << " : " << @element_type.id
+    end
+  end
+
   # String interpolation "Hello #{x}!"
   class StringInterpolation < Value
     getter parts : Array(ValueId)
