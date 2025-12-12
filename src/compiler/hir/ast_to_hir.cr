@@ -237,6 +237,115 @@ module Crystal::HIR
       @class_info[name]?
     end
 
+    # Enum info: name -> {member_name -> value}
+    @enum_info : Hash(String, Hash(String, Int64))?
+
+    # Register an enum type (pass 1)
+    def register_enum(node : CrystalV2::Compiler::Frontend::EnumNode)
+      enum_name = String.new(node.name)
+      @enum_info ||= {} of String => Hash(String, Int64)
+
+      members = {} of String => Int64
+      current_value = 0_i64
+
+      node.members.each do |member|
+        member_name = String.new(member.name)
+        # If member has explicit value, use it
+        if val_id = member.value
+          val_node = @arena[val_id]
+          if val_node.is_a?(CrystalV2::Compiler::Frontend::NumberNode)
+            current_value = String.new(val_node.value).to_i64? || current_value
+          end
+        end
+        members[member_name] = current_value
+        current_value += 1
+      end
+
+      @enum_info.not_nil![enum_name] = members
+    end
+
+    # Register a module and its methods (pass 1)
+    # Modules are like classes but with only class methods (self.method)
+    def register_module(node : CrystalV2::Compiler::Frontend::ModuleNode)
+      module_name = String.new(node.name)
+
+      # Register module methods (def self.foo)
+      if body = node.body
+        body.each do |expr_id|
+          member = @arena[expr_id]
+          if member.is_a?(CrystalV2::Compiler::Frontend::DefNode)
+            method_name = String.new(member.name)
+            # Module methods are always class methods: Module.method
+            full_name = "#{module_name}.#{method_name}"
+            return_type = if rt = member.return_type
+                            type_ref_for_name(String.new(rt))
+                          else
+                            TypeRef::VOID
+                          end
+            @function_types[full_name] = return_type
+          end
+        end
+      end
+    end
+
+    # Lower a module's methods (pass 3)
+    def lower_module(node : CrystalV2::Compiler::Frontend::ModuleNode)
+      module_name = String.new(node.name)
+
+      if body = node.body
+        body.each do |expr_id|
+          member = @arena[expr_id]
+          if member.is_a?(CrystalV2::Compiler::Frontend::DefNode)
+            lower_module_method(module_name, member)
+          end
+        end
+      end
+    end
+
+    # Lower a module method (static function)
+    private def lower_module_method(module_name : String, node : CrystalV2::Compiler::Frontend::DefNode)
+      method_name = String.new(node.name)
+      full_name = "#{module_name}.#{method_name}"
+
+      return_type = if rt = node.return_type
+                      type_ref_for_name(String.new(rt))
+                    else
+                      TypeRef::VOID
+                    end
+
+      func = @module.create_function(full_name, return_type)
+      ctx = LoweringContext.new(func, @module, @arena)
+
+      # Lower parameters (no self for module methods)
+      if params = node.params
+        params.each do |param|
+          param_name = param.name.nil? ? "_" : String.new(param.name.not_nil!)
+          param_type = if ta = param.type_annotation
+                         type_ref_for_name(String.new(ta))
+                       else
+                         TypeRef::VOID
+                       end
+          hir_param = func.add_param(param_name, param_type)
+          ctx.register_local(param_name, hir_param.id)
+          ctx.register_type(hir_param.id, param_type)
+        end
+      end
+
+      # Lower body
+      last_value : ValueId? = nil
+      if body = node.body
+        body.each do |expr_id|
+          last_value = lower_expr(ctx, expr_id)
+        end
+      end
+
+      # Add implicit return
+      block = ctx.get_block(ctx.current_block)
+      if block.terminator.is_a?(Unreachable)
+        block.terminator = Return.new(last_value)
+      end
+    end
+
     # Register a class type and its methods (pass 1)
     def register_class(node : CrystalV2::Compiler::Frontend::ClassNode)
       class_name = String.new(node.name)
@@ -973,6 +1082,9 @@ module Crystal::HIR
         # Lower the inner expression (splat semantics handled at call site)
         lower_expr(ctx, node.expr)
 
+      when CrystalV2::Compiler::Frontend::PathNode
+        lower_path(ctx, node)
+
       else
         raise LoweringError.new("Unsupported AST node type: #{node.class}", node)
       end
@@ -1196,6 +1308,64 @@ module Crystal::HIR
       call = Call.new(ctx.next_id, return_type, self_id, super_method_name, args)
       ctx.emit(call)
       call.id
+    end
+
+    # Lower path expression (e.g., Color::Green for enums, or Module::Constant)
+    private def lower_path(ctx : LoweringContext, node : CrystalV2::Compiler::Frontend::PathNode) : ValueId
+      # Extract left and right parts
+      # For Color::Green: left = Color (IdentifierNode), right = Green (IdentifierNode)
+      left_name : String? = nil
+      if left_id = node.left
+        left_node = @arena[left_id]
+        left_name = case left_node
+                    when CrystalV2::Compiler::Frontend::IdentifierNode
+                      String.new(left_node.name)
+                    when CrystalV2::Compiler::Frontend::ConstantNode
+                      String.new(left_node.name)
+                    when CrystalV2::Compiler::Frontend::PathNode
+                      # Nested path like A::B::C - recurse to get full path
+                      # For now, just get the rightmost part
+                      right_of_left = @arena[left_node.right]
+                      case right_of_left
+                      when CrystalV2::Compiler::Frontend::IdentifierNode
+                        String.new(right_of_left.name)
+                      else
+                        nil
+                      end
+                    else
+                      nil
+                    end
+      end
+
+      right_node = @arena[node.right]
+      right_name = case right_node
+                   when CrystalV2::Compiler::Frontend::IdentifierNode
+                     String.new(right_node.name)
+                   when CrystalV2::Compiler::Frontend::ConstantNode
+                     String.new(right_node.name)
+                   else
+                     nil
+                   end
+
+      # Check if this is an enum value access
+      if left_name && right_name
+        if enum_info = @enum_info
+          if members = enum_info[left_name]?
+            if value = members[right_name]?
+              # Found enum value - emit as Int32 literal
+              lit = Literal.new(ctx.next_id, TypeRef::INT32, value)
+              ctx.emit(lit)
+              return lit.id
+            end
+          end
+        end
+      end
+
+      # Fallback: treat as constant or module access (for future expansion)
+      # For now, just return 0
+      lit = Literal.new(ctx.next_id, TypeRef::INT32, 0_i64)
+      ctx.emit(lit)
+      lit.id
     end
 
     private def lower_global(ctx : LoweringContext, node : CrystalV2::Compiler::Frontend::GlobalNode) : ValueId
@@ -1947,7 +2117,7 @@ module Crystal::HIR
         obj_node = @arena[callee_node.object]
         method_name = String.new(callee_node.member)
 
-        # Check if it's a class method call (ClassName.new())
+        # Check if it's a class/module method call (ClassName.new() or Module.method())
         # Can be ConstantNode, IdentifierNode starting with uppercase, or GenericNode
         class_name_str : String? = nil
         if obj_node.is_a?(CrystalV2::Compiler::Frontend::ConstantNode)
@@ -1955,8 +2125,14 @@ module Crystal::HIR
         elsif obj_node.is_a?(CrystalV2::Compiler::Frontend::IdentifierNode)
           name = String.new(obj_node.name)
           # Check if it's a class name (starts with uppercase and is known class)
-          if name[0].uppercase? && @class_info.has_key?(name)
-            class_name_str = name
+          # OR a module name (check if Module.method exists in function_types)
+          if name[0].uppercase?
+            if @class_info.has_key?(name)
+              class_name_str = name
+            elsif @function_types.has_key?("#{name}.#{method_name}")
+              # It's a module method call
+              class_name_str = name
+            end
           end
         elsif obj_node.is_a?(CrystalV2::Compiler::Frontend::GenericNode)
           # Generic type like Box(Int32).new()

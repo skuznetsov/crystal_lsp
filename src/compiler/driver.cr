@@ -88,9 +88,11 @@ module Crystal::V2
       log "\n[2/5] Lowering to HIR..."
       hir_converter = HIR::AstToHir.new(arena, @input_file)
 
-      # Collect all DefNodes and ClassNodes
+      # Collect all DefNodes, ClassNodes, ModuleNodes, and EnumNodes
       def_nodes = [] of CrystalV2::Compiler::Frontend::DefNode
       class_nodes = [] of CrystalV2::Compiler::Frontend::ClassNode
+      module_nodes = [] of CrystalV2::Compiler::Frontend::ModuleNode
+      enum_nodes = [] of CrystalV2::Compiler::Frontend::EnumNode
       exprs.each do |expr_id|
         node = arena[expr_id]
         case node
@@ -98,11 +100,21 @@ module Crystal::V2
           def_nodes << node
         when CrystalV2::Compiler::Frontend::ClassNode
           class_nodes << node
+        when CrystalV2::Compiler::Frontend::ModuleNode
+          module_nodes << node
+        when CrystalV2::Compiler::Frontend::EnumNode
+          enum_nodes << node
         end
       end
 
       # Three-pass approach:
-      # Pass 1: Register all class types and their methods
+      # Pass 1: Register all enums, modules, class types and their methods
+      enum_nodes.each do |enum_node|
+        hir_converter.register_enum(enum_node)
+      end
+      module_nodes.each do |module_node|
+        hir_converter.register_module(module_node)
+      end
       class_nodes.each do |class_node|
         hir_converter.register_class(class_node)
       end
@@ -114,6 +126,10 @@ module Crystal::V2
 
       # Pass 3: Lower all function and method bodies
       func_count = 0
+      module_nodes.each do |module_node|
+        hir_converter.lower_module(module_node)
+        func_count += 1
+      end
       class_nodes.each do |class_node|
         hir_converter.lower_class(class_node)
         func_count += 1
