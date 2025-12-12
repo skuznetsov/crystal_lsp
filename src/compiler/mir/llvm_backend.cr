@@ -394,38 +394,106 @@ module Crystal::MIR
     end
 
     private def emit_runtime_declarations
-      # Memory allocation
-      emit_raw "declare ptr @__crystal_v2_malloc64(i64)\n"
-      emit_raw "declare ptr @__crystal_malloc_atomic64(i64)\n"
-      emit_raw "declare ptr @__crystal_realloc64(ptr, i64)\n"
+      # External C library functions
+      emit_raw "declare ptr @malloc(i64)\n"
+      emit_raw "declare ptr @calloc(i64, i64)\n"
+      emit_raw "declare ptr @realloc(ptr, i64)\n"
       emit_raw "declare void @free(ptr)\n"
+      emit_raw "declare i32 @printf(ptr, ...)\n"
+      emit_raw "declare i32 @puts(ptr)\n"
       emit_raw "\n"
 
-      # ARC runtime
-      emit_raw "declare void @__crystal_v2_rc_inc(ptr)\n"
-      emit_raw "declare void @__crystal_v2_rc_dec(ptr, ptr)\n"
-      emit_raw "declare void @__crystal_v2_rc_inc_atomic(ptr)\n"
-      emit_raw "declare void @__crystal_v2_rc_dec_atomic(ptr, ptr)\n"
+      # Format strings for printing
+      emit_raw "@.int_fmt = private constant [4 x i8] c\"%d\\0A\\00\"\n"
+      emit_raw "@.int_fmt_no_nl = private constant [3 x i8] c\"%d\\00\"\n"
+      emit_raw "@.long_fmt = private constant [5 x i8] c\"%ld\\0A\\00\"\n"
+      emit_raw "@.long_fmt_no_nl = private constant [4 x i8] c\"%ld\\00\"\n"
       emit_raw "\n"
 
-      # Slab allocator
-      emit_raw "declare ptr @__crystal_v2_slab_alloc(i32)\n"
-      emit_raw "declare void @__crystal_v2_slab_free(ptr, i32)\n"
-      emit_raw "\n"
+      # Memory allocation - just wrap malloc
+      emit_raw "define ptr @__crystal_v2_malloc64(i64 %size) {\n"
+      emit_raw "  %ptr = call ptr @malloc(i64 %size)\n"
+      emit_raw "  ret ptr %ptr\n"
+      emit_raw "}\n\n"
 
-      # IO functions
-      emit_raw "declare void @__crystal_v2_puts(ptr)\n"
-      emit_raw "declare void @__crystal_v2_print_int32(i32)\n"
-      emit_raw "declare void @__crystal_v2_print_int32_ln(i32)\n"
-      emit_raw "declare void @__crystal_v2_print_int64(i64)\n"
-      emit_raw "declare void @__crystal_v2_print_int64_ln(i64)\n"
-      emit_raw "\n"
+      emit_raw "define ptr @__crystal_malloc_atomic64(i64 %size) {\n"
+      emit_raw "  %ptr = call ptr @malloc(i64 %size)\n"
+      emit_raw "  ret ptr %ptr\n"
+      emit_raw "}\n\n"
 
-      # String functions
-      emit_raw "declare ptr @__crystal_v2_string_concat(ptr, ptr)\n"
-      emit_raw "declare ptr @__crystal_v2_int_to_string(i32)\n"
-      emit_raw "declare ptr @__crystal_v2_int64_to_string(i64)\n"
-      emit_raw "\n"
+      emit_raw "define ptr @__crystal_realloc64(ptr %ptr, i64 %size) {\n"
+      emit_raw "  %new_ptr = call ptr @realloc(ptr %ptr, i64 %size)\n"
+      emit_raw "  ret ptr %new_ptr\n"
+      emit_raw "}\n\n"
+
+      # ARC runtime - stubs (no-op for bootstrap)
+      emit_raw "define void @__crystal_v2_rc_inc(ptr %ptr) {\n"
+      emit_raw "  ret void\n"
+      emit_raw "}\n\n"
+
+      emit_raw "define void @__crystal_v2_rc_dec(ptr %ptr, ptr %destructor) {\n"
+      emit_raw "  ret void\n"
+      emit_raw "}\n\n"
+
+      emit_raw "define void @__crystal_v2_rc_inc_atomic(ptr %ptr) {\n"
+      emit_raw "  ret void\n"
+      emit_raw "}\n\n"
+
+      emit_raw "define void @__crystal_v2_rc_dec_atomic(ptr %ptr, ptr %destructor) {\n"
+      emit_raw "  ret void\n"
+      emit_raw "}\n\n"
+
+      # Slab allocator - just use malloc for bootstrap
+      emit_raw "define ptr @__crystal_v2_slab_alloc(i32 %size_class) {\n"
+      emit_raw "  %size = sext i32 %size_class to i64\n"
+      emit_raw "  %shift = shl i64 1, %size\n"
+      emit_raw "  %ptr = call ptr @malloc(i64 %shift)\n"
+      emit_raw "  ret ptr %ptr\n"
+      emit_raw "}\n\n"
+
+      emit_raw "define void @__crystal_v2_slab_free(ptr %ptr, i32 %size_class) {\n"
+      emit_raw "  call void @free(ptr %ptr)\n"
+      emit_raw "  ret void\n"
+      emit_raw "}\n\n"
+
+      # IO functions - use printf
+      emit_raw "define void @__crystal_v2_puts(ptr %str) {\n"
+      emit_raw "  call i32 @puts(ptr %str)\n"
+      emit_raw "  ret void\n"
+      emit_raw "}\n\n"
+
+      emit_raw "define void @__crystal_v2_print_int32(i32 %val) {\n"
+      emit_raw "  call i32 (ptr, ...) @printf(ptr @.int_fmt_no_nl, i32 %val)\n"
+      emit_raw "  ret void\n"
+      emit_raw "}\n\n"
+
+      emit_raw "define void @__crystal_v2_print_int32_ln(i32 %val) {\n"
+      emit_raw "  call i32 (ptr, ...) @printf(ptr @.int_fmt, i32 %val)\n"
+      emit_raw "  ret void\n"
+      emit_raw "}\n\n"
+
+      emit_raw "define void @__crystal_v2_print_int64(i64 %val) {\n"
+      emit_raw "  call i32 (ptr, ...) @printf(ptr @.long_fmt_no_nl, i64 %val)\n"
+      emit_raw "  ret void\n"
+      emit_raw "}\n\n"
+
+      emit_raw "define void @__crystal_v2_print_int64_ln(i64 %val) {\n"
+      emit_raw "  call i32 (ptr, ...) @printf(ptr @.long_fmt, i64 %val)\n"
+      emit_raw "  ret void\n"
+      emit_raw "}\n\n"
+
+      # String functions - stubs for bootstrap
+      emit_raw "define ptr @__crystal_v2_string_concat(ptr %a, ptr %b) {\n"
+      emit_raw "  ret ptr %a\n"
+      emit_raw "}\n\n"
+
+      emit_raw "define ptr @__crystal_v2_int_to_string(i32 %val) {\n"
+      emit_raw "  ret ptr null\n"
+      emit_raw "}\n\n"
+
+      emit_raw "define ptr @__crystal_v2_int64_to_string(i64 %val) {\n"
+      emit_raw "  ret ptr null\n"
+      emit_raw "}\n\n"
 
       # Thread Sanitizer (TSan) instrumentation
       if @emit_tsan
@@ -447,35 +515,74 @@ module Crystal::MIR
         emit_raw "\n"
       end
 
-      # Synchronization primitives runtime
+      # Synchronization primitives runtime - stubs for bootstrap
       emit_raw "; Synchronization runtime functions\n"
-      emit_raw "declare void @__crystal_v2_mutex_lock(ptr)\n"
-      emit_raw "declare void @__crystal_v2_mutex_unlock(ptr)\n"
-      emit_raw "declare i1 @__crystal_v2_mutex_trylock(ptr)\n"
-      emit_raw "declare void @__crystal_v2_channel_send(ptr, ptr)\n"
-      emit_raw "declare ptr @__crystal_v2_channel_receive(ptr)\n"
-      emit_raw "declare void @__crystal_v2_channel_close(ptr)\n"
-      emit_raw "\n"
+      emit_raw "define void @__crystal_v2_mutex_lock(ptr %mutex) {\n"
+      emit_raw "  ret void\n"
+      emit_raw "}\n\n"
+
+      emit_raw "define void @__crystal_v2_mutex_unlock(ptr %mutex) {\n"
+      emit_raw "  ret void\n"
+      emit_raw "}\n\n"
+
+      emit_raw "define i1 @__crystal_v2_mutex_trylock(ptr %mutex) {\n"
+      emit_raw "  ret i1 true\n"
+      emit_raw "}\n\n"
+
+      emit_raw "define void @__crystal_v2_channel_send(ptr %chan, ptr %val) {\n"
+      emit_raw "  ret void\n"
+      emit_raw "}\n\n"
+
+      emit_raw "define ptr @__crystal_v2_channel_receive(ptr %chan) {\n"
+      emit_raw "  ret ptr null\n"
+      emit_raw "}\n\n"
+
+      emit_raw "define void @__crystal_v2_channel_close(ptr %chan) {\n"
+      emit_raw "  ret void\n"
+      emit_raw "}\n\n"
     end
 
-    # Union debug helper function declarations
+    # Union debug helper function definitions - stubs for bootstrap
     private def emit_union_debug_helpers
       emit_raw "; Union debug helper functions\n"
       # Debug print: prints union value with type name
-      emit_raw "declare void @__crystal_v2_union_debug_print(ptr, ptr)\n"
+      emit_raw "define void @__crystal_v2_union_debug_print(ptr %union_ptr, ptr %descriptor) {\n"
+      emit_raw "  ret void\n"
+      emit_raw "}\n\n"
+
       # Type check with error: verifies type_id, traps on mismatch
-      emit_raw "declare void @__crystal_v2_union_type_check(i32, i32, ptr)\n"
+      emit_raw "define void @__crystal_v2_union_type_check(i32 %expected, i32 %actual, ptr %msg) {\n"
+      emit_raw "  ret void\n"
+      emit_raw "}\n\n"
+
       # Get type name from union descriptor
-      emit_raw "declare ptr @__crystal_v2_union_type_name(i32, ptr)\n"
+      emit_raw "define ptr @__crystal_v2_union_type_name(i32 %type_id, ptr %descriptor) {\n"
+      emit_raw "  ret ptr null\n"
+      emit_raw "}\n\n"
+
+      # Exception handling runtime functions - stubs that abort
+      emit_raw "; Exception handling runtime functions\n"
+      emit_raw "declare void @abort()\n"
       emit_raw "\n"
 
-      # Exception handling runtime functions
-      emit_raw "; Exception handling runtime functions\n"
-      emit_raw "declare void @__crystal_v2_raise(ptr)\n"
-      emit_raw "declare void @__crystal_v2_raise_msg(ptr)\n"
-      emit_raw "declare void @__crystal_v2_reraise()\n"
-      emit_raw "declare ptr @__crystal_v2_get_exception()\n"
-      emit_raw "\n"
+      emit_raw "define void @__crystal_v2_raise(ptr %exc) {\n"
+      emit_raw "  call void @abort()\n"
+      emit_raw "  unreachable\n"
+      emit_raw "}\n\n"
+
+      emit_raw "define void @__crystal_v2_raise_msg(ptr %msg) {\n"
+      emit_raw "  call void @abort()\n"
+      emit_raw "  unreachable\n"
+      emit_raw "}\n\n"
+
+      emit_raw "define void @__crystal_v2_reraise() {\n"
+      emit_raw "  call void @abort()\n"
+      emit_raw "  unreachable\n"
+      emit_raw "}\n\n"
+
+      emit_raw "define ptr @__crystal_v2_get_exception() {\n"
+      emit_raw "  ret ptr null\n"
+      emit_raw "}\n\n"
     end
 
     private def emit_function(func : Function)

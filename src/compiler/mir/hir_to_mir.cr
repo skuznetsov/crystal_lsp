@@ -551,7 +551,9 @@ module Crystal
       end
 
       # Handle built-in print functions
-      if call.method_name == "puts"
+      # Method name may be mangled as "puts:Int32" etc, so extract base name
+      base_method_name = call.method_name.split(':').first
+      if base_method_name == "puts"
         # Determine the actual extern based on argument type
         if args.size == 1
           arg_type = get_arg_type(call.args[0])
@@ -571,7 +573,7 @@ module Crystal
       end
 
       # Handle print (without newline)
-      if call.method_name == "print"
+      if base_method_name == "print"
         if args.size == 1
           arg_type = get_arg_type(call.args[0])
           extern_name = case arg_type
