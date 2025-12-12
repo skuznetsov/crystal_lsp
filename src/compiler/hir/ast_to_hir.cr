@@ -1093,6 +1093,10 @@ module Crystal::HIR
       full_name = mangle_function_name(base_name, param_types)
       @function_types[full_name] = return_type
 
+      # Also register with base name for fallback lookup
+      # (when function is not overloaded, we look up by base name)
+      @function_types[base_name] = return_type
+
       # Store AST for potential inline expansion (use mangled name)
       @function_defs[full_name] = node
 
@@ -2913,12 +2917,20 @@ module Crystal::HIR
       mangled_method_name = mangle_function_name(base_method_name, arg_types)
 
       # Try to infer return type using mangled name first, fallback to base name
+      # For non-overloaded functions, prefer base name since that's how they're registered in HIR module
       return_type = get_function_return_type(mangled_method_name)
-      if return_type == TypeRef::VOID && mangled_method_name != base_method_name
-        # Try unmangled name as fallback (for non-overloaded functions)
+
+      # Check if function exists in module by base name (for user-defined functions)
+      base_func_exists = @module.functions.any? { |f| f.name == base_method_name }
+
+      if base_func_exists
+        # Function exists with base name - use that (no mangling needed for simple functions)
+        return_type = get_function_return_type(base_method_name) if return_type == TypeRef::VOID
+        mangled_method_name = base_method_name
+      elsif return_type == TypeRef::VOID && mangled_method_name != base_method_name
+        # Try unmangled name as fallback
         return_type = get_function_return_type(base_method_name)
         if return_type != TypeRef::VOID
-          # Function exists without mangling - use unmangled name
           mangled_method_name = base_method_name
         end
       end
