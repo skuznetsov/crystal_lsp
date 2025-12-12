@@ -3767,8 +3767,40 @@ module Crystal::HIR
     end
 
     private def lower_member_access(ctx : LoweringContext, node : CrystalV2::Compiler::Frontend::MemberAccessNode) : ValueId
-      object_id = lower_expr(ctx, node.object)
+      obj_node = @arena[node.object]
       member_name = String.new(node.member)
+
+      # Check if this is a class/module static call like Counter.new (without parens)
+      # Similar logic to lower_call for MemberAccessNode
+      class_name_str : String? = nil
+
+      if obj_node.is_a?(CrystalV2::Compiler::Frontend::ConstantNode)
+        class_name_str = String.new(obj_node.name)
+      elsif obj_node.is_a?(CrystalV2::Compiler::Frontend::IdentifierNode)
+        name = String.new(obj_node.name)
+        if name[0].uppercase? && @class_info.has_key?(name)
+          class_name_str = name
+        end
+      end
+
+      # If it's a static class call (like Counter.new), emit as static call
+      if class_name_str
+        full_method_name = "#{class_name_str}.#{member_name}"
+        return_type = @function_types[full_method_name]? || TypeRef::VOID
+        # For .new, use class type_ref as return type
+        if member_name == "new" && return_type == TypeRef::VOID
+          if class_info = @class_info[class_name_str]?
+            return_type = class_info.type_ref
+          end
+        end
+        call = Call.new(ctx.next_id, return_type, nil, full_method_name, [] of ValueId)
+        ctx.emit(call)
+        ctx.register_type(call.id, return_type)
+        return call.id
+      end
+
+      # Otherwise it's an instance method call - evaluate object first
+      object_id = lower_expr(ctx, node.object)
 
       # Check for pointer.value -> PointerLoad
       receiver_type = ctx.type_of(object_id)
@@ -3781,7 +3813,7 @@ module Crystal::HIR
       end
 
       # Determine receiver type to find the correct method
-      full_method_name : String? = nil
+      resolved_method_name : String? = nil
       return_type = TypeRef::VOID
 
       # Try to find method by receiver type
@@ -3790,7 +3822,7 @@ module Crystal::HIR
           if info.type_ref.id == receiver_type.id
             test_name = "#{class_name}##{member_name}"
             if type = @function_types[test_name]?
-              full_method_name = test_name
+              resolved_method_name = test_name
               return_type = type
             end
             break
@@ -3799,18 +3831,18 @@ module Crystal::HIR
       end
 
       # Fallback: search all classes for this method
-      if full_method_name.nil?
+      if resolved_method_name.nil?
         @class_info.each do |class_name, info|
           test_name = "#{class_name}##{member_name}"
           if type = @function_types[test_name]?
-            full_method_name = test_name
+            resolved_method_name = test_name
             return_type = type
             break
           end
         end
       end
 
-      actual_name = full_method_name || member_name
+      actual_name = resolved_method_name || member_name
       call = Call.new(ctx.next_id, return_type, object_id, actual_name, [] of ValueId)
       ctx.emit(call)
       call.id
