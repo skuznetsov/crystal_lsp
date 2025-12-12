@@ -1468,6 +1468,10 @@ module Crystal::HIR
       when CrystalV2::Compiler::Frontend::PathNode
         lower_path(ctx, node)
 
+      when CrystalV2::Compiler::Frontend::GenericNode
+        # Generic type like Array(Int32) - lower as type reference for use as receiver
+        lower_generic_type_ref(ctx, node)
+
       else
         raise LoweringError.new("Unsupported AST node type: #{node.class}", node)
       end
@@ -1771,6 +1775,50 @@ module Crystal::HIR
       ctx.emit(local)
       ctx.register_local("self", local.id)
       local.id
+    end
+
+    # Lower a generic type reference like Array(Int32), Hash(String, Int32)
+    # This is used when calling static methods like Array(Int32).new
+    private def lower_generic_type_ref(ctx : LoweringContext, node : CrystalV2::Compiler::Frontend::GenericNode) : ValueId
+      # Extract base type name
+      base_node = @arena[node.base_type]
+      base_name = case base_node
+                  when CrystalV2::Compiler::Frontend::ConstantNode
+                    String.new(base_node.name)
+                  when CrystalV2::Compiler::Frontend::IdentifierNode
+                    String.new(base_node.name)
+                  else
+                    "Unknown"
+                  end
+
+      # Extract type arguments
+      type_args = node.type_args.map do |arg_id|
+        arg_node = @arena[arg_id]
+        case arg_node
+        when CrystalV2::Compiler::Frontend::ConstantNode
+          String.new(arg_node.name)
+        when CrystalV2::Compiler::Frontend::IdentifierNode
+          String.new(arg_node.name)
+        else
+          "Unknown"
+        end
+      end
+
+      # Create specialized class name like Array(Int32)
+      class_name = "#{base_name}(#{type_args.join(", ")})"
+
+      # Monomorphize if needed
+      if !@monomorphized.includes?(class_name)
+        monomorphize_generic_class(base_name, type_args, class_name)
+      end
+
+      # Return a type reference literal (for use as receiver in static calls)
+      # We use a nil literal with special type tracking
+      type_ref = @class_info[class_name]?.try(&.type_ref) || TypeRef::VOID
+      lit = Literal.new(ctx.next_id, type_ref, nil)
+      ctx.emit(lit)
+      ctx.register_type(lit.id, type_ref)
+      lit.id
     end
 
     # ═══════════════════════════════════════════════════════════════════════

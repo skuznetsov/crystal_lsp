@@ -1,8 +1,10 @@
-# Crystal v2 Minimal Standard Library
-# Bootstrap prelude - enough to compile simple programs
+# Crystal v2 Standard Library Prelude
+# Loaded automatically unless --no-prelude is specified
 
 require "./int"
 require "./string"
 require "./array"
+require "./hash"
 require "./pointer"
+require "./exception"
 require "./io"
