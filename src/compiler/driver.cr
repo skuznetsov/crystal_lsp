@@ -18,6 +18,9 @@ require "./mir/llvm_backend"
 
 module Crystal::V2
   class CompilerDriver
+    # Standard library path - relative to compiler source
+    STDLIB_PATH = File.expand_path("../stdlib", File.dirname(__FILE__))
+
     property input_file : String = ""
     property output_file : String = "a.out"
     property emit_llvm : Bool = false
@@ -25,6 +28,7 @@ module Crystal::V2
     property emit_mir : Bool = false
     property verbose : Bool = false
     property optimize : Int32 = 0
+    property no_prelude : Bool = false  # Skip automatic prelude loading
 
     def initialize
     end
@@ -53,6 +57,8 @@ module Crystal::V2
           @optimize = 2
         when "-O3"
           @optimize = 3
+        when "--no-prelude"
+          @no_prelude = true
         when /^-/
           STDERR.puts "Unknown option: #{arg}"
           exit 1
@@ -63,7 +69,7 @@ module Crystal::V2
       end
 
       if @input_file.empty?
-        STDERR.puts "Usage: driver <input.cr> [-o output] [--emit-llvm] [-v]"
+        STDERR.puts "Usage: driver <input.cr> [-o output] [--emit-llvm] [--no-prelude] [-v]"
         exit 1
       end
     end
@@ -81,6 +87,17 @@ module Crystal::V2
 
       # Parse all files recursively (require support)
       all_arenas = [] of Tuple(CrystalV2::Compiler::Frontend::ArenaLike, Array(CrystalV2::Compiler::Frontend::ExprId), String)
+
+      # Load prelude first (unless --no-prelude)
+      unless @no_prelude
+        prelude_path = File.join(STDLIB_PATH, "prelude.cr")
+        if File.exists?(prelude_path)
+          log "  Loading prelude: #{prelude_path}"
+          parse_file_recursive(prelude_path, all_arenas, loaded_files)
+        end
+      end
+
+      # Parse user's input file
       parse_file_recursive(@input_file, all_arenas, loaded_files)
 
       total_exprs = all_arenas.sum { |t| t[1].size }
@@ -373,6 +390,14 @@ module Crystal::V2
           return input_rel_path + ".cr"
         elsif File.exists?(input_rel_path) && File.file?(input_rel_path)
           return input_rel_path
+        end
+
+        # Try in stdlib directory (for require "int", require "pointer", etc.)
+        stdlib_path = File.expand_path(req_path, STDLIB_PATH)
+        if File.exists?(stdlib_path + ".cr") && File.file?(stdlib_path + ".cr")
+          return stdlib_path + ".cr"
+        elsif File.exists?(stdlib_path) && File.file?(stdlib_path)
+          return stdlib_path
         end
       end
 
