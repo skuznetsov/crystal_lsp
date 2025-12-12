@@ -2343,7 +2343,13 @@ module Crystal::HIR
         method_name = "call"
       end
 
-      args = node.args.map { |arg| lower_expr(ctx, arg) }
+      # Handle named arguments by reordering them to match parameter positions
+      # Also expand splat arguments (*array -> individual elements)
+      args = if named_args = node.named_args
+               reorder_named_args(ctx, node.args, named_args, method_name, full_method_name)
+             else
+               expand_splat_args(ctx, node.args)
+             end
 
       # Handle .times { |i| body } intrinsic BEFORE lowering block
       if method_name == "times" && receiver_id
@@ -2448,6 +2454,89 @@ module Crystal::HIR
       call = Call.new(ctx.next_id, return_type, receiver_id, actual_method_name, args, block_id)
       ctx.emit(call)
       call.id
+    end
+
+    # Expand splat arguments in a call
+    # *array becomes individual elements at compile time (if array is literal)
+    private def expand_splat_args(ctx : LoweringContext, arg_exprs : Array(ExprId)) : Array(ValueId)
+      result = [] of ValueId
+
+      arg_exprs.each do |arg_expr|
+        arg_node = @arena[arg_expr]
+
+        if arg_node.is_a?(CrystalV2::Compiler::Frontend::SplatNode)
+          # Splat - try to expand if inner is array literal
+          inner_node = @arena[arg_node.expr]
+          if inner_node.is_a?(CrystalV2::Compiler::Frontend::ArrayLiteralNode)
+            # Expand array elements as individual arguments
+            inner_node.elements.each do |elem_id|
+              result << lower_expr(ctx, elem_id)
+            end
+          else
+            # Non-literal splat - just pass through (runtime behavior not fully supported)
+            result << lower_expr(ctx, arg_node.expr)
+          end
+        else
+          result << lower_expr(ctx, arg_expr)
+        end
+      end
+
+      result
+    end
+
+    # Reorder named arguments to match parameter positions
+    private def reorder_named_args(
+      ctx : LoweringContext,
+      positional_args : Array(ExprId),
+      named_args : Array(CrystalV2::Compiler::Frontend::NamedArgument),
+      method_name : String,
+      full_method_name : String?
+    ) : Array(ValueId)
+      # First, lower positional args
+      result = positional_args.map { |arg| lower_expr(ctx, arg) }
+
+      # Get parameter names from function definition
+      func_name = full_method_name || method_name
+      func_def = @function_defs[func_name]?
+
+      if func_def && (params = func_def.params)
+        param_names = params.map do |p|
+          if name = p.name
+            String.new(name)
+          else
+            ""
+          end
+        end
+
+        # Process named args
+        named_args.each do |named_arg|
+          arg_name = String.new(named_arg.name)
+          arg_value = lower_expr(ctx, named_arg.value)
+
+          # Find position of this parameter
+          idx = param_names.index(arg_name)
+          if idx
+            # Extend result array if needed
+            while result.size <= idx
+              # Fill with nil placeholder (will be replaced)
+              nil_lit = Literal.new(ctx.next_id, TypeRef::NIL, nil)
+              ctx.emit(nil_lit)
+              result << nil_lit.id
+            end
+            result[idx] = arg_value
+          else
+            # Unknown parameter name - just append
+            result << arg_value
+          end
+        end
+      else
+        # No function definition found - just append named args in order
+        named_args.each do |named_arg|
+          result << lower_expr(ctx, named_arg.value)
+        end
+      end
+
+      result
     end
 
     # Intrinsic: n.times { |i| body }
