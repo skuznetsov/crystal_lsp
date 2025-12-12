@@ -167,7 +167,7 @@ module Crystal::HIR
   record ClassVarInfo, name : String, type : TypeRef, initial_value : Int64?
 
   # Class type info (is_struct=true for value types)
-  record ClassInfo, name : String, type_ref : TypeRef, ivars : Array(IVarInfo), class_vars : Array(ClassVarInfo), size : Int32, is_struct : Bool = false
+  record ClassInfo, name : String, type_ref : TypeRef, ivars : Array(IVarInfo), class_vars : Array(ClassVarInfo), size : Int32, is_struct : Bool = false, parent_name : String? = nil
 
   # Generic class template (not yet specialized)
   record GenericClassTemplate,
@@ -214,12 +214,16 @@ module Crystal::HIR
     # Current type parameter substitutions for generic lowering
     @type_param_map : Hash(String, String)
 
+    # Current method name being lowered (for super calls)
+    @current_method : String?
+
     def initialize(@arena, module_name : String = "main")
       @module = Module.new(module_name)
       @function_types = {} of String => TypeRef
       @class_info = {} of String => ClassInfo
       @init_params = {} of String => Array({String, TypeRef})
       @current_class = nil
+      @current_method = nil
       @union_descriptors = {} of MIR::TypeRef => MIR::UnionDescriptor
       @function_defs = {} of String => CrystalV2::Compiler::Frontend::DefNode
       @yield_functions = Set(String).new
@@ -261,6 +265,20 @@ module Crystal::HIR
       class_vars = [] of ClassVarInfo
       # Struct has no type_id header (value type), class starts at 8 for header
       offset = is_struct ? 0 : 8
+
+      # Inheritance: copy parent ivars first (to preserve layout)
+      parent_name : String? = nil
+      if super_name_slice = node.super_name
+        parent_name = String.new(super_name_slice)
+        if parent_info = @class_info[parent_name]?
+          # Copy all ivars from parent, preserving their offsets
+          parent_info.ivars.each do |parent_ivar|
+            ivars << parent_ivar.dup
+          end
+          # Start child ivars after parent ivars
+          offset = parent_info.size
+        end
+      end
 
       # Also find initialize to get constructor parameters
       init_params = [] of {String, TypeRef}
@@ -341,10 +359,16 @@ module Crystal::HIR
       # Create class/struct type
       type_kind = is_struct ? TypeKind::Struct : TypeKind::Class
       type_ref = @module.intern_type(TypeDescriptor.new(type_kind, class_name))
-      @class_info[class_name] = ClassInfo.new(class_name, type_ref, ivars, class_vars, offset, is_struct)
+      @class_info[class_name] = ClassInfo.new(class_name, type_ref, ivars, class_vars, offset, is_struct, parent_name)
 
       # Store initialize params for allocator generation
+      # If child class has no initialize, inherit from parent
       @init_params ||= {} of String => Array({String, TypeRef})
+      if init_params.empty? && parent_name
+        if parent_init_params = @init_params.not_nil![parent_name]?
+          init_params = parent_init_params
+        end
+      end
       @init_params.not_nil![class_name] = init_params
 
       # Register "new" allocator function
@@ -468,8 +492,9 @@ module Crystal::HIR
       end
 
       # Call initialize if it exists, passing through the parameters
-      init_name = "#{class_name}#initialize"
-      if @function_types.has_key?(init_name)
+      # Use inheritance-aware resolution to find initialize in parent classes
+      init_name = resolve_method_with_inheritance(class_name, "initialize")
+      if init_name
         init_call = Call.new(ctx.next_id, TypeRef::VOID, alloc.id, init_name, param_ids)
         ctx.emit(init_call)
       end
@@ -482,6 +507,10 @@ module Crystal::HIR
     private def lower_method(class_name : String, class_info : ClassInfo, node : CrystalV2::Compiler::Frontend::DefNode)
       method_name = String.new(node.name)
       full_name = "#{class_name}##{method_name}"
+
+      # Track current method for super calls
+      old_method = @current_method
+      @current_method = method_name
 
       return_type = if rt = node.return_type
                       type_ref_for_name(String.new(rt))
@@ -545,6 +574,9 @@ module Crystal::HIR
       if block.terminator.is_a?(Unreachable)
         block.terminator = Return.new(last_value)
       end
+
+      # Restore previous method context
+      @current_method = old_method
     end
 
     # Helper to get type size in bytes
@@ -652,6 +684,29 @@ module Crystal::HIR
           class_info.ivars.each do |ivar|
             return ivar.type if ivar.name == name
           end
+        end
+      end
+      nil
+    end
+
+    # Resolve method name with inheritance: look in class and all parent classes
+    # Returns the fully qualified method name (e.g., "Animal#age") or nil if not found
+    private def resolve_method_with_inheritance(class_name : String, method_name : String) : String?
+      current = class_name
+      while true
+        test_name = "#{current}##{method_name}"
+        if @function_types.has_key?(test_name)
+          return test_name
+        end
+        # Try parent class
+        if info = @class_info[current]?
+          if parent = info.parent_name
+            current = parent
+          else
+            break
+          end
+        else
+          break
         end
       end
       nil
@@ -789,6 +844,9 @@ module Crystal::HIR
 
       when CrystalV2::Compiler::Frontend::SelfNode
         lower_self(ctx, node)
+
+      when CrystalV2::Compiler::Frontend::SuperNode
+        lower_super(ctx, node)
 
       when CrystalV2::Compiler::Frontend::GlobalNode
         lower_global(ctx, node)
@@ -1091,6 +1149,53 @@ module Crystal::HIR
 
     private def lower_self(ctx : LoweringContext, node : CrystalV2::Compiler::Frontend::SelfNode) : ValueId
       emit_self(ctx)
+    end
+
+    # Lower super call - calls parent class method with same name
+    private def lower_super(ctx : LoweringContext, node : CrystalV2::Compiler::Frontend::SuperNode) : ValueId
+      class_name = @current_class
+      method_name = @current_method
+
+      unless class_name && method_name
+        # Fallback: return void
+        void_lit = Literal.new(ctx.next_id, TypeRef::VOID, 0_i64)
+        ctx.emit(void_lit)
+        return void_lit.id
+      end
+
+      # Find parent class
+      class_info = @class_info[class_name]?
+      parent_name = class_info.try(&.parent_name)
+
+      unless parent_name
+        # No parent - return void
+        void_lit = Literal.new(ctx.next_id, TypeRef::VOID, 0_i64)
+        ctx.emit(void_lit)
+        return void_lit.id
+      end
+
+      # Find the method in parent class (not using inheritance - we want specifically parent's version)
+      super_method_name = "#{parent_name}##{method_name}"
+
+      # Get return type
+      return_type = @function_types[super_method_name]? || TypeRef::VOID
+
+      # Lower arguments if provided
+      args = if node_args = node.args
+               node_args.map { |arg| lower_expr(ctx, arg) }
+             else
+               # If no args, forward current method's parameters
+               # Get them from the function context (skip 'self' param at index 0)
+               ctx.function.params[1..].map(&.id)
+             end
+
+      # Get self for the call
+      self_id = emit_self(ctx)
+
+      # Call parent method
+      call = Call.new(ctx.next_id, return_type, self_id, super_method_name, args)
+      ctx.emit(call)
+      call.id
     end
 
     private def lower_global(ctx : LoweringContext, node : CrystalV2::Compiler::Frontend::GlobalNode) : ValueId
@@ -1900,10 +2005,11 @@ module Crystal::HIR
           # Try to determine the class from receiver's type
           receiver_type = ctx.type_of(receiver_id)
           if receiver_type.id > 0
-            # Look up class name from type
+            # Look up class name from type, then resolve method with inheritance
             @class_info.each do |name, info|
               if info.type_ref.id == receiver_type.id
-                full_method_name = "#{name}##{method_name}"
+                # Use inheritance-aware method resolution
+                full_method_name = resolve_method_with_inheritance(name, method_name)
                 break
               end
             end
