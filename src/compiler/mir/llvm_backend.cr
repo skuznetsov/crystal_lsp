@@ -860,6 +860,12 @@ module Crystal::MIR
               when Nil     then "null"
               else              "0"
               end
+
+      # For pointer types, use "null" instead of "0"
+      if type == "ptr" && value == "0"
+        value = "null"
+      end
+
       # Store constant for inlining at use sites
       @constant_values[inst.id] = value
       # Generate real instruction so phi nodes can reference it
@@ -995,6 +1001,11 @@ module Crystal::MIR
       # Look up the type of the value being stored
       val_type = @value_types[inst.value]? || TypeRef::POINTER
       val_type_str = @type_mapper.llvm_type(val_type)
+
+      # Fix for VOID types - if value looks like a pointer reference, use ptr type
+      if val_type_str == "void" && val.starts_with?("%")
+        val_type_str = "ptr"
+      end
 
       # TSan instrumentation: report write before store
       if @emit_tsan
