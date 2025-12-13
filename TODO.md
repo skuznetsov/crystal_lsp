@@ -873,8 +873,13 @@ The key insight is: **Don't compete with LLVM, complement it.**
 
 | Feature | Uses in v2 | Priority |
 |---------|------------|----------|
-| macro | 133 | LOW - defer metaprogramming |
+| macro | 133 | LOW - NOT blocking self-host (our stdlib/code don't use macros) |
 | exception stacktrace | - | LOW - debugging aid |
+
+**Note:** Self-hosting does NOT require macros because:
+- Our compiler code doesn't use `{% %}` or `{{ }}` syntax
+- Our stdlib (`src/stdlib/`) is macro-free
+- Dependencies (option_parser, set) have macro-free implementations
 
 ### 7.4 Self-Hosting Target Constructs (grep of v2 codebase)
 

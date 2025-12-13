@@ -38,4 +38,4 @@ logs/__pycache__/
 bin/
 logs/
 tools/lldb/__pycache__/
-examples/bootstrap_struct.cr
+examples/bootstrap_struct.crsrc/stdlib_crystal/

@@ -414,6 +414,7 @@ module Crystal::MIR
       emit_raw "declare void @free(ptr)\n"
       emit_raw "declare i32 @printf(ptr, ...)\n"
       emit_raw "declare i32 @puts(ptr)\n"
+      emit_raw "declare void @exit(i32)\n"
       emit_raw "\n"
 
       # Format strings for printing

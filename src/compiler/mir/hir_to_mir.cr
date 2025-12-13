@@ -583,8 +583,9 @@ module Crystal
       end
 
       # Handle built-in print functions
-      # Method name may be mangled as "puts:Int32" etc, so extract base name
-      base_method_name = call.method_name.split(':').first
+      # Method name may be mangled as "puts$Int32" or "puts:Int32" etc, so extract base name
+      # We use $ as separator (: is not valid in LLVM identifiers)
+      base_method_name = call.method_name.split(/[:\$]/).first
       if base_method_name == "puts"
         # Determine the actual extern based on argument type
         if args.size == 1
@@ -618,6 +619,11 @@ module Crystal
                         end
           return builder.extern_call(extern_name, args, TypeRef::VOID)
         end
+      end
+
+      # Handle exit() - call libc exit
+      if base_method_name == "exit" && args.size == 1
+        return builder.extern_call("exit", args, TypeRef::VOID)
       end
 
       # Look up function by name

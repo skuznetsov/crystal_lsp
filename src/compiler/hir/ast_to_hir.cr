@@ -456,14 +456,16 @@ module Crystal::HIR
 
     # Register a module and its methods (pass 1)
     # Modules are like classes but with only class methods (self.method)
+    # Also handles nested classes: module Foo; class Bar; end; end -> Foo::Bar
     def register_module(node : CrystalV2::Compiler::Frontend::ModuleNode)
       module_name = String.new(node.name)
 
-      # Register module methods (def self.foo)
+      # Register module methods (def self.foo) and nested classes
       if body = node.body
         body.each do |expr_id|
           member = @arena[expr_id]
-          if member.is_a?(CrystalV2::Compiler::Frontend::DefNode)
+          case member
+          when CrystalV2::Compiler::Frontend::DefNode
             method_name = String.new(member.name)
             # Module methods are always class methods: Module.method
             base_name = "#{module_name}.#{method_name}"
@@ -486,20 +488,90 @@ module Crystal::HIR
             end
             full_name = mangle_function_name(base_name, param_types)
             @function_types[full_name] = return_type
+          when CrystalV2::Compiler::Frontend::ClassNode
+            # Nested class: Foo::Bar
+            class_name = String.new(member.name)
+            full_class_name = "#{module_name}::#{class_name}"
+            # Create alias for the nested class name
+            @type_aliases[full_class_name] = full_class_name
+            # Register the class with its full name
+            register_class_with_name(member, full_class_name)
+          when CrystalV2::Compiler::Frontend::ModuleNode
+            # Nested module: Foo::Bar (as module)
+            nested_name = String.new(member.name)
+            full_nested_name = "#{module_name}::#{nested_name}"
+            # Recursively register nested module
+            register_nested_module(member, full_nested_name)
           end
         end
       end
     end
 
-    # Lower a module's methods (pass 3)
-    def lower_module(node : CrystalV2::Compiler::Frontend::ModuleNode)
-      module_name = String.new(node.name)
-
+    # Register a nested module with full path
+    private def register_nested_module(node : CrystalV2::Compiler::Frontend::ModuleNode, full_name : String)
       if body = node.body
         body.each do |expr_id|
           member = @arena[expr_id]
-          if member.is_a?(CrystalV2::Compiler::Frontend::DefNode)
+          case member
+          when CrystalV2::Compiler::Frontend::DefNode
+            method_name = String.new(member.name)
+            base_name = "#{full_name}.#{method_name}"
+            return_type = if rt = member.return_type
+                            type_ref_for_name(String.new(rt))
+                          else
+                            TypeRef::VOID
+                          end
+            param_types = [] of TypeRef
+            if params = member.params
+              params.each do |param|
+                param_type = if ta = param.type_annotation
+                               type_ref_for_name(String.new(ta))
+                             else
+                               TypeRef::VOID
+                             end
+                param_types << param_type
+              end
+            end
+            full_method_name = mangle_function_name(base_name, param_types)
+            @function_types[full_method_name] = return_type
+          when CrystalV2::Compiler::Frontend::ClassNode
+            class_name = String.new(member.name)
+            full_class_name = "#{full_name}::#{class_name}"
+            @type_aliases[full_class_name] = full_class_name
+            register_class_with_name(member, full_class_name)
+          when CrystalV2::Compiler::Frontend::ModuleNode
+            nested_name = String.new(member.name)
+            full_nested_name = "#{full_name}::#{nested_name}"
+            register_nested_module(member, full_nested_name)
+          end
+        end
+      end
+    end
+
+    # Lower a module's methods and nested classes (pass 3)
+    def lower_module(node : CrystalV2::Compiler::Frontend::ModuleNode)
+      module_name = String.new(node.name)
+      lower_module_with_name(node, module_name)
+    end
+
+    # Lower a module with a specific name prefix
+    private def lower_module_with_name(node : CrystalV2::Compiler::Frontend::ModuleNode, module_name : String)
+      if body = node.body
+        body.each do |expr_id|
+          member = @arena[expr_id]
+          case member
+          when CrystalV2::Compiler::Frontend::DefNode
             lower_module_method(module_name, member)
+          when CrystalV2::Compiler::Frontend::ClassNode
+            # Lower nested class with full name
+            class_name = String.new(member.name)
+            full_class_name = "#{module_name}::#{class_name}"
+            lower_class_with_name(member, full_class_name)
+          when CrystalV2::Compiler::Frontend::ModuleNode
+            # Recursively lower nested module
+            nested_name = String.new(member.name)
+            full_nested_name = "#{module_name}::#{nested_name}"
+            lower_module_with_name(member, full_nested_name)
           end
         end
       end
@@ -564,6 +636,11 @@ module Crystal::HIR
     # Register a class type and its methods (pass 1)
     def register_class(node : CrystalV2::Compiler::Frontend::ClassNode)
       class_name = String.new(node.name)
+      register_class_with_name(node, class_name)
+    end
+
+    # Register a class with a specific name (for nested classes like Foo::Bar)
+    def register_class_with_name(node : CrystalV2::Compiler::Frontend::ClassNode, class_name : String)
       is_struct = node.is_struct == true
 
       # Check if this is a generic class (has type parameters)
@@ -783,7 +860,11 @@ module Crystal::HIR
     # Lower a class and all its methods (pass 3)
     def lower_class(node : CrystalV2::Compiler::Frontend::ClassNode)
       class_name = String.new(node.name)
+      lower_class_with_name(node, class_name)
+    end
 
+    # Lower a class with a specific name (for nested classes like Foo::Bar)
+    def lower_class_with_name(node : CrystalV2::Compiler::Frontend::ClassNode, class_name : String)
       # Skip generic class templates - they're lowered on-demand during monomorphization
       if @generic_templates.has_key?(class_name)
         return
@@ -1111,12 +1192,13 @@ module Crystal::HIR
     end
 
     # Mangle function name with parameter types for overloading
-    # Example: "IO.print" + [String] -> "IO.print:String"
-    # Example: "Int32#++" + [Int32] -> "Int32#+:Int32"
+    # Example: "IO.print" + [String] -> "IO.print$String"
+    # Example: "Int32#++" + [Int32] -> "Int32#+$Int32"
+    # Note: Using $ instead of : because LLVM doesn't support : in identifiers
     private def mangle_function_name(base_name : String, param_types : Array(TypeRef)) : String
       return base_name if param_types.empty?
-      type_suffix = param_types.map { |t| type_name_for_mangling(t) }.join(",")
-      "#{base_name}:#{type_suffix}"
+      type_suffix = param_types.map { |t| type_name_for_mangling(t) }.join("_")
+      "#{base_name}$#{type_suffix}"
     end
 
     # Resolve method call for a receiver type and method name
@@ -1625,6 +1707,14 @@ module Crystal::HIR
         # Generic type like Array(Int32) - lower as type reference for use as receiver
         lower_generic_type_ref(ctx, node)
 
+      when CrystalV2::Compiler::Frontend::UninitializedNode
+        # uninitialized Type - returns undefined value of given type
+        lower_uninitialized(ctx, node)
+
+      when CrystalV2::Compiler::Frontend::TypeDeclarationNode
+        # x : Type = value - local variable with type annotation
+        lower_type_declaration(ctx, node)
+
       else
         raise LoweringError.new("Unsupported AST node type: #{node.class}", node)
       end
@@ -1658,7 +1748,16 @@ module Crystal::HIR
       value = if node.kind.f32? || node.kind.f64?
                 value_str.to_f64
               else
-                value_str.to_i64
+                # Handle hex (0x), binary (0b), and octal (0o)
+                if value_str.starts_with?("0x") || value_str.starts_with?("0X")
+                  value_str[2..].to_i64(16)
+                elsif value_str.starts_with?("0b") || value_str.starts_with?("0B")
+                  value_str[2..].to_i64(2)
+                elsif value_str.starts_with?("0o") || value_str.starts_with?("0O")
+                  value_str[2..].to_i64(8)
+                else
+                  value_str.to_i64
+                end
               end
 
       lit = Literal.new(ctx.next_id, type, value)
@@ -1670,6 +1769,92 @@ module Crystal::HIR
       str = String.new(node.value)
       lit = Literal.new(ctx.next_id, TypeRef::STRING, str)
       ctx.emit(lit)
+      lit.id
+    end
+
+    private def lower_type_declaration(ctx : LoweringContext, node : CrystalV2::Compiler::Frontend::TypeDeclarationNode) : ValueId
+      # x : Type = value - local variable declaration with type annotation
+      var_name = String.new(node.name)
+      type_name = String.new(node.declared_type)
+      type_ref = type_ref_for_name(type_name)
+
+      if value_id = node.value
+        # Has initial value: x : Type = value
+        value = lower_expr(ctx, value_id)
+        # Register as local variable
+        ctx.register_local(var_name, value)
+        ctx.register_type(value, type_ref)
+        value
+      else
+        # No initial value: x : Type (uninitialized)
+        # Create undefined value for the type
+        undefined_value : Int64 | Float64 | String | Bool | Nil = case type_ref
+          when TypeRef::BOOL then false
+          when TypeRef::FLOAT32, TypeRef::FLOAT64 then 0.0
+          when TypeRef::STRING, TypeRef::POINTER then nil
+          else 0_i64
+        end
+
+        lit = Literal.new(ctx.next_id, type_ref, undefined_value)
+        ctx.emit(lit)
+        ctx.register_local(var_name, lit.id)
+        ctx.register_type(lit.id, type_ref)
+        lit.id
+      end
+    end
+
+    private def lower_uninitialized(ctx : LoweringContext, node : CrystalV2::Compiler::Frontend::UninitializedNode) : ValueId
+      # uninitialized Type - returns undefined value of given type
+      # Extract type name from the type expression
+      type_node = @arena[node.type]
+      type_name = case type_node
+                  when CrystalV2::Compiler::Frontend::IdentifierNode
+                    String.new(type_node.name)
+                  when CrystalV2::Compiler::Frontend::ConstantNode
+                    String.new(type_node.name)
+                  when CrystalV2::Compiler::Frontend::PathNode
+                    collect_path_string(type_node)
+                  when CrystalV2::Compiler::Frontend::GenericNode
+                    # Generic type - extract base and type args
+                    base = @arena[type_node.base_type]
+                    base_name = case base
+                                when CrystalV2::Compiler::Frontend::IdentifierNode
+                                  String.new(base.name)
+                                when CrystalV2::Compiler::Frontend::ConstantNode
+                                  String.new(base.name)
+                                else
+                                  "Unknown"
+                                end
+                    type_args = type_node.type_args.map do |arg_id|
+                      arg = @arena[arg_id]
+                      case arg
+                      when CrystalV2::Compiler::Frontend::IdentifierNode
+                        String.new(arg.name)
+                      when CrystalV2::Compiler::Frontend::ConstantNode
+                        String.new(arg.name)
+                      else
+                        "Unknown"
+                      end
+                    end
+                    "#{base_name}(#{type_args.join(", ")})"
+                  else
+                    "Unknown"
+                  end
+
+      type_ref = type_ref_for_name(type_name)
+
+      # Create an undefined literal (value doesn't matter, it's uninitialized)
+      # For numeric types, use 0; for pointers, use null
+      undefined_value : Int64 | Float64 | String | Bool | Nil = case type_ref
+        when TypeRef::BOOL then false
+        when TypeRef::FLOAT32, TypeRef::FLOAT64 then 0.0
+        when TypeRef::STRING, TypeRef::POINTER then nil
+        else 0_i64
+      end
+
+      lit = Literal.new(ctx.next_id, type_ref, undefined_value)
+      ctx.emit(lit)
+      ctx.register_type(lit.id, type_ref)
       lit.id
     end
 
@@ -1853,6 +2038,36 @@ module Crystal::HIR
       ctx.emit(call)
       ctx.register_type(call.id, return_type)
       call.id
+    end
+
+    # Collect full path string from PathNode (e.g., Foo::Bar::Baz -> "Foo::Bar::Baz")
+    private def collect_path_string(node : CrystalV2::Compiler::Frontend::PathNode) : String
+      parts = [] of String
+
+      # Get left part recursively
+      if left_id = node.left
+        left_node = @arena[left_id]
+        case left_node
+        when CrystalV2::Compiler::Frontend::PathNode
+          # Recursively collect left path
+          parts << collect_path_string(left_node)
+        when CrystalV2::Compiler::Frontend::IdentifierNode
+          parts << String.new(left_node.name)
+        when CrystalV2::Compiler::Frontend::ConstantNode
+          parts << String.new(left_node.name)
+        end
+      end
+
+      # Get right part
+      right_node = @arena[node.right]
+      case right_node
+      when CrystalV2::Compiler::Frontend::IdentifierNode
+        parts << String.new(right_node.name)
+      when CrystalV2::Compiler::Frontend::ConstantNode
+        parts << String.new(right_node.name)
+      end
+
+      parts.join("::")
     end
 
     # Lower path expression (e.g., Color::Green for enums, or Module::Constant)
@@ -3052,6 +3267,15 @@ module Crystal::HIR
             if !@monomorphized.includes?(class_name_str)
               monomorphize_generic_class(base_name, type_args, class_name_str)
             end
+          end
+        elsif obj_node.is_a?(CrystalV2::Compiler::Frontend::PathNode)
+          # Path like Foo::Bar for nested classes/modules
+          full_path = collect_path_string(obj_node)
+          # Check if this path is a known class
+          if @class_info.has_key?(full_path)
+            class_name_str = full_path
+          elsif @type_aliases.has_key?(full_path)
+            class_name_str = @type_aliases[full_path]
           end
         end
 
@@ -4999,9 +5223,11 @@ module Crystal::HIR
         return type_ref_for_name(substitution)
       end
 
-      # Check if this is a type alias
+      # Check if this is a type alias (but not self-referencing)
       if alias_target = @type_aliases[name]?
-        return type_ref_for_name(alias_target)
+        if alias_target != name
+          return type_ref_for_name(alias_target)
+        end
       end
 
       # Handle generic types like Pointer(K), Array(T) - substitute type parameters
