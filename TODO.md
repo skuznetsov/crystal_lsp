@@ -853,6 +853,7 @@ The key insight is: **Don't compete with LLVM, complement it.**
 | **OptionParser** | ✅ | Minimal stdlib implementation (2025-12-12) |
 | **Array#map** | ✅ | Compile-time unrolling for literals (2025-12-12) |
 | **Array#select** | ✅ | Compile-time predicate evaluation (2025-12-12) |
+| **abstract class/def** | ✅ | Skip codegen for abstract methods (2025-12-12) |
 
 ### 7.2 Bug Fixes (2025-12-12)
 
@@ -866,13 +867,12 @@ The key insight is: **Don't compete with LLVM, complement it.**
 | Block return values | Blocks now properly return values from inlined yield |
 | Array literal type | Register array literals as POINTER type for indexing |
 | Require directory resolution | Try `dir/dir.cr` when require path is a directory |
+| Member access inheritance | Use inheritance-aware method resolution for obj.method |
 
 ### 7.3 Pending (by priority)
 
 | Feature | Uses in v2 | Priority |
 |---------|------------|----------|
-| inheritance | - | MEDIUM - class hierarchy |
-| abstract | 53 | MEDIUM |
 | macro | 133 | LOW - defer metaprogramming |
 | exception stacktrace | - | LOW - debugging aid |
 

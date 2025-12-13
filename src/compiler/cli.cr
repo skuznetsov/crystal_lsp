@@ -458,25 +458,49 @@ module CrystalV2
         # Relative paths
         if req_path.starts_with?("./") || req_path.starts_with?("../")
           full_path = File.expand_path(req_path, base_dir)
-          return full_path + ".cr" if File.exists?(full_path + ".cr")
-          return full_path if File.exists?(full_path)
+          if result = try_require_path(full_path)
+            return result
+          end
         else
           # Try relative to current file
           rel_path = File.expand_path(req_path, base_dir)
-          return rel_path + ".cr" if File.exists?(rel_path + ".cr")
-          return rel_path if File.exists?(rel_path)
+          if result = try_require_path(rel_path)
+            return result
+          end
 
           # Try relative to input file
           input_dir = File.dirname(File.expand_path(input_file))
           input_rel = File.expand_path(req_path, input_dir)
-          return input_rel + ".cr" if File.exists?(input_rel + ".cr")
-          return input_rel if File.exists?(input_rel)
+          if result = try_require_path(input_rel)
+            return result
+          end
 
           # Try stdlib
           stdlib_path = File.expand_path(req_path, STDLIB_PATH)
-          return stdlib_path + ".cr" if File.exists?(stdlib_path + ".cr")
-          return stdlib_path if File.exists?(stdlib_path)
+          if result = try_require_path(stdlib_path)
+            return result
+          end
         end
+        nil
+      end
+
+      # Try to resolve a require path, handling both files and directories
+      # Crystal convention: require "foo" looks for foo.cr, then foo/foo.cr
+      private def try_require_path(path : String) : String?
+        # Try with .cr extension first
+        cr_path = path + ".cr"
+        return cr_path if File.file?(cr_path)
+
+        # If path exists as a directory, look for dir/basename.cr inside it
+        if Dir.exists?(path)
+          basename = File.basename(path)
+          inner_path = File.join(path, basename + ".cr")
+          return inner_path if File.file?(inner_path)
+        end
+
+        # Try exact path if it's a file
+        return path if File.file?(path)
+
         nil
       end
 

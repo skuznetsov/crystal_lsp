@@ -889,6 +889,11 @@ module Crystal::HIR
       method_name = String.new(node.name)
       base_name = "#{class_name}##{method_name}"
 
+      # Skip abstract methods - they have no implementation
+      if node.is_abstract
+        return
+      end
+
       # Skip methods for Pointer types - they're all primitives handled at call sites
       if class_name.starts_with?("Pointer(") || class_name.starts_with?("Pointer_")
         return
@@ -3261,6 +3266,7 @@ module Crystal::HIR
       end
 
       # If still not found and receiver_id is set, try to find method in any class
+      # NOTE: This fallback doesn't use inheritance - it's a last resort
       if return_type == TypeRef::VOID && receiver_id
         @class_info.each do |class_name, info|
           test_base = "#{class_name}##{method_name}"
@@ -4542,21 +4548,24 @@ module Crystal::HIR
       resolved_method_name : String? = nil
       return_type = TypeRef::VOID
 
-      # Try to find method by receiver type
+      # Try to find method by receiver type with inheritance support
       if receiver_type.id > 0
         @class_info.each do |class_name, info|
           if info.type_ref.id == receiver_type.id
-            test_name = "#{class_name}##{member_name}"
-            if type = @function_types[test_name]?
-              resolved_method_name = test_name
-              return_type = type
+            # Use inheritance-aware method resolution
+            if base_method = resolve_method_with_inheritance(class_name, member_name)
+              if type = @function_types[base_method]?
+                resolved_method_name = base_method
+                return_type = type
+              end
             end
             break
           end
         end
       end
 
-      # Fallback: search all classes for this method
+      # Fallback: search all classes for this method (still non-inheritance aware)
+      # This fallback should rarely be used now
       if resolved_method_name.nil?
         @class_info.each do |class_name, info|
           test_name = "#{class_name}##{member_name}"
