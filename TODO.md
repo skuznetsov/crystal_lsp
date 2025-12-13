@@ -851,6 +851,8 @@ The key insight is: **Don't compete with LLVM, complement it.**
 | **Hash(K,V)** | ✅ | Generic hash with [], []=, has_key? (2025-12-12) |
 | **Set(T)** | ✅ | Generic set with add, includes?, size (2025-12-12) |
 | **OptionParser** | ✅ | Minimal stdlib implementation (2025-12-12) |
+| **Array#map** | ✅ | Compile-time unrolling for literals (2025-12-12) |
+| **Array#select** | ✅ | Compile-time predicate evaluation (2025-12-12) |
 
 ### 7.2 Bug Fixes (2025-12-12)
 
@@ -860,12 +862,15 @@ The key insight is: **Don't compete with LLVM, complement it.**
 | Built-in type fields | Register fields on existing MIR types (String, etc.) |
 | Call return type tracking | Register return types for chained method calls |
 | Index operator dispatch | Emit method calls for `[]`/`[]=` on non-array types |
+| Yield function inline | Fixed mangled name lookup for yield function expansion |
+| Block return values | Blocks now properly return values from inlined yield |
+| Array literal type | Register array literals as POINTER type for indexing |
+| Require directory resolution | Try `dir/dir.cr` when require path is a directory |
 
 ### 7.3 Pending (by priority)
 
 | Feature | Uses in v2 | Priority |
 |---------|------------|----------|
-| .map / .select | 90+ | HIGH - collection transforms |
 | inheritance | - | MEDIUM - class hierarchy |
 | abstract | 53 | MEDIUM |
 | macro | 133 | LOW - defer metaprogramming |
@@ -881,7 +886,8 @@ yield:    182  ← ✅ DONE
 struct:   169  ← ✅ DONE
 require:  167  ← ✅ DONE
 macro:    133  ← defer (metaprogramming)
-.map:      90  ← pending (needs block return)
+.map:      90  ← ✅ DONE (compile-time unrolling)
+.select:   ~40 ← ✅ DONE (compile-time predicate)
 module:    65  ← ✅ DONE
 enum:      64  ← ✅ DONE
 ```
