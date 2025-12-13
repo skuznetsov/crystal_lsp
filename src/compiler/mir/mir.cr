@@ -234,7 +234,12 @@ module Crystal::MIR
     end
 
     # Create type with explicit id (for mapping HIR TypeRef to MIR Type)
+    # If type already exists, return existing type
     def create_type_with_id(id : TypeId, kind : TypeKind, name : String, size : UInt64, alignment : UInt32) : Type
+      # Return existing type if already registered
+      if existing = @type_map[id]?
+        return existing
+      end
       type = Type.new(id, kind, name, size, alignment)
       @types << type
       @type_map[id] = type
@@ -1838,6 +1843,11 @@ module Crystal::MIR
 
     def const_nil : ValueId
       emit(Constant.new(@function.next_value_id, TypeRef::NIL, nil))
+    end
+
+    # Nil with explicit type (for typed nil pointers)
+    def const_nil_typed(type : TypeRef) : ValueId
+      emit(Constant.new(@function.next_value_id, type, nil))
     end
 
     def const_string(value : String) : ValueId

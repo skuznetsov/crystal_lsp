@@ -584,15 +584,26 @@ module Crystal::HIR
 
     # Register a concrete (non-generic or specialized) class
     private def register_concrete_class(node : CrystalV2::Compiler::Frontend::ClassNode, class_name : String, is_struct : Bool)
+      # Check if class already exists (class reopening)
+      existing_info = @class_info[class_name]?
+
       # Collect instance variables and their types
       ivars = [] of IVarInfo
       class_vars = [] of ClassVarInfo
       # Struct has no type_id header (value type), class starts at 8 for header
       offset = is_struct ? 0 : 8
 
+      # If class already exists, preserve existing ivars and class_vars
+      if existing_info
+        existing_info.ivars.each { |iv| ivars << iv.dup }
+        existing_info.class_vars.each { |cv| class_vars << cv.dup }
+        offset = existing_info.size
+      end
+
       # Inheritance: copy parent ivars first (to preserve layout)
+      # Only do this for new class definitions, not reopened classes
       parent_name : String? = nil
-      if super_name_slice = node.super_name
+      if !existing_info && (super_name_slice = node.super_name)
         parent_name = String.new(super_name_slice)
         if parent_info = @class_info[parent_name]?
           # Copy all ivars from parent, preserving their offsets
@@ -602,6 +613,8 @@ module Crystal::HIR
           # Start child ivars after parent ivars
           offset = parent_info.size
         end
+      elsif existing_info
+        parent_name = existing_info.parent_name
       end
 
       # Also find initialize to get constructor parameters
@@ -693,9 +706,13 @@ module Crystal::HIR
         end
       end
 
-      # Create class/struct type
+      # Create class/struct type (reuse existing type_ref for reopened classes)
       type_kind = is_struct ? TypeKind::Struct : TypeKind::Class
-      type_ref = @module.intern_type(TypeDescriptor.new(type_kind, class_name))
+      type_ref = if existing_info
+                   existing_info.type_ref
+                 else
+                   @module.intern_type(TypeDescriptor.new(type_kind, class_name))
+                 end
       @class_info[class_name] = ClassInfo.new(class_name, type_ref, ivars, class_vars, offset, is_struct, parent_name)
 
       # Store initialize params for allocator generation
@@ -3297,6 +3314,7 @@ module Crystal::HIR
 
       call = Call.new(ctx.next_id, return_type, receiver_id, mangled_method_name, args, block_id)
       ctx.emit(call)
+      ctx.register_type(call.id, return_type)
       call.id
     end
 
@@ -4110,6 +4128,11 @@ module Crystal::HIR
         return load_node.id
       end
 
+      # Check for enum.value -> return the enum value as-is (enums are stored as Int32)
+      if receiver_type == TypeRef::INT32 && member_name == "value"
+        return object_id
+      end
+
       # Determine receiver type to find the correct method
       resolved_method_name : String? = nil
       return_type = TypeRef::VOID
@@ -4143,6 +4166,7 @@ module Crystal::HIR
       actual_name = resolved_method_name || member_name
       call = Call.new(ctx.next_id, return_type, object_id, actual_name, [] of ValueId)
       ctx.emit(call)
+      ctx.register_type(call.id, return_type)
       call.id
     end
 
@@ -4253,6 +4277,7 @@ module Crystal::HIR
           return_type = get_function_return_type(method_name)
           call = Call.new(ctx.next_id, return_type, object_id, method_name, all_args)
           ctx.emit(call)
+          ctx.register_type(call.id, return_type)
           call.id
         end
 

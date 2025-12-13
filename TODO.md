@@ -335,9 +335,9 @@ Goal: v2 LSP must report only real errors and match original compiler behavior.
 
 ## 5. Codegen: Multi-Stage Compilation with Hybrid Memory Management
 
-**Status:** Active development on `codegen` branch (2025-12-09)
+**Status:** Active development on `codegen` branch (2025-12-12)
 
-### Completed Milestones (2025-12-09)
+### Completed Milestones (2025-12-12)
 - [x] **M1.1** HIR data structures (`src/compiler/hir/hir.cr`) - 87 tests
 - [x] **M1.2** AST → HIR lowering (`src/compiler/hir/ast_to_hir.cr`) - 87 tests
 - [x] **M2.1** Basic escape analysis (`src/compiler/hir/escape_analysis.cr`) - 16 tests
@@ -780,7 +780,12 @@ The key insight is: **Don't compete with LLVM, complement it.**
 | M4.1b | Debug DX (type metadata) | ✅ Complete | 24 |
 | M4.1c | LLDB/DAP tooling | ✅ Complete | 13 (py) |
 | M4.2 | Runtime library | ✅ Complete | 43 |
-| M4.3 | End-to-end compile | 🔲 Pending | - |
+| M4.3 | End-to-end compile | 🔧 In Progress | 27+ bootstrap |
+
+**M4.3 Bootstrap Progress (2025-12-12):**
+- struct, require, module, enum all working
+- Hash(K,V), Set(T), OptionParser stdlib implemented
+- Class reopening, method chaining, index operators fixed
 
 ---
 
@@ -808,17 +813,18 @@ The key insight is: **Don't compete with LLVM, complement it.**
 | Performance | Complete | Incremental inference, lazy method bodies, cache warming |
 | HIR | Complete | 155 tests (data structures, lowering, escape, taint, memory strategy) |
 | MIR | Complete | 128 tests (SSA form, memory ops, optimizations, PGO passes) |
-| Codegen | 55% | M1-M3.3 done, LLVM backend pending |
+| Codegen | 70% | M1-M4.2 done, bootstrap in progress |
+| Bootstrap | ~60% | struct/require/module/enum/Hash/Set working |
 
 ---
 
 ## 7. Bootstrap Compiler (Self-Hosting Path)
 
-**Status:** Active development on `codegen` branch (2025-12-10)
+**Status:** Active development on `codegen` branch (2025-12-12)
 
 **Strategy:** Original Crystal compiles v2 compiler. Add features one by one until v2 can compile itself.
 
-### 7.1 Completed Features (28 bootstrap tests passing)
+### 7.1 Completed Features
 
 | Feature | Tests | Notes |
 |---------|-------|-------|
@@ -838,41 +844,44 @@ The key insight is: **Don't compete with LLVM, complement it.**
 | **Array indexing** | ✅ | arr[i] |
 | **Array#each** | ✅ | arr.each { \|x\| } |
 | **String literal** | ✅ | puts "hello" |
+| **struct** | ✅ | Value type, stack allocation (2025-12-12) |
+| **require** | ✅ | Multi-file compilation (2025-12-12) |
+| **module** | ✅ | Module methods with self. prefix (2025-12-12) |
+| **enum** | ✅ | Enum::Member access, .value method (2025-12-12) |
+| **Hash(K,V)** | ✅ | Generic hash with [], []=, has_key? (2025-12-12) |
+| **Set(T)** | ✅ | Generic set with add, includes?, size (2025-12-12) |
+| **OptionParser** | ✅ | Minimal stdlib implementation (2025-12-12) |
 
-### 7.2 In Progress
+### 7.2 Bug Fixes (2025-12-12)
 
-| Feature | Status | Notes |
-|---------|--------|-------|
-| **struct** | 🔧 WIP | Value type, stack allocation - needs type registry with fields |
-
-**Struct issue details:**
-- HIR: is_struct flag added, ClassInfo tracks is_struct
-- MIR: select_memory_strategy returns Stack for is_value_type
-- **BLOCKED**: Type fields not registered in MIR TypeRegistry
-- **FIX NEEDED**: Register struct/class ivars as Type.fields in MIR
+| Fix | Description |
+|-----|-------------|
+| Class reopening | Preserve ivars when class is reopened (e.g., String in hash.cr) |
+| Built-in type fields | Register fields on existing MIR types (String, etc.) |
+| Call return type tracking | Register return types for chained method calls |
+| Index operator dispatch | Emit method calls for `[]`/`[]=` on non-array types |
 
 ### 7.3 Pending (by priority)
 
 | Feature | Uses in v2 | Priority |
 |---------|------------|----------|
-| struct | 169 | HIGH - WIP |
-| require | 167 | HIGH - multi-file |
-| module | 65 | MEDIUM - namespace |
-| enum | 64 | MEDIUM |
-| abstract | 53 | LOW |
-| inheritance | - | LOW |
+| .map / .select | 90+ | HIGH - collection transforms |
+| inheritance | - | MEDIUM - class hierarchy |
+| abstract | 53 | MEDIUM |
+| macro | 133 | LOW - defer metaprogramming |
+| exception stacktrace | - | LOW - debugging aid |
 
 ### 7.4 Self-Hosting Target Constructs (grep of v2 codebase)
 
 ```
 .each:    846  ← ✅ DONE
-class:    491  ← ✅ basic working
+class:    491  ← ✅ DONE
 case:     471  ← ✅ DONE
 yield:    182  ← ✅ DONE
-struct:   169  ← 🔧 WIP
-require:  167  ← pending
+struct:   169  ← ✅ DONE
+require:  167  ← ✅ DONE
 macro:    133  ← defer (metaprogramming)
-.map:      90  ← needs blocks
-module:    65  ← pending
-enum:      64  ← pending
+.map:      90  ← pending (needs block return)
+module:    65  ← ✅ DONE
+enum:      64  ← ✅ DONE
 ```

@@ -129,14 +129,18 @@ module Crystal
         # Calculate total size (struct: just ivars, class: 8-byte header + ivars)
         total_size = info.size.to_u64
 
-        # Create type in registry
-        mir_type = @mir_module.type_registry.create_type_with_id(
-          mir_type_ref.id,
-          type_kind,
-          class_name,
-          total_size,
-          8_u32  # alignment
-        )
+        # Create type in registry, or get existing type by name (for built-in types like String)
+        # First check if a type with this name already exists (e.g., String as primitive)
+        mir_type = @mir_module.type_registry.get_by_name(class_name)
+        unless mir_type
+          mir_type = @mir_module.type_registry.create_type_with_id(
+            mir_type_ref.id,
+            type_kind,
+            class_name,
+            total_size,
+            8_u32  # alignment
+          )
+        end
 
         # Add fields (ivars)
         info.ivars.each do |ivar|
