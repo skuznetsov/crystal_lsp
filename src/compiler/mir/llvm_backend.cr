@@ -309,9 +309,12 @@ module Crystal::MIR
     end
 
     private def emit_string_constants
+      emit_raw "\n; String constants\n"
+      # Always emit empty string constant (used for void interpolation parts)
+      emit_raw "@.str.empty = private unnamed_addr constant [1 x i8] c\"\\00\", align 1\n"
+
       return if @string_constants.empty?
 
-      emit_raw "\n; String constants\n"
       @string_constants.each do |str, global_name|
         # Escape string for LLVM: replace special chars
         escaped = str.gsub("\\", "\\\\")
@@ -1349,6 +1352,11 @@ module Crystal::MIR
       index = value_ref(inst.index)
       element_type = @type_mapper.llvm_type(inst.element_type)
 
+      # Void is not a valid GEP element type - use i8 (byte pointer arithmetic)
+      if element_type == "void"
+        element_type = "i8"
+      end
+
       # Check if index needs to be converted to i64 for GEP
       index_type = @value_types[inst.index]? || TypeRef::INT32
       index_type_str = @type_mapper.llvm_type(index_type)
@@ -1414,10 +1422,14 @@ module Crystal::MIR
       end
 
       # Convert ptr operands to appropriate int type for arithmetic/comparison ops
-      needs_int_operands = is_arithmetic || is_comparison
+      # Skip for float/double operations
+      is_float_op = result_type == "float" || result_type == "double" ||
+                    operand_type_str == "float" || operand_type_str == "double" ||
+                    right_type_str == "float" || right_type_str == "double"
+      needs_int_operands = (is_arithmetic || is_comparison) && !is_float_op
       if needs_int_operands
         # Helper to check if type is valid for int conversion
-        valid_int = ->(t : String) { t != "ptr" && t != "void" && !t.includes?(".union") }
+        valid_int = ->(t : String) { t != "ptr" && t != "void" && !t.includes?(".union") && t != "float" && t != "double" }
 
         # Use result type for arithmetic, non-ptr operand type for comparison
         int_type = if is_arithmetic
@@ -1440,29 +1452,68 @@ module Crystal::MIR
         if right_type_str == "ptr"
           emit "%binop#{inst.id}.right = ptrtoint ptr #{right} to #{int_type}"
           right = "%binop#{inst.id}.right"
+          right_type_str = int_type
+        end
+
+        # Handle int type size mismatch (e.g., i32 + i64)
+        if operand_type_str != right_type_str
+          # Convert smaller type to larger type
+          left_bits = operand_type_str[1..-1].to_i? || 32
+          right_bits = right_type_str[1..-1].to_i? || 32
+          if left_bits < right_bits
+            # Extend left to match right
+            emit "%binop#{inst.id}.left_ext = sext #{operand_type_str} #{left} to #{right_type_str}"
+            left = "%binop#{inst.id}.left_ext"
+            operand_type_str = right_type_str
+            result_type = right_type_str if is_arithmetic
+          elsif right_bits < left_bits
+            # Extend right to match left
+            emit "%binop#{inst.id}.right_ext = sext #{right_type_str} #{right} to #{operand_type_str}"
+            right = "%binop#{inst.id}.right_ext"
+            right_type_str = operand_type_str
+            result_type = operand_type_str if is_arithmetic
+          end
         end
       end
 
       is_signed = operand_type.id <= TypeRef::INT128.id
 
-      op = case inst.op
-           when .add? then "add"
-           when .sub? then "sub"
-           when .mul? then "mul"
-           when .div? then is_signed ? "sdiv" : "udiv"
-           when .rem? then is_signed ? "srem" : "urem"
-           when .shl? then "shl"
-           when .shr? then is_signed ? "ashr" : "lshr"
-           when .and? then "and"
-           when .or?  then "or"
-           when .xor? then "xor"
-           when .eq?  then "icmp eq"
-           when .ne?  then "icmp ne"
-           when .lt?  then is_signed ? "icmp slt" : "icmp ult"
-           when .le?  then is_signed ? "icmp sle" : "icmp ule"
-           when .gt?  then is_signed ? "icmp sgt" : "icmp ugt"
-           when .ge?  then is_signed ? "icmp sge" : "icmp uge"
-           else            "add"
+      # Use float operations for float/double types
+      op = if is_float_op
+             case inst.op
+             when .add? then "fadd"
+             when .sub? then "fsub"
+             when .mul? then "fmul"
+             when .div? then "fdiv"
+             when .rem? then "frem"
+             when .eq?  then "fcmp oeq"
+             when .ne?  then "fcmp une"
+             when .lt?  then "fcmp olt"
+             when .le?  then "fcmp ole"
+             when .gt?  then "fcmp ogt"
+             when .ge?  then "fcmp oge"
+             else            "fadd"
+             end
+           else
+             case inst.op
+             when .add? then "add"
+             when .sub? then "sub"
+             when .mul? then "mul"
+             when .div? then is_signed ? "sdiv" : "udiv"
+             when .rem? then is_signed ? "srem" : "urem"
+             when .shl? then "shl"
+             when .shr? then is_signed ? "ashr" : "lshr"
+             when .and? then "and"
+             when .or?  then "or"
+             when .xor? then "xor"
+             when .eq?  then "icmp eq"
+             when .ne?  then "icmp ne"
+             when .lt?  then is_signed ? "icmp slt" : "icmp ult"
+             when .le?  then is_signed ? "icmp sle" : "icmp ule"
+             when .gt?  then is_signed ? "icmp sgt" : "icmp ugt"
+             when .ge?  then is_signed ? "icmp sge" : "icmp uge"
+             else            "add"
+             end
            end
 
       if op.starts_with?("icmp")
@@ -1483,6 +1534,11 @@ module Crystal::MIR
             right = "%cmp.#{inst.id}.right"
           end
         end
+        emit "#{name} = #{op} #{cmp_type} #{left}, #{right}"
+        @value_types[inst.id] = TypeRef::BOOL
+      elsif op.starts_with?("fcmp")
+        # Float comparisons - use float/double type
+        cmp_type = operand_type_str == "double" || right_type_str == "double" ? "double" : "float"
         emit "#{name} = #{op} #{cmp_type} #{left}, #{right}"
         @value_types[inst.id] = TypeRef::BOOL
       else
@@ -1629,6 +1685,7 @@ module Crystal::MIR
       is_bool_type = phi_type == "i1"
       is_ptr_type = phi_type == "ptr"
       is_union_type = phi_type.includes?(".union")
+      is_float_type = phi_type == "float" || phi_type == "double"
 
       # Check if i1 phi has union incoming - use 0 for union values
       if is_bool_type
@@ -1747,6 +1804,8 @@ module Crystal::MIR
             "[null, %#{@block_names[block]}]"
           elsif is_int_type || is_bool_type
             "[0, %#{@block_names[block]}]"
+          elsif is_float_type
+            "[0.0, %#{@block_names[block]}]"
           else
             "[null, %#{@block_names[block]}]"
           end
@@ -1765,6 +1824,13 @@ module Crystal::MIR
           elsif is_int_type && (val_type_str == "ptr" || val_type_str == "void")
             # Ptr/void flowing into int phi - use 0 (type mismatch from MIR)
             "[0, %#{@block_names[block]}]"
+          elsif is_int_type && (val_type_str == "double" || val_type_str == "float")
+            # Float/double flowing into int phi - bitcast to i64/i32
+            ref = value_ref(val)
+            c = @cond_counter
+            @cond_counter += 1
+            emit "%phi_ftoi.#{c} = bitcast #{val_type_str} #{ref} to #{phi_type}"
+            "[%phi_ftoi.#{c}, %#{@block_names[block]}]"
           elsif is_int_type && val_type_str.nil?
             # Unknown type flowing into int phi - check if value_ref looks like ptr
             ref = value_ref(val)
@@ -1979,6 +2045,27 @@ module Crystal::MIR
                    @cond_counter += 1
                    emit "%trunc_to_i1.#{c} = trunc #{actual_llvm_type} #{val} to i1"
                    "i1 %trunc_to_i1.#{c}"
+                 elsif expected_llvm_type == "i32" && actual_llvm_type == "i64"
+                   # i64 to i32 - truncate
+                   val = value_ref(a)
+                   c = @cond_counter
+                   @cond_counter += 1
+                   emit "%trunc_to_i32.#{c} = trunc i64 #{val} to i32"
+                   "i32 %trunc_to_i32.#{c}"
+                 elsif expected_llvm_type == "i16" && (actual_llvm_type == "i32" || actual_llvm_type == "i64")
+                   # Larger int to i16 - truncate
+                   val = value_ref(a)
+                   c = @cond_counter
+                   @cond_counter += 1
+                   emit "%trunc_to_i16.#{c} = trunc #{actual_llvm_type} #{val} to i16"
+                   "i16 %trunc_to_i16.#{c}"
+                 elsif expected_llvm_type == "i8" && (actual_llvm_type == "i16" || actual_llvm_type == "i32" || actual_llvm_type == "i64")
+                   # Larger int to i8 - truncate
+                   val = value_ref(a)
+                   c = @cond_counter
+                   @cond_counter += 1
+                   emit "%trunc_to_i8.#{c} = trunc #{actual_llvm_type} #{val} to i8"
+                   "i8 %trunc_to_i8.#{c}"
                  elsif expected_llvm_type.starts_with?("i") && actual_llvm_type.includes?(".union")
                    # Coerce union to int: extract payload as int
                    # Union layout: { type_id : i32, payload : [N x i8] }
@@ -2239,6 +2326,17 @@ module Crystal::MIR
         llvm_type = "ptr"
         val = "null" if val == "null" || val.starts_with?("%r") # likely void value
       end
+      # For ptr type, convert integer constants to null or inttoptr
+      if llvm_type == "ptr" && val.matches?(/^\d+$/)
+        if val == "0"
+          val = "null"
+        else
+          c = @cond_counter
+          @cond_counter += 1
+          emit "%global_inttoptr.#{c} = inttoptr i64 #{val} to ptr"
+          val = "%global_inttoptr.#{c}"
+        end
+      end
       mangled_global = @type_mapper.mangle_name(inst.global_name)
       emit "store #{llvm_type} #{val}, ptr @#{mangled_global}"
     end
@@ -2491,8 +2589,16 @@ module Crystal::MIR
       # Convert each part to string ptr, handling type conversion
       string_parts = [] of String
       inst.parts.each_with_index do |part_id, idx|
-        part_ref = value_ref(part_id)
         part_type = @value_types[part_id]?
+        part_llvm_type_check = part_type ? @type_mapper.llvm_type(part_type) : nil
+
+        # Check for void type - void calls don't produce a value, use empty string
+        if part_llvm_type_check == "void"
+          string_parts << "@.str.empty"
+          next
+        end
+
+        part_ref = value_ref(part_id)
 
         # Check if part is already a string (ptr type from string literal)
         if part_type == TypeRef::STRING || part_type == TypeRef::POINTER || part_type.nil?
@@ -2539,6 +2645,13 @@ module Crystal::MIR
           elsif part_llvm_type == "i1"
             emit "%#{base_name}.conv#{idx} = call ptr @__crystal_v2_bool_to_string(i1 #{part_ref})"
             string_parts << "%#{base_name}.conv#{idx}"
+          elsif part_llvm_type.includes?(".union")
+            # Union type (e.g. String | Nil) - extract ptr from payload
+            emit "%#{base_name}.union_ptr#{idx} = alloca #{part_llvm_type}, align 8"
+            emit "store #{part_llvm_type} #{part_ref}, ptr %#{base_name}.union_ptr#{idx}"
+            emit "%#{base_name}.payload_ptr#{idx} = getelementptr #{part_llvm_type}, ptr %#{base_name}.union_ptr#{idx}, i32 0, i32 1"
+            emit "%#{base_name}.str_ptr#{idx} = load ptr, ptr %#{base_name}.payload_ptr#{idx}"
+            string_parts << "%#{base_name}.str_ptr#{idx}"
           else
             # Fallback - treat as ptr
             string_parts << part_ref
