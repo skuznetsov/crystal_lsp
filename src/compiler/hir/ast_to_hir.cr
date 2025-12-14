@@ -2845,15 +2845,33 @@ module Crystal::HIR
                                     else_locals : Hash(String, ValueId),
                                     then_block : BlockId,
                                     else_block : BlockId)
-      # Find all variables that exist in either branch
-      all_vars = (then_locals.keys + else_locals.keys).uniq
+      # Find all variables that exist in either branch or existed before
+      all_vars = (then_locals.keys + else_locals.keys + pre_locals.keys).uniq
 
       all_vars.each do |var_name|
         then_val = then_locals[var_name]?
         else_val = else_locals[var_name]?
         pre_val = pre_locals[var_name]?
 
-        # Skip if variable didn't exist before and doesn't exist in both branches
+        # Use pre-branch value if branch didn't define the variable
+        then_val ||= pre_val
+        else_val ||= pre_val
+
+        # If variable is new in only one branch (not in pre_locals), use nil for other
+        # Crystal semantics: variables assigned in one branch are nilable outside
+        if then_val && !else_val
+          # Create nil literal for else branch
+          nil_lit = Literal.new(ctx.next_id, TypeRef::NIL, nil)
+          ctx.emit_to_block(else_block, nil_lit)
+          else_val = nil_lit.id
+        elsif else_val && !then_val
+          # Create nil literal for then branch
+          nil_lit = Literal.new(ctx.next_id, TypeRef::NIL, nil)
+          ctx.emit_to_block(then_block, nil_lit)
+          then_val = nil_lit.id
+        end
+
+        # Skip if variable doesn't exist in either branch (and didn't exist before)
         next unless then_val && else_val
 
         # If both branches have the same value, no phi needed
@@ -2872,9 +2890,56 @@ module Crystal::HIR
       end
     end
 
+    # Merge locals from N branches (for case expressions), creating phi nodes where needed
+    # branch_info: Array of (BlockId, Hash(String, ValueId)) for each branch
+    private def merge_case_locals(ctx : LoweringContext,
+                                  pre_locals : Hash(String, ValueId),
+                                  branch_info : Array(Tuple(BlockId, Hash(String, ValueId))))
+      return if branch_info.empty?
+
+      # Collect all variable names across all branches
+      all_vars = Set(String).new
+      branch_info.each { |(_, locals)| all_vars.concat(locals.keys) }
+
+      all_vars.each do |var_name|
+        pre_val = pre_locals[var_name]?
+
+        # Collect values from all branches that have this variable
+        branch_values = [] of Tuple(BlockId, ValueId)
+        branch_info.each do |(block, locals)|
+          if val = locals[var_name]?
+            branch_values << {block, val}
+          elsif pre_val
+            # Branch didn't modify, use pre-case value
+            branch_values << {block, pre_val}
+          end
+        end
+
+        # Skip if variable doesn't exist in all branches and didn't exist before
+        next if branch_values.size != branch_info.size
+
+        # If all branches have the same value, no phi needed
+        first_val = branch_values.first[1]
+        if branch_values.all? { |(_, v)| v == first_val }
+          ctx.register_local(var_name, first_val)
+          next
+        end
+
+        # Create phi to merge values from all branches
+        var_type = ctx.type_of(first_val)
+        merge_phi = Phi.new(ctx.next_id, var_type)
+        branch_values.each { |(blk, val)| merge_phi.add_incoming(blk, val) }
+        ctx.emit(merge_phi)
+        ctx.register_local(var_name, merge_phi.id)
+      end
+    end
+
     private def lower_unless(ctx : LoweringContext, node : CrystalV2::Compiler::Frontend::UnlessNode) : ValueId
       # Unless is just if with inverted condition
       cond_id = lower_expr(ctx, node.condition)
+
+      # Save locals state before branching
+      pre_branch_locals = ctx.save_locals
 
       # Negate condition
       neg_cond = UnaryOperation.new(ctx.next_id, TypeRef::BOOL, UnaryOp::Not, cond_id)
@@ -2888,10 +2953,12 @@ module Crystal::HIR
 
       # Then (was unless body)
       ctx.current_block = then_block
+      ctx.restore_locals(pre_branch_locals)
       ctx.push_scope(ScopeKind::Block)
       then_value = lower_body(ctx, node.then_branch)
       then_exit = ctx.current_block
       ctx.pop_scope
+      then_locals = ctx.save_locals
 
       if ctx.get_block(ctx.current_block).terminator.is_a?(Unreachable)
         ctx.terminate(Jump.new(merge_block))
@@ -2899,6 +2966,7 @@ module Crystal::HIR
 
       # Else branch (if any)
       ctx.current_block = else_block
+      ctx.restore_locals(pre_branch_locals)
       else_value = if else_branch = node.else_branch
                      lower_body(ctx, else_branch)
                    else
@@ -2907,10 +2975,16 @@ module Crystal::HIR
                      nil_lit.id
                    end
       else_exit = ctx.current_block
+      else_locals = ctx.save_locals
       ctx.terminate(Jump.new(merge_block))
 
       # Merge
       ctx.current_block = merge_block
+
+      # Merge locals from both branches
+      merge_branch_locals(ctx, pre_branch_locals, then_locals, else_locals,
+                          then_exit, else_exit)
+
       phi_type = ctx.type_of(then_value)  # Infer type from incoming value
 
       # Don't create phi for void types - LLVM doesn't allow phi void
@@ -3153,6 +3227,9 @@ module Crystal::HIR
     private def lower_ternary(ctx : LoweringContext, node : CrystalV2::Compiler::Frontend::TernaryNode) : ValueId
       cond_id = lower_expr(ctx, node.condition)
 
+      # Save locals before branching
+      pre_branch_locals = ctx.save_locals
+
       then_block = ctx.create_block
       else_block = ctx.create_block
       merge_block = ctx.create_block
@@ -3160,16 +3237,25 @@ module Crystal::HIR
       ctx.terminate(Branch.new(cond_id, then_block, else_block))
 
       ctx.current_block = then_block
+      ctx.restore_locals(pre_branch_locals)
       then_value = lower_expr(ctx, node.true_branch)
       then_exit = ctx.current_block
+      then_locals = ctx.save_locals
       ctx.terminate(Jump.new(merge_block))
 
       ctx.current_block = else_block
+      ctx.restore_locals(pre_branch_locals)
       else_value = lower_expr(ctx, node.false_branch)
       else_exit = ctx.current_block
+      else_locals = ctx.save_locals
       ctx.terminate(Jump.new(merge_block))
 
       ctx.current_block = merge_block
+
+      # Merge locals from both branches
+      merge_branch_locals(ctx, pre_branch_locals, then_locals, else_locals,
+                          then_exit, else_exit)
+
       phi_type = ctx.type_of(then_value)  # Infer type from incoming value
 
       # Don't create phi for void types - LLVM doesn't allow phi void
@@ -3299,6 +3385,9 @@ module Crystal::HIR
     end
 
     private def lower_case(ctx : LoweringContext, node : CrystalV2::Compiler::Frontend::CaseNode) : ValueId
+      # Save locals state before case for proper phi merging
+      pre_case_locals = ctx.save_locals
+
       # Lower case subject
       subject_id = if subj = node.value
                      lower_expr(ctx, subj)
@@ -3308,6 +3397,7 @@ module Crystal::HIR
 
       merge_block = ctx.create_block
       incoming = [] of Tuple(BlockId, ValueId)
+      branch_locals = [] of Tuple(BlockId, Hash(String, ValueId))  # Track locals for each branch
 
       # Process each when branch
       node.when_branches.each_with_index do |when_branch, idx|
@@ -3335,12 +3425,16 @@ module Crystal::HIR
           ctx.terminate(Branch.new(cond_val, when_block, next_block))
         end
 
-        # When body
+        # When body - restore locals before each branch
         ctx.current_block = when_block
+        ctx.restore_locals(pre_case_locals)
         ctx.push_scope(ScopeKind::Block)
         result = lower_body(ctx, when_branch.body)
         exit_block = ctx.current_block
         ctx.pop_scope
+
+        # Save branch locals before jumping to merge
+        branch_locals << {exit_block, ctx.save_locals}
 
         if ctx.get_block(ctx.current_block).terminator.is_a?(Unreachable)
           ctx.terminate(Jump.new(merge_block))
@@ -3350,7 +3444,8 @@ module Crystal::HIR
         ctx.current_block = next_block
       end
 
-      # Else branch
+      # Else branch - restore locals before else branch
+      ctx.restore_locals(pre_case_locals)
       ctx.push_scope(ScopeKind::Block)
       else_result = if else_body = node.else_branch
                       if else_body.empty?
@@ -3367,11 +3462,19 @@ module Crystal::HIR
                     end
       else_exit = ctx.current_block
       ctx.pop_scope
+
+      # Save else branch locals
+      branch_locals << {else_exit, ctx.save_locals}
+
       ctx.terminate(Jump.new(merge_block))
       incoming << {else_exit, else_result}
 
       # Merge
       ctx.current_block = merge_block
+
+      # Merge locals from all branches
+      merge_case_locals(ctx, pre_case_locals, branch_locals)
+
       phi_type = incoming.first?.try { |(_, val)| ctx.type_of(val) } || TypeRef::VOID
 
       # Don't create phi for void types - LLVM doesn't allow phi void
