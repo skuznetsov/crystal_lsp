@@ -1142,6 +1142,10 @@ module Crystal::HIR
       func
     end
 
+    def has_function?(name : String) : Bool
+      @functions.any? { |f| f.name == name }
+    end
+
     def intern_string(str : String) : StringId
       @string_intern[str] ||= begin
         id = @strings.size.to_u32

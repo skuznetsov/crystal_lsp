@@ -626,13 +626,38 @@ module Crystal
         return builder.extern_call("exit", args, TypeRef::VOID)
       end
 
-      # Look up function by name
-      callee_id = if func = @mir_module.get_function(call.method_name)
+      # Look up function by name - try exact match first, then fuzzy match
+      func = @mir_module.get_function(call.method_name)
+
+      # If not found, try fuzzy matching to handle type variations (e.g., String vs String | Nil)
+      unless func
+        # Only apply fuzzy matching for qualified method names (containing . or #)
+        if call.method_name.includes?(".") || call.method_name.includes?("#")
+          # Extract base name (before $ type suffix)
+          base_name = call.method_name.split("$").first
+
+          # Search for any function that starts with the base name
+          func = @mir_module.functions.find do |f|
+            f.name.split("$").first == base_name
+          end
+        end
+      end
+
+      callee_id = if func
                     func.id
                   else
                     # Unknown function - emit as extern call
                     return builder.extern_call(call.method_name, args, convert_type(call.type))
                   end
+
+      # Coerce arguments to match parameter types (handle concrete type -> union coercion)
+      if func
+        if call.method_name.includes?("format_gutter")
+          STDERR.puts "[MIR-COERCE] func=#{func.name} params=#{func.params.map(&.type.id).join(",")}"
+        end
+        coerced_args = coerce_call_args(builder, args, call.args, func)
+        return builder.call(callee_id, coerced_args, convert_type(call.type))
+      end
 
       builder.call(callee_id, args, convert_type(call.type))
     end
@@ -656,6 +681,77 @@ module Crystal
         end
       end
       TypeRef::INT32  # Default fallback
+    end
+
+    # Coerce call arguments to match function parameter types
+    # This handles concrete type -> union type coercion (e.g., Int32 -> Int32 | Nil)
+    private def coerce_call_args(
+      builder : MIR::Builder,
+      mir_args : Array(ValueId),
+      hir_args : Array(HIR::ValueId),
+      func : MIR::Function
+    ) : Array(ValueId)
+      params = func.params
+      result = [] of ValueId
+
+      mir_args.each_with_index do |mir_arg, idx|
+        param = params[idx]?
+        unless param
+          # More args than params - pass through
+          result << mir_arg
+          next
+        end
+
+        arg_type = if idx < hir_args.size
+                     get_arg_type(hir_args[idx])
+                   else
+                     TypeRef::INT32  # Fallback
+                   end
+        param_type = param.type
+
+        # Check if coercion needed: different types and param is a union
+        is_param_union = is_union_type?(param_type)
+        if arg_type != param_type && is_param_union && !is_union_type?(arg_type)
+          # Wrap concrete value in union type
+          variant_id = get_union_variant_id(arg_type)
+          STDERR.puts "[MIR-COERCE] Wrapping arg #{mir_arg} type #{arg_type.id} into union type #{param_type.id} (variant #{variant_id})"
+          wrapped = builder.union_wrap(mir_arg, variant_id, param_type)
+          result << wrapped
+        else
+          if func.name.includes?("format_gutter")
+            STDERR.puts "[MIR-COERCE] No wrap: arg_type=#{arg_type.id} param_type=#{param_type.id} is_param_union=#{is_param_union}"
+          end
+          result << mir_arg
+        end
+      end
+
+      result
+    end
+
+    # Check if a type is a union type based on its ID
+    private def is_union_type?(type : TypeRef) : Bool
+      # First check MIR module's union_descriptors (most authoritative)
+      return true if @mir_module.union_descriptors.has_key?(type)
+
+      # Fall back to checking HIR types
+      if type.id >= HIR::TypeRef::FIRST_USER_TYPE
+        @hir_module.types.each_with_index do |desc, idx|
+          if HIR::TypeRef.new(HIR::TypeRef::FIRST_USER_TYPE + idx.to_u32) == type
+            return desc.kind == HIR::TypeKind::Union || desc.name.includes?("___")
+          end
+        end
+      end
+      false
+    end
+
+    # Get the variant ID for a concrete type when wrapping into a union
+    private def get_union_variant_id(concrete_type : TypeRef) : Int32
+      # Convention: Nil is variant 1, other concrete types are variant 0
+      if concrete_type == TypeRef::NIL
+        1
+      else
+        0
+      end
     end
 
     # ─────────────────────────────────────────────────────────────────────────

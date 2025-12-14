@@ -1221,7 +1221,7 @@ module Crystal::MIR
     getter elements : Array(ValueId)
 
     def initialize(id : ValueId, @element_type : TypeRef, @elements : Array(ValueId))
-      super(id, TypeRef::VOID)  # Returns ptr to array struct
+      super(id, TypeRef::POINTER)  # Returns ptr to array struct
     end
 
     def size : Int32
@@ -2058,6 +2058,11 @@ module Crystal::MIR
 
     def extern_call(extern_name : String, args : Array(ValueId), return_type : TypeRef) : ValueId
       emit(ExternCall.new(@function.next_value_id, return_type, extern_name, args))
+    end
+
+    # Union operations
+    def union_wrap(value : ValueId, variant_type_id : Int32, union_type : TypeRef) : ValueId
+      emit(UnionWrap.new(@function.next_value_id, union_type, value, variant_type_id, union_type))
     end
 
     # Terminators
