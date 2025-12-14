@@ -3182,6 +3182,22 @@ module Crystal::HIR
           collect_assigned_vars(else_body).each { |v| vars << v }
         end
 
+      when CrystalV2::Compiler::Frontend::UnlessNode
+        # Check all branches
+        collect_assigned_vars(node.then_branch).each { |v| vars << v }
+        if else_body = node.else_branch
+          collect_assigned_vars(else_body).each { |v| vars << v }
+        end
+
+      when CrystalV2::Compiler::Frontend::CaseNode
+        # Check all when branches and else
+        node.when_branches.each do |when_branch|
+          collect_assigned_vars(when_branch.body).each { |v| vars << v }
+        end
+        if else_body = node.else_branch
+          collect_assigned_vars(else_body).each { |v| vars << v }
+        end
+
       when CrystalV2::Compiler::Frontend::BinaryNode
         collect_assigned_vars_in_expr(node.left, vars)
         collect_assigned_vars_in_expr(node.right, vars)
