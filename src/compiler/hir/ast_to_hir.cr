@@ -2960,7 +2960,11 @@ module Crystal::HIR
       ctx.pop_scope
       then_locals = ctx.save_locals
 
-      if ctx.get_block(ctx.current_block).terminator.is_a?(Unreachable)
+      # Check if then branch flows to merge (not terminated by return/raise)
+      then_block_data = ctx.get_block(ctx.current_block)
+      then_has_noreturn = then_block_data.instructions.any? { |inst| inst.is_a?(Raise) }
+      then_flows_to_merge = then_block_data.terminator.is_a?(Unreachable) && !then_has_noreturn
+      if then_flows_to_merge
         ctx.terminate(Jump.new(merge_block))
       end
 
@@ -2976,29 +2980,54 @@ module Crystal::HIR
                    end
       else_exit = ctx.current_block
       else_locals = ctx.save_locals
-      ctx.terminate(Jump.new(merge_block))
+
+      # Check if else branch flows to merge
+      else_block_data = ctx.get_block(ctx.current_block)
+      else_has_noreturn = else_block_data.instructions.any? { |inst| inst.is_a?(Raise) }
+      else_flows_to_merge = else_block_data.terminator.is_a?(Unreachable) && !else_has_noreturn
+      if else_flows_to_merge
+        ctx.terminate(Jump.new(merge_block))
+      end
 
       # Merge
       ctx.current_block = merge_block
 
-      # Merge locals from both branches
-      merge_branch_locals(ctx, pre_branch_locals, then_locals, else_locals,
-                          then_exit, else_exit)
+      # Only create phi if at least one branch flows to merge
+      if then_flows_to_merge || else_flows_to_merge
+        if then_flows_to_merge && else_flows_to_merge
+          # Merge locals from both branches
+          merge_branch_locals(ctx, pre_branch_locals, then_locals, else_locals,
+                              then_exit, else_exit)
 
-      phi_type = ctx.type_of(then_value)  # Infer type from incoming value
+          phi_type = ctx.type_of(then_value)
 
-      # Don't create phi for void types - LLVM doesn't allow phi void
-      if phi_type == TypeRef::VOID || phi_type == TypeRef::NIL
-        nil_lit = Literal.new(ctx.next_id, TypeRef::NIL, nil)
-        ctx.emit(nil_lit)
-        return nil_lit.id
+          # Don't create phi for void types - LLVM doesn't allow phi void
+          if phi_type == TypeRef::VOID || phi_type == TypeRef::NIL
+            nil_lit = Literal.new(ctx.next_id, TypeRef::NIL, nil)
+            ctx.emit(nil_lit)
+            return nil_lit.id
+          end
+
+          phi = Phi.new(ctx.next_id, phi_type)
+          phi.add_incoming(then_exit, then_value)
+          phi.add_incoming(else_exit, else_value)
+          ctx.emit(phi)
+          return phi.id
+        elsif then_flows_to_merge
+          # Only then flows - use then_value, then_locals
+          then_locals.each { |name, val| ctx.register_local(name, val) }
+          return then_value
+        else
+          # Only else flows - use else_value, else_locals
+          else_locals.each { |name, val| ctx.register_local(name, val) }
+          return else_value
+        end
       end
 
-      phi = Phi.new(ctx.next_id, phi_type)
-      phi.add_incoming(then_exit, then_value)
-      phi.add_incoming(else_exit, else_value)
-      ctx.emit(phi)
-      phi.id
+      # Neither branch flows to merge - emit nil placeholder
+      nil_lit = Literal.new(ctx.next_id, TypeRef::NIL, nil)
+      ctx.emit(nil_lit)
+      nil_lit.id
     end
 
     private def lower_while(ctx : LoweringContext, node : CrystalV2::Compiler::Frontend::WhileNode) : ValueId
@@ -3257,35 +3286,65 @@ module Crystal::HIR
       then_value = lower_expr(ctx, node.true_branch)
       then_exit = ctx.current_block
       then_locals = ctx.save_locals
-      ctx.terminate(Jump.new(merge_block))
+
+      # Check if then branch flows to merge
+      then_block_data = ctx.get_block(ctx.current_block)
+      then_has_noreturn = then_block_data.instructions.any? { |inst| inst.is_a?(Raise) }
+      then_flows_to_merge = then_block_data.terminator.is_a?(Unreachable) && !then_has_noreturn
+      if then_flows_to_merge
+        ctx.terminate(Jump.new(merge_block))
+      end
 
       ctx.current_block = else_block
       ctx.restore_locals(pre_branch_locals)
       else_value = lower_expr(ctx, node.false_branch)
       else_exit = ctx.current_block
       else_locals = ctx.save_locals
-      ctx.terminate(Jump.new(merge_block))
+
+      # Check if else branch flows to merge
+      else_block_data = ctx.get_block(ctx.current_block)
+      else_has_noreturn = else_block_data.instructions.any? { |inst| inst.is_a?(Raise) }
+      else_flows_to_merge = else_block_data.terminator.is_a?(Unreachable) && !else_has_noreturn
+      if else_flows_to_merge
+        ctx.terminate(Jump.new(merge_block))
+      end
 
       ctx.current_block = merge_block
 
-      # Merge locals from both branches
-      merge_branch_locals(ctx, pre_branch_locals, then_locals, else_locals,
-                          then_exit, else_exit)
+      # Only create phi if at least one branch flows to merge
+      if then_flows_to_merge || else_flows_to_merge
+        if then_flows_to_merge && else_flows_to_merge
+          # Merge locals from both branches
+          merge_branch_locals(ctx, pre_branch_locals, then_locals, else_locals,
+                              then_exit, else_exit)
 
-      phi_type = ctx.type_of(then_value)  # Infer type from incoming value
+          phi_type = ctx.type_of(then_value)
 
-      # Don't create phi for void types - LLVM doesn't allow phi void
-      if phi_type == TypeRef::VOID || phi_type == TypeRef::NIL
-        nil_lit = Literal.new(ctx.next_id, TypeRef::NIL, nil)
-        ctx.emit(nil_lit)
-        return nil_lit.id
+          # Don't create phi for void types - LLVM doesn't allow phi void
+          if phi_type == TypeRef::VOID || phi_type == TypeRef::NIL
+            nil_lit = Literal.new(ctx.next_id, TypeRef::NIL, nil)
+            ctx.emit(nil_lit)
+            return nil_lit.id
+          end
+
+          phi = Phi.new(ctx.next_id, phi_type)
+          phi.add_incoming(then_exit, then_value)
+          phi.add_incoming(else_exit, else_value)
+          ctx.emit(phi)
+          return phi.id
+        elsif then_flows_to_merge
+          then_locals.each { |name, val| ctx.register_local(name, val) }
+          return then_value
+        else
+          else_locals.each { |name, val| ctx.register_local(name, val) }
+          return else_value
+        end
       end
 
-      phi = Phi.new(ctx.next_id, phi_type)
-      phi.add_incoming(then_exit, then_value)
-      phi.add_incoming(else_exit, else_value)
-      ctx.emit(phi)
-      phi.id
+      # Neither branch flows - return nil placeholder
+      nil_lit = Literal.new(ctx.next_id, TypeRef::NIL, nil)
+      ctx.emit(nil_lit)
+      nil_lit.id
     end
 
     # Emit comparison for case/when using appropriate === semantics
@@ -3449,13 +3508,17 @@ module Crystal::HIR
         exit_block = ctx.current_block
         ctx.pop_scope
 
-        # Save branch locals before jumping to merge
-        branch_locals << {exit_block, ctx.save_locals}
+        # Check if branch flows to merge
+        when_block_data = ctx.get_block(ctx.current_block)
+        when_has_noreturn = when_block_data.instructions.any? { |inst| inst.is_a?(Raise) }
+        when_flows_to_merge = when_block_data.terminator.is_a?(Unreachable) && !when_has_noreturn
 
-        if ctx.get_block(ctx.current_block).terminator.is_a?(Unreachable)
+        if when_flows_to_merge
+          # Save branch locals before jumping to merge (only if flowing)
+          branch_locals << {exit_block, ctx.save_locals}
           ctx.terminate(Jump.new(merge_block))
+          incoming << {exit_block, result}
         end
-        incoming << {exit_block, result}
 
         ctx.current_block = next_block
       end
@@ -3479,16 +3542,30 @@ module Crystal::HIR
       else_exit = ctx.current_block
       ctx.pop_scope
 
-      # Save else branch locals
-      branch_locals << {else_exit, ctx.save_locals}
+      # Check if else branch flows to merge
+      else_block_data = ctx.get_block(ctx.current_block)
+      else_has_noreturn = else_block_data.instructions.any? { |inst| inst.is_a?(Raise) }
+      else_flows_to_merge = else_block_data.terminator.is_a?(Unreachable) && !else_has_noreturn
 
-      ctx.terminate(Jump.new(merge_block))
-      incoming << {else_exit, else_result}
+      if else_flows_to_merge
+        # Save else branch locals (only if flowing)
+        branch_locals << {else_exit, ctx.save_locals}
+        ctx.terminate(Jump.new(merge_block))
+        incoming << {else_exit, else_result}
+      end
 
       # Merge
       ctx.current_block = merge_block
 
-      # Merge locals from all branches
+      # Only merge locals and create phi if at least one branch flows
+      if incoming.empty?
+        # No branches flow to merge - emit nil placeholder
+        nil_lit = Literal.new(ctx.next_id, TypeRef::NIL, nil)
+        ctx.emit(nil_lit)
+        return nil_lit.id
+      end
+
+      # Merge locals from branches that flow to merge
       merge_case_locals(ctx, pre_case_locals, branch_locals)
 
       phi_type = incoming.first?.try { |(_, val)| ctx.type_of(val) } || TypeRef::VOID
@@ -3498,6 +3575,11 @@ module Crystal::HIR
         nil_lit = Literal.new(ctx.next_id, TypeRef::NIL, nil)
         ctx.emit(nil_lit)
         return nil_lit.id
+      end
+
+      # If only one branch flows, no phi needed
+      if incoming.size == 1
+        return incoming.first[1]
       end
 
       phi = Phi.new(ctx.next_id, phi_type)
