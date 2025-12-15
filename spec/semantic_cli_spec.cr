@@ -2,12 +2,12 @@ require "spec"
 require "../src/compiler/cli"
 
 describe CrystalV2::Compiler::CLI do
-  it "reports semantic errors when --check is used" do
+  it "reports semantic errors when --no-codegen is used" do
     file_path = File.join(__DIR__, "semantic/test_data/missing_method.cr")
     out_io = IO::Memory.new
     err_io = IO::Memory.new
 
-    cli = CrystalV2::Compiler::CLI.new([file_path, "--check"])
+    cli = CrystalV2::Compiler::CLI.new([file_path, "--no-codegen"])
     cli.run(out_io: out_io, err_io: err_io)
 
     err_io.rewind
@@ -20,7 +20,7 @@ describe CrystalV2::Compiler::CLI do
     out_io = IO::Memory.new
     err_io = IO::Memory.new
 
-    cli = CrystalV2::Compiler::CLI.new([file_path, "--dump-symbols"])
+    cli = CrystalV2::Compiler::CLI.new([file_path, "--dump-symbols", "--no-codegen"])
     cli.run(out_io: out_io, err_io: err_io)
 
     err_io.rewind
@@ -33,12 +33,12 @@ describe CrystalV2::Compiler::CLI do
     output.should contain("    variable name")
   end
 
-  it "emits semantic diagnostics for incompatible redefinitions with --check" do
+  it "emits semantic diagnostics for incompatible redefinitions with --no-codegen" do
     file_path = File.join(__DIR__, "semantic/test_data/incompatible_redefinition.cr")
     out_io = IO::Memory.new
     err_io = IO::Memory.new
 
-    cli = CrystalV2::Compiler::CLI.new([file_path, "--check"])
+    cli = CrystalV2::Compiler::CLI.new([file_path, "--no-codegen"])
     cli.run(out_io: out_io, err_io: err_io)
 
     err_io.rewind
@@ -53,7 +53,7 @@ describe CrystalV2::Compiler::CLI do
     out_io = IO::Memory.new
     err_io = IO::Memory.new
 
-    cli = CrystalV2::Compiler::CLI.new([file_path, "--check"])
+    cli = CrystalV2::Compiler::CLI.new([file_path, "--no-codegen"])
     cli.run(out_io: out_io, err_io: err_io)
 
     err_io.rewind

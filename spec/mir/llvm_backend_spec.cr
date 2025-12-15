@@ -82,16 +82,17 @@ describe Crystal::MIR::LLVMIRGenerator do
       output.should contain("target triple")
     end
 
-    it "generates runtime declarations" do
+    it "generates runtime definitions" do
       mod = Crystal::MIR::Module.new("test")
       gen = Crystal::MIR::LLVMIRGenerator.new(mod)
       gen.emit_type_metadata = false
       output = gen.generate
 
-      output.should contain("declare ptr @__crystal_v2_malloc64(i64)")
-      output.should contain("declare void @__crystal_v2_rc_inc(ptr)")
-      output.should contain("declare void @__crystal_v2_rc_dec(ptr, ptr)")
-      output.should contain("declare ptr @__crystal_v2_slab_alloc(i32)")
+      # Runtime functions are now defined with implementations
+      output.should contain("define ptr @__crystal_v2_malloc64(i64 %size)")
+      output.should contain("define void @__crystal_v2_rc_inc(ptr %ptr)")
+      output.should contain("define void @__crystal_v2_rc_dec(ptr %ptr, ptr %destructor)")
+      output.should contain("define ptr @__crystal_v2_slab_alloc(i32 %size_class)")
     end
 
     it "generates simple function" do
