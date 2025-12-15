@@ -2017,6 +2017,10 @@ module Crystal::HIR
         # fun malloc(size : Int64) : Void* - external C function
         lower_fun(ctx, node)
 
+      when CrystalV2::Compiler::Frontend::DefNode
+        # Top-level method definition
+        lower_top_level_def(ctx, node)
+
       else
         raise LoweringError.new("Unsupported AST node type: #{node.class}", node)
       end
@@ -2322,6 +2326,40 @@ module Crystal::HIR
       else
         TypeRef::POINTER  # Default to pointer for unknown types
       end
+    end
+
+    # Lower top-level method definition
+    private def lower_top_level_def(ctx : LoweringContext, node : CrystalV2::Compiler::Frontend::DefNode) : ValueId
+      # Top-level methods are global functions
+      method_name = String.new(node.name)
+
+      # Skip if already registered
+      if @function_defs.has_key?(method_name)
+        nil_lit = Literal.new(ctx.next_id, TypeRef::NIL, nil)
+        ctx.emit(nil_lit)
+        return nil_lit.id
+      end
+
+      # Determine return type
+      return_type = if rt = node.return_type
+                      type_ref_for_name(String.new(rt))
+                    elsif method_name.ends_with?("?")
+                      TypeRef::BOOL
+                    else
+                      TypeRef::VOID
+                    end
+
+      # Create function
+      func = @module.create_function(method_name, return_type)
+      @function_defs[method_name] = node
+
+      # Register return type
+      @function_types[method_name] = return_type
+
+      # Method definitions don't produce a value
+      nil_lit = Literal.new(ctx.next_id, TypeRef::NIL, nil)
+      ctx.emit(nil_lit)
+      nil_lit.id
     end
 
     # Lower pointerof(x) to get address of a variable
