@@ -1144,6 +1144,8 @@ module Crystal::MIR
             inst.args.each { |arg| used << arg }
           when ExternCall
             inst.args.each { |arg| used << arg }
+          when AddressOf
+            used << inst.operand
           when IndirectCall
             inst.args.each { |arg| used << arg }
             used << inst.callee_ptr
@@ -1346,6 +1348,8 @@ module Crystal::MIR
         emit_indirect_call(inst, name)
       when ExternCall
         emit_extern_call(inst, name)
+      when AddressOf
+        emit_address_of(inst, name)
       when GlobalLoad
         emit_global_load(inst, name)
       when GlobalStore
@@ -3021,6 +3025,21 @@ module Crystal::MIR
           @value_types[inst.id] = actual_type
         end
       end
+    end
+
+    private def emit_address_of(inst : AddressOf, name : String)
+      # Get address of a value (pointerof)
+      # We need to alloca storage for the value, store it, and return the pointer
+      operand_type = @value_types[inst.operand]? || TypeRef::POINTER
+      llvm_type = @type_mapper.llvm_type(operand_type)
+      operand_ref = value_ref(inst.operand)
+
+      # Allocate space for the value and store it
+      emit "#{name}.alloca = alloca #{llvm_type}"
+      emit "store #{llvm_type} #{operand_ref}, ptr #{name}.alloca"
+      # Return the pointer
+      emit "#{name} = bitcast ptr #{name}.alloca to ptr"
+      @value_types[inst.id] = TypeRef::POINTER
     end
 
     private def emit_global_load(inst : GlobalLoad, name : String)

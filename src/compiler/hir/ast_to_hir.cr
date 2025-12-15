@@ -2001,6 +2001,22 @@ module Crystal::HIR
         ctx.emit(nil_lit)
         nil_lit.id
 
+      when CrystalV2::Compiler::Frontend::PointerofNode
+        lower_pointerof(ctx, node)
+
+      when CrystalV2::Compiler::Frontend::AnnotationNode
+        # Annotations like @[Link("c")] - store for later processing
+        # For now, just return nil (annotations are metadata, not values)
+        lower_annotation(ctx, node)
+
+      when CrystalV2::Compiler::Frontend::LibNode
+        # lib LibC ... end - C library bindings
+        lower_lib(ctx, node)
+
+      when CrystalV2::Compiler::Frontend::FunNode
+        # fun malloc(size : Int64) : Void* - external C function
+        lower_fun(ctx, node)
+
       else
         raise LoweringError.new("Unsupported AST node type: #{node.class}", node)
       end
@@ -2152,6 +2168,209 @@ module Crystal::HIR
       ctx.emit(lit)
       ctx.register_type(lit.id, type_ref)
       lit.id
+    end
+
+    # ═══════════════════════════════════════════════════════════════════════
+    # LIB BINDINGS (C FFI)
+    # ═══════════════════════════════════════════════════════════════════════
+
+    private def lower_annotation(ctx : LoweringContext, node : CrystalV2::Compiler::Frontend::AnnotationNode) : ValueId
+      # Annotations like @[Link("c")] are metadata
+      # Store Link annotations for the linker
+      # node.name is an ExprId pointing to IdentifierNode or PathNode
+      annotation_name = resolve_annotation_name(node.name)
+
+      if annotation_name == "Link"
+        # Extract library name from annotation arguments
+        # Positional args: @[Link("c")]
+        node.args.each do |arg_id|
+          arg_node = @arena[arg_id]
+          if arg_node.is_a?(CrystalV2::Compiler::Frontend::StringNode)
+            lib_name = String.new(arg_node.value)
+            @module.add_link_library(lib_name)
+          end
+        end
+
+        # Named args: @[Link(framework: "Cocoa")] or @[Link(pkg_config: "libfoo")]
+        if named_args = node.named_args
+          named_args.each do |named_arg|
+            value_node = @arena[named_arg.value]
+            if value_node.is_a?(CrystalV2::Compiler::Frontend::StringNode)
+              named_lib_name = String.new(value_node.value)
+              @module.add_link_library(named_lib_name)
+            end
+          end
+        end
+      end
+
+      # Annotations don't produce values
+      nil_lit = Literal.new(ctx.next_id, TypeRef::NIL, nil)
+      ctx.emit(nil_lit)
+      nil_lit.id
+    end
+
+    private def lower_lib(ctx : LoweringContext, node : CrystalV2::Compiler::Frontend::LibNode) : ValueId
+      # lib LibC ... end - C library bindings
+      # Process the body to register external functions
+      lib_name = String.new(node.name)
+
+      if body = node.body
+        body.each do |expr_id|
+          body_node = @arena[expr_id]
+          case body_node
+          when CrystalV2::Compiler::Frontend::FunNode
+            # Register external function
+            register_extern_fun(lib_name, body_node)
+          when CrystalV2::Compiler::Frontend::AnnotationNode
+            # Process annotations within lib (e.g., @[Link])
+            lower_annotation(ctx, body_node)
+          when CrystalV2::Compiler::Frontend::AliasNode
+            # type aliases within lib - ignore for now
+          else
+            # Other declarations (structs, unions, enums, type aliases)
+            # Process recursively
+            lower_node(ctx, body_node)
+          end
+        end
+      end
+
+      # Lib declarations don't produce values
+      nil_lit = Literal.new(ctx.next_id, TypeRef::NIL, nil)
+      ctx.emit(nil_lit)
+      nil_lit.id
+    end
+
+    private def lower_fun(ctx : LoweringContext, node : CrystalV2::Compiler::Frontend::FunNode) : ValueId
+      # fun malloc(size : Int64) : Void* - external C function
+      # Register in current lib context (or global if not in lib)
+      register_extern_fun(nil, node)
+
+      # Fun declarations don't produce values
+      nil_lit = Literal.new(ctx.next_id, TypeRef::NIL, nil)
+      ctx.emit(nil_lit)
+      nil_lit.id
+    end
+
+    private def register_extern_fun(lib_name : String?, node : CrystalV2::Compiler::Frontend::FunNode)
+      fun_name = String.new(node.name)
+      real_name = node.real_name ? String.new(node.real_name.not_nil!) : fun_name
+
+      # Build parameter types
+      param_types = [] of TypeRef
+      if params = node.params
+        params.each do |param|
+          if type_ann = param.type_annotation
+            type_name = String.new(type_ann)
+            param_types << type_ref_for_c_type(type_name)
+          else
+            param_types << TypeRef::POINTER  # Default to pointer for untyped params
+          end
+        end
+      end
+
+      # Return type
+      return_type = if ret = node.return_type
+                      type_ref_for_c_type(String.new(ret))
+                    else
+                      TypeRef::VOID
+                    end
+
+      # Register the external function
+      @module.add_extern_function(ExternFunction.new(
+        name: fun_name,
+        real_name: real_name,
+        lib_name: lib_name,
+        param_types: param_types,
+        return_type: return_type,
+        varargs: node.varargs
+      ))
+    end
+
+    # Convert Crystal type notation to C-compatible TypeRef
+    private def type_ref_for_c_type(type_name : String) : TypeRef
+      case type_name
+      when "Void", "Void*", "Pointer(Void)", "Pointer"
+        TypeRef::POINTER
+      when "Int8", "SChar"
+        TypeRef::INT8
+      when "UInt8", "Char", "UChar"
+        TypeRef::UINT8
+      when "Int16", "Short"
+        TypeRef::INT16
+      when "UInt16", "UShort"
+        TypeRef::UINT16
+      when "Int32", "Int"
+        TypeRef::INT32
+      when "UInt32", "UInt"
+        TypeRef::UINT32
+      when "Int64", "Long", "LongLong"
+        TypeRef::INT64
+      when "UInt64", "ULong", "ULongLong", "SizeT"
+        TypeRef::UINT64
+      when "Float32", "Float"
+        TypeRef::FLOAT32
+      when "Float64", "Double"
+        TypeRef::FLOAT64
+      when "Bool"
+        TypeRef::BOOL
+      when "NoReturn"
+        TypeRef::VOID  # NoReturn functions still have void return in LLVM
+      when .ends_with?("*")
+        TypeRef::POINTER
+      when .starts_with?("Pointer(")
+        TypeRef::POINTER
+      else
+        TypeRef::POINTER  # Default to pointer for unknown types
+      end
+    end
+
+    # Lower pointerof(x) to get address of a variable
+    private def lower_pointerof(ctx : LoweringContext, node : CrystalV2::Compiler::Frontend::PointerofNode) : ValueId
+      # pointerof takes one argument - the variable/expression to get address of
+      if node.args.empty?
+        # Return null pointer if no args
+        nil_lit = Literal.new(ctx.next_id, TypeRef::POINTER, nil)
+        ctx.emit(nil_lit)
+        return nil_lit.id
+      end
+
+      # Lower the operand (the thing we're getting a pointer to)
+      operand_id = lower_expr(ctx, node.args.first)
+
+      # Create AddressOf instruction
+      addr_of = AddressOf.new(ctx.next_id, TypeRef::POINTER, operand_id)
+      ctx.emit(addr_of)
+      ctx.register_type(addr_of.id, TypeRef::POINTER)
+      addr_of.id
+    end
+
+    # Emit a call to an external C function
+    private def emit_extern_call(ctx : LoweringContext, extern_func : ExternFunction, arg_ids : Array(ValueId)) : ValueId
+      # Emit an ExternCall instruction with the real C function name
+      extern_call = ExternCall.new(
+        ctx.next_id,
+        extern_func.return_type,
+        extern_func.real_name,  # Use the real C name
+        arg_ids,
+        extern_func.varargs
+      )
+      ctx.emit(extern_call)
+      ctx.register_type(extern_call.id, extern_func.return_type)
+      extern_call.id
+    end
+
+    # Resolve annotation name from ExprId to string
+    private def resolve_annotation_name(name_expr : CrystalV2::Compiler::Frontend::ExprId) : String
+      name_node = @arena[name_expr]
+      case name_node
+      when CrystalV2::Compiler::Frontend::IdentifierNode
+        String.new(name_node.name)
+      when CrystalV2::Compiler::Frontend::PathNode
+        # For paths like JSON::Field, extract the last part
+        resolve_annotation_name(name_node.right)
+      else
+        "Unknown"
+      end
     end
 
     private def lower_string_interpolation(ctx : LoweringContext, node : CrystalV2::Compiler::Frontend::StringInterpolationNode) : ValueId
@@ -3942,6 +4161,14 @@ module Crystal::HIR
         end
 
         if class_name_str
+          # Check if this is a lib function call (e.g., LibC.puts)
+          if extern_func = @module.get_extern_function(class_name_str, method_name)
+            # This is a call to an extern C function
+            # Lower args and emit extern call with real C name
+            arg_ids = expand_splat_args(ctx, node.args)
+            return emit_extern_call(ctx, extern_func, arg_ids)
+          end
+
           # Class method call like Counter.new()
           full_method_name = "#{class_name_str}.#{method_name}"
           receiver_id = nil  # Static call, no receiver

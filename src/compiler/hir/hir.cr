@@ -446,6 +446,19 @@ module Crystal::HIR
     end
   end
 
+  # pointerof(x) - get pointer to a variable/expression
+  class AddressOf < Value
+    getter operand : ValueId
+
+    def initialize(id : ValueId, type : TypeRef, @operand : ValueId)
+      super(id, type)
+    end
+
+    def to_s(io : IO) : Nil
+      io << "%" << @id << " = addressof %" << @operand
+    end
+  end
+
   # ═══════════════════════════════════════════════════════════════════
 
   # Array/Hash indexing: obj[key]
@@ -527,6 +540,31 @@ module Crystal::HIR
       if blk = @block
         io << " with_block block." << blk
       end
+    end
+  end
+
+  # External C function call (libc, etc.)
+  class ExternCall < Value
+    getter extern_name : String  # The real C function name (e.g., "puts", "malloc")
+    getter args : Array(ValueId)
+    getter varargs : Bool
+
+    def initialize(
+      id : ValueId,
+      type : TypeRef,
+      @extern_name : String,
+      @args : Array(ValueId) = [] of ValueId,
+      @varargs : Bool = false
+    )
+      super(id, type)
+    end
+
+    def to_s(io : IO) : Nil
+      io << "%" << @id << " = extern_call @" << @extern_name << "("
+      @args.join(io, ", ") { |arg, o| o << "%" << arg }
+      io << ")"
+      io << " : " << @type.id
+      io << " [varargs]" if @varargs
     end
   end
 
@@ -1117,11 +1155,26 @@ module Crystal::HIR
   # MODULE
   # ═══════════════════════════════════════════════════════════════════════════
 
+  # External C function declaration from lib bindings
+  struct ExternFunction
+    getter name : String         # Crystal-side name
+    getter real_name : String    # Actual C symbol name
+    getter lib_name : String?    # Library containing the function
+    getter param_types : Array(TypeRef)
+    getter return_type : TypeRef
+    getter varargs : Bool
+
+    def initialize(@name, @real_name, @lib_name, @param_types, @return_type, @varargs = false)
+    end
+  end
+
   class Module
     getter name : String
     getter functions : Array(Function)
     getter types : Array(TypeDescriptor)
     getter strings : Array(String)
+    getter link_libraries : Array(String)
+    getter extern_functions : Array(ExternFunction)
 
     @next_function_id : FunctionId = 0_u32
     @next_type_id : TypeId = TypeRef::FIRST_USER_TYPE
@@ -1132,6 +1185,33 @@ module Crystal::HIR
       @types = [] of TypeDescriptor
       @strings = [] of String
       @string_intern = {} of String => StringId
+      @link_libraries = [] of String
+      @extern_functions = [] of ExternFunction
+    end
+
+    def add_link_library(lib_name : String)
+      @link_libraries << lib_name unless @link_libraries.includes?(lib_name)
+    end
+
+    def add_extern_function(func : ExternFunction)
+      # Don't add duplicates
+      unless @extern_functions.any? { |f| f.real_name == func.real_name }
+        @extern_functions << func
+      end
+    end
+
+    def get_extern_function(name : String) : ExternFunction?
+      @extern_functions.find { |f| f.name == name || f.real_name == name }
+    end
+
+    # Look up extern function by lib name and function name (e.g., "LibC", "puts")
+    def get_extern_function(lib_name : String, fun_name : String) : ExternFunction?
+      @extern_functions.find { |f| f.lib_name == lib_name && f.name == fun_name }
+    end
+
+    # Check if a name is a known lib (has any extern functions registered under it)
+    def is_lib?(name : String) : Bool
+      @extern_functions.any? { |f| f.lib_name == name }
     end
 
     def create_function(name : String, return_type : TypeRef) : Function

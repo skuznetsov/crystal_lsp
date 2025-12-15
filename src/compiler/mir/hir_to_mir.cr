@@ -281,6 +281,8 @@ module Crystal
                  lower_index_set(hir_value)
                when HIR::Call
                  lower_call(hir_value)
+               when HIR::ExternCall
+                 lower_hir_extern_call(hir_value)
                when Crystal::HIR::BinaryOperation
                  lower_binary_op(hir_value)
                when Crystal::HIR::UnaryOperation
@@ -333,6 +335,8 @@ module Crystal
                  lower_pointer_add(hir_value)
                when HIR::PointerRealloc
                  lower_pointer_realloc(hir_value)
+               when HIR::AddressOf
+                 lower_address_of(hir_value)
                else
                  raise "Unsupported HIR value: #{hir_value.class}"
                end
@@ -565,6 +569,17 @@ module Crystal
     # ─────────────────────────────────────────────────────────────────────────
     # Call Lowering
     # ─────────────────────────────────────────────────────────────────────────
+
+    # Lower HIR::ExternCall to MIR::ExternCall (direct C function call)
+    private def lower_hir_extern_call(extern_call : HIR::ExternCall) : ValueId
+      builder = @builder.not_nil!
+
+      # Get arguments
+      args = extern_call.args.map { |arg| get_value(arg) }
+
+      # Emit MIR extern_call with the real C function name
+      builder.extern_call(extern_call.extern_name, args, convert_type(extern_call.type))
+    end
 
     private def lower_call(call : HIR::Call) : ValueId
       builder = @builder.not_nil!
@@ -1165,6 +1180,18 @@ module Crystal
 
       args = [ptr, new_size]
       builder.extern_call("__crystal_v2_realloc64", args, TypeRef::POINTER)
+    end
+
+    private def lower_address_of(addr_of : HIR::AddressOf) : ValueId
+      builder = @builder.not_nil!
+
+      # Get the operand value
+      operand = get_value(addr_of.operand)
+
+      # For address-of, we need to return the address of the operand
+      # In MIR, this is a pointer to the value's storage location
+      # For now, emit an alloca and return its address
+      builder.addressof(operand, TypeRef::POINTER)
     end
 
     # Get size of a type in bytes

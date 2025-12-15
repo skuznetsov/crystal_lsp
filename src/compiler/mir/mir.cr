@@ -1403,6 +1403,23 @@ module Crystal::MIR
     end
   end
 
+  # Get address of a value (pointerof)
+  class AddressOf < Value
+    getter operand : ValueId
+
+    def initialize(id : ValueId, type : TypeRef, @operand : ValueId)
+      super(id, type)
+    end
+
+    def operands : Array(ValueId)
+      [@operand]
+    end
+
+    def to_s(io : IO) : Nil
+      io << "%" << @id << " = addressof %" << @operand << " : " << @type
+    end
+  end
+
   # Indirect call through function pointer
   class IndirectCall < Value
     getter callee_ptr : ValueId
@@ -1945,6 +1962,10 @@ module Crystal::MIR
     # GEP with dynamic index for pointer arithmetic
     def gep_dynamic(base : ValueId, index : ValueId, element_type : TypeRef) : ValueId
       emit(GetElementPtrDynamic.new(@function.next_value_id, TypeRef::POINTER, base, index, element_type))
+    end
+
+    def addressof(operand : ValueId, result_type : TypeRef) : ValueId
+      emit(AddressOf.new(@function.next_value_id, result_type, operand))
     end
 
     # Arithmetic
