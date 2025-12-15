@@ -6316,6 +6316,8 @@ module Crystal::HIR
     private def lower_block_to_block_id(ctx : LoweringContext, node : CrystalV2::Compiler::Frontend::BlockNode) : BlockId
       body_block = ctx.create_block
       saved_block = ctx.current_block
+      # Save locals before lowering block body - block-local vars shouldn't leak
+      saved_locals = ctx.save_locals
 
       ctx.current_block = body_block
       ctx.push_scope(ScopeKind::Closure)
@@ -6349,6 +6351,8 @@ module Crystal::HIR
       end
 
       ctx.current_block = saved_block
+      # Restore locals - block-local vars shouldn't pollute outer scope
+      ctx.restore_locals(saved_locals)
       body_block
     end
 
