@@ -4934,7 +4934,29 @@ module Crystal::HIR
       index_get = IndexGet.new(ctx.next_id, element_type, array_id, index_phi.id)
       ctx.emit(index_get)
       ctx.register_type(index_get.id, element_type)
-      ctx.register_local(param_name, index_get.id)
+
+      # Handle tuple destructuring: |(a, b, ...)| vs single param |x|
+      if params = block.params
+        if params.size > 1
+          # Tuple destructuring - extract each element
+          params.each_with_index do |param, idx|
+            if pname = param.name
+              name = String.new(pname)
+              idx_lit = Literal.new(ctx.next_id, TypeRef::INT32, idx.to_i64)
+              ctx.emit(idx_lit)
+              elem_extract = IndexGet.new(ctx.next_id, TypeRef::POINTER, index_get.id, idx_lit.id)
+              ctx.emit(elem_extract)
+              ctx.register_type(elem_extract.id, TypeRef::POINTER)
+              ctx.register_local(name, elem_extract.id)
+            end
+          end
+        else
+          # Single parameter - bind whole element
+          ctx.register_local(param_name, index_get.id)
+        end
+      else
+        ctx.register_local(param_name, index_get.id)
+      end
 
       lower_body(ctx, block.body)
       ctx.pop_scope
@@ -5056,7 +5078,29 @@ module Crystal::HIR
       index_get = IndexGet.new(ctx.next_id, element_type, array_id, index_phi.id)
       ctx.emit(index_get)
       ctx.register_type(index_get.id, element_type)
-      ctx.register_local(param_name, index_get.id)
+
+      # Handle tuple destructuring: |(a, b, ...)| vs single param |x|
+      if params = block.params
+        if params.size > 1
+          # Tuple destructuring - extract each element
+          params.each_with_index do |param, idx|
+            if pname = param.name
+              name = String.new(pname)
+              idx_lit = Literal.new(ctx.next_id, TypeRef::INT32, idx.to_i64)
+              ctx.emit(idx_lit)
+              elem_extract = IndexGet.new(ctx.next_id, TypeRef::POINTER, index_get.id, idx_lit.id)
+              ctx.emit(elem_extract)
+              ctx.register_type(elem_extract.id, TypeRef::POINTER)
+              ctx.register_local(name, elem_extract.id)
+            end
+          end
+        else
+          # Single parameter - bind whole element
+          ctx.register_local(param_name, index_get.id)
+        end
+      else
+        ctx.register_local(param_name, index_get.id)
+      end
 
       lower_body(ctx, block.body)
       ctx.pop_scope
