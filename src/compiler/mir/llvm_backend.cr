@@ -3756,20 +3756,17 @@ module Crystal::MIR
                          val_llvm_type == "void"
           if is_undefined
             # Undefined value - use safe default
-            if @current_return_type == "ptr" || @current_return_type.includes?(".union")
-              emit "ret #{@current_return_type} null" if @current_return_type == "ptr"
-              if @current_return_type.includes?(".union")
-                # Return nil union
-                c = @cond_counter
-                @cond_counter += 1
-                emit "%ret_nil.#{c}.ptr = alloca #{@current_return_type}, align 8"
-                emit "%ret_nil.#{c}.type_id_ptr = getelementptr #{@current_return_type}, ptr %ret_nil.#{c}.ptr, i32 0, i32 0"
-                emit "store i32 1, ptr %ret_nil.#{c}.type_id_ptr"
-                emit "%ret_nil.#{c}.val = load #{@current_return_type}, ptr %ret_nil.#{c}.ptr"
-                emit "ret #{@current_return_type} %ret_nil.#{c}.val"
-              else
-                emit "ret ptr null"
-              end
+            if @current_return_type == "ptr"
+              emit "ret ptr null"
+            elsif @current_return_type.includes?(".union")
+              # Return nil union
+              c = @cond_counter
+              @cond_counter += 1
+              emit "%ret_nil.#{c}.ptr = alloca #{@current_return_type}, align 8"
+              emit "%ret_nil.#{c}.type_id_ptr = getelementptr #{@current_return_type}, ptr %ret_nil.#{c}.ptr, i32 0, i32 0"
+              emit "store i32 1, ptr %ret_nil.#{c}.type_id_ptr"
+              emit "%ret_nil.#{c}.val = load #{@current_return_type}, ptr %ret_nil.#{c}.ptr"
+              emit "ret #{@current_return_type} %ret_nil.#{c}.val"
             else
               emit "ret #{@current_return_type} 0"
             end
