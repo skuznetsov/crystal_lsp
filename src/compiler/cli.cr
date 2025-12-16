@@ -259,26 +259,73 @@ module CrystalV2
         end
 
         # Pass 1: Register types
+        log(options, out_io, "  Pass 1: Registering types...")
+        log(options, out_io, "    Enums: #{enum_nodes.size}")
         enum_nodes.each { |n, a| hir_converter.arena = a; hir_converter.register_enum(n) }
+        log(options, out_io, "    Modules: #{module_nodes.size}")
         module_nodes.each { |n, a| hir_converter.arena = a; hir_converter.register_module(n) }
-        class_nodes.each { |n, a| hir_converter.arena = a; hir_converter.register_class(n) }
+        log(options, out_io, "    Classes: #{class_nodes.size}")
+        class_nodes.each_with_index do |(n, a), i|
+          hir_converter.arena = a
+          hir_converter.register_class(n)
+          STDERR.print "\r    Registered class #{i+1}/#{class_nodes.size}" if options.progress && (i % 10 == 0 || i == class_nodes.size - 1)
+        end
+        STDERR.puts if options.progress
+        log(options, out_io, "    Macros: #{macro_nodes.size}")
         macro_nodes.each { |n, a| hir_converter.arena = a; hir_converter.register_macro(n) }
+        log(options, out_io, "    Aliases: #{alias_nodes.size}")
         alias_nodes.each { |n, a| hir_converter.arena = a; hir_converter.register_alias(n) }
 
         # Pass 2: Register function signatures
-        def_nodes.each { |n, a| hir_converter.arena = a; hir_converter.register_function(n) }
+        log(options, out_io, "  Pass 2: Registering #{def_nodes.size} function signatures...")
+        def_nodes.each_with_index do |(n, a), i|
+          hir_converter.arena = a
+          hir_converter.register_function(n)
+          STDERR.print "\r    Registered function #{i+1}/#{def_nodes.size}" if options.progress && (i % 50 == 0 || i == def_nodes.size - 1)
+        end
+        STDERR.puts if options.progress
 
         # Pass 3: Lower bodies
-        module_nodes.each { |n, a| hir_converter.arena = a; hir_converter.lower_module(n) }
-        class_nodes.each { |n, a| hir_converter.arena = a; hir_converter.lower_class(n) }
-        def_nodes.each { |n, a| hir_converter.arena = a; hir_converter.lower_def(n) }
+        log(options, out_io, "  Pass 3: Lowering bodies...")
+        log(options, out_io, "    Modules: #{module_nodes.size}")
+        module_nodes.each_with_index do |(n, a), i|
+          name = String.new(n.name)
+          # Skip huge modules for now (Enumerable has 126 methods)
+          skip_modules = ["Enumerable", "Indexable", "Iterator"]
+          if skip_modules.includes?(name)
+            STDERR.puts "    Skipping module #{i+1}/#{module_nodes.size}: #{name} (too many methods)" if options.progress
+            next
+          end
+          STDERR.puts "    Lowering module #{i+1}/#{module_nodes.size}: #{name}" if options.progress
+          STDERR.flush if options.progress
+          hir_converter.arena = a
+          hir_converter.lower_module(n)
+        end
+        log(options, out_io, "    Classes: #{class_nodes.size}")
+        class_nodes.each_with_index do |(n, a), i|
+          hir_converter.arena = a
+          hir_converter.lower_class(n)
+          STDERR.print "\r    Lowered class #{i+1}/#{class_nodes.size}" if options.progress && (i % 10 == 0 || i == class_nodes.size - 1)
+        end
+        STDERR.puts if options.progress
+        log(options, out_io, "    Functions: #{def_nodes.size}")
+        def_nodes.each_with_index do |(n, a), i|
+          hir_converter.arena = a
+          hir_converter.lower_def(n)
+          STDERR.print "\r    Lowered function #{i+1}/#{def_nodes.size}" if options.progress && (i % 50 == 0 || i == def_nodes.size - 1)
+        end
+        STDERR.puts if options.progress
 
         # Create main function from top-level expressions
+        STDERR.puts "  Creating main function..." if options.progress
         if main_exprs.size > 0
           hir_converter.lower_main(main_exprs)
         end
+        STDERR.puts "  Main function created" if options.progress
 
+        STDERR.puts "  Getting HIR module..." if options.progress
         hir_module = hir_converter.module
+        STDERR.puts "  Got HIR module with #{hir_module.functions.size} functions" if options.progress
         log(options, out_io, "  Functions: #{hir_module.functions.size}")
 
         if options.emit_hir
@@ -289,7 +336,11 @@ module CrystalV2
 
         # Step 3: Escape analysis
         log(options, out_io, "\n[3/6] Escape analysis...")
-        hir_module.functions.each do |func|
+        total_funcs = hir_module.functions.size
+        hir_module.functions.each_with_index do |func, idx|
+          if options.progress && (idx % 1000 == 0 || idx == total_funcs - 1)
+            STDERR.puts "  Escape analysis: #{idx + 1}/#{total_funcs}..."
+          end
           escape = HIR::EscapeAnalyzer.new(func)
           escape.analyze
           ms = HIR::MemoryStrategyAssigner.new(func)
@@ -312,14 +363,20 @@ module CrystalV2
         mir_lowering.register_union_types(hir_converter.union_descriptors)
         mir_lowering.register_class_types(hir_converter.class_info)
 
-        mir_module = mir_lowering.lower
+        STDERR.puts "  Lowering #{hir_module.functions.size} functions to MIR..." if options.progress
+        mir_module = mir_lowering.lower(options.progress)
         log(options, out_io, "  Functions: #{mir_module.functions.size}")
 
         # Optimize MIR
         log(options, out_io, "  Optimizing MIR...")
-        mir_module.functions.each do |func|
-          stats, potential = func.optimize_with_potential
-          log(options, out_io, "    #{func.name} -> #{stats.total} changes") if options.verbose
+        mir_module.functions.each_with_index do |func, idx|
+          begin
+            STDERR.puts "  Optimizing #{idx + 1}/#{mir_module.functions.size}: #{func.name}..." if options.progress
+            stats, potential = func.optimize_with_potential
+            log(options, out_io, "    #{func.name} -> #{stats.total} changes") if options.verbose
+          rescue ex : IndexError
+            raise "Index error in optimize for: #{func.name}\n#{ex.message}\n#{ex.backtrace.join("\n")}"
+          end
         end
 
         if options.emit_mir
@@ -332,6 +389,8 @@ module CrystalV2
         log(options, out_io, "\n[5/6] Generating LLVM IR...")
         llvm_gen = MIR::LLVMIRGenerator.new(mir_module)
         llvm_gen.emit_type_metadata = true
+        llvm_gen.progress = options.progress
+        llvm_gen.reachability = true  # Only emit reachable functions from main
         llvm_ir = llvm_gen.generate
         log(options, out_io, "  LLVM IR size: #{llvm_ir.size} bytes")
 

@@ -257,6 +257,8 @@ module Crystal::MIR
     property emit_debug_info : Bool = true
     property emit_type_metadata : Bool = true
     property emit_tsan : Bool = false  # Thread Sanitizer instrumentation
+    property progress : Bool = false   # Print progress during generation
+    property reachability : Bool = false  # Only emit reachable functions (from main) - DISABLED, needs HIR-level implementation
     property target_triple : String = {% if flag?(:darwin) %}
                                         {% if flag?(:aarch64) %}
                                           "arm64-apple-macosx"
@@ -289,19 +291,44 @@ module Crystal::MIR
     end
 
     def generate : String
+      STDERR.puts "  [LLVM] emit_header..." if @progress
       emit_header
+      STDERR.puts "  [LLVM] emit_type_definitions..." if @progress
       emit_type_definitions
+      STDERR.puts "  [LLVM] emit_runtime_declarations..." if @progress
       emit_runtime_declarations
+      STDERR.puts "  [LLVM] emit_union_debug_helpers..." if @progress
       emit_union_debug_helpers
+      STDERR.puts "  [LLVM] emit_global_variables..." if @progress
       emit_global_variables
 
       if @emit_type_metadata
+        STDERR.puts "  [LLVM] collect_type_metadata..." if @progress
         collect_type_metadata
+        STDERR.puts "  [LLVM] collect_union_metadata..." if @progress
         collect_union_metadata
       end
 
-      @module.functions.each do |func|
-        emit_function(func)
+      # Determine which functions to emit
+      functions_to_emit = if @reachability
+                            STDERR.puts "  [LLVM] computing reachable functions..." if @progress
+                            reachable_ids = compute_reachable_functions
+                            @module.functions.select { |f| reachable_ids.includes?(f.id) }
+                          else
+                            @module.functions
+                          end
+
+      total_funcs = functions_to_emit.size
+      STDERR.puts "  [LLVM] emitting #{total_funcs} functions (#{@module.functions.size} total, #{@module.functions.size - total_funcs} pruned)..." if @progress
+      functions_to_emit.each_with_index do |func, idx|
+        if @progress && (idx % 100 == 0 || idx == total_funcs - 1)
+          STDERR.puts "    Emitting function #{idx + 1}/#{total_funcs}: #{func.name}"
+        end
+        begin
+          emit_function(func)
+        rescue ex : IndexError
+          raise "Index error in emit_function for: #{func.name}\n#{ex.message}"
+        end
       end
 
       # Emit string constants at end (LLVM allows globals anywhere)
@@ -316,6 +343,90 @@ module Crystal::MIR
       end
 
       @output.to_s
+    end
+
+    # Compute reachable functions from main via transitive call graph
+    private def compute_reachable_functions : Set(FunctionId)
+      reachable = Set(FunctionId).new
+      worklist = [] of FunctionId
+
+      # Find main function
+      main_func = @module.functions.find { |f| f.name == "main" }
+      if main_func
+        worklist << main_func.id
+        reachable << main_func.id
+      else
+        # No main, emit all functions
+        @module.functions.each { |f| reachable << f.id }
+        return reachable
+      end
+
+      # Build function lookup by ID and by name
+      func_by_id = {} of FunctionId => Function
+      func_by_name = {} of String => Function
+      @module.functions.each do |f|
+        func_by_id[f.id] = f
+        mangled = @type_mapper.mangle_name(f.name)
+        func_by_name[mangled] = f
+        func_by_name[f.name] = f
+      end
+
+      # Traverse call graph
+      while func_id = worklist.shift?
+        func = func_by_id[func_id]?
+        next unless func  # External function - skip
+
+        # Scan all blocks for Call and other function-referencing instructions
+        func.blocks.each do |block|
+          block.instructions.each do |inst|
+            case inst
+            when Call
+              callee_id = inst.callee
+              unless reachable.includes?(callee_id)
+                reachable << callee_id
+                worklist << callee_id
+              end
+            when ExternCall
+              # ExternCall uses name - resolve to function ID if it's a defined function
+              extern_name = inst.extern_name
+              mangled_extern = @type_mapper.mangle_name(extern_name)
+
+              # Try to find matching function by exact name or mangled name
+              matching_func = func_by_name[mangled_extern]? || func_by_name[extern_name]?
+
+              # If not found, search for suffix match (handles namespace prefixes)
+              unless matching_func
+                matching_func = @module.functions.find do |f|
+                  mangled = @type_mapper.mangle_name(f.name)
+                  mangled.ends_with?(mangled_extern) || mangled.ends_with?("__#{mangled_extern}")
+                end
+              end
+
+              if matching_func
+                unless reachable.includes?(matching_func.id)
+                  reachable << matching_func.id
+                  worklist << matching_func.id
+                end
+              else
+                # DEBUG: log truly unresolved extern calls (not in module)
+                if @progress
+                  STDERR.puts "  [REACHABILITY] Unresolved extern: #{extern_name} (mangled: #{mangled_extern})"
+                end
+              end
+            when RCDecrement
+              # Destructor is also a function reference
+              if destructor_id = inst.destructor
+                unless reachable.includes?(destructor_id)
+                  reachable << destructor_id
+                  worklist << destructor_id
+                end
+              end
+            end
+          end
+        end
+      end
+
+      reachable
     end
 
     private def emit_undefined_extern_declarations
@@ -483,7 +594,10 @@ module Crystal::MIR
         end
 
         fields.each do |field|
-          field_types << @type_mapper.llvm_type(field.type_ref)
+          llvm_type = @type_mapper.llvm_type(field.type_ref)
+          # void is not valid for struct fields - use ptr instead (opaque pointer for untyped field)
+          llvm_type = "ptr" if llvm_type == "void"
+          field_types << llvm_type
         end
 
         emit_raw "%#{name} = type { #{field_types.join(", ")} }\n"
@@ -625,14 +739,14 @@ module Crystal::MIR
 
       # int32 absolute value
       emit_raw "define i32 @__crystal_v2_int_abs(i32 %val) {\n"
-      emit_raw "entry:\n"
+      emit_raw "fn_entry:\n"
       emit_raw "  %neg = icmp slt i32 %val, 0\n"
       emit_raw "  br i1 %neg, label %do_neg, label %done\n"
       emit_raw "do_neg:\n"
       emit_raw "  %negated = sub i32 0, %val\n"
       emit_raw "  br label %done\n"
       emit_raw "done:\n"
-      emit_raw "  %result = phi i32 [ %negated, %do_neg ], [ %val, %entry ]\n"
+      emit_raw "  %result = phi i32 [ %negated, %do_neg ], [ %val, %fn_entry ]\n"
       emit_raw "  ret i32 %result\n"
       emit_raw "}\n\n"
 
@@ -932,7 +1046,8 @@ module Crystal::MIR
       emit_raw "define #{return_type} @#{mangled_name}(#{param_types.join(", ")}) {\n"
 
       # Emit entry block with hoisted allocas for dominance correctness
-      emit_raw "entry:\n"
+      # Use fn_entry to avoid conflict with parameter names like %entry
+      emit_raw "fn_entry:\n"
       emit_hoisted_allocas(func)
       # Jump to first user block
       if first_block = func.blocks.first?
@@ -997,7 +1112,7 @@ module Crystal::MIR
               callee_name = @type_mapper.mangle_name(callee_func.name)
               # DEBUG: check what callee names look like for low IDs
               if inst.id < 50
-                STDERR.puts "[PREPASS-CALLEE-FOUND] id=#{inst.id}, callee_name=#{callee_name}, ret=#{callee_ret_type}"
+                # STDERR.puts "[PREPASS-CALLEE-FOUND] id=#{inst.id}, callee_name=#{callee_name}, ret=#{callee_ret_type}"
               end
               # Known void functions (inspect, puts, print, etc.)
               # Check various naming patterns since functions can be mangled differently
@@ -1013,7 +1128,7 @@ module Crystal::MIR
                               callee_name.ends_with?("_p")
               # DEBUG: trace inspect calls
               if callee_name.includes?("inspect")
-                STDERR.puts "[PREPASS-INSPECT] id=#{inst.id}, callee=#{callee_name}, callee_ret=#{callee_ret_type}, is_known=#{is_known_void}, inst_type=#{@type_mapper.llvm_type(inst.type)}"
+                # STDERR.puts "[PREPASS-INSPECT] id=#{inst.id}, callee=#{callee_name}, callee_ret=#{callee_ret_type}, is_known=#{is_known_void}, inst_type=#{@type_mapper.llvm_type(inst.type)}"
               end
               if callee_ret_type == "void" || is_known_void
                 effective_type = TypeRef::VOID
@@ -1022,7 +1137,7 @@ module Crystal::MIR
               # Callee not found - check if MIR type is void or name suggests void
               inst_type_str = @type_mapper.llvm_type(inst.type)
               # DEBUG: trace callee not found cases
-              STDERR.puts "[PREPASS-NO-CALLEE] id=#{inst.id}, callee_id=#{inst.callee}, inst_type=#{inst_type_str}"
+              # STDERR.puts "[PREPASS-NO-CALLEE] id=#{inst.id}, callee_id=#{inst.callee}, inst_type=#{inst_type_str}"
               if inst_type_str == "void"
                 effective_type = TypeRef::VOID
               end
@@ -1031,10 +1146,10 @@ module Crystal::MIR
             # For ExternCall, the return type is typically determined at emit time
             # If MIR type is void, it's void; otherwise check extern declaration if available
             extern_type_str = @type_mapper.llvm_type(inst.type)
-            # DEBUG: trace all ExternCall
-            if inst.extern_name.includes?("inspect") || inst.extern_name.includes?("puts") || inst.extern_name.includes?("print")
-              STDERR.puts "[PREPASS-EXTERN] id=#{inst.id}, name=#{inst.extern_name}, type=#{extern_type_str}"
-            end
+            # DEBUG: trace all ExternCall (disabled)
+            # if inst.extern_name.includes?("inspect") || inst.extern_name.includes?("puts") || inst.extern_name.includes?("print")
+            #   STDERR.puts "[PREPASS-EXTERN] id=#{inst.id}, name=#{inst.extern_name}, type=#{extern_type_str}"
+            # end
             if extern_type_str == "void"
               effective_type = TypeRef::VOID
             end
@@ -1606,6 +1721,11 @@ module Crystal::MIR
         end
       end
 
+      # For pointer types, use "null" instead of "0"
+      if val_type_str == "ptr" && val == "0"
+        val = "null"
+      end
+
       # TSan instrumentation: report write before store
       if @emit_tsan
         tsan_size = tsan_access_size(val_type)
@@ -1643,7 +1763,8 @@ module Crystal::MIR
       # Check if base is a struct or reference type (from registered types)
       base_value_type = @value_types[inst.base]?
       if base_value_type && (mir_type = @module.type_registry.get(base_value_type))
-        if mir_type.kind.struct? || mir_type.kind.reference?
+        has_fields = (mir_type.fields && !mir_type.fields.not_nil!.empty?) || mir_type.kind.reference?
+        if has_fields && (mir_type.kind.struct? || mir_type.kind.reference?)
           # Struct/Class GEP: use actual struct type and field index
           struct_type = "%#{@type_mapper.mangle_name(mir_type.name)}"
           # Convert byte offset to field index
@@ -1724,8 +1845,15 @@ module Crystal::MIR
 
       # If base is not a pointer, we have a type mismatch from MIR
       # Convert integer types to pointer using inttoptr
-      if base_type_str != "ptr" && !base_type_str.includes?(".union")
-        if base_type_str.starts_with?("i")
+      if base_type_str != "ptr"
+        if base_type_str.includes?(".union")
+          # Union type - extract payload as ptr
+          emit "#{name}.union_ptr = alloca #{base_type_str}, align 8"
+          emit "store #{base_type_str} #{normalize_union_value(base, base_type_str)}, ptr #{name}.union_ptr"
+          emit "#{name}.payload_ptr = getelementptr #{base_type_str}, ptr #{name}.union_ptr, i32 0, i32 1"
+          emit "#{name}.base_ptr = load ptr, ptr #{name}.payload_ptr"
+          base = "#{name}.base_ptr"
+        elsif base_type_str.starts_with?("i")
           # Integer to pointer: inttoptr (may be a value used as address)
           emit "#{name}.base_ptr = inttoptr #{base_type_str} #{base} to ptr"
           base = "#{name}.base_ptr"
@@ -1748,6 +1876,9 @@ module Crystal::MIR
         ext_name = "#{name}.idx64"
         emit "#{ext_name} = ptrtoint ptr #{index} to i64"
         emit "#{name} = getelementptr #{element_type}, ptr #{base}, i64 #{ext_name}"
+      elsif index_type_str == "void"
+        # Void index - use 0 as default
+        emit "#{name} = getelementptr #{element_type}, ptr #{base}, i64 0"
       else
         # Convert integer type to i64 with sign extension
         ext_name = "#{name}.idx64"
@@ -1776,7 +1907,7 @@ module Crystal::MIR
           if param.name == param_name
             param_type = param.type == TypeRef::VOID ? TypeRef::POINTER : param.type
             operand_type_str = @type_mapper.llvm_type(param_type)
-            STDERR.puts "[BINOP-PARAM-LEFT] left=#{left}, param_name=#{param_name}, found_type=#{operand_type_str}"
+            # STDERR.puts "[BINOP-PARAM-LEFT] left=#{left}, param_name=#{param_name}, found_type=#{operand_type_str}"
             break
           end
         end
@@ -1787,18 +1918,10 @@ module Crystal::MIR
           if param.name == param_name
             param_type = param.type == TypeRef::VOID ? TypeRef::POINTER : param.type
             right_type_str = @type_mapper.llvm_type(param_type)
-            STDERR.puts "[BINOP-PARAM-RIGHT] right=#{right}, param_name=#{param_name}, found_type=#{right_type_str}"
+            # STDERR.puts "[BINOP-PARAM-RIGHT] right=#{right}, param_name=#{param_name}, found_type=#{right_type_str}"
             break
           end
         end
-      end
-      # Debug: trace binary op with %self
-      if right == "%self" || left == "%self"
-        STDERR.puts "[BINOP-SELF] left=#{left}, right=#{right}, left_type=#{operand_type_str}, right_type=#{right_type_str}, func=#{@current_func_name}, params=#{@current_func_params.map(&.name).join(",")}"
-      end
-      # Debug: trace all binary ops in compute_ltp_potential
-      if @current_func_name.includes?("compute_ltp_potential")
-        STDERR.puts "[BINOP-LTP] id=#{inst.id}, op=#{inst.op}, left=#{left}, right=#{right}, left_type=#{operand_type_str}, right_type=#{right_type_str}"
       end
 
       # Determine operation type
@@ -1876,6 +1999,19 @@ module Crystal::MIR
         end
         if !right.starts_with?("%") && right =~ /^-?\d+$/ && !right.includes?(".")
           right = "#{right}.0"
+          right_type_str = float_type
+        end
+        # Convert ptr operands to float (ptrtoint then sitofp)
+        if left.starts_with?("%") && operand_type_str == "ptr"
+          emit "%binop#{inst.id}.left_ptrtoint = ptrtoint ptr #{left} to i64"
+          emit "%binop#{inst.id}.left_itof = sitofp i64 %binop#{inst.id}.left_ptrtoint to #{float_type}"
+          left = "%binop#{inst.id}.left_itof"
+          operand_type_str = float_type
+        end
+        if right.starts_with?("%") && right_type_str == "ptr"
+          emit "%binop#{inst.id}.right_ptrtoint = ptrtoint ptr #{right} to i64"
+          emit "%binop#{inst.id}.right_itof = sitofp i64 %binop#{inst.id}.right_ptrtoint to #{float_type}"
+          right = "%binop#{inst.id}.right_itof"
           right_type_str = float_type
         end
         # Convert integer SSA values to float for float operations
@@ -1974,6 +2110,28 @@ module Crystal::MIR
             result_type = operand_type_str if is_arithmetic
           end
         end
+
+      end
+
+      # Handle float/double type mismatch (MUST be outside needs_int_operands block!)
+      # This handles cases like: fmul double %r15, float %max
+      if is_float_op && operand_type_str != right_type_str
+        left_is_float = operand_type_str == "float" || operand_type_str == "double"
+        right_is_float = right_type_str == "float" || right_type_str == "double"
+        if left_is_float && right_is_float
+          # Convert float to double (always widen to larger type)
+          if operand_type_str == "float" && right_type_str == "double"
+            emit "%binop#{inst.id}.left_fpext = fpext float #{left} to double"
+            left = "%binop#{inst.id}.left_fpext"
+            operand_type_str = "double"
+            result_type = "double"
+          elsif operand_type_str == "double" && right_type_str == "float"
+            emit "%binop#{inst.id}.right_fpext = fpext float #{right} to double"
+            right = "%binop#{inst.id}.right_fpext"
+            right_type_str = "double"
+            result_type = "double"
+          end
+        end
       end
 
       is_signed = operand_type.id <= TypeRef::INT128.id
@@ -2050,6 +2208,9 @@ module Crystal::MIR
                       when "i16" then TypeRef::INT16
                       when "i32" then TypeRef::INT32
                       when "i64" then TypeRef::INT64
+                      when "i128" then TypeRef::INT128
+                      when "float" then TypeRef::FLOAT32
+                      when "double" then TypeRef::FLOAT64
                       when "ptr" then TypeRef::POINTER
                       else inst.type  # Use MIR type as fallback
                       end
@@ -2115,8 +2276,25 @@ module Crystal::MIR
         end
         @value_types[inst.id] = TypeRef::BOOL  # NOT always returns i1
       when .bit_not?
-        emit "#{name} = xor #{type} #{operand}, -1"
-        @value_types[inst.id] = operand_type  # bit_not preserves operand type
+        # Use operand_llvm_type which is more accurately tracked than inst.type
+        actual_type = operand_llvm_type
+        actual_type = "i64" if actual_type == "void"  # void operand defaults to i64
+
+        if actual_type == "ptr"
+          # Can't xor ptr directly - convert to i64, xor, convert back
+          base_name = name.lstrip('%')
+          emit "%#{base_name}.ptr_to_int = ptrtoint ptr #{operand} to i64"
+          emit "%#{base_name}.xor = xor i64 %#{base_name}.ptr_to_int, -1"
+          emit "#{name} = inttoptr i64 %#{base_name}.xor to ptr"
+          @value_types[inst.id] = TypeRef::POINTER
+        elsif operand_llvm_type == "void"
+          # Void operand - use 0 as default value, ~0 = -1
+          emit "#{name} = xor i64 0, -1"
+          @value_types[inst.id] = TypeRef::INT64
+        else
+          emit "#{name} = xor #{actual_type} #{operand}, -1"
+          @value_types[inst.id] = operand_type  # bit_not preserves operand type
+        end
       end
     end
 
@@ -2188,6 +2366,21 @@ module Crystal::MIR
         elsif src_type == "ptr" && is_dst_int
           op = "ptrtoint"
         end
+      end
+
+      # Guard: sext/zext/trunc can't be used with ptr - use ptrtoint instead
+      if (op == "sext" || op == "zext" || op == "trunc") && src_type == "ptr"
+        # ptr to int - use ptrtoint
+        emit "#{name} = ptrtoint ptr #{value} to #{dst_type}"
+        @value_types[inst.id] = inst.type
+        return
+      end
+
+      # Guard: sext/zext/trunc can't be used with void - use default 0
+      if (op == "sext" || op == "zext" || op == "trunc") && src_type == "void"
+        emit "#{name} = add #{dst_type} 0, 0"
+        @value_types[inst.id] = inst.type
+        return
       end
 
       # Guard: can't bitcast union to ptr - extract payload instead
@@ -2614,7 +2807,7 @@ module Crystal::MIR
       use_callee_params = callee_func && callee_func.params.size == inst.args.size
       # Debug void args
       has_void_arg = inst.args.any? { |a| @type_mapper.llvm_type(@value_types[a]? || TypeRef::POINTER) == "void" }
-      STDERR.puts "[CALL-DEBUG] #{callee_name}, use_callee_params=#{use_callee_params}, has_void_arg=#{has_void_arg}" if has_void_arg
+      # STDERR.puts "[CALL-DEBUG] #{callee_name}, use_callee_params=#{use_callee_params}, has_void_arg=#{has_void_arg}" if has_void_arg
       args = if use_callee_params && callee_func
                inst.args.map_with_index { |a, i|
                  param_type = callee_func.params[i].type
@@ -2630,12 +2823,15 @@ module Crystal::MIR
                  # If original type was void, use null instead of value reference
                  if original_was_void
                    "ptr null"
-                 # If types match, use directly (but handle union 0/null specially)
+                 # If types match, use directly (but handle union 0/null and float literals specially)
                  elsif expected_llvm_type == actual_llvm_type
                    val = value_ref(a)
                    # Union types need zeroinitializer instead of 0 or null
                    if expected_llvm_type.includes?(".union") && (val == "0" || val == "null")
                      "#{expected_llvm_type} zeroinitializer"
+                   # Float types need 0.0 instead of 0
+                   elsif (expected_llvm_type == "float" || expected_llvm_type == "double") && val == "0"
+                     "#{expected_llvm_type} 0.0"
                    else
                      "#{expected_llvm_type} #{val}"
                    end
@@ -2716,6 +2912,27 @@ module Crystal::MIR
                    @cond_counter += 1
                    emit "%trunc_to_i32.#{c} = trunc i64 #{val} to i32"
                    "i32 %trunc_to_i32.#{c}"
+                 elsif expected_llvm_type == "i64" && (actual_llvm_type == "i32" || actual_llvm_type == "i16" || actual_llvm_type == "i8")
+                   # Smaller int to i64 - sign extend
+                   val = value_ref(a)
+                   c = @cond_counter
+                   @cond_counter += 1
+                   emit "%sext_to_i64.#{c} = sext #{actual_llvm_type} #{val} to i64"
+                   "i64 %sext_to_i64.#{c}"
+                 elsif expected_llvm_type == "i32" && (actual_llvm_type == "i16" || actual_llvm_type == "i8")
+                   # Smaller int to i32 - sign extend
+                   val = value_ref(a)
+                   c = @cond_counter
+                   @cond_counter += 1
+                   emit "%sext_to_i32.#{c} = sext #{actual_llvm_type} #{val} to i32"
+                   "i32 %sext_to_i32.#{c}"
+                 elsif expected_llvm_type == "i16" && actual_llvm_type == "i8"
+                   # i8 to i16 - sign extend
+                   val = value_ref(a)
+                   c = @cond_counter
+                   @cond_counter += 1
+                   emit "%sext_to_i16.#{c} = sext i8 #{val} to i16"
+                   "i16 %sext_to_i16.#{c}"
                  elsif expected_llvm_type == "i16" && (actual_llvm_type == "i32" || actual_llvm_type == "i64")
                    # Larger int to i16 - truncate
                    val = value_ref(a)
@@ -2806,6 +3023,9 @@ module Crystal::MIR
                    # For union types, use zeroinitializer instead of 0
                    elsif expected_llvm_type.includes?(".union") && (val == "0" || val == "null")
                      "#{expected_llvm_type} zeroinitializer"
+                   # For float types, convert 0 to 0.0
+                   elsif (expected_llvm_type == "float" || expected_llvm_type == "double") && val == "0"
+                     "#{expected_llvm_type} 0.0"
                    else
                      "#{expected_llvm_type} #{val}"
                    end
@@ -2852,6 +3072,7 @@ module Crystal::MIR
                             when "i16" then TypeRef::INT16
                             when "i32" then TypeRef::INT32
                             when "i64" then TypeRef::INT64
+                            when "i128" then TypeRef::INT128
                             when "float" then TypeRef::FLOAT32
                             when "double" then TypeRef::FLOAT64
                             when "ptr" then TypeRef::POINTER
@@ -2879,6 +3100,7 @@ module Crystal::MIR
                       when "i16" then TypeRef::INT16
                       when "i32" then TypeRef::INT32
                       when "i64" then TypeRef::INT64
+                      when "i128" then TypeRef::INT128
                       when "float" then TypeRef::FLOAT32
                       when "double" then TypeRef::FLOAT64
                       when "ptr" then TypeRef::POINTER
@@ -3017,6 +3239,7 @@ module Crystal::MIR
                         when "i16" then TypeRef::INT16
                         when "i32" then TypeRef::INT32
                         when "i64" then TypeRef::INT64
+                        when "i128" then TypeRef::INT128
                         when "float" then TypeRef::FLOAT32
                         when "double" then TypeRef::FLOAT64
                         when "ptr" then TypeRef::POINTER
@@ -3787,7 +4010,12 @@ module Crystal::MIR
               emit "%ret_nil.#{c}.val = load #{@current_return_type}, ptr %ret_nil.#{c}.ptr"
               emit "ret #{@current_return_type} %ret_nil.#{c}.val"
             else
-              emit "ret #{@current_return_type} 0"
+              # Use 0.0 for float types, 0 for others
+              if @current_return_type == "double" || @current_return_type == "float"
+                emit "ret #{@current_return_type} 0.0"
+              else
+                emit "ret #{@current_return_type} 0"
+              end
             end
           else
             val_ref = value_ref(val)
@@ -3898,8 +4126,37 @@ module Crystal::MIR
               @cond_counter += 1
               emit "%ret_ftoi.#{c} = fptosi #{val_llvm_type} #{val_ref} to #{@current_return_type}"
               emit "ret #{@current_return_type} %ret_ftoi.#{c}"
+            elsif (@current_return_type == "double" || @current_return_type == "float") && val_llvm_type == "ptr"
+              # Pointer to float conversion - try to load from pointer or return 0.0
+              # This often happens with incomplete function bodies
+              c = @cond_counter
+              @cond_counter += 1
+              emit "%ret_ptr_to_float.#{c} = load #{@current_return_type}, ptr #{val_ref}"
+              emit "ret #{@current_return_type} %ret_ptr_to_float.#{c}"
+            elsif @current_return_type == "float" && val_llvm_type == "double"
+              # Double to float conversion (truncate)
+              c = @cond_counter
+              @cond_counter += 1
+              emit "%ret_fptrunc.#{c} = fptrunc double #{val_ref} to float"
+              emit "ret float %ret_fptrunc.#{c}"
+            elsif @current_return_type == "double" && val_llvm_type == "float"
+              # Float to double conversion (extend)
+              c = @cond_counter
+              @cond_counter += 1
+              emit "%ret_fpext.#{c} = fpext float #{val_ref} to double"
+              emit "ret double %ret_fpext.#{c}"
             else
-              emit "ret #{@current_return_type} #{val_ref}"
+              # Handle literal values for return types
+              actual_val = if (@current_return_type == "double" || @current_return_type == "float") && (val_ref == "0" || val_ref == "null")
+                             "0.0"
+                           elsif @current_return_type == "ptr" && val_ref == "0"
+                             "null"
+                           elsif @current_return_type.starts_with?("i") && val_ref == "null"
+                             "0"
+                           else
+                             val_ref
+                           end
+              emit "ret #{@current_return_type} #{actual_val}"
             end
           end
           end  # End of else block for defined value

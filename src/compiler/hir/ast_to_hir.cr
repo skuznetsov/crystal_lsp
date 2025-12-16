@@ -244,6 +244,9 @@ module Crystal::HIR
     # Track which allocators have been generated (to avoid duplicates for reopened classes)
     @generated_allocators : Set(String)
 
+    # Type cache to prevent infinite recursion in type_ref_for_name/create_union_type
+    @type_cache : Hash(String, TypeRef)
+
     def initialize(@arena, module_name : String = "main")
       @module = Module.new(module_name)
       @function_types = {} of String => TypeRef
@@ -260,6 +263,7 @@ module Crystal::HIR
       @macro_defs = {} of String => CrystalV2::Compiler::Frontend::MacroDefNode
       @type_aliases = {} of String => String
       @generated_allocators = Set(String).new
+      @type_cache = {} of String => TypeRef
     end
 
     # Get class info by name
@@ -598,10 +602,13 @@ module Crystal::HIR
     # Lower a module with a specific name prefix
     private def lower_module_with_name(node : CrystalV2::Compiler::Frontend::ModuleNode, module_name : String)
       if body = node.body
-        body.each do |expr_id|
+        body.each_with_index do |expr_id, idx|
           member = @arena[expr_id]
           case member
           when CrystalV2::Compiler::Frontend::DefNode
+            method_name = String.new(member.name)
+            STDERR.puts "      [#{module_name}] Method #{idx}: #{method_name}" if ENV["HIR_DEBUG"]?
+            STDERR.flush if ENV["HIR_DEBUG"]?
             lower_module_method(module_name, member)
           when CrystalV2::Compiler::Frontend::ClassNode
             # Lower nested class with full name
@@ -935,6 +942,10 @@ module Crystal::HIR
     private def monomorphize_generic_class(base_name : String, type_args : Array(String), specialized_name : String)
       template = @generic_templates[base_name]?
       return unless template
+
+      # Mark as monomorphized BEFORE processing to prevent infinite recursion
+      # (e.g., Array(String) method calls something that creates Array(String) again)
+      @monomorphized.add(specialized_name)
 
       # Check arity matches
       if template.type_params.size != type_args.size
@@ -1417,8 +1428,10 @@ module Crystal::HIR
     # Example: "Int32#++" + [Int32] -> "Int32#+$Int32"
     # Note: Using $ instead of : because LLVM doesn't support : in identifiers
     private def mangle_function_name(base_name : String, param_types : Array(TypeRef)) : String
-      return base_name if param_types.empty?
-      type_suffix = param_types.map { |t| type_name_for_mangling(t) }.join("_")
+      # Filter out VOID types (untyped parameters don't provide overload info)
+      typed_params = param_types.reject { |t| t == TypeRef::VOID }
+      return base_name if typed_params.empty?
+      type_suffix = typed_params.map { |t| type_name_for_mangling(t) }.join("_")
       "#{base_name}$#{type_suffix}"
     end
 
@@ -1834,6 +1847,9 @@ module Crystal::HIR
       when CrystalV2::Compiler::Frontend::SuperNode
         lower_super(ctx, node)
 
+      when CrystalV2::Compiler::Frontend::PreviousDefNode
+        lower_previous_def(ctx, node)
+
       when CrystalV2::Compiler::Frontend::GlobalNode
         lower_global(ctx, node)
 
@@ -2021,6 +2037,81 @@ module Crystal::HIR
         # Top-level method definition
         lower_top_level_def(ctx, node)
 
+      when CrystalV2::Compiler::Frontend::TypeofNode
+        # typeof(x) - returns type at compile time, for runtime just return nil
+        lower_typeof(ctx, node)
+
+      when CrystalV2::Compiler::Frontend::SizeofNode
+        # sizeof(T) - returns size of type
+        lower_sizeof(ctx, node)
+
+      when CrystalV2::Compiler::Frontend::OffsetofNode
+        # offsetof(T, @field) - returns field offset
+        lower_offsetof(ctx, node)
+
+      when CrystalV2::Compiler::Frontend::MacroDefNode
+        # Macro definitions - skip at runtime, just return nil
+        nil_lit = Literal.new(ctx.next_id, TypeRef::NIL, nil)
+        ctx.emit(nil_lit)
+        nil_lit.id
+
+      when CrystalV2::Compiler::Frontend::ModuleNode
+        # Module definitions inside expressions - skip, just return nil
+        nil_lit = Literal.new(ctx.next_id, TypeRef::NIL, nil)
+        ctx.emit(nil_lit)
+        nil_lit.id
+
+      when CrystalV2::Compiler::Frontend::ClassNode
+        # Class definitions inside expressions - skip, just return nil
+        nil_lit = Literal.new(ctx.next_id, TypeRef::NIL, nil)
+        ctx.emit(nil_lit)
+        nil_lit.id
+
+      when CrystalV2::Compiler::Frontend::RequireNode
+        # Require directives - already processed, return nil
+        nil_lit = Literal.new(ctx.next_id, TypeRef::NIL, nil)
+        ctx.emit(nil_lit)
+        nil_lit.id
+
+      when CrystalV2::Compiler::Frontend::GlobalVarDeclNode
+        # Global variable declaration ($name : Type) - declaration only, return nil
+        nil_lit = Literal.new(ctx.next_id, TypeRef::NIL, nil)
+        ctx.emit(nil_lit)
+        nil_lit.id
+
+      when CrystalV2::Compiler::Frontend::AnnotationDefNode
+        # Annotation definition (annotation Foo) - declaration only, return nil
+        nil_lit = Literal.new(ctx.next_id, TypeRef::NIL, nil)
+        ctx.emit(nil_lit)
+        nil_lit.id
+
+      when CrystalV2::Compiler::Frontend::ConstantNode
+        # Constant definition (FOO = value) - evaluate and return the value
+        value_id = lower_expr(ctx, node.value)
+        value_id
+
+      when CrystalV2::Compiler::Frontend::VisibilityModifierNode
+        # Visibility modifier (private, protected) - just lower the target expression
+        lower_expr(ctx, node.expression)
+
+      when CrystalV2::Compiler::Frontend::OutNode
+        # out x - creates a pointer to a local variable for C functions
+        # The variable name is in node.identifier
+        var_name = String.new(node.identifier)
+        # Create the local variable if it doesn't exist
+        var_id = ctx.lookup_local(var_name)
+        if var_id.nil?
+          # Create uninitialized variable
+          alloc = Allocate.new(ctx.next_id, TypeRef::POINTER, [] of ValueId, true)
+          ctx.emit(alloc)
+          ctx.register_local(var_name, alloc.id)
+          var_id = alloc.id
+        end
+        # Get address of the variable
+        ptr = AddressOf.new(ctx.next_id, TypeRef::POINTER, var_id)
+        ctx.emit(ptr)
+        ptr.id
+
       else
         raise LoweringError.new("Unsupported AST node type: #{node.class}", node)
       end
@@ -2051,20 +2142,30 @@ module Crystal::HIR
       value_str = String.new(node.value).gsub('_', "")
       # Strip type suffix (i8, i16, i32, i64, i128, u8, u16, u32, u64, u128, f32, f64)
       value_str = value_str.gsub(/[iuf]\d+$/, "")
-      value = if node.kind.f32? || node.kind.f64?
-                value_str.to_f64
+
+      # Handle empty string case (malformed number)
+      if value_str.empty?
+        value = 0_i64
+      elsif node.kind.f32? || node.kind.f64?
+        value = value_str.to_f64
+      else
+        # Handle hex (0x), binary (0b), and octal (0o)
+        # Use UInt64 for parsing to handle large hex values, then cast to Int64
+        raw = if value_str.starts_with?("0x") || value_str.starts_with?("0X")
+                digits = value_str[2..]
+                digits.empty? ? 0_u64 : digits.to_u64(16)
+              elsif value_str.starts_with?("0b") || value_str.starts_with?("0B")
+                digits = value_str[2..]
+                digits.empty? ? 0_u64 : digits.to_u64(2)
+              elsif value_str.starts_with?("0o") || value_str.starts_with?("0O")
+                digits = value_str[2..]
+                digits.empty? ? 0_u64 : digits.to_u64(8)
               else
-                # Handle hex (0x), binary (0b), and octal (0o)
-                if value_str.starts_with?("0x") || value_str.starts_with?("0X")
-                  value_str[2..].to_i64(16)
-                elsif value_str.starts_with?("0b") || value_str.starts_with?("0B")
-                  value_str[2..].to_i64(2)
-                elsif value_str.starts_with?("0o") || value_str.starts_with?("0O")
-                  value_str[2..].to_i64(8)
-                else
-                  value_str.to_i64
-                end
+                # Try to parse as UInt64 first (handles numbers > Int64::MAX)
+                value_str.to_u64? || value_str.to_i64?.try(&.to_u64!) || 0_u64
               end
+        value = raw.to_i64!  # Bitcast to Int64
+      end
 
       lit = Literal.new(ctx.next_id, type, value)
       ctx.emit(lit)
@@ -2325,6 +2426,70 @@ module Crystal::HIR
         TypeRef::POINTER
       else
         TypeRef::POINTER  # Default to pointer for unknown types
+      end
+    end
+
+    # ═══════════════════════════════════════════════════════════════════════
+    # METAPROGRAMMING (typeof, sizeof, etc.)
+    # ═══════════════════════════════════════════════════════════════════════
+
+    private def lower_typeof(ctx : LoweringContext, node : CrystalV2::Compiler::Frontend::TypeofNode) : ValueId
+      # typeof(x) returns the type of x at compile time
+      # At runtime, we evaluate the expressions for side effects and return a type placeholder
+      # For now, just lower the args and return a nil (type info is compile-time only)
+      node.args.each do |arg_id|
+        lower_expr(ctx, arg_id)
+      end
+      nil_lit = Literal.new(ctx.next_id, TypeRef::NIL, nil)
+      ctx.emit(nil_lit)
+      nil_lit.id
+    end
+
+    private def lower_sizeof(ctx : LoweringContext, node : CrystalV2::Compiler::Frontend::SizeofNode) : ValueId
+      # sizeof(T) returns the size of type T in bytes
+      # For basic types, we can compute this at compile time
+      size = 8_i64  # Default pointer size
+      if node.args.size > 0
+        type_node = @arena[node.args.first]
+        size = compute_type_size(type_node)
+      end
+      lit = Literal.new(ctx.next_id, TypeRef::INT32, size)
+      ctx.emit(lit)
+      lit.id
+    end
+
+    private def lower_offsetof(ctx : LoweringContext, node : CrystalV2::Compiler::Frontend::OffsetofNode) : ValueId
+      # offsetof(T, @field) returns the byte offset of a field
+      offset = 0_i64  # Default
+      lit = Literal.new(ctx.next_id, TypeRef::INT32, offset)
+      ctx.emit(lit)
+      lit.id
+    end
+
+    private def compute_type_size(type_node : CrystalV2::Compiler::Frontend::Node) : Int64
+      case type_node
+      when CrystalV2::Compiler::Frontend::IdentifierNode
+        name = String.new(type_node.name)
+        case name
+        when "Int8", "UInt8", "Bool" then 1_i64
+        when "Int16", "UInt16"       then 2_i64
+        when "Int32", "UInt32", "Float32", "Char" then 4_i64
+        when "Int64", "UInt64", "Float64" then 8_i64
+        when "Int128", "UInt128"     then 16_i64
+        else 8_i64  # Pointer/reference size
+        end
+      when CrystalV2::Compiler::Frontend::ConstantNode
+        name = String.new(type_node.name)
+        case name
+        when "Int8", "UInt8", "Bool" then 1_i64
+        when "Int16", "UInt16"       then 2_i64
+        when "Int32", "UInt32", "Float32", "Char" then 4_i64
+        when "Int64", "UInt64", "Float64" then 8_i64
+        when "Int128", "UInt128"     then 16_i64
+        else 8_i64
+        end
+      else
+        8_i64  # Default pointer size
       end
     end
 
@@ -2614,6 +2779,49 @@ module Crystal::HIR
       call.id
     end
 
+    private def lower_previous_def(ctx : LoweringContext, node : CrystalV2::Compiler::Frontend::PreviousDefNode) : ValueId
+      # previous_def calls the previous definition of the current method
+      # This is used when reopening classes/methods
+      class_name = @current_class
+      method_name = @current_method
+
+      unless class_name && method_name
+        # No current method context - return nil
+        nil_lit = Literal.new(ctx.next_id, TypeRef::NIL, nil)
+        ctx.emit(nil_lit)
+        return nil_lit.id
+      end
+
+      # Lower arguments first to get their types
+      args = if node_args = node.args
+               node_args.map { |arg| lower_expr(ctx, arg) }
+             else
+               # If no args, forward current method's parameters
+               # Get them from the function context (skip 'self' param at index 0)
+               ctx.function.params[1..].map(&.id)
+             end
+
+      # Get argument types for mangling
+      arg_types = args.map { |arg| ctx.type_of(arg) }
+
+      # For previous_def, we call the same method with a _previous suffix
+      # The actual linking will resolve this (or fail if no previous def exists)
+      base_method_name = "#{class_name}##{method_name}_previous"
+      previous_method_name = mangle_function_name(base_method_name, arg_types)
+
+      # Get return type (fallback to VOID if unknown)
+      return_type = @function_types[previous_method_name]? || TypeRef::VOID
+
+      # Get self for the call
+      self_id = emit_self(ctx)
+
+      # Call previous method definition
+      call = Call.new(ctx.next_id, return_type, self_id, previous_method_name, args)
+      ctx.emit(call)
+      ctx.register_type(call.id, return_type)
+      call.id
+    end
+
     # Collect full path string from PathNode (e.g., Foo::Bar::Baz -> "Foo::Bar::Baz")
     private def collect_path_string(node : CrystalV2::Compiler::Frontend::PathNode) : String
       parts = [] of String
@@ -2825,7 +3033,10 @@ module Crystal::HIR
       if !is_integer_type && op_str == "<<"
         # Emit as method call: left.<<(right)
         # Use mangled name "shovel" since << is not valid LLVM identifier
-        call = Call.new(ctx.next_id, left_type, left_id, "shovel", [right_id])
+        # Qualify method name with receiver's class
+        right_type = ctx.type_of(right_id)
+        method_name = resolve_method_call(ctx, left_id, "shovel", [right_type])
+        call = Call.new(ctx.next_id, left_type, left_id, method_name, [right_id])
         ctx.emit(call)
         ctx.register_type(call.id, left_type)
         return call.id
@@ -2900,7 +3111,10 @@ module Crystal::HIR
     end
 
     private def emit_binary_call(ctx : LoweringContext, left : ValueId, op : String, right : ValueId) : ValueId
-      call = Call.new(ctx.next_id, TypeRef::VOID, left, op, [right])
+      # Qualify method name with receiver's class
+      right_type = ctx.type_of(right)
+      method_name = resolve_method_call(ctx, left, op, [right_type])
+      call = Call.new(ctx.next_id, TypeRef::VOID, left, method_name, [right])
       ctx.emit(call)
       call.id
     end
@@ -2915,7 +3129,9 @@ module Crystal::HIR
            when "~" then UnaryOp::BitNot
            else
              # Unknown unary op - emit as method call
-             call = Call.new(ctx.next_id, TypeRef::VOID, operand_id, op_str, [] of ValueId)
+             # Qualify method name with receiver's class
+             method_name = resolve_method_call(ctx, operand_id, op_str, [] of TypeRef)
+             call = Call.new(ctx.next_id, TypeRef::VOID, operand_id, method_name, [] of ValueId)
              ctx.emit(call)
              return call.id
            end
@@ -6121,7 +6337,11 @@ module Crystal::HIR
 
           # Emit a call to an intrinsic that creates a slice
           # For now, create a new array and copy elements
-          call = Call.new(ctx.next_id, TypeRef::POINTER, object_id, "[]", [start_id, end_id])
+          # Qualify method name with receiver's class
+          start_type = ctx.type_of(start_id)
+          end_type = ctx.type_of(end_id)
+          method_name = resolve_method_call(ctx, object_id, "[]", [start_type, end_type])
+          call = Call.new(ctx.next_id, TypeRef::POINTER, object_id, method_name, [start_id, end_id])
           ctx.emit(call)
           ctx.register_type(call.id, TypeRef::POINTER)
           return call.id
@@ -6456,7 +6676,8 @@ module Crystal::HIR
         end
       end
 
-      actual_name = resolved_method_name || member_name
+      # If no resolved method found, qualify the method name using resolve_method_call
+      actual_name = resolved_method_name || resolve_method_call(ctx, object_id, member_name, [] of TypeRef)
 
       # Fallback for stdlib methods that should return a value (like to_a, map, etc.)
       # Same logic as in lower_call for consistency
@@ -6645,6 +6866,14 @@ module Crystal::HIR
         ctx.emit(call)
         ctx.register_type(call.id, return_type)
         call.id
+
+      when CrystalV2::Compiler::Frontend::GlobalNode
+        # Global variable assignment: $name = value
+        name = String.new(target_node.name)
+        value_type = ctx.type_of(value_id)
+        class_var_set = ClassVarSet.new(ctx.next_id, value_type, "$", name, value_id)
+        ctx.emit(class_var_set)
+        class_var_set.id
 
       else
         raise LoweringError.new("Unsupported assignment target: #{target_node.class}", target_node)
@@ -6987,9 +7216,16 @@ module Crystal::HIR
     end
 
     private def type_ref_for_name(name : String) : TypeRef
+      # Check cache first
+      if cached = @type_cache[name]?
+        return cached
+      end
+
       # Check for union type syntax: "Type1 | Type2" or "Type1|Type2" (parser may not add spaces)
       if name.includes?("|")
-        return create_union_type(name)
+        result = create_union_type(name)
+        @type_cache[name] = result
+        return result
       end
 
       # Handle nullable type suffix: "T?" means "T | Nil"
@@ -6997,7 +7233,11 @@ module Crystal::HIR
         base_name = name[0, name.size - 1]
         # Substitute type parameter if present
         base_name = @type_param_map[base_name]? || base_name
-        return create_union_type("#{base_name} | Nil")
+        union_name = "#{base_name} | Nil"
+        result = create_union_type(union_name)
+        @type_cache[name] = result
+        @type_cache[union_name] = result
+        return result
       end
 
       # Check if this is a type parameter that should be substituted
@@ -7073,6 +7313,13 @@ module Crystal::HIR
 
     # Create a union type from "Type1 | Type2 | Type3" syntax
     private def create_union_type(name : String) : TypeRef
+      # Check cache first to prevent infinite recursion
+      if cached = @type_cache[name]?
+        return cached
+      end
+      # Mark as being processed with placeholder to break cycles
+      @type_cache[name] = TypeRef::VOID
+
       # Parse variant type names (handle both "Type1 | Type2" and "Type1|Type2")
       variant_names = name.split("|").map(&.strip)
 
@@ -7123,6 +7370,9 @@ module Crystal::HIR
 
       # Store descriptor for LLVM backend
       @union_descriptors[mir_union_type_ref] = descriptor
+
+      # Update cache with real value (replacing placeholder)
+      @type_cache[name] = type_ref
 
       type_ref
     end

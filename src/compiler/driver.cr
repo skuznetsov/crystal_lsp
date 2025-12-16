@@ -250,6 +250,7 @@ module Crystal::V2
       log "\n[5/5] Generating LLVM IR..."
       llvm_gen = MIR::LLVMIRGenerator.new(mir_module)
       llvm_gen.emit_type_metadata = true
+      llvm_gen.reachability = true  # Only emit reachable functions from main
       llvm_ir = llvm_gen.generate
       log "  LLVM IR size: #{llvm_ir.size} bytes"
 

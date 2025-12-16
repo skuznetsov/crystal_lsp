@@ -36,6 +36,7 @@ module Crystal
     @current_hir_func : HIR::Function?
     @current_mir_func : Function?
     @builder : Builder?
+    @current_lowering_func_name : String = ""
 
     # Memory strategy (note: we use inline selection, not global assigner)
 
@@ -53,16 +54,40 @@ module Crystal
     # Main Entry Point
     # ─────────────────────────────────────────────────────────────────────────
 
-    def lower : Module
+    def lower(progress : Bool = false) : Module
       # Two-pass approach for forward references:
       # Pass 1: Create all function stubs (for call resolution)
-      @hir_module.functions.each do |hir_func|
+      # Track which functions we've created stubs for (avoid duplicates from methods with/without blocks)
+      total = @hir_module.functions.size
+      STDERR.puts "    Pass 1: Creating #{total} function stubs..." if progress
+      seen_names = Set(String).new
+      @hir_module.functions.each_with_index do |hir_func, idx|
+        if progress && (idx % 5000 == 0 || idx == total - 1)
+          STDERR.puts "      Stub #{idx + 1}/#{total}..."
+        end
+        # Skip duplicates (methods with block have same mangled name as non-block version)
+        next if seen_names.includes?(hir_func.name)
+        seen_names.add(hir_func.name)
         create_function_stub(hir_func)
       end
 
       # Pass 2: Lower function bodies
-      @hir_module.functions.each do |hir_func|
-        lower_function_body(hir_func)
+      # Track which functions we've processed to avoid duplicate lowering
+      STDERR.puts "    Pass 2: Lowering #{total} function bodies..." if progress
+      processed = Set(String).new
+      @hir_module.functions.each_with_index do |hir_func, idx|
+        if progress && (idx % 5000 == 0 || idx == total - 1)
+          STDERR.puts "      Body #{idx + 1}/#{total}..."
+        end
+        # Skip if already processed
+        next if processed.includes?(hir_func.name)
+        processed.add(hir_func.name)
+        begin
+          @current_lowering_func_name = hir_func.name
+          lower_function_body(hir_func)
+        rescue ex : IndexError
+          raise "Index out of bounds in function #{idx + 1}/#{total}: #{hir_func.name}\n#{ex.message}\n#{ex.backtrace.first(10).join("\n")}"
+        end
       end
 
       @mir_module
@@ -177,7 +202,12 @@ module Crystal
       end
 
       # Get the pre-created function stub
-      mir_func = @mir_module.get_function(hir_func.name).not_nil!
+      mir_func = @mir_module.get_function(hir_func.name)
+      if mir_func.nil?
+        # List available functions for debugging
+        available = @mir_module.functions.map(&.name).sort.join(", ")
+        raise "MIR function stub not found for: #{hir_func.name}\nAvailable functions containing 'step': #{@mir_module.functions.select { |f| f.name.includes?("step") }.map(&.name).join(", ")}"
+      end
 
       @current_hir_func = hir_func
       @current_mir_func = mir_func
@@ -251,10 +281,11 @@ module Crystal
     # ─────────────────────────────────────────────────────────────────────────
 
     private def lower_value(hir_value : HIR::Value)
-      mir_id = case hir_value
-               when HIR::Literal
-                 lower_literal(hir_value)
-               when HIR::Local
+      mir_id = begin
+        case hir_value
+        when HIR::Literal
+          lower_literal(hir_value)
+        when HIR::Local
                  lower_local(hir_value)
                when HIR::Parameter
                  # Function parameters are pre-mapped, block parameters need allocation
@@ -340,6 +371,9 @@ module Crystal
                else
                  raise "Unsupported HIR value: #{hir_value.class}"
                end
+      rescue ex : IndexError
+        raise "Index error in #{@current_lowering_func_name} lowering #{hir_value.class} (id=#{hir_value.id}): #{ex.message}\n#{ex.backtrace.first(10).join("\n")}"
+      end
 
       @value_map[hir_value.id] = mir_id if mir_id
       @stats.values_lowered += 1
@@ -585,7 +619,11 @@ module Crystal
       builder = @builder.not_nil!
 
       # Get arguments
-      args = call.args.map { |arg| get_value(arg) }
+      begin
+        args = call.args.map { |arg| get_value(arg) }
+      rescue ex : IndexError
+        raise "Index error getting args for call to #{call.method_name}: #{ex.message}"
+      end
 
       # Add receiver as first arg if present
       if recv = call.receiver
@@ -600,11 +638,27 @@ module Crystal
       # Handle built-in print functions
       # Method name may be mangled as "puts$Int32" or "puts:Int32" etc, so extract base name
       # We use $ as separator (: is not valid in LLVM identifiers)
-      base_method_name = call.method_name.split(/[:\$]/).first
+      # Avoid regex by extracting up to first : or $
+      method_name_str = call.method_name
+      colon_pos = method_name_str.index(':')
+      dollar_pos = method_name_str.index('$')
+      base_method_name = if colon_pos || dollar_pos
+                           split_pos = [colon_pos || method_name_str.size, dollar_pos || method_name_str.size].min
+                           method_name_str[0, split_pos]
+                         else
+                           method_name_str
+                         end
       if base_method_name == "puts"
         # Determine the actual extern based on argument type
         if args.size == 1
-          arg_type = get_arg_type(call.args[0])
+          # Get arg type - could be from call.args[0] or from receiver
+          arg_type = if call.args.size > 0
+                       get_arg_type(call.args[0])
+                     elsif recv_id = call.receiver
+                       get_arg_type(recv_id)
+                     else
+                       TypeRef::STRING
+                     end
           extern_name = case arg_type
                         when TypeRef::INT32, TypeRef::UINT32, TypeRef::CHAR
                           "__crystal_v2_print_int32_ln"
@@ -623,7 +677,14 @@ module Crystal
       # Handle print (without newline)
       if base_method_name == "print"
         if args.size == 1
-          arg_type = get_arg_type(call.args[0])
+          # Get arg type - could be from call.args[0] or from receiver
+          arg_type = if call.args.size > 0
+                       get_arg_type(call.args[0])
+                     elsif recv_id = call.receiver
+                       get_arg_type(recv_id)
+                     else
+                       TypeRef::INT32
+                     end
           extern_name = case arg_type
                         when TypeRef::INT32, TypeRef::UINT32, TypeRef::CHAR
                           "__crystal_v2_print_int32"
@@ -656,20 +717,27 @@ module Crystal
             f.name.split("$").first == base_name
           end
         end
+        # NOTE: Unqualified method names are left as extern calls
+        # The proper fix is to qualify names at HIR generation time
       end
 
       callee_id = if func
                     func.id
                   else
                     # Unknown function - emit as extern call
+                    # Debug: log unresolved call
+                    if ENV.has_key?("DEBUG_CALLS")
+                      STDERR.puts "[UNRESOLVED CALL] #{call.method_name} in #{@current_lowering_func_name}"
+                    end
                     return builder.extern_call(call.method_name, args, convert_type(call.type))
                   end
 
       # Coerce arguments to match parameter types (handle concrete type -> union coercion)
       if func
-        if call.method_name.includes?("format_gutter")
-          STDERR.puts "[MIR-COERCE] func=#{func.name} params=#{func.params.map(&.type.id).join(",")}"
-        end
+        # Debug disabled for performance:
+        # if call.method_name.includes?("format_gutter")
+        #   STDERR.puts "[MIR-COERCE] func=#{func.name} params=#{func.params.map(&.type.id).join(",")}"
+        # end
         coerced_args = coerce_call_args(builder, args, call.args, func)
         return builder.call(callee_id, coerced_args, convert_type(call.type))
       end
@@ -710,33 +778,39 @@ module Crystal
       result = [] of ValueId
 
       mir_args.each_with_index do |mir_arg, idx|
-        param = params[idx]?
-        unless param
-          # More args than params - pass through
-          result << mir_arg
-          next
-        end
-
-        arg_type = if idx < hir_args.size
-                     get_arg_type(hir_args[idx])
-                   else
-                     TypeRef::INT32  # Fallback
-                   end
-        param_type = param.type
-
-        # Check if coercion needed: different types and param is a union
-        is_param_union = is_union_type?(param_type)
-        if arg_type != param_type && is_param_union && !is_union_type?(arg_type)
-          # Wrap concrete value in union type
-          variant_id = get_union_variant_id(arg_type)
-          STDERR.puts "[MIR-COERCE] Wrapping arg #{mir_arg} type #{arg_type.id} into union type #{param_type.id} (variant #{variant_id})"
-          wrapped = builder.union_wrap(mir_arg, variant_id, param_type)
-          result << wrapped
-        else
-          if func.name.includes?("format_gutter")
-            STDERR.puts "[MIR-COERCE] No wrap: arg_type=#{arg_type.id} param_type=#{param_type.id} is_param_union=#{is_param_union}"
+        begin
+          param = params[idx]?
+          unless param
+            # More args than params - pass through
+            result << mir_arg
+            next
           end
-          result << mir_arg
+
+          arg_type = if idx < hir_args.size
+                       get_arg_type(hir_args[idx])
+                     else
+                       TypeRef::INT32  # Fallback
+                     end
+          param_type = param.type
+
+          # Check if coercion needed: different types and param is a union
+          is_param_union = is_union_type?(param_type)
+          if arg_type != param_type && is_param_union && !is_union_type?(arg_type)
+            # Wrap concrete value in union type
+            variant_id = get_union_variant_id(arg_type)
+            # Debug disabled for performance:
+            # STDERR.puts "[MIR-COERCE] Wrapping arg #{mir_arg} type #{arg_type.id} into union type #{param_type.id} (variant #{variant_id})"
+            wrapped = builder.union_wrap(mir_arg, variant_id, param_type)
+            result << wrapped
+          else
+            # Debug disabled for performance:
+            # if func.name.includes?("format_gutter")
+            #   STDERR.puts "[MIR-COERCE] No wrap: arg_type=#{arg_type.id} param_type=#{param_type.id} is_param_union=#{is_param_union}"
+            # end
+            result << mir_arg
+          end
+        rescue ex : IndexError
+          raise "Index error in coerce_call_args for #{func.name} at arg #{idx}: mir_args.size=#{mir_args.size} params.size=#{params.size} hir_args.size=#{hir_args.size}\n#{ex.message}"
         end
       end
 
