@@ -199,6 +199,48 @@ module Crystal::HIR
     alias AstNode = CrystalV2::Compiler::Frontend::Node
     alias ExprId = CrystalV2::Compiler::Frontend::ExprId
 
+    # Platform-specific LibC type aliases (fallback for unevaluated macro conditionals)
+    # On 64-bit systems (aarch64-darwin, x86_64-*):
+    # Includes both LibC:: prefixed and bare names for direct use
+    LIBC_TYPE_ALIASES = {
+      # With LibC:: prefix
+      "LibC::Char"      => "UInt8",
+      "LibC::UChar"     => "UInt8",
+      "LibC::SChar"     => "Int8",
+      "LibC::Short"     => "Int16",
+      "LibC::UShort"    => "UInt16",
+      "LibC::Int"       => "Int32",
+      "LibC::UInt"      => "UInt32",
+      "LibC::Long"      => "Int64",      # 64-bit
+      "LibC::ULong"     => "UInt64",     # 64-bit
+      "LibC::LongLong"  => "Int64",
+      "LibC::ULongLong" => "UInt64",
+      "LibC::Float"     => "Float32",
+      "LibC::Double"    => "Float64",
+      "LibC::SizeT"     => "UInt64",     # 64-bit: ULong -> UInt64
+      "LibC::SSizeT"    => "Int64",      # 64-bit: Long -> Int64
+      "LibC::PtrDiffT"  => "Int64",      # 64-bit: Long -> Int64
+      "LibC::OffT"      => "Int64",      # 64-bit
+      "LibC::ModeT"     => "UInt16",     # darwin
+      "LibC::PidT"      => "Int32",
+      "LibC::UidT"      => "UInt32",
+      "LibC::GidT"      => "UInt32",
+      "LibC::TimeT"     => "Int64",      # 64-bit
+      "LibC::ClockT"    => "UInt64",     # darwin
+      # Without LibC:: prefix (for macro conditionals that define these)
+      "Char"     => "UInt8",
+      "UChar"    => "UInt8",
+      "SChar"    => "Int8",
+      "Short"    => "Int16",
+      "UShort"   => "UInt16",
+      "Int"      => "Int32",
+      "UInt"     => "UInt32",
+      "Long"     => "Int64",             # 64-bit
+      "ULong"    => "UInt64",            # 64-bit
+      "SizeT"    => "UInt64",            # 64-bit
+      "SSizeT"   => "Int64",             # 64-bit
+    }
+
     getter module : Module
     property arena : CrystalV2::Compiler::Frontend::ArenaLike
 
@@ -354,6 +396,38 @@ module Crystal::HIR
       alias_name = String.new(node.name)
       target_name = String.new(node.value)
       @type_aliases[alias_name] = target_name
+    end
+
+    # Register a C library binding (pass 1)
+    # e.g., lib LibC ... end
+    def register_lib(node : CrystalV2::Compiler::Frontend::LibNode)
+      lib_name = String.new(node.name)
+
+      if body = node.body
+        body.each do |expr_id|
+          body_node = @arena[expr_id]
+          case body_node
+          when CrystalV2::Compiler::Frontend::FunNode
+            # Register external function
+            register_extern_fun(lib_name, body_node)
+          when CrystalV2::Compiler::Frontend::AliasNode
+            # type aliases within lib
+            alias_name = String.new(body_node.name)
+            target_name = String.new(body_node.value)
+            full_alias_name = "#{lib_name}::#{alias_name}"
+            @type_aliases[full_alias_name] = target_name
+            @type_aliases[alias_name] = target_name
+          when CrystalV2::Compiler::Frontend::EnumNode
+            # Enums within lib - register with lib prefix
+            enum_name = String.new(body_node.name)
+            full_enum_name = "#{lib_name}::#{enum_name}"
+            register_enum_with_name(body_node, full_enum_name)
+          when CrystalV2::Compiler::Frontend::StructNode
+            # Structs within lib - skip for now
+          # Annotations, nested libs, etc. - ignored for now
+          end
+        end
+      end
     end
 
     # Expand a macro call inline
@@ -1074,9 +1148,37 @@ module Crystal::HIR
       template = @generic_templates[base_name]?
       return unless template
 
+      # Double-check inside the method (belt and suspenders)
+      if @monomorphized.includes?(specialized_name)
+        return
+      end
+
+      # Skip if type_args contain unresolved type parameters
+      # These indicate incomplete substitution and would cause infinite recursion
+      unresolved_patterns = ["typeof(", "|", "K", "V", "T", "U", "L", "W", "K2", "V2"]
+      has_unresolved = type_args.any? do |arg|
+        # Skip known concrete types
+        next false if arg == "String" || arg == "Int32" || arg == "Int64" || arg == "UInt8" ||
+                      arg == "UInt32" || arg == "UInt64" || arg == "Float64" || arg == "Bool" ||
+                      arg == "Nil" || arg == "Void" || arg.starts_with?("Pointer(") ||
+                      arg.starts_with?("Array(") || arg.starts_with?("Hash(")
+        # Check for type parameter patterns
+        unresolved_patterns.any? { |p| arg.includes?(p) && !arg.includes?("::") }
+      end
+      if has_unresolved
+        if ENV.has_key?("DEBUG_MONO")
+          STDERR.puts "[MONO] Skipping unresolved: #{specialized_name}"
+        end
+        return
+      end
+
       # Mark as monomorphized BEFORE processing to prevent infinite recursion
       # (e.g., Array(String) method calls something that creates Array(String) again)
       @monomorphized.add(specialized_name)
+
+      if ENV.has_key?("DEBUG_MONO")
+        STDERR.puts "[MONO] Starting: #{specialized_name} (depth=#{@monomorphized.size})"
+      end
 
       # Check arity matches
       if template.type_params.size != type_args.size
@@ -2474,6 +2576,19 @@ module Crystal::HIR
         ctx.emit(ptr)
         ptr.id
 
+      when CrystalV2::Compiler::Frontend::EnumNode
+        # Enum declarations are processed during registration phase
+        # Just return nil literal during lowering
+        nil_lit = Literal.new(ctx.next_id, TypeRef::NIL, nil)
+        ctx.emit(nil_lit)
+        nil_lit.id
+
+      when CrystalV2::Compiler::Frontend::StructNode
+        # Struct declarations are processed during registration phase
+        nil_lit = Literal.new(ctx.next_id, TypeRef::NIL, nil)
+        ctx.emit(nil_lit)
+        nil_lit.id
+
       else
         raise LoweringError.new("Unsupported AST node type: #{node.class}", node)
       end
@@ -2616,6 +2731,30 @@ module Crystal::HIR
                       end
                     end
                     "#{base_name}(#{type_args.join(", ")})"
+                  when CrystalV2::Compiler::Frontend::IndexNode
+                    # Static array type: UInt8[256] -> StaticArray(UInt8, 256)
+                    base = @arena[type_node.object]
+                    base_name = case base
+                                when CrystalV2::Compiler::Frontend::IdentifierNode
+                                  String.new(base.name)
+                                when CrystalV2::Compiler::Frontend::ConstantNode
+                                  String.new(base.name)
+                                else
+                                  "Unknown"
+                                end
+                    # Get size from first index
+                    if type_node.indexes.size > 0
+                      size_node = @arena[type_node.indexes[0]]
+                      size_str = case size_node
+                                 when CrystalV2::Compiler::Frontend::NumberNode
+                                   String.new(size_node.value)
+                                 else
+                                   "0"
+                                 end
+                      "StaticArray(#{base_name}, #{size_str})"
+                    else
+                      "StaticArray(#{base_name}, 0)"
+                    end
                   else
                     "Unknown"
                   end
@@ -2692,10 +2831,21 @@ module Crystal::HIR
             # Process annotations within lib (e.g., @[Link])
             lower_annotation(ctx, body_node)
           when CrystalV2::Compiler::Frontend::AliasNode
-            # type aliases within lib - ignore for now
+            # type aliases within lib - register for later resolution
+            alias_name = String.new(body_node.name)
+            target_name = String.new(body_node.value)
+            full_alias_name = "#{lib_name}::#{alias_name}"
+            @type_aliases[full_alias_name] = target_name
+            @type_aliases[alias_name] = target_name
+          when CrystalV2::Compiler::Frontend::EnumNode
+            # Enums within lib - register with lib prefix
+            enum_name = String.new(body_node.name)
+            full_enum_name = "#{lib_name}::#{enum_name}"
+            register_enum_with_name(body_node, full_enum_name)
+          when CrystalV2::Compiler::Frontend::StructNode
+            # Structs within lib - skip for now (handled separately)
           else
-            # Other declarations (structs, unions, enums, type aliases)
-            # Process recursively
+            # Other declarations - process recursively
             lower_node(ctx, body_node)
           end
         end
@@ -4743,16 +4893,35 @@ module Crystal::HIR
         class_name_str : String? = nil
         if obj_node.is_a?(CrystalV2::Compiler::Frontend::ConstantNode)
           name = String.new(obj_node.name)
-          # Resolve type alias if exists, then check class_info
-          class_name_str = @type_aliases[name]? || name
+          # Resolve type alias with chain resolution (check both @type_aliases and LIBC_TYPE_ALIASES)
+          resolved = @type_aliases[name]? || LIBC_TYPE_ALIASES[name]? || name
+          # Chain resolve (e.g., LibCrypto::ULong -> LibC::ULong -> UInt64) - max 10 iterations to prevent cycles
+          depth = 0
+          while (next_resolved = @type_aliases[resolved]? || LIBC_TYPE_ALIASES[resolved]?) && next_resolved != resolved && depth < 10
+            resolved = next_resolved
+            depth += 1
+          end
+          if name == "ULong"
+            STDERR.puts "[DEBUG] ConstantNode ULong, resolved=#{resolved.inspect}, method=#{method_name}"
+          end
+          class_name_str = resolved
           # If the short name isn't a known class, try to resolve using current namespace
-          unless @class_info.has_key?(class_name_str)
+          unless @class_info.has_key?(class_name_str) || resolved != name
             class_name_str = resolve_class_name_in_context(name)
           end
         elsif obj_node.is_a?(CrystalV2::Compiler::Frontend::IdentifierNode)
           name = String.new(obj_node.name)
-          # Resolve type alias if exists
-          resolved_name = @type_aliases[name]? || name
+          # Resolve type alias with chain resolution (check both @type_aliases and LIBC_TYPE_ALIASES)
+          resolved_name = @type_aliases[name]? || LIBC_TYPE_ALIASES[name]? || name
+          # Chain resolve (e.g., LibCrypto::ULong -> LibC::ULong -> UInt64) - max 10 iterations
+          depth = 0
+          while (next_resolved = @type_aliases[resolved_name]? || LIBC_TYPE_ALIASES[resolved_name]?) && next_resolved != resolved_name && depth < 10
+            resolved_name = next_resolved
+            depth += 1
+          end
+          if name == "ULong"
+            STDERR.puts "[DEBUG] IdentifierNode ULong, resolved=#{resolved_name}, method=#{method_name}"
+          end
           # Check if it's a class name (starts with uppercase and is known class)
           # OR a module name (check if Module.method exists in function_types)
           if resolved_name[0].uppercase?
@@ -4784,8 +4953,9 @@ module Crystal::HIR
                 end
               end
             else
-              # Try to resolve using current namespace
-              class_name_str = resolve_class_name_in_context(name)
+              # For primitive types and aliases not in class_info, use the resolved name directly
+              # This handles cases like ULong -> UInt64 where UInt64 isn't registered as a class
+              class_name_str = resolved_name
             end
           end
         elsif obj_node.is_a?(CrystalV2::Compiler::Frontend::GenericNode)
@@ -4827,11 +4997,22 @@ module Crystal::HIR
         elsif obj_node.is_a?(CrystalV2::Compiler::Frontend::PathNode)
           # Path like Foo::Bar for nested classes/modules
           full_path = collect_path_string(obj_node)
+          if full_path.includes?("ULong")
+            STDERR.puts "[DEBUG] PathNode #{full_path}, type_aliases=#{@type_aliases[full_path]?}, libc=#{LIBC_TYPE_ALIASES[full_path]?}"
+          end
           # Check if this path is a known class
           if @class_info.has_key?(full_path)
             class_name_str = full_path
-          elsif @type_aliases.has_key?(full_path)
-            class_name_str = @type_aliases[full_path]
+          elsif @type_aliases.has_key?(full_path) || LIBC_TYPE_ALIASES.has_key?(full_path)
+            # Resolve type alias with chain resolution
+            resolved = @type_aliases[full_path]? || LIBC_TYPE_ALIASES[full_path]? || full_path
+            # Chain resolve if needed (e.g., LibCrypto::ULong -> LibC::ULong -> UInt64) - max 10 iterations
+            depth = 0
+            while (next_resolved = @type_aliases[resolved]? || LIBC_TYPE_ALIASES[resolved]?) && next_resolved != resolved && depth < 10
+              resolved = next_resolved
+              depth += 1
+            end
+            class_name_str = resolved
           else
             # Even if not in class_info, treat path as class name for class method calls
             # This handles nested classes/modules that may not be fully registered
@@ -4847,7 +5028,6 @@ module Crystal::HIR
             arg_ids = expand_splat_args(ctx, node.args)
             return emit_extern_call(ctx, extern_func, arg_ids)
           end
-
           # Class method call like Counter.new()
           full_method_name = "#{class_name_str}.#{method_name}"
           receiver_id = nil  # Static call, no receiver
@@ -6865,13 +7045,25 @@ module Crystal::HIR
 
       if obj_node.is_a?(CrystalV2::Compiler::Frontend::ConstantNode)
         name = String.new(obj_node.name)
-        # Resolve type alias if exists
-        resolved_name = @type_aliases[name]? || name
+        # Resolve type alias if exists (check both @type_aliases and LIBC_TYPE_ALIASES)
+        resolved_name = @type_aliases[name]? || LIBC_TYPE_ALIASES[name]? || name
+        # Chain resolve if needed (e.g., LibCrypto::ULong -> LibC::ULong -> UInt64) - max 10 iterations
+        depth = 0
+        while (next_resolved = @type_aliases[resolved_name]? || LIBC_TYPE_ALIASES[resolved_name]?) && next_resolved != resolved_name && depth < 10
+          resolved_name = next_resolved
+          depth += 1
+        end
         class_name_str = resolved_name
       elsif obj_node.is_a?(CrystalV2::Compiler::Frontend::IdentifierNode)
         name = String.new(obj_node.name)
-        # Resolve type alias if exists
-        resolved_name = @type_aliases[name]? || name
+        # Resolve type alias if exists (check both @type_aliases and LIBC_TYPE_ALIASES)
+        resolved_name = @type_aliases[name]? || LIBC_TYPE_ALIASES[name]? || name
+        # Chain resolve if needed - max 10 iterations
+        depth = 0
+        while (next_resolved = @type_aliases[resolved_name]? || LIBC_TYPE_ALIASES[resolved_name]?) && next_resolved != resolved_name && depth < 10
+          resolved_name = next_resolved
+          depth += 1
+        end
         if resolved_name[0].uppercase? && @class_info.has_key?(resolved_name)
           class_name_str = resolved_name
         end
@@ -7647,6 +7839,9 @@ module Crystal::HIR
         return cached
       end
 
+      # Mark as being processed with placeholder to break cycles (BEFORE any recursion)
+      @type_cache[name] = TypeRef::VOID
+
       # Check for union type syntax: "Type1 | Type2" or "Type1|Type2" (parser may not add spaces)
       if name.includes?("|")
         result = create_union_type(name)
@@ -7668,16 +7863,26 @@ module Crystal::HIR
 
       # Check if this is a type parameter that should be substituted
       if substitution = @type_param_map[name]?
-        return type_ref_for_name(substitution)
+        result = type_ref_for_name(substitution)
+        @type_cache[name] = result
+        return result
       end
 
       # Check if this is a type alias (but not self-referencing)
       if alias_target = @type_aliases[name]?
         if alias_target != name
-          return type_ref_for_name(alias_target)
+          result = type_ref_for_name(alias_target)
+          @type_cache[name] = result
+          return result
         end
       end
 
+      # Check LibC type aliases (platform-specific fallback)
+      if libc_target = LIBC_TYPE_ALIASES[name]?
+        result = type_ref_for_name(libc_target)
+        @type_cache[name] = result
+        return result
+      end
 
       # Handle generic types like Pointer(K), Array(T) - substitute type parameters
       if name.includes?("(") && name.includes?(")")

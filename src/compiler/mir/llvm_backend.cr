@@ -332,16 +332,21 @@ module Crystal::MIR
       end
 
       # Emit string constants at end (LLVM allows globals anywhere)
+      STDERR.puts "  [LLVM] emit_string_constants..." if @progress
       emit_string_constants
 
       # Emit declarations for undefined extern calls
+      STDERR.puts "  [LLVM] emit_undefined_extern_declarations..." if @progress
       emit_undefined_extern_declarations
 
       if @emit_type_metadata
+        STDERR.puts "  [LLVM] emit_type_metadata_globals..." if @progress
         emit_type_metadata_globals
+        STDERR.puts "  [LLVM] emit_union_metadata_globals..." if @progress
         emit_union_metadata_globals
       end
 
+      STDERR.puts "  [LLVM] finalizing output..." if @progress
       @output.to_s
     end
 
@@ -394,13 +399,8 @@ module Crystal::MIR
               # Try to find matching function by exact name or mangled name
               matching_func = func_by_name[mangled_extern]? || func_by_name[extern_name]?
 
-              # If not found, search for suffix match (handles namespace prefixes)
-              unless matching_func
-                matching_func = @module.functions.find do |f|
-                  mangled = @type_mapper.mangle_name(f.name)
-                  mangled.ends_with?(mangled_extern) || mangled.ends_with?("__#{mangled_extern}")
-                end
-              end
+              # Note: Disabled suffix matching as it causes false positives
+              # Functions should be found by exact name match only
 
               if matching_func
                 unless reachable.includes?(matching_func.id)
@@ -525,7 +525,14 @@ module Crystal::MIR
           actual_name = ".global.#{mangled_name}"
           @global_name_mapping[mangled_name] = actual_name
         end
-        emit_raw "@#{actual_name} = global #{llvm_type} #{initial}\n"
+        # Use zeroinitializer for struct/union types, numeric 0 for primitives
+        if llvm_type.starts_with?("%") || llvm_type.starts_with?("{")
+          emit_raw "@#{actual_name} = global #{llvm_type} zeroinitializer\n"
+        elsif llvm_type == "ptr"
+          emit_raw "@#{actual_name} = global #{llvm_type} null\n"
+        else
+          emit_raw "@#{actual_name} = global #{llvm_type} #{initial}\n"
+        end
       end
 
       # Emit undefined globals (class variables that weren't explicitly defined)
@@ -534,8 +541,14 @@ module Crystal::MIR
         next if function_names.includes?(name)
         llvm_type = @type_mapper.llvm_type(type_ref)
         llvm_type = "ptr" if llvm_type == "void"
-        emit_raw "@#{name} = global #{llvm_type} null\n" if llvm_type == "ptr"
-        emit_raw "@#{name} = global #{llvm_type} 0\n" if llvm_type != "ptr"
+        # Use zeroinitializer for struct/union types, null for pointers, 0 for primitives
+        if llvm_type == "ptr"
+          emit_raw "@#{name} = global #{llvm_type} null\n"
+        elsif llvm_type.starts_with?("%") || llvm_type.starts_with?("{")
+          emit_raw "@#{name} = global #{llvm_type} zeroinitializer\n"
+        else
+          emit_raw "@#{name} = global #{llvm_type} 0\n"
+        end
       end
 
       emit_raw "\n" unless @module.globals.empty? && referenced_globals.empty?
@@ -3135,10 +3148,15 @@ module Crystal::MIR
       mangled_extern_name = @type_mapper.mangle_name(inst.extern_name)
 
       # If the mangled name doesn't match any defined function, try to find a match with namespace prefix
-      # Search in MIR module's functions (complete list, not just emitted so far)
+      # Search in MIR module's functions - but only exact matches or proper namespace matches
+      # Note: Suffix matching is disabled as it causes false positives (e.g., matching initialize to unrelated methods)
       matching_func = @module.functions.find do |f|
         mangled = @type_mapper.mangle_name(f.name)
-        mangled.ends_with?(mangled_extern_name) || mangled.ends_with?("__#{mangled_extern_name}")
+        # Only match if:
+        # 1. Exact match, or
+        # 2. Function name is namespace-prefixed version: "Namespace__method" == "method"
+        mangled == mangled_extern_name ||
+        (mangled_extern_name.includes?("#") || mangled_extern_name.includes?(".")) && mangled == mangled_extern_name
       end
       if matching_func
         old_name = mangled_extern_name

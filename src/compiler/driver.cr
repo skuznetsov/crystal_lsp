@@ -144,6 +144,21 @@ module Crystal::V2
 
       # Three-pass approach:
       # Pass 1: Register all enums, modules, class types and their methods
+      if ENV.has_key?("DEBUG_NESTED_CLASS")
+        STDERR.puts "[DEBUG_DRIVER] class_nodes: #{class_nodes.size}, module_nodes: #{module_nodes.size}"
+        module_nodes.each do |module_node, arena|
+          name = String.new(module_node.name)
+          if name == "IO" || name.includes?("FileDescriptor")
+            STDERR.puts "[DEBUG_DRIVER] Module: #{name}"
+          end
+        end
+        class_nodes.each do |class_node, arena|
+          name = String.new(class_node.name)
+          if name == "IO" || name.includes?("FileDescriptor")
+            STDERR.puts "[DEBUG_DRIVER] Class: #{name}"
+          end
+        end
+      end
       enum_nodes.each do |enum_node, arena|
         hir_converter.arena = arena
         hir_converter.register_enum(enum_node)

@@ -232,6 +232,7 @@ module CrystalV2
         enum_nodes = [] of Tuple(Frontend::EnumNode, Frontend::ArenaLike)
         macro_nodes = [] of Tuple(Frontend::MacroDefNode, Frontend::ArenaLike)
         alias_nodes = [] of Tuple(Frontend::AliasNode, Frontend::ArenaLike)
+        lib_nodes = [] of Tuple(Frontend::LibNode, Frontend::ArenaLike)
         main_exprs = [] of Tuple(Frontend::ExprId, Frontend::ArenaLike)
 
         all_arenas.each do |arena, exprs, file_path|
@@ -250,6 +251,8 @@ module CrystalV2
               macro_nodes << {node, arena}
             when Frontend::AliasNode
               alias_nodes << {node, arena}
+            when Frontend::LibNode
+              lib_nodes << {node, arena}
             when Frontend::RequireNode
               # Skip - already processed
             else
@@ -275,6 +278,8 @@ module CrystalV2
         log(options, out_io, "  Pass 1: Registering types...")
         log(options, out_io, "    Enums: #{enum_nodes.size}")
         enum_nodes.each { |n, a| hir_converter.arena = a; hir_converter.register_enum(n) }
+        log(options, out_io, "    Libs: #{lib_nodes.size}")
+        lib_nodes.each { |n, a| hir_converter.arena = a; hir_converter.register_lib(n) }
         log(options, out_io, "    Modules: #{module_nodes.size}")
         module_nodes.each { |n, a| hir_converter.arena = a; hir_converter.register_module(n) }
         log(options, out_io, "    Classes: #{class_nodes.size}")
@@ -583,47 +588,74 @@ module CrystalV2
           return resolve_wildcard_require(req_path, base_dir)
         end
 
+        # Handle special "c/*" requires that map to lib_c/TARGET/c/*.cr
+        # This is Crystal's way of handling platform-specific C library bindings
+        if req_path.starts_with?("c/")
+          # On macOS aarch64, resolve to lib_c/aarch64-darwin/c/*
+          # TODO: Detect actual platform
+          platform = "aarch64-darwin"
+          platform_path = File.join(STDLIB_PATH, "lib_c", platform, req_path)
+          result = try_require_path(platform_path)
+          return result if result
+        end
+
         # Relative paths
         if req_path.starts_with?("./") || req_path.starts_with?("../")
           full_path = File.expand_path(req_path, base_dir)
-          if result = try_require_path(full_path)
-            return result
-          end
+          result = try_require_path(full_path)
+          return result if result
         else
           # Try relative to current file
           rel_path = File.expand_path(req_path, base_dir)
-          if result = try_require_path(rel_path)
-            return result
-          end
+          result = try_require_path(rel_path)
+          return result if result
 
           # Try relative to input file
           input_dir = File.dirname(File.expand_path(input_file))
           input_rel = File.expand_path(req_path, input_dir)
-          if result = try_require_path(input_rel)
-            return result
-          end
+          result = try_require_path(input_rel)
+          return result if result
 
           # Try stdlib
           stdlib_path = File.expand_path(req_path, STDLIB_PATH)
-          if result = try_require_path(stdlib_path)
-            return result
-          end
+          result = try_require_path(stdlib_path)
+          return result if result
         end
         nil
       end
 
       # Try to resolve a require path, handling both files and directories
       # Crystal convention: require "foo" looks for foo.cr, then foo/foo.cr
-      private def try_require_path(path : String) : String?
+      private def try_require_path(path : String) : String | Array(String) | Nil
         # Try with .cr extension first
         cr_path = path + ".cr"
-        return cr_path if File.file?(cr_path)
+        if File.file?(cr_path)
+          # For crystal/system modules, also load the unix variant
+          # (since macro conditionals aren't evaluated, we load all platform files)
+          if path.includes?("/crystal/system/") && !path.includes?("/unix/") && !path.includes?("/win32/") && !path.includes?("/wasi/")
+            unix_path = path.gsub("/crystal/system/", "/crystal/system/unix/") + ".cr"
+            if File.file?(unix_path)
+              return [cr_path, unix_path]
+            end
+          end
+          return cr_path
+        end
 
         # If path exists as a directory, look for dir/basename.cr inside it
         if Dir.exists?(path)
           basename = File.basename(path)
           inner_path = File.join(path, basename + ".cr")
-          return inner_path if File.file?(inner_path)
+          if File.file?(inner_path)
+            # For crystal/system modules, also load the unix variant
+            if path.includes?("/crystal/system/") && !path.includes?("/unix/") && !path.includes?("/win32/") && !path.includes?("/wasi/")
+              unix_path = path.gsub("/crystal/system/", "/crystal/system/unix/")
+              unix_inner = File.join(unix_path, basename + ".cr")
+              if File.file?(unix_inner)
+                return [inner_path, unix_inner]
+              end
+            end
+            return inner_path
+          end
         end
 
         # Try exact path if it's a file
