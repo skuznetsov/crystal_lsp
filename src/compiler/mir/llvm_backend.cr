@@ -2407,6 +2407,21 @@ module Crystal::MIR
         return
       end
 
+      # Guard: can't convert to void - just pass through as ptr
+      if dst_type == "void"
+        if src_type == "ptr"
+          # ptr to void conversion: emit identity bitcast (ptr to ptr)
+          emit "#{name} = bitcast ptr #{value} to ptr"
+          @value_types[inst.id] = TypeRef::POINTER
+          return
+        else
+          # Other types to void: emit null ptr
+          emit "#{name} = inttoptr i64 0 to ptr"
+          @value_types[inst.id] = TypeRef::POINTER
+          return
+        end
+      end
+
       emit "#{name} = #{op} #{src_type} #{value} to #{dst_type}"
       # Track actual destination type for downstream use
       @value_types[inst.id] = inst.type
@@ -3138,6 +3153,9 @@ module Crystal::MIR
           # For union types, use zeroinitializer instead of 0
           if arg_type.includes?(".union") && (val == "0" || val == "null")
             "#{arg_type} zeroinitializer"
+          elsif arg_type == "ptr" && val == "0"
+            # ptr 0 is invalid - use ptr null
+            "ptr null"
           else
             "#{arg_type} #{val}"
           end

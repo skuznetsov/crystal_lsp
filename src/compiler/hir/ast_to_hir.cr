@@ -7905,6 +7905,20 @@ module Crystal::HIR
         end
       end
 
+      # Handle pointer types (Void*, Pointer(T), T*)
+      # IMPORTANT: This must be checked BEFORE the case statement for "Void"
+      if name.ends_with?("*")
+        # T* syntax -> pointer type
+        @type_cache[name] = TypeRef::POINTER
+        return TypeRef::POINTER
+      end
+
+      if name.starts_with?("Pointer")
+        # Pointer(T) or just Pointer -> pointer type
+        @type_cache[name] = TypeRef::POINTER
+        return TypeRef::POINTER
+      end
+
       case name
       when "Void", "Nil"    then TypeRef::VOID
       when "Bool"           then TypeRef::BOOL
