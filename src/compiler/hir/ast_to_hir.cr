@@ -205,6 +205,10 @@ module Crystal::HIR
     # Pre-registered function signatures for forward reference support
     @function_types : Hash(String, TypeRef)
 
+    # Index of function base names (without $ type suffix) for fast prefix lookups
+    # Maps base name -> true (existence check)
+    @function_base_names : Set(String)
+
     # Class type information
     getter class_info : Hash(String, ClassInfo)
 
@@ -250,6 +254,7 @@ module Crystal::HIR
     def initialize(@arena, module_name : String = "main")
       @module = Module.new(module_name)
       @function_types = {} of String => TypeRef
+      @function_base_names = Set(String).new
       @class_info = {} of String => ClassInfo
       @init_params = {} of String => Array({String, TypeRef})
       @current_class = nil
@@ -264,6 +269,19 @@ module Crystal::HIR
       @type_aliases = {} of String => String
       @generated_allocators = Set(String).new
       @type_cache = {} of String => TypeRef
+    end
+
+    # Register a function type and maintain the base name index
+    private def register_function_type(full_name : String, return_type : TypeRef)
+      @function_types[full_name] = return_type
+      # Extract base name (without $ type suffix) for fast lookups
+      base_name = full_name.split("$").first
+      @function_base_names.add(base_name)
+    end
+
+    # Check if a function exists with given base name (fast O(1) lookup)
+    private def has_function_base?(base_name : String) : Bool
+      @function_base_names.includes?(base_name)
     end
 
     # Get class info by name
@@ -489,9 +507,38 @@ module Crystal::HIR
     # Also handles nested classes: module Foo; class Bar; end; end -> Foo::Bar
     def register_module(node : CrystalV2::Compiler::Frontend::ModuleNode)
       module_name = String.new(node.name)
+      if ENV.has_key?("DEBUG_NESTED_CLASS") && (module_name == "IO" || module_name.includes?("FileDescriptor"))
+        STDERR.puts "[DEBUG_MODULE] Processing module: #{module_name}, body_size=#{node.body.try(&.size) || 0}"
+      end
 
       # Register module methods (def self.foo) and nested classes
       if body = node.body
+        # PASS 1: Register aliases and nested modules first (so they're available for function type resolution)
+        body.each do |expr_id|
+          member = @arena[expr_id]
+          if member.is_a?(CrystalV2::Compiler::Frontend::AliasNode)
+            alias_name = String.new(member.name)
+            target_name = String.new(member.value)
+            full_alias_name = "#{module_name}::#{alias_name}"
+            @type_aliases[full_alias_name] = target_name
+            @type_aliases[alias_name] = target_name
+            if ENV.has_key?("DEBUG_ALIAS")
+              STDERR.puts "[ALIAS] Registered (module): #{full_alias_name} => #{target_name}, also: #{alias_name} => #{target_name}"
+            end
+          elsif member.is_a?(CrystalV2::Compiler::Frontend::ModuleNode)
+            # Nested module: Foo::Bar (as module)
+            nested_name = String.new(member.name)
+            full_nested_name = "#{module_name}::#{nested_name}"
+            register_nested_module(member, full_nested_name)
+          elsif member.is_a?(CrystalV2::Compiler::Frontend::ClassNode)
+            # Register class type alias and any aliases inside the class
+            class_name = String.new(member.name)
+            full_class_name = "#{module_name}::#{class_name}"
+            @type_aliases[full_class_name] = full_class_name
+            register_class_aliases(member, full_class_name)
+          end
+        end
+        # PASS 2: Register functions and classes (now that aliases are available)
         body.each do |expr_id|
           member = @arena[expr_id]
           case member
@@ -502,12 +549,10 @@ module Crystal::HIR
             return_type = if rt = member.return_type
                             type_ref_for_name(String.new(rt))
                           elsif method_name.ends_with?("?")
-                            # Predicate methods (ending in ?) return Bool
                             TypeRef::BOOL
                           else
                             TypeRef::VOID
                           end
-            # Collect parameter types for mangling
             param_types = [] of TypeRef
             if params = member.params
               params.each do |param|
@@ -520,23 +565,15 @@ module Crystal::HIR
               end
             end
             full_name = mangle_function_name(base_name, param_types)
-            @function_types[full_name] = return_type
+            register_function_type(full_name, return_type)
           when CrystalV2::Compiler::Frontend::ClassNode
-            # Nested class: Foo::Bar
             class_name = String.new(member.name)
             full_class_name = "#{module_name}::#{class_name}"
-            # Create alias for the nested class name
-            @type_aliases[full_class_name] = full_class_name
-            # Register the class with its full name
+            if ENV.has_key?("DEBUG_NESTED_CLASS") && full_class_name.includes?("FileDescriptor")
+              STDERR.puts "[DEBUG_NESTED_CLASS] Registering nested class: #{full_class_name}"
+            end
             register_class_with_name(member, full_class_name)
-          when CrystalV2::Compiler::Frontend::ModuleNode
-            # Nested module: Foo::Bar (as module)
-            nested_name = String.new(member.name)
-            full_nested_name = "#{module_name}::#{nested_name}"
-            # Recursively register nested module
-            register_nested_module(member, full_nested_name)
           when CrystalV2::Compiler::Frontend::EnumNode
-            # Nested enum: Foo::Bar
             enum_name = String.new(member.name)
             full_enum_name = "#{module_name}::#{enum_name}"
             register_enum_with_name(member, full_enum_name)
@@ -548,6 +585,33 @@ module Crystal::HIR
     # Register a nested module with full path
     private def register_nested_module(node : CrystalV2::Compiler::Frontend::ModuleNode, full_name : String)
       if body = node.body
+        # PASS 1: Register aliases first (so they're available for function type resolution)
+        body.each do |expr_id|
+          member = @arena[expr_id]
+          if member.is_a?(CrystalV2::Compiler::Frontend::AliasNode)
+            alias_name = String.new(member.name)
+            target_name = String.new(member.value)
+            full_alias_name = "#{full_name}::#{alias_name}"
+            @type_aliases[full_alias_name] = target_name
+            # Also register short name for local resolution within module
+            @type_aliases[alias_name] = target_name
+            if ENV.has_key?("DEBUG_ALIAS")
+              STDERR.puts "[ALIAS] Registered: #{full_alias_name} => #{target_name}, also: #{alias_name} => #{target_name}"
+            end
+          elsif member.is_a?(CrystalV2::Compiler::Frontend::ModuleNode)
+            # Recursively register nested module aliases first
+            nested_name = String.new(member.name)
+            full_nested_name = "#{full_name}::#{nested_name}"
+            register_nested_module(member, full_nested_name)
+          elsif member.is_a?(CrystalV2::Compiler::Frontend::ClassNode)
+            # Register class type alias and any aliases inside the class
+            class_name = String.new(member.name)
+            full_class_name = "#{full_name}::#{class_name}"
+            @type_aliases[full_class_name] = full_class_name
+            register_class_aliases(member, full_class_name)
+          end
+        end
+        # PASS 2: Register functions and other members (now that aliases are available)
         body.each do |expr_id|
           member = @arena[expr_id]
           case member
@@ -557,7 +621,6 @@ module Crystal::HIR
             return_type = if rt = member.return_type
                             type_ref_for_name(String.new(rt))
                           elsif method_name.ends_with?("?")
-                            # Predicate methods (ending in ?) return Bool
                             TypeRef::BOOL
                           else
                             TypeRef::VOID
@@ -574,20 +637,34 @@ module Crystal::HIR
               end
             end
             full_method_name = mangle_function_name(base_name, param_types)
-            @function_types[full_method_name] = return_type
+            register_function_type(full_method_name, return_type)
           when CrystalV2::Compiler::Frontend::ClassNode
             class_name = String.new(member.name)
             full_class_name = "#{full_name}::#{class_name}"
-            @type_aliases[full_class_name] = full_class_name
             register_class_with_name(member, full_class_name)
-          when CrystalV2::Compiler::Frontend::ModuleNode
-            nested_name = String.new(member.name)
-            full_nested_name = "#{full_name}::#{nested_name}"
-            register_nested_module(member, full_nested_name)
           when CrystalV2::Compiler::Frontend::EnumNode
             enum_name = String.new(member.name)
             full_enum_name = "#{full_name}::#{enum_name}"
             register_enum_with_name(member, full_enum_name)
+          end
+        end
+      end
+    end
+
+    # Register aliases inside a class (for nested alias-first processing)
+    private def register_class_aliases(node : CrystalV2::Compiler::Frontend::ClassNode, class_name : String)
+      if body = node.body
+        body.each do |expr_id|
+          member = @arena[expr_id]
+          if member.is_a?(CrystalV2::Compiler::Frontend::AliasNode)
+            alias_name = String.new(member.name)
+            target_name = String.new(member.value)
+            full_alias_name = "#{class_name}::#{alias_name}"
+            @type_aliases[full_alias_name] = target_name
+            @type_aliases[alias_name] = target_name
+            if ENV.has_key?("DEBUG_ALIAS")
+              STDERR.puts "[ALIAS] Registered (class): #{full_alias_name} => #{target_name}, also: #{alias_name} => #{target_name}"
+            end
           end
         end
       end
@@ -601,9 +678,15 @@ module Crystal::HIR
 
     # Lower a module with a specific name prefix
     private def lower_module_with_name(node : CrystalV2::Compiler::Frontend::ModuleNode, module_name : String)
+      if ENV.has_key?("DEBUG_NESTED_CLASS") && (module_name == "IO" || module_name.includes?("FileDescriptor"))
+        STDERR.puts "[DEBUG_LOWER_MOD] lower_module_with_name: #{module_name}, body_size=#{node.body.try(&.size) || 0}"
+      end
       if body = node.body
         body.each_with_index do |expr_id, idx|
           member = @arena[expr_id]
+          if ENV.has_key?("DEBUG_NESTED_CLASS") && (module_name == "IO" || module_name.includes?("FileDescriptor"))
+            STDERR.puts "[DEBUG_LOWER_MOD] #{module_name} member #{idx}: #{member.class}"
+          end
           case member
           when CrystalV2::Compiler::Frontend::DefNode
             method_name = String.new(member.name)
@@ -614,6 +697,9 @@ module Crystal::HIR
             # Lower nested class with full name
             class_name = String.new(member.name)
             full_class_name = "#{module_name}::#{class_name}"
+            if ENV.has_key?("DEBUG_NESTED_CLASS") && (module_name == "IO" || class_name.includes?("FileDescriptor"))
+              STDERR.puts "[DEBUG_LOWER_MOD] lowering nested class: #{full_class_name}"
+            end
             lower_class_with_name(member, full_class_name)
           when CrystalV2::Compiler::Frontend::ModuleNode
             # Recursively lower nested module
@@ -691,6 +777,9 @@ module Crystal::HIR
     # Register a class type and its methods (pass 1)
     def register_class(node : CrystalV2::Compiler::Frontend::ClassNode)
       class_name = String.new(node.name)
+      if ENV.has_key?("DEBUG_NESTED_CLASS") && (class_name == "IO" || class_name.includes?("FileDescriptor"))
+        STDERR.puts "[DEBUG_CLASS_REG] register_class called: #{class_name}"
+      end
       register_class_with_name(node, class_name)
     end
 
@@ -784,7 +873,18 @@ module Crystal::HIR
           when CrystalV2::Compiler::Frontend::DefNode
             # Register method signature
             method_name = String.new(member.name)
-            base_name = "#{class_name}##{method_name}"
+            # Check if this is a class method (def self.method) or instance method (def method)
+            is_class_method = if recv = member.receiver
+                                String.new(recv) == "self"
+                              else
+                                false
+                              end
+            # Use . for class methods, # for instance methods
+            base_name = if is_class_method
+                          "#{class_name}.#{method_name}"
+                        else
+                          "#{class_name}##{method_name}"
+                        end
             return_type = if rt = member.return_type
                             type_ref_for_name(String.new(rt))
                           elsif method_name.ends_with?("?")
@@ -806,7 +906,10 @@ module Crystal::HIR
               end
             end
             full_name = mangle_function_name(base_name, method_param_types)
-            @function_types[full_name] = return_type
+            if ENV.has_key?("DEBUG_NESTED_CLASS") && class_name.includes?("FileDescriptor")
+              STDERR.puts "[DEBUG_METHOD_REG] #{class_name}: #{method_name} -> #{full_name} (class_method=#{is_class_method})"
+            end
+            register_function_type(full_name, return_type)
 
             # Capture initialize parameters for new()
             # Also extract ivars from shorthand: def initialize(@value : T)
@@ -859,7 +962,7 @@ module Crystal::HIR
               # Register getter method: def name : Type
               getter_name = "#{class_name}##{accessor_name}"
               full_name = mangle_function_name(getter_name, [] of TypeRef)
-              @function_types[full_name] = ivar_type
+              register_function_type(full_name, ivar_type)
             end
 
           when CrystalV2::Compiler::Frontend::SetterNode
@@ -882,7 +985,7 @@ module Crystal::HIR
               # Register setter method: def name=(value : Type) : Type
               setter_name = "#{class_name}##{accessor_name}="
               full_name = mangle_function_name(setter_name, [ivar_type])
-              @function_types[full_name] = ivar_type
+              register_function_type(full_name, ivar_type)
             end
 
           when CrystalV2::Compiler::Frontend::PropertyNode
@@ -905,12 +1008,40 @@ module Crystal::HIR
               # Register getter method
               getter_name = "#{class_name}##{accessor_name}"
               getter_full = mangle_function_name(getter_name, [] of TypeRef)
-              @function_types[getter_full] = ivar_type
+              register_function_type(getter_full, ivar_type)
               # Register setter method
               setter_name = "#{class_name}##{accessor_name}="
               setter_full = mangle_function_name(setter_name, [ivar_type])
-              @function_types[setter_full] = ivar_type
+              register_function_type(setter_full, ivar_type)
             end
+
+          when CrystalV2::Compiler::Frontend::AssignNode
+            # Handle ivar assignments at class body level: @vec = SomeType.new
+            target_node = @arena[member.target]
+            if target_node.is_a?(CrystalV2::Compiler::Frontend::InstanceVarNode)
+              ivar_name = String.new(target_node.name)
+              # Infer type from the assigned value
+              value_node = @arena[member.value]
+              if ENV.has_key?("DEBUG_IVAR_REG")
+                STDERR.puts "[IVAR_REG] #{class_name}##{ivar_name} value_node=#{value_node.class}"
+              end
+              ivar_type = infer_type_from_class_ivar_assign(value_node)
+              if ENV.has_key?("DEBUG_IVAR_REG")
+                STDERR.puts "[IVAR_REG] #{class_name}##{ivar_name} inferred type=#{ivar_type.id}"
+              end
+              unless ivars.any? { |iv| iv.name == ivar_name }
+                ivars << IVarInfo.new(ivar_name, ivar_type, offset)
+                offset += type_size(ivar_type)
+              end
+            end
+          when CrystalV2::Compiler::Frontend::AliasNode
+            # Type alias within class: alias Handle = Int32
+            alias_name = String.new(member.name)
+            target_name = String.new(member.value)
+            full_alias_name = "#{class_name}::#{alias_name}"
+            @type_aliases[full_alias_name] = target_name
+            # Also register short name for local resolution within class
+            @type_aliases[alias_name] = target_name
           end
         end
       end
@@ -935,7 +1066,7 @@ module Crystal::HIR
       @init_params.not_nil![class_name] = init_params
 
       # Register "new" allocator function
-      @function_types["#{class_name}.new"] = type_ref
+      register_function_type("#{class_name}.new", type_ref)
     end
 
     # Monomorphize a generic class: create specialized version with concrete types
@@ -1197,7 +1328,25 @@ module Crystal::HIR
     # Lower a method within a class
     private def lower_method(class_name : String, class_info : ClassInfo, node : CrystalV2::Compiler::Frontend::DefNode)
       method_name = String.new(node.name)
-      base_name = "#{class_name}##{method_name}"
+
+      # Check if this is a class method (def self.method_name)
+      is_class_method = if recv = node.receiver
+                          String.new(recv) == "self"
+                        else
+                          false
+                        end
+
+      if ENV.has_key?("DEBUG_NESTED_CLASS") && (class_name.includes?("FileDescriptor") && method_name.includes?("from_stdio"))
+        sep = is_class_method ? "." : "#"
+        STDERR.puts "[DEBUG_LOWER_METHOD] #{class_name}#{sep}#{method_name} (class_method=#{is_class_method}, receiver=#{node.receiver})"
+      end
+
+      # Class methods use "." separator, instance methods use "#"
+      base_name = if is_class_method
+                    "#{class_name}.#{method_name}"
+                  else
+                    "#{class_name}##{method_name}"
+                  end
 
       # Skip abstract methods - they have no implementation
       if node.is_abstract
@@ -1463,7 +1612,8 @@ module Crystal::HIR
         return base_method_name
       end
 
-      # Search through all class info for matching method
+      # Search through all class info for matching method (O(n) fallback)
+      # This is needed when the receiver's type descriptor is not found
       @class_info.each do |klass_name, info|
         test_base = "#{klass_name}##{method_name}"
         test_mangled = mangle_function_name(test_base, arg_types)
@@ -1471,6 +1621,34 @@ module Crystal::HIR
           return test_mangled
         elsif @function_types[test_base]?
           return test_base
+        end
+      end
+
+      # For special operators like <<, try common receivers with relaxed type matching
+      if method_name == "<<" && class_name.empty?
+        # Try Array(T)#<< with various element types
+        ["String", "Int32", "Pointer"].each do |elem_type|
+          array_class = "Array(#{elem_type})"
+          test_base = "#{array_class}#<<"
+          test_mangled = mangle_function_name(test_base, arg_types)
+          if @function_types[test_mangled]?
+            return test_mangled
+          end
+          # Also try without arg types mangling
+          @function_types.each_key do |key|
+            if key.starts_with?("#{test_base}$")
+              return key
+            end
+          end
+        end
+        # Try IO#<<
+        ["IO", "IO::Memory", "String::Builder"].each do |io_class|
+          test_base = "#{io_class}#<<"
+          @function_types.each_key do |key|
+            if key.starts_with?("#{test_base}$") || key == test_base
+              return key
+            end
+          end
         end
       end
 
@@ -1529,11 +1707,11 @@ module Crystal::HIR
 
       # Register with mangled name
       full_name = mangle_function_name(base_name, param_types)
-      @function_types[full_name] = return_type
+      register_function_type(full_name, return_type)
 
       # Also register with base name for fallback lookup
       # (when function is not overloaded, we look up by base name)
-      @function_types[base_name] = return_type
+      register_function_type(base_name, return_type)
 
       # Store AST for potential inline expansion (use mangled name)
       @function_defs[full_name] = node
@@ -1575,8 +1753,9 @@ module Crystal::HIR
 
     # Check if a module method exists (with any signature - for module detection)
     private def is_module_method?(module_name : String, method_name : String) : Bool
-      prefix = "#{module_name}.#{method_name}"
-      @function_types.keys.any? { |key| key.starts_with?(prefix) }
+      base_name = "#{module_name}.#{method_name}"
+      # O(1) lookup: check exact match or mangled version exists
+      @function_types.has_key?(base_name) || has_function_base?(base_name)
     end
 
     # Look up return type of a function by name
@@ -1658,9 +1837,8 @@ module Crystal::HIR
       current = class_name
       while true
         test_name = "#{current}##{method_name}"
-        # Check for any function with this prefix (handles mangled names)
-        found = @function_types.keys.find { |key| key.starts_with?(test_name) }
-        if found
+        # O(1) lookup: check exact match first, then check if base name exists
+        if @function_types.has_key?(test_name) || has_function_base?(test_name)
           return test_name  # Return base name - caller will mangle
         end
         # Try parent class
@@ -1675,6 +1853,190 @@ module Crystal::HIR
         end
       end
       nil
+    end
+
+    # Infer type argument for generic class constructor call
+    # E.g., Array.new(size, value) -> infer T from value's type
+    #       Array.new(size) { block } -> infer T from block's return type
+    private def infer_generic_type_arg(class_name : String, args : Array(CrystalV2::Compiler::Frontend::ExprId)?, block : CrystalV2::Compiler::Frontend::ExprId?, ctx : LoweringContext) : String?
+      # For Array.new(size, initial_value), infer from initial_value (second arg)
+      if class_name == "Array" && args && args.size >= 2
+        value_arg = @arena[args[1]]
+        return infer_type_from_expr(value_arg)
+      end
+
+      # For Array.new(size) { block }, infer from block's return type
+      if class_name == "Array" && block
+        block_node = @arena[block]
+        if block_node.is_a?(CrystalV2::Compiler::Frontend::BlockNode)
+          if body = block_node.body
+            # Look at last expression in block to infer return type
+            last_expr_id = body.last?
+            if last_expr_id
+              last_expr = @arena[last_expr_id]
+              return infer_type_from_expr(last_expr)
+            end
+          end
+        end
+      end
+
+      # For Hash.new, return nil (needs two type params - more complex)
+      nil
+    end
+
+    # Infer type name from an expression AST node
+    private def infer_type_from_expr(node) : String?
+      case node
+      when CrystalV2::Compiler::Frontend::StringNode, CrystalV2::Compiler::Frontend::StringInterpolationNode
+        "String"
+      when CrystalV2::Compiler::Frontend::NumberNode
+        # Check if it's a float (has decimal point or exponent)
+        num_str = String.new(node.value)
+        if num_str.includes?('.') || num_str.includes?('e') || num_str.includes?('E')
+          "Float64"
+        else
+          "Int32"
+        end
+      when CrystalV2::Compiler::Frontend::BoolNode
+        "Bool"
+      when CrystalV2::Compiler::Frontend::CharNode
+        "Char"
+      when CrystalV2::Compiler::Frontend::SymbolNode
+        "Symbol"
+      when CrystalV2::Compiler::Frontend::NilNode
+        "Nil"
+      when CrystalV2::Compiler::Frontend::CallNode
+        # For calls like String.new(...), try to get return type
+        callee = node.callee
+        callee_node = @arena[callee]
+        case callee_node
+        when CrystalV2::Compiler::Frontend::MemberAccessNode
+          obj_node = @arena[callee_node.object]
+          member_name = String.new(callee_node.member)
+          if obj_node.is_a?(CrystalV2::Compiler::Frontend::ConstantNode) && member_name == "new"
+            # ClassName.new() returns ClassName
+            return String.new(obj_node.name)
+          elsif obj_node.is_a?(CrystalV2::Compiler::Frontend::IdentifierNode) && member_name == "new"
+            name = String.new(obj_node.name)
+            if name[0].uppercase?
+              return name
+            end
+          end
+        end
+        nil
+      else
+        nil
+      end
+    end
+
+    # Infer type from class-level ivar assignment: @vec = SomeType.new
+    # Used during class registration (pass 2) to handle implicit ivars
+    private def infer_type_from_class_ivar_assign(value_node) : TypeRef
+      case value_node
+      when CrystalV2::Compiler::Frontend::MemberAccessNode
+        # Direct member access: SomeType.new (without call parens)
+        obj_node = @arena[value_node.object]
+        member_name = String.new(value_node.member)
+        if ENV.has_key?("DEBUG_TYPE_INFER")
+          STDERR.puts "[TYPE_INFER] Direct MemberAccess member=#{member_name}, obj_node type: #{obj_node.class}"
+        end
+        if member_name == "new"
+          type_name = extract_type_name_from_node(obj_node)
+          if ENV.has_key?("DEBUG_TYPE_INFER")
+            STDERR.puts "[TYPE_INFER] extracted type_name=#{type_name || "nil"}"
+          end
+          if type_name
+            return type_ref_for_name(type_name)
+          end
+        end
+      when CrystalV2::Compiler::Frontend::CallNode
+        # For calls like SomeClass.new() or GenericClass(T).new()
+        callee = value_node.callee
+        callee_node = @arena[callee]
+        if ENV.has_key?("DEBUG_TYPE_INFER")
+          STDERR.puts "[TYPE_INFER] CallNode callee_node type: #{callee_node.class}"
+        end
+        case callee_node
+        when CrystalV2::Compiler::Frontend::MemberAccessNode
+          obj_node = @arena[callee_node.object]
+          member_name = String.new(callee_node.member)
+          if ENV.has_key?("DEBUG_TYPE_INFER")
+            STDERR.puts "[TYPE_INFER] MemberAccess member=#{member_name}, obj_node type: #{obj_node.class}"
+          end
+          if member_name == "new"
+            type_name = extract_type_name_from_node(obj_node)
+            if ENV.has_key?("DEBUG_TYPE_INFER")
+              STDERR.puts "[TYPE_INFER] extracted type_name=#{type_name || "nil"}"
+            end
+            if type_name
+              return type_ref_for_name(type_name)
+            end
+          end
+        end
+      when CrystalV2::Compiler::Frontend::StringNode, CrystalV2::Compiler::Frontend::StringInterpolationNode
+        return TypeRef::STRING
+      when CrystalV2::Compiler::Frontend::NumberNode
+        num_str = String.new(value_node.value)
+        if num_str.includes?('.') || num_str.includes?('e') || num_str.includes?('E')
+          return TypeRef::FLOAT64
+        else
+          return TypeRef::INT32
+        end
+      when CrystalV2::Compiler::Frontend::BoolNode
+        return TypeRef::BOOL
+      when CrystalV2::Compiler::Frontend::CharNode
+        return TypeRef::CHAR
+      when CrystalV2::Compiler::Frontend::NilNode
+        return TypeRef::VOID
+      when CrystalV2::Compiler::Frontend::ArrayLiteralNode
+        # Array literal - infer element type from first element
+        if elements = value_node.elements
+          if first_id = elements.first?
+            first_node = @arena[first_id]
+            if elem_type = infer_type_from_expr(first_node)
+              return type_ref_for_name("Array(#{elem_type})")
+            end
+          end
+        end
+        return type_ref_for_name("Array(String)")  # Default
+      end
+      TypeRef::VOID  # Default to VOID if we can't infer
+    end
+
+    # Extract type name from AST node (ConstantNode, GenericNode, etc.)
+    private def extract_type_name_from_node(node) : String?
+      case node
+      when CrystalV2::Compiler::Frontend::ConstantNode
+        String.new(node.name)
+      when CrystalV2::Compiler::Frontend::IdentifierNode
+        # Identifiers can be type names (uppercase) or constants used as type args
+        String.new(node.name)
+      when CrystalV2::Compiler::Frontend::GenericNode
+        # GenericClass(T, U) -> "GenericClass(T, U)"
+        base_node = @arena[node.base_type]
+        base_name = extract_type_name_from_node(base_node)
+        if base_name && (type_args = node.type_args)
+          # Resolve type args (may be type params like T that need substitution)
+          arg_names = type_args.map do |arg_id|
+            arg_node = @arena[arg_id]
+            extract_type_name_from_node(arg_node) || "UNKNOWN"
+          end
+          "#{base_name}(#{arg_names.join(", ")})"
+        else
+          base_name
+        end
+      when CrystalV2::Compiler::Frontend::MemberAccessNode
+        # Nested::Class - reconstruct qualified name
+        obj_node = @arena[node.object]
+        member_name = String.new(node.member)
+        if obj_name = extract_type_name_from_node(obj_node)
+          "#{obj_name}::#{member_name}"
+        else
+          member_name
+        end
+      else
+        nil
+      end
     end
 
     # Check if a type is a union type
@@ -2519,7 +2881,7 @@ module Crystal::HIR
       @function_defs[method_name] = node
 
       # Register return type
-      @function_types[method_name] = return_type
+      register_function_type(method_name, return_type)
 
       # Method definitions don't produce a value
       nil_lit = Literal.new(ctx.next_id, TypeRef::NIL, nil)
@@ -2695,6 +3057,34 @@ module Crystal::HIR
               break
             end
           end
+          # Debug: log ivar lookup results (commented out for performance)
+          # if ENV.has_key?("DEBUG_IVAR") && ivar_type == TypeRef::VOID
+          #   ivar_names = class_info.ivars.map { |iv| "#{iv.name}:#{iv.type.id}" }.join(", ")
+          #   found_ivar = class_info.ivars.find { |iv| iv.name == name }
+          #   if found_ivar
+          #     STDERR.puts "[IVAR] #{class_name}##{name} FOUND but type is VOID (id=#{found_ivar.type.id})"
+          #   else
+          #     STDERR.puts "[IVAR] #{class_name}##{name} NOT FOUND in ivars: [#{ivar_names}]"
+          #   end
+          # end
+        end
+      end
+
+      # If ivar type is still VOID, try to find a getter method as fallback
+      # This handles cases where ivars are defined implicitly (e.g., @ivar = value in initialize)
+      if ivar_type == TypeRef::VOID && (class_name = @current_class)
+        # Try to find getter method: @bytesize -> bytesize()
+        accessor_name = name.lchop('@')
+        getter_base = resolve_method_with_inheritance(class_name, accessor_name)
+        if getter_base
+          # Found a getter method - emit as method call instead of field get
+          self_id = emit_self(ctx)
+          full_name = mangle_function_name(getter_base, [] of TypeRef)
+          return_type = @function_types[full_name]? || TypeRef::VOID
+          call = Call.new(ctx.next_id, return_type, self_id, full_name, [] of ValueId)
+          ctx.emit(call)
+          ctx.register_type(call.id, return_type)
+          return call.id
         end
       end
 
@@ -3032,10 +3422,17 @@ module Crystal::HIR
       is_integer_type = left_type.id >= TypeRef::INT8.id && left_type.id <= TypeRef::INT128.id
       if !is_integer_type && op_str == "<<"
         # Emit as method call: left.<<(right)
-        # Use mangled name "shovel" since << is not valid LLVM identifier
-        # Qualify method name with receiver's class
+        # The method is registered as "#<<" in the function_types
         right_type = ctx.type_of(right_id)
-        method_name = resolve_method_call(ctx, left_id, "shovel", [right_type])
+        # Debug: log the resolution attempt
+        if ENV.has_key?("DEBUG_SHOVEL")
+          type_desc = @module.get_type_descriptor(left_type)
+          STDERR.puts "[SHOVEL] left_type=#{left_type.id}, type_desc=#{type_desc.try(&.name) || "nil"}, right_type=#{right_type.id}"
+        end
+        method_name = resolve_method_call(ctx, left_id, "<<", [right_type])
+        if ENV.has_key?("DEBUG_SHOVEL")
+          STDERR.puts "[SHOVEL] resolved to: #{method_name}"
+        end
         call = Call.new(ctx.next_id, left_type, left_id, method_name, [right_id])
         ctx.emit(call)
         ctx.register_type(call.id, left_type)
@@ -4313,7 +4710,8 @@ module Crystal::HIR
         if current = @current_class
           # Check if method exists in current class (instance method: Class#method)
           class_method_name = "#{current}##{method_name}"
-          has_class_method = @function_types.keys.any? { |k| k.starts_with?(class_method_name) }
+          # O(1) lookup: check exact match or mangled version exists
+          has_class_method = @function_types.has_key?(class_method_name) || has_function_base?(class_method_name)
           if has_class_method
             # This is a method call on self - set receiver to self
             receiver_id = emit_self(ctx)
@@ -4321,7 +4719,8 @@ module Crystal::HIR
           else
             # Also check for module-style method (Module.method)
             module_method_name = "#{current}.#{method_name}"
-            has_module_method = @function_types.keys.any? { |k| k.starts_with?(module_method_name) }
+            # O(1) lookup: check exact match or mangled version exists
+            has_module_method = @function_types.has_key?(module_method_name) || has_function_base?(module_method_name)
             if has_module_method
               # This is a module method call (no receiver)
               receiver_id = nil
@@ -4362,6 +4761,28 @@ module Crystal::HIR
             elsif is_module_method?(resolved_name, method_name)
               # It's a module method call
               class_name_str = resolved_name
+            elsif @generic_templates.has_key?(resolved_name) && method_name == "new"
+              # Calling .new on a generic template (e.g., Array.new, Hash.new)
+              # Try to infer type argument from constructor arguments or block
+              inferred_type = infer_generic_type_arg(resolved_name, node.args, node.block, ctx)
+              if inferred_type
+                specialized_name = "#{resolved_name}(#{inferred_type})"
+                # Monomorphize if not already done
+                if !@monomorphized.includes?(specialized_name)
+                  monomorphize_generic_class(resolved_name, [inferred_type], specialized_name)
+                end
+                class_name_str = specialized_name
+              else
+                # Can't infer type - use fallback or report error
+                # For now, use String as default for Array (common case)
+                if resolved_name == "Array"
+                  specialized_name = "Array(String)"
+                  if !@monomorphized.includes?(specialized_name)
+                    monomorphize_generic_class(resolved_name, ["String"], specialized_name)
+                  end
+                  class_name_str = specialized_name
+                end
+              end
             else
               # Try to resolve using current namespace
               class_name_str = resolve_class_name_in_context(name)
@@ -4411,6 +4832,10 @@ module Crystal::HIR
             class_name_str = full_path
           elsif @type_aliases.has_key?(full_path)
             class_name_str = @type_aliases[full_path]
+          else
+            # Even if not in class_info, treat path as class name for class method calls
+            # This handles nested classes/modules that may not be fully registered
+            class_name_str = full_path
           end
         end
 
@@ -7174,8 +7599,9 @@ module Crystal::HIR
       result = false
       if class_name && !method_name.empty?
         # Check if the class has this method
+        # O(1) lookup: check exact match or mangled version exists
         full_method = "#{class_name}.#{method_name}"
-        result = @function_types.keys.any? { |k| k.starts_with?(full_method) }
+        result = @function_types.has_key?(full_method) || has_function_base?(full_method)
       end
 
       # Return compile-time constant boolean
@@ -7251,6 +7677,7 @@ module Crystal::HIR
           return type_ref_for_name(alias_target)
         end
       end
+
 
       # Handle generic types like Pointer(K), Array(T) - substitute type parameters
       if name.includes?("(") && name.includes?(")")

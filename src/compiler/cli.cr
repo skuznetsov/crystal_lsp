@@ -259,6 +259,19 @@ module CrystalV2
         end
 
         # Pass 1: Register types
+        if ENV.has_key?("DEBUG_NESTED_CLASS")
+          STDERR.puts "[DEBUG_CLI] class_nodes: #{class_nodes.size}, module_nodes: #{module_nodes.size}"
+          module_nodes.each do |module_node, arena|
+            name = String.new(module_node.name)
+            STDERR.puts "[DEBUG_CLI] Module: #{name}, body_size=#{module_node.body.try(&.size) || 0}"
+          end
+          class_nodes.each do |class_node, arena|
+            name = String.new(class_node.name)
+            if name == "IO" || name.includes?("FileDescriptor")
+              STDERR.puts "[DEBUG_CLI] Class: #{name}"
+            end
+          end
+        end
         log(options, out_io, "  Pass 1: Registering types...")
         log(options, out_io, "    Enums: #{enum_nodes.size}")
         enum_nodes.each { |n, a| hir_converter.arena = a; hir_converter.register_enum(n) }
@@ -495,25 +508,81 @@ module CrystalV2
         # Process requires first
         base_dir = File.dirname(abs_path)
         exprs.each do |expr_id|
-          node = arena[expr_id]
-          if node.is_a?(Frontend::RequireNode)
-            path_node = arena[node.path]
-            if path_node.is_a?(Frontend::StringNode)
-              req_path = String.new(path_node.value)
-              resolved = resolve_require_path(req_path, base_dir, input_file)
-              if resolved
-                parse_file_recursive(resolved, results, loaded, input_file, options, out_io)
-              else
-                log(options, out_io, "  Warning: Could not resolve require '#{req_path}'")
-              end
-            end
-          end
+          process_require_node(arena, expr_id, base_dir, input_file, results, loaded, options, out_io)
         end
 
         results << {arena, exprs, abs_path}
       end
 
-      private def resolve_require_path(req_path : String, base_dir : String, input_file : String) : String?
+      # Process a node for require statements (recursively handles macro bodies)
+      private def process_require_node(
+        arena : Frontend::ArenaLike,
+        expr_id : Frontend::ExprId,
+        base_dir : String,
+        input_file : String,
+        results : Array(Tuple(Frontend::ArenaLike, Array(Frontend::ExprId), String)),
+        loaded : Set(String),
+        options : Options,
+        out_io : IO
+      )
+        node = arena[expr_id]
+        case node
+        when Frontend::RequireNode
+          path_node = arena[node.path]
+          if path_node.is_a?(Frontend::StringNode)
+            req_path = String.new(path_node.value)
+            resolved = resolve_require_path(req_path, base_dir, input_file)
+            case resolved
+            when String
+              parse_file_recursive(resolved, results, loaded, input_file, options, out_io)
+            when Array
+              resolved.each do |file|
+                parse_file_recursive(file, results, loaded, input_file, options, out_io)
+              end
+            else
+              log(options, out_io, "  Warning: Could not resolve require '#{req_path}'")
+            end
+          end
+        when Frontend::MacroIfNode
+          # Process requires in both branches of macro conditionals
+          # Since we don't evaluate macros, load both branches to get all possible requires
+          if then_body = node.then_body
+            process_require_node(arena, then_body, base_dir, input_file, results, loaded, options, out_io)
+          end
+          if else_body = node.else_body
+            process_require_node(arena, else_body, base_dir, input_file, results, loaded, options, out_io)
+          end
+        when Frontend::MacroLiteralNode
+          # Macro literal - check pieces for require text patterns
+          node.pieces.each do |piece|
+            if piece.kind == Frontend::MacroPiece::Kind::Text
+              text = piece.text
+              if text && text.includes?("require ")
+                # Extract require paths from text (e.g., "require \"./unix/file_descriptor\"")
+                text.scan(/require\s+["']([^"']+)["']/) do |match|
+                  req_path = match[1]
+                  resolved = resolve_require_path(req_path, base_dir, input_file)
+                  case resolved
+                  when String
+                    parse_file_recursive(resolved, results, loaded, input_file, options, out_io)
+                  when Array
+                    resolved.each do |file|
+                      parse_file_recursive(file, results, loaded, input_file, options, out_io)
+                    end
+                  end
+                end
+              end
+            end
+          end
+        end
+      end
+
+      private def resolve_require_path(req_path : String, base_dir : String, input_file : String) : String | Array(String) | Nil
+        # Handle wildcards (/* and /**)
+        if req_path.ends_with?("/*") || req_path.ends_with?("/**")
+          return resolve_wildcard_require(req_path, base_dir)
+        end
+
         # Relative paths
         if req_path.starts_with?("./") || req_path.starts_with?("../")
           full_path = File.expand_path(req_path, base_dir)
@@ -561,6 +630,37 @@ module CrystalV2
         return path if File.file?(path)
 
         nil
+      end
+
+      # Resolve wildcard require patterns like ./io/* or ./io/**
+      private def resolve_wildcard_require(req_path : String, base_dir : String) : Array(String)?
+        recursive = req_path.ends_with?("/**")
+        pattern = req_path.rchop(recursive ? "/**" : "/*")
+
+        # Handle relative paths
+        if pattern.starts_with?("./") || pattern.starts_with?("../")
+          full_dir = File.expand_path(pattern, base_dir)
+        else
+          full_dir = File.expand_path(pattern, STDLIB_PATH)
+        end
+
+        return nil unless Dir.exists?(full_dir)
+
+        files = [] of String
+        gather_crystal_files(full_dir, files, recursive)
+        files.empty? ? nil : files.sort  # Sort for deterministic order
+      end
+
+      # Gather all .cr files in a directory
+      private def gather_crystal_files(dir : String, accumulator : Array(String), recursive : Bool)
+        Dir.each_child(dir) do |entry|
+          full_path = File.join(dir, entry)
+          if File.directory?(full_path)
+            gather_crystal_files(full_path, accumulator, true) if recursive
+          elsif entry.ends_with?(".cr")
+            accumulator << File.expand_path(full_path)
+          end
+        end
       end
 
       private def log(options : Options, out_io : IO, msg : String)
