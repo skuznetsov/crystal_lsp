@@ -238,6 +238,9 @@ module Crystal::MIR
     end
 
     def mangle_name(name : String) : String
+      # LLVM intrinsics must keep their dots (e.g., "llvm.bswap.i32")
+      # These are special built-in functions that LLVM recognizes by exact name
+      return name if name.starts_with?("llvm.")
       name.gsub(/[^a-zA-Z0-9_]/, "_")
     end
   end
@@ -485,8 +488,286 @@ module Crystal::MIR
         # Skip runtime functions
         next if name.starts_with?(runtime_prefix)
         already_declared << name
-        # Declare with varargs to accept any arguments
-        emit_raw "declare #{return_type} @#{name}(...)\n"
+
+        # LLVM intrinsics need proper signatures (not varargs)
+        if name.starts_with?("llvm.")
+          decl = emit_llvm_intrinsic_declaration(name)
+          emit_raw "#{decl}\n" if decl
+        else
+          # Declare with varargs to accept any arguments
+          emit_raw "declare #{return_type} @#{name}(...)\n"
+        end
+      end
+    end
+
+    # Generate proper declaration for LLVM intrinsics
+    private def emit_llvm_intrinsic_declaration(name : String) : String?
+      case name
+      # Bitreverse intrinsics
+      when "llvm.bitreverse.i8"   then "declare i8 @llvm.bitreverse.i8(i8)"
+      when "llvm.bitreverse.i16"  then "declare i16 @llvm.bitreverse.i16(i16)"
+      when "llvm.bitreverse.i32"  then "declare i32 @llvm.bitreverse.i32(i32)"
+      when "llvm.bitreverse.i64"  then "declare i64 @llvm.bitreverse.i64(i64)"
+      when "llvm.bitreverse.i128" then "declare i128 @llvm.bitreverse.i128(i128)"
+      # Byte swap intrinsics
+      when "llvm.bswap.i16"  then "declare i16 @llvm.bswap.i16(i16)"
+      when "llvm.bswap.i32"  then "declare i32 @llvm.bswap.i32(i32)"
+      when "llvm.bswap.i64"  then "declare i64 @llvm.bswap.i64(i64)"
+      when "llvm.bswap.i128" then "declare i128 @llvm.bswap.i128(i128)"
+      # Population count (ctpop)
+      when "llvm.ctpop.i8"   then "declare i8 @llvm.ctpop.i8(i8)"
+      when "llvm.ctpop.i16"  then "declare i16 @llvm.ctpop.i16(i16)"
+      when "llvm.ctpop.i32"  then "declare i32 @llvm.ctpop.i32(i32)"
+      when "llvm.ctpop.i64"  then "declare i64 @llvm.ctpop.i64(i64)"
+      when "llvm.ctpop.i128" then "declare i128 @llvm.ctpop.i128(i128)"
+      # Count leading zeros
+      when "llvm.ctlz.i8"   then "declare i8 @llvm.ctlz.i8(i8, i1)"
+      when "llvm.ctlz.i16"  then "declare i16 @llvm.ctlz.i16(i16, i1)"
+      when "llvm.ctlz.i32"  then "declare i32 @llvm.ctlz.i32(i32, i1)"
+      when "llvm.ctlz.i64"  then "declare i64 @llvm.ctlz.i64(i64, i1)"
+      when "llvm.ctlz.i128" then "declare i128 @llvm.ctlz.i128(i128, i1)"
+      # Count trailing zeros
+      when "llvm.cttz.i8"   then "declare i8 @llvm.cttz.i8(i8, i1)"
+      when "llvm.cttz.i16"  then "declare i16 @llvm.cttz.i16(i16, i1)"
+      when "llvm.cttz.i32"  then "declare i32 @llvm.cttz.i32(i32, i1)"
+      when "llvm.cttz.i64"  then "declare i64 @llvm.cttz.i64(i64, i1)"
+      when "llvm.cttz.i128" then "declare i128 @llvm.cttz.i128(i128, i1)"
+      # Funnel shift left/right
+      when "llvm.fshl.i8"   then "declare i8 @llvm.fshl.i8(i8, i8, i8)"
+      when "llvm.fshl.i16"  then "declare i16 @llvm.fshl.i16(i16, i16, i16)"
+      when "llvm.fshl.i32"  then "declare i32 @llvm.fshl.i32(i32, i32, i32)"
+      when "llvm.fshl.i64"  then "declare i64 @llvm.fshl.i64(i64, i64, i64)"
+      when "llvm.fshl.i128" then "declare i128 @llvm.fshl.i128(i128, i128, i128)"
+      when "llvm.fshr.i8"   then "declare i8 @llvm.fshr.i8(i8, i8, i8)"
+      when "llvm.fshr.i16"  then "declare i16 @llvm.fshr.i16(i16, i16, i16)"
+      when "llvm.fshr.i32"  then "declare i32 @llvm.fshr.i32(i32, i32, i32)"
+      when "llvm.fshr.i64"  then "declare i64 @llvm.fshr.i64(i64, i64, i64)"
+      when "llvm.fshr.i128" then "declare i128 @llvm.fshr.i128(i128, i128, i128)"
+      # Math intrinsics (float)
+      when "llvm.ceil.f32"  then "declare float @llvm.ceil.f32(float)"
+      when "llvm.ceil.f64"  then "declare double @llvm.ceil.f64(double)"
+      when "llvm.floor.f32" then "declare float @llvm.floor.f32(float)"
+      when "llvm.floor.f64" then "declare double @llvm.floor.f64(double)"
+      when "llvm.round.f32" then "declare float @llvm.round.f32(float)"
+      when "llvm.round.f64" then "declare double @llvm.round.f64(double)"
+      when "llvm.trunc.f32" then "declare float @llvm.trunc.f32(float)"
+      when "llvm.trunc.f64" then "declare double @llvm.trunc.f64(double)"
+      when "llvm.sqrt.f32"  then "declare float @llvm.sqrt.f32(float)"
+      when "llvm.sqrt.f64"  then "declare double @llvm.sqrt.f64(double)"
+      when "llvm.fabs.f32"  then "declare float @llvm.fabs.f32(float)"
+      when "llvm.fabs.f64"  then "declare double @llvm.fabs.f64(double)"
+      when "llvm.sin.f32"   then "declare float @llvm.sin.f32(float)"
+      when "llvm.sin.f64"   then "declare double @llvm.sin.f64(double)"
+      when "llvm.cos.f32"   then "declare float @llvm.cos.f32(float)"
+      when "llvm.cos.f64"   then "declare double @llvm.cos.f64(double)"
+      when "llvm.exp.f32"   then "declare float @llvm.exp.f32(float)"
+      when "llvm.exp.f64"   then "declare double @llvm.exp.f64(double)"
+      when "llvm.exp2.f32"  then "declare float @llvm.exp2.f32(float)"
+      when "llvm.exp2.f64"  then "declare double @llvm.exp2.f64(double)"
+      when "llvm.log.f32"   then "declare float @llvm.log.f32(float)"
+      when "llvm.log.f64"   then "declare double @llvm.log.f64(double)"
+      when "llvm.log2.f32"  then "declare float @llvm.log2.f32(float)"
+      when "llvm.log2.f64"  then "declare double @llvm.log2.f64(double)"
+      when "llvm.log10.f32" then "declare float @llvm.log10.f32(float)"
+      when "llvm.log10.f64" then "declare double @llvm.log10.f64(double)"
+      when "llvm.rint.f32"  then "declare float @llvm.rint.f32(float)"
+      when "llvm.rint.f64"  then "declare double @llvm.rint.f64(double)"
+      when "llvm.pow.f32"   then "declare float @llvm.pow.f32(float, float)"
+      when "llvm.pow.f64"   then "declare double @llvm.pow.f64(double, double)"
+      when "llvm.fma.f32"   then "declare float @llvm.fma.f32(float, float, float)"
+      when "llvm.fma.f64"   then "declare double @llvm.fma.f64(double, double, double)"
+      when "llvm.copysign.f32" then "declare float @llvm.copysign.f32(float, float)"
+      when "llvm.copysign.f64" then "declare double @llvm.copysign.f64(double, double)"
+      when "llvm.minnum.f32" then "declare float @llvm.minnum.f32(float, float)"
+      when "llvm.minnum.f64" then "declare double @llvm.minnum.f64(double, double)"
+      when "llvm.maxnum.f32" then "declare float @llvm.maxnum.f32(float, float)"
+      when "llvm.maxnum.f64" then "declare double @llvm.maxnum.f64(double, double)"
+      # Memory intrinsics (opaque pointer variant for LLVM 15+)
+      when "llvm.memcpy.p0.p0.i64"  then "declare void @llvm.memcpy.p0.p0.i64(ptr, ptr, i64, i1)"
+      when "llvm.memcpy.p0.p0.i32"  then "declare void @llvm.memcpy.p0.p0.i32(ptr, ptr, i32, i1)"
+      when "llvm.memmove.p0.p0.i64" then "declare void @llvm.memmove.p0.p0.i64(ptr, ptr, i64, i1)"
+      when "llvm.memmove.p0.p0.i32" then "declare void @llvm.memmove.p0.p0.i32(ptr, ptr, i32, i1)"
+      when "llvm.memset.p0.i64"     then "declare void @llvm.memset.p0.i64(ptr, i8, i64, i1)"
+      when "llvm.memset.p0.i32"     then "declare void @llvm.memset.p0.i32(ptr, i8, i32, i1)"
+      # VA intrinsics
+      when "llvm.va_start.p0" then "declare void @llvm.va_start.p0(ptr)"
+      when "llvm.va_end.p0"   then "declare void @llvm.va_end.p0(ptr)"
+      when "llvm.va_start"    then "declare void @llvm.va_start(ptr)"
+      when "llvm.va_end"      then "declare void @llvm.va_end(ptr)"
+      # Debug trap
+      when "llvm.debugtrap" then "declare void @llvm.debugtrap()"
+      # Read cycle counter
+      when "llvm.readcyclecounter" then "declare i64 @llvm.readcyclecounter()"
+      else
+        # Unknown intrinsic - emit as varargs (may not work but better than nothing)
+        STDERR.puts "[LLVM] Unknown intrinsic: #{name}"
+        nil
+      end
+    end
+
+    # Build arguments for LLVM intrinsic calls with correct types
+    # Returns tuple of (args_string, return_type)
+    private def emit_llvm_intrinsic_call_args(inst : ExternCall, result_name : String, intrinsic_name : String) : Tuple(String, String)
+      # Parse intrinsic signature to get expected types
+      sig = parse_intrinsic_signature(intrinsic_name)
+      return {"", "void"} unless sig
+
+      param_types, return_type = sig
+
+      # Build args with proper types, loading from pointers if needed
+      args = inst.args.map_with_index do |arg_id, idx|
+        expected_type = param_types[idx]? || "ptr"
+        actual_type_ref = @value_types[arg_id]? || TypeRef::POINTER
+        actual_type = @type_mapper.llvm_type(actual_type_ref)
+        val = value_ref(arg_id)
+
+        if actual_type == "ptr" && expected_type != "ptr"
+          # Need to load the value from the pointer
+          load_name = "%intrinsic_load.#{@cond_counter}"
+          @cond_counter += 1
+          emit "#{load_name} = load #{expected_type}, ptr #{val}"
+          "#{expected_type} #{load_name}"
+        elsif actual_type == expected_type
+          "#{expected_type} #{val}"
+        else
+          # Type mismatch - try to convert
+          if expected_type.starts_with?("i") && actual_type.starts_with?("i")
+            # Integer to integer - truncate or extend
+            expected_bits = expected_type[1..].to_i? || 32
+            actual_bits = actual_type[1..].to_i? || 32
+            if expected_bits < actual_bits
+              conv_name = "%intrinsic_trunc.#{@cond_counter}"
+              @cond_counter += 1
+              emit "#{conv_name} = trunc #{actual_type} #{val} to #{expected_type}"
+              "#{expected_type} #{conv_name}"
+            elsif expected_bits > actual_bits
+              conv_name = "%intrinsic_ext.#{@cond_counter}"
+              @cond_counter += 1
+              emit "#{conv_name} = zext #{actual_type} #{val} to #{expected_type}"
+              "#{expected_type} #{conv_name}"
+            else
+              "#{expected_type} #{val}"
+            end
+          elsif expected_type == "float" && actual_type == "double"
+            conv_name = "%intrinsic_fptrunc.#{@cond_counter}"
+            @cond_counter += 1
+            emit "#{conv_name} = fptrunc double #{val} to float"
+            "float #{conv_name}"
+          elsif expected_type == "double" && actual_type == "float"
+            conv_name = "%intrinsic_fpext.#{@cond_counter}"
+            @cond_counter += 1
+            emit "#{conv_name} = fpext float #{val} to double"
+            "double #{conv_name}"
+          else
+            # Fallback - hope for the best
+            "#{expected_type} #{val}"
+          end
+        end
+      end.join(", ")
+
+      {args, return_type}
+    end
+
+    # Parse LLVM intrinsic name to get parameter types and return type
+    private def parse_intrinsic_signature(name : String) : Tuple(Array(String), String)?
+      case name
+      # Bitreverse intrinsics
+      when "llvm.bitreverse.i8"   then {["i8"], "i8"}
+      when "llvm.bitreverse.i16"  then {["i16"], "i16"}
+      when "llvm.bitreverse.i32"  then {["i32"], "i32"}
+      when "llvm.bitreverse.i64"  then {["i64"], "i64"}
+      when "llvm.bitreverse.i128" then {["i128"], "i128"}
+      # Byte swap intrinsics
+      when "llvm.bswap.i16"  then {["i16"], "i16"}
+      when "llvm.bswap.i32"  then {["i32"], "i32"}
+      when "llvm.bswap.i64"  then {["i64"], "i64"}
+      when "llvm.bswap.i128" then {["i128"], "i128"}
+      # Population count (ctpop)
+      when "llvm.ctpop.i8"   then {["i8"], "i8"}
+      when "llvm.ctpop.i16"  then {["i16"], "i16"}
+      when "llvm.ctpop.i32"  then {["i32"], "i32"}
+      when "llvm.ctpop.i64"  then {["i64"], "i64"}
+      when "llvm.ctpop.i128" then {["i128"], "i128"}
+      # Count leading zeros
+      when "llvm.ctlz.i8"   then {["i8", "i1"], "i8"}
+      when "llvm.ctlz.i16"  then {["i16", "i1"], "i16"}
+      when "llvm.ctlz.i32"  then {["i32", "i1"], "i32"}
+      when "llvm.ctlz.i64"  then {["i64", "i1"], "i64"}
+      when "llvm.ctlz.i128" then {["i128", "i1"], "i128"}
+      # Count trailing zeros
+      when "llvm.cttz.i8"   then {["i8", "i1"], "i8"}
+      when "llvm.cttz.i16"  then {["i16", "i1"], "i16"}
+      when "llvm.cttz.i32"  then {["i32", "i1"], "i32"}
+      when "llvm.cttz.i64"  then {["i64", "i1"], "i64"}
+      when "llvm.cttz.i128" then {["i128", "i1"], "i128"}
+      # Funnel shift left/right
+      when "llvm.fshl.i8"   then {["i8", "i8", "i8"], "i8"}
+      when "llvm.fshl.i16"  then {["i16", "i16", "i16"], "i16"}
+      when "llvm.fshl.i32"  then {["i32", "i32", "i32"], "i32"}
+      when "llvm.fshl.i64"  then {["i64", "i64", "i64"], "i64"}
+      when "llvm.fshl.i128" then {["i128", "i128", "i128"], "i128"}
+      when "llvm.fshr.i8"   then {["i8", "i8", "i8"], "i8"}
+      when "llvm.fshr.i16"  then {["i16", "i16", "i16"], "i16"}
+      when "llvm.fshr.i32"  then {["i32", "i32", "i32"], "i32"}
+      when "llvm.fshr.i64"  then {["i64", "i64", "i64"], "i64"}
+      when "llvm.fshr.i128" then {["i128", "i128", "i128"], "i128"}
+      # Math intrinsics (float)
+      when "llvm.ceil.f32"  then {["float"], "float"}
+      when "llvm.ceil.f64"  then {["double"], "double"}
+      when "llvm.floor.f32" then {["float"], "float"}
+      when "llvm.floor.f64" then {["double"], "double"}
+      when "llvm.round.f32" then {["float"], "float"}
+      when "llvm.round.f64" then {["double"], "double"}
+      when "llvm.trunc.f32" then {["float"], "float"}
+      when "llvm.trunc.f64" then {["double"], "double"}
+      when "llvm.sqrt.f32"  then {["float"], "float"}
+      when "llvm.sqrt.f64"  then {["double"], "double"}
+      when "llvm.fabs.f32"  then {["float"], "float"}
+      when "llvm.fabs.f64"  then {["double"], "double"}
+      when "llvm.sin.f32"   then {["float"], "float"}
+      when "llvm.sin.f64"   then {["double"], "double"}
+      when "llvm.cos.f32"   then {["float"], "float"}
+      when "llvm.cos.f64"   then {["double"], "double"}
+      when "llvm.exp.f32"   then {["float"], "float"}
+      when "llvm.exp.f64"   then {["double"], "double"}
+      when "llvm.exp2.f32"  then {["float"], "float"}
+      when "llvm.exp2.f64"  then {["double"], "double"}
+      when "llvm.log.f32"   then {["float"], "float"}
+      when "llvm.log.f64"   then {["double"], "double"}
+      when "llvm.log2.f32"  then {["float"], "float"}
+      when "llvm.log2.f64"  then {["double"], "double"}
+      when "llvm.log10.f32" then {["float"], "float"}
+      when "llvm.log10.f64" then {["double"], "double"}
+      when "llvm.rint.f32"  then {["float"], "float"}
+      when "llvm.rint.f64"  then {["double"], "double"}
+      when "llvm.pow.f32"   then {["float", "float"], "float"}
+      when "llvm.pow.f64"   then {["double", "double"], "double"}
+      when "llvm.fma.f32"   then {["float", "float", "float"], "float"}
+      when "llvm.fma.f64"   then {["double", "double", "double"], "double"}
+      when "llvm.copysign.f32" then {["float", "float"], "float"}
+      when "llvm.copysign.f64" then {["double", "double"], "double"}
+      when "llvm.minnum.f32" then {["float", "float"], "float"}
+      when "llvm.minnum.f64" then {["double", "double"], "double"}
+      when "llvm.maxnum.f32" then {["float", "float"], "float"}
+      when "llvm.maxnum.f64" then {["double", "double"], "double"}
+      # Memory intrinsics (opaque pointer variant for LLVM 15+)
+      when "llvm.memcpy.p0.p0.i64"  then {["ptr", "ptr", "i64", "i1"], "void"}
+      when "llvm.memcpy.p0.p0.i32"  then {["ptr", "ptr", "i32", "i1"], "void"}
+      when "llvm.memmove.p0.p0.i64" then {["ptr", "ptr", "i64", "i1"], "void"}
+      when "llvm.memmove.p0.p0.i32" then {["ptr", "ptr", "i32", "i1"], "void"}
+      when "llvm.memset.p0.i64"     then {["ptr", "i8", "i64", "i1"], "void"}
+      when "llvm.memset.p0.i32"     then {["ptr", "i8", "i32", "i1"], "void"}
+      # VA intrinsics
+      when "llvm.va_start.p0" then {["ptr"], "void"}
+      when "llvm.va_end.p0"   then {["ptr"], "void"}
+      when "llvm.va_start"    then {["ptr"], "void"}
+      when "llvm.va_end"      then {["ptr"], "void"}
+      # Debug trap
+      when "llvm.debugtrap" then {[] of String, "void"}
+      # Read cycle counter
+      when "llvm.readcyclecounter" then {[] of String, "i64"}
+      else
+        nil
       end
     end
 
@@ -3628,6 +3909,31 @@ module Crystal::MIR
 
       # Mangle the extern name to be a valid LLVM identifier
       mangled_extern_name = @type_mapper.mangle_name(inst.extern_name)
+
+      # Special handling for LLVM intrinsics - need correct argument types
+      if mangled_extern_name.starts_with?("llvm.")
+        args, return_type = emit_llvm_intrinsic_call_args(inst, name, mangled_extern_name)
+        if return_type == "void"
+          emit "call void @#{mangled_extern_name}(#{args})"
+          @void_values << inst.id
+        else
+          emit "#{name} = call #{return_type} @#{mangled_extern_name}(#{args})"
+          actual_type = case return_type
+                        when "i1" then TypeRef::BOOL
+                        when "i8" then TypeRef::INT8
+                        when "i16" then TypeRef::INT16
+                        when "i32" then TypeRef::INT32
+                        when "i64" then TypeRef::INT64
+                        when "i128" then TypeRef::INT128
+                        when "float" then TypeRef::FLOAT32
+                        when "double" then TypeRef::FLOAT64
+                        when "ptr" then TypeRef::POINTER
+                        else inst.type
+                        end
+          @value_types[inst.id] = actual_type
+        end
+        return
+      end
 
       # If the mangled name doesn't match any defined function, try to find a match with namespace prefix
       # Search in MIR module's functions - but only exact matches or proper namespace matches
