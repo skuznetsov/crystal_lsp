@@ -965,7 +965,9 @@ module Crystal::HIR
                             # Predicate methods (ending in ?) return Bool
                             TypeRef::BOOL
                           else
-                            TypeRef::VOID
+                            # Try to infer return type from getter-style methods (single ivar access)
+                            inferred = infer_getter_return_type(member, ivars)
+                            inferred || TypeRef::VOID
                           end
             # Collect parameter types for mangling
             method_param_types = [] of TypeRef
@@ -1700,7 +1702,9 @@ module Crystal::HIR
                       # Predicate methods (ending in ?) return Bool
                       TypeRef::BOOL
                     else
-                      TypeRef::VOID
+                      # Try to infer return type from getter-style methods (single ivar access)
+                      inferred = infer_getter_return_type(node, class_info.ivars)
+                      inferred || TypeRef::VOID
                     end
 
       # Collect parameter types first for name mangling
@@ -1986,6 +1990,24 @@ module Crystal::HIR
 
       # Fallback to mangled name
       mangled_name
+    end
+
+    # Infer return type for getter-style methods (single ivar access in body)
+    # Returns the ivar type if the method body is just "@x", nil otherwise
+    private def infer_getter_return_type(node : CrystalV2::Compiler::Frontend::DefNode, ivars : Array(IVarInfo)) : TypeRef?
+      body = node.body
+      return nil unless body && body.size == 1
+
+      # Single expression in body - check if it's an ivar access
+      body_node = @arena[body[0]]
+      case body_node
+      when CrystalV2::Compiler::Frontend::InstanceVarNode
+        # Body is just "@x" - find the ivar type
+        ivar_name = String.new(body_node.name)
+        ivar_info = ivars.find { |iv| iv.name == ivar_name }
+        return ivar_info.type if ivar_info && ivar_info.type != TypeRef::VOID
+      end
+      nil
     end
 
     # Helper to get type size in bytes
@@ -3474,16 +3496,23 @@ module Crystal::HIR
       if ivar_type == TypeRef::VOID && (class_name = @current_class)
         # Try to find getter method: @bytesize -> bytesize()
         accessor_name = name.lchop('@')
-        getter_base = resolve_method_with_inheritance(class_name, accessor_name)
-        if getter_base
-          # Found a getter method - emit as method call instead of field get
-          self_id = emit_self(ctx)
-          full_name = mangle_function_name(getter_base, [] of TypeRef)
-          return_type = @function_types[full_name]? || TypeRef::VOID
-          call = Call.new(ctx.next_id, return_type, self_id, full_name, [] of ValueId)
-          ctx.emit(call)
-          ctx.register_type(call.id, return_type)
-          return call.id
+        # IMPORTANT: Don't call getter if we're inside that getter method!
+        # This prevents infinite recursion in `def x; @x; end`
+        current_method_name = @current_method
+        is_inside_getter = current_method_name && current_method_name == accessor_name
+
+        unless is_inside_getter
+          getter_base = resolve_method_with_inheritance(class_name, accessor_name)
+          if getter_base
+            # Found a getter method - emit as method call instead of field get
+            self_id = emit_self(ctx)
+            full_name = mangle_function_name(getter_base, [] of TypeRef)
+            return_type = @function_types[full_name]? || TypeRef::VOID
+            call = Call.new(ctx.next_id, return_type, self_id, full_name, [] of ValueId)
+            ctx.emit(call)
+            ctx.register_type(call.id, return_type)
+            return call.id
+          end
         end
       end
 
@@ -8168,42 +8197,46 @@ module Crystal::HIR
         return TypeRef::POINTER
       end
 
-      case name
-      when "Void", "Nil"    then TypeRef::VOID
-      when "Bool"           then TypeRef::BOOL
-      when "Int8"           then TypeRef::INT8
-      when "Int16"          then TypeRef::INT16
-      when "Int32"          then TypeRef::INT32
-      when "Int64"          then TypeRef::INT64
-      when "Int128"         then TypeRef::INT128
-      when "UInt8"          then TypeRef::UINT8
-      when "UInt16"         then TypeRef::UINT16
-      when "UInt32"         then TypeRef::UINT32
-      when "UInt64"         then TypeRef::UINT64
-      when "UInt128"        then TypeRef::UINT128
-      when "Float32"        then TypeRef::FLOAT32
-      when "Float64"        then TypeRef::FLOAT64
-      when "Char"           then TypeRef::CHAR
-      when "String"         then TypeRef::STRING
-      when "Symbol"         then TypeRef::SYMBOL
-      # Abstract/stdlib types that should be treated as pointers
-      when "IO"             then TypeRef::POINTER
-      when "Object"         then TypeRef::POINTER
-      when "Reference"      then TypeRef::POINTER
-      when "Exception"      then TypeRef::POINTER
-      when "Enumerable"     then TypeRef::POINTER
-      when "Indexable"      then TypeRef::POINTER
-      when "Comparable"     then TypeRef::POINTER
-      when "Iterable"       then TypeRef::POINTER
-      else
-        # Check if this is an enum type - enums are stored as Int32
-        if enum_info = @enum_info
-          if enum_info.has_key?(name)
-            return TypeRef::INT32
-          end
-        end
-        @module.intern_type(TypeDescriptor.new(TypeKind::Class, name))
-      end
+      result = case name
+               when "Void", "Nil"    then TypeRef::VOID
+               when "Bool"           then TypeRef::BOOL
+               when "Int8"           then TypeRef::INT8
+               when "Int16"          then TypeRef::INT16
+               when "Int32"          then TypeRef::INT32
+               when "Int64"          then TypeRef::INT64
+               when "Int128"         then TypeRef::INT128
+               when "UInt8"          then TypeRef::UINT8
+               when "UInt16"         then TypeRef::UINT16
+               when "UInt32"         then TypeRef::UINT32
+               when "UInt64"         then TypeRef::UINT64
+               when "UInt128"        then TypeRef::UINT128
+               when "Float32"        then TypeRef::FLOAT32
+               when "Float64"        then TypeRef::FLOAT64
+               when "Char"           then TypeRef::CHAR
+               when "String"         then TypeRef::STRING
+               when "Symbol"         then TypeRef::SYMBOL
+               # Abstract/stdlib types that should be treated as pointers
+               when "IO"             then TypeRef::POINTER
+               when "Object"         then TypeRef::POINTER
+               when "Reference"      then TypeRef::POINTER
+               when "Exception"      then TypeRef::POINTER
+               when "Enumerable"     then TypeRef::POINTER
+               when "Indexable"      then TypeRef::POINTER
+               when "Comparable"     then TypeRef::POINTER
+               when "Iterable"       then TypeRef::POINTER
+               else
+                 # Check if this is an enum type - enums are stored as Int32
+                 if enum_info = @enum_info
+                   if enum_info.has_key?(name)
+                     @type_cache[name] = TypeRef::INT32
+                     return TypeRef::INT32
+                   end
+                 end
+                 @module.intern_type(TypeDescriptor.new(TypeKind::Class, name))
+               end
+      # Cache the result to avoid VOID placeholder being returned on subsequent calls
+      @type_cache[name] = result
+      result
     end
 
     # Create a union type from "Type1 | Type2 | Type3" syntax
