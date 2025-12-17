@@ -1369,6 +1369,9 @@ module Crystal::MIR
       # Pre-pass: detect cross-block values that need alloca slots for dominance
       prepass_detect_cross_block_values(func)
 
+      # Pre-pass: infer binary op result types (for widening detection in phi nodes)
+      prepass_infer_binary_op_types(func)
+
       # Function signature
       # Note: void is not valid for parameters, substitute with ptr
       param_types = func.params.map do |p|
@@ -1866,6 +1869,87 @@ module Crystal::MIR
             end
           end
         end
+      end
+    end
+
+    # Pre-pass: Infer binary operation result types considering type widening
+    # This is needed for phi nodes that reference binary ops in later blocks
+    private def prepass_infer_binary_op_types(func : Function)
+      # Multiple passes to handle dependencies between instructions
+      # Iterate until no changes occur (fixed point)
+      3.times do |pass|
+        changed = false
+        func.blocks.each do |block|
+          block.instructions.each do |inst|
+            case inst
+            when BinaryOp
+              # Check if both operands have known types and compute widened type
+              left_type = @value_types[inst.left]? || inst.type
+              right_type = @value_types[inst.right]? || inst.type
+
+              # IMPORTANT: Match emit_binary_op behavior - void types default to INT64
+              # This ensures prepass type matches runtime type
+              effective_type = inst.type
+              if @type_mapper.llvm_type(effective_type) == "void"
+                effective_type = TypeRef::INT64
+              end
+              if @type_mapper.llvm_type(left_type) == "void"
+                left_type = TypeRef::INT64
+              end
+              if @type_mapper.llvm_type(right_type) == "void"
+                right_type = TypeRef::INT64
+              end
+
+              # The MIR BinaryOp type is stored in inst.type
+              # But we need to track when widening will occur
+
+              left_llvm = @type_mapper.llvm_type(left_type)
+              right_llvm = @type_mapper.llvm_type(right_type)
+              result_llvm = @type_mapper.llvm_type(effective_type)
+
+              # Check for int type size mismatch that will cause widening
+              if left_llvm.starts_with?("i") && !left_llvm.includes?(".") &&
+                 right_llvm.starts_with?("i") && !right_llvm.includes?(".")
+                left_bits = left_llvm[1..].to_i? || 32
+                right_bits = right_llvm[1..].to_i? || 32
+                max_bits = {left_bits, right_bits}.max
+
+                # If widening will occur, record the widened type
+                declared_bits = result_llvm.starts_with?("i") ? (result_llvm[1..].to_i? || 32) : 32
+                if max_bits > declared_bits
+                  # Will be widened to max_bits
+                  actual_type = case max_bits
+                                when 8 then TypeRef::INT8
+                                when 16 then TypeRef::INT16
+                                when 32 then TypeRef::INT32
+                                when 64 then TypeRef::INT64
+                                else TypeRef::INT64
+                                end
+                  if @value_types[inst.id]? != actual_type
+                    @value_types[inst.id] = actual_type
+                    changed = true
+                  end
+                elsif @value_types[inst.id]? != effective_type
+                  # No widening, use effective type (void→INT64)
+                  # Always update since prepass_collect_constants may have set wrong type
+                  @value_types[inst.id] = effective_type
+                  changed = true
+                end
+              elsif @value_types[inst.id]? != effective_type
+                # Non-int binary op, use effective type (void→INT64)
+                @value_types[inst.id] = effective_type
+                changed = true
+              end
+            else
+              # For non-BinaryOp, record declared type if not already set
+              if !@value_types.has_key?(inst.id)
+                @value_types[inst.id] = inst.type
+                changed = true
+              end
+            end
+          end
+        end
+        break unless changed
       end
     end
 
@@ -3157,6 +3241,54 @@ module Crystal::MIR
         end
       end
 
+      # Check if int phi (i8, i16, i32, i64) has type-mismatched incoming values
+      # This happens when binary ops extend smaller types to larger ones in loops
+      if is_int_type
+        phi_bits = phi_type[1..-1].to_i? || 32
+        has_mismatched_int_incoming = inst.incoming.any? do |(block, val)|
+          val_type = @value_types[val]?
+          next false unless val_type
+          val_type_str = @type_mapper.llvm_type(val_type)
+          next false unless val_type_str.starts_with?("i") && !val_type_str.includes?(".union")
+          val_bits = val_type_str[1..-1].to_i? || 32
+          val_bits != phi_bits
+        end
+        if has_mismatched_int_incoming
+          incoming = inst.incoming.map do |(block, val)|
+            val_type = @value_types[val]?
+            val_type_str = val_type ? @type_mapper.llvm_type(val_type) : nil
+            if val_type_str && val_type_str.starts_with?("i") && !val_type_str.includes?(".union")
+              val_bits = val_type_str[1..-1].to_i? || 32
+              if val_bits != phi_bits
+                # Type size mismatch - can't truncate/extend in phi, use 0 as default
+                "[0, %#{@block_names[block]}]"
+              else
+                ref = value_ref(val)
+                ref = "0" if ref == "null"
+                "[#{ref}, %#{@block_names[block]}]"
+              end
+            elsif val_type_str.nil? || val_type_str == "void"
+              "[0, %#{@block_names[block]}]"
+            else
+              # Check if value was emitted
+              val_emitted = @value_names.has_key?(val)
+              val_is_const = @constant_values.has_key?(val)
+              if !val_emitted && !val_is_const
+                "[0, %#{@block_names[block]}]"
+              else
+                ref = value_ref(val)
+                ref = "0" if ref == "null"
+                "[#{ref}, %#{@block_names[block]}]"
+              end
+            end
+          end
+          emit "#{name} = phi #{phi_type} #{incoming.join(", ")}"
+          @value_types[inst.id] = inst.type
+          @in_phi_mode = false
+          return
+        end
+      end
+
       # Check if ptr phi has incompatible incoming (union, int, float) - use null for them
       # Can't extract/convert in current block for phi, so use null (lossy but compiles)
       if is_ptr_type
@@ -3997,6 +4129,30 @@ module Crystal::MIR
         returns_ptr = ptr_returning_methods.any? { |m| matches_extern.call(m, mangled_extern_name) }
         # Check for patterns like ClassName___MethodName (accessor methods)
         returns_ptr = true if mangled_extern_name.includes?("____") || mangled_extern_name.includes?("_____")
+
+        # Check for arithmetic operators: ___ = *, __ = +, ____ = - (when at start of method name)
+        # These return the type of the first argument (receiver)
+        is_mul_op = mangled_extern_name.starts_with?("___") && !mangled_extern_name.starts_with?("____")
+        is_add_op = mangled_extern_name.starts_with?("__") && !mangled_extern_name.starts_with?("___")
+        is_arithmetic_op = is_mul_op || is_add_op
+        if is_arithmetic_op && inst.args.size > 0
+          first_arg_type = @value_types[inst.args[0]]?
+          if first_arg_type
+            first_arg_llvm = @type_mapper.llvm_type(first_arg_type)
+            if first_arg_llvm.starts_with?("i") && !first_arg_llvm.includes?(".")
+              return_type = first_arg_llvm
+              @value_types[inst.id] = first_arg_type
+            end
+          end
+        end
+
+        # Check for type conversion methods (to_u64, to_i64, etc.) - handles trailing underscores from method names
+        is_u64_conversion = mangled_extern_name.includes?("to_u64") || mangled_extern_name.includes?("to_UInt64")
+        is_i64_conversion = mangled_extern_name.includes?("to_i64") || mangled_extern_name.includes?("to_Int64")
+        if is_u64_conversion || is_i64_conversion
+          return_type = "i64"
+          @value_types[inst.id] = TypeRef::INT64
+        end
 
         # Check for i64-returning methods
         returns_i64 = i64_returning_methods.any? { |m| matches_extern.call(m, mangled_extern_name) }
