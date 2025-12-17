@@ -941,6 +941,13 @@ module Crystal::MIR
       emit_raw "define void @__crystal_v2_channel_close(ptr %chan) {\n"
       emit_raw "  ret void\n"
       emit_raw "}\n\n"
+
+      # Entry point: main() calls __crystal_main()
+      emit_raw "; Program entry point\n"
+      emit_raw "define i32 @main(i32 %argc, ptr %argv) {\n"
+      emit_raw "  call void @__crystal_main(i32 %argc, ptr %argv)\n"
+      emit_raw "  ret i32 0\n"
+      emit_raw "}\n\n"
     end
 
     # Union debug helper function definitions - stubs for bootstrap
