@@ -2096,8 +2096,10 @@ module Crystal::MIR
         emit "#{name} = load #{type}, ptr %#{base_name}.ptr"
         @value_types[inst.id] = inst.type
       elsif type == "double" || type == "float"
-        # Float/double constants use fadd
-        emit "#{name} = fadd #{type} 0.0, #{value}"
+        # Float/double constants use fadd - ensure value is proper float literal
+        float_value = value == "0" ? "0.0" : value
+        float_value = "#{float_value}.0" if float_value.matches?(/^\d+$/)  # Add .0 if just digits
+        emit "#{name} = fadd #{type} 0.0, #{float_value}"
         @value_types[inst.id] = inst.type
       else
         emit "#{name} = add #{type} 0, #{value}"
@@ -2258,6 +2260,12 @@ module Crystal::MIR
       # For pointer types, use "null" instead of "0"
       if val_type_str == "ptr" && val == "0"
         val = "null"
+      end
+
+      # For float/double types, ensure values are proper float literals
+      if (val_type_str == "float" || val_type_str == "double") && !val.starts_with?("%")
+        # Convert integer literals to float literals (e.g., "0" -> "0.0", "3" -> "3.0")
+        val = "#{val}.0" if val.matches?(/^-?\d+$/)
       end
 
       # TSan instrumentation: report write before store
