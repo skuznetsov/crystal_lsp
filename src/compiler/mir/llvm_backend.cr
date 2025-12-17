@@ -142,32 +142,57 @@ module Crystal::MIR
     end
 
     private def compute_llvm_type(type_ref : TypeRef) : String
+      # IMPORTANT: Check primitive TypeRefs FIRST before registry lookup
+      # This prevents primitive types like Float32 from being treated as structs
+      # if they happen to be registered in the type registry as class types
+      case type_ref
+      when TypeRef::VOID    then return "void"
+      when TypeRef::NIL     then return "void"
+      when TypeRef::BOOL    then return "i1"
+      when TypeRef::INT8    then return "i8"
+      when TypeRef::INT16   then return "i16"
+      when TypeRef::INT32   then return "i32"
+      when TypeRef::INT64   then return "i64"
+      when TypeRef::INT128  then return "i128"
+      when TypeRef::UINT8   then return "i8"
+      when TypeRef::UINT16  then return "i16"
+      when TypeRef::UINT32  then return "i32"
+      when TypeRef::UINT64  then return "i64"
+      when TypeRef::UINT128 then return "i128"
+      when TypeRef::FLOAT32 then return "float"
+      when TypeRef::FLOAT64 then return "double"
+      when TypeRef::CHAR    then return "i32"
+      when TypeRef::STRING  then return "ptr"
+      when TypeRef::SYMBOL  then return "i32"
+      when TypeRef::POINTER then return "ptr"
+      end
+
+      # For non-primitive types, consult the registry
       if type = @type_registry.get(type_ref)
+        # Check if it's a primitive type by NAME (not just TypeRef id)
+        # This handles cases where Float32 etc. are registered as class types
+        # but should still map to LLVM primitives
+        case type.name
+        when "Void", "Nil" then return "void"
+        when "Bool"        then return "i1"
+        when "Int8"        then return "i8"
+        when "Int16"       then return "i16"
+        when "Int32"       then return "i32"
+        when "Int64"       then return "i64"
+        when "Int128"      then return "i128"
+        when "UInt8"       then return "i8"
+        when "UInt16"      then return "i16"
+        when "UInt32"      then return "i32"
+        when "UInt64"      then return "i64"
+        when "UInt128"     then return "i128"
+        when "Float32"     then return "float"
+        when "Float64"     then return "double"
+        when "Char"        then return "i32"
+        when "Symbol"      then return "i32"
+        end
         compute_llvm_type_for_type(type)
       else
-        # Primitive type based on TypeRef ID
-        case type_ref
-        when TypeRef::VOID    then "void"
-        when TypeRef::NIL     then "void"
-        when TypeRef::BOOL    then "i1"
-        when TypeRef::INT8    then "i8"
-        when TypeRef::INT16   then "i16"
-        when TypeRef::INT32   then "i32"
-        when TypeRef::INT64   then "i64"
-        when TypeRef::INT128  then "i128"
-        when TypeRef::UINT8   then "i8"
-        when TypeRef::UINT16  then "i16"
-        when TypeRef::UINT32  then "i32"
-        when TypeRef::UINT64  then "i64"
-        when TypeRef::UINT128 then "i128"
-        when TypeRef::FLOAT32 then "float"
-        when TypeRef::FLOAT64 then "double"
-        when TypeRef::CHAR    then "i32"
-        when TypeRef::STRING  then "ptr"
-        when TypeRef::SYMBOL  then "i32"
-        when TypeRef::POINTER then "ptr"
-        else                       "ptr"  # Unknown → opaque pointer
-        end
+        "ptr"  # Unknown → opaque pointer
       end
     end
 
@@ -645,6 +670,9 @@ module Crystal::MIR
       emit_raw "declare void @free(ptr)\n"
       emit_raw "declare i32 @printf(ptr, ...)\n"
       emit_raw "declare i32 @puts(ptr)\n"
+      emit_raw "declare ptr @gets(ptr)\n"
+      emit_raw "declare ptr @fgets(ptr, i32, ptr)\n"
+      emit_raw "declare ptr @fputs(ptr, ptr)\n"
       emit_raw "declare void @exit(i32)\n"
       emit_raw "\n"
 
@@ -2219,6 +2247,15 @@ module Crystal::MIR
           right = "0.0"
           right_type_str = float_type
         end
+        # Handle "null" literals in float operations - convert to 0.0
+        if left == "null"
+          left = "0.0"
+          operand_type_str = float_type
+        end
+        if right == "null"
+          right = "0.0"
+          right_type_str = float_type
+        end
         # Convert integer literals to float format for float operations
         # Integer literals are numeric strings without "%" prefix and without "."
         if !left.starts_with?("%") && left =~ /^-?\d+$/ && !left.includes?(".")
@@ -2438,8 +2475,19 @@ module Crystal::MIR
         @value_types[inst.id] = TypeRef::BOOL
       else
         # Ensure operands match result_type for arithmetic ops
-        # If result_type is larger integer, extend operands
+        # If operand is larger than result_type, use operand type instead (don't truncate)
         if result_type.starts_with?("i") && result_type != "i1"
+          result_bits = result_type[1..].to_i? || 32
+          operand_bits = operand_type_str.starts_with?("i") ? (operand_type_str[1..].to_i? || 32) : 0
+          right_bits_val = right_type_str.starts_with?("i") ? (right_type_str[1..].to_i? || 32) : 0
+
+          # If operands are larger than result, use the larger operand type
+          max_operand_bits = {operand_bits, right_bits_val}.max
+          if max_operand_bits > result_bits
+            result_type = "i#{max_operand_bits}"
+          end
+
+          # Extend smaller operands to result_type
           result_bits = result_type[1..].to_i? || 32
           if operand_type_str.starts_with?("i") && operand_type_str != result_type
             operand_bits = operand_type_str[1..].to_i? || 32
@@ -2449,8 +2497,8 @@ module Crystal::MIR
             end
           end
           if right_type_str.starts_with?("i") && right_type_str != result_type
-            right_bits = right_type_str[1..].to_i? || 32
-            if right_bits < result_bits
+            right_bits_check = right_type_str[1..].to_i? || 32
+            if right_bits_check < result_bits
               emit "%binop#{inst.id}.right_to_result = sext #{right_type_str} #{right} to #{result_type}"
               right = "%binop#{inst.id}.right_to_result"
             end
@@ -2505,6 +2553,10 @@ module Crystal::MIR
           emit "%#{base_name}.ptr_to_int = ptrtoint ptr #{operand} to i64"
           emit "#{name} = sub i64 0, %#{base_name}.ptr_to_int"
           @value_types[inst.id] = TypeRef::INT64  # Negated ptr becomes i64
+        elsif operand_llvm_type == "float" || operand_llvm_type == "double"
+          # Float negation uses fsub with 0.0
+          emit "#{name} = fsub #{operand_llvm_type} 0.0, #{operand}"
+          @value_types[inst.id] = operand_type
         else
           # Handle type mismatch: if result type is larger than operand type, extend operand
           actual_type = type
@@ -4608,6 +4660,21 @@ module Crystal::MIR
               @cond_counter += 1
               emit "%ret_ptr_to_float.#{c} = load #{@current_return_type}, ptr #{val_ref}"
               emit "ret #{@current_return_type} %ret_ptr_to_float.#{c}"
+            elsif @current_return_type == "ptr" && val_llvm_type == "double"
+              # Double to ptr conversion - bitcast to i64 then inttoptr
+              # This happens with abstract numeric types like Int that return `: self`
+              c = @cond_counter
+              @cond_counter += 1
+              emit "%ret_float_to_ptr.#{c}.bits = bitcast double #{val_ref} to i64"
+              emit "%ret_float_to_ptr.#{c} = inttoptr i64 %ret_float_to_ptr.#{c}.bits to ptr"
+              emit "ret ptr %ret_float_to_ptr.#{c}"
+            elsif @current_return_type == "ptr" && val_llvm_type == "float"
+              # Float to ptr conversion - bitcast to i32 then inttoptr
+              c = @cond_counter
+              @cond_counter += 1
+              emit "%ret_float_to_ptr.#{c}.bits = bitcast float #{val_ref} to i32"
+              emit "%ret_float_to_ptr.#{c} = inttoptr i32 %ret_float_to_ptr.#{c}.bits to ptr"
+              emit "ret ptr %ret_float_to_ptr.#{c}"
             elsif @current_return_type == "float" && val_llvm_type == "double"
               # Double to float conversion (truncate)
               c = @cond_counter

@@ -1123,11 +1123,33 @@ module Crystal::HIR
       end
 
       # Create class/struct type (reuse existing type_ref for reopened classes)
+      # IMPORTANT: Use well-known TypeRefs for primitive types, not intern_type
       type_kind = is_struct ? TypeKind::Struct : TypeKind::Class
       type_ref = if existing_info
                    existing_info.type_ref
                  else
-                   @module.intern_type(TypeDescriptor.new(type_kind, class_name))
+                   # Check for primitive types - use well-known TypeRefs
+                   case class_name
+                   when "Bool"    then TypeRef::BOOL
+                   when "Int8"    then TypeRef::INT8
+                   when "Int16"   then TypeRef::INT16
+                   when "Int32"   then TypeRef::INT32
+                   when "Int64"   then TypeRef::INT64
+                   when "Int128"  then TypeRef::INT128
+                   when "UInt8"   then TypeRef::UINT8
+                   when "UInt16"  then TypeRef::UINT16
+                   when "UInt32"  then TypeRef::UINT32
+                   when "UInt64"  then TypeRef::UINT64
+                   when "UInt128" then TypeRef::UINT128
+                   when "Float32" then TypeRef::FLOAT32
+                   when "Float64" then TypeRef::FLOAT64
+                   when "Char"    then TypeRef::CHAR
+                   when "String"  then TypeRef::STRING
+                   when "Symbol"  then TypeRef::SYMBOL
+                   when "Nil"     then TypeRef::NIL
+                   else
+                     @module.intern_type(TypeDescriptor.new(type_kind, class_name))
+                   end
                  end
       @class_info[class_name] = ClassInfo.new(class_name, type_ref, ivars, class_vars, offset, is_struct, parent_name)
 
@@ -1516,6 +1538,15 @@ module Crystal::HIR
         return
       end
 
+      # Skip primitive number types - they don't need allocators
+      # (their .new methods convert from other types, not allocate)
+      case class_name
+      when "Int8", "Int16", "Int32", "Int64", "Int128",
+           "UInt8", "UInt16", "UInt32", "UInt64", "UInt128",
+           "Float32", "Float64", "Bool", "Char"
+        return
+      end
+
       # Skip if allocator already generated (for reopened classes)
       return if @generated_allocators.includes?(class_name)
       @generated_allocators.add(class_name)
@@ -1697,7 +1728,13 @@ module Crystal::HIR
       @current_method = method_name
 
       return_type = if rt = node.return_type
-                      type_ref_for_name(String.new(rt))
+                      rt_name = String.new(rt)
+                      # "self" in return type means "the current class type"
+                      if rt_name == "self"
+                        class_info.type_ref
+                      else
+                        type_ref_for_name(rt_name)
+                      end
                     elsif method_name.ends_with?("?")
                       # Predicate methods (ending in ?) return Bool
                       TypeRef::BOOL

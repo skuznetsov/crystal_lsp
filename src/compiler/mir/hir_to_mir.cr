@@ -145,6 +145,15 @@ module Crystal
     # This allows LLVM backend to generate proper struct types
     def register_class_types(class_infos : Hash(String, Crystal::HIR::ClassInfo))
       class_infos.each do |class_name, info|
+        # Skip primitive types - they should not be registered as struct types
+        # (their LLVM types are handled by the TypeRef case statement)
+        case class_name
+        when "Int8", "Int16", "Int32", "Int64", "Int128",
+             "UInt8", "UInt16", "UInt32", "UInt64", "UInt128",
+             "Float32", "Float64", "Bool", "Char", "Nil", "Void"
+          next
+        end
+
         # Convert HIR TypeRef to MIR TypeRef
         mir_type_ref = convert_type(info.type_ref)
 
