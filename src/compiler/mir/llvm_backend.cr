@@ -4031,10 +4031,21 @@ module Crystal::MIR
         end  # end else for prepass_type check
       end
 
+      # Known varargs functions need explicit function signature in call
+      varargs_functions = Set{"printf", "fprintf", "sprintf", "snprintf", "scanf", "sscanf", "fscanf",
+                              "vprintf", "vfprintf", "vsprintf", "vsnprintf", "vscanf", "vsscanf", "vfscanf",
+                              "wprintf", "swprintf", "wscanf", "swscanf",
+                              "execl", "execle", "execlp", "fcntl", "ioctl", "open"}
+      is_varargs = varargs_functions.includes?(mangled_extern_name)
+
       if return_type == "void"
         emit "call void @#{mangled_extern_name}(#{args})"
         # Mark as void so value_ref returns a safe default for downstream uses
         @void_values << inst.id
+      elsif is_varargs
+        # Varargs functions need explicit function signature in call instruction
+        # e.g., call i32 (ptr, ...) @printf(ptr @fmt, i32 %val)
+        emit "#{name} = call #{return_type} (ptr, ...) @#{mangled_extern_name}(#{args})"
       else
         emit "#{name} = call #{return_type} @#{mangled_extern_name}(#{args})"
         # Track type for downstream use (if not already set by pattern matching above)
