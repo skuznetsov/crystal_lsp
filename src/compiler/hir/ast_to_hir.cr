@@ -4018,19 +4018,32 @@ module Crystal::HIR
     # ═══════════════════════════════════════════════════════════════════════
 
     private def lower_if(ctx : LoweringContext, node : CrystalV2::Compiler::Frontend::IfNode) : ValueId
-      cond_id = lower_expr(ctx, node.condition)
-
-      then_block = ctx.create_block
-      else_block = ctx.create_block
       merge_block = ctx.create_block
 
       # Save locals state before branching
       pre_branch_locals = ctx.save_locals
 
-      # Branch on condition
-      ctx.terminate(Branch.new(cond_id, then_block, else_block))
+      # Collect all branches: (exit_block, value, locals, flows_to_merge)
+      branches = [] of {BlockId, ValueId, Hash(String, ValueId), Bool}
 
-      # Then branch
+      # Build the chain: if -> elsif1 -> elsif2 -> ... -> else
+      # Each test that fails jumps to the next test block (or final else block)
+      elsifs = node.elsifs
+      has_elsifs = elsifs && !elsifs.empty?
+
+      # Create blocks for the chain
+      then_block = ctx.create_block
+      next_test_block = if has_elsifs
+                          ctx.create_block  # First elsif test
+                        else
+                          ctx.create_block  # Direct else block
+                        end
+
+      # Lower main condition and branch
+      cond_id = lower_expr(ctx, node.condition)
+      ctx.terminate(Branch.new(cond_id, then_block, next_test_block))
+
+      # Process "then" branch
       ctx.current_block = then_block
       ctx.push_scope(ScopeKind::Block)
       then_value = lower_body(ctx, node.then_body)
@@ -4038,20 +4051,58 @@ module Crystal::HIR
       then_locals = ctx.save_locals
       ctx.pop_scope
 
-      # Only jump if block isn't already terminated (e.g., by return or raise)
-      # Check if block ends with a noreturn instruction (Raise, Return, etc.)
       then_block_data = ctx.get_block(ctx.current_block)
       then_has_noreturn = then_block_data.instructions.any? { |inst| inst.is_a?(Raise) || inst.is_a?(Return) }
       then_flows_to_merge = then_block_data.terminator.is_a?(Unreachable) && !then_has_noreturn
       if then_flows_to_merge
         ctx.terminate(Jump.new(merge_block))
       end
+      branches << {then_exit_block, then_value, then_locals, then_flows_to_merge}
 
-      # Restore locals for else branch (else branch sees pre-branch state)
+      # Process elsif branches
+      if elsifs && !elsifs.empty?
+        elsifs.each_with_index do |elsif_branch, idx|
+          # Restore locals for this test (each elsif sees pre-branch state)
+          ctx.restore_locals(pre_branch_locals)
+
+          # We're now in the test block for this elsif
+          ctx.current_block = next_test_block
+
+          # Lower elsif condition
+          elsif_cond_id = lower_expr(ctx, elsif_branch.condition)
+
+          # Create body block and next block
+          elsif_body_block = ctx.create_block
+          is_last_elsif = (idx == elsifs.size - 1)
+          next_test_block = if is_last_elsif
+                              ctx.create_block  # Final else block
+                            else
+                              ctx.create_block  # Next elsif test
+                            end
+
+          ctx.terminate(Branch.new(elsif_cond_id, elsif_body_block, next_test_block))
+
+          # Process elsif body
+          ctx.current_block = elsif_body_block
+          ctx.push_scope(ScopeKind::Block)
+          elsif_value = lower_body(ctx, elsif_branch.body)
+          elsif_exit_block = ctx.current_block
+          elsif_locals = ctx.save_locals
+          ctx.pop_scope
+
+          elsif_block_data = ctx.get_block(ctx.current_block)
+          elsif_has_noreturn = elsif_block_data.instructions.any? { |inst| inst.is_a?(Raise) || inst.is_a?(Return) }
+          elsif_flows_to_merge = elsif_block_data.terminator.is_a?(Unreachable) && !elsif_has_noreturn
+          if elsif_flows_to_merge
+            ctx.terminate(Jump.new(merge_block))
+          end
+          branches << {elsif_exit_block, elsif_value, elsif_locals, elsif_flows_to_merge}
+        end
+      end
+
+      # Process final else branch
       ctx.restore_locals(pre_branch_locals)
-
-      # Else branch
-      ctx.current_block = else_block
+      ctx.current_block = next_test_block
       ctx.push_scope(ScopeKind::Block)
       else_value = if else_body = node.else_body
                      if else_body.empty?
@@ -4071,106 +4122,50 @@ module Crystal::HIR
       else_locals = ctx.save_locals
       ctx.pop_scope
 
-      # Check if else block has noreturn instruction
       else_block_data = ctx.get_block(ctx.current_block)
       else_has_noreturn = else_block_data.instructions.any? { |inst| inst.is_a?(Raise) || inst.is_a?(Return) }
       else_flows_to_merge = else_block_data.terminator.is_a?(Unreachable) && !else_has_noreturn
       if else_flows_to_merge
         ctx.terminate(Jump.new(merge_block))
       end
+      branches << {else_exit_block, else_value, else_locals, else_flows_to_merge}
 
-      # Merge block with phi for the if expression value
+      # Merge block
       ctx.current_block = merge_block
 
-      # Only create phi if at least one branch flows to merge
-      if then_flows_to_merge || else_flows_to_merge
-        if then_flows_to_merge && else_flows_to_merge
-          # Both branches flow to merge - need phi (unless void type)
-          then_type = ctx.type_of(then_value)
-          else_type = ctx.type_of(else_value)
+      # Count flowing branches
+      flowing_branches = branches.select { |_, _, _, flows| flows }
 
-          # Determine phi type - handle type unification
-          phi_type : TypeRef
-          actual_then_value = then_value
-          actual_else_value = else_value
+      if flowing_branches.empty?
+        # All branches return/raise - emit nil placeholder
+        nil_lit = Literal.new(ctx.next_id, TypeRef::NIL, nil)
+        ctx.emit(nil_lit)
+        return nil_lit.id
+      elsif flowing_branches.size == 1
+        # Only one branch flows - use its value and locals
+        exit_block, value, locals, _ = flowing_branches.first
+        locals.each { |name, val| ctx.register_local(name, val) }
+        return value
+      else
+        # Multiple branches flow - create phi
+        # Use first flowing branch's type as phi type (simplified)
+        first_value = flowing_branches.first[1]
+        phi_type = ctx.type_of(first_value)
 
-          if then_type == else_type
-            # Same types - simple case
-            phi_type = then_type
-          elsif else_type == TypeRef::NIL && then_type != TypeRef::VOID
-            # Else is nil, then is concrete type -> create union T | Nil
-            phi_type = create_union_type_for_nullable(then_type)
-
-            # Wrap then value in union (variant 0 = concrete type)
-            then_wrap = UnionWrap.new(ctx.next_id, phi_type, then_value, 0)
-            ctx.emit_to_block(then_exit_block, then_wrap)
-            ctx.register_type(then_wrap.id, phi_type)
-            actual_then_value = then_wrap.id
-
-            # Wrap nil in union (variant 1 = Nil)
-            nil_lit = Literal.new(ctx.next_id, TypeRef::NIL, nil)
-            ctx.emit_to_block(else_exit_block, nil_lit)
-            nil_wrap = UnionWrap.new(ctx.next_id, phi_type, nil_lit.id, 1)
-            ctx.emit_to_block(else_exit_block, nil_wrap)
-            ctx.register_type(nil_wrap.id, phi_type)
-            actual_else_value = nil_wrap.id
-          elsif then_type == TypeRef::NIL && else_type != TypeRef::VOID
-            # Then is nil, else is concrete type -> create union T | Nil
-            phi_type = create_union_type_for_nullable(else_type)
-
-            # Wrap nil in union (variant 1 = Nil)
-            nil_lit = Literal.new(ctx.next_id, TypeRef::NIL, nil)
-            ctx.emit_to_block(then_exit_block, nil_lit)
-            nil_wrap = UnionWrap.new(ctx.next_id, phi_type, nil_lit.id, 1)
-            ctx.emit_to_block(then_exit_block, nil_wrap)
-            ctx.register_type(nil_wrap.id, phi_type)
-            actual_then_value = nil_wrap.id
-
-            # Wrap else value in union (variant 0 = concrete type)
-            else_wrap = UnionWrap.new(ctx.next_id, phi_type, else_value, 0)
-            ctx.emit_to_block(else_exit_block, else_wrap)
-            ctx.register_type(else_wrap.id, phi_type)
-            actual_else_value = else_wrap.id
-          else
-            # Different non-nil types - just use then_type for now
-            # TODO: proper type unification
-            phi_type = then_type
-          end
-
-          # Don't create phi for void types - LLVM doesn't allow phi void
-          if phi_type == TypeRef::VOID || phi_type == TypeRef::NIL
-            merge_branch_locals(ctx, pre_branch_locals, then_locals, else_locals,
-                                then_exit_block, else_exit_block)
-            # Return nil literal as the result of void if-expression
-            nil_lit = Literal.new(ctx.next_id, TypeRef::NIL, nil)
-            ctx.emit(nil_lit)
-            return nil_lit.id
-          end
-
-          phi = Phi.new(ctx.next_id, phi_type)
-          phi.add_incoming(then_exit_block, actual_then_value)
-          phi.add_incoming(else_exit_block, actual_else_value)
-          ctx.emit(phi)
-
-          # Merge locals from both branches
-          merge_branch_locals(ctx, pre_branch_locals, then_locals, else_locals,
-                              then_exit_block, else_exit_block)
-          return phi.id
-        elsif then_flows_to_merge
-          # Only then flows - use then_value, then_locals
-          then_locals.each { |name, val| ctx.register_local(name, val) }
-          return then_value
-        else
-          # Only else flows - use else_value, else_locals
-          else_locals.each { |name, val| ctx.register_local(name, val) }
-          return else_value
+        # Don't create phi for void/nil types
+        if phi_type == TypeRef::VOID || phi_type == TypeRef::NIL
+          nil_lit = Literal.new(ctx.next_id, TypeRef::NIL, nil)
+          ctx.emit(nil_lit)
+          return nil_lit.id
         end
-      end
 
-      # Neither branch flows to merge (both return) - emit nil as placeholder
-      nil_lit = Literal.new(ctx.next_id, TypeRef::NIL, nil)
-      ctx.emit(nil_lit)
-      nil_lit.id
+        phi = Phi.new(ctx.next_id, phi_type)
+        flowing_branches.each do |exit_block, value, _, _|
+          phi.add_incoming(exit_block, value)
+        end
+        ctx.emit(phi)
+        return phi.id
+      end
     end
 
     # Merge locals from two branches, creating phi nodes where needed
