@@ -3331,8 +3331,12 @@ module Crystal::MIR
           STDERR.puts "[DEBUG-PHI-NULL] func=#{@current_func_name} inst.id=#{inst.id} block=#{block} val=#{val} const_val=#{const_val} val_emitted=#{val_emitted} val_is_const=#{val_is_const} is_void=#{is_void_value}"
         end
 
-        if (!val_emitted || is_void_value) && !val_is_const
-          # Use safe default based on phi type
+        # Check if this is a forward reference (value defined but not yet emitted)
+        # Prepass collects all types, so if value has a type, it's a valid forward reference
+        is_forward_ref = !val_emitted && !val_is_const && @value_types.has_key?(val)
+
+        if (!val_emitted || is_void_value) && !val_is_const && !is_forward_ref
+          # Truly undefined value - use safe default based on phi type
           if is_union_type
             "[zeroinitializer, %#{@block_names[block]}]"
           elsif is_ptr_type
@@ -3344,6 +3348,9 @@ module Crystal::MIR
           else
             "[null, %#{@block_names[block]}]"
           end
+        elsif is_forward_ref
+          # Forward reference from loop back-edge - use %r#{val} which will be defined later
+          "[%r#{val}, %#{@block_names[block]}]"
         elsif const_val == "null" && is_union_type
           # null constant in union phi - use zeroinitializer
           "[zeroinitializer, %#{@block_names[block]}]"
@@ -3374,13 +3381,13 @@ module Crystal::MIR
             # We can't emit trunc/ext in phi, would need to be in source block
             "[0, %#{@block_names[block]}]"
           elsif (is_int_type || is_bool_type) && val_type_str.nil?
-            # Unknown type flowing into int/bool phi - check if value_ref looks like ptr
+            # Unknown type flowing into int/bool phi
             ref = value_ref(val)
-            if ref == "null" || ref.starts_with?("%r")
-              # Forward-referenced value - can't determine type, use 0 as safe default
-              # This handles MIR bugs where phi references values from wrong control paths
+            if ref == "null"
+              # Null value can't flow into int/bool phi
               "[0, %#{@block_names[block]}]"
             else
+              # Allow %r* forward references - these are valid in phi nodes for loop back-edges
               "[#{ref}, %#{@block_names[block]}]"
             end
           elsif is_ptr_type && val_type_str && val_type_str.starts_with?("i") && !val_type_str.includes?(".union")
@@ -5139,15 +5146,10 @@ module Crystal::MIR
           if name = @value_names[id]?
             return "%#{name}"
           end
-          # Value not emitted - return safe default for this phi incoming
-          val_type = @value_types[id]?
-          llvm_type = val_type ? @type_mapper.llvm_type(val_type) : "i64"
-          case llvm_type
-          when "ptr" then return "null"
-          when "float", "double" then return "0.0"
-          when .includes?(".union") then return "zeroinitializer"
-          else return "0"
-          end
+          # Value not emitted yet (forward reference from loop back-edge)
+          # For phi nodes, return the name that WILL be assigned to this value
+          # LLVM phi nodes support forward references
+          return "%r#{id}"
         end
         # Non-phi use: load from slot to handle dominance issues
         val_type = @value_types[id]?
@@ -5162,7 +5164,15 @@ module Crystal::MIR
       if name = @value_names[id]?
         "%#{name}"
       else
-        # Value was never emitted - this is likely an unreachable instruction or
+        # Value was never emitted yet.
+        # In phi mode: return forward reference (LLVM phi nodes support this for loop back-edges)
+        # Outside phi mode: return default value
+        if @in_phi_mode
+          # Forward reference for phi node from loop back-edge
+          # The value will be assigned to %r#{id} when its block is emitted
+          return "%r#{id}"
+        end
+        # Not in phi mode - this is likely an unreachable instruction or
         # a call that was skipped. Check if we know the type and return appropriate default.
         val_type = @value_types[id]?
         if val_type
