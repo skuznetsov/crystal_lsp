@@ -1522,6 +1522,7 @@ module Crystal::MIR
                         when Load         then [inst.ptr]
                         when GetElementPtr        then [inst.base]
                         when GetElementPtrDynamic then [inst.base, inst.index]
+                        when UnionWrap    then [inst.value]
                         else              [] of ValueId
                         end
 
@@ -1543,8 +1544,14 @@ module Crystal::MIR
                 break if def_inst
               end
 
-              # Flag Load, ArrayGet, GetElementPtr, GetElementPtrDynamic as they're commonly in loop bodies
-              if def_inst.is_a?(Load) || def_inst.is_a?(ArrayGet) || def_inst.is_a?(GetElementPtr) || def_inst.is_a?(GetElementPtrDynamic)
+              # Flag instructions that commonly cause cross-block domination issues
+              # Includes: Load, ArrayGet, GetElementPtr, GetElementPtrDynamic, Call, ExternCall
+              # But exclude void-returning calls (they don't produce values to track)
+              is_void_call = (def_inst.is_a?(Call) || def_inst.is_a?(ExternCall)) &&
+                             def_inst.type == TypeRef::VOID
+              if !is_void_call &&
+                 (def_inst.is_a?(Load) || def_inst.is_a?(ArrayGet) || def_inst.is_a?(GetElementPtr) ||
+                  def_inst.is_a?(GetElementPtrDynamic) || def_inst.is_a?(Call) || def_inst.is_a?(ExternCall))
                 @cross_block_values << op_id
               end
             end
