@@ -5622,6 +5622,8 @@ module CrystalV2
                 else
                   name
                 end
+                # Detect if this is a class-level accessor (class_getter, class_setter, class_property)
+                is_class = slice_starts_with?(base, "class_")
                 kind = if slice_eq?(base, "getter") || slice_eq?(base, "class_getter")
                   :getter
                 elsif slice_eq?(base, "setter") || slice_eq?(base, "class_setter")
@@ -5629,7 +5631,7 @@ module CrystalV2
                 else
                   :property
                 end
-                expr = parse_accessor_macro(kind)
+                expr = parse_accessor_macro(kind, is_class)
               elsif definition_start?
                 expr = case current_token.kind
                   when Token::Kind::Def
@@ -6281,7 +6283,8 @@ module CrystalV2
         # Phase 30: Parse accessor macro (getter/setter/property)
         # Grammar: getter name [: Type] [= value] [, name2 [: Type2] [= value2]]
         # Returns GetterNode/SetterNode/PropertyNode
-        private def parse_accessor_macro(kind : Symbol) : ExprId
+        # is_class: true for class_getter/class_setter/class_property
+        private def parse_accessor_macro(kind : Symbol, is_class : Bool = false) : ExprId
           start_token = current_token
           advance  # consume getter/setter/property keyword
           skip_trivia
@@ -6360,11 +6363,11 @@ module CrystalV2
           # Create appropriate node based on kind
           node = case kind
                  when :getter
-                   GetterNode.new(overall_span, specs)
+                   GetterNode.new(overall_span, specs, is_class)
                  when :setter
-                   SetterNode.new(overall_span, specs)
+                   SetterNode.new(overall_span, specs, is_class)
                  when :property
-                   PropertyNode.new(overall_span, specs)
+                   PropertyNode.new(overall_span, specs, is_class)
                  else
                    raise "Unknown accessor kind: #{kind}"
                  end
@@ -6441,7 +6444,6 @@ module CrystalV2
             token = current_token
             break if token.kind == Token::Kind::End
             break if token.kind == Token::Kind::EOF
-
             if token.kind == Token::Kind::InstanceVar
               next_token = peek_next_non_trivia
               if next_token.kind == Token::Kind::Colon
@@ -6458,6 +6460,63 @@ module CrystalV2
               end
             elsif token.kind == Token::Kind::Identifier && slice_eq?(token.slice, "type")
               expr = parse_lib_type_alias
+            # Phase 30: Accessor macros in modules (getter/setter/property for mixin support)
+            elsif token.kind == Token::Kind::Identifier
+              next_token = peek_next_non_trivia
+              is_accessor = (next_token.kind == Token::Kind::Identifier || is_keyword_identifier?(next_token))
+
+              if is_accessor && accessor_macro_callee?(token)
+                name = token.slice
+                base = if name.size > 0 && name[name.size - 1] == '?'.ord.to_u8
+                  Slice.new(name.to_unsafe, name.size - 1)
+                else
+                  name
+                end
+                # Detect if this is a class-level accessor (class_getter, class_setter, class_property)
+                is_class = slice_starts_with?(base, "class_")
+                kind = if slice_eq?(base, "getter") || slice_eq?(base, "class_getter")
+                  :getter
+                elsif slice_eq?(base, "setter") || slice_eq?(base, "class_setter")
+                  :setter
+                else
+                  :property
+                end
+                expr = parse_accessor_macro(kind, is_class)
+              elsif definition_start?
+                expr = case current_token.kind
+                  when Token::Kind::Def
+                    parse_def
+                  when Token::Kind::Fun
+                    parse_fun
+                  when Token::Kind::Class
+                    parse_class
+                  when Token::Kind::Module
+                    parse_module
+                  when Token::Kind::Struct
+                    parse_struct
+                  when Token::Kind::Union
+                    parse_union
+                  when Token::Kind::Enum
+                    parse_enum
+                  when Token::Kind::Alias
+                    parse_alias
+                  when Token::Kind::Annotation
+                    # Phase 92: annotation definition
+                    parse_annotation_def
+                  when Token::Kind::Abstract
+                    parse_abstract
+                  when Token::Kind::Private
+                    parse_private
+                  when Token::Kind::Protected
+                    parse_protected
+                  when Token::Kind::Lib
+                    parse_lib
+                  else
+                    parse_statement
+                  end
+              else
+                expr = parse_statement
+              end
             elsif definition_start?
               expr = case current_token.kind
                 when Token::Kind::Def
@@ -6944,7 +7003,7 @@ module CrystalV2
                    Token::Kind::Struct, Token::Kind::Enum, Token::Kind::Begin,
                    Token::Kind::If, Token::Kind::Unless, Token::Kind::While,
                    Token::Kind::Until, Token::Kind::Case, Token::Kind::Select,
-                   Token::Kind::Lib, Token::Kind::Do
+                   Token::Kind::Lib, Token::Kind::Do, Token::Kind::Macro
                 block_depth += 1 if starts_statement
               when Token::Kind::End
                 if control_depth == 0 && block_depth == 0 && starts_statement
@@ -11697,6 +11756,16 @@ module CrystalV2
           return false if slice.size != str.bytesize
           slice.each_with_index do |byte, i|
             return false if byte != str.to_unsafe[i]
+          end
+          true
+        end
+
+        # Check if slice starts with given prefix string
+        @[AlwaysInline]
+        private def slice_starts_with?(slice : Slice(UInt8), prefix : String) : Bool
+          return false if slice.size < prefix.bytesize
+          prefix.bytesize.times do |i|
+            return false if slice[i] != prefix.to_unsafe[i]
           end
           true
         end
