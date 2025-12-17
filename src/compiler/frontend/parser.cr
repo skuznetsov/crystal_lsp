@@ -8704,7 +8704,29 @@ module CrystalV2
 
         private def percent_literal_token?(token : Token) : Bool
           slice = token.slice
-          slice.size >= 2 && slice[0] == '%'.ord
+          return false if slice.size < 3  # Minimum: %w(...) needs at least 4 chars, but %() needs 3
+          return false unless slice[0] == '%'.ord
+
+          # Check for valid percent-literal syntax:
+          # %w[...], %i(...), %q{...}, %Q<...>, %(...)
+          # The pattern is: % [optional type letter] <delimiter>
+          idx = 1
+          if slice.size > idx
+            char = slice[idx].chr
+            # If there's a type letter (w, i, q, Q, etc.), skip it
+            if char.ascii_letter?
+              idx += 1
+            end
+          end
+
+          # At this point, idx should point to the opening delimiter
+          # Valid delimiters: ( ) [ ] { } < > | and any other char (but typically punctuation)
+          return false if slice.size <= idx
+          delimiter_char = slice[idx].chr
+
+          # Valid percent literal delimiters
+          delimiter_char == '(' || delimiter_char == '[' || delimiter_char == '{' ||
+            delimiter_char == '<' || delimiter_char == '|'
         end
 
         private def parse_percent_literal(token : Token) : ExprId
