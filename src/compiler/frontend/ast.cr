@@ -1375,8 +1375,9 @@ module CrystalV2
         end
 
         getter specs : Array(AccessorSpec)
+        getter? is_class : Bool  # true for class_getter, false for getter
 
-        def initialize(@span : Span, @specs : Array(AccessorSpec))
+        def initialize(@span : Span, @specs : Array(AccessorSpec), @is_class : Bool = false)
         end
       end
 
@@ -1387,8 +1388,9 @@ module CrystalV2
         end
 
         getter specs : Array(AccessorSpec)
+        getter? is_class : Bool  # true for class_setter, false for setter
 
-        def initialize(@span : Span, @specs : Array(AccessorSpec))
+        def initialize(@span : Span, @specs : Array(AccessorSpec), @is_class : Bool = false)
         end
       end
 
@@ -1399,8 +1401,9 @@ module CrystalV2
         end
 
         getter specs : Array(AccessorSpec)
+        getter? is_class : Bool  # true for class_property, false for property
 
-        def initialize(@span : Span, @specs : Array(AccessorSpec))
+        def initialize(@span : Span, @specs : Array(AccessorSpec), @is_class : Bool = false)
         end
       end
 

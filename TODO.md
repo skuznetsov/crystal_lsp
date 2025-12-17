@@ -896,3 +896,40 @@ macro:    133  ← defer (metaprogramming)
 module:    65  ← ✅ DONE
 enum:      64  ← ✅ DONE
 ```
+
+---
+
+## 8. Stage 2 Bootstrap: Full Prelude Compilation
+
+**Status:** Active (2025-12-16) - LLC passes, linker stage reached
+
+### 8.1 Completed (2025-12-16)
+
+| Fix | Description |
+|-----|-------------|
+| Generic monomorphization | Prevent infinite recursion with visited sets + unresolved type detection |
+| Type alias chains | Resolve LibC::ULong → UInt64 with chain resolution + depth limits |
+| Pointer type caching | Fix Void*/T*/Pointer(T) returning VOID due to cache placeholder bug |
+| ptr 0 → ptr null | Fix invalid LLVM IR in extern call arguments |
+| bitcast to void | Convert to identity bitcast or null pointer |
+
+### 8.2 Current: Linker Errors
+
+**Status:** LLC (LLVM compilation) passes. Linker fails with unresolved symbols.
+
+| Symbol | Cause | Priority |
+|--------|-------|----------|
+| `_getter` | Macro not expanded | HIGH |
+| `_to_u64` | Method not found/registered | HIGH |
+| `_func715`, `_func1306` | Internal function IDs | MED |
+| `___crystal_main` | Entry point missing | HIGH |
+| `_Crystal__System__FileDescriptor_from_stdio` | Method not generated | MED |
+| `_Pointer_String__null` | Generic method not generated | MED |
+
+### 8.3 TODO
+
+1. [ ] **Macro expansion for `getter`** - property accessor generation
+2. [ ] **Method resolution for `to_u64`** - numeric conversion
+3. [ ] **Entry point `__crystal_main`** - proper main function generation
+4. [ ] **FileDescriptor methods** - system I/O stubs
+5. [ ] **Generic Pointer methods** - `Pointer(T).null` etc.

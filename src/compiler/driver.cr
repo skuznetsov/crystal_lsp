@@ -126,6 +126,7 @@ module Crystal::V2
           when CrystalV2::Compiler::Frontend::DefNode
             def_nodes << {node, arena}
           when CrystalV2::Compiler::Frontend::ClassNode
+            # Parser creates ClassNode with is_struct=true for struct keyword
             class_nodes << {node, arena}
           when CrystalV2::Compiler::Frontend::ModuleNode
             module_nodes << {node, arena}

@@ -1143,6 +1143,192 @@ module Crystal::HIR
       register_function_type("#{class_name}.new", type_ref)
     end
 
+    # Register a struct type and its methods (pass 1)
+    # Structs are value types, similar to classes but without inheritance
+    def register_struct(node : CrystalV2::Compiler::Frontend::StructNode)
+      struct_name = String.new(node.name)
+      register_struct_with_name(node, struct_name)
+    end
+
+    # Register a struct with a specific name (for nested structs like Foo::Bar)
+    def register_struct_with_name(node : CrystalV2::Compiler::Frontend::StructNode, struct_name : String)
+      # Collect instance variables and their types
+      # Structs have no type_id header (value type), so offset starts at 0
+      ivars = [] of IVarInfo
+      class_vars = [] of ClassVarInfo
+      offset = 0
+
+      # Check if struct already exists (reopening)
+      if existing_info = @class_info[struct_name]?
+        existing_info.ivars.each { |iv| ivars << iv.dup }
+        existing_info.class_vars.each { |cv| class_vars << cv.dup }
+        offset = existing_info.size
+      end
+
+      # Initialize constructor params
+      init_params = [] of {String, TypeRef}
+
+      if body = node.body
+        body.each do |expr_id|
+          member = @arena[expr_id]
+          case member
+          when CrystalV2::Compiler::Frontend::InstanceVarDeclNode
+            ivar_name = String.new(member.name)
+            ivar_type = type_ref_for_name(String.new(member.type))
+            ivars << IVarInfo.new(ivar_name, ivar_type, offset)
+            offset += type_size(ivar_type)
+
+          when CrystalV2::Compiler::Frontend::ClassVarDeclNode
+            raw_name = String.new(member.name)
+            cvar_name = raw_name.lstrip('@')
+            cvar_type = type_ref_for_name(String.new(member.type))
+            initial_value : Int64? = nil
+            if val_id = member.value
+              val_node = @arena[val_id]
+              if val_node.is_a?(CrystalV2::Compiler::Frontend::NumberNode)
+                num_str = String.new(val_node.value)
+                initial_value = num_str.to_i64?
+              end
+            end
+            class_vars << ClassVarInfo.new(cvar_name, cvar_type, initial_value)
+
+          when CrystalV2::Compiler::Frontend::DefNode
+            method_name = String.new(member.name)
+            is_class_method = if recv = member.receiver
+                                String.new(recv) == "self"
+                              else
+                                false
+                              end
+            base_name = if is_class_method
+                          "#{struct_name}.#{method_name}"
+                        else
+                          "#{struct_name}##{method_name}"
+                        end
+            param_types = [] of TypeRef
+            if params = member.params
+              params.each do |param|
+                if param.is_instance_var
+                  param_name = "@#{String.new(param.name.not_nil!)}"
+                  existing_ivar = ivars.find { |iv| iv.name == param_name }
+                  if existing_ivar
+                    param_types << existing_ivar.type
+                  elsif ta = param.type_annotation
+                    param_types << type_ref_for_name(String.new(ta))
+                  else
+                    param_types << TypeRef::VOID
+                  end
+                elsif ta = param.type_annotation
+                  param_types << type_ref_for_name(String.new(ta))
+                else
+                  param_types << TypeRef::VOID
+                end
+              end
+            end
+            full_name = mangle_function_name(base_name, param_types)
+            return_type = if rta = member.return_type
+                           type_ref_for_name(String.new(rta))
+                         else
+                           TypeRef::VOID
+                         end
+            register_function_type(full_name, return_type)
+
+            if method_name == "initialize"
+              if params = member.params
+                params.each do |param|
+                  if param.is_instance_var
+                    param_name = String.new(param.name.not_nil!)
+                    ivar_name = "@#{param_name}"
+                    ivar_type = if ta = param.type_annotation
+                                  type_ref_for_name(String.new(ta))
+                                else
+                                  existing_iv = ivars.find { |iv| iv.name == ivar_name }
+                                  existing_iv ? existing_iv.type : TypeRef::VOID
+                                end
+                    unless ivars.any? { |iv| iv.name == ivar_name }
+                      ivars << IVarInfo.new(ivar_name, ivar_type, offset)
+                      offset += type_size(ivar_type)
+                    end
+                    init_params << {param_name, ivar_type}
+                  elsif ta = param.type_annotation
+                    param_name = String.new(param.name.not_nil!)
+                    param_type = type_ref_for_name(String.new(ta))
+                    init_params << {param_name, param_type}
+                  end
+                end
+              end
+            end
+
+          when CrystalV2::Compiler::Frontend::GetterNode
+            member.specs.each do |spec|
+              accessor_name = String.new(spec.name)
+              ivar_name = "@#{accessor_name}"
+              ivar_type = if ta = spec.type_annotation
+                            type_ref_for_name(String.new(ta))
+                          else
+                            TypeRef::VOID
+                          end
+              unless ivars.any? { |iv| iv.name == ivar_name }
+                ivars << IVarInfo.new(ivar_name, ivar_type, offset)
+                offset += type_size(ivar_type)
+              end
+              getter_name = "#{struct_name}##{accessor_name}"
+              full_name = mangle_function_name(getter_name, [] of TypeRef)
+              register_function_type(full_name, ivar_type)
+            end
+
+          when CrystalV2::Compiler::Frontend::SetterNode
+            member.specs.each do |spec|
+              accessor_name = String.new(spec.name)
+              ivar_name = "@#{accessor_name}"
+              ivar_type = if ta = spec.type_annotation
+                            type_ref_for_name(String.new(ta))
+                          else
+                            TypeRef::VOID
+                          end
+              unless ivars.any? { |iv| iv.name == ivar_name }
+                ivars << IVarInfo.new(ivar_name, ivar_type, offset)
+                offset += type_size(ivar_type)
+              end
+              setter_name = "#{struct_name}##{accessor_name}="
+              full_name = mangle_function_name(setter_name, [ivar_type])
+              register_function_type(full_name, TypeRef::VOID)
+            end
+
+          when CrystalV2::Compiler::Frontend::PropertyNode
+            member.specs.each do |spec|
+              accessor_name = String.new(spec.name)
+              ivar_name = "@#{accessor_name}"
+              ivar_type = if ta = spec.type_annotation
+                            type_ref_for_name(String.new(ta))
+                          else
+                            TypeRef::VOID
+                          end
+              unless ivars.any? { |iv| iv.name == ivar_name }
+                ivars << IVarInfo.new(ivar_name, ivar_type, offset)
+                offset += type_size(ivar_type)
+              end
+              getter_name = "#{struct_name}##{accessor_name}"
+              getter_full = mangle_function_name(getter_name, [] of TypeRef)
+              register_function_type(getter_full, ivar_type)
+              setter_name = "#{struct_name}##{accessor_name}="
+              setter_full = mangle_function_name(setter_name, [ivar_type])
+              register_function_type(setter_full, TypeRef::VOID)
+            end
+          end
+        end
+      end
+
+      # Calculate final size
+      size = offset > 0 ? offset : 1
+      type_ref = type_ref_for_name(struct_name)
+
+      # Create struct info (is_struct = true)
+      @class_info[struct_name] = ClassInfo.new(struct_name, type_ref, ivars, class_vars, size, true, nil)
+
+      @init_params.not_nil![struct_name] = init_params
+      register_function_type("#{struct_name}.new", type_ref)
+    end
+
     # Monomorphize a generic class: create specialized version with concrete types
     private def monomorphize_generic_class(base_name : String, type_args : Array(String), specialized_name : String)
       template = @generic_templates[base_name]?
@@ -1267,6 +1453,50 @@ module Crystal::HIR
             member.specs.each do |spec|
               generate_getter_method(class_name, class_info, spec)
               generate_setter_method(class_name, class_info, spec)
+            end
+          end
+        end
+      end
+
+      @current_class = nil
+    end
+
+    # Lower a struct and all its methods (pass 3)
+    def lower_struct(node : CrystalV2::Compiler::Frontend::StructNode)
+      struct_name = String.new(node.name)
+      lower_struct_with_name(node, struct_name)
+    end
+
+    # Lower a struct with a specific name (for nested structs like Foo::Bar)
+    def lower_struct_with_name(node : CrystalV2::Compiler::Frontend::StructNode, struct_name : String)
+      struct_info = @class_info[struct_name]? || return
+      @current_class = struct_name
+
+      # Generate allocator function: StructName.new
+      generate_allocator(struct_name, struct_info)
+
+      # Lower each method
+      if body = node.body
+        body.each do |expr_id|
+          member = @arena[expr_id]
+          case member
+          when CrystalV2::Compiler::Frontend::DefNode
+            lower_method(struct_name, struct_info, member)
+          when CrystalV2::Compiler::Frontend::GetterNode
+            # Generate synthetic getter methods
+            member.specs.each do |spec|
+              generate_getter_method(struct_name, struct_info, spec)
+            end
+          when CrystalV2::Compiler::Frontend::SetterNode
+            # Generate synthetic setter methods
+            member.specs.each do |spec|
+              generate_setter_method(struct_name, struct_info, spec)
+            end
+          when CrystalV2::Compiler::Frontend::PropertyNode
+            # Generate both getter and setter methods
+            member.specs.each do |spec|
+              generate_getter_method(struct_name, struct_info, spec)
+              generate_setter_method(struct_name, struct_info, spec)
             end
           end
         end
@@ -2227,10 +2457,22 @@ module Crystal::HIR
     end
 
     # Lower top-level expressions into a synthetic main function
+    # Note: Named __crystal_main because stdlib's fun main calls LibCrystalMain.__crystal_main
     def lower_main(main_exprs : Array(Tuple(CrystalV2::Compiler::Frontend::ExprId, CrystalV2::Compiler::Frontend::ArenaLike))) : Function
-      # Create main function with Int32 return type (standard C main)
-      func = @module.create_function("main", TypeRef::INT32)
+      # Create __crystal_main function with void return type
+      # Signature: fun __crystal_main(argc : Int32, argv : UInt8**)
+      func = @module.create_function("__crystal_main", TypeRef::VOID)
+
+      # Add parameters to match lib declaration
+      argc_param = func.add_param("argc", TypeRef::INT32)
+      # UInt8** = pointer to pointer to UInt8, use generic POINTER type
+      argv_param = func.add_param("argv", TypeRef::POINTER)
+
       ctx = LoweringContext.new(func, @module, @arena)
+
+      # Register parameters in context for potential use
+      ctx.register_local("argc", argc_param.id)
+      ctx.register_local("argv", argv_param.id)
 
       # Lower each top-level expression in order
       last_value : ValueId? = nil
@@ -2240,12 +2482,10 @@ module Crystal::HIR
         last_value = lower_expr(ctx, expr_id)
       end
 
-      # Return 0 for success (main returns int)
+      # Return void (stdlib's fun main handles the return value)
       block = ctx.get_block(ctx.current_block)
       if block.terminator.is_a?(Unreachable)
-        zero = Literal.new(ctx.next_id, TypeRef::INT32, 0_i64)
-        ctx.emit(zero)
-        block.terminator = Return.new(zero.id)
+        block.terminator = Return.new(nil)
       end
 
       func
@@ -2585,6 +2825,15 @@ module Crystal::HIR
 
       when CrystalV2::Compiler::Frontend::StructNode
         # Struct declarations are processed during registration phase
+        nil_lit = Literal.new(ctx.next_id, TypeRef::NIL, nil)
+        ctx.emit(nil_lit)
+        nil_lit.id
+
+      when CrystalV2::Compiler::Frontend::GetterNode,
+           CrystalV2::Compiler::Frontend::SetterNode,
+           CrystalV2::Compiler::Frontend::PropertyNode
+        # Accessor declarations are processed during class registration/generation
+        # If encountered during expression lowering, return nil
         nil_lit = Literal.new(ctx.next_id, TypeRef::NIL, nil)
         ctx.emit(nil_lit)
         nil_lit.id

@@ -242,6 +242,7 @@ module CrystalV2
             when Frontend::DefNode
               def_nodes << {node, arena}
             when Frontend::ClassNode
+              # Parser creates ClassNode with is_struct=true for struct keyword
               class_nodes << {node, arena}
             when Frontend::ModuleNode
               module_nodes << {node, arena}
@@ -449,7 +450,19 @@ module CrystalV2
                    else        "-O3"
                    end
 
-        llc_cmd = "llc #{opt_flag} -filetype=obj -o #{obj_file} #{ll_file} 2>&1"
+        # Run opt to clean up and fix any IR issues
+        # mem2reg promotes allocas, -O1 includes more fixes
+        opt_ll_file = "#{ll_file}.opt.ll"
+        opt_cmd = "opt -O1 -S -o #{opt_ll_file} #{ll_file} 2>&1"
+        log(options, out_io, "  $ #{opt_cmd}")
+        opt_result = `#{opt_cmd}`
+        unless $?.success?
+          err_io.puts "opt failed:"
+          err_io.puts opt_result
+          return 1
+        end
+
+        llc_cmd = "llc #{opt_flag} -filetype=obj -o #{obj_file} #{opt_ll_file} 2>&1"
         log(options, out_io, "  $ #{llc_cmd}")
         llc_result = `#{llc_cmd}`
         unless $?.success?
