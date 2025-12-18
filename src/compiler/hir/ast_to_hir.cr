@@ -605,11 +605,19 @@ module Crystal::HIR
             full_nested_name = "#{module_name}::#{nested_name}"
             register_nested_module(member, full_nested_name)
           elsif member.is_a?(CrystalV2::Compiler::Frontend::ClassNode)
-            # Register class type alias and any aliases inside the class
+            # Register class/struct type alias and any aliases inside the class
             class_name = String.new(member.name)
             full_class_name = "#{module_name}::#{class_name}"
             @type_aliases[full_class_name] = full_class_name
+            # Also register short name -> full name for local resolution (for both classes and structs)
+            @type_aliases[class_name] = full_class_name
             register_class_aliases(member, full_class_name)
+          elsif member.is_a?(CrystalV2::Compiler::Frontend::StructNode)
+            # Register struct type alias - both short and full names (for actual StructNode type)
+            struct_name = String.new(member.name)
+            full_struct_name = "#{module_name}::#{struct_name}"
+            @type_aliases[full_struct_name] = full_struct_name
+            @type_aliases[struct_name] = full_struct_name
           end
         end
         # PASS 2: Register functions and classes (now that aliases are available)
@@ -651,6 +659,10 @@ module Crystal::HIR
             enum_name = String.new(member.name)
             full_enum_name = "#{module_name}::#{enum_name}"
             register_enum_with_name(member, full_enum_name)
+          when CrystalV2::Compiler::Frontend::StructNode
+            struct_name = String.new(member.name)
+            full_struct_name = "#{module_name}::#{struct_name}"
+            register_struct_with_name(member, full_struct_name)
           end
         end
       end
@@ -678,11 +690,20 @@ module Crystal::HIR
             full_nested_name = "#{full_name}::#{nested_name}"
             register_nested_module(member, full_nested_name)
           elsif member.is_a?(CrystalV2::Compiler::Frontend::ClassNode)
-            # Register class type alias and any aliases inside the class
+            # Register class/struct type alias and any aliases inside the class
             class_name = String.new(member.name)
             full_class_name = "#{full_name}::#{class_name}"
             @type_aliases[full_class_name] = full_class_name
+            # Also register short name -> full name for local resolution (for both classes and structs)
+            @type_aliases[class_name] = full_class_name
             register_class_aliases(member, full_class_name)
+          elsif member.is_a?(CrystalV2::Compiler::Frontend::StructNode)
+            # Register struct type alias - both short and full names
+            struct_name = String.new(member.name)
+            full_struct_name = "#{full_name}::#{struct_name}"
+            @type_aliases[full_struct_name] = full_struct_name
+            # Also register short name -> full name for local resolution
+            @type_aliases[struct_name] = full_struct_name
           end
         end
         # PASS 2: Register functions and other members (now that aliases are available)
@@ -720,6 +741,10 @@ module Crystal::HIR
             enum_name = String.new(member.name)
             full_enum_name = "#{full_name}::#{enum_name}"
             register_enum_with_name(member, full_enum_name)
+          when CrystalV2::Compiler::Frontend::StructNode
+            struct_name = String.new(member.name)
+            full_struct_name = "#{full_name}::#{struct_name}"
+            register_struct_with_name(member, full_struct_name)
           end
         end
       end
@@ -780,6 +805,11 @@ module Crystal::HIR
             nested_name = String.new(member.name)
             full_nested_name = "#{module_name}::#{nested_name}"
             lower_module_with_name(member, full_nested_name)
+          when CrystalV2::Compiler::Frontend::StructNode
+            # Lower nested struct with full name
+            struct_name = String.new(member.name)
+            full_struct_name = "#{module_name}::#{struct_name}"
+            lower_struct_with_name(member, full_struct_name)
           end
         end
       end
@@ -1421,8 +1451,25 @@ module Crystal::HIR
         if body = template.node.body
           body.each do |expr_id|
             member = @arena[expr_id]
-            if member.is_a?(CrystalV2::Compiler::Frontend::DefNode)
+            case member
+            when CrystalV2::Compiler::Frontend::DefNode
               lower_method(specialized_name, class_info, member)
+            when CrystalV2::Compiler::Frontend::GetterNode
+              # Generate synthetic getter methods
+              member.specs.each do |spec|
+                generate_getter_method(specialized_name, class_info, spec)
+              end
+            when CrystalV2::Compiler::Frontend::SetterNode
+              # Generate synthetic setter methods
+              member.specs.each do |spec|
+                generate_setter_method(specialized_name, class_info, spec)
+              end
+            when CrystalV2::Compiler::Frontend::PropertyNode
+              # Generate both getter and setter methods
+              member.specs.each do |spec|
+                generate_getter_method(specialized_name, class_info, spec)
+                generate_setter_method(specialized_name, class_info, spec)
+              end
             end
           end
         end
@@ -2198,14 +2245,19 @@ module Crystal::HIR
       if current = @current_class
         # Extract namespace: "Foo::Bar::Baz" -> "Foo::Bar"
         parts = current.split("::")
-        # Try increasingly shorter prefixes
+
+        # Try full namespace first (e.g., Foo::Bar::Baz::Name), then increasingly shorter
+        # This handles cases where we're inside module Foo::Bar and reference Name
+        # which should resolve to Foo::Bar::Name before trying Foo::Name
         while parts.size > 0
-          parts.pop
           qualified_name = (parts + [name]).join("::")
           if @class_info.has_key?(qualified_name)
             return qualified_name
           end
+          parts.pop
         end
+
+        # All namespace prefixes tried and failed - continue with other checks below
       end
 
       # Also try the exact class name if current class matches
@@ -5212,9 +5264,6 @@ module Crystal::HIR
             resolved = next_resolved
             depth += 1
           end
-          if name == "ULong"
-            STDERR.puts "[DEBUG] ConstantNode ULong, resolved=#{resolved.inspect}, method=#{method_name}"
-          end
           class_name_str = resolved
           # If the short name isn't a known class, try to resolve using current namespace
           unless @class_info.has_key?(class_name_str) || resolved != name
@@ -5229,9 +5278,6 @@ module Crystal::HIR
           while (next_resolved = @type_aliases[resolved_name]? || LIBC_TYPE_ALIASES[resolved_name]?) && next_resolved != resolved_name && depth < 10
             resolved_name = next_resolved
             depth += 1
-          end
-          if name == "ULong"
-            STDERR.puts "[DEBUG] IdentifierNode ULong, resolved=#{resolved_name}, method=#{method_name}"
           end
           # Check if it's a class name (starts with uppercase and is known class)
           # OR a module name (check if Module.method exists in function_types)
@@ -5308,9 +5354,6 @@ module Crystal::HIR
         elsif obj_node.is_a?(CrystalV2::Compiler::Frontend::PathNode)
           # Path like Foo::Bar for nested classes/modules
           full_path = collect_path_string(obj_node)
-          if full_path.includes?("ULong")
-            STDERR.puts "[DEBUG] PathNode #{full_path}, type_aliases=#{@type_aliases[full_path]?}, libc=#{LIBC_TYPE_ALIASES[full_path]?}"
-          end
           # Check if this path is a known class
           if @class_info.has_key?(full_path)
             class_name_str = full_path

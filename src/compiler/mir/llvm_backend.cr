@@ -369,6 +369,39 @@ module Crystal::MIR
                             @module.functions
                           end
 
+      # Filter out functions with unresolved type patterns (typeof, unsubstituted type params)
+      # These are functions that were partially created but couldn't be monomorphized
+      unresolved_patterns = ["typeof(", "typeof_"]
+
+      # First pass: collect names of functions to skip
+      skip_functions = Set(String).new
+      functions_to_emit.each do |func|
+        if unresolved_patterns.any? { |p| func.name.includes?(p) }
+          skip_functions << func.name
+          skip_functions << @type_mapper.mangle_name(func.name)
+        end
+      end
+
+      # Second pass: also skip functions that call the skipped functions
+      functions_to_emit.each do |func|
+        func.blocks.each do |block|
+          block.instructions.each do |inst|
+            case inst
+            when ExternCall
+              if unresolved_patterns.any? { |p| inst.extern_name.includes?(p) }
+                skip_functions << func.name
+                skip_functions << @type_mapper.mangle_name(func.name)
+              end
+            end
+          end
+        end
+      end
+
+      # Apply filter
+      functions_to_emit = functions_to_emit.reject do |func|
+        skip_functions.includes?(func.name)
+      end
+
       total_funcs = functions_to_emit.size
       STDERR.puts "  [LLVM] emitting #{total_funcs} functions (#{@module.functions.size} total, #{@module.functions.size - total_funcs} pruned)..." if @progress
       functions_to_emit.each_with_index do |func, idx|
