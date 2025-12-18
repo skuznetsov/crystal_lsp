@@ -5384,6 +5384,51 @@ module Crystal::HIR
         end
       end
 
+      # Handle nil? intrinsic for union types (T | Nil)
+      if method_name == "nil?" && receiver_id
+        receiver_type = ctx.type_of(receiver_id)
+        # Try to get declared type from local variable if receiver is a Load
+        declared_type = receiver_type
+        if callee_node.is_a?(CrystalV2::Compiler::Frontend::MemberAccessNode)
+          obj = @arena[callee_node.object]
+          if obj.is_a?(CrystalV2::Compiler::Frontend::IdentifierNode)
+            var_name = String.new(obj.name)
+            if local_id = ctx.lookup_local(var_name)
+              local_type = ctx.type_of(local_id)
+              if @module.get_type_descriptor(local_type)
+                declared_type = local_type
+              end
+            end
+          end
+        end
+        # Check if receiver is a union type (has variants) or nilable
+        if is_union_or_nilable_type?(declared_type)
+          return lower_nil_check_intrinsic(ctx, receiver_id, declared_type)
+        end
+      end
+
+      # Handle not_nil! intrinsic for union types - extracts non-nil value
+      if method_name == "not_nil!" && receiver_id
+        receiver_type = ctx.type_of(receiver_id)
+        # Try to get declared type from local variable if receiver is a Load
+        declared_type = receiver_type
+        if callee_node.is_a?(CrystalV2::Compiler::Frontend::MemberAccessNode)
+          obj = @arena[callee_node.object]
+          if obj.is_a?(CrystalV2::Compiler::Frontend::IdentifierNode)
+            var_name = String.new(obj.name)
+            if local_id = ctx.lookup_local(var_name)
+              local_type = ctx.type_of(local_id)
+              if type_desc = @module.get_type_descriptor(local_type)
+                declared_type = local_type
+              end
+            end
+          end
+        end
+        if is_union_or_nilable_type?(declared_type)
+          return lower_not_nil_intrinsic(ctx, receiver_id, declared_type)
+        end
+      end
+
       # Handle Range#each { |i| body } and Array#each { |x| body } intrinsics
       if method_name == "each"
         # Check if callee is (range).each - MemberAccessNode on RangeNode
@@ -7433,6 +7478,17 @@ module Crystal::HIR
 
       # Check for pointer.value -> PointerLoad
       receiver_type = ctx.type_of(object_id)
+
+      # Handle nil? intrinsic for union types (T | Nil)
+      if member_name == "nil?" && is_union_or_nilable_type?(receiver_type)
+        return lower_nil_check_intrinsic(ctx, object_id, receiver_type)
+      end
+
+      # Handle not_nil! intrinsic for union types
+      if member_name == "not_nil!" && is_union_or_nilable_type?(receiver_type)
+        return lower_not_nil_intrinsic(ctx, object_id, receiver_type)
+      end
+
       if receiver_type == TypeRef::POINTER && member_name == "value"
         deref_type = TypeRef::INT32  # TODO: track actual element type
         load_node = PointerLoad.new(ctx.next_id, deref_type, object_id, nil)
@@ -8144,18 +8200,30 @@ module Crystal::HIR
     end
 
     private def type_ref_for_name(name : String) : TypeRef
-      # Check cache first
-      if cached = @type_cache[name]?
+      # Normalize union type names: "Int32|Nil" -> "Int32 | Nil"
+      # This ensures consistent caching regardless of spacing
+      normalized_name = if name.includes?("|")
+        name.split("|").map(&.strip).join(" | ")
+      else
+        name
+      end
+
+      # Check cache first (use normalized name for union types)
+      if cached = @type_cache[normalized_name]?
+        # Also cache the original name if different
+        @type_cache[name] = cached if name != normalized_name
         return cached
       end
 
       # Mark as being processed with placeholder to break cycles (BEFORE any recursion)
-      @type_cache[name] = TypeRef::VOID
+      @type_cache[normalized_name] = TypeRef::VOID
+      @type_cache[name] = TypeRef::VOID if name != normalized_name
 
       # Check for union type syntax: "Type1 | Type2" or "Type1|Type2" (parser may not add spaces)
       if name.includes?("|")
-        result = create_union_type(name)
-        @type_cache[name] = result
+        result = create_union_type(normalized_name)
+        @type_cache[normalized_name] = result
+        @type_cache[name] = result if name != normalized_name
         return result
       end
 
@@ -8429,6 +8497,56 @@ module Crystal::HIR
     private def type_ref_for_expr(ctx : LoweringContext, expr_id : ExprId) : TypeRef
       name = get_type_name(expr_id)
       type_ref_for_name(name)
+    end
+
+    # Check if a type is a union type or nilable (T | Nil)
+    private def is_union_or_nilable_type?(type : TypeRef) : Bool
+      is_union_type?(type)
+    end
+
+    # Intrinsic: value.nil? for union types
+    # Checks if the union's type tag indicates Nil variant
+    private def lower_nil_check_intrinsic(ctx : LoweringContext, value_id : ValueId, value_type : TypeRef) : ValueId
+      # Nil is variant 1 in T | Nil unions (by convention)
+      nil_variant_id = get_union_variant_id(TypeRef::NIL, value_type)
+
+      # Emit UnionIs instruction to check if value is Nil variant
+      union_is = UnionIs.new(ctx.next_id, value_id, nil_variant_id)
+      ctx.emit(union_is)
+      ctx.register_type(union_is.id, TypeRef::BOOL)
+      union_is.id
+    end
+
+    # Intrinsic: value.not_nil! for union types
+    # Extracts the non-nil value from a union (asserts it's not nil)
+    private def lower_not_nil_intrinsic(ctx : LoweringContext, value_id : ValueId, value_type : TypeRef) : ValueId
+      # Determine the non-nil type from the union descriptor
+      non_nil_type = TypeRef::INT32  # Default fallback for Int32 | Nil
+
+      # Try to get the actual non-nil type from the union descriptor
+      mir_union_ref = hir_to_mir_type_ref(value_type)
+      if descriptor = @union_descriptors[mir_union_ref]?
+        descriptor.variants.each do |variant|
+          if variant.type_ref != MIR::TypeRef::NIL
+            # Convert MIR type back to HIR type (rough approximation)
+            non_nil_type = case variant.type_ref
+                           when MIR::TypeRef::INT32  then TypeRef::INT32
+                           when MIR::TypeRef::INT64  then TypeRef::INT64
+                           when MIR::TypeRef::FLOAT64 then TypeRef::FLOAT64
+                           when MIR::TypeRef::BOOL   then TypeRef::BOOL
+                           when MIR::TypeRef::POINTER then TypeRef::POINTER
+                           else TypeRef::POINTER
+                           end
+            break
+          end
+        end
+      end
+
+      # Extract using UnionUnwrap (variant 0 is the non-nil type)
+      unwrap = UnionUnwrap.new(ctx.next_id, non_nil_type, value_id, 0_i32, false)
+      ctx.emit(unwrap)
+      ctx.register_type(unwrap.id, non_nil_type)
+      unwrap.id
     end
   end
 end
