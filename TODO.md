@@ -8,7 +8,7 @@ about syntax or types and should match what the original compiler would report.
 
 ---
 
-## Current Status (2025-12-09)
+## Current Status (2025-12-18)
 
 ### Test Coverage
 - **2958 tests**, 0 failures, 7 pending
@@ -782,10 +782,11 @@ The key insight is: **Don't compete with LLVM, complement it.**
 | M4.2 | Runtime library | ✅ Complete | 43 |
 | M4.3 | End-to-end compile | 🔧 In Progress | 27+ bootstrap |
 
-**M4.3 Bootstrap Progress (2025-12-12):**
-- struct, require, module, enum all working
-- Hash(K,V), Set(T), OptionParser stdlib implemented
-- Class reopening, method chaining, index operators fixed
+**M4.3 Bootstrap Progress (2025-12-18):**
+- Basic codegen fully working (unions, nil?, not_nil!, conditionals, loops)
+- Namespace resolution for nested structs/classes in modules
+- Getter/setter monomorphization for generics
+- Stdlib compilation blocked on: typeof in types, generic blocks, module mixins
 
 ---
 
@@ -813,8 +814,8 @@ The key insight is: **Don't compete with LLVM, complement it.**
 | Performance | Complete | Incremental inference, lazy method bodies, cache warming |
 | HIR | Complete | 155 tests (data structures, lowering, escape, taint, memory strategy) |
 | MIR | Complete | 128 tests (SSA form, memory ops, optimizations, PGO passes) |
-| Codegen | 70% | M1-M4.2 done, bootstrap in progress |
-| Bootstrap | ~60% | struct/require/module/enum/Hash/Set working |
+| Codegen | 75% | M1-M4.2 done, basic codegen working |
+| Bootstrap | ~65% | Basic codegen works, stdlib needs typeof/blocks/mixins |
 
 ---
 
@@ -901,9 +902,9 @@ enum:      64  ← ✅ DONE
 
 ## 8. Stage 2 Bootstrap: Full Prelude Compilation
 
-**Status:** Active (2025-12-16) - LLC passes, linker stage reached
+**Status:** Active (2025-12-18) - Basic codegen working, stdlib requires advanced features
 
-### 8.1 Completed (2025-12-16)
+### 8.1 Completed (2025-12-18)
 
 | Fix | Description |
 |-----|-------------|
@@ -912,24 +913,43 @@ enum:      64  ← ✅ DONE
 | Pointer type caching | Fix Void*/T*/Pointer(T) returning VOID due to cache placeholder bug |
 | ptr 0 → ptr null | Fix invalid LLVM IR in extern call arguments |
 | bitcast to void | Convert to identity bitcast or null pointer |
+| nil?/not_nil! intrinsics | Emit inline LLVM IR for nil checks on union types |
+| Union function returns | Fix phi node nil detection for union return types (type_id check) |
+| Union return type VOID | Fix cache placeholder bug in type_ref_for_name (set after union check) |
+| Namespace resolution | Register short name aliases for nested classes/structs in modules |
+| Getter/setter monomorphization | Handle GetterNode/SetterNode/PropertyNode in generic class lowering |
+| typeof filter | Filter out functions with unresolved typeof(...) patterns in LLVM emission |
 
-### 8.2 Current: Linker Errors
+### 8.2 Current Status
 
-**Status:** LLC (LLVM compilation) passes. Linker fails with unresolved symbols.
+**Basic codegen working:**
+```crystal
+# This compiles and runs correctly with --no-prelude:
+def maybe(give : Bool) : Int32 | Nil
+  if give; 42; else; nil; end
+end
+r1 = maybe(true)   # => 42
+r2 = maybe(false)  # => nil
+```
 
-| Symbol | Cause | Priority |
-|--------|-------|----------|
-| `_getter` | Macro not expanded | HIGH |
-| `_to_u64` | Method not found/registered | HIGH |
-| `_func715`, `_func1306` | Internal function IDs | MED |
-| `___crystal_main` | Entry point missing | HIGH |
-| `_Crystal__System__FileDescriptor_from_stdio` | Method not generated | MED |
-| `_Pointer_String__null` | Generic method not generated | MED |
+**Stdlib requires advanced features not yet implemented:**
 
-### 8.3 TODO
+| Feature | Issue | Priority |
+|---------|-------|----------|
+| `typeof(...)` in types | Used in Array#flatten, Enumerable methods | HIGH |
+| Generic methods with blocks | `def self.build(capacity : Int, &)` | HIGH |
+| Module mixins (Indexable, Enumerable) | Methods from included modules need monomorphization | MED |
+| Macro expansion | `getter`, `property` need compile-time expansion | MED |
 
-1. [ ] **Macro expansion for `getter`** - property accessor generation
-2. [ ] **Method resolution for `to_u64`** - numeric conversion
-3. [ ] **Entry point `__crystal_main`** - proper main function generation
-4. [ ] **FileDescriptor methods** - system I/O stubs
-5. [ ] **Generic Pointer methods** - `Pointer(T).null` etc.
+### 8.3 Known Limitations
+
+1. **typeof in type positions**: `Array(typeof(Enumerable.element_type(self)))` is emitted as literal string instead of resolved type
+2. **Block parameters**: Methods with `& : Pointer(T) ->` block types not fully lowered
+3. **Module mixin methods**: Array includes Indexable, but Indexable methods not monomorphized for Array(Char) etc.
+
+### 8.4 TODO
+
+1. [ ] **Implement typeof resolution** - Compile-time evaluation of typeof(...) in type annotations
+2. [ ] **Fix generic methods with blocks** - Handle block parameter types during lowering
+3. [ ] **Module mixin monomorphization** - Generate methods from included modules for concrete types
+4. [ ] **Macro expansion for `getter`/`property`** - Compile-time accessor generation
