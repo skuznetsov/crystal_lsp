@@ -2472,7 +2472,8 @@ module Crystal::HIR
 
       # Determine return type (default to Void if not specified)
       return_type = if rt = node.return_type
-                      type_ref_for_name(String.new(rt))
+                      rt_string = String.new(rt)
+                      type_ref_for_name(rt_string)
                     else
                       TypeRef::VOID
                     end
@@ -8215,17 +8216,19 @@ module Crystal::HIR
         return cached
       end
 
-      # Mark as being processed with placeholder to break cycles (BEFORE any recursion)
-      @type_cache[normalized_name] = TypeRef::VOID
-      @type_cache[name] = TypeRef::VOID if name != normalized_name
-
       # Check for union type syntax: "Type1 | Type2" or "Type1|Type2" (parser may not add spaces)
+      # NOTE: Don't set placeholder here - create_union_type handles its own caching
       if name.includes?("|")
         result = create_union_type(normalized_name)
         @type_cache[normalized_name] = result
         @type_cache[name] = result if name != normalized_name
         return result
       end
+
+      # Mark as being processed with placeholder to break cycles (BEFORE any recursion)
+      # Only for non-union types - union types are handled by create_union_type
+      @type_cache[normalized_name] = TypeRef::VOID
+      @type_cache[name] = TypeRef::VOID if name != normalized_name
 
       # Handle nullable type suffix: "T?" means "T | Nil"
       if name.ends_with?("?")

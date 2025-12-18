@@ -186,9 +186,10 @@ module Crystal
 
     # Create function stub with params and return type (no body)
     private def create_function_stub(hir_func : HIR::Function)
+      mir_return_type = convert_type(hir_func.return_type)
       mir_func = @mir_module.create_function(
         hir_func.name,
-        convert_type(hir_func.return_type)
+        mir_return_type
       )
 
       # Add parameter types (needed for call site type checking)

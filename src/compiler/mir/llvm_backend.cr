@@ -293,6 +293,10 @@ module Crystal::MIR
     @phi_predecessor_loads : Hash({BlockId, ValueId}, String) = {} of {BlockId, ValueId} => String
     @current_func_blocks : Hash(BlockId, BasicBlock) = {} of BlockId => BasicBlock
 
+    # Track phi nodes that have nil incoming values (for union return type handling)
+    # Maps phi value_id -> set of blocks that contribute nil
+    @phi_nil_incoming_blocks : Hash(ValueId, Set(BlockId)) = {} of ValueId => Set(BlockId)
+
     # Type metadata for debug DX
     @type_info_entries : Array(TypeInfoEntry)
     @field_info_entries : Array(FieldInfoEntry)
@@ -1808,6 +1812,53 @@ module Crystal::MIR
           end
         end
       end
+
+      # Sixth pass: Track phi nodes that have NIL-typed incoming values
+      # This is used by return emission to correctly set union type_id for nilable returns
+      func.blocks.each do |block|
+        block.instructions.each do |inst|
+          next unless inst.is_a?(Phi)
+
+          nil_blocks = Set(BlockId).new
+          inst.incoming.each do |(block_id, val)|
+            val_type = @value_types[val]?
+            const_val = @constant_values[val]?
+            # Check if value is NIL type, VOID type, POINTER type with null value,
+            # or a constant that is null
+            is_nil_value = val_type == TypeRef::NIL ||
+                           val_type == TypeRef::VOID ||
+                           const_val == "null" ||
+                           (val_type == TypeRef::POINTER && const_val == "null")
+
+            # Also check for Cast instructions that produce ptr from 0 (nil pattern)
+            # These have type POINTER but represent nil (inttoptr 0 to ptr)
+            if !is_nil_value && val_type == TypeRef::POINTER
+              # Look up the instruction that produced this value
+              func.blocks.each do |b|
+                b.instructions.each do |prod_inst|
+                  if prod_inst.id == val && prod_inst.is_a?(Cast)
+                    # IntToPtr with source value 0 is nil
+                    if prod_inst.kind == CastKind::IntToPtr
+                      src_const = @constant_values[prod_inst.value]?
+                      if src_const == "0"
+                        is_nil_value = true
+                      end
+                    end
+                  end
+                end
+              end
+            end
+
+            if is_nil_value
+              nil_blocks << block_id
+            end
+          end
+
+          if !nil_blocks.empty?
+            @phi_nil_incoming_blocks[inst.id] = nil_blocks
+          end
+        end
+      end
     end
 
     # Collect all value IDs that are used (referenced by other instructions)
@@ -2169,6 +2220,7 @@ module Crystal::MIR
       @array_info.clear
       @phi_zext_conversions.clear
       @zext_value_names.clear
+      @phi_nil_incoming_blocks.clear
       @cond_counter = 0  # Reset for each function
 
       func.params.each do |param|
@@ -5602,6 +5654,15 @@ module Crystal::MIR
             if val_llvm_type == "void" || val_ref == "null"
               emit "store i32 1, ptr %ret#{c}.type_id_ptr"
               # Don't store payload for nil
+            elsif @phi_nil_incoming_blocks.has_key?(val) && val_llvm_type.starts_with?("i")
+              # Value comes from a phi that has nil incoming - emit conditional type_id
+              # When nil flows into an integer phi, it becomes 0, so check if val == 0
+              # TODO: This heuristic assumes non-nil values are never 0, which may not always be true
+              emit "%ret#{c}.is_nil = icmp eq #{val_llvm_type} #{val_ref}, 0"
+              emit "%ret#{c}.type_id = select i1 %ret#{c}.is_nil, i32 1, i32 0"
+              emit "store i32 %ret#{c}.type_id, ptr %ret#{c}.type_id_ptr"
+              emit "%ret#{c}.payload_ptr = getelementptr #{@current_return_type}, ptr %ret#{c}.union_ptr, i32 0, i32 1"
+              emit "store #{val_llvm_type} #{val_ref}, ptr %ret#{c}.payload_ptr"
             else
               # Non-nil value - set type_id=0 and store payload
               emit "store i32 0, ptr %ret#{c}.type_id_ptr"
