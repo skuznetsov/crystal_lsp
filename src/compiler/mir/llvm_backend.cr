@@ -4457,6 +4457,90 @@ module Crystal::MIR
         return
       end
 
+      # Handle nil? and not_nil! intrinsics inline
+      # These are Crystal intrinsics that should be inlined, not external calls
+      if mangled_extern_name == "nil_" && inst.args.size == 1
+        arg_id = inst.args[0]
+        arg_type = @value_types[arg_id]? || TypeRef::POINTER
+        arg_llvm_type = @type_mapper.llvm_type(arg_type)
+        arg_val = value_ref(arg_id)
+
+        if arg_llvm_type.includes?(".union")
+          # Union type: extract type tag and compare to NIL (type_id = 1)
+          c = @cond_counter
+          @cond_counter += 1
+          # Union is { i32 type_id, [N x i8] payload }
+          # Store union to memory to extract type_id
+          emit "%nil_check_alloca.#{c} = alloca #{arg_llvm_type}, align 8"
+          emit "store #{arg_llvm_type} #{normalize_union_value(arg_val, arg_llvm_type)}, ptr %nil_check_alloca.#{c}"
+          emit "%nil_check_tag_ptr.#{c} = getelementptr #{arg_llvm_type}, ptr %nil_check_alloca.#{c}, i32 0, i32 0"
+          emit "%nil_check_tag.#{c} = load i32, ptr %nil_check_tag_ptr.#{c}"
+          emit "#{name} = icmp eq i32 %nil_check_tag.#{c}, 1"  # 1 = NIL type_id
+        elsif arg_llvm_type == "ptr"
+          # Pointer type: compare to null
+          emit "#{name} = icmp eq ptr #{arg_val}, null"
+        else
+          # Primitive type (i32, i64, etc.): cannot be nil, always false
+          emit "#{name} = add i1 0, 0"  # false
+        end
+        @value_types[inst.id] = TypeRef::BOOL
+        @value_names[inst.id] = "r#{inst.id}"  # Register for later value_ref lookups
+        return
+      end
+
+      if mangled_extern_name == "not_nil_" && inst.args.size == 1
+        arg_id = inst.args[0]
+        arg_type = @value_types[arg_id]? || TypeRef::POINTER
+        arg_llvm_type = @type_mapper.llvm_type(arg_type)
+        arg_val = value_ref(arg_id)
+
+        if arg_llvm_type.includes?(".union")
+          # Union type: extract the payload value
+          # Union is { i32 type_id, [N x i8] payload }
+          # Determine the non-nil type from union name (e.g., %Int32___Nil.union -> i32)
+          result_type = "i32"  # Default to i32
+          if arg_llvm_type.includes?("Int64")
+            result_type = "i64"
+          elsif arg_llvm_type.includes?("Float64") || arg_llvm_type.includes?("Double")
+            result_type = "double"
+          elsif arg_llvm_type.includes?("Float32")
+            result_type = "float"
+          elsif arg_llvm_type.includes?("String") || arg_llvm_type.includes?("Pointer") || arg_llvm_type.includes?("Array")
+            result_type = "ptr"
+          end
+
+          c = @cond_counter
+          @cond_counter += 1
+          emit "%not_nil_alloca.#{c} = alloca #{arg_llvm_type}, align 8"
+          emit "store #{arg_llvm_type} #{normalize_union_value(arg_val, arg_llvm_type)}, ptr %not_nil_alloca.#{c}"
+          emit "%not_nil_payload_ptr.#{c} = getelementptr #{arg_llvm_type}, ptr %not_nil_alloca.#{c}, i32 0, i32 1"
+          emit "#{name} = load #{result_type}, ptr %not_nil_payload_ptr.#{c}"
+
+          result_type_ref = case result_type
+                            when "i32" then TypeRef::INT32
+                            when "i64" then TypeRef::INT64
+                            when "float" then TypeRef::FLOAT32
+                            when "double" then TypeRef::FLOAT64
+                            when "ptr" then TypeRef::POINTER
+                            else TypeRef::INT32
+                            end
+          @value_types[inst.id] = result_type_ref
+          @value_names[inst.id] = "r#{inst.id}"  # Register for later value_ref lookups
+        else
+          # Non-union type: just return the value itself
+          # Guard against void type - void values are nil, return null ptr instead
+          if arg_llvm_type == "void"
+            emit "#{name} = inttoptr i64 0 to ptr"
+            @value_types[inst.id] = TypeRef::POINTER
+          else
+            emit "#{name} = bitcast #{arg_llvm_type} #{arg_val} to #{arg_llvm_type}"
+            @value_types[inst.id] = arg_type
+          end
+          @value_names[inst.id] = "r#{inst.id}"  # Register for later value_ref lookups
+        end
+        return
+      end
+
       # If the mangled name doesn't match any defined function, try to find a match with namespace prefix
       # Search in MIR module's functions - but only exact matches or proper namespace matches
       # Note: Suffix matching is disabled as it causes false positives (e.g., matching initialize to unrelated methods)
