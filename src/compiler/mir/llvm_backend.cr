@@ -3387,6 +3387,15 @@ module Crystal::MIR
         return
       end
 
+      # Guard: detect integer literal used with ptr type (type mismatch)
+      # This happens when @value_types defaults to POINTER but actual value is int
+      is_int_literal = value.match(/^-?\d+$/) && value != "null"
+      if is_int_literal && src_type == "ptr"
+        # Actual src type is int, not ptr - correct it
+        src_type = "i64"
+        src_type_ref = TypeRef::INT64
+      end
+
       # Guard: can't convert to void - just pass through as ptr
       if dst_type == "void"
         if src_type == "ptr"
@@ -4801,8 +4810,19 @@ module Crystal::MIR
         end
       else
         # Not a union struct - just use the value directly
-        # If result_type is ptr, use the union_val as-is
-        if result_type == "ptr" || result_type == union_type
+        # Check if union_val is an integer literal (type mismatch from defaulting to POINTER)
+        is_int_literal = union_val.match(/^-?\d+$/) && union_val != "null"
+
+        if is_int_literal
+          # union_val is an int literal, use it directly for int result types
+          if result_type.starts_with?("i")
+            emit "#{name} = add #{result_type} #{union_val}, 0"
+          elsif result_type == "ptr"
+            emit "#{name} = inttoptr i64 #{union_val} to ptr"
+          else
+            emit "#{name} = add i64 #{union_val}, 0"
+          end
+        elsif result_type == "ptr" || result_type == union_type
           emit "#{name} = bitcast ptr #{union_val} to ptr"
         elsif result_type.starts_with?("i")
           # Need to convert ptr to int
