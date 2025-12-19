@@ -613,6 +613,277 @@ module Crystal::HIR
       end
     end
 
+    private def resolve_path_like_name(expr_id : ExprId) : String?
+      return nil if expr_id.invalid?
+
+      node = @arena[expr_id]
+      case node
+      when CrystalV2::Compiler::Frontend::IdentifierNode
+        String.new(node.name)
+      when CrystalV2::Compiler::Frontend::ConstantNode
+        String.new(node.name)
+      when CrystalV2::Compiler::Frontend::PathNode
+        left = node.left
+        left_name = left ? resolve_path_like_name(left.not_nil!) : nil
+        right_name = resolve_path_like_name(node.right)
+        return nil unless right_name
+        left_name ? "#{left_name}::#{right_name}" : right_name
+      when CrystalV2::Compiler::Frontend::GenericNode
+        resolve_path_like_name(node.base_type)
+      else
+        nil
+      end
+    end
+
+    private def stringify_type_expr(expr_id : ExprId) : String?
+      return nil if expr_id.invalid?
+
+      node = @arena[expr_id]
+      case node
+      when CrystalV2::Compiler::Frontend::IdentifierNode
+        name = String.new(node.name)
+        @type_param_map[name]? || name
+      when CrystalV2::Compiler::Frontend::ConstantNode
+        name = String.new(node.name)
+        @type_param_map[name]? || name
+      when CrystalV2::Compiler::Frontend::PathNode
+        left = node.left
+        left_name = left ? stringify_type_expr(left.not_nil!) : nil
+        right_name = stringify_type_expr(node.right)
+        return nil unless right_name
+        left_name ? "#{left_name}::#{right_name}" : right_name
+      when CrystalV2::Compiler::Frontend::GenericNode
+        base = stringify_type_expr(node.base_type)
+        return nil unless base
+        args = [] of String
+        node.type_args.each do |arg|
+          if str = stringify_type_expr(arg)
+            args << str
+          end
+        end
+        "#{base}(#{args.join(", ")})"
+      else
+        nil
+      end
+    end
+
+    private def with_arena(arena : CrystalV2::Compiler::Frontend::ArenaLike, &)
+      old_arena = @arena
+      @arena = arena
+      begin
+        yield
+      ensure
+        @arena = old_arena
+      end
+    end
+
+    private def with_type_param_map(extra : Hash(String, String), &)
+      old_map = @type_param_map
+      @type_param_map = old_map.merge(extra)
+      begin
+        yield
+      ensure
+        @type_param_map = old_map
+      end
+    end
+
+    private def include_type_param_map(
+      module_node : CrystalV2::Compiler::Frontend::ModuleNode,
+      include_target : ExprId
+    ) : Hash(String, String)
+      extra = {} of String => String
+      type_params = module_node.type_params
+      return extra unless type_params
+
+      target_node = @arena[include_target]
+      return extra unless target_node.is_a?(CrystalV2::Compiler::Frontend::GenericNode)
+
+      arg_strings = [] of String
+      target_node.type_args.each do |arg|
+        if str = stringify_type_expr(arg)
+          arg_strings << str
+        end
+      end
+      return extra if arg_strings.empty?
+
+      type_params.each_with_index do |tp, idx|
+        break if idx >= arg_strings.size
+        extra[String.new(tp)] = arg_strings[idx]
+      end
+      extra
+    end
+
+    private def collect_defined_instance_method_full_names(class_name : String, body : Array(ExprId)) : Set(String)
+      defined = Set(String).new
+      body.each do |expr_id|
+        member = @arena[expr_id]
+        next unless member.is_a?(CrystalV2::Compiler::Frontend::DefNode)
+        next if member.is_abstract
+        next if (recv = member.receiver) && String.new(recv) == "self"
+
+        method_name = String.new(member.name)
+        base_name = "#{class_name}##{method_name}"
+
+        param_types = [] of TypeRef
+        has_block = false
+        if params = member.params
+          params.each do |param|
+            if param.is_block
+              has_block = true
+              next
+            end
+            if ta = param.type_annotation
+              param_types << type_ref_for_name(String.new(ta))
+            else
+              param_types << TypeRef::VOID
+            end
+          end
+        end
+
+        full_name = mangle_function_name(base_name, param_types, has_block)
+        defined << full_name
+      end
+      defined
+    end
+
+    private def register_module_instance_methods_for(
+      class_name : String,
+      include_node : CrystalV2::Compiler::Frontend::IncludeNode,
+      defined_full_names : Set(String),
+      visited : Set(String)
+    )
+      module_full_name = resolve_path_like_name(include_node.target)
+      return unless module_full_name
+      return if visited.includes?(module_full_name)
+      visited << module_full_name
+
+      defs = @module_defs[module_full_name]? || return
+      defs.each do |mod_node, mod_arena|
+        with_arena(mod_arena) do
+          extra_map = include_type_param_map(mod_node, include_node.target)
+          with_type_param_map(extra_map) do
+            if body = mod_node.body
+              body.each do |member_id|
+                member = @arena[member_id]
+                case member
+                when CrystalV2::Compiler::Frontend::IncludeNode
+                  register_module_instance_methods_for(class_name, member, defined_full_names, visited)
+                when CrystalV2::Compiler::Frontend::DefNode
+                  next if (recv = member.receiver) && String.new(recv) == "self"
+                  next if member.is_abstract
+
+                  method_name = String.new(member.name)
+                  base_name = "#{class_name}##{method_name}"
+
+                  return_type = if rt = member.return_type
+                                  type_ref_for_name(String.new(rt))
+                                elsif method_name.ends_with?("?")
+                                  TypeRef::BOOL
+                                else
+                                  TypeRef::VOID
+                                end
+
+                  param_types = [] of TypeRef
+                  has_block = false
+                  if params = member.params
+                    params.each do |param|
+                      if param.is_block
+                        has_block = true
+                        next
+                      end
+                      param_type = if ta = param.type_annotation
+                                     type_ref_for_name(String.new(ta))
+                                   else
+                                     TypeRef::VOID
+                                   end
+                      param_types << param_type
+                    end
+                  end
+
+                  full_name = mangle_function_name(base_name, param_types, has_block)
+                  next if defined_full_names.includes?(full_name)
+
+                  register_function_type(full_name, return_type)
+
+                  if body = member.body
+                    if contains_yield?(body)
+                      @yield_functions.add(base_name)
+                      @yield_functions.add(full_name)
+                      unless @function_defs.has_key?(base_name)
+                        @function_defs[base_name] = member
+                        @function_def_arenas[base_name] = @arena
+                      end
+                      @function_defs[full_name] = member
+                      @function_def_arenas[full_name] = @arena
+                    end
+                  end
+                end
+              end
+            end
+          end
+        end
+      end
+    end
+
+    private def lower_module_instance_methods_for(
+      class_name : String,
+      class_info : ClassInfo,
+      include_node : CrystalV2::Compiler::Frontend::IncludeNode,
+      defined_full_names : Set(String),
+      visited : Set(String)
+    )
+      module_full_name = resolve_path_like_name(include_node.target)
+      return unless module_full_name
+      return if visited.includes?(module_full_name)
+      visited << module_full_name
+
+      defs = @module_defs[module_full_name]? || return
+      defs.each do |mod_node, mod_arena|
+        with_arena(mod_arena) do
+          extra_map = include_type_param_map(mod_node, include_node.target)
+          with_type_param_map(extra_map) do
+            if body = mod_node.body
+              body.each do |member_id|
+                member = @arena[member_id]
+                case member
+                when CrystalV2::Compiler::Frontend::IncludeNode
+                  lower_module_instance_methods_for(class_name, class_info, member, defined_full_names, visited)
+                when CrystalV2::Compiler::Frontend::DefNode
+                  next if (recv = member.receiver) && String.new(recv) == "self"
+                  next if member.is_abstract
+
+                  method_name = String.new(member.name)
+                  base_name = "#{class_name}##{method_name}"
+
+                  param_types = [] of TypeRef
+                  has_block = false
+                  if params = member.params
+                    params.each do |param|
+                      if param.is_block
+                        has_block = true
+                        next
+                      end
+                      if ta = param.type_annotation
+                        param_types << type_ref_for_name(String.new(ta))
+                      else
+                        param_types << TypeRef::VOID
+                      end
+                    end
+                  end
+
+                  full_name = mangle_function_name(base_name, param_types, has_block)
+                  next if defined_full_names.includes?(full_name)
+                  next if @module.has_function?(full_name)
+
+                  lower_method(class_name, class_info, member)
+                end
+              end
+            end
+          end
+        end
+      end
+    end
+
     # Register a module and its methods (pass 1)
     # Modules are like classes but with only class methods (self.method)
     # Also handles nested classes: module Foo; class Bar; end; end -> Foo::Bar
@@ -1052,9 +1323,14 @@ module Crystal::HIR
       init_params = [] of {String, TypeRef}
 
       if body = node.body
+        defined_instance_method_full_names = collect_defined_instance_method_full_names(class_name, body)
+        include_nodes = [] of CrystalV2::Compiler::Frontend::IncludeNode
+
         body.each do |expr_id|
           member = @arena[expr_id]
           case member
+          when CrystalV2::Compiler::Frontend::IncludeNode
+            include_nodes << member
           when CrystalV2::Compiler::Frontend::InstanceVarDeclNode
             # Instance variable declaration: @value : Int32
             ivar_name = String.new(member.name)
@@ -1276,6 +1552,12 @@ module Crystal::HIR
             # Also register short name for local resolution within class
             @type_aliases[alias_name] = target_name
           end
+        end
+
+        # Expand module mixins: register included module instance method signatures.
+        visited_modules = Set(String).new
+        include_nodes.each do |inc|
+          register_module_instance_methods_for(class_name, inc, defined_instance_method_full_names, visited_modules)
         end
       end
 
@@ -1651,9 +1933,24 @@ module Crystal::HIR
 
       # Lower each method
       if body = node.body
+        defined_full_names = collect_defined_instance_method_full_names(class_name, body)
+        include_nodes = [] of CrystalV2::Compiler::Frontend::IncludeNode
+
+        body.each do |expr_id|
+          member = @arena[expr_id]
+          include_nodes << member if member.is_a?(CrystalV2::Compiler::Frontend::IncludeNode)
+        end
+
+        visited_modules = Set(String).new
+        include_nodes.each do |inc|
+          lower_module_instance_methods_for(class_name, class_info, inc, defined_full_names, visited_modules)
+        end
+
         body.each do |expr_id|
           member = @arena[expr_id]
           case member
+          when CrystalV2::Compiler::Frontend::IncludeNode
+            # Handled above via mixin expansion.
           when CrystalV2::Compiler::Frontend::DefNode
             lower_method(class_name, class_info, member)
           when CrystalV2::Compiler::Frontend::GetterNode
@@ -1695,9 +1992,24 @@ module Crystal::HIR
 
       # Lower each method
       if body = node.body
+        defined_full_names = collect_defined_instance_method_full_names(struct_name, body)
+        include_nodes = [] of CrystalV2::Compiler::Frontend::IncludeNode
+
+        body.each do |expr_id|
+          member = @arena[expr_id]
+          include_nodes << member if member.is_a?(CrystalV2::Compiler::Frontend::IncludeNode)
+        end
+
+        visited_modules = Set(String).new
+        include_nodes.each do |inc|
+          lower_module_instance_methods_for(struct_name, struct_info, inc, defined_full_names, visited_modules)
+        end
+
         body.each do |expr_id|
           member = @arena[expr_id]
           case member
+          when CrystalV2::Compiler::Frontend::IncludeNode
+            # Handled above via mixin expansion.
           when CrystalV2::Compiler::Frontend::DefNode
             lower_method(struct_name, struct_info, member)
           when CrystalV2::Compiler::Frontend::GetterNode
@@ -7555,6 +7867,24 @@ module Crystal::HIR
       ctx.push_scope(ScopeKind::Block)
 
       caller_arena = @arena
+
+      # Prevent infinite recursion / runaway stack usage in aggressive yield inlining.
+      # This can happen in stdlib where yield is used deeply (or recursively).
+      max_depth = (ENV["INLINE_YIELD_MAX_DEPTH"]? || "256").to_i
+      if @inline_yield_name_stack.size >= max_depth || @inline_yield_name_stack.includes?(inline_key)
+        if ENV.has_key?("DEBUG_YIELD_INLINE")
+          STDERR.puts "[INLINE_YIELD] skipping inline: #{inline_key} (depth=#{@inline_yield_name_stack.size}, max=#{max_depth})"
+        end
+
+        return_type = get_function_return_type(inline_key)
+        block_id = lower_block_to_block_id(ctx, block)
+        call = Call.new(ctx.next_id, return_type, receiver_id, inline_key, call_args, block_id)
+        ctx.emit(call)
+        ctx.register_type(call.id, return_type)
+        ctx.pop_scope
+        return call.id
+      end
+
       old_inline_arenas = @inline_arenas
       @inline_arenas = {caller_arena, callee_arena}
       @arena = callee_arena
@@ -7565,24 +7895,8 @@ module Crystal::HIR
       ctx.restore_locals({} of String => ValueId)
 
       begin
-        # Prevent infinite recursion / runaway stack usage in aggressive yield inlining.
-        # This can happen in stdlib where yield is used deeply (or recursively).
-        max_depth = (ENV["INLINE_YIELD_MAX_DEPTH"]? || "256").to_i
         pushed_name = false
         pushed_block = false
-
-        if @inline_yield_name_stack.size >= max_depth || @inline_yield_name_stack.includes?(inline_key)
-          if ENV.has_key?("DEBUG_YIELD_INLINE")
-            STDERR.puts "[INLINE_YIELD] skipping inline: #{inline_key} (depth=#{@inline_yield_name_stack.size}, max=#{max_depth})"
-          end
-
-          return_type = get_function_return_type(inline_key)
-          block_id = lower_block_to_block_id(ctx, block)
-          call = Call.new(ctx.next_id, return_type, receiver_id, inline_key, call_args, block_id)
-          ctx.emit(call)
-          ctx.register_type(call.id, return_type)
-          return call.id
-        end
 
         @inline_yield_name_stack << inline_key
         pushed_name = true
