@@ -4546,26 +4546,61 @@ module Crystal::MIR
         end
       end
 
-      # Format arguments using actual types from value_types registry
-      args = inst.args.map do |a|
-        arg_type_ref = @value_types[a]? || TypeRef::POINTER
-        arg_type = @type_mapper.llvm_type(arg_type_ref)
-        # Guard against void argument type - use ptr null instead
-        if arg_type == "void"
-          "ptr null"
-        else
-          val = value_ref(a)
-          # For union types, use zeroinitializer instead of 0
-          if arg_type.includes?(".union") && (val == "0" || val == "null")
-            "#{arg_type} zeroinitializer"
-          elsif arg_type == "ptr" && val == "0"
-            # ptr 0 is invalid - use ptr null
-            "ptr null"
+      cast_fixed_arg = ->(actual_type : String, value : String, expected_type : String) : String {
+        return value if actual_type == expected_type
+
+        c = @cond_counter
+        @cond_counter += 1
+        cast_name = "%varargs_cast.#{c}"
+
+        if actual_type == "ptr" && expected_type.starts_with?("i")
+          emit "#{cast_name} = ptrtoint ptr #{value} to #{expected_type}"
+          return cast_name
+        end
+
+        if expected_type == "ptr" && actual_type.starts_with?("i")
+          emit "#{cast_name} = inttoptr #{actual_type} #{value} to ptr"
+          return cast_name
+        end
+
+        if actual_type.starts_with?("i") && expected_type.starts_with?("i")
+          actual_bits = actual_type[1..].to_i?
+          expected_bits = expected_type[1..].to_i?
+          if actual_bits && expected_bits
+            if actual_bits < expected_bits
+              emit "#{cast_name} = sext #{actual_type} #{value} to #{expected_type}"
+            elsif actual_bits > expected_bits
+              emit "#{cast_name} = trunc #{actual_type} #{value} to #{expected_type}"
+            else
+              emit "#{cast_name} = bitcast #{actual_type} #{value} to #{expected_type}"
+            end
           else
-            "#{arg_type} #{val}"
+            emit "#{cast_name} = bitcast #{actual_type} #{value} to #{expected_type}"
+          end
+          return cast_name
+        end
+
+        emit "#{cast_name} = bitcast #{actual_type} #{value} to #{expected_type}"
+        cast_name
+      }
+
+      arg_entries = inst.args.map do |arg_id|
+        arg_type_ref = @value_types[arg_id]? || TypeRef::POINTER
+        arg_type = @type_mapper.llvm_type(arg_type_ref)
+
+        if arg_type == "void"
+          {"ptr", "null"}
+        else
+          val = value_ref(arg_id)
+          if arg_type.includes?(".union") && (val == "0" || val == "null")
+            {arg_type, "zeroinitializer"}
+          elsif arg_type == "ptr" && val == "0"
+            {"ptr", "null"}
+          else
+            {arg_type, val}
           end
         end
-      end.join(", ")
+      end
 
       # Mangle the extern name to be a valid LLVM identifier
       mangled_extern_name = @type_mapper.mangle_name(inst.extern_name)
@@ -4847,31 +4882,53 @@ module Crystal::MIR
         end  # end else for prepass_type check
       end
 
-      # Known varargs functions need explicit function signature in call
-      varargs_functions = Set{"printf", "fprintf", "sprintf", "snprintf", "scanf", "sscanf", "fscanf",
-                              "vprintf", "vfprintf", "vsprintf", "vsnprintf", "vscanf", "vsscanf", "vfscanf",
-                              "wprintf", "swprintf", "wscanf", "swscanf",
-                              "execl", "execle", "execlp", "fcntl", "ioctl", "open"}
-      is_varargs = varargs_functions.includes?(mangled_extern_name)
+      # Known varargs functions need explicit signatures because we currently declare unknown
+      # varargs as `declare <ret> @name(...)` (no fixed params). For correct ABI lowering,
+      # the number and types of *fixed* parameters must match the real C prototype.
+      #
+      # IMPORTANT: Do not treat all arguments as fixed. That breaks `va_start` offsets and
+      # results in garbage reads for functions like `printf`.
+      varargs_signatures = {
+        # stdio
+        "printf"    => ["ptr"],
+        "fprintf"   => ["ptr", "ptr"],
+        "sprintf"   => ["ptr", "ptr"],
+        "snprintf"  => ["ptr", "i64", "ptr"],
+        "scanf"     => ["ptr"],
+        "sscanf"    => ["ptr", "ptr"],
+        "fscanf"    => ["ptr", "ptr"],
+        "vprintf"   => ["ptr", "ptr"],
+        "vfprintf"  => ["ptr", "ptr", "ptr"],
+        "vsprintf"  => ["ptr", "ptr", "ptr"],
+        "vsnprintf" => ["ptr", "i64", "ptr", "ptr"],
+        # unix
+        "open"      => ["ptr", "i32"],
+        "fcntl"     => ["i32", "i32"],
+        "ioctl"     => ["i32", "i64"],
+        # exec*
+        "execl"     => ["ptr", "ptr"],
+        "execle"    => ["ptr", "ptr"],
+        "execlp"    => ["ptr", "ptr"],
+      } of String => Array(String)
+      fixed_sig = varargs_signatures[mangled_extern_name]?
+
+      if fixed_sig
+        fixed_sig.each_with_index do |expected_type, idx|
+          break if idx >= arg_entries.size
+          actual_type, actual_val = arg_entries[idx]
+          coerced_val = cast_fixed_arg.call(actual_type, actual_val, expected_type)
+          arg_entries[idx] = {expected_type, coerced_val}
+        end
+      end
+
+      args = arg_entries.map { |(t, v)| "#{t} #{v}" }.join(", ")
 
       if return_type == "void"
         emit "call void @#{mangled_extern_name}(#{args})"
         # Mark as void so value_ref returns a safe default for downstream uses
         @void_values << inst.id
-      elsif is_varargs
-        # Varargs functions need explicit function signature in call instruction
-        # Use the argument types from this call site to build a compatible signature.
-        #
-        # NOTE: We currently declare unknown varargs functions as `declare <ret> @name(...)`,
-        # so the call-site signature is authoritative (opaque pointers allow this pattern).
-        sig_types = inst.args.map do |arg_id|
-          arg_type = @value_types[arg_id]? || TypeRef::POINTER
-          llvm_type = @type_mapper.llvm_type(arg_type)
-          llvm_type = "ptr" if llvm_type == "void"
-          llvm_type
-        end
-        sig_prefix = sig_types.join(", ")
-        sig_prefix = "ptr" if sig_prefix.empty?
+      elsif fixed_sig
+        sig_prefix = fixed_sig.join(", ")
         emit "#{name} = call #{return_type} (#{sig_prefix}, ...) @#{mangled_extern_name}(#{args})"
       else
         emit "#{name} = call #{return_type} @#{mangled_extern_name}(#{args})"
