@@ -744,4 +744,52 @@ describe "Codegen Integration" do
       output.strip.should eq("7 1")
     end
   end
+
+  describe "stdlib-style combinators" do
+    it "monomorphizes module-nested iterator types (with_object)" do
+      source = <<-CR
+        lib LibC
+          fun printf(format : UInt8*, ...) : Int32
+        end
+
+        module Iterator(T)
+          def with_object(obj : Int32)
+            WithObjectIterator(typeof(self), T, typeof(obj)).new(self, obj)
+          end
+
+          struct WithObjectIterator(I, T, O)
+            def initialize(@iter : I, @value : O)
+            end
+
+            def value : O
+              @value
+            end
+          end
+        end
+
+        class Dir
+          struct EntryIterator
+            include Iterator(String)
+
+            def initialize
+            end
+          end
+
+          def each : EntryIterator
+            EntryIterator.new
+          end
+
+          def run
+            each.with_object(123).value
+          end
+        end
+
+        v = Dir.new.run
+        LibC.printf("%d\\n", v)
+        CR
+
+      output = CodegenTestHelper.compile_and_run(source)
+      output.strip.should eq("123")
+    end
+  end
 end

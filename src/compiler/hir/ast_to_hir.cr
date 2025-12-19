@@ -1403,6 +1403,9 @@ module Crystal::HIR
         defined_instance_method_full_names = collect_defined_instance_method_full_names(class_name, body)
         include_nodes = [] of CrystalV2::Compiler::Frontend::IncludeNode
 
+        old_class = @current_class
+        @current_class = class_name
+        begin
         body.each do |expr_id|
           member = @arena[expr_id]
           case member
@@ -1637,6 +1640,9 @@ module Crystal::HIR
         visited_modules = Set(String).new
         include_nodes.each do |inc|
           register_module_instance_methods_for(class_name, inc, defined_instance_method_full_names, visited_modules)
+        end
+        ensure
+          @current_class = old_class
         end
       end
 
@@ -2458,6 +2464,22 @@ module Crystal::HIR
         end
       end
 
+      # Infer return type from the last expression for unannotated methods.
+      # This is a pragmatic bootstrap improvement for stdlib-style combinators
+      # (e.g., Iterator#with_object returning a nested iterator type).
+      if node.return_type.nil? && !method_name.ends_with?("?") && return_type == TypeRef::VOID
+        if last_value
+          inferred = ctx.type_of(last_value)
+          if inferred != TypeRef::VOID
+            return_type = inferred
+            func.return_type = inferred
+          end
+        end
+      end
+
+      # Ensure the return type map matches the lowered function.
+      register_function_type(full_name, return_type)
+
       # Add implicit return if not already terminated
       # BUT don't add return after raise (which sets Unreachable terminator)
       block = ctx.get_block(ctx.current_block)
@@ -2972,6 +2994,16 @@ module Crystal::HIR
 
       # Fallback to original name
       name
+    end
+
+    private def resolve_type_alias_chain(name : String) : String
+      resolved = @type_aliases[name]? || LIBC_TYPE_ALIASES[name]? || name
+      depth = 0
+      while (next_resolved = @type_aliases[resolved]? || LIBC_TYPE_ALIASES[resolved]?) && next_resolved != resolved && depth < 10
+        resolved = next_resolved
+        depth += 1
+      end
+      resolved
     end
 
     # Returns the fully qualified method name (e.g., "Animal#age" or "Animal#age:Int32") or nil if not found
@@ -4583,15 +4615,8 @@ module Crystal::HIR
     # This is used when calling static methods like Array(Int32).new
     private def lower_generic_type_ref(ctx : LoweringContext, node : CrystalV2::Compiler::Frontend::GenericNode) : ValueId
       # Extract base type name
-      base_node = @arena[node.base_type]
-      base_name = case base_node
-                  when CrystalV2::Compiler::Frontend::ConstantNode
-                    String.new(base_node.name)
-                  when CrystalV2::Compiler::Frontend::IdentifierNode
-                    String.new(base_node.name)
-                  else
-                    "Unknown"
-                  end
+      base_name = resolve_path_like_name(node.base_type) || "Unknown"
+      base_name = resolve_type_alias_chain(base_name)
 
       # Extract type arguments, substituting any type parameters
       normalize_typeof_name = ->(type_name : String) : String {
@@ -6124,6 +6149,7 @@ module Crystal::HIR
           # Generic type like Box(Int32).new()
           base_name = resolve_path_like_name(obj_node.base_type)
           if base_name
+            base_name = resolve_type_alias_chain(base_name)
             normalize_typeof_name = ->(type_name : String) : String {
               if type_name == "Void" || type_name == "Unknown" || type_name.includes?("|")
                 "Pointer(Void)"
@@ -8411,6 +8437,7 @@ module Crystal::HIR
         # Generic type like Hash(Int32, Int32).new
         base_name = resolve_path_like_name(obj_node.base_type)
         if base_name
+          base_name = resolve_type_alias_chain(base_name)
           normalize_typeof_name = ->(type_name : String) : String {
             if type_name == "Void" || type_name == "Unknown" || type_name.includes?("|")
               "Pointer(Void)"
@@ -9186,68 +9213,69 @@ module Crystal::HIR
         name
       end
 
-      # Check cache first (use normalized name for union types)
-      if cached = @type_cache[normalized_name]?
-        # Also cache the original name if different
-        @type_cache[name] = cached if name != normalized_name
+      lookup_name = normalized_name
+      # Resolve unqualified type names in the current namespace before cache lookup.
+      # This avoids poisoning the cache with short names that can resolve differently per scope.
+      if !lookup_name.includes?("|") && !lookup_name.includes?("::") && lookup_name.size > 0 && lookup_name[0].uppercase?
+        lookup_name = resolve_class_name_in_context(lookup_name)
+      end
+
+      if cached = @type_cache[lookup_name]?
         return cached
       end
 
       # Check for union type syntax: "Type1 | Type2" or "Type1|Type2" (parser may not add spaces)
       # NOTE: Don't set placeholder here - create_union_type handles its own caching
-      if name.includes?("|")
-        result = create_union_type(normalized_name)
-        @type_cache[normalized_name] = result
-        @type_cache[name] = result if name != normalized_name
+      if lookup_name.includes?("|")
+        result = create_union_type(lookup_name)
+        @type_cache[lookup_name] = result
         return result
       end
 
       # Mark as being processed with placeholder to break cycles (BEFORE any recursion)
       # Only for non-union types - union types are handled by create_union_type
-      @type_cache[normalized_name] = TypeRef::VOID
-      @type_cache[name] = TypeRef::VOID if name != normalized_name
+      @type_cache[lookup_name] = TypeRef::VOID
 
       # Handle nullable type suffix: "T?" means "T | Nil"
-      if name.ends_with?("?")
-        base_name = name[0, name.size - 1]
+      if lookup_name.ends_with?("?")
+        base_name = lookup_name[0, lookup_name.size - 1]
         # Substitute type parameter if present
         base_name = @type_param_map[base_name]? || base_name
         union_name = "#{base_name} | Nil"
         result = create_union_type(union_name)
-        @type_cache[name] = result
-        @type_cache[union_name] = result
+        @type_cache[lookup_name] = result
         return result
       end
 
       # Check if this is a type parameter that should be substituted
-      if substitution = @type_param_map[name]?
+      if substitution = @type_param_map[lookup_name]?
         result = type_ref_for_name(substitution)
-        @type_cache[name] = result
+        @type_cache[lookup_name] = result
         return result
       end
 
       # Check if this is a type alias (but not self-referencing)
-      if alias_target = @type_aliases[name]?
-        if alias_target != name
+      if alias_target = @type_aliases[lookup_name]?
+        if alias_target != lookup_name
           result = type_ref_for_name(alias_target)
-          @type_cache[name] = result
+          @type_cache[lookup_name] = result
           return result
         end
       end
 
       # Check LibC type aliases (platform-specific fallback)
-      if libc_target = LIBC_TYPE_ALIASES[name]?
+      if libc_target = LIBC_TYPE_ALIASES[lookup_name]?
         result = type_ref_for_name(libc_target)
-        @type_cache[name] = result
+        @type_cache[lookup_name] = result
         return result
       end
 
       # Handle generic types like Pointer(K), Array(T) - substitute type parameters
-      if name.includes?("(") && name.includes?(")")
+      if lookup_name.includes?("(") && lookup_name.includes?(")")
         # Parse generic: "Pointer(K)" -> base="Pointer", params=["K"]
-        paren_start = name.index('(').not_nil!
-        base_name = name[0, paren_start]
-        params_str = name[paren_start + 1, name.size - paren_start - 2]
+        paren_start = lookup_name.index('(').not_nil!
+        base_name = lookup_name[0, paren_start]
+        params_str = lookup_name[paren_start + 1, lookup_name.size - paren_start - 2]
 
         # Substitute each type parameter
         substituted_params = params_str.split(",").map do |param|
@@ -9257,7 +9285,7 @@ module Crystal::HIR
 
         # Reconstruct with substituted params
         substituted_name = "#{base_name}(#{substituted_params.join(", ")})"
-        if substituted_name != name
+        if substituted_name != lookup_name
           # Types changed - recurse with new name
           return type_ref_for_name(substituted_name)
         end
@@ -9265,58 +9293,65 @@ module Crystal::HIR
 
       # Handle pointer types (Void*, Pointer(T), T*)
       # IMPORTANT: This must be checked BEFORE the case statement for "Void"
-      if name.ends_with?("*")
+      if lookup_name.ends_with?("*")
         # T* syntax -> pointer type
-        @type_cache[name] = TypeRef::POINTER
+        @type_cache[lookup_name] = TypeRef::POINTER
         return TypeRef::POINTER
       end
 
-      if name.starts_with?("Pointer")
+      if lookup_name.starts_with?("Pointer")
         # Pointer(T) or just Pointer -> pointer type
-        @type_cache[name] = TypeRef::POINTER
+        @type_cache[lookup_name] = TypeRef::POINTER
         return TypeRef::POINTER
       end
 
-      result = case name
-               when "Void"           then TypeRef::VOID
-               when "Nil"            then TypeRef::NIL
-               when "Bool"           then TypeRef::BOOL
-               when "Int8"           then TypeRef::INT8
-               when "Int16"          then TypeRef::INT16
-               when "Int32"          then TypeRef::INT32
-               when "Int64"          then TypeRef::INT64
-               when "Int128"         then TypeRef::INT128
-               when "UInt8"          then TypeRef::UINT8
-               when "UInt16"         then TypeRef::UINT16
-               when "UInt32"         then TypeRef::UINT32
-               when "UInt64"         then TypeRef::UINT64
-               when "UInt128"        then TypeRef::UINT128
-               when "Float32"        then TypeRef::FLOAT32
-               when "Float64"        then TypeRef::FLOAT64
-               when "Char"           then TypeRef::CHAR
-               when "String"         then TypeRef::STRING
-               when "Symbol"         then TypeRef::SYMBOL
+      result = case lookup_name
+               when "Void"    then TypeRef::VOID
+               when "Nil"     then TypeRef::NIL
+               when "Bool"    then TypeRef::BOOL
+               when "Int8"    then TypeRef::INT8
+               when "Int16"   then TypeRef::INT16
+               when "Int32"   then TypeRef::INT32
+               when "Int64"   then TypeRef::INT64
+               when "Int128"  then TypeRef::INT128
+               when "UInt8"   then TypeRef::UINT8
+               when "UInt16"  then TypeRef::UINT16
+               when "UInt32"  then TypeRef::UINT32
+               when "UInt64"  then TypeRef::UINT64
+               when "UInt128" then TypeRef::UINT128
+               when "Float32" then TypeRef::FLOAT32
+               when "Float64" then TypeRef::FLOAT64
+               when "Char"    then TypeRef::CHAR
+               when "String"  then TypeRef::STRING
+               when "Symbol"  then TypeRef::SYMBOL
                # Abstract/stdlib types that should be treated as pointers
-               when "IO"             then TypeRef::POINTER
-               when "Object"         then TypeRef::POINTER
-               when "Reference"      then TypeRef::POINTER
-               when "Exception"      then TypeRef::POINTER
-               when "Enumerable"     then TypeRef::POINTER
-               when "Indexable"      then TypeRef::POINTER
-               when "Comparable"     then TypeRef::POINTER
-               when "Iterable"       then TypeRef::POINTER
+               when "IO"         then TypeRef::POINTER
+               when "Object"     then TypeRef::POINTER
+               when "Reference"  then TypeRef::POINTER
+               when "Exception"  then TypeRef::POINTER
+               when "Enumerable" then TypeRef::POINTER
+               when "Indexable"  then TypeRef::POINTER
+               when "Comparable" then TypeRef::POINTER
+               when "Iterable"   then TypeRef::POINTER
                else
                  # Check if this is an enum type - enums are stored as Int32
                  if enum_info = @enum_info
-                   if enum_info.has_key?(name)
-                     @type_cache[name] = TypeRef::INT32
+                   if enum_info.has_key?(lookup_name)
+                     @type_cache[lookup_name] = TypeRef::INT32
                      return TypeRef::INT32
                    end
                  end
-                 @module.intern_type(TypeDescriptor.new(TypeKind::Class, name))
+
+                 # Prefer already-registered concrete types to preserve kind (struct vs class).
+                 if info = @class_info[lookup_name]?
+                   @type_cache[lookup_name] = info.type_ref
+                   return info.type_ref
+                 end
+
+                 @module.intern_type(TypeDescriptor.new(TypeKind::Class, lookup_name))
                end
       # Cache the result to avoid VOID placeholder being returned on subsequent calls
-      @type_cache[name] = result
+      @type_cache[lookup_name] = result
       result
     end
 

@@ -1072,7 +1072,7 @@ module Crystal::HIR
     getter id : FunctionId
     getter name : String
     getter params : Array(Parameter)
-    getter return_type : TypeRef
+    property return_type : TypeRef
     getter scopes : Array(Scope)
     getter blocks : Array(Block)
     getter entry_block : BlockId
