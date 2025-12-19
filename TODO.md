@@ -8,10 +8,10 @@ about syntax or types and should match what the original compiler would report.
 
 ---
 
-## Current Status (2025-12-18)
+## Current Status (2025-12-19)
 
 ### Test Coverage
-- **2958 tests**, 0 failures, 7 pending
+- **3407 tests**, 0 failures, 9 pending
 - **1390 test cases** ported from Crystal's original `parser_spec.cr`
 - **97.6% parser compatibility** with original Crystal
 
@@ -31,7 +31,8 @@ about syntax or types and should match what the original compiler would report.
 - [x] lsp_probe speaks correct binary Content-Length (no dropped responses)
 - [x] TypeIndex binary storage (5.6x faster than JSON)
 
-### Pending (7 tests)
+### Pending (9 tests)
+- 2 HIR type operation lowering (`as`, `as?`) specs (pending while type ops are still being aligned)
 - 6 macro whitespace trimming (`{%- -%}`, `{%~ ~%}`) - for web templates
 - 1 invalid ASM syntax test (intentionally pending)
 
@@ -927,6 +928,8 @@ enum:      64  ← ✅ DONE
 | Varargs prototypes | Use real fixed-parameter signatures for known C varargs (`printf`, `fcntl`, etc.) |
 | Varargs fixed-arg coercion | Insert ptr/int casts for fixed params to satisfy LLVM verifier (`opt -O1`) |
 | Module-typed return inference | If return type is module-like (e.g., `Iterator(T)`), infer concrete return type when body is `Type.new(...)` |
+| Stdlib-style combinators | Infer return types for unannotated combinators (e.g., `Iterator#with_object`) from last expression + keep function return map in sync |
+| Scope-safe type resolution | Resolve unqualified type names in the current namespace before caching (avoid poisoning `type_ref_for_name` cache) |
 
 ### 8.2 Current Status
 
@@ -961,6 +964,10 @@ r2 = maybe(false)  # => nil
 ### 8.4 TODO
 
 1. [ ] **Implement typeof resolution** - Compile-time evaluation of typeof(...) in type annotations
+   - [x] `typeof(self)` / `typeof(arg)` inside generic instantiations (HIR lowering) (2025-12-19)
+   - [ ] General `typeof(...)` evaluation in type positions (type aliases, return types, nested generic args)
 2. [ ] **Fix generic methods with blocks** - Handle block parameter types during lowering
-3. [ ] **Module mixin monomorphization** - Generate methods from included modules for concrete types (partial: include expansion + module-typed return inference; missing: robust module-typed receiver resolution like `Iterator(T)`)
+3. [ ] **Module mixin monomorphization** - Generate methods from included modules for concrete types
+   - Partial: include expansion + module-typed return inference + stdlib-style combinator return inference
+   - Remaining: robust module-typed receiver resolution beyond simple nested iterator combinators
 4. [ ] **Macro expansion for `getter`/`property`** - Compile-time accessor generation
