@@ -252,6 +252,10 @@ module Crystal::HIR
     # Maps base name -> true (existence check)
     @function_base_names : Set(String)
 
+    # Cached return type for a function base name (without $ suffix).
+    # This is used for method resolution when only the base name is known.
+    @function_base_return_types : Hash(String, TypeRef)
+
     # Class type information
     getter class_info : Hash(String, ClassInfo)
 
@@ -286,6 +290,10 @@ module Crystal::HIR
     # Macro definitions (name -> MacroDefNode)
     @macro_defs : Hash(String, CrystalV2::Compiler::Frontend::MacroDefNode)
 
+    # Module AST definitions (name -> list of {node, arena}) for mixin expansion.
+    # Many stdlib "modules" provide instance methods meant to be included into classes/structs.
+    @module_defs : Hash(String, Array({CrystalV2::Compiler::Frontend::ModuleNode, CrystalV2::Compiler::Frontend::ArenaLike}))
+
     # Type aliases (alias_name -> target_type_name)
     @type_aliases : Hash(String, String)
 
@@ -303,10 +311,19 @@ module Crystal::HIR
     # Otherwise callee locals (especially `self`) can leak into the caller and break ivar access.
     @inline_caller_locals_stack : Array(Hash(String, ValueId)) = [] of Hash(String, ValueId)
 
+    # While inlining yield-functions, substitute `yield` with the call-site block body.
+    # Use a stack to support nested inlining (a block body may itself contain `yield`).
+    @inline_yield_block_stack : Array(CrystalV2::Compiler::Frontend::BlockNode) = [] of CrystalV2::Compiler::Frontend::BlockNode
+    @inline_yield_block_arena_stack : Array(CrystalV2::Compiler::Frontend::ArenaLike) = [] of CrystalV2::Compiler::Frontend::ArenaLike
+
+    # Track currently inlined yield-functions to avoid infinite inline recursion on stdlib code.
+    @inline_yield_name_stack : Array(String) = [] of String
+
     def initialize(@arena, module_name : String = "main")
       @module = Module.new(module_name)
       @function_types = {} of String => TypeRef
       @function_base_names = Set(String).new
+      @function_base_return_types = {} of String => TypeRef
       @class_info = {} of String => ClassInfo
       @init_params = {} of String => Array({String, TypeRef})
       @current_class = nil
@@ -319,6 +336,7 @@ module Crystal::HIR
       @monomorphized = Set(String).new
       @type_param_map = {} of String => String
       @macro_defs = {} of String => CrystalV2::Compiler::Frontend::MacroDefNode
+      @module_defs = {} of String => Array({CrystalV2::Compiler::Frontend::ModuleNode, CrystalV2::Compiler::Frontend::ArenaLike})
       @type_aliases = {} of String => String
       @generated_allocators = Set(String).new
       @type_cache = {} of String => TypeRef
@@ -330,6 +348,14 @@ module Crystal::HIR
       # Extract base name (without $ type suffix) for fast lookups
       base_name = full_name.split("$").first
       @function_base_names.add(base_name)
+      # Cache a representative return type for the base name.
+      # Prefer a non-VOID return type when available.
+      if return_type != TypeRef::VOID
+        cached = @function_base_return_types[base_name]?
+        if cached.nil? || cached == TypeRef::VOID
+          @function_base_return_types[base_name] = return_type
+        end
+      end
     end
 
     # Check if a function exists with given base name (fast O(1) lookup)
@@ -596,6 +622,9 @@ module Crystal::HIR
         STDERR.puts "[DEBUG_MODULE] Processing module: #{module_name}, body_size=#{node.body.try(&.size) || 0}"
       end
 
+      # Keep module AST around for mixin expansion (`include Foo` in classes/structs).
+      (@module_defs[module_name] ||= [] of {CrystalV2::Compiler::Frontend::ModuleNode, CrystalV2::Compiler::Frontend::ArenaLike}) << {node, @arena}
+
       # Register module methods (def self.foo) and nested classes
       if body = node.body
         # PASS 1: Register aliases and nested modules first (so they're available for function type resolution)
@@ -637,7 +666,14 @@ module Crystal::HIR
           case member
           when CrystalV2::Compiler::Frontend::DefNode
             method_name = String.new(member.name)
-            # Module methods are always class methods: Module.method
+            # In Crystal, `def self.foo` defines a module (class) method,
+            # while `def foo` defines an instance method meant to be mixed in via `include`.
+            is_class_method = if recv = member.receiver
+                                String.new(recv) == "self"
+                              else
+                                false
+                              end
+            next unless is_class_method
             base_name = "#{module_name}.#{method_name}"
             return_type = if rt = member.return_type
                             type_ref_for_name(String.new(rt))
@@ -647,8 +683,13 @@ module Crystal::HIR
                             TypeRef::VOID
                           end
             param_types = [] of TypeRef
+            has_block = false
             if params = member.params
               params.each do |param|
+                if param.is_block
+                  has_block = true
+                  next
+                end
                 param_type = if ta = param.type_annotation
                                type_ref_for_name(String.new(ta))
                              else
@@ -657,7 +698,7 @@ module Crystal::HIR
                 param_types << param_type
               end
             end
-            full_name = mangle_function_name(base_name, param_types)
+            full_name = mangle_function_name(base_name, param_types, has_block)
             register_function_type(full_name, return_type)
 
             # Track yield-functions for inline expansion (module methods).
@@ -695,6 +736,9 @@ module Crystal::HIR
 
     # Register a nested module with full path
     private def register_nested_module(node : CrystalV2::Compiler::Frontend::ModuleNode, full_name : String)
+      # Keep nested module AST around for mixin expansion.
+      (@module_defs[full_name] ||= [] of {CrystalV2::Compiler::Frontend::ModuleNode, CrystalV2::Compiler::Frontend::ArenaLike}) << {node, @arena}
+
       if body = node.body
         # PASS 1: Register aliases first (so they're available for function type resolution)
         body.each do |expr_id|
@@ -737,6 +781,12 @@ module Crystal::HIR
           case member
           when CrystalV2::Compiler::Frontend::DefNode
             method_name = String.new(member.name)
+            is_class_method = if recv = member.receiver
+                                String.new(recv) == "self"
+                              else
+                                false
+                              end
+            next unless is_class_method
             base_name = "#{full_name}.#{method_name}"
             return_type = if rt = member.return_type
                             type_ref_for_name(String.new(rt))
@@ -746,8 +796,13 @@ module Crystal::HIR
                             TypeRef::VOID
                           end
             param_types = [] of TypeRef
+            has_block = false
             if params = member.params
               params.each do |param|
+                if param.is_block
+                  has_block = true
+                  next
+                end
                 param_type = if ta = param.type_annotation
                                type_ref_for_name(String.new(ta))
                              else
@@ -756,7 +811,7 @@ module Crystal::HIR
                 param_types << param_type
               end
             end
-            full_method_name = mangle_function_name(base_name, param_types)
+            full_method_name = mangle_function_name(base_name, param_types, has_block)
             register_function_type(full_method_name, return_type)
 
             # Track yield-functions for inline expansion (nested module methods).
@@ -828,6 +883,12 @@ module Crystal::HIR
           case member
           when CrystalV2::Compiler::Frontend::DefNode
             method_name = String.new(member.name)
+            is_class_method = if recv = member.receiver
+                                String.new(recv) == "self"
+                              else
+                                false
+                              end
+            next unless is_class_method
             STDERR.puts "      [#{module_name}] Method #{idx}: #{method_name}" if ENV["HIR_DEBUG"]?
             STDERR.flush if ENV["HIR_DEBUG"]?
             lower_module_method(module_name, member)
@@ -867,6 +928,8 @@ module Crystal::HIR
 
       # Collect parameter types for name mangling
       param_infos = [] of Tuple(String, TypeRef)
+      param_types = [] of TypeRef
+      has_block = false
       if params = node.params
         params.each do |param|
           param_name = param.name.nil? ? "_" : String.new(param.name.not_nil!)
@@ -876,12 +939,16 @@ module Crystal::HIR
                          TypeRef::VOID
                        end
           param_infos << {param_name, param_type}
+          if param.is_block
+            has_block = true
+          else
+            param_types << param_type
+          end
         end
       end
 
       # Mangle function name with parameter types
-      param_types = param_infos.map { |_, t| t }
-      full_name = mangle_function_name(base_name, param_types)
+      full_name = mangle_function_name(base_name, param_types, has_block)
 
       func = @module.create_function(full_name, return_type)
       ctx = LoweringContext.new(func, @module, @arena)
@@ -1040,8 +1107,13 @@ module Crystal::HIR
                           end
             # Collect parameter types for mangling
             method_param_types = [] of TypeRef
+            has_block = false
             if params = member.params
               params.each do |param|
+                if param.is_block
+                  has_block = true
+                  next
+                end
                 param_type = if ta = param.type_annotation
                                type_ref_for_name(String.new(ta))
                              else
@@ -1050,7 +1122,7 @@ module Crystal::HIR
                 method_param_types << param_type
               end
             end
-            full_name = mangle_function_name(base_name, method_param_types)
+            full_name = mangle_function_name(base_name, method_param_types, has_block)
             if ENV.has_key?("DEBUG_NESTED_CLASS") && class_name.includes?("FileDescriptor")
               STDERR.puts "[DEBUG_METHOD_REG] #{class_name}: #{method_name} -> #{full_name} (class_method=#{is_class_method})"
             end
@@ -1314,8 +1386,13 @@ module Crystal::HIR
                           "#{struct_name}##{method_name}"
                         end
             param_types = [] of TypeRef
+            has_block = false
             if params = member.params
               params.each do |param|
+                if param.is_block
+                  has_block = true
+                  next
+                end
                 if param.is_instance_var
                   param_name = "@#{String.new(param.name.not_nil!)}"
                   existing_ivar = ivars.find { |iv| iv.name == param_name }
@@ -1333,13 +1410,28 @@ module Crystal::HIR
                 end
               end
             end
-            full_name = mangle_function_name(base_name, param_types)
+            full_name = mangle_function_name(base_name, param_types, has_block)
             return_type = if rta = member.return_type
                            type_ref_for_name(String.new(rta))
                          else
                            TypeRef::VOID
                          end
             register_function_type(full_name, return_type)
+
+            # Track yield-functions for inline expansion (struct methods).
+            # MIR lowering removes yield-containing functions (inline-only), so we must inline them.
+            if body = member.body
+              if contains_yield?(body)
+                @yield_functions.add(base_name)
+                @yield_functions.add(full_name)
+                unless @function_defs.has_key?(base_name)
+                  @function_defs[base_name] = member
+                  @function_def_arenas[base_name] = @arena
+                end
+                @function_defs[full_name] = member
+                @function_def_arenas[full_name] = @arena
+              end
+            end
 
             if method_name == "initialize"
               if params = member.params
@@ -1848,6 +1940,8 @@ module Crystal::HIR
 
       # Collect parameter types first for name mangling
       param_infos = [] of Tuple(String, TypeRef, Bool)  # (name, type, is_instance_var)
+      param_types = [] of TypeRef
+      has_block = false
       if params = node.params
         params.each do |param|
           param_name = param.name.nil? ? "_" : String.new(param.name.not_nil!)
@@ -1857,12 +1951,16 @@ module Crystal::HIR
                          TypeRef::VOID
                        end
           param_infos << {param_name, param_type, param.is_instance_var}
+          if param.is_block
+            has_block = true
+          else
+            param_types << param_type
+          end
         end
       end
 
       # Mangle function name with parameter types for overloading
-      param_types = param_infos.map { |_, t, _| t }
-      full_name = mangle_function_name(base_name, param_types)
+      full_name = mangle_function_name(base_name, param_types, has_block)
 
       func = @module.create_function(full_name, return_type)
       ctx = LoweringContext.new(func, @module, @arena)
@@ -2047,16 +2145,24 @@ module Crystal::HIR
       end
     end
 
-    # Mangle function name with parameter types for overloading
-    # Example: "IO.print" + [String] -> "IO.print$String"
-    # Example: "Int32#++" + [Int32] -> "Int32#+$Int32"
-    # Note: Using $ instead of : because LLVM doesn't support : in identifiers
-    private def mangle_function_name(base_name : String, param_types : Array(TypeRef)) : String
+    # Mangle function name with parameter types for overloading.
+    #
+    # Examples:
+    # - "IO.print" + [String] -> "IO.print$String"
+    # - "Int32#+ " + [Int32] -> "Int32#+$Int32"
+    # - "Int32#downto" + [] + has_block=true -> "Int32#downto$block"
+    #
+    # Note: Using $ instead of : because LLVM doesn't support : in identifiers.
+    private def mangle_function_name(base_name : String, param_types : Array(TypeRef), has_block : Bool = false) : String
       # Filter out VOID types (untyped parameters don't provide overload info)
       typed_params = param_types.reject { |t| t == TypeRef::VOID }
-      return base_name if typed_params.empty?
-      type_suffix = typed_params.map { |t| type_name_for_mangling(t) }.join("_")
-      "#{base_name}$#{type_suffix}"
+
+      suffix = typed_params.map { |t| type_name_for_mangling(t) }.join("_")
+      if has_block
+        suffix = suffix.empty? ? "block" : "#{suffix}_block"
+      end
+
+      suffix.empty? ? base_name : "#{base_name}$#{suffix}"
     end
 
     # Resolve method call for a receiver type and method name
@@ -2074,16 +2180,18 @@ module Crystal::HIR
       # Mangle with argument types
       mangled_name = mangle_function_name(base_method_name, arg_types)
 
-      # Try to find the function in the module
-      # First try the mangled name, then try variations
-      return_type = get_function_return_type(mangled_name)
-      if return_type != TypeRef::VOID
+      # Try to find the function in the module.
+      #
+      # IMPORTANT: Don't use return type as an existence check.
+      # Many valid methods return `Nil` (VOID) in our IR, and treating VOID as "missing"
+      # causes qualified calls to degrade into unqualified extern calls.
+      if @function_types.has_key?(mangled_name)
         return mangled_name
       end
 
-      # Try base method name without mangling
-      return_type = get_function_return_type(base_method_name)
-      if return_type != TypeRef::VOID
+      # If any overload exists for the base name, return the base name and let
+      # the MIR lowering do fuzzy matching to pick a concrete overload.
+      if !class_name.empty? && has_function_base?(base_method_name)
         return base_method_name
       end
 
@@ -2092,9 +2200,9 @@ module Crystal::HIR
       @class_info.each do |klass_name, info|
         test_base = "#{klass_name}##{method_name}"
         test_mangled = mangle_function_name(test_base, arg_types)
-        if @function_types[test_mangled]?
+        if @function_types.has_key?(test_mangled)
           return test_mangled
-        elsif @function_types[test_base]?
+        elsif has_function_base?(test_base)
           return test_base
         end
       end
@@ -2138,10 +2246,15 @@ module Crystal::HIR
       class_suffix = ".#{method_name}"
 
       candidates = [] of String
+      seen_defs = Set(UInt64).new
       @yield_functions.each do |name|
-        next unless name.ends_with?(instance_suffix) || name.ends_with?(class_suffix)
+        base = name.split("$").first
+        next unless base.ends_with?(instance_suffix) || base.ends_with?(class_suffix)
         func_def = @function_defs[name]?
+        func_def ||= @function_defs[base]?
         next unless func_def
+        def_id = func_def.object_id
+        next if seen_defs.includes?(def_id)
         non_block_params = if params = func_def.params
                              params.count { |p| !p.is_block }
                            else
@@ -2149,6 +2262,7 @@ module Crystal::HIR
                            end
         next unless non_block_params == arg_count
         candidates << name
+        seen_defs << def_id
       end
 
       return candidates.first if candidates.size == 1
@@ -2211,8 +2325,13 @@ module Crystal::HIR
 
       # Collect parameter types for name mangling
       param_types = [] of TypeRef
+      has_block = false
       if params = node.params
         params.each do |param|
+          if param.is_block
+            has_block = true
+            next
+          end
           param_type = if ta = param.type_annotation
                          type_ref_for_name(String.new(ta))
                        else
@@ -2223,7 +2342,7 @@ module Crystal::HIR
       end
 
       # Register with mangled name
-      full_name = mangle_function_name(base_name, param_types)
+      full_name = mangle_function_name(base_name, param_types, has_block)
       register_function_type(full_name, return_type)
 
       # Also register with base name for fallback lookup
@@ -2248,22 +2367,67 @@ module Crystal::HIR
     end
 
     private def contains_yield_in_expr?(expr_id : ExprId) : Bool
+      return false if expr_id.invalid?
       node = @arena[expr_id]
       case node
       when CrystalV2::Compiler::Frontend::YieldNode
         true
+      when CrystalV2::Compiler::Frontend::AssignNode
+        contains_yield_in_expr?(node.target) || contains_yield_in_expr?(node.value)
+      when CrystalV2::Compiler::Frontend::MemberAccessNode
+        contains_yield_in_expr?(node.object)
+      when CrystalV2::Compiler::Frontend::CallNode
+        if callee_id = node.callee
+          return true if contains_yield_in_expr?(callee_id)
+        end
+        node.args.each do |arg|
+          return true if contains_yield_in_expr?(arg)
+        end
+        if block_id = node.block
+          return true if contains_yield_in_expr?(block_id)
+        end
+        if named = node.named_args
+          named.each do |na|
+            return true if contains_yield_in_expr?(na.value)
+          end
+        end
+        false
+      when CrystalV2::Compiler::Frontend::UnaryNode
+        contains_yield_in_expr?(node.operand)
+      when CrystalV2::Compiler::Frontend::BinaryNode
+        contains_yield_in_expr?(node.left) || contains_yield_in_expr?(node.right)
+      when CrystalV2::Compiler::Frontend::GroupingNode
+        contains_yield_in_expr?(node.expression)
+      when CrystalV2::Compiler::Frontend::MacroExpressionNode
+        contains_yield_in_expr?(node.expression)
+      when CrystalV2::Compiler::Frontend::ConstantNode
+        contains_yield_in_expr?(node.value)
       when CrystalV2::Compiler::Frontend::IfNode
-        contains_yield?(node.then_body) ||
+        contains_yield_in_expr?(node.condition) ||
+          contains_yield?(node.then_body) ||
           (node.else_body ? contains_yield?(node.else_body.not_nil!) : false)
+      when CrystalV2::Compiler::Frontend::UnlessNode
+        contains_yield_in_expr?(node.condition) ||
+          contains_yield?(node.then_branch) ||
+          (node.else_branch ? contains_yield?(node.else_branch.not_nil!) : false)
       when CrystalV2::Compiler::Frontend::WhileNode
-        contains_yield?(node.body)
+        contains_yield_in_expr?(node.condition) || contains_yield?(node.body)
+      when CrystalV2::Compiler::Frontend::UntilNode
+        contains_yield_in_expr?(node.condition) || contains_yield?(node.body)
       when CrystalV2::Compiler::Frontend::LoopNode
         contains_yield?(node.body)
       when CrystalV2::Compiler::Frontend::BlockNode
         contains_yield?(node.body)
+      when CrystalV2::Compiler::Frontend::ProcLiteralNode
+        contains_yield?(node.body)
       when CrystalV2::Compiler::Frontend::CaseNode
         node.when_branches.any? { |w| contains_yield?(w.body) } ||
           (node.else_branch ? contains_yield?(node.else_branch.not_nil!) : false)
+      when CrystalV2::Compiler::Frontend::IndexNode
+        return true if contains_yield_in_expr?(node.object)
+        node.indexes.any? { |idx| contains_yield_in_expr?(idx) }
+      when CrystalV2::Compiler::Frontend::RangeNode
+        contains_yield_in_expr?(node.begin_expr) || contains_yield_in_expr?(node.end_expr)
       else
         false
       end
@@ -2281,6 +2445,10 @@ module Crystal::HIR
       # First check pre-registered signatures (for forward references)
       if type = @function_types[name]?
         return type
+      end
+      # If this is a base name (no $ suffix), use cached return type if available.
+      if cached = @function_base_return_types[name]?
+        return cached
       end
       # Fall back to already-lowered functions
       @module.functions.each do |func|
@@ -2614,6 +2782,8 @@ module Crystal::HIR
 
       # Lower parameters
       param_infos = [] of Tuple(String, TypeRef)
+      param_types = [] of TypeRef
+      has_block = false
       if params = node.params
         params.each do |param|
           param_name = param.name.nil? ? "_" : String.new(param.name.not_nil!)
@@ -2624,12 +2794,16 @@ module Crystal::HIR
                        end
 
           param_infos << {param_name, param_type}
+          if param.is_block
+            has_block = true
+          else
+            param_types << param_type
+          end
         end
       end
 
       # Top-level functions support overloading, so use mangled names consistently.
-      param_types = param_infos.map { |_, t| t }
-      full_name = mangle_function_name(base_name, param_types)
+      full_name = mangle_function_name(base_name, param_types, has_block)
 
       # Idempotency: avoid lowering the same function twice (can happen with conditional defs).
       if existing = @module.functions.find { |f| f.name == full_name }
@@ -2817,7 +2991,11 @@ module Crystal::HIR
         lower_return(ctx, node)
 
       when CrystalV2::Compiler::Frontend::YieldNode
-        lower_yield(ctx, node)
+        if blk = @inline_yield_block_stack.last?
+          inline_block_body(ctx, node, blk)
+        else
+          lower_yield(ctx, node)
+        end
 
       when CrystalV2::Compiler::Frontend::BreakNode
         lower_break(ctx, node)
@@ -5360,6 +5538,39 @@ module Crystal::HIR
         obj_node = @arena[callee_node.object]
         method_name = String.new(callee_node.member)
 
+        # Intrinsic: `x.upto(y).each { ... }` / `x.downto(y).each { ... }`
+        # Prefer lowering directly via the yield-based overload to avoid iterator types like
+        # `UptoIterator(typeof(self), typeof(to))` which are not yet fully monomorphized in codegen.
+        if method_name == "each"
+          if blk_expr = node.block
+            blk_node = @arena[blk_expr]
+            if blk_node.is_a?(CrystalV2::Compiler::Frontend::BlockNode) && obj_node.is_a?(CrystalV2::Compiler::Frontend::CallNode)
+              inner_call = obj_node
+              if inner_call.block.nil?
+                inner_callee = @arena[inner_call.callee]
+                if inner_callee.is_a?(CrystalV2::Compiler::Frontend::MemberAccessNode)
+                  inner_method = String.new(inner_callee.member)
+                  if inner_method == "upto" || inner_method == "downto"
+                    inner_receiver_id = lower_expr(ctx, inner_callee.object)
+                    inner_args = if inner_call.named_args
+                                   # Named args for upto/downto are not expected; fall back to positional.
+                                   expand_splat_args(ctx, inner_call.args)
+                                 else
+                                   expand_splat_args(ctx, inner_call.args)
+                                 end
+                    if yield_key = find_yield_method_fallback(inner_method, inner_args.size)
+                      if func_def = @function_defs[yield_key]?
+                        callee_arena = @function_def_arenas[yield_key]? || @arena
+                        return inline_yield_function(ctx, func_def, yield_key, inner_receiver_id, inner_args, blk_node, callee_arena)
+                      end
+                    end
+                  end
+                end
+              end
+            end
+          end
+        end
+
         # Check if it's a class/module method call (ClassName.new() or Module.method())
         # Can be ConstantNode, IdentifierNode starting with uppercase, or GenericNode
         class_name_str : String? = nil
@@ -5714,7 +5925,14 @@ module Crystal::HIR
                          else
                            method_name
                          end
+      has_block_call = !node.block.nil?
       mangled_method_name = mangle_function_name(base_method_name, arg_types)
+      if has_block_call
+        mangled_with_block = mangle_function_name(base_method_name, arg_types, true)
+        if @function_types.has_key?(mangled_with_block) || @yield_functions.includes?(mangled_with_block) || @module.has_function?(mangled_with_block)
+          mangled_method_name = mangled_with_block
+        end
+      end
 
       # Handle yield-functions with inline expansion FIRST (before lowering block)
       # Must check with mangled name since that's how yield functions are registered
@@ -5725,14 +5943,14 @@ module Crystal::HIR
           if @yield_functions.includes?(mangled_method_name)
             if func_def = @function_defs[mangled_method_name]?
               callee_arena = @function_def_arenas[mangled_method_name]? || @arena
-              return inline_yield_function(ctx, func_def, receiver_id, args, blk_node, callee_arena)
+              return inline_yield_function(ctx, func_def, mangled_method_name, receiver_id, args, blk_node, callee_arena)
             end
           end
           # Also try base method name (for functions without overloading)
           if @yield_functions.includes?(base_method_name)
             if func_def = @function_defs[base_method_name]?
               callee_arena = @function_def_arenas[base_method_name]? || @arena
-              return inline_yield_function(ctx, func_def, receiver_id, args, blk_node, callee_arena)
+              return inline_yield_function(ctx, func_def, base_method_name, receiver_id, args, blk_node, callee_arena)
             end
           end
 
@@ -5742,7 +5960,7 @@ module Crystal::HIR
             if yield_key = find_yield_method_fallback(method_name, args.size)
               if func_def = @function_defs[yield_key]?
                 callee_arena = @function_def_arenas[yield_key]? || @arena
-                return inline_yield_function(ctx, func_def, receiver_id, args, blk_node, callee_arena)
+                return inline_yield_function(ctx, func_def, yield_key, receiver_id, args, blk_node, callee_arena)
               end
             end
           end
@@ -7328,6 +7546,7 @@ module Crystal::HIR
     private def inline_yield_function(
       ctx : LoweringContext,
       func_def : CrystalV2::Compiler::Frontend::DefNode,
+      inline_key : String,
       receiver_id : ValueId?,
       call_args : Array(ValueId),
       block : CrystalV2::Compiler::Frontend::BlockNode,
@@ -7346,6 +7565,31 @@ module Crystal::HIR
       ctx.restore_locals({} of String => ValueId)
 
       begin
+        # Prevent infinite recursion / runaway stack usage in aggressive yield inlining.
+        # This can happen in stdlib where yield is used deeply (or recursively).
+        max_depth = (ENV["INLINE_YIELD_MAX_DEPTH"]? || "256").to_i
+        pushed_name = false
+        pushed_block = false
+
+        if @inline_yield_name_stack.size >= max_depth || @inline_yield_name_stack.includes?(inline_key)
+          if ENV.has_key?("DEBUG_YIELD_INLINE")
+            STDERR.puts "[INLINE_YIELD] skipping inline: #{inline_key} (depth=#{@inline_yield_name_stack.size}, max=#{max_depth})"
+          end
+
+          return_type = get_function_return_type(inline_key)
+          block_id = lower_block_to_block_id(ctx, block)
+          call = Call.new(ctx.next_id, return_type, receiver_id, inline_key, call_args, block_id)
+          ctx.emit(call)
+          ctx.register_type(call.id, return_type)
+          return call.id
+        end
+
+        @inline_yield_name_stack << inline_key
+        pushed_name = true
+        @inline_yield_block_stack << block
+        @inline_yield_block_arena_stack << caller_arena
+        pushed_block = true
+
         # If inlining an instance method, bind the receiver as `self`.
         if receiver_id
           ctx.register_local("self", receiver_id)
@@ -7367,10 +7611,13 @@ module Crystal::HIR
         # Lower function body with yield substitution
         result_value = nil_value(ctx)
         if body = func_def.body
-          result_value = lower_body_with_yield_substitution(ctx, body, block)
+          result_value = lower_body(ctx, body)
         end
         result_value
       ensure
+        @inline_yield_block_stack.pop? if pushed_block
+        @inline_yield_block_arena_stack.pop? if pushed_block
+        @inline_yield_name_stack.pop? if pushed_name
         # Restore caller locals (including any mutations made inside the inlined block body).
         if restored = @inline_caller_locals_stack.pop?
           ctx.restore_locals(restored)
@@ -7378,37 +7625,6 @@ module Crystal::HIR
         @arena = caller_arena
         @inline_arenas = old_inline_arenas
         ctx.pop_scope
-      end
-    end
-
-    # Lower body expressions, substituting yield with block body
-    private def lower_body_with_yield_substitution(
-      ctx : LoweringContext,
-      body : Array(ExprId),
-      block : CrystalV2::Compiler::Frontend::BlockNode
-    ) : ValueId
-      last_value = nil_value(ctx)
-      body.each do |expr_id|
-        last_value = lower_expr_with_yield_substitution(ctx, expr_id, block)
-      end
-      last_value
-    end
-
-    # Lower single expression, substituting yield
-    private def lower_expr_with_yield_substitution(
-      ctx : LoweringContext,
-      expr_id : ExprId,
-      block : CrystalV2::Compiler::Frontend::BlockNode
-    ) : ValueId
-      node = @arena[expr_id]
-
-      case node
-      when CrystalV2::Compiler::Frontend::YieldNode
-        # YIELD SUBSTITUTION: Replace yield with block body
-        inline_block_body(ctx, node, block)
-      else
-        # Regular lowering
-        lower_node(ctx, node)
       end
     end
 
@@ -7451,18 +7667,40 @@ module Crystal::HIR
           ctx.register_type(arg_id, ctx.type_of(arg_id))
         end
 
-        # Ensure block body is lowered in the caller arena, even when the callee comes from another file.
-        body_result = if arenas = @inline_arenas
-                        old_arena = @arena
-                        @arena = arenas[0]
-                        begin
-                          lower_body(ctx, block.body)
-                        ensure
-                          @arena = old_arena
-                        end
-                      else
-                        lower_body(ctx, block.body)
-                      end
+      # Ensure block body is lowered in the caller arena, even when the callee comes from another file.
+        body_result = begin
+          # The block body belongs to the *caller* and may itself contain `yield`.
+          # Temporarily disable the current inlined-yield substitution so nested `yield`
+          # in the block body can bind to an outer inlining context (if any).
+          popped_block = @inline_yield_block_stack.pop?
+          popped_arena = @inline_yield_block_arena_stack.pop?
+          if popped_block && popped_block.object_id != block.object_id
+            # Unexpected mismatch; restore stacks and continue without popping.
+            @inline_yield_block_stack << popped_block
+            @inline_yield_block_arena_stack << popped_arena if popped_arena
+            popped_block = nil
+            popped_arena = nil
+          end
+
+          old_arena = @arena
+          begin
+            @arena = popped_arena || old_arena
+            begin
+              lower_body(ctx, block.body)
+            ensure
+              @arena = old_arena
+            end
+          ensure
+            if popped_block
+              @inline_yield_block_stack << popped_block
+              if restored_arena = popped_arena
+                @inline_yield_block_arena_stack << restored_arena
+              else
+                @inline_yield_block_arena_stack << old_arena
+              end
+            end
+          end
+        end
 
         caller_locals_after = ctx.save_locals
         # Block parameters must not leak outside the block.
@@ -7480,8 +7718,17 @@ module Crystal::HIR
       else
         # No yield inlining context; just lower block normally.
         if arenas = @inline_arenas
+          candidate = arenas[0]
+          chosen = candidate
+          unless block.body.empty?
+            max_index = block.body.max_of(&.index)
+            if max_index < 0 || max_index >= candidate.size
+              chosen = @arena
+            end
+          end
+
           old_arena = @arena
-          @arena = arenas[0]
+          @arena = chosen
           begin
             lower_body(ctx, block.body)
           ensure
@@ -7835,10 +8082,8 @@ module Crystal::HIR
           if info.type_ref.id == receiver_type.id
             # Use inheritance-aware method resolution
             if base_method = resolve_method_with_inheritance(class_name, member_name)
-              if type = @function_types[base_method]?
-                resolved_method_name = base_method
-                return_type = type
-              end
+              resolved_method_name = base_method
+              return_type = get_function_return_type(base_method)
             end
             break
           end
@@ -7852,10 +8097,8 @@ module Crystal::HIR
           # Try full name first
           if @class_info.has_key?(type_name)
             if base_method = resolve_method_with_inheritance(type_name, member_name)
-              if type = @function_types[base_method]?
-                resolved_method_name = base_method
-                return_type = type
-              end
+              resolved_method_name = base_method
+              return_type = get_function_return_type(base_method)
             end
           else
             # Try to find a class that ends with the type name (handle namespacing)
@@ -7863,11 +8106,9 @@ module Crystal::HIR
             @class_info.each do |class_name, info|
               if class_name.ends_with?("::#{type_name}") || class_name == type_name
                 if base_method = resolve_method_with_inheritance(class_name, member_name)
-                  if type = @function_types[base_method]?
-                    resolved_method_name = base_method
-                    return_type = type
-                    break
-                  end
+                  resolved_method_name = base_method
+                  return_type = get_function_return_type(base_method)
+                  break
                 end
               end
             end
@@ -7879,9 +8120,9 @@ module Crystal::HIR
       if resolved_method_name.nil? && receiver_type.id == 0
         @class_info.each do |class_name, info|
           test_name = "#{class_name}##{member_name}"
-          if type = @function_types[test_name]?
+          if has_function_base?(test_name)
             resolved_method_name = test_name
-            return_type = type
+            return_type = get_function_return_type(test_name)
             break
           end
         end
