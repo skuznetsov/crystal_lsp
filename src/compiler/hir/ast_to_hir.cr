@@ -4512,16 +4512,47 @@ module Crystal::HIR
                   end
 
       # Extract type arguments, substituting any type parameters
+      normalize_typeof_name = ->(type_name : String) : String {
+        if type_name == "Void" || type_name == "Unknown" || type_name.includes?("|")
+          "Pointer(Void)"
+        else
+          type_name
+        end
+      }
+
       type_args = node.type_args.map do |arg_id|
         arg_node = @arena[arg_id]
         arg_name = case arg_node
-                   when CrystalV2::Compiler::Frontend::ConstantNode
-                     String.new(arg_node.name)
-                   when CrystalV2::Compiler::Frontend::IdentifierNode
-                     String.new(arg_node.name)
+                   when CrystalV2::Compiler::Frontend::TypeofNode
+                     inner = arg_node.args.first?
+                     if inner
+                       inner_node = @arena[inner]
+                       if inner_node.is_a?(CrystalV2::Compiler::Frontend::IdentifierNode)
+                         ident_name = String.new(inner_node.name)
+                         if value_id = ctx.lookup_local(ident_name)
+                           type_name = get_type_name_from_ref(ctx.type_of(value_id))
+                           normalize_typeof_name.call(type_name)
+                         else
+                           "Pointer(Void)"
+                         end
+                       else
+                         "Pointer(Void)"
+                       end
+                     else
+                       "Pointer(Void)"
+                     end
                    else
-                     "Unknown"
+                     stringify_type_expr(arg_id) || "Unknown"
                    end
+        if arg_name.starts_with?("typeof(") && arg_name.ends_with?(")")
+          inner_name = arg_name[7, arg_name.size - 8].strip
+          if value_id = ctx.lookup_local(inner_name)
+            type_name = get_type_name_from_ref(ctx.type_of(value_id))
+            arg_name = normalize_typeof_name.call(type_name)
+          else
+            arg_name = "Pointer(Void)"
+          end
+        end
         # Substitute type parameter if applicable
         @type_param_map[arg_name]? || arg_name
       end
@@ -6007,29 +6038,49 @@ module Crystal::HIR
           end
         elsif obj_node.is_a?(CrystalV2::Compiler::Frontend::GenericNode)
           # Generic type like Box(Int32).new()
-          # Extract base type name and type arguments
-          base_node = @arena[obj_node.base_type]
-          base_name = case base_node
-                      when CrystalV2::Compiler::Frontend::ConstantNode
-                        String.new(base_node.name)
-                      when CrystalV2::Compiler::Frontend::IdentifierNode
-                        String.new(base_node.name)
-                      else
-                        nil
-                      end
+          base_name = resolve_path_like_name(obj_node.base_type)
           if base_name
-            # Extract type argument names, substituting type parameters
+            normalize_typeof_name = ->(type_name : String) : String {
+              if type_name == "Void" || type_name == "Unknown" || type_name.includes?("|")
+                "Pointer(Void)"
+              else
+                type_name
+              end
+            }
+
             type_args = obj_node.type_args.map do |arg_id|
               arg_node = @arena[arg_id]
               arg_name = case arg_node
-                         when CrystalV2::Compiler::Frontend::ConstantNode
-                           String.new(arg_node.name)
-                         when CrystalV2::Compiler::Frontend::IdentifierNode
-                           String.new(arg_node.name)
+                         when CrystalV2::Compiler::Frontend::TypeofNode
+                           inner = arg_node.args.first?
+                           if inner
+                             inner_node = @arena[inner]
+                             if inner_node.is_a?(CrystalV2::Compiler::Frontend::IdentifierNode)
+                               ident_name = String.new(inner_node.name)
+                               if value_id = ctx.lookup_local(ident_name)
+                                 type_name = get_type_name_from_ref(ctx.type_of(value_id))
+                                 normalize_typeof_name.call(type_name)
+                               else
+                                 "Pointer(Void)"
+                               end
+                             else
+                               "Pointer(Void)"
+                             end
+                           else
+                             "Pointer(Void)"
+                           end
                          else
-                           "Unknown"
+                           stringify_type_expr(arg_id) || "Unknown"
                          end
-              # Substitute type parameter if applicable
+              if arg_name.starts_with?("typeof(") && arg_name.ends_with?(")")
+                inner_name = arg_name[7, arg_name.size - 8].strip
+                if value_id = ctx.lookup_local(inner_name)
+                  type_name = get_type_name_from_ref(ctx.type_of(value_id))
+                  arg_name = normalize_typeof_name.call(type_name)
+                else
+                  arg_name = "Pointer(Void)"
+                end
+              end
               @type_param_map[arg_name]? || arg_name
             end
 
@@ -8271,28 +8322,27 @@ module Crystal::HIR
         end
       elsif obj_node.is_a?(CrystalV2::Compiler::Frontend::GenericNode)
         # Generic type like Hash(Int32, Int32).new
-        base_node = @arena[obj_node.base_type]
-        base_name = case base_node
-                    when CrystalV2::Compiler::Frontend::ConstantNode
-                      String.new(base_node.name)
-                    when CrystalV2::Compiler::Frontend::IdentifierNode
-                      String.new(base_node.name)
-                    else
-                      nil
-                    end
+        base_name = resolve_path_like_name(obj_node.base_type)
         if base_name
-          # Extract type argument names, substituting type parameters
+          normalize_typeof_name = ->(type_name : String) : String {
+            if type_name == "Void" || type_name == "Unknown" || type_name.includes?("|")
+              "Pointer(Void)"
+            else
+              type_name
+            end
+          }
+
           type_args = obj_node.type_args.map do |arg_id|
-            arg_node = @arena[arg_id]
-            arg_name = case arg_node
-                       when CrystalV2::Compiler::Frontend::ConstantNode
-                         String.new(arg_node.name)
-                       when CrystalV2::Compiler::Frontend::IdentifierNode
-                         String.new(arg_node.name)
-                       else
-                         "Unknown"
-                       end
-            # Substitute type parameter if applicable
+            arg_name = stringify_type_expr(arg_id) || "Unknown"
+            if arg_name.starts_with?("typeof(") && arg_name.ends_with?(")")
+              inner_name = arg_name[7, arg_name.size - 8].strip
+              if value_id = ctx.lookup_local(inner_name)
+                type_name = get_type_name_from_ref(ctx.type_of(value_id))
+                arg_name = normalize_typeof_name.call(type_name)
+              else
+                arg_name = "Pointer(Void)"
+              end
+            end
             @type_param_map[arg_name]? || arg_name
           end
           # Create specialized class name like Hash(Int32, Int32)

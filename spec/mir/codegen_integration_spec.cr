@@ -677,4 +677,34 @@ describe "Codegen Integration" do
       output.strip.should eq("7")
     end
   end
+
+  describe "typeof in generic type refs" do
+    it "monomorphizes generic instantiations with typeof(self) and typeof(arg)" do
+      source = <<-CR
+        lib LibC
+          fun printf(format : UInt8*, ...) : Int32
+        end
+
+        struct Box(I, X)
+          def initialize
+          end
+        end
+
+        class Foo
+          def initialize
+          end
+
+          def make(x)
+            Box(typeof(self), typeof(x)).new
+          end
+        end
+
+        Foo.new.make(123)
+        LibC.printf("ok\\n")
+        CR
+
+      output = CodegenTestHelper.compile_and_run(source)
+      output.strip.should eq("ok")
+    end
+  end
 end
