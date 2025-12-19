@@ -923,6 +923,8 @@ enum:      64  ← ✅ DONE
 | Namespace resolution | Register short name aliases for nested classes/structs in modules |
 | Getter/setter monomorphization | Handle GetterNode/SetterNode/PropertyNode in generic class lowering |
 | typeof filter | Filter out functions with unresolved typeof(...) patterns in LLVM emission |
+| Module mixin expansion | Copy `include`d module instance methods into concrete classes/structs during HIR lowering |
+| Varargs call signatures | Derive varargs call signatures from argument types to satisfy `opt` verification |
 
 ### 8.2 Current Status
 
@@ -942,7 +944,7 @@ r2 = maybe(false)  # => nil
 |---------|-------|----------|
 | `typeof(...)` in types | Used in Array#flatten, Enumerable methods | HIGH |
 | Generic methods with blocks | `def self.build(capacity : Int, &)` | HIGH |
-| Module mixins (Indexable, Enumerable) | Methods from included modules need monomorphization | MED |
+| Module mixins (Indexable, Enumerable) | Instance methods from `include`d modules are expanded into concrete types; module-typed receivers still need better resolution | MED |
 | Macro expansion | `getter`, `property` need compile-time expansion | MED |
 
 ### 8.3 Known Limitations
@@ -955,5 +957,5 @@ r2 = maybe(false)  # => nil
 
 1. [ ] **Implement typeof resolution** - Compile-time evaluation of typeof(...) in type annotations
 2. [ ] **Fix generic methods with blocks** - Handle block parameter types during lowering
-3. [ ] **Module mixin monomorphization** - Generate methods from included modules for concrete types
+3. [ ] **Module mixin monomorphization** - Generate methods from included modules for concrete types (partially implemented: include expansion; missing: module-typed receiver resolution like `Iterator(T)`)
 4. [ ] **Macro expansion for `getter`/`property`** - Compile-time accessor generation
