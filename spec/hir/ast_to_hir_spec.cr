@@ -656,27 +656,21 @@ describe Crystal::HIR::AstToHir do
   # ═══════════════════════════════════════════════════════════════════════════
 
   describe "error handling" do
-    it "raises on unsupported node type" do
-      # Macro nodes should raise error during lowering
-      # (they should be expanded before HIR conversion)
+    it "lowers declaration nodes to nil" do
+      # Declaration nodes (class/module/require/etc.) are treated as non-values
+      # during expression lowering and are represented as `nil` at runtime.
 
-      expect_raises(Crystal::HIR::LoweringError) do
-        # Try to lower something that isn't a function
-        arena, exprs = parse("class Foo; end")
-        converter = Crystal::HIR::AstToHir.new(arena)
+      arena, exprs = parse("class Foo; end")
+      converter = Crystal::HIR::AstToHir.new(arena)
 
-        # Get class node
-        class_expr = exprs.first
-        class_node = arena[class_expr]
+      class_expr = exprs.first
+      class_node = arena[class_expr]
 
-        # Try to lower as expression (should work but produce limited HIR)
-        ctx = Crystal::HIR::LoweringContext.new(
-          converter.module.create_function("test", Crystal::HIR::TypeRef::VOID),
-          converter.module,
-          arena
-        )
-        converter.lower_node(ctx, class_node)
-      end
+      func = converter.module.create_function("test", Crystal::HIR::TypeRef::VOID)
+      ctx = Crystal::HIR::LoweringContext.new(func, converter.module, arena)
+
+      converter.lower_node(ctx, class_node)
+      hir_text(func).should contain("literal nil")
     end
   end
 
