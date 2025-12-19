@@ -373,34 +373,64 @@ module Crystal::MIR
       # These are functions that were partially created but couldn't be monomorphized
       unresolved_patterns = ["typeof(", "typeof_"]
 
-      # First pass: collect names of functions to skip
-      skip_functions = Set(String).new
+      # Build a skip set by FunctionId so we can propagate skips through the call graph.
+      skip_ids = Set(FunctionId).new
+
+      # 1) Directly unresolved: function name contains unresolved type patterns.
       functions_to_emit.each do |func|
-        if unresolved_patterns.any? { |p| func.name.includes?(p) }
-          skip_functions << func.name
-          skip_functions << @type_mapper.mangle_name(func.name)
-        end
+        skip_ids << func.id if unresolved_patterns.any? { |p| func.name.includes?(p) }
       end
 
-      # Second pass: also skip functions that call the skipped functions
+      # 2) Local unresolved: function body references unresolved type patterns via extern calls.
       functions_to_emit.each do |func|
+        next if skip_ids.includes?(func.id)
         func.blocks.each do |block|
           block.instructions.each do |inst|
             case inst
             when ExternCall
               if unresolved_patterns.any? { |p| inst.extern_name.includes?(p) }
-                skip_functions << func.name
-                skip_functions << @type_mapper.mangle_name(func.name)
+                skip_ids << func.id
+                break
               end
             end
+          end
+          break if skip_ids.includes?(func.id)
+        end
+      end
+
+      # 3) Propagate: skip any function that depends on a skipped function.
+      # This prevents emitting reachable callers that would otherwise reference missing symbols.
+      changed = true
+      while changed
+        changed = false
+        functions_to_emit.each do |func|
+          next if skip_ids.includes?(func.id)
+          func.blocks.each do |block|
+            block.instructions.each do |inst|
+              case inst
+              when Call
+                if skip_ids.includes?(inst.callee)
+                  skip_ids << func.id
+                  changed = true
+                  break
+                end
+              when RCDecrement
+                if destructor_id = inst.destructor
+                  if skip_ids.includes?(destructor_id)
+                    skip_ids << func.id
+                    changed = true
+                    break
+                  end
+                end
+              end
+            end
+            break if skip_ids.includes?(func.id)
           end
         end
       end
 
       # Apply filter
-      functions_to_emit = functions_to_emit.reject do |func|
-        skip_functions.includes?(func.name)
-      end
+      functions_to_emit = functions_to_emit.reject { |func| skip_ids.includes?(func.id) }
 
       total_funcs = functions_to_emit.size
       STDERR.puts "  [LLVM] emitting #{total_funcs} functions (#{@module.functions.size} total, #{@module.functions.size - total_funcs} pruned)..." if @progress
@@ -1433,10 +1463,26 @@ module Crystal::MIR
 
       # Function signature
       # Note: void is not valid for parameters, substitute with ptr
+      used_param_names = Hash(String, Int32).new(0)
       param_types = func.params.map do |p|
         llvm_type = @type_mapper.llvm_type(p.type)
         llvm_type = "ptr" if llvm_type == "void"
-        "#{llvm_type} %#{p.name}"
+
+        base_name = p.name
+        base_name = "arg" if base_name.empty?
+        count = used_param_names[base_name]?
+        if count
+          used_param_names[base_name] = count + 1
+          llvm_name = "#{base_name}#{count + 1}"
+        else
+          used_param_names[base_name] = 0
+          llvm_name = base_name
+        end
+
+        # Keep param references consistent with the signature.
+        @value_names[p.index] = llvm_name
+
+        "#{llvm_type} %#{llvm_name}"
       end
       return_type = @type_mapper.llvm_type(func.return_type)
       @current_return_type = return_type  # Store for terminator emission
@@ -2117,9 +2163,16 @@ module Crystal::MIR
                 break if def_inst
               end
 
-              # Add to cross_block_values if it's a value-producing instruction
-              if def_inst && !(def_inst.is_a?(Call) && def_inst.type == TypeRef::VOID)
-                @cross_block_values << val_id
+              # Add to cross_block_values if it's a value-producing instruction.
+              #
+              # IMPORTANT: Don't trust MIR's `Call#type` here. In many cases it can be `VOID`
+              # as a placeholder even when the callee returns a value (the LLVM backend
+              # corrects this via `prepass_collect_constants` and `@value_types`).
+              if def_inst
+                is_non_value_inst = def_inst.is_a?(Store) || def_inst.is_a?(Free) ||
+                                    def_inst.is_a?(RCIncrement) || def_inst.is_a?(RCDecrement) ||
+                                    def_inst.is_a?(GlobalStore) || def_inst.is_a?(AtomicStore)
+                @cross_block_values << val_id unless is_non_value_inst
               end
             end
           end
