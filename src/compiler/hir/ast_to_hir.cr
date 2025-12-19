@@ -776,7 +776,9 @@ module Crystal::HIR
                   base_name = "#{class_name}##{method_name}"
 
                   return_type = if rt = member.return_type
-                                  type_ref_for_name(String.new(rt))
+                                  rt_name = String.new(rt)
+                                  inferred = module_like_type_name?(rt_name) ? infer_concrete_return_type_from_body(member) : nil
+                                  inferred || type_ref_for_name(rt_name)
                                 elsif method_name.ends_with?("?")
                                   TypeRef::BOOL
                                 else
@@ -884,6 +886,53 @@ module Crystal::HIR
       end
     end
 
+    private def module_like_type_name?(name : String) : Bool
+      base = if paren = name.index('(')
+               name[0, paren]
+             else
+               name
+             end
+      @module_defs.has_key?(base)
+    end
+
+    private def infer_concrete_return_type_from_body(node : CrystalV2::Compiler::Frontend::DefNode) : TypeRef?
+      body = node.body
+      return nil unless body && body.size == 1
+
+      expr_id = body.first
+      loop do
+        expr_node = @arena[expr_id]
+        case expr_node
+        when CrystalV2::Compiler::Frontend::GroupingNode
+          expr_id = expr_node.expression
+        when CrystalV2::Compiler::Frontend::MacroExpressionNode
+          expr_id = expr_node.expression
+        when CrystalV2::Compiler::Frontend::ReturnNode
+          value = expr_node.value
+          return nil unless value
+          expr_id = value
+        else
+          break
+        end
+      end
+
+      expr_node = @arena[expr_id]
+      case expr_node
+      when CrystalV2::Compiler::Frontend::CallNode
+        callee_node = @arena[expr_node.callee]
+        if callee_node.is_a?(CrystalV2::Compiler::Frontend::MemberAccessNode)
+          member_name = String.new(callee_node.member)
+          if member_name == "new"
+            if type_str = stringify_type_expr(callee_node.object)
+              return type_ref_for_name(type_str)
+            end
+          end
+        end
+      end
+
+      nil
+    end
+
     # Register a module and its methods (pass 1)
     # Modules are like classes but with only class methods (self.method)
     # Also handles nested classes: module Foo; class Bar; end; end -> Foo::Bar
@@ -947,7 +996,9 @@ module Crystal::HIR
             next unless is_class_method
             base_name = "#{module_name}.#{method_name}"
             return_type = if rt = member.return_type
-                            type_ref_for_name(String.new(rt))
+                            rt_name = String.new(rt)
+                            inferred = module_like_type_name?(rt_name) ? infer_concrete_return_type_from_body(member) : nil
+                            inferred || type_ref_for_name(rt_name)
                           elsif method_name.ends_with?("?")
                             TypeRef::BOOL
                           else
@@ -1060,7 +1111,9 @@ module Crystal::HIR
             next unless is_class_method
             base_name = "#{full_name}.#{method_name}"
             return_type = if rt = member.return_type
-                            type_ref_for_name(String.new(rt))
+                            rt_name = String.new(rt)
+                            inferred = module_like_type_name?(rt_name) ? infer_concrete_return_type_from_body(member) : nil
+                            inferred || type_ref_for_name(rt_name)
                           elsif method_name.ends_with?("?")
                             TypeRef::BOOL
                           else
@@ -1372,7 +1425,9 @@ module Crystal::HIR
                           "#{class_name}##{method_name}"
                         end
             return_type = if rt = member.return_type
-                            type_ref_for_name(String.new(rt))
+                            rt_name = String.new(rt)
+                            inferred = module_like_type_name?(rt_name) ? infer_concrete_return_type_from_body(member) : nil
+                            inferred || type_ref_for_name(rt_name)
                           elsif method_name.ends_with?("?")
                             # Predicate methods (ending in ?) return Bool
                             TypeRef::BOOL
@@ -2238,6 +2293,9 @@ module Crystal::HIR
                       # "self" in return type means "the current class type"
                       if rt_name == "self"
                         class_info.type_ref
+                      elsif module_like_type_name?(rt_name)
+                        inferred = infer_concrete_return_type_from_body(node)
+                        inferred || type_ref_for_name(rt_name)
                       else
                         type_ref_for_name(rt_name)
                       end
