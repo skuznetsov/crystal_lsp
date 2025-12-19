@@ -865,6 +865,7 @@ The key insight is: **Don't compete with LLVM, complement it.**
 | Call return type tracking | Register return types for chained method calls |
 | Index operator dispatch | Emit method calls for `[]`/`[]=` on non-array types |
 | Yield function inline | Fixed mangled name lookup for yield function expansion |
+| Yield method inlining (cross-file) | Inline yield-containing methods across arenas (bind receiver as `self`) |
 | Block return values | Blocks now properly return values from inlined yield |
 | Array literal type | Register array literals as POINTER type for indexing |
 | Require directory resolution | Try `dir/dir.cr` when require path is a directory |
@@ -914,6 +915,9 @@ enum:      64  ← ✅ DONE
 | ptr 0 → ptr null | Fix invalid LLVM IR in extern call arguments |
 | bitcast to void | Convert to identity bitcast or null pointer |
 | nil?/not_nil! intrinsics | Emit inline LLVM IR for nil checks on union types |
+| Nil type mapping | Fix `Nil` being treated as `Void` during lowering (broke union tagging and nil? checks) |
+| Union variant tagging | Use union descriptors to resolve variant ids (remove buggy overload that forced `Nil -> 0`) |
+| Top-level def mangling | Lower top-level defs using mangled names (fixes mutual recursion forward refs) |
 | Union function returns | Fix phi node nil detection for union return types (type_id check) |
 | Union return type VOID | Fix cache placeholder bug in type_ref_for_name (set after union check) |
 | Namespace resolution | Register short name aliases for nested classes/structs in modules |
