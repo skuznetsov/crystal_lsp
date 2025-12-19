@@ -4860,8 +4860,19 @@ module Crystal::MIR
         @void_values << inst.id
       elsif is_varargs
         # Varargs functions need explicit function signature in call instruction
-        # e.g., call i32 (ptr, ...) @printf(ptr @fmt, i32 %val)
-        emit "#{name} = call #{return_type} (ptr, ...) @#{mangled_extern_name}(#{args})"
+        # Use the argument types from this call site to build a compatible signature.
+        #
+        # NOTE: We currently declare unknown varargs functions as `declare <ret> @name(...)`,
+        # so the call-site signature is authoritative (opaque pointers allow this pattern).
+        sig_types = inst.args.map do |arg_id|
+          arg_type = @value_types[arg_id]? || TypeRef::POINTER
+          llvm_type = @type_mapper.llvm_type(arg_type)
+          llvm_type = "ptr" if llvm_type == "void"
+          llvm_type
+        end
+        sig_prefix = sig_types.join(", ")
+        sig_prefix = "ptr" if sig_prefix.empty?
+        emit "#{name} = call #{return_type} (#{sig_prefix}, ...) @#{mangled_extern_name}(#{args})"
       else
         emit "#{name} = call #{return_type} @#{mangled_extern_name}(#{args})"
         # Track type for downstream use (if not already set by pattern matching above)
