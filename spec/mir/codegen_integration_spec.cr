@@ -707,4 +707,41 @@ describe "Codegen Integration" do
       output.strip.should eq("ok")
     end
   end
+
+  describe "nested type resolution" do
+    it "resolves nested structs inside a class (prefers local scope)" do
+      source = <<-CR
+        lib LibC
+          fun printf(format : UInt8*, ...) : Int32
+        end
+
+        struct Inner
+          def ping : Int32
+            1
+          end
+        end
+
+        class Outer
+          struct Inner
+            def initialize(@x : Int32)
+            end
+
+            def ping : Int32
+              @x
+            end
+          end
+
+          def make : Int32
+            Inner.new(7).ping
+          end
+        end
+
+        o = Outer.new
+        LibC.printf("%d %d\\n", o.make, Inner.new.ping)
+        CR
+
+      output = CodegenTestHelper.compile_and_run(source)
+      output.strip.should eq("7 1")
+    end
+  end
 end

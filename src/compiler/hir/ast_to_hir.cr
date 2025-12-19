@@ -1376,6 +1376,30 @@ module Crystal::HIR
       init_params = [] of {String, TypeRef}
 
       if body = node.body
+        # PASS 0: Register nested types first so method signatures and bodies can resolve them
+        # (e.g., Dir::EntryIterator used as `EntryIterator` inside Dir).
+        body.each do |expr_id|
+          member = @arena[expr_id]
+          case member
+          when CrystalV2::Compiler::Frontend::ClassNode
+            nested_name = String.new(member.name)
+            full_nested_name = "#{class_name}::#{nested_name}"
+            register_class_with_name(member, full_nested_name)
+          when CrystalV2::Compiler::Frontend::StructNode
+            nested_name = String.new(member.name)
+            full_nested_name = "#{class_name}::#{nested_name}"
+            register_struct_with_name(member, full_nested_name)
+          when CrystalV2::Compiler::Frontend::EnumNode
+            enum_name = String.new(member.name)
+            full_enum_name = "#{class_name}::#{enum_name}"
+            register_enum_with_name(member, full_enum_name)
+          when CrystalV2::Compiler::Frontend::ModuleNode
+            nested_name = String.new(member.name)
+            full_nested_name = "#{class_name}::#{nested_name}"
+            register_nested_module(member, full_nested_name)
+          end
+        end
+
         defined_instance_method_full_names = collect_defined_instance_method_full_names(class_name, body)
         include_nodes = [] of CrystalV2::Compiler::Frontend::IncludeNode
 
@@ -1687,6 +1711,29 @@ module Crystal::HIR
       init_params = [] of {String, TypeRef}
 
       if body = node.body
+        # PASS 0: Register nested types first so method signatures and bodies can resolve them
+        body.each do |expr_id|
+          member = @arena[expr_id]
+          case member
+          when CrystalV2::Compiler::Frontend::ClassNode
+            nested_name = String.new(member.name)
+            full_nested_name = "#{struct_name}::#{nested_name}"
+            register_class_with_name(member, full_nested_name)
+          when CrystalV2::Compiler::Frontend::StructNode
+            nested_name = String.new(member.name)
+            full_nested_name = "#{struct_name}::#{nested_name}"
+            register_struct_with_name(member, full_nested_name)
+          when CrystalV2::Compiler::Frontend::EnumNode
+            enum_name = String.new(member.name)
+            full_enum_name = "#{struct_name}::#{enum_name}"
+            register_enum_with_name(member, full_enum_name)
+          when CrystalV2::Compiler::Frontend::ModuleNode
+            nested_name = String.new(member.name)
+            full_nested_name = "#{struct_name}::#{nested_name}"
+            register_nested_module(member, full_nested_name)
+          end
+        end
+
         body.each do |expr_id|
           member = @arena[expr_id]
           case member
@@ -1981,6 +2028,7 @@ module Crystal::HIR
       end
 
       class_info = @class_info[class_name]? || return
+      old_class = @current_class
       @current_class = class_name
 
       # Generate allocator function: ClassName.new
@@ -1988,6 +2036,23 @@ module Crystal::HIR
 
       # Lower each method
       if body = node.body
+        # Lower nested types first (classes/structs/modules inside the class body).
+        # These can be referenced unqualified from within the class (e.g., `EntryIterator.new` inside `Dir`).
+        body.each do |expr_id|
+          member = @arena[expr_id]
+          case member
+          when CrystalV2::Compiler::Frontend::ClassNode
+            nested_name = String.new(member.name)
+            lower_class_with_name(member, "#{class_name}::#{nested_name}")
+          when CrystalV2::Compiler::Frontend::StructNode
+            nested_name = String.new(member.name)
+            lower_struct_with_name(member, "#{class_name}::#{nested_name}")
+          when CrystalV2::Compiler::Frontend::ModuleNode
+            nested_name = String.new(member.name)
+            lower_module_with_name(member, "#{class_name}::#{nested_name}")
+          end
+        end
+
         defined_full_names = collect_defined_instance_method_full_names(class_name, body)
         include_nodes = [] of CrystalV2::Compiler::Frontend::IncludeNode
 
@@ -2028,7 +2093,7 @@ module Crystal::HIR
         end
       end
 
-      @current_class = nil
+      @current_class = old_class
     end
 
     # Lower a struct and all its methods (pass 3)
@@ -2040,6 +2105,7 @@ module Crystal::HIR
     # Lower a struct with a specific name (for nested structs like Foo::Bar)
     def lower_struct_with_name(node : CrystalV2::Compiler::Frontend::StructNode, struct_name : String)
       struct_info = @class_info[struct_name]? || return
+      old_class = @current_class
       @current_class = struct_name
 
       # Generate allocator function: StructName.new
@@ -2047,6 +2113,22 @@ module Crystal::HIR
 
       # Lower each method
       if body = node.body
+        # Lower nested types first (classes/structs/modules inside the struct body).
+        body.each do |expr_id|
+          member = @arena[expr_id]
+          case member
+          when CrystalV2::Compiler::Frontend::ClassNode
+            nested_name = String.new(member.name)
+            lower_class_with_name(member, "#{struct_name}::#{nested_name}")
+          when CrystalV2::Compiler::Frontend::StructNode
+            nested_name = String.new(member.name)
+            lower_struct_with_name(member, "#{struct_name}::#{nested_name}")
+          when CrystalV2::Compiler::Frontend::ModuleNode
+            nested_name = String.new(member.name)
+            lower_module_with_name(member, "#{struct_name}::#{nested_name}")
+          end
+        end
+
         defined_full_names = collect_defined_instance_method_full_names(struct_name, body)
         include_nodes = [] of CrystalV2::Compiler::Frontend::IncludeNode
 
@@ -2087,7 +2169,7 @@ module Crystal::HIR
         end
       end
 
-      @current_class = nil
+      @current_class = old_class
     end
 
     # Generate allocator: ClassName.new(...) -> allocates and returns instance
@@ -2856,10 +2938,7 @@ module Crystal::HIR
     # E.g., if @current_class is "CrystalV2::Compiler::Frontend::Span" and name is "Span",
     # returns "CrystalV2::Compiler::Frontend::Span"
     private def resolve_class_name_in_context(name : String) : String
-      # First check if it's directly in class_info
-      return name if @class_info.has_key?(name)
-
-      # Try to resolve using current class's namespace
+      # Prefer the current namespace first (nested types shadow outer/global ones).
       if current = @current_class
         # Extract namespace: "Foo::Bar::Baz" -> "Foo::Bar"
         parts = current.split("::")
@@ -2877,6 +2956,9 @@ module Crystal::HIR
 
         # All namespace prefixes tried and failed - continue with other checks below
       end
+
+      # Fall back to a top-level type
+      return name if @class_info.has_key?(name)
 
       # Also try the exact class name if current class matches
       # E.g., inside Span, "Span" should resolve to the same class
@@ -6003,6 +6085,8 @@ module Crystal::HIR
           # Check if it's a class name (starts with uppercase and is known class)
           # OR a module name (check if Module.method exists in function_types)
           if resolved_name[0].uppercase?
+            # Prefer nested types in the current namespace over top-level types.
+            resolved_name = resolve_class_name_in_context(resolved_name)
             if @class_info.has_key?(resolved_name)
               class_name_str = resolved_name
             elsif is_module_method?(resolved_name, method_name)
@@ -8317,8 +8401,11 @@ module Crystal::HIR
           resolved_name = next_resolved
           depth += 1
         end
-        if resolved_name[0].uppercase? && @class_info.has_key?(resolved_name)
-          class_name_str = resolved_name
+        if resolved_name[0].uppercase?
+          resolved_name = resolve_class_name_in_context(resolved_name)
+          if @class_info.has_key?(resolved_name)
+            class_name_str = resolved_name
+          end
         end
       elsif obj_node.is_a?(CrystalV2::Compiler::Frontend::GenericNode)
         # Generic type like Hash(Int32, Int32).new
