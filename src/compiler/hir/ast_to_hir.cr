@@ -299,6 +299,10 @@ module Crystal::HIR
     # {caller_arena, callee_arena}
     @inline_arenas : {CrystalV2::Compiler::Frontend::ArenaLike, CrystalV2::Compiler::Frontend::ArenaLike}? = nil
 
+    # While inlining yield-functions, we must preserve caller locals for the block body.
+    # Otherwise callee locals (especially `self`) can leak into the caller and break ivar access.
+    @inline_caller_locals_stack : Array(Hash(String, ValueId)) = [] of Hash(String, ValueId)
+
     def initialize(@arena, module_name : String = "main")
       @module = Module.new(module_name)
       @function_types = {} of String => TypeRef
@@ -7336,6 +7340,11 @@ module Crystal::HIR
       @inline_arenas = {caller_arena, callee_arena}
       @arena = callee_arena
 
+      # Isolate callee locals from caller locals, but keep caller locals available for block bodies.
+      caller_locals = ctx.save_locals
+      @inline_caller_locals_stack << caller_locals
+      ctx.restore_locals({} of String => ValueId)
+
       begin
         # If inlining an instance method, bind the receiver as `self`.
         if receiver_id
@@ -7362,6 +7371,10 @@ module Crystal::HIR
         end
         result_value
       ensure
+        # Restore caller locals (including any mutations made inside the inlined block body).
+        if restored = @inline_caller_locals_stack.pop?
+          ctx.restore_locals(restored)
+        end
         @arena = caller_arena
         @inline_arenas = old_inline_arenas
         ctx.pop_scope
@@ -7412,33 +7425,72 @@ module Crystal::HIR
                      [] of ValueId
                    end
 
-      # Bind block parameters to yield arguments
-      if params = block.params
-        params.each_with_index do |param, idx|
-          if pname = param.name
-            param_name = String.new(pname)
-            if idx < yield_args.size
-              ctx.register_local(param_name, yield_args[idx])
-              # Propagate taints/lifetime for inline block params to support RC/ThreadShared decisions
-              arg_id = yield_args[idx]
-              ctx.register_type(arg_id, ctx.type_of(arg_id))
+      # Lower block body
+      # For inlined yield-functions, the block body must run in the *caller* lexical scope
+      # (caller locals, caller `self`). Otherwise ivar access inside the block can target
+      # the callee receiver (e.g. `tap` receiver) and generate invalid IR.
+      result = if caller_locals = @inline_caller_locals_stack.last?
+        saved_callee_locals = ctx.save_locals
+        ctx.restore_locals(caller_locals)
+
+        caller_locals_before_params = ctx.save_locals
+        param_names = [] of String
+        if params = block.params
+          params.each do |param|
+            if pname = param.name
+              param_names << String.new(pname)
             end
           end
         end
-      end
 
-      # Lower block body
-      result = if arenas = @inline_arenas
-                 old_arena = @arena
-                 @arena = arenas[0]
-                 begin
-                   lower_body(ctx, block.body)
-                 ensure
-                   @arena = old_arena
-                 end
-               else
-                 lower_body(ctx, block.body)
-               end
+        # Bind block parameters to yield arguments (in caller scope).
+        param_names.each_with_index do |param_name, idx|
+          next unless idx < yield_args.size
+          ctx.register_local(param_name, yield_args[idx])
+          arg_id = yield_args[idx]
+          ctx.register_type(arg_id, ctx.type_of(arg_id))
+        end
+
+        # Ensure block body is lowered in the caller arena, even when the callee comes from another file.
+        body_result = if arenas = @inline_arenas
+                        old_arena = @arena
+                        @arena = arenas[0]
+                        begin
+                          lower_body(ctx, block.body)
+                        ensure
+                          @arena = old_arena
+                        end
+                      else
+                        lower_body(ctx, block.body)
+                      end
+
+        caller_locals_after = ctx.save_locals
+        # Block parameters must not leak outside the block.
+        param_names.each do |name|
+          if prev = caller_locals_before_params[name]?
+            caller_locals_after[name] = prev
+          else
+            caller_locals_after.delete(name)
+          end
+        end
+        @inline_caller_locals_stack[-1] = caller_locals_after
+
+        ctx.restore_locals(saved_callee_locals)
+        body_result
+      else
+        # No yield inlining context; just lower block normally.
+        if arenas = @inline_arenas
+          old_arena = @arena
+          @arena = arenas[0]
+          begin
+            lower_body(ctx, block.body)
+          ensure
+            @arena = old_arena
+          end
+        else
+          lower_body(ctx, block.body)
+        end
+      end
 
       # Propagate taints from arguments to result if result is present
       if result
