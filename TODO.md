@@ -924,7 +924,9 @@ enum:      64  ← ✅ DONE
 | Getter/setter monomorphization | Handle GetterNode/SetterNode/PropertyNode in generic class lowering |
 | typeof filter | Filter out functions with unresolved typeof(...) patterns in LLVM emission |
 | Module mixin expansion | Copy `include`d module instance methods into concrete classes/structs during HIR lowering |
-| Varargs call signatures | Derive varargs call signatures from argument types to satisfy `opt` verification |
+| Varargs prototypes | Use real fixed-parameter signatures for known C varargs (`printf`, `fcntl`, etc.) |
+| Varargs fixed-arg coercion | Insert ptr/int casts for fixed params to satisfy LLVM verifier (`opt -O1`) |
+| Module-typed return inference | If return type is module-like (e.g., `Iterator(T)`), infer concrete return type when body is `Type.new(...)` |
 
 ### 8.2 Current Status
 
@@ -937,6 +939,9 @@ end
 r1 = maybe(true)   # => 42
 r2 = maybe(false)  # => nil
 ```
+
+**Prelude build progress (with stdlib/prelude):**
+- Reaches LLVM IR emission and `opt -O1` successfully; link still fails due to missing runtime/stdlib symbols (expected at this stage).
 
 **Stdlib requires advanced features not yet implemented:**
 
@@ -951,11 +956,11 @@ r2 = maybe(false)  # => nil
 
 1. **typeof in type positions**: `Array(typeof(Enumerable.element_type(self)))` is emitted as literal string instead of resolved type
 2. **Block parameters**: Methods with `& : Pointer(T) ->` block types not fully lowered
-3. **Module mixin methods**: Array includes Indexable, but Indexable methods not monomorphized for Array(Char) etc.
+3. **Module mixin methods**: Include expansion works, but module-typed receiver resolution is still incomplete (beyond simple `Type.new(...)` return bodies).
 
 ### 8.4 TODO
 
 1. [ ] **Implement typeof resolution** - Compile-time evaluation of typeof(...) in type annotations
 2. [ ] **Fix generic methods with blocks** - Handle block parameter types during lowering
-3. [ ] **Module mixin monomorphization** - Generate methods from included modules for concrete types (partially implemented: include expansion; missing: module-typed receiver resolution like `Iterator(T)`)
+3. [ ] **Module mixin monomorphization** - Generate methods from included modules for concrete types (partial: include expansion + module-typed return inference; missing: robust module-typed receiver resolution like `Iterator(T)`)
 4. [ ] **Macro expansion for `getter`/`property`** - Compile-time accessor generation

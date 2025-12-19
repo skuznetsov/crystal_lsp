@@ -363,55 +363,17 @@ Deduplication: 100% (0% duplicate parsing)
 
 ## Roadmap to Production
 
-### ✅ Completed (2025-11-30)
+For the authoritative, frequently-updated roadmap and current progress, see `TODO.md`.
 
-**Parser (97.6% parity with Crystal)**
-- [x] Fast streaming lexer with string interning
-- [x] Pratt parser with comprehensive error recovery
-- [x] 2856 tests passing (1390 ported from Crystal's parser_spec.cr)
-- [x] AST class inheritance (94 node types migrated)
-- [x] All major constructs: heredocs, blocks, case/when, rescue/ensure
-- [x] `out` keyword, inline `asm`, annotations, macros
+### ✅ Completed (high level)
 
-**Infrastructure**
-- [x] Zero-copy VirtualArena for multi-file AST
-- [x] Parallel FileLoader with perfect deduplication
-- [x] Real-world validation (Kemal, compiler.cr, prelude.cr)
+- Parser: ~97.6% parity with Crystal (error recovery, macros, annotations, inline asm, etc.)
+- LSP server: core navigation + IDE features (hover/definition/references/rename/formatting/folding/semantic tokens/inlay hints/signature help/call hierarchy) with DX guardrails and a VSCode extension.
+- Semantic + macros: symbol table + name resolution, type inference engine, macro expander (see `TODO.md` for detail).
 
-**LSP Server (~70%)**
-- [x] 21 LSP methods implemented
-- [x] Definition, references, hover, completion
-- [x] Semantic tokens, inlay hints, folding
-- [x] Formatting (54% faster than original)
+### 🚧 In Progress
 
-**Semantic (~50%)**
-- [x] Basic type inference
-- [x] Symbol table and name resolution
-- [x] MVP MacroExpander (`{{ }}`, `{% if/for %}`, `@type.*`)
-
-### 🎯 Current Focus: LSP Correctness
-
-- [ ] Diagnostics parity (no false positives)
-- [ ] Type/hover accuracy matching original compiler
-- [ ] Navigation to stdlib and macro-generated methods
-
-### 🚧 In Progress: Rich Macro API
-
-- [ ] Full `@type.*` API with type graph
-- [ ] Annotation objects (`.args`, `.named_args`)
-- [ ] Macro methods (`.stringify`, `.id`, `.class?`)
-
-### 🔮 Future: Full Type System
-
-- [ ] Generic instantiation and unification
-- [ ] Union type narrowing with flow analysis
-- [ ] Method overload resolution
-
-### 🚀 Later: Codegen
-
-- [ ] SSA-style IR
-- [ ] LLVM IR generation
-- [ ] Self-hosting test
+- Codegen (`codegen` branch): HIR → MIR → LLVM pipeline; end-to-end compilation works in `--no-prelude` mode (see `spec/mir/codegen_integration_spec.cr`); full prelude/stdlib bootstrap ongoing.
 
 ---
 
