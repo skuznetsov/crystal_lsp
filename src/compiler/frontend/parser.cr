@@ -34,6 +34,7 @@ module CrystalV2
         # Streaming tokenization support
         @streaming : Bool
         @lexer : Lexer?
+        @source : String
         @keep_trivia : Bool
         @expect_context : String?
         # Parser context flags
@@ -46,6 +47,7 @@ module CrystalV2
         @skip_newlines_in_braces : Bool = false
 
         def initialize(lexer : Lexer, *, recovery_mode : Bool = false)
+          @source = lexer.source
           @tokens = [] of Token
           @index = 0
           # Choose arena implementation (default: AstArena; PageArena via env)
@@ -154,6 +156,7 @@ module CrystalV2
         # Phase 87B-2: Constructor for reparsing with existing arena
         # Used by macro expander to add parsed nodes to existing arena
         def initialize(lexer : Lexer, @arena : ArenaLike, *, recovery_mode : Bool = false)
+          @source = lexer.source
           @tokens = [] of Token
           @index = 0
           @diagnostics = [] of Diagnostic
@@ -6885,7 +6888,7 @@ module CrystalV2
           end
         end
 
-        private def parse_macro_body
+        private def parse_macro_body(stop_on_branch : Bool = false)
           @macro_mode += 1
           begin
             pieces = Array(MacroPiece).new(16)
@@ -6909,6 +6912,13 @@ module CrystalV2
               break if token.kind == Token::Kind::EOF
 
               if macro_control_start?
+                if stop_on_branch
+                  if keyword = peek_macro_keyword
+                    if control_depth == 0 && block_depth == 0 && (keyword == "elsif" || keyword == "else" || keyword == "end")
+                      break
+                    end
+                  end
+                end
                 left_trim = macro_control_left_trim?
                 already_empty = pieces.empty?
                 trim_applied = left_trim
@@ -12576,7 +12586,12 @@ module CrystalV2
           fast_forward_percent_block
           end_span = @previous_token ? @previous_token.not_nil!.span : start_span
           block_span = start_span.cover(end_span)
+          byte_count = block_span.end_offset - block_span.start_offset
           pieces = [] of MacroPiece
+          if byte_count > 0
+            slice = @source.to_slice[block_span.start_offset, byte_count]
+            pieces << MacroPiece.text(String.new(slice), block_span)
+          end
           @arena.add_typed(MacroLiteralNode.new(block_span, pieces, false, false))
         end
 
@@ -13072,33 +13087,10 @@ module CrystalV2
         # Full implementation would properly parse expressions and text
         private def parse_macro_body_until_branch(stop_on_branch : Bool = true) : ExprId
           start_span = current_token.span
-          pieces = SmallVec(MacroPiece, 16).new
-          depth = 0
-
-          # Skip tokens until we hit {% keyword at depth 0
-          loop do
-            if current_token.kind == Token::Kind::EOF
-              break
-            end
-
-            # Check for {% sequence
-            if keyword = peek_macro_keyword
-              if depth == 0 && keyword == "end"
-                break
-              elsif stop_on_branch && depth == 0 && (keyword == "elsif" || keyword == "else")
-                break
-              elsif keyword == "if" || keyword == "for" || keyword == "unless" || keyword == "while" || keyword == "begin" || keyword == "verbatim"
-                skip_nested_macro_control
-                next
-              end
-            end
-
-            # Just skip this token
-            advance
-          end
-
-          # Return stub MacroLiteralNode
-          @arena.add_typed(MacroLiteralNode.new(start_span, pieces.to_a, false, false))
+          pieces, macro_trim_left, macro_trim_right = parse_macro_body(stop_on_branch)
+          end_span = @previous_token ? @previous_token.not_nil!.span : start_span
+          body_span = start_span.cover(end_span)
+          @arena.add_typed(MacroLiteralNode.new(body_span, pieces, macro_trim_left, macro_trim_right))
         end
 
         # Skip an entire nested macro control structure {% ... %}...{% end %}
@@ -13163,7 +13155,7 @@ module CrystalV2
 
         # Parse macro body content until we hit {% end %}
         private def parse_macro_body_until_end : ExprId
-          parse_macro_body_until_branch
+          parse_macro_body_until_branch(false)
         end
 
         # Phase 103B: Parse {{ expr }} in expression context

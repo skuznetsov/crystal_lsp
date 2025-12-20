@@ -15,8 +15,11 @@ module CrystalV2
         @macro_expr_depth : Int32        # Track nesting of {{ ... }} macro expressions
         @string_pool : StringPool  # String interning for memory optimization
         getter string_pool : StringPool  # Week 1 Day 2: expose for parser generic type interning
+        @source : String
+        getter source : String
 
         def initialize(source : String, *, diagnostics : Array(Diagnostic)? = nil)
+          @source = source
           @rope = Rope.new(source)
           @offset = 0
           @line = 1

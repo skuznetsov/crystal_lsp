@@ -119,7 +119,7 @@ module CrystalV2
 
       class AstCache
         MAGIC   = "CV2A"
-        VERSION = 2_u32
+        VERSION = 3_u32
 
         getter arena : Frontend::AstArena
         getter roots : Array(Frontend::ExprId)

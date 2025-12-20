@@ -716,9 +716,9 @@ module CrystalV2
           node.pieces.each do |piece|
             if piece.kind == Frontend::MacroPiece::Kind::Text
               text = piece.text
-              if text && text.includes?("require ")
-                # Extract require paths from text (e.g., "require \"./unix/file_descriptor\"")
-                text.scan(/require\s+["']([^"']+)["']/) do |match|
+              if text && text.includes?("require")
+                # Extract require paths from text (handles optional whitespace/quotes).
+                text.scan(/\brequire\s*["']?([^"'\s]+)["']?/) do |match|
                   req_path = match[1]
                   resolved = resolve_require_path(req_path, base_dir, input_file)
                   case resolved
