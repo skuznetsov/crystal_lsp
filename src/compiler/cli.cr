@@ -729,28 +729,94 @@ module CrystalV2
             end
           end
         when Frontend::MacroLiteralNode
-          # Macro literal - check pieces for require text patterns
-          node.pieces.each do |piece|
-            if piece.kind == Frontend::MacroPiece::Kind::Text
-              text = piece.text
-              if text && text.includes?("require")
-                # Extract require paths from text (handles optional whitespace/quotes).
-                text.scan(/\brequire\s*["']?([^"'\s]+)["']?/) do |match|
-                  req_path = match[1]
-                  resolved = resolve_require_path(req_path, base_dir, input_file)
-                  case resolved
-                  when String
-                    parse_file_recursive(resolved, results, loaded, input_file, options, out_io)
-                  when Array
-                    resolved.each do |file|
-                      parse_file_recursive(file, results, loaded, input_file, options, out_io)
-                    end
-                  end
+          macro_literal_require_texts(arena, node, Runtime.target_flags).each do |text|
+            next unless text.includes?("require")
+            # Extract require paths from text (handles optional whitespace/quotes).
+            text.scan(/\brequire\s*["']?([^"'\s]+)["']?/) do |match|
+              req_path = match[1]
+              resolved = resolve_require_path(req_path, base_dir, input_file)
+              case resolved
+              when String
+                parse_file_recursive(resolved, results, loaded, input_file, options, out_io)
+              when Array
+                resolved.each do |file|
+                  parse_file_recursive(file, results, loaded, input_file, options, out_io)
                 end
               end
             end
           end
         end
+      end
+
+      private def macro_literal_require_texts(
+        arena : Frontend::ArenaLike,
+        node : Frontend::MacroLiteralNode,
+        flags : Set(String)
+      ) : Array(String)
+        texts = [] of String
+        control_stack = [] of {Bool, Bool, Bool} # {parent_active, branch_taken, active}
+        active = true
+
+        node.pieces.each do |piece|
+          case piece.kind
+          when Frontend::MacroPiece::Kind::Text
+            if active && (text = piece.text)
+              texts << text
+            end
+          when Frontend::MacroPiece::Kind::ControlStart
+            keyword = piece.control_keyword || ""
+            cond_expr = piece.expr
+            cond = cond_expr ? evaluate_macro_condition(arena, cond_expr, flags) : nil
+            if keyword == "unless"
+              cond = cond.nil? ? nil : !cond
+            end
+
+            parent_active = active
+            branch_active = if cond == true
+                              parent_active
+                            elsif cond == false
+                              false
+                            else
+                              parent_active
+                            end
+            branch_taken = cond == true
+            control_stack << {parent_active, branch_taken, branch_active}
+            active = branch_active
+          when Frontend::MacroPiece::Kind::ControlElseIf
+            next if control_stack.empty?
+            parent_active, branch_taken, _ = control_stack[-1]
+            cond_expr = piece.expr
+            cond = cond_expr ? evaluate_macro_condition(arena, cond_expr, flags) : nil
+            take = !branch_taken && cond == true
+            branch_active = if cond == false
+                              false
+                            elsif cond == true
+                              parent_active && take
+                            else
+                              parent_active
+                            end
+            branch_taken = true if cond == true
+            control_stack[-1] = {parent_active, branch_taken, branch_active}
+            active = branch_active
+          when Frontend::MacroPiece::Kind::ControlElse
+            next if control_stack.empty?
+            parent_active, branch_taken, _ = control_stack[-1]
+            branch_active = parent_active && !branch_taken
+            control_stack[-1] = {parent_active, true, branch_active}
+            active = branch_active
+          when Frontend::MacroPiece::Kind::ControlEnd
+            if control_stack.empty?
+              active = true
+            else
+              parent_active, _, _ = control_stack.pop
+              active = parent_active
+            end
+          else
+            # Ignore expression/macro var pieces for require scanning.
+          end
+        end
+
+        texts
       end
 
       private def evaluate_macro_condition(
