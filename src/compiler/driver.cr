@@ -15,6 +15,7 @@ require "./mir/mir"
 require "./mir/optimizations"
 require "./mir/hir_to_mir"
 require "./mir/llvm_backend"
+require "../runtime"
 
 module Crystal::V2
   class CompilerDriver
@@ -391,25 +392,127 @@ module Crystal::V2
       # Extract require paths and process them first (dependencies before dependents)
       base_dir = File.dirname(abs_path)
       exprs.each do |expr_id|
-        node = arena[expr_id]
-        if node.is_a?(CrystalV2::Compiler::Frontend::RequireNode)
-          path_node = arena[node.path]
-          if path_node.is_a?(CrystalV2::Compiler::Frontend::StringNode)
-            req_path = String.new(path_node.value)
-
-            # Resolve the require path
-            resolved = resolve_require_path(req_path, base_dir)
-            if resolved
-              parse_file_recursive(resolved, results, loaded)
-            else
-              log "  Warning: Could not resolve require '#{req_path}'"
-            end
-          end
-        end
+        process_require_node(arena, expr_id, base_dir, results, loaded)
       end
 
       # Add this file's results (after dependencies)
       results << {arena, exprs, abs_path}
+    end
+
+    private def process_require_node(
+      arena : CrystalV2::Compiler::Frontend::ArenaLike,
+      expr_id : CrystalV2::Compiler::Frontend::ExprId,
+      base_dir : String,
+      results : Array(Tuple(CrystalV2::Compiler::Frontend::ArenaLike, Array(CrystalV2::Compiler::Frontend::ExprId), String)),
+      loaded : Set(String)
+    )
+      node = arena[expr_id]
+      case node
+      when CrystalV2::Compiler::Frontend::RequireNode
+        path_node = arena[node.path]
+        if path_node.is_a?(CrystalV2::Compiler::Frontend::StringNode)
+          req_path = String.new(path_node.value)
+          resolved = resolve_require_path(req_path, base_dir)
+          if resolved
+            parse_file_recursive(resolved, results, loaded)
+          else
+            log "  Warning: Could not resolve require '#{req_path}'"
+          end
+        end
+      when CrystalV2::Compiler::Frontend::MacroIfNode
+        condition = evaluate_macro_condition(arena, node.condition, CrystalV2::Runtime.target_flags)
+        if condition == true
+          process_require_node(arena, node.then_body, base_dir, results, loaded)
+        elsif condition == false
+          if else_body = node.else_body
+            process_require_node(arena, else_body, base_dir, results, loaded)
+          end
+        else
+          process_require_node(arena, node.then_body, base_dir, results, loaded)
+          if else_body = node.else_body
+            process_require_node(arena, else_body, base_dir, results, loaded)
+          end
+        end
+      when CrystalV2::Compiler::Frontend::MacroLiteralNode
+        node.pieces.each do |piece|
+          next unless piece.kind == CrystalV2::Compiler::Frontend::MacroPiece::Kind::Text
+          text = piece.text
+          next unless text && text.includes?("require")
+          text.scan(/\brequire\s*["']?([^"'\s]+)["']?/) do |match|
+            req_path = match[1]
+            resolved = resolve_require_path(req_path, base_dir)
+            parse_file_recursive(resolved, results, loaded) if resolved
+          end
+        end
+      end
+    end
+
+    private def evaluate_macro_condition(
+      arena : CrystalV2::Compiler::Frontend::ArenaLike,
+      expr_id : CrystalV2::Compiler::Frontend::ExprId,
+      flags : Set(String)
+    ) : Bool?
+      node = arena[expr_id]
+      case node
+      when CrystalV2::Compiler::Frontend::BoolNode
+        node.value
+      when CrystalV2::Compiler::Frontend::NilNode
+        false
+      when CrystalV2::Compiler::Frontend::MacroExpressionNode
+        evaluate_macro_condition(arena, node.expression, flags)
+      when CrystalV2::Compiler::Frontend::UnaryNode
+        op = String.new(node.operator)
+        return nil unless op == "!"
+        value = evaluate_macro_condition(arena, node.operand, flags)
+        value.nil? ? nil : !value
+      when CrystalV2::Compiler::Frontend::BinaryNode
+        op = String.new(node.operator)
+        left = evaluate_macro_condition(arena, node.left, flags)
+        right = evaluate_macro_condition(arena, node.right, flags)
+        case op
+        when "&&"
+          return false if left == false || right == false
+          return true if left == true && right == true
+          nil
+        when "||"
+          return true if left == true || right == true
+          return false if left == false && right == false
+          nil
+        else
+          nil
+        end
+      when CrystalV2::Compiler::Frontend::CallNode
+        macro_flag_call?(arena, node, flags)
+      else
+        nil
+      end
+    end
+
+    private def macro_flag_call?(
+      arena : CrystalV2::Compiler::Frontend::ArenaLike,
+      node : CrystalV2::Compiler::Frontend::CallNode,
+      flags : Set(String)
+    ) : Bool?
+      callee = arena[node.callee]
+      callee_name = case callee
+                    when CrystalV2::Compiler::Frontend::IdentifierNode
+                      String.new(callee.name)
+                    else
+                      nil
+                    end
+      return nil unless callee_name == "flag?"
+      return nil unless node.args.size == 1
+      arg = arena[node.args[0]]
+      flag_name = case arg
+                  when CrystalV2::Compiler::Frontend::SymbolNode
+                    String.new(arg.name)
+                  when CrystalV2::Compiler::Frontend::StringNode
+                    String.new(arg.value)
+                  else
+                    nil
+                  end
+      return nil unless flag_name
+      flags.includes?(flag_name)
     end
 
     # Resolve require path to absolute file path

@@ -15,6 +15,7 @@ require "./mir/optimizations"
 require "./mir/hir_to_mir"
 require "./mir/llvm_backend"
 require "./lsp/ast_cache"
+require "../runtime"
 
 # Module aliases for convenience
 alias HIR = Crystal::HIR
@@ -712,13 +713,20 @@ module CrystalV2
             end
           end
         when Frontend::MacroIfNode
-          # Process requires in both branches of macro conditionals
-          # Since we don't evaluate macros, load both branches to get all possible requires
-          if then_body = node.then_body
-            process_require_node(arena, then_body, base_dir, input_file, results, loaded, options, out_io)
-          end
-          if else_body = node.else_body
-            process_require_node(arena, else_body, base_dir, input_file, results, loaded, options, out_io)
+          # Evaluate flag? conditions when possible to avoid loading the wrong platform branch.
+          # Fall back to both branches if the condition is unknown.
+          condition = evaluate_macro_condition(arena, node.condition, Runtime.target_flags)
+          if condition == true
+            process_require_node(arena, node.then_body, base_dir, input_file, results, loaded, options, out_io)
+          elsif condition == false
+            if else_body = node.else_body
+              process_require_node(arena, else_body, base_dir, input_file, results, loaded, options, out_io)
+            end
+          else
+            process_require_node(arena, node.then_body, base_dir, input_file, results, loaded, options, out_io)
+            if else_body = node.else_body
+              process_require_node(arena, else_body, base_dir, input_file, results, loaded, options, out_io)
+            end
           end
         when Frontend::MacroLiteralNode
           # Macro literal - check pieces for require text patterns
@@ -743,6 +751,74 @@ module CrystalV2
             end
           end
         end
+      end
+
+      private def evaluate_macro_condition(
+        arena : Frontend::ArenaLike,
+        expr_id : Frontend::ExprId,
+        flags : Set(String)
+      ) : Bool?
+        node = arena[expr_id]
+        case node
+        when Frontend::BoolNode
+          node.value
+        when Frontend::NilNode
+          false
+        when Frontend::MacroExpressionNode
+          evaluate_macro_condition(arena, node.expression, flags)
+        when Frontend::UnaryNode
+          op = String.new(node.operator)
+          return nil unless op == "!"
+          value = evaluate_macro_condition(arena, node.operand, flags)
+          value.nil? ? nil : !value
+        when Frontend::BinaryNode
+          op = String.new(node.operator)
+          left = evaluate_macro_condition(arena, node.left, flags)
+          right = evaluate_macro_condition(arena, node.right, flags)
+          case op
+          when "&&"
+            return false if left == false || right == false
+            return true if left == true && right == true
+            nil
+          when "||"
+            return true if left == true || right == true
+            return false if left == false && right == false
+            nil
+          else
+            nil
+          end
+        when Frontend::CallNode
+          macro_flag_call?(arena, node, flags)
+        else
+          nil
+        end
+      end
+
+      private def macro_flag_call?(
+        arena : Frontend::ArenaLike,
+        node : Frontend::CallNode,
+        flags : Set(String)
+      ) : Bool?
+        callee = arena[node.callee]
+        callee_name = case callee
+                      when Frontend::IdentifierNode
+                        String.new(callee.name)
+                      else
+                        nil
+                      end
+        return nil unless callee_name == "flag?"
+        return nil unless node.args.size == 1
+        arg = arena[node.args[0]]
+        flag_name = case arg
+                    when Frontend::SymbolNode
+                      String.new(arg.name)
+                    when Frontend::StringNode
+                      String.new(arg.value)
+                    else
+                      nil
+                    end
+        return nil unless flag_name
+        flags.includes?(flag_name)
       end
 
       private def resolve_require_path(req_path : String, base_dir : String, input_file : String) : String | Array(String) | Nil
