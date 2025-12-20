@@ -728,8 +728,8 @@ The key insight is: **Don't compete with LLVM, complement it.**
 
 **Phase 6: Integration & Testing**
 - [x] Replace `optimize_with_potential` with LTP engine (returns LTPPotential; LTP run after legacy loop)
-- [ ] Add specs for each move type
-- [ ] Add specs for dual-frame fallback
+- [x] Add specs for each move type
+- [x] Add specs for dual-frame fallback
 - [ ] Benchmark: compare old vs new on bootstrap examples
 - [ ] Verify monotone descent property
 

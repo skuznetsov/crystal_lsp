@@ -1077,7 +1077,16 @@ module Crystal::MIR
       while @iterations < max_iters
         # BR-1: Find trigger window
         window = find_window
-        break unless window
+        unless window
+          log "  Iter #{@iterations}: No window found. Trying dual frame..."
+          if try_dual_frame
+            build_analysis_maps
+            @final_potential = compute_ltp_potential
+            @iterations += 1
+            next
+          end
+          break
+        end
 
         log "  Iter #{@iterations}: Window = #{window}"
 
@@ -1120,8 +1129,14 @@ module Crystal::MIR
             build_analysis_maps
             @final_potential = compute_ltp_potential
           else
-            log "    Nothing to collapse. Stopping."
-            break
+            log "    Nothing to collapse. Trying dual frame..."
+            if try_dual_frame
+              build_analysis_maps
+              @final_potential = compute_ltp_potential
+            else
+              log "    Dual frame exhausted. Stopping."
+              break
+            end
           end
         end
 

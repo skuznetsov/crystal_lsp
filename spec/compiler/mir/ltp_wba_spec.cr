@@ -454,4 +454,32 @@ describe "LTP Theory Compliance" do
       after.should be < before
     end
   end
+
+  describe "Dual Frame Fallback" do
+    it "applies constant folding when no LTP move or collapse is available" do
+      int_type = Crystal::MIR::TypeRef::INT32
+
+      func = Crystal::MIR::Function.new(LTPTestHelpers.next_func_id, "test_dual_frame", int_type)
+      entry_id = func.create_block
+      entry = func.get_block(entry_id)
+
+      left = Crystal::MIR::Constant.new(1_u32, int_type, 10_i64)
+      right = Crystal::MIR::Constant.new(2_u32, int_type, 32_i64)
+      entry.add(left)
+      entry.add(right)
+
+      add = Crystal::MIR::BinaryOp.new(3_u32, int_type, Crystal::MIR::BinOp::Add, left.id, right.id)
+      entry.add(add)
+
+      entry.terminator = Crystal::MIR::Return.new(add.id)
+
+      func.optimize_ltp(max_iters: 1)
+
+      folded = entry.instructions.find do |inst|
+        inst.is_a?(Crystal::MIR::Constant) && inst.id == add.id
+      end
+
+      folded.should_not be_nil
+    end
+  end
 end
