@@ -7332,6 +7332,9 @@ module Crystal::HIR
       func_def = @function_defs[target_name]?
       arena = @function_def_arenas[target_name]?
       unless func_def
+        if maybe_generate_accessor_for_name(name)
+          return
+        end
         base_name = name.split("$").first
         if base_name != name
           func_def = @function_defs[base_name]?
@@ -7372,6 +7375,38 @@ module Crystal::HIR
         @lowering_functions.delete(target_name)
         @lowered_functions.add(target_name)
       end
+    end
+
+    private def maybe_generate_accessor_for_name(name : String) : Bool
+      base_name = name.split("$", 2)[0]
+      return false unless base_name.includes?("#")
+
+      owner, method_name = base_name.split("#", 2)
+      return false if owner.empty? || method_name.empty?
+
+      class_info = @class_info[owner]?
+      return false unless class_info
+
+      if method_name.ends_with?("=")
+        accessor = method_name[0, method_name.size - 1]
+        ivar_name = "@#{accessor}"
+        if ivar_info = class_info.ivars.find { |iv| iv.name == ivar_name }
+          expected_name = mangle_function_name(base_name, [ivar_info.type])
+          return false if name.includes?("$") && expected_name != name
+          generate_setter_method_for_ivar(owner, class_info, ivar_info)
+          return true
+        end
+      else
+        ivar_name = "@#{method_name}"
+        if ivar_info = class_info.ivars.find { |iv| iv.name == ivar_name }
+          expected_name = mangle_function_name(base_name, [] of TypeRef)
+          return false if name.includes?("$") && expected_name != name
+          generate_getter_method_for_ivar(owner, class_info, ivar_info)
+          return true
+        end
+      end
+
+      false
     end
 
     private def ensure_accessor_method(
