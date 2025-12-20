@@ -353,9 +353,15 @@ module CrystalV2
         STDERR.puts "  Creating main function..." if options.progress
         if main_exprs.size > 0
           hir_converter.lower_main(main_exprs)
-        elsif main_def = def_nodes.find { |(n, _)| String.new(n.name) == "main" }
+        elsif main_def = def_nodes.find { |(n, _)| String.new(n.name) == "main" && !(n.receiver.try { |recv| String.new(recv) == HIR::AstToHir::FUN_DEF_RECEIVER } || false) }
           hir_converter.arena = main_def[1]
           hir_converter.lower_main_from_def(main_def[0])
+        end
+
+        # Ensure top-level `fun main` is lowered as a real entrypoint (C ABI).
+        if fun_main = def_nodes.find { |(n, _)| n.receiver.try { |recv| String.new(recv) == HIR::AstToHir::FUN_DEF_RECEIVER } || false }
+          hir_converter.arena = fun_main[1]
+          hir_converter.lower_def(fun_main[0])
         end
         STDERR.puts "  Main function created" if options.progress
 

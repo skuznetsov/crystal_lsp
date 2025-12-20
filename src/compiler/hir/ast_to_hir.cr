@@ -244,6 +244,8 @@ module Crystal::HIR
 
     # Top-level user-defined `def main` is renamed to avoid clashing with the C entrypoint.
     TOP_LEVEL_MAIN_BASE = "__crystal_user_main"
+    # Marker for top-level `fun` definitions (C ABI). Stored in DefNode.receiver.
+    FUN_DEF_RECEIVER = "__fun__"
 
     getter module : Module
     property arena : CrystalV2::Compiler::Frontend::ArenaLike
@@ -366,6 +368,14 @@ module Crystal::HIR
       @type_cache = {} of String => TypeRef
       @current_typeof_local_names = nil
       @top_level_main_defined = false
+    end
+
+    private def fun_def?(node : CrystalV2::Compiler::Frontend::DefNode) : Bool
+      if recv = node.receiver
+        String.new(recv) == FUN_DEF_RECEIVER
+      else
+        false
+      end
     end
 
     private def record_module_inclusion(module_name : String, class_name : String) : Nil
@@ -3606,7 +3616,7 @@ module Crystal::HIR
     # Call this for all functions before lowering any function bodies
     def register_function(node : CrystalV2::Compiler::Frontend::DefNode)
       base_name = String.new(node.name)
-      if base_name == "main" && @current_class.nil?
+      if base_name == "main" && @current_class.nil? && !fun_def?(node)
         base_name = TOP_LEVEL_MAIN_BASE
         @top_level_main_defined = true
       end
@@ -4272,7 +4282,7 @@ module Crystal::HIR
     # Lower a function definition
     def lower_def(node : CrystalV2::Compiler::Frontend::DefNode) : Function
       base_name = String.new(node.name)
-      if base_name == "main" && @current_class.nil?
+      if base_name == "main" && @current_class.nil? && !fun_def?(node)
         base_name = TOP_LEVEL_MAIN_BASE
         @top_level_main_defined = true
       end
@@ -4440,7 +4450,7 @@ module Crystal::HIR
         end
       end
 
-      main_base = if String.new(node.name) == "main" && @current_class.nil?
+      main_base = if String.new(node.name) == "main" && @current_class.nil? && !fun_def?(node)
                     @top_level_main_defined = true
                     TOP_LEVEL_MAIN_BASE
                   else
@@ -5111,6 +5121,13 @@ module Crystal::HIR
     private def register_extern_fun(lib_name : String?, node : CrystalV2::Compiler::Frontend::FunNode)
       fun_name = String.new(node.name)
       real_name = node.real_name ? String.new(node.real_name.not_nil!) : fun_name
+
+      # Top-level `fun main` in the stdlib is a C-ABI entrypoint in the real compiler.
+      # Our bootstrap uses a synthetic wrapper main, so skip registering it as an extern
+      # to avoid LLVM redefinition (declare + define).
+      if lib_name.nil? && fun_name == "main"
+        return
+      end
 
       # Build parameter types
       param_types = [] of TypeRef

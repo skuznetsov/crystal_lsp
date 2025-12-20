@@ -208,9 +208,16 @@ module Crystal::V2
       if main_exprs.size > 0
         hir_converter.lower_main(main_exprs)
         func_count += 1
-      elsif main_def = def_nodes.find { |(n, _)| String.new(n.name) == "main" }
+      elsif main_def = def_nodes.find { |(n, _)| String.new(n.name) == "main" && !(n.receiver.try { |recv| String.new(recv) == HIR::AstToHir::FUN_DEF_RECEIVER } || false) }
         hir_converter.arena = main_def[1]
         hir_converter.lower_main_from_def(main_def[0])
+        func_count += 1
+      end
+
+      # Ensure top-level `fun main` is lowered as an entrypoint when present.
+      if fun_main = def_nodes.find { |(n, _)| n.receiver.try { |recv| String.new(recv) == HIR::AstToHir::FUN_DEF_RECEIVER } || false }
+        hir_converter.arena = fun_main[1]
+        hir_converter.lower_def(fun_main[0])
         func_count += 1
       end
 

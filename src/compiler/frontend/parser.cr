@@ -256,7 +256,7 @@ module CrystalV2
             when Token::Kind::Private  then node = parse_private
             when Token::Kind::Protected then node = parse_protected
             when Token::Kind::Lib      then node = parse_lib
-            when Token::Kind::Fun      then node = parse_fun
+            when Token::Kind::Fun      then node = parse_fun_def
             else
               node = nil
             end
@@ -272,7 +272,7 @@ module CrystalV2
                 when Token::Kind::Def
                   parse_def
                 when Token::Kind::Fun
-                  parse_fun
+                  parse_fun_def
                 when Token::Kind::Class
                   parse_class
                 when Token::Kind::Module
@@ -2150,6 +2150,135 @@ module CrystalV2
               is_abstract,
               visibility,
               receiver_slice
+            )
+          )
+        end
+
+        # Phase 64: Parse fun definition at top-level (C ABI, with body).
+        # Grammar: fun name(params) : ReturnType; ...; end
+        private def parse_fun_def : ExprId
+          fun_token = current_token
+          advance
+          skip_trivia
+
+          name_token = current_token
+          unless name_token.kind == Token::Kind::Identifier || is_keyword_identifier?(name_token)
+            emit_unexpected(name_token)
+            return PREFIX_ERROR
+          end
+          advance
+          # Support namespaced class/struct: fun Foo::Bar(...)
+          while current_token.kind == Token::Kind::ColonColon
+            advance
+            skip_trivia
+            if current_token.kind != Token::Kind::Identifier && !is_keyword_identifier?(current_token)
+              emit_unexpected(current_token)
+              return PREFIX_ERROR
+            end
+            name_token = current_token
+            advance
+          end
+          skip_trivia
+
+          # Optional alias: fun name = real_name
+          if operator_token?(current_token, Token::Kind::Eq)
+            advance
+            skip_trivia
+            case current_token.kind
+            when Token::Kind::Identifier, Token::Kind::String
+              advance
+              skip_trivia
+            else
+              if is_keyword_identifier?(current_token)
+                advance
+                skip_trivia
+              else
+                emit_unexpected(current_token)
+                return PREFIX_ERROR
+              end
+            end
+          end
+
+          params_result = parse_fun_params
+          return PREFIX_ERROR if params_result.is_a?(ExprId)
+          params, _varargs = params_result
+
+          # Optional return type annotation: : ReturnType
+          return_type : Slice(UInt8)? = nil
+          skip_trivia
+          if operator_token?(current_token, Token::Kind::Colon)
+            advance
+            skip_trivia
+            return_type = parse_bare_proc_type
+            if return_type.nil?
+              emit_unexpected(current_token)
+              return PREFIX_ERROR
+            end
+          end
+
+          # Allow separators after header
+          skip_statement_end
+
+          body_ids_arr, rescue_clauses, else_body, ensure_body = parse_block_body_with_optional_rescue
+
+          if current_token.kind == Token::Kind::End
+            next_token = peek_next_non_trivia
+            if next_token.kind == Token::Kind::Rescue || next_token.kind == Token::Kind::Ensure
+              advance
+              skip_statement_end
+            end
+          end
+
+          if rescue_clauses.nil? && else_body.nil? && ensure_body.nil? &&
+             (current_token.kind == Token::Kind::Rescue || current_token.kind == Token::Kind::Ensure)
+            rescue_clauses, else_body, ensure_body = parse_rescue_sections
+          end
+
+          body_ids = if rescue_clauses || else_body || ensure_body
+                       begin_start_span = if body_ids_arr.empty?
+                         fun_token.span
+                       else
+                         @arena[body_ids_arr.first].span
+                       end
+                       begin_node_id = @arena.add_typed(
+                         BeginNode.new(
+                           begin_start_span,
+                           body_ids_arr,
+                           rescue_clauses,
+                           else_body,
+                           ensure_body
+                         )
+                       )
+                       [begin_node_id]
+                     else
+                       body_ids_arr
+                     end
+
+          previous_context = @expect_context
+          fun_name = String.new(name_token.slice)
+          @expect_context = "fun #{fun_name}"
+          expect_identifier("end")
+          @expect_context = previous_context
+          end_token = previous_token
+          skip_statement_end
+
+          fun_span = if end_token
+            fun_token.span.cover(end_token.span)
+          else
+            fun_token.span
+          end
+
+          fun_receiver = @string_pool.intern("__fun__".to_slice)
+          @arena.add_typed(
+            DefNode.new(
+              fun_span,
+              name_token.slice,
+              params,
+              return_type,
+              body_ids,
+              nil,
+              nil,
+              fun_receiver
             )
           )
         end
