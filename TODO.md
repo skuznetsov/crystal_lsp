@@ -656,6 +656,7 @@ The key insight is: **Don't compete with LLVM, complement it.**
 - [x] CLI flags for faster iteration: `--no-llvm-opt` and `--no-link` (2025-12-23)
 - [x] LLVM opt/llc artifact cache keyed by ll hash + flags (2025-12-23)
 - [x] AST cache key stabilized (FNV hash) and verified hits on warm run (parse ~164ms → ~79ms)
+- [ ] Fix AST cache save failures (ClassNode→StructNode, SplatNode→Unary) seen in verbose compile logs
 - [x] Add `--no-llvm-metadata` to skip type metadata (small LLVM time reduction)
 - [x] Reachability roots include `__crystal_main` (avoid emitting all funcs; LLVM ≈ 0.35s on /tmp/cv2_smoke.cr)
 - [ ] Investigate release compile latency on small programs (43s on /tmp/cv2_smoke.cr); add per-phase timing + cache hit diagnostics
