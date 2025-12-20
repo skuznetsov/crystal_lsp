@@ -388,6 +388,15 @@ module CrystalV2
         timings["hir"] = (Time.monotonic - hir_start).total_milliseconds if options.stats
         timings["hir_funcs"] = hir_module.functions.size.to_f if options.stats
 
+        # Reduce later phases by keeping only functions reachable from entrypoints.
+        reachable = hir_module.reachable_function_names(["__crystal_main", "main"])
+        if !reachable.empty? && reachable.size < hir_module.functions.size
+          total_before = hir_module.functions.size
+          hir_module.functions.select! { |func| reachable.includes?(func.name) }
+          log(options, out_io, "  Reachable functions: #{hir_module.functions.size}/#{total_before}")
+        end
+        timings["hir_reachable_funcs"] = hir_module.functions.size.to_f if options.stats
+
         if options.emit_hir
           hir_file = options.output + ".hir"
           File.write(hir_file, hir_module.to_s)
@@ -883,6 +892,9 @@ module CrystalV2
         end
         if (hir_funcs = timings["hir_funcs"]?)
           parts << "hir_funcs=#{hir_funcs.to_i}"
+        end
+        if (hir_reach = timings["hir_reachable_funcs"]?)
+          parts << "hir_reach=#{hir_reach.to_i}"
         end
         if (escape = timings["escape"]?)
           parts << "escape=#{escape.round(1)}"

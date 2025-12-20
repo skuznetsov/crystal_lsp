@@ -1226,6 +1226,39 @@ module Crystal::HIR
       @functions.any? { |f| f.name == name }
     end
 
+    # Compute reachable function names from a set of entry roots by following Call instructions.
+    def reachable_function_names(roots : Array(String)) : Set(String)
+      reachable = Set(String).new
+      worklist = [] of String
+      func_by_name = {} of String => Function
+      @functions.each { |func| func_by_name[func.name] = func }
+
+      roots.each do |root|
+        if func_by_name.has_key?(root)
+          reachable << root
+          worklist << root
+        end
+      end
+
+      while name = worklist.pop?
+        func = func_by_name[name]?
+        next unless func
+
+        func.blocks.each do |block|
+          block.instructions.each do |inst|
+            next unless inst.is_a?(Call)
+            callee = inst.method_name
+            next unless func_by_name.has_key?(callee)
+            next if reachable.includes?(callee)
+            reachable << callee
+            worklist << callee
+          end
+        end
+      end
+
+      reachable
+    end
+
     def intern_string(str : String) : StringId
       @string_intern[str] ||= begin
         id = @strings.size.to_u32
