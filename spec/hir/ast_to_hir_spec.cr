@@ -870,6 +870,32 @@ describe Crystal::HIR::AstToHir do
     end
   end
 
+  describe "generic block return types" do
+    it "substitutes block return type params in call return types" do
+      code = <<-CRYSTAL
+        def map_like(&block : Int32 -> U) : Array(U) forall U
+          [] of U
+        end
+
+        def foo
+          map_like { 1 }
+        end
+      CRYSTAL
+
+      converter = lower_program(code)
+      func = converter.module.functions.find { |f| f.name == "foo" }
+      func.should_not be_nil
+
+      call = func.not_nil!.blocks.flat_map(&.instructions)
+        .find { |inst| inst.is_a?(Crystal::HIR::Call) && inst.as(Crystal::HIR::Call).method_name.includes?("map_like") }
+      call.should_not be_nil
+
+      desc = converter.module.get_type_descriptor(call.not_nil!.as(Crystal::HIR::Call).type)
+      desc.should_not be_nil
+      desc.not_nil!.name.should eq("Array(Int32)")
+    end
+  end
+
   describe "typeof in type positions" do
     it "resolves typeof in generic type args using locals" do
       code = <<-CRYSTAL

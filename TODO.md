@@ -953,6 +953,7 @@ enum:      64  ← ✅ DONE
 | Scope-safe type resolution | Resolve unqualified type names in the current namespace before caching (avoid poisoning `type_ref_for_name` cache) |
 | Yield inlining re-entry guard | Skip re-lowering when mangled names fall back to base during inlining (prevents HIR segfaults) (2025-12-25) |
 | typeof in type args (locals/params) | Resolve `typeof(x)` in generic instantiations using live locals (2025-12-25) |
+| Block-return generic substitution | Substitute block-return type params in generic method return types (2025-12-20) |
 
 ### 8.2 Current Status
 

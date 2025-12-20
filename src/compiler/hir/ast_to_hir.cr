@@ -3432,6 +3432,73 @@ module Crystal::HIR
       nil
     end
 
+    private def extract_proc_return_type_name(type_name : String) : String?
+      stripped = type_name.strip
+      if stripped.starts_with?("Proc(") && stripped.ends_with?(")")
+        inner = stripped[5, stripped.size - 6]
+        args = split_generic_type_args(inner)
+        if ret = args.last?
+          ret = ret.strip
+          return ret unless ret.empty?
+        end
+      end
+      if arrow_index = find_top_level_arrow(stripped)
+        right = stripped[arrow_index + 2, stripped.size - arrow_index - 2].strip
+        return right unless right.empty?
+      end
+      nil
+    end
+
+    private def substitute_type_param(type_name : String, param_name : String, actual_name : String) : String
+      return type_name if param_name.empty? || actual_name.empty?
+      pattern = /(^|[^A-Za-z0-9_:])#{Regex.escape(param_name)}([^A-Za-z0-9_:]|$)/
+      type_name.gsub(pattern, "\\1#{actual_name}\\2")
+    end
+
+    private def block_return_type_name(ctx : LoweringContext, block_id : BlockId) : String?
+      block = ctx.get_block(block_id)
+      term = block.terminator
+      return nil unless term.is_a?(Return)
+      value_id = term.value
+      return nil unless value_id
+      type_ref = ctx.type_of(value_id)
+      return nil if type_ref == TypeRef::VOID
+      type_name = get_type_name_from_ref(type_ref)
+      return nil if type_name == "Void" || type_name == "Unknown"
+      type_name
+    end
+
+    private def resolve_block_dependent_return_type(
+      mangled_method_name : String,
+      base_method_name : String,
+      block_return_name : String
+    ) : TypeRef?
+      return nil if block_return_name.empty?
+
+      func_def = @function_defs[mangled_method_name]? || @function_defs[base_method_name]?
+      return nil unless func_def
+
+      return_type_slice = func_def.return_type
+      return nil unless return_type_slice
+      return_type_name = String.new(return_type_slice)
+      return nil if return_type_name.empty?
+
+      block_param = func_def.params.try(&.find(&.is_block))
+      return nil unless block_param
+
+      block_type = block_param.type_annotation
+      return nil unless block_type
+
+      block_type_name = String.new(block_type)
+      type_param_name = extract_proc_return_type_name(block_type_name)
+      return nil unless type_param_name && !type_param_name.empty?
+
+      substituted = substitute_type_param(return_type_name, type_param_name, block_return_name)
+      return nil if substituted == return_type_name
+
+      type_ref_for_name(substituted)
+    end
+
     private def intern_proc_type(type_names : Array(String)) : TypeRef
       names = type_names
       names = ["Nil"] if names.empty?
@@ -7349,6 +7416,14 @@ module Crystal::HIR
         return_type = get_function_return_type(base_method_name)
         if return_type != TypeRef::VOID
           mangled_method_name = base_method_name
+        end
+      end
+
+      if block_id
+        if block_return_name = block_return_type_name(ctx, block_id)
+          if inferred = resolve_block_dependent_return_type(mangled_method_name, base_method_name, block_return_name)
+            return_type = inferred
+          end
         end
       end
 
