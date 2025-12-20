@@ -6734,6 +6734,8 @@ module Crystal::HIR
         end
       end
       return unless func_def
+      return if @yield_functions.includes?(target_name)
+      return if @lowering_functions.includes?(target_name)
 
       @lowering_functions.add(target_name)
       begin

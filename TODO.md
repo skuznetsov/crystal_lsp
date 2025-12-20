@@ -951,6 +951,7 @@ enum:      64  ← ✅ DONE
 | Module-typed return inference | If return type is module-like (e.g., `Iterator(T)`), infer concrete return type when body is `Type.new(...)` |
 | Stdlib-style combinators | Infer return types for unannotated combinators (e.g., `Iterator#with_object`) from last expression + keep function return map in sync |
 | Scope-safe type resolution | Resolve unqualified type names in the current namespace before caching (avoid poisoning `type_ref_for_name` cache) |
+| Yield inlining re-entry guard | Skip re-lowering when mangled names fall back to base during inlining (prevents HIR segfaults) (2025-12-25) |
 
 ### 8.2 Current Status
 
