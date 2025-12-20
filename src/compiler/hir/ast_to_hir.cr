@@ -6678,7 +6678,15 @@ module Crystal::HIR
           block_id = inline_block.object_id
           unless visited_blocks.includes?(block_id)
             visited_blocks.add(block_id)
-            block_vars = collect_assigned_vars(inline_block.body, visited_blocks)
+            old_arena = @arena
+            if block_arena = @inline_yield_block_arena_stack.last?
+              @arena = block_arena
+            end
+            begin
+              block_vars = collect_assigned_vars(inline_block.body, visited_blocks)
+            ensure
+              @arena = old_arena
+            end
             if params = inline_block.params
               param_names = params.compact_map { |param| param.name ? String.new(param.name.not_nil!) : nil }
               block_vars.reject! { |name| param_names.includes?(name) }
