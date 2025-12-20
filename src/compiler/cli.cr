@@ -85,6 +85,7 @@ module CrystalV2
           p.on("--no-llvm-cache", "Disable LLVM opt/llc cache") { options.llvm_cache = false }
           p.on("--no-llvm-metadata", "Disable LLVM type metadata (faster, less debug info)") { options.emit_type_metadata = false }
           p.on("--no-link", "Skip final link step (leave .o file)") { options.link = false }
+          p.on("--no-ltp", "Disable LTP/WBA MIR optimization (benchmarking)") { options.ltp_opt = false }
 
           # Help/version (Crystal-compatible)
           p.on("--version", "Show version") { options.show_version = true }
@@ -148,6 +149,7 @@ module CrystalV2
         property llvm_cache : Bool = ENV["CRYSTAL_V2_LLVM_CACHE"]? != "0"
         property link : Bool = true
         property emit_type_metadata : Bool = true
+        property ltp_opt : Bool = true
         property show_version : Bool = false
         property show_help : Bool = false
         property help_text : String = ""
@@ -420,8 +422,15 @@ module CrystalV2
         mir_module.functions.each_with_index do |func, idx|
           begin
             STDERR.puts "  Optimizing #{idx + 1}/#{mir_module.functions.size}: #{func.name}..." if options.progress
-            stats, _ltp_potential = func.optimize_with_potential
-            log(options, out_io, "    #{func.name} -> #{stats.total} changes") if options.verbose
+            if options.ltp_opt
+              stats, ltp_potential = func.optimize_with_potential
+              if options.verbose
+                log(options, out_io, "    #{func.name} -> #{stats.total} changes, potential #{ltp_potential}")
+              end
+            else
+              stats = func.optimize
+              log(options, out_io, "    #{func.name} -> #{stats.total} changes (legacy)") if options.verbose
+            end
           rescue ex : IndexError
             raise "Index error in optimize for: #{func.name}\n#{ex.message}\n#{ex.backtrace.join("\n")}"
           end

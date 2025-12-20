@@ -737,7 +737,11 @@ The key insight is: **Don't compete with LLVM, complement it.**
 - [x] Replace `optimize_with_potential` with LTP engine (returns LTPPotential; LTP run after legacy loop)
 - [x] Add specs for each move type
 - [x] Add specs for dual-frame fallback
-- [ ] Benchmark: compare old vs new on bootstrap examples
+- [x] Benchmark: compare old vs new on bootstrap examples
+  - Script: `scripts/bench_ltp.sh` (uses `--no-ltp` for baseline)
+  - Result (29 bootstrap files, `--no-link --no-llvm-opt`):
+    - LTP avg total ≈ 157.1ms, baseline avg total ≈ 139.3ms (Δ ≈ +17.8ms)
+    - LTP avg mir_opt ≈ 0.100ms, baseline ≈ 0.003ms
 - [x] Verify monotone descent property
 
 **Files to modify:**

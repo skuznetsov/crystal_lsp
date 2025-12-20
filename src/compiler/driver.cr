@@ -29,6 +29,7 @@ module Crystal::V2
     property verbose : Bool = false
     property optimize : Int32 = 0
     property no_prelude : Bool = false  # Skip automatic prelude loading
+    property ltp_opt : Bool = true
 
     def initialize
     end
@@ -59,6 +60,8 @@ module Crystal::V2
           @optimize = 3
         when "--no-prelude"
           @no_prelude = true
+        when "--no-ltp"
+          @ltp_opt = false
         when /^-/
           STDERR.puts "Unknown option: #{arg}"
           exit 1
@@ -69,7 +72,7 @@ module Crystal::V2
       end
 
       if @input_file.empty?
-        STDERR.puts "Usage: driver <input.cr> [-o output] [--emit-llvm] [--no-prelude] [-v]"
+        STDERR.puts "Usage: driver <input.cr> [-o output] [--emit-llvm] [--no-prelude] [--no-ltp] [-v]"
         exit 1
       end
     end
@@ -252,8 +255,13 @@ module Crystal::V2
       # Step 4.1: Local MIR optimizations with monotone potential
       log "  Optimizing MIR (local LTP loop)..."
       mir_module.functions.each do |func|
-        stats, ltp_potential = func.optimize_with_potential
-        log "    #{@verbose ? "#{func.name} -> #{stats.total} changes, potential #{ltp_potential}" : "optimized #{func.name}"}" if @verbose
+        if @ltp_opt
+          stats, ltp_potential = func.optimize_with_potential
+          log "    #{@verbose ? "#{func.name} -> #{stats.total} changes, potential #{ltp_potential}" : "optimized #{func.name}"}" if @verbose
+        else
+          stats = func.optimize
+          log "    #{@verbose ? "#{func.name} -> #{stats.total} changes (legacy)" : "optimized #{func.name} (legacy)"}" if @verbose
+        end
       end
 
       if @emit_mir
