@@ -993,7 +993,7 @@ r2 = maybe(false)  # => nil
    - [x] General `typeof(...)` evaluation in type positions (params/returns/ivars/self) during lowering (2025-12-23)
    - [x] Simple constant/path typeof in type strings (no local scope) (2025-12-24)
    - [x] Enumerable/Indexable element_type patterns in typeof (2025-12-24)
-   - [ ] typeof(...) inside type aliases without local context (no direct uses found in stdlib as of 2025-12-24)
+   - [x] typeof(...) inside type aliases without local context (2025-12-20)
 2. [x] **Fix generic methods with blocks** - Parse block parameter types into Proc signatures (2025-12-24)
 3. [ ] **Module mixin monomorphization** - Generate methods from included modules for concrete types
    - Partial: include expansion + module-typed return inference + stdlib-style combinator return inference

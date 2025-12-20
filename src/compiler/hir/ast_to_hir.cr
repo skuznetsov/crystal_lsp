@@ -455,7 +455,7 @@ module Crystal::HIR
     # e.g., alias HIR = Crystal::HIR
     def register_alias(node : CrystalV2::Compiler::Frontend::AliasNode)
       alias_name = String.new(node.name)
-      target_name = String.new(node.value)
+      target_name = resolve_alias_target(String.new(node.value))
       @type_aliases[alias_name] = target_name
     end
 
@@ -474,7 +474,10 @@ module Crystal::HIR
           when CrystalV2::Compiler::Frontend::AliasNode
             # type aliases within lib
             alias_name = String.new(body_node.name)
-            target_name = String.new(body_node.value)
+            old_class = @current_class
+            @current_class = lib_name
+            target_name = resolve_alias_target(String.new(body_node.value))
+            @current_class = old_class
             full_alias_name = "#{lib_name}::#{alias_name}"
             @type_aliases[full_alias_name] = target_name
             @type_aliases[alias_name] = target_name
@@ -939,6 +942,13 @@ module Crystal::HIR
       output
     end
 
+    private def resolve_alias_target(target_name : String) : String
+      return target_name unless target_name.includes?("typeof(")
+      resolved = resolve_typeof_in_type_string(target_name)
+      return target_name if resolved.includes?("Pointer(Void)") || resolved.includes?("Unknown")
+      resolved
+    end
+
     private def update_typeof_local(name : String, type_ref : TypeRef) : Nil
       return unless locals = @current_typeof_locals
       locals[name] = type_ref
@@ -1277,7 +1287,10 @@ module Crystal::HIR
           member = @arena[expr_id]
           if member.is_a?(CrystalV2::Compiler::Frontend::AliasNode)
             alias_name = String.new(member.name)
-            target_name = String.new(member.value)
+            old_class = @current_class
+            @current_class = module_name
+            target_name = resolve_alias_target(String.new(member.value))
+            @current_class = old_class
             full_alias_name = "#{module_name}::#{alias_name}"
             @type_aliases[full_alias_name] = target_name
             @type_aliases[alias_name] = target_name
@@ -1394,7 +1407,10 @@ module Crystal::HIR
           member = @arena[expr_id]
           if member.is_a?(CrystalV2::Compiler::Frontend::AliasNode)
             alias_name = String.new(member.name)
-            target_name = String.new(member.value)
+            old_class = @current_class
+            @current_class = full_name
+            target_name = resolve_alias_target(String.new(member.value))
+            @current_class = old_class
             full_alias_name = "#{full_name}::#{alias_name}"
             @type_aliases[full_alias_name] = target_name
             # Also register short name for local resolution within module
@@ -1504,7 +1520,10 @@ module Crystal::HIR
           member = @arena[expr_id]
           if member.is_a?(CrystalV2::Compiler::Frontend::AliasNode)
             alias_name = String.new(member.name)
-            target_name = String.new(member.value)
+            old_class = @current_class
+            @current_class = class_name
+            target_name = resolve_alias_target(String.new(member.value))
+            @current_class = old_class
             full_alias_name = "#{class_name}::#{alias_name}"
             @type_aliases[full_alias_name] = target_name
             @type_aliases[alias_name] = target_name
@@ -1965,7 +1984,7 @@ module Crystal::HIR
           when CrystalV2::Compiler::Frontend::AliasNode
             # Type alias within class: alias Handle = Int32
             alias_name = String.new(member.name)
-            target_name = String.new(member.value)
+            target_name = resolve_alias_target(String.new(member.value))
             full_alias_name = "#{class_name}::#{alias_name}"
             @type_aliases[full_alias_name] = target_name
             # Also register short name for local resolution within class
@@ -4551,7 +4570,10 @@ module Crystal::HIR
           when CrystalV2::Compiler::Frontend::AliasNode
             # type aliases within lib - register for later resolution
             alias_name = String.new(body_node.name)
-            target_name = String.new(body_node.value)
+            old_class = @current_class
+            @current_class = lib_name
+            target_name = resolve_alias_target(String.new(body_node.value))
+            @current_class = old_class
             full_alias_name = "#{lib_name}::#{alias_name}"
             @type_aliases[full_alias_name] = target_name
             @type_aliases[alias_name] = target_name

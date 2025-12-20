@@ -896,6 +896,27 @@ describe Crystal::HIR::AstToHir do
     end
   end
 
+  describe "typeof in alias targets" do
+    it "resolves typeof(self) without local context" do
+      code = <<-CRYSTAL
+        class Box
+          alias SelfType = typeof(self)
+
+          def foo : SelfType
+            self
+          end
+        end
+      CRYSTAL
+
+      converter = lower_program(code)
+      func = converter.module.functions.find { |f| f.name == "Box#foo" }
+      func.should_not be_nil
+
+      box_type = converter.class_info["Box"].type_ref
+      func.not_nil!.return_type.should eq(box_type)
+    end
+  end
+
   describe "typeof in type positions" do
     it "resolves typeof in generic type args using locals" do
       code = <<-CRYSTAL
