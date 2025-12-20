@@ -1050,7 +1050,7 @@ module Crystal::HIR
 
                   return_type = if rt = member.return_type
                                   rt_name = String.new(rt)
-                                  inferred = module_like_type_name?(rt_name) ? infer_concrete_return_type_from_body(member) : nil
+                                  inferred = module_like_type_name?(rt_name) ? infer_concrete_return_type_from_body(member, class_name) : nil
                                   inferred || type_ref_for_name(rt_name)
                                 elsif method_name.ends_with?("?")
                                   TypeRef::BOOL
@@ -1196,7 +1196,10 @@ module Crystal::HIR
       end
     end
 
-    private def infer_concrete_return_type_from_body(node : CrystalV2::Compiler::Frontend::DefNode) : TypeRef?
+    private def infer_concrete_return_type_from_body(
+      node : CrystalV2::Compiler::Frontend::DefNode,
+      self_type_name : String? = nil
+    ) : TypeRef?
       body = node.body
       return nil unless body && !body.empty?
 
@@ -1220,6 +1223,21 @@ module Crystal::HIR
 
       expr_node = @arena[expr_id]
       case expr_node
+      when CrystalV2::Compiler::Frontend::SelfNode
+        return type_ref_for_name(self_type_name) if self_type_name
+      when CrystalV2::Compiler::Frontend::IdentifierNode
+        if self_type_name && String.new(expr_node.name) == "self"
+          return type_ref_for_name(self_type_name)
+        end
+      when CrystalV2::Compiler::Frontend::InstanceVarNode
+        if self_type_name
+          if info = @class_info[self_type_name]?
+            ivar_name = String.new(expr_node.name)
+            if ivar = info.ivars.find { |iv| iv.name == ivar_name }
+              return ivar.type
+            end
+          end
+        end
       when CrystalV2::Compiler::Frontend::CallNode
         callee_node = @arena[expr_node.callee]
         if callee_node.is_a?(CrystalV2::Compiler::Frontend::MemberAccessNode)
@@ -1759,7 +1777,7 @@ module Crystal::HIR
                         end
             return_type = if rt = member.return_type
                             rt_name = String.new(rt)
-                            inferred = module_like_type_name?(rt_name) ? infer_concrete_return_type_from_body(member) : nil
+                            inferred = module_like_type_name?(rt_name) ? infer_concrete_return_type_from_body(member, class_name) : nil
                             inferred || type_ref_for_name(rt_name)
                           elsif method_name.ends_with?("?")
                             self_type = type_ref_for_name(class_name)
@@ -2713,7 +2731,7 @@ module Crystal::HIR
                       if rt_name == "self"
                         class_info.type_ref
                       elsif module_like_type_name?(rt_name)
-                        inferred = infer_concrete_return_type_from_body(node)
+                        inferred = infer_concrete_return_type_from_body(node, class_name)
                         inferred || type_ref_for_name(rt_name)
                       else
                         type_ref_for_name(rt_name)

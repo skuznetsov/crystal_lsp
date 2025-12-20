@@ -995,5 +995,6 @@ r2 = maybe(false)  # => nil
 3. [ ] **Module mixin monomorphization** - Generate methods from included modules for concrete types
    - Partial: include expansion + module-typed return inference + stdlib-style combinator return inference
    - Improved: module-typed receiver fallback via includer map + last-expression return inference (2025-12-24)
+   - [x] Prefer concrete `self`/ivar returns for module-like annotations (reduces module-typed receivers) (2025-12-25)
    - Remaining: robust module-typed receiver resolution (avoid heuristic includer selection)
 4. [ ] **Macro expansion for `getter`/`property`** - Compile-time accessor generation
