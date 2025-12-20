@@ -660,6 +660,7 @@ The key insight is: **Don't compete with LLVM, complement it.**
 - [x] Reachability roots include `__crystal_main` (avoid emitting all funcs; LLVM ≈ 0.35s on /tmp/cv2_smoke.cr)
 - [ ] Investigate release compile latency on small programs (43s on /tmp/cv2_smoke.cr); add per-phase timing + cache hit diagnostics
   - Current: `--no-prelude` ≈ 16ms total; with prelude HIR ≈ 6.8s, MIR ≈ 4.5s, LLVM ≈ 0.35s, total ≈ 12s (AST cache hits working)
+  - Added `hir_funcs` / `mir_funcs` counts to --stats output for sizing (6532 / 5364 on cv2_smoke)
 
 ### 5.3.6 LTP/WBA Optimization Framework
 

@@ -386,6 +386,7 @@ module CrystalV2
         STDERR.puts "  Got HIR module with #{hir_module.functions.size} functions" if options.progress
         log(options, out_io, "  Functions: #{hir_module.functions.size}")
         timings["hir"] = (Time.monotonic - hir_start).total_milliseconds if options.stats
+        timings["hir_funcs"] = hir_module.functions.size.to_f if options.stats
 
         if options.emit_hir
           hir_file = options.output + ".hir"
@@ -429,6 +430,7 @@ module CrystalV2
         mir_module = mir_lowering.lower(options.progress)
         log(options, out_io, "  Functions: #{mir_module.functions.size}")
         timings["mir"] = (Time.monotonic - mir_start).total_milliseconds if options.stats
+        timings["mir_funcs"] = mir_module.functions.size.to_f if options.stats
 
         # Optimize MIR
         log(options, out_io, "  Optimizing MIR...")
@@ -879,11 +881,17 @@ module CrystalV2
         if (hir = timings["hir"]?)
           parts << "hir=#{hir.round(1)}"
         end
+        if (hir_funcs = timings["hir_funcs"]?)
+          parts << "hir_funcs=#{hir_funcs.to_i}"
+        end
         if (escape = timings["escape"]?)
           parts << "escape=#{escape.round(1)}"
         end
         if (mir = timings["mir"]?)
           parts << "mir=#{mir.round(1)}"
+        end
+        if (mir_funcs = timings["mir_funcs"]?)
+          parts << "mir_funcs=#{mir_funcs.to_i}"
         end
         if (opt = timings["mir_opt"]?)
           parts << "mir_opt=#{opt.round(1)}"
