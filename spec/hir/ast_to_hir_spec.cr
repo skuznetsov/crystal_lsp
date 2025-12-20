@@ -832,6 +832,44 @@ describe Crystal::HIR::AstToHir do
     end
   end
 
+  describe "module-typed locals" do
+    it "keeps concrete initializer types for module-annotated locals" do
+      code = <<-CRYSTAL
+        module M
+          def value : M
+            self
+          end
+        end
+
+        class Box
+          include M
+        end
+
+        def foo
+          x : M = Box.new
+          x.value
+        end
+      CRYSTAL
+
+      converter = lower_program(code)
+      func = converter.module.functions.find { |f| f.name == "foo" }
+      func.should_not be_nil
+
+      call = func.not_nil!.blocks.flat_map(&.instructions)
+        .find { |inst| inst.is_a?(Crystal::HIR::Call) && inst.as(Crystal::HIR::Call).method_name.includes?("#value") }
+      call.should_not be_nil
+
+      recv_id = call.not_nil!.as(Crystal::HIR::Call).receiver
+      recv_id.should_not be_nil
+
+      recv = func.not_nil!.blocks.flat_map(&.instructions).find { |inst| inst.id == recv_id }
+      recv.should_not be_nil
+
+      box_type = converter.class_info["Box"].type_ref
+      recv.not_nil!.type.should eq(box_type)
+    end
+  end
+
   # ═══════════════════════════════════════════════════════════════════════════
   # BLOCK STRUCTURE TESTS
   # ═══════════════════════════════════════════════════════════════════════════

@@ -4305,7 +4305,14 @@ module Crystal::HIR
         value = lower_expr(ctx, value_id)
         # Register as local variable
         ctx.register_local(var_name, value)
-        ctx.register_type(value, type_ref)
+        value_type = ctx.type_of(value)
+        # If the declared type is module-like and the initializer is concrete,
+        # keep the concrete type for call resolution to avoid includer heuristics.
+        if module_like_type_name?(type_name) && value_type != TypeRef::VOID
+          ctx.register_type(value, value_type)
+        else
+          ctx.register_type(value, type_ref)
+        end
         value
       else
         # No initial value: x : Type (uninitialized)
