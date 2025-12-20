@@ -1,4 +1,6 @@
 require "option_parser"
+require "digest/sha256"
+require "file_utils"
 require "./frontend/diagnostic_formatter"
 require "./frontend/lexer"
 require "./frontend/parser"
@@ -12,6 +14,7 @@ require "./mir/mir"
 require "./mir/optimizations"
 require "./mir/hir_to_mir"
 require "./mir/llvm_backend"
+require "./lsp/ast_cache"
 
 # Module aliases for convenience
 alias HIR = Crystal::HIR
@@ -25,6 +28,11 @@ module CrystalV2
     STDLIB_PATH = File.expand_path("../stdlib", File.dirname(__FILE__))
 
     class CLI
+      @ast_cache_hits : Int32 = 0
+      @ast_cache_misses : Int32 = 0
+      @llvm_cache_hits : Int32 = 0
+      @llvm_cache_misses : Int32 = 0
+
       def initialize(@args : Array(String))
       end
 
@@ -70,6 +78,13 @@ module CrystalV2
 
           # Additional
           p.on("--dump-symbols", "Dump symbol table") { options.dump_symbols = true }
+          p.on("--ast-cache", "Enable AST cache (file-based)") { options.ast_cache = true }
+          p.on("--no-ast-cache", "Disable AST cache (file-based)") { options.ast_cache = false }
+          p.on("--no-llvm-opt", "Skip LLVM opt (faster, less optimized)") { options.llvm_opt = false }
+          p.on("--llvm-cache", "Enable LLVM opt/llc cache") { options.llvm_cache = true }
+          p.on("--no-llvm-cache", "Disable LLVM opt/llc cache") { options.llvm_cache = false }
+          p.on("--no-llvm-metadata", "Disable LLVM type metadata (faster, less debug info)") { options.emit_type_metadata = false }
+          p.on("--no-link", "Skip final link step (leave .o file)") { options.link = false }
 
           # Help/version (Crystal-compatible)
           p.on("--version", "Show version") { options.show_version = true }
@@ -128,6 +143,11 @@ module CrystalV2
         property progress : Bool = false
         property check_only : Bool = false
         property dump_symbols : Bool = false
+        property ast_cache : Bool = ENV["CRYSTAL_V2_AST_CACHE"]? != "0"
+        property llvm_opt : Bool = true
+        property llvm_cache : Bool = ENV["CRYSTAL_V2_LLVM_CACHE"]? != "0"
+        property link : Bool = true
+        property emit_type_metadata : Bool = true
         property show_version : Bool = false
         property show_help : Bool = false
         property help_text : String = ""
@@ -185,12 +205,20 @@ module CrystalV2
 
       # Full compilation (driver.cr functionality)
       private def compile(input_file : String, options : Options, out_io : IO, err_io : IO) : Int32
+        timings = {} of String => Float64
+        total_start = Time.monotonic
+        @ast_cache_hits = 0
+        @ast_cache_misses = 0
+        @llvm_cache_hits = 0
+        @llvm_cache_misses = 0
+
         log(options, out_io, "=== Crystal v2 Compiler ===")
         log(options, out_io, "Input: #{input_file}")
         log(options, out_io, "Output: #{options.output}")
 
         # Step 1: Parse source (with require support)
         log(options, out_io, "\n[1/6] Parsing...")
+        parse_start = Time.monotonic
 
         loaded_files = Set(String).new
         all_arenas = [] of Tuple(Frontend::ArenaLike, Array(Frontend::ExprId), String)
@@ -204,15 +232,25 @@ module CrystalV2
                          end
           if File.exists?(prelude_path)
             log(options, out_io, "  Loading prelude: #{prelude_path}")
+            prelude_start = Time.monotonic
             parse_file_recursive(prelude_path, all_arenas, loaded_files, input_file, options, out_io)
+            if options.stats
+              timings["parse_prelude"] = (Time.monotonic - prelude_start).total_milliseconds
+            end
           end
         end
 
         # Parse user's input file
+        user_parse_start = Time.monotonic
         parse_file_recursive(input_file, all_arenas, loaded_files, input_file, options, out_io)
+        if options.stats
+          timings["parse_user"] = (Time.monotonic - user_parse_start).total_milliseconds
+          timings["parse_total"] = (Time.monotonic - parse_start).total_milliseconds
+        end
 
         if all_arenas.empty?
           err_io.puts "error: no valid source files found"
+          emit_timings(options, out_io, timings, total_start)
           return 1
         end
 
@@ -221,6 +259,7 @@ module CrystalV2
 
         # Step 2: Lower to HIR
         log(options, out_io, "\n[2/6] Lowering to HIR...")
+        hir_start = Time.monotonic
 
         first_arena = all_arenas[0][0]
         hir_converter = HIR::AstToHir.new(first_arena, input_file)
@@ -346,6 +385,7 @@ module CrystalV2
         hir_module = hir_converter.module
         STDERR.puts "  Got HIR module with #{hir_module.functions.size} functions" if options.progress
         log(options, out_io, "  Functions: #{hir_module.functions.size}")
+        timings["hir"] = (Time.monotonic - hir_start).total_milliseconds if options.stats
 
         if options.emit_hir
           hir_file = options.output + ".hir"
@@ -355,6 +395,7 @@ module CrystalV2
 
         # Step 3: Escape analysis
         log(options, out_io, "\n[3/6] Escape analysis...")
+        escape_start = Time.monotonic
         total_funcs = hir_module.functions.size
         hir_module.functions.each_with_index do |func, idx|
           if options.progress && (idx % 1000 == 0 || idx == total_funcs - 1)
@@ -365,9 +406,11 @@ module CrystalV2
           ms = HIR::MemoryStrategyAssigner.new(func)
           ms.assign
         end
+        timings["escape"] = (Time.monotonic - escape_start).total_milliseconds if options.stats
 
         # Step 4: Lower to MIR
         log(options, out_io, "\n[4/6] Lowering to MIR...")
+        mir_start = Time.monotonic
         mir_lowering = MIR::HIRToMIRLowering.new(hir_module)
 
         # Register globals from class variables
@@ -385,9 +428,11 @@ module CrystalV2
         STDERR.puts "  Lowering #{hir_module.functions.size} functions to MIR..." if options.progress
         mir_module = mir_lowering.lower(options.progress)
         log(options, out_io, "  Functions: #{mir_module.functions.size}")
+        timings["mir"] = (Time.monotonic - mir_start).total_milliseconds if options.stats
 
         # Optimize MIR
         log(options, out_io, "  Optimizing MIR...")
+        mir_opt_start = Time.monotonic
         mir_module.functions.each_with_index do |func, idx|
           begin
             STDERR.puts "  Optimizing #{idx + 1}/#{mir_module.functions.size}: #{func.name}..." if options.progress
@@ -397,6 +442,7 @@ module CrystalV2
             raise "Index error in optimize for: #{func.name}\n#{ex.message}\n#{ex.backtrace.join("\n")}"
           end
         end
+        timings["mir_opt"] = (Time.monotonic - mir_opt_start).total_milliseconds if options.stats
 
         if options.emit_mir
           mir_file = options.output + ".mir"
@@ -406,41 +452,58 @@ module CrystalV2
 
         # Step 5: Generate LLVM IR
         log(options, out_io, "\n[5/6] Generating LLVM IR...")
+        llvm_start = Time.monotonic
         llvm_gen = MIR::LLVMIRGenerator.new(mir_module)
-        llvm_gen.emit_type_metadata = true
+        llvm_gen.emit_type_metadata = options.emit_type_metadata
         llvm_gen.progress = options.progress
         llvm_gen.reachability = true  # Only emit reachable functions from main
         llvm_ir = llvm_gen.generate
         log(options, out_io, "  LLVM IR size: #{llvm_ir.size} bytes")
+        timings["llvm"] = (Time.monotonic - llvm_start).total_milliseconds if options.stats
 
         ll_file = options.output + ".ll"
         File.write(ll_file, llvm_ir)
         log(options, out_io, "  Wrote: #{ll_file}")
 
         if options.emit_llvm
+          emit_timings(options, out_io, timings, total_start)
           out_io.puts llvm_ir
           return 0
         end
 
         # Step 6: Compile to binary
         log(options, out_io, "\n[6/6] Compiling to binary...")
-        result = compile_llvm_ir(ll_file, options, out_io, err_io)
-        return result unless result == 0
+        compile_start = Time.monotonic
+        result = compile_llvm_ir(ll_file, options, out_io, err_io, timings)
+        timings["compile"] = (Time.monotonic - compile_start).total_milliseconds if options.stats
+        if result != 0
+          emit_timings(options, out_io, timings, total_start)
+          return result
+        end
 
         log(options, out_io, "\n=== Compilation complete ===")
         log(options, out_io, "Output: #{options.output}")
+        emit_timings(options, out_io, timings, total_start)
         return 0
 
       rescue ex : File::NotFoundError
         err_io.puts "error: file not found - #{ex.message}"
+        emit_timings(options, out_io, timings, total_start)
         return 1
       rescue ex
         err_io.puts "error: #{ex.message}"
         err_io.puts ex.backtrace.join("\n") if options.verbose
+        emit_timings(options, out_io, timings, total_start)
         return 1
       end
 
-      private def compile_llvm_ir(ll_file : String, options : Options, out_io : IO, err_io : IO) : Int32
+      private def compile_llvm_ir(
+        ll_file : String,
+        options : Options,
+        out_io : IO,
+        err_io : IO,
+        timings : Hash(String, Float64)
+      ) : Int32
         obj_file = ll_file.gsub(/\.ll$/, ".o")
 
         opt_flag = case options.optimize
@@ -450,26 +513,61 @@ module CrystalV2
                    else        "-O3"
                    end
 
-        # Run opt to clean up and fix any IR issues
-        # mem2reg promotes allocas, -O1 includes more fixes
-        opt_ll_file = "#{ll_file}.opt.ll"
-        opt_cmd = "opt -O1 -S -o #{opt_ll_file} #{ll_file} 2>&1"
-        log(options, out_io, "  $ #{opt_cmd}")
-        opt_result = `#{opt_cmd}`
-        unless $?.success?
-          err_io.puts "opt failed:"
-          err_io.puts opt_result
-          return 1
+        cache_dir = File.expand_path("tmp/llvm_cache", Dir.current)
+        base_hash = ""
+        if options.llvm_cache
+          FileUtils.mkdir_p(cache_dir)
+          base_hash = file_sha256(ll_file)
         end
 
-        llc_cmd = "llc #{opt_flag} -filetype=obj -o #{obj_file} #{opt_ll_file} 2>&1"
-        log(options, out_io, "  $ #{llc_cmd}")
-        llc_result = `#{llc_cmd}`
-        unless $?.success?
-          err_io.puts "llc failed:"
-          err_io.puts llc_result
-          return 1
+        opt_tag = options.llvm_opt ? "opt=O1" : "opt=none"
+        llc_tag = "llc=#{opt_flag}"
+        opt_cache_file = options.llvm_cache ? File.join(cache_dir, "#{digest_string("#{base_hash}|#{opt_tag}")}.opt.ll") : ""
+        obj_cache_file = options.llvm_cache ? File.join(cache_dir, "#{digest_string("#{base_hash}|#{opt_tag}|#{llc_tag}")}.o") : ""
+
+        opt_ll_file = ll_file
+        if options.llvm_opt
+          opt_ll_file = "#{ll_file}.opt.ll"
+          opt_start = Time.monotonic
+          if options.llvm_cache && File.exists?(opt_cache_file)
+            FileUtils.cp(opt_cache_file, opt_ll_file)
+            @llvm_cache_hits += 1
+          else
+            opt_cmd = "opt -O1 -S -o #{opt_ll_file} #{ll_file} 2>&1"
+            log(options, out_io, "  $ #{opt_cmd}")
+            opt_result = `#{opt_cmd}`
+            unless $?.success?
+              err_io.puts "opt failed:"
+              err_io.puts opt_result
+              return 1
+            end
+            if options.llvm_cache
+              FileUtils.cp(opt_ll_file, opt_cache_file)
+              @llvm_cache_misses += 1
+            end
+          end
+          timings["opt"] = (Time.monotonic - opt_start).total_milliseconds if options.stats
         end
+
+        llc_start = Time.monotonic
+        if options.llvm_cache && File.exists?(obj_cache_file)
+          FileUtils.cp(obj_cache_file, obj_file)
+          @llvm_cache_hits += 1
+        else
+          llc_cmd = "llc #{opt_flag} -filetype=obj -o #{obj_file} #{opt_ll_file} 2>&1"
+          log(options, out_io, "  $ #{llc_cmd}")
+          llc_result = `#{llc_cmd}`
+          unless $?.success?
+            err_io.puts "llc failed:"
+            err_io.puts llc_result
+            return 1
+          end
+          if options.llvm_cache
+            FileUtils.cp(obj_file, obj_cache_file)
+            @llvm_cache_misses += 1
+          end
+        end
+        timings["llc"] = (Time.monotonic - llc_start).total_milliseconds if options.stats
 
         # Find runtime stub
         runtime_dir = File.dirname(File.dirname(__FILE__))
@@ -485,18 +583,42 @@ module CrystalV2
         link_objs = [obj_file]
         link_objs << runtime_stub if File.exists?(runtime_stub)
 
-        link_cmd = "cc -o #{options.output} #{link_objs.join(" ")} 2>&1"
-        log(options, out_io, "  $ #{link_cmd}")
-        link_result = `#{link_cmd}`
-        unless $?.success?
-          err_io.puts "Linking failed:"
-          err_io.puts link_result
-          return 1
+        if options.link
+          link_start = Time.monotonic
+          link_cmd = "cc -o #{options.output} #{link_objs.join(" ")} 2>&1"
+          log(options, out_io, "  $ #{link_cmd}")
+          link_result = `#{link_cmd}`
+          unless $?.success?
+            err_io.puts "Linking failed:"
+            err_io.puts link_result
+            return 1
+          end
+          timings["link"] = (Time.monotonic - link_start).total_milliseconds if options.stats
+        else
+          log(options, out_io, "  Skipping link (--no-link)")
+          return 0
         end
 
         # Clean up intermediate files
         File.delete(obj_file) if File.exists?(obj_file)
         return 0
+      end
+
+      private def file_sha256(path : String) : String
+        digest = Digest::SHA256.new
+        File.open(path) do |io|
+          buffer = Bytes.new(64 * 1024)
+          while (read_bytes = io.read(buffer)) > 0
+            digest.update(buffer[0, read_bytes])
+          end
+        end
+        digest.hexfinal
+      end
+
+      private def digest_string(value : String) : String
+        digest = Digest::SHA256.new
+        digest.update(value.to_slice)
+        digest.hexfinal
       end
 
       private def parse_file_recursive(
@@ -516,6 +638,22 @@ module CrystalV2
           return
         end
 
+        if options.ast_cache
+          if cached = LSP::AstCache.load(abs_path)
+            @ast_cache_hits += 1
+            arena = cached.arena
+            exprs = cached.roots
+            base_dir = File.dirname(abs_path)
+            exprs.each do |expr_id|
+              process_require_node(arena, expr_id, base_dir, input_file, results, loaded, options, out_io)
+            end
+            results << {arena, exprs, abs_path}
+            log(options, out_io, "  AST cache hit: #{abs_path}") if options.verbose
+            return
+          end
+          @ast_cache_misses += 1
+        end
+
         source = File.read(abs_path)
         lexer = Frontend::Lexer.new(source)
         parser = Frontend::Parser.new(lexer)
@@ -530,6 +668,16 @@ module CrystalV2
         end
 
         results << {arena, exprs, abs_path}
+
+        if options.ast_cache && arena.is_a?(Frontend::AstArena)
+          begin
+            cache = LSP::AstCache.new(arena, exprs, lexer.string_pool)
+            cache.save(abs_path)
+            log(options, out_io, "  AST cache saved: #{abs_path}") if options.verbose
+          rescue ex
+            log(options, out_io, "  AST cache save failed: #{ex.message}") if options.verbose
+          end
+        end
       end
 
       # Process a node for require statements (recursively handles macro bodies)
@@ -710,6 +858,55 @@ module CrystalV2
 
       private def log(options : Options, out_io : IO, msg : String)
         out_io.puts msg if options.verbose
+      end
+
+      private def emit_timings(options : Options, out_io : IO, timings : Hash(String, Float64)?, total_start : Time::Span?)
+        return unless options.stats
+        return unless timings
+        return unless total_start
+
+        total_ms = (Time.monotonic - total_start).total_milliseconds
+        parts = [] of String
+        if (parse = timings["parse_total"]?)
+          parts << "parse=#{parse.round(1)}"
+        end
+        if (prelude = timings["parse_prelude"]?)
+          parts << "prelude=#{prelude.round(1)}"
+        end
+        if (user = timings["parse_user"]?)
+          parts << "user=#{user.round(1)}"
+        end
+        if (hir = timings["hir"]?)
+          parts << "hir=#{hir.round(1)}"
+        end
+        if (escape = timings["escape"]?)
+          parts << "escape=#{escape.round(1)}"
+        end
+        if (mir = timings["mir"]?)
+          parts << "mir=#{mir.round(1)}"
+        end
+        if (opt = timings["mir_opt"]?)
+          parts << "mir_opt=#{opt.round(1)}"
+        end
+        if (opt = timings["opt"]?)
+          parts << "opt=#{opt.round(1)}"
+        end
+        if (llc = timings["llc"]?)
+          parts << "llc=#{llc.round(1)}"
+        end
+        if (link = timings["link"]?)
+          parts << "link=#{link.round(1)}"
+        end
+        if (llvm = timings["llvm"]?)
+          parts << "llvm=#{llvm.round(1)}"
+        end
+        if (compile = timings["compile"]?)
+          parts << "compile=#{compile.round(1)}"
+        end
+        parts << "total=#{total_ms.round(1)}"
+        parts << "ast_cache=#{@ast_cache_hits} hit/#{@ast_cache_misses} miss" if options.ast_cache
+        parts << "llvm_cache=#{@llvm_cache_hits} hit/#{@llvm_cache_misses} miss" if options.llvm_cache
+        out_io.puts "Timing (ms): #{parts.join(" ")}"
       end
 
       private def dump_symbols(program, table, out_io, indent = 0)

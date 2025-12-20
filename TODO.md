@@ -656,7 +656,9 @@ The key insight is: **Don't compete with LLVM, complement it.**
 - [x] CLI flags for faster iteration: `--no-llvm-opt` and `--no-link` (2025-12-23)
 - [x] LLVM opt/llc artifact cache keyed by ll hash + flags (2025-12-23)
 - [x] AST cache key stabilized (FNV hash) and verified hits on warm run (parse ~164ms → ~79ms)
+- [x] Add `--no-llvm-metadata` to skip type metadata (small LLVM time reduction)
 - [ ] Investigate release compile latency on small programs (43s on /tmp/cv2_smoke.cr); add per-phase timing + cache hit diagnostics
+  - Current: `--no-prelude` ≈ 16ms total; with prelude HIR ≈ 7s, MIR ≈ 4.7s, LLVM ≈ 26s (AST cache hits working)
 
 ### 5.3.6 LTP/WBA Optimization Framework
 
