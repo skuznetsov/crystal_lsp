@@ -347,5 +347,111 @@ describe "LTP Theory Compliance" do
       final_count = entry.instructions.size
       final_count.should be <= initial_count
     end
+
+    it "Ladder eligibility recognizes short corridors" do
+      func = LTPTestHelpers.create_test_function_with_rc
+      block = func.blocks.last
+
+      rc_inc = block.instructions.find(&.is_a?(Crystal::MIR::RCIncrement)).not_nil!.as(Crystal::MIR::RCIncrement)
+      load_inst = block.instructions.find(&.is_a?(Crystal::MIR::Load)).not_nil!.as(Crystal::MIR::Load)
+      rc_dec = block.instructions.find(&.is_a?(Crystal::MIR::RCDecrement)).not_nil!.as(Crystal::MIR::RCDecrement)
+
+      window_index = block.instructions.index(rc_inc).not_nil!
+      window = Crystal::MIR::Window.new(rc_inc, block, window_index, 1, rc_inc.ptr)
+      path = [] of Crystal::MIR::Value
+      path << rc_inc
+      path << load_inst
+      path << rc_dec
+
+      corridor = Crystal::MIR::Corridor.new(
+        window,
+        path,
+        Crystal::MIR::CorridorExit::Elision,
+        rc_dec
+      )
+
+      corridor.ladder_eligible?.should be_true
+    end
+
+    it "Diamond move resolves competing windows for same pointer" do
+      int_type = Crystal::MIR::TypeRef::INT32
+      void_type = Crystal::MIR::TypeRef::VOID
+
+      func = Crystal::MIR::Function.new(LTPTestHelpers.next_func_id, "test_diamond", int_type)
+      entry_id = func.create_block
+      entry = func.get_block(entry_id)
+
+      alloc = Crystal::MIR::Alloc.new(
+        1_u32,
+        int_type,
+        Crystal::MIR::MemoryStrategy::ARC,
+        int_type
+      )
+      alloc.no_alias = true
+      entry.add(alloc)
+
+      rc_inc1 = Crystal::MIR::RCIncrement.new(2_u32, alloc.id)
+      entry.add(rc_inc1)
+
+      call = Crystal::MIR::Call.new(
+        3_u32,
+        void_type,
+        LTPTestHelpers.next_func_id,
+        [alloc.id]
+      )
+      entry.add(call)
+
+      rc_inc2 = Crystal::MIR::RCIncrement.new(4_u32, alloc.id)
+      entry.add(rc_inc2)
+
+      rc_dec = Crystal::MIR::RCDecrement.new(5_u32, alloc.id)
+      entry.add(rc_dec)
+
+      ret = Crystal::MIR::Return.new(alloc.id)
+      entry.terminator = ret
+
+      engine = Crystal::MIR::LTPEngine.new(func)
+      engine.run(max_iters: 1)
+
+      engine.moves_applied.any? { |move| move.type == Crystal::MIR::MoveType::Diamond }.should be_true
+    end
+
+    it "Collapse removes dead instructions when no legal move exists" do
+      int_type = Crystal::MIR::TypeRef::INT32
+
+      func = Crystal::MIR::Function.new(LTPTestHelpers.next_func_id, "test_collapse", int_type)
+      entry_id = func.create_block
+      entry = func.get_block(entry_id)
+
+      alloc = Crystal::MIR::Alloc.new(
+        1_u32,
+        int_type,
+        Crystal::MIR::MemoryStrategy::ARC,
+        int_type
+      )
+      alloc.no_alias = true
+      entry.add(alloc)
+
+      rc_inc = Crystal::MIR::RCIncrement.new(2_u32, alloc.id)
+      entry.add(rc_inc)
+
+      live_const = Crystal::MIR::Constant.new(3_u32, int_type, 1_i64)
+      entry.add(live_const)
+
+      store = Crystal::MIR::Store.new(4_u32, alloc.id, live_const.id)
+      entry.add(store)
+
+      dead_const = Crystal::MIR::Constant.new(5_u32, int_type, 99_i64)
+      entry.add(dead_const)
+
+      ret = Crystal::MIR::Return.new(alloc.id)
+      entry.terminator = ret
+
+      before = entry.instructions.size
+      func.optimize_ltp(max_iters: 1)
+      after = entry.instructions.size
+
+      after.should be < before
+    end
   end
 end

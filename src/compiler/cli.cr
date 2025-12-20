@@ -391,7 +391,7 @@ module CrystalV2
         mir_module.functions.each_with_index do |func, idx|
           begin
             STDERR.puts "  Optimizing #{idx + 1}/#{mir_module.functions.size}: #{func.name}..." if options.progress
-            stats, potential = func.optimize_with_potential
+            stats, _ltp_potential = func.optimize_with_potential
             log(options, out_io, "    #{func.name} -> #{stats.total} changes") if options.verbose
           rescue ex : IndexError
             raise "Index error in optimize for: #{func.name}\n#{ex.message}\n#{ex.backtrace.join("\n")}"

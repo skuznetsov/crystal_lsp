@@ -252,8 +252,8 @@ module Crystal::V2
       # Step 4.1: Local MIR optimizations with monotone potential
       log "  Optimizing MIR (local LTP loop)..."
       mir_module.functions.each do |func|
-        stats, potential = func.optimize_with_potential
-        log "    #{@verbose ? "#{func.name} -> #{stats.total} changes, potential #{potential}" : "optimized #{func.name}"}" if @verbose
+        stats, ltp_potential = func.optimize_with_potential
+        log "    #{@verbose ? "#{func.name} -> #{stats.total} changes, potential #{ltp_potential}" : "optimized #{func.name}"}" if @verbose
       end
 
       if @emit_mir

@@ -846,8 +846,9 @@ module Crystal::MIR
     end
 
     # LTP/WBA-inspired local optimization loop with monotone potential.
-    # Runs a small pipeline repeatedly while the potential decreases.
-    def optimize_with_potential(max_iters : Int32 = 4) : Tuple(OptimizationStats, PotentialMetrics)
+    # Runs a small pipeline repeatedly while the legacy potential decreases,
+    # then finishes with LTP optimization for window/corridor moves.
+    def optimize_with_potential(max_iters : Int32 = 4) : Tuple(OptimizationStats, LTPPotential)
       aggregate = OptimizationStats.new
       last_potential = compute_potential
       iter = 0
@@ -865,7 +866,8 @@ module Crystal::MIR
         iter += 1
       end
 
-      {aggregate, last_potential}
+      ltp_potential = optimize_ltp(max_iters: max_iters)
+      {aggregate, ltp_potential}
     end
 
     private def compute_potential : PotentialMetrics

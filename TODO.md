@@ -652,6 +652,11 @@ The key insight is: **Don't compete with LLVM, complement it.**
 
 ---
 
+### Build DX (Codegen)
+- [x] CLI flags for faster iteration: `--no-llvm-opt` and `--no-link` (2025-12-23)
+- [x] LLVM opt/llc artifact cache keyed by ll hash + flags (2025-12-23)
+- [ ] Investigate release compile latency on small programs (43s on /tmp/cv2_smoke.cr); add per-phase timing + cache hit diagnostics
+
 ### 5.3.6 LTP/WBA Optimization Framework
 
 **Status:** 🔧 WIP (2025-12-11)
@@ -719,7 +724,7 @@ The key insight is: **Don't compete with LLVM, complement it.**
 - [ ] Logging: emit move sequence for debugging
 
 **Phase 6: Integration & Testing**
-- [ ] Replace `optimize_with_potential` with LTP engine
+- [x] Replace `optimize_with_potential` with LTP engine (returns LTPPotential; LTP run after legacy loop)
 - [ ] Add specs for each move type
 - [ ] Add specs for dual-frame fallback
 - [ ] Benchmark: compare old vs new on bootstrap examples
