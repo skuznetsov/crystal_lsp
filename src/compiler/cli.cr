@@ -753,6 +753,12 @@ module CrystalV2
         node : Frontend::MacroLiteralNode,
         flags : Set(String)
       ) : Array(String)
+        if node.pieces.size == 1 && node.pieces[0].kind == Frontend::MacroPiece::Kind::Text
+          if text = node.pieces[0].text
+            return macro_literal_texts_from_raw(text, flags) if text.includes?("{%")
+          end
+        end
+
         texts = [] of String
         control_stack = [] of {Bool, Bool, Bool} # {parent_active, branch_taken, active}
         active = true
@@ -817,6 +823,256 @@ module CrystalV2
         end
 
         texts
+      end
+
+      private def macro_literal_texts_from_raw(text : String, flags : Set(String)) : Array(String)
+        texts = [] of String
+        control_stack = [] of {Bool, Bool, Bool} # {parent_active, branch_taken, active}
+        active = true
+        idx = 0
+
+        while idx < text.size
+          tag_start = text.index("{%", idx)
+          if tag_start.nil?
+            texts << text[idx, text.size - idx] if active
+            break
+          end
+
+          if tag_start > idx && active
+            texts << text[idx, tag_start - idx]
+          end
+
+          tag_end = text.index("%}", tag_start + 2)
+          break unless tag_end
+
+          tag = text[tag_start + 2, tag_end - tag_start - 2]
+          tag = tag.strip
+          tag = tag.lstrip('-').lstrip('~').rstrip('-').rstrip('~').strip
+
+          if tag.starts_with?("skip_file")
+            cond_text = tag.sub(/^skip_file/, "").strip
+            skip = if cond_text.starts_with?("if ")
+                     evaluate_macro_condition_text(cond_text.lstrip("if").strip, flags)
+                   elsif cond_text.starts_with?("unless ")
+                     val = evaluate_macro_condition_text(cond_text.lstrip("unless").strip, flags)
+                     val.nil? ? nil : !val
+                   else
+                     true
+                   end
+            return [] of String if skip == true
+          elsif tag.starts_with?("if ")
+            cond = evaluate_macro_condition_text(tag.lstrip("if").strip, flags)
+            parent_active = active
+            branch_active = if cond == true
+                              parent_active
+                            elsif cond == false
+                              false
+                            else
+                              parent_active
+                            end
+            branch_taken = cond == true
+            control_stack << {parent_active, branch_taken, branch_active}
+            active = branch_active
+          elsif tag.starts_with?("unless ")
+            cond = evaluate_macro_condition_text(tag.lstrip("unless").strip, flags)
+            cond = cond.nil? ? nil : !cond
+            parent_active = active
+            branch_active = if cond == true
+                              parent_active
+                            elsif cond == false
+                              false
+                            else
+                              parent_active
+                            end
+            branch_taken = cond == true
+            control_stack << {parent_active, branch_taken, branch_active}
+            active = branch_active
+          elsif tag.starts_with?("elsif ")
+            next if control_stack.empty?
+            parent_active, branch_taken, _ = control_stack[-1]
+            cond = evaluate_macro_condition_text(tag.lstrip("elsif").strip, flags)
+            take = !branch_taken && cond == true
+            branch_active = if cond == false
+                              false
+                            elsif cond == true
+                              parent_active && take
+                            else
+                              parent_active
+                            end
+            branch_taken = true if cond == true
+            control_stack[-1] = {parent_active, branch_taken, branch_active}
+            active = branch_active
+          elsif tag == "else"
+            next if control_stack.empty?
+            parent_active, branch_taken, _ = control_stack[-1]
+            branch_active = parent_active && !branch_taken
+            control_stack[-1] = {parent_active, true, branch_active}
+            active = branch_active
+          elsif tag == "end"
+            if control_stack.empty?
+              active = true
+            else
+              parent_active, _, _ = control_stack.pop
+              active = parent_active
+            end
+          end
+
+          idx = tag_end + 2
+        end
+
+        texts
+      end
+
+      private def evaluate_macro_condition_text(text : String, flags : Set(String)) : Bool?
+        MacroConditionScanner.new(text, flags).parse
+      end
+
+      private class MacroConditionScanner
+        def initialize(@input : String, @flags : Set(String))
+          @index = 0
+        end
+
+        def parse : Bool?
+          skip_ws
+          result = parse_or
+          skip_ws
+          result
+        end
+
+        private def parse_or : Bool?
+          left = parse_and
+          loop do
+            skip_ws
+            break unless peek_two == "||"
+            advance(2)
+            right = parse_and
+            left = merge_or(left, right)
+          end
+          left
+        end
+
+        private def parse_and : Bool?
+          left = parse_unary
+          loop do
+            skip_ws
+            break unless peek_two == "&&"
+            advance(2)
+            right = parse_unary
+            left = merge_and(left, right)
+          end
+          left
+        end
+
+        private def parse_unary : Bool?
+          skip_ws
+          if peek_char == '!'
+            advance(1)
+            value = parse_unary
+            return value.nil? ? nil : !value
+          end
+          parse_primary
+        end
+
+        private def parse_primary : Bool?
+          skip_ws
+          if peek_char == '('
+            advance(1)
+            value = parse_or
+            skip_ws
+            advance(1) if peek_char == ')'
+            return value
+          end
+
+          ident = read_identifier
+          return nil unless ident
+
+          case ident
+          when "true"
+            true
+          when "false", "nil"
+            false
+          when "flag?"
+            parse_flag_call
+          else
+            nil
+          end
+        end
+
+        private def parse_flag_call : Bool?
+          skip_ws
+          return nil unless peek_char == '('
+          advance(1)
+          skip_ws
+          flag_name = parse_flag_name
+          skip_ws
+          advance(1) if peek_char == ')'
+          return nil unless flag_name
+          @flags.includes?(flag_name)
+        end
+
+        private def parse_flag_name : String?
+          if peek_char == ':'
+            advance(1)
+            read_identifier
+          elsif peek_char == '"' || peek_char == '\''
+            quote = peek_char
+            advance(1)
+            start = @index
+            while @index < @input.size && @input[@index] != quote
+              @index += 1
+            end
+            return nil if @index <= start
+            value = @input[start, @index - start]
+            advance(1) if @index < @input.size
+            value
+          else
+            nil
+          end
+        end
+
+        private def read_identifier : String?
+          skip_ws
+          start = @index
+          while @index < @input.size
+            ch = @input[@index]
+            break unless ch.alphanumeric? || ch == '_' || ch == '?'
+            @index += 1
+          end
+          return nil if @index == start
+          @input[start, @index - start]
+        end
+
+        private def skip_ws
+          while @index < @input.size && @input[@index].whitespace?
+            @index += 1
+          end
+        end
+
+        private def peek_char : Char?
+          return nil if @index >= @input.size
+          @input[@index]
+        end
+
+        private def peek_two : String?
+          return nil if @index + 1 >= @input.size
+          @input[@index, 2]
+        end
+
+        private def advance(count : Int32)
+          @index += count
+        end
+
+        private def merge_or(left : Bool?, right : Bool?) : Bool?
+          return true if left == true || right == true
+          return false if left == false && right == false
+          nil
+        end
+
+        private def merge_and(left : Bool?, right : Bool?) : Bool?
+          return false if left == false || right == false
+          return true if left == true && right == true
+          nil
+        end
       end
 
       private def evaluate_macro_condition(
