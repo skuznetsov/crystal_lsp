@@ -7477,6 +7477,13 @@ module Crystal::HIR
         end
       end
 
+      call_virtual = false
+      if receiver_id
+        if type_desc = @module.get_type_descriptor(ctx.type_of(receiver_id))
+          call_virtual = type_desc.kind.in?(TypeKind::Union, TypeKind::Module)
+        end
+      end
+
       # Lazily lower target function bodies (avoid full stdlib lowering).
       lower_function_if_needed(primary_mangled_name)
       if mangled_method_name != primary_mangled_name
@@ -7487,7 +7494,7 @@ module Crystal::HIR
       # This handles cases like passing Int32 to a parameter of type Int32 | Nil
       args = coerce_args_to_param_types(ctx, args, mangled_method_name)
 
-      call = Call.new(ctx.next_id, return_type, receiver_id, mangled_method_name, args, block_id)
+      call = Call.new(ctx.next_id, return_type, receiver_id, mangled_method_name, args, block_id, call_virtual)
       ctx.emit(call)
       ctx.register_type(call.id, return_type)
       call.id

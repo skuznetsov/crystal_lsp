@@ -1231,7 +1231,23 @@ module Crystal::HIR
       reachable = Set(String).new
       worklist = [] of String
       func_by_name = {} of String => Function
-      @functions.each { |func| func_by_name[func.name] = func }
+      base_to_funcs = Hash(String, Array(String)).new { |h, k| h[k] = [] of String }
+      base_name_for = ->(name : String) do
+        base = name
+        if hash_idx = base.rindex('#')
+          base = base[(hash_idx + 1)..]
+        elsif dot_idx = base.rindex('.')
+          base = base[(dot_idx + 1)..]
+        end
+        if split_idx = base.index('$') || base.index(':')
+          base = base[0, split_idx]
+        end
+        base
+      end
+      @functions.each do |func|
+        func_by_name[func.name] = func
+        base_to_funcs[base_name_for.call(func.name)] << func.name
+      end
 
       roots.each do |root|
         if func_by_name.has_key?(root)
@@ -1248,6 +1264,15 @@ module Crystal::HIR
           block.instructions.each do |inst|
             next unless inst.is_a?(Call)
             callee = inst.method_name
+            if inst.virtual
+              base = base_name_for.call(callee)
+              base_to_funcs[base].each do |candidate|
+                next if reachable.includes?(candidate)
+                reachable << candidate
+                worklist << candidate
+              end
+              next
+            end
             next unless func_by_name.has_key?(callee)
             next if reachable.includes?(callee)
             reachable << callee

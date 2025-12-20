@@ -659,11 +659,13 @@ The key insight is: **Don't compete with LLVM, complement it.**
 - [x] Fix AST cache save failures (ClassNode→StructNode, SplatNode→Unary) seen in verbose compile logs (2025-12-20)
 - [x] Add `--no-llvm-metadata` to skip type metadata (small LLVM time reduction)
 - [x] Reachability roots include `__crystal_main` (avoid emitting all funcs; LLVM ≈ 0.35s on /tmp/cv2_smoke.cr)
-- [ ] Investigate release compile latency on small programs (43s on /tmp/cv2_smoke.cr); add per-phase timing + cache hit diagnostics
+- [x] Investigate release compile latency on small programs (43s on /tmp/cv2_smoke.cr); add per-phase timing + cache hit diagnostics (2025-12-20)
   - Current: `--no-prelude` ≈ 16ms total; with prelude HIR ≈ 0.11s, MIR ≈ 0.1ms, LLVM ≈ 1.3ms, total ≈ 0.22s (lazy HIR lowering + reachability)
   - Current (release + caches): `./bin/crystal_v2 --release --stats --no-link /tmp/cv2_smoke.cr` total ≈ 188ms, opt ≈ 0.1ms, llc ≈ 21.5ms
+  - Current (release + caches, latest): `./bin/crystal_v2 --stats --no-link /tmp/cv2_smoke.cr` total ≈ 132ms, hir_reach=9, mir_funcs=9
   - Added `hir_funcs` / `hir_reach` / `mir_funcs` counts to --stats output (cv2_smoke: 915 / 8 / 8)
-- [ ] Validate lazy HIR lowering for dynamic dispatch (virtual calls / module mixins) to avoid pruning needed methods
+- [x] Validate lazy HIR lowering for dynamic dispatch (virtual calls / module mixins) to avoid pruning needed methods (2025-12-20)
+  - Virtual calls now expand reachability by base method name; spec covers HIR reachability for virtual calls.
 
 ### 5.3.6 LTP/WBA Optimization Framework
 

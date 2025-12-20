@@ -52,6 +52,32 @@ describe Crystal::HIR do
       func.blocks.size.should eq(1)  # Entry block
       func.scopes.size.should eq(1)  # Function scope
     end
+
+    it "includes virtual call targets by base name" do
+      mod = Crystal::HIR::Module.new
+      main = mod.create_function("__crystal_main", Crystal::HIR::TypeRef::VOID)
+      receiver = main.add_param("self", Crystal::HIR::TypeRef::POINTER)
+
+      call = Crystal::HIR::Call.new(
+        1_u32,
+        Crystal::HIR::TypeRef::VOID,
+        receiver.id,
+        "A#foo",
+        [] of Crystal::HIR::ValueId,
+        nil,
+        true
+      )
+      main.blocks[0].add(call)
+
+      mod.create_function("A#foo", Crystal::HIR::TypeRef::VOID)
+      mod.create_function("B#foo", Crystal::HIR::TypeRef::VOID)
+      mod.create_function("C#bar", Crystal::HIR::TypeRef::VOID)
+
+      reachable = mod.reachable_function_names(["__crystal_main"])
+      reachable.should contain("A#foo")
+      reachable.should contain("B#foo")
+      reachable.should_not contain("C#bar")
+    end
   end
 
   describe "Function" do
