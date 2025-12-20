@@ -1267,7 +1267,6 @@ module Crystal::HIR
 
                   if body = member.body
                     if contains_yield?(body)
-                      @yield_functions.add(base_name)
                       @yield_functions.add(full_name)
                       unless @function_defs.has_key?(base_name)
                         @function_defs[base_name] = member
@@ -1642,7 +1641,6 @@ module Crystal::HIR
             # Track yield-functions for inline expansion (module methods).
             if body = member.body
               if contains_yield?(body)
-                @yield_functions.add(base_name)
                 @yield_functions.add(full_name)
                 unless @function_defs.has_key?(base_name)
                   @function_defs[base_name] = member
@@ -1763,7 +1761,6 @@ module Crystal::HIR
             # Track yield-functions for inline expansion (nested module methods).
             if body = member.body
               if contains_yield?(body)
-                @yield_functions.add(base_name)
                 @yield_functions.add(full_method_name)
                 unless @function_defs.has_key?(base_name)
                   @function_defs[base_name] = member
@@ -2143,7 +2140,6 @@ module Crystal::HIR
             # them at call sites. We key by both base and mangled names so resolution can find them.
             if body = member.body
               if contains_yield?(body)
-                @yield_functions.add(base_name)
                 @yield_functions.add(full_name)
                 unless @function_defs.has_key?(base_name)
                   @function_defs[base_name] = member
@@ -2489,7 +2485,6 @@ module Crystal::HIR
             # MIR lowering removes yield-containing functions (inline-only), so we must inline them.
             if body = member.body
               if contains_yield?(body)
-                @yield_functions.add(base_name)
                 @yield_functions.add(full_name)
                 unless @function_defs.has_key?(base_name)
                   @function_defs[base_name] = member
