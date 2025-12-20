@@ -27,6 +27,20 @@ private def lower_function(code : String) : Crystal::HIR::Function
   converter.lower_def(def_node)
 end
 
+private def lower_function_with_converter(code : String) : {Crystal::HIR::Function, Crystal::HIR::AstToHir}
+  arena, exprs = parse(code)
+  converter = Crystal::HIR::AstToHir.new(arena)
+
+  def_expr = exprs.find do |expr_id|
+    arena[expr_id].is_a?(CrystalV2::Compiler::Frontend::DefNode)
+  end
+
+  raise "No function definition found" unless def_expr
+  def_node = arena[def_expr].as(CrystalV2::Compiler::Frontend::DefNode)
+
+  {converter.lower_def(def_node), converter}
+end
+
 # Helper to get HIR text output
 private def hir_text(func : Crystal::HIR::Function) : String
   String.build { |io| func.to_s(io) }
@@ -179,6 +193,17 @@ describe Crystal::HIR::AstToHir do
     end
   end
 
+  describe "block type lowering" do
+    it "captures block parameter types as Proc" do
+      func, converter = lower_function_with_converter("def foo(&block : Int32 -> String); 1; end")
+      param = func.params.find { |p| p.name == "block" }
+      param.should_not be_nil
+      desc = converter.module.get_type_descriptor(param.not_nil!.type)
+      desc.should_not be_nil
+      desc.not_nil!.kind.should eq(Crystal::HIR::TypeKind::Proc)
+    end
+  end
+
   # ═══════════════════════════════════════════════════════════════════════════
   # POSITIVE TESTS: BINARY OPERATIONS
   # ═══════════════════════════════════════════════════════════════════════════
@@ -237,14 +262,16 @@ describe Crystal::HIR::AstToHir do
       func = lower_function("def foo; true && false; end")
       text = hir_text(func)
 
-      text.should contain("binop And")
+      text.should contain("branch")
+      text.should contain("phi")
     end
 
     it "lowers logical or" do
       func = lower_function("def foo; true || false; end")
       text = hir_text(func)
 
-      text.should contain("binop Or")
+      text.should contain("branch")
+      text.should contain("phi")
     end
 
     it "lowers bitwise operations" do

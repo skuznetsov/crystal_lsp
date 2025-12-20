@@ -287,12 +287,17 @@ module Crystal::HIR
     # Current method name being lowered (for super calls)
     @current_method : String?
 
+    # Locals available for resolving typeof(...) in type positions (per def)
+    @current_typeof_locals : Hash(String, TypeRef)?
+
     # Macro definitions (name -> MacroDefNode)
     @macro_defs : Hash(String, CrystalV2::Compiler::Frontend::MacroDefNode)
 
     # Module AST definitions (name -> list of {node, arena}) for mixin expansion.
     # Many stdlib "modules" provide instance methods meant to be included into classes/structs.
     @module_defs : Hash(String, Array({CrystalV2::Compiler::Frontend::ModuleNode, CrystalV2::Compiler::Frontend::ArenaLike}))
+    # Track concrete types that include a module for module-typed receiver fallback.
+    @module_includers : Hash(String, Set(String))
 
     # Type aliases (alias_name -> target_type_name)
     @type_aliases : Hash(String, String)
@@ -328,6 +333,7 @@ module Crystal::HIR
       @init_params = {} of String => Array({String, TypeRef})
       @current_class = nil
       @current_method = nil
+      @current_typeof_locals = nil
       @union_descriptors = {} of MIR::TypeRef => MIR::UnionDescriptor
       @function_defs = {} of String => CrystalV2::Compiler::Frontend::DefNode
       @function_def_arenas = {} of String => CrystalV2::Compiler::Frontend::ArenaLike
@@ -337,9 +343,19 @@ module Crystal::HIR
       @type_param_map = {} of String => String
       @macro_defs = {} of String => CrystalV2::Compiler::Frontend::MacroDefNode
       @module_defs = {} of String => Array({CrystalV2::Compiler::Frontend::ModuleNode, CrystalV2::Compiler::Frontend::ArenaLike})
+      @module_includers = {} of String => Set(String)
       @type_aliases = {} of String => String
       @generated_allocators = Set(String).new
       @type_cache = {} of String => TypeRef
+    end
+
+    private def record_module_inclusion(module_name : String, class_name : String) : Nil
+      set = @module_includers[module_name]? || begin
+        new_set = Set(String).new
+        @module_includers[module_name] = new_set
+        new_set
+      end
+      set.add(class_name)
     end
 
     # Register a function type and maintain the base name index
@@ -640,6 +656,9 @@ module Crystal::HIR
 
       node = @arena[expr_id]
       case node
+      when CrystalV2::Compiler::Frontend::TypeofNode
+        inner = node.args.first?
+        inner ? resolve_typeof_expr(inner) : "Pointer(Void)"
       when CrystalV2::Compiler::Frontend::IdentifierNode
         name = String.new(node.name)
         @type_param_map[name]? || name
@@ -662,9 +681,254 @@ module Crystal::HIR
           end
         end
         "#{base}(#{args.join(", ")})"
+      when CrystalV2::Compiler::Frontend::UnaryNode
+        base = stringify_type_expr(node.operand)
+        return nil unless base
+        op = String.new(node.operator)
+        case op
+        when "?"
+          "#{base}?"
+        when "*", "**"
+          "#{base}#{op}"
+        else
+          nil
+        end
+      when CrystalV2::Compiler::Frontend::BinaryNode
+        op = String.new(node.operator)
+        return nil unless op == "|"
+        left = stringify_type_expr(node.left)
+        right = stringify_type_expr(node.right)
+        return nil unless left && right
+        "#{left} | #{right}"
       else
         nil
       end
+    end
+
+    private def normalize_typeof_type_name(type_name : String) : String
+      return "Pointer(Void)" if type_name.empty? || type_name == "Void" || type_name == "Unknown" || type_name.includes?("|")
+      type_name
+    end
+
+    private def resolve_typeof_expr(expr_id : ExprId) : String
+      node = @arena[expr_id]
+      case node
+      when CrystalV2::Compiler::Frontend::IdentifierNode
+        resolve_typeof_inner(String.new(node.name))
+      when CrystalV2::Compiler::Frontend::InstanceVarNode
+        resolve_typeof_inner(String.new(node.name))
+      when CrystalV2::Compiler::Frontend::ClassVarNode
+        resolve_typeof_inner(String.new(node.name))
+      when CrystalV2::Compiler::Frontend::SelfNode
+        resolve_typeof_inner("self")
+      else
+        "Pointer(Void)"
+      end
+    end
+
+    private def resolve_typeof_inner(expr : String) : String
+      expr = expr.strip
+      if expr == "self"
+        return normalize_typeof_type_name(@current_class || "Pointer(Void)")
+      end
+
+      if locals = @current_typeof_locals
+        if type_ref = locals[expr]?
+          return normalize_typeof_type_name(get_type_name_from_ref(type_ref))
+        end
+      end
+
+      if class_name = @current_class
+        if info = @class_info[class_name]?
+          if expr.starts_with?("@@")
+            cvar_name = expr.lstrip('@')
+            if cvar = info.class_vars.find { |cv| cv.name == cvar_name }
+              return normalize_typeof_type_name(get_type_name_from_ref(cvar.type))
+            end
+          elsif expr.starts_with?("@")
+            if ivar = info.ivars.find { |iv| iv.name == expr }
+              return normalize_typeof_type_name(get_type_name_from_ref(ivar.type))
+            end
+          end
+        end
+      end
+
+      drop_nil = false
+      if expr.ends_with?(".not_nil!")
+        drop_nil = true
+        expr = expr[0, expr.size - 9].strip
+      end
+
+      index_suffix = nil
+      if expr.ends_with?("]")
+        if match = expr.match(/^(.*)\[(\d+)\]\s*$/)
+          expr = match[1].strip
+          index_suffix = match[2].to_i
+        end
+      end
+
+      if resolved = resolve_element_type_expression(expr)
+        resolved = apply_index_to_type_name(resolved, index_suffix) if index_suffix
+        resolved = drop_nil_from_union(resolved) if drop_nil
+        return normalize_typeof_type_name(resolved)
+      end
+
+      # Allow simple constant/path typeof usage in type contexts (no local scope needed).
+      if expr.includes?("::") || (expr.size > 0 && expr[0].uppercase?)
+        resolved = resolve_type_alias_chain(expr)
+        if !resolved.includes?("::")
+          resolved = resolve_class_name_in_context(resolved)
+        end
+        if @class_info.has_key?(resolved) || @module_defs.has_key?(resolved)
+          return normalize_typeof_type_name(resolved)
+        end
+      end
+
+      "Pointer(Void)"
+    end
+
+    ELEMENT_TYPE_PREFIXES = ["Enumerable.element_type", "::Enumerable.element_type", "Indexable.element_type",
+                             "::Indexable.element_type", "Iterator.element_type", "::Iterator.element_type",
+                             "Iterable.element_type", "::Iterable.element_type"] of String
+
+    private def resolve_element_type_expression(expr : String) : String?
+      prefix = ELEMENT_TYPE_PREFIXES.find { |p| expr.starts_with?(p) }
+      return nil unless prefix
+
+      rest = expr[prefix.size, expr.size - prefix.size].strip
+      arg_str = if rest.starts_with?("(")
+                  extract_balanced_paren_content(rest)
+                else
+                  rest
+                end
+      return nil if arg_str.nil? || arg_str.empty?
+
+      inner_type = resolve_typeof_inner(arg_str.not_nil!)
+      if inner_type == "Pointer(Void)" && arg_str.not_nil!.size > 0 && arg_str.not_nil![0].uppercase?
+        inner_type = arg_str.not_nil!
+      end
+
+      element_type_for_type_name(inner_type)
+    end
+
+    private def extract_balanced_paren_content(expr : String) : String?
+      return nil unless expr.starts_with?("(")
+      depth = 0
+      i = 0
+      while i < expr.bytesize
+        ch = expr.byte_at(i).unsafe_chr
+        case ch
+        when '('
+          depth += 1
+        when ')'
+          depth -= 1
+          if depth == 0
+            return expr[1, i - 1].strip
+          end
+        end
+        i += 1
+      end
+      nil
+    end
+
+    private def element_type_for_type_name(type_name : String) : String?
+      name = type_name.strip
+      if name.includes?("|")
+        variants = name.split("|").map(&.strip)
+        element_variants = variants.compact_map { |v| element_type_for_type_name(v) }
+        uniq = element_variants.uniq
+        return uniq.join(" | ") unless uniq.empty?
+      end
+
+      if name.ends_with?("?")
+        base = name[0, name.size - 1]
+        return element_type_for_type_name(base)
+      end
+
+      paren = name.index('(')
+      if paren && name.ends_with?(")")
+        base = name[0, paren]
+        params_str = name[paren + 1, name.size - paren - 2]
+        args = split_generic_type_args(params_str)
+        case base
+        when "Array", "StaticArray", "Slice", "Deque", "Set", "Indexable", "Enumerable", "Iterator", "Iterable", "Range"
+          return args.first?
+        when "Hash"
+          return "Tuple(#{args[0]}, #{args[1]})" if args.size >= 2
+        end
+      end
+
+      nil
+    end
+
+    private def apply_index_to_type_name(type_name : String, index : Int32?) : String
+      return type_name unless index
+      name = type_name.strip
+      if name.includes?("|")
+        variants = name.split("|").map(&.strip)
+        indexed = variants.compact_map { |v| apply_index_to_type_name(v, index) }
+        uniq = indexed.uniq
+        return uniq.join(" | ") unless uniq.empty?
+      end
+
+      if name.starts_with?("Tuple(") && name.ends_with?(")")
+        params_str = name[6, name.size - 7]
+        args = split_generic_type_args(params_str)
+        return args[index]? || type_name
+      end
+
+      if name.starts_with?("Array(") && name.ends_with?(")")
+        params_str = name[6, name.size - 7]
+        args = split_generic_type_args(params_str)
+        return args.first? || type_name
+      end
+
+      type_name
+    end
+
+    private def drop_nil_from_union(type_name : String) : String
+      return type_name unless type_name.includes?("|")
+      parts = type_name.split("|").map(&.strip)
+      filtered = parts.reject { |p| p == "Nil" }
+      return "Nil" if filtered.empty?
+      filtered.uniq.join(" | ")
+    end
+
+    private def resolve_typeof_in_type_string(type_name : String) : String
+      return type_name unless type_name.includes?("typeof(")
+
+      output = String.build do |io|
+        i = 0
+        while i < type_name.bytesize
+          if i + 7 <= type_name.bytesize && type_name.byte_slice(i, 7) == "typeof("
+            start = i + 7
+            depth = 1
+            j = start
+            while j < type_name.bytesize && depth > 0
+              ch = type_name[j]
+              if ch == '('
+                depth += 1
+              elsif ch == ')'
+                depth -= 1
+              end
+              j += 1
+            end
+            if depth != 0
+              io << type_name[i]
+              i += 1
+              next
+            end
+            inner = type_name.byte_slice(start, j - start - 1)
+            io << resolve_typeof_inner(inner)
+            i = j
+          else
+            io << type_name[i]
+            i += 1
+          end
+        end
+      end
+
+      output
     end
 
     private def with_arena(arena : CrystalV2::Compiler::Frontend::ArenaLike, &)
@@ -754,6 +1018,7 @@ module Crystal::HIR
     )
       module_full_name = resolve_path_like_name(include_node.target)
       return unless module_full_name
+      record_module_inclusion(module_full_name, class_name)
       return if visited.includes?(module_full_name)
       visited << module_full_name
 
@@ -836,6 +1101,7 @@ module Crystal::HIR
     )
       module_full_name = resolve_path_like_name(include_node.target)
       return unless module_full_name
+      record_module_inclusion(module_full_name, class_name)
       return if visited.includes?(module_full_name)
       visited << module_full_name
 
@@ -895,11 +1161,37 @@ module Crystal::HIR
       @module_defs.has_key?(base)
     end
 
+    NILABLE_QUERY_METHODS = ["[]?", "at?", "first?", "last?", "pop?", "shift?"] of String
+
+    # Some stdlib methods end in `?` but return a value (typically `T?` / `V?`) rather than `Bool`.
+    # We need correct return types early (during signature registration) so callers lowered before the
+    # callee body still get a stable type (avoids emitting `i1` where `i32`/union is expected).
+    private def infer_unannotated_query_return_type(method_name : String, self_type : TypeRef) : TypeRef?
+      return nil unless NILABLE_QUERY_METHODS.includes?(method_name)
+
+      desc = @module.get_type_descriptor(self_type)
+      return nil unless desc
+
+      case desc.kind
+      when TypeKind::Array
+        elem = desc.type_params.first?
+        return nil unless elem
+        create_union_type_for_nullable(elem)
+      when TypeKind::Hash
+        value = desc.type_params[1]?
+        return nil unless value
+        create_union_type_for_nullable(value)
+      else
+        nil
+      end
+    end
+
     private def infer_concrete_return_type_from_body(node : CrystalV2::Compiler::Frontend::DefNode) : TypeRef?
       body = node.body
-      return nil unless body && body.size == 1
+      return nil unless body && !body.empty?
 
-      expr_id = body.first
+      # Use the last expression as a heuristic return (handles simple multi-line bodies).
+      expr_id = body.last
       loop do
         expr_node = @arena[expr_id]
         case expr_node
@@ -1456,8 +1748,8 @@ module Crystal::HIR
                             inferred = module_like_type_name?(rt_name) ? infer_concrete_return_type_from_body(member) : nil
                             inferred || type_ref_for_name(rt_name)
                           elsif method_name.ends_with?("?")
-                            # Predicate methods (ending in ?) return Bool
-                            TypeRef::BOOL
+                            self_type = type_ref_for_name(class_name)
+                            infer_unannotated_query_return_type(method_name, self_type) || TypeRef::BOOL
                           else
                             # Try to infer return type from getter-style methods (single ivar access)
                             inferred = infer_getter_return_type(member, ivars)
@@ -1672,7 +1964,13 @@ module Crystal::HIR
                    when "Symbol"  then TypeRef::SYMBOL
                    when "Nil"     then TypeRef::NIL
                    else
-                     @module.intern_type(TypeDescriptor.new(type_kind, class_name))
+                     # For generic instantiations, reuse type_ref_for_name so the TypeRef id
+                     # matches annotations and preserves Hash/Array kinds.
+                     if class_name.includes?("(")
+                       type_ref_for_name(class_name)
+                     else
+                       @module.intern_type(TypeDescriptor.new(type_kind, class_name))
+                     end
                    end
                  end
       @class_info[class_name] = ClassInfo.new(class_name, type_ref, ivars, class_vars, offset, is_struct, parent_name)
@@ -1932,15 +2230,13 @@ module Crystal::HIR
 
       # Skip if type_args contain unresolved type parameters
       # These indicate incomplete substitution and would cause infinite recursion
-      unresolved_patterns = ["typeof(", "|", "K", "V", "T", "U", "L", "W", "K2", "V2"]
+      # NOTE: unions like `String | Nil` are concrete and must be allowed here.
+      unresolved_token_re = /(?:^|[^A-Za-z0-9_:])(K2|V2|K|V|T|U|L|W)(?:$|[^A-Za-z0-9_:])/
       has_unresolved = type_args.any? do |arg|
-        # Skip known concrete types
-        next false if arg == "String" || arg == "Int32" || arg == "Int64" || arg == "UInt8" ||
-                      arg == "UInt32" || arg == "UInt64" || arg == "Float64" || arg == "Bool" ||
-                      arg == "Nil" || arg == "Void" || arg.starts_with?("Pointer(") ||
-                      arg.starts_with?("Array(") || arg.starts_with?("Hash(")
-        # Check for type parameter patterns
-        unresolved_patterns.any? { |p| arg.includes?(p) && !arg.includes?("::") }
+        # typeof(...) in type positions is not fully resolved during bootstrap.
+        next true if arg.includes?("typeof(")
+        # Detect remaining generic placeholders as standalone tokens (avoid false positives like "ValueId").
+        arg.matches?(unresolved_token_re)
       end
       if has_unresolved
         if ENV.has_key?("DEBUG_MONO")
@@ -2376,6 +2672,31 @@ module Crystal::HIR
       old_method = @current_method
       @current_method = method_name
 
+      # Collect parameter types first for name mangling
+      param_infos = [] of Tuple(String, TypeRef, Bool)  # (name, type, is_instance_var)
+      param_types = [] of TypeRef
+      has_block = false
+      param_type_map = {} of String => TypeRef
+      old_typeof_locals = @current_typeof_locals
+      @current_typeof_locals = param_type_map
+      if params = node.params
+        params.each do |param|
+          param_name = param.name.nil? ? "_" : String.new(param.name.not_nil!)
+          param_type = if ta = param.type_annotation
+                         type_ref_for_name(String.new(ta))
+                       else
+                         TypeRef::VOID
+                       end
+          param_type_map[param_name] = param_type
+          param_infos << {param_name, param_type, param.is_instance_var}
+          if param.is_block
+            has_block = true
+          else
+            param_types << param_type
+          end
+        end
+      end
+
       return_type = if rt = node.return_type
                       rt_name = String.new(rt)
                       # "self" in return type means "the current class type"
@@ -2388,34 +2709,13 @@ module Crystal::HIR
                         type_ref_for_name(rt_name)
                       end
                     elsif method_name.ends_with?("?")
-                      # Predicate methods (ending in ?) return Bool
-                      TypeRef::BOOL
+                      infer_unannotated_query_return_type(method_name, class_info.type_ref) || TypeRef::BOOL
                     else
                       # Try to infer return type from getter-style methods (single ivar access)
                       inferred = infer_getter_return_type(node, class_info.ivars)
                       inferred || TypeRef::VOID
                     end
-
-      # Collect parameter types first for name mangling
-      param_infos = [] of Tuple(String, TypeRef, Bool)  # (name, type, is_instance_var)
-      param_types = [] of TypeRef
-      has_block = false
-      if params = node.params
-        params.each do |param|
-          param_name = param.name.nil? ? "_" : String.new(param.name.not_nil!)
-          param_type = if ta = param.type_annotation
-                         type_ref_for_name(String.new(ta))
-                       else
-                         TypeRef::VOID
-                       end
-          param_infos << {param_name, param_type, param.is_instance_var}
-          if param.is_block
-            has_block = true
-          else
-            param_types << param_type
-          end
-        end
-      end
+      @current_typeof_locals = old_typeof_locals
 
       # Mangle function name with parameter types for overloading
       full_name = mangle_function_name(base_name, param_types, has_block)
@@ -2436,6 +2736,10 @@ module Crystal::HIR
       auto_assign_params = [] of Tuple(String, ValueId, Int32)  # (ivar_name, param_value_id, offset)
 
       param_infos.each do |(param_name, param_type, is_instance_var)|
+        # If a method parameter references a concrete generic instantiation (e.g., `Hash(String, ValueId)`),
+        # ensure it is monomorphized before lowering the method body so calls on the value can resolve.
+        ensure_monomorphized_type(param_type) unless param_type == TypeRef::VOID
+
         hir_param = func.add_param(param_name, param_type)
         ctx.register_local(param_name, hir_param.id)
         ctx.register_type(hir_param.id, param_type)
@@ -2465,15 +2769,13 @@ module Crystal::HIR
       end
 
       # Infer return type from the last expression for unannotated methods.
-      # This is a pragmatic bootstrap improvement for stdlib-style combinators
-      # (e.g., Iterator#with_object returning a nested iterator type).
-      if node.return_type.nil? && !method_name.ends_with?("?") && return_type == TypeRef::VOID
-        if last_value
-          inferred = ctx.type_of(last_value)
-          if inferred != TypeRef::VOID
-            return_type = inferred
-            func.return_type = inferred
-          end
+      # This is a pragmatic bootstrap improvement for stdlib-style combinators and nilable query methods
+      # that often omit return annotations (e.g., `Hash#[]?`, `Array#first?`).
+      if node.return_type.nil? && last_value
+        inferred = ctx.type_of(last_value)
+        if inferred != TypeRef::VOID && inferred != return_type
+          return_type = inferred
+          func.return_type = inferred
         end
       end
 
@@ -2669,6 +2971,36 @@ module Crystal::HIR
         return base_method_name
       end
 
+      # If the receiver is a module-like type (e.g., Iterator(T)), try resolving against
+      # concrete includers as a fallback. This is a best-effort path to keep call chains
+      # alive during bootstrap when module-typed receivers appear.
+      if !class_name.empty? && module_like_type_name?(class_name)
+        module_base = if paren = class_name.index('(')
+                        class_name[0, paren]
+                      else
+                        class_name
+                      end
+        if includers = @module_includers[module_base]?
+          candidates = includers.to_a
+          if current = @current_class
+            candidates.delete(current)
+            candidates.sort!
+            candidates.unshift(current)
+          else
+            candidates.sort!
+          end
+          candidates.each do |candidate|
+            candidate_base = "#{candidate}##{method_name}"
+            candidate_mangled = mangle_function_name(candidate_base, arg_types)
+            if @function_types.has_key?(candidate_mangled)
+              return candidate_mangled
+            elsif has_function_base?(candidate_base)
+              return candidate_base
+            end
+          end
+        end
+      end
+
       # Search through all class info for matching method (O(n) fallback)
       # This is needed when the receiver's type descriptor is not found
       @class_info.each do |klass_name, info|
@@ -2791,29 +3123,35 @@ module Crystal::HIR
     # Call this for all functions before lowering any function bodies
     def register_function(node : CrystalV2::Compiler::Frontend::DefNode)
       base_name = String.new(node.name)
-      return_type = if rt = node.return_type
-                      type_ref_for_name(String.new(rt))
-                    else
-                      TypeRef::VOID
-                    end
-
-      # Collect parameter types for name mangling
       param_types = [] of TypeRef
+      param_type_map = {} of String => TypeRef
       has_block = false
+
+      old_typeof_locals = @current_typeof_locals
+      @current_typeof_locals = param_type_map
       if params = node.params
         params.each do |param|
           if param.is_block
             has_block = true
             next
           end
+          param_name = param.name.nil? ? "_" : String.new(param.name.not_nil!)
           param_type = if ta = param.type_annotation
                          type_ref_for_name(String.new(ta))
                        else
                          TypeRef::VOID
                        end
+          param_type_map[param_name] = param_type
           param_types << param_type
         end
       end
+
+      return_type = if rt = node.return_type
+                      type_ref_for_name(String.new(rt))
+                    else
+                      TypeRef::VOID
+                    end
+      @current_typeof_locals = old_typeof_locals
 
       # Register with mangled name
       full_name = mangle_function_name(base_name, param_types, has_block)
@@ -3004,6 +3342,104 @@ module Crystal::HIR
         depth += 1
       end
       resolved
+    end
+
+    # Split a generic type argument list like "String, Array(Int32), Hash(K, V)"
+    # into top-level arguments, respecting nested parentheses.
+    private def split_generic_type_args(params_str : String) : Array(String)
+      args = [] of String
+      depth = 0
+      start = 0
+      i = 0
+      while i < params_str.bytesize
+        ch = params_str.byte_at(i).unsafe_chr
+        case ch
+        when '(', '{', '['
+          depth += 1
+        when ')', '}', ']'
+          depth -= 1 if depth > 0
+        when ','
+          if depth == 0
+            part = params_str[start, i - start].strip
+            args << part unless part.empty?
+            start = i + 1
+          end
+        end
+        i += 1
+      end
+      tail = params_str[start, params_str.size - start].strip
+      args << tail unless tail.empty?
+      args
+    end
+
+    private def find_top_level_arrow(name : String) : Int32?
+      depth = 0
+      i = 0
+      while i + 1 < name.bytesize
+        ch = name.byte_at(i).unsafe_chr
+        case ch
+        when '(', '{', '['
+          depth += 1
+        when ')', '}', ']'
+          depth -= 1 if depth > 0
+        when '-'
+          if depth == 0 && name.byte_at(i + 1).unsafe_chr == '>'
+            return i
+          end
+        end
+        i += 1
+      end
+      nil
+    end
+
+    private def intern_proc_type(type_names : Array(String)) : TypeRef
+      names = type_names
+      names = ["Nil"] if names.empty?
+      type_refs = names.map { |tn| type_ref_for_name(tn) }
+      @module.intern_type(TypeDescriptor.new(TypeKind::Proc, "Proc", type_refs))
+    end
+
+    private def proc_type_ref_for_name(name : String) : TypeRef?
+      stripped = name.strip
+      return nil if stripped.empty?
+
+      if stripped.starts_with?("Proc(") && stripped.ends_with?(")")
+        inner = stripped[5, stripped.size - 6]
+        return intern_proc_type(split_generic_type_args(inner))
+      end
+
+      if arrow_index = find_top_level_arrow(stripped)
+        left = stripped[0, arrow_index].strip
+        right = stripped[arrow_index + 2, stripped.size - arrow_index - 2].strip
+        args = left.empty? ? [] of String : split_generic_type_args(left)
+        ret_name = right.empty? ? "Nil" : right
+        return intern_proc_type(args + [ret_name])
+      end
+
+      nil
+    end
+
+    # Ensure a generic instantiation referenced via a type annotation (e.g. `Hash(String, ValueId)`)
+    # is monomorphized before lowering code that calls methods on it.
+    private def ensure_monomorphized_type(type_ref : TypeRef) : Nil
+      type_desc = @module.get_type_descriptor(type_ref)
+      return unless type_desc
+      return unless (type_desc.kind == TypeKind::Hash || type_desc.kind == TypeKind::Array)
+
+      name = type_desc.name
+      paren = name.index('(')
+      return unless paren
+
+      base = name[0, paren]
+      template = @generic_templates[base]?
+      return unless template
+      return if @monomorphized.includes?(name)
+
+      params_str = name[paren + 1, name.size - paren - 2]
+      type_args = split_generic_type_args(params_str)
+      return unless template.type_params.size == type_args.size
+
+      monomorphize_generic_class(base, type_args, name)
     end
 
     # Returns the fully qualified method name (e.g., "Animal#age" or "Animal#age:Int32") or nil if not found
@@ -3238,6 +3674,34 @@ module Crystal::HIR
       -1
     end
 
+    # Find an existing union type in the module that can represent all required types.
+    # Prefer the smallest matching union (fewest variants) to avoid needlessly wide phis.
+    private def find_covering_union_type(required_types : Array(TypeRef)) : TypeRef?
+      required_mir = required_types.map { |t| hir_to_mir_type_ref(t) }.uniq
+
+      best_ref : TypeRef? = nil
+      best_variant_count = Int32::MAX
+
+      @module.types.each_with_index do |desc, idx|
+        next unless desc.kind == TypeKind::Union || desc.name.includes?("___")
+
+        hir_union_ref = TypeRef.new(TypeRef::FIRST_USER_TYPE + idx.to_u32)
+        mir_union_ref = hir_to_mir_type_ref(hir_union_ref)
+        descriptor = @union_descriptors[mir_union_ref]?
+        next unless descriptor
+
+        variants = descriptor.variants.map(&.type_ref)
+        next unless required_mir.all? { |rt| variants.includes?(rt) }
+
+        if variants.size < best_variant_count
+          best_variant_count = variants.size
+          best_ref = hir_union_ref
+        end
+      end
+
+      best_ref
+    end
+
     # Get class variable type from current class
     private def get_class_var_type(name : String) : TypeRef
       if class_name = @current_class
@@ -3254,20 +3718,13 @@ module Crystal::HIR
     def lower_def(node : CrystalV2::Compiler::Frontend::DefNode) : Function
       base_name = String.new(node.name)
 
-      # Determine return type (default to Void if not specified)
-      return_type = if rt = node.return_type
-                      rt_string = String.new(rt)
-                      type_ref_for_name(rt_string)
-                    elsif base_name.ends_with?("?")
-                      TypeRef::BOOL
-                    else
-                      TypeRef::VOID
-                    end
-
       # Lower parameters
       param_infos = [] of Tuple(String, TypeRef)
       param_types = [] of TypeRef
       has_block = false
+      param_type_map = {} of String => TypeRef
+      old_typeof_locals = @current_typeof_locals
+      @current_typeof_locals = param_type_map
       if params = node.params
         params.each do |param|
           param_name = param.name.nil? ? "_" : String.new(param.name.not_nil!)
@@ -3277,6 +3734,7 @@ module Crystal::HIR
                          TypeRef::VOID  # Unknown type
                        end
 
+          param_type_map[param_name] = param_type
           param_infos << {param_name, param_type}
           if param.is_block
             has_block = true
@@ -3285,6 +3743,17 @@ module Crystal::HIR
           end
         end
       end
+
+      # Determine return type (default to Void if not specified)
+      return_type = if rt = node.return_type
+                      rt_string = String.new(rt)
+                      type_ref_for_name(rt_string)
+                    elsif base_name.ends_with?("?")
+                      TypeRef::BOOL
+                    else
+                      TypeRef::VOID
+                    end
+      @current_typeof_locals = old_typeof_locals
 
       # Top-level functions support overloading, so use mangled names consistently.
       full_name = mangle_function_name(base_name, param_types, has_block)
@@ -4686,12 +5155,16 @@ module Crystal::HIR
     # ═══════════════════════════════════════════════════════════════════════
 
     private def lower_binary(ctx : LoweringContext, node : CrystalV2::Compiler::Frontend::BinaryNode) : ValueId
+      op_str = node.operator_string
+      if op_str == "&&" || op_str == "||"
+        return lower_short_circuit(ctx, node, op_str)
+      end
+
       left_id = lower_expr(ctx, node.left)
       right_id = lower_expr(ctx, node.right)
 
       # Check for pointer arithmetic: ptr + n or ptr - n
       left_type = ctx.type_of(left_id)
-      op_str = node.operator_string
       if left_type == TypeRef::POINTER && (op_str == "+" || op_str == "-")
         offset_id = right_id
         # For subtraction, negate the offset
@@ -4770,43 +5243,10 @@ module Crystal::HIR
            when "<="  then BinaryOp::Le
            when ">"   then BinaryOp::Gt
            when ">="  then BinaryOp::Ge
-           when "&&"  then BinaryOp::And
-           when "||"  then BinaryOp::Or
            else
              # Unknown operator - emit as method call
              return emit_binary_call(ctx, left_id, op_str, right_id)
            end
-
-      # For && and ||, both operands must be boolean
-      # If they're not, convert them (pointer types become nil-check, others assume truthy)
-      if op == BinaryOp::And || op == BinaryOp::Or
-        if left_type == TypeRef::POINTER
-          # Pointer type: check if not null
-          nil_val = Literal.new(ctx.next_id, TypeRef::POINTER, 0_i64)
-          ctx.emit(nil_val)
-          ne_check = BinaryOperation.new(ctx.next_id, TypeRef::BOOL, BinaryOp::Ne, left_id, nil_val.id)
-          ctx.emit(ne_check)
-          left_id = ne_check.id
-        elsif left_type != TypeRef::BOOL
-          # Union or other types: just emit true constant for now (simplified)
-          # TODO: proper union nil-check by examining type_id field
-          true_val = Literal.new(ctx.next_id, TypeRef::BOOL, 1_i64)
-          ctx.emit(true_val)
-          left_id = true_val.id
-        end
-        right_type = ctx.type_of(right_id)
-        if right_type == TypeRef::POINTER
-          nil_val = Literal.new(ctx.next_id, TypeRef::POINTER, 0_i64)
-          ctx.emit(nil_val)
-          ne_check = BinaryOperation.new(ctx.next_id, TypeRef::BOOL, BinaryOp::Ne, right_id, nil_val.id)
-          ctx.emit(ne_check)
-          right_id = ne_check.id
-        elsif right_type != TypeRef::BOOL
-          true_val = Literal.new(ctx.next_id, TypeRef::BOOL, 1_i64)
-          ctx.emit(true_val)
-          right_id = true_val.id
-        end
-      end
 
       result_type = if op.eq? || op.ne? || op.lt? || op.le? || op.gt? || op.ge? || op.and? || op.or?
                       TypeRef::BOOL
@@ -4818,6 +5258,136 @@ module Crystal::HIR
       binop = BinaryOperation.new(ctx.next_id, result_type, op, left_id, right_id)
       ctx.emit(binop)
       binop.id
+    end
+
+    # Lower short-circuiting || and && with value semantics (returns last evaluated value).
+    private def lower_short_circuit(
+      ctx : LoweringContext,
+      node : CrystalV2::Compiler::Frontend::BinaryNode,
+      op_str : String
+    ) : ValueId
+      left_id = lower_expr(ctx, node.left)
+      left_type = ctx.type_of(left_id)
+
+      cond_id = lower_truthy_check(ctx, left_id, left_type)
+
+      pre_branch_locals = ctx.save_locals
+
+      then_block = ctx.create_block
+      else_block = ctx.create_block
+      merge_block = ctx.create_block
+
+      ctx.terminate(Branch.new(cond_id, then_block, else_block))
+
+      # then: left is truthy
+      ctx.current_block = then_block
+      ctx.restore_locals(pre_branch_locals)
+      then_value = if op_str == "||"
+                     left_id
+                   else
+                     lower_expr(ctx, node.right)
+                   end
+      then_exit = ctx.current_block
+      then_locals = ctx.save_locals
+      then_block_data = ctx.get_block(ctx.current_block)
+      then_has_noreturn = then_block_data.instructions.any? { |inst| inst.is_a?(Raise) }
+      then_flows_to_merge = then_block_data.terminator.is_a?(Unreachable) && !then_has_noreturn
+      if then_flows_to_merge
+        ctx.terminate(Jump.new(merge_block))
+      end
+
+      # else: left is falsy
+      ctx.current_block = else_block
+      ctx.restore_locals(pre_branch_locals)
+      else_value = if op_str == "||"
+                     lower_expr(ctx, node.right)
+                   else
+                     left_id
+                   end
+      else_exit = ctx.current_block
+      else_locals = ctx.save_locals
+      else_block_data = ctx.get_block(ctx.current_block)
+      else_has_noreturn = else_block_data.instructions.any? { |inst| inst.is_a?(Raise) }
+      else_flows_to_merge = else_block_data.terminator.is_a?(Unreachable) && !else_has_noreturn
+      if else_flows_to_merge
+        ctx.terminate(Jump.new(merge_block))
+      end
+
+      ctx.current_block = merge_block
+
+      if then_flows_to_merge || else_flows_to_merge
+        if then_flows_to_merge && else_flows_to_merge
+          # Merge locals and result value
+          merge_branch_locals(ctx, pre_branch_locals, then_locals, else_locals, then_exit, else_exit)
+
+          then_type = ctx.type_of(then_value)
+          else_type = ctx.type_of(else_value)
+          phi_type = union_type_for_values(then_type, else_type)
+
+          if phi_type == TypeRef::VOID || phi_type == TypeRef::NIL
+            nil_lit = Literal.new(ctx.next_id, TypeRef::NIL, nil)
+            ctx.emit(nil_lit)
+            return nil_lit.id
+          end
+
+          phi = Phi.new(ctx.next_id, phi_type)
+          phi.add_incoming(then_exit, then_value)
+          phi.add_incoming(else_exit, else_value)
+          ctx.emit(phi)
+          ctx.register_type(phi.id, phi_type)
+          return phi.id
+        elsif then_flows_to_merge
+          then_locals.each { |name, val| ctx.register_local(name, val) }
+          return then_value
+        else
+          else_locals.each { |name, val| ctx.register_local(name, val) }
+          return else_value
+        end
+      end
+
+      nil_lit = Literal.new(ctx.next_id, TypeRef::NIL, nil)
+      ctx.emit(nil_lit)
+      nil_lit.id
+    end
+
+    private def union_type_for_values(left_type : TypeRef, right_type : TypeRef) : TypeRef
+      return left_type if left_type == right_type
+      left_name = get_type_name_from_ref(left_type)
+      right_name = get_type_name_from_ref(right_type)
+      create_union_type("#{left_name} | #{right_name}")
+    end
+
+    private def lower_truthy_check(ctx : LoweringContext, value_id : ValueId, value_type : TypeRef) : ValueId
+      if value_type == TypeRef::BOOL
+        return value_id
+      end
+
+      if value_type == TypeRef::NIL || value_type == TypeRef::VOID
+        lit = Literal.new(ctx.next_id, TypeRef::BOOL, false)
+        ctx.emit(lit)
+        return lit.id
+      end
+
+      if value_type == TypeRef::POINTER
+        nil_val = Literal.new(ctx.next_id, TypeRef::POINTER, 0_i64)
+        ctx.emit(nil_val)
+        ne_check = BinaryOperation.new(ctx.next_id, TypeRef::BOOL, BinaryOp::Ne, value_id, nil_val.id)
+        ctx.emit(ne_check)
+        return ne_check.id
+      end
+
+      if is_union_or_nilable_type?(value_type)
+        is_nil = lower_nil_check_intrinsic(ctx, value_id, value_type)
+        not_nil = UnaryOperation.new(ctx.next_id, TypeRef::BOOL, UnaryOp::Not, is_nil)
+        ctx.emit(not_nil)
+        ctx.register_type(not_nil.id, TypeRef::BOOL)
+        return not_nil.id
+      end
+
+      # Non-nilable, non-bool types are always truthy.
+      lit = Literal.new(ctx.next_id, TypeRef::BOOL, true)
+      ctx.emit(lit)
+      lit.id
     end
 
     private def emit_binary_call(ctx : LoweringContext, left : ValueId, op : String, right : ValueId) : ValueId
@@ -5746,7 +6316,46 @@ module Crystal::HIR
       # Merge locals from branches that flow to merge
       merge_case_locals(ctx, pre_case_locals, branch_locals)
 
-      phi_type = incoming.first?.try { |(_, val)| ctx.type_of(val) } || TypeRef::VOID
+      value_types = incoming.map { |(_, val)| ctx.type_of(val) }.reject { |t| t == TypeRef::VOID }.uniq
+      phi_type = value_types.first? || TypeRef::VOID
+
+      # If branch value types differ, prefer a union type that covers them.
+      # This avoids invalid IR when merging mixed types (e.g., Bool/Float64/Int64),
+      # and matches Crystal semantics (case expression returns a union).
+      if value_types.size > 1 && !value_types.all? { |t| numeric_primitive?(t) }
+        if union_ref = find_covering_union_type(value_types)
+          phi_type = union_ref
+        else
+          union_name = value_types.map { |t| get_type_name_from_ref(t) }.uniq.join(" | ")
+          phi_type = create_union_type(union_name)
+        end
+      end
+
+      # Coerce incoming values to the chosen phi type when needed.
+      #
+      # NOTE: We must insert conversions into the predecessor blocks (not the merge block),
+      # otherwise the SSA value won't dominate the phi edge.
+      coerced_incoming = incoming.map do |(blk, val)|
+        val_type = ctx.type_of(val)
+        if val_type == phi_type
+          {blk, val}
+        elsif is_union_type?(phi_type)
+          variant_id = get_union_variant_id(phi_type, val_type)
+          if variant_id >= 0
+            wrap = UnionWrap.new(ctx.next_id, phi_type, val, variant_id)
+            ctx.emit_to_block(blk, wrap)
+            {blk, wrap.id}
+          else
+            {blk, val}
+          end
+        elsif numeric_primitive?(val_type) && numeric_primitive?(phi_type)
+          cast = Cast.new(ctx.next_id, phi_type, val, phi_type, safe: false)
+          ctx.emit_to_block(blk, cast)
+          {blk, cast.id}
+        else
+          {blk, val}
+        end
+      end
 
       # Don't create phi for void types - LLVM doesn't allow phi void
       if phi_type == TypeRef::VOID || phi_type == TypeRef::NIL
@@ -5756,12 +6365,12 @@ module Crystal::HIR
       end
 
       # If only one branch flows, no phi needed
-      if incoming.size == 1
-        return incoming.first[1]
+      if coerced_incoming.size == 1
+        return coerced_incoming.first[1]
       end
 
       phi = Phi.new(ctx.next_id, phi_type)
-      incoming.each { |(blk, val)| phi.add_incoming(blk, val) }
+      coerced_incoming.each { |(blk, val)| phi.add_incoming(blk, val) }
       ctx.emit(phi)
       phi.id
     end
@@ -6251,6 +6860,10 @@ module Crystal::HIR
                 break
               end
             end
+
+            # NOTE: Avoid call-site monomorphization here: it can explode compilation time by creating many
+            # specialized types reachable only through transient receiver types. Prefer monomorphization from
+            # explicit annotations (see `ensure_monomorphized_type`) and constructor calls.
           end
         end
 
@@ -6299,6 +6912,23 @@ module Crystal::HIR
         # Check if receiver is a union type (has variants) or nilable
         if is_union_or_nilable_type?(declared_type)
           return lower_nil_check_intrinsic(ctx, receiver_id, declared_type)
+        end
+        # Non-union nil? is a constant for primitives and Nil, and a pointer check for pointers.
+        if declared_type == TypeRef::NIL
+          lit = Literal.new(ctx.next_id, TypeRef::BOOL, true)
+          ctx.emit(lit)
+          return lit.id
+        elsif declared_type == TypeRef::POINTER
+          nil_val = Literal.new(ctx.next_id, TypeRef::POINTER, 0_i64)
+          ctx.emit(nil_val)
+          eq_check = BinaryOperation.new(ctx.next_id, TypeRef::BOOL, BinaryOp::Eq, receiver_id, nil_val.id)
+          ctx.emit(eq_check)
+          ctx.register_type(eq_check.id, TypeRef::BOOL)
+          return eq_check.id
+        else
+          lit = Literal.new(ctx.next_id, TypeRef::BOOL, false)
+          ctx.emit(lit)
+          return lit.id
         end
       end
 
@@ -6398,7 +7028,12 @@ module Crystal::HIR
           if blk_expr = node.block
             blk_node = @arena[blk_expr]
             if blk_node.is_a?(CrystalV2::Compiler::Frontend::BlockNode)
-              return lower_array_map_dynamic(ctx, receiver_id, blk_node)
+              receiver_type = ctx.type_of(receiver_id)
+              type_desc = @module.get_type_descriptor(receiver_type)
+              is_array_type = type_desc && (type_desc.kind == TypeKind::Array ||
+                type_desc.name.starts_with?("Array") ||
+                type_desc.name.starts_with?("StaticArray"))
+              return lower_array_map_dynamic(ctx, receiver_id, blk_node) if is_array_type
             end
           end
         end
@@ -6542,9 +7177,10 @@ module Crystal::HIR
         end
       end
 
-      # If still not found and receiver_id is set, try to find method in any class
-      # NOTE: This fallback doesn't use inheritance - it's a last resort
-      if return_type == TypeRef::VOID && receiver_id
+      # If still not found and receiver_id is set, try to find method in any class.
+      # NOTE: Only do this when we couldn't resolve the receiver class; otherwise it can
+      # incorrectly bind to a different specialization (e.g., Hash(Int32, Bool)#[]?).
+      if return_type == TypeRef::VOID && receiver_id && full_method_name.nil?
         @class_info.each do |class_name, info|
           test_base = "#{class_name}##{method_name}"
           test_mangled = mangle_function_name(test_base, arg_types)
@@ -8372,10 +9008,10 @@ module Crystal::HIR
 
       if is_array_type && index_ids.size == 1
         # Array element access: arr[i] -> IndexGet
-        element_type = object_type
-        if element_type == TypeRef::VOID
-          element_type = TypeRef::INT32  # Default for untyped arrays
-        end
+        # Prefer the array's element type from the interned TypeDescriptor params.
+        # Arrays are represented as POINTER at runtime, so we must carry element type explicitly.
+        element_type = type_desc.not_nil!.type_params.first? || TypeRef::INT32
+        element_type = TypeRef::INT32 if element_type == TypeRef::VOID
 
         index_get = IndexGet.new(ctx.next_id, element_type, object_id, index_ids.first)
         ctx.emit(index_get)
@@ -8793,9 +9429,10 @@ module Crystal::HIR
 
         if is_pointer_type && index_ids.size == 1
           # Pointer store: ptr[i] = val -> PointerStore with index
-          store_node = PointerStore.new(ctx.next_id, TypeRef::VOID, object_id, value_id, index_ids.first)
+          store_type = ctx.type_of(value_id)
+          store_node = PointerStore.new(ctx.next_id, store_type, object_id, value_id, index_ids.first)
           ctx.emit(store_node)
-          return store_node.id
+          return value_id
         end
 
         # Check if this is an array type (which uses IndexSet for element assignment)
@@ -8805,9 +9442,11 @@ module Crystal::HIR
 
         if is_array_type && index_ids.size == 1
           # Array element assignment: arr[i] = val -> IndexSet
-          index_set = IndexSet.new(ctx.next_id, TypeRef::VOID, object_id, index_ids.first, value_id)
+          element_type = type_desc.not_nil!.type_params.first? || ctx.type_of(value_id)
+          element_type = TypeRef::INT32 if element_type == TypeRef::VOID
+          index_set = IndexSet.new(ctx.next_id, element_type, object_id, index_ids.first, value_id)
           ctx.emit(index_set)
-          index_set.id
+          value_id
         else
           # Everything else (classes like Hash, custom types): call []= method
           # Resolve the method name properly (with class name and mangling)
@@ -9013,8 +9652,14 @@ module Crystal::HIR
     private def lower_array_literal(ctx : LoweringContext, node : CrystalV2::Compiler::Frontend::ArrayLiteralNode) : ValueId
       element_ids = node.elements.map { |e| lower_expr(ctx, e) }
 
-      # Determine element type from first element (or Int32 default)
-      element_type = if element_ids.size > 0
+      # Determine element type from explicit `of` type, or from first element (or Int32 default)
+      element_type = if of_type = node.of_type
+                       if type_str = stringify_type_expr(of_type)
+                         type_ref_for_name(type_str)
+                       else
+                         element_ids.size > 0 ? ctx.type_of(element_ids.first) : TypeRef::INT32
+                       end
+                     elsif element_ids.size > 0
                        ctx.type_of(element_ids.first)
                      else
                        TypeRef::INT32
@@ -9214,6 +9859,9 @@ module Crystal::HIR
       end
 
       lookup_name = normalized_name
+      if lookup_name.includes?("typeof(")
+        lookup_name = resolve_typeof_in_type_string(lookup_name)
+      end
       # Resolve unqualified type names in the current namespace before cache lookup.
       # This avoids poisoning the cache with short names that can resolve differently per scope.
       if !lookup_name.includes?("|") && !lookup_name.includes?("::") && lookup_name.size > 0 && lookup_name[0].uppercase?
@@ -9222,6 +9870,11 @@ module Crystal::HIR
 
       if cached = @type_cache[lookup_name]?
         return cached
+      end
+
+      if proc_ref = proc_type_ref_for_name(lookup_name)
+        @type_cache[lookup_name] = proc_ref
+        return proc_ref
       end
 
       # Check for union type syntax: "Type1 | Type2" or "Type1|Type2" (parser may not add spaces)
@@ -9289,6 +9942,20 @@ module Crystal::HIR
           # Types changed - recurse with new name
           return type_ref_for_name(substituted_name)
         end
+
+        # Intern a parameterized type descriptor so downstream passes can recover element/key/value types.
+        # This is critical for arrays/hashes/pointers where runtime representation is "ptr", but codegen
+        # still needs the generic parameters for correct loads/stores.
+        type_params = substituted_params.map { |p| type_ref_for_name(p) }
+        type_kind = case base_name
+                    when "Array", "StaticArray" then TypeKind::Array
+                    when "Hash"                then TypeKind::Hash
+                    when "Pointer"             then TypeKind::Pointer
+                    else                            TypeKind::Generic
+                    end
+        result = @module.intern_type(TypeDescriptor.new(type_kind, substituted_name, type_params))
+        @type_cache[lookup_name] = result
+        return result
       end
 
       # Handle pointer types (Void*, Pointer(T), T*)
@@ -9299,7 +9966,7 @@ module Crystal::HIR
         return TypeRef::POINTER
       end
 
-      if lookup_name.starts_with?("Pointer")
+      if lookup_name == "Pointer"
         # Pointer(T) or just Pointer -> pointer type
         @type_cache[lookup_name] = TypeRef::POINTER
         return TypeRef::POINTER

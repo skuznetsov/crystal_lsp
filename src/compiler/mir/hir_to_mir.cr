@@ -26,6 +26,10 @@ module Crystal
     # Mapping from HIR ValueId to MIR ValueId per function
     @value_map : Hash(HIR::ValueId, ValueId)
 
+    # Mapping from HIR ValueId to HIR TypeRef per function
+    # (needed to lower HIR::Cast into correct MIR::CastKind)
+    @hir_value_types : Hash(HIR::ValueId, HIR::TypeRef)
+
     # Mapping from HIR BlockId to MIR BlockId
     @block_map : Hash(HIR::BlockId, BlockId)
 
@@ -46,6 +50,7 @@ module Crystal
     def initialize(@hir_module : HIR::Module)
       @mir_module = Module.new(@hir_module.name)
       @value_map = {} of HIR::ValueId => ValueId
+      @hir_value_types = {} of HIR::ValueId => HIR::TypeRef
       @block_map = {} of HIR::BlockId => BlockId
       @pending_phis = [] of Tuple(Phi, HIR::Phi)
     end
@@ -222,6 +227,7 @@ module Crystal
       @current_hir_func = hir_func
       @current_mir_func = mir_func
       @value_map.clear
+      @hir_value_types.clear
       @block_map.clear
       @pending_phis.clear
       @builder = Builder.new(mir_func)
@@ -230,6 +236,16 @@ module Crystal
       hir_func.params.each_with_index do |param, idx|
         # MIR params are value IDs starting from 0
         @value_map[param.id] = idx.to_u32
+      end
+
+      # Record HIR value types for cast lowering
+      hir_func.params.each do |param|
+        @hir_value_types[param.id] = param.type
+      end
+      hir_func.blocks.each do |hir_block|
+        hir_block.instructions.each do |inst|
+          @hir_value_types[inst.id] = inst.type
+        end
       end
 
       # Create all blocks first (for forward references)
@@ -559,6 +575,7 @@ module Crystal
       # GEP to field address + store
       field_ptr = builder.gep(obj_ptr, [field.field_offset.to_u32], TypeRef::POINTER)
       builder.store(field_ptr, value)
+      value
     end
 
     # ─────────────────────────────────────────────────────────────────────────
@@ -607,7 +624,7 @@ module Crystal
         value
       )
       builder.emit(arr_set)
-      arr_set.id
+      value
     end
 
     # ─────────────────────────────────────────────────────────────────────────
@@ -912,11 +929,68 @@ module Crystal
     private def lower_cast(cast : HIR::Cast) : ValueId
       builder = @builder.not_nil!
       value = get_value(cast.value)
-      target = convert_type(cast.target_type)
+      src_hir_type = @hir_value_types[cast.value]? || HIR::TypeRef::POINTER
+      dst_hir_type = cast.target_type
 
-      # Determine cast kind based on source/target types
-      # For now, use bitcast as default
-      builder.bitcast(value, target)
+      src_type = convert_type(src_hir_type)
+      dst_type = convert_type(dst_hir_type)
+
+      # No-op cast
+      return value if src_type == dst_type
+
+      # Helpers (HIR types carry signedness via Int*/UInt*)
+      int_like = ->(t : HIR::TypeRef) do
+        case t
+        when HIR::TypeRef::BOOL,
+             HIR::TypeRef::INT8, HIR::TypeRef::INT16, HIR::TypeRef::INT32, HIR::TypeRef::INT64, HIR::TypeRef::INT128,
+             HIR::TypeRef::UINT8, HIR::TypeRef::UINT16, HIR::TypeRef::UINT32, HIR::TypeRef::UINT64, HIR::TypeRef::UINT128,
+             HIR::TypeRef::CHAR
+          true
+        else
+          false
+        end
+      end
+
+      float_like = ->(t : HIR::TypeRef) do
+        t == HIR::TypeRef::FLOAT32 || t == HIR::TypeRef::FLOAT64
+      end
+
+      signed_int = ->(t : HIR::TypeRef) do
+        case t
+        when HIR::TypeRef::INT8, HIR::TypeRef::INT16, HIR::TypeRef::INT32, HIR::TypeRef::INT64, HIR::TypeRef::INT128
+          true
+        else
+          false
+        end
+      end
+
+      kind = if src_type == TypeRef::POINTER && int_like.call(dst_hir_type)
+               CastKind::PtrToInt
+             elsif dst_type == TypeRef::POINTER && int_like.call(src_hir_type)
+               CastKind::IntToPtr
+             elsif int_like.call(src_hir_type) && int_like.call(dst_hir_type)
+               src_size = type_size(src_hir_type)
+               dst_size = type_size(dst_hir_type)
+               if dst_size < src_size
+                 CastKind::Trunc
+               elsif dst_size > src_size
+                 signed_int.call(src_hir_type) ? CastKind::SExt : CastKind::ZExt
+               else
+                 CastKind::Bitcast
+               end
+             elsif float_like.call(src_hir_type) && float_like.call(dst_hir_type)
+               src_size = type_size(src_hir_type)
+               dst_size = type_size(dst_hir_type)
+               dst_size < src_size ? CastKind::FPTrunc : CastKind::FPExt
+             elsif float_like.call(src_hir_type) && int_like.call(dst_hir_type)
+               signed_int.call(dst_hir_type) ? CastKind::FPToSI : CastKind::FPToUI
+             elsif int_like.call(src_hir_type) && float_like.call(dst_hir_type)
+               signed_int.call(src_hir_type) ? CastKind::SIToFP : CastKind::UIToFP
+             else
+               CastKind::Bitcast
+             end
+
+      builder.cast(kind, value, dst_type)
     end
 
     private def lower_is_a(isa : HIR::IsA) : ValueId
@@ -1030,6 +1104,7 @@ module Crystal
       # Generate global name: ClassName_varname
       global_name = "#{cv.class_name}_#{cv.var_name}"
       builder.global_store(global_name, value, convert_type(cv.type))
+      value
     end
 
     # ─────────────────────────────────────────────────────────────────────────
