@@ -163,6 +163,26 @@ describe Crystal::MIR do
       func.blocks.size.should be > original_block_count
     end
 
+    it "keeps an indirect fallback path for non-dominant targets" do
+      mod = PGOTestHelpers.create_test_module
+      _target_func = mod.create_function("Dog::speak", Crystal::MIR::TypeRef::INT32)
+      func, call = PGOTestHelpers.create_function_with_virtual_call(mod)
+      profile = PGOTestHelpers.create_empty_profile
+
+      call_site_id = (func.id.to_u64 << 32) | call.id.to_u64
+      cs = profile.add_call_site(call_site_id, "call_speak", "Animal::speak", is_virtual: true)
+      cs.call_count = 1000
+      cs.target_distribution["Dog::speak"] = 900
+      cs.target_distribution["Cat::speak"] = 100
+
+      pass = Crystal::MIR::DevirtualizationPass.new(func, mod, profile)
+      stats = pass.run
+
+      stats.calls_devirtualized.should eq(1)
+      func.blocks.any? { |block| block.terminator.is_a?(Crystal::MIR::Branch) }.should be_true
+      func.blocks.any? { |block| block.instructions.any? { |inst| inst.is_a?(Crystal::MIR::IndirectCall) } }.should be_true
+    end
+
     it "records devirtualization statistics correctly" do
       mod = PGOTestHelpers.create_test_module
       _target = mod.create_function("Cat::meow", Crystal::MIR::TypeRef::INT32)

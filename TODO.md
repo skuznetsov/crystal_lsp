@@ -641,7 +641,7 @@ The key insight is: **Don't compete with LLVM, complement it.**
   - extract_generic_params() parses generic type parameters
   - PRIMITIVE_TYPES set for types that cannot form cycles
   - 6 new tests, 23 total taint analysis tests
-- [ ] Guarded devirtualization safety specs: ensure fallback when profile misses a type (switch/if coverage).
+- [x] Guarded devirtualization safety specs: ensure fallback when profile misses a type (switch/if coverage).
 - [ ] ABI sanity harness: golden tests for class/struct/union layout (offset/align/payload), union header, vtable layout (if present).
 - [ ] Inline intrinsics RC/taint audit: propagate lifetime/taints through inlined .times/.each/Range; re-evaluate captured vars post-inline.
 - [ ] ThreadShared propagation → atomic RC or GC fallback for closures/objects crossing fiber boundaries; add spec.
