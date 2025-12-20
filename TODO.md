@@ -655,6 +655,7 @@ The key insight is: **Don't compete with LLVM, complement it.**
 ### Build DX (Codegen)
 - [x] CLI flags for faster iteration: `--no-llvm-opt` and `--no-link` (2025-12-23)
 - [x] LLVM opt/llc artifact cache keyed by ll hash + flags (2025-12-23)
+- [x] AST cache key stabilized (FNV hash) and verified hits on warm run (parse ~164ms → ~79ms)
 - [ ] Investigate release compile latency on small programs (43s on /tmp/cv2_smoke.cr); add per-phase timing + cache hit diagnostics
 
 ### 5.3.6 LTP/WBA Optimization Framework
@@ -950,6 +951,7 @@ r2 = maybe(false)  # => nil
 
 **Prelude build progress (with stdlib/prelude):**
 - Reaches LLVM IR emission and `opt -O1` successfully; link still fails due to missing runtime/stdlib symbols (expected at this stage).
+- Timing snapshot (release + `--stats`): parse prelude ~214ms, HIR ~7.6s, MIR ~5.4s, LLVM ~33s, total ~48s; link failure is the current blocker.
 
 **Stdlib requires advanced features not yet implemented:**
 
@@ -970,9 +972,13 @@ r2 = maybe(false)  # => nil
 
 1. [ ] **Implement typeof resolution** - Compile-time evaluation of typeof(...) in type annotations
    - [x] `typeof(self)` / `typeof(arg)` inside generic instantiations (HIR lowering) (2025-12-19)
-   - [ ] General `typeof(...)` evaluation in type positions (type aliases, return types, nested generic args)
-2. [ ] **Fix generic methods with blocks** - Handle block parameter types during lowering
+   - [x] General `typeof(...)` evaluation in type positions (params/returns/ivars/self) during lowering (2025-12-23)
+   - [x] Simple constant/path typeof in type strings (no local scope) (2025-12-24)
+   - [x] Enumerable/Indexable element_type patterns in typeof (2025-12-24)
+   - [ ] typeof(...) inside type aliases without local context (no direct uses found in stdlib as of 2025-12-24)
+2. [x] **Fix generic methods with blocks** - Parse block parameter types into Proc signatures (2025-12-24)
 3. [ ] **Module mixin monomorphization** - Generate methods from included modules for concrete types
    - Partial: include expansion + module-typed return inference + stdlib-style combinator return inference
-   - Remaining: robust module-typed receiver resolution beyond simple nested iterator combinators
+   - Improved: module-typed receiver fallback via includer map + last-expression return inference (2025-12-24)
+   - Remaining: robust module-typed receiver resolution (avoid heuristic includer selection)
 4. [ ] **Macro expansion for `getter`/`property`** - Compile-time accessor generation

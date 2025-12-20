@@ -119,7 +119,7 @@ module CrystalV2
 
       class AstCache
         MAGIC   = "CV2A"
-        VERSION = 1_u32
+        VERSION = 2_u32
 
         getter arena : Frontend::AstArena
         getter roots : Array(Frontend::ExprId)
@@ -134,8 +134,8 @@ module CrystalV2
 
         def self.cache_path(file_path : String) : String
           cache_dir = ENV["XDG_CACHE_HOME"]? || File.join(ENV["HOME"]? || "/tmp", ".cache")
-          # Hash file path for cache key
-          hash = file_path.hash.to_u64.to_s(16)
+          # Stable hash for cache key (avoid randomized String#hash).
+          hash = fnv_hash(file_path).to_s(16)
           File.join(cache_dir, "crystal_v2_lsp", "ast", "#{hash}.ast")
         end
 
@@ -231,6 +231,18 @@ module CrystalV2
           table
         end
 
+        private def self.fnv_hash(str : String) : UInt64
+          fnv_offset = 14695981039346656037_u64
+          fnv_prime = 1099511628211_u64
+
+          hash = fnv_offset
+          str.each_byte do |byte|
+            hash ^= byte.to_u64
+            hash &*= fnv_prime
+          end
+          hash
+        end
+
         @[NoInline]
         private def collect_strings(node : Frontend::TypedNode, table : Hash(String, UInt32), &block : String ->)
           node_kind = Frontend.node_kind(node)
@@ -280,20 +292,25 @@ module CrystalV2
           when Frontend::NodeKind::SafeNavigation
             safe_node = node.as(Frontend::SafeNavigationNode)
             yield String.new(safe_node.member)
+          when Frontend::NodeKind::Call
+            call_node = node.as(Frontend::CallNode)
+            call_node.named_args.try &.each do |arg|
+              yield String.new(arg.name)
+            end
           when Frontend::NodeKind::Def
             def_node = node.as(Frontend::DefNode)
             yield String.new(def_node.name)
             def_node.return_type.try { |rt| yield String.new(rt) }
-            def_node.params.each do |p|
+            def_node.params.try &.each do |p|
               p.name.try { |n| yield String.new(n) }
               p.external_name.try { |n| yield String.new(n) }
               p.type_annotation.try { |t| yield String.new(t) }
             end
-            def_node.type_params.try &.each { |tp| yield String.new(tp) }
+            def_node.receiver.try { |r| yield String.new(r) }
           when Frontend::NodeKind::Class
             class_node = node.as(Frontend::ClassNode)
             yield String.new(class_node.name)
-            class_node.superclass.try { |s| yield String.new(s) }
+            class_node.super_name.try { |s| yield String.new(s) }
             class_node.type_params.try &.each { |tp| yield String.new(tp) }
           when Frontend::NodeKind::Module
             mod_node = node.as(Frontend::ModuleNode)
@@ -302,7 +319,24 @@ module CrystalV2
           when Frontend::NodeKind::Struct
             struct_node = node.as(Frontend::StructNode)
             yield String.new(struct_node.name)
-            struct_node.type_params.try &.each { |tp| yield String.new(tp) }
+          when Frontend::NodeKind::Getter
+            getter_node = node.as(Frontend::GetterNode)
+            getter_node.specs.each do |spec|
+              yield String.new(spec.name)
+              spec.type_annotation.try { |t| yield String.new(t) }
+            end
+          when Frontend::NodeKind::Setter
+            setter_node = node.as(Frontend::SetterNode)
+            setter_node.specs.each do |spec|
+              yield String.new(spec.name)
+              spec.type_annotation.try { |t| yield String.new(t) }
+            end
+          when Frontend::NodeKind::Property
+            prop_node = node.as(Frontend::PropertyNode)
+            prop_node.specs.each do |spec|
+              yield String.new(spec.name)
+              spec.type_annotation.try { |t| yield String.new(t) }
+            end
           when Frontend::NodeKind::Enum
             enum_node = node.as(Frontend::EnumNode)
             yield String.new(enum_node.name)
@@ -311,29 +345,80 @@ module CrystalV2
           when Frontend::NodeKind::Alias
             alias_node = node.as(Frontend::AliasNode)
             yield String.new(alias_node.name)
-            yield String.new(alias_node.aliased_type)
+            yield String.new(alias_node.value)
           when Frontend::NodeKind::Constant
             const_node = node.as(Frontend::ConstantNode)
             yield String.new(const_node.name)
           when Frontend::NodeKind::Include
             incl_node = node.as(Frontend::IncludeNode)
-            yield String.new(incl_node.module_path)
+            yield String.new(incl_node.name)
           when Frontend::NodeKind::Extend
             ext_node = node.as(Frontend::ExtendNode)
-            yield String.new(ext_node.module_path)
+            yield String.new(ext_node.name)
           when Frontend::NodeKind::Require
-            req_node = node.as(Frontend::RequireNode)
-            yield String.new(req_node.path)
+            # Require path is an ExprId (typically a StringNode) which is covered elsewhere.
           when Frontend::NodeKind::Lib
             lib_node = node.as(Frontend::LibNode)
             yield String.new(lib_node.name)
           when Frontend::NodeKind::Fun
             fun_node = node.as(Frontend::FunNode)
             yield String.new(fun_node.name)
+            fun_node.real_name.try { |rn| yield String.new(rn) }
             fun_node.return_type.try { |rt| yield String.new(rt) }
+            fun_node.params.try &.each do |p|
+              p.name.try { |n| yield String.new(n) }
+              p.external_name.try { |n| yield String.new(n) }
+              p.type_annotation.try { |t| yield String.new(t) }
+            end
           when Frontend::NodeKind::Path
-            path_node = node.as(Frontend::PathNode)
-            path_node.parts.each { |p| yield String.new(p) }
+            # Path parts are separate nodes.
+          when Frontend::NodeKind::As
+            as_node = node.as(Frontend::AsNode)
+            yield String.new(as_node.target_type)
+          when Frontend::NodeKind::AsQuestion
+            asq_node = node.as(Frontend::AsQuestionNode)
+            yield String.new(asq_node.target_type)
+          when Frontend::NodeKind::IsA
+            isa_node = node.as(Frontend::IsANode)
+            yield String.new(isa_node.target_type)
+          when Frontend::NodeKind::Out
+            out_node = node.as(Frontend::OutNode)
+            yield String.new(out_node.identifier)
+          when Frontend::NodeKind::TypeDeclaration
+            type_decl_node = node.as(Frontend::TypeDeclarationNode)
+            yield String.new(type_decl_node.name)
+            yield String.new(type_decl_node.declared_type)
+          when Frontend::NodeKind::Annotation
+            anno_node = node.as(Frontend::AnnotationNode)
+            anno_node.named_args.try &.each do |arg|
+              yield String.new(arg.name)
+            end
+          when Frontend::NodeKind::InstanceVarDecl
+            ivar_decl_node = node.as(Frontend::InstanceVarDeclNode)
+            yield String.new(ivar_decl_node.name)
+            yield String.new(ivar_decl_node.type)
+          when Frontend::NodeKind::ClassVarDecl
+            cvar_decl_node = node.as(Frontend::ClassVarDeclNode)
+            yield String.new(cvar_decl_node.name)
+            yield String.new(cvar_decl_node.type)
+          when Frontend::NodeKind::GlobalVarDecl
+            gvar_decl_node = node.as(Frontend::GlobalVarDeclNode)
+            yield String.new(gvar_decl_node.name)
+            yield String.new(gvar_decl_node.type)
+          when Frontend::NodeKind::MacroLiteral
+            macro_node = node.as(Frontend::MacroLiteralNode)
+            macro_node.pieces.each do |piece|
+              piece.text.try { |t| yield t }
+              piece.control_keyword.try { |k| yield k }
+              piece.iter_vars.try &.each { |v| yield v }
+              piece.macro_var_name.try { |n| yield n }
+            end
+          when Frontend::NodeKind::MacroDef
+            macro_def = node.as(Frontend::MacroDefNode)
+            yield String.new(macro_def.name)
+          when Frontend::NodeKind::MacroFor
+            macro_for = node.as(Frontend::MacroForNode)
+            macro_for.iter_vars.each { |v| yield String.new(v) }
           else
             # Other nodes don't have string fields or are handled elsewhere
           end
@@ -364,6 +449,13 @@ module CrystalV2
 
 @[NoInline]
         private def write_node(io : IO, node : Frontend::TypedNode, string_table : Hash(String, UInt32))
+          if node.is_a?(Frontend::SplatNode)
+            io.write_byte(AstNodeTag::SplatNode.value)
+            write_span(io, node.span)
+            write_expr_id(io, node.expr)
+            return
+          end
+
           node_kind = Frontend.node_kind(node)
           case node_kind
           when Frontend::NodeKind::Number
@@ -371,7 +463,7 @@ module CrystalV2
             io.write_byte(AstNodeTag::NumberNode.value)
             write_span(io, num_node.span)
             write_string_ref(io, String.new(num_node.value), string_table)
-            io.write_byte(num_node.kind.value)
+            io.write_byte(num_node.kind.value.to_u8)
 
           when Frontend::NodeKind::Identifier
             ident_node = node.as(Frontend::IdentifierNode)
@@ -599,12 +691,6 @@ module CrystalV2
             write_optional_expr_id(io, spawn_node.expression)
             write_optional_expr_id_array(io, spawn_node.body)
 
-          when Frontend::NodeKind::Splat
-            splat_node = node.as(Frontend::SplatNode)
-            io.write_byte(AstNodeTag::SplatNode.value)
-            write_span(io, splat_node.span)
-            write_expr_id(io, splat_node.expr)
-
           when Frontend::NodeKind::Index
             index_node = node.as(Frontend::IndexNode)
             io.write_byte(AstNodeTag::IndexNode.value)
@@ -674,29 +760,29 @@ module CrystalV2
             write_string_ref(io, String.new(def_node.name), string_table)
             write_parameters(io, def_node.params, string_table)
             write_optional_string_ref(io, def_node.return_type.try { |rt| String.new(rt) }, string_table)
-            write_expr_id_array(io, def_node.body)
-            write_optional_string_array(io, def_node.type_params.try { |tp| tp.map { |t| String.new(t) } }, string_table)
-            io.write_byte(def_node.visibility.value)
+            write_optional_expr_id_array(io, def_node.body)
+            write_optional_visibility(io, def_node.visibility)
             io.write_byte(def_node.is_abstract ? 1_u8 : 0_u8)
-            io.write_byte(def_node.is_macro_def ? 1_u8 : 0_u8)
-            write_optional_expr_id(io, def_node.receiver)
+            write_optional_string_ref(io, def_node.receiver.try { |r| String.new(r) }, string_table)
 
           when Frontend::NodeKind::Class
             class_node = node.as(Frontend::ClassNode)
             io.write_byte(AstNodeTag::ClassNode.value)
             write_span(io, class_node.span)
             write_string_ref(io, String.new(class_node.name), string_table)
-            write_optional_string_ref(io, class_node.superclass.try { |s| String.new(s) }, string_table)
-            write_expr_id_array(io, class_node.body)
+            write_optional_string_ref(io, class_node.super_name.try { |s| String.new(s) }, string_table)
+            write_optional_expr_id_array(io, class_node.body)
             write_optional_string_array(io, class_node.type_params.try { |tp| tp.map { |t| String.new(t) } }, string_table)
             io.write_byte(class_node.is_abstract ? 1_u8 : 0_u8)
+            io.write_byte(class_node.is_struct ? 1_u8 : 0_u8)
+            io.write_byte(class_node.is_union ? 1_u8 : 0_u8)
 
           when Frontend::NodeKind::Module
             mod_node = node.as(Frontend::ModuleNode)
             io.write_byte(AstNodeTag::ModuleNode.value)
             write_span(io, mod_node.span)
             write_string_ref(io, String.new(mod_node.name), string_table)
-            write_expr_id_array(io, mod_node.body)
+            write_optional_expr_id_array(io, mod_node.body)
             write_optional_string_array(io, mod_node.type_params.try { |tp| tp.map { |t| String.new(t) } }, string_table)
 
           when Frontend::NodeKind::Struct
@@ -704,9 +790,7 @@ module CrystalV2
             io.write_byte(AstNodeTag::StructNode.value)
             write_span(io, struct_node.span)
             write_string_ref(io, String.new(struct_node.name), string_table)
-            write_expr_id_array(io, struct_node.body)
-            write_optional_string_array(io, struct_node.type_params.try { |tp| tp.map { |t| String.new(t) } }, string_table)
-            io.write_byte(struct_node.is_abstract ? 1_u8 : 0_u8)
+            write_optional_expr_id_array(io, struct_node.body)
 
           when Frontend::NodeKind::Enum
             enum_node = node.as(Frontend::EnumNode)
@@ -715,14 +799,13 @@ module CrystalV2
             write_string_ref(io, String.new(enum_node.name), string_table)
             write_enum_members(io, enum_node.members, string_table)
             write_optional_string_ref(io, enum_node.base_type.try { |bt| String.new(bt) }, string_table)
-            write_expr_id_array(io, enum_node.methods)
 
           when Frontend::NodeKind::Alias
             alias_node = node.as(Frontend::AliasNode)
             io.write_byte(AstNodeTag::AliasNode.value)
             write_span(io, alias_node.span)
             write_string_ref(io, String.new(alias_node.name), string_table)
-            write_string_ref(io, String.new(alias_node.aliased_type), string_table)
+            write_string_ref(io, String.new(alias_node.value), string_table)
 
           when Frontend::NodeKind::Constant
             const_node = node.as(Frontend::ConstantNode)
@@ -735,115 +818,119 @@ module CrystalV2
             incl_node = node.as(Frontend::IncludeNode)
             io.write_byte(AstNodeTag::IncludeNode.value)
             write_span(io, incl_node.span)
-            write_string_ref(io, String.new(incl_node.module_path), string_table)
+            write_string_ref(io, String.new(incl_node.name), string_table)
+            write_expr_id(io, incl_node.target)
 
           when Frontend::NodeKind::Extend
             ext_node = node.as(Frontend::ExtendNode)
             io.write_byte(AstNodeTag::ExtendNode.value)
             write_span(io, ext_node.span)
-            write_string_ref(io, String.new(ext_node.module_path), string_table)
+            write_string_ref(io, String.new(ext_node.name), string_table)
+            write_expr_id(io, ext_node.target)
 
           when Frontend::NodeKind::Getter
             getter_node = node.as(Frontend::GetterNode)
             io.write_byte(AstNodeTag::GetterNode.value)
             write_span(io, getter_node.span)
             write_accessor_specs(io, getter_node.specs, string_table)
+            io.write_byte(getter_node.is_class? ? 1_u8 : 0_u8)
 
           when Frontend::NodeKind::Setter
             setter_node = node.as(Frontend::SetterNode)
             io.write_byte(AstNodeTag::SetterNode.value)
             write_span(io, setter_node.span)
             write_accessor_specs(io, setter_node.specs, string_table)
+            io.write_byte(setter_node.is_class? ? 1_u8 : 0_u8)
 
           when Frontend::NodeKind::Property
             prop_node = node.as(Frontend::PropertyNode)
             io.write_byte(AstNodeTag::PropertyNode.value)
             write_span(io, prop_node.span)
             write_accessor_specs(io, prop_node.specs, string_table)
+            io.write_byte(prop_node.is_class? ? 1_u8 : 0_u8)
 
           when Frontend::NodeKind::Require
             req_node = node.as(Frontend::RequireNode)
             io.write_byte(AstNodeTag::RequireNode.value)
             write_span(io, req_node.span)
-            write_string_ref(io, String.new(req_node.path), string_table)
+            write_expr_id(io, req_node.path)
 
           when Frontend::NodeKind::Lib
             lib_node = node.as(Frontend::LibNode)
             io.write_byte(AstNodeTag::LibNode.value)
             write_span(io, lib_node.span)
             write_string_ref(io, String.new(lib_node.name), string_table)
-            write_expr_id_array(io, lib_node.body)
+            write_optional_expr_id_array(io, lib_node.body)
 
           when Frontend::NodeKind::Fun
             fun_node = node.as(Frontend::FunNode)
             io.write_byte(AstNodeTag::FunNode.value)
             write_span(io, fun_node.span)
             write_string_ref(io, String.new(fun_node.name), string_table)
+            write_optional_string_ref(io, fun_node.real_name.try { |rn| String.new(rn) }, string_table)
             write_parameters(io, fun_node.params, string_table)
             write_optional_string_ref(io, fun_node.return_type.try { |rt| String.new(rt) }, string_table)
-            write_optional_expr_id_array(io, fun_node.body)
-            io.write_byte(fun_node.is_variadic ? 1_u8 : 0_u8)
+            io.write_byte(fun_node.varargs ? 1_u8 : 0_u8)
 
           when Frontend::NodeKind::Generic
             generic_node = node.as(Frontend::GenericNode)
             io.write_byte(AstNodeTag::GenericNode.value)
             write_span(io, generic_node.span)
-            write_expr_id(io, generic_node.name)
+            write_expr_id(io, generic_node.base_type)
             write_expr_id_array(io, generic_node.type_args)
 
           when Frontend::NodeKind::Path
             path_node = node.as(Frontend::PathNode)
             io.write_byte(AstNodeTag::PathNode.value)
             write_span(io, path_node.span)
-            io.write_bytes(path_node.parts.size.to_u32, IO::ByteFormat::LittleEndian)
-            path_node.parts.each { |p| write_string_ref(io, String.new(p), string_table) }
-            io.write_byte(path_node.is_global ? 1_u8 : 0_u8)
+            write_optional_expr_id(io, path_node.left)
+            write_expr_id(io, path_node.right)
 
           when Frontend::NodeKind::As
             as_node = node.as(Frontend::AsNode)
             io.write_byte(AstNodeTag::AsNode.value)
             write_span(io, as_node.span)
             write_expr_id(io, as_node.expression)
-            write_expr_id(io, as_node.type_expr)
+            write_string_ref(io, String.new(as_node.target_type), string_table)
 
           when Frontend::NodeKind::AsQuestion
             as_q_node = node.as(Frontend::AsQuestionNode)
             io.write_byte(AstNodeTag::AsQuestionNode.value)
             write_span(io, as_q_node.span)
             write_expr_id(io, as_q_node.expression)
-            write_expr_id(io, as_q_node.type_expr)
+            write_string_ref(io, String.new(as_q_node.target_type), string_table)
 
           when Frontend::NodeKind::IsA
             isa_node = node.as(Frontend::IsANode)
             io.write_byte(AstNodeTag::IsANode.value)
             write_span(io, isa_node.span)
             write_expr_id(io, isa_node.expression)
-            write_expr_id(io, isa_node.type_expr)
+            write_string_ref(io, String.new(isa_node.target_type), string_table)
 
           when Frontend::NodeKind::RespondsTo
             responds_node = node.as(Frontend::RespondsToNode)
             io.write_byte(AstNodeTag::RespondsToNode.value)
             write_span(io, responds_node.span)
             write_expr_id(io, responds_node.expression)
-            write_string_ref(io, String.new(responds_node.method_name), string_table)
+            write_expr_id(io, responds_node.method_name)
 
           when Frontend::NodeKind::Typeof
             typeof_node = node.as(Frontend::TypeofNode)
             io.write_byte(AstNodeTag::TypeofNode.value)
             write_span(io, typeof_node.span)
-            write_expr_id(io, typeof_node.expression)
+            write_expr_id_array(io, typeof_node.args)
 
           when Frontend::NodeKind::Sizeof
             sizeof_node = node.as(Frontend::SizeofNode)
             io.write_byte(AstNodeTag::SizeofNode.value)
             write_span(io, sizeof_node.span)
-            write_expr_id(io, sizeof_node.type_expr)
+            write_expr_id_array(io, sizeof_node.args)
 
           when Frontend::NodeKind::Pointerof
             ptrof_node = node.as(Frontend::PointerofNode)
             io.write_byte(AstNodeTag::PointerofNode.value)
             write_span(io, ptrof_node.span)
-            write_expr_id(io, ptrof_node.expression)
+            write_expr_id_array(io, ptrof_node.args)
 
           when Frontend::NodeKind::Begin
             begin_node = node.as(Frontend::BeginNode)
@@ -858,13 +945,13 @@ module CrystalV2
             raise_node = node.as(Frontend::RaiseNode)
             io.write_byte(AstNodeTag::RaiseNode.value)
             write_span(io, raise_node.span)
-            write_optional_expr_id(io, raise_node.expression)
+            write_optional_expr_id(io, raise_node.value)
 
           when Frontend::NodeKind::VisibilityModifier
             vis_node = node.as(Frontend::VisibilityModifierNode)
             io.write_byte(AstNodeTag::VisibilityModifierNode.value)
             write_span(io, vis_node.span)
-            io.write_byte(vis_node.visibility.value)
+            io.write_byte(vis_node.visibility.value.to_u8)
             write_expr_id(io, vis_node.expression)
 
           when Frontend::NodeKind::Super
@@ -883,39 +970,38 @@ module CrystalV2
             uninit_node = node.as(Frontend::UninitializedNode)
             io.write_byte(AstNodeTag::UninitializedNode.value)
             write_span(io, uninit_node.span)
-            write_expr_id(io, uninit_node.type_expr)
+            write_expr_id(io, uninit_node.type)
 
           when Frontend::NodeKind::Offsetof
             offset_node = node.as(Frontend::OffsetofNode)
             io.write_byte(AstNodeTag::OffsetofNode.value)
             write_span(io, offset_node.span)
-            write_expr_id(io, offset_node.type_expr)
-            write_expr_id(io, offset_node.field)
+            write_expr_id_array(io, offset_node.args)
 
           when Frontend::NodeKind::Alignof
             alignof_node = node.as(Frontend::AlignofNode)
             io.write_byte(AstNodeTag::AlignofNode.value)
             write_span(io, alignof_node.span)
-            write_expr_id(io, alignof_node.type_expr)
+            write_expr_id_array(io, alignof_node.args)
 
           when Frontend::NodeKind::InstanceAlignof
             inst_alignof_node = node.as(Frontend::InstanceAlignofNode)
             io.write_byte(AstNodeTag::InstanceAlignofNode.value)
             write_span(io, inst_alignof_node.span)
-            write_expr_id(io, inst_alignof_node.type_expr)
+            write_expr_id_array(io, inst_alignof_node.args)
 
           when Frontend::NodeKind::Out
             out_node = node.as(Frontend::OutNode)
             io.write_byte(AstNodeTag::OutNode.value)
             write_span(io, out_node.span)
-            write_expr_id(io, out_node.expression)
+            write_string_ref(io, String.new(out_node.identifier), string_table)
 
           when Frontend::NodeKind::TypeDeclaration
             type_decl_node = node.as(Frontend::TypeDeclarationNode)
             io.write_byte(AstNodeTag::TypeDeclarationNode.value)
             write_span(io, type_decl_node.span)
-            write_expr_id(io, type_decl_node.variable)
-            write_expr_id(io, type_decl_node.type_expr)
+            write_string_ref(io, String.new(type_decl_node.name), string_table)
+            write_string_ref(io, String.new(type_decl_node.declared_type), string_table)
             write_optional_expr_id(io, type_decl_node.value)
 
           when Frontend::NodeKind::InstanceVarDecl
@@ -923,7 +1009,7 @@ module CrystalV2
             io.write_byte(AstNodeTag::InstanceVarDeclNode.value)
             write_span(io, ivar_decl_node.span)
             write_string_ref(io, String.new(ivar_decl_node.name), string_table)
-            write_expr_id(io, ivar_decl_node.type_expr)
+            write_string_ref(io, String.new(ivar_decl_node.type), string_table)
             write_optional_expr_id(io, ivar_decl_node.value)
 
           when Frontend::NodeKind::ClassVarDecl
@@ -931,7 +1017,7 @@ module CrystalV2
             io.write_byte(AstNodeTag::ClassVarDeclNode.value)
             write_span(io, cvar_decl_node.span)
             write_string_ref(io, String.new(cvar_decl_node.name), string_table)
-            write_expr_id(io, cvar_decl_node.type_expr)
+            write_string_ref(io, String.new(cvar_decl_node.type), string_table)
             write_optional_expr_id(io, cvar_decl_node.value)
 
           when Frontend::NodeKind::GlobalVarDecl
@@ -939,8 +1025,7 @@ module CrystalV2
             io.write_byte(AstNodeTag::GlobalVarDeclNode.value)
             write_span(io, gvar_decl_node.span)
             write_string_ref(io, String.new(gvar_decl_node.name), string_table)
-            write_expr_id(io, gvar_decl_node.type_expr)
-            write_optional_expr_id(io, gvar_decl_node.value)
+            write_string_ref(io, String.new(gvar_decl_node.type), string_table)
 
           when Frontend::NodeKind::With
             with_node = node.as(Frontend::WithNode)
@@ -959,73 +1044,74 @@ module CrystalV2
             anno_node = node.as(Frontend::AnnotationNode)
             io.write_byte(AstNodeTag::AnnotationNode.value)
             write_span(io, anno_node.span)
-            write_string_ref(io, String.new(anno_node.name), string_table)
-            write_named_args(io, anno_node.args, string_table)
+            write_expr_id(io, anno_node.name)
+            write_expr_id_array(io, anno_node.args)
+            write_named_args(io, anno_node.named_args, string_table)
 
           when Frontend::NodeKind::Union
             union_node = node.as(Frontend::UnionNode)
             io.write_byte(AstNodeTag::UnionNode.value)
             write_span(io, union_node.span)
             write_string_ref(io, String.new(union_node.name), string_table)
-            write_expr_id_array(io, union_node.body)
+            write_optional_expr_id_array(io, union_node.body)
 
           when Frontend::NodeKind::Select
             select_node = node.as(Frontend::SelectNode)
             io.write_byte(AstNodeTag::SelectNode.value)
             write_span(io, select_node.span)
-            write_select_branches(io, select_node.when_branches)
+            write_select_branches(io, select_node.branches)
             write_optional_expr_id_array(io, select_node.else_branch)
 
           when Frontend::NodeKind::Asm
             asm_node = node.as(Frontend::AsmNode)
             io.write_byte(AstNodeTag::AsmNode.value)
             write_span(io, asm_node.span)
-            write_string_ref(io, asm_node.template, string_table)
-            io.write_byte(asm_node.volatile ? 1_u8 : 0_u8)
+            write_expr_id_array(io, asm_node.args)
 
           when Frontend::NodeKind::MacroExpression
             macro_expr_node = node.as(Frontend::MacroExpressionNode)
             io.write_byte(AstNodeTag::MacroExpressionNode.value)
             write_span(io, macro_expr_node.span)
-            write_macro_pieces(io, macro_expr_node.pieces, string_table)
+            write_expr_id(io, macro_expr_node.expression)
 
           when Frontend::NodeKind::MacroLiteral
             macro_lit_node = node.as(Frontend::MacroLiteralNode)
             io.write_byte(AstNodeTag::MacroLiteralNode.value)
             write_span(io, macro_lit_node.span)
-            write_string_ref(io, macro_lit_node.value, string_table)
+            write_macro_pieces(io, macro_lit_node.pieces, string_table)
+            io.write_byte(macro_lit_node.trim_left ? 1_u8 : 0_u8)
+            io.write_byte(macro_lit_node.trim_right ? 1_u8 : 0_u8)
 
           when Frontend::NodeKind::MacroDef
             macro_def_node = node.as(Frontend::MacroDefNode)
             io.write_byte(AstNodeTag::MacroDefNode.value)
             write_span(io, macro_def_node.span)
             write_string_ref(io, String.new(macro_def_node.name), string_table)
-            write_parameters(io, macro_def_node.params, string_table)
-            write_macro_pieces(io, macro_def_node.body, string_table)
+            write_expr_id(io, macro_def_node.body)
 
           when Frontend::NodeKind::MacroIf
             macro_if_node = node.as(Frontend::MacroIfNode)
             io.write_byte(AstNodeTag::MacroIfNode.value)
             write_span(io, macro_if_node.span)
             write_expr_id(io, macro_if_node.condition)
-            write_macro_pieces(io, macro_if_node.then_branch, string_table)
-            write_optional_macro_pieces(io, macro_if_node.else_branch, string_table)
+            write_expr_id(io, macro_if_node.then_body)
+            write_optional_expr_id(io, macro_if_node.else_body)
 
           when Frontend::NodeKind::MacroFor
             macro_for_node = node.as(Frontend::MacroForNode)
             io.write_byte(AstNodeTag::MacroForNode.value)
             write_span(io, macro_for_node.span)
-            io.write_bytes(macro_for_node.variables.size.to_u32, IO::ByteFormat::LittleEndian)
-            macro_for_node.variables.each { |v| write_string_ref(io, v, string_table) }
+            io.write_bytes(macro_for_node.iter_vars.size.to_u32, IO::ByteFormat::LittleEndian)
+            macro_for_node.iter_vars.each { |v| write_string_ref(io, String.new(v), string_table) }
             write_expr_id(io, macro_for_node.iterable)
-            write_macro_pieces(io, macro_for_node.body, string_table)
+            write_expr_id(io, macro_for_node.body)
           end
         end
 
         # Helper methods for writing primitives
         private def write_span(io : IO, span : Frontend::Span)
-          io.write_bytes(span.start_byte.to_u32, IO::ByteFormat::LittleEndian)
-          io.write_bytes(span.end_byte.to_u32, IO::ByteFormat::LittleEndian)
+          io.write_bytes(span.start_offset.to_u32, IO::ByteFormat::LittleEndian)
+          io.write_bytes(span.end_offset.to_u32, IO::ByteFormat::LittleEndian)
           io.write_bytes(span.start_line.to_u32, IO::ByteFormat::LittleEndian)
           io.write_bytes(span.start_column.to_u32, IO::ByteFormat::LittleEndian)
           io.write_bytes(span.end_line.to_u32, IO::ByteFormat::LittleEndian)
@@ -1068,6 +1154,15 @@ module CrystalV2
           if str
             io.write_byte(1_u8)
             write_string_ref(io, str, table)
+          else
+            io.write_byte(0_u8)
+          end
+        end
+
+        private def write_optional_visibility(io : IO, visibility : Frontend::Visibility?)
+          if visibility
+            io.write_byte(1_u8)
+            io.write_byte(visibility.value.to_u8)
           else
             io.write_byte(0_u8)
           end
@@ -1232,7 +1327,7 @@ module CrystalV2
         private def write_string_pieces(io : IO, pieces : Array(Frontend::StringPiece), table : Hash(String, UInt32))
           io.write_bytes(pieces.size.to_u32, IO::ByteFormat::LittleEndian)
           pieces.each do |p|
-            io.write_byte(p.kind.value)
+            io.write_byte(p.kind.value.to_u8)
             if p.kind.text?
               write_string_ref(io, p.text.not_nil!, table)
             else
@@ -1244,7 +1339,7 @@ module CrystalV2
         private def write_macro_pieces(io : IO, pieces : Array(Frontend::MacroPiece), table : Hash(String, UInt32))
           io.write_bytes(pieces.size.to_u32, IO::ByteFormat::LittleEndian)
           pieces.each do |p|
-            io.write_byte(p.kind.value)
+            io.write_byte(p.kind.value.to_u8)
             write_optional_string_ref(io, p.text, table)
             write_optional_expr_id(io, p.expr)
             write_optional_string_ref(io, p.control_keyword, table)
@@ -1530,53 +1625,50 @@ module CrystalV2
           when .def_node?
             span = read_span(io)
             name = pool.intern(strings[read_string_idx(io)].to_slice)
-            params = read_parameters(io, strings, pool) || [] of Frontend::Parameter
+            params = read_parameters(io, strings, pool)
             return_type = read_optional_string(io, strings, pool)
-            body = read_expr_id_array(io)
-            type_params = read_optional_string_array(io, strings, pool)
-            visibility = Frontend::Visibility.new(io.read_byte.not_nil!)
+            body = read_optional_expr_id_array(io)
+            visibility = read_optional_visibility(io)
             is_abstract = io.read_byte.not_nil! == 1_u8
-            is_macro_def = io.read_byte.not_nil! == 1_u8
-            receiver = read_optional_expr_id(io)
-            Frontend::DefNode.new(span, name, params, return_type, body, type_params, visibility, is_abstract, is_macro_def, receiver)
+            receiver = read_optional_string(io, strings, pool)
+            Frontend::DefNode.new(span, name, params, return_type, body, is_abstract, visibility, receiver)
 
           when .class_node?
             span = read_span(io)
             name = pool.intern(strings[read_string_idx(io)].to_slice)
             superclass = read_optional_string(io, strings, pool)
-            body = read_expr_id_array(io)
+            body = read_optional_expr_id_array(io)
             type_params = read_optional_string_array(io, strings, pool)
             is_abstract = io.read_byte.not_nil! == 1_u8
-            Frontend::ClassNode.new(span, name, superclass, body, type_params, is_abstract)
+            is_struct = io.read_byte.not_nil! == 1_u8
+            is_union = io.read_byte.not_nil! == 1_u8
+            Frontend::ClassNode.new(span, name, superclass, body, is_abstract, is_struct, is_union, type_params)
 
           when .module_node?
             span = read_span(io)
             name = pool.intern(strings[read_string_idx(io)].to_slice)
-            body = read_expr_id_array(io)
+            body = read_optional_expr_id_array(io)
             type_params = read_optional_string_array(io, strings, pool)
             Frontend::ModuleNode.new(span, name, body, type_params)
 
           when .struct_node?
             span = read_span(io)
             name = pool.intern(strings[read_string_idx(io)].to_slice)
-            body = read_expr_id_array(io)
-            type_params = read_optional_string_array(io, strings, pool)
-            is_abstract = io.read_byte.not_nil! == 1_u8
-            Frontend::StructNode.new(span, name, body, type_params, is_abstract)
+            body = read_optional_expr_id_array(io)
+            Frontend::StructNode.new(span, name, body)
 
           when .enum_node?
             span = read_span(io)
             name = pool.intern(strings[read_string_idx(io)].to_slice)
             members = read_enum_members(io, strings, pool)
             base_type = read_optional_string(io, strings, pool)
-            methods = read_expr_id_array(io)
-            Frontend::EnumNode.new(span, name, members, base_type, methods)
+            Frontend::EnumNode.new(span, name, base_type, members)
 
           when .alias_node?
             span = read_span(io)
             name = pool.intern(strings[read_string_idx(io)].to_slice)
-            aliased_type = pool.intern(strings[read_string_idx(io)].to_slice)
-            Frontend::AliasNode.new(span, name, aliased_type)
+            value = pool.intern(strings[read_string_idx(io)].to_slice)
+            Frontend::AliasNode.new(span, name, value)
 
           when .constant_node?
             span = read_span(io)
@@ -1586,48 +1678,53 @@ module CrystalV2
 
           when .include_node?
             span = read_span(io)
-            module_path = pool.intern(strings[read_string_idx(io)].to_slice)
-            Frontend::IncludeNode.new(span, module_path)
+            name = pool.intern(strings[read_string_idx(io)].to_slice)
+            target = read_expr_id(io)
+            Frontend::IncludeNode.new(span, name, target)
 
           when .extend_node?
             span = read_span(io)
-            module_path = pool.intern(strings[read_string_idx(io)].to_slice)
-            Frontend::ExtendNode.new(span, module_path)
+            name = pool.intern(strings[read_string_idx(io)].to_slice)
+            target = read_expr_id(io)
+            Frontend::ExtendNode.new(span, name, target)
 
           when .getter_node?
             span = read_span(io)
             specs = read_accessor_specs(io, strings, pool)
-            Frontend::GetterNode.new(span, specs)
+            is_class = io.read_byte.not_nil! == 1_u8
+            Frontend::GetterNode.new(span, specs, is_class)
 
           when .setter_node?
             span = read_span(io)
             specs = read_accessor_specs(io, strings, pool)
-            Frontend::SetterNode.new(span, specs)
+            is_class = io.read_byte.not_nil! == 1_u8
+            Frontend::SetterNode.new(span, specs, is_class)
 
           when .property_node?
             span = read_span(io)
             specs = read_accessor_specs(io, strings, pool)
-            Frontend::PropertyNode.new(span, specs)
+            is_class = io.read_byte.not_nil! == 1_u8
+            Frontend::PropertyNode.new(span, specs, is_class)
 
           when .require_node?
             span = read_span(io)
-            path = pool.intern(strings[read_string_idx(io)].to_slice)
+            path = read_expr_id(io)
             Frontend::RequireNode.new(span, path)
 
           when .lib_node?
             span = read_span(io)
             name = pool.intern(strings[read_string_idx(io)].to_slice)
-            body = read_expr_id_array(io)
+            body = read_optional_expr_id_array(io)
             Frontend::LibNode.new(span, name, body)
 
           when .fun_node?
             span = read_span(io)
             name = pool.intern(strings[read_string_idx(io)].to_slice)
-            params = read_parameters(io, strings, pool) || [] of Frontend::Parameter
+            real_name = read_optional_string(io, strings, pool)
+            params = read_parameters(io, strings, pool)
             return_type = read_optional_string(io, strings, pool)
-            body = read_optional_expr_id_array(io)
             is_variadic = io.read_byte.not_nil! == 1_u8
-            Frontend::FunNode.new(span, name, params, return_type, body, is_variadic)
+            Frontend::FunNode.new(span, name, real_name, params, return_type, is_variadic)
 
           when .generic_node?
             span = read_span(io)
@@ -1637,52 +1734,48 @@ module CrystalV2
 
           when .path_node?
             span = read_span(io)
-            count = io.read_bytes(UInt32, IO::ByteFormat::LittleEndian).to_i
-            parts = Array(Slice(UInt8)).new(count)
-            count.times do
-              parts << pool.intern(strings[read_string_idx(io)].to_slice)
-            end
-            is_global = io.read_byte.not_nil! == 1_u8
-            Frontend::PathNode.new(span, parts, is_global)
+            left = read_optional_expr_id(io)
+            right = read_expr_id(io)
+            Frontend::PathNode.new(span, left, right)
 
           when .as_node?
             span = read_span(io)
             expr = read_expr_id(io)
-            type_expr = read_expr_id(io)
-            Frontend::AsNode.new(span, expr, type_expr)
+            target_type = pool.intern(strings[read_string_idx(io)].to_slice)
+            Frontend::AsNode.new(span, expr, target_type)
 
           when .as_question_node?
             span = read_span(io)
             expr = read_expr_id(io)
-            type_expr = read_expr_id(io)
-            Frontend::AsQuestionNode.new(span, expr, type_expr)
+            target_type = pool.intern(strings[read_string_idx(io)].to_slice)
+            Frontend::AsQuestionNode.new(span, expr, target_type)
 
           when .is_a_node?
             span = read_span(io)
             expr = read_expr_id(io)
-            type_expr = read_expr_id(io)
-            Frontend::IsANode.new(span, expr, type_expr)
+            target_type = pool.intern(strings[read_string_idx(io)].to_slice)
+            Frontend::IsANode.new(span, expr, target_type)
 
           when .responds_to_node?
             span = read_span(io)
             expr = read_expr_id(io)
-            method_name = pool.intern(strings[read_string_idx(io)].to_slice)
+            method_name = read_expr_id(io)
             Frontend::RespondsToNode.new(span, expr, method_name)
 
           when .typeof_node?
             span = read_span(io)
-            expr = read_expr_id(io)
-            Frontend::TypeofNode.new(span, expr)
+            args = read_expr_id_array(io)
+            Frontend::TypeofNode.new(span, args)
 
           when .sizeof_node?
             span = read_span(io)
-            type_expr = read_expr_id(io)
-            Frontend::SizeofNode.new(span, type_expr)
+            args = read_expr_id_array(io)
+            Frontend::SizeofNode.new(span, args)
 
           when .pointerof_node?
             span = read_span(io)
-            expr = read_expr_id(io)
-            Frontend::PointerofNode.new(span, expr)
+            args = read_expr_id_array(io)
+            Frontend::PointerofNode.new(span, args)
 
           when .begin_node?
             span = read_span(io)
@@ -1720,52 +1813,50 @@ module CrystalV2
 
           when .offsetof_node?
             span = read_span(io)
-            type_expr = read_expr_id(io)
-            field = read_expr_id(io)
-            Frontend::OffsetofNode.new(span, type_expr, field)
+            args = read_expr_id_array(io)
+            Frontend::OffsetofNode.new(span, args)
 
           when .alignof_node?
             span = read_span(io)
-            type_expr = read_expr_id(io)
-            Frontend::AlignofNode.new(span, type_expr)
+            args = read_expr_id_array(io)
+            Frontend::AlignofNode.new(span, args)
 
           when .instance_alignof_node?
             span = read_span(io)
-            type_expr = read_expr_id(io)
-            Frontend::InstanceAlignofNode.new(span, type_expr)
+            args = read_expr_id_array(io)
+            Frontend::InstanceAlignofNode.new(span, args)
 
           when .out_node?
             span = read_span(io)
-            expr = read_expr_id(io)
-            Frontend::OutNode.new(span, expr)
+            identifier = pool.intern(strings[read_string_idx(io)].to_slice)
+            Frontend::OutNode.new(span, identifier)
 
           when .type_declaration_node?
             span = read_span(io)
-            variable = read_expr_id(io)
-            type_expr = read_expr_id(io)
+            name = pool.intern(strings[read_string_idx(io)].to_slice)
+            declared_type = pool.intern(strings[read_string_idx(io)].to_slice)
             value = read_optional_expr_id(io)
-            Frontend::TypeDeclarationNode.new(span, variable, type_expr, value)
+            Frontend::TypeDeclarationNode.new(span, name, declared_type, value)
 
           when .instance_var_decl_node?
             span = read_span(io)
             name = pool.intern(strings[read_string_idx(io)].to_slice)
-            type_expr = read_expr_id(io)
+            type = pool.intern(strings[read_string_idx(io)].to_slice)
             value = read_optional_expr_id(io)
-            Frontend::InstanceVarDeclNode.new(span, name, type_expr, value)
+            Frontend::InstanceVarDeclNode.new(span, name, type, value)
 
           when .class_var_decl_node?
             span = read_span(io)
             name = pool.intern(strings[read_string_idx(io)].to_slice)
-            type_expr = read_expr_id(io)
+            type = pool.intern(strings[read_string_idx(io)].to_slice)
             value = read_optional_expr_id(io)
-            Frontend::ClassVarDeclNode.new(span, name, type_expr, value)
+            Frontend::ClassVarDeclNode.new(span, name, type, value)
 
           when .global_var_decl_node?
             span = read_span(io)
             name = pool.intern(strings[read_string_idx(io)].to_slice)
-            type_expr = read_expr_id(io)
-            value = read_optional_expr_id(io)
-            Frontend::GlobalVarDeclNode.new(span, name, type_expr, value)
+            type = pool.intern(strings[read_string_idx(io)].to_slice)
+            Frontend::GlobalVarDeclNode.new(span, name, type)
 
           when .with_node?
             span = read_span(io)
@@ -1780,14 +1871,15 @@ module CrystalV2
 
           when .annotation_node?
             span = read_span(io)
-            name = pool.intern(strings[read_string_idx(io)].to_slice)
-            args = read_named_args(io, strings, pool)
-            Frontend::AnnotationNode.new(span, name, args)
+            name = read_expr_id(io)
+            args = read_expr_id_array(io)
+            named_args = read_named_args(io, strings, pool)
+            Frontend::AnnotationNode.new(span, name, args, named_args)
 
           when .union_node?
             span = read_span(io)
             name = pool.intern(strings[read_string_idx(io)].to_slice)
-            body = read_expr_id_array(io)
+            body = read_optional_expr_id_array(io)
             Frontend::UnionNode.new(span, name, body)
 
           when .select_node?
@@ -1798,41 +1890,41 @@ module CrystalV2
 
           when .asm_node?
             span = read_span(io)
-            template = strings[read_string_idx(io)]
-            volatile = io.read_byte.not_nil! == 1_u8
-            Frontend::AsmNode.new(span, template, volatile)
+            args = read_expr_id_array(io)
+            Frontend::AsmNode.new(span, args)
 
           when .macro_expression_node?
             span = read_span(io)
-            pieces = read_macro_pieces(io, strings, pool)
-            Frontend::MacroExpressionNode.new(span, pieces)
+            expr = read_expr_id(io)
+            Frontend::MacroExpressionNode.new(span, expr)
 
           when .macro_literal_node?
             span = read_span(io)
-            value = strings[read_string_idx(io)]
-            Frontend::MacroLiteralNode.new(span, value)
+            pieces = read_macro_pieces(io, strings, pool)
+            trim_left = io.read_byte.not_nil! == 1_u8
+            trim_right = io.read_byte.not_nil! == 1_u8
+            Frontend::MacroLiteralNode.new(span, pieces, trim_left, trim_right)
 
           when .macro_def_node?
             span = read_span(io)
             name = pool.intern(strings[read_string_idx(io)].to_slice)
-            params = read_parameters(io, strings, pool) || [] of Frontend::Parameter
-            body = read_macro_pieces(io, strings, pool)
-            Frontend::MacroDefNode.new(span, name, params, body)
+            body = read_expr_id(io)
+            Frontend::MacroDefNode.new(span, name, body)
 
           when .macro_if_node?
             span = read_span(io)
             condition = read_expr_id(io)
-            then_branch = read_macro_pieces(io, strings, pool)
-            else_branch = read_optional_macro_pieces(io, strings, pool)
-            Frontend::MacroIfNode.new(span, condition, then_branch, else_branch)
+            then_body = read_expr_id(io)
+            else_body = read_optional_expr_id(io)
+            Frontend::MacroIfNode.new(span, condition, then_body, else_body)
 
           when .macro_for_node?
             span = read_span(io)
             count = io.read_bytes(UInt32, IO::ByteFormat::LittleEndian).to_i
-            variables = Array(String).new(count)
-            count.times { variables << strings[read_string_idx(io)] }
+            variables = Array(Slice(UInt8)).new(count)
+            count.times { variables << pool.intern(strings[read_string_idx(io)].to_slice) }
             iterable = read_expr_id(io)
-            body = read_macro_pieces(io, strings, pool)
+            body = read_expr_id(io)
             Frontend::MacroForNode.new(span, variables, iterable, body)
 
           else
@@ -1844,13 +1936,13 @@ module CrystalV2
 
         # Read helper methods
         private def self.read_span(io : IO) : Frontend::Span
-          start_byte = io.read_bytes(UInt32, IO::ByteFormat::LittleEndian).to_i32
-          end_byte = io.read_bytes(UInt32, IO::ByteFormat::LittleEndian).to_i32
+          start_offset = io.read_bytes(UInt32, IO::ByteFormat::LittleEndian).to_i32
+          end_offset = io.read_bytes(UInt32, IO::ByteFormat::LittleEndian).to_i32
           start_line = io.read_bytes(UInt32, IO::ByteFormat::LittleEndian).to_i32
           start_col = io.read_bytes(UInt32, IO::ByteFormat::LittleEndian).to_i32
           end_line = io.read_bytes(UInt32, IO::ByteFormat::LittleEndian).to_i32
           end_col = io.read_bytes(UInt32, IO::ByteFormat::LittleEndian).to_i32
-          Frontend::Span.new(start_byte, end_byte, start_line, start_col, end_line, end_col)
+          Frontend::Span.new(start_offset, end_offset, start_line, start_col, end_line, end_col)
         end
 
         private def self.read_optional_span(io : IO) : Frontend::Span?
@@ -1880,6 +1972,11 @@ module CrystalV2
 
         private def self.read_optional_string(io : IO, strings : Array(String), pool : Frontend::StringPool) : Slice(UInt8)?
           io.read_byte.not_nil! == 1_u8 ? pool.intern(strings[read_string_idx(io)].to_slice) : nil
+        end
+
+        private def self.read_optional_visibility(io : IO) : Frontend::Visibility?
+          return nil unless io.read_byte.not_nil! == 1_u8
+          Frontend::Visibility.new(io.read_byte.not_nil!)
         end
 
         private def self.read_optional_string_array(io : IO, strings : Array(String), pool : Frontend::StringPool) : Array(Slice(UInt8))?
