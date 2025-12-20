@@ -64,6 +64,29 @@ describe "MIR ABI layout sanity" do
     fields.find(&.name.==("@y")).not_nil!.offset.should eq(12)
   end
 
+  it "lays out subclass ivars after parent fields" do
+    code = <<-CRYSTAL
+      class Parent
+        @x : Int32
+      end
+
+      class Child < Parent
+        @y : Int64
+      end
+    CRYSTAL
+
+    mir_mod = build_mir_module(code)
+    child_type = mir_mod.type_registry.get_by_name("Child").not_nil!
+
+    child_type.kind.reference?.should be_true
+    child_type.size.should eq(20)
+    child_type.alignment.should eq(8)
+
+    fields = child_type.fields.not_nil!
+    fields.find(&.name.==("@x")).not_nil!.offset.should eq(8)
+    fields.find(&.name.==("@y")).not_nil!.offset.should eq(12)
+  end
+
   it "lays out struct ivars without a header offset" do
     code = <<-CRYSTAL
       struct S
@@ -100,5 +123,23 @@ describe "MIR ABI layout sanity" do
     descriptor = mir_mod.get_union_descriptor(Crystal::MIR::TypeRef.new(union_type.id)).not_nil!
     descriptor.payload_offset.should eq(8)
     descriptor.max_payload_size.should eq(8)
+  end
+
+  it "aligns union payload to the max variant alignment" do
+    code = <<-CRYSTAL
+      class U
+        @u : Int128 | Int8
+      end
+    CRYSTAL
+
+    mir_mod = build_mir_module(code)
+    union_type = mir_mod.type_registry.get_by_name("Int128 | Int8").not_nil!
+    union_type.kind.union?.should be_true
+    union_type.size.should eq(32)
+    union_type.alignment.should eq(16)
+
+    descriptor = mir_mod.get_union_descriptor(Crystal::MIR::TypeRef.new(union_type.id)).not_nil!
+    descriptor.payload_offset.should eq(16)
+    descriptor.max_payload_size.should eq(16)
   end
 end
