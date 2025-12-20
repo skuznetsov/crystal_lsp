@@ -68,6 +68,22 @@ describe Crystal::HIR::TaintAnalyzer do
       analyzer.cyclic?("B").should be_true
     end
 
+    it "detects cycles through generic element types" do
+      # class Node; @children : Array(Node); end
+      type_info = MockTypeInfoProvider.new({
+        "Node" => {"@children" => "Array(Node)"},
+      })
+
+      mod, func = create_function
+      entry = func.get_block(func.entry_block)
+      entry.terminator = Crystal::HIR::Return.new(nil)
+
+      analyzer = Crystal::HIR::TaintAnalyzer.new(func, type_info)
+      analyzer.analyze
+
+      analyzer.cyclic?("Node").should be_true
+    end
+
     it "does not mark non-cyclic types" do
       # class Container; @value : String; end
       type_info = MockTypeInfoProvider.new({

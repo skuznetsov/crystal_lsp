@@ -89,10 +89,10 @@ module Crystal::HIR
       # Build type graph: class_name → field types
       type_graph = {} of String => Array(String)
       type_info.class_names.each do |class_name|
-        field_types = type_info.instance_var_types(class_name).values.compact.map do |type_ann|
-          extract_base_type(type_ann)
+        field_types = type_info.instance_var_types(class_name).values.compact.flat_map do |type_ann|
+          extract_type_references(type_ann)
         end
-        type_graph[class_name] = field_types
+        type_graph[class_name] = field_types.uniq
       end
 
       type_graph.each_key do |name|
@@ -127,17 +127,25 @@ module Crystal::HIR
       in_stack.delete(type_name)
     end
 
-    # Extract base type name from annotation like "Array(Node)?" → "Array"
-    private def extract_base_type(type_ann : String) : String
-      # Remove nilable suffix
-      name = type_ann.rchop("?")
+    # Extract all referenced type names from an annotation like:
+    # "Array(Hash(String, Node?))" → ["Array", "Hash", "String", "Node"]
+    private def extract_type_references(type_ann : String) : Array(String)
+      refs = [] of String
+      current = ""
 
-      # Remove generic parameters
-      if paren_idx = name.index('(')
-        name = name[0...paren_idx]
+      type_ann.each_char do |char|
+        if char.ascii_alphanumeric? || char == '_' || char == ':'
+          current += char
+        else
+          unless current.empty?
+            refs << current
+            current = ""
+          end
+        end
       end
 
-      name
+      refs << current unless current.empty?
+      refs
     end
 
     # =========================================================================

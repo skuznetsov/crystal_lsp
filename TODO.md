@@ -650,7 +650,10 @@ The key insight is: **Don't compete with LLVM, complement it.**
 - [ ] Arena/slab frame experiment: prolog/epilog frame for no-escape functions (behind flag).
 - [x] LTP/WBA optimization framework implemented (2025-12-11): 4-component potential, Window/Corridor tracking, legal moves.
 - [x] **Tests green after recent hardening** (2025-12-10): all specs passing (9 pending intentional) after fixing yield/puts/array/lifetime, empty hash inference, struct LLVM type mapping, and stabilizing pipeline.
-- [ ] **Next:** cycle detection, ABI harness (offset/align/union), RC/taint inline audit, ThreadShared→atomic/GC enforcement.
+- [x] **Next:** cycle detection (generic element types) (2025-12-26)
+- [ ] ABI harness (offset/align/union)
+- [ ] RC/taint inline audit
+- [ ] ThreadShared→atomic/GC enforcement
 
 ---
 
