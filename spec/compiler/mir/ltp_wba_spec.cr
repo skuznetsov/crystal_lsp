@@ -188,6 +188,19 @@ describe Crystal::MIR::LTPEngine do
       # The potential's area should be less than or equal to initial
       potential.area.should be <= initial_insts
     end
+
+    it "keeps potential monotone non-increasing" do
+      func = LTPTestHelpers.create_test_function_with_rc
+      engine = Crystal::MIR::LTPEngine.new(func)
+
+      engine.run(max_iters: 5)
+      trace = engine.potential_trace
+
+      trace.size.should be > 0
+      (1...trace.size).each do |idx|
+        (trace[idx] <= trace[idx - 1]).should be_true
+      end
+    end
   end
 
   describe "BR-5 (Finiteness)" do

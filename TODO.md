@@ -697,48 +697,48 @@ The key insight is: **Don't compete with LLVM, complement it.**
 #### Implementation Tasks:
 
 **Phase 1: Enhanced Potential (Φ′)**
-- [ ] Add `WindowMetrics` struct with overlap/tie-plateau/corner-mismatch
-- [ ] Implement `find_window()` to select max-exposure trigger instruction
-- [ ] Update `PotentialMetrics` to 4-component `(I, -M, P, area)`
-- [ ] Implement lexicographic comparison for new potential
+- [x] Add window metrics (overlap/tie-plateau/corner-mismatch) via `LTPPotential`
+- [x] Implement `find_window()` to select max-exposure trigger instruction
+- [x] Update potential to 4-component `(I, -M, P, area)`
+- [x] Implement lexicographic comparison for new potential
 
 **Phase 2: Window & Corridor (BR-1, BR-2)**
-- [ ] Implement `Window` struct representing a boundary cell (instruction + context)
-- [ ] Implement `Corridor` struct for def-use chain from trigger to terminator
-- [ ] Add `trace_corridor(window)` to follow value through uses
-- [ ] Corridor exits: boundary (func return), escape (call arg), or alternative frame
+- [x] Implement `Window` struct representing a boundary cell (instruction + context)
+- [x] Implement `Corridor` struct for def-use chain from trigger to terminator
+- [x] Add `trace_corridor(window)` to follow value through uses
+- [x] Corridor exits: boundary (func return), escape (call arg), or alternative frame
 
 **Phase 3: Legal Moves Library**
-- [ ] **Spike move:** rc_inc/rc_dec pair cancellation (existing, enhance)
+- [x] **Spike move:** rc_inc/rc_dec pair cancellation (existing, enhance)
   - Track must-alias for safe elision
   - Decrease: ΔI or Δ(-M) if tie-breaker
-- [ ] **Ladder move:** Short corridor elimination
+- [x] **Ladder move:** Short corridor elimination
   - If rc_inc → single_use → rc_dec, remove middle
   - Decrease: ΔP (corner mismatch)
-- [ ] **Diamond move:** Confluent critical pair resolution
+- [x] **Diamond move:** Confluent critical pair resolution
   - When two moves conflict, compute Φ for both, choose lower
   - Decrease: ΔP or Δarea
-- [ ] **Collapse move:** Redundant instruction removal (DCE)
+- [x] **Collapse move:** Redundant instruction removal (DCE)
   - Decrease: Δarea only (I, M, P fixed)
 
 **Phase 4: Dual Frame Fallback (BR-4)**
-- [ ] Detect "stuck" state: no legal move decreases Φ
-- [ ] Switch to escape analysis frame
+- [x] Detect "stuck" state: no legal move decreases Φ
+- [x] Switch to escape analysis frame (initial: constant-folding fallback)
 - [ ] If escape frame also stuck, switch to curvature/lifetime frame
 - [ ] Unified potential across frames (Φ_esc compatible with Φ_primary)
 
 **Phase 5: L2-Engine Scheduler**
-- [ ] Priority: S ≻ L ≻ D ≻ C (Spike > Ladder > Diamond > Collapse)
-- [ ] Main loop: find window → trace corridor → apply best move → recompute Φ
-- [ ] Termination: Φ stops decreasing or area = 0
-- [ ] Logging: emit move sequence for debugging
+- [x] Priority: S ≻ L ≻ D ≻ C (Spike > Ladder > Diamond > Collapse)
+- [x] Main loop: find window → trace corridor → apply best move → recompute Φ
+- [x] Termination: Φ stops decreasing or area = 0
+- [x] Logging: emit move sequence for debugging
 
 **Phase 6: Integration & Testing**
 - [x] Replace `optimize_with_potential` with LTP engine (returns LTPPotential; LTP run after legacy loop)
 - [x] Add specs for each move type
 - [x] Add specs for dual-frame fallback
 - [ ] Benchmark: compare old vs new on bootstrap examples
-- [ ] Verify monotone descent property
+- [x] Verify monotone descent property
 
 **Files to modify:**
 - `src/compiler/mir/optimizations.cr` - Main LTP implementation

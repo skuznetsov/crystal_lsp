@@ -1045,6 +1045,7 @@ module Crystal::MIR
     getter moves_applied : Array(LegalMove)
     getter iterations : Int32
     getter final_potential : LTPPotential
+    getter potential_trace : Array(LTPPotential)
     property debug : Bool
 
     # Def-use chains for corridor tracing
@@ -1058,6 +1059,7 @@ module Crystal::MIR
       @moves_applied = [] of LegalMove
       @iterations = 0
       @final_potential = LTPPotential.zero
+      @potential_trace = [] of LTPPotential
       @debug = false
       @use_map = Hash(ValueId, Array(Tuple(BasicBlock, Int32, Value))).new
       @alias_map = Hash(ValueId, ValueId).new
@@ -1071,6 +1073,7 @@ module Crystal::MIR
     def run(max_iters : Int32 = 10) : LTPPotential
       build_analysis_maps
       @final_potential = compute_ltp_potential
+      @potential_trace << @final_potential
 
       log "LTP Engine start: #{@final_potential}"
 
@@ -1082,6 +1085,7 @@ module Crystal::MIR
           if try_dual_frame
             build_analysis_maps
             @final_potential = compute_ltp_potential
+            @potential_trace << @final_potential
             @iterations += 1
             next
           end
@@ -1119,6 +1123,7 @@ module Crystal::MIR
           end
 
           @final_potential = new_potential
+          @potential_trace << @final_potential
           log "    New potential: #{@final_potential}"
         else
           log "    No legal move found. Trying Collapse..."
@@ -1128,11 +1133,13 @@ module Crystal::MIR
             log "    Collapsed #{collapsed} dead instructions"
             build_analysis_maps
             @final_potential = compute_ltp_potential
+            @potential_trace << @final_potential
           else
             log "    Nothing to collapse. Trying dual frame..."
             if try_dual_frame
               build_analysis_maps
               @final_potential = compute_ltp_potential
+              @potential_trace << @final_potential
             else
               log "    Dual frame exhausted. Stopping."
               break
