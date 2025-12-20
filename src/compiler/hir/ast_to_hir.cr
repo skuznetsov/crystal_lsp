@@ -330,6 +330,9 @@ module Crystal::HIR
     # Track currently inlined yield-functions to avoid infinite inline recursion on stdlib code.
     @inline_yield_name_stack : Array(String) = [] of String
 
+    # Track declared type names for locals (used to resolve module-typed receivers).
+    @current_typeof_local_names : Hash(String, String)?
+
     def initialize(@arena, module_name : String = "main")
       @module = Module.new(module_name)
       @function_types = {} of String => TypeRef
@@ -355,6 +358,7 @@ module Crystal::HIR
       @type_aliases = {} of String => String
       @generated_allocators = Set(String).new
       @type_cache = {} of String => TypeRef
+      @current_typeof_local_names = nil
     end
 
     private def record_module_inclusion(module_name : String, class_name : String) : Nil
@@ -943,15 +947,31 @@ module Crystal::HIR
     end
 
     private def resolve_alias_target(target_name : String) : String
-      return target_name unless target_name.includes?("typeof(")
-      resolved = resolve_typeof_in_type_string(target_name)
+      resolved = normalize_declared_type_name(target_name)
       return target_name if resolved.includes?("Pointer(Void)") || resolved.includes?("Unknown")
+      resolved
+    end
+
+    private def normalize_declared_type_name(type_name : String) : String
+      resolved = resolve_typeof_in_type_string(type_name)
+      @type_param_map.each do |param, actual|
+        resolved = substitute_type_param(resolved, param, actual)
+      end
       resolved
     end
 
     private def update_typeof_local(name : String, type_ref : TypeRef) : Nil
       return unless locals = @current_typeof_locals
       locals[name] = type_ref
+    end
+
+    private def update_typeof_local_name(name : String, type_name : String) : Nil
+      return unless locals = @current_typeof_local_names
+      locals[name] = normalize_declared_type_name(type_name)
+    end
+
+    private def lookup_typeof_local_name(name : String) : String?
+      @current_typeof_local_names.try(&.[name]?)
     end
 
     private def with_arena(arena : CrystalV2::Compiler::Frontend::ArenaLike, &)
@@ -1604,7 +1624,9 @@ module Crystal::HIR
       has_block = false
       param_type_map = {} of String => TypeRef
       old_typeof_locals = @current_typeof_locals
+      old_typeof_local_names = @current_typeof_local_names
       @current_typeof_locals = param_type_map
+      @current_typeof_local_names = {} of String => String
       if params = node.params
         params.each do |param|
           param_name = param.name.nil? ? "_" : String.new(param.name.not_nil!)
@@ -1615,6 +1637,9 @@ module Crystal::HIR
                        end
           param_type_map[param_name] = param_type
           param_infos << {param_name, param_type}
+          if ta = param.type_annotation
+            update_typeof_local_name(param_name, String.new(ta))
+          end
           if param.is_block
             has_block = true
           else
@@ -1649,6 +1674,7 @@ module Crystal::HIR
       end
 
       @current_typeof_locals = old_typeof_locals
+      @current_typeof_local_names = old_typeof_local_names
 
       # Restore current class
       @current_class = old_class
@@ -2736,7 +2762,9 @@ module Crystal::HIR
       has_block = false
       param_type_map = {} of String => TypeRef
       old_typeof_locals = @current_typeof_locals
+      old_typeof_local_names = @current_typeof_local_names
       @current_typeof_locals = param_type_map
+      @current_typeof_local_names = {} of String => String
       if params = node.params
         params.each do |param|
           param_name = param.name.nil? ? "_" : String.new(param.name.not_nil!)
@@ -2747,6 +2775,9 @@ module Crystal::HIR
                        end
           param_type_map[param_name] = param_type
           param_infos << {param_name, param_type, param.is_instance_var}
+          if ta = param.type_annotation
+            update_typeof_local_name(param_name, String.new(ta))
+          end
           if param.is_block
             has_block = true
           else
@@ -2848,6 +2879,7 @@ module Crystal::HIR
       end
 
       @current_typeof_locals = old_typeof_locals
+      @current_typeof_local_names = old_typeof_local_names
 
       # Restore previous method context
       @current_method = old_method
@@ -3102,6 +3134,61 @@ module Crystal::HIR
 
       # Fallback to mangled name
       mangled_name
+    end
+
+    private def module_receiver_type_name(node : CrystalV2::Compiler::Frontend::MemberAccessNode) : String?
+      obj_node = @arena[node.object]
+      case obj_node
+      when CrystalV2::Compiler::Frontend::IdentifierNode
+        name = String.new(obj_node.name)
+        if type_name = lookup_typeof_local_name(name)
+          return type_name if module_like_type_name?(type_name)
+        end
+      end
+      nil
+    end
+
+    private def resolve_module_typed_method(
+      method_name : String,
+      arg_types : Array(TypeRef),
+      module_type_name : String,
+      has_block : Bool,
+      prefer_class : String?
+    ) : String?
+      module_base = if paren = module_type_name.index('(')
+                      module_type_name[0, paren]
+                    else
+                      module_type_name
+                    end
+      includers = @module_includers[module_base]?
+      return nil unless includers && !includers.empty?
+
+      candidates = includers.to_a
+      if prefer_class
+        candidates.delete(prefer_class)
+        candidates.sort!
+        candidates.unshift(prefer_class)
+      else
+        candidates.sort!
+      end
+
+      matches = [] of String
+      candidates.each do |candidate|
+        base = "#{candidate}##{method_name}"
+        mangled = mangle_function_name(base, arg_types, has_block)
+        if @function_types.has_key?(mangled) || @module.has_function?(mangled)
+          matches << mangled
+        elsif has_function_base?(base)
+          matches << base
+        end
+      end
+
+      return matches.first if matches.size == 1
+      if prefer_class
+        preferred = matches.find { |name| name.starts_with?("#{prefer_class}#") }
+        return preferred if preferred
+      end
+      nil
     end
 
     # Fallback for yield-function inlining when receiver type is unknown (often due to untyped params).
@@ -3850,7 +3937,9 @@ module Crystal::HIR
       has_block = false
       param_type_map = {} of String => TypeRef
       old_typeof_locals = @current_typeof_locals
+      old_typeof_local_names = @current_typeof_local_names
       @current_typeof_locals = param_type_map
+      @current_typeof_local_names = {} of String => String
       if params = node.params
         params.each do |param|
           param_name = param.name.nil? ? "_" : String.new(param.name.not_nil!)
@@ -3862,6 +3951,9 @@ module Crystal::HIR
 
           param_type_map[param_name] = param_type
           param_infos << {param_name, param_type}
+          if ta = param.type_annotation
+            update_typeof_local_name(param_name, String.new(ta))
+          end
           if param.is_block
             has_block = true
           else
@@ -3926,6 +4018,7 @@ module Crystal::HIR
       end
 
       @current_typeof_locals = old_typeof_locals
+      @current_typeof_local_names = old_typeof_local_names
 
       func
     end
@@ -4410,9 +4503,11 @@ module Crystal::HIR
         if module_like_type_name?(type_name) && value_type != TypeRef::VOID
           ctx.register_type(value, value_type)
           update_typeof_local(var_name, value_type)
+          update_typeof_local_name(var_name, type_name)
         else
           ctx.register_type(value, type_ref)
           update_typeof_local(var_name, type_ref)
+          update_typeof_local_name(var_name, type_name)
         end
         value
       else
@@ -4430,6 +4525,7 @@ module Crystal::HIR
         ctx.register_local(var_name, lit.id)
         ctx.register_type(lit.id, type_ref)
         update_typeof_local(var_name, type_ref)
+        update_typeof_local_name(var_name, type_name)
         lit.id
       end
     end
@@ -7362,6 +7458,15 @@ module Crystal::HIR
           mangled_method_name = mangled_with_block
         end
       end
+
+      if receiver_id && full_method_name.nil? && callee_node.is_a?(CrystalV2::Compiler::Frontend::MemberAccessNode)
+        if module_type_name = module_receiver_type_name(callee_node)
+          if resolved = resolve_module_typed_method(method_name, arg_types, module_type_name, has_block_call, @current_class)
+            mangled_method_name = resolved
+            base_method_name = resolved.split("$").first
+          end
+        end
+      end
       primary_mangled_name = mangled_method_name
 
       # Handle yield-functions with inline expansion FIRST (before lowering block)
@@ -9930,7 +10035,9 @@ module Crystal::HIR
       # Save locals before lowering block body - block-local vars shouldn't leak
       saved_locals = ctx.save_locals
       old_typeof_locals = @current_typeof_locals
+      old_typeof_local_names = @current_typeof_local_names
       @current_typeof_locals = old_typeof_locals ? old_typeof_locals.dup : old_typeof_locals
+      @current_typeof_local_names = old_typeof_local_names ? old_typeof_local_names.dup : old_typeof_local_names
 
       ctx.current_block = body_block
       ctx.push_scope(ScopeKind::Closure)
@@ -9951,6 +10058,9 @@ module Crystal::HIR
             ctx.register_local(name, param_val.id)
             ctx.register_type(param_val.id, param_type)
             update_typeof_local(name, param_type)
+            if ta = param.type_annotation
+              update_typeof_local_name(name, String.new(ta))
+            end
           end
         end
       end
@@ -9968,6 +10078,7 @@ module Crystal::HIR
       # Restore locals - block-local vars shouldn't pollute outer scope
       ctx.restore_locals(saved_locals)
       @current_typeof_locals = old_typeof_locals
+      @current_typeof_local_names = old_typeof_local_names
       body_block
     end
 
@@ -9975,7 +10086,9 @@ module Crystal::HIR
       body_block = ctx.create_block
       saved_block = ctx.current_block
       old_typeof_locals = @current_typeof_locals
+      old_typeof_local_names = @current_typeof_local_names
       @current_typeof_locals = old_typeof_locals ? old_typeof_locals.dup : old_typeof_locals
+      @current_typeof_local_names = old_typeof_local_names ? old_typeof_local_names.dup : old_typeof_local_names
 
       ctx.current_block = body_block
       ctx.push_scope(ScopeKind::Closure)
@@ -9995,6 +10108,9 @@ module Crystal::HIR
             ctx.register_local(name, param_val.id)
             ctx.register_type(param_val.id, param_type)
             update_typeof_local(name, param_type)
+            if ta = param.type_annotation
+              update_typeof_local_name(name, String.new(ta))
+            end
           end
         end
       end
@@ -10009,6 +10125,7 @@ module Crystal::HIR
 
       ctx.current_block = saved_block
       @current_typeof_locals = old_typeof_locals
+      @current_typeof_local_names = old_typeof_local_names
 
       # Create MakeClosure
       captures = [] of CapturedVar
