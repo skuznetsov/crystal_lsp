@@ -656,11 +656,12 @@ The key insight is: **Don't compete with LLVM, complement it.**
 - [x] CLI flags for faster iteration: `--no-llvm-opt` and `--no-link` (2025-12-23)
 - [x] LLVM opt/llc artifact cache keyed by ll hash + flags (2025-12-23)
 - [x] AST cache key stabilized (FNV hash) and verified hits on warm run (parse ~164ms → ~79ms)
-- [ ] Fix AST cache save failures (ClassNode→StructNode, SplatNode→Unary) seen in verbose compile logs
+- [x] Fix AST cache save failures (ClassNode→StructNode, SplatNode→Unary) seen in verbose compile logs (2025-12-20)
 - [x] Add `--no-llvm-metadata` to skip type metadata (small LLVM time reduction)
 - [x] Reachability roots include `__crystal_main` (avoid emitting all funcs; LLVM ≈ 0.35s on /tmp/cv2_smoke.cr)
 - [ ] Investigate release compile latency on small programs (43s on /tmp/cv2_smoke.cr); add per-phase timing + cache hit diagnostics
   - Current: `--no-prelude` ≈ 16ms total; with prelude HIR ≈ 0.11s, MIR ≈ 0.1ms, LLVM ≈ 1.3ms, total ≈ 0.22s (lazy HIR lowering + reachability)
+  - Current (release + caches): `./bin/crystal_v2 --release --stats --no-link /tmp/cv2_smoke.cr` total ≈ 188ms, opt ≈ 0.1ms, llc ≈ 21.5ms
   - Added `hir_funcs` / `hir_reach` / `mir_funcs` counts to --stats output (cv2_smoke: 915 / 8 / 8)
 - [ ] Validate lazy HIR lowering for dynamic dispatch (virtual calls / module mixins) to avoid pruning needed methods
 

@@ -245,6 +245,18 @@ module CrystalV2
 
         @[NoInline]
         private def collect_strings(node : Frontend::TypedNode, table : Hash(String, UInt32), &block : String ->)
+          if node.is_a?(Frontend::SplatNode)
+            return
+          end
+
+          if node.is_a?(Frontend::ClassNode)
+            class_node = node.as(Frontend::ClassNode)
+            yield String.new(class_node.name)
+            class_node.super_name.try { |s| yield String.new(s) }
+            class_node.type_params.try &.each { |tp| yield String.new(tp) }
+            return
+          end
+
           node_kind = Frontend.node_kind(node)
           case node_kind
           when Frontend::NodeKind::Number
@@ -307,11 +319,6 @@ module CrystalV2
               p.type_annotation.try { |t| yield String.new(t) }
             end
             def_node.receiver.try { |r| yield String.new(r) }
-          when Frontend::NodeKind::Class
-            class_node = node.as(Frontend::ClassNode)
-            yield String.new(class_node.name)
-            class_node.super_name.try { |s| yield String.new(s) }
-            class_node.type_params.try &.each { |tp| yield String.new(tp) }
           when Frontend::NodeKind::Module
             mod_node = node.as(Frontend::ModuleNode)
             yield String.new(mod_node.name)
@@ -447,12 +454,26 @@ module CrystalV2
           strings
         end
 
-@[NoInline]
+        @[NoInline]
         private def write_node(io : IO, node : Frontend::TypedNode, string_table : Hash(String, UInt32))
           if node.is_a?(Frontend::SplatNode)
             io.write_byte(AstNodeTag::SplatNode.value)
             write_span(io, node.span)
             write_expr_id(io, node.expr)
+            return
+          end
+
+          if node.is_a?(Frontend::ClassNode)
+            class_node = node.as(Frontend::ClassNode)
+            io.write_byte(AstNodeTag::ClassNode.value)
+            write_span(io, class_node.span)
+            write_string_ref(io, String.new(class_node.name), string_table)
+            write_optional_string_ref(io, class_node.super_name.try { |s| String.new(s) }, string_table)
+            write_optional_expr_id_array(io, class_node.body)
+            write_optional_string_array(io, class_node.type_params.try { |tp| tp.map { |t| String.new(t) } }, string_table)
+            io.write_byte(class_node.is_abstract ? 1_u8 : 0_u8)
+            io.write_byte(class_node.is_struct ? 1_u8 : 0_u8)
+            io.write_byte(class_node.is_union ? 1_u8 : 0_u8)
             return
           end
 
@@ -764,18 +785,6 @@ module CrystalV2
             write_optional_visibility(io, def_node.visibility)
             io.write_byte(def_node.is_abstract ? 1_u8 : 0_u8)
             write_optional_string_ref(io, def_node.receiver.try { |r| String.new(r) }, string_table)
-
-          when Frontend::NodeKind::Class
-            class_node = node.as(Frontend::ClassNode)
-            io.write_byte(AstNodeTag::ClassNode.value)
-            write_span(io, class_node.span)
-            write_string_ref(io, String.new(class_node.name), string_table)
-            write_optional_string_ref(io, class_node.super_name.try { |s| String.new(s) }, string_table)
-            write_optional_expr_id_array(io, class_node.body)
-            write_optional_string_array(io, class_node.type_params.try { |tp| tp.map { |t| String.new(t) } }, string_table)
-            io.write_byte(class_node.is_abstract ? 1_u8 : 0_u8)
-            io.write_byte(class_node.is_struct ? 1_u8 : 0_u8)
-            io.write_byte(class_node.is_union ? 1_u8 : 0_u8)
 
           when Frontend::NodeKind::Module
             mod_node = node.as(Frontend::ModuleNode)
