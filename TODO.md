@@ -643,7 +643,9 @@ The key insight is: **Don't compete with LLVM, complement it.**
   - 6 new tests, 23 total taint analysis tests
 - [x] Guarded devirtualization safety specs: ensure fallback when profile misses a type (switch/if coverage).
 - [x] ABI sanity harness: golden tests for class/struct/union layout (offset/align/payload), union header, vtable layout (if present).
-- [ ] Inline intrinsics RC/taint audit: propagate lifetime/taints through inlined .times/.each/Range; re-evaluate captured vars post-inline.
+- [x] Inline intrinsics RC/taint audit: propagate lifetime/taints through inlined .times/.each/Range; re-evaluate captured vars post-inline.
+  - Yield inlining now threads caller locals through loop phis and preserves phi-bound locals across iterations.
+  - Spec: `spec/hir/inline_yield_spec.cr`
 - [ ] ThreadShared propagation → atomic RC or GC fallback for closures/objects crossing fiber boundaries; add spec.
 - [ ] Arena/slab frame experiment: prolog/epilog frame for no-escape functions (behind flag).
 - [x] LTP/WBA optimization framework implemented (2025-12-11): 4-component potential, Window/Corridor tracking, legal moves.

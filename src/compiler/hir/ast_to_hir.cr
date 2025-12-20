@@ -319,6 +319,8 @@ module Crystal::HIR
     # While inlining yield-functions, we must preserve caller locals for the block body.
     # Otherwise callee locals (especially `self`) can leak into the caller and break ivar access.
     @inline_caller_locals_stack : Array(Hash(String, ValueId)) = [] of Hash(String, ValueId)
+    # Loop-carried locals for inline yield contexts (used to keep phi-bound values stable).
+    @inline_loop_vars_stack : Array(Set(String)) = [] of Set(String)
 
     # While inlining yield-functions, substitute `yield` with the call-site block body.
     # Use a stack to support nested inlining (a block body may itself contain `yield`).
@@ -5790,12 +5792,13 @@ module Crystal::HIR
       # Collect variables that might be assigned in the loop body
       # We need phi nodes at the loop header for these
       assigned_vars = collect_assigned_vars(node.body)
+      inline_vars = Set(String).new
 
       # Save the initial values of variables before the loop
       pre_loop_block = ctx.current_block
       initial_values = {} of String => ValueId
       assigned_vars.each do |var_name|
-        if val = ctx.lookup_local(var_name)
+        if val = lookup_local_for_phi(ctx, var_name, inline_vars)
           initial_values[var_name] = val
         end
       end
@@ -5820,6 +5823,9 @@ module Crystal::HIR
           phi_nodes[var_name] = phi
           # Update local to point to phi
           ctx.register_local(var_name, phi.id)
+          if inline_vars.includes?(var_name)
+            @inline_caller_locals_stack[-1][var_name] = phi.id
+          end
         end
       end
 
@@ -5829,7 +5835,16 @@ module Crystal::HIR
       # Body block
       ctx.current_block = body_block
       ctx.push_scope(ScopeKind::Loop)
-      lower_body(ctx, node.body)
+      pushed_inline = false
+      if !inline_vars.empty?
+        @inline_loop_vars_stack << inline_vars
+        pushed_inline = true
+      end
+      begin
+        lower_body(ctx, node.body)
+      ensure
+        @inline_loop_vars_stack.pop? if pushed_inline
+      end
       body_exit_block = ctx.current_block
       ctx.pop_scope
 
@@ -5868,12 +5883,13 @@ module Crystal::HIR
     private def lower_loop(ctx : LoweringContext, node : CrystalV2::Compiler::Frontend::LoopNode) : ValueId
       # Collect variables that might be assigned in the loop body
       assigned_vars = collect_assigned_vars(node.body)
+      inline_vars = Set(String).new
 
       # Save the initial values of variables before the loop
       pre_loop_block = ctx.current_block
       initial_values = {} of String => ValueId
       assigned_vars.each do |var_name|
-        if val = ctx.lookup_local(var_name)
+        if val = lookup_local_for_phi(ctx, var_name, inline_vars)
           initial_values[var_name] = val
         end
       end
@@ -5896,11 +5912,23 @@ module Crystal::HIR
           ctx.emit(phi)
           phi_nodes[var_name] = phi
           ctx.register_local(var_name, phi.id)
+          if inline_vars.includes?(var_name)
+            @inline_caller_locals_stack[-1][var_name] = phi.id
+          end
         end
       end
 
       ctx.push_scope(ScopeKind::Loop)
-      lower_body(ctx, node.body)
+      pushed_inline = false
+      if !inline_vars.empty?
+        @inline_loop_vars_stack << inline_vars
+        pushed_inline = true
+      end
+      begin
+        lower_body(ctx, node.body)
+      ensure
+        @inline_loop_vars_stack.pop? if pushed_inline
+      end
       body_exit_block = ctx.current_block
       ctx.pop_scope
 
@@ -5933,15 +5961,16 @@ module Crystal::HIR
     end
 
     # Collect variable names that are assigned in a list of expressions
-    private def collect_assigned_vars(body : Array(ExprId)) : Array(String)
+    private def collect_assigned_vars(body : Array(ExprId), visited_blocks : Set(UInt64)? = nil) : Array(String)
+      visited_blocks ||= Set(UInt64).new
       vars = [] of String
       body.each do |expr_id|
-        collect_assigned_vars_in_expr(expr_id, vars)
+        collect_assigned_vars_in_expr(expr_id, vars, visited_blocks)
       end
       vars.uniq
     end
 
-    private def collect_assigned_vars_in_expr(expr_id : ExprId, vars : Array(String))
+    private def collect_assigned_vars_in_expr(expr_id : ExprId, vars : Array(String), visited_blocks : Set(UInt64))
       node = @arena[expr_id]
       case node
       when CrystalV2::Compiler::Frontend::AssignNode
@@ -5950,49 +5979,102 @@ module Crystal::HIR
           vars << String.new(target.name)
         end
         # Also check the value side for nested assignments
-        collect_assigned_vars_in_expr(node.value, vars)
+        collect_assigned_vars_in_expr(node.value, vars, visited_blocks)
+
+      when CrystalV2::Compiler::Frontend::MultipleAssignNode
+        node.targets.each do |target_id|
+          target = @arena[target_id]
+          if target.is_a?(CrystalV2::Compiler::Frontend::IdentifierNode)
+            vars << String.new(target.name)
+          end
+        end
+        collect_assigned_vars_in_expr(node.value, vars, visited_blocks)
+
+      when CrystalV2::Compiler::Frontend::TypeDeclarationNode
+        vars << String.new(node.name)
+        if value = node.value
+          collect_assigned_vars_in_expr(value, vars, visited_blocks)
+        end
 
       when CrystalV2::Compiler::Frontend::WhileNode
         # Nested while - check its body
-        collect_assigned_vars(node.body).each { |v| vars << v }
+        collect_assigned_vars(node.body, visited_blocks).each { |v| vars << v }
 
       when CrystalV2::Compiler::Frontend::LoopNode
         # Nested loop - check its body
-        collect_assigned_vars(node.body).each { |v| vars << v }
+        collect_assigned_vars(node.body, visited_blocks).each { |v| vars << v }
 
       when CrystalV2::Compiler::Frontend::IfNode
         # Check all branches
-        collect_assigned_vars(node.then_body).each { |v| vars << v }
+        collect_assigned_vars(node.then_body, visited_blocks).each { |v| vars << v }
         if else_body = node.else_body
-          collect_assigned_vars(else_body).each { |v| vars << v }
+          collect_assigned_vars(else_body, visited_blocks).each { |v| vars << v }
         end
 
       when CrystalV2::Compiler::Frontend::UnlessNode
         # Check all branches
-        collect_assigned_vars(node.then_branch).each { |v| vars << v }
+        collect_assigned_vars(node.then_branch, visited_blocks).each { |v| vars << v }
         if else_body = node.else_branch
-          collect_assigned_vars(else_body).each { |v| vars << v }
+          collect_assigned_vars(else_body, visited_blocks).each { |v| vars << v }
         end
 
       when CrystalV2::Compiler::Frontend::CaseNode
         # Check all when branches and else
         node.when_branches.each do |when_branch|
-          collect_assigned_vars(when_branch.body).each { |v| vars << v }
+          collect_assigned_vars(when_branch.body, visited_blocks).each { |v| vars << v }
         end
         if else_body = node.else_branch
-          collect_assigned_vars(else_body).each { |v| vars << v }
+          collect_assigned_vars(else_body, visited_blocks).each { |v| vars << v }
         end
 
       when CrystalV2::Compiler::Frontend::BinaryNode
-        collect_assigned_vars_in_expr(node.left, vars)
-        collect_assigned_vars_in_expr(node.right, vars)
+        collect_assigned_vars_in_expr(node.left, vars, visited_blocks)
+        collect_assigned_vars_in_expr(node.right, vars, visited_blocks)
 
       when CrystalV2::Compiler::Frontend::CallNode
-        node.args.each { |arg| collect_assigned_vars_in_expr(arg, vars) }
+        node.args.each { |arg| collect_assigned_vars_in_expr(arg, vars, visited_blocks) }
 
       when CrystalV2::Compiler::Frontend::GroupingNode
-        collect_assigned_vars_in_expr(node.expression, vars)
+        collect_assigned_vars_in_expr(node.expression, vars, visited_blocks)
+
+      when CrystalV2::Compiler::Frontend::YieldNode
+        if inline_block = @inline_yield_block_stack.last?
+          block_id = inline_block.object_id
+          unless visited_blocks.includes?(block_id)
+            visited_blocks.add(block_id)
+            block_vars = collect_assigned_vars(inline_block.body, visited_blocks)
+            if params = inline_block.params
+              param_names = params.compact_map { |param| param.name ? String.new(param.name.not_nil!) : nil }
+              block_vars.reject! { |name| param_names.includes?(name) }
+            end
+            block_vars.each { |v| vars << v }
+          end
+        end
       end
+    end
+
+    private def lookup_local_for_phi(ctx : LoweringContext, name : String, inline_vars : Set(String)) : ValueId?
+      if val = ctx.lookup_local(name)
+        return val
+      end
+
+      if caller_locals = @inline_caller_locals_stack.last?
+        if val = caller_locals[name]?
+          inline_vars.add(name)
+          return val
+        end
+      end
+
+      nil
+    end
+
+    private def inline_loop_vars_union : Set(String)?
+      return nil if @inline_loop_vars_stack.empty?
+      union = Set(String).new
+      @inline_loop_vars_stack.each do |set|
+        set.each { |name| union.add(name) }
+      end
+      union
     end
 
     private def lower_until(ctx : LoweringContext, node : CrystalV2::Compiler::Frontend::UntilNode) : ValueId
@@ -7735,12 +7817,13 @@ module Crystal::HIR
       assigned_vars = collect_assigned_vars(block.body)
       # Remove the block parameter from assigned vars - it's handled separately
       assigned_vars = assigned_vars.reject { |v| v == param_name }
+      inline_vars = Set(String).new
 
       # Save initial values of mutable variables before the loop
       entry_block = ctx.current_block
       initial_values = {} of String => ValueId
       assigned_vars.each do |var_name|
-        if val = ctx.lookup_local(var_name)
+        if val = lookup_local_for_phi(ctx, var_name, inline_vars)
           initial_values[var_name] = val
         end
       end
@@ -7774,6 +7857,9 @@ module Crystal::HIR
           ctx.emit(phi)
           phi_nodes[var_name] = phi
           ctx.register_local(var_name, phi.id)
+          if inline_vars.includes?(var_name)
+            @inline_caller_locals_stack[-1][var_name] = phi.id
+          end
         end
       end
 
@@ -7791,7 +7877,16 @@ module Crystal::HIR
       ctx.push_scope(ScopeKind::Block)
 
       # Lower block body
-      lower_body(ctx, block.body)
+      pushed_inline = false
+      if !inline_vars.empty?
+        @inline_loop_vars_stack << inline_vars
+        pushed_inline = true
+      end
+      begin
+        lower_body(ctx, block.body)
+      ensure
+        @inline_loop_vars_stack.pop? if pushed_inline
+      end
       body_exit_block = ctx.current_block
       ctx.pop_scope
 
@@ -7861,11 +7956,12 @@ module Crystal::HIR
       # Collect mutable vars (same as times)
       assigned_vars = collect_assigned_vars(block.body)
       assigned_vars = assigned_vars.reject { |v| v == param_name }
+      inline_vars = Set(String).new
 
       entry_block = ctx.current_block
       initial_values = {} of String => ValueId
       assigned_vars.each do |var_name|
-        if val = ctx.lookup_local(var_name)
+        if val = lookup_local_for_phi(ctx, var_name, inline_vars)
           initial_values[var_name] = val
         end
       end
@@ -7894,6 +7990,9 @@ module Crystal::HIR
           ctx.emit(phi)
           phi_nodes[var_name] = phi
           ctx.register_local(var_name, phi.id)
+          if inline_vars.includes?(var_name)
+            @inline_caller_locals_stack[-1][var_name] = phi.id
+          end
         end
       end
 
@@ -7909,7 +8008,16 @@ module Crystal::HIR
       # Body block
       ctx.current_block = body_block
       ctx.push_scope(ScopeKind::Block)
-      lower_body(ctx, block.body)
+      pushed_inline = false
+      if !inline_vars.empty?
+        @inline_loop_vars_stack << inline_vars
+        pushed_inline = true
+      end
+      begin
+        lower_body(ctx, block.body)
+      ensure
+        @inline_loop_vars_stack.pop? if pushed_inline
+      end
       ctx.pop_scope
       ctx.terminate(Jump.new(incr_block))
 
@@ -7969,11 +8077,12 @@ module Crystal::HIR
       # Collect mutable vars
       assigned_vars = collect_assigned_vars(block.body)
       assigned_vars = assigned_vars.reject { |v| v == param_name }
+      inline_vars = Set(String).new
 
       entry_block = ctx.current_block
       initial_values = {} of String => ValueId
       assigned_vars.each do |var_name|
-        if val = ctx.lookup_local(var_name)
+        if val = lookup_local_for_phi(ctx, var_name, inline_vars)
           initial_values[var_name] = val
         end
       end
@@ -8006,6 +8115,9 @@ module Crystal::HIR
           ctx.emit(phi)
           phi_nodes[var_name] = phi
           ctx.register_local(var_name, phi.id)
+          if inline_vars.includes?(var_name)
+            @inline_caller_locals_stack[-1][var_name] = phi.id
+          end
         end
       end
 
@@ -8052,7 +8164,16 @@ module Crystal::HIR
         ctx.register_local(param_name, index_get.id)
       end
 
-      lower_body(ctx, block.body)
+      pushed_inline = false
+      if !inline_vars.empty?
+        @inline_loop_vars_stack << inline_vars
+        pushed_inline = true
+      end
+      begin
+        lower_body(ctx, block.body)
+      ensure
+        @inline_loop_vars_stack.pop? if pushed_inline
+      end
       ctx.pop_scope
       ctx.terminate(Jump.new(incr_block))
 
@@ -8111,11 +8232,12 @@ module Crystal::HIR
       # Collect mutable vars
       assigned_vars = collect_assigned_vars(block.body)
       assigned_vars = assigned_vars.reject { |v| v == param_name }
+      inline_vars = Set(String).new
 
       entry_block = ctx.current_block
       initial_values = {} of String => ValueId
       assigned_vars.each do |var_name|
-        if val = ctx.lookup_local(var_name)
+        if val = lookup_local_for_phi(ctx, var_name, inline_vars)
           initial_values[var_name] = val
         end
       end
@@ -8148,6 +8270,9 @@ module Crystal::HIR
           ctx.emit(phi)
           phi_nodes[var_name] = phi
           ctx.register_local(var_name, phi.id)
+          if inline_vars.includes?(var_name)
+            @inline_caller_locals_stack[-1][var_name] = phi.id
+          end
         end
       end
 
@@ -8196,7 +8321,16 @@ module Crystal::HIR
         ctx.register_local(param_name, index_get.id)
       end
 
-      lower_body(ctx, block.body)
+      pushed_inline = false
+      if !inline_vars.empty?
+        @inline_loop_vars_stack << inline_vars
+        pushed_inline = true
+      end
+      begin
+        lower_body(ctx, block.body)
+      ensure
+        @inline_loop_vars_stack.pop? if pushed_inline
+      end
       ctx.pop_scope
       ctx.terminate(Jump.new(incr_block))
 
@@ -8256,11 +8390,12 @@ module Crystal::HIR
       # Collect mutable vars
       assigned_vars = collect_assigned_vars(block.body)
       assigned_vars = assigned_vars.reject { |v| v == elem_param_name || v == index_param_name }
+      inline_vars = Set(String).new
 
       entry_block = ctx.current_block
       initial_values = {} of String => ValueId
       assigned_vars.each do |var_name|
-        if val = ctx.lookup_local(var_name)
+        if val = lookup_local_for_phi(ctx, var_name, inline_vars)
           initial_values[var_name] = val
         end
       end
@@ -8293,6 +8428,9 @@ module Crystal::HIR
           ctx.emit(phi)
           phi_nodes[var_name] = phi
           ctx.register_local(var_name, phi.id)
+          if inline_vars.includes?(var_name)
+            @inline_caller_locals_stack[-1][var_name] = phi.id
+          end
         end
       end
 
@@ -8320,7 +8458,16 @@ module Crystal::HIR
       ctx.register_local(index_param_name, index_phi.id)
       ctx.register_type(index_phi.id, TypeRef::INT32)
 
-      lower_body(ctx, block.body)
+      pushed_inline = false
+      if !inline_vars.empty?
+        @inline_loop_vars_stack << inline_vars
+        pushed_inline = true
+      end
+      begin
+        lower_body(ctx, block.body)
+      ensure
+        @inline_loop_vars_stack.pop? if pushed_inline
+      end
       ctx.pop_scope
       ctx.terminate(Jump.new(incr_block))
 
@@ -8993,6 +9140,17 @@ module Crystal::HIR
             caller_locals_after[name] = prev
           else
             caller_locals_after.delete(name)
+          end
+        end
+
+        # If we're in an inline loop context, keep phi-bound locals stable across iterations.
+        if loop_vars = inline_loop_vars_union
+          loop_vars.each do |name|
+            if prev = caller_locals[name]?
+              caller_locals_after[name] = prev
+            else
+              caller_locals_after.delete(name)
+            end
           end
         end
         @inline_caller_locals_stack[-1] = caller_locals_after
