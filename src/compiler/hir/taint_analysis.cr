@@ -38,6 +38,7 @@ module Crystal::HIR
     @worklist : Deque(ValueId)
     @definitions : Hash(ValueId, Value)
     @users : Hash(ValueId, Array(ValueId))
+    @value_blocks : Hash(ValueId, BlockId)
 
     # Optional: type info provider for cycle detection
     @type_info : TypeInfoProvider?
@@ -47,6 +48,7 @@ module Crystal::HIR
       @worklist = Deque(ValueId).new
       @definitions = Hash(ValueId, Value).new
       @users = Hash(ValueId, Array(ValueId)).new { |h, k| h[k] = [] of ValueId }
+      @value_blocks = {} of ValueId => BlockId
 
       # Pre-compute cyclic types if we have type info
       if ti = @type_info
@@ -60,6 +62,7 @@ module Crystal::HIR
       @worklist = Deque(ValueId).new
       @definitions = Hash(ValueId, Value).new
       @users = Hash(ValueId, Array(ValueId)).new { |h, k| h[k] = [] of ValueId }
+      @value_blocks = {} of ValueId => BlockId
     end
 
     # Run taint analysis
@@ -145,49 +148,56 @@ module Crystal::HIR
       @function.blocks.each do |block|
         block.instructions.each do |value|
           @definitions[value.id] = value
+          @value_blocks[value.id] = block.id
           record_uses(value)
         end
       end
     end
 
     private def record_uses(value : Value)
+      each_operand(value) do |operand|
+        @users[operand] << value.id
+      end
+    end
+
+    private def each_operand(value : Value, &block : ValueId ->)
       case value
       when Copy
-        @users[value.source] << value.id
+        yield value.source
       when BinaryOperation
-        @users[value.left] << value.id
-        @users[value.right] << value.id
+        yield value.left
+        yield value.right
       when UnaryOperation
-        @users[value.operand] << value.id
+        yield value.operand
       when Call
         if recv = value.receiver
-          @users[recv] << value.id
+          yield recv
         end
-        value.args.each { |arg| @users[arg] << value.id }
+        value.args.each { |arg| yield arg }
       when FieldGet
-        @users[value.object] << value.id
+        yield value.object
       when FieldSet
-        @users[value.object] << value.id
-        @users[value.value] << value.id
+        yield value.object
+        yield value.value
       when IndexGet
-        @users[value.object] << value.id
-        @users[value.index] << value.id
+        yield value.object
+        yield value.index
       when IndexSet
-        @users[value.object] << value.id
-        @users[value.index] << value.id
-        @users[value.value] << value.id
+        yield value.object
+        yield value.index
+        yield value.value
       when MakeClosure
-        value.captures.each { |cap| @users[cap.value_id] << value.id }
+        value.captures.each { |cap| yield cap.value_id }
       when Yield
-        value.args.each { |arg| @users[arg] << value.id }
+        value.args.each { |arg| yield arg }
       when Phi
-        value.incoming.each { |(_, val)| @users[val] << value.id }
+        value.incoming.each { |(_, val)| yield val }
       when Cast
-        @users[value.value] << value.id
+        yield value.value
       when IsA
-        @users[value.value] << value.id
+        yield value.value
       when Allocate
-        value.constructor_args.each { |arg| @users[arg] << value.id }
+        value.constructor_args.each { |arg| yield arg }
       end
     end
 
@@ -218,6 +228,11 @@ module Crystal::HIR
           if is_spawn_method?(value.method_name)
             # Arguments shared with other fiber
             value.args.each { |arg| mark_taint(arg, Taint::ThreadShared) }
+            if blk = value.block
+              block_capture_values(blk).each do |captured|
+                mark_taint(captured, Taint::ThreadShared)
+              end
+            end
           end
 
           if is_channel_type?(value.method_name)
@@ -269,6 +284,38 @@ module Crystal::HIR
 
           propagate_to_user(value, user, current_taints)
         end
+      end
+    end
+
+    private def block_capture_values(block_id : BlockId) : Array(ValueId)
+      captures = Set(ValueId).new
+      closure_scope = @function.get_block(block_id).scope
+
+      @function.blocks.each do |block|
+        next unless scope_within?(block.scope, closure_scope)
+        block.instructions.each do |inst|
+          each_operand(inst) do |operand|
+            def_block = @value_blocks[operand]?
+            if def_block
+              def_scope = @function.get_block(def_block).scope
+              next if scope_within?(def_scope, closure_scope)
+            end
+            captures.add(operand)
+          end
+        end
+      end
+
+      captures.to_a
+    end
+
+    private def scope_within?(scope_id : ScopeId, root_scope : ScopeId) : Bool
+      current = scope_id
+      loop do
+        return true if current == root_scope
+        scope = @function.get_scope(current)
+        parent = scope.parent
+        return false unless parent
+        current = parent
       end
     end
 

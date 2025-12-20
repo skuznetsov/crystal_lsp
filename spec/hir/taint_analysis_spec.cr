@@ -269,6 +269,36 @@ describe Crystal::HIR::TaintAnalyzer do
       data.taints.thread_shared?.should be_true
     end
 
+    it "marks spawn block captures as ThreadShared" do
+      mod, func = create_function
+
+      entry = func.get_block(func.entry_block)
+
+      # %0 = allocate Data
+      data = Crystal::HIR::Allocate.new(func.next_value_id, Crystal::HIR::TypeRef.new(100_u32))
+      entry.add(data)
+
+      closure_scope = func.create_scope(Crystal::HIR::ScopeKind::Closure, func.scopes[0].id)
+      block_id = func.create_block(closure_scope)
+      block = func.get_block(block_id)
+
+      # %1 = copy %0 inside block (capture)
+      copy = Crystal::HIR::Copy.new(func.next_value_id, data.type, data.id)
+      block.add(copy)
+      block.terminator = Crystal::HIR::Return.new(copy.id)
+
+      # %2 = call spawn { ... }
+      call = Crystal::HIR::Call.new(func.next_value_id, Crystal::HIR::TypeRef::VOID, nil, "spawn", [] of Crystal::HIR::ValueId, block_id)
+      entry.add(call)
+
+      entry.terminator = Crystal::HIR::Return.new(nil)
+
+      analyzer = Crystal::HIR::TaintAnalyzer.new(func)
+      analyzer.analyze
+
+      data.taints.thread_shared?.should be_true
+    end
+
     it "marks channel send/receive as ThreadShared" do
       mod, func = create_function
 

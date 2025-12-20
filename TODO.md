@@ -646,7 +646,7 @@ The key insight is: **Don't compete with LLVM, complement it.**
 - [x] Inline intrinsics RC/taint audit: propagate lifetime/taints through inlined .times/.each/Range; re-evaluate captured vars post-inline.
   - Yield inlining now threads caller locals through loop phis and preserves phi-bound locals across iterations.
   - Spec: `spec/hir/inline_yield_spec.cr`
-- [ ] ThreadShared propagation → atomic RC or GC fallback for closures/objects crossing fiber boundaries; add spec.
+- [x] ThreadShared propagation → atomic RC or GC fallback for closures/objects crossing fiber boundaries; add spec (spawn block captures covered).
 - [ ] Arena/slab frame experiment: prolog/epilog frame for no-escape functions (behind flag).
 - [x] LTP/WBA optimization framework implemented (2025-12-11): 4-component potential, Window/Corridor tracking, legal moves.
 - [x] **Tests green after recent hardening** (2025-12-10): all specs passing (9 pending intentional) after fixing yield/puts/array/lifetime, empty hash inference, struct LLVM type mapping, and stabilizing pipeline.
