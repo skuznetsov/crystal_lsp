@@ -8181,7 +8181,7 @@ module Crystal::HIR
       if return_type == TypeRef::VOID && receiver_id
         # Methods that typically return self or a collection (stdlib methods)
         methods_returning_self_or_value = ["to_a", "to_s", "map", "select", "reduce", "each",
-                                           "first", "last", "dup", "clone", "cover", "tap",
+                                           "first", "last", "dup", "clone", "cover",
                                            "compact", "flatten", "sort", "reverse", "uniq",
                                            "join", "split", "strip", "chomp", "chars",
                                            "keys", "values", "value",  # 'value' is common getter
@@ -8202,7 +8202,7 @@ module Crystal::HIR
       end
 
       # Methods that return the same type as the receiver
-      methods_returning_receiver_type = ["clamp", "abs", "ceil", "floor", "round", "truncate"]
+      methods_returning_receiver_type = ["tap", "clamp", "abs", "ceil", "floor", "round", "truncate"]
       if return_type == TypeRef::VOID && receiver_id && methods_returning_receiver_type.includes?(method_name)
         return_type = ctx.type_of(receiver_id)
       end
@@ -10490,7 +10490,7 @@ module Crystal::HIR
           return_type = TypeRef::INT32
         else
           methods_returning_self_or_value = ["to_a", "to_s", "map", "select", "reduce", "each",
-                                             "first", "last", "dup", "clone", "cover", "tap",
+                                             "first", "last", "dup", "clone", "cover",
                                              "compact", "flatten", "sort", "reverse", "uniq",
                                              "join", "split", "strip", "chomp", "chars",
                                              "keys", "values", "value",  # 'value' is common getter
@@ -10508,6 +10508,13 @@ module Crystal::HIR
           if methods_returning_self_or_value.includes?(member_name)
             return_type = TypeRef::POINTER
           end
+        end
+      end
+
+      if return_type == TypeRef::VOID
+        methods_returning_receiver_type = ["tap", "clamp", "abs", "ceil", "floor", "round", "truncate"]
+        if methods_returning_receiver_type.includes?(member_name)
+          return_type = ctx.type_of(object_id)
         end
       end
 
