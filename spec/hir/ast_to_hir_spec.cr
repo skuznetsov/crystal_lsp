@@ -495,6 +495,29 @@ describe Crystal::HIR::AstToHir do
       text.should contain("bar")
     end
 
+    it "applies default args for member access calls" do
+      code = <<-CRYSTAL
+        class Foo
+          def bar(x : Int32 = 1, y : Int32 = 2) : Int32
+            x + y
+          end
+        end
+
+        def foo
+          Foo.new.bar
+        end
+      CRYSTAL
+
+      converter = lower_program(code)
+      func = converter.module.functions.find { |f| f.name.split("$").first == "foo" }
+      func.should_not be_nil
+
+      call = func.not_nil!.blocks.flat_map(&.instructions)
+        .find { |inst| inst.is_a?(Crystal::HIR::Call) && inst.as(Crystal::HIR::Call).method_name.includes?("Foo#bar") }
+      call.should_not be_nil
+      call.not_nil!.as(Crystal::HIR::Call).args.size.should eq(2)
+    end
+
     it "lowers method call with args" do
       func = lower_function("def foo; x.bar(1, 2); end")
       text = hir_text(func)
@@ -868,6 +891,45 @@ describe Crystal::HIR::AstToHir do
       box_type = converter.class_info["Box"].type_ref
       recv.not_nil!.type.should eq(box_type)
     end
+
+    it "prefers concrete assignment when includers are ambiguous" do
+      code = <<-CRYSTAL
+        module M
+          def value : Int32
+            1
+          end
+        end
+
+        class Box
+          include M
+          def value : Int32
+            2
+          end
+        end
+
+        class Bag
+          include M
+          def value : Int32
+            3
+          end
+        end
+
+        def foo(x : M)
+          x = Box.new
+          x.value
+        end
+      CRYSTAL
+
+      converter = lower_program(code)
+      func = converter.module.functions.find { |f| f.name.split("$").first == "foo" }
+      func.should_not be_nil
+
+      call = func.not_nil!.blocks.flat_map(&.instructions)
+        .find { |inst| inst.is_a?(Crystal::HIR::Call) && inst.as(Crystal::HIR::Call).method_name.includes?("#value") }
+      call.should_not be_nil
+
+      call.not_nil!.as(Crystal::HIR::Call).method_name.should contain("Box#value")
+    end
   end
 
   describe "module-typed receivers" do
@@ -897,6 +959,162 @@ describe Crystal::HIR::AstToHir do
       call.should_not be_nil
 
       call.not_nil!.as(Crystal::HIR::Call).method_name.should contain("Box#value")
+    end
+
+    it "does not guess when includers are ambiguous" do
+      code = <<-CRYSTAL
+        module M
+        end
+
+        class Box
+          include M
+          def value : Int32
+            1
+          end
+        end
+
+        class Bag
+          include M
+          def value : Int32
+            2
+          end
+        end
+
+        def foo(x : M)
+          x.value
+        end
+      CRYSTAL
+
+      converter = lower_program(code)
+      func = converter.module.functions.find { |f| f.name.split("$").first == "foo" }
+      func.should_not be_nil
+
+      call = func.not_nil!.blocks.flat_map(&.instructions)
+        .find { |inst| inst.is_a?(Crystal::HIR::Call) }
+      call.should_not be_nil
+
+      call_name = call.not_nil!.as(Crystal::HIR::Call).method_name
+      call_name.should_not contain("Box#value")
+      call_name.should_not contain("Bag#value")
+    end
+
+    it "prefers includers that match arity for module-typed params" do
+      code = <<-CRYSTAL
+        module M
+        end
+
+        class Box
+          include M
+          def value(x : Int32) : Int32
+            x
+          end
+        end
+
+        class Bag
+          include M
+          def value(x : Int32, y : Int32) : Int32
+            x + y
+          end
+        end
+
+        def foo(x : M)
+          x.value(1)
+        end
+      CRYSTAL
+
+      converter = lower_program(code)
+      func = converter.module.functions.find { |f| f.name.split("$").first == "foo" }
+      func.should_not be_nil
+
+      call = func.not_nil!.blocks.flat_map(&.instructions)
+        .find { |inst| inst.is_a?(Crystal::HIR::Call) }
+      call.should_not be_nil
+
+      call.not_nil!.as(Crystal::HIR::Call).method_name.should contain("Box#value")
+    end
+
+    it "prefers includers that match parameter types for module-typed params" do
+      code = <<-CRYSTAL
+        module M
+        end
+
+        class Box
+          include M
+          def value(x : Int32) : Int32
+            x
+          end
+        end
+
+        class Bag
+          include M
+          def value(x : String) : Int32
+            x.size
+          end
+        end
+
+        def foo(x : M)
+          x.value(1)
+        end
+      CRYSTAL
+
+      converter = lower_program(code)
+      func = converter.module.functions.find { |f| f.name.split("$").first == "foo" }
+      func.should_not be_nil
+
+      call = func.not_nil!.blocks.flat_map(&.instructions)
+        .find { |inst| inst.is_a?(Crystal::HIR::Call) }
+      call.should_not be_nil
+
+      call.not_nil!.as(Crystal::HIR::Call).method_name.should contain("Box#value")
+    end
+  end
+
+  describe "module accessor mixins" do
+    it "generates accessors from included modules for classes" do
+      code = <<-CRYSTAL
+        module M
+          getter foo : Int32
+          property bar : Int32
+        end
+
+        class Box
+          include M
+          def initialize(@foo : Int32, @bar : Int32)
+          end
+        end
+      CRYSTAL
+
+      converter = lower_program(code)
+      getter = converter.module.functions.find { |f| f.name == "Box#foo" }
+      getter.should_not be_nil
+
+      setter = converter.module.functions.find { |f| f.name.split("$").first == "Box#bar=" }
+      setter.should_not be_nil
+
+      ivars = converter.class_info["Box"].ivars.map(&.name)
+      ivars.should contain("@foo")
+      ivars.should contain("@bar")
+    end
+
+    it "generates accessors from included modules for structs" do
+      code = <<-CRYSTAL
+        module M
+          getter foo : Int32
+        end
+
+        struct Bag
+          include M
+          def initialize(@foo : Int32)
+          end
+        end
+      CRYSTAL
+
+      converter = lower_program(code)
+      getter = converter.module.functions.find { |f| f.name == "Bag#foo" }
+      getter.should_not be_nil
+
+      ivars = converter.class_info["Bag"].ivars.map(&.name)
+      ivars.should contain("@foo")
     end
   end
 

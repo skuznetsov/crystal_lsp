@@ -954,7 +954,8 @@ enum:      64  ← ✅ DONE
 | Yield inlining re-entry guard | Skip re-lowering when mangled names fall back to base during inlining (prevents HIR segfaults) (2025-12-25) |
 | typeof in type args (locals/params) | Resolve `typeof(x)` in generic instantiations using live locals (2025-12-25) |
 | Block-return generic substitution | Substitute block-return type params in generic method return types (2025-12-20) |
-| Module-typed receiver resolution | Resolve module-typed locals to unique includer methods (2025-12-20) |
+| Module-typed receiver resolution | Resolve module-typed locals to unique includer methods; arity+type-aware includer filtering (2025-12-20) |
+| Member access default args | Apply defaults + lazy lowering for no-parens member calls (2025-12-20) |
 
 ### 8.2 Current Status
 
@@ -989,17 +990,19 @@ r2 = maybe(false)  # => nil
 
 ### 8.4 TODO
 
-1. [ ] **Implement typeof resolution** - Compile-time evaluation of typeof(...) in type annotations
+1. [x] **Implement typeof resolution** - Compile-time evaluation of typeof(...) in type annotations
    - [x] `typeof(self)` / `typeof(arg)` inside generic instantiations (HIR lowering) (2025-12-19)
    - [x] General `typeof(...)` evaluation in type positions (params/returns/ivars/self) during lowering (2025-12-23)
    - [x] Simple constant/path typeof in type strings (no local scope) (2025-12-24)
    - [x] Enumerable/Indexable element_type patterns in typeof (2025-12-24)
    - [x] typeof(...) inside type aliases without local context (2025-12-20)
 2. [x] **Fix generic methods with blocks** - Parse block parameter types into Proc signatures (2025-12-24)
-3. [ ] **Module mixin monomorphization** - Generate methods from included modules for concrete types
+3. [x] **Module mixin monomorphization** - Generate methods from included modules for concrete types
    - Partial: include expansion + module-typed return inference + stdlib-style combinator return inference
    - Improved: module-typed receiver fallback via includer map + last-expression return inference (2025-12-24)
    - [x] Prefer concrete `self`/ivar returns for module-like annotations (reduces module-typed receivers) (2025-12-25)
    - [x] Preserve concrete initializer types for module-annotated locals (avoids includer heuristics) (2025-12-25)
-   - Remaining: robust module-typed receiver resolution (avoid heuristic includer selection)
-4. [ ] **Macro expansion for `getter`/`property`** - Compile-time accessor generation
+   - [x] Robust module-typed receiver resolution: avoid includer guessing; require unique match or concrete local type (2025-12-26)
+     - Restrict class-scan fallbacks to unknown receiver types
+     - Module-typed fallback only for module-like receiver names
+4. [x] **Macro expansion for `getter`/`property`** - Compile-time accessor generation (module mixins) (2025-12-20)
