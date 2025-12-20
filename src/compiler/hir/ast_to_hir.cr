@@ -481,7 +481,12 @@ module Crystal::HIR
     def register_alias(node : CrystalV2::Compiler::Frontend::AliasNode)
       alias_name = String.new(node.name)
       target_name = resolve_alias_target(String.new(node.value))
+      register_type_alias(alias_name, target_name)
+    end
+
+    private def register_type_alias(alias_name : String, target_name : String)
       @type_aliases[alias_name] = target_name
+      @type_cache.delete(alias_name)
     end
 
     # Register a C library binding (pass 1)
@@ -504,8 +509,8 @@ module Crystal::HIR
             target_name = resolve_alias_target(String.new(body_node.value))
             @current_class = old_class
             full_alias_name = "#{lib_name}::#{alias_name}"
-            @type_aliases[full_alias_name] = target_name
-            @type_aliases[alias_name] = target_name
+            register_type_alias(full_alias_name, target_name)
+            register_type_alias(alias_name, target_name)
           when CrystalV2::Compiler::Frontend::EnumNode
             # Enums within lib - register with lib prefix
             enum_name = String.new(body_node.name)
@@ -1566,8 +1571,8 @@ module Crystal::HIR
             target_name = resolve_alias_target(String.new(member.value))
             @current_class = old_class
             full_alias_name = "#{module_name}::#{alias_name}"
-            @type_aliases[full_alias_name] = target_name
-            @type_aliases[alias_name] = target_name
+            register_type_alias(full_alias_name, target_name)
+            register_type_alias(alias_name, target_name)
             if ENV.has_key?("DEBUG_ALIAS")
               STDERR.puts "[ALIAS] Registered (module): #{full_alias_name} => #{target_name}, also: #{alias_name} => #{target_name}"
             end
@@ -1580,16 +1585,16 @@ module Crystal::HIR
             # Register class/struct type alias and any aliases inside the class
             class_name = String.new(member.name)
             full_class_name = "#{module_name}::#{class_name}"
-            @type_aliases[full_class_name] = full_class_name
+            register_type_alias(full_class_name, full_class_name)
             # Also register short name -> full name for local resolution (for both classes and structs)
-            @type_aliases[class_name] = full_class_name
+            register_type_alias(class_name, full_class_name)
             register_class_aliases(member, full_class_name)
           elsif member.is_a?(CrystalV2::Compiler::Frontend::StructNode)
             # Register struct type alias - both short and full names (for actual StructNode type)
             struct_name = String.new(member.name)
             full_struct_name = "#{module_name}::#{struct_name}"
-            @type_aliases[full_struct_name] = full_struct_name
-            @type_aliases[struct_name] = full_struct_name
+            register_type_alias(full_struct_name, full_struct_name)
+            register_type_alias(struct_name, full_struct_name)
           end
         end
         # PASS 2: Register functions and classes (now that aliases are available)
@@ -1686,9 +1691,9 @@ module Crystal::HIR
             target_name = resolve_alias_target(String.new(member.value))
             @current_class = old_class
             full_alias_name = "#{full_name}::#{alias_name}"
-            @type_aliases[full_alias_name] = target_name
+            register_type_alias(full_alias_name, target_name)
             # Also register short name for local resolution within module
-            @type_aliases[alias_name] = target_name
+            register_type_alias(alias_name, target_name)
             if ENV.has_key?("DEBUG_ALIAS")
               STDERR.puts "[ALIAS] Registered: #{full_alias_name} => #{target_name}, also: #{alias_name} => #{target_name}"
             end
@@ -1701,17 +1706,17 @@ module Crystal::HIR
             # Register class/struct type alias and any aliases inside the class
             class_name = String.new(member.name)
             full_class_name = "#{full_name}::#{class_name}"
-            @type_aliases[full_class_name] = full_class_name
+            register_type_alias(full_class_name, full_class_name)
             # Also register short name -> full name for local resolution (for both classes and structs)
-            @type_aliases[class_name] = full_class_name
+            register_type_alias(class_name, full_class_name)
             register_class_aliases(member, full_class_name)
           elsif member.is_a?(CrystalV2::Compiler::Frontend::StructNode)
             # Register struct type alias - both short and full names
             struct_name = String.new(member.name)
             full_struct_name = "#{full_name}::#{struct_name}"
-            @type_aliases[full_struct_name] = full_struct_name
+            register_type_alias(full_struct_name, full_struct_name)
             # Also register short name -> full name for local resolution
-            @type_aliases[struct_name] = full_struct_name
+            register_type_alias(struct_name, full_struct_name)
           end
         end
         # PASS 2: Register functions and other members (now that aliases are available)
@@ -1799,8 +1804,8 @@ module Crystal::HIR
             target_name = resolve_alias_target(String.new(member.value))
             @current_class = old_class
             full_alias_name = "#{class_name}::#{alias_name}"
-            @type_aliases[full_alias_name] = target_name
-            @type_aliases[alias_name] = target_name
+            register_type_alias(full_alias_name, target_name)
+            register_type_alias(alias_name, target_name)
             if ENV.has_key?("DEBUG_ALIAS")
               STDERR.puts "[ALIAS] Registered (class): #{full_alias_name} => #{target_name}, also: #{alias_name} => #{target_name}"
             end
@@ -2279,9 +2284,9 @@ module Crystal::HIR
             alias_name = String.new(member.name)
             target_name = resolve_alias_target(String.new(member.value))
             full_alias_name = "#{class_name}::#{alias_name}"
-            @type_aliases[full_alias_name] = target_name
+            register_type_alias(full_alias_name, target_name)
             # Also register short name for local resolution within class
-            @type_aliases[alias_name] = target_name
+            register_type_alias(alias_name, target_name)
           end
         end
 
@@ -5080,8 +5085,8 @@ module Crystal::HIR
             target_name = resolve_alias_target(String.new(body_node.value))
             @current_class = old_class
             full_alias_name = "#{lib_name}::#{alias_name}"
-            @type_aliases[full_alias_name] = target_name
-            @type_aliases[alias_name] = target_name
+            register_type_alias(full_alias_name, target_name)
+            register_type_alias(alias_name, target_name)
           when CrystalV2::Compiler::Frontend::EnumNode
             # Enums within lib - register with lib prefix
             enum_name = String.new(body_node.name)

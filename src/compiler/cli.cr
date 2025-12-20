@@ -323,6 +323,8 @@ module CrystalV2
         enum_nodes.each { |n, a| hir_converter.arena = a; hir_converter.register_enum(n) }
         log(options, out_io, "    Libs: #{lib_nodes.size}")
         lib_nodes.each { |n, a| hir_converter.arena = a; hir_converter.register_lib(n) }
+        log(options, out_io, "    Aliases: #{alias_nodes.size}")
+        alias_nodes.each { |n, a| hir_converter.arena = a; hir_converter.register_alias(n) }
         log(options, out_io, "    Modules: #{module_nodes.size}")
         module_nodes.each { |n, a| hir_converter.arena = a; hir_converter.register_module(n) }
         log(options, out_io, "    Classes: #{class_nodes.size}")
@@ -334,8 +336,6 @@ module CrystalV2
         STDERR.puts if options.progress
         log(options, out_io, "    Macros: #{macro_nodes.size}")
         macro_nodes.each { |n, a| hir_converter.arena = a; hir_converter.register_macro(n) }
-        log(options, out_io, "    Aliases: #{alias_nodes.size}")
-        alias_nodes.each { |n, a| hir_converter.arena = a; hir_converter.register_alias(n) }
 
         # Pass 2: Register function signatures
         log(options, out_io, "  Pass 2: Registering #{def_nodes.size} function signatures...")
