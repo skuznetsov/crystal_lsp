@@ -1333,12 +1333,16 @@ module Crystal::MIR
       emit_raw "  ret void\n"
       emit_raw "}\n\n"
 
-      # Entry point: main() calls __crystal_main()
-      emit_raw "; Program entry point\n"
-      emit_raw "define i32 @main(i32 %argc, ptr %argv) {\n"
-      emit_raw "  call void @__crystal_main(i32 %argc, ptr %argv)\n"
-      emit_raw "  ret i32 0\n"
-      emit_raw "}\n\n"
+      has_user_main = @module.functions.any? { |f| f.name == "main" }
+      has_crystal_main = @module.functions.any? { |f| f.name == "__crystal_main" }
+      if !has_user_main && has_crystal_main
+        # Entry point: main() calls __crystal_main()
+        emit_raw "; Program entry point\n"
+        emit_raw "define i32 @main(i32 %argc, ptr %argv) {\n"
+        emit_raw "  call void @__crystal_main(i32 %argc, ptr %argv)\n"
+        emit_raw "  ret i32 0\n"
+        emit_raw "}\n\n"
+      end
     end
 
     # Union debug helper function definitions - stubs for bootstrap

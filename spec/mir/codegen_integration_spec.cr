@@ -213,6 +213,43 @@ describe "Codegen Integration" do
     end
   end
 
+  describe "entrypoint handling" do
+    it "handles top-level expressions with def main" do
+      source = <<-CR
+        lib LibC
+          fun printf(format : UInt8*, ...) : Int32
+        end
+
+        x = 1
+
+        def main : Int32
+          2
+        end
+
+        LibC.printf("%d %d\\n", x, main)
+        CR
+
+      output = CodegenTestHelper.compile_and_run(source)
+      output.strip.should eq("1 2")
+    end
+
+    it "runs def main when no top-level expressions exist" do
+      source = <<-CR
+        lib LibC
+          fun printf(format : UInt8*, ...) : Int32
+        end
+
+        def main : Int32
+          LibC.printf("%d\\n", 7)
+          7
+        end
+        CR
+
+      output = CodegenTestHelper.compile_and_run(source)
+      output.strip.should eq("7")
+    end
+  end
+
   # ═══════════════════════════════════════════════════════════════════════════
   # STRUCTS
   # ═══════════════════════════════════════════════════════════════════════════

@@ -204,9 +204,13 @@ module Crystal::V2
         func_count += 1
       end
 
-      # Create synthetic main function from top-level expressions
+      # Create synthetic main function from top-level expressions (or user-defined main)
       if main_exprs.size > 0
         hir_converter.lower_main(main_exprs)
+        func_count += 1
+      elsif main_def = def_nodes.find { |(n, _)| String.new(n.name) == "main" }
+        hir_converter.arena = main_def[1]
+        hir_converter.lower_main_from_def(main_def[0])
         func_count += 1
       end
 

@@ -242,6 +242,9 @@ module Crystal::HIR
       "SSizeT"   => "Int64",             # 64-bit
     }
 
+    # Top-level user-defined `def main` is renamed to avoid clashing with the C entrypoint.
+    TOP_LEVEL_MAIN_BASE = "__crystal_user_main"
+
     getter module : Module
     property arena : CrystalV2::Compiler::Frontend::ArenaLike
 
@@ -333,6 +336,9 @@ module Crystal::HIR
     # Track declared type names for locals (used to resolve module-typed receivers).
     @current_typeof_local_names : Hash(String, String)?
 
+    # Track top-level `def main` so we can remap calls and avoid entrypoint collisions.
+    @top_level_main_defined : Bool
+
     def initialize(@arena, module_name : String = "main")
       @module = Module.new(module_name)
       @function_types = {} of String => TypeRef
@@ -359,6 +365,7 @@ module Crystal::HIR
       @generated_allocators = Set(String).new
       @type_cache = {} of String => TypeRef
       @current_typeof_local_names = nil
+      @top_level_main_defined = false
     end
 
     private def record_module_inclusion(module_name : String, class_name : String) : Nil
@@ -3599,6 +3606,10 @@ module Crystal::HIR
     # Call this for all functions before lowering any function bodies
     def register_function(node : CrystalV2::Compiler::Frontend::DefNode)
       base_name = String.new(node.name)
+      if base_name == "main" && @current_class.nil?
+        base_name = TOP_LEVEL_MAIN_BASE
+        @top_level_main_defined = true
+      end
       param_types = [] of TypeRef
       param_type_map = {} of String => TypeRef
       has_block = false
@@ -4261,6 +4272,10 @@ module Crystal::HIR
     # Lower a function definition
     def lower_def(node : CrystalV2::Compiler::Frontend::DefNode) : Function
       base_name = String.new(node.name)
+      if base_name == "main" && @current_class.nil?
+        base_name = TOP_LEVEL_MAIN_BASE
+        @top_level_main_defined = true
+      end
 
       # Lower parameters
       param_infos = [] of Tuple(String, TypeRef)
@@ -4387,6 +4402,59 @@ module Crystal::HIR
         block.terminator = Return.new(nil)
       end
 
+      func
+    end
+
+    # Lower a synthetic __crystal_main that calls a user-defined main.
+    # Used when there are no top-level expressions (no implicit main body).
+    def lower_main_from_def(node : CrystalV2::Compiler::Frontend::DefNode) : Function
+      if existing = @module.functions.find { |f| f.name == "__crystal_main" }
+        return existing
+      end
+
+      # Ensure user main is lowered (lazy lowering in CLI).
+      lower_def(node)
+
+      # Create __crystal_main(argc, argv)
+      func = @module.create_function("__crystal_main", TypeRef::VOID)
+      argc_param = func.add_param("argc", TypeRef::INT32)
+      argv_param = func.add_param("argv", TypeRef::POINTER)
+
+      ctx = LoweringContext.new(func, @module, @arena)
+      ctx.register_local("argc", argc_param.id)
+      ctx.register_local("argv", argv_param.id)
+      ctx.register_type(argc_param.id, TypeRef::INT32)
+      ctx.register_type(argv_param.id, TypeRef::POINTER)
+
+      # Build the call to main with argc/argv if requested by the signature.
+      param_types = [] of TypeRef
+      has_block = false
+      if params = node.params
+        params.each do |param|
+          next if named_only_separator?(param)
+          if param.is_block
+            has_block = true
+            next
+          end
+          param_types << (param.type_annotation ? type_ref_for_name(String.new(param.type_annotation.not_nil!)) : TypeRef::VOID)
+        end
+      end
+
+      main_base = if String.new(node.name) == "main" && @current_class.nil?
+                    @top_level_main_defined = true
+                    TOP_LEVEL_MAIN_BASE
+                  else
+                    "main"
+                  end
+      main_name = mangle_function_name(main_base, param_types, has_block)
+      return_type = get_function_return_type(main_name)
+      args = [] of ValueId
+      args << argc_param.id if param_types.size >= 1
+      args << argv_param.id if param_types.size >= 2
+      call = Call.new(ctx.next_id, return_type, nil, main_name, args)
+      ctx.emit(call)
+
+      ctx.terminate(Return.new(nil))
       func
     end
 
@@ -5356,6 +5424,17 @@ module Crystal::HIR
           ctx.register_type(call.id, return_type)
           return call.id
         end
+      end
+
+      # Top-level: treat `main` as a function call when a top-level main is defined.
+      if @current_class.nil? && name == "main" && @top_level_main_defined
+        full_name = mangle_function_name(TOP_LEVEL_MAIN_BASE, [] of TypeRef)
+        return_type = @function_types[full_name]? || TypeRef::VOID
+        lower_function_if_needed(full_name)
+        call = Call.new(ctx.next_id, return_type, nil, full_name, [] of ValueId)
+        ctx.emit(call)
+        ctx.register_type(call.id, return_type)
+        return call.id
       end
 
       # Otherwise create a new local (first use)
@@ -7788,6 +7867,9 @@ module Crystal::HIR
                          else
                            method_name
                          end
+      if receiver_id.nil? && full_method_name.nil? && method_name == "main" && @top_level_main_defined
+        base_method_name = TOP_LEVEL_MAIN_BASE
+      end
       mangled_method_name = mangle_function_name(base_method_name, arg_types)
       if has_block_call
         mangled_with_block = mangle_function_name(base_method_name, arg_types, true)

@@ -349,10 +349,13 @@ module CrystalV2
         # Only lower top-level expressions; function bodies are lowered on demand.
         log(options, out_io, "  Pass 3: Lowering bodies (lazy)...")
 
-        # Create main function from top-level expressions
+        # Create main function from top-level expressions (or user-defined main)
         STDERR.puts "  Creating main function..." if options.progress
         if main_exprs.size > 0
           hir_converter.lower_main(main_exprs)
+        elsif main_def = def_nodes.find { |(n, _)| String.new(n.name) == "main" }
+          hir_converter.arena = main_def[1]
+          hir_converter.lower_main_from_def(main_def[0])
         end
         STDERR.puts "  Main function created" if options.progress
 
