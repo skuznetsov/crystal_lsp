@@ -469,15 +469,17 @@ module Crystal::MIR
       reachable = Set(FunctionId).new
       worklist = [] of FunctionId
 
-      # Find main function
-      main_func = @module.functions.find { |f| f.name == "main" }
-      if main_func
-        worklist << main_func.id
-        reachable << main_func.id
-      else
-        # No main, emit all functions
+      # Find entry functions (Crystal uses __crystal_main as the synthetic entry).
+      roots = @module.functions.select { |f| f.name == "main" || f.name == "__crystal_main" }
+      if roots.empty?
+        # No entry, emit all functions
         @module.functions.each { |f| reachable << f.id }
         return reachable
+      end
+
+      roots.each do |root|
+        worklist << root.id
+        reachable << root.id
       end
 
       # Build function lookup by ID and by name

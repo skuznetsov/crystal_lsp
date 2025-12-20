@@ -657,8 +657,9 @@ The key insight is: **Don't compete with LLVM, complement it.**
 - [x] LLVM opt/llc artifact cache keyed by ll hash + flags (2025-12-23)
 - [x] AST cache key stabilized (FNV hash) and verified hits on warm run (parse ~164ms → ~79ms)
 - [x] Add `--no-llvm-metadata` to skip type metadata (small LLVM time reduction)
+- [x] Reachability roots include `__crystal_main` (avoid emitting all funcs; LLVM ≈ 0.35s on /tmp/cv2_smoke.cr)
 - [ ] Investigate release compile latency on small programs (43s on /tmp/cv2_smoke.cr); add per-phase timing + cache hit diagnostics
-  - Current: `--no-prelude` ≈ 16ms total; with prelude HIR ≈ 7s, MIR ≈ 4.7s, LLVM ≈ 26s (AST cache hits working)
+  - Current: `--no-prelude` ≈ 16ms total; with prelude HIR ≈ 6.8s, MIR ≈ 4.5s, LLVM ≈ 0.35s, total ≈ 12s (AST cache hits working)
 
 ### 5.3.6 LTP/WBA Optimization Framework
 
