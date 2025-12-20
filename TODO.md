@@ -660,8 +660,9 @@ The key insight is: **Don't compete with LLVM, complement it.**
 - [x] Add `--no-llvm-metadata` to skip type metadata (small LLVM time reduction)
 - [x] Reachability roots include `__crystal_main` (avoid emitting all funcs; LLVM ≈ 0.35s on /tmp/cv2_smoke.cr)
 - [ ] Investigate release compile latency on small programs (43s on /tmp/cv2_smoke.cr); add per-phase timing + cache hit diagnostics
-  - Current: `--no-prelude` ≈ 16ms total; with prelude HIR ≈ 6.9s, MIR ≈ 0.3ms, LLVM ≈ 3ms, total ≈ 7.1s (HIR reachability reduces MIR workload)
-  - Added `hir_funcs` / `mir_funcs` counts to --stats output for sizing (6532 / 5364 on cv2_smoke; hir_reach≈39)
+  - Current: `--no-prelude` ≈ 16ms total; with prelude HIR ≈ 0.11s, MIR ≈ 0.1ms, LLVM ≈ 1.3ms, total ≈ 0.22s (lazy HIR lowering + reachability)
+  - Added `hir_funcs` / `hir_reach` / `mir_funcs` counts to --stats output (cv2_smoke: 915 / 8 / 8)
+- [ ] Validate lazy HIR lowering for dynamic dispatch (virtual calls / module mixins) to avoid pruning needed methods
 
 ### 5.3.6 LTP/WBA Optimization Framework
 

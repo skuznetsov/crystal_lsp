@@ -343,36 +343,9 @@ module CrystalV2
         end
         STDERR.puts if options.progress
 
-        # Pass 3: Lower bodies
-        log(options, out_io, "  Pass 3: Lowering bodies...")
-        log(options, out_io, "    Modules: #{module_nodes.size}")
-        module_nodes.each_with_index do |(n, a), i|
-          name = String.new(n.name)
-          # Skip huge modules for now (Enumerable has 126 methods)
-          skip_modules = ["Enumerable", "Indexable", "Iterator"]
-          if skip_modules.includes?(name)
-            STDERR.puts "    Skipping module #{i+1}/#{module_nodes.size}: #{name} (too many methods)" if options.progress
-            next
-          end
-          STDERR.puts "    Lowering module #{i+1}/#{module_nodes.size}: #{name}" if options.progress
-          STDERR.flush if options.progress
-          hir_converter.arena = a
-          hir_converter.lower_module(n)
-        end
-        log(options, out_io, "    Classes: #{class_nodes.size}")
-        class_nodes.each_with_index do |(n, a), i|
-          hir_converter.arena = a
-          hir_converter.lower_class(n)
-          STDERR.print "\r    Lowered class #{i+1}/#{class_nodes.size}" if options.progress && (i % 10 == 0 || i == class_nodes.size - 1)
-        end
-        STDERR.puts if options.progress
-        log(options, out_io, "    Functions: #{def_nodes.size}")
-        def_nodes.each_with_index do |(n, a), i|
-          hir_converter.arena = a
-          hir_converter.lower_def(n)
-          STDERR.print "\r    Lowered function #{i+1}/#{def_nodes.size}" if options.progress && (i % 50 == 0 || i == def_nodes.size - 1)
-        end
-        STDERR.puts if options.progress
+        # Pass 3: Lower bodies (lazy)
+        # Only lower top-level expressions; function bodies are lowered on demand.
+        log(options, out_io, "  Pass 3: Lowering bodies (lazy)...")
 
         # Create main function from top-level expressions
         STDERR.puts "  Creating main function..." if options.progress

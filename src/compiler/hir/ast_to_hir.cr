@@ -275,6 +275,10 @@ module Crystal::HIR
     # Functions that contain yield (candidates for inline)
     @yield_functions : Set(String)
 
+    # Track functions lowered lazily to avoid re-entrancy/duplication.
+    @lowered_functions : Set(String)
+    @lowering_functions : Set(String)
+
     # Generic class templates (base name -> template)
     @generic_templates : Hash(String, GenericClassTemplate)
 
@@ -338,6 +342,8 @@ module Crystal::HIR
       @function_defs = {} of String => CrystalV2::Compiler::Frontend::DefNode
       @function_def_arenas = {} of String => CrystalV2::Compiler::Frontend::ArenaLike
       @yield_functions = Set(String).new
+      @lowered_functions = Set(String).new
+      @lowering_functions = Set(String).new
       @generic_templates = {} of String => GenericClassTemplate
       @monomorphized = Set(String).new
       @type_param_map = {} of String => String
@@ -1071,6 +1077,8 @@ module Crystal::HIR
                   next if defined_full_names.includes?(full_name)
 
                   register_function_type(full_name, return_type)
+                  @function_defs[full_name] = member
+                  @function_def_arenas[full_name] = @arena
 
                   if body = member.body
                     if contains_yield?(body)
@@ -1314,6 +1322,8 @@ module Crystal::HIR
             end
             full_name = mangle_function_name(base_name, param_types, has_block)
             register_function_type(full_name, return_type)
+            @function_defs[full_name] = member
+            @function_def_arenas[full_name] = @arena
 
             # Track yield-functions for inline expansion (module methods).
             if body = member.body
@@ -1429,6 +1439,8 @@ module Crystal::HIR
             end
             full_method_name = mangle_function_name(base_name, param_types, has_block)
             register_function_type(full_method_name, return_type)
+            @function_defs[full_method_name] = member
+            @function_def_arenas[full_method_name] = @arena
 
             # Track yield-functions for inline expansion (nested module methods).
             if body = member.body
@@ -1777,6 +1789,8 @@ module Crystal::HIR
               STDERR.puts "[DEBUG_METHOD_REG] #{class_name}: #{method_name} -> #{full_name} (class_method=#{is_class_method})"
             end
             register_function_type(full_name, return_type)
+            @function_defs[full_name] = member
+            @function_def_arenas[full_name] = @arena
 
             # Track yield-functions for inline expansion.
             # Note: MIR lowering removes yield-containing functions (inline-only), so we must inline
@@ -2105,6 +2119,8 @@ module Crystal::HIR
                            TypeRef::VOID
                          end
             register_function_type(full_name, return_type)
+            @function_defs[full_name] = member
+            @function_def_arenas[full_name] = @arena
 
             # Track yield-functions for inline expansion (struct methods).
             # MIR lowering removes yield-containing functions (inline-only), so we must inline them.
@@ -2551,6 +2567,7 @@ module Crystal::HIR
         # Mangle the initialize call with parameter types
         init_param_types = init_params.map { |_, t| t }
         init_name = mangle_function_name(init_base_name, init_param_types)
+        lower_function_if_needed(init_name)
         init_call = Call.new(ctx.next_id, TypeRef::VOID, alloc.id, init_name, param_ids)
         ctx.emit(init_call)
       end
@@ -2563,75 +2580,66 @@ module Crystal::HIR
     private def generate_getter_method(class_name : String, class_info : ClassInfo, spec : CrystalV2::Compiler::Frontend::AccessorSpec)
       accessor_name = String.new(spec.name)
       ivar_name = "@#{accessor_name}"
-
-      # Find ivar info
       ivar_info = class_info.ivars.find { |iv| iv.name == ivar_name }
       return unless ivar_info
 
-      ivar_type = ivar_info.type
-
-      # Create mangled function name
-      base_name = "#{class_name}##{accessor_name}"
-      func_name = mangle_function_name(base_name, [] of TypeRef)
-
-      # Skip if already generated
-      return if @module.has_function?(func_name)
-
-      # Create function returning the ivar type
-      func = @module.create_function(func_name, ivar_type)
-      ctx = LoweringContext.new(func, @module, @arena)
-
-      # Add self parameter
-      self_param = func.add_param("self", class_info.type_ref)
-      ctx.register_local("self", self_param.id)
-      ctx.register_type(self_param.id, class_info.type_ref)
-
-      # Read the ivar
-      field_get = FieldGet.new(ctx.next_id, ivar_type, self_param.id, ivar_name, ivar_info.offset)
-      ctx.emit(field_get)
-      ctx.register_type(field_get.id, ivar_type)
-
-      # Return the value
-      ctx.terminate(Return.new(field_get.id))
+      generate_getter_method_for_ivar(class_name, class_info, ivar_info)
     end
 
     # Generate synthetic setter method: def name=(value); @name = value; end
     private def generate_setter_method(class_name : String, class_info : ClassInfo, spec : CrystalV2::Compiler::Frontend::AccessorSpec)
       accessor_name = String.new(spec.name)
       ivar_name = "@#{accessor_name}"
-
-      # Find ivar info
       ivar_info = class_info.ivars.find { |iv| iv.name == ivar_name }
       return unless ivar_info
 
+      generate_setter_method_for_ivar(class_name, class_info, ivar_info)
+    end
+
+    private def generate_getter_method_for_ivar(class_name : String, class_info : ClassInfo, ivar_info : IVarInfo)
+      accessor_name = ivar_info.name.lstrip('@')
       ivar_type = ivar_info.type
 
-      # Create mangled function name with parameter type
-      base_name = "#{class_name}##{accessor_name}="
-      func_name = mangle_function_name(base_name, [ivar_type])
-
-      # Skip if already generated
+      base_name = "#{class_name}##{accessor_name}"
+      func_name = mangle_function_name(base_name, [] of TypeRef)
       return if @module.has_function?(func_name)
 
-      # Create function returning the ivar type (returns the set value)
       func = @module.create_function(func_name, ivar_type)
       ctx = LoweringContext.new(func, @module, @arena)
 
-      # Add self parameter
       self_param = func.add_param("self", class_info.type_ref)
       ctx.register_local("self", self_param.id)
       ctx.register_type(self_param.id, class_info.type_ref)
 
-      # Add value parameter
+      field_get = FieldGet.new(ctx.next_id, ivar_type, self_param.id, ivar_info.name, ivar_info.offset)
+      ctx.emit(field_get)
+      ctx.register_type(field_get.id, ivar_type)
+
+      ctx.terminate(Return.new(field_get.id))
+    end
+
+    private def generate_setter_method_for_ivar(class_name : String, class_info : ClassInfo, ivar_info : IVarInfo)
+      accessor_name = ivar_info.name.lstrip('@')
+      ivar_type = ivar_info.type
+
+      base_name = "#{class_name}##{accessor_name}="
+      func_name = mangle_function_name(base_name, [ivar_type])
+      return if @module.has_function?(func_name)
+
+      func = @module.create_function(func_name, ivar_type)
+      ctx = LoweringContext.new(func, @module, @arena)
+
+      self_param = func.add_param("self", class_info.type_ref)
+      ctx.register_local("self", self_param.id)
+      ctx.register_type(self_param.id, class_info.type_ref)
+
       value_param = func.add_param("value", ivar_type)
       ctx.register_local("value", value_param.id)
       ctx.register_type(value_param.id, ivar_type)
 
-      # Write to ivar
-      field_set = FieldSet.new(ctx.next_id, TypeRef::VOID, self_param.id, ivar_name, value_param.id, ivar_info.offset)
+      field_set = FieldSet.new(ctx.next_id, TypeRef::VOID, self_param.id, ivar_info.name, value_param.id, ivar_info.offset)
       ctx.emit(field_set)
 
-      # Return the value
       ctx.terminate(Return.new(value_param.id))
     end
 
@@ -6601,6 +6609,86 @@ module Crystal::HIR
     # CALLS
     # ═══════════════════════════════════════════════════════════════════════
 
+    private def lower_function_if_needed(name : String) : Nil
+      return if name.empty?
+      return if @yield_functions.includes?(name)
+      return if @module.has_function?(name)
+      return if @lowering_functions.includes?(name)
+
+      target_name = name
+      func_def = @function_defs[target_name]?
+      arena = @function_def_arenas[target_name]?
+      unless func_def
+        base_name = name.split("$").first
+        if base_name != name
+          func_def = @function_defs[base_name]?
+          arena = @function_def_arenas[base_name]? if func_def
+          target_name = base_name if func_def
+        end
+      end
+      return unless func_def
+
+      @lowering_functions.add(target_name)
+      begin
+        with_arena(arena || @arena) do
+          if target_name.includes?("#")
+            owner = target_name.split("#", 2)[0]
+            if class_info = @class_info[owner]?
+              old_class = @current_class
+              @current_class = owner
+              lower_method(owner, class_info, func_def)
+              @current_class = old_class
+            end
+          elsif target_name.includes?(".")
+            owner = target_name.split(".", 2)[0]
+            if class_info = @class_info[owner]?
+              old_class = @current_class
+              @current_class = owner
+              lower_method(owner, class_info, func_def)
+              @current_class = old_class
+            else
+              lower_module_method(owner, func_def)
+            end
+          else
+            lower_def(func_def)
+          end
+        end
+      ensure
+        @lowering_functions.delete(target_name)
+        @lowered_functions.add(target_name)
+      end
+    end
+
+    private def ensure_accessor_method(
+      ctx : LoweringContext,
+      receiver_id : ValueId,
+      method_name : String
+    ) : Tuple(TypeRef, String)?
+      receiver_type = ctx.type_of(receiver_id)
+      class_name = get_type_name_from_ref(receiver_type)
+      class_info = @class_info[class_name]?
+      return nil unless class_info
+
+      if method_name.ends_with?("=")
+        accessor_name = method_name[0, method_name.size - 1]
+        ivar_name = "@#{accessor_name}"
+        if ivar_info = class_info.ivars.find { |iv| iv.name == ivar_name }
+          func_name = mangle_function_name("#{class_name}##{accessor_name}=", [ivar_info.type])
+          generate_setter_method_for_ivar(class_name, class_info, ivar_info) unless @module.has_function?(func_name)
+          return {ivar_info.type, func_name}
+        end
+      else
+        ivar_name = "@#{method_name}"
+        if ivar_info = class_info.ivars.find { |iv| iv.name == ivar_name }
+          func_name = mangle_function_name("#{class_name}##{method_name}", [] of TypeRef)
+          generate_getter_method_for_ivar(class_name, class_info, ivar_info) unless @module.has_function?(func_name)
+          return {ivar_info.type, func_name}
+        end
+      end
+
+      nil
+    end
+
     private def lower_call(ctx : LoweringContext, node : CrystalV2::Compiler::Frontend::CallNode) : ValueId
       # CallNode has callee (ExprId) which can be:
       # - IdentifierNode: simple function call like foo() or ClassName.new()
@@ -6845,6 +6933,11 @@ module Crystal::HIR
           # Class method call like Counter.new()
           full_method_name = "#{class_name_str}.#{method_name}"
           receiver_id = nil  # Static call, no receiver
+          if method_name == "new"
+            if class_info = @class_info[class_name_str]?
+              generate_allocator(class_name_str, class_info)
+            end
+          end
         else
           # Instance method call like c.increment()
           receiver_id = lower_expr(ctx, callee_node.object)
@@ -7099,6 +7192,7 @@ module Crystal::HIR
           mangled_method_name = mangled_with_block
         end
       end
+      primary_mangled_name = mangled_method_name
 
       # Handle yield-functions with inline expansion FIRST (before lowering block)
       # Must check with mangled name since that's how yield functions are registered
@@ -7193,6 +7287,14 @@ module Crystal::HIR
             mangled_method_name = test_base
             break
           end
+        end
+      end
+
+      # Ensure synthetic accessors exist for direct ivar access.
+      if return_type == TypeRef::VOID && receiver_id
+        if accessor = ensure_accessor_method(ctx, receiver_id, method_name)
+          return_type = accessor[0]
+          mangled_method_name = accessor[1]
         end
       end
 
@@ -7373,6 +7475,12 @@ module Crystal::HIR
            method_name.ends_with?("_gutter") || method_name.ends_with?("_segment")
           return_type = TypeRef::POINTER
         end
+      end
+
+      # Lazily lower target function bodies (avoid full stdlib lowering).
+      lower_function_if_needed(primary_mangled_name)
+      if mangled_method_name != primary_mangled_name
+        lower_function_if_needed(mangled_method_name)
       end
 
       # Coerce arguments to union types if needed
