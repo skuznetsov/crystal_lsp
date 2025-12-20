@@ -939,6 +939,11 @@ module Crystal::HIR
       output
     end
 
+    private def update_typeof_local(name : String, type_ref : TypeRef) : Nil
+      return unless locals = @current_typeof_locals
+      locals[name] = type_ref
+    end
+
     private def with_arena(arena : CrystalV2::Compiler::Frontend::ArenaLike, &)
       old_arena = @arena
       @arena = arena
@@ -1578,6 +1583,9 @@ module Crystal::HIR
       param_infos = [] of Tuple(String, TypeRef)
       param_types = [] of TypeRef
       has_block = false
+      param_type_map = {} of String => TypeRef
+      old_typeof_locals = @current_typeof_locals
+      @current_typeof_locals = param_type_map
       if params = node.params
         params.each do |param|
           param_name = param.name.nil? ? "_" : String.new(param.name.not_nil!)
@@ -1586,6 +1594,7 @@ module Crystal::HIR
                        else
                          TypeRef::VOID
                        end
+          param_type_map[param_name] = param_type
           param_infos << {param_name, param_type}
           if param.is_block
             has_block = true
@@ -1619,6 +1628,8 @@ module Crystal::HIR
           last_value = lower_expr(ctx, expr_id)
         end
       end
+
+      @current_typeof_locals = old_typeof_locals
 
       # Restore current class
       @current_class = old_class
@@ -2743,7 +2754,6 @@ module Crystal::HIR
                       inferred = infer_getter_return_type(node, class_info.ivars)
                       inferred || TypeRef::VOID
                     end
-      @current_typeof_locals = old_typeof_locals
 
       # Mangle function name with parameter types for overloading
       full_name = mangle_function_name(base_name, param_types, has_block)
@@ -2817,6 +2827,8 @@ module Crystal::HIR
       if block.terminator.is_a?(Unreachable) && !block_has_raise
         block.terminator = Return.new(last_value)
       end
+
+      @current_typeof_locals = old_typeof_locals
 
       # Restore previous method context
       @current_method = old_method
@@ -3781,7 +3793,6 @@ module Crystal::HIR
                     else
                       TypeRef::VOID
                     end
-      @current_typeof_locals = old_typeof_locals
 
       # Top-level functions support overloading, so use mangled names consistently.
       full_name = mangle_function_name(base_name, param_types, has_block)
@@ -3827,6 +3838,8 @@ module Crystal::HIR
       if block.terminator.is_a?(Unreachable) && !block_has_raise
         block.terminator = Return.new(last_value)
       end
+
+      @current_typeof_locals = old_typeof_locals
 
       func
     end
@@ -4310,8 +4323,10 @@ module Crystal::HIR
         # keep the concrete type for call resolution to avoid includer heuristics.
         if module_like_type_name?(type_name) && value_type != TypeRef::VOID
           ctx.register_type(value, value_type)
+          update_typeof_local(var_name, value_type)
         else
           ctx.register_type(value, type_ref)
+          update_typeof_local(var_name, type_ref)
         end
         value
       else
@@ -4328,6 +4343,7 @@ module Crystal::HIR
         ctx.emit(lit)
         ctx.register_local(var_name, lit.id)
         ctx.register_type(lit.id, type_ref)
+        update_typeof_local(var_name, type_ref)
         lit.id
       end
     end
@@ -5136,34 +5152,12 @@ module Crystal::HIR
         arg_name = case arg_node
                    when CrystalV2::Compiler::Frontend::TypeofNode
                      inner = arg_node.args.first?
-                     if inner
-                       inner_node = @arena[inner]
-                       if inner_node.is_a?(CrystalV2::Compiler::Frontend::IdentifierNode)
-                         ident_name = String.new(inner_node.name)
-                         if value_id = ctx.lookup_local(ident_name)
-                           type_name = get_type_name_from_ref(ctx.type_of(value_id))
-                           normalize_typeof_name.call(type_name)
-                         else
-                           "Pointer(Void)"
-                         end
-                       else
-                         "Pointer(Void)"
-                       end
-                     else
-                       "Pointer(Void)"
-                     end
+                     inner ? resolve_typeof_expr(inner) : "Pointer(Void)"
                    else
                      stringify_type_expr(arg_id) || "Unknown"
                    end
-        if arg_name.starts_with?("typeof(") && arg_name.ends_with?(")")
-          inner_name = arg_name[7, arg_name.size - 8].strip
-          if value_id = ctx.lookup_local(inner_name)
-            type_name = get_type_name_from_ref(ctx.type_of(value_id))
-            arg_name = normalize_typeof_name.call(type_name)
-          else
-            arg_name = "Pointer(Void)"
-          end
-        end
+        arg_name = resolve_typeof_in_type_string(arg_name)
+        arg_name = normalize_typeof_name.call(arg_name)
         # Substitute type parameter if applicable
         @type_param_map[arg_name]? || arg_name
       end
@@ -6969,34 +6963,12 @@ module Crystal::HIR
               arg_name = case arg_node
                          when CrystalV2::Compiler::Frontend::TypeofNode
                            inner = arg_node.args.first?
-                           if inner
-                             inner_node = @arena[inner]
-                             if inner_node.is_a?(CrystalV2::Compiler::Frontend::IdentifierNode)
-                               ident_name = String.new(inner_node.name)
-                               if value_id = ctx.lookup_local(ident_name)
-                                 type_name = get_type_name_from_ref(ctx.type_of(value_id))
-                                 normalize_typeof_name.call(type_name)
-                               else
-                                 "Pointer(Void)"
-                               end
-                             else
-                               "Pointer(Void)"
-                             end
-                           else
-                             "Pointer(Void)"
-                           end
+                           inner ? resolve_typeof_expr(inner) : "Pointer(Void)"
                          else
                            stringify_type_expr(arg_id) || "Unknown"
                          end
-              if arg_name.starts_with?("typeof(") && arg_name.ends_with?(")")
-                inner_name = arg_name[7, arg_name.size - 8].strip
-                if value_id = ctx.lookup_local(inner_name)
-                  type_name = get_type_name_from_ref(ctx.type_of(value_id))
-                  arg_name = normalize_typeof_name.call(type_name)
-                else
-                  arg_name = "Pointer(Void)"
-                end
-              end
+              arg_name = resolve_typeof_in_type_string(arg_name)
+              arg_name = normalize_typeof_name.call(arg_name)
               @type_param_map[arg_name]? || arg_name
             end
 
@@ -9384,15 +9356,8 @@ module Crystal::HIR
 
           type_args = obj_node.type_args.map do |arg_id|
             arg_name = stringify_type_expr(arg_id) || "Unknown"
-            if arg_name.starts_with?("typeof(") && arg_name.ends_with?(")")
-              inner_name = arg_name[7, arg_name.size - 8].strip
-              if value_id = ctx.lookup_local(inner_name)
-                type_name = get_type_name_from_ref(ctx.type_of(value_id))
-                arg_name = normalize_typeof_name.call(type_name)
-              else
-                arg_name = "Pointer(Void)"
-              end
-            end
+            arg_name = resolve_typeof_in_type_string(arg_name)
+            arg_name = normalize_typeof_name.call(arg_name)
             @type_param_map[arg_name]? || arg_name
           end
           # Create specialized class name like Hash(Int32, Int32)
@@ -9663,6 +9628,7 @@ module Crystal::HIR
           copy = Copy.new(ctx.next_id, value_type, value_id)
           ctx.emit(copy)
           ctx.register_local(name, copy.id)
+          update_typeof_local(name, value_type)
           copy.id
         else
           # New variable
@@ -9673,6 +9639,7 @@ module Crystal::HIR
           copy = Copy.new(ctx.next_id, value_type, value_id)
           ctx.emit(copy)
           ctx.register_local(name, copy.id)
+          update_typeof_local(name, value_type)
           copy.id
         end
 
@@ -9865,6 +9832,8 @@ module Crystal::HIR
       saved_block = ctx.current_block
       # Save locals before lowering block body - block-local vars shouldn't leak
       saved_locals = ctx.save_locals
+      old_typeof_locals = @current_typeof_locals
+      @current_typeof_locals = old_typeof_locals ? old_typeof_locals.dup : old_typeof_locals
 
       ctx.current_block = body_block
       ctx.push_scope(ScopeKind::Closure)
@@ -9884,6 +9853,7 @@ module Crystal::HIR
             ctx.emit(param_val)
             ctx.register_local(name, param_val.id)
             ctx.register_type(param_val.id, param_type)
+            update_typeof_local(name, param_type)
           end
         end
       end
@@ -9900,12 +9870,15 @@ module Crystal::HIR
       ctx.current_block = saved_block
       # Restore locals - block-local vars shouldn't pollute outer scope
       ctx.restore_locals(saved_locals)
+      @current_typeof_locals = old_typeof_locals
       body_block
     end
 
     private def lower_proc_literal(ctx : LoweringContext, node : CrystalV2::Compiler::Frontend::ProcLiteralNode) : ValueId
       body_block = ctx.create_block
       saved_block = ctx.current_block
+      old_typeof_locals = @current_typeof_locals
+      @current_typeof_locals = old_typeof_locals ? old_typeof_locals.dup : old_typeof_locals
 
       ctx.current_block = body_block
       ctx.push_scope(ScopeKind::Closure)
@@ -9923,6 +9896,8 @@ module Crystal::HIR
             param_val = Parameter.new(ctx.next_id, param_type, idx, name)
             ctx.emit(param_val)
             ctx.register_local(name, param_val.id)
+            ctx.register_type(param_val.id, param_type)
+            update_typeof_local(name, param_type)
           end
         end
       end
@@ -9936,6 +9911,7 @@ module Crystal::HIR
       end
 
       ctx.current_block = saved_block
+      @current_typeof_locals = old_typeof_locals
 
       # Create MakeClosure
       captures = [] of CapturedVar

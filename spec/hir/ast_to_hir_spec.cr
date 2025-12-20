@@ -870,6 +870,25 @@ describe Crystal::HIR::AstToHir do
     end
   end
 
+  describe "typeof in type positions" do
+    it "resolves typeof in generic type args using locals" do
+      code = <<-CRYSTAL
+        class Box(T)
+          def initialize(@value : T)
+          end
+        end
+
+        def foo(x : Int32)
+          b = Box(typeof(x)).new(x)
+          b
+        end
+      CRYSTAL
+
+      converter = lower_program(code)
+      converter.class_info.has_key?("Box(Int32)").should be_true
+    end
+  end
+
   # ═══════════════════════════════════════════════════════════════════════════
   # BLOCK STRUCTURE TESTS
   # ═══════════════════════════════════════════════════════════════════════════

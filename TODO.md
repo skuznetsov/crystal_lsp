@@ -952,6 +952,7 @@ enum:      64  ← ✅ DONE
 | Stdlib-style combinators | Infer return types for unannotated combinators (e.g., `Iterator#with_object`) from last expression + keep function return map in sync |
 | Scope-safe type resolution | Resolve unqualified type names in the current namespace before caching (avoid poisoning `type_ref_for_name` cache) |
 | Yield inlining re-entry guard | Skip re-lowering when mangled names fall back to base during inlining (prevents HIR segfaults) (2025-12-25) |
+| typeof in type args (locals/params) | Resolve `typeof(x)` in generic instantiations using live locals (2025-12-25) |
 
 ### 8.2 Current Status
 
@@ -973,7 +974,7 @@ r2 = maybe(false)  # => nil
 
 | Feature | Issue | Priority |
 |---------|-------|----------|
-| `typeof(...)` in types | Used in Array#flatten, Enumerable methods | HIGH |
+| `typeof(...)` in types | Partial: locals/params resolved; remaining complex/macros | HIGH |
 | Generic methods with blocks | `def self.build(capacity : Int, &)` | HIGH |
 | Module mixins (Indexable, Enumerable) | Instance methods from `include`d modules are expanded into concrete types; module-typed receivers still need better resolution | MED |
 | Macro expansion | `getter`, `property` need compile-time expansion | MED |
