@@ -652,7 +652,7 @@ The key insight is: **Don't compete with LLVM, complement it.**
 - [x] **Tests green after recent hardening** (2025-12-10): all specs passing (9 pending intentional) after fixing yield/puts/array/lifetime, empty hash inference, struct LLVM type mapping, and stabilizing pipeline.
 - [x] **Next:** cycle detection (generic element types) (2025-12-26)
 - [x] ABI harness (offset/align/union) (2025-12-26)
-- [ ] RC/taint inline audit
+- [x] RC/taint inline audit
 - [ ] ThreadShared→atomic/GC enforcement
 
 ---

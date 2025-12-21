@@ -312,7 +312,15 @@ module Crystal::HIR
     end
 
     private def is_container_add?(method_name : String) : Bool
-      CONTAINER_ADD_METHODS.includes?(method_name)
+      CONTAINER_ADD_METHODS.includes?(container_method_base(method_name))
+    end
+
+    private def container_method_base(method_name : String) : String
+      if idx = method_name.index('$')
+        method_name[0, idx]
+      else
+        method_name
+      end
     end
 
     private def is_virtual_call?(call : Call) : Bool

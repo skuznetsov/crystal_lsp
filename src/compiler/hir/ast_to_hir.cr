@@ -335,6 +335,9 @@ module Crystal::HIR
     # Track currently inlined yield-functions to avoid infinite inline recursion on stdlib code.
     @inline_yield_name_stack : Array(String) = [] of String
 
+    # Captures computed for block literals (body_block -> captures).
+    @block_captures : Hash(BlockId, Array(CapturedVar)) = {} of BlockId => Array(CapturedVar)
+
     # Track declared type names for locals (used to resolve module-typed receivers).
     @current_typeof_local_names : Hash(String, String)?
 
@@ -368,6 +371,7 @@ module Crystal::HIR
       @type_cache = {} of String => TypeRef
       @current_typeof_local_names = nil
       @top_level_main_defined = false
+      @block_captures = {} of BlockId => Array(CapturedVar)
     end
 
     private def fun_def?(node : CrystalV2::Compiler::Frontend::DefNode) : Bool
@@ -10767,12 +10771,95 @@ module Crystal::HIR
     # CLOSURES
     # ═══════════════════════════════════════════════════════════════════════
 
+    private def compute_block_captures(
+      ctx : LoweringContext,
+      closure_scope : ScopeId,
+      saved_locals : Hash(String, ValueId),
+      assigned_vars : Set(String)
+    ) : Array(CapturedVar)
+      return [] of CapturedVar if saved_locals.empty?
+
+      value_to_name = {} of ValueId => String
+      saved_locals.each { |name, id| value_to_name[id] = name }
+
+      captured_names = Set(String).new
+      ctx.function.blocks.each do |block|
+        next unless scope_within?(ctx.function, block.scope, closure_scope)
+        block.instructions.each do |inst|
+          each_operand_for_capture(inst) do |operand|
+            if name = value_to_name[operand]?
+              captured_names << name
+            end
+          end
+        end
+      end
+
+      captures = [] of CapturedVar
+      captured_names.each do |name|
+        value_id = saved_locals[name]
+        by_ref = assigned_vars.includes?(name)
+        captures << CapturedVar.new(value_id, name, by_ref)
+      end
+      captures
+    end
+
+    private def scope_within?(function : Function, scope_id : ScopeId, root_scope : ScopeId) : Bool
+      current = scope_id
+      loop do
+        return true if current == root_scope
+        scope = function.get_scope(current)
+        parent = scope.parent
+        return false unless parent
+        current = parent
+      end
+    end
+
+    private def each_operand_for_capture(value : Value, &block : ValueId ->)
+      case value
+      when Copy
+        yield value.source
+      when BinaryOperation
+        yield value.left
+        yield value.right
+      when UnaryOperation
+        yield value.operand
+      when Call
+        if recv = value.receiver
+          yield recv
+        end
+        value.args.each { |arg| yield arg }
+      when FieldGet
+        yield value.object
+      when FieldSet
+        yield value.object
+        yield value.value
+      when IndexGet
+        yield value.object
+        yield value.index
+      when IndexSet
+        yield value.object
+        yield value.index
+        yield value.value
+      when MakeClosure
+        value.captures.each { |cap| yield cap.value_id }
+      when Yield
+        value.args.each { |arg| yield arg }
+      when Phi
+        value.incoming.each { |(_, val)| yield val }
+      when Cast
+        yield value.value
+      when IsA
+        yield value.value
+      when Allocate
+        value.constructor_args.each { |arg| yield arg }
+      end
+    end
+
     private def lower_block(ctx : LoweringContext, node : CrystalV2::Compiler::Frontend::BlockNode) : ValueId
       block_id = lower_block_to_block_id(ctx, node)
 
       # Create MakeClosure
-      # For now, capture analysis is deferred to escape analysis phase
-      captures = [] of CapturedVar  # Will be filled by escape analysis
+      captures = @block_captures.delete(block_id) || [] of CapturedVar
 
       closure = MakeClosure.new(ctx.next_id, TypeRef::VOID, block_id, captures)
       ctx.emit(closure)
@@ -10780,17 +10867,25 @@ module Crystal::HIR
     end
 
     private def lower_block_to_block_id(ctx : LoweringContext, node : CrystalV2::Compiler::Frontend::BlockNode) : BlockId
-      body_block = ctx.create_block
       saved_block = ctx.current_block
       # Save locals before lowering block body - block-local vars shouldn't leak
       saved_locals = ctx.save_locals
+      assigned_vars = collect_assigned_vars(node.body).to_set
+      if params = node.params
+        params.each do |param|
+          next unless param_name = param.name
+          assigned_vars.delete(String.new(param_name))
+        end
+      end
       old_typeof_locals = @current_typeof_locals
       old_typeof_local_names = @current_typeof_local_names
       @current_typeof_locals = old_typeof_locals ? old_typeof_locals.dup : old_typeof_locals
       @current_typeof_local_names = old_typeof_local_names ? old_typeof_local_names.dup : old_typeof_local_names
 
-      ctx.current_block = body_block
       ctx.push_scope(ScopeKind::Closure)
+      closure_scope = ctx.current_scope
+      body_block = ctx.create_block
+      ctx.current_block = body_block
 
       # Add block parameters (params can be nil)
       # Default to POINTER type since block parameters are typically objects (IO, etc.)
@@ -10819,6 +10914,8 @@ module Crystal::HIR
       last_value = lower_body(ctx, node.body)
       ctx.pop_scope
 
+      @block_captures[body_block] = compute_block_captures(ctx, closure_scope, saved_locals, assigned_vars)
+
       # Implicit return from block
       if ctx.get_block(ctx.current_block).terminator.is_a?(Unreachable)
         ctx.terminate(Return.new(last_value))
@@ -10833,15 +10930,18 @@ module Crystal::HIR
     end
 
     private def lower_proc_literal(ctx : LoweringContext, node : CrystalV2::Compiler::Frontend::ProcLiteralNode) : ValueId
-      body_block = ctx.create_block
       saved_block = ctx.current_block
+      saved_locals = ctx.save_locals
+      assigned_vars = collect_assigned_vars(node.body).to_set
       old_typeof_locals = @current_typeof_locals
       old_typeof_local_names = @current_typeof_local_names
       @current_typeof_locals = old_typeof_locals ? old_typeof_locals.dup : old_typeof_locals
       @current_typeof_local_names = old_typeof_local_names ? old_typeof_local_names.dup : old_typeof_local_names
 
-      ctx.current_block = body_block
       ctx.push_scope(ScopeKind::Closure)
+      closure_scope = ctx.current_scope
+      body_block = ctx.create_block
+      ctx.current_block = body_block
 
       # Add proc parameters (params can be nil)
       if params = node.params
@@ -10861,6 +10961,7 @@ module Crystal::HIR
             if ta = param.type_annotation
               update_typeof_local_name(name, String.new(ta))
             end
+            assigned_vars.delete(name)
           end
         end
       end
@@ -10878,7 +10979,7 @@ module Crystal::HIR
       @current_typeof_local_names = old_typeof_local_names
 
       # Create MakeClosure
-      captures = [] of CapturedVar
+      captures = compute_block_captures(ctx, closure_scope, saved_locals, assigned_vars)
       closure = MakeClosure.new(ctx.next_id, TypeRef::VOID, body_block, captures)
       closure.lifetime = LifetimeTag::HeapEscape  # Procs typically escape
       ctx.emit(closure)
