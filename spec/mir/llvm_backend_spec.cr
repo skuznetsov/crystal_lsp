@@ -211,6 +211,22 @@ describe Crystal::MIR::LLVMIRGenerator do
       output.should contain("call ptr @__crystal_v2_slab_alloc(i32 0)")  # Size class 0 for <=16 bytes
     end
 
+    it "generates slab free" do
+      mod = Crystal::MIR::Module.new("test")
+      func = mod.create_function("slab_free_test", Crystal::MIR::TypeRef::VOID)
+
+      builder = Crystal::MIR::Builder.new(func)
+      ptr = builder.alloc(Crystal::MIR::MemoryStrategy::Slab, Crystal::MIR::TypeRef::INT32, 16_u64, 4_u32)
+      builder.free(ptr, Crystal::MIR::MemoryStrategy::Slab)
+      builder.ret
+
+      gen = Crystal::MIR::LLVMIRGenerator.new(mod)
+      gen.emit_type_metadata = false
+      output = gen.generate
+
+      output.should contain("call void @__crystal_v2_slab_free(ptr %")
+    end
+
     it "generates RC increment and decrement" do
       mod = Crystal::MIR::Module.new("test")
       func = mod.create_function("rc_test", Crystal::MIR::TypeRef::VOID)

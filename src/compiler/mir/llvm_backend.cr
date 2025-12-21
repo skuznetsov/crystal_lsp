@@ -2680,7 +2680,7 @@ module Crystal::MIR
       ptr = value_ref(inst.ptr)
       case inst.strategy
       when MemoryStrategy::Slab
-        emit "call void @__crystal_slab_free(ptr #{ptr}, i32 0)"
+        emit "call void @__crystal_v2_slab_free(ptr #{ptr}, i32 0)"
       else
         emit "call void @free(ptr #{ptr})"
       end
