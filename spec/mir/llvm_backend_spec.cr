@@ -93,6 +93,8 @@ describe Crystal::MIR::LLVMIRGenerator do
       output.should contain("define void @__crystal_v2_rc_inc(ptr %ptr)")
       output.should contain("define void @__crystal_v2_rc_dec(ptr %ptr, ptr %destructor)")
       output.should contain("define ptr @__crystal_v2_slab_alloc(i32 %size_class)")
+      output.should contain("define void @__crystal_v2_slab_frame_push()")
+      output.should contain("define void @__crystal_v2_slab_frame_pop()")
     end
 
     it "emits entrypoint when __crystal_main is present" do
@@ -108,6 +110,21 @@ describe Crystal::MIR::LLVMIRGenerator do
 
       output.should contain("define i32 @main")
       output.should contain("call void @__crystal_main")
+    end
+
+    it "emits slab frame prolog/epilog when enabled" do
+      mod = Crystal::MIR::Module.new("test")
+      func = mod.create_function("foo", Crystal::MIR::TypeRef::VOID)
+      func.slab_frame = true
+      builder = Crystal::MIR::Builder.new(func)
+      builder.ret
+
+      gen = Crystal::MIR::LLVMIRGenerator.new(mod)
+      gen.emit_type_metadata = false
+      output = gen.generate
+
+      output.should contain("call void @__crystal_v2_slab_frame_push()")
+      output.should contain("call void @__crystal_v2_slab_frame_pop()")
     end
 
     it "skips entrypoint when __crystal_main is filtered" do

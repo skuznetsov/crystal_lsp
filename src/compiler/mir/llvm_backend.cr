@@ -259,6 +259,7 @@ module Crystal::MIR
     @current_return_type : String = "void"
     @current_func_name : String = ""
     @current_func_params : Array(Parameter) = [] of Parameter
+    @current_slab_frame : Bool = false
     @tsan_needs_func_entry : Bool = false
     @constant_values : Hash(ValueId, String)  # For inlining constants
     @value_types : Hash(ValueId, TypeRef)     # For tracking operand types
@@ -1102,6 +1103,14 @@ module Crystal::MIR
       emit_raw "  ret void\n"
       emit_raw "}\n\n"
 
+      emit_raw "define void @__crystal_v2_slab_frame_push() {\n"
+      emit_raw "  ret void\n"
+      emit_raw "}\n\n"
+
+      emit_raw "define void @__crystal_v2_slab_frame_pop() {\n"
+      emit_raw "  ret void\n"
+      emit_raw "}\n\n"
+
       # IO functions - use printf
       emit_raw "define void @__crystal_v2_puts(ptr %str) {\n"
       emit_raw "  call i32 @puts(ptr %str)\n"
@@ -1501,6 +1510,7 @@ module Crystal::MIR
 
       mangled_name = @current_func_name
       @current_func_params = func.params
+      @current_slab_frame = func.slab_frame
 
       # Skip functions that would conflict with C library declarations
       c_library_functions = Set{"printf", "sprintf", "snprintf", "fprintf", "vprintf",
@@ -1531,6 +1541,9 @@ module Crystal::MIR
       # Use fn_entry to avoid conflict with parameter names like %entry
       emit_raw "fn_entry:\n"
       emit_hoisted_allocas(func)
+      if @current_slab_frame
+        emit_raw "  call void @__crystal_v2_slab_frame_push()\n"
+      end
       # Jump to first user block
       if first_block = func.blocks.first?
         emit_raw "  br label %#{@block_names[first_block.id]}\n"
@@ -6015,6 +6028,9 @@ module Crystal::MIR
     private def emit_terminator(term : Terminator)
       case term
       when Return
+        if @current_slab_frame
+          emit "call void @__crystal_v2_slab_frame_pop()"
+        end
         # TSan: emit function exit before return
         if @emit_tsan
           emit "call void @__tsan_func_exit()"

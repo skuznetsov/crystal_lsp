@@ -87,6 +87,7 @@ module CrystalV2
           p.on("--no-llvm-metadata", "Disable LLVM type metadata (faster, less debug info)") { options.emit_type_metadata = false }
           p.on("--no-link", "Skip final link step (leave .o file)") { options.link = false }
           p.on("--no-ltp", "Disable LTP/WBA MIR optimization (benchmarking)") { options.ltp_opt = false }
+          p.on("--slab-frame", "Use slab frame for no-escape functions (experimental)") { options.slab_frame = true }
 
           # Help/version (Crystal-compatible)
           p.on("--version", "Show version") { options.show_version = true }
@@ -151,6 +152,7 @@ module CrystalV2
         property link : Bool = true
         property emit_type_metadata : Bool = true
         property ltp_opt : Bool = true
+        property slab_frame : Bool = false
         property show_version : Bool = false
         property show_help : Bool = false
         property help_text : String = ""
@@ -406,7 +408,7 @@ module CrystalV2
         # Step 4: Lower to MIR
         log(options, out_io, "\n[4/6] Lowering to MIR...")
         mir_start = Time.monotonic
-        mir_lowering = MIR::HIRToMIRLowering.new(hir_module)
+        mir_lowering = MIR::HIRToMIRLowering.new(hir_module, slab_frame: options.slab_frame)
 
         # Register globals from class variables
         globals = [] of Tuple(String, HIR::TypeRef, Int64?)

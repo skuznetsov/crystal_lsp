@@ -41,18 +41,21 @@ module Crystal
     @current_mir_func : Function?
     @builder : Builder?
     @current_lowering_func_name : String = ""
+    @slab_frame_enabled : Bool
+    @current_slab_frame : Bool = false
 
     # Memory strategy (note: we use inline selection, not global assigner)
 
     # Statistics
     getter stats : LoweringStats = LoweringStats.new
 
-    def initialize(@hir_module : HIR::Module)
+    def initialize(@hir_module : HIR::Module, *, slab_frame : Bool = false)
       @mir_module = Module.new(@hir_module.name)
       @value_map = {} of HIR::ValueId => ValueId
       @hir_value_types = {} of HIR::ValueId => HIR::TypeRef
       @block_map = {} of HIR::BlockId => BlockId
       @pending_phis = [] of Tuple(Phi, HIR::Phi)
+      @slab_frame_enabled = slab_frame
     end
 
     # ─────────────────────────────────────────────────────────────────────────
@@ -226,6 +229,8 @@ module Crystal
 
       @current_hir_func = hir_func
       @current_mir_func = mir_func
+      @current_slab_frame = should_use_slab_frame?(hir_func)
+      mir_func.slab_frame = @current_slab_frame
       @value_map.clear
       @hir_value_types.clear
       @block_map.clear
@@ -498,7 +503,11 @@ module Crystal
     private def select_memory_strategy(alloc : HIR::Allocate) : MemoryStrategy
       # If HIR already carries a chosen strategy, honor it.
       if strat = alloc.memory_strategy
-        return map_hir_strategy(strat)
+        mapped = map_hir_strategy(strat)
+        if @current_slab_frame && alloc.lifetime == HIR::LifetimeTag::StackLocal && mapped == MemoryStrategy::ARC
+          return MemoryStrategy::Slab
+        end
+        return mapped
       end
 
       # Struct (value type) always uses stack allocation
@@ -551,6 +560,24 @@ module Crystal
       else
         MemoryStrategy::GC
       end
+    end
+
+    private def should_use_slab_frame?(hir_func : HIR::Function) : Bool
+      return false unless @slab_frame_enabled
+
+      saw_alloc = false
+      hir_func.blocks.each do |block|
+        block.instructions.each do |inst|
+          next unless inst.is_a?(HIR::Allocate)
+          saw_alloc = true
+          return false unless inst.lifetime == HIR::LifetimeTag::StackLocal
+
+          taints = inst.taints
+          return false if taints.thread_shared? || taints.ffi_exposed? || taints.cyclic?
+        end
+      end
+
+      saw_alloc
     end
 
     # ─────────────────────────────────────────────────────────────────────────

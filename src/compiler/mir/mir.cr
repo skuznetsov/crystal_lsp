@@ -1661,6 +1661,7 @@ module Crystal::MIR
     getter blocks : Array(BasicBlock)
     getter entry_block : BlockId
     property source_location : SourceLocation?
+    property slab_frame : Bool = false
 
     @next_value_id : ValueId = 0_u32
     @next_block_id : BlockId = 0_u32
