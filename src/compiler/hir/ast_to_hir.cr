@@ -6123,6 +6123,9 @@ module Crystal::HIR
             self_id = emit_self(ctx)
             full_name = mangle_function_name(getter_base, [] of TypeRef)
             return_type = @function_types[full_name]? || TypeRef::VOID
+            # Ensure the getter method is lowered
+            remember_callsite_arg_types(full_name, [] of TypeRef)
+            lower_function_if_needed(full_name)
             call = Call.new(ctx.next_id, return_type, self_id, full_name, [] of ValueId)
             ctx.emit(call)
             ctx.register_type(call.id, return_type)
@@ -8108,6 +8111,38 @@ module Crystal::HIR
           end
           if ENV.has_key?("DEBUG_LOOKUP") && !func_def
             STDERR.puts "[DEBUG_LOOKUP]   No match found for '#{mangled_prefix}'"
+          end
+        end
+
+        # If still not found, try looking in included modules
+        # e.g., IO::FileDescriptor#sync= -> IO::Buffered#sync=
+        unless func_def
+          if base_name.includes?("#")
+            owner, method = base_name.split("#", 2)
+            if included = @class_included_modules[owner]?
+              included.each do |module_name|
+                # Strip generic params: IO::Buffered(T) -> IO::Buffered
+                base_module = module_name.split('(').first
+                module_method = "#{base_module}##{method}"
+                if mod_func_def = @function_defs[module_method]?
+                  func_def = mod_func_def
+                  arena = @function_def_arenas[module_method]
+                  # Keep target_name as class method name - will generate with class prefix
+                  target_name = base_name
+                  break
+                end
+                # Also try mangled versions
+                @function_defs.each_key do |key|
+                  if key.starts_with?("#{module_method}$")
+                    func_def = @function_defs[key]
+                    arena = @function_def_arenas[key]
+                    target_name = base_name
+                    break
+                  end
+                end
+                break if func_def
+              end
+            end
           end
         end
       end
@@ -11840,6 +11875,9 @@ module Crystal::HIR
           arg_types = all_args.map { |arg| ctx.type_of(arg) }
           method_name = resolve_method_call(ctx, object_id, "[]=", arg_types)
           return_type = get_function_return_type(method_name)
+          # Ensure the []= method is lowered
+          remember_callsite_arg_types(method_name, arg_types)
+          lower_function_if_needed(method_name)
           call = Call.new(ctx.next_id, return_type, object_id, method_name, all_args)
           ctx.emit(call)
           ctx.register_type(call.id, return_type)
@@ -11875,6 +11913,9 @@ module Crystal::HIR
         arg_types = [ctx.type_of(value_id)]
         method_name = resolve_method_call(ctx, object_id, setter_name, arg_types)
         return_type = get_function_return_type(method_name)
+        # Ensure the setter method is lowered
+        remember_callsite_arg_types(method_name, arg_types)
+        lower_function_if_needed(method_name)
         call = Call.new(ctx.next_id, return_type, object_id, method_name, [value_id])
         ctx.emit(call)
         ctx.register_type(call.id, return_type)
