@@ -81,6 +81,74 @@ module LTPTestHelpers
 
     func
   end
+
+  def self.create_test_function_with_long_corridor : Crystal::MIR::Function
+    int_type = Crystal::MIR::TypeRef::INT32
+
+    func = Crystal::MIR::Function.new(next_func_id, "test_rc_long", int_type)
+    entry_id = func.create_block
+    entry = func.get_block(entry_id)
+
+    alloc = Crystal::MIR::Alloc.new(
+      1_u32,
+      int_type,
+      Crystal::MIR::MemoryStrategy::ARC,
+      int_type
+    )
+    alloc.no_alias = true
+    entry.add(alloc)
+
+    rc_inc = Crystal::MIR::RCIncrement.new(2_u32, alloc.id)
+    entry.add(rc_inc)
+
+    # Add extra instructions between rc_inc and rc_dec to lengthen corridor.
+    const1 = Crystal::MIR::Constant.new(3_u32, int_type, 1_i64)
+    entry.add(const1)
+
+    const2 = Crystal::MIR::Constant.new(4_u32, int_type, 2_i64)
+    entry.add(const2)
+
+    rc_dec = Crystal::MIR::RCDecrement.new(5_u32, alloc.id)
+    entry.add(rc_dec)
+
+    ret = Crystal::MIR::Return.new(const2.id)
+    entry.terminator = ret
+
+    func
+  end
+
+  def self.create_test_function_with_escape : Crystal::MIR::Function
+    int_type = Crystal::MIR::TypeRef::INT32
+
+    func = Crystal::MIR::Function.new(next_func_id, "test_rc_escape", int_type)
+    entry_id = func.create_block
+    entry = func.get_block(entry_id)
+
+    alloc = Crystal::MIR::Alloc.new(
+      1_u32,
+      int_type,
+      Crystal::MIR::MemoryStrategy::ARC,
+      int_type
+    )
+    alloc.no_alias = true
+    entry.add(alloc)
+
+    rc_inc = Crystal::MIR::RCIncrement.new(2_u32, alloc.id)
+    entry.add(rc_inc)
+
+    call = Crystal::MIR::Call.new(
+      3_u32,
+      int_type,
+      Crystal::MIR::FunctionId.new(999_u32),
+      [alloc.id]
+    )
+    entry.add(call)
+
+    ret = Crystal::MIR::Return.new(call.id)
+    entry.terminator = ret
+
+    func
+  end
 end
 
 describe Crystal::MIR::LTPPotential do
@@ -221,6 +289,28 @@ describe Crystal::MIR::LTPEngine do
 
       # Moves should be recorded
       engine.moves_applied.should be_a(Array(Crystal::MIR::LegalMove))
+    end
+  end
+
+  describe "#curvature_potential" do
+    it "penalizes longer corridors" do
+      short_func = LTPTestHelpers.create_test_function_with_rc
+      long_func = LTPTestHelpers.create_test_function_with_long_corridor
+
+      short_potential = Crystal::MIR::LTPEngine.new(short_func).curvature_potential
+      long_potential = Crystal::MIR::LTPEngine.new(long_func).curvature_potential
+
+      long_potential.corner_mismatch.should be > short_potential.corner_mismatch
+    end
+
+    it "penalizes escape corridors more than elision" do
+      elision_func = LTPTestHelpers.create_test_function_with_rc
+      escape_func = LTPTestHelpers.create_test_function_with_escape
+
+      elision_potential = Crystal::MIR::LTPEngine.new(elision_func).curvature_potential
+      escape_potential = Crystal::MIR::LTPEngine.new(escape_func).curvature_potential
+
+      escape_potential.corner_mismatch.should be > elision_potential.corner_mismatch
     end
   end
 end

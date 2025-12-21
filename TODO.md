@@ -730,7 +730,14 @@ The key insight is: **Don't compete with LLVM, complement it.**
 - [x] Detect "stuck" state: no legal move decreases Φ
 - [x] Switch to escape analysis frame (initial: constant-folding fallback)
 - [ ] If escape frame also stuck, switch to curvature/lifetime frame
+  - [x] Add corridor-length "curvature" metric (sum/max path length) to guide the frame
+  - [x] Add lifetime-pressure metric (distance between rc_inc/rc_dec along def-use)
+  - [x] Implement curvature/lifetime frame pass (RC elision + DCE gated by metrics)
+  - [ ] Add specs for curvature frame fallback (monotone descent across frames)
 - [ ] Unified potential across frames (Φ_esc compatible with Φ_primary)
+  - [ ] Define frame-normalized LTPPotential mapping (same 4 components)
+  - [ ] Reject frame switch if mapped Φ does not decrease
+  - [ ] Spec: cross-frame monotone descent with mixed moves
 
 **Phase 5: L2-Engine Scheduler**
 - [x] Priority: S ≻ L ≻ D ≻ C (Spike > Ladder > Diamond > Collapse)

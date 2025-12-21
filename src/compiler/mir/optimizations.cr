@@ -1403,20 +1403,39 @@ module Crystal::MIR
     # ═══════════════════════════════════════════════════════════════════════════
 
     private def try_dual_frame : Bool
-      # Dual frame: switch to escape-based analysis
-      # For now, just try constant folding as alternative
+      # Dual frame: switch to escape-based analysis, then curvature/lifetime.
+      return true if try_escape_frame
+      return true if try_curvature_frame
+      false
+    end
+
+    private def try_escape_frame : Bool
       cf = ConstantFoldingPass.new(@function)
       folded = cf.run
-
       if folded > 0
         log "    Dual frame (CF): folded #{folded} constants"
         return true
       end
+      false
+    end
 
-      # Could add more frames here:
-      # - Lifetime analysis frame
-      # - Curvature/region analysis frame
+    private def try_curvature_frame : Bool
+      pre = compute_curvature_potential
 
+      rc = RCElisionPass.new(@function).run
+      dce = DeadCodeEliminationPass.new(@function).run
+
+      return false if rc == 0 && dce == 0
+
+      build_analysis_maps
+      post = compute_curvature_potential
+
+      if post < pre
+        log "    Dual frame (curvature): rc=#{rc}, dce=#{dce}, Φ #{pre} → #{post}"
+        return true
+      end
+
+      log "    Dual frame (curvature) made changes but did not decrease Φ"
       false
     end
 
@@ -1466,6 +1485,52 @@ module Crystal::MIR
       end
 
       LTPPotential.new(window_overlap, -tie_plateau, corner_mismatch, area)
+    end
+
+    # Curvature/Lifetime potential: adds corridor-length and lifetime pressure to P.
+    private def compute_curvature_potential : LTPPotential
+      base = compute_ltp_potential
+      curvature = 0
+      lifetime_pressure = 0
+
+      @function.blocks.each do |block|
+        block.instructions.each_with_index do |inst, idx|
+          next unless inst.is_a?(RCIncrement)
+
+          ptr = canonical_ptr(inst.ptr)
+          next unless @no_alias_ids.includes?(ptr)
+
+          exposure = (@use_map[ptr]?.try(&.size) || 0)
+          window = Window.new(inst, block, idx, exposure, ptr)
+          corridor = trace_corridor(window)
+
+          case corridor.exit_type
+          when CorridorExit::Elision
+            if corridor.path.size > 2
+              lifetime_pressure += corridor.path.size - 2
+            end
+          when CorridorExit::Escape, CorridorExit::Store
+            curvature += 2
+            lifetime_pressure += corridor.path.size
+          when CorridorExit::Unknown
+            curvature += 1
+            lifetime_pressure += corridor.path.size
+          end
+        end
+      end
+
+      LTPPotential.new(
+        base.window_overlap,
+        base.tie_plateau,
+        base.corner_mismatch + curvature + lifetime_pressure,
+        base.area
+      )
+    end
+
+    # Debug/testing hook: compute curvature potential with fresh maps.
+    def curvature_potential : LTPPotential
+      build_analysis_maps
+      compute_curvature_potential
     end
 
     # ═══════════════════════════════════════════════════════════════════════════
