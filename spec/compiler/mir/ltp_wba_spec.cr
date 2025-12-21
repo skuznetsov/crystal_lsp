@@ -313,6 +313,16 @@ describe Crystal::MIR::LTPEngine do
       escape_potential.corner_mismatch.should be > elision_potential.corner_mismatch
     end
   end
+
+  describe "#frame_potential" do
+    it "uses curvature mapping when frame_kind is Curvature" do
+      func = LTPTestHelpers.create_test_function_with_long_corridor
+      engine = Crystal::MIR::LTPEngine.new(func)
+      engine.frame_kind = Crystal::MIR::FrameKind::Curvature
+
+      engine.frame_potential.should eq(engine.curvature_potential)
+    end
+  end
 end
 
 describe Crystal::MIR::Function do

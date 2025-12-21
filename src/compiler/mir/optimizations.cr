@@ -1007,6 +1007,12 @@ module Crystal::MIR
     end
   end
 
+  # Frame kind for dual-frame potentials.
+  enum FrameKind
+    Primary
+    Curvature
+  end
+
   # ─────────────────────────────────────────────────────────────────────────────
   # Legal Moves (S/L/D/C)
   # ─────────────────────────────────────────────────────────────────────────────
@@ -1047,6 +1053,7 @@ module Crystal::MIR
     getter final_potential : LTPPotential
     getter potential_trace : Array(LTPPotential)
     property debug : Bool
+    property frame_kind : FrameKind
 
     # Def-use chains for corridor tracing
     @use_map : Hash(ValueId, Array(Tuple(BasicBlock, Int32, Value)))
@@ -1061,6 +1068,7 @@ module Crystal::MIR
       @final_potential = LTPPotential.zero
       @potential_trace = [] of LTPPotential
       @debug = false
+      @frame_kind = FrameKind::Primary
       @use_map = Hash(ValueId, Array(Tuple(BasicBlock, Int32, Value))).new
       @alias_map = Hash(ValueId, ValueId).new
       @no_alias_ids = Set(ValueId).new
@@ -1072,7 +1080,7 @@ module Crystal::MIR
 
     def run(max_iters : Int32 = 10) : LTPPotential
       build_analysis_maps
-      @final_potential = compute_ltp_potential
+      @final_potential = compute_frame_potential
       @potential_trace << @final_potential
 
       log "LTP Engine start: #{@final_potential}"
@@ -1084,7 +1092,7 @@ module Crystal::MIR
           log "  Iter #{@iterations}: No window found. Trying dual frame..."
           if try_dual_frame
             build_analysis_maps
-            @final_potential = compute_ltp_potential
+            @final_potential = compute_frame_potential
             @potential_trace << @final_potential
             @iterations += 1
             next
@@ -1110,7 +1118,7 @@ module Crystal::MIR
 
           # Recompute potential
           build_analysis_maps  # Rebuild after modification
-          new_potential = compute_ltp_potential
+          new_potential = compute_frame_potential
 
           # BR-3: Verify strict decrease
           if new_potential >= @final_potential
@@ -1132,13 +1140,13 @@ module Crystal::MIR
           if collapsed > 0
             log "    Collapsed #{collapsed} dead instructions"
             build_analysis_maps
-            @final_potential = compute_ltp_potential
+            @final_potential = compute_frame_potential
             @potential_trace << @final_potential
           else
             log "    Nothing to collapse. Trying dual frame..."
             if try_dual_frame
               build_analysis_maps
-              @final_potential = compute_ltp_potential
+              @final_potential = compute_frame_potential
               @potential_trace << @final_potential
             else
               log "    Dual frame exhausted. Stopping."
@@ -1410,12 +1418,19 @@ module Crystal::MIR
     end
 
     private def try_escape_frame : Bool
+      pre = compute_frame_potential
       cf = ConstantFoldingPass.new(@function)
       folded = cf.run
-      if folded > 0
-        log "    Dual frame (CF): folded #{folded} constants"
+      return false if folded == 0
+
+      build_analysis_maps
+      post = compute_frame_potential
+      if post < pre
+        log "    Dual frame (CF): folded #{folded} constants, Φ #{pre} → #{post}"
         return true
       end
+
+      log "    Dual frame (CF) made changes but did not decrease Φ"
       false
     end
 
@@ -1432,6 +1447,7 @@ module Crystal::MIR
 
       if post < pre
         log "    Dual frame (curvature): rc=#{rc}, dce=#{dce}, Φ #{pre} → #{post}"
+        @frame_kind = FrameKind::Curvature
         return true
       end
 
@@ -1487,6 +1503,17 @@ module Crystal::MIR
       LTPPotential.new(window_overlap, -tie_plateau, corner_mismatch, area)
     end
 
+    private def compute_frame_potential : LTPPotential
+      case @frame_kind
+      when FrameKind::Primary
+        compute_ltp_potential
+      when FrameKind::Curvature
+        compute_curvature_potential
+      else
+        compute_ltp_potential
+      end
+    end
+
     # Curvature/Lifetime potential: adds corridor-length and lifetime pressure to P.
     private def compute_curvature_potential : LTPPotential
       base = compute_ltp_potential
@@ -1531,6 +1558,12 @@ module Crystal::MIR
     def curvature_potential : LTPPotential
       build_analysis_maps
       compute_curvature_potential
+    end
+
+    # Debug/testing hook: compute frame potential with fresh maps.
+    def frame_potential : LTPPotential
+      build_analysis_maps
+      compute_frame_potential
     end
 
     # ═══════════════════════════════════════════════════════════════════════════

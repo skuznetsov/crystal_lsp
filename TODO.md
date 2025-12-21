@@ -735,8 +735,8 @@ The key insight is: **Don't compete with LLVM, complement it.**
   - [x] Implement curvature/lifetime frame pass (RC elision + DCE gated by metrics)
   - [ ] Add specs for curvature frame fallback (monotone descent across frames)
 - [ ] Unified potential across frames (Φ_esc compatible with Φ_primary)
-  - [ ] Define frame-normalized LTPPotential mapping (same 4 components)
-  - [ ] Reject frame switch if mapped Φ does not decrease
+  - [x] Define frame-normalized LTPPotential mapping (same 4 components)
+  - [x] Reject frame switch if mapped Φ does not decrease
   - [ ] Spec: cross-frame monotone descent with mixed moves
 
 **Phase 5: L2-Engine Scheduler**
