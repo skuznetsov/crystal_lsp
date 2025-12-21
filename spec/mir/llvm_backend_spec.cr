@@ -93,6 +93,7 @@ describe Crystal::MIR::LLVMIRGenerator do
       output.should contain("define void @__crystal_v2_rc_inc(ptr %ptr)")
       output.should contain("define void @__crystal_v2_rc_dec(ptr %ptr, ptr %destructor)")
       output.should contain("define ptr @__crystal_v2_slab_alloc(i32 %size_class)")
+      output.should contain("shl i64 16, %size")
       output.should contain("define void @__crystal_v2_slab_frame_push()")
       output.should contain("define void @__crystal_v2_slab_frame_pop()")
     end

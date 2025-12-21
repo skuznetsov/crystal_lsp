@@ -1093,7 +1093,7 @@ module Crystal::MIR
       # Slab allocator - just use malloc for bootstrap
       emit_raw "define ptr @__crystal_v2_slab_alloc(i32 %size_class) {\n"
       emit_raw "  %size = sext i32 %size_class to i64\n"
-      emit_raw "  %shift = shl i64 1, %size\n"
+      emit_raw "  %shift = shl i64 16, %size\n"
       emit_raw "  %ptr = call ptr @malloc(i64 %shift)\n"
       emit_raw "  ret ptr %ptr\n"
       emit_raw "}\n\n"
