@@ -3689,6 +3689,10 @@ module Crystal::HIR
       when ">="  then BinaryOp::Ge
       when "&&"  then BinaryOp::And
       when "||"  then BinaryOp::Or
+      # Wrapping operators - map to same ops (LLVM integer ops already wrap)
+      when "&+"  then BinaryOp::Add
+      when "&-"  then BinaryOp::Sub
+      when "&*"  then BinaryOp::Mul
       else            nil
       end
     end
@@ -6515,6 +6519,10 @@ module Crystal::HIR
            when "<="  then BinaryOp::Le
            when ">"   then BinaryOp::Gt
            when ">="  then BinaryOp::Ge
+           # Wrapping operators - map to same ops (LLVM integer ops already wrap)
+           when "&+"  then BinaryOp::Add
+           when "&-"  then BinaryOp::Sub
+           when "&*"  then BinaryOp::Mul
            else
              # Unknown operator - emit as method call
              return emit_binary_call(ctx, left_id, op_str, right_id)
@@ -8986,7 +8994,10 @@ module Crystal::HIR
       # ptr + offset or ptr - offset -> PointerAdd
       if receiver_id && (method_name == "+" || method_name == "-") && args.size == 1
         receiver_type = ctx.type_of(receiver_id)
-        if receiver_type == TypeRef::POINTER
+        recv_type_desc = @module.get_type_descriptor(receiver_type)
+        is_pointer_type = receiver_type == TypeRef::POINTER ||
+                          (recv_type_desc && recv_type_desc.name.starts_with?("Pointer"))
+        if is_pointer_type
           offset_id = args[0]
           # For subtraction, negate the offset
           if method_name == "-"
@@ -9009,7 +9020,10 @@ module Crystal::HIR
       # ptr.realloc(new_count) -> PointerRealloc
       if receiver_id && method_name == "realloc" && args.size == 1
         receiver_type = ctx.type_of(receiver_id)
-        if receiver_type == TypeRef::POINTER
+        recv_type_desc = @module.get_type_descriptor(receiver_type)
+        is_pointer_type = receiver_type == TypeRef::POINTER ||
+                          (recv_type_desc && recv_type_desc.name.starts_with?("Pointer"))
+        if is_pointer_type
           realloc_node = PointerRealloc.new(ctx.next_id, TypeRef::POINTER, receiver_id, args[0])
           ctx.emit(realloc_node)
           ctx.register_type(realloc_node.id, TypeRef::POINTER)
@@ -11155,10 +11169,11 @@ module Crystal::HIR
         return load_node.id
       end
 
-      # Check if this is an array type (which uses IndexGet for element access)
+      # Check if this is an array-like type (which uses IndexGet for element access)
       is_array_type = type_desc && (type_desc.kind == TypeKind::Array ||
                                      type_desc.name.starts_with?("Array") ||
-                                     type_desc.name.starts_with?("StaticArray"))
+                                     type_desc.name.starts_with?("StaticArray") ||
+                                     type_desc.name.starts_with?("Slice"))
 
       if is_array_type && index_ids.size == 1
         # Array element access: arr[i] -> IndexGet
@@ -11536,6 +11551,35 @@ module Crystal::HIR
                       resolve_method_call(ctx, object_id, member_name, arg_types)
                     end
 
+      # Special handling for Tuple#size - return compile-time constant based on type parameters
+      if member_name == "size"
+        if type_desc = @module.get_type_descriptor(receiver_type)
+          type_name = type_desc.name
+          if type_name.starts_with?("Tuple(") && type_name.ends_with?(")")
+            # Count the number of type parameters in Tuple(T1, T2, ...)
+            # by counting commas + 1 (handling nested generics)
+            inner = type_name[6...-1]  # Strip "Tuple(" and ")"
+            tuple_size = 0
+            depth = 0
+            unless inner.empty?
+              tuple_size = 1
+              inner.each_char do |c|
+                case c
+                when '(' then depth += 1
+                when ')' then depth -= 1
+                when ','
+                  tuple_size += 1 if depth == 0
+                end
+              end
+            end
+            lit = Literal.new(ctx.next_id, TypeRef::INT32, tuple_size.to_i64)
+            ctx.emit(lit)
+            ctx.register_type(lit.id, TypeRef::INT32)
+            return lit.id
+          end
+        end
+      end
+
       return_type = get_function_return_type(actual_name)
       if return_type == TypeRef::VOID && actual_name != base_method_name
         base_return = get_function_return_type(base_method_name)
@@ -11712,10 +11756,11 @@ module Crystal::HIR
           return value_id
         end
 
-        # Check if this is an array type (which uses IndexSet for element assignment)
+        # Check if this is an array-like type (which uses IndexSet for element assignment)
         is_array_type = type_desc && (type_desc.kind == TypeKind::Array ||
                                        type_desc.name.starts_with?("Array") ||
-                                       type_desc.name.starts_with?("StaticArray"))
+                                       type_desc.name.starts_with?("StaticArray") ||
+                                       type_desc.name.starts_with?("Slice"))
 
         if is_array_type && index_ids.size == 1
           # Array element assignment: arr[i] = val -> IndexSet
