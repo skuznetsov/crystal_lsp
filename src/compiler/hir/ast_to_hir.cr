@@ -299,6 +299,14 @@ module Crystal::HIR
     # Already monomorphized generic classes (specialized name -> true)
     @monomorphized : Set(String)
 
+    # Debug counters
+    @template_reg_counter : Int32?
+    @mono_counter : Int32?
+
+    # Pending monomorphizations (deferred until after all templates are registered)
+    @pending_monomorphizations : Array({String, Array(String), String})
+    @defer_monomorphization : Bool
+
     # Current type parameter substitutions for generic lowering
     @type_param_map : Hash(String, String)
 
@@ -321,6 +329,8 @@ module Crystal::HIR
     @module_defs : Hash(String, Array({CrystalV2::Compiler::Frontend::ModuleNode, CrystalV2::Compiler::Frontend::ArenaLike}))
     # Track concrete types that include a module for module-typed receiver fallback.
     @module_includers : Hash(String, Set(String))
+    # Reverse mapping: track which modules each class includes (for method lookup)
+    @class_included_modules : Hash(String, Set(String))
 
     # Type aliases (alias_name -> target_type_name)
     @type_aliases : Hash(String, String)
@@ -382,11 +392,14 @@ module Crystal::HIR
       @pending_arg_types = {} of String => Array(TypeRef)
       @generic_templates = {} of String => GenericClassTemplate
       @monomorphized = Set(String).new
+      @pending_monomorphizations = [] of {String, Array(String), String}
+      @defer_monomorphization = true  # Start in deferred mode
       @type_param_map = {} of String => String
       @macro_defs = {} of String => CrystalV2::Compiler::Frontend::MacroDefNode
       @class_accessor_entries = {} of String => ClassAccessorEntry
       @module_defs = {} of String => Array({CrystalV2::Compiler::Frontend::ModuleNode, CrystalV2::Compiler::Frontend::ArenaLike})
       @module_includers = {} of String => Set(String)
+      @class_included_modules = {} of String => Set(String)
       @type_aliases = {} of String => String
       @generated_allocators = Set(String).new
       @type_cache = {} of String => TypeRef
@@ -410,6 +423,13 @@ module Crystal::HIR
         new_set
       end
       set.add(class_name)
+      # Also record reverse mapping (class -> modules it includes)
+      class_set = @class_included_modules[class_name]? || begin
+        new_set = Set(String).new
+        @class_included_modules[class_name] = new_set
+        new_set
+      end
+      class_set.add(module_name)
     end
 
     private def named_only_separator?(param : CrystalV2::Compiler::Frontend::Parameter) : Bool
@@ -1243,7 +1263,8 @@ module Crystal::HIR
       return offset if visited.includes?(module_full_name)
       visited << module_full_name
 
-      defs = @module_defs[module_full_name]? || return offset
+      defs = @module_defs[module_full_name]?
+      return offset unless defs
       include_arena = @arena
       defs.each do |mod_node, mod_arena|
         with_arena(mod_arena) do
@@ -2096,6 +2117,14 @@ module Crystal::HIR
       if type_params = node.type_params
         if type_params.size > 0
           # Store as generic template - don't create ClassInfo yet
+          # Keep the template with the LARGEST body (main definition, not reopenings)
+          new_body_size = node.body.try(&.size) || 0
+          if existing = @generic_templates[class_name]?
+            existing_body_size = existing.node.body.try(&.size) || 0
+            if new_body_size <= existing_body_size
+              return  # Existing template has larger body, skip this reopening
+            end
+          end
           param_names = type_params.map { |p| String.new(p) }
           @generic_templates[class_name] = GenericClassTemplate.new(
             class_name, param_names, node, @arena, is_struct
@@ -2771,6 +2800,18 @@ module Crystal::HIR
       register_function_type("#{struct_name}.new", type_ref)
     end
 
+    # Flush all pending monomorphizations (call after all templates are registered)
+    def flush_pending_monomorphizations
+      @defer_monomorphization = false
+      pending = @pending_monomorphizations.dup
+      @pending_monomorphizations.clear
+
+      pending.each do |(base_name, type_args, specialized_name)|
+        next if @monomorphized.includes?(specialized_name)
+        monomorphize_generic_class(base_name, type_args, specialized_name)
+      end
+    end
+
     # Monomorphize a generic class: create specialized version with concrete types
     private def monomorphize_generic_class(base_name : String, type_args : Array(String), specialized_name : String)
       template = @generic_templates[base_name]?
@@ -2801,10 +2842,6 @@ module Crystal::HIR
       # Mark as monomorphized BEFORE processing to prevent infinite recursion
       # (e.g., Array(String) method calls something that creates Array(String) again)
       @monomorphized.add(specialized_name)
-
-      if ENV.has_key?("DEBUG_MONO")
-        STDERR.puts "[MONO] Starting: #{specialized_name} (depth=#{@monomorphized.size})"
-      end
 
       # Check arity matches
       if template.type_params.size != type_args.size
@@ -4448,11 +4485,26 @@ module Crystal::HIR
     # Note: Returns the base name without mangling - caller should mangle with actual arg types
     private def resolve_method_with_inheritance(class_name : String, method_name : String) : String?
       current = class_name
+      visited = Set(String).new
       while true
+        break if visited.includes?(current)
+        visited << current
         test_name = "#{current}##{method_name}"
         # O(1) lookup: check exact match first, then check if base name exists
         if @function_types.has_key?(test_name) || has_function_base?(test_name)
           return test_name  # Return base name - caller will mangle
+        end
+        # Also check included modules for this class
+        if included = @class_included_modules[current]?
+          included.each do |module_name|
+            # Strip generic params for module lookup (Indexable(T) -> Indexable)
+            base_module = module_name.split('(').first
+            module_method = "#{base_module}##{method_name}"
+            if @function_types.has_key?(module_method) || has_function_base?(module_method)
+              # Return with class prefix so it gets lowered for this class
+              return test_name
+            end
+          end
         end
         # Try parent class
         if info = @class_info[current]?
@@ -4885,6 +4937,18 @@ module Crystal::HIR
       block_has_raise = block.instructions.any? { |inst| inst.is_a?(Raise) }
       if block.terminator.is_a?(Unreachable) && !block_has_raise
         block.terminator = Return.new(last_value)
+      end
+
+      # Infer return type from last expression if not explicitly specified
+      # This handles methods with implicit returns like `def root_buffer; @buffer - @offset; end`
+      if return_type == TypeRef::VOID && last_value
+        inferred_type = ctx.type_of(last_value)
+        if inferred_type != TypeRef::VOID
+          func.return_type = inferred_type
+          # Update function type registry to match
+          register_function_type(full_name, inferred_type)
+          register_function_type(base_name, inferred_type)
+        end
       end
 
       @current_typeof_locals = old_typeof_locals
@@ -12405,6 +12469,20 @@ module Crystal::HIR
                     end
         result = @module.intern_type(TypeDescriptor.new(type_kind, substituted_name, type_params))
         @type_cache[lookup_name] = result
+
+        # Trigger monomorphization if this is a generic class/struct template
+        # This ensures included module methods get registered for the specialized type
+        if template = @generic_templates[base_name]?
+          unless @monomorphized.includes?(substituted_name)
+            if @defer_monomorphization
+              # Queue for later - templates may not be fully registered yet
+              @pending_monomorphizations << {base_name, substituted_params, substituted_name}
+            else
+              monomorphize_generic_class(base_name, substituted_params, substituted_name)
+            end
+          end
+        end
+
         return result
       end
 

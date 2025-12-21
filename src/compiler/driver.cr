@@ -34,6 +34,7 @@ module Crystal::V2
     property lto : Bool = false
     property pgo_generate : Bool = false
     property pgo_profile : String = ""
+    property link_libraries : Array(String) = [] of String
 
     def initialize
     end
@@ -201,6 +202,10 @@ module Crystal::V2
         hir_converter.register_macro(macro_node)
       end
 
+      # Flush pending monomorphizations now that all templates are registered
+      puts "  Flushing pending monomorphizations..." if @verbose
+      hir_converter.flush_pending_monomorphizations
+
       # Pass 2: Register all top-level function signatures
       def_nodes.each do |node, arena|
         hir_converter.arena = arena
@@ -243,6 +248,7 @@ module Crystal::V2
       end
 
       hir_module = hir_converter.module
+      @link_libraries = hir_module.link_libraries.dup
       log "  Functions: #{hir_module.functions.size}"
 
       if @emit_hir
@@ -364,8 +370,11 @@ module Crystal::V2
         end
 
         lto_flag = @lto ? "-flto" : ""
+        link_flags = build_link_flags
+        link_flags_str = link_flags.join(" ")
         clang_cmd = "clang #{opt_flag} #{lto_flag} #{pgo_flags.join(" ")} -o #{@output_file} #{ll_file}"
         clang_cmd += " #{runtime_stub}" if File.exists?(runtime_stub)
+        clang_cmd += " #{link_flags_str}" unless link_flags_str.empty?
         clang_cmd += " 2>&1"
 
         log "  $ #{clang_cmd}"
@@ -388,7 +397,11 @@ module Crystal::V2
         link_objs = [obj_file]
         link_objs << runtime_stub if File.exists?(runtime_stub)
 
-        link_cmd = "cc -o #{@output_file} #{link_objs.join(" ")} 2>&1"
+        link_flags = build_link_flags
+        link_flags_str = link_flags.join(" ")
+        link_cmd = "cc -o #{@output_file} #{link_objs.join(" ")}"
+        link_cmd += " #{link_flags_str}" unless link_flags_str.empty?
+        link_cmd += " 2>&1"
         log "  $ #{link_cmd}"
         link_result = `#{link_cmd}`
         unless $?.success?
@@ -399,6 +412,63 @@ module Crystal::V2
 
         # Clean up intermediate files
         File.delete(obj_file) if File.exists?(obj_file)
+      end
+    end
+
+    private def build_link_flags : Array(String)
+      flags = [] of String
+      seen = Set(String).new
+      @link_libraries.each do |entry|
+        key, value = parse_link_entry(entry)
+        case key
+        when "pkg_config"
+          next if value.empty?
+          cmd = "pkg-config --libs #{value} 2>/dev/null"
+          output = `#{cmd}`.strip
+          if $?.success? && !output.empty?
+            output.split.each do |flag|
+              next if seen.includes?(flag)
+              flags << flag
+              seen << flag
+            end
+          else
+            log "  Warning: pkg-config failed for #{value}"
+          end
+        when "framework"
+          next if value.empty?
+          marker = "-framework #{value}"
+          next if seen.includes?(marker)
+          flags << "-framework"
+          flags << value
+          seen << marker
+        when "dll"
+          unless CrystalV2::Runtime.target_flags.includes?("win32") || CrystalV2::Runtime.target_flags.includes?("windows")
+            next
+          end
+          next if value.empty?
+          flag = "-l#{value}"
+          next if seen.includes?(flag)
+          flags << flag
+          seen << flag
+        else
+          lib_name = value.empty? ? entry : value
+          next if lib_name.empty?
+          flag = "-l#{lib_name}"
+          next if seen.includes?(flag)
+          flags << flag
+          seen << flag
+        end
+      end
+      flags
+    end
+
+    private def parse_link_entry(entry : String) : {String, String}
+      if idx = entry.index(':')
+        key = entry[0, idx]
+        value = entry[(idx + 1)..-1]
+        {key, value}
+      else
+        {"", entry}
       end
     end
 

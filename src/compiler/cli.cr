@@ -135,6 +135,11 @@ module CrystalV2
         options.input = input_file
         options.output = input_file.gsub(/\.cr$/, "") if options.output.empty?
 
+        if options.verbose || options.progress || options.stats
+          STDOUT.sync = true
+          STDERR.sync = true
+        end
+
         if options.check_only
           return run_check(input_file, options, out_io, err_io)
         else
@@ -168,6 +173,7 @@ module CrystalV2
         property lto : Bool = false
         property pgo_generate : Bool = false
         property pgo_profile : String = ""
+        property link_libraries : Array(String) = [] of String
         property show_version : Bool = false
         property show_help : Bool = false
         property help_text : String = ""
@@ -277,12 +283,15 @@ module CrystalV2
         total_exprs = all_arenas.sum { |t| t[1].size }
         log(options, out_io, "  Files: #{all_arenas.size}, Expressions: #{total_exprs}")
 
+        link_libs = collect_link_libraries(all_arenas, options, out_io)
+
         # Step 2: Lower to HIR
         log(options, out_io, "\n[2/6] Lowering to HIR...")
         hir_start = Time.monotonic
 
         first_arena = all_arenas[0][0]
         hir_converter = HIR::AstToHir.new(first_arena, input_file)
+        link_libs.each { |lib_name| hir_converter.module.add_link_library(lib_name) }
 
         # Collect nodes by type
         def_nodes = [] of Tuple(Frontend::DefNode, Frontend::ArenaLike)
@@ -354,6 +363,10 @@ module CrystalV2
         log(options, out_io, "    Macros: #{macro_nodes.size}")
         macro_nodes.each { |n, a| hir_converter.arena = a; hir_converter.register_macro(n) }
 
+        # Flush pending monomorphizations now that all templates are registered
+        log(options, out_io, "  Flushing pending monomorphizations...")
+        hir_converter.flush_pending_monomorphizations
+
         # Pass 2: Register function signatures
         log(options, out_io, "  Pass 2: Registering #{def_nodes.size} function signatures...")
         def_nodes.each_with_index do |(n, a), i|
@@ -386,6 +399,7 @@ module CrystalV2
         STDERR.puts "  Getting HIR module..." if options.progress
         hir_module = hir_converter.module
         STDERR.puts "  Got HIR module with #{hir_module.functions.size} functions" if options.progress
+        options.link_libraries = hir_module.link_libraries.dup
         log(options, out_io, "  Functions: #{hir_module.functions.size}")
         timings["hir"] = (Time.monotonic - hir_start).total_milliseconds if options.stats
         timings["hir_funcs"] = hir_module.functions.size.to_f if options.stats
@@ -613,6 +627,8 @@ module CrystalV2
 
         if options.link
           link_start = Time.monotonic
+          link_flags = build_link_flags(options, out_io)
+          link_flags_str = link_flags.join(" ")
           if use_clang_link
             pgo_flags = [] of String
             if options.pgo_generate
@@ -624,6 +640,7 @@ module CrystalV2
             lto_flag = options.lto ? "-flto" : ""
             clang_cmd = "clang #{opt_flag} #{lto_flag} #{pgo_flags.join(" ")} -o #{options.output} #{opt_ll_file}"
             clang_cmd += " #{runtime_stub}" if File.exists?(runtime_stub)
+            clang_cmd += " #{link_flags_str}" unless link_flags_str.empty?
             clang_cmd += " 2>&1"
 
             log(options, out_io, "  $ #{clang_cmd}")
@@ -634,7 +651,9 @@ module CrystalV2
               return 1
             end
           else
-            link_cmd = "cc -o #{options.output} #{link_objs.join(" ")} 2>&1"
+            link_cmd = "cc -o #{options.output} #{link_objs.join(" ")}"
+            link_cmd += " #{link_flags_str}" unless link_flags_str.empty?
+            link_cmd += " 2>&1"
             log(options, out_io, "  $ #{link_cmd}")
             link_result = `#{link_cmd}`
             unless $?.success?
@@ -652,6 +671,63 @@ module CrystalV2
         # Clean up intermediate files
         File.delete(obj_file) if File.exists?(obj_file)
         return 0
+      end
+
+      private def build_link_flags(options : Options, out_io : IO) : Array(String)
+        flags = [] of String
+        seen = Set(String).new
+        options.link_libraries.each do |entry|
+          key, value = parse_link_entry(entry)
+          case key
+          when "pkg_config"
+            next if value.empty?
+            cmd = "pkg-config --libs #{value} 2>/dev/null"
+            output = `#{cmd}`.strip
+            if $?.success? && !output.empty?
+              output.split.each do |flag|
+                next if seen.includes?(flag)
+                flags << flag
+                seen << flag
+              end
+            else
+              log(options, out_io, "  Warning: pkg-config failed for #{value}")
+            end
+          when "framework"
+            next if value.empty?
+            marker = "-framework #{value}"
+            next if seen.includes?(marker)
+            flags << "-framework"
+            flags << value
+            seen << marker
+          when "dll"
+            unless Runtime.target_flags.includes?("win32") || Runtime.target_flags.includes?("windows")
+              next
+            end
+            next if value.empty?
+            flag = "-l#{value}"
+            next if seen.includes?(flag)
+            flags << flag
+            seen << flag
+          else
+            lib_name = value.empty? ? entry : value
+            next if lib_name.empty?
+            flag = "-l#{lib_name}"
+            next if seen.includes?(flag)
+            flags << flag
+            seen << flag
+          end
+        end
+        flags
+      end
+
+      private def parse_link_entry(entry : String) : {String, String}
+        if idx = entry.index(':')
+          key = entry[0, idx]
+          value = entry[(idx + 1)..-1]
+          {key, value}
+        else
+          {"", entry}
+        end
       end
 
       private def file_sha256(path : String) : String
@@ -682,6 +758,7 @@ module CrystalV2
         abs_path = File.expand_path(file_path)
         return if loaded.includes?(abs_path)
         loaded << abs_path
+        log(options, out_io, "  Loading: #{abs_path}") if options.verbose
 
         unless File.exists?(abs_path)
           log(options, out_io, "  Warning: File not found: #{abs_path}")
@@ -694,8 +771,18 @@ module CrystalV2
             arena = cached.arena
             exprs = cached.roots
             base_dir = File.dirname(abs_path)
-            exprs.each do |expr_id|
-              process_require_node(arena, expr_id, base_dir, input_file, results, loaded, options, out_io)
+            if cached_requires = load_require_cache(abs_path)
+              log(options, out_io, "  Require cache hit (#{cached_requires.size}): #{abs_path}") if options.verbose
+              cached_requires.each do |req_path|
+                parse_file_recursive(req_path, results, loaded, input_file, options, out_io)
+              end
+            else
+              log(options, out_io, "  Require cache miss: #{abs_path}") if options.verbose
+              requires = [] of String
+              exprs.each do |expr_id|
+                process_require_node(arena, expr_id, base_dir, input_file, results, loaded, options, out_io, requires)
+              end
+              save_require_cache(abs_path, requires)
             end
             results << {arena, exprs, abs_path}
             log(options, out_io, "  AST cache hit: #{abs_path}") if options.verbose
@@ -713,8 +800,9 @@ module CrystalV2
 
         # Process requires first
         base_dir = File.dirname(abs_path)
+        requires = [] of String
         exprs.each do |expr_id|
-          process_require_node(arena, expr_id, base_dir, input_file, results, loaded, options, out_io)
+          process_require_node(arena, expr_id, base_dir, input_file, results, loaded, options, out_io, requires)
         end
 
         results << {arena, exprs, abs_path}
@@ -723,6 +811,7 @@ module CrystalV2
           begin
             cache = LSP::AstCache.new(arena, exprs, lexer.string_pool)
             cache.save(abs_path)
+            save_require_cache(abs_path, requires)
             log(options, out_io, "  AST cache saved: #{abs_path}") if options.verbose
           rescue ex
             log(options, out_io, "  AST cache save failed: #{ex.message}") if options.verbose
@@ -739,7 +828,8 @@ module CrystalV2
         results : Array(Tuple(Frontend::ArenaLike, Array(Frontend::ExprId), String)),
         loaded : Set(String),
         options : Options,
-        out_io : IO
+        out_io : IO,
+        requires_out : Array(String)? = nil
       )
         node = arena[expr_id]
         case node
@@ -750,9 +840,11 @@ module CrystalV2
             resolved = resolve_require_path(req_path, base_dir, input_file)
             case resolved
             when String
+              requires_out << resolved if requires_out
               parse_file_recursive(resolved, results, loaded, input_file, options, out_io)
             when Array
               resolved.each do |file|
+                requires_out << file if requires_out
                 parse_file_recursive(file, results, loaded, input_file, options, out_io)
               end
             else
@@ -764,15 +856,15 @@ module CrystalV2
           # Fall back to both branches if the condition is unknown.
           condition = evaluate_macro_condition(arena, node.condition, Runtime.target_flags)
           if condition == true
-            process_require_node(arena, node.then_body, base_dir, input_file, results, loaded, options, out_io)
+            process_require_node(arena, node.then_body, base_dir, input_file, results, loaded, options, out_io, requires_out)
           elsif condition == false
             if else_body = node.else_body
-              process_require_node(arena, else_body, base_dir, input_file, results, loaded, options, out_io)
+              process_require_node(arena, else_body, base_dir, input_file, results, loaded, options, out_io, requires_out)
             end
           else
-            process_require_node(arena, node.then_body, base_dir, input_file, results, loaded, options, out_io)
+            process_require_node(arena, node.then_body, base_dir, input_file, results, loaded, options, out_io, requires_out)
             if else_body = node.else_body
-              process_require_node(arena, else_body, base_dir, input_file, results, loaded, options, out_io)
+              process_require_node(arena, else_body, base_dir, input_file, results, loaded, options, out_io, requires_out)
             end
           end
         when Frontend::MacroLiteralNode
@@ -784,14 +876,259 @@ module CrystalV2
               resolved = resolve_require_path(req_path, base_dir, input_file)
               case resolved
               when String
+                requires_out << resolved if requires_out
                 parse_file_recursive(resolved, results, loaded, input_file, options, out_io)
               when Array
                 resolved.each do |file|
+                  requires_out << file if requires_out
                   parse_file_recursive(file, results, loaded, input_file, options, out_io)
                 end
               end
             end
           end
+        end
+      end
+
+      private def require_cache_path(file_path : String) : String
+        cache_dir = ENV["XDG_CACHE_HOME"]? || File.join(ENV["HOME"]? || "/tmp", ".cache")
+        hash = digest_string(file_path)
+        File.join(cache_dir, "crystal_v2", "requires", "#{hash}.req")
+      end
+
+      private def load_require_cache(file_path : String) : Array(String)?
+        cache_path = require_cache_path(file_path)
+        return nil unless File.exists?(cache_path)
+        return nil unless File.exists?(file_path)
+
+        cache_mtime = File.info(cache_path).modification_time
+        file_mtime = File.info(file_path).modification_time
+        return nil if file_mtime > cache_mtime
+
+        lines = File.read_lines(cache_path)
+        lines.reject { |line| line.empty? || line.starts_with?("#") }
+      rescue ex
+        nil
+      end
+
+      private def save_require_cache(file_path : String, requires : Array(String))
+        unique = requires.uniq
+        return if unique.empty?
+
+        cache_path = require_cache_path(file_path)
+        Dir.mkdir_p(File.dirname(cache_path))
+        File.write(cache_path, unique.join("\n") + "\n")
+      rescue ex
+        nil
+      end
+
+      private def collect_link_libraries(
+        all_arenas : Array(Tuple(Frontend::ArenaLike, Array(Frontend::ExprId), String)),
+        options : Options,
+        out_io : IO
+      ) : Array(String)
+        libraries = [] of String
+        all_arenas.each do |arena, exprs, _|
+          exprs.each do |expr_id|
+            collect_link_libraries_from_expr(arena, expr_id, libraries, options, out_io)
+          end
+        end
+        libraries
+      end
+
+      private def collect_link_libraries_from_expr(
+        arena : Frontend::ArenaLike,
+        expr_id : Frontend::ExprId,
+        libraries : Array(String),
+        options : Options,
+        out_io : IO
+      )
+        node = arena[expr_id]
+        case node
+        when Frontend::AnnotationNode
+          annotation_name = annotation_name_from_expr(arena, node.name)
+          if annotation_name == "Link"
+            extract_link_libraries_from_annotation(arena, node).each do |lib_name|
+              libraries << lib_name
+            end
+          end
+        when Frontend::MacroIfNode
+          condition = evaluate_macro_condition(arena, node.condition, Runtime.target_flags)
+          if condition == true
+            collect_link_libraries_from_expr(arena, node.then_body, libraries, options, out_io)
+          elsif condition == false
+            if else_body = node.else_body
+              collect_link_libraries_from_expr(arena, else_body, libraries, options, out_io)
+            end
+          else
+            collect_link_libraries_from_expr(arena, node.then_body, libraries, options, out_io)
+            if else_body = node.else_body
+              collect_link_libraries_from_expr(arena, else_body, libraries, options, out_io)
+            end
+          end
+        when Frontend::MacroLiteralNode
+          macro_literal_active_texts(arena, node, Runtime.target_flags).each do |text|
+            extract_link_libraries_from_text(text).each do |lib_name|
+              libraries << lib_name
+            end
+          end
+        end
+      end
+
+      private def extract_link_libraries_from_annotation(
+        arena : Frontend::ArenaLike,
+        node : Frontend::AnnotationNode
+      ) : Array(String)
+        libraries = [] of String
+        node.args.each do |arg_id|
+          arg_node = arena[arg_id]
+          if arg_node.is_a?(Frontend::StringNode)
+            libraries << String.new(arg_node.value)
+          end
+        end
+
+        if named_args = node.named_args
+          named_args.each do |named_arg|
+            value_node = arena[named_arg.value]
+            next unless value_node.is_a?(Frontend::StringNode)
+
+            named_lib_name = String.new(value_node.value)
+            named_key = String.new(named_arg.name)
+            prefix = case named_key
+                     when "pkg_config" then "pkg_config:"
+                     when "framework"  then "framework:"
+                     when "dll"        then "dll:"
+                     else "#{named_key}:"
+                     end
+            libraries << "#{prefix}#{named_lib_name}"
+          end
+        end
+
+        libraries
+      end
+
+      private def extract_link_libraries_from_text(text : String) : Array(String)
+        libraries = [] of String
+        text.scan(/@\[\s*Link\s*\((.*?)\)\s*\]/m) do |match|
+          args_text = match[1]
+          libraries.concat(parse_link_annotation_args(args_text))
+        end
+        libraries
+      end
+
+      private def parse_link_annotation_args(text : String) : Array(String)
+        libraries = [] of String
+        working = text.dup
+
+        working.scan(/(\w+)\s*:\s*["']([^"']*)["']/) do |match|
+          key = match[1]
+          value = match[2]
+          prefix = case key
+                   when "pkg_config" then "pkg_config:"
+                   when "framework"  then "framework:"
+                   when "dll"        then "dll:"
+                   else "#{key}:"
+                   end
+          libraries << "#{prefix}#{value}"
+        end
+
+        working = working.gsub(/(\w+)\s*:\s*["'][^"']*["']/, "")
+        working.scan(/["']([^"']*)["']/) do |match|
+          libraries << match[1]
+        end
+
+        libraries
+      end
+
+      private def macro_literal_active_texts(
+        arena : Frontend::ArenaLike,
+        node : Frontend::MacroLiteralNode,
+        flags : Set(String)
+      ) : Array(String)
+        if node.pieces.size == 1 && node.pieces[0].kind == Frontend::MacroPiece::Kind::Text
+          if text = node.pieces[0].text
+            return macro_literal_texts_from_raw(text, flags) if text.includes?("{%")
+            return [text]
+          end
+        end
+
+        texts = [] of String
+        control_stack = [] of {Bool, Bool, Bool} # {parent_active, branch_taken, active}
+        active = true
+
+        node.pieces.each do |piece|
+          case piece.kind
+          when Frontend::MacroPiece::Kind::Text
+            if active && (text = piece.text)
+              texts << text
+            end
+          when Frontend::MacroPiece::Kind::ControlStart
+            keyword = piece.control_keyword || ""
+            cond_expr = piece.expr
+            cond = cond_expr ? evaluate_macro_condition(arena, cond_expr, flags) : nil
+            if keyword == "unless"
+              cond = cond.nil? ? nil : !cond
+            end
+
+            parent_active = active
+            branch_active = if cond == true
+                              parent_active
+                            elsif cond == false
+                              false
+                            else
+                              parent_active
+                            end
+            branch_taken = cond == true
+            control_stack << {parent_active, branch_taken, branch_active}
+            active = branch_active
+          when Frontend::MacroPiece::Kind::ControlElseIf
+            next if control_stack.empty?
+            parent_active, branch_taken, _ = control_stack[-1]
+            cond_expr = piece.expr
+            cond = cond_expr ? evaluate_macro_condition(arena, cond_expr, flags) : nil
+            take = !branch_taken && cond == true
+            branch_active = if cond == false
+                              false
+                            elsif cond == true
+                              parent_active && take
+                            else
+                              parent_active
+                            end
+            branch_taken = true if cond == true
+            control_stack[-1] = {parent_active, branch_taken, branch_active}
+            active = branch_active
+          when Frontend::MacroPiece::Kind::ControlElse
+            next if control_stack.empty?
+            parent_active, branch_taken, _ = control_stack[-1]
+            branch_active = parent_active && !branch_taken
+            control_stack[-1] = {parent_active, true, branch_active}
+            active = branch_active
+          when Frontend::MacroPiece::Kind::ControlEnd
+            if control_stack.empty?
+              active = true
+            else
+              parent_active, _, _ = control_stack.pop
+              active = parent_active
+            end
+          else
+            # Ignore expression/macro var pieces.
+          end
+        end
+
+        texts
+      end
+
+      private def annotation_name_from_expr(
+        arena : Frontend::ArenaLike,
+        expr_id : Frontend::ExprId
+      ) : String
+        node = arena[expr_id]
+        case node
+        when Frontend::IdentifierNode
+          String.new(node.name)
+        when Frontend::PathNode
+          annotation_name_from_expr(arena, node.right)
+        else
+          "Unknown"
         end
       end
 
@@ -878,94 +1215,108 @@ module CrystalV2
         control_stack = [] of {Bool, Bool, Bool} # {parent_active, branch_taken, active}
         active = true
         idx = 0
+        segment_start = 0
+        bytes = text.to_slice
+        size = bytes.size
 
-        while idx < text.size
-          tag_start = text.index("{%", idx)
-          if tag_start.nil?
-            texts << text[idx, text.size - idx] if active
-            break
-          end
-
-          if tag_start > idx && active
-            texts << text[idx, tag_start - idx]
-          end
-
-          tag_end = text.index("%}", tag_start + 2)
-          break unless tag_end
-
-          tag = text[tag_start + 2, tag_end - tag_start - 2]
-          tag = tag.strip
-          tag = tag.lstrip('-').lstrip('~').rstrip('-').rstrip('~').strip
-
-          if tag.starts_with?("skip_file")
-            cond_text = tag.sub(/^skip_file/, "").strip
-            skip = if cond_text.starts_with?("if ")
-                     evaluate_macro_condition_text(cond_text.lstrip("if").strip, flags)
-                   elsif cond_text.starts_with?("unless ")
-                     val = evaluate_macro_condition_text(cond_text.lstrip("unless").strip, flags)
-                     val.nil? ? nil : !val
-                   else
-                     true
-                   end
-            return [] of String if skip == true
-          elsif tag.starts_with?("if ")
-            cond = evaluate_macro_condition_text(tag.lstrip("if").strip, flags)
-            parent_active = active
-            branch_active = if cond == true
-                              parent_active
-                            elsif cond == false
-                              false
-                            else
-                              parent_active
-                            end
-            branch_taken = cond == true
-            control_stack << {parent_active, branch_taken, branch_active}
-            active = branch_active
-          elsif tag.starts_with?("unless ")
-            cond = evaluate_macro_condition_text(tag.lstrip("unless").strip, flags)
-            cond = cond.nil? ? nil : !cond
-            parent_active = active
-            branch_active = if cond == true
-                              parent_active
-                            elsif cond == false
-                              false
-                            else
-                              parent_active
-                            end
-            branch_taken = cond == true
-            control_stack << {parent_active, branch_taken, branch_active}
-            active = branch_active
-          elsif tag.starts_with?("elsif ")
-            next if control_stack.empty?
-            parent_active, branch_taken, _ = control_stack[-1]
-            cond = evaluate_macro_condition_text(tag.lstrip("elsif").strip, flags)
-            take = !branch_taken && cond == true
-            branch_active = if cond == false
-                              false
-                            elsif cond == true
-                              parent_active && take
-                            else
-                              parent_active
-                            end
-            branch_taken = true if cond == true
-            control_stack[-1] = {parent_active, branch_taken, branch_active}
-            active = branch_active
-          elsif tag == "else"
-            next if control_stack.empty?
-            parent_active, branch_taken, _ = control_stack[-1]
-            branch_active = parent_active && !branch_taken
-            control_stack[-1] = {parent_active, true, branch_active}
-            active = branch_active
-          elsif tag == "end"
-            if control_stack.empty?
-              active = true
-            else
-              parent_active, _, _ = control_stack.pop
-              active = parent_active
+        missing_end = false
+        while idx + 1 < size
+          if bytes[idx] == '{'.ord && bytes[idx + 1] == '%'.ord
+            if idx > segment_start && active
+              texts << text.byte_slice(segment_start, idx - segment_start)
             end
-          end
+            idx += 2
+            tag_start = idx
+            while idx + 1 < size && !(bytes[idx] == '%'.ord && bytes[idx + 1] == '}'.ord)
+              idx += 1
+            end
+            if idx + 1 >= size
+              missing_end = true
+              break
+            end
 
-          idx = tag_end + 2
+            tag = text.byte_slice(tag_start, idx - tag_start)
+            tag = tag.strip
+            tag = tag.lstrip('-').lstrip('~').rstrip('-').rstrip('~').strip
+
+            if tag.starts_with?("skip_file")
+              cond_text = tag.sub(/^skip_file/, "").strip
+              skip = if cond_text.starts_with?("if ")
+                       evaluate_macro_condition_text(cond_text.lstrip("if").strip, flags)
+                     elsif cond_text.starts_with?("unless ")
+                       val = evaluate_macro_condition_text(cond_text.lstrip("unless").strip, flags)
+                       val.nil? ? nil : !val
+                     else
+                       true
+                     end
+              return [] of String if skip == true
+            elsif tag.starts_with?("if ")
+              cond = evaluate_macro_condition_text(tag.lstrip("if").strip, flags)
+              parent_active = active
+              branch_active = if cond == true
+                                parent_active
+                              elsif cond == false
+                                false
+                              else
+                                parent_active
+                              end
+              branch_taken = cond == true
+              control_stack << {parent_active, branch_taken, branch_active}
+              active = branch_active
+            elsif tag.starts_with?("unless ")
+              cond = evaluate_macro_condition_text(tag.lstrip("unless").strip, flags)
+              cond = cond.nil? ? nil : !cond
+              parent_active = active
+              branch_active = if cond == true
+                                parent_active
+                              elsif cond == false
+                                false
+                              else
+                                parent_active
+                              end
+              branch_taken = cond == true
+              control_stack << {parent_active, branch_taken, branch_active}
+              active = branch_active
+            elsif tag.starts_with?("elsif ")
+              next if control_stack.empty?
+              parent_active, branch_taken, _ = control_stack[-1]
+              cond = evaluate_macro_condition_text(tag.lstrip("elsif").strip, flags)
+              take = !branch_taken && cond == true
+              branch_active = if cond == false
+                                false
+                              elsif cond == true
+                                parent_active && take
+                              else
+                                parent_active
+                              end
+              branch_taken = true if cond == true
+              control_stack[-1] = {parent_active, branch_taken, branch_active}
+              active = branch_active
+            elsif tag == "else"
+              next if control_stack.empty?
+              parent_active, branch_taken, _ = control_stack[-1]
+              branch_active = parent_active && !branch_taken
+              control_stack[-1] = {parent_active, true, branch_active}
+              active = branch_active
+            elsif tag == "end"
+              if control_stack.empty?
+                active = true
+              else
+                parent_active, _, _ = control_stack.pop
+                active = parent_active
+              end
+            end
+
+            idx += 2
+            segment_start = idx
+            next
+          else
+            idx += 1
+          end
+        end
+
+        if !missing_end && segment_start < size && active
+          texts << text.byte_slice(segment_start, size - segment_start)
         end
 
         texts
@@ -1423,3 +1774,6 @@ module CrystalV2
     end
   end
 end
+
+# Main entry point
+exit CrystalV2::Compiler::CLI.new(ARGV).run
