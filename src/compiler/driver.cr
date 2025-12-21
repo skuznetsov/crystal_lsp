@@ -31,6 +31,9 @@ module Crystal::V2
     property optimize : Int32 = 0
     property no_prelude : Bool = false  # Skip automatic prelude loading
     property ltp_opt : Bool = true
+    property lto : Bool = false
+    property pgo_generate : Bool = false
+    property pgo_profile : String = ""
 
     def initialize
     end
@@ -63,6 +66,13 @@ module Crystal::V2
           @no_prelude = true
         when "--no-ltp"
           @ltp_opt = false
+        when "--lto"
+          @lto = true
+        when "--pgo-gen"
+          @pgo_generate = true
+        when "--pgo-use"
+          i += 1
+          @pgo_profile = args[i]? || ""
         when /^-/
           STDERR.puts "Unknown option: #{arg}"
           exit 1
@@ -73,7 +83,17 @@ module Crystal::V2
       end
 
       if @input_file.empty?
-        STDERR.puts "Usage: driver <input.cr> [-o output] [--emit-llvm] [--no-prelude] [--no-ltp] [-v]"
+        STDERR.puts "Usage: driver <input.cr> [-o output] [--emit-llvm] [--no-prelude] [--no-ltp] [--lto] [--pgo-gen|--pgo-use FILE] [-v]"
+        exit 1
+      end
+
+      if @pgo_generate && !@pgo_profile.empty?
+        STDERR.puts "Error: --pgo-gen and --pgo-use are mutually exclusive"
+        exit 1
+      end
+
+      if !@pgo_profile.empty? && !File.exists?(@pgo_profile)
+        STDERR.puts "Error: PGO profile not found: #{@pgo_profile}"
         exit 1
       end
     end
@@ -322,16 +342,8 @@ module Crystal::V2
                  else        "-O3"
                  end
 
-      llc_cmd = "llc #{opt_flag} -filetype=obj -o #{obj_file} #{ll_file} 2>&1"
-      log "  $ #{llc_cmd}"
-      llc_result = `#{llc_cmd}`
-      unless $?.success?
-        STDERR.puts "llc failed:"
-        STDERR.puts llc_result
-        exit 1
-      end
+      use_clang_link = @lto || @pgo_generate || !@pgo_profile.empty?
 
-      # Link with system linker and runtime
       # Find runtime stub relative to driver location
       runtime_dir = File.dirname(File.dirname(__FILE__))
       runtime_stub = File.join(runtime_dir, "..", "runtime_stub.o")
@@ -343,20 +355,51 @@ module Crystal::V2
         `cc -c #{runtime_src} -o #{runtime_stub} 2>&1`
       end
 
-      link_objs = [obj_file]
-      link_objs << runtime_stub if File.exists?(runtime_stub)
+      if use_clang_link
+        pgo_flags = [] of String
+        if @pgo_generate
+          pgo_flags << "-fprofile-instr-generate"
+        elsif !@pgo_profile.empty?
+          pgo_flags << "-fprofile-instr-use=#{@pgo_profile}"
+        end
 
-      link_cmd = "cc -o #{@output_file} #{link_objs.join(" ")} 2>&1"
-      log "  $ #{link_cmd}"
-      link_result = `#{link_cmd}`
-      unless $?.success?
-        STDERR.puts "Linking failed:"
-        STDERR.puts link_result
-        exit 1
+        lto_flag = @lto ? "-flto" : ""
+        clang_cmd = "clang #{opt_flag} #{lto_flag} #{pgo_flags.join(" ")} -o #{@output_file} #{ll_file}"
+        clang_cmd += " #{runtime_stub}" if File.exists?(runtime_stub)
+        clang_cmd += " 2>&1"
+
+        log "  $ #{clang_cmd}"
+        clang_result = `#{clang_cmd}`
+        unless $?.success?
+          STDERR.puts "clang failed:"
+          STDERR.puts clang_result
+          exit 1
+        end
+      else
+        llc_cmd = "llc #{opt_flag} -filetype=obj -o #{obj_file} #{ll_file} 2>&1"
+        log "  $ #{llc_cmd}"
+        llc_result = `#{llc_cmd}`
+        unless $?.success?
+          STDERR.puts "llc failed:"
+          STDERR.puts llc_result
+          exit 1
+        end
+
+        link_objs = [obj_file]
+        link_objs << runtime_stub if File.exists?(runtime_stub)
+
+        link_cmd = "cc -o #{@output_file} #{link_objs.join(" ")} 2>&1"
+        log "  $ #{link_cmd}"
+        link_result = `#{link_cmd}`
+        unless $?.success?
+          STDERR.puts "Linking failed:"
+          STDERR.puts link_result
+          exit 1
+        end
+
+        # Clean up intermediate files
+        File.delete(obj_file) if File.exists?(obj_file)
       end
-
-      # Clean up intermediate files
-      File.delete(obj_file) if File.exists?(obj_file)
     end
 
     private def log(msg : String)
