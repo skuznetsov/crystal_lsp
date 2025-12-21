@@ -525,7 +525,7 @@ module CrystalV2
           base_hash = file_sha256(ll_file)
         end
 
-        opt_tag = options.llvm_opt ? "opt=O1" : "opt=none"
+        opt_tag = options.llvm_opt ? "opt=#{opt_flag}" : "opt=none"
         llc_tag = "llc=#{opt_flag}"
         opt_cache_file = options.llvm_cache ? File.join(cache_dir, "#{digest_string("#{base_hash}|#{opt_tag}")}.opt.ll") : ""
         obj_cache_file = options.llvm_cache ? File.join(cache_dir, "#{digest_string("#{base_hash}|#{opt_tag}|#{llc_tag}")}.o") : ""
@@ -538,7 +538,7 @@ module CrystalV2
             FileUtils.cp(opt_cache_file, opt_ll_file)
             @llvm_cache_hits += 1
           else
-            opt_cmd = "opt -O1 -S -o #{opt_ll_file} #{ll_file} 2>&1"
+            opt_cmd = "opt #{opt_flag} -S -o #{opt_ll_file} #{ll_file} 2>&1"
             log(options, out_io, "  $ #{opt_cmd}")
             opt_result = `#{opt_cmd}`
             unless $?.success?

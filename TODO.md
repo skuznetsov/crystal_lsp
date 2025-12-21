@@ -614,7 +614,7 @@ The key insight is: **Don't compete with LLVM, complement it.**
 - [ ] Full slab allocator (with actual slab pooling)
 
 #### 5.3.3 Optimization Pipeline
-- [ ] LLVM optimization passes (O0/O1/O2/O3)
+- [x] LLVM optimization passes (O0/O1/O2/O3)
 - [ ] LTO support for release builds
 - [ ] PGO hooks (profile-guided LLVM opts)
 
