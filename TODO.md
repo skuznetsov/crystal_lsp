@@ -729,11 +729,11 @@ The key insight is: **Don't compete with LLVM, complement it.**
 **Phase 4: Dual Frame Fallback (BR-4)**
 - [x] Detect "stuck" state: no legal move decreases Φ
 - [x] Switch to escape analysis frame (initial: constant-folding fallback)
-- [ ] If escape frame also stuck, switch to curvature/lifetime frame
+- [x] If escape frame also stuck, switch to curvature/lifetime frame
   - [x] Add corridor-length "curvature" metric (sum/max path length) to guide the frame
   - [x] Add lifetime-pressure metric (distance between rc_inc/rc_dec along def-use)
   - [x] Implement curvature/lifetime frame pass (RC elision + DCE gated by metrics)
-  - [ ] Add specs for curvature frame fallback (monotone descent across frames)
+  - [x] Add specs for curvature frame fallback (monotone descent across frames)
 - [ ] Unified potential across frames (Φ_esc compatible with Φ_primary)
   - [x] Define frame-normalized LTPPotential mapping (same 4 components)
   - [x] Reject frame switch if mapped Φ does not decrease
