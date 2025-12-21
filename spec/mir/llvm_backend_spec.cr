@@ -95,6 +95,38 @@ describe Crystal::MIR::LLVMIRGenerator do
       output.should contain("define ptr @__crystal_v2_slab_alloc(i32 %size_class)")
     end
 
+    it "emits entrypoint when __crystal_main is present" do
+      mod = Crystal::MIR::Module.new("test")
+      func = mod.create_function("__crystal_main", Crystal::MIR::TypeRef::VOID)
+      builder = Crystal::MIR::Builder.new(func)
+      builder.ret
+
+      gen = Crystal::MIR::LLVMIRGenerator.new(mod)
+      gen.emit_type_metadata = false
+      gen.reachability = true
+      output = gen.generate
+
+      output.should contain("define i32 @main")
+      output.should contain("call void @__crystal_main")
+    end
+
+    it "skips entrypoint when __crystal_main is filtered" do
+      mod = Crystal::MIR::Module.new("test")
+      func = mod.create_function("__crystal_main", Crystal::MIR::TypeRef::VOID)
+      builder = Crystal::MIR::Builder.new(func)
+      args = [] of Crystal::MIR::ValueId
+      builder.extern_call("typeof_foo", args, Crystal::MIR::TypeRef::VOID)
+      builder.ret
+
+      gen = Crystal::MIR::LLVMIRGenerator.new(mod)
+      gen.emit_type_metadata = false
+      gen.reachability = true
+      output = gen.generate
+
+      output.should_not contain("define i32 @main")
+      output.should_not contain("call void @__crystal_main")
+    end
+
     it "generates simple function" do
       mod = Crystal::MIR::Module.new("test")
       func = mod.create_function("add", Crystal::MIR::TypeRef::INT32)

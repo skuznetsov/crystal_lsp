@@ -445,6 +445,8 @@ module Crystal::MIR
         end
       end
 
+      emit_entrypoint_if_needed(functions_to_emit)
+
       # Emit string constants at end (LLVM allows globals anywhere)
       STDERR.puts "  [LLVM] emit_string_constants..." if @progress
       emit_string_constants
@@ -1333,16 +1335,6 @@ module Crystal::MIR
       emit_raw "  ret void\n"
       emit_raw "}\n\n"
 
-      has_user_main = @module.functions.any? { |f| f.name == "main" }
-      has_crystal_main = @module.functions.any? { |f| f.name == "__crystal_main" }
-      if !has_user_main && has_crystal_main
-        # Entry point: main() calls __crystal_main()
-        emit_raw "; Program entry point\n"
-        emit_raw "define i32 @main(i32 %argc, ptr %argv) {\n"
-        emit_raw "  call void @__crystal_main(i32 %argc, ptr %argv)\n"
-        emit_raw "  ret i32 0\n"
-        emit_raw "}\n\n"
-      end
     end
 
     # Union debug helper function definitions - stubs for bootstrap
@@ -1438,6 +1430,19 @@ module Crystal::MIR
       emit_raw "define ptr @__crystal_v2_get_exception() {\n"
       emit_raw "  %exc = load ptr, ptr @__crystal_exc_ptr\n"
       emit_raw "  ret ptr %exc\n"
+      emit_raw "}\n\n"
+    end
+
+    private def emit_entrypoint_if_needed(functions_to_emit : Array(Function))
+      has_user_main = functions_to_emit.any? { |f| f.name == "main" }
+      has_crystal_main = functions_to_emit.any? { |f| f.name == "__crystal_main" }
+      return if has_user_main || !has_crystal_main
+
+      # Entry point: main() calls __crystal_main()
+      emit_raw "; Program entry point\n"
+      emit_raw "define i32 @main(i32 %argc, ptr %argv) {\n"
+      emit_raw "  call void @__crystal_main(i32 %argc, ptr %argv)\n"
+      emit_raw "  ret i32 0\n"
       emit_raw "}\n\n"
     end
 
