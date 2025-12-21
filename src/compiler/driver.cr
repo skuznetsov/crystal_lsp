@@ -452,6 +452,7 @@ module Crystal::V2
     ) : Array(String)
       if node.pieces.size == 1 && node.pieces[0].kind == CrystalV2::Compiler::Frontend::MacroPiece::Kind::Text
         if text = node.pieces[0].text
+          return [] of String unless text.includes?("require") || text.includes?("skip_file")
           return macro_literal_texts_from_raw(text, flags) if text.includes?("{%")
         end
       end
