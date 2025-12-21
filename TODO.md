@@ -615,8 +615,8 @@ The key insight is: **Don't compete with LLVM, complement it.**
 
 #### 5.3.3 Optimization Pipeline
 - [x] LLVM optimization passes (O0/O1/O2/O3)
-- [ ] LTO support for release builds
-- [ ] PGO hooks (profile-guided LLVM opts)
+- [x] LTO support for release builds (clang link path)
+- [x] PGO hooks (profile-guided LLVM opts via clang flags)
 
 #### 5.3.4 Platform Support
 - [ ] macOS (arm64, x86_64)

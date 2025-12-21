@@ -85,6 +85,9 @@ module CrystalV2
           p.on("--llvm-cache", "Enable LLVM opt/llc cache") { options.llvm_cache = true }
           p.on("--no-llvm-cache", "Disable LLVM opt/llc cache") { options.llvm_cache = false }
           p.on("--no-llvm-metadata", "Disable LLVM type metadata (faster, less debug info)") { options.emit_type_metadata = false }
+          p.on("--lto", "Enable LLVM LTO at link time (clang)") { options.lto = true }
+          p.on("--pgo-gen", "Enable LLVM PGO instrumentation (clang)") { options.pgo_generate = true }
+          p.on("--pgo-use FILE", "Use LLVM PGO profile data (clang)") { |f| options.pgo_profile = f }
           p.on("--no-link", "Skip final link step (leave .o file)") { options.link = false }
           p.on("--no-ltp", "Disable LTP/WBA MIR optimization (benchmarking)") { options.ltp_opt = false }
           p.on("--slab-frame", "Use slab frame for no-escape functions (experimental)") { options.slab_frame = true }
@@ -110,6 +113,15 @@ module CrystalV2
         if options.show_help
           out_io.puts options.help_text
           return 0
+        end
+
+        if options.pgo_generate && !options.pgo_profile.empty?
+          err_io.puts "Error: --pgo-gen and --pgo-use are mutually exclusive"
+          return 1
+        end
+        if !options.pgo_profile.empty? && !File.exists?(options.pgo_profile)
+          err_io.puts "Error: PGO profile not found: #{options.pgo_profile}"
+          return 1
         end
 
         # Get input file from remaining args
@@ -153,6 +165,9 @@ module CrystalV2
         property emit_type_metadata : Bool = true
         property ltp_opt : Bool = true
         property slab_frame : Bool = false
+        property lto : Bool = false
+        property pgo_generate : Bool = false
+        property pgo_profile : String = ""
         property show_version : Bool = false
         property show_help : Bool = false
         property help_text : String = ""
@@ -554,25 +569,33 @@ module CrystalV2
           timings["opt"] = (Time.monotonic - opt_start).total_milliseconds if options.stats
         end
 
-        llc_start = Time.monotonic
-        if options.llvm_cache && File.exists?(obj_cache_file)
-          FileUtils.cp(obj_cache_file, obj_file)
-          @llvm_cache_hits += 1
-        else
-          llc_cmd = "llc #{opt_flag} -filetype=obj -o #{obj_file} #{opt_ll_file} 2>&1"
-          log(options, out_io, "  $ #{llc_cmd}")
-          llc_result = `#{llc_cmd}`
-          unless $?.success?
-            err_io.puts "llc failed:"
-            err_io.puts llc_result
-            return 1
-          end
-          if options.llvm_cache
-            FileUtils.cp(obj_file, obj_cache_file)
-            @llvm_cache_misses += 1
-          end
+        use_clang_link = options.lto || options.pgo_generate || !options.pgo_profile.empty?
+        if use_clang_link && !options.link
+          err_io.puts "error: --lto/--pgo-* require linking (remove --no-link)"
+          return 1
         end
-        timings["llc"] = (Time.monotonic - llc_start).total_milliseconds if options.stats
+
+        llc_start = Time.monotonic
+        unless use_clang_link
+          if options.llvm_cache && File.exists?(obj_cache_file)
+            FileUtils.cp(obj_cache_file, obj_file)
+            @llvm_cache_hits += 1
+          else
+            llc_cmd = "llc #{opt_flag} -filetype=obj -o #{obj_file} #{opt_ll_file} 2>&1"
+            log(options, out_io, "  $ #{llc_cmd}")
+            llc_result = `#{llc_cmd}`
+            unless $?.success?
+              err_io.puts "llc failed:"
+              err_io.puts llc_result
+              return 1
+            end
+            if options.llvm_cache
+              FileUtils.cp(obj_file, obj_cache_file)
+              @llvm_cache_misses += 1
+            end
+          end
+          timings["llc"] = (Time.monotonic - llc_start).total_milliseconds if options.stats
+        end
 
         # Find runtime stub
         runtime_dir = File.dirname(File.dirname(__FILE__))
@@ -590,13 +613,35 @@ module CrystalV2
 
         if options.link
           link_start = Time.monotonic
-          link_cmd = "cc -o #{options.output} #{link_objs.join(" ")} 2>&1"
-          log(options, out_io, "  $ #{link_cmd}")
-          link_result = `#{link_cmd}`
-          unless $?.success?
-            err_io.puts "Linking failed:"
-            err_io.puts link_result
-            return 1
+          if use_clang_link
+            pgo_flags = [] of String
+            if options.pgo_generate
+              pgo_flags << "-fprofile-instr-generate"
+            elsif !options.pgo_profile.empty?
+              pgo_flags << "-fprofile-instr-use=#{options.pgo_profile}"
+            end
+
+            lto_flag = options.lto ? "-flto" : ""
+            clang_cmd = "clang #{opt_flag} #{lto_flag} #{pgo_flags.join(" ")} -o #{options.output} #{opt_ll_file}"
+            clang_cmd += " #{runtime_stub}" if File.exists?(runtime_stub)
+            clang_cmd += " 2>&1"
+
+            log(options, out_io, "  $ #{clang_cmd}")
+            clang_result = `#{clang_cmd}`
+            unless $?.success?
+              err_io.puts "clang failed:"
+              err_io.puts clang_result
+              return 1
+            end
+          else
+            link_cmd = "cc -o #{options.output} #{link_objs.join(" ")} 2>&1"
+            log(options, out_io, "  $ #{link_cmd}")
+            link_result = `#{link_cmd}`
+            unless $?.success?
+              err_io.puts "Linking failed:"
+              err_io.puts link_result
+              return 1
+            end
           end
           timings["link"] = (Time.monotonic - link_start).total_milliseconds if options.stats
         else
