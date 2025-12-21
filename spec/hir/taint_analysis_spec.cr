@@ -242,6 +242,31 @@ describe Crystal::HIR::TaintAnalyzer do
       str.taints.ffi_exposed?.should be_true
     end
 
+    it "propagates FFIExposed back through copies" do
+      mod, func = create_function
+
+      entry = func.get_block(func.entry_block)
+
+      # %0 = allocate String
+      str = Crystal::HIR::Allocate.new(func.next_value_id, Crystal::HIR::TypeRef::STRING)
+      entry.add(str)
+
+      # %1 = copy %0
+      copy = Crystal::HIR::Copy.new(func.next_value_id, str.type, str.id)
+      entry.add(copy)
+
+      # %2 = call copy.to_unsafe()
+      call = Crystal::HIR::Call.new(func.next_value_id, Crystal::HIR::TypeRef::VOID, copy.id, "to_unsafe", [] of Crystal::HIR::ValueId)
+      entry.add(call)
+
+      entry.terminator = Crystal::HIR::Return.new(nil)
+
+      analyzer = Crystal::HIR::TaintAnalyzer.new(func)
+      analyzer.analyze
+
+      str.taints.ffi_exposed?.should be_true
+    end
+
     it "detects double-underscore methods as FFI" do
       mod, func = create_function
 
@@ -275,6 +300,31 @@ describe Crystal::HIR::TaintAnalyzer do
 
       # %1 = call spawn(data)
       call = Crystal::HIR::Call.new(func.next_value_id, Crystal::HIR::TypeRef::VOID, nil, "spawn", [data.id])
+      entry.add(call)
+
+      entry.terminator = Crystal::HIR::Return.new(nil)
+
+      analyzer = Crystal::HIR::TaintAnalyzer.new(func)
+      analyzer.analyze
+
+      data.taints.thread_shared?.should be_true
+    end
+
+    it "propagates ThreadShared back through copies" do
+      mod, func = create_function
+
+      entry = func.get_block(func.entry_block)
+
+      # %0 = allocate Data
+      data = Crystal::HIR::Allocate.new(func.next_value_id, Crystal::HIR::TypeRef.new(100_u32))
+      entry.add(data)
+
+      # %1 = copy %0
+      copy = Crystal::HIR::Copy.new(func.next_value_id, data.type, data.id)
+      entry.add(copy)
+
+      # %2 = call spawn(copy)
+      call = Crystal::HIR::Call.new(func.next_value_id, Crystal::HIR::TypeRef::VOID, nil, "spawn", [copy.id])
       entry.add(call)
 
       entry.terminator = Crystal::HIR::Return.new(nil)

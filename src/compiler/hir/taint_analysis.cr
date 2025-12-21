@@ -292,6 +292,33 @@ module Crystal::HIR
 
           propagate_to_user(value, user, current_taints)
         end
+
+        propagate_backwards(value, current_taints)
+      end
+    end
+
+    private def propagate_backwards(value : Value, taints : Taint)
+      flow_taints = taints & (Taint::ThreadShared | Taint::FFIExposed)
+      return if flow_taints == Taint::None
+
+      case value
+      when Copy
+        merge_taints(value.source, flow_taints)
+      when Phi
+        value.incoming.each { |(_, val)| merge_taints(val, flow_taints) }
+      when FieldGet
+        merge_taints(value.object, flow_taints)
+      when IndexGet
+        merge_taints(value.object, flow_taints)
+      when Cast
+        merge_taints(value.value, flow_taints)
+      when IsA
+        merge_taints(value.value, flow_taints)
+      when UnaryOperation
+        merge_taints(value.operand, flow_taints)
+      when BinaryOperation
+        merge_taints(value.left, flow_taints)
+        merge_taints(value.right, flow_taints)
       end
     end
 

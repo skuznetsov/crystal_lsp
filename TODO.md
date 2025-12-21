@@ -653,7 +653,7 @@ The key insight is: **Don't compete with LLVM, complement it.**
 - [x] **Next:** cycle detection (generic element types) (2025-12-26)
 - [x] ABI harness (offset/align/union) (2025-12-26)
 - [x] RC/taint inline audit
-- [ ] ThreadShared→atomic/GC enforcement
+- [x] ThreadShared→atomic/GC enforcement
 
 ---
 
