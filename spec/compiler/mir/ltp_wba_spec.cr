@@ -149,6 +149,34 @@ module LTPTestHelpers
 
     func
   end
+
+  def self.create_test_function_with_dead_code : Crystal::MIR::Function
+    int_type = Crystal::MIR::TypeRef::INT32
+
+    func = Crystal::MIR::Function.new(next_func_id, "test_dead", int_type)
+    entry_id = func.create_block
+    entry = func.get_block(entry_id)
+
+    # Unused constant should be eliminated by DCE in the dual frame.
+    dead_const = Crystal::MIR::Constant.new(
+      1_u32,
+      int_type,
+      7_i64
+    )
+    entry.add(dead_const)
+
+    live_const = Crystal::MIR::Constant.new(
+      2_u32,
+      int_type,
+      42_i64
+    )
+    entry.add(live_const)
+
+    ret = Crystal::MIR::Return.new(live_const.id)
+    entry.terminator = ret
+
+    func
+  end
 end
 
 describe Crystal::MIR::LTPPotential do
@@ -321,6 +349,23 @@ describe Crystal::MIR::LTPEngine do
       engine.frame_kind = Crystal::MIR::FrameKind::Curvature
 
       engine.frame_potential.should eq(engine.curvature_potential)
+    end
+  end
+
+  describe "dual-frame fallback" do
+    it "switches to curvature frame when it reduces potential" do
+      func = LTPTestHelpers.create_test_function_with_dead_code
+      engine = Crystal::MIR::LTPEngine.new(func)
+
+      engine.run(max_iters: 2)
+
+      engine.frame_kind.should eq(Crystal::MIR::FrameKind::Curvature)
+
+      trace = engine.potential_trace
+      trace.size.should be >= 2
+      (1...trace.size).each do |idx|
+        (trace[idx] <= trace[idx - 1]).should be_true
+      end
     end
   end
 end

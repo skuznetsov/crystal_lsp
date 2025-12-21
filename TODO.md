@@ -737,7 +737,7 @@ The key insight is: **Don't compete with LLVM, complement it.**
 - [ ] Unified potential across frames (Φ_esc compatible with Φ_primary)
   - [x] Define frame-normalized LTPPotential mapping (same 4 components)
   - [x] Reject frame switch if mapped Φ does not decrease
-  - [ ] Spec: cross-frame monotone descent with mixed moves
+  - [x] Spec: cross-frame monotone descent with mixed moves
 
 **Phase 5: L2-Engine Scheduler**
 - [x] Priority: S ≻ L ≻ D ≻ C (Spike > Ladder > Diamond > Collapse)
