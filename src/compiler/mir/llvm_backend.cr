@@ -5619,7 +5619,20 @@ module Crystal::MIR
       index_type = @value_types[inst.index_value]?
       if index_type
         index_llvm = @type_mapper.llvm_type(index_type)
-        if index_llvm == "ptr"
+        if index_llvm.includes?(".union")
+          # Union type index - extract payload as i32
+          emit "%#{base_name}.idx_union_ptr = alloca #{index_llvm}, align 8"
+          emit "store #{index_llvm} #{normalize_union_value(index, index_llvm)}, ptr %#{base_name}.idx_union_ptr"
+          emit "%#{base_name}.idx_payload_ptr = getelementptr #{index_llvm}, ptr %#{base_name}.idx_union_ptr, i32 0, i32 1"
+          # Check if payload is likely pointer or integer based on union name
+          if index_llvm.includes?("Pointer") || index_llvm.includes?("Int64")
+            emit "%#{base_name}.idx_payload = load i64, ptr %#{base_name}.idx_payload_ptr"
+            emit "%#{base_name}.idx_int = trunc i64 %#{base_name}.idx_payload to i32"
+          else
+            emit "%#{base_name}.idx_int = load i32, ptr %#{base_name}.idx_payload_ptr"
+          end
+          index = "%#{base_name}.idx_int"
+        elsif index_llvm == "ptr"
           emit "%#{base_name}.idx_int = ptrtoint ptr #{index} to i32"
           index = "%#{base_name}.idx_int"
         elsif index_llvm == "i64"
@@ -5677,7 +5690,19 @@ module Crystal::MIR
       index_type = @value_types[inst.index_value]?
       if index_type
         index_llvm = @type_mapper.llvm_type(index_type)
-        if index_llvm == "ptr"
+        if index_llvm.includes?(".union")
+          # Union type index - extract payload as i32
+          emit "%#{base_name}.idx_union_ptr = alloca #{index_llvm}, align 8"
+          emit "store #{index_llvm} #{normalize_union_value(index, index_llvm)}, ptr %#{base_name}.idx_union_ptr"
+          emit "%#{base_name}.idx_payload_ptr = getelementptr #{index_llvm}, ptr %#{base_name}.idx_union_ptr, i32 0, i32 1"
+          if index_llvm.includes?("Pointer") || index_llvm.includes?("Int64")
+            emit "%#{base_name}.idx_payload = load i64, ptr %#{base_name}.idx_payload_ptr"
+            emit "%#{base_name}.idx_int = trunc i64 %#{base_name}.idx_payload to i32"
+          else
+            emit "%#{base_name}.idx_int = load i32, ptr %#{base_name}.idx_payload_ptr"
+          end
+          index = "%#{base_name}.idx_int"
+        elsif index_llvm == "ptr"
           emit "%#{base_name}.idx_int = ptrtoint ptr #{index} to i32"
           index = "%#{base_name}.idx_int"
         elsif index_llvm == "i64"
