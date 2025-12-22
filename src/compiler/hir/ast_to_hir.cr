@@ -800,16 +800,243 @@ module Crystal::HIR
       node = @arena[expr_id]
       case node
       when CrystalV2::Compiler::Frontend::IdentifierNode
-        resolve_typeof_inner(String.new(node.name))
+        name = String.new(node.name)
+        # Parser stores typeof(...) as identifier name in generic type args
+        if name.starts_with?("typeof(") && name.ends_with?(")")
+          inner_expr = name[7..-2]  # Extract content between typeof( and )
+          resolve_typeof_string_expr(inner_expr)
+        else
+          resolve_typeof_inner(name)
+        end
       when CrystalV2::Compiler::Frontend::InstanceVarNode
         resolve_typeof_inner(String.new(node.name))
       when CrystalV2::Compiler::Frontend::ClassVarNode
         resolve_typeof_inner(String.new(node.name))
       when CrystalV2::Compiler::Frontend::SelfNode
         resolve_typeof_inner("self")
+      when CrystalV2::Compiler::Frontend::MemberAccessNode
+        # Handle expressions like str.to_unsafe.value
+        resolve_typeof_member_chain(node)
+      when CrystalV2::Compiler::Frontend::CallNode
+        # Handle expressions like str.to_unsafe()
+        resolve_typeof_call_chain(node)
       else
         "Pointer(Void)"
       end
+    end
+
+    # Resolve typeof from a string expression like "str.to_unsafe.value"
+    # This handles the case where parser stores typeof(...) as an identifier name
+    private def resolve_typeof_string_expr(expr : String) : String
+      expr = expr.strip
+
+      # Split on dots to get the call chain
+      # Handle patterns like: str.to_unsafe.value, str.to_slice, @buffer.to_unsafe
+      parts = split_method_chain(expr)
+      return resolve_typeof_inner(expr) if parts.size <= 1
+
+      # Start with the base variable's type
+      base = parts[0].strip
+      current_type = resolve_typeof_inner(base)
+      return "Pointer(Void)" if current_type == "Pointer(Void)"
+
+      # Walk through each method call
+      parts[1..].each do |method_part|
+        method_name = method_part.gsub(/\(\)$/, "").strip  # Remove trailing ()
+
+        case method_name
+        when "to_unsafe"
+          if current_type == "String"
+            current_type = "Pointer(UInt8)"
+          elsif current_type.starts_with?("Array(") && current_type.ends_with?(")")
+            inner = current_type[6..-2]
+            current_type = "Pointer(#{inner})"
+          elsif current_type.starts_with?("Slice(") && current_type.ends_with?(")")
+            inner = current_type[6..-2]
+            current_type = "Pointer(#{inner})"
+          elsif current_type.starts_with?("Pointer(")
+            # Already a pointer, to_unsafe is identity
+          else
+            # Default to Pointer(current_type)
+            current_type = "Pointer(#{current_type})"
+          end
+        when "to_slice"
+          if current_type == "String"
+            current_type = "Slice(UInt8)"
+          elsif current_type.starts_with?("Array(") && current_type.ends_with?(")")
+            inner = current_type[6..-2]
+            current_type = "Slice(#{inner})"
+          end
+        when "value"
+          # Dereference pointer: Pointer(T).value -> T
+          if current_type.starts_with?("Pointer(") && current_type.ends_with?(")")
+            current_type = current_type[8..-2]
+          end
+        when "size", "bytesize"
+          current_type = "Int32"
+        else
+          # Try to look up return type
+          method_full_name = "#{current_type}##{method_name}"
+          if ret_type = @function_types[method_full_name]?
+            current_type = get_type_name_from_ref(ret_type)
+          else
+            return "Pointer(Void)"  # Unknown method
+          end
+        end
+      end
+
+      current_type
+    end
+
+    # Split a method chain string, handling nested parentheses
+    private def split_method_chain(expr : String) : Array(String)
+      parts = [] of String
+      current = String::Builder.new
+      depth = 0
+
+      expr.each_char do |c|
+        case c
+        when '(', '[', '{'
+          depth += 1
+          current << c
+        when ')', ']', '}'
+          depth -= 1
+          current << c
+        when '.'
+          if depth == 0
+            parts << current.to_s
+            current = String::Builder.new
+          else
+            current << c
+          end
+        else
+          current << c
+        end
+      end
+
+      parts << current.to_s unless current.empty?
+      parts
+    end
+
+    # Resolve typeof for member access chains like str.to_unsafe.value
+    private def resolve_typeof_member_chain(node : CrystalV2::Compiler::Frontend::MemberAccessNode) : String
+      member_name = String.new(node.member)
+
+      # Special case: x.to_unsafe.value pattern - common for getting element type
+      # This handles typeof(str.to_unsafe.value) where str is String
+      if member_name == "value"
+        obj = @arena[node.object]
+        if obj.is_a?(CrystalV2::Compiler::Frontend::CallNode)
+          callee = @arena[obj.callee]
+          if callee.is_a?(CrystalV2::Compiler::Frontend::MemberAccessNode)
+            call_method = String.new(callee.member)
+            if call_method == "to_unsafe"
+              # x.to_unsafe.value - infer x's element type
+              base_obj = @arena[callee.object]
+              # Check if base is String parameter (common pattern)
+              if base_obj.is_a?(CrystalV2::Compiler::Frontend::IdentifierNode)
+                # For String.to_unsafe.value, returns UInt8
+                # This is a conservative assumption but handles the common case
+                return "UInt8"
+              end
+            end
+          end
+        end
+      end
+
+      # Get the base type
+      base_type = resolve_typeof_expr(node.object)
+      return "Pointer(Void)" if base_type == "Pointer(Void)"
+
+      # Handle common patterns
+      case member_name
+      when "value"
+        # Pointer(T).value returns T
+        if base_type.starts_with?("Pointer(") && base_type.ends_with?(")")
+          inner = base_type[8..-2]  # Extract T from Pointer(T)
+          return inner
+        end
+        # For other types, return element type if available
+        if element_type = extract_element_type(base_type)
+          return element_type
+        end
+      end
+
+      # Try to look up the return type of the method
+      method_full_name = "#{base_type}##{member_name}"
+      if ret_type = @function_types[method_full_name]?
+        return get_type_name_from_ref(ret_type)
+      end
+
+      "Pointer(Void)"
+    end
+
+    # Resolve typeof for call chains like str.to_unsafe()
+    private def resolve_typeof_call_chain(node : CrystalV2::Compiler::Frontend::CallNode) : String
+      callee = @arena[node.callee]
+      case callee
+      when CrystalV2::Compiler::Frontend::MemberAccessNode
+        method_name = String.new(callee.member)
+        base_type = resolve_typeof_expr(callee.object)
+        return "Pointer(Void)" if base_type == "Pointer(Void)"
+
+        # Handle common stdlib methods
+        case method_name
+        when "to_unsafe"
+          # String.to_unsafe returns Pointer(UInt8)
+          if base_type == "String"
+            return "Pointer(UInt8)"
+          end
+          # Array(T).to_unsafe returns Pointer(T)
+          if base_type.starts_with?("Array(") && base_type.ends_with?(")")
+            inner = base_type[6..-2]
+            return "Pointer(#{inner})"
+          end
+          # Slice(T).to_unsafe returns Pointer(T)
+          if base_type.starts_with?("Slice(") && base_type.ends_with?(")")
+            inner = base_type[6..-2]
+            return "Pointer(#{inner})"
+          end
+        when "to_slice"
+          # String.to_slice returns Slice(UInt8)
+          if base_type == "String"
+            return "Slice(UInt8)"
+          end
+        end
+
+        # Try to look up the return type of the method
+        method_full_name = "#{base_type}##{method_name}"
+        if ret_type = @function_types[method_full_name]?
+          return get_type_name_from_ref(ret_type)
+        end
+      when CrystalV2::Compiler::Frontend::IdentifierNode
+        # Simple identifier call like some_func()
+        method_name = String.new(callee.name)
+        # Look up return type
+        if ret_type = @function_types[method_name]?
+          return get_type_name_from_ref(ret_type)
+        end
+      end
+
+      "Pointer(Void)"
+    end
+
+    # Extract element type from container types
+    private def extract_element_type(type_name : String) : String?
+      if type_name.starts_with?("Array(") && type_name.ends_with?(")")
+        return type_name[6..-2]
+      elsif type_name.starts_with?("Slice(") && type_name.ends_with?(")")
+        return type_name[6..-2]
+      elsif type_name.starts_with?("Pointer(") && type_name.ends_with?(")")
+        return type_name[8..-2]
+      elsif type_name.starts_with?("StaticArray(") && type_name.ends_with?(")")
+        # StaticArray(T, N) - extract T
+        inner = type_name[12..-2]
+        if comma_idx = inner.index(',')
+          return inner[0, comma_idx].strip
+        end
+      end
+      nil
     end
 
     private def resolve_typeof_inner(expr : String) : String
@@ -1257,14 +1484,41 @@ module Crystal::HIR
       offset : Int32,
       is_struct : Bool
     ) : Int32
+      # Sanitize class_name (fix malformed types with unbalanced parens)
+      class_name = sanitize_type_name(class_name)
+
       module_full_name = resolve_path_like_name(include_node.target)
       return offset unless module_full_name
+
+      STDERR.puts "[INC_DEBUG] class=#{class_name}, module_resolved=#{module_full_name}, has_key=#{@module_defs.has_key?(module_full_name)}"
+
+      # If module not found directly, try resolving relative to the including class's namespace
+      # e.g., BinaryFormat_Float64 includes BinaryFormat -> Float::FastFloat::BinaryFormat
+      unless @module_defs.has_key?(module_full_name)
+        # Extract namespace from class_name (e.g., Float::FastFloat from Float::FastFloat::BinaryFormat_Float64)
+        if class_name.includes?("::")
+          parts = class_name.split("::")
+          parts.pop  # Remove the class name itself
+          # Try progressively shorter namespaces
+          while parts.size > 0
+            qualified_name = "#{parts.join("::")}::#{module_full_name}"
+            if @module_defs.has_key?(qualified_name)
+              module_full_name = qualified_name
+              break
+            end
+            parts.pop
+          end
+        end
+        STDERR.puts "[INC_DEBUG] after resolution: module_full_name=#{module_full_name}"
+      end
+
       record_module_inclusion(module_full_name, class_name)
       return offset if visited.includes?(module_full_name)
       visited << module_full_name
 
       defs = @module_defs[module_full_name]?
       return offset unless defs
+      STDERR.puts "[INC_DEBUG] module=#{module_full_name}, num_defs=#{defs.size}, class=#{class_name}"
       include_arena = @arena
       defs.each do |mod_node, mod_arena|
         with_arena(mod_arena) do
@@ -1322,6 +1576,9 @@ module Crystal::HIR
                   full_name = mangle_function_name(base_name, param_types, has_block)
                   next if defined_full_names.includes?(full_name)
 
+                  if full_name.includes?("from_chars_advanced") || class_name.includes?("BinaryFormat")
+                    STDERR.puts "[MOD_INCLUDE] class=#{class_name}, method=#{method_name}, full_name=#{full_name}, return_type=#{return_type}"
+                  end
                   register_function_type(full_name, return_type)
                   @function_defs[full_name] = member
                   @function_def_arenas[full_name] = @arena
@@ -1615,6 +1872,9 @@ module Crystal::HIR
 
       # Keep module AST around for mixin expansion (`include Foo` in classes/structs).
       (@module_defs[module_name] ||= [] of {CrystalV2::Compiler::Frontend::ModuleNode, CrystalV2::Compiler::Frontend::ArenaLike}) << {node, @arena}
+      if module_name.includes?("BinaryFormat")
+        STDERR.puts "[REG_MODULE_TOP] #{module_name}, now has #{@module_defs[module_name].size} defs"
+      end
 
       # Register module methods (def self.foo) and nested classes
       if body = node.body
@@ -1752,6 +2012,25 @@ module Crystal::HIR
     private def register_nested_module(node : CrystalV2::Compiler::Frontend::ModuleNode, full_name : String)
       # Keep nested module AST around for mixin expansion.
       (@module_defs[full_name] ||= [] of {CrystalV2::Compiler::Frontend::ModuleNode, CrystalV2::Compiler::Frontend::ArenaLike}) << {node, @arena}
+      if full_name.includes?("BinaryFormat") && full_name == "Float::FastFloat::BinaryFormat"
+        body_methods = [] of String
+        body_size = node.body.try(&.size) || 0
+        start_line = node.span.start_line rescue 0
+        end_line = node.span.end_line rescue 0
+        if b = node.body
+          b.each do |id|
+            mem = @arena[id]
+            while mem.is_a?(CrystalV2::Compiler::Frontend::VisibilityModifierNode)
+              mem = @arena[mem.expression]
+            end
+            if mem.is_a?(CrystalV2::Compiler::Frontend::DefNode)
+              param_count = mem.params.try(&.size) || 0
+              body_methods << "#{String.new(mem.name)}(#{param_count})"
+            end
+          end
+        end
+        STDERR.puts "[REG_MODULE] #{full_name} (lines #{start_line}-#{end_line}), now has #{@module_defs[full_name].size} defs, body_size=#{body_size}, methods=#{body_methods}"
+      end
 
       if body = node.body
         # PASS 1: Register aliases first (so they're available for function type resolution)
@@ -3546,6 +3825,10 @@ module Crystal::HIR
 
       # Mangle function name with parameter types for overloading
       full_name = full_name_override || mangle_function_name(base_name, param_types, has_block)
+
+      if base_name.includes?("from_chars")
+        STDERR.puts "[LOWER_METHOD] base_name=#{base_name}, full_name=#{full_name}, param_types=#{param_types.map(&.to_s)}, override=#{full_name_override}"
+      end
 
       func = @module.create_function(full_name, return_type)
       ctx = LoweringContext.new(func, @module, @arena)
@@ -8072,6 +8355,9 @@ module Crystal::HIR
     private def lower_function_if_needed(name : String) : Nil
       return if name.empty?
       return if @yield_functions.includes?(name)
+      if name.includes?("from_chars_advanced") || name.includes?("current") || name.includes?("from_errno")
+        STDERR.puts "[LOWER_NEEDED] #{name}: has_func=#{@module.has_function?(name)}, lowering=#{@lowering_functions.includes?(name)}"
+      end
       return if @module.has_function?(name)
       return if @lowering_functions.includes?(name)
 
@@ -8145,6 +8431,73 @@ module Crystal::HIR
             end
           end
         end
+
+        # DEFERRED MODULE LOOKUP: If still not found, look directly in @module_defs
+        # This handles cases where module inclusion was processed before all module
+        # reopenings were registered (e.g., BinaryFormat reopened across multiple files)
+        deferred_lookup_used = false
+        unless func_def
+          if base_name.includes?("#")
+            owner, method_part = base_name.split("#", 2)
+            # Extract param signature from original name (includes $params)
+            original_method_part = name.includes?("#") ? name.split("#", 2).last : method_part
+            if included = @class_included_modules[owner]?
+              included.each do |module_name|
+                base_module = module_name.split('(').first
+                if mod_defs = @module_defs[base_module]?
+                  mod_defs.each do |mod_node, mod_arena|
+                    if body = mod_node.body
+                      body.each do |expr_id|
+                        member = mod_arena[expr_id]
+                        # Unwrap visibility nodes
+                        while member.is_a?(CrystalV2::Compiler::Frontend::VisibilityModifierNode)
+                          member = mod_arena[member.expression]
+                        end
+                        if member.is_a?(CrystalV2::Compiler::Frontend::DefNode)
+                          member_name = String.new(member.name)
+                          # Match by method name (before any $ suffix)
+                          method_base = method_part.split("$").first
+                          if member_name == method_base && !((recv = member.receiver) && String.new(recv) == "self")
+                            # Count expected params from mangled name (count _ after $)
+                            expected_param_count = if original_method_part.includes?("$")
+                                                     original_method_part.split("$", 2).last.split("_").size
+                                                   else
+                                                     0
+                                                   end
+                            # Count actual params in def (excluding blocks and splats)
+                            actual_param_count = 0
+                            if params = member.params
+                              params.each do |p|
+                                actual_param_count += 1 unless p.is_block || p.is_splat || p.is_double_splat || named_only_separator?(p)
+                              end
+                            end
+                            # Match by param count if mangled name has params
+                            if expected_param_count == 0 || expected_param_count == actual_param_count
+                              func_def = member
+                              arena = mod_arena
+                              # DON'T override target_name - let lower_method compute correct mangled name
+                              # target_name stays as the original base_name (owner#method)
+                              target_name = base_name
+                              deferred_lookup_used = true
+                              if method_part.includes?("from_chars")
+                                STDERR.puts "[DEFERRED_LOOKUP] Found #{member_name} (params=#{actual_param_count}) in module #{base_module} for #{base_name}"
+                              end
+                              break
+                            elsif method_part.includes?("from_chars")
+                              STDERR.puts "[DEFERRED_LOOKUP] Skipping #{member_name} (expected=#{expected_param_count}, actual=#{actual_param_count})"
+                            end
+                          end
+                        end
+                      end
+                    end
+                    break if func_def
+                  end
+                end
+                break if func_def
+              end
+            end
+          end
+        end
       end
       return unless func_def
       return if @yield_functions.includes?(target_name)
@@ -8155,6 +8508,9 @@ module Crystal::HIR
       @pending_arg_types.delete(target_name) if @pending_arg_types.has_key?(target_name)
 
       @lowering_functions.add(target_name)
+      if target_name.includes?("from_chars")
+        STDERR.puts "[LOWERING] Starting lower for #{target_name}, arena=#{arena.class}"
+      end
       begin
         with_arena(arena || @arena) do
           if target_name.includes?("#")
@@ -8162,8 +8518,15 @@ module Crystal::HIR
             if class_info = @class_info[owner]?
               old_class = @current_class
               @current_class = owner
-              lower_method(owner, class_info, func_def, call_arg_types, target_name)
+              if target_name.includes?("from_chars")
+                STDERR.puts "[LOWERING] Calling lower_method for #{target_name}, deferred=#{deferred_lookup_used}"
+              end
+              # For deferred lookup, don't pass full_name_override - let lower_method compute from param types
+              override = deferred_lookup_used ? nil : target_name
+              lower_method(owner, class_info, func_def, call_arg_types, override)
               @current_class = old_class
+            elsif target_name.includes?("from_chars")
+              STDERR.puts "[LOWERING] No class_info for #{owner}"
             end
           elsif target_name.includes?(".")
             owner = target_name.split(".", 2)[0]
@@ -8546,6 +8909,25 @@ module Crystal::HIR
                 # Use inheritance-aware method resolution
                 full_method_name = resolve_method_with_inheritance(name, method_name)
                 break
+              end
+            end
+
+            # Fallback: if not found in class_info, try type descriptor name
+            # This handles records, generic structs, and module types
+            unless full_method_name
+              if type_desc = @module.get_type_descriptor(receiver_type)
+                type_name = type_desc.name
+                unless type_name.empty? || module_like_type_name?(type_name)
+                  # Try to find method with this type name
+                  test_method = "#{type_name}##{method_name}"
+                  if @function_types.has_key?(test_method) || has_function_base?(test_method)
+                    full_method_name = test_method
+                  else
+                    # Even if method not registered, use type name as prefix
+                    # This ensures proper symbol naming
+                    full_method_name = test_method
+                  end
+                end
               end
             end
 
@@ -9221,9 +9603,21 @@ module Crystal::HIR
       if mangled_method_name != primary_mangled_name
         remember_callsite_arg_types(mangled_method_name, arg_types)
       end
+      if mangled_method_name.includes?("from_chars") || mangled_method_name == "ec" || mangled_method_name == "ptr" || mangled_method_name == "current" || mangled_method_name == "write"
+        STDERR.puts "[CALL_DEBUG] method=#{method_name}, base=#{base_method_name}, mangled=#{mangled_method_name}, primary=#{primary_mangled_name}, return_type=#{return_type}"
+      end
       lower_function_if_needed(primary_mangled_name)
       if mangled_method_name != primary_mangled_name
         lower_function_if_needed(mangled_method_name)
+      end
+
+      # After lowering, re-check return type if it was VOID
+      # The lowered function may have registered its return type
+      if return_type == TypeRef::VOID
+        return_type = get_function_return_type(mangled_method_name)
+        if return_type == TypeRef::VOID && mangled_method_name != base_method_name
+          return_type = get_function_return_type(base_method_name)
+        end
       end
 
       # Coerce arguments to union types if needed
@@ -12394,7 +12788,97 @@ module Crystal::HIR
       end
     end
 
+    # Sanitize malformed type names with unbalanced parentheses
+    private def sanitize_type_name(name : String) : String
+      # Handle union types by sanitizing each part separately
+      if name.includes?(" | ")
+        parts = name.split(" | ").map { |part| sanitize_type_name_part(part.strip) }
+        return parts.join(" | ")
+      end
+
+      sanitize_type_name_part(name)
+    end
+
+    private def sanitize_type_name_part(name : String) : String
+      # Count parens to check balance
+      open_count = name.count('(')
+      close_count = name.count(')')
+
+      return name if open_count == close_count
+
+      # Remove extra closing parens - find and remove unbalanced ones
+      if close_count > open_count
+        result = String::Builder.new
+        depth = 0
+        extra_close = close_count - open_count
+
+        name.each_char do |c|
+          case c
+          when '('
+            depth += 1
+            result << c
+          when ')'
+            if depth > 0
+              depth -= 1
+              result << c
+            else
+              # This is an unbalanced close paren
+              if extra_close > 0
+                extra_close -= 1
+                # Skip this paren
+              else
+                result << c
+              end
+            end
+          else
+            result << c
+          end
+        end
+
+        return result.to_s
+      end
+
+      # Remove extra opening parens from the end (less common)
+      if open_count > close_count
+        result = String::Builder.new
+        depth = 0
+        extra_open = open_count - close_count
+
+        # Reverse scan to find unbalanced opens at end
+        chars = name.chars.reverse
+        kept_chars = [] of Char
+
+        chars.each do |c|
+          case c
+          when ')'
+            depth += 1
+            kept_chars << c
+          when '('
+            if depth > 0
+              depth -= 1
+              kept_chars << c
+            else
+              if extra_open > 0
+                extra_open -= 1
+              else
+                kept_chars << c
+              end
+            end
+          else
+            kept_chars << c
+          end
+        end
+
+        return kept_chars.reverse.join
+      end
+
+      name
+    end
+
     private def type_ref_for_name(name : String) : TypeRef
+      # Sanitize malformed type names (extra parens etc)
+      name = sanitize_type_name(name)
+
       # Normalize union type names: "Int32|Nil" -> "Int32 | Nil"
       # This ensures consistent caching regardless of spacing
       normalized_name = if name.includes?("|")

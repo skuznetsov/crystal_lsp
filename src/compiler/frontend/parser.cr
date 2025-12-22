@@ -1236,8 +1236,17 @@ module CrystalV2
 
               # Update depth based on keyword
               if first_header
-                depth = 1
                 first_header = false
+                # Only start a block for keywords that require {% end %}
+                case kw_text
+                when "if", "unless", "for", "while", "begin", "verbatim", "comment"
+                  depth = 1
+                else
+                  # Self-contained statements like {% raise %}, {% skip %} - just return
+                  debug("fast_forward_percent_block: self-contained '#{kw_text}', returning early")
+                  skip_whitespace_and_optional_newlines
+                  return
+                end
               else
                 case kw_text
                 when "end"
@@ -5920,6 +5929,29 @@ module CrystalV2
           advance  # Skip 'private'
           skip_trivia
 
+          # Accessor macros: allow `private getter`, `private class_getter`, etc.
+          if current_token.kind == Token::Kind::Identifier
+            next_token = peek_next_non_trivia
+            is_accessor = (next_token.kind == Token::Kind::Identifier || is_keyword_identifier?(next_token))
+            if is_accessor && accessor_macro_callee?(current_token)
+              name = current_token.slice
+              base = if name.size > 0 && name[name.size - 1] == '?'.ord.to_u8
+                Slice.new(name.to_unsafe, name.size - 1)
+              else
+                name
+              end
+              is_class = slice_starts_with?(base, "class_")
+              kind = if slice_eq?(base, "getter") || slice_eq?(base, "class_getter")
+                :getter
+              elsif slice_eq?(base, "setter") || slice_eq?(base, "class_setter")
+                :setter
+              else
+                :property
+              end
+              return parse_accessor_macro(kind, is_class)
+            end
+          end
+
           # Special case: private def (definition needs separate handling)
           if current_token.kind == Token::Kind::Def
             return parse_def(visibility: Visibility::Private)
@@ -5974,6 +6006,29 @@ module CrystalV2
           start_span = visibility_token.span
           advance  # Skip 'protected'
           skip_trivia
+
+          # Accessor macros: allow `protected getter`, `protected class_getter`, etc.
+          if current_token.kind == Token::Kind::Identifier
+            next_token = peek_next_non_trivia
+            is_accessor = (next_token.kind == Token::Kind::Identifier || is_keyword_identifier?(next_token))
+            if is_accessor && accessor_macro_callee?(current_token)
+              name = current_token.slice
+              base = if name.size > 0 && name[name.size - 1] == '?'.ord.to_u8
+                Slice.new(name.to_unsafe, name.size - 1)
+              else
+                name
+              end
+              is_class = slice_starts_with?(base, "class_")
+              kind = if slice_eq?(base, "getter") || slice_eq?(base, "class_getter")
+                :getter
+              elsif slice_eq?(base, "setter") || slice_eq?(base, "class_setter")
+                :setter
+              else
+                :property
+              end
+              return parse_accessor_macro(kind, is_class)
+            end
+          end
 
           # Special case: protected def (definition needs separate handling)
           if current_token.kind == Token::Kind::Def
@@ -6507,10 +6562,24 @@ module CrystalV2
           result = @arena.add_typed(node)
 
           # Optional block after accessor macro: getter x : T do ... end
+          # Treat as implicit default value when no explicit default is given.
+          block_id : ExprId? = nil
           consume_newlines
           if current_token.kind == Token::Kind::Do || current_token.kind == Token::Kind::LBrace
             blk = parse_block
-            blk unless blk.invalid?
+            block_id = blk unless blk.invalid?
+          end
+
+          if block_id && specs.size == 1 && specs[0].default_value.nil?
+            spec = specs[0]
+            specs[0] = AccessorSpec.new(
+              name: spec.name,
+              type_annotation: spec.type_annotation,
+              default_value: block_id,
+              name_span: spec.name_span,
+              type_span: spec.type_span,
+              default_span: node_span(block_id.not_nil!)
+            )
           end
 
           result
