@@ -2561,7 +2561,7 @@ module Crystal::HIR
               end
             end
             full_name = mangle_function_name(base_name, method_param_types, has_block)
-            if ENV.has_key?("DEBUG_NESTED_CLASS") && class_name.includes?("FileDescriptor")
+            if ENV.has_key?("DEBUG_NESTED_CLASS") && (class_name.includes?("FileDescriptor") || class_name.includes?("EventLoop"))
               STDERR.puts "[DEBUG_METHOD_REG] #{class_name}: #{method_name} -> #{full_name} (class_method=#{is_class_method})"
             end
             register_function_type(full_name, return_type)
@@ -5551,9 +5551,15 @@ module Crystal::HIR
         # loop do ... end - infinite loop (exits via break)
         lower_loop(ctx, node)
 
-      when CrystalV2::Compiler::Frontend::MacroLiteralNode,
-           CrystalV2::Compiler::Frontend::MacroVarNode,
-           CrystalV2::Compiler::Frontend::MacroIfNode,
+      when CrystalV2::Compiler::Frontend::MacroIfNode
+        # Handle macro conditionals like {% if flag?(:darwin) %}
+        lower_macro_if(ctx, node)
+
+      when CrystalV2::Compiler::Frontend::MacroLiteralNode
+        # Handle macro literals with text pieces that may contain {% if flag?() %}
+        lower_macro_literal(ctx, node)
+
+      when CrystalV2::Compiler::Frontend::MacroVarNode,
            CrystalV2::Compiler::Frontend::MacroForNode,
            CrystalV2::Compiler::Frontend::MacroExpressionNode
         # Macro nodes are not lowered directly - they are expanded first
@@ -6063,6 +6069,269 @@ module Crystal::HIR
       else
         TypeRef::POINTER  # Default to pointer for unknown types
       end
+    end
+
+    # ═══════════════════════════════════════════════════════════════════════
+    # MACRO EXPANSION
+    # ═══════════════════════════════════════════════════════════════════════
+
+    # Compile-time flags for platform detection
+    COMPILE_FLAGS = Set{
+      # Platform
+      "darwin", "unix", "linux", "freebsd", "openbsd", "netbsd", "dragonfly",
+      "win32", "windows", "android", "wasi",
+      # Architecture
+      "x86_64", "aarch64", "arm64", "i386", "arm",
+      # Build config
+      "release", "debug",
+      # Crystal-specific
+      "preview_mt",
+    }
+
+    # Evaluate a macro flag condition at compile time
+    private def evaluate_macro_flag(flag_name : String) : Bool
+      # Remove leading/trailing quotes and colons
+      clean_name = flag_name.strip.gsub(/^[:"']|["']$/, "")
+      # Check against known compile flags - use macOS defaults for now
+      case clean_name
+      when "darwin", "unix"
+        true  # macOS is darwin and unix
+      when "kqueue"
+        true  # macOS uses kqueue for event loop
+      when "linux", "win32", "windows", "android", "wasi", "epoll", "libevent"
+        false  # Not linux/windows/android
+      when "x86_64", "aarch64", "arm64"
+        # Assume arm64 for modern Macs
+        clean_name == "aarch64" || clean_name == "arm64"
+      when "release"
+        true  # Assume release build
+      when "execution_context", "preview_mt"
+        false  # Not using execution context by default
+      else
+        # Check using macro-style syntax flag?("evloop=kqueue")
+        if clean_name.starts_with?("evloop=")
+          clean_name == "evloop=kqueue"  # macOS uses kqueue
+        else
+          COMPILE_FLAGS.includes?(clean_name)
+        end
+      end
+    end
+
+    # Try to evaluate a macro condition expression at compile time
+    # Returns true/false if evaluable, nil if not
+    private def try_evaluate_macro_condition(condition_id : ExprId) : Bool?
+      cond_node = @arena[condition_id]
+      case cond_node
+      when CrystalV2::Compiler::Frontend::CallNode
+        # Check for flag?(:name) or flag?("name")
+        callee = @arena[cond_node.callee]
+        if callee.is_a?(CrystalV2::Compiler::Frontend::IdentifierNode)
+          callee_name = String.new(callee.name)
+          if callee_name == "flag?"
+            if cond_node.args.size >= 1
+              arg_node = @arena[cond_node.args[0]]
+              flag_name = case arg_node
+                          when CrystalV2::Compiler::Frontend::SymbolNode
+                            String.new(arg_node.name)
+                          when CrystalV2::Compiler::Frontend::StringNode
+                            String.new(arg_node.value)
+                          else
+                            nil
+                          end
+              if flag_name
+                return evaluate_macro_flag(flag_name)
+              end
+            end
+          end
+        end
+      when CrystalV2::Compiler::Frontend::UnaryNode
+        # Handle !flag?(:name)
+        op_str = String.new(cond_node.operator)
+        if op_str == "!"
+          inner = try_evaluate_macro_condition(cond_node.operand)
+          return !inner if inner
+        end
+      when CrystalV2::Compiler::Frontend::BinaryNode
+        # Handle flag?(:a) || flag?(:b) or flag?(:a) && flag?(:b)
+        left = try_evaluate_macro_condition(cond_node.left)
+        right = try_evaluate_macro_condition(cond_node.right)
+        if left && right
+          op_str = String.new(cond_node.operator)
+          case op_str
+          when "||"
+            return left || right
+          when "&&"
+            return left && right
+          end
+        end
+      end
+      nil  # Can't evaluate
+    end
+
+    # Lower macro if/elsif/else at compile time
+    private def lower_macro_if(ctx : LoweringContext, node : CrystalV2::Compiler::Frontend::MacroIfNode) : ValueId
+      # Try to evaluate condition at compile time
+      result = try_evaluate_macro_condition(node.condition)
+      STDERR.puts "[MACRO_IF] condition_id=#{node.condition}, result=#{result.inspect}"
+
+      if result == true
+        # Condition is true - lower the then branch
+        lower_macro_body(ctx, node.then_body)
+      elsif result == false
+        # Condition is false - check else branch
+        if else_node = node.else_body
+          else_ast = @arena[else_node]
+          case else_ast
+          when CrystalV2::Compiler::Frontend::MacroIfNode
+            # elsif - recursive evaluation
+            lower_macro_if(ctx, else_ast)
+          else
+            # else branch (MacroLiteralNode containing body)
+            lower_macro_body(ctx, else_node)
+          end
+        else
+          # No else - return nil
+          nil_lit = Literal.new(ctx.next_id, TypeRef::NIL, nil)
+          ctx.emit(nil_lit)
+          nil_lit.id
+        end
+      else
+        # Can't evaluate at compile time - return nil with warning
+        # STDERR.puts "[WARN] Cannot evaluate macro condition at compile time"
+        nil_lit = Literal.new(ctx.next_id, TypeRef::NIL, nil)
+        ctx.emit(nil_lit)
+        nil_lit.id
+      end
+    end
+
+    # Lower the body of a macro branch (MacroLiteralNode or expression)
+    private def lower_macro_body(ctx : LoweringContext, body_id : ExprId) : ValueId
+      body_node = @arena[body_id]
+      case body_node
+      when CrystalV2::Compiler::Frontend::MacroLiteralNode
+        # Macro literal contains pieces (text and expressions)
+        last_value : ValueId? = nil
+        if pieces = body_node.pieces
+          pieces.each do |piece|
+            case piece.kind
+            when CrystalV2::Compiler::Frontend::MacroPiece::Kind::Expression
+              # Expression piece - lower the expression
+              if expr_id = piece.expr
+                last_value = lower_expr(ctx, expr_id)
+              end
+            when CrystalV2::Compiler::Frontend::MacroPiece::Kind::Text
+              # Text piece - skip (just literal text, not code)
+              nil
+            else
+              # Other control pieces - skip
+              nil
+            end
+          end
+        end
+        last_value || begin
+          nil_lit = Literal.new(ctx.next_id, TypeRef::NIL, nil)
+          ctx.emit(nil_lit)
+          nil_lit.id
+        end
+      else
+        # Direct expression
+        lower_expr(ctx, body_id)
+      end
+    end
+
+    # Lower a MacroLiteralNode that may contain text with {% if flag?() %} patterns
+    private def lower_macro_literal(ctx : LoweringContext, node : CrystalV2::Compiler::Frontend::MacroLiteralNode) : ValueId
+      # Check if any piece contains macro control text
+      node.pieces.each do |piece|
+        if piece.kind == CrystalV2::Compiler::Frontend::MacroPiece::Kind::Text
+          if text = piece.text
+            # Try to expand {% if flag?() %} pattern
+            expanded = expand_flag_macro_text(text)
+            if expanded
+              # Parse and lower the expanded code
+              result = lower_expanded_macro_code(ctx, expanded)
+              return result if result
+            end
+          end
+        elsif piece.kind == CrystalV2::Compiler::Frontend::MacroPiece::Kind::Expression
+          if expr_id = piece.expr
+            return lower_expr(ctx, expr_id)
+          end
+        end
+      end
+      # No expansion possible - return nil
+      nil_lit = Literal.new(ctx.next_id, TypeRef::NIL, nil)
+      ctx.emit(nil_lit)
+      nil_lit.id
+    end
+
+    # Expand {% if flag?(:name) %} ... {% else %} ... {% end %} patterns in text
+    private def expand_flag_macro_text(text : String) : String?
+      # Pattern: {% if flag?(:name) %} then_code {% else %} else_code {% end %}
+      # Or:      {% if flag?(:name) %} then_code {% end %}
+      # Or:      {% unless flag?(:name) %} unless_code {% else %} else_code {% end %}
+      if_match = text.match(/\{%\s*if\s+flag\?\s*\(\s*:(\w+)\s*\)\s*%\}(.*?)(?:\{%\s*else\s*%\}(.*?))?\{%\s*end\s*%\}/m)
+      if if_match
+        flag_name = if_match[1]
+        then_code = if_match[2]?.try(&.strip) || ""
+        else_code = if_match[3]?.try(&.strip) || ""
+        if evaluate_macro_flag(flag_name)
+          return then_code unless then_code.empty?
+        else
+          return else_code unless else_code.empty?
+        end
+      end
+
+      unless_match = text.match(/\{%\s*unless\s+flag\?\s*\(\s*:(\w+)\s*\)\s*%\}(.*?)(?:\{%\s*else\s*%\}(.*?))?\{%\s*end\s*%\}/m)
+      if unless_match
+        flag_name = unless_match[1]
+        unless_code = unless_match[2]?.try(&.strip) || ""
+        else_code = unless_match[3]?.try(&.strip) || ""
+        if evaluate_macro_flag(flag_name)
+          return else_code unless else_code.empty?
+        else
+          return unless_code unless unless_code.empty?
+        end
+      end
+
+      nil
+    end
+
+    # Lower expanded macro code by parsing and lowering it
+    private def lower_expanded_macro_code(ctx : LoweringContext, code : String) : ValueId?
+      return nil if code.empty?
+
+      # Create a mini-parser for simple Crystal expressions
+      # Handle common patterns: Path.method, method_call, Path
+      code = code.strip
+
+      # Pattern: Namespace::Path.method_call (handles Crystal::Scheduler.event_loop)
+      if match = code.match(/^([A-Z][A-Za-z0-9_]*(?:::[A-Z][A-Za-z0-9_]*)*)\.(\w+)$/)
+        type_path = match[1]
+        method_name = match[2]
+        # Generate call to type.method()
+        full_name = "#{type_path}.#{method_name}"
+        lower_function_if_needed(full_name)
+        if @module.has_function?(full_name)
+          return_type = @function_base_return_types[full_name]? || TypeRef::VOID
+          call = Call.new(ctx.next_id, return_type, nil, full_name, [] of ValueId)
+          ctx.emit(call)
+          return call.id
+        end
+      end
+
+      # Pattern: Simple path reference (constant)
+      if match = code.match(/^([A-Z][A-Za-z0-9_]*(?:::[A-Z][A-Za-z0-9_]*)*)$/)
+        type_path = match[1]
+        type_ref = type_ref_for_name(type_path)
+        if type_ref != TypeRef::VOID
+          lit = Literal.new(ctx.next_id, type_ref, nil)
+          ctx.emit(lit)
+          return lit.id
+        end
+      end
+
+      nil
     end
 
     # ═══════════════════════════════════════════════════════════════════════
@@ -8355,9 +8624,6 @@ module Crystal::HIR
     private def lower_function_if_needed(name : String) : Nil
       return if name.empty?
       return if @yield_functions.includes?(name)
-      if name.includes?("from_chars_advanced") || name.includes?("current") || name.includes?("from_errno")
-        STDERR.puts "[LOWER_NEEDED] #{name}: has_func=#{@module.has_function?(name)}, lowering=#{@lowering_functions.includes?(name)}"
-      end
       return if @module.has_function?(name)
       return if @lowering_functions.includes?(name)
 
@@ -11757,6 +12023,10 @@ module Crystal::HIR
             monomorphize_generic_class(base_name, type_args, class_name_str)
           end
         end
+      elsif obj_node.is_a?(CrystalV2::Compiler::Frontend::PathNode)
+        # Path like Crystal::EventLoop for nested module/class method calls
+        full_path = collect_path_string(obj_node)
+        class_name_str = full_path
       end
 
       # If it's a static class call (like Counter.new), emit as static call
