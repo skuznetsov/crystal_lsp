@@ -5131,6 +5131,43 @@ module Crystal::HIR
       type_name.gsub(pattern, "\\1#{actual_name}\\2")
     end
 
+    private def substitute_type_params(type_name : String, param_map : Hash(String, String)) : String
+      result = type_name
+      param_map.each do |param, actual|
+        result = substitute_type_param(result, param, actual)
+      end
+      result
+    end
+
+    private def receiver_name_from_method_name(method_name : String) : String?
+      if idx = method_name.index('#')
+        return method_name[0, idx]
+      elsif idx = method_name.index('.')
+        return method_name[0, idx]
+      end
+      nil
+    end
+
+    private def type_param_map_for_receiver_name(method_name : String) : Hash(String, String)
+      receiver = receiver_name_from_method_name(method_name)
+      return {} of String => String unless receiver
+
+      paren = receiver.index('(')
+      return {} of String => String unless paren && receiver.ends_with?(")")
+
+      base = receiver[0, paren]
+      args_str = receiver[paren + 1, receiver.size - paren - 2]
+      args = split_generic_type_args(args_str)
+      template = @generic_templates[base]?
+      return {} of String => String unless template && template.type_params.size == args.size
+
+      mapping = {} of String => String
+      template.type_params.each_with_index do |param, i|
+        mapping[param] = args[i].strip
+      end
+      mapping
+    end
+
     private def block_return_type_name(ctx : LoweringContext, block_id : BlockId) : String?
       block = ctx.get_block(block_id)
       term = block.terminator
@@ -5191,7 +5228,14 @@ module Crystal::HIR
       input_names = proc_input_type_names(String.new(type_slice))
       return nil unless input_names && !input_names.empty?
 
-      input_names.map { |name| type_ref_for_name(name) }
+      param_map = type_param_map_for_receiver_name(base_method_name)
+      resolved_names = if param_map.empty?
+                         input_names
+                       else
+                         input_names.map { |name| substitute_type_params(name, param_map) }
+                       end
+
+      resolved_names.map { |name| type_ref_for_name(name) }
     end
 
     private def intern_proc_type(type_names : Array(String)) : TypeRef

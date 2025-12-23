@@ -1218,7 +1218,7 @@ describe Crystal::HIR::AstToHir do
 
     it "handles nested Enumerable.element_type without parentheses" do
       code = <<-CRYSTAL
-        def foo(indexables : Indexable(Indexable))
+        def foo(indexables : Array(Array(Int32)))
           ary = [] of typeof(Enumerable.element_type Enumerable.element_type indexables)
           ary
         end
@@ -1235,9 +1235,9 @@ describe Crystal::HIR::AstToHir do
       element_type = array_lit.not_nil!.as(Crystal::HIR::ArrayLiteral).element_type
       desc = converter.module.get_type_descriptor(element_type)
       if desc
-        desc.not_nil!.name.should_not eq("Pointer(Void)")
+        desc.not_nil!.name.should eq("Int32")
       else
-        element_type.should eq(Crystal::HIR::TypeRef::POINTER)
+        element_type.should eq(Crystal::HIR::TypeRef::INT32)
       end
     end
   end
@@ -1367,6 +1367,41 @@ describe Crystal::HIR::AstToHir do
       desc = converter.module.get_type_descriptor(param_type)
       desc.should_not be_nil
       desc.not_nil!.name.should eq("Pointer(Int32)")
+    end
+
+    it "substitutes generic block param types from receiver" do
+      code = <<-CRYSTAL
+        class Box(T)
+          def initialize(@value : T)
+          end
+
+          def consume(& : T ->)
+          end
+        end
+
+        def foo
+          Box(Int32).new(1).consume do |value|
+            value
+          end
+        end
+      CRYSTAL
+
+      converter = lower_program(code)
+      func = converter.module.functions.find { |f| f.name.starts_with?("foo$") || f.name == "foo" }
+      func.should_not be_nil
+
+      params = func.not_nil!.blocks.flat_map(&.instructions)
+        .select { |inst| inst.is_a?(Crystal::HIR::Parameter) }
+      value_param = params.find { |inst| inst.as(Crystal::HIR::Parameter).name == "value" }
+      value_param.should_not be_nil
+
+      param_type = value_param.not_nil!.as(Crystal::HIR::Parameter).type
+      desc = converter.module.get_type_descriptor(param_type)
+      if desc
+        desc.not_nil!.name.should eq("Int32")
+      else
+        param_type.should eq(Crystal::HIR::TypeRef::INT32)
+      end
     end
   end
 end
