@@ -1873,7 +1873,7 @@ module Crystal::HIR
       if module_name.includes?("BinaryFormat")
         STDERR.puts "[REG_MODULE_TOP] #{module_name}, now has #{@module_defs[module_name].size} defs"
       end
-      if module_name.includes?("Thread")
+      if ENV.has_key?("DEBUG_MODULE_THREAD") && module_name.includes?("Thread")
         STDERR.puts "[REG_MODULE_TOP] #{module_name}, body_size=#{node.body.try(&.size) || 0}"
         if body = node.body
           body.each do |expr_id|
@@ -1963,7 +1963,7 @@ module Crystal::HIR
               end
             end
             full_name = mangle_function_name(base_name, param_types, has_block)
-            if module_name.includes?("System::Thread")
+            if ENV.has_key?("DEBUG_MODULE_THREAD") && module_name.includes?("System::Thread")
               STDERR.puts "[REG_MODULE_METHOD] #{module_name}.#{method_name} -> #{full_name}"
             end
             register_function_type(full_name, return_type)
@@ -2126,7 +2126,7 @@ module Crystal::HIR
         end
       end
       full_name = mangle_function_name(base_name, param_types, has_block)
-      if module_name.includes?("System::Thread")
+      if ENV.has_key?("DEBUG_MODULE_THREAD") && module_name.includes?("System::Thread")
         STDERR.puts "[REG_MODULE_METHOD_MACRO] #{module_name}.#{method_name} -> #{full_name}"
       end
       if @function_defs.has_key?(full_name)
