@@ -1002,7 +1002,7 @@ r2 = maybe(false)  # => nil
 | Macro expansion | `getter`, `property` need compile-time expansion | MED |
 
 **Additional codegen gaps (observed):**
-- MacroIf-wrapped module definitions are not registering module methods yet (e.g., `M.foo` inside `{% if %}` at top-level).
+- Top-level `{% if %}` blocks are parsed as raw `MacroLiteral` text (no control pieces), so module/def nodes inside are not collected yet.
 
 ### 8.3 Known Limitations
 

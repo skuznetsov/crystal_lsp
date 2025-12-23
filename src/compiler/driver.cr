@@ -153,27 +153,20 @@ module Crystal::V2
       # Top-level expressions that form the main function
       main_exprs = [] of Tuple(CrystalV2::Compiler::Frontend::ExprId, CrystalV2::Compiler::Frontend::ArenaLike)
 
+      flags = CrystalV2::Runtime.target_flags
       all_arenas.each do |arena, exprs, file_path|
         exprs.each do |expr_id|
-          node = arena[expr_id]
-          case node
-          when CrystalV2::Compiler::Frontend::DefNode
-            def_nodes << {node, arena}
-          when CrystalV2::Compiler::Frontend::ClassNode
-            # Parser creates ClassNode with is_struct=true for struct keyword
-            class_nodes << {node, arena}
-          when CrystalV2::Compiler::Frontend::ModuleNode
-            module_nodes << {node, arena}
-          when CrystalV2::Compiler::Frontend::EnumNode
-            enum_nodes << {node, arena}
-          when CrystalV2::Compiler::Frontend::MacroDefNode
-            macro_nodes << {node, arena}
-          when CrystalV2::Compiler::Frontend::RequireNode
-            # Skip require nodes - already processed
-          else
-            # Top-level expression: collect for main function
-            main_exprs << {expr_id, arena}
-          end
+          collect_top_level_nodes(
+            arena,
+            expr_id,
+            def_nodes,
+            class_nodes,
+            module_nodes,
+            enum_nodes,
+            macro_nodes,
+            main_exprs,
+            flags
+          )
         end
       end
 
@@ -589,6 +582,126 @@ module Crystal::V2
           end
         end
       end
+    end
+
+    private def collect_top_level_nodes(
+      arena : CrystalV2::Compiler::Frontend::ArenaLike,
+      expr_id : CrystalV2::Compiler::Frontend::ExprId,
+      def_nodes : Array(Tuple(CrystalV2::Compiler::Frontend::DefNode, CrystalV2::Compiler::Frontend::ArenaLike)),
+      class_nodes : Array(Tuple(CrystalV2::Compiler::Frontend::ClassNode, CrystalV2::Compiler::Frontend::ArenaLike)),
+      module_nodes : Array(Tuple(CrystalV2::Compiler::Frontend::ModuleNode, CrystalV2::Compiler::Frontend::ArenaLike)),
+      enum_nodes : Array(Tuple(CrystalV2::Compiler::Frontend::EnumNode, CrystalV2::Compiler::Frontend::ArenaLike)),
+      macro_nodes : Array(Tuple(CrystalV2::Compiler::Frontend::MacroDefNode, CrystalV2::Compiler::Frontend::ArenaLike)),
+      main_exprs : Array(Tuple(CrystalV2::Compiler::Frontend::ExprId, CrystalV2::Compiler::Frontend::ArenaLike)),
+      flags : Set(String)
+    ) : Nil
+      node = arena[expr_id]
+      case node
+      when CrystalV2::Compiler::Frontend::DefNode
+        def_nodes << {node, arena}
+      when CrystalV2::Compiler::Frontend::ClassNode
+        class_nodes << {node, arena}
+      when CrystalV2::Compiler::Frontend::ModuleNode
+        module_nodes << {node, arena}
+      when CrystalV2::Compiler::Frontend::EnumNode
+        enum_nodes << {node, arena}
+      when CrystalV2::Compiler::Frontend::MacroDefNode
+        macro_nodes << {node, arena}
+      when CrystalV2::Compiler::Frontend::RequireNode
+        # Skip require nodes - already processed
+      when CrystalV2::Compiler::Frontend::MacroExpressionNode
+        collect_top_level_nodes(arena, node.expression, def_nodes, class_nodes, module_nodes, enum_nodes, macro_nodes, main_exprs, flags)
+      when CrystalV2::Compiler::Frontend::MacroIfNode
+        condition = evaluate_macro_condition(arena, node.condition, flags)
+        if condition == true
+          collect_top_level_nodes(arena, node.then_body, def_nodes, class_nodes, module_nodes, enum_nodes, macro_nodes, main_exprs, flags)
+        elsif condition == false
+          if else_body = node.else_body
+            collect_top_level_nodes(arena, else_body, def_nodes, class_nodes, module_nodes, enum_nodes, macro_nodes, main_exprs, flags)
+          end
+        else
+          collect_top_level_nodes(arena, node.then_body, def_nodes, class_nodes, module_nodes, enum_nodes, macro_nodes, main_exprs, flags)
+          if else_body = node.else_body
+            collect_top_level_nodes(arena, else_body, def_nodes, class_nodes, module_nodes, enum_nodes, macro_nodes, main_exprs, flags)
+          end
+        end
+      when CrystalV2::Compiler::Frontend::MacroLiteralNode
+        collect_macro_literal_exprs(arena, node, flags).each do |expr|
+          collect_top_level_nodes(arena, expr, def_nodes, class_nodes, module_nodes, enum_nodes, macro_nodes, main_exprs, flags)
+        end
+      else
+        main_exprs << {expr_id, arena}
+      end
+    end
+
+    private def collect_macro_literal_exprs(
+      arena : CrystalV2::Compiler::Frontend::ArenaLike,
+      node : CrystalV2::Compiler::Frontend::MacroLiteralNode,
+      flags : Set(String)
+    ) : Array(CrystalV2::Compiler::Frontend::ExprId)
+      exprs = [] of CrystalV2::Compiler::Frontend::ExprId
+      control_stack = [] of {Bool, Bool, Bool} # {parent_active, branch_taken, active}
+      active = true
+
+      node.pieces.each do |piece|
+        case piece.kind
+        when CrystalV2::Compiler::Frontend::MacroPiece::Kind::Expression
+          if active && (expr = piece.expr)
+            exprs << expr
+          end
+        when CrystalV2::Compiler::Frontend::MacroPiece::Kind::ControlStart
+          keyword = piece.control_keyword || ""
+          cond_expr = piece.expr
+          cond = cond_expr ? evaluate_macro_condition(arena, cond_expr, flags) : nil
+          if keyword == "unless"
+            cond = cond.nil? ? nil : !cond
+          end
+          parent_active = active
+          branch_active = if cond == true
+                            parent_active
+                          elsif cond == false
+                            false
+                          else
+                            parent_active
+                          end
+          branch_taken = cond == true
+          control_stack << {parent_active, branch_taken, branch_active}
+          active = branch_active
+        when CrystalV2::Compiler::Frontend::MacroPiece::Kind::ControlElseIf
+          next if control_stack.empty?
+          parent_active, branch_taken, _ = control_stack[-1]
+          cond_expr = piece.expr
+          cond = cond_expr ? evaluate_macro_condition(arena, cond_expr, flags) : nil
+          take = !branch_taken && cond == true
+          branch_active = if cond == false
+                            false
+                          elsif cond == true
+                            parent_active && take
+                          else
+                            parent_active
+                          end
+          branch_taken = true if cond == true
+          control_stack[-1] = {parent_active, branch_taken, branch_active}
+          active = branch_active
+        when CrystalV2::Compiler::Frontend::MacroPiece::Kind::ControlElse
+          next if control_stack.empty?
+          parent_active, branch_taken, _ = control_stack[-1]
+          branch_active = parent_active && !branch_taken
+          control_stack[-1] = {parent_active, true, branch_active}
+          active = branch_active
+        when CrystalV2::Compiler::Frontend::MacroPiece::Kind::ControlEnd
+          if control_stack.empty?
+            active = true
+          else
+            parent_active, _, _ = control_stack.pop
+            active = parent_active
+          end
+        else
+          # ignore text/vars for top-level node collection
+        end
+      end
+
+      exprs
     end
 
     private def macro_literal_require_texts(

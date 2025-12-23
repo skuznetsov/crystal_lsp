@@ -303,30 +303,22 @@ module CrystalV2
         lib_nodes = [] of Tuple(Frontend::LibNode, Frontend::ArenaLike)
         main_exprs = [] of Tuple(Frontend::ExprId, Frontend::ArenaLike)
 
+        flags = Runtime.target_flags
         all_arenas.each do |arena, exprs, file_path|
           exprs.each do |expr_id|
-            node = arena[expr_id]
-            case node
-            when Frontend::DefNode
-              def_nodes << {node, arena}
-            when Frontend::ClassNode
-              # Parser creates ClassNode with is_struct=true for struct keyword
-              class_nodes << {node, arena}
-            when Frontend::ModuleNode
-              module_nodes << {node, arena}
-            when Frontend::EnumNode
-              enum_nodes << {node, arena}
-            when Frontend::MacroDefNode
-              macro_nodes << {node, arena}
-            when Frontend::AliasNode
-              alias_nodes << {node, arena}
-            when Frontend::LibNode
-              lib_nodes << {node, arena}
-            when Frontend::RequireNode
-              # Skip - already processed
-            else
-              main_exprs << {expr_id, arena}
-            end
+            collect_top_level_nodes(
+              arena,
+              expr_id,
+              def_nodes,
+              class_nodes,
+              module_nodes,
+              enum_nodes,
+              macro_nodes,
+              alias_nodes,
+              lib_nodes,
+              main_exprs,
+              flags
+            )
           end
         end
 
@@ -977,6 +969,132 @@ module CrystalV2
             end
           end
         end
+      end
+
+      private def collect_top_level_nodes(
+        arena : Frontend::ArenaLike,
+        expr_id : Frontend::ExprId,
+        def_nodes : Array(Tuple(Frontend::DefNode, Frontend::ArenaLike)),
+        class_nodes : Array(Tuple(Frontend::ClassNode, Frontend::ArenaLike)),
+        module_nodes : Array(Tuple(Frontend::ModuleNode, Frontend::ArenaLike)),
+        enum_nodes : Array(Tuple(Frontend::EnumNode, Frontend::ArenaLike)),
+        macro_nodes : Array(Tuple(Frontend::MacroDefNode, Frontend::ArenaLike)),
+        alias_nodes : Array(Tuple(Frontend::AliasNode, Frontend::ArenaLike)),
+        lib_nodes : Array(Tuple(Frontend::LibNode, Frontend::ArenaLike)),
+        main_exprs : Array(Tuple(Frontend::ExprId, Frontend::ArenaLike)),
+        flags : Set(String)
+      ) : Nil
+        node = arena[expr_id]
+        case node
+        when Frontend::DefNode
+          def_nodes << {node, arena}
+        when Frontend::ClassNode
+          class_nodes << {node, arena}
+        when Frontend::ModuleNode
+          module_nodes << {node, arena}
+        when Frontend::EnumNode
+          enum_nodes << {node, arena}
+        when Frontend::MacroDefNode
+          macro_nodes << {node, arena}
+        when Frontend::AliasNode
+          alias_nodes << {node, arena}
+        when Frontend::LibNode
+          lib_nodes << {node, arena}
+        when Frontend::RequireNode
+          # Skip - already processed
+        when Frontend::MacroExpressionNode
+          collect_top_level_nodes(arena, node.expression, def_nodes, class_nodes, module_nodes, enum_nodes, macro_nodes, alias_nodes, lib_nodes, main_exprs, flags)
+        when Frontend::MacroIfNode
+          condition = evaluate_macro_condition(arena, node.condition, flags)
+          if condition == true
+            collect_top_level_nodes(arena, node.then_body, def_nodes, class_nodes, module_nodes, enum_nodes, macro_nodes, alias_nodes, lib_nodes, main_exprs, flags)
+          elsif condition == false
+            if else_body = node.else_body
+              collect_top_level_nodes(arena, else_body, def_nodes, class_nodes, module_nodes, enum_nodes, macro_nodes, alias_nodes, lib_nodes, main_exprs, flags)
+            end
+          else
+            collect_top_level_nodes(arena, node.then_body, def_nodes, class_nodes, module_nodes, enum_nodes, macro_nodes, alias_nodes, lib_nodes, main_exprs, flags)
+            if else_body = node.else_body
+              collect_top_level_nodes(arena, else_body, def_nodes, class_nodes, module_nodes, enum_nodes, macro_nodes, alias_nodes, lib_nodes, main_exprs, flags)
+            end
+          end
+        when Frontend::MacroLiteralNode
+          collect_macro_literal_exprs(arena, node, flags).each do |expr|
+            collect_top_level_nodes(arena, expr, def_nodes, class_nodes, module_nodes, enum_nodes, macro_nodes, alias_nodes, lib_nodes, main_exprs, flags)
+          end
+        else
+          main_exprs << {expr_id, arena}
+        end
+      end
+
+      private def collect_macro_literal_exprs(
+        arena : Frontend::ArenaLike,
+        node : Frontend::MacroLiteralNode,
+        flags : Set(String)
+      ) : Array(Frontend::ExprId)
+        exprs = [] of Frontend::ExprId
+        control_stack = [] of {Bool, Bool, Bool} # {parent_active, branch_taken, active}
+        active = true
+
+        node.pieces.each do |piece|
+          case piece.kind
+          when Frontend::MacroPiece::Kind::Expression
+            if active && (expr = piece.expr)
+              exprs << expr
+            end
+          when Frontend::MacroPiece::Kind::ControlStart
+            keyword = piece.control_keyword || ""
+            cond_expr = piece.expr
+            cond = cond_expr ? evaluate_macro_condition(arena, cond_expr, flags) : nil
+            if keyword == "unless"
+              cond = cond.nil? ? nil : !cond
+            end
+            parent_active = active
+            branch_active = if cond == true
+                              parent_active
+                            elsif cond == false
+                              false
+                            else
+                              parent_active
+                            end
+            branch_taken = cond == true
+            control_stack << {parent_active, branch_taken, branch_active}
+            active = branch_active
+          when Frontend::MacroPiece::Kind::ControlElseIf
+            next if control_stack.empty?
+            parent_active, branch_taken, _ = control_stack[-1]
+            cond_expr = piece.expr
+            cond = cond_expr ? evaluate_macro_condition(arena, cond_expr, flags) : nil
+            take = !branch_taken && cond == true
+            branch_active = if cond == false
+                              false
+                            elsif cond == true
+                              parent_active && take
+                            else
+                              parent_active
+                            end
+            branch_taken = true if cond == true
+            control_stack[-1] = {parent_active, branch_taken, branch_active}
+            active = branch_active
+          when Frontend::MacroPiece::Kind::ControlElse
+            next if control_stack.empty?
+            parent_active, branch_taken, _ = control_stack[-1]
+            branch_active = parent_active && !branch_taken
+            control_stack[-1] = {parent_active, true, branch_active}
+            active = branch_active
+          when Frontend::MacroPiece::Kind::ControlEnd
+            if control_stack.empty?
+              active = true
+            else
+              parent_active, _, _ = control_stack.pop
+              active = parent_active
+            end
+          else
+            # ignore text/vars for top-level node collection
+          end
+        end
+
+        exprs
       end
 
       private def extract_link_libraries_from_annotation(
