@@ -677,16 +677,14 @@ describe Crystal::HIR::AstToHir do
   # ═══════════════════════════════════════════════════════════════════════════
 
   describe "type operation lowering" do
-    # NOTE: Parser doesn't yet produce AsNode for "x as Type" syntax
-    # These tests are pending until parser support is added
-    pending "lowers as cast" do
+    it "lowers as cast" do
       func = lower_function("def foo(x); x as Int32; end")
       text = hir_text(func)
 
       text.should contain("cast")
     end
 
-    pending "lowers as? safe cast" do
+    it "lowers as? safe cast" do
       func = lower_function("def foo(x); x as? Int32; end")
       text = hir_text(func)
 

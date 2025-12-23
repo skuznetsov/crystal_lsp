@@ -7928,6 +7928,12 @@ module CrystalV2
               # trailing '?'. Handle it here as a postfix conversion.
               left = handle_index_question_postfix(left)
               next
+            when Token::Kind::As
+              left = parse_as_like(left, token, false)
+              next
+            when Token::Kind::AsQuestion
+              left = parse_as_like(left, token, true)
+              next
             when Token::Kind::If, Token::Kind::Unless, Token::Kind::While, Token::Kind::Until
               break unless @consume_postfix_modifiers
               # Postfix conditional modifier: expr if cond / expr unless cond.
@@ -11135,6 +11141,7 @@ module CrystalV2
                Token::Kind::DotDot, Token::Kind::DotDotDot,
                Token::Kind::Match, Token::Kind::NotMatch,
                Token::Kind::In,
+               Token::Kind::As, Token::Kind::AsQuestion,
                Token::Kind::LParen
             true
           else
@@ -11335,19 +11342,13 @@ module CrystalV2
           @arena.add_typed(GenericNode.new(span, base, args_b.to_a))
         end
 
-        # Phase 44: Parse type cast (.as(Type))
-        # Phase 44/103J: Parse .as type cast
-        # Supports both .as(Type) and .as Type syntaxes
-        # Following original parser design (parser.cr:903-919)
-        private def parse_as_cast(receiver : ExprId, dot : Token, as_token : Token) : ExprId
+        private def parse_as_like(receiver : ExprId, as_token : Token, safe : Bool) : ExprId
           advance  # Skip 'as' keyword
           skip_trivia
 
-          type_start = current_token
-
-          # Check if parentheses are used: .as(Type) vs .as Type
+          # Check if parentheses are used: as(Type) vs as Type
           if current_token.kind == Token::Kind::LParen
-            # With parens: .as(Type) or .as(Proc(...))
+            # With parens: as(Type) or as(Proc(...))
             advance  # skip (
             skip_trivia
 
@@ -11381,83 +11382,44 @@ module CrystalV2
             end
             advance  # skip )
           else
-            # Without parens: .as Float32 or .as Int32 | String
+            # Without parens: as Float32 or as Int32 | String
             target_type = parse_type_annotation
             type_end = previous_token.not_nil!
           end
 
-          # Create As node
           as_span = node_span(receiver).cover(as_token.span).cover(type_end.span)
-
-          @arena.add_typed(
-            AsNode.new(
-              as_span,
-              receiver,
-              target_type
+          if safe
+            @arena.add_typed(
+              AsQuestionNode.new(
+                as_span,
+                receiver,
+                target_type
+              )
             )
-          )
+          else
+            @arena.add_typed(
+              AsNode.new(
+                as_span,
+                receiver,
+                target_type
+              )
+            )
+          end
+        end
+
+        # Phase 44: Parse type cast (.as(Type))
+        # Phase 44/103J: Parse .as type cast
+        # Supports both .as(Type) and .as Type syntaxes
+        # Following original parser design (parser.cr:903-919)
+        private def parse_as_cast(receiver : ExprId, dot : Token, as_token : Token) : ExprId
+          parse_as_like(receiver, as_token, false)
         end
 
         # Phase 45/103J: Parse safe type cast (.as?(Type) or .as? Type)
         # Supports both .as?(Type) and .as? Type syntaxes
         # Following original parser design (parser.cr:903-919)
         private def parse_as_safe_cast(receiver : ExprId, dot : Token, as_question_token : Token) : ExprId
-          advance  # Skip 'as?' keyword
-          skip_trivia
-
-          type_start = current_token
-
-          # Check if parentheses are used: .as?(Type) vs .as? Type
-          if current_token.kind == Token::Kind::LParen
-            # With parens: .as?(Type) or .as?(Proc(...))
-            advance  # skip (
-            skip_trivia
-
-            target_type = parse_type_annotation
-            type_end = previous_token.not_nil!
-
-            skip_trivia
-            # Expect closing parenthesis (tolerate stray tokens by fast-forwarding)
-            unless current_token.kind == Token::Kind::RParen
-              scan_idx = @index
-              paren_balance = 0
-              while scan_idx < @tokens.size
-                tok = @tokens[scan_idx]
-                if tok.kind == Token::Kind::LParen
-                  paren_balance += 1
-                elsif tok.kind == Token::Kind::RParen
-                  if paren_balance == 0
-                    @index = scan_idx
-                    @previous_token = scan_idx > 0 ? @tokens[scan_idx - 1] : nil
-                    break
-                  else
-                    paren_balance -= 1
-                  end
-                end
-                scan_idx += 1
-              end
-              unless current_token.kind == Token::Kind::RParen
-                emit_unexpected(current_token)
-                return PREFIX_ERROR
-              end
-            end
-            advance  # skip )
-          else
-            # Without parens: .as? Float32 or .as? Int32 | String
-            target_type = parse_type_annotation
-            type_end = previous_token.not_nil!
-          end
-
-          # Create AsQuestion node
-          as_question_span = node_span(receiver).cover(as_question_token.span).cover(type_end.span)
-
-          @arena.add_typed(
-            AsQuestionNode.new(
-              as_question_span,
-              receiver,
-              target_type
-            )
-          )
+          parse_as_like(receiver, as_question_token, true)
         end
 
         # Phase 93: Parse type check (.is_a?(Type) or .is_a? Type)
