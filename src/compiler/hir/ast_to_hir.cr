@@ -1490,7 +1490,7 @@ module Crystal::HIR
       module_full_name = resolve_path_like_name(include_node.target)
       return offset unless module_full_name
 
-      STDERR.puts "[INC_DEBUG] class=#{class_name}, module_resolved=#{module_full_name}, has_key=#{@module_defs.has_key?(module_full_name)}"
+      # INC_DEBUG disabled
 
       # If module not found directly, try resolving relative to the including class's namespace
       # e.g., BinaryFormat_Float64 includes BinaryFormat -> Float::FastFloat::BinaryFormat
@@ -1509,7 +1509,7 @@ module Crystal::HIR
             parts.pop
           end
         end
-        STDERR.puts "[INC_DEBUG] after resolution: module_full_name=#{module_full_name}"
+        # STDERR.puts "[INC_DEBUG] after resolution: module_full_name=#{module_full_name}"
       end
 
       record_module_inclusion(module_full_name, class_name)
@@ -1518,7 +1518,7 @@ module Crystal::HIR
 
       defs = @module_defs[module_full_name]?
       return offset unless defs
-      STDERR.puts "[INC_DEBUG] module=#{module_full_name}, num_defs=#{defs.size}, class=#{class_name}"
+      # INC_DEBUG disabled
       include_arena = @arena
       defs.each do |mod_node, mod_arena|
         with_arena(mod_arena) do
@@ -1576,9 +1576,7 @@ module Crystal::HIR
                   full_name = mangle_function_name(base_name, param_types, has_block)
                   next if defined_full_names.includes?(full_name)
 
-                  if full_name.includes?("from_chars_advanced") || class_name.includes?("BinaryFormat")
-                    STDERR.puts "[MOD_INCLUDE] class=#{class_name}, method=#{method_name}, full_name=#{full_name}, return_type=#{return_type}"
-                  end
+                  # MOD_INCLUDE debug disabled
                   register_function_type(full_name, return_type)
                   @function_defs[full_name] = member
                   @function_def_arenas[full_name] = @arena
@@ -1875,6 +1873,15 @@ module Crystal::HIR
       if module_name.includes?("BinaryFormat")
         STDERR.puts "[REG_MODULE_TOP] #{module_name}, now has #{@module_defs[module_name].size} defs"
       end
+      if module_name.includes?("Thread")
+        STDERR.puts "[REG_MODULE_TOP] #{module_name}, body_size=#{node.body.try(&.size) || 0}"
+        if body = node.body
+          body.each do |expr_id|
+            member = @arena[expr_id]
+            STDERR.puts "[REG_MODULE_MEMBER] type=#{member.class}"
+          end
+        end
+      end
 
       # Register module methods (def self.foo) and nested classes
       if body = node.body
@@ -1956,6 +1963,9 @@ module Crystal::HIR
               end
             end
             full_name = mangle_function_name(base_name, param_types, has_block)
+            if module_name.includes?("System::Thread")
+              STDERR.puts "[REG_MODULE_METHOD] #{module_name}.#{method_name} -> #{full_name}"
+            end
             register_function_type(full_name, return_type)
             @function_defs[full_name] = member
             @function_def_arenas[full_name] = @arena
@@ -2003,7 +2013,136 @@ module Crystal::HIR
             struct_name = String.new(member.name)
             full_struct_name = "#{module_name}::#{struct_name}"
             register_struct_with_name(member, full_struct_name)
+          when CrystalV2::Compiler::Frontend::MacroIfNode
+            # Handle macro conditionals inside module body
+            process_macro_if_in_module(member, module_name)
+          when CrystalV2::Compiler::Frontend::MacroLiteralNode
+            # Handle macro literal (may contain def/class inside)
+            process_macro_literal_in_module(member, module_name)
           end
+        end
+      end
+    end
+
+    # Process MacroIfNode inside a module body to extract methods
+    private def process_macro_if_in_module(node : CrystalV2::Compiler::Frontend::MacroIfNode, module_name : String)
+      result = try_evaluate_macro_condition(node.condition)
+      if result == true
+        process_macro_body_in_module(node.then_body, module_name)
+      elsif result == false
+        if else_node = node.else_body
+          else_ast = @arena[else_node]
+          case else_ast
+          when CrystalV2::Compiler::Frontend::MacroIfNode
+            process_macro_if_in_module(else_ast, module_name)
+          else
+            process_macro_body_in_module(else_node, module_name)
+          end
+        end
+      else
+        # Can't evaluate - try both branches
+        process_macro_body_in_module(node.then_body, module_name)
+        if else_node = node.else_body
+          process_macro_body_in_module(else_node, module_name)
+        end
+      end
+    end
+
+    # Process macro body (MacroLiteralNode or expression) to extract module methods
+    private def process_macro_body_in_module(body_id : ExprId, module_name : String)
+      body_node = @arena[body_id]
+      case body_node
+      when CrystalV2::Compiler::Frontend::MacroLiteralNode
+        process_macro_literal_in_module(body_node, module_name)
+      when CrystalV2::Compiler::Frontend::DefNode
+        register_module_method_from_def(body_node, module_name)
+      when CrystalV2::Compiler::Frontend::ClassNode
+        class_name = String.new(body_node.name)
+        full_class_name = "#{module_name}::#{class_name}"
+        register_class_with_name(body_node, full_class_name)
+      when CrystalV2::Compiler::Frontend::MacroIfNode
+        process_macro_if_in_module(body_node, module_name)
+      end
+    end
+
+    # Process MacroLiteralNode to extract module methods
+    private def process_macro_literal_in_module(node : CrystalV2::Compiler::Frontend::MacroLiteralNode, module_name : String)
+      node.pieces.each do |piece|
+        case piece.kind
+        when CrystalV2::Compiler::Frontend::MacroPiece::Kind::Expression
+          if expr_id = piece.expr
+            expr_node = @arena[expr_id]
+            case expr_node
+            when CrystalV2::Compiler::Frontend::DefNode
+              register_module_method_from_def(expr_node, module_name)
+            when CrystalV2::Compiler::Frontend::ClassNode
+              class_name = String.new(expr_node.name)
+              full_class_name = "#{module_name}::#{class_name}"
+              register_class_with_name(expr_node, full_class_name)
+            when CrystalV2::Compiler::Frontend::MacroIfNode
+              process_macro_if_in_module(expr_node, module_name)
+            when CrystalV2::Compiler::Frontend::MacroLiteralNode
+              process_macro_literal_in_module(expr_node, module_name)
+            end
+          end
+        end
+      end
+    end
+
+    # Register a class method from a DefNode inside a module
+    private def register_module_method_from_def(member : CrystalV2::Compiler::Frontend::DefNode, module_name : String)
+      method_name = String.new(member.name)
+      is_class_method = if recv = member.receiver
+                          String.new(recv) == "self"
+                        else
+                          false
+                        end
+      return unless is_class_method
+      base_name = "#{module_name}.#{method_name}"
+      return_type = if rt = member.return_type
+                      rt_name = String.new(rt)
+                      inferred = module_like_type_name?(rt_name) ? infer_concrete_return_type_from_body(member) : nil
+                      inferred || type_ref_for_name(rt_name)
+                    elsif method_name.ends_with?("?")
+                      TypeRef::BOOL
+                    else
+                      infer_concrete_return_type_from_body(member) || TypeRef::VOID
+                    end
+      param_types = [] of TypeRef
+      has_block = false
+      if params = member.params
+        params.each do |param|
+          next if named_only_separator?(param)
+          if param.is_block
+            has_block = true
+            next
+          end
+          param_type = if ta = param.type_annotation
+                         type_ref_for_name(String.new(ta))
+                       else
+                         TypeRef::VOID
+                       end
+          param_types << param_type
+        end
+      end
+      full_name = mangle_function_name(base_name, param_types, has_block)
+      if module_name.includes?("System::Thread")
+        STDERR.puts "[REG_MODULE_METHOD_MACRO] #{module_name}.#{method_name} -> #{full_name}"
+      end
+      register_function_type(full_name, return_type)
+      @function_defs[full_name] = member
+      @function_def_arenas[full_name] = @arena
+
+      # Track yield-functions for inline expansion
+      if body = member.body
+        if contains_yield?(body)
+          @yield_functions.add(full_name)
+          unless @function_defs.has_key?(base_name)
+            @function_defs[base_name] = member
+            @function_def_arenas[base_name] = @arena
+          end
+          @function_defs[full_name] = member
+          @function_def_arenas[full_name] = @arena
         end
       end
     end
@@ -2029,7 +2168,7 @@ module Crystal::HIR
             end
           end
         end
-        STDERR.puts "[REG_MODULE] #{full_name} (lines #{start_line}-#{end_line}), now has #{@module_defs[full_name].size} defs, body_size=#{body_size}, methods=#{body_methods}"
+        # STDERR.puts "[REG_MODULE] #{full_name} (lines #{start_line}-#{end_line}), now has #{@module_defs[full_name].size} defs, body_size=#{body_size}, methods=#{body_methods}"
       end
 
       if body = node.body
@@ -2177,6 +2316,7 @@ module Crystal::HIR
       if ENV.has_key?("DEBUG_NESTED_CLASS") && (module_name == "IO" || module_name.includes?("FileDescriptor"))
         STDERR.puts "[DEBUG_LOWER_MOD] lower_module_with_name: #{module_name}, body_size=#{node.body.try(&.size) || 0}"
       end
+      # DEBUG_MODULE_THREAD disabled
       if body = node.body
         body.each_with_index do |expr_id, idx|
           member = unwrap_visibility_member(@arena[expr_id])
@@ -2588,14 +2728,23 @@ module Crystal::HIR
             # Note: Only capture from FIRST initialize (for multiple overloads, each gets its own mangled name)
             if method_name == "initialize" && init_params.empty?
               if params = member.params
+                # Debug disabled for performance
+                # if class_name.includes?("Slice(UInt8)")
+                #   STDERR.puts "[INIT_PARAMS] Processing #{class_name}#initialize, type_param_map=#{@type_param_map}"
+                # end
                 params.each do |param|
                   next if named_only_separator?(param)
                   param_name = param.name.nil? ? "_" : String.new(param.name.not_nil!)
+                  ta_str = param.type_annotation ? String.new(param.type_annotation.not_nil!) : nil
                   param_type = if ta = param.type_annotation
                                  type_ref_for_name(String.new(ta))
                                else
                                  TypeRef::VOID
                                end
+                  # Debug disabled for performance
+                  # if class_name.includes?("Slice(UInt8)")
+                  #   STDERR.puts "  param #{param_name}: annotation=#{ta_str}, resolved=#{param_type.id}"
+                  # end
 
                   # Handle instance variable shorthand: @value : T
                   # Note: parser stores name WITHOUT @ prefix when is_instance_var=true
@@ -3104,10 +3253,16 @@ module Crystal::HIR
       # Skip if type_args contain unresolved type parameters
       # These indicate incomplete substitution and would cause infinite recursion
       # NOTE: unions like `String | Nil` are concrete and must be allowed here.
-      unresolved_token_re = /(?:^|[^A-Za-z0-9_:])(K2|V2|K|V|T|U|L|W)(?:$|[^A-Za-z0-9_:])/
+      unresolved_token_re = /(?:^|[^A-Za-z0-9_:])(K2|V2|K|V|T|U|L|W|self)(?:$|[^A-Za-z0-9_:])/
+      # Bare generic names without type params (like Array, Hash) are not concrete
+      bare_generic_names = {"Array", "Hash", "Set", "Slice", "Pointer", "StaticArray", "Iterator", "Enumerable"}
       has_unresolved = type_args.any? do |arg|
         # typeof(...) in type positions is not fully resolved during bootstrap.
         next true if arg.includes?("typeof(")
+        # `self` as a standalone type arg is unresolved
+        next true if arg == "self"
+        # Bare generic class names without type params are not concrete
+        next true if bare_generic_names.includes?(arg)
         # Detect remaining generic placeholders as standalone tokens (avoid false positives like "ValueId").
         arg.matches?(unresolved_token_re)
       end
@@ -3385,6 +3540,15 @@ module Crystal::HIR
     private def generate_allocator(class_name : String, class_info : ClassInfo)
       func_name = "#{class_name}.new"
 
+      # Debug disabled for performance
+      # if class_name.includes?("Slice(UInt8)")
+      #   init_params_debug = @init_params[class_name]? || [] of {String, TypeRef}
+      #   param_strs = init_params_debug.map { |name, type_ref| "#{name}:#{type_ref.id}" }
+      #   already = @generated_allocators.includes?(class_name)
+      #   has_func = @module.has_function?(func_name)
+      #   STDERR.puts "[ALLOC_GEN] class=#{class_name}, init_params=[#{param_strs.join(", ")}], already=#{already}, has_func=#{has_func}"
+      # end
+
       # Skip Pointer types - they're primitive types with no allocator
       if class_name.starts_with?("Pointer(") || class_name.starts_with?("Pointer_")
         return
@@ -3403,16 +3567,25 @@ module Crystal::HIR
       return if @generated_allocators.includes?(class_name)
       @generated_allocators.add(class_name)
 
+      # Also check if function already exists in HIR module (belt and suspenders)
+      return if @module.has_function?(func_name)
+
+      # Get initialize parameters for this class
+      init_params = @init_params[class_name]? || [] of {String, TypeRef}
+
       # Return type is the class type (semantically)
       # LLVM backend converts to ptr for ABI
       func = @module.create_function(func_name, class_info.type_ref)
       ctx = LoweringContext.new(func, @module, @arena)
 
-      # Get initialize parameters for this class
-      init_params = @init_params[class_name]? || [] of {String, TypeRef}
-
       # Add parameters to new() that match initialize()
       param_ids = [] of ValueId
+      # if class_name.includes?("Slice")
+      #   STDERR.puts "[ALLOC_PARAMS] func=#{func_name}, init_params.size=#{init_params.size}"
+      #   init_params.each_with_index do |(name, type_ref), idx|
+      #     STDERR.puts "  [#{idx}] #{name}: #{type_ref.id}"
+      #   end
+      # end
       init_params.each do |param_name, param_type|
         hir_param = func.add_param(param_name, param_type)
         ctx.register_local(param_name, hir_param.id)
@@ -4093,6 +4266,8 @@ module Crystal::HIR
       # Get the class name from the type descriptor
       class_name = type_desc.try(&.name) || ""
 
+      # RESOLVE_CALL debug disabled
+
       # Build the base method name as ClassName#method
       base_method_name = class_name.empty? ? method_name : "#{class_name}##{method_name}"
 
@@ -4193,9 +4368,58 @@ module Crystal::HIR
                       module_type_name
                     end
       includers = @module_includers[module_base]?
+      # Fallback: try short name if full name has no includers
+      # e.g., "Crystal::EventLoop::FileDescriptor" -> "FileDescriptor"
+      if includers.nil? || includers.empty?
+        short_name = module_base.split("::").last
+        if short_name != module_base
+          includers = @module_includers[short_name]?
+        end
+      end
+      # RESOLVE_DEBUG disabled
       return nil unless includers && !includers.empty?
 
       candidates = includers.to_a
+      # Also add subclasses of includers (for abstract classes like Crystal::EventLoop)
+      # The concrete implementation may be in a subclass (e.g., Polling, Kqueue)
+      subclasses = [] of String
+      # Debug disabled
+      # if method_name == "write"
+      #   ev_classes = @class_info.select { |k, _| k.includes?("EventLoop") || k.includes?("Polling") || k.includes?("Kqueue") }
+      #   STDERR.puts "[SUBCLASS_DEBUG] Checking parents: #{ev_classes.map { |k, v| "#{k}->#{v.parent_name}" }}"
+      # end
+      includers.each do |inc|
+        # Get short name (e.g., "Crystal::EventLoop" -> "EventLoop")
+        inc_short = inc.split("::").last
+        @class_info.each do |name, ci|
+          parent = ci.parent_name
+          next unless parent
+          # Match if parent equals full name, short name, or ends with short name
+          if parent == inc || parent == inc_short || inc.ends_with?("::#{parent}")
+            subclasses << name
+          end
+        end
+      end
+      # Recursively find subclasses of subclasses (e.g., Kqueue < Polling < EventLoop)
+      prev_size = 0
+      while subclasses.size > prev_size
+        prev_size = subclasses.size
+        subclasses.dup.each do |sub|
+          sub_short = sub.split("::").last
+          @class_info.each do |name, ci|
+            parent = ci.parent_name
+            next unless parent
+            if parent == sub || parent == sub_short || sub.ends_with?("::#{parent}")
+              unless subclasses.includes?(name)
+                subclasses << name
+              end
+            end
+          end
+        end
+      end
+      candidates.concat(subclasses)
+      candidates.uniq!
+      # RESOLVE_DEBUG2 disabled
       if prefer_class
         candidates.delete(prefer_class)
         candidates.sort!
@@ -4246,24 +4470,42 @@ module Crystal::HIR
         break if arg_idx >= arg_types.size
 
         param_type_name = param.type_annotation ? String.new(param.type_annotation.not_nil!) : ""
-        param_type = if param_type_name.empty?
-                       TypeRef::VOID
-                     else
-                       type_ref_for_name(param_type_name)
-                     end
         arg_type = arg_types[arg_idx]
 
         if !param_type_name.empty?
+          # Resolve type alias chain FIRST, then get type ref
           resolved_name = resolve_type_alias_chain(param_type_name)
           if module_like_type_name?(resolved_name)
             return false if primitive_type?(arg_type)
             arg_idx += 1
             next
           end
+          # Use resolved name for type lookup
+          param_type = type_ref_for_name(resolved_name)
+        else
+          param_type = TypeRef::VOID
         end
 
         if param_type != TypeRef::VOID && arg_type != TypeRef::VOID
           if param_type != arg_type && !needs_union_coercion?(arg_type, param_type)
+            # Also check if arg type's name matches after alias resolution
+            arg_desc = @module.get_type_descriptor(arg_type)
+            # PARAMS_COMPAT debug disabled
+            if arg_desc && resolve_type_alias_chain(arg_desc.name) == resolve_type_alias_chain(param_type_name)
+              # They're the same type after alias resolution, allow
+              arg_idx += 1
+              next
+            end
+            # Check if arg type includes the param type (for module methods)
+            # e.g., IO::FileDescriptor includes Crystal::System::FileDescriptor
+            if arg_desc
+              arg_class = arg_desc.name
+              param_base = param_type_name.split("(").first
+              if @class_included_modules[arg_class]?.try(&.any? { |m| m.includes?(param_base) || param_base.includes?(m.split("::").last) })
+                arg_idx += 1
+                next
+              end
+            end
             return false
           end
         end
@@ -6098,8 +6340,8 @@ module Crystal::HIR
         true  # macOS is darwin and unix
       when "kqueue"
         true  # macOS uses kqueue for event loop
-      when "linux", "win32", "windows", "android", "wasi", "epoll", "libevent"
-        false  # Not linux/windows/android
+      when "linux", "win32", "windows", "android", "wasi", "epoll", "libevent", "openbsd", "freebsd", "netbsd", "dragonfly"
+        false  # Not linux/windows/android/bsd
       when "x86_64", "aarch64", "arm64"
         # Assume arm64 for modern Macs
         clean_name == "aarch64" || clean_name == "arm64"
@@ -8787,15 +9029,38 @@ module Crystal::HIR
               if target_name.includes?("from_chars")
                 STDERR.puts "[LOWERING] Calling lower_method for #{target_name}, deferred=#{deferred_lookup_used}"
               end
-              # For deferred lookup, don't pass full_name_override - let lower_method compute from param types
-              override = deferred_lookup_used ? nil : target_name
-              lower_method(owner, class_info, func_def, call_arg_types, override)
+              # For deferred lookup, pass the caller's expected name (with mangled types) so the
+              # generated function matches what the call site is looking for. This handles cases where
+              # the def signature uses unresolved generic types (like ParseOptionsT(UC)) but the call
+              # site uses concrete types (like Pointer).
+              # The `name` variable contains the full mangled name from the call site.
+              override = name
+              # Add forall type param bindings for FastFloat methods (UC is always UInt8 per stdlib constraints)
+              extra_params = if target_name.includes?("FastFloat")
+                               {"UC" => "UInt8", "T" => "Float64"}
+                             else
+                               {} of String => String
+                             end
+              with_type_param_map(extra_params) do
+                lower_method(owner, class_info, func_def, call_arg_types, override)
+              end
               @current_class = old_class
             elsif target_name.includes?("from_chars")
               STDERR.puts "[LOWERING] No class_info for #{owner}"
             end
           elsif target_name.includes?(".")
-            owner = target_name.split(".", 2)[0]
+            parts = target_name.split(".", 2)
+            owner = parts[0]
+            method = parts[1]?
+            # For .new on classes/structs, use generate_allocator (not lower_method)
+            # This ensures correct init_params from the initialize method are used
+            if method && method.split("$", 2)[0] == "new"
+              if class_info = @class_info[owner]?
+                generate_allocator(owner, class_info)
+                # The function was just generated (or already existed), return
+                return
+              end
+            end
             if class_info = @class_info[owner]?
               old_class = @current_class
               @current_class = owner
@@ -9452,12 +9717,14 @@ module Crystal::HIR
       if receiver_id && full_method_name.nil? && callee_node.is_a?(CrystalV2::Compiler::Frontend::MemberAccessNode)
         receiver_type = ctx.type_of(receiver_id)
         if type_desc = @module.get_type_descriptor(receiver_type)
+          # LOWER_CALL_DEBUG disabled
           if module_like_type_name?(type_desc.name)
-            if module_type_name = module_receiver_type_name(callee_node)
-              if resolved = resolve_module_typed_method(method_name, arg_types, module_type_name, has_block_call, @current_class)
-                mangled_method_name = resolved
-                base_method_name = resolved.split("$").first
-              end
+            # Try to get module type name from AST, fall back to type_desc.name
+            # This handles cases where the receiver is a call result (e.g., event_loop().write())
+            module_type_name = module_receiver_type_name(callee_node) || type_desc.name
+            if resolved = resolve_module_typed_method(method_name, arg_types, module_type_name, has_block_call, @current_class)
+              mangled_method_name = resolved
+              base_method_name = resolved.split("$").first
             end
           end
         end
@@ -9869,9 +10136,11 @@ module Crystal::HIR
       if mangled_method_name != primary_mangled_name
         remember_callsite_arg_types(mangled_method_name, arg_types)
       end
-      if mangled_method_name.includes?("from_chars") || mangled_method_name == "ec" || mangled_method_name == "ptr" || mangled_method_name == "current" || mangled_method_name == "write"
-        STDERR.puts "[CALL_DEBUG] method=#{method_name}, base=#{base_method_name}, mangled=#{mangled_method_name}, primary=#{primary_mangled_name}, return_type=#{return_type}"
-      end
+      # Debug disabled for performance
+      # if mangled_method_name.includes?("from_chars") || mangled_method_name == "ec" || mangled_method_name == "ptr" || mangled_method_name == "current" || (method_name == "write" && base_method_name.includes?("FileDescriptor")) || mangled_method_name.includes?("Slice") && method_name == "new"
+      #   arg_type_names = arg_types.map { |t| type_name_for_mangling(t) }
+      #   STDERR.puts "[CALL_DEBUG] method=#{method_name}, base=#{base_method_name}, mangled=#{mangled_method_name}, primary=#{primary_mangled_name}, return_type=#{return_type}, arg_types=#{arg_type_names}, full=#{full_method_name}"
+      # end
       lower_function_if_needed(primary_mangled_name)
       if mangled_method_name != primary_mangled_name
         lower_function_if_needed(mangled_method_name)
@@ -13166,6 +13435,32 @@ module Crystal::HIR
         result = type_ref_for_name(substitution)
         @type_cache[lookup_name] = result
         return result
+      end
+      # Substitute type params inside generic type names EARLY, before cache lookup.
+      # This handles cases like ParseOptionsT(UC) when UC -> UInt8 is in type_param_map.
+      if lookup_name.includes?("(") && !@type_param_map.empty?
+        paren_start = lookup_name.index('(')
+        paren_end = lookup_name.rindex(')')
+        if paren_start && paren_end && paren_end > paren_start
+          base = lookup_name[0, paren_start]
+          args_str = lookup_name[paren_start + 1, paren_end - paren_start - 1]
+          # Split args and substitute each one, tracking if any actual substitution occurred
+          args = split_generic_type_args(args_str)
+          substituted = false
+          new_args = args.map do |arg|
+            stripped = arg.strip
+            if sub = @type_param_map[stripped]?
+              substituted = true
+              sub
+            else
+              stripped
+            end
+          end
+          if substituted
+            new_name = "#{base}(#{new_args.join(", ")})"
+            return type_ref_for_name(new_name)
+          end
+        end
       end
       # Resolve unqualified type names in the current namespace before cache lookup.
       # This avoids poisoning the cache with short names that can resolve differently per scope.

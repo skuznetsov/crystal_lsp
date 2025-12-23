@@ -3094,14 +3094,18 @@ module Crystal::MIR
 
       # Guard: arithmetic/shift ops can't use ptr or void type
       # Use operand type instead of defaulting to i64
+      # Track if we need to convert result back to ptr
+      convert_result_to_ptr = false
       if (result_type == "ptr" || result_type == "void") && is_arithmetic
+        convert_result_to_ptr = (result_type == "ptr")
         # Try to use the actual operand type if it's a concrete int type
-        if operand_type_str != "ptr" && operand_type_str != "void"
+        # But avoid using union types - use i64 for arithmetic instead
+        if operand_type_str != "ptr" && operand_type_str != "void" && !operand_type_str.includes?(".union")
           result_type = operand_type_str
-        elsif right_type_str != "ptr" && right_type_str != "void"
+        elsif right_type_str != "ptr" && right_type_str != "void" && !right_type_str.includes?(".union")
           result_type = right_type_str
         else
-          result_type = "i64"  # Fallback only when both operands are ptr/void
+          result_type = "i64"  # Fallback for ptr/void/union operands
         end
         # Update @value_types to reflect actual emitted type (not MIR's wrong ptr type)
         actual_type_ref = case result_type
@@ -3454,21 +3458,28 @@ module Crystal::MIR
             end
           end
         end
-        emit "#{name} = #{op} #{result_type} #{left}, #{right}"
-        # Track actual emitted type for downstream use
-        actual_type = case result_type
-                      when "i1" then TypeRef::BOOL
-                      when "i8" then TypeRef::INT8
-                      when "i16" then TypeRef::INT16
-                      when "i32" then TypeRef::INT32
-                      when "i64" then TypeRef::INT64
-                      when "i128" then TypeRef::INT128
-                      when "float" then TypeRef::FLOAT32
-                      when "double" then TypeRef::FLOAT64
-                      when "ptr" then TypeRef::POINTER
-                      else inst.type  # Use MIR type as fallback
-                      end
-        @value_types[inst.id] = actual_type
+        # If MIR expects ptr but we did arithmetic as int, convert back to ptr
+        if convert_result_to_ptr && result_type.starts_with?("i")
+          emit "%binop#{inst.id}.int_result = #{op} #{result_type} #{left}, #{right}"
+          emit "#{name} = inttoptr #{result_type} %binop#{inst.id}.int_result to ptr"
+          @value_types[inst.id] = TypeRef::POINTER
+        else
+          emit "#{name} = #{op} #{result_type} #{left}, #{right}"
+          # Track actual emitted type for downstream use
+          actual_type = case result_type
+                        when "i1" then TypeRef::BOOL
+                        when "i8" then TypeRef::INT8
+                        when "i16" then TypeRef::INT16
+                        when "i32" then TypeRef::INT32
+                        when "i64" then TypeRef::INT64
+                        when "i128" then TypeRef::INT128
+                        when "float" then TypeRef::FLOAT32
+                        when "double" then TypeRef::FLOAT64
+                        when "ptr" then TypeRef::POINTER
+                        else inst.type  # Use MIR type as fallback
+                        end
+          @value_types[inst.id] = actual_type
+        end
       end
     end
 

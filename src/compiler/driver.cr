@@ -189,7 +189,10 @@ module Crystal::V2
         hir_converter.arena = arena
         hir_converter.register_enum(enum_node)
       end
+      STDERR.puts "[DRIVER] total module_nodes to register: #{module_nodes.size}"
       module_nodes.each do |module_node, arena|
+        mod_name = String.new(module_node.name)
+        STDERR.puts "[DRIVER_REG_MODULE] #{mod_name}" if mod_name.includes?("Thread") || mod_name.includes?("System") || mod_name.includes?("Crystal")
         hir_converter.arena = arena
         hir_converter.register_module(module_node)
       end

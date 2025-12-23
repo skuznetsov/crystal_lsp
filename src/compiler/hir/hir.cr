@@ -1215,6 +1215,16 @@ module Crystal::HIR
     end
 
     def create_function(name : String, return_type : TypeRef) : Function
+      # Check for duplicates
+      if existing = @functions.find { |f| f.name == name }
+        # STDERR.puts "[WARN] Duplicate function: #{name} (existing return: #{existing.return_type.id}, new return: #{return_type.id})"
+        return existing
+      end
+      # Debug disabled for performance
+      # if name.includes?("Slice(UInt8).new")
+      #   STDERR.puts "[FUNC_CREATE] #{name}, return=#{return_type.id}"
+      #   STDERR.puts "  Stack: #{caller.first(5).join(" -> ")}"
+      # end
       id = @next_function_id
       @next_function_id += 1
       func = Function.new(id, name, return_type)
