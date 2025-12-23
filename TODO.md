@@ -34,8 +34,7 @@ about syntax or types and should match what the original compiler would report.
 - [x] Driver trace logging gated via `CRYSTAL_V2_DRIVER_TRACE` (2025-12-23)
 - [x] Resolve module method calls without parens (`M.foo`) to static dispatch (2025-12-23)
 
-### Pending (9 tests)
-- 2 HIR type operation lowering (`as`, `as?`) specs (pending while type ops are still being aligned)
+### Pending (7 tests)
 - 6 macro whitespace trimming (`{%- -%}`, `{%~ ~%}`) - for web templates
 - 1 invalid ASM syntax test (intentionally pending)
 
