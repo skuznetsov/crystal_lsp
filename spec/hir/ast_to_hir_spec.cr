@@ -1164,7 +1164,7 @@ describe Crystal::HIR::AstToHir do
       CRYSTAL
 
       converter = lower_program(code)
-      func = converter.module.functions.find { |f| f.name == "foo" }
+      func = converter.module.functions.find { |f| f.name.starts_with?("foo") }
       func.should_not be_nil
 
       call = func.not_nil!.blocks.flat_map(&.instructions)
@@ -1214,6 +1214,31 @@ describe Crystal::HIR::AstToHir do
 
       converter = lower_program(code)
       converter.class_info.has_key?("Box(Int32)").should be_true
+    end
+
+    it "handles nested Enumerable.element_type without parentheses" do
+      code = <<-CRYSTAL
+        def foo(indexables : Indexable(Indexable))
+          ary = [] of typeof(Enumerable.element_type Enumerable.element_type indexables)
+          ary
+        end
+      CRYSTAL
+
+      converter = lower_program(code)
+      func = converter.module.functions.find { |f| f.name.starts_with?("foo$") || f.name == "foo" }
+      func.should_not be_nil
+
+      array_lit = func.not_nil!.blocks.flat_map(&.instructions)
+        .find { |inst| inst.is_a?(Crystal::HIR::ArrayLiteral) }
+      array_lit.should_not be_nil
+
+      element_type = array_lit.not_nil!.as(Crystal::HIR::ArrayLiteral).element_type
+      desc = converter.module.get_type_descriptor(element_type)
+      if desc
+        desc.not_nil!.name.should_not eq("Pointer(Void)")
+      else
+        element_type.should eq(Crystal::HIR::TypeRef::POINTER)
+      end
     end
   end
 

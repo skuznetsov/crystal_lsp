@@ -984,6 +984,27 @@ module Crystal::HIR
       case callee
       when CrystalV2::Compiler::Frontend::MemberAccessNode
         method_name = String.new(callee.member)
+        if method_name == "element_type"
+          if arg_id = node.args.first?
+            arg_node = @arena[arg_id]
+            chained = false
+            if arg_node.is_a?(CrystalV2::Compiler::Frontend::CallNode)
+              inner_callee = @arena[arg_node.callee]
+              chained = inner_callee.is_a?(CrystalV2::Compiler::Frontend::MemberAccessNode) &&
+                        String.new(inner_callee.member) == "element_type"
+            end
+            inner_type = resolve_typeof_expr(arg_id)
+            if inner_type == "Pointer(Void)" && arg_node.is_a?(CrystalV2::Compiler::Frontend::IdentifierNode)
+              if type_name = lookup_typeof_local_name(String.new(arg_node.name))
+                inner_type = type_name
+              end
+            end
+            element_type = element_type_for_type_name(inner_type)
+            return inner_type if element_type.nil? && chained
+            return element_type if element_type
+          end
+        end
+
         base_type = resolve_typeof_expr(callee.object)
         return "Pointer(Void)" if base_type == "Pointer(Void)"
 
@@ -1054,8 +1075,12 @@ module Crystal::HIR
 
       if locals = @current_typeof_locals
         if type_ref = locals[expr]?
-          return normalize_typeof_type_name(get_type_name_from_ref(type_ref))
+          resolved = get_type_name_from_ref(type_ref)
+          return normalize_typeof_type_name(resolved) unless resolved == "Void"
         end
+      end
+      if type_name = lookup_typeof_local_name(expr)
+        return normalize_typeof_type_name(type_name)
       end
 
       if class_name = @current_class
@@ -1123,12 +1148,16 @@ module Crystal::HIR
                 end
       return nil if arg_str.nil? || arg_str.empty?
 
-      inner_type = resolve_typeof_inner(arg_str.not_nil!)
-      if inner_type == "Pointer(Void)" && arg_str.not_nil!.size > 0 && arg_str.not_nil![0].uppercase?
-        inner_type = arg_str.not_nil!
+      arg_expr = arg_str.not_nil!.strip
+      chained = ELEMENT_TYPE_PREFIXES.any? { |p| arg_expr.starts_with?(p) }
+      inner_type = resolve_typeof_inner(arg_expr)
+      if !chained && inner_type == "Pointer(Void)" && arg_expr.size > 0 && arg_expr[0].uppercase?
+        inner_type = arg_expr
       end
 
-      element_type_for_type_name(inner_type)
+      element_type = element_type_for_type_name(inner_type)
+      return inner_type if element_type.nil? && chained
+      element_type
     end
 
     private def extract_balanced_paren_content(expr : String) : String?
