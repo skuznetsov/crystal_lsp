@@ -12,6 +12,14 @@ module Crystal::HIR
   module TypeInfoProvider
     abstract def class_names : Array(String)
     abstract def instance_var_types(class_name : String) : Hash(String, String)
+
+    def acyclic_type_names : Set(String)
+      Set(String).new
+    end
+
+    def type_name_for(type_ref : TypeRef) : String?
+      nil
+    end
   end
 
   # Taint analyzer using worklist algorithm
@@ -24,7 +32,7 @@ module Crystal::HIR
 
     # Methods that indicate thread sharing
     SPAWN_METHODS = Set{
-      "spawn", "send", "receive",
+      "spawn",
     }
 
     # Channel-related type names
@@ -99,6 +107,11 @@ module Crystal::HIR
         unless visited.includes?(name)
           dfs_find_cycles(name, type_graph, visited, in_stack)
         end
+      end
+
+      # Allow user override via @[Acyclic]
+      type_info.acyclic_type_names.each do |acyclic|
+        @cyclic_types.delete(acyclic)
       end
     end
 
@@ -206,6 +219,8 @@ module Crystal::HIR
         yield value.value
       when Allocate
         value.constructor_args.each { |arg| yield arg }
+      when ExternCall
+        value.args.each { |arg| yield arg }
       end
     end
 
@@ -226,20 +241,41 @@ module Crystal::HIR
         # Calls that might expose to FFI or spawn
         when Call
           if is_ffi_method?(value.method_name)
-            # Arguments exposed to FFI
-            value.args.each { |arg| mark_taint(arg, Taint::FFIExposed) }
+            # to_unsafe-style methods expose the receiver to FFI
             if recv = value.receiver
               mark_taint(recv, Taint::FFIExposed)
+            else
+              value.args.each { |arg| mark_taint(arg, Taint::FFIExposed) }
             end
           end
 
-          if is_spawn_method?(value.method_name)
-            # Arguments shared with other fiber
-            value.args.each { |arg| mark_taint(arg, Taint::ThreadShared) }
-            if blk = value.block
-              block_capture_values(blk).each do |captured|
-                mark_taint(captured, Taint::ThreadShared)
+          case value.method_name
+          when "spawn"
+            # spawn shares captured values; only treat closure arguments as shared
+            if value.receiver.nil?
+              value.args.each do |arg|
+                if defn = @definitions[arg]?
+                  if defn.is_a?(MakeClosure)
+                    mark_taint(arg, Taint::ThreadShared)
+                  end
+                end
               end
+              if blk = value.block
+                block_capture_values(blk).each do |captured|
+                  mark_taint(captured, Taint::ThreadShared)
+                end
+              end
+            end
+          when "send"
+            # Channel send shares the argument across fibers
+            if recv = value.receiver
+              mark_taint(recv, Taint::ThreadShared)
+              value.args.each { |arg| mark_taint(arg, Taint::ThreadShared) }
+            end
+          when "receive"
+            # Receiving from a channel yields a shared value
+            if recv = value.receiver
+              mark_taint(recv, Taint::ThreadShared)
             end
           end
 
@@ -247,6 +283,9 @@ module Crystal::HIR
             # Value passed through channel is thread-shared
             value.args.each { |arg| mark_taint(arg, Taint::ThreadShared) }
           end
+        when ExternCall
+          # Arguments passed to C are exposed to FFI
+          value.args.each { |arg| mark_taint(arg, Taint::FFIExposed) }
 
         # Class variables are implicitly thread-shared
         when ClassVarGet, ClassVarSet
@@ -427,8 +466,13 @@ module Crystal::HIR
     # =========================================================================
 
     private def get_type_name(type_ref : TypeRef) : String
-      # For now, use simple mapping from TypeRef ID
-      # In full implementation, would look up in type table
+      if ti = @type_info
+        if name = ti.type_name_for(type_ref)
+          return name
+        end
+      end
+
+      # Fallback: use simple mapping from TypeRef ID
       case type_ref
       when TypeRef::STRING then "String"
       when TypeRef::INT32  then "Int32"
@@ -528,7 +572,7 @@ module Crystal::HIR
     }
 
     private def is_ffi_method?(name : String) : Bool
-      FFI_METHODS.includes?(name) || name.starts_with?("__")
+      FFI_METHODS.includes?(name)
     end
 
     private def is_spawn_method?(name : String) : Bool
@@ -585,4 +629,5 @@ module Crystal::HIR
       analyzer
     end
   end
+
 end

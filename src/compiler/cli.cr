@@ -10,6 +10,7 @@ require "./hir/hir"
 require "./hir/ast_to_hir"
 require "./hir/escape_analysis"
 require "./hir/memory_strategy"
+require "./hir/class_info_type_provider"
 require "./mir/mir"
 require "./mir/optimizations"
 require "./mir/hir_to_mir"
@@ -39,6 +40,7 @@ module CrystalV2
 
       def run(*, out_io : IO = STDOUT, err_io : IO = STDERR) : Int32
         options = Options.new
+        mm_stack_threshold_invalid = false
 
         parser = OptionParser.new do |p|
           p.banner = "Usage: crystal_v2 [options] <source.cr>\n\nOptions:"
@@ -91,6 +93,15 @@ module CrystalV2
           p.on("--no-link", "Skip final link step (leave .o file)") { options.link = false }
           p.on("--no-ltp", "Disable LTP/WBA MIR optimization (benchmarking)") { options.ltp_opt = false }
           p.on("--slab-frame", "Use slab frame for no-escape functions (experimental)") { options.slab_frame = true }
+          p.on("--mm=MODE", "Memory mode: conservative, balanced, aggressive") { |mode| options.mm_mode = mode }
+          p.on("--mm-stack-threshold BYTES", "Max bytes for stack allocation in MM mode") do |bytes|
+            if value = bytes.to_u32?
+              options.mm_stack_threshold = value
+            else
+              mm_stack_threshold_invalid = true
+            end
+          end
+          p.on("--no-gc", "Fail if any allocation uses GC") { options.no_gc = true }
 
           # Help/version (Crystal-compatible)
           p.on("--version", "Show version") { options.show_version = true }
@@ -101,6 +112,16 @@ module CrystalV2
           parser.parse(@args)
         rescue ex : OptionParser::InvalidOption
           err_io.puts "Error: #{ex.message}"
+          err_io.puts parser
+          return 1
+        end
+        if mm_stack_threshold_invalid
+          err_io.puts "Error: --mm-stack-threshold expects an integer"
+          err_io.puts parser
+          return 1
+        end
+        unless valid_mm_mode?(options.mm_mode)
+          err_io.puts "Error: Unknown --mm mode: #{options.mm_mode}"
           err_io.puts parser
           return 1
         end
@@ -170,6 +191,9 @@ module CrystalV2
         property emit_type_metadata : Bool = true
         property ltp_opt : Bool = true
         property slab_frame : Bool = false
+        property mm_mode : String = "balanced"
+        property mm_stack_threshold : UInt32 = 4096_u32
+        property no_gc : Bool = false
         property lto : Bool = false
         property pgo_generate : Bool = false
         property pgo_profile : String = ""
@@ -306,9 +330,11 @@ module CrystalV2
         alias_nodes = [] of Tuple(Frontend::AliasNode, Frontend::ArenaLike)
         lib_nodes = [] of Tuple(Frontend::LibNode, Frontend::ArenaLike)
         main_exprs = [] of Tuple(Frontend::ExprId, Frontend::ArenaLike)
+        acyclic_types = Set(String).new
 
         flags = Runtime.target_flags
         all_arenas.each do |arena, exprs, file_path, source|
+          pending_annotations = [] of String
           exprs.each do |expr_id|
             collect_top_level_nodes(
               arena,
@@ -321,6 +347,8 @@ module CrystalV2
               alias_nodes,
               lib_nodes,
               main_exprs,
+              pending_annotations,
+              acyclic_types,
               flags,
               sources_by_arena,
               source
@@ -426,16 +454,46 @@ module CrystalV2
         log(options, out_io, "\n[3/6] Escape analysis...")
         escape_start = Time.monotonic
         total_funcs = hir_module.functions.size
+        memory_config = memory_config_for(options)
+        type_provider = HIR::ClassInfoTypeProvider.new(hir_module, hir_converter.class_info, acyclic_types)
+        total_ms_stats = HIR::MemoryStrategyResult::Stats.new
+        gc_functions = [] of Tuple(String, Int32)
+        total_gc = 0
         hir_module.functions.each_with_index do |func, idx|
           if options.progress && (idx % 1000 == 0 || idx == total_funcs - 1)
             STDERR.puts "  Escape analysis: #{idx + 1}/#{total_funcs}..."
           end
           escape = HIR::EscapeAnalyzer.new(func)
           escape.analyze
-          ms = HIR::MemoryStrategyAssigner.new(func)
-          ms.assign
+          ms = HIR::MemoryStrategyAssigner.new(func, memory_config, type_provider)
+          result = ms.assign
+          stats = result.stats
+          total_ms_stats.stack_count += stats.stack_count
+          total_ms_stats.slab_count += stats.slab_count
+          total_ms_stats.arc_count += stats.arc_count
+          total_ms_stats.atomic_arc_count += stats.atomic_arc_count
+          total_ms_stats.gc_count += stats.gc_count
+          if options.no_gc && stats.gc_count > 0
+            total_gc += stats.gc_count
+            gc_functions << {func.name, stats.gc_count}
+          end
         end
         timings["escape"] = (Time.monotonic - escape_start).total_milliseconds if options.stats
+        if options.stats
+          timings["mm_stack"] = total_ms_stats.stack_count.to_f
+          timings["mm_slab"] = total_ms_stats.slab_count.to_f
+          timings["mm_arc"] = total_ms_stats.arc_count.to_f
+          timings["mm_atomic"] = total_ms_stats.atomic_arc_count.to_f
+          timings["mm_gc"] = total_ms_stats.gc_count.to_f
+        end
+        if options.no_gc && total_gc > 0
+          err_io.puts "error: --no-gc requested but #{total_gc} allocation(s) require GC"
+          gc_functions.sort_by { |(_, count)| -count }.first(10).each do |(name, count)|
+            err_io.puts "  #{name}: #{count}"
+          end
+          emit_timings(options, out_io, timings, total_start)
+          return 1
+        end
 
         # Step 4: Lower to MIR
         log(options, out_io, "\n[4/6] Lowering to MIR...")
@@ -989,6 +1047,8 @@ module CrystalV2
         alias_nodes : Array(Tuple(Frontend::AliasNode, Frontend::ArenaLike)),
         lib_nodes : Array(Tuple(Frontend::LibNode, Frontend::ArenaLike)),
         main_exprs : Array(Tuple(Frontend::ExprId, Frontend::ArenaLike)),
+        pending_annotations : Array(String),
+        acyclic_types : Set(String),
         flags : Set(String),
         sources_by_arena : Hash(Frontend::ArenaLike, String),
         source : String,
@@ -999,22 +1059,34 @@ module CrystalV2
         case node
         when Frontend::DefNode
           def_nodes << {node, arena}
+          pending_annotations.clear
         when Frontend::ClassNode
           class_nodes << {node, arena}
+          if pending_annotations.includes?("Acyclic")
+            acyclic_types << String.new(node.name)
+          end
+          pending_annotations.clear
         when Frontend::ModuleNode
           module_nodes << {node, arena}
+          pending_annotations.clear
         when Frontend::EnumNode
           enum_nodes << {node, arena}
+          pending_annotations.clear
         when Frontend::MacroDefNode
           macro_nodes << {node, arena}
+          pending_annotations.clear
         when Frontend::AliasNode
           alias_nodes << {node, arena}
+          pending_annotations.clear
         when Frontend::LibNode
           lib_nodes << {node, arena}
+          pending_annotations.clear
+        when Frontend::AnnotationNode
+          pending_annotations << annotation_name_from_expr(arena, node.name)
         when Frontend::RequireNode
           # Skip - already processed
         when Frontend::MacroExpressionNode
-          collect_top_level_nodes(arena, node.expression, def_nodes, class_nodes, module_nodes, enum_nodes, macro_nodes, alias_nodes, lib_nodes, main_exprs, flags, sources_by_arena, source, depth)
+          collect_top_level_nodes(arena, node.expression, def_nodes, class_nodes, module_nodes, enum_nodes, macro_nodes, alias_nodes, lib_nodes, main_exprs, pending_annotations, acyclic_types, flags, sources_by_arena, source, depth)
         when Frontend::MacroIfNode
           if raw_text = macro_if_raw_text(node, source)
             parsed_any = false
@@ -1025,7 +1097,7 @@ module CrystalV2
                 parsed_any = true
                 sources_by_arena[program.arena] = text
                 program.roots.each do |inner_id|
-                  collect_top_level_nodes(program.arena, inner_id, def_nodes, class_nodes, module_nodes, enum_nodes, macro_nodes, alias_nodes, lib_nodes, main_exprs, flags, sources_by_arena, text, depth + 1)
+                  collect_top_level_nodes(program.arena, inner_id, def_nodes, class_nodes, module_nodes, enum_nodes, macro_nodes, alias_nodes, lib_nodes, main_exprs, pending_annotations, acyclic_types, flags, sources_by_arena, text, depth + 1)
                 end
               end
             end
@@ -1033,20 +1105,20 @@ module CrystalV2
           end
           condition = evaluate_macro_condition(arena, node.condition, flags)
           if condition == true
-            collect_top_level_nodes(arena, node.then_body, def_nodes, class_nodes, module_nodes, enum_nodes, macro_nodes, alias_nodes, lib_nodes, main_exprs, flags, sources_by_arena, source, depth)
+            collect_top_level_nodes(arena, node.then_body, def_nodes, class_nodes, module_nodes, enum_nodes, macro_nodes, alias_nodes, lib_nodes, main_exprs, pending_annotations, acyclic_types, flags, sources_by_arena, source, depth)
           elsif condition == false
             if else_body = node.else_body
-              collect_top_level_nodes(arena, else_body, def_nodes, class_nodes, module_nodes, enum_nodes, macro_nodes, alias_nodes, lib_nodes, main_exprs, flags, sources_by_arena, source, depth)
+              collect_top_level_nodes(arena, else_body, def_nodes, class_nodes, module_nodes, enum_nodes, macro_nodes, alias_nodes, lib_nodes, main_exprs, pending_annotations, acyclic_types, flags, sources_by_arena, source, depth)
             end
           else
-            collect_top_level_nodes(arena, node.then_body, def_nodes, class_nodes, module_nodes, enum_nodes, macro_nodes, alias_nodes, lib_nodes, main_exprs, flags, sources_by_arena, source, depth)
+            collect_top_level_nodes(arena, node.then_body, def_nodes, class_nodes, module_nodes, enum_nodes, macro_nodes, alias_nodes, lib_nodes, main_exprs, pending_annotations, acyclic_types, flags, sources_by_arena, source, depth)
             if else_body = node.else_body
-              collect_top_level_nodes(arena, else_body, def_nodes, class_nodes, module_nodes, enum_nodes, macro_nodes, alias_nodes, lib_nodes, main_exprs, flags, sources_by_arena, source, depth)
+              collect_top_level_nodes(arena, else_body, def_nodes, class_nodes, module_nodes, enum_nodes, macro_nodes, alias_nodes, lib_nodes, main_exprs, pending_annotations, acyclic_types, flags, sources_by_arena, source, depth)
             end
           end
         when Frontend::MacroLiteralNode
           collect_macro_literal_exprs(arena, node, flags).each do |expr|
-            collect_top_level_nodes(arena, expr, def_nodes, class_nodes, module_nodes, enum_nodes, macro_nodes, alias_nodes, lib_nodes, main_exprs, flags, sources_by_arena, source, depth)
+            collect_top_level_nodes(arena, expr, def_nodes, class_nodes, module_nodes, enum_nodes, macro_nodes, alias_nodes, lib_nodes, main_exprs, pending_annotations, acyclic_types, flags, sources_by_arena, source, depth)
           end
           if raw_text = macro_literal_raw_text(node, source)
             macro_literal_texts_from_raw(raw_text, flags).each do |text|
@@ -1055,7 +1127,7 @@ module CrystalV2
               if program = parse_macro_literal_program(text)
                 sources_by_arena[program.arena] = text
                 program.roots.each do |inner_id|
-                  collect_top_level_nodes(program.arena, inner_id, def_nodes, class_nodes, module_nodes, enum_nodes, macro_nodes, alias_nodes, lib_nodes, main_exprs, flags, sources_by_arena, text, depth + 1)
+                  collect_top_level_nodes(program.arena, inner_id, def_nodes, class_nodes, module_nodes, enum_nodes, macro_nodes, alias_nodes, lib_nodes, main_exprs, pending_annotations, acyclic_types, flags, sources_by_arena, text, depth + 1)
                 end
               end
             end
@@ -1868,6 +1940,21 @@ module CrystalV2
         end
       end
 
+      private def valid_mm_mode?(mode : String) : Bool
+        mode == "conservative" || mode == "balanced" || mode == "aggressive"
+      end
+
+      private def memory_config_for(options : Options) : HIR::MemoryConfig
+        mode = case options.mm_mode
+               when "conservative" then HIR::MemoryConfig::Mode::Conservative
+               when "balanced" then HIR::MemoryConfig::Mode::Balanced
+               when "aggressive" then HIR::MemoryConfig::Mode::Aggressive
+               else
+                 HIR::MemoryConfig::Mode::Balanced
+               end
+        HIR::MemoryConfig.new(stack_threshold: options.mm_stack_threshold, mode: mode)
+      end
+
       private def log(options : Options, out_io : IO, msg : String)
         out_io.puts msg if options.verbose
       end
@@ -1902,6 +1989,21 @@ module CrystalV2
         end
         if (mir = timings["mir"]?)
           parts << "mir=#{mir.round(1)}"
+        end
+        if (mm_stack = timings["mm_stack"]?)
+          parts << "mm_stack=#{mm_stack.to_i}"
+        end
+        if (mm_slab = timings["mm_slab"]?)
+          parts << "mm_slab=#{mm_slab.to_i}"
+        end
+        if (mm_arc = timings["mm_arc"]?)
+          parts << "mm_arc=#{mm_arc.to_i}"
+        end
+        if (mm_atomic = timings["mm_atomic"]?)
+          parts << "mm_atomic=#{mm_atomic.to_i}"
+        end
+        if (mm_gc = timings["mm_gc"]?)
+          parts << "mm_gc=#{mm_gc.to_i}"
         end
         if (mir_funcs = timings["mir_funcs"]?)
           parts << "mir_funcs=#{mir_funcs.to_i}"

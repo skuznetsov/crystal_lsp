@@ -674,6 +674,13 @@ The key insight is: **Don't compete with LLVM, complement it.**
 - [x] Validate lazy HIR lowering for dynamic dispatch (virtual calls / module mixins) to avoid pruning needed methods (2025-12-20)
   - Virtual calls now expand reachability by base method name; spec covers HIR reachability for virtual calls.
 
+### GC Minimization (DX / Bootstrap)
+- [x] Wire CLI/driver `--mm=conservative|balanced|aggressive` to HIR MemoryConfig.
+- [x] Add `--mm-stack-threshold` tuning + `--no-gc` diagnostic mode (fail on GC allocations).
+- [x] Report memory strategy totals in `--stats` output.
+- [x] Reduce false-positive GC via taint refinement (thread_shared / ffi_exposed) + specs.
+- [x] Optional: type-info-backed cycle detection + `@[Acyclic]` override.
+
 ### 5.3.6 LTP/WBA Optimization Framework
 
 **Status:** 🔧 WIP (2025-12-11)

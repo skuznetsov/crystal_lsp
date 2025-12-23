@@ -14,8 +14,9 @@ class MockTypeInfoProvider
   include Crystal::HIR::TypeInfoProvider
 
   @types : Hash(String, Hash(String, String))
+  @acyclic_types : Set(String)
 
-  def initialize(@types = {} of String => Hash(String, String))
+  def initialize(@types = {} of String => Hash(String, String), @acyclic_types = Set(String).new)
   end
 
   def class_names : Array(String)
@@ -24,6 +25,10 @@ class MockTypeInfoProvider
 
   def instance_var_types(class_name : String) : Hash(String, String)
     @types[class_name]? || {} of String => String
+  end
+
+  def acyclic_type_names : Set(String)
+    @acyclic_types
   end
 end
 
@@ -82,6 +87,21 @@ describe Crystal::HIR::TaintAnalyzer do
       analyzer.analyze
 
       analyzer.cyclic?("Node").should be_true
+    end
+
+    it "honors @[Acyclic] override" do
+      type_info = MockTypeInfoProvider.new({
+        "Node" => {"@next" => "Node?"},
+      }, Set{"Node"})
+
+      mod, func = create_function
+      entry = func.get_block(func.entry_block)
+      entry.terminator = Crystal::HIR::Return.new(nil)
+
+      analyzer = Crystal::HIR::TaintAnalyzer.new(func, type_info)
+      analyzer.analyze
+
+      analyzer.cyclic?("Node").should be_false
     end
 
     it "does not mark non-cyclic types" do
@@ -267,7 +287,7 @@ describe Crystal::HIR::TaintAnalyzer do
       str.taints.ffi_exposed?.should be_true
     end
 
-    it "detects double-underscore methods as FFI" do
+    it "marks extern call arguments as FFIExposed" do
       mod, func = create_function
 
       entry = func.get_block(func.entry_block)
@@ -275,8 +295,8 @@ describe Crystal::HIR::TaintAnalyzer do
       ptr = Crystal::HIR::Allocate.new(func.next_value_id, Crystal::HIR::TypeRef.new(100_u32))
       entry.add(ptr)
 
-      # Call to __some_c_function
-      call = Crystal::HIR::Call.new(func.next_value_id, Crystal::HIR::TypeRef::VOID, nil, "__some_c_function", [ptr.id])
+      # extern_call @puts(ptr)
+      call = Crystal::HIR::ExternCall.new(func.next_value_id, Crystal::HIR::TypeRef::VOID, "puts", [ptr.id])
       entry.add(call)
 
       entry.terminator = Crystal::HIR::Return.new(nil)
@@ -289,7 +309,7 @@ describe Crystal::HIR::TaintAnalyzer do
   end
 
   describe "thread sharing detection" do
-    it "marks spawn arguments as ThreadShared" do
+    it "does not mark spawn non-closure args as ThreadShared" do
       mod, func = create_function
 
       entry = func.get_block(func.entry_block)
@@ -307,7 +327,7 @@ describe Crystal::HIR::TaintAnalyzer do
       analyzer = Crystal::HIR::TaintAnalyzer.new(func)
       analyzer.analyze
 
-      data.taints.thread_shared?.should be_true
+      data.taints.thread_shared?.should be_false
     end
 
     it "propagates ThreadShared back through copies" do
@@ -323,8 +343,10 @@ describe Crystal::HIR::TaintAnalyzer do
       copy = Crystal::HIR::Copy.new(func.next_value_id, data.type, data.id)
       entry.add(copy)
 
-      # %2 = call spawn(copy)
-      call = Crystal::HIR::Call.new(func.next_value_id, Crystal::HIR::TypeRef::VOID, nil, "spawn", [copy.id])
+      # %2 = call channel.send(copy)
+      channel = Crystal::HIR::Allocate.new(func.next_value_id, Crystal::HIR::TypeRef.new(101_u32))
+      entry.add(channel)
+      call = Crystal::HIR::Call.new(func.next_value_id, Crystal::HIR::TypeRef::VOID, channel.id, "send", [copy.id])
       entry.add(call)
 
       entry.terminator = Crystal::HIR::Return.new(nil)
@@ -606,9 +628,11 @@ describe Crystal::HIR::TaintAnalyzer do
       data = Crystal::HIR::Allocate.new(func.next_value_id, Crystal::HIR::TypeRef.new(101_u32))
       entry.add(data)
 
-      # Mark data as thread-shared
-      spawn_call = Crystal::HIR::Call.new(func.next_value_id, Crystal::HIR::TypeRef::VOID, nil, "spawn", [data.id])
-      entry.add(spawn_call)
+      # Mark data as thread-shared via channel send
+      channel = Crystal::HIR::Allocate.new(func.next_value_id, Crystal::HIR::TypeRef.new(102_u32))
+      entry.add(channel)
+      send_call = Crystal::HIR::Call.new(func.next_value_id, Crystal::HIR::TypeRef::VOID, channel.id, "send", [data.id])
+      entry.add(send_call)
 
       # %3 = field_set container.@data = data
       field_set = Crystal::HIR::FieldSet.new(func.next_value_id, Crystal::HIR::TypeRef::VOID, container.id, "@data", data.id)
@@ -646,9 +670,11 @@ describe Crystal::HIR::TaintAnalyzer do
       ffi_call = Crystal::HIR::Call.new(func.next_value_id, Crystal::HIR::TypeRef::VOID, data1.id, "to_unsafe", [] of Crystal::HIR::ValueId)
       entry.add(ffi_call)
 
-      # Make data2 thread-shared
-      spawn_call = Crystal::HIR::Call.new(func.next_value_id, Crystal::HIR::TypeRef::VOID, nil, "spawn", [data2.id])
-      entry.add(spawn_call)
+      # Make data2 thread-shared via channel send
+      channel = Crystal::HIR::Allocate.new(func.next_value_id, Crystal::HIR::TypeRef.new(102_u32))
+      entry.add(channel)
+      send_call = Crystal::HIR::Call.new(func.next_value_id, Crystal::HIR::TypeRef::VOID, channel.id, "send", [data2.id])
+      entry.add(send_call)
 
       entry.terminator = Crystal::HIR::Return.new(nil)
 
@@ -669,8 +695,10 @@ describe Crystal::HIR::TaintAnalyzer do
       data = Crystal::HIR::Allocate.new(func.next_value_id, Crystal::HIR::TypeRef.new(100_u32))
       entry.add(data)
 
-      spawn_call = Crystal::HIR::Call.new(func.next_value_id, Crystal::HIR::TypeRef::VOID, nil, "spawn", [data.id])
-      entry.add(spawn_call)
+      channel = Crystal::HIR::Allocate.new(func.next_value_id, Crystal::HIR::TypeRef.new(101_u32))
+      entry.add(channel)
+      send_call = Crystal::HIR::Call.new(func.next_value_id, Crystal::HIR::TypeRef::VOID, channel.id, "send", [data.id])
+      entry.add(send_call)
 
       entry.terminator = Crystal::HIR::Return.new(nil)
 
