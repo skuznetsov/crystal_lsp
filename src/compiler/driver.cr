@@ -35,8 +35,10 @@ module Crystal::V2
     property pgo_generate : Bool = false
     property pgo_profile : String = ""
     property link_libraries : Array(String) = [] of String
+    @trace_driver : Bool = false
 
     def initialize
+      @trace_driver = ENV.has_key?("CRYSTAL_V2_DRIVER_TRACE")
     end
 
     def parse_args(args : Array(String))
@@ -100,12 +102,14 @@ module Crystal::V2
     end
 
     def compile
+      trace_driver("[DRIVER_TRACE] compile() started")
       log "=== Crystal v2 Compiler ==="
       log "Input: #{@input_file}"
       log "Output: #{@output_file}"
 
       # Step 1: Parse source (with require support)
       log "\n[1/5] Parsing..."
+      trace_driver("[DRIVER_TRACE] [1/5] Parsing...")
 
       # Track loaded files to avoid duplicates
       loaded_files = Set(String).new
@@ -117,18 +121,23 @@ module Crystal::V2
       unless @no_prelude
         prelude_path = File.join(STDLIB_PATH, "prelude.cr")
         if File.exists?(prelude_path)
+          trace_driver("[DRIVER_TRACE] Loading prelude...")
           log "  Loading prelude: #{prelude_path}"
           parse_file_recursive(prelude_path, all_arenas, loaded_files)
+          trace_driver("[DRIVER_TRACE] Prelude loaded, all_arenas.size=#{all_arenas.size}")
         end
       end
 
       # Parse user's input file
+      trace_driver("[DRIVER_TRACE] Parsing user file...")
       parse_file_recursive(@input_file, all_arenas, loaded_files)
+      trace_driver("[DRIVER_TRACE] User file parsed")
 
       total_exprs = all_arenas.sum { |t| t[1].size }
       log "  Files: #{all_arenas.size}, Expressions: #{total_exprs}"
 
       # Step 2: Lower to HIR
+      trace_driver("[DRIVER_TRACE] [2/5] Lowering to HIR...")
       log "\n[2/5] Lowering to HIR..."
 
       # Use first file's arena for the converter (it merges all)
@@ -479,6 +488,12 @@ module Crystal::V2
       puts msg if @verbose
     end
 
+    private def trace_driver(message : String) : Nil
+      return unless @trace_driver
+      STDERR.puts message
+      STDERR.flush
+    end
+
     # Recursively parse files, handling require statements
     private def parse_file_recursive(
       file_path : String,
@@ -491,6 +506,7 @@ module Crystal::V2
       # Skip if already loaded
       return if loaded.includes?(abs_path)
       loaded << abs_path
+      trace_driver("[DRIVER_TRACE] parse_file: #{abs_path}")
 
       unless File.exists?(abs_path)
         STDERR.puts "File not found: #{abs_path}"
@@ -504,12 +520,14 @@ module Crystal::V2
       program = parser.parse_program
       arena = program.arena
       exprs = program.roots
+      trace_driver("[DRIVER_TRACE] parsed #{abs_path}, #{exprs.size} exprs")
 
       # Extract require paths and process them first (dependencies before dependents)
       base_dir = File.dirname(abs_path)
       exprs.each do |expr_id|
         process_require_node(arena, expr_id, base_dir, results, loaded)
       end
+      trace_driver("[DRIVER_TRACE] done requires for #{File.basename(abs_path)}")
 
       # Add this file's results (after dependencies)
       results << {arena, exprs, abs_path}
@@ -523,20 +541,30 @@ module Crystal::V2
       loaded : Set(String)
     )
       node = arena[expr_id]
+      # Uncomment for debug: STDERR.puts "[DRIVER_TRACE] process_require_node: #{node.class}"
       case node
       when CrystalV2::Compiler::Frontend::RequireNode
         path_node = arena[node.path]
         if path_node.is_a?(CrystalV2::Compiler::Frontend::StringNode)
           req_path = String.new(path_node.value)
+          trace_driver("[DRIVER_TRACE] require '#{req_path}' from #{base_dir}")
           resolved = resolve_require_path(req_path, base_dir)
+          trace_driver("[DRIVER_TRACE] resolved to: #{resolved || "nil"}")
           if resolved
+            if loaded.includes?(resolved)
+              trace_driver("[DRIVER_TRACE] already loaded, skipping")
+            else
+              trace_driver("[DRIVER_TRACE] will parse: #{resolved}")
+            end
             parse_file_recursive(resolved, results, loaded)
           else
-            log "  Warning: Could not resolve require '#{req_path}'"
+            trace_driver("[DRIVER_TRACE] WARN: Could not resolve require '#{req_path}'")
           end
         end
       when CrystalV2::Compiler::Frontend::MacroIfNode
+        trace_driver("[DRIVER_TRACE] MacroIfNode processing")
         condition = evaluate_macro_condition(arena, node.condition, CrystalV2::Runtime.target_flags)
+        trace_driver("[DRIVER_TRACE] MacroIfNode condition=#{condition.inspect}")
         if condition == true
           process_require_node(arena, node.then_body, base_dir, results, loaded)
         elsif condition == false
@@ -549,7 +577,9 @@ module Crystal::V2
             process_require_node(arena, else_body, base_dir, results, loaded)
           end
         end
+        trace_driver("[DRIVER_TRACE] MacroIfNode done")
       when CrystalV2::Compiler::Frontend::MacroLiteralNode
+        trace_driver("[DRIVER_TRACE] MacroLiteralNode processing (#{node.pieces.size} pieces)")
         macro_literal_require_texts(arena, node, CrystalV2::Runtime.target_flags).each do |text|
           next unless text.includes?("require")
           text.scan(/\brequire\s*["']?([^"'\s]+)["']?/) do |match|
@@ -644,6 +674,7 @@ module Crystal::V2
       control_stack = [] of {Bool, Bool, Bool} # {parent_active, branch_taken, active}
       active = true
       idx = 0
+      trace_driver("[DRIVER_TRACE] macro_literal_texts_from_raw: text.size=#{text.size}")
 
       while idx < text.size
         tag_start = text.index("{%", idx)
@@ -702,7 +733,10 @@ module Crystal::V2
           control_stack << {parent_active, branch_taken, branch_active}
           active = branch_active
         elsif tag.starts_with?("elsif ")
-          next if control_stack.empty?
+          if control_stack.empty?
+            idx = tag_end + 2
+            next
+          end
           parent_active, branch_taken, _ = control_stack[-1]
           cond = evaluate_macro_condition_text(tag.lstrip("elsif").strip, flags)
           take = !branch_taken && cond == true
@@ -717,7 +751,10 @@ module Crystal::V2
           control_stack[-1] = {parent_active, branch_taken, branch_active}
           active = branch_active
         elsif tag == "else"
-          next if control_stack.empty?
+          if control_stack.empty?
+            idx = tag_end + 2
+            next
+          end
           parent_active, branch_taken, _ = control_stack[-1]
           branch_active = parent_active && !branch_taken
           control_stack[-1] = {parent_active, true, branch_active}
