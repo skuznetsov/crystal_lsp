@@ -1217,6 +1217,30 @@ describe Crystal::HIR::AstToHir do
     end
   end
 
+  describe "generic specialization return inference" do
+    it "infers return types for specialized generic methods" do
+      code = <<-CRYSTAL
+        class Box(T)
+          def initialize(@value : T)
+          end
+
+          def value
+            @value
+          end
+        end
+
+        def use
+          Box(Int32).new(1).value
+        end
+      CRYSTAL
+
+      converter = lower_program(code)
+      func = converter.module.functions.find { |f| f.name == "Box(Int32)#value" }
+      func.should_not be_nil
+      func.not_nil!.return_type.should eq(Crystal::HIR::TypeRef::INT32)
+    end
+  end
+
   describe "macro if in module bodies" do
     it "registers module methods from active flag branches" do
       code = <<-CRYSTAL
