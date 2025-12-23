@@ -30,6 +30,8 @@ about syntax or types and should match what the original compiler would report.
 - [x] Hover/definition fallback to cached expr types (scoped lookup fixes; e.g., `cas` → `Array(Atom)`)
 - [x] lsp_probe speaks correct binary Content-Length (no dropped responses)
 - [x] TypeIndex binary storage (5.6x faster than JSON)
+- [x] HIR macro condition evaluation: tri-state merge + duplicate module method guard (2025-12-23)
+- [x] Driver trace logging gated via `CRYSTAL_V2_DRIVER_TRACE` (2025-12-23)
 
 ### Pending (9 tests)
 - 2 HIR type operation lowering (`as`, `as?`) specs (pending while type ops are still being aligned)
@@ -662,6 +664,7 @@ The key insight is: **Don't compete with LLVM, complement it.**
 - [x] LLVM opt/llc artifact cache keyed by ll hash + flags (2025-12-23)
 - [x] AST cache key stabilized (FNV hash) and verified hits on warm run (parse ~164ms → ~79ms)
 - [x] Fix AST cache save failures (ClassNode→StructNode, SplatNode→Unary) seen in verbose compile logs (2025-12-20)
+- [x] Optimize macro-literal require scanning (linear scan, avoids String#index O(n^2)); prelude parse now ~47ms on bootstrap_array (2025-12-21)
 - [x] Add `--no-llvm-metadata` to skip type metadata (small LLVM time reduction)
 - [x] Reachability roots include `__crystal_main` (avoid emitting all funcs; LLVM ≈ 0.35s on /tmp/cv2_smoke.cr)
 - [x] Investigate release compile latency on small programs (43s on /tmp/cv2_smoke.cr); add per-phase timing + cache hit diagnostics (2025-12-20)
@@ -966,6 +969,10 @@ enum:      64  ← ✅ DONE
 | Block-return generic substitution | Substitute block-return type params in generic method return types (2025-12-20) |
 | Module-typed receiver resolution | Resolve module-typed locals to unique includer methods; arity+type-aware includer filtering (2025-12-20) |
 | Member access default args | Apply defaults + lazy lowering for no-parens member calls (2025-12-20) |
+| Generic param substitution before cache | Substitute type params before type cache lookup (fixes `T` leaking into mangled names) (2025-12-27) |
+| Tuple literal type normalization | Normalize `{A, B}` to `Tuple(A, B)` in type_ref_for_name (2025-12-27) |
+| Operator lazy lowering | Binary/unary operator calls now remember callsite arg types and lazy-lower targets (2025-12-27) |
+| Call-site type refinement | Refine annotated base types (Array/Hash/etc.) using concrete call types (2025-12-27) |
 
 ### 8.2 Current Status
 
@@ -981,7 +988,8 @@ r2 = maybe(false)  # => nil
 
 **Prelude build progress (with stdlib/prelude):**
 - Reaches LLVM IR emission and `opt -O1` successfully; link still fails due to missing runtime/stdlib symbols (expected at this stage).
-- Timing snapshot (release + `--stats`): parse prelude ~214ms, HIR ~7.6s, MIR ~5.4s, LLVM ~33s, total ~48s; link failure is the current blocker.
+- Timing snapshot (release + `--stats --no-llvm-opt --no-llvm-metadata`): parse prelude ~167ms, HIR ~2.0s, MIR ~0.3ms, LLVM ~1.8ms, total ~2.2s; link failure is the current blocker.
+- Linker missing symbols (recent minimal unicode_use run): `_Exception_initialize`, `_IO__FileDescriptor_sync__Bool`, `_Pointer_UInt8__realloc_Int32`, `_Pointer_UInt8__to_f64`, `_RuntimeError_from_errno_String`, `_Slice_UInt8_____`, `_Tuple_Int32__Int32__Int32__size`, `_tap`.
 
 **Stdlib requires advanced features not yet implemented:**
 
