@@ -34,8 +34,7 @@ about syntax or types and should match what the original compiler would report.
 - [x] Driver trace logging gated via `CRYSTAL_V2_DRIVER_TRACE` (2025-12-23)
 - [x] Resolve module method calls without parens (`M.foo`) to static dispatch (2025-12-23)
 
-### Pending (7 tests)
-- 6 macro whitespace trimming (`{%- -%}`, `{%~ ~%}`) - for web templates
+### Pending (1 test)
 - 1 invalid ASM syntax test (intentionally pending)
 
 ---
@@ -50,7 +49,7 @@ about syntax or types and should match what the original compiler would report.
 - [x] `out` keyword (C bindings output parameter + identifier fallback)
 
 ### Remaining Edge Cases (Low Priority)
-- [ ] Macro whitespace trimming (`{%- -%}`, `{%~ ~%}`) - web templates only
+- [x] Macro whitespace trimming (`{%- -%}`, `{%~ ~%}`) - web templates only
 - [ ] Full `{% ... %}` complex nested cases (rare in practice)
 
 ---
