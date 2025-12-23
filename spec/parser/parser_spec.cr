@@ -116,7 +116,7 @@ bar")
   end
 
   # ECR feature, not Crystal macros
-  pending "trims whitespace around macro expressions" do
+  it "trims whitespace around macro expressions" do
     source = <<-'CR'
       macro trim_macro
         line1
@@ -141,7 +141,7 @@ bar")
   end
 
   # ECR feature, not Crystal macros
-  pending "trims whitespace around macro expressions using tilde" do
+  it "trims whitespace around macro expressions using tilde" do
     source = <<-'CR'
       macro trim_macro
         line1
@@ -220,7 +220,7 @@ bar")
   end
 
   # ECR feature, not Crystal macros
-  pending "parses macro while loop with trims" do
+  it "parses macro while loop with trims" do
     source = <<-CR
       macro trim_loop
         {%- while active? -%}
@@ -344,7 +344,7 @@ bar")
   end
 
   # ECR feature, not Crystal macros
-  pending "parses macro comment block with trim markers" do
+  it "parses macro comment block with trim markers" do
     source = <<-CR
       macro trim_comment
         line1
@@ -417,7 +417,7 @@ bar")
   end
 
   # ECR feature, not Crystal macros
-  pending "handles mixed dash and tilde trim markers" do
+  it "handles mixed dash and tilde trim markers" do
     source = <<-'CR'
       macro mixed_trims
         line1
@@ -444,7 +444,7 @@ bar")
   end
 
   # ECR feature, not Crystal macros
-  pending "handles consecutive expressions with shared trims" do
+  it "handles consecutive expressions with shared trims" do
     source = <<-'CR'
       macro consecutive
         {{ a -}}{{ b }}{{ c -}}

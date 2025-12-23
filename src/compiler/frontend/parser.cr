@@ -7176,7 +7176,7 @@ module CrystalV2
                 buffer_start_token = nil
                 macro_trim_left ||= already_empty && trim_applied
 
-                piece, skip_whitespace = parse_macro_expression_piece
+                piece, skip_whitespace = parse_macro_expression_piece(left_trim)
                 pieces << piece
 
                 trim_next_left = skip_whitespace
@@ -12100,9 +12100,11 @@ module CrystalV2
             return next_token.kind == Token::Kind::RBrace
           elsif token.kind == Token::Kind::RBrace
             return peek_token.kind == Token::Kind::RBrace
-          elsif token.kind == Token::Kind::Minus
+          elsif token.kind == Token::Kind::Minus || token.kind == Token::Kind::Tilde
             next_token = peek_token
             if next_token.kind == Token::Kind::PercentRBrace
+              return true
+            elsif next_token.kind == Token::Kind::MacroExprEnd
               return true
             elsif next_token.kind == Token::Kind::Percent
               next_next = peek_token(2)
@@ -12238,7 +12240,8 @@ module CrystalV2
 
         private def macro_trim_token?(token : Token) : Bool
           token.kind == Token::Kind::Minus ||
-            (token.kind == Token::Kind::Operator && slice_eq?(token.slice, "-"))
+            token.kind == Token::Kind::Tilde ||
+            (token.kind == Token::Kind::Operator && (slice_eq?(token.slice, "-") || slice_eq?(token.slice, "~")))
         end
 
         private def macro_trim_operator? : Bool
@@ -12306,14 +12309,15 @@ module CrystalV2
               return true
             elsif token.kind == Token::Kind::RBrace
               return true if peek_token.kind == Token::Kind::RBrace
-            elsif token.kind == Token::Kind::Minus
+            elsif token.kind == Token::Kind::Minus || token.kind == Token::Kind::Tilde
+              return true if peek_token.kind == Token::Kind::MacroExprEnd
               return true if peek_token.kind == Token::Kind::RBrace && peek_token(2).kind == Token::Kind::RBrace
             end
           when :control
             # Close on '%}' or '-%}' as either combined or split tokens
             if token.kind == Token::Kind::PercentRBrace
               return true
-            elsif token.kind == Token::Kind::Minus
+            elsif token.kind == Token::Kind::Minus || token.kind == Token::Kind::Tilde
               nxt = peek_token(1)
               return true if nxt.kind == Token::Kind::PercentRBrace
               return true if nxt.kind == Token::Kind::Percent && peek_token(2).kind == Token::Kind::RBrace
@@ -13411,7 +13415,7 @@ module CrystalV2
           @arena.add_typed(MacroExpressionNode.new(full_span, expr))
         end
 
-        private def parse_macro_expression_piece
+        private def parse_macro_expression_piece(left_trim : Bool)
           start_token = current_token
           if current_token.kind == Token::Kind::MacroExprStart
             advance
@@ -13419,6 +13423,10 @@ module CrystalV2
             # Phase 15: { is LBrace token
             expect_operator(Token::Kind::LBrace)
             expect_operator(Token::Kind::LBrace)
+          end
+          if macro_trim_token?(current_token)
+            left_trim = true
+            advance
           end
           skip_macro_whitespace
           # Use parse_op_assign to handle assignments (a = 1) and wrap with
@@ -13429,6 +13437,7 @@ module CrystalV2
           }
           skip_macro_whitespace
 
+          right_trim = macro_trim_operator?
           closing_span = nil
           if current_token.kind == Token::Kind::MacroExprEnd
             closing_span = current_token.span
@@ -13441,11 +13450,11 @@ module CrystalV2
           end
 
           newline_escape = consume_macro_newline_escape?
-          skip_whitespace = newline_escape
+          skip_whitespace = newline_escape || right_trim
 
           macro_span = closing_span ? start_token.span.cover(closing_span) : start_token.span
           macro_expr_id = @arena.add_typed(MacroExpressionNode.new(macro_span, expr))
-          piece = MacroPiece.expression(macro_expr_id, false, false, macro_span)
+          piece = MacroPiece.expression(macro_expr_id, left_trim, right_trim, macro_span)
           {piece, skip_whitespace}
         end
 
