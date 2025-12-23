@@ -1006,8 +1006,8 @@ r2 = maybe(false)  # => nil
 
 ### 8.3 Known Limitations
 
-1. **typeof in type positions**: `Array(typeof(Enumerable.element_type(self)))` is emitted as literal string instead of resolved type
-2. **Block parameters**: Methods with `& : Pointer(T) ->` block types not fully lowered
+1. **typeof in type positions**: remaining gaps for module `self`/macro contexts; nested `Enumerable.element_type` chains on locals now resolve
+2. **Block parameters**: callee-provided block param types now applied for non-inlined calls; remaining gaps around return-type constraints for `Proc` signatures without outputs
 3. **Module mixin methods**: Include expansion works, but module-typed receiver resolution is still incomplete (beyond simple `Type.new(...)` return bodies).
 
 ### 8.4 TODO
