@@ -73,6 +73,39 @@ private def lower_program(code : String) : Crystal::HIR::AstToHir
   converter
 end
 
+private def lower_program_with_sources(code : String) : Crystal::HIR::AstToHir
+  arena, exprs = parse(code)
+  sources_by_arena = {arena => code}
+  converter = Crystal::HIR::AstToHir.new(arena, sources_by_arena: sources_by_arena)
+  converter.arena = arena
+
+  module_nodes = [] of CrystalV2::Compiler::Frontend::ModuleNode
+  class_nodes = [] of CrystalV2::Compiler::Frontend::ClassNode
+  def_nodes = [] of CrystalV2::Compiler::Frontend::DefNode
+
+  exprs.each do |expr_id|
+    node = arena[expr_id]
+    case node
+    when CrystalV2::Compiler::Frontend::ModuleNode
+      module_nodes << node
+    when CrystalV2::Compiler::Frontend::ClassNode
+      class_nodes << node
+    when CrystalV2::Compiler::Frontend::DefNode
+      def_nodes << node
+    end
+  end
+
+  module_nodes.each { |node| converter.register_module(node) }
+  class_nodes.each { |node| converter.register_class(node) }
+  def_nodes.each { |node| converter.register_function(node) }
+
+  module_nodes.each { |node| converter.lower_module(node) }
+  class_nodes.each { |node| converter.lower_class(node) }
+  def_nodes.each { |node| converter.lower_def(node) }
+
+  converter
+end
+
 # Helper to get HIR text output
 private def hir_text(func : Crystal::HIR::Function) : String
   String.build { |io| func.to_s(io) }
@@ -1181,6 +1214,27 @@ describe Crystal::HIR::AstToHir do
 
       converter = lower_program(code)
       converter.class_info.has_key?("Box(Int32)").should be_true
+    end
+  end
+
+  describe "macro if in module bodies" do
+    it "registers module methods from active flag branches" do
+      code = <<-CRYSTAL
+        module M
+          {% if flag?(:darwin) %}
+            def self.foo
+              1
+            end
+          {% end %}
+        end
+
+        def use
+          M.foo
+        end
+      CRYSTAL
+
+      converter = lower_program_with_sources(code)
+      converter.module.has_function?("M.foo").should be_true
     end
   end
 
