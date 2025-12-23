@@ -4544,6 +4544,12 @@ module Crystal::HIR
         if type_name = lookup_typeof_local_name(name)
           return type_name if module_like_type_name?(type_name)
         end
+        if locals = @current_typeof_locals
+          if type_ref = locals[name]?
+            resolved = get_type_name_from_ref(type_ref)
+            return resolved if module_like_type_name?(resolved)
+          end
+        end
       end
       nil
     end
