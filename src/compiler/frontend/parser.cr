@@ -12777,9 +12777,44 @@ module CrystalV2
         end
 
         # Phase 103B: Parse {% control %} in expression context
-        # Called from parse_prefix when seeing {% token sequence
-        # Returns MacroIfNode or MacroForNode wrapped in ExprId
+        # Called from parse_prefix when seeing {% token sequence.
+        # Returns MacroIfNode or MacroForNode when possible; falls back to raw MacroLiteral.
         private def parse_percent_macro_control : ExprId
+          keyword_peek = peek_macro_keyword_after_lbracepercent
+          if keyword_peek && keyword_peek.in?("if", "unless", "for", "begin", "verbatim")
+            start_span = consume_macro_control_start
+            return PREFIX_ERROR unless start_span
+
+            if macro_trim_token?(current_token)
+              advance
+            end
+
+            skip_trivia
+
+            keyword_token = current_token
+            keyword_index = @index
+            keyword = token_text(keyword_token)
+            advance
+
+            skip_trivia
+
+            case keyword
+            when "if", "unless"
+              return parse_macro_if_control(start_span, keyword)
+            when "for"
+              return parse_macro_for_control(start_span)
+            when "begin"
+              return parse_macro_begin_control(start_span)
+            when "verbatim"
+              return parse_macro_verbatim_control(start_span)
+            else
+              expr = parse_macro_expression_control(start_span, keyword_token, keyword_index)
+              skip_trivia
+              expect_macro_close("Expected '%}' after macro expression")
+              return expr
+            end
+          end
+
           start_span = current_token.span
           fast_forward_percent_block
           end_span = @previous_token ? @previous_token.not_nil!.span : start_span
