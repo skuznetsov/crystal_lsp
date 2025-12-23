@@ -1002,7 +1002,7 @@ r2 = maybe(false)  # => nil
 | Macro expansion | `getter`, `property` need compile-time expansion | MED |
 
 **Additional codegen gaps (observed):**
-- Top-level `{% if %}` now yields `MacroIfNode`, but its body is `MacroLiteral` text with trimmed whitespace; without macro expansion we still can't register module/def nodes inside.
+- Top-level `{% if flag? %}` bodies now use raw source spans to parse defs/modules for simple flag branches; general macro expansion for complex bodies is still missing.
 
 ### 8.3 Known Limitations
 
