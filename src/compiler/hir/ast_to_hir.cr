@@ -2129,6 +2129,15 @@ module Crystal::HIR
       if module_name.includes?("System::Thread")
         STDERR.puts "[REG_MODULE_METHOD_MACRO] #{module_name}.#{method_name} -> #{full_name}"
       end
+      if @function_defs.has_key?(full_name)
+        if body = member.body
+          @yield_functions.add(full_name) if contains_yield?(body)
+        end
+        if ENV.has_key?("DEBUG_DUP_FUNCTION")
+          STDERR.puts "[DEBUG_DUP_FUNCTION] Skipping duplicate module method: #{full_name}"
+        end
+        return
+      end
       register_function_type(full_name, return_type)
       @function_defs[full_name] = member
       @function_def_arenas[full_name] = @arena
@@ -6359,11 +6368,29 @@ module Crystal::HIR
       end
     end
 
+    private def merge_macro_or(left : Bool?, right : Bool?) : Bool?
+      return true if left == true || right == true
+      return false if left == false && right == false
+      nil
+    end
+
+    private def merge_macro_and(left : Bool?, right : Bool?) : Bool?
+      return false if left == false || right == false
+      return true if left == true && right == true
+      nil
+    end
+
     # Try to evaluate a macro condition expression at compile time
     # Returns true/false if evaluable, nil if not
     private def try_evaluate_macro_condition(condition_id : ExprId) : Bool?
       cond_node = @arena[condition_id]
       case cond_node
+      when CrystalV2::Compiler::Frontend::BoolNode
+        cond_node.value
+      when CrystalV2::Compiler::Frontend::NilNode
+        false
+      when CrystalV2::Compiler::Frontend::MacroExpressionNode
+        try_evaluate_macro_condition(cond_node.expression)
       when CrystalV2::Compiler::Frontend::CallNode
         # Check for flag?(:name) or flag?("name")
         callee = @arena[cond_node.callee]
@@ -6391,20 +6418,18 @@ module Crystal::HIR
         op_str = String.new(cond_node.operator)
         if op_str == "!"
           inner = try_evaluate_macro_condition(cond_node.operand)
-          return !inner if inner
+          return inner.nil? ? nil : !inner
         end
       when CrystalV2::Compiler::Frontend::BinaryNode
         # Handle flag?(:a) || flag?(:b) or flag?(:a) && flag?(:b)
         left = try_evaluate_macro_condition(cond_node.left)
         right = try_evaluate_macro_condition(cond_node.right)
-        if left && right
-          op_str = String.new(cond_node.operator)
-          case op_str
-          when "||"
-            return left || right
-          when "&&"
-            return left && right
-          end
+        op_str = String.new(cond_node.operator)
+        case op_str
+        when "||"
+          return merge_macro_or(left, right)
+        when "&&"
+          return merge_macro_and(left, right)
         end
       end
       nil  # Can't evaluate
@@ -6414,7 +6439,9 @@ module Crystal::HIR
     private def lower_macro_if(ctx : LoweringContext, node : CrystalV2::Compiler::Frontend::MacroIfNode) : ValueId
       # Try to evaluate condition at compile time
       result = try_evaluate_macro_condition(node.condition)
-      STDERR.puts "[MACRO_IF] condition_id=#{node.condition}, result=#{result.inspect}"
+      if ENV.has_key?("DEBUG_MACRO_IF")
+        STDERR.puts "[MACRO_IF] condition_id=#{node.condition}, result=#{result.inspect}"
+      end
 
       if result == true
         # Condition is true - lower the then branch

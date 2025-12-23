@@ -1217,7 +1217,11 @@ module Crystal::HIR
     def create_function(name : String, return_type : TypeRef) : Function
       # Check for duplicates
       if existing = @functions.find { |f| f.name == name }
-        # STDERR.puts "[WARN] Duplicate function: #{name} (existing return: #{existing.return_type.id}, new return: #{return_type.id})"
+        if existing.return_type == TypeRef::VOID && return_type != TypeRef::VOID
+          existing.return_type = return_type
+        elsif existing.return_type != return_type && return_type != TypeRef::VOID && ENV.has_key?("DEBUG_DUP_FUNCTION")
+          STDERR.puts "[DEBUG_DUP_FUNCTION] Duplicate function #{name}: existing=#{existing.return_type.id}, new=#{return_type.id}"
+        end
         return existing
       end
       # Debug disabled for performance
