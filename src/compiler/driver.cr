@@ -624,6 +624,21 @@ module Crystal::V2
       when CrystalV2::Compiler::Frontend::MacroExpressionNode
         collect_top_level_nodes(arena, node.expression, def_nodes, class_nodes, module_nodes, enum_nodes, macro_nodes, main_exprs, flags, sources_by_arena, source, depth)
       when CrystalV2::Compiler::Frontend::MacroIfNode
+        if raw_text = macro_if_raw_text(node, source)
+          parsed_any = false
+          macro_literal_texts_from_raw(raw_text, flags).each do |text|
+            next if text.strip.empty?
+            next if text.includes?("{%") || text.includes?("{{")
+            if program = parse_macro_literal_program(text)
+              parsed_any = true
+              sources_by_arena[program.arena] = text
+              program.roots.each do |inner_id|
+                collect_top_level_nodes(program.arena, inner_id, def_nodes, class_nodes, module_nodes, enum_nodes, macro_nodes, main_exprs, flags, sources_by_arena, text, depth + 1)
+              end
+            end
+          end
+          return if parsed_any
+        end
         condition = evaluate_macro_condition(arena, node.condition, flags)
         if condition == true
           collect_top_level_nodes(arena, node.then_body, def_nodes, class_nodes, module_nodes, enum_nodes, macro_nodes, main_exprs, flags, sources_by_arena, source, depth)
@@ -829,6 +844,21 @@ module Crystal::V2
         end
       end
       builder.to_s
+    end
+
+    private def macro_if_raw_text(
+      node : CrystalV2::Compiler::Frontend::MacroIfNode,
+      source : String
+    ) : String?
+      span = node.span
+      start = span.start_offset
+      length = span.end_offset - span.start_offset
+      return nil if length <= 0
+      return nil if start < 0 || start >= source.bytesize
+      if start + length > source.bytesize
+        length = source.bytesize - start
+      end
+      source.byte_slice(start, length)
     end
 
     private def parse_macro_literal_program(text : String) : CrystalV2::Compiler::Frontend::Program?

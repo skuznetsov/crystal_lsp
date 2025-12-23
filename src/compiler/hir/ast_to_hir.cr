@@ -2030,6 +2030,39 @@ module Crystal::HIR
 
     # Process MacroIfNode inside a module body to extract methods
     private def process_macro_if_in_module(node : CrystalV2::Compiler::Frontend::MacroIfNode, module_name : String)
+      if raw_text = macro_if_raw_text(node)
+        if expanded = expand_flag_macro_text(raw_text)
+          if program = parse_macro_literal_program(expanded)
+            with_arena(program.arena) do
+              program.roots.each do |expr_id|
+                expr_node = @arena[expr_id]
+                case expr_node
+                when CrystalV2::Compiler::Frontend::DefNode
+                  register_module_method_from_def(expr_node, module_name)
+                when CrystalV2::Compiler::Frontend::ClassNode
+                  class_name = String.new(expr_node.name)
+                  full_class_name = "#{module_name}::#{class_name}"
+                  register_class_with_name(expr_node, full_class_name)
+                when CrystalV2::Compiler::Frontend::StructNode
+                  struct_name = String.new(expr_node.name)
+                  full_struct_name = "#{module_name}::#{struct_name}"
+                  register_struct_with_name(expr_node, full_struct_name)
+                when CrystalV2::Compiler::Frontend::ModuleNode
+                  nested_name = String.new(expr_node.name)
+                  full_nested_name = "#{module_name}::#{nested_name}"
+                  register_nested_module(expr_node, full_nested_name)
+                when CrystalV2::Compiler::Frontend::MacroIfNode
+                  process_macro_if_in_module(expr_node, module_name)
+                when CrystalV2::Compiler::Frontend::MacroLiteralNode
+                  process_macro_literal_in_module(expr_node, module_name)
+                end
+              end
+            end
+            return
+          end
+        end
+      end
+
       result = try_evaluate_macro_condition(node.condition)
       if result == true
         process_macro_body_in_module(node.then_body, module_name)
@@ -6635,6 +6668,20 @@ module Crystal::HIR
         end
       end
       builder.to_s
+    end
+
+    private def macro_if_raw_text(node : CrystalV2::Compiler::Frontend::MacroIfNode) : String?
+      source = @sources_by_arena[@arena]?
+      return nil unless source
+      span = node.span
+      start = span.start_offset
+      length = span.end_offset - span.start_offset
+      return nil if length <= 0
+      return nil if start < 0 || start >= source.bytesize
+      if start + length > source.bytesize
+        length = source.bytesize - start
+      end
+      source.byte_slice(start, length)
     end
 
     private def parse_macro_literal_program(code : String) : CrystalV2::Compiler::Frontend::Program?
