@@ -306,6 +306,8 @@ module Crystal::HIR
     # Pending monomorphizations (deferred until after all templates are registered)
     @pending_monomorphizations : Array({String, Array(String), String})
     @defer_monomorphization : Bool
+    # Suppress monomorphization while scanning specialized class bodies.
+    @suppress_monomorphization : Bool
 
     # Current type parameter substitutions for generic lowering
     @type_param_map : Hash(String, String)
@@ -397,6 +399,7 @@ module Crystal::HIR
       @monomorphized = Set(String).new
       @pending_monomorphizations = [] of {String, Array(String), String}
       @defer_monomorphization = true  # Start in deferred mode
+      @suppress_monomorphization = false
       @type_param_map = {} of String => String
       @macro_defs = {} of String => CrystalV2::Compiler::Frontend::MacroDefNode
       @class_accessor_entries = {} of String => ClassAccessorEntry
@@ -2638,6 +2641,8 @@ module Crystal::HIR
     private def register_concrete_class(node : CrystalV2::Compiler::Frontend::ClassNode, class_name : String, is_struct : Bool)
       # Check if class already exists (class reopening)
       existing_info = @class_info[class_name]?
+      mono_debug = ENV.has_key?("DEBUG_MONO") && (class_name.starts_with?("Hash(") || class_name.starts_with?("Set("))
+      mono_start = Time.monotonic if mono_debug
 
       # Collect instance variables and their types
       ivars = [] of IVarInfo
@@ -2673,8 +2678,15 @@ module Crystal::HIR
       init_params = [] of {String, TypeRef}
 
       if body = node.body
+        specialized_class = class_name.includes?("(")
+        if mono_debug
+          STDERR.puts "[MONO] register_concrete_class #{class_name} body_size=#{body.size}"
+        end
+        old_suppress = @suppress_monomorphization
+        @suppress_monomorphization = @suppress_monomorphization || specialized_class
         # PASS 0: Register nested types first so method signatures and bodies can resolve them
         # (e.g., Dir::EntryIterator used as `EntryIterator` inside Dir).
+        pass0_start = Time.monotonic if mono_debug
         body.each do |expr_id|
           member = unwrap_visibility_member(@arena[expr_id])
           case member
@@ -2696,15 +2708,29 @@ module Crystal::HIR
             register_nested_module(member, full_nested_name)
           end
         end
+        if mono_debug && pass0_start
+          elapsed = (Time.monotonic - pass0_start).total_milliseconds
+          STDERR.puts "[MONO] #{class_name} pass0 nested types #{elapsed.round(1)}ms"
+        end
 
+        defined_start = Time.monotonic if mono_debug
         defined_instance_method_full_names = collect_defined_instance_method_full_names(class_name, body)
+        if mono_debug && defined_start
+          elapsed = (Time.monotonic - defined_start).total_milliseconds
+          STDERR.puts "[MONO] #{class_name} collect_defined_instance_methods #{elapsed.round(1)}ms"
+        end
         include_nodes = [] of CrystalV2::Compiler::Frontend::IncludeNode
 
         old_class = @current_class
         @current_class = class_name
         begin
+        body_start = Time.monotonic if mono_debug
         body.each do |expr_id|
           member = unwrap_visibility_member(@arena[expr_id])
+          member_start = mono_debug ? Time.monotonic : nil
+          return_elapsed = nil
+          param_elapsed = nil
+          yield_elapsed = nil
           case member
           when CrystalV2::Compiler::Frontend::IncludeNode
             include_nodes << member
@@ -2748,6 +2774,7 @@ module Crystal::HIR
                         else
                           "#{class_name}##{method_name}"
                         end
+            return_start = mono_debug ? Time.monotonic : nil
             return_type = if rt = member.return_type
                             rt_name = String.new(rt)
                             inferred = module_like_type_name?(rt_name) ? infer_concrete_return_type_from_body(member, class_name) : nil
@@ -2760,16 +2787,18 @@ module Crystal::HIR
                             inferred = infer_getter_return_type(member, ivars)
                             inferred || TypeRef::VOID
                           end
+            return_elapsed = return_start ? (Time.monotonic - return_start).total_milliseconds : nil
             # Collect parameter types for mangling
             method_param_types = [] of TypeRef
             has_block = false
-      if params = member.params
-        params.each do |param|
-          next if named_only_separator?(param)
-          if param.is_block
-            has_block = true
-            next
-          end
+            param_start = mono_debug ? Time.monotonic : nil
+            if params = member.params
+              params.each do |param|
+                next if named_only_separator?(param)
+                if param.is_block
+                  has_block = true
+                  next
+                end
                 param_type = if ta = param.type_annotation
                                type_ref_for_name(String.new(ta))
                              else
@@ -2778,6 +2807,7 @@ module Crystal::HIR
                 method_param_types << param_type
               end
             end
+            param_elapsed = param_start ? (Time.monotonic - param_start).total_milliseconds : nil
             full_name = mangle_function_name(base_name, method_param_types, has_block)
             if ENV.has_key?("DEBUG_NESTED_CLASS") && (class_name.includes?("FileDescriptor") || class_name.includes?("EventLoop"))
               STDERR.puts "[DEBUG_METHOD_REG] #{class_name}: #{method_name} -> #{full_name} (class_method=#{is_class_method})"
@@ -2789,6 +2819,7 @@ module Crystal::HIR
             # Track yield-functions for inline expansion.
             # Note: MIR lowering removes yield-containing functions (inline-only), so we must inline
             # them at call sites. We key by both base and mangled names so resolution can find them.
+            yield_start = mono_debug ? Time.monotonic : nil
             if body = member.body
               if contains_yield?(body)
                 @yield_functions.add(full_name)
@@ -2800,6 +2831,7 @@ module Crystal::HIR
                 @function_def_arenas[full_name] = @arena
               end
             end
+            yield_elapsed = yield_start ? (Time.monotonic - yield_start).total_milliseconds : nil
 
             # Capture initialize parameters for new()
             # Also extract ivars from shorthand: def initialize(@value : T)
@@ -2962,9 +2994,35 @@ module Crystal::HIR
             # Also register short name for local resolution within class
             register_type_alias(alias_name, target_name)
           end
+          if mono_debug && member_start
+            elapsed = (Time.monotonic - member_start).total_milliseconds
+            if elapsed > 50.0
+              detail = case member
+                       when CrystalV2::Compiler::Frontend::DefNode
+                         return_ms = return_elapsed ? return_elapsed.round(1) : 0.0
+                         param_ms = param_elapsed ? param_elapsed.round(1) : 0.0
+                         yield_ms = yield_elapsed ? yield_elapsed.round(1) : 0.0
+                         "def #{String.new(member.name)} (return=#{return_ms}ms params=#{param_ms}ms yield=#{yield_ms}ms)"
+                       when CrystalV2::Compiler::Frontend::IncludeNode
+                         "include"
+                       when CrystalV2::Compiler::Frontend::InstanceVarDeclNode
+                         "ivar #{String.new(member.name)}"
+                       when CrystalV2::Compiler::Frontend::ClassVarDeclNode
+                         "cvar #{String.new(member.name)}"
+                       else
+                         member.class.to_s
+                       end
+              STDERR.puts "[MONO] #{class_name} slow member #{detail} #{elapsed.round(1)}ms"
+            end
+          end
+        end
+        if mono_debug && body_start
+          elapsed = (Time.monotonic - body_start).total_milliseconds
+          STDERR.puts "[MONO] #{class_name} body scan #{elapsed.round(1)}ms"
         end
 
         # Expand module mixins: register included module instance method signatures.
+        include_start = Time.monotonic if mono_debug
         visited_modules = Set(String).new
         include_nodes.each do |inc|
           offset = register_module_instance_methods_for(
@@ -2977,8 +3035,17 @@ module Crystal::HIR
             is_struct
           )
         end
+        if mono_debug && include_start
+          elapsed = (Time.monotonic - include_start).total_milliseconds
+          STDERR.puts "[MONO] #{class_name} include expansion #{elapsed.round(1)}ms"
+        end
         ensure
           @current_class = old_class
+          @suppress_monomorphization = old_suppress
+        end
+        if mono_debug && mono_start
+          elapsed = (Time.monotonic - mono_start).total_milliseconds
+          STDERR.puts "[MONO] register_concrete_class #{class_name} total #{elapsed.round(1)}ms"
         end
       end
 
@@ -3312,7 +3379,14 @@ module Crystal::HIR
       pending = @pending_monomorphizations.dup
       @pending_monomorphizations.clear
 
-      pending.each do |(base_name, type_args, specialized_name)|
+      if ENV.has_key?("DEBUG_MONO")
+        STDERR.puts "[MONO] Flush pending monomorphizations: #{pending.size}"
+      end
+
+      pending.each_with_index do |(base_name, type_args, specialized_name), idx|
+        if ENV.has_key?("DEBUG_MONO") && (idx % 100 == 0 || idx == pending.size - 1)
+          STDERR.puts "[MONO] #{idx + 1}/#{pending.size}: #{specialized_name}"
+        end
         next if @monomorphized.includes?(specialized_name)
         monomorphize_generic_class(base_name, type_args, specialized_name)
       end
@@ -3339,6 +3413,8 @@ module Crystal::HIR
         next true if arg.includes?("typeof(")
         # `self` as a standalone type arg is unresolved
         next true if arg == "self"
+        # NoReturn type args are effectively placeholders; skip monomorphization.
+        next true if arg == "NoReturn"
         # Bare generic class names without type params are not concrete
         next true if bare_generic_names.includes?(arg)
         # Detect remaining generic placeholders as standalone tokens (avoid false positives like "ValueId").
@@ -3354,6 +3430,11 @@ module Crystal::HIR
       # Mark as monomorphized BEFORE processing to prevent infinite recursion
       # (e.g., Array(String) method calls something that creates Array(String) again)
       @monomorphized.add(specialized_name)
+      mono_start = nil
+      if ENV.has_key?("DEBUG_MONO")
+        mono_start = Time.monotonic
+        STDERR.puts "[MONO] start #{specialized_name}"
+      end
 
       # Check arity matches
       if template.type_params.size != type_args.size
@@ -3373,6 +3454,11 @@ module Crystal::HIR
       # Register the specialized class using the template's AST node
       # The type_ref_for_name calls will now substitute T => Int32
       register_concrete_class(template.node, specialized_name, template.is_struct)
+
+      if mono_start && ENV.has_key?("DEBUG_MONO")
+        elapsed_ms = (Time.monotonic - mono_start).total_milliseconds
+        STDERR.puts "[MONO] done #{specialized_name} in #{elapsed_ms.round(1)}ms"
+      end
 
       # Generate allocator and methods for the specialized class
       if class_info = @class_info[specialized_name]?
@@ -5580,10 +5666,43 @@ module Crystal::HIR
 
       # Lower each top-level expression in order
       last_value : ValueId? = nil
-      main_exprs.each do |expr_id, arena|
+      debug_main = ENV.has_key?("DEBUG_MAIN")
+      if debug_main
+        STDERR.puts "[MAIN] lower_main exprs=#{main_exprs.size}"
+      end
+      main_exprs.each_with_index do |(expr_id, arena), idx|
         # Switch arena context for this expression
         @arena = arena
+        if debug_main
+          node = @arena[expr_id]
+          snippet = nil
+          if source = @sources_by_arena[@arena]?
+            span = node.span
+            start = span.start_offset
+            length = span.end_offset - span.start_offset
+            if length > 0 && start >= 0 && start < source.bytesize
+              max_len = 80
+              slice_len = length > max_len ? max_len : length
+              snippet = source.byte_slice(start, slice_len).gsub(/\s+/, " ").strip
+            end
+          end
+          if snippet
+            STDERR.puts "[MAIN] start #{idx + 1}/#{main_exprs.size} #{node.class} offs=#{node.span.start_offset} \"#{snippet}\""
+          else
+            STDERR.puts "[MAIN] start #{idx + 1}/#{main_exprs.size} #{node.class}"
+          end
+        end
+        expr_start = debug_main ? Time.monotonic : nil
         last_value = lower_expr(ctx, expr_id)
+        if debug_main && expr_start
+          elapsed = (Time.monotonic - expr_start).total_milliseconds
+          if elapsed > 50.0
+            node = @arena[expr_id]
+            STDERR.puts "[MAIN] expr #{idx + 1}/#{main_exprs.size} #{node.class} #{elapsed.round(1)}ms"
+          elsif (idx % 500 == 0) || (idx + 1 == main_exprs.size)
+            STDERR.puts "[MAIN] progress #{idx + 1}/#{main_exprs.size}"
+          end
+        end
       end
 
       # Return void (stdlib's fun main handles the return value)
@@ -13723,7 +13842,9 @@ module Crystal::HIR
         # This ensures included module methods get registered for the specialized type
         if template = @generic_templates[base_name]?
           unless @monomorphized.includes?(substituted_name)
-            if @defer_monomorphization
+            if @suppress_monomorphization
+              # Skip eager monomorphization while scanning specialized bodies.
+            elsif @defer_monomorphization
               # Queue for later - templates may not be fully registered yet
               @pending_monomorphizations << {base_name, substituted_params, substituted_name}
             else
