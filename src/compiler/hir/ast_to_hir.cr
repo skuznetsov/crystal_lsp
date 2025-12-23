@@ -372,7 +372,10 @@ module Crystal::HIR
     # Track top-level `def main` so we can remap calls and avoid entrypoint collisions.
     @top_level_main_defined : Bool
 
-    def initialize(@arena, module_name : String = "main")
+    # Source text per arena (used to reconstruct macro literal text from spans).
+    @sources_by_arena : Hash(CrystalV2::Compiler::Frontend::ArenaLike, String)
+
+    def initialize(@arena, module_name : String = "main", sources_by_arena : Hash(CrystalV2::Compiler::Frontend::ArenaLike, String)? = nil)
       @module = Module.new(module_name)
       @function_types = {} of String => TypeRef
       @function_base_names = Set(String).new
@@ -406,6 +409,7 @@ module Crystal::HIR
       @current_typeof_local_names = nil
       @top_level_main_defined = false
       @block_captures = {} of BlockId => Array(CapturedVar)
+      @sources_by_arena = sources_by_arena || {} of CrystalV2::Compiler::Frontend::ArenaLike => String
     end
 
     private def fun_def?(node : CrystalV2::Compiler::Frontend::DefNode) : Bool
@@ -2067,6 +2071,38 @@ module Crystal::HIR
 
     # Process MacroLiteralNode to extract module methods
     private def process_macro_literal_in_module(node : CrystalV2::Compiler::Frontend::MacroLiteralNode, module_name : String)
+      if raw_text = macro_literal_raw_text(node)
+        expanded = expand_flag_macro_text(raw_text) || raw_text
+        if program = parse_macro_literal_program(expanded)
+          with_arena(program.arena) do
+            program.roots.each do |expr_id|
+              expr_node = @arena[expr_id]
+              case expr_node
+              when CrystalV2::Compiler::Frontend::DefNode
+                register_module_method_from_def(expr_node, module_name)
+              when CrystalV2::Compiler::Frontend::ClassNode
+                class_name = String.new(expr_node.name)
+                full_class_name = "#{module_name}::#{class_name}"
+                register_class_with_name(expr_node, full_class_name)
+              when CrystalV2::Compiler::Frontend::StructNode
+                struct_name = String.new(expr_node.name)
+                full_struct_name = "#{module_name}::#{struct_name}"
+                register_struct_with_name(expr_node, full_struct_name)
+              when CrystalV2::Compiler::Frontend::ModuleNode
+                nested_name = String.new(expr_node.name)
+                full_nested_name = "#{module_name}::#{nested_name}"
+                register_nested_module(expr_node, full_nested_name)
+              when CrystalV2::Compiler::Frontend::MacroIfNode
+                process_macro_if_in_module(expr_node, module_name)
+              when CrystalV2::Compiler::Frontend::MacroLiteralNode
+                process_macro_literal_in_module(expr_node, module_name)
+              end
+            end
+          end
+          return
+        end
+      end
+
       node.pieces.each do |piece|
         case piece.kind
         when CrystalV2::Compiler::Frontend::MacroPiece::Kind::Expression
@@ -6510,24 +6546,35 @@ module Crystal::HIR
 
     # Lower a MacroLiteralNode that may contain text with {% if flag?() %} patterns
     private def lower_macro_literal(ctx : LoweringContext, node : CrystalV2::Compiler::Frontend::MacroLiteralNode) : ValueId
-      # Check if any piece contains macro control text
-      node.pieces.each do |piece|
-        if piece.kind == CrystalV2::Compiler::Frontend::MacroPiece::Kind::Text
+      # Prefer raw source text (includes control tags and whitespace).
+      if raw_text = macro_literal_raw_text(node)
+        if expanded = expand_flag_macro_text(raw_text)
+          # Parse and lower the expanded code
+          result = lower_expanded_macro_code(ctx, expanded)
+          return result if result
+        end
+      else
+        # Fallback to piece text when source is unavailable.
+        node.pieces.each do |piece|
+          next unless piece.kind == CrystalV2::Compiler::Frontend::MacroPiece::Kind::Text
           if text = piece.text
-            # Try to expand {% if flag?() %} pattern
             expanded = expand_flag_macro_text(text)
             if expanded
-              # Parse and lower the expanded code
               result = lower_expanded_macro_code(ctx, expanded)
               return result if result
             end
           end
-        elsif piece.kind == CrystalV2::Compiler::Frontend::MacroPiece::Kind::Expression
-          if expr_id = piece.expr
-            return lower_expr(ctx, expr_id)
-          end
         end
       end
+
+      # Fall back to expression pieces only.
+      node.pieces.each do |piece|
+        next unless piece.kind == CrystalV2::Compiler::Frontend::MacroPiece::Kind::Expression
+        if expr_id = piece.expr
+          return lower_expr(ctx, expr_id)
+        end
+      end
+
       # No expansion possible - return nil
       nil_lit = Literal.new(ctx.next_id, TypeRef::NIL, nil)
       ctx.emit(nil_lit)
@@ -6564,6 +6611,42 @@ module Crystal::HIR
       end
 
       nil
+    end
+
+    private def macro_literal_raw_text(node : CrystalV2::Compiler::Frontend::MacroLiteralNode) : String?
+      source = @sources_by_arena[@arena]?
+      return nil unless source
+      return nil if node.pieces.empty?
+
+      builder = String::Builder.new
+      bytesize = source.bytesize
+      node.pieces.each do |piece|
+        if span = piece.span
+          start = span.start_offset
+          length = span.end_offset - span.start_offset
+          next if length <= 0
+          next if start < 0 || start >= bytesize
+          if start + length > bytesize
+            length = bytesize - start
+          end
+          builder << source.byte_slice(start, length)
+        elsif text = piece.text
+          builder << text
+        end
+      end
+      builder.to_s
+    end
+
+    private def parse_macro_literal_program(code : String) : CrystalV2::Compiler::Frontend::Program?
+      trimmed = code.strip
+      return nil if trimmed.empty?
+      return nil if trimmed.includes?("{%") || trimmed.includes?("{{")
+
+      lexer = CrystalV2::Compiler::Frontend::Lexer.new(trimmed)
+      parser = CrystalV2::Compiler::Frontend::Parser.new(lexer, recovery_mode: true)
+      program = parser.parse_program
+      return nil if program.roots.empty?
+      program
     end
 
     # Lower expanded macro code by parsing and lowering it

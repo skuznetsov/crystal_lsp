@@ -115,7 +115,7 @@ module Crystal::V2
       loaded_files = Set(String).new
 
       # Parse all files recursively (require support)
-      all_arenas = [] of Tuple(CrystalV2::Compiler::Frontend::ArenaLike, Array(CrystalV2::Compiler::Frontend::ExprId), String)
+      all_arenas = [] of Tuple(CrystalV2::Compiler::Frontend::ArenaLike, Array(CrystalV2::Compiler::Frontend::ExprId), String, String)
 
       # Load prelude first (unless --no-prelude)
       unless @no_prelude
@@ -142,7 +142,11 @@ module Crystal::V2
 
       # Use first file's arena for the converter (it merges all)
       first_arena = all_arenas[0][0]
-      hir_converter = HIR::AstToHir.new(first_arena, @input_file)
+      sources_by_arena = {} of CrystalV2::Compiler::Frontend::ArenaLike => String
+      all_arenas.each do |arena, _exprs, _path, source|
+        sources_by_arena[arena] = source
+      end
+      hir_converter = HIR::AstToHir.new(first_arena, @input_file, sources_by_arena)
 
       # Collect all DefNodes, ClassNodes, ModuleNodes, EnumNodes, MacroDefNodes, and top-level expressions
       def_nodes = [] of Tuple(CrystalV2::Compiler::Frontend::DefNode, CrystalV2::Compiler::Frontend::ArenaLike)
@@ -154,7 +158,7 @@ module Crystal::V2
       main_exprs = [] of Tuple(CrystalV2::Compiler::Frontend::ExprId, CrystalV2::Compiler::Frontend::ArenaLike)
 
       flags = CrystalV2::Runtime.target_flags
-      all_arenas.each do |arena, exprs, file_path|
+      all_arenas.each do |arena, exprs, file_path, source|
         exprs.each do |expr_id|
           collect_top_level_nodes(
             arena,
@@ -165,7 +169,9 @@ module Crystal::V2
             enum_nodes,
             macro_nodes,
             main_exprs,
-            flags
+            flags,
+            sources_by_arena,
+            source
           )
         end
       end
@@ -492,7 +498,7 @@ module Crystal::V2
     # Recursively parse files, handling require statements
     private def parse_file_recursive(
       file_path : String,
-      results : Array(Tuple(CrystalV2::Compiler::Frontend::ArenaLike, Array(CrystalV2::Compiler::Frontend::ExprId), String)),
+      results : Array(Tuple(CrystalV2::Compiler::Frontend::ArenaLike, Array(CrystalV2::Compiler::Frontend::ExprId), String, String)),
       loaded : Set(String)
     )
       # Normalize and resolve path
@@ -525,14 +531,14 @@ module Crystal::V2
       trace_driver("[DRIVER_TRACE] done requires for #{File.basename(abs_path)}")
 
       # Add this file's results (after dependencies)
-      results << {arena, exprs, abs_path}
+      results << {arena, exprs, abs_path, source}
     end
 
     private def process_require_node(
       arena : CrystalV2::Compiler::Frontend::ArenaLike,
       expr_id : CrystalV2::Compiler::Frontend::ExprId,
       base_dir : String,
-      results : Array(Tuple(CrystalV2::Compiler::Frontend::ArenaLike, Array(CrystalV2::Compiler::Frontend::ExprId), String)),
+      results : Array(Tuple(CrystalV2::Compiler::Frontend::ArenaLike, Array(CrystalV2::Compiler::Frontend::ExprId), String, String)),
       loaded : Set(String)
     )
       node = arena[expr_id]
@@ -595,8 +601,12 @@ module Crystal::V2
       enum_nodes : Array(Tuple(CrystalV2::Compiler::Frontend::EnumNode, CrystalV2::Compiler::Frontend::ArenaLike)),
       macro_nodes : Array(Tuple(CrystalV2::Compiler::Frontend::MacroDefNode, CrystalV2::Compiler::Frontend::ArenaLike)),
       main_exprs : Array(Tuple(CrystalV2::Compiler::Frontend::ExprId, CrystalV2::Compiler::Frontend::ArenaLike)),
-      flags : Set(String)
+      flags : Set(String),
+      sources_by_arena : Hash(CrystalV2::Compiler::Frontend::ArenaLike, String),
+      source : String,
+      depth : Int32 = 0
     ) : Nil
+      return if depth > 4
       node = arena[expr_id]
       case node
       when CrystalV2::Compiler::Frontend::DefNode
@@ -612,24 +622,36 @@ module Crystal::V2
       when CrystalV2::Compiler::Frontend::RequireNode
         # Skip require nodes - already processed
       when CrystalV2::Compiler::Frontend::MacroExpressionNode
-        collect_top_level_nodes(arena, node.expression, def_nodes, class_nodes, module_nodes, enum_nodes, macro_nodes, main_exprs, flags)
+        collect_top_level_nodes(arena, node.expression, def_nodes, class_nodes, module_nodes, enum_nodes, macro_nodes, main_exprs, flags, sources_by_arena, source, depth)
       when CrystalV2::Compiler::Frontend::MacroIfNode
         condition = evaluate_macro_condition(arena, node.condition, flags)
         if condition == true
-          collect_top_level_nodes(arena, node.then_body, def_nodes, class_nodes, module_nodes, enum_nodes, macro_nodes, main_exprs, flags)
+          collect_top_level_nodes(arena, node.then_body, def_nodes, class_nodes, module_nodes, enum_nodes, macro_nodes, main_exprs, flags, sources_by_arena, source, depth)
         elsif condition == false
           if else_body = node.else_body
-            collect_top_level_nodes(arena, else_body, def_nodes, class_nodes, module_nodes, enum_nodes, macro_nodes, main_exprs, flags)
+            collect_top_level_nodes(arena, else_body, def_nodes, class_nodes, module_nodes, enum_nodes, macro_nodes, main_exprs, flags, sources_by_arena, source, depth)
           end
         else
-          collect_top_level_nodes(arena, node.then_body, def_nodes, class_nodes, module_nodes, enum_nodes, macro_nodes, main_exprs, flags)
+          collect_top_level_nodes(arena, node.then_body, def_nodes, class_nodes, module_nodes, enum_nodes, macro_nodes, main_exprs, flags, sources_by_arena, source, depth)
           if else_body = node.else_body
-            collect_top_level_nodes(arena, else_body, def_nodes, class_nodes, module_nodes, enum_nodes, macro_nodes, main_exprs, flags)
+            collect_top_level_nodes(arena, else_body, def_nodes, class_nodes, module_nodes, enum_nodes, macro_nodes, main_exprs, flags, sources_by_arena, source, depth)
           end
         end
       when CrystalV2::Compiler::Frontend::MacroLiteralNode
         collect_macro_literal_exprs(arena, node, flags).each do |expr|
-          collect_top_level_nodes(arena, expr, def_nodes, class_nodes, module_nodes, enum_nodes, macro_nodes, main_exprs, flags)
+          collect_top_level_nodes(arena, expr, def_nodes, class_nodes, module_nodes, enum_nodes, macro_nodes, main_exprs, flags, sources_by_arena, source, depth)
+        end
+        if raw_text = macro_literal_raw_text(node, source)
+          macro_literal_texts_from_raw(raw_text, flags).each do |text|
+            next if text.strip.empty?
+            next if text.includes?("{%") || text.includes?("{{")
+            if program = parse_macro_literal_program(text)
+              sources_by_arena[program.arena] = text
+              program.roots.each do |inner_id|
+                collect_top_level_nodes(program.arena, inner_id, def_nodes, class_nodes, module_nodes, enum_nodes, macro_nodes, main_exprs, flags, sources_by_arena, text, depth + 1)
+              end
+            end
+          end
         end
       else
         main_exprs << {expr_id, arena}
@@ -783,6 +805,42 @@ module Crystal::V2
       end
 
       texts
+    end
+
+    private def macro_literal_raw_text(
+      node : CrystalV2::Compiler::Frontend::MacroLiteralNode,
+      source : String
+    ) : String?
+      return nil if node.pieces.empty?
+      builder = String::Builder.new
+      bytesize = source.bytesize
+      node.pieces.each do |piece|
+        if span = piece.span
+          start = span.start_offset
+          length = span.end_offset - span.start_offset
+          next if length <= 0
+          next if start < 0 || start >= bytesize
+          if start + length > bytesize
+            length = bytesize - start
+          end
+          builder << source.byte_slice(start, length)
+        elsif text = piece.text
+          builder << text
+        end
+      end
+      builder.to_s
+    end
+
+    private def parse_macro_literal_program(text : String) : CrystalV2::Compiler::Frontend::Program?
+      trimmed = text.strip
+      return nil if trimmed.empty?
+      return nil if trimmed.includes?("{%") || trimmed.includes?("{{")
+
+      lexer = CrystalV2::Compiler::Frontend::Lexer.new(trimmed)
+      parser = CrystalV2::Compiler::Frontend::Parser.new(lexer, recovery_mode: true)
+      program = parser.parse_program
+      return nil if program.roots.empty?
+      program
     end
 
     private def macro_literal_texts_from_raw(text : String, flags : Set(String)) : Array(String)
