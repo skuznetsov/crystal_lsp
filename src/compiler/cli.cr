@@ -1097,6 +1097,7 @@ module CrystalV2
         exprs
       end
 
+
       private def extract_link_libraries_from_annotation(
         arena : Frontend::ArenaLike,
         node : Frontend::AnnotationNode

@@ -1002,7 +1002,7 @@ r2 = maybe(false)  # => nil
 | Macro expansion | `getter`, `property` need compile-time expansion | MED |
 
 **Additional codegen gaps (observed):**
-- Top-level `{% if %}` blocks are parsed as raw `MacroLiteral` text (no control pieces), so module/def nodes inside are not collected yet.
+- Top-level `{% if %}` now yields `MacroIfNode`, but its body is `MacroLiteral` text with trimmed whitespace; without macro expansion we still can't register module/def nodes inside.
 
 ### 8.3 Known Limitations
 

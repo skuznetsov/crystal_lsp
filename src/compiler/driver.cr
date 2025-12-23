@@ -704,6 +704,7 @@ module Crystal::V2
       exprs
     end
 
+
     private def macro_literal_require_texts(
       arena : CrystalV2::Compiler::Frontend::ArenaLike,
       node : CrystalV2::Compiler::Frontend::MacroLiteralNode,
