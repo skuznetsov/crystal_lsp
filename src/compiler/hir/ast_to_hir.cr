@@ -5099,6 +5099,26 @@ module Crystal::HIR
       nil
     end
 
+    private def proc_input_type_names(type_name : String) : Array(String)?
+      stripped = type_name.strip
+      return nil if stripped.empty?
+
+      if stripped.starts_with?("Proc(") && stripped.ends_with?(")")
+        inner = stripped[5, stripped.size - 6]
+        args = split_generic_type_args(inner)
+        return [] of String if args.size <= 1
+        return args[0...-1]
+      end
+
+      if arrow_index = find_top_level_arrow(stripped)
+        left = stripped[0, arrow_index].strip
+        return [] of String if left.empty?
+        return split_generic_type_args(left)
+      end
+
+      nil
+    end
+
     private def substitute_type_param(type_name : String, param_name : String, actual_name : String) : String
       return type_name if param_name.empty? || actual_name.empty?
       pattern = /(^|[^A-Za-z0-9_:])#{Regex.escape(param_name)}([^A-Za-z0-9_:]|$)/
@@ -5147,6 +5167,25 @@ module Crystal::HIR
       return nil if substituted == return_type_name
 
       type_ref_for_name(substituted)
+    end
+
+    private def block_param_types_for_call(
+      mangled_method_name : String,
+      base_method_name : String
+    ) : Array(TypeRef)?
+      func_def = @function_defs[mangled_method_name]? || @function_defs[base_method_name]?
+      return nil unless func_def
+
+      block_param = func_def.params.try(&.find(&.is_block))
+      return nil unless block_param
+
+      type_slice = block_param.type_annotation
+      return nil unless type_slice
+
+      input_names = proc_input_type_names(String.new(type_slice))
+      return nil unless input_names && !input_names.empty?
+
+      input_names.map { |name| type_ref_for_name(name) }
     end
 
     private def intern_proc_type(type_names : Array(String)) : TypeRef
@@ -10125,7 +10164,8 @@ module Crystal::HIR
       block_id = if blk_expr = node.block
                    blk_node = @arena[blk_expr]
                    if blk_node.is_a?(CrystalV2::Compiler::Frontend::BlockNode)
-                     lower_block_to_block_id(ctx, blk_node)
+                     block_param_types = block_param_types_for_call(mangled_method_name, base_method_name)
+                     lower_block_to_block_id(ctx, blk_node, block_param_types)
                    else
                      # Block is some other expression - should not happen in well-formed AST
                      nil
@@ -13310,7 +13350,11 @@ module Crystal::HIR
       closure.id
     end
 
-    private def lower_block_to_block_id(ctx : LoweringContext, node : CrystalV2::Compiler::Frontend::BlockNode) : BlockId
+    private def lower_block_to_block_id(
+      ctx : LoweringContext,
+      node : CrystalV2::Compiler::Frontend::BlockNode,
+      param_types : Array(TypeRef)? = nil
+    ) : BlockId
       saved_block = ctx.current_block
       # Save locals before lowering block body - block-local vars shouldn't leak
       saved_locals = ctx.save_locals
@@ -13339,6 +13383,8 @@ module Crystal::HIR
             name = String.new(param_name)
             param_type = if ta = param.type_annotation
                            type_ref_for_name(String.new(ta))
+                         elsif param_types && (resolved = param_types[idx]?)
+                           resolved
                          else
                            TypeRef::POINTER  # Default to pointer for block params
                          end
@@ -13349,6 +13395,8 @@ module Crystal::HIR
             update_typeof_local(name, param_type)
             if ta = param.type_annotation
               update_typeof_local_name(name, String.new(ta))
+            elsif param_type != TypeRef::VOID
+              update_typeof_local_name(name, get_type_name_from_ref(param_type))
             end
           end
         end

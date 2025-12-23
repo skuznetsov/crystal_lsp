@@ -1340,4 +1340,33 @@ describe Crystal::HIR::AstToHir do
       phi_node.incoming.size.should eq(2)  # then and else branches
     end
   end
+
+  describe "block parameter types" do
+    it "applies block param types from callee signature" do
+      code = <<-CRYSTAL
+        def consume(& : Pointer(Int32) ->)
+        end
+
+        def foo
+          consume do |ptr|
+            ptr
+          end
+        end
+      CRYSTAL
+
+      converter = lower_program(code)
+      func = converter.module.functions.find { |f| f.name.starts_with?("foo$") || f.name == "foo" }
+      func.should_not be_nil
+
+      params = func.not_nil!.blocks.flat_map(&.instructions)
+        .select { |inst| inst.is_a?(Crystal::HIR::Parameter) }
+      ptr_param = params.find { |inst| inst.as(Crystal::HIR::Parameter).name == "ptr" }
+      ptr_param.should_not be_nil
+
+      param_type = ptr_param.not_nil!.as(Crystal::HIR::Parameter).type
+      desc = converter.module.get_type_descriptor(param_type)
+      desc.should_not be_nil
+      desc.not_nil!.name.should eq("Pointer(Int32)")
+    end
+  end
 end
