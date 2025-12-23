@@ -738,7 +738,7 @@ The key insight is: **Don't compete with LLVM, complement it.**
   - [x] Add lifetime-pressure metric (distance between rc_inc/rc_dec along def-use)
   - [x] Implement curvature/lifetime frame pass (RC elision + DCE gated by metrics)
   - [x] Add specs for curvature frame fallback (monotone descent across frames)
-- [ ] Unified potential across frames (Φ_esc compatible with Φ_primary)
+- [x] Unified potential across frames (Φ_esc compatible with Φ_primary)
   - [x] Define frame-normalized LTPPotential mapping (same 4 components)
   - [x] Reject frame switch if mapped Φ does not decrease
   - [x] Spec: cross-frame monotone descent with mixed moves
