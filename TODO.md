@@ -32,6 +32,7 @@ about syntax or types and should match what the original compiler would report.
 - [x] TypeIndex binary storage (5.6x faster than JSON)
 - [x] HIR macro condition evaluation: tri-state merge + duplicate module method guard (2025-12-23)
 - [x] Driver trace logging gated via `CRYSTAL_V2_DRIVER_TRACE` (2025-12-23)
+- [x] Resolve module method calls without parens (`M.foo`) to static dispatch (2025-12-23)
 
 ### Pending (9 tests)
 - 2 HIR type operation lowering (`as`, `as?`) specs (pending while type ops are still being aligned)
@@ -999,6 +1000,9 @@ r2 = maybe(false)  # => nil
 | Generic methods with blocks | `def self.build(capacity : Int, &)` | HIGH |
 | Module mixins (Indexable, Enumerable) | Instance methods from `include`d modules are expanded into concrete types; module-typed receivers still need better resolution | MED |
 | Macro expansion | `getter`, `property` need compile-time expansion | MED |
+
+**Additional codegen gaps (observed):**
+- MacroIf-wrapped module definitions are not registering module methods yet (e.g., `M.foo` inside `{% if %}` at top-level).
 
 ### 8.3 Known Limitations
 

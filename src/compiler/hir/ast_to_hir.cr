@@ -12291,6 +12291,8 @@ module Crystal::HIR
           resolved_name = resolve_class_name_in_context(resolved_name)
           if @class_info.has_key?(resolved_name)
             class_name_str = resolved_name
+          elsif is_module_method?(resolved_name, member_name)
+            class_name_str = resolved_name
           end
         end
       elsif obj_node.is_a?(CrystalV2::Compiler::Frontend::GenericNode)
