@@ -4672,6 +4672,77 @@ module Crystal::HIR
       nil
     end
 
+    private def resolve_module_typed_ivar(
+      module_type_name : String,
+      ivar_name : String
+    ) : {ClassInfo, IVarInfo}?
+      module_base = if paren = module_type_name.index('(')
+                      module_type_name[0, paren]
+                    else
+                      module_type_name
+                    end
+      includers = @module_includers[module_base]?
+      if includers.nil? || includers.empty?
+        matches = @module_includers.keys.select { |key| key.ends_with?("::#{module_base}") }
+        module_base = matches.first if matches.size == 1
+        includers = @module_includers[module_base]?
+      end
+      if includers.nil? || includers.empty?
+        short_name = module_base.split("::").last
+        if short_name != module_base
+          includers = @module_includers[short_name]?
+          if includers.nil? || includers.empty?
+            matches = @module_includers.keys.select { |key| key.ends_with?("::#{short_name}") }
+            if matches.size == 1
+              module_base = matches.first
+              includers = @module_includers[module_base]?
+            end
+          end
+        end
+      end
+      return nil unless includers && !includers.empty?
+
+      candidates = includers.to_a
+      subclasses = [] of String
+      includers.each do |inc|
+        inc_short = inc.split("::").last
+        @class_info.each do |name, ci|
+          parent = ci.parent_name
+          next unless parent
+          if parent == inc || parent == inc_short || inc.ends_with?("::#{parent}")
+            subclasses << name unless subclasses.includes?(name)
+          end
+        end
+      end
+
+      prev_size = 0
+      while subclasses.size > prev_size
+        prev_size = subclasses.size
+        subclasses.dup.each do |sub|
+          sub_short = sub.split("::").last
+          @class_info.each do |name, ci|
+            parent = ci.parent_name
+            next unless parent
+            if parent == sub || parent == sub_short || sub.ends_with?("::#{parent}")
+              subclasses << name unless subclasses.includes?(name)
+            end
+          end
+        end
+      end
+      subclasses.each { |name| candidates << name unless candidates.includes?(name) }
+
+      matches = [] of {ClassInfo, IVarInfo}
+      candidates.each do |name|
+        next unless info = @class_info[name]?
+        if ivar_info = info.ivars.find { |iv| iv.name == ivar_name }
+          matches << {info, ivar_info}
+        end
+      end
+
+      return matches.first if matches.size == 1
+      nil
+    end
+
     private def params_compatible_with_args?(
       def_node : CrystalV2::Compiler::Frontend::DefNode,
       arg_types : Array(TypeRef)
@@ -9840,6 +9911,12 @@ module Crystal::HIR
         obj_node = @arena[callee_node.object]
         method_name = String.new(callee_node.member)
 
+        # Direct ivar access on another object: obj.@ivar
+        # Lower as field get when no args/block are present.
+        if method_name.starts_with?("@") && node.args.empty? && node.block.nil?
+          return lower_member_access(ctx, callee_node)
+        end
+
         # Intrinsic: `x.upto(y).each { ... }` / `x.downto(y).each { ... }`
         # Prefer lowering directly via the yield-based overload to avoid iterator types like
         # `UptoIterator(typeof(self), typeof(to))` which are not yet fully monomorphized in codegen.
@@ -12982,6 +13059,14 @@ module Crystal::HIR
             ctx.register_type(field_get.id, ivar_info.type)
             return field_get.id
           end
+        end
+        module_type_name = get_type_name_from_ref(receiver_type)
+        if resolved = resolve_module_typed_ivar(module_type_name, member_name)
+          _info, ivar_info = resolved
+          field_get = FieldGet.new(ctx.next_id, ivar_info.type, object_id, member_name, ivar_info.offset)
+          ctx.emit(field_get)
+          ctx.register_type(field_get.id, ivar_info.type)
+          return field_get.id
         end
       end
 
