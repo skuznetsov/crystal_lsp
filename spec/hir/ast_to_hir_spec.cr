@@ -1402,4 +1402,26 @@ describe Crystal::HIR::AstToHir do
       end
     end
   end
+
+  describe "pointer overload mangling" do
+    it "distinguishes pointer element types in overloads" do
+      code = <<-CRYSTAL
+        struct Pointer(T)
+        end
+
+        def foo(x : Pointer(Int32))
+          1
+        end
+
+        def foo(x : Pointer(Float64))
+          2
+        end
+      CRYSTAL
+
+      converter = lower_program(code)
+      names = converter.module.functions.map(&.name)
+      names.should contain("foo$Pointer(Int32)")
+      names.should contain("foo$Pointer(Float64)")
+    end
+  end
 end

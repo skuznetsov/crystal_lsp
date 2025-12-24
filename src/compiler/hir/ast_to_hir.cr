@@ -7978,7 +7978,9 @@ module Crystal::HIR
 
       # Check for pointer arithmetic: ptr + n or ptr - n
       left_type = ctx.type_of(left_id)
-      if left_type == TypeRef::POINTER && (op_str == "+" || op_str == "-")
+      left_desc = @module.get_type_descriptor(left_type)
+      is_pointer_type = left_type == TypeRef::POINTER || (left_desc && left_desc.kind == TypeKind::Pointer)
+      if is_pointer_type && (op_str == "+" || op_str == "-")
         offset_id = right_id
         # For subtraction, negate the offset
         if op_str == "-"
@@ -7990,10 +7992,16 @@ module Crystal::HIR
           ctx.register_type(neg_offset.id, TypeRef::INT32)
           offset_id = neg_offset.id
         end
-        element_type = TypeRef::INT32  # TODO: track pointer element type
-        add_node = PointerAdd.new(ctx.next_id, TypeRef::POINTER, left_id, offset_id, element_type)
+        element_type = if left_desc && left_desc.kind == TypeKind::Pointer
+                         pointer_element_type(left_desc.name)
+                       else
+                         TypeRef::INT32
+                       end
+        element_type = TypeRef::INT32 if element_type == TypeRef::VOID
+        result_type = left_desc && left_desc.kind == TypeKind::Pointer ? left_type : TypeRef::POINTER
+        add_node = PointerAdd.new(ctx.next_id, result_type, left_id, offset_id, element_type)
         ctx.emit(add_node)
-        ctx.register_type(add_node.id, TypeRef::POINTER)
+        ctx.register_type(add_node.id, result_type)
         return add_node.id
       end
 
