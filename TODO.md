@@ -1024,6 +1024,8 @@ r2 = maybe(false)  # => nil
 
 **Additional codegen gaps (observed):**
 - Top-level `{% if flag? %}` bodies now use raw source spans to parse defs/modules for simple flag branches; general macro expansion for complex bodies is still missing.
+- Enum method bodies are parsed but discarded (EnumNode lacks body); methods like `Signal#reset` are not registered.
+- Macro `flag?` branches inside class/struct bodies are not registering defs (e.g., `Crystal::Scheduler.init`).
 
 ### 8.3 Known Limitations
 
