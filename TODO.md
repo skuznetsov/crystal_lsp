@@ -968,6 +968,7 @@ enum:      64  ← ✅ DONE
 | Top-level def mangling | Lower top-level defs using mangled names (fixes mutual recursion forward refs) |
 | Union function returns | Fix phi node nil detection for union return types (type_id check) |
 | Union return type VOID | Fix cache placeholder bug in type_ref_for_name (set after union check) |
+| not_nil! union unwrap | Use descriptor variant ids + MIR→HIR mapping (fixes `UInt8 | Nil#unsafe_chr`) (2025-12-24) |
 | Namespace resolution | Register short name aliases for nested classes/structs in modules |
 | Getter/setter monomorphization | Handle GetterNode/SetterNode/PropertyNode in generic class lowering |
 | typeof filter | Filter out functions with unresolved typeof(...) patterns in LLVM emission |
