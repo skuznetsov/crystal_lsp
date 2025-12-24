@@ -7078,6 +7078,7 @@ module CrystalV2
             pieces = Array(MacroPiece).new(16)
             buffer = IO::Memory.new
             buffer_start_token : Token? = nil
+            buffer_end_token : Token? = nil
             control_depth = 0
             block_depth = 0
             macro_trim_left = false
@@ -7108,8 +7109,9 @@ module CrystalV2
                 left_trim = macro_control_left_trim?
                 already_empty = pieces.empty?
                 trim_applied = left_trim
-                flush_macro_text(buffer, pieces, trim_applied, buffer_start_token, previous_token)
+                flush_macro_text(buffer, pieces, trim_applied, buffer_start_token, buffer_end_token)
                 buffer_start_token = nil
+                buffer_end_token = nil
                 macro_trim_left ||= already_empty && trim_applied
 
                 piece, effect, skip_whitespace = parse_macro_control_piece(left_trim)
@@ -7162,8 +7164,9 @@ module CrystalV2
                 left_trim = macro_expression_left_trim?
                 already_empty = pieces.empty?
                 trim_applied = left_trim
-                flush_macro_text(buffer, pieces, trim_applied, buffer_start_token, previous_token)
+                flush_macro_text(buffer, pieces, trim_applied, buffer_start_token, buffer_end_token)
                 buffer_start_token = nil
+                buffer_end_token = nil
                 macro_trim_left ||= already_empty && trim_applied
 
                 piece, skip_whitespace = parse_macro_expression_piece(left_trim)
@@ -7173,8 +7176,9 @@ module CrystalV2
                 next
               elsif macro_variable_start?
                 already_empty = pieces.empty?
-                flush_macro_text(buffer, pieces, false, buffer_start_token, previous_token)
+                flush_macro_text(buffer, pieces, false, buffer_start_token, buffer_end_token)
                 buffer_start_token = nil
+                buffer_end_token = nil
                 macro_trim_left ||= already_empty
 
                 piece, skip_whitespace = parse_macro_variable_piece
@@ -7220,10 +7224,11 @@ module CrystalV2
               end
 
               buffer.write(token.slice)
+              buffer_end_token = token
               advance
             end
 
-            flush_macro_text(buffer, pieces, trim_final, buffer_start_token, previous_token)
+            flush_macro_text(buffer, pieces, trim_final, buffer_start_token, buffer_end_token)
             {
               pieces,
               macro_trim_left,
