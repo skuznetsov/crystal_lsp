@@ -4142,6 +4142,10 @@ module Crystal::HIR
         sep = is_class_method ? "." : "#"
         STDERR.puts "[DEBUG_LOWER_METHOD] #{class_name}#{sep}#{method_name} (class_method=#{is_class_method}, receiver=#{node.receiver})"
       end
+      if ENV.has_key?("DEBUG_STRING_METHOD_LOWER") && class_name == "String" && (method_name == "[]" || method_name == "char_index_to_byte_index")
+        sep = is_class_method ? "." : "#"
+        STDERR.puts "[DEBUG_LOWER_METHOD] #{class_name}#{sep}#{method_name} override=#{full_name_override || "(none)"}"
+      end
 
       # Class methods use "." separator, instance methods use "#"
       base_name = if is_class_method
@@ -4161,8 +4165,10 @@ module Crystal::HIR
       end
 
       # Track current method for super calls
+      old_class = @current_class
       old_method = @current_method
       old_method_is_class = @current_method_is_class
+      @current_class = class_name
       @current_method = method_name
       @current_method_is_class = is_class_method
 
@@ -4333,6 +4339,7 @@ module Crystal::HIR
       @current_typeof_local_names = old_typeof_local_names
 
       # Restore previous method context
+      @current_class = old_class
       @current_method = old_method
       @current_method_is_class = old_method_is_class || false
     end
@@ -5034,6 +5041,9 @@ module Crystal::HIR
     # Call this for all functions before lowering any function bodies
     def register_function(node : CrystalV2::Compiler::Frontend::DefNode)
       base_name = String.new(node.name)
+      if ENV.has_key?("DEBUG_STRING_METHOD_LOWER") && (base_name == "[]" || base_name == "char_index_to_byte_index")
+        STDERR.puts "[DEBUG_REGISTER_FUNCTION] name=#{base_name} receiver=#{node.receiver ? String.new(node.receiver.not_nil!) : "(none)"} span=#{node.span.start_line}-#{node.span.end_line}"
+      end
       if base_name == "main" && @current_class.nil? && !fun_def?(node)
         base_name = TOP_LEVEL_MAIN_BASE
         @top_level_main_defined = true
@@ -5910,6 +5920,9 @@ module Crystal::HIR
       full_name_override : String? = nil
     ) : Function
       base_name = String.new(node.name)
+      if ENV.has_key?("DEBUG_STRING_METHOD_LOWER") && (base_name == "[]" || base_name == "char_index_to_byte_index")
+        STDERR.puts "[DEBUG_LOWER_DEF] name=#{base_name} override=#{full_name_override || "(none)"} current_class=#{@current_class || "(none)"}"
+      end
       if base_name == "main" && @current_class.nil? && !fun_def?(node)
         base_name = TOP_LEVEL_MAIN_BASE
         @top_level_main_defined = true
@@ -9747,6 +9760,25 @@ module Crystal::HIR
           end
         end
       end
+
+      if !func_def && !name.includes?("#") && !name.includes?(".")
+        if current = @current_class
+          base = name.split("$", 2)[0]
+          qualified_base = "#{current}##{base}"
+          if candidate = @function_defs[qualified_base]?
+            func_def = candidate
+            arena = @function_def_arenas[qualified_base]?
+            if name.includes?("$")
+              suffix = name.split("$", 2)[1]
+              target_name = "#{qualified_base}$#{suffix}"
+            else
+              target_name = qualified_base
+            end
+            name = target_name
+          end
+        end
+      end
+
       return unless func_def
       return if @yield_functions.includes?(target_name)
       return if @lowering_functions.includes?(target_name)
