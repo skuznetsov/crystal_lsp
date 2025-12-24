@@ -7193,11 +7193,15 @@ module CrystalV2
                                  prev_tok.kind.in?(Token::Kind::Newline, Token::Kind::Semicolon) ||
                                  prev_tok.span.end_line < token.span.start_line
               case token.kind
+              when Token::Kind::Begin, Token::Kind::Do
+                # begin/do always introduce a block that must be closed with end,
+                # even when used as expressions (e.g., x = begin ... end, foo do ... end).
+                block_depth += 1
               when Token::Kind::Def, Token::Kind::Class, Token::Kind::Module,
-                   Token::Kind::Struct, Token::Kind::Enum, Token::Kind::Begin,
+                   Token::Kind::Struct, Token::Kind::Enum,
                    Token::Kind::If, Token::Kind::Unless, Token::Kind::While,
                    Token::Kind::Until, Token::Kind::Case, Token::Kind::Select,
-                   Token::Kind::Lib, Token::Kind::Do, Token::Kind::Macro
+                   Token::Kind::Lib, Token::Kind::Macro
                 block_depth += 1 if starts_statement
               when Token::Kind::End
                 if control_depth == 0 && block_depth == 0 && starts_statement
@@ -12148,13 +12152,16 @@ module CrystalV2
         end
 
         private def macro_control_start?
-          current_token.kind == Token::Kind::LBracePercent
+          return true if current_token.kind == Token::Kind::LBracePercent
+          current_token.kind == Token::Kind::LBrace && peek_token.kind == Token::Kind::Percent
         end
 
         private def macro_control_left_trim?
-          return false unless current_token.kind == Token::Kind::LBracePercent
-          next_token = peek_token
-          macro_trim_token?(next_token)
+          if current_token.kind == Token::Kind::LBracePercent
+            return macro_trim_token?(peek_token)
+          end
+          return false unless current_token.kind == Token::Kind::LBrace && peek_token.kind == Token::Kind::Percent
+          macro_trim_token?(peek_token(2))
         end
 
         # Peek ahead inside a '{' ... '}' literal to guess its kind without consuming tokens.
@@ -13073,7 +13080,7 @@ module CrystalV2
           end
 
           # Parse body until {% end %}
-          body = parse_macro_body_until_end
+          body = parse_macro_body_until_branch
           return PREFIX_ERROR if body.invalid?
 
           # Expect {% end %}
