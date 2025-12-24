@@ -10243,6 +10243,7 @@ module Crystal::HIR
               if info.type_ref.id == receiver_type.id
                 # Use inheritance-aware method resolution
                 full_method_name = resolve_method_with_inheritance(name, method_name)
+                full_method_name ||= "#{name}##{method_name}"
                 break
               end
             end
