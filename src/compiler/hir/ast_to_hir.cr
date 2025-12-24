@@ -4532,6 +4532,29 @@ module Crystal::HIR
       suffix.empty? ? base_name : "#{base_name}$#{suffix}"
     end
 
+    private def split_union_type_name(type_name : String) : Array(String)
+      type_name.split("|").map(&.strip).reject(&.empty?)
+    end
+
+    private def resolve_union_method_call(type_name : String, method_name : String, arg_types : Array(TypeRef)) : String?
+      variants = split_union_type_name(type_name)
+      return nil if variants.empty?
+
+      # Prefer non-nil variants when selecting a concrete method target.
+      ordered = variants.sort_by { |v| v == "Nil" ? 1 : 0 }
+      ordered.each do |variant|
+        base_name = resolve_method_with_inheritance(variant, method_name) || "#{variant}##{method_name}"
+        mangled = mangle_function_name(base_name, arg_types)
+        if @function_types.has_key?(mangled)
+          return mangled
+        elsif has_function_base?(base_name)
+          return base_name
+        end
+      end
+
+      nil
+    end
+
     # Resolve method call for a receiver type and method name
     # Returns the properly mangled method name that should be used in the Call node
     private def resolve_method_call(ctx : LoweringContext, receiver_id : ValueId, method_name : String, arg_types : Array(TypeRef)) : String
@@ -4558,10 +4581,29 @@ module Crystal::HIR
         return mangled_name
       end
 
+      if !class_name.empty? && method_name.ends_with?("=")
+        if info = @class_info[class_name]?
+          accessor = method_name[0, method_name.size - 1]
+          ivar_name = "@#{accessor}"
+          if ivar_info = info.ivars.find { |iv| iv.name == ivar_name }
+            expected_name = mangle_function_name(base_method_name, [ivar_info.type])
+            if @function_types.has_key?(expected_name)
+              return expected_name
+            end
+          end
+        end
+      end
+
       # If any overload exists for the base name, return the base name and let
       # the MIR lowering do fuzzy matching to pick a concrete overload.
       if !class_name.empty? && has_function_base?(base_method_name)
         return base_method_name
+      end
+
+      if !class_name.empty? && class_name.includes?("|")
+        if resolved = resolve_union_method_call(class_name, method_name, arg_types)
+          return resolved
+        end
       end
 
       # If the receiver is module-like (e.g., Iterator(T)) or maps to a known includer,
@@ -10473,6 +10515,19 @@ module Crystal::HIR
         end
       end
 
+      if receiver_id && base_method_name.includes?("|") && base_method_name.includes?("#")
+        union_name = base_method_name.split("#", 2)[0]
+        if resolved = resolve_union_method_call(union_name, method_name, arg_types)
+          if resolved.includes?("$")
+            mangled_method_name = resolved
+            base_method_name = resolved.split("$", 2)[0]
+          else
+            base_method_name = resolved
+            mangled_method_name = mangle_function_name(base_method_name, arg_types, has_block_call)
+          end
+        end
+      end
+
       if full_method_name && !@function_defs.has_key?(mangled_method_name)
         if entry = lookup_function_def_for_call(full_method_name, args.size, has_block_call)
           mangled_method_name = entry[0]
@@ -10694,6 +10749,37 @@ module Crystal::HIR
 
       if receiver_id && method_name == "unsafe_chr" && args.empty?
         receiver_type = ctx.type_of(receiver_id)
+        if is_union_or_nilable_type?(receiver_type)
+          nil_variant_id = get_union_variant_id(receiver_type, TypeRef::NIL)
+          if nil_variant_id >= 0
+            unwrapped = lower_not_nil_intrinsic(ctx, receiver_id, receiver_type)
+            unwrapped_type = ctx.type_of(unwrapped)
+            if numeric_primitive?(unwrapped_type)
+              cast = Cast.new(ctx.next_id, TypeRef::CHAR, unwrapped, TypeRef::CHAR)
+              ctx.emit(cast)
+              ctx.register_type(cast.id, TypeRef::CHAR)
+              return cast.id
+            end
+          elsif type_desc = @module.get_type_descriptor(receiver_type)
+            variants = split_union_type_name(type_desc.name)
+            idx = variants.index do |variant|
+              next false if variant == "Nil"
+              numeric_primitive?(type_ref_for_name(variant))
+            end
+            if idx
+              unwrap_type = type_ref_for_name(variants[idx])
+              unwrapped = UnionUnwrap.new(ctx.next_id, unwrap_type, receiver_id, idx, false)
+              ctx.emit(unwrapped)
+              ctx.register_type(unwrapped.id, unwrap_type)
+              if numeric_primitive?(unwrap_type)
+                cast = Cast.new(ctx.next_id, TypeRef::CHAR, unwrapped.id, TypeRef::CHAR)
+                ctx.emit(cast)
+                ctx.register_type(cast.id, TypeRef::CHAR)
+                return cast.id
+              end
+            end
+          end
+        end
         case receiver_type
         when TypeRef::INT8, TypeRef::INT16, TypeRef::INT32, TypeRef::INT64, TypeRef::INT128,
              TypeRef::UINT8, TypeRef::UINT16, TypeRef::UINT32, TypeRef::UINT64, TypeRef::UINT128
@@ -13177,6 +13263,37 @@ module Crystal::HIR
       end
 
       if member_name == "unsafe_chr"
+        if is_union_or_nilable_type?(receiver_type)
+          nil_variant_id = get_union_variant_id(receiver_type, TypeRef::NIL)
+          if nil_variant_id >= 0
+            unwrapped = lower_not_nil_intrinsic(ctx, object_id, receiver_type)
+            unwrapped_type = ctx.type_of(unwrapped)
+            if numeric_primitive?(unwrapped_type)
+              cast = Cast.new(ctx.next_id, TypeRef::CHAR, unwrapped, TypeRef::CHAR)
+              ctx.emit(cast)
+              ctx.register_type(cast.id, TypeRef::CHAR)
+              return cast.id
+            end
+          elsif type_desc = @module.get_type_descriptor(receiver_type)
+            variants = split_union_type_name(type_desc.name)
+            idx = variants.index do |variant|
+              next false if variant == "Nil"
+              numeric_primitive?(type_ref_for_name(variant))
+            end
+            if idx
+              unwrap_type = type_ref_for_name(variants[idx])
+              unwrapped = UnionUnwrap.new(ctx.next_id, unwrap_type, object_id, idx, false)
+              ctx.emit(unwrapped)
+              ctx.register_type(unwrapped.id, unwrap_type)
+              if numeric_primitive?(unwrap_type)
+                cast = Cast.new(ctx.next_id, TypeRef::CHAR, unwrapped.id, TypeRef::CHAR)
+                ctx.emit(cast)
+                ctx.register_type(cast.id, TypeRef::CHAR)
+                return cast.id
+              end
+            end
+          end
+        end
         case receiver_type
         when TypeRef::INT8, TypeRef::INT16, TypeRef::INT32, TypeRef::INT64, TypeRef::INT128,
              TypeRef::UINT8, TypeRef::UINT16, TypeRef::UINT32, TypeRef::UINT64, TypeRef::UINT128
@@ -14550,6 +14667,38 @@ module Crystal::HIR
       end
     end
 
+    # Convert MIR::TypeRef back to HIR::TypeRef (inverse of hir_to_mir_type_ref).
+    private def mir_to_hir_type_ref(mir_type : MIR::TypeRef) : TypeRef
+      case mir_type
+      when MIR::TypeRef::VOID    then TypeRef::VOID
+      when MIR::TypeRef::BOOL    then TypeRef::BOOL
+      when MIR::TypeRef::INT8    then TypeRef::INT8
+      when MIR::TypeRef::INT16   then TypeRef::INT16
+      when MIR::TypeRef::INT32   then TypeRef::INT32
+      when MIR::TypeRef::INT64   then TypeRef::INT64
+      when MIR::TypeRef::INT128  then TypeRef::INT128
+      when MIR::TypeRef::UINT8   then TypeRef::UINT8
+      when MIR::TypeRef::UINT16  then TypeRef::UINT16
+      when MIR::TypeRef::UINT32  then TypeRef::UINT32
+      when MIR::TypeRef::UINT64  then TypeRef::UINT64
+      when MIR::TypeRef::UINT128 then TypeRef::UINT128
+      when MIR::TypeRef::FLOAT32 then TypeRef::FLOAT32
+      when MIR::TypeRef::FLOAT64 then TypeRef::FLOAT64
+      when MIR::TypeRef::CHAR    then TypeRef::CHAR
+      when MIR::TypeRef::STRING  then TypeRef::STRING
+      when MIR::TypeRef::NIL     then TypeRef::NIL
+      when MIR::TypeRef::SYMBOL  then TypeRef::SYMBOL
+      when MIR::TypeRef::POINTER then TypeRef::POINTER
+      else
+        first_user_mir = TypeRef::FIRST_USER_TYPE + 20_u32
+        if mir_type.id >= first_user_mir
+          TypeRef.new(mir_type.id - 20_u32)
+        else
+          TypeRef::POINTER
+        end
+      end
+    end
+
     # Get type alignment in bytes
     private def type_alignment(type : TypeRef) : Int32
       case type
@@ -14600,33 +14749,34 @@ module Crystal::HIR
     # Intrinsic: value.not_nil! for union types
     # Extracts the non-nil value from a union (asserts it's not nil)
     private def lower_not_nil_intrinsic(ctx : LoweringContext, value_id : ValueId, value_type : TypeRef) : ValueId
-      # Determine the non-nil type from the union descriptor
-      non_nil_type = TypeRef::INT32  # Default fallback for Int32 | Nil
+      # Determine the non-nil variant and its index from the union descriptor.
+      non_nil_type = TypeRef::POINTER
+      non_nil_variant = -1
+      extra_non_nil = false
 
-      # Try to get the actual non-nil type from the union descriptor
       mir_union_ref = hir_to_mir_type_ref(value_type)
       if descriptor = @union_descriptors[mir_union_ref]?
-        descriptor.variants.each do |variant|
-          if variant.type_ref != MIR::TypeRef::NIL
-            # Convert MIR type back to HIR type (rough approximation)
-            non_nil_type = case variant.type_ref
-                           when MIR::TypeRef::INT32  then TypeRef::INT32
-                           when MIR::TypeRef::INT64  then TypeRef::INT64
-                           when MIR::TypeRef::FLOAT64 then TypeRef::FLOAT64
-                           when MIR::TypeRef::BOOL   then TypeRef::BOOL
-                           when MIR::TypeRef::POINTER then TypeRef::POINTER
-                           else TypeRef::POINTER
-                           end
+        descriptor.variants.each_with_index do |variant, idx|
+          next if variant.type_ref == MIR::TypeRef::NIL
+          if non_nil_variant >= 0
+            extra_non_nil = true
             break
           end
+          non_nil_variant = idx
+          non_nil_type = mir_to_hir_type_ref(variant.type_ref)
         end
       end
 
-      # Extract using UnionUnwrap (variant 0 is the non-nil type)
-      unwrap = UnionUnwrap.new(ctx.next_id, non_nil_type, value_id, 0_i32, false)
-      ctx.emit(unwrap)
-      ctx.register_type(unwrap.id, non_nil_type)
-      unwrap.id
+      # Only unwrap when a single concrete non-nil variant exists.
+      if non_nil_variant >= 0 && !extra_non_nil
+        unwrap = UnionUnwrap.new(ctx.next_id, non_nil_type, value_id, non_nil_variant, false)
+        ctx.emit(unwrap)
+        ctx.register_type(unwrap.id, non_nil_type)
+        return unwrap.id
+      end
+
+      # Fallback: return the original value to avoid incorrect narrowing.
+      value_id
     end
   end
 end
