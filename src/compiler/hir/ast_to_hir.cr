@@ -1381,7 +1381,7 @@ module Crystal::HIR
       with_arena(include_arena) do
         target_node.type_args.each do |arg|
           if str = stringify_type_expr(arg)
-            arg_strings << str
+            arg_strings << substitute_type_params_in_type_name(str)
           end
         end
       end
@@ -9373,6 +9373,57 @@ module Crystal::HIR
       {base: base, owner: resolved_owner, args: substituted_args, map: map}
     end
 
+    private def find_module_def_recursive(
+      module_name : String,
+      method_base : String,
+      expected_param_count : Int32,
+      visited : Set(String)
+    ) : Tuple(CrystalV2::Compiler::Frontend::DefNode, CrystalV2::Compiler::Frontend::ArenaLike)?
+      return nil if visited.includes?(module_name)
+      visited << module_name
+
+      mod_defs = @module_defs[module_name]?
+      return nil unless mod_defs
+
+      mod_defs.each do |mod_node, mod_arena|
+        with_arena(mod_arena) do
+          body = mod_node.body
+          next unless body
+
+          body.each do |expr_id|
+            member = unwrap_visibility_member(@arena[expr_id])
+            case member
+            when CrystalV2::Compiler::Frontend::IncludeNode
+              include_name = resolve_path_like_name(member.target)
+              next unless include_name
+              if found = find_module_def_recursive(include_name, method_base, expected_param_count, visited)
+                return found
+              end
+            when CrystalV2::Compiler::Frontend::DefNode
+              next if (recv = member.receiver) && String.new(recv) == "self"
+              next if member.is_abstract
+              member_name = String.new(member.name)
+              next unless member_name == method_base
+
+              actual_param_count = 0
+              if params = member.params
+                params.each do |param|
+                  next if param.is_block || param.is_splat || param.is_double_splat || named_only_separator?(param)
+                  actual_param_count += 1
+                end
+              end
+
+              if expected_param_count == 0 || expected_param_count == actual_param_count
+                return {member, mod_arena}
+              end
+            end
+          end
+        end
+      end
+
+      nil
+    end
+
     private def lower_function_if_needed(name : String) : Nil
       return if name.empty?
       return if @yield_functions.includes?(name)
@@ -9460,56 +9511,27 @@ module Crystal::HIR
             # Extract param signature from original name (includes $params)
             original_method_part = name.includes?("#") ? name.split("#", 2).last : method_part
             if included = @class_included_modules[owner]?
+              method_base = method_part.split("$").first
+              expected_param_count = if original_method_part.includes?("$")
+                                       original_method_part.split("$", 2).last.split("_").size
+                                     else
+                                       0
+                                     end
               included.each do |module_name|
                 base_module = module_name.split('(').first
-                if mod_defs = @module_defs[base_module]?
-                  mod_defs.each do |mod_node, mod_arena|
-                    if body = mod_node.body
-                      body.each do |expr_id|
-                        member = mod_arena[expr_id]
-                        # Unwrap visibility nodes
-                        while member.is_a?(CrystalV2::Compiler::Frontend::VisibilityModifierNode)
-                          member = mod_arena[member.expression]
-                        end
-                        if member.is_a?(CrystalV2::Compiler::Frontend::DefNode)
-                          member_name = String.new(member.name)
-                          # Match by method name (before any $ suffix)
-                          method_base = method_part.split("$").first
-                          if member_name == method_base && !((recv = member.receiver) && String.new(recv) == "self")
-                            # Count expected params from mangled name (count _ after $)
-                            expected_param_count = if original_method_part.includes?("$")
-                                                     original_method_part.split("$", 2).last.split("_").size
-                                                   else
-                                                     0
-                                                   end
-                            # Count actual params in def (excluding blocks and splats)
-                            actual_param_count = 0
-                            if params = member.params
-                              params.each do |p|
-                                actual_param_count += 1 unless p.is_block || p.is_splat || p.is_double_splat || named_only_separator?(p)
-                              end
-                            end
-                            # Match by param count if mangled name has params
-                            if expected_param_count == 0 || expected_param_count == actual_param_count
-                              func_def = member
-                              arena = mod_arena
-                              # DON'T override target_name - let lower_method compute correct mangled name
-                              # target_name stays as the original base_name (owner#method)
-                              target_name = base_name
-                              deferred_lookup_used = true
-                              if method_part.includes?("from_chars")
-                                STDERR.puts "[DEFERRED_LOOKUP] Found #{member_name} (params=#{actual_param_count}) in module #{base_module} for #{base_name}"
-                              end
-                              break
-                            elsif method_part.includes?("from_chars")
-                              STDERR.puts "[DEFERRED_LOOKUP] Skipping #{member_name} (expected=#{expected_param_count}, actual=#{actual_param_count})"
-                            end
-                          end
-                        end
-                      end
-                    end
-                    break if func_def
+                visited = Set(String).new
+                if found = find_module_def_recursive(base_module, method_base, expected_param_count, visited)
+                  func_def = found[0]
+                  arena = found[1]
+                  # DON'T override target_name - let lower_method compute correct mangled name
+                  target_name = base_name
+                  deferred_lookup_used = true
+                  if method_part.includes?("from_chars")
+                    STDERR.puts "[DEFERRED_LOOKUP] Found #{method_base} in module #{base_module} for #{base_name}"
                   end
+                  break
+                elsif method_part.includes?("from_chars")
+                  STDERR.puts "[DEFERRED_LOOKUP] Skipping #{method_base} in module #{base_module} (no match)"
                 end
                 break if func_def
               end
@@ -12798,6 +12820,19 @@ module Crystal::HIR
         # Resolve the method name properly (with class name and mangling)
         arg_types = index_ids.map { |idx| ctx.type_of(idx) }
         method_name = resolve_method_call(ctx, object_id, "[]", arg_types)
+        # Ensure the target function is lowered (IndexNode bypasses lower_call).
+        type_desc = @module.get_type_descriptor(ctx.type_of(object_id))
+        class_name = type_desc.try(&.name) || ""
+        base_method_name = class_name.empty? ? "[]" : "#{class_name}#[]"
+        primary_mangled_name = mangle_function_name(base_method_name, arg_types)
+        remember_callsite_arg_types(primary_mangled_name, arg_types)
+        if method_name != primary_mangled_name
+          remember_callsite_arg_types(method_name, arg_types)
+        end
+        lower_function_if_needed(primary_mangled_name)
+        if method_name != primary_mangled_name
+          lower_function_if_needed(method_name)
+        end
         return_type = get_function_return_type(method_name)
         # Fallback: [] typically returns a value (element or subslice)
         if return_type == TypeRef::VOID
