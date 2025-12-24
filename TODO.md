@@ -237,6 +237,7 @@ Goal: v2 LSP must report only real errors and match original compiler behavior.
 - [x] Extend summaries with ivars/class vars/consts and richer type info; reuse same pipeline for prelude
 - [x] Make cache/inference idempotent: if infer times out, resume later and backfill tables in background fibers
 - [x] Apply rich cache pipeline to prelude: spans/types/ivars/class vars, rebuild prelude symbol_table from cache without full parse when unchanged
+- [x] AST cache version bump to invalidate stale roots (fixes top-level def leakage in codegen) (2025-12-24)
 
 ---
 
