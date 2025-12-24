@@ -5028,11 +5028,22 @@ module Crystal::HIR
       nil
     end
 
+    private def type_name_exists?(name : String) : Bool
+      @class_info.has_key?(name) || @generic_templates.has_key?(name)
+    end
+
     # Resolve method name with inheritance: look in class and all parent classes
     # Resolve a short class name to its fully qualified name using current context
     # E.g., if @current_class is "CrystalV2::Compiler::Frontend::Span" and name is "Span",
     # returns "CrystalV2::Compiler::Frontend::Span"
     private def resolve_class_name_in_context(name : String) : String
+      # If this is a generic type name, resolve the base in context and
+      # reconstruct with the original type args.
+      if info = split_generic_base_and_args(name)
+        resolved_base = resolve_class_name_in_context(info[:base])
+        return resolved_base == info[:base] ? name : "#{resolved_base}(#{info[:args]})"
+      end
+
       # Prefer the current namespace first (nested types shadow outer/global ones).
       if current = @current_class
         # Extract namespace: "Foo::Bar::Baz" -> "Foo::Bar"
@@ -5043,7 +5054,7 @@ module Crystal::HIR
         # which should resolve to Foo::Bar::Name before trying Foo::Name
         while parts.size > 0
           qualified_name = (parts + [name]).join("::")
-          if @class_info.has_key?(qualified_name)
+          if type_name_exists?(qualified_name)
             return qualified_name
           end
           parts.pop
@@ -5053,14 +5064,14 @@ module Crystal::HIR
       end
 
       # Fall back to a top-level type
-      return name if @class_info.has_key?(name)
+      return name if type_name_exists?(name)
 
       # Also try the exact class name if current class matches
       # E.g., inside Span, "Span" should resolve to the same class
       if current = @current_class
         # Check if name is the last component of current class
         last_part = current.split("::").last
-        if last_part == name && @class_info.has_key?(current)
+        if last_part == name && type_name_exists?(current)
           return current
         end
       end
@@ -5105,6 +5116,56 @@ module Crystal::HIR
       tail = params_str[start, params_str.size - start].strip
       args << tail unless tail.empty?
       args
+    end
+
+    # Split a full generic type name into base and args, handling nested parens in the base.
+    # Example: "Foo(Bar, Baz)::Entry(Qux)" -> base="Foo(Bar, Baz)::Entry", args="Qux"
+    private def split_generic_base_and_args(name : String) : NamedTuple(base: String, args: String)?
+      return nil unless name.ends_with?(")")
+
+      depth = 0
+      i = name.bytesize - 1
+      while i >= 0
+        ch = name.byte_at(i).unsafe_chr
+        case ch
+        when ')'
+          depth += 1
+        when '('
+          depth -= 1
+          if depth == 0
+            base = name[0, i]
+            args = name[i + 1, name.size - i - 2]
+            return {base: base, args: args}
+          end
+        end
+        i -= 1
+      end
+
+      nil
+    end
+
+    private def substitute_type_params_in_type_name(name : String) : String
+      if substitution = @type_param_map[name]?
+        return substitution
+      end
+
+      if name.includes?("|")
+        parts = name.split("|").map(&.strip)
+        return parts.map { |part| substitute_type_params_in_type_name(part) }.join(" | ")
+      end
+
+      if name.ends_with?("?")
+        base = name[0, name.size - 1]
+        return "#{substitute_type_params_in_type_name(base)}?"
+      end
+
+      if info = split_generic_base_and_args(name)
+        args = split_generic_type_args(info[:args])
+        new_args = args.map { |arg| substitute_type_params_in_type_name(arg.strip) }
+        return "#{info[:base]}(#{new_args.join(", ")})"
+      end
+
+      name
     end
 
     private def find_top_level_arrow(name : String) : Int32?
@@ -5191,12 +5252,11 @@ module Crystal::HIR
       receiver = receiver_name_from_method_name(method_name)
       return {} of String => String unless receiver
 
-      paren = receiver.index('(')
-      return {} of String => String unless paren && receiver.ends_with?(")")
+      info = split_generic_base_and_args(receiver)
+      return {} of String => String unless info
 
-      base = receiver[0, paren]
-      args_str = receiver[paren + 1, receiver.size - paren - 2]
-      args = split_generic_type_args(args_str)
+      base = info[:base]
+      args = split_generic_type_args(info[:args])
       template = @generic_templates[base]?
       return {} of String => String unless template && template.type_params.size == args.size
 
@@ -5311,17 +5371,16 @@ module Crystal::HIR
       return unless type_desc
 
       name = type_desc.name
-      paren = name.index('(')
-      return unless paren
+      info = split_generic_base_and_args(name)
+      return unless info
 
-      base = name[0, paren]
+      base = info[:base]
       return if base == "Pointer"
       template = @generic_templates[base]?
       return unless template
       return if @monomorphized.includes?(name)
 
-      params_str = name[paren + 1, name.size - paren - 2]
-      type_args = split_generic_type_args(params_str)
+      type_args = split_generic_type_args(info[:args])
       return unless template.type_params.size == type_args.size
 
       monomorphize_generic_class(base, type_args, name)
@@ -7683,12 +7742,12 @@ module Crystal::HIR
                    end
         arg_name = resolve_typeof_in_type_string(arg_name)
         arg_name = normalize_typeof_name.call(arg_name)
-        # Substitute type parameter if applicable
-        @type_param_map[arg_name]? || arg_name
+        substitute_type_params_in_type_name(arg_name)
       end
 
       # Create specialized class name like Array(Int32)
       class_name = "#{base_name}(#{type_args.join(", ")})"
+      class_name = substitute_type_params_in_type_name(class_name)
 
       # Monomorphize if needed
       if !@monomorphized.includes?(class_name)
@@ -9294,14 +9353,14 @@ module Crystal::HIR
     end
 
     private def generic_owner_info(owner : String) : NamedTuple(base: String, owner: String, args: Array(String), map: Hash(String, String))?
-      return nil unless owner.includes?("(") && owner.ends_with?(")")
+      info = split_generic_base_and_args(owner)
+      return nil unless info
 
-      base = owner.split("(", 2)[0]
+      base = info[:base]
       template = @generic_templates[base]?
       return nil unless template
 
-      args_str = owner[base.size + 1, owner.size - base.size - 2]
-      raw_args = split_generic_type_args(args_str).map(&.strip)
+      raw_args = split_generic_type_args(info[:args]).map(&.strip)
       return nil unless raw_args.size == template.type_params.size
 
       substituted_args = raw_args.map { |arg| @type_param_map[arg]? || arg }
@@ -9882,11 +9941,12 @@ module Crystal::HIR
                          end
               arg_name = resolve_typeof_in_type_string(arg_name)
               arg_name = normalize_typeof_name.call(arg_name)
-              @type_param_map[arg_name]? || arg_name
+              substitute_type_params_in_type_name(arg_name)
             end
 
             # Create specialized class name like Box(Int32)
             class_name_str = "#{base_name}(#{type_args.join(", ")})"
+            class_name_str = substitute_type_params_in_type_name(class_name_str)
 
             # Monomorphize generic class if not already done
             if !@monomorphized.includes?(class_name_str)
@@ -13954,36 +14014,13 @@ module Crystal::HIR
       if lookup_name.includes?("typeof(")
         lookup_name = resolve_typeof_in_type_string(lookup_name)
       end
-      # Resolve type parameters before cache and namespace resolution.
-      if substitution = @type_param_map[lookup_name]?
-        result = type_ref_for_name(substitution)
-        @type_cache[lookup_name] = result
-        return result
-      end
-      # Substitute type params inside generic type names EARLY, before cache lookup.
-      # This handles cases like ParseOptionsT(UC) when UC -> UInt8 is in type_param_map.
-      if lookup_name.includes?("(") && !@type_param_map.empty?
-        paren_start = lookup_name.index('(')
-        paren_end = lookup_name.rindex(')')
-        if paren_start && paren_end && paren_end > paren_start
-          base = lookup_name[0, paren_start]
-          args_str = lookup_name[paren_start + 1, paren_end - paren_start - 1]
-          # Split args and substitute each one, tracking if any actual substitution occurred
-          args = split_generic_type_args(args_str)
-          substituted = false
-          new_args = args.map do |arg|
-            stripped = arg.strip
-            if sub = @type_param_map[stripped]?
-              substituted = true
-              sub
-            else
-              stripped
-            end
-          end
-          if substituted
-            new_name = "#{base}(#{new_args.join(", ")})"
-            return type_ref_for_name(new_name)
-          end
+      # Resolve type parameters (including nested generics) before cache and namespace resolution.
+      if !@type_param_map.empty?
+        substituted_name = substitute_type_params_in_type_name(lookup_name)
+        if substituted_name != lookup_name
+          result = type_ref_for_name(substituted_name)
+          @type_cache[lookup_name] = result
+          return result
         end
       end
       # Resolve unqualified type names in the current namespace before cache lookup.
@@ -14052,11 +14089,10 @@ module Crystal::HIR
       end
 
       # Handle generic types like Pointer(K), Array(T) - substitute type parameters
-      if lookup_name.includes?("(") && lookup_name.includes?(")")
+      if info = split_generic_base_and_args(lookup_name)
         # Parse generic: "Pointer(K)" -> base="Pointer", params=["K"]
-        paren_start = lookup_name.index('(').not_nil!
-        base_name = lookup_name[0, paren_start]
-        params_str = lookup_name[paren_start + 1, lookup_name.size - paren_start - 2]
+        base_name = info[:base]
+        params_str = info[:args]
 
         # Substitute each type parameter
         substituted_params = split_generic_type_args(params_str).map do |param|
