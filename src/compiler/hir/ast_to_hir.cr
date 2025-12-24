@@ -2419,7 +2419,7 @@ module Crystal::HIR
         member = unwrap_visibility_member(@arena[expr_id])
         case member
         when CrystalV2::Compiler::Frontend::DefNode
-          register_enum_method_from_def(member, enum_name)
+          register_type_method_from_def(member, enum_name)
         when CrystalV2::Compiler::Frontend::MacroIfNode
           process_macro_if_in_enum(member, enum_name)
         when CrystalV2::Compiler::Frontend::MacroLiteralNode
@@ -2428,7 +2428,7 @@ module Crystal::HIR
       end
     end
 
-    private def register_enum_method_from_def(member : CrystalV2::Compiler::Frontend::DefNode, enum_name : String)
+    private def register_type_method_from_def(member : CrystalV2::Compiler::Frontend::DefNode, type_name : String)
       method_name = String.new(member.name)
       is_class_method = if recv = member.receiver
                           String.new(recv) == "self"
@@ -2436,16 +2436,16 @@ module Crystal::HIR
                           false
                         end
       base_name = if is_class_method
-                    "#{enum_name}.#{method_name}"
+                    "#{type_name}.#{method_name}"
                   else
-                    "#{enum_name}##{method_name}"
+                    "#{type_name}##{method_name}"
                   end
       return_type = if rt = member.return_type
                       type_ref_for_name(String.new(rt))
                     elsif method_name.ends_with?("?")
                       TypeRef::BOOL
                     else
-                      infer_concrete_return_type_from_body(member, enum_name) || TypeRef::VOID
+                      infer_concrete_return_type_from_body(member, type_name) || TypeRef::VOID
                     end
       param_types = [] of TypeRef
       has_block = false
@@ -2495,7 +2495,7 @@ module Crystal::HIR
                   expr_node = @arena[expr_id]
                   case expr_node
                   when CrystalV2::Compiler::Frontend::DefNode
-                    register_enum_method_from_def(expr_node, enum_name)
+                    register_type_method_from_def(expr_node, enum_name)
                   when CrystalV2::Compiler::Frontend::MacroIfNode
                     process_macro_if_in_enum(expr_node, enum_name)
                   when CrystalV2::Compiler::Frontend::MacroLiteralNode
@@ -2536,7 +2536,7 @@ module Crystal::HIR
       when CrystalV2::Compiler::Frontend::MacroLiteralNode
         process_macro_literal_in_enum(body_node, enum_name)
       when CrystalV2::Compiler::Frontend::DefNode
-        register_enum_method_from_def(body_node, enum_name)
+        register_type_method_from_def(body_node, enum_name)
       when CrystalV2::Compiler::Frontend::MacroIfNode
         process_macro_if_in_enum(body_node, enum_name)
       end
@@ -2551,7 +2551,7 @@ module Crystal::HIR
               expr_node = @arena[expr_id]
               case expr_node
               when CrystalV2::Compiler::Frontend::DefNode
-                register_enum_method_from_def(expr_node, enum_name)
+                register_type_method_from_def(expr_node, enum_name)
               when CrystalV2::Compiler::Frontend::MacroIfNode
                 process_macro_if_in_enum(expr_node, enum_name)
               when CrystalV2::Compiler::Frontend::MacroLiteralNode
@@ -2573,11 +2573,113 @@ module Crystal::HIR
               expr_node = @arena[expr_id]
               case expr_node
               when CrystalV2::Compiler::Frontend::DefNode
-                register_enum_method_from_def(expr_node, enum_name)
+                register_type_method_from_def(expr_node, enum_name)
               when CrystalV2::Compiler::Frontend::MacroIfNode
                 process_macro_if_in_enum(expr_node, enum_name)
               when CrystalV2::Compiler::Frontend::MacroLiteralNode
                 process_macro_literal_in_enum(expr_node, enum_name)
+              end
+            end
+          end
+        end
+      end
+      return if parsed_any
+    end
+
+    private def process_macro_if_in_class(node : CrystalV2::Compiler::Frontend::MacroIfNode, class_name : String)
+      if raw_text = macro_if_raw_text(node)
+        nested_macro_end = raw_text.scan(/\{%\s*end\s*%\}/).size > 1
+        unless nested_macro_end
+          if expanded = expand_flag_macro_text(raw_text)
+            if program = parse_macro_literal_program(expanded)
+              with_arena(program.arena) do
+                program.roots.each do |expr_id|
+                  expr_node = @arena[expr_id]
+                  case expr_node
+                  when CrystalV2::Compiler::Frontend::DefNode
+                    register_type_method_from_def(expr_node, class_name)
+                  when CrystalV2::Compiler::Frontend::MacroIfNode
+                    process_macro_if_in_class(expr_node, class_name)
+                  when CrystalV2::Compiler::Frontend::MacroLiteralNode
+                    process_macro_literal_in_class(expr_node, class_name)
+                  end
+                end
+              end
+              return
+            end
+          end
+        end
+      end
+
+      result = try_evaluate_macro_condition(node.condition)
+      if result == true
+        process_macro_body_in_class(node.then_body, class_name)
+      elsif result == false
+        if else_node = node.else_body
+          else_ast = @arena[else_node]
+          case else_ast
+          when CrystalV2::Compiler::Frontend::MacroIfNode
+            process_macro_if_in_class(else_ast, class_name)
+          else
+            process_macro_body_in_class(else_node, class_name)
+          end
+        end
+      else
+        process_macro_body_in_class(node.then_body, class_name)
+        if else_node = node.else_body
+          process_macro_body_in_class(else_node, class_name)
+        end
+      end
+    end
+
+    private def process_macro_body_in_class(body_id : ExprId, class_name : String)
+      body_node = @arena[body_id]
+      case body_node
+      when CrystalV2::Compiler::Frontend::MacroLiteralNode
+        process_macro_literal_in_class(body_node, class_name)
+      when CrystalV2::Compiler::Frontend::DefNode
+        register_type_method_from_def(body_node, class_name)
+      when CrystalV2::Compiler::Frontend::MacroIfNode
+        process_macro_if_in_class(body_node, class_name)
+      end
+    end
+
+    private def process_macro_literal_in_class(node : CrystalV2::Compiler::Frontend::MacroLiteralNode, class_name : String)
+      if raw_text = macro_literal_raw_text(node)
+        expanded = expand_flag_macro_text(raw_text) || raw_text
+        if program = parse_macro_literal_program(expanded)
+          with_arena(program.arena) do
+            program.roots.each do |expr_id|
+              expr_node = @arena[expr_id]
+              case expr_node
+              when CrystalV2::Compiler::Frontend::DefNode
+                register_type_method_from_def(expr_node, class_name)
+              when CrystalV2::Compiler::Frontend::MacroIfNode
+                process_macro_if_in_class(expr_node, class_name)
+              when CrystalV2::Compiler::Frontend::MacroLiteralNode
+                process_macro_literal_in_class(expr_node, class_name)
+              end
+            end
+          end
+          return
+        end
+      end
+
+      parsed_any = false
+      macro_literal_active_texts(node).each do |text|
+        next if text.strip.empty?
+        if program = parse_macro_literal_program(text)
+          parsed_any = true
+          with_arena(program.arena) do
+            program.roots.each do |expr_id|
+              expr_node = @arena[expr_id]
+              case expr_node
+              when CrystalV2::Compiler::Frontend::DefNode
+                register_type_method_from_def(expr_node, class_name)
+              when CrystalV2::Compiler::Frontend::MacroIfNode
+                process_macro_if_in_class(expr_node, class_name)
+              when CrystalV2::Compiler::Frontend::MacroLiteralNode
+                process_macro_literal_in_class(expr_node, class_name)
               end
             end
           end
@@ -3247,6 +3349,11 @@ module Crystal::HIR
               end
             end
 
+          when CrystalV2::Compiler::Frontend::MacroIfNode
+            process_macro_if_in_class(member, class_name)
+          when CrystalV2::Compiler::Frontend::MacroLiteralNode
+            process_macro_literal_in_class(member, class_name)
+
           when CrystalV2::Compiler::Frontend::GetterNode
             # Getter declarations: getter name : Type
             # Creates @name ivar and def name; @name; end method
@@ -3659,6 +3766,11 @@ module Crystal::HIR
                 end
               end
             end
+
+          when CrystalV2::Compiler::Frontend::MacroIfNode
+            process_macro_if_in_class(member, struct_name)
+          when CrystalV2::Compiler::Frontend::MacroLiteralNode
+            process_macro_literal_in_class(member, struct_name)
 
           when CrystalV2::Compiler::Frontend::GetterNode
             if member.is_class?
