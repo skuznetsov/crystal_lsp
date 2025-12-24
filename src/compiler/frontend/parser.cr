@@ -212,26 +212,6 @@ module CrystalV2
           # Phase 103J: Check for macro control ({% if %}, {% for %}, etc.)
           debug("parse_program: current=#{current_token.kind}, checking macro_control_start?")
           if macro_control_start?
-            # Special-case top-level skip_file: {% skip_file ... %}
-            if roots_builder.size == 0
-              if keyword = peek_macro_keyword
-                if keyword == "skip_file"
-                  # Consume control start
-                  control_span = consume_macro_control_start
-                  if macro_trim_token?(current_token)
-                    advance
-                  end
-                  skip_trivia
-                  # consume keyword 'skip_file'
-                  advance
-                  skip_trivia
-                  # consume closing %}
-                  consume_macro_close_span("Expected '%}' after skip_file")
-                  # Short-circuit: ignore rest of file for LSP parsing
-                  break
-                end
-              end
-            end
             debug("parse_program: macro_control_start? returned true, calling parse_percent_macro_control")
             macro_ctrl = parse_percent_macro_control
             roots_builder << macro_ctrl unless macro_ctrl.invalid?

@@ -334,6 +334,7 @@ module CrystalV2
 
         flags = Runtime.target_flags
         all_arenas.each do |arena, exprs, file_path, source|
+          next if skip_file_directive?(source, flags)
           pending_annotations = [] of String
           exprs.each do |expr_id|
             collect_top_level_nodes(
@@ -1137,6 +1138,47 @@ module CrystalV2
         end
       end
 
+      private def skip_file_directive?(source : String, flags : Set(String)) : Bool
+        bytes = source.to_slice
+        size = bytes.size
+        idx = 0
+        loop do
+          while idx < size && (bytes[idx] == ' '.ord || bytes[idx] == '\t'.ord || bytes[idx] == '\r'.ord || bytes[idx] == '\n'.ord)
+            idx += 1
+          end
+          break if idx >= size
+          if bytes[idx] == '#'.ord
+            while idx < size && bytes[idx] != '\n'.ord
+              idx += 1
+            end
+            next
+          end
+          break
+        end
+        return false unless idx + 1 < size && bytes[idx] == '{'.ord && bytes[idx + 1] == '%'.ord
+
+        tag_end = source.index("%}", idx)
+        return false unless tag_end
+
+        tag_start = idx + 2
+        tag = source.byte_slice(tag_start, tag_end - tag_start)
+        tag = tag.strip
+        tag = tag.lstrip('-').lstrip('~').rstrip('-').rstrip('~').strip
+        return false unless tag.starts_with?("skip_file")
+
+        cond_text = tag.sub(/^skip_file/, "").strip
+        return true if cond_text.empty?
+
+        if cond_text.starts_with?("if ")
+          evaluate_macro_condition_text(cond_text.lstrip("if").strip, flags) == true
+        elsif cond_text.starts_with?("unless ")
+          cond = evaluate_macro_condition_text(cond_text.lstrip("unless").strip, flags)
+          cond.nil? ? false : !cond
+        else
+          false
+        end
+      end
+
       private def collect_macro_literal_exprs(
         arena : Frontend::ArenaLike,
         node : Frontend::MacroLiteralNode,
@@ -1503,9 +1545,55 @@ module CrystalV2
         segment_start = 0
         bytes = text.to_slice
         size = bytes.size
+        in_line_comment = false
+        in_string = false
+        in_char = false
+        escape = false
 
         missing_end = false
         while idx + 1 < size
+          if in_line_comment
+            if bytes[idx] == '\n'.ord
+              in_line_comment = false
+            end
+            idx += 1
+            next
+          elsif in_string
+            if escape
+              escape = false
+            elsif bytes[idx] == '\\'.ord
+              escape = true
+            elsif bytes[idx] == '"'.ord
+              in_string = false
+            end
+            idx += 1
+            next
+          elsif in_char
+            if escape
+              escape = false
+            elsif bytes[idx] == '\\'.ord
+              escape = true
+            elsif bytes[idx] == '\''.ord
+              in_char = false
+            end
+            idx += 1
+            next
+          else
+            if bytes[idx] == '#'.ord
+              in_line_comment = true
+              idx += 1
+              next
+            elsif bytes[idx] == '"'.ord
+              in_string = true
+              idx += 1
+              next
+            elsif bytes[idx] == '\''.ord
+              in_char = true
+              idx += 1
+              next
+            end
+          end
+
           if bytes[idx] == '{'.ord && bytes[idx + 1] == '%'.ord
             if idx > segment_start && active
               texts << text.byte_slice(segment_start, idx - segment_start)
