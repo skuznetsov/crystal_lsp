@@ -673,6 +673,8 @@ The key insight is: **Don't compete with LLVM, complement it.**
   - Added `hir_funcs` / `hir_reach` / `mir_funcs` counts to --stats output (cv2_smoke: 915 / 8 / 8)
 - [x] Validate lazy HIR lowering for dynamic dispatch (virtual calls / module mixins) to avoid pruning needed methods (2025-12-20)
   - Virtual calls now expand reachability by base method name; spec covers HIR reachability for virtual calls.
+- [x] Lazy monomorphization flush by default to avoid prelude stalls; set `CRYSTAL_V2_EAGER_MONO=1` to restore eager behavior (2025-12-27)
+- [x] HIR lowering for `spawn` keyword via synthetic `spawn { ... }` call (2025-12-27)
 
 ### GC Minimization (DX / Bootstrap)
 - [x] Wire CLI/driver `--mm=conservative|balanced|aggressive` to HIR MemoryConfig.

@@ -308,6 +308,8 @@ module Crystal::HIR
     @defer_monomorphization : Bool
     # Suppress monomorphization while scanning specialized class bodies.
     @suppress_monomorphization : Bool
+    # Only lower bodies for monomorphized classes when explicitly enabled.
+    @eager_monomorphization : Bool
 
     # Current type parameter substitutions for generic lowering
     @type_param_map : Hash(String, String)
@@ -400,6 +402,7 @@ module Crystal::HIR
       @pending_monomorphizations = [] of {String, Array(String), String}
       @defer_monomorphization = true  # Start in deferred mode
       @suppress_monomorphization = false
+      @eager_monomorphization = ENV.has_key?("CRYSTAL_V2_EAGER_MONO")
       @type_param_map = {} of String => String
       @macro_defs = {} of String => CrystalV2::Compiler::Frontend::MacroDefNode
       @class_accessor_entries = {} of String => ClassAccessorEntry
@@ -2521,7 +2524,6 @@ module Crystal::HIR
       splat_param_info_index : Int32? = nil
       splat_param_types_index : Int32? = nil
       splat_param_name : String? = nil
-      splat_param_has_annotation = false
 
       if params = node.params
         params.each do |param|
@@ -2553,7 +2555,6 @@ module Crystal::HIR
               splat_param_info_index = param_infos.size - 1
               splat_param_types_index = param_types.size
               splat_param_name = param_name
-              splat_param_has_annotation = !param.type_annotation.nil?
             else
               call_index += 1
             end
@@ -2562,13 +2563,9 @@ module Crystal::HIR
         end
       end
 
-      if splat_param_name && !call_types.empty? && !splat_param_has_annotation
+      if splat_param_name && !call_types.empty?
         remaining = call_types[call_index..-1]? || [] of TypeRef
-        splat_type = if remaining.size == 1
-                       remaining[0]
-                     else
-                       tuple_type_from_arg_types(remaining)
-                     end
+        splat_type = tuple_type_from_arg_types(remaining)
         if splat_type != TypeRef::VOID
           param_type_map[splat_param_name.not_nil!] = splat_type
           if idx = splat_param_info_index
@@ -3407,6 +3404,7 @@ module Crystal::HIR
       @defer_monomorphization = false
       pending = @pending_monomorphizations.dup
       @pending_monomorphizations.clear
+      return unless @eager_monomorphization
 
       if ENV.has_key?("DEBUG_MONO")
         STDERR.puts "[MONO] Flush pending monomorphizations: #{pending.size}"
@@ -3417,7 +3415,30 @@ module Crystal::HIR
           STDERR.puts "[MONO] #{idx + 1}/#{pending.size}: #{specialized_name}"
         end
         next if @monomorphized.includes?(specialized_name)
+        unless concrete_type_args?(type_args)
+          STDERR.puts "[MONO] Skipping unresolved: #{specialized_name}" if ENV.has_key?("DEBUG_MONO")
+          next
+        end
         monomorphize_generic_class(base_name, type_args, specialized_name)
+      end
+    end
+
+    private def concrete_type_args?(type_args : Array(String)) : Bool
+      # NOTE: unions like `String | Nil` are concrete and must be allowed here.
+      unresolved_token_re = /(?:^|[^A-Za-z0-9_:])(K2|V2|K|V|T|U|L|W|self)(?:$|[^A-Za-z0-9_:])/
+      # Bare generic names without type params (like Array, Hash) are not concrete
+      bare_generic_names = {"Array", "Hash", "Set", "Slice", "Pointer", "StaticArray", "Iterator", "Enumerable"}
+      type_args.none? do |arg|
+        # typeof(...) in type positions is not fully resolved during bootstrap.
+        next true if arg.includes?("typeof(")
+        # `self` as a standalone type arg is unresolved
+        next true if arg == "self"
+        # NoReturn type args are effectively placeholders; skip monomorphization.
+        next true if arg == "NoReturn"
+        # Bare generic class names without type params are not concrete
+        next true if bare_generic_names.includes?(arg)
+        # Detect remaining generic placeholders as standalone tokens (avoid false positives like "ValueId").
+        arg.matches?(unresolved_token_re)
       end
     end
 
@@ -3431,25 +3452,8 @@ module Crystal::HIR
         return
       end
 
-      # Skip if type_args contain unresolved type parameters
-      # These indicate incomplete substitution and would cause infinite recursion
-      # NOTE: unions like `String | Nil` are concrete and must be allowed here.
-      unresolved_token_re = /(?:^|[^A-Za-z0-9_:])(K2|V2|K|V|T|U|L|W|self)(?:$|[^A-Za-z0-9_:])/
-      # Bare generic names without type params (like Array, Hash) are not concrete
-      bare_generic_names = {"Array", "Hash", "Set", "Slice", "Pointer", "StaticArray", "Iterator", "Enumerable"}
-      has_unresolved = type_args.any? do |arg|
-        # typeof(...) in type positions is not fully resolved during bootstrap.
-        next true if arg.includes?("typeof(")
-        # `self` as a standalone type arg is unresolved
-        next true if arg == "self"
-        # NoReturn type args are effectively placeholders; skip monomorphization.
-        next true if arg == "NoReturn"
-        # Bare generic class names without type params are not concrete
-        next true if bare_generic_names.includes?(arg)
-        # Detect remaining generic placeholders as standalone tokens (avoid false positives like "ValueId").
-        arg.matches?(unresolved_token_re)
-      end
-      if has_unresolved
+      # Skip if type_args contain unresolved type parameters.
+      if !concrete_type_args?(type_args)
         if ENV.has_key?("DEBUG_MONO")
           STDERR.puts "[MONO] Skipping unresolved: #{specialized_name}"
         end
@@ -3489,42 +3493,45 @@ module Crystal::HIR
         STDERR.puts "[MONO] done #{specialized_name} in #{elapsed_ms.round(1)}ms"
       end
 
-      # Generate allocator and methods for the specialized class
-      if class_info = @class_info[specialized_name]?
-        # Set current class for ivar lookup
-        old_class = @current_class
-        @current_class = specialized_name
+      # Lowering bodies for monomorphized classes is expensive on prelude.
+      # Keep it lazy unless explicitly enabled.
+      if @eager_monomorphization
+        if class_info = @class_info[specialized_name]?
+          # Set current class for ivar lookup
+          old_class = @current_class
+          @current_class = specialized_name
 
-        generate_allocator(specialized_name, class_info)
+          generate_allocator(specialized_name, class_info)
 
-        # Lower methods with type substitutions
-        if body = template.node.body
-          body.each do |expr_id|
-            member = @arena[expr_id]
-            case member
-            when CrystalV2::Compiler::Frontend::DefNode
-              lower_method(specialized_name, class_info, member)
-            when CrystalV2::Compiler::Frontend::GetterNode
-              # Generate synthetic getter methods
-              member.specs.each do |spec|
-                generate_getter_method(specialized_name, class_info, spec)
-              end
-            when CrystalV2::Compiler::Frontend::SetterNode
-              # Generate synthetic setter methods
-              member.specs.each do |spec|
-                generate_setter_method(specialized_name, class_info, spec)
-              end
-            when CrystalV2::Compiler::Frontend::PropertyNode
-              # Generate both getter and setter methods
-              member.specs.each do |spec|
-                generate_getter_method(specialized_name, class_info, spec)
-                generate_setter_method(specialized_name, class_info, spec)
+          # Lower methods with type substitutions
+          if body = template.node.body
+            body.each do |expr_id|
+              member = @arena[expr_id]
+              case member
+              when CrystalV2::Compiler::Frontend::DefNode
+                lower_method(specialized_name, class_info, member)
+              when CrystalV2::Compiler::Frontend::GetterNode
+                # Generate synthetic getter methods
+                member.specs.each do |spec|
+                  generate_getter_method(specialized_name, class_info, spec)
+                end
+              when CrystalV2::Compiler::Frontend::SetterNode
+                # Generate synthetic setter methods
+                member.specs.each do |spec|
+                  generate_setter_method(specialized_name, class_info, spec)
+                end
+              when CrystalV2::Compiler::Frontend::PropertyNode
+                # Generate both getter and setter methods
+                member.specs.each do |spec|
+                  generate_getter_method(specialized_name, class_info, spec)
+                  generate_setter_method(specialized_name, class_info, spec)
+                end
               end
             end
           end
-        end
 
-        @current_class = old_class
+          @current_class = old_class
+        end
       end
 
       # Restore arena and type param map
@@ -4111,7 +4118,6 @@ module Crystal::HIR
       splat_param_info_index : Int32? = nil
       splat_param_types_index : Int32? = nil
       splat_param_name : String? = nil
-      splat_param_has_annotation = false
 
       if params = node.params
         params.each do |param|
@@ -4143,7 +4149,6 @@ module Crystal::HIR
               splat_param_info_index = param_infos.size - 1
               splat_param_types_index = param_types.size
               splat_param_name = param_name
-              splat_param_has_annotation = !param.type_annotation.nil?
             else
               call_index += 1
             end
@@ -4152,13 +4157,9 @@ module Crystal::HIR
         end
       end
 
-      if splat_param_name && !call_types.empty? && !splat_param_has_annotation
+      if splat_param_name && !call_types.empty?
         remaining = call_types[call_index..-1]? || [] of TypeRef
-        splat_type = if remaining.size == 1
-                       remaining[0]
-                     else
-                       tuple_type_from_arg_types(remaining)
-                     end
+        splat_type = tuple_type_from_arg_types(remaining)
         if splat_type != TypeRef::VOID
           param_type_map[splat_param_name.not_nil!] = splat_type
           if idx = splat_param_info_index
@@ -4334,6 +4335,25 @@ module Crystal::HIR
 
       parts = arg_types.map { |t| type_name_for_mangling(t) }
       type_ref_for_name("Tuple(#{parts.join(", ")})")
+    end
+
+    private def tuple_size_from_type_name(type_name : String) : Int32?
+      return nil unless type_name.starts_with?("Tuple(") && type_name.ends_with?(")")
+
+      inner = type_name[6...-1]
+      tuple_size = 0
+      depth = 0
+      unless inner.empty?
+        tuple_size = 1
+        inner.each_char do |c|
+          case c
+          when '(' then depth += 1
+          when ')' then depth -= 1
+          when ',' then tuple_size += 1 if depth == 0
+          end
+        end
+      end
+      tuple_size
     end
 
     private def refine_param_type_from_call(param_type : TypeRef, call_type : TypeRef) : TypeRef
@@ -4989,6 +5009,25 @@ module Crystal::HIR
       nil
     end
 
+    private def class_info_for_type(receiver_type : TypeRef) : ClassInfo?
+      return nil if receiver_type == TypeRef::VOID
+
+      @class_info.each_value do |info|
+        return info if info.type_ref.id == receiver_type.id
+      end
+
+      if desc = @module.get_type_descriptor(receiver_type)
+        if info = @class_info[desc.name]?
+          return info
+        end
+        @class_info.each do |name, info|
+          return info if name.ends_with?("::#{desc.name}") || name == desc.name
+        end
+      end
+
+      nil
+    end
+
     # Resolve method name with inheritance: look in class and all parent classes
     # Resolve a short class name to its fully qualified name using current context
     # E.g., if @current_class is "CrystalV2::Compiler::Frontend::Span" and name is "Span",
@@ -5631,7 +5670,6 @@ module Crystal::HIR
       splat_param_info_index : Int32? = nil
       splat_param_types_index : Int32? = nil
       splat_param_name : String? = nil
-      splat_param_has_annotation = false
 
       if params = node.params
         params.each do |param|
@@ -5664,7 +5702,6 @@ module Crystal::HIR
               splat_param_info_index = param_infos.size - 1
               splat_param_types_index = param_types.size
               splat_param_name = param_name
-              splat_param_has_annotation = !param.type_annotation.nil?
             else
               call_index += 1
             end
@@ -5673,13 +5710,9 @@ module Crystal::HIR
         end
       end
 
-      if splat_param_name && !call_types.empty? && !splat_param_has_annotation
+      if splat_param_name && !call_types.empty?
         remaining = call_types[call_index..-1]? || [] of TypeRef
-        splat_type = if remaining.size == 1
-                       remaining[0]
-                     else
-                       tuple_type_from_arg_types(remaining)
-                     end
+        splat_type = tuple_type_from_arg_types(remaining)
         if splat_type != TypeRef::VOID
           param_type_map[splat_param_name.not_nil!] = splat_type
           if idx = splat_param_info_index
@@ -6241,6 +6274,9 @@ module Crystal::HIR
         nil_lit = Literal.new(ctx.next_id, TypeRef::NIL, nil)
         ctx.emit(nil_lit)
         nil_lit.id
+
+      when CrystalV2::Compiler::Frontend::SpawnNode
+        lower_spawn(ctx, node)
 
       else
         raise LoweringError.new("Unsupported AST node type: #{node.class}", node)
@@ -9257,11 +9293,32 @@ module Crystal::HIR
       @pending_arg_types[name] = arg_types.dup
     end
 
+    private def generic_owner_info(owner : String) : NamedTuple(base: String, owner: String, args: Array(String), map: Hash(String, String))?
+      return nil unless owner.includes?("(") && owner.ends_with?(")")
+
+      base = owner.split("(", 2)[0]
+      template = @generic_templates[base]?
+      return nil unless template
+
+      args_str = owner[base.size + 1, owner.size - base.size - 2]
+      raw_args = split_generic_type_args(args_str).map(&.strip)
+      return nil unless raw_args.size == template.type_params.size
+
+      substituted_args = raw_args.map { |arg| @type_param_map[arg]? || arg }
+      map = {} of String => String
+      template.type_params.each_with_index do |param, idx|
+        map[param] = substituted_args[idx]
+      end
+
+      resolved_owner = "#{base}(#{substituted_args.join(", ")})"
+      {base: base, owner: resolved_owner, args: substituted_args, map: map}
+    end
+
     private def lower_function_if_needed(name : String) : Nil
       return if name.empty?
       return if @yield_functions.includes?(name)
-      return if @module.has_function?(name)
       return if @lowering_functions.includes?(name)
+      return if @module.has_function?(name)
 
       target_name = name
       func_def = @function_defs[target_name]?
@@ -9409,6 +9466,35 @@ module Crystal::HIR
       @pending_arg_types.delete(name) if @pending_arg_types.has_key?(name)
       @pending_arg_types.delete(target_name) if @pending_arg_types.has_key?(target_name)
 
+      extra_type_params : Hash(String, String)? = nil
+      resolved_owner : String? = nil
+      resolved_target_name = target_name
+      base_target_name = target_name.split("$", 2)[0]
+      if base_target_name.includes?("#") || base_target_name.includes?(".")
+        sep = base_target_name.includes?("#") ? "#" : "."
+        owner, method = base_target_name.split(sep, 2)
+        if info = generic_owner_info(owner)
+          resolved_owner = info[:owner]
+          extra_type_params = info[:map]
+          if resolved_owner != owner
+            resolved_base = "#{resolved_owner}#{sep}#{method}"
+            if target_name.includes?("$")
+              suffix = target_name.split("$", 2)[1]
+              resolved_target_name = "#{resolved_base}$#{suffix}"
+            else
+              resolved_target_name = resolved_base
+            end
+          end
+          if !@class_info.has_key?(info[:owner]) && !@monomorphized.includes?(info[:owner]) && concrete_type_args?(info[:args])
+            monomorphize_generic_class(info[:base], info[:args], info[:owner])
+          end
+        end
+      end
+
+      return if @module.has_function?(resolved_target_name)
+      return if @lowering_functions.includes?(resolved_target_name)
+
+      target_name = resolved_target_name
       @lowering_functions.add(target_name)
       if target_name.includes?("from_chars")
         STDERR.puts "[LOWERING] Starting lower for #{target_name}, arena=#{arena.class}"
@@ -9416,7 +9502,7 @@ module Crystal::HIR
       begin
         with_arena(arena || @arena) do
           if target_name.includes?("#")
-            owner = target_name.split("#", 2)[0]
+            owner = resolved_owner || target_name.split("#", 2)[0]
             if class_info = @class_info[owner]?
               old_class = @current_class
               @current_class = owner
@@ -9435,7 +9521,8 @@ module Crystal::HIR
                              else
                                {} of String => String
                              end
-              with_type_param_map(extra_params) do
+              merged_params = extra_type_params ? extra_params.merge(extra_type_params) : extra_params
+              with_type_param_map(merged_params) do
                 lower_method(owner, class_info, func_def, call_arg_types, override)
               end
               @current_class = old_class
@@ -9444,7 +9531,7 @@ module Crystal::HIR
             end
           elsif target_name.includes?(".")
             parts = target_name.split(".", 2)
-            owner = parts[0]
+            owner = resolved_owner || parts[0]
             method = parts[1]?
             # For .new on classes/structs, use generate_allocator (not lower_method)
             # This ensures correct init_params from the initialize method are used
@@ -9458,7 +9545,13 @@ module Crystal::HIR
             if class_info = @class_info[owner]?
               old_class = @current_class
               @current_class = owner
-              lower_method(owner, class_info, func_def, call_arg_types, target_name)
+              if extra_type_params
+                with_type_param_map(extra_type_params) do
+                  lower_method(owner, class_info, func_def, call_arg_types, target_name)
+                end
+              else
+                lower_method(owner, class_info, func_def, call_arg_types, target_name)
+              end
               @current_class = old_class
             else
               lower_module_method(owner, func_def, call_arg_types, target_name)
@@ -9591,6 +9684,25 @@ module Crystal::HIR
       end
 
       nil
+    end
+
+    private def lower_spawn(ctx : LoweringContext, node : CrystalV2::Compiler::Frontend::SpawnNode) : ValueId
+      body_exprs = if body = node.body
+                     body
+                   elsif expr = node.expression
+                     [expr] of CrystalV2::Compiler::Frontend::ExprId
+                   else
+                     [] of CrystalV2::Compiler::Frontend::ExprId
+                   end
+
+      block_node = CrystalV2::Compiler::Frontend::BlockNode.new(node.span, nil, body_exprs)
+      block_id = @arena.add_typed(block_node)
+
+      callee_id = @arena.add_typed(
+        CrystalV2::Compiler::Frontend::IdentifierNode.new(node.span, "spawn".to_slice)
+      )
+      call_node = CrystalV2::Compiler::Frontend::CallNode.new(node.span, callee_id, [] of CrystalV2::Compiler::Frontend::ExprId, block_id)
+      lower_call(ctx, call_node)
     end
 
     private def lower_call(ctx : LoweringContext, node : CrystalV2::Compiler::Frontend::CallNode) : ValueId
@@ -9879,6 +9991,18 @@ module Crystal::HIR
              end
       args = apply_default_args(ctx, args, method_name, full_method_name, has_block_call)
       args = pack_splat_args_for_call(ctx, args, method_name, full_method_name, has_block_call)
+
+      # Special handling for Tuple#size - return compile-time constant based on type parameters
+      if method_name == "size" && receiver_id && args.empty?
+        if type_desc = @module.get_type_descriptor(ctx.type_of(receiver_id))
+          if tuple_size = tuple_size_from_type_name(type_desc.name)
+            lit = Literal.new(ctx.next_id, TypeRef::INT32, tuple_size.to_i64)
+            ctx.emit(lit)
+            ctx.register_type(lit.id, TypeRef::INT32)
+            return lit.id
+          end
+        end
+      end
 
       # Handle .times { |i| body } intrinsic BEFORE lowering block
       if method_name == "times" && receiver_id
@@ -12754,6 +12878,18 @@ module Crystal::HIR
       receiver_type = ctx.type_of(object_id)
       ensure_monomorphized_type(receiver_type) unless receiver_type == TypeRef::VOID
 
+      # Direct ivar access on another object (obj.@ivar) - use field get.
+      if member_name.starts_with?("@")
+        if info = class_info_for_type(receiver_type)
+          if ivar_info = info.ivars.find { |iv| iv.name == member_name }
+            field_get = FieldGet.new(ctx.next_id, ivar_info.type, object_id, member_name, ivar_info.offset)
+            ctx.emit(field_get)
+            ctx.register_type(field_get.id, ivar_info.type)
+            return field_get.id
+          end
+        end
+      end
+
       # Handle nil? intrinsic for union types (T | Nil)
       if member_name == "nil?" && is_union_or_nilable_type?(receiver_type)
         return lower_nil_check_intrinsic(ctx, object_id, receiver_type)
@@ -12983,24 +13119,7 @@ module Crystal::HIR
       # Special handling for Tuple#size - return compile-time constant based on type parameters
       if member_name == "size"
         if type_desc = @module.get_type_descriptor(receiver_type)
-          type_name = type_desc.name
-          if type_name.starts_with?("Tuple(") && type_name.ends_with?(")")
-            # Count the number of type parameters in Tuple(T1, T2, ...)
-            # by counting commas + 1 (handling nested generics)
-            inner = type_name[6...-1]  # Strip "Tuple(" and ")"
-            tuple_size = 0
-            depth = 0
-            unless inner.empty?
-              tuple_size = 1
-              inner.each_char do |c|
-                case c
-                when '(' then depth += 1
-                when ')' then depth -= 1
-                when ','
-                  tuple_size += 1 if depth == 0
-                end
-              end
-            end
+          if tuple_size = tuple_size_from_type_name(type_desc.name)
             lit = Literal.new(ctx.next_id, TypeRef::INT32, tuple_size.to_i64)
             ctx.emit(lit)
             ctx.register_type(lit.id, TypeRef::INT32)
@@ -13969,7 +14088,9 @@ module Crystal::HIR
         # This ensures included module methods get registered for the specialized type
         if template = @generic_templates[base_name]?
           unless @monomorphized.includes?(substituted_name)
-            if @suppress_monomorphization
+            if !concrete_type_args?(substituted_params)
+              STDERR.puts "[MONO] Skipping unresolved: #{substituted_name}" if ENV.has_key?("DEBUG_MONO")
+            elsif @suppress_monomorphization
               # Skip eager monomorphization while scanning specialized bodies.
             elsif @defer_monomorphization
               # Queue for later - templates may not be fully registered yet
