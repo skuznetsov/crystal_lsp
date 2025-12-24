@@ -7096,11 +7096,13 @@ module CrystalV2
               break if token.kind == Token::Kind::EOF
 
               if macro_control_start?
-                if stop_on_branch
-                  if keyword = peek_macro_keyword
-                    if control_depth == 0 && block_depth == 0 && (keyword == "elsif" || keyword == "else" || keyword == "end")
-                      break
-                    end
+                keyword = peek_macro_keyword
+                if ENV["DEBUG_MACRO_BODY"]? && keyword
+                  STDERR.puts "[MACRO_BODY] line=#{token.span.start_line + 1} keyword=#{keyword} control_depth=#{control_depth} block_depth=#{block_depth}"
+                end
+                if stop_on_branch && keyword
+                  if control_depth == 0 && block_depth == 0 && (keyword == "elsif" || keyword == "else" || keyword == "end")
+                    break
                   end
                 end
                 left_trim = macro_control_left_trim?
@@ -7146,8 +7148,10 @@ module CrystalV2
                 when :push
                   control_depth += 1
                 when :pop
-                  break if control_depth == 0
-                  control_depth -= 1
+                  if !stop_on_branch && control_depth == 0
+                    break
+                  end
+                  control_depth -= 1 if control_depth > 0
                 end
 
                 macro_trim_right ||= skip_whitespace
@@ -7192,6 +7196,9 @@ module CrystalV2
               starts_statement = prev_tok.nil? ||
                                  prev_tok.kind.in?(Token::Kind::Newline, Token::Kind::Semicolon) ||
                                  prev_tok.span.end_line < token.span.start_line
+              if !starts_statement && prev_tok
+                starts_statement = prev_tok.kind.in?(Token::Kind::Private, Token::Kind::Protected, Token::Kind::Abstract)
+              end
               case token.kind
               when Token::Kind::Begin, Token::Kind::Do
                 # begin/do always introduce a block that must be closed with end,
@@ -7204,7 +7211,7 @@ module CrystalV2
                    Token::Kind::Lib, Token::Kind::Macro
                 block_depth += 1 if starts_statement
               when Token::Kind::End
-                if control_depth == 0 && block_depth == 0 && starts_statement
+                if !stop_on_branch && control_depth == 0 && block_depth == 0 && starts_statement
                   # Do not consume macro-def 'end'; leave it for caller
                   break
                 else
@@ -12931,6 +12938,11 @@ module CrystalV2
 
           condition = parse_expression(0)
           return PREFIX_ERROR if condition.invalid?
+          if keyword == "unless"
+            op_slice = @string_pool.intern("!".to_slice)
+            cond_span = @arena[condition].span
+            condition = @arena.add_typed(UnaryNode.new(cond_span, op_slice, condition))
+          end
 
           skip_trivia
 

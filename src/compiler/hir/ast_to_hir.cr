@@ -2081,34 +2081,37 @@ module Crystal::HIR
     # Process MacroIfNode inside a module body to extract methods
     private def process_macro_if_in_module(node : CrystalV2::Compiler::Frontend::MacroIfNode, module_name : String)
       if raw_text = macro_if_raw_text(node)
-        if expanded = expand_flag_macro_text(raw_text)
-          if program = parse_macro_literal_program(expanded)
-            with_arena(program.arena) do
-              program.roots.each do |expr_id|
-                expr_node = @arena[expr_id]
-                case expr_node
-                when CrystalV2::Compiler::Frontend::DefNode
-                  register_module_method_from_def(expr_node, module_name)
-                when CrystalV2::Compiler::Frontend::ClassNode
-                  class_name = String.new(expr_node.name)
-                  full_class_name = "#{module_name}::#{class_name}"
-                  register_class_with_name(expr_node, full_class_name)
-                when CrystalV2::Compiler::Frontend::StructNode
-                  struct_name = String.new(expr_node.name)
-                  full_struct_name = "#{module_name}::#{struct_name}"
-                  register_struct_with_name(expr_node, full_struct_name)
-                when CrystalV2::Compiler::Frontend::ModuleNode
-                  nested_name = String.new(expr_node.name)
-                  full_nested_name = "#{module_name}::#{nested_name}"
-                  register_nested_module(expr_node, full_nested_name)
-                when CrystalV2::Compiler::Frontend::MacroIfNode
-                  process_macro_if_in_module(expr_node, module_name)
-                when CrystalV2::Compiler::Frontend::MacroLiteralNode
-                  process_macro_literal_in_module(expr_node, module_name)
+        nested_macro_end = raw_text.scan(/\{%\s*end\s*%\}/).size > 1
+        unless nested_macro_end
+          if expanded = expand_flag_macro_text(raw_text)
+            if program = parse_macro_literal_program(expanded)
+              with_arena(program.arena) do
+                program.roots.each do |expr_id|
+                  expr_node = @arena[expr_id]
+                  case expr_node
+                  when CrystalV2::Compiler::Frontend::DefNode
+                    register_module_method_from_def(expr_node, module_name)
+                  when CrystalV2::Compiler::Frontend::ClassNode
+                    class_name = String.new(expr_node.name)
+                    full_class_name = "#{module_name}::#{class_name}"
+                    register_class_with_name(expr_node, full_class_name)
+                  when CrystalV2::Compiler::Frontend::StructNode
+                    struct_name = String.new(expr_node.name)
+                    full_struct_name = "#{module_name}::#{struct_name}"
+                    register_struct_with_name(expr_node, full_struct_name)
+                  when CrystalV2::Compiler::Frontend::ModuleNode
+                    nested_name = String.new(expr_node.name)
+                    full_nested_name = "#{module_name}::#{nested_name}"
+                    register_nested_module(expr_node, full_nested_name)
+                  when CrystalV2::Compiler::Frontend::MacroIfNode
+                    process_macro_if_in_module(expr_node, module_name)
+                  when CrystalV2::Compiler::Frontend::MacroLiteralNode
+                    process_macro_literal_in_module(expr_node, module_name)
+                  end
                 end
               end
+              return
             end
-            return
           end
         end
       end
@@ -2186,6 +2189,41 @@ module Crystal::HIR
         end
       end
 
+      # Fallback: evaluate active text pieces (handles nested macro controls).
+      parsed_any = false
+      macro_literal_active_texts(node).each do |text|
+        next if text.strip.empty?
+        if program = parse_macro_literal_program(text)
+          parsed_any = true
+          with_arena(program.arena) do
+            program.roots.each do |expr_id|
+              expr_node = @arena[expr_id]
+              case expr_node
+              when CrystalV2::Compiler::Frontend::DefNode
+                register_module_method_from_def(expr_node, module_name)
+              when CrystalV2::Compiler::Frontend::ClassNode
+                class_name = String.new(expr_node.name)
+                full_class_name = "#{module_name}::#{class_name}"
+                register_class_with_name(expr_node, full_class_name)
+              when CrystalV2::Compiler::Frontend::StructNode
+                struct_name = String.new(expr_node.name)
+                full_struct_name = "#{module_name}::#{struct_name}"
+                register_struct_with_name(expr_node, full_struct_name)
+              when CrystalV2::Compiler::Frontend::ModuleNode
+                nested_name = String.new(expr_node.name)
+                full_nested_name = "#{module_name}::#{nested_name}"
+                register_nested_module(expr_node, full_nested_name)
+              when CrystalV2::Compiler::Frontend::MacroIfNode
+                process_macro_if_in_module(expr_node, module_name)
+              when CrystalV2::Compiler::Frontend::MacroLiteralNode
+                process_macro_literal_in_module(expr_node, module_name)
+              end
+            end
+          end
+        end
+      end
+      return if parsed_any
+
       node.pieces.each do |piece|
         case piece.kind
         when CrystalV2::Compiler::Frontend::MacroPiece::Kind::Expression
@@ -2206,6 +2244,73 @@ module Crystal::HIR
           end
         end
       end
+    end
+
+    private def macro_literal_active_texts(node : CrystalV2::Compiler::Frontend::MacroLiteralNode) : Array(String)
+      texts = [] of String
+      control_stack = [] of {Bool, Bool, Bool} # {parent_active, branch_taken, active}
+      active = true
+
+      node.pieces.each do |piece|
+        case piece.kind
+        when CrystalV2::Compiler::Frontend::MacroPiece::Kind::Text
+          if active && (text = piece.text)
+            texts << text
+          end
+        when CrystalV2::Compiler::Frontend::MacroPiece::Kind::ControlStart
+          keyword = piece.control_keyword || ""
+          cond_expr = piece.expr
+          cond = cond_expr ? try_evaluate_macro_condition(cond_expr) : nil
+          if keyword == "unless"
+            cond = cond.nil? ? nil : !cond
+          end
+
+          parent_active = active
+          branch_active = if cond == true
+                            parent_active
+                          elsif cond == false
+                            false
+                          else
+                            parent_active
+                          end
+          branch_taken = cond == true
+          control_stack << {parent_active, branch_taken, branch_active}
+          active = branch_active
+        when CrystalV2::Compiler::Frontend::MacroPiece::Kind::ControlElseIf
+          next if control_stack.empty?
+          parent_active, branch_taken, _ = control_stack[-1]
+          cond_expr = piece.expr
+          cond = cond_expr ? try_evaluate_macro_condition(cond_expr) : nil
+          take = !branch_taken && cond == true
+          branch_active = if cond == false
+                            false
+                          elsif cond == true
+                            parent_active && take
+                          else
+                            parent_active
+                          end
+          branch_taken = true if cond == true
+          control_stack[-1] = {parent_active, branch_taken, branch_active}
+          active = branch_active
+        when CrystalV2::Compiler::Frontend::MacroPiece::Kind::ControlElse
+          next if control_stack.empty?
+          parent_active, branch_taken, _ = control_stack[-1]
+          branch_active = parent_active && !branch_taken
+          control_stack[-1] = {parent_active, true, branch_active}
+          active = branch_active
+        when CrystalV2::Compiler::Frontend::MacroPiece::Kind::ControlEnd
+          if control_stack.empty?
+            active = true
+          else
+            parent_active, _, _ = control_stack.pop
+            active = parent_active
+          end
+        else
+          # Ignore expression/macro var pieces for module registration.
+        end
+      end
+
+      texts
     end
 
     # Register a class method from a DefNode inside a module
@@ -2279,6 +2384,10 @@ module Crystal::HIR
     private def register_nested_module(node : CrystalV2::Compiler::Frontend::ModuleNode, full_name : String)
       # Keep nested module AST around for mixin expansion.
       (@module_defs[full_name] ||= [] of {CrystalV2::Compiler::Frontend::ModuleNode, CrystalV2::Compiler::Frontend::ArenaLike}) << {node, @arena}
+      if ENV.has_key?("DEBUG_MODULE_LOOKUP") && full_name == "Crystal::System::Signal"
+        body_size = node.body.try(&.size) || 0
+        STDERR.puts "[DEBUG_MODULE_LOOKUP] register_nested_module #{full_name} body_size=#{body_size}"
+      end
       if full_name.includes?("BinaryFormat") && full_name == "Float::FastFloat::BinaryFormat"
         body_methods = [] of String
         body_size = node.body.try(&.size) || 0
@@ -2350,6 +2459,9 @@ module Crystal::HIR
                                 false
                               end
             next unless is_class_method
+            if ENV.has_key?("DEBUG_MODULE_LOOKUP") && full_name == "Crystal::System::Signal"
+              STDERR.puts "[DEBUG_MODULE_LOOKUP] register #{full_name}.#{method_name}"
+            end
             base_name = "#{full_name}.#{method_name}"
             return_type = if rt = member.return_type
                             rt_name = String.new(rt)
@@ -7199,6 +7311,12 @@ module Crystal::HIR
       builder = String::Builder.new
       bytesize = source.bytesize
       node.pieces.each do |piece|
+        if piece.kind == CrystalV2::Compiler::Frontend::MacroPiece::Kind::Text
+          if text = piece.text
+            builder << text
+            next
+          end
+        end
         if span = piece.span
           start = span.start_offset
           length = span.end_offset - span.start_offset
@@ -9645,6 +9763,43 @@ module Crystal::HIR
       nil
     end
 
+    private def find_module_class_def(
+      module_name : String,
+      method_base : String,
+      expected_param_count : Int32
+    ) : Tuple(CrystalV2::Compiler::Frontend::DefNode, CrystalV2::Compiler::Frontend::ArenaLike)?
+      entries = @module_defs[module_name]?
+      return nil unless entries
+
+      entries.each do |mod_node, mod_arena|
+        body = mod_node.body
+        next unless body
+
+        body.each do |expr_id|
+          member = unwrap_visibility_member(mod_arena[expr_id])
+          next unless member.is_a?(CrystalV2::Compiler::Frontend::DefNode)
+          next if member.is_abstract
+          recv = member.receiver
+          next unless recv && String.new(recv) == "self"
+          next unless String.new(member.name) == method_base
+
+          actual_param_count = 0
+          if params = member.params
+            params.each do |param|
+              next if param.is_block || param.is_splat || param.is_double_splat || named_only_separator?(param)
+              actual_param_count += 1
+            end
+          end
+
+          if expected_param_count == 0 || expected_param_count == actual_param_count
+            return {member, mod_arena}
+          end
+        end
+      end
+
+      nil
+    end
+
     private def lower_function_if_needed(name : String) : Nil
       return if name.empty?
       return if @yield_functions.includes?(name)
@@ -9756,6 +9911,26 @@ module Crystal::HIR
                 end
                 break if func_def
               end
+            end
+          end
+        end
+
+        # DEFERRED MODULE LOOKUP (class methods): direct module/class method call (Module.method)
+        unless func_def
+          if base_name.includes?(".")
+            owner, method_part = base_name.split(".", 2)
+            original_method_part = name.includes?(".") ? name.split(".", 2).last : method_part
+            method_base = method_part.split("$").first
+            expected_param_count = if original_method_part.includes?("$")
+                                     original_method_part.split("$", 2).last.split("_").size
+                                   else
+                                     0
+                                   end
+            if found = find_module_class_def(owner, method_base, expected_param_count)
+              func_def = found[0]
+              arena = found[1]
+              target_name = base_name
+              deferred_lookup_used = true
             end
           end
         end
