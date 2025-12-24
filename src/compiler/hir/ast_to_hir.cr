@@ -3293,11 +3293,15 @@ module Crystal::HIR
       @class_info[class_name] = ClassInfo.new(class_name, type_ref, ivars, class_vars, offset, is_struct, parent_name)
 
       # Store initialize params for allocator generation
-      # If child class has no initialize, inherit from parent
+      # Preserve existing init params on class reopening; otherwise inherit from parent.
       @init_params ||= {} of String => Array({String, TypeRef})
-      if init_params.empty? && parent_name
-        if parent_init_params = @init_params.not_nil![parent_name]?
-          init_params = parent_init_params
+      if init_params.empty?
+        if existing_params = @init_params.not_nil![class_name]?
+          init_params = existing_params
+        elsif parent_name
+          if parent_init_params = @init_params.not_nil![parent_name]?
+            init_params = parent_init_params
+          end
         end
       end
       @init_params.not_nil![class_name] = init_params
@@ -3601,6 +3605,11 @@ module Crystal::HIR
       # Create struct info (is_struct = true)
       @class_info[struct_name] = ClassInfo.new(struct_name, type_ref, ivars, class_vars, size, true, nil)
 
+      if init_params.empty?
+        if existing_params = @init_params.not_nil![struct_name]?
+          init_params = existing_params
+        end
+      end
       @init_params.not_nil![struct_name] = init_params
       register_function_type("#{struct_name}.new", type_ref)
     end
