@@ -290,6 +290,92 @@ describe Crystal::MIR do
   end
 
   # ═══════════════════════════════════════════════════════════════════════════
+  # COPY PROPAGATION
+  # ═══════════════════════════════════════════════════════════════════════════
+
+  describe "CopyPropagationPass" do
+    it "propagates trivial phi nodes" do
+      mod = Crystal::MIR::Module.new
+      func = mod.create_function("test", Crystal::MIR::TypeRef::INT32)
+      builder = Crystal::MIR::Builder.new(func)
+
+      value = builder.const_int(1_i64, Crystal::MIR::TypeRef::INT32)
+      cond = builder.const_bool(true)
+
+      then_block = func.create_block
+      else_block = func.create_block
+      join_block = func.create_block
+
+      builder.branch(cond, then_block, else_block)
+
+      builder.current_block = then_block
+      builder.jump(join_block)
+
+      builder.current_block = else_block
+      builder.jump(join_block)
+
+      builder.current_block = join_block
+      phi = builder.phi(Crystal::MIR::TypeRef::INT32)
+      phi.add_incoming(then_block, value)
+      phi.add_incoming(else_block, value)
+
+      sum = builder.add(phi.id, value, Crystal::MIR::TypeRef::INT32)
+      builder.ret(sum)
+
+      pass = Crystal::MIR::CopyPropagationPass.new(func)
+      propagated = pass.run
+
+      propagated.should be > 0
+
+      join = func.get_block(join_block)
+      add = join.instructions.find { |inst| inst.is_a?(Crystal::MIR::BinaryOp) }.as(Crystal::MIR::BinaryOp)
+      add.left.should eq(value)
+    end
+
+    it "propagates select with constant condition" do
+      mod = Crystal::MIR::Module.new
+      func = mod.create_function("test", Crystal::MIR::TypeRef::INT32)
+      builder = Crystal::MIR::Builder.new(func)
+
+      cond = builder.const_bool(true)
+      a = builder.const_int(10_i64, Crystal::MIR::TypeRef::INT32)
+      b = builder.const_int(99_i64, Crystal::MIR::TypeRef::INT32)
+      sel = builder.select(cond, a, b, Crystal::MIR::TypeRef::INT32)
+      sum = builder.add(sel, a, Crystal::MIR::TypeRef::INT32)
+      builder.ret(sum)
+
+      pass = Crystal::MIR::CopyPropagationPass.new(func)
+      propagated = pass.run
+
+      propagated.should be > 0
+
+      block = func.get_block(func.entry_block)
+      add = block.instructions.find { |inst| inst.is_a?(Crystal::MIR::BinaryOp) }.as(Crystal::MIR::BinaryOp)
+      add.left.should eq(a)
+    end
+
+    it "propagates no-op bitcasts" do
+      mod = Crystal::MIR::Module.new
+      func = mod.create_function("test", Crystal::MIR::TypeRef::VOID)
+      builder = Crystal::MIR::Builder.new(func)
+
+      ptr = builder.alloc(Crystal::MIR::MemoryStrategy::ARC, Crystal::MIR::TypeRef.new(100_u32))
+      cast = builder.bitcast(ptr, Crystal::MIR::TypeRef::POINTER)
+      builder.rc_inc(cast)
+      builder.ret(nil)
+
+      pass = Crystal::MIR::CopyPropagationPass.new(func)
+      propagated = pass.run
+
+      propagated.should be > 0
+
+      block = func.get_block(func.entry_block)
+      rc_inc = block.instructions.find { |inst| inst.is_a?(Crystal::MIR::RCIncrement) }.as(Crystal::MIR::RCIncrement)
+      rc_inc.ptr.should eq(ptr)
+    end
+  end
+
+  # ═══════════════════════════════════════════════════════════════════════════
   # OPTIMIZATION PIPELINE
   # ═══════════════════════════════════════════════════════════════════════════
 

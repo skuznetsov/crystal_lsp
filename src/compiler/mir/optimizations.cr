@@ -735,8 +735,290 @@ module Crystal::MIR
 
     def run : Int32
       @propagated = 0
-      # TODO: implement use-def based copy propagation when Copy instruction exists
-      0
+      value_types = {} of ValueId => TypeRef
+      value_nodes = {} of ValueId => Value
+      constants = {} of ValueId => (Int64 | UInt64 | Float64 | Bool | Nil)
+
+      @function.params.each do |param|
+        value_types[param.index] = param.type
+      end
+
+      @function.blocks.each do |block|
+        block.instructions.each do |inst|
+          value_types[inst.id] = inst.type
+          value_nodes[inst.id] = inst
+          if inst.is_a?(Constant)
+            case v = inst.value
+            when Int64, UInt64, Float64, Bool, Nil
+              constants[inst.id] = v
+            end
+          end
+        end
+      end
+
+      replacements = {} of ValueId => ValueId
+
+      @function.blocks.each do |block|
+        block.instructions.each do |inst|
+          case inst
+          when Cast
+            src_id = canonical(inst.value, replacements)
+            src_type = value_types[src_id]?
+            if inst.kind.bitcast? && src_type == inst.type && src_id != inst.id
+              replacements[inst.id] = src_id
+            end
+          when Select
+            then_val = canonical(inst.then_value, replacements)
+            else_val = canonical(inst.else_value, replacements)
+            if then_val == else_val
+              replacements[inst.id] = then_val if then_val != inst.id
+            else
+              cond_id = canonical(inst.condition, replacements)
+              cond_const = constants[cond_id]?
+              if cond_const.is_a?(Bool)
+                chosen = cond_const ? then_val : else_val
+                replacements[inst.id] = chosen if chosen != inst.id
+              end
+            end
+          when Phi
+            incoming = inst.incoming.map { |(_, v)| canonical(v, replacements) }
+            next if incoming.empty?
+            if incoming.uniq.size == 1
+              candidate = incoming.first
+              next if candidate == inst.id
+              node = value_nodes[candidate]?
+              next if node.is_a?(Undef)
+              replacements[inst.id] = candidate
+            end
+          end
+        end
+      end
+
+      return 0 if replacements.empty?
+
+      @propagated = replacements.size
+
+      @function.blocks.each do |block|
+        new_instructions = [] of Value
+        block.instructions.each do |inst|
+          new_instructions << rewrite_instruction(inst, replacements)
+        end
+        block.instructions.clear
+        new_instructions.each { |i| block.add(i) }
+        block.terminator = rewrite_terminator(block.terminator, replacements)
+      end
+
+      @propagated
+    end
+
+    private def canonical(id : ValueId, replacements : Hash(ValueId, ValueId)) : ValueId
+      current = id
+      seen = Set(ValueId).new
+
+      while next_id = replacements[current]?
+        break if next_id == current
+        return current if seen.includes?(current)
+        seen << current
+        current = next_id
+      end
+
+      replacements[id] = current if current != id
+      current
+    end
+
+    private def rewrite_instruction(inst : Value, replacements : Hash(ValueId, ValueId)) : Value
+      case inst
+      when Free
+        ptr = canonical(inst.ptr, replacements)
+        return inst if ptr == inst.ptr
+        Free.new(inst.id, ptr, inst.strategy)
+      when RCIncrement
+        ptr = canonical(inst.ptr, replacements)
+        return inst if ptr == inst.ptr
+        RCIncrement.new(inst.id, ptr, inst.atomic)
+      when RCDecrement
+        ptr = canonical(inst.ptr, replacements)
+        return inst if ptr == inst.ptr
+        RCDecrement.new(inst.id, ptr, inst.atomic, inst.destructor)
+      when AtomicLoad
+        ptr = canonical(inst.ptr, replacements)
+        return inst if ptr == inst.ptr
+        AtomicLoad.new(inst.id, inst.type, ptr, inst.ordering)
+      when AtomicStore
+        ptr = canonical(inst.ptr, replacements)
+        val = canonical(inst.value, replacements)
+        return inst if ptr == inst.ptr && val == inst.value
+        AtomicStore.new(inst.id, ptr, val, inst.ordering)
+      when AtomicCAS
+        ptr = canonical(inst.ptr, replacements)
+        expected = canonical(inst.expected, replacements)
+        desired = canonical(inst.desired, replacements)
+        return inst if ptr == inst.ptr && expected == inst.expected && desired == inst.desired
+        AtomicCAS.new(inst.id, inst.type, ptr, expected, desired, inst.success_ordering, inst.failure_ordering)
+      when AtomicRMW
+        ptr = canonical(inst.ptr, replacements)
+        val = canonical(inst.value, replacements)
+        return inst if ptr == inst.ptr && val == inst.value
+        AtomicRMW.new(inst.id, inst.type, inst.op, ptr, val, inst.ordering)
+      when MutexLock
+        ptr = canonical(inst.mutex_ptr, replacements)
+        return inst if ptr == inst.mutex_ptr
+        MutexLock.new(inst.id, ptr)
+      when MutexUnlock
+        ptr = canonical(inst.mutex_ptr, replacements)
+        return inst if ptr == inst.mutex_ptr
+        MutexUnlock.new(inst.id, ptr)
+      when MutexTryLock
+        ptr = canonical(inst.mutex_ptr, replacements)
+        return inst if ptr == inst.mutex_ptr
+        MutexTryLock.new(inst.id, ptr)
+      when ChannelSend
+        chan = canonical(inst.channel_ptr, replacements)
+        val = canonical(inst.value, replacements)
+        return inst if chan == inst.channel_ptr && val == inst.value
+        ChannelSend.new(inst.id, chan, val)
+      when ChannelReceive
+        chan = canonical(inst.channel_ptr, replacements)
+        return inst if chan == inst.channel_ptr
+        ChannelReceive.new(inst.id, inst.type, chan)
+      when ChannelClose
+        chan = canonical(inst.channel_ptr, replacements)
+        return inst if chan == inst.channel_ptr
+        ChannelClose.new(inst.id, chan)
+      when Load
+        ptr = canonical(inst.ptr, replacements)
+        return inst if ptr == inst.ptr
+        new_inst = Load.new(inst.id, inst.type, ptr)
+        new_inst.no_alias = inst.no_alias
+        new_inst
+      when Store
+        ptr = canonical(inst.ptr, replacements)
+        val = canonical(inst.value, replacements)
+        return inst if ptr == inst.ptr && val == inst.value
+        Store.new(inst.id, ptr, val)
+      when GetElementPtr
+        base = canonical(inst.base, replacements)
+        return inst if base == inst.base
+        GetElementPtr.new(inst.id, inst.type, base, inst.indices, inst.base_type)
+      when GetElementPtrDynamic
+        base = canonical(inst.base, replacements)
+        index = canonical(inst.index, replacements)
+        return inst if base == inst.base && index == inst.index
+        GetElementPtrDynamic.new(inst.id, inst.type, base, index, inst.element_type)
+      when BinaryOp
+        left = canonical(inst.left, replacements)
+        right = canonical(inst.right, replacements)
+        return inst if left == inst.left && right == inst.right
+        BinaryOp.new(inst.id, inst.type, inst.op, left, right)
+      when UnaryOp
+        operand = canonical(inst.operand, replacements)
+        return inst if operand == inst.operand
+        UnaryOp.new(inst.id, inst.type, inst.op, operand)
+      when Cast
+        value = canonical(inst.value, replacements)
+        return inst if value == inst.value
+        Cast.new(inst.id, inst.type, inst.kind, value)
+      when Phi
+        changed = false
+        phi = Phi.new(inst.id, inst.type)
+        inst.incoming.each do |block_id, val|
+          new_val = canonical(val, replacements)
+          changed ||= new_val != val
+          phi.add_incoming(block_id, new_val)
+        end
+        return inst unless changed
+        phi
+      when Select
+        cond = canonical(inst.condition, replacements)
+        then_val = canonical(inst.then_value, replacements)
+        else_val = canonical(inst.else_value, replacements)
+        return inst if cond == inst.condition && then_val == inst.then_value && else_val == inst.else_value
+        Select.new(inst.id, inst.type, cond, then_val, else_val)
+      when UnionWrap
+        val = canonical(inst.value, replacements)
+        return inst if val == inst.value
+        UnionWrap.new(inst.id, inst.type, val, inst.variant_type_id, inst.union_type)
+      when UnionUnwrap
+        val = canonical(inst.union_value, replacements)
+        return inst if val == inst.union_value
+        UnionUnwrap.new(inst.id, inst.type, val, inst.variant_type_id, inst.safe)
+      when UnionTypeIdGet
+        val = canonical(inst.union_value, replacements)
+        return inst if val == inst.union_value
+        UnionTypeIdGet.new(inst.id, val)
+      when UnionIs
+        val = canonical(inst.union_value, replacements)
+        return inst if val == inst.union_value
+        UnionIs.new(inst.id, val, inst.variant_type_id)
+      when ArrayLiteral
+        new_elements = inst.elements.map { |e| canonical(e, replacements) }
+        return inst if new_elements == inst.elements
+        ArrayLiteral.new(inst.id, inst.element_type, new_elements)
+      when ArraySize
+        array_val = canonical(inst.array_value, replacements)
+        return inst if array_val == inst.array_value
+        ArraySize.new(inst.id, array_val)
+      when ArrayGet
+        array_val = canonical(inst.array_value, replacements)
+        index_val = canonical(inst.index_value, replacements)
+        return inst if array_val == inst.array_value && index_val == inst.index_value
+        ArrayGet.new(inst.id, inst.element_type, array_val, index_val)
+      when ArraySet
+        array_val = canonical(inst.array_value, replacements)
+        index_val = canonical(inst.index_value, replacements)
+        value_id = canonical(inst.value_id, replacements)
+        return inst if array_val == inst.array_value && index_val == inst.index_value && value_id == inst.value_id
+        ArraySet.new(inst.id, inst.element_type, array_val, index_val, value_id)
+      when StringInterpolation
+        new_parts = inst.parts.map { |p| canonical(p, replacements) }
+        return inst if new_parts == inst.parts
+        StringInterpolation.new(inst.id, new_parts)
+      when GlobalStore
+        value = canonical(inst.value, replacements)
+        return inst if value == inst.value
+        GlobalStore.new(inst.id, inst.type, inst.global_name, value)
+      when Call
+        new_args = inst.args.map { |a| canonical(a, replacements) }
+        return inst if new_args == inst.args
+        Call.new(inst.id, inst.type, inst.callee, new_args)
+      when ExternCall
+        new_args = inst.args.map { |a| canonical(a, replacements) }
+        return inst if new_args == inst.args
+        ExternCall.new(inst.id, inst.type, inst.extern_name, new_args)
+      when AddressOf
+        operand = canonical(inst.operand, replacements)
+        return inst if operand == inst.operand
+        AddressOf.new(inst.id, inst.type, operand)
+      when IndirectCall
+        callee_ptr = canonical(inst.callee_ptr, replacements)
+        new_args = inst.args.map { |a| canonical(a, replacements) }
+        return inst if callee_ptr == inst.callee_ptr && new_args == inst.args
+        IndirectCall.new(inst.id, inst.type, callee_ptr, new_args)
+      else
+        inst
+      end
+    end
+
+    private def rewrite_terminator(term : Terminator, replacements : Hash(ValueId, ValueId)) : Terminator
+      case term
+      when Return
+        if value = term.value
+          new_value = canonical(value, replacements)
+          return term if new_value == value
+          Return.new(new_value)
+        end
+        term
+      when Branch
+        cond = canonical(term.condition, replacements)
+        return term if cond == term.condition
+        Branch.new(cond, term.then_block, term.else_block)
+      when Switch
+        value = canonical(term.value, replacements)
+        return term if value == term.value
+        Switch.new(value, term.cases, term.default_block)
+      else
+        term
+      end
     end
   end
 
@@ -760,6 +1042,7 @@ module Crystal::MIR
       io << rc_eliminated << " RC ops, "
       io << dead_eliminated << " dead insts, "
       io << constants_folded << " constants folded, "
+      io << copies_propagated << " copies propagated, "
       io << locks_elided << " locks elided"
     end
   end
