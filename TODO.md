@@ -619,6 +619,11 @@ The key insight is: **Don't compete with LLVM, complement it.**
 - [x] LTO support for release builds (clang link path)
 - [x] PGO hooks (profile-guided LLVM opts via clang flags)
 
+#### Post-Bootstrap Optimizations (defer until full-prelude bootstrap works)
+- [ ] Algebraic simplifications in MIR (x + 0, x * 1, x * 0, x | 0, x & -1)
+- [ ] Extend constant folding to UInt64 and Bool ops (comparisons + bitwise)
+- [ ] Local store→load forwarding in a block for no_alias (no full alias analysis)
+
 #### 5.3.4 Platform Support
 - [ ] macOS (arm64, x86_64)
 - [ ] Linux (arm64, x86_64)
