@@ -1313,8 +1313,9 @@ module CrystalV2
         getter name : Slice(UInt8)
         getter base_type : Slice(UInt8)?
         getter members : Array(EnumMember)
+        getter body : Array(ExprId)?
 
-        def initialize(@span : Span, @name : Slice(UInt8), @base_type : Slice(UInt8)?, @members : Array(EnumMember))
+        def initialize(@span : Span, @name : Slice(UInt8), @base_type : Slice(UInt8)?, @members : Array(EnumMember), @body : Array(ExprId)? = nil)
         end
       end
 
@@ -3025,6 +3026,16 @@ def self.node_enum_members(node : EnumNode)
 end
 
 def self.node_enum_members(node : TypedNode)
+  nil
+end
+
+# enum_body
+
+def self.node_enum_body(node : EnumNode)
+  node.body
+end
+
+def self.node_enum_body(node : TypedNode)
   nil
 end
 
