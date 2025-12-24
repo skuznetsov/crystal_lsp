@@ -21,6 +21,7 @@ about syntax or types and should match what the original compiler would report.
 - [x] String interning (Phase A memory optimization)
 - [x] `out` keyword handling (C bindings + identifier contexts)
 - [x] Inline `asm` basic syntax
+- [x] Macro literal text spans cover full token range for accurate hover/definition (2025-12-31)
 - [x] VirtualArena zero-copy multi-file AST
 - [x] Parallel FileLoader with deduplication
 - [x] Full type inference engine (Phase 103A-C)
@@ -624,6 +625,9 @@ The key insight is: **Don't compete with LLVM, complement it.**
 - [ ] Algebraic simplifications in MIR (x + 0, x * 1, x * 0, x | 0, x & -1)
 - [ ] Extend constant folding to UInt64 and Bool ops (comparisons + bitwise)
 - [ ] Local store→load forwarding in a block for no_alias (no full alias analysis)
+- [ ] Copy propagation: real def-use replacement beyond cast/select/phi (cross-block where safe)
+- [ ] Local CSE for pure ops (arith/compare/bitcast/gep) within a block
+- [ ] Peephole simplifications: redundant casts, constant-branch to jump, phi with identical incoming
 
 #### 5.3.4 Platform Support
 - [ ] macOS (arm64, x86_64)
@@ -990,6 +994,7 @@ enum:      64  ← ✅ DONE
 | Call-site type refinement | Refine annotated base types (Array/Hash/etc.) using concrete call types (2025-12-27) |
 | IndexNode lazy lowering | IndexNode now triggers lazy lowering for []/[]? calls (fix missing Slice(UInt8)#[] defs) (2025-12-30) |
 | Module-typed ivar access | Lower `obj.@ivar` for module-typed receivers via includer ivars (fixes FileDescriptor timeouts) (2025-12-30) |
+| Enum symbol arg coercion | Coerce symbol literals to enum values + pack double splat NamedTuple in call lowering (fixes Crystal.trace in prelude) (2025-12-31) |
 
 ### 8.2 Current Status
 
