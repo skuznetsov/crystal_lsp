@@ -474,6 +474,8 @@ module Crystal::HIR
 
     # Enum info: name -> {member_name -> value}
     @enum_info : Hash(String, Hash(String, Int64))?
+    # Map enum value literals to their enum type names (for method resolution).
+    @enum_value_types : Hash(ValueId, String)?
 
     # Register an enum type (pass 1)
     def register_enum(node : CrystalV2::Compiler::Frontend::EnumNode)
@@ -497,6 +499,7 @@ module Crystal::HIR
       end
 
       @enum_info.not_nil![enum_name] = members
+      register_enum_methods(node, enum_name)
     end
 
     # Register an enum type with explicit name (for nested enums)
@@ -523,6 +526,10 @@ module Crystal::HIR
       # Also register by short name for lookups
       short_name = String.new(node.name)
       @enum_info.not_nil![short_name] = members
+      register_enum_methods(node, full_enum_name)
+      if short_name != full_enum_name
+        register_enum_methods(node, short_name)
+      end
     end
 
     # Register a macro definition (pass 1)
@@ -2403,6 +2410,180 @@ module Crystal::HIR
           @function_def_arenas[full_name] = @arena
         end
       end
+    end
+
+    private def register_enum_methods(node : CrystalV2::Compiler::Frontend::EnumNode, enum_name : String)
+      return unless body = node.body
+
+      body.each do |expr_id|
+        member = unwrap_visibility_member(@arena[expr_id])
+        case member
+        when CrystalV2::Compiler::Frontend::DefNode
+          register_enum_method_from_def(member, enum_name)
+        when CrystalV2::Compiler::Frontend::MacroIfNode
+          process_macro_if_in_enum(member, enum_name)
+        when CrystalV2::Compiler::Frontend::MacroLiteralNode
+          process_macro_literal_in_enum(member, enum_name)
+        end
+      end
+    end
+
+    private def register_enum_method_from_def(member : CrystalV2::Compiler::Frontend::DefNode, enum_name : String)
+      method_name = String.new(member.name)
+      is_class_method = if recv = member.receiver
+                          String.new(recv) == "self"
+                        else
+                          false
+                        end
+      base_name = if is_class_method
+                    "#{enum_name}.#{method_name}"
+                  else
+                    "#{enum_name}##{method_name}"
+                  end
+      return_type = if rt = member.return_type
+                      type_ref_for_name(String.new(rt))
+                    elsif method_name.ends_with?("?")
+                      TypeRef::BOOL
+                    else
+                      infer_concrete_return_type_from_body(member, enum_name) || TypeRef::VOID
+                    end
+      param_types = [] of TypeRef
+      has_block = false
+      if params = member.params
+        params.each do |param|
+          next if named_only_separator?(param)
+          if param.is_block
+            has_block = true
+            next
+          end
+          param_type = if ta = param.type_annotation
+                         type_ref_for_name(String.new(ta))
+                       elsif param.is_double_splat
+                         type_ref_for_name("NamedTuple")
+                       else
+                         TypeRef::VOID
+                       end
+          param_types << param_type
+        end
+      end
+      full_name = mangle_function_name(base_name, param_types, has_block)
+      register_function_type(full_name, return_type)
+      @function_defs[full_name] = member
+      @function_def_arenas[full_name] = @arena
+
+      if body = member.body
+        if contains_yield?(body)
+          @yield_functions.add(full_name)
+          unless @function_defs.has_key?(base_name)
+            @function_defs[base_name] = member
+            @function_def_arenas[base_name] = @arena
+          end
+          @function_defs[full_name] = member
+          @function_def_arenas[full_name] = @arena
+        end
+      end
+    end
+
+    private def process_macro_if_in_enum(node : CrystalV2::Compiler::Frontend::MacroIfNode, enum_name : String)
+      if raw_text = macro_if_raw_text(node)
+        nested_macro_end = raw_text.scan(/\{%\s*end\s*%\}/).size > 1
+        unless nested_macro_end
+          if expanded = expand_flag_macro_text(raw_text)
+            if program = parse_macro_literal_program(expanded)
+              with_arena(program.arena) do
+                program.roots.each do |expr_id|
+                  expr_node = @arena[expr_id]
+                  case expr_node
+                  when CrystalV2::Compiler::Frontend::DefNode
+                    register_enum_method_from_def(expr_node, enum_name)
+                  when CrystalV2::Compiler::Frontend::MacroIfNode
+                    process_macro_if_in_enum(expr_node, enum_name)
+                  when CrystalV2::Compiler::Frontend::MacroLiteralNode
+                    process_macro_literal_in_enum(expr_node, enum_name)
+                  end
+                end
+              end
+              return
+            end
+          end
+        end
+      end
+
+      result = try_evaluate_macro_condition(node.condition)
+      if result == true
+        process_macro_body_in_enum(node.then_body, enum_name)
+      elsif result == false
+        if else_node = node.else_body
+          else_ast = @arena[else_node]
+          case else_ast
+          when CrystalV2::Compiler::Frontend::MacroIfNode
+            process_macro_if_in_enum(else_ast, enum_name)
+          else
+            process_macro_body_in_enum(else_node, enum_name)
+          end
+        end
+      else
+        process_macro_body_in_enum(node.then_body, enum_name)
+        if else_node = node.else_body
+          process_macro_body_in_enum(else_node, enum_name)
+        end
+      end
+    end
+
+    private def process_macro_body_in_enum(body_id : ExprId, enum_name : String)
+      body_node = @arena[body_id]
+      case body_node
+      when CrystalV2::Compiler::Frontend::MacroLiteralNode
+        process_macro_literal_in_enum(body_node, enum_name)
+      when CrystalV2::Compiler::Frontend::DefNode
+        register_enum_method_from_def(body_node, enum_name)
+      when CrystalV2::Compiler::Frontend::MacroIfNode
+        process_macro_if_in_enum(body_node, enum_name)
+      end
+    end
+
+    private def process_macro_literal_in_enum(node : CrystalV2::Compiler::Frontend::MacroLiteralNode, enum_name : String)
+      if raw_text = macro_literal_raw_text(node)
+        expanded = expand_flag_macro_text(raw_text) || raw_text
+        if program = parse_macro_literal_program(expanded)
+          with_arena(program.arena) do
+            program.roots.each do |expr_id|
+              expr_node = @arena[expr_id]
+              case expr_node
+              when CrystalV2::Compiler::Frontend::DefNode
+                register_enum_method_from_def(expr_node, enum_name)
+              when CrystalV2::Compiler::Frontend::MacroIfNode
+                process_macro_if_in_enum(expr_node, enum_name)
+              when CrystalV2::Compiler::Frontend::MacroLiteralNode
+                process_macro_literal_in_enum(expr_node, enum_name)
+              end
+            end
+          end
+          return
+        end
+      end
+
+      parsed_any = false
+      macro_literal_active_texts(node).each do |text|
+        next if text.strip.empty?
+        if program = parse_macro_literal_program(text)
+          parsed_any = true
+          with_arena(program.arena) do
+            program.roots.each do |expr_id|
+              expr_node = @arena[expr_id]
+              case expr_node
+              when CrystalV2::Compiler::Frontend::DefNode
+                register_enum_method_from_def(expr_node, enum_name)
+              when CrystalV2::Compiler::Frontend::MacroIfNode
+                process_macro_if_in_enum(expr_node, enum_name)
+              when CrystalV2::Compiler::Frontend::MacroLiteralNode
+                process_macro_literal_in_enum(expr_node, enum_name)
+              end
+            end
+          end
+        end
+      end
+      return if parsed_any
     end
 
     # Register a nested module with full path
@@ -4731,7 +4912,8 @@ module Crystal::HIR
       type_desc = @module.get_type_descriptor(receiver_type)
 
       # Get the class name from the type descriptor
-      class_name = type_desc.try(&.name) || ""
+      enum_type_name = @enum_value_types.try(&.[receiver_id]?)
+      class_name = enum_type_name || type_desc.try(&.name) || ""
 
       # RESOLVE_CALL debug disabled
 
@@ -8070,15 +8252,7 @@ module Crystal::HIR
                     when CrystalV2::Compiler::Frontend::ConstantNode
                       String.new(left_node.name)
                     when CrystalV2::Compiler::Frontend::PathNode
-                      # Nested path like A::B::C - recurse to get full path
-                      # For now, just get the rightmost part
-                      right_of_left = @arena[left_node.right]
-                      case right_of_left
-                      when CrystalV2::Compiler::Frontend::IdentifierNode
-                        String.new(right_of_left.name)
-                      else
-                        nil
-                      end
+                      collect_path_string(left_node)
                     else
                       nil
                     end
@@ -8099,9 +8273,10 @@ module Crystal::HIR
         if enum_info = @enum_info
           if members = enum_info[left_name]?
             if value = members[right_name]?
-              # Found enum value - emit as Int32 literal
+              # Found enum value - emit as Int32 literal but remember enum type.
               lit = Literal.new(ctx.next_id, TypeRef::INT32, value)
               ctx.emit(lit)
+              (@enum_value_types ||= {} of ValueId => String)[lit.id] = left_name
               return lit.id
             end
           end
@@ -13685,7 +13860,47 @@ module Crystal::HIR
       elsif obj_node.is_a?(CrystalV2::Compiler::Frontend::PathNode)
         # Path like Crystal::EventLoop for nested module/class method calls
         full_path = collect_path_string(obj_node)
-        class_name_str = full_path
+        left_name = nil
+        if left_id = obj_node.left
+          left_node = @arena[left_id]
+          left_name = case left_node
+                      when CrystalV2::Compiler::Frontend::IdentifierNode
+                        String.new(left_node.name)
+                      when CrystalV2::Compiler::Frontend::ConstantNode
+                        String.new(left_node.name)
+                      when CrystalV2::Compiler::Frontend::PathNode
+                        collect_path_string(left_node)
+                      else
+                        nil
+                      end
+        end
+        right_node = @arena[obj_node.right]
+        right_name = case right_node
+                     when CrystalV2::Compiler::Frontend::IdentifierNode
+                       String.new(right_node.name)
+                     when CrystalV2::Compiler::Frontend::ConstantNode
+                       String.new(right_node.name)
+                     else
+                       nil
+                     end
+
+        if left_name && right_name
+          if enum_info = @enum_info
+            if members = enum_info[left_name]?
+              if members.has_key?(right_name)
+                class_name_str = nil
+              else
+                class_name_str = full_path
+              end
+            else
+              class_name_str = full_path
+            end
+          else
+            class_name_str = full_path
+          end
+        else
+          class_name_str = full_path
+        end
       end
 
       # If it's a static class call (like Counter.new), emit as static call

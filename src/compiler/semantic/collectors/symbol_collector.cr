@@ -21,6 +21,7 @@ module CrystalV2
         @diagnostics = [] of Diagnostic
           @macro_expander = MacroExpander.new(@program, @arena, context.flags)
           @class_stack = [] of ClassSymbol
+          @enum_stack = [] of EnumSymbol
           # Pending root-level annotations (for example,
           # @[JSON::Serializable::Options] immediately before a class
           # definition). These annotations are attached to the next class we
@@ -143,7 +144,11 @@ module CrystalV2
           target_table = current_table
           is_class_method = false
           if receiver && String.new(receiver) == "self"
-            target_table = @class_stack.last?.try(&.class_scope) || current_table
+            if enum_owner = @enum_stack.last?
+              target_table = enum_owner.scope
+            else
+              target_table = @class_stack.last?.try(&.class_scope) || current_table
+            end
             is_class_method = true
           end
 
@@ -344,6 +349,12 @@ module CrystalV2
           else
             table.define(name, enum_symbol)
           end
+
+          push_table(enum_scope)
+          @enum_stack << enum_symbol
+          (node.body || [] of Frontend::ExprId).each { |expr_id| visit(expr_id) }
+          @enum_stack.pop
+          pop_table
         end
 
         private def handle_constant(node_id : Frontend::ExprId, node : Frontend::ConstantNode)

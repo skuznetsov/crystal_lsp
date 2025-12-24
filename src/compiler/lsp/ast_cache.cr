@@ -119,7 +119,7 @@ module CrystalV2
 
       class AstCache
         MAGIC   = "CV2A"
-        VERSION = 11_u32
+        VERSION = 12_u32
 
         getter arena : Frontend::AstArena
         getter roots : Array(Frontend::ExprId)
@@ -808,6 +808,7 @@ module CrystalV2
             write_string_ref(io, String.new(enum_node.name), string_table)
             write_enum_members(io, enum_node.members, string_table)
             write_optional_string_ref(io, enum_node.base_type.try { |bt| String.new(bt) }, string_table)
+            write_optional_expr_id_array(io, enum_node.body)
 
           when Frontend::NodeKind::Alias
             alias_node = node.as(Frontend::AliasNode)
@@ -1672,7 +1673,8 @@ module CrystalV2
             name = pool.intern(strings[read_string_idx(io)].to_slice)
             members = read_enum_members(io, strings, pool)
             base_type = read_optional_string(io, strings, pool)
-            Frontend::EnumNode.new(span, name, base_type, members)
+            body = read_optional_expr_id_array(io)
+            Frontend::EnumNode.new(span, name, base_type, members, body)
 
           when .alias_node?
             span = read_span(io)

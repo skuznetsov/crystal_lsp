@@ -6327,12 +6327,15 @@ module CrystalV2
             enum_token.span
           end
 
+          enum_body = method_bodies_b.empty? ? nil : method_bodies_b.to_a
+
           @arena.add_typed(
             EnumNode.new(
               enum_span,
               name_token.slice,
               base_type_slice,
-              members
+              members,
+              enum_body
             )
           )
         end

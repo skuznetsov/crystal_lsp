@@ -305,6 +305,9 @@ module CrystalV2
                 children << value unless value.invalid?
               end
             end
+            if body = n.body
+              body.each { |expr_id| children << expr_id unless expr_id.invalid? }
+            end
             children
 
           when NodeKind::Annotation

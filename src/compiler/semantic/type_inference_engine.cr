@@ -995,6 +995,10 @@ module CrystalV2
             end
           end
 
+          if body = node.body
+            body.each { |expr_id| infer_expression(expr_id) }
+          end
+
           # Enum definitions don't have value types
           @context.nil_type
         end

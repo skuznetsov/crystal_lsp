@@ -616,6 +616,31 @@ describe Crystal::HIR::AstToHir do
       text.should contain("bar")
     end
 
+    it "resolves enum value method calls" do
+      code = <<-CRYSTAL
+        enum Signal
+          CHLD
+
+          def reset : Int32
+            1
+          end
+        end
+
+        def foo
+          Signal::CHLD.reset
+        end
+      CRYSTAL
+
+      converter = lower_program(code)
+      func = converter.module.functions.find { |f| f.name.split("$").first == "foo" }
+      func.should_not be_nil
+
+      call = func.not_nil!.blocks.flat_map(&.instructions)
+        .find { |inst| inst.is_a?(Crystal::HIR::Call) }
+      call.should_not be_nil
+      call.not_nil!.as(Crystal::HIR::Call).method_name.should contain("Signal#reset")
+    end
+
     it "applies default args for member access calls" do
       code = <<-CRYSTAL
         class Foo
