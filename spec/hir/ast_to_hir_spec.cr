@@ -46,6 +46,7 @@ private def lower_program(code : String) : Crystal::HIR::AstToHir
   converter = Crystal::HIR::AstToHir.new(arena)
   converter.arena = arena
 
+  enum_nodes = [] of CrystalV2::Compiler::Frontend::EnumNode
   module_nodes = [] of CrystalV2::Compiler::Frontend::ModuleNode
   class_nodes = [] of CrystalV2::Compiler::Frontend::ClassNode
   def_nodes = [] of CrystalV2::Compiler::Frontend::DefNode
@@ -53,6 +54,8 @@ private def lower_program(code : String) : Crystal::HIR::AstToHir
   exprs.each do |expr_id|
     node = arena[expr_id]
     case node
+    when CrystalV2::Compiler::Frontend::EnumNode
+      enum_nodes << node
     when CrystalV2::Compiler::Frontend::ModuleNode
       module_nodes << node
     when CrystalV2::Compiler::Frontend::ClassNode
@@ -62,6 +65,7 @@ private def lower_program(code : String) : Crystal::HIR::AstToHir
     end
   end
 
+  enum_nodes.each { |node| converter.register_enum(node) }
   module_nodes.each { |node| converter.register_module(node) }
   class_nodes.each { |node| converter.register_class(node) }
   def_nodes.each { |node| converter.register_function(node) }
@@ -69,6 +73,47 @@ private def lower_program(code : String) : Crystal::HIR::AstToHir
   module_nodes.each { |node| converter.lower_module(node) }
   class_nodes.each { |node| converter.lower_class(node) }
   def_nodes.each { |node| converter.lower_def(node) }
+
+  converter
+end
+
+private def lower_program_with_main(code : String) : Crystal::HIR::AstToHir
+  arena, exprs = parse(code)
+  converter = Crystal::HIR::AstToHir.new(arena)
+  converter.arena = arena
+
+  enum_nodes = [] of CrystalV2::Compiler::Frontend::EnumNode
+  module_nodes = [] of CrystalV2::Compiler::Frontend::ModuleNode
+  class_nodes = [] of CrystalV2::Compiler::Frontend::ClassNode
+  def_nodes = [] of CrystalV2::Compiler::Frontend::DefNode
+  main_exprs = [] of Tuple(CrystalV2::Compiler::Frontend::ExprId, CrystalV2::Compiler::Frontend::ArenaLike)
+
+  exprs.each do |expr_id|
+    node = arena[expr_id]
+    case node
+    when CrystalV2::Compiler::Frontend::EnumNode
+      enum_nodes << node
+    when CrystalV2::Compiler::Frontend::ModuleNode
+      module_nodes << node
+    when CrystalV2::Compiler::Frontend::ClassNode
+      class_nodes << node
+    when CrystalV2::Compiler::Frontend::DefNode
+      def_nodes << node
+    when CrystalV2::Compiler::Frontend::CallNode
+      main_exprs << {expr_id, arena}
+    end
+  end
+
+  enum_nodes.each { |node| converter.register_enum(node) }
+  module_nodes.each { |node| converter.register_module(node) }
+  class_nodes.each { |node| converter.register_class(node) }
+  def_nodes.each { |node| converter.register_function(node) }
+
+  module_nodes.each { |node| converter.lower_module(node) }
+  class_nodes.each { |node| converter.lower_class(node) }
+  def_nodes.each { |node| converter.lower_def(node) }
+
+  converter.lower_main(main_exprs) if main_exprs.size > 0
 
   converter
 end
@@ -182,6 +227,49 @@ describe Crystal::HIR::AstToHir do
 
       # Should have Int64 type
       func.blocks[0].instructions.first.type.should eq(Crystal::HIR::TypeRef::INT64)
+    end
+  end
+
+  describe "enum symbol arguments" do
+    it "casts symbol literal to enum value and mangles double splat calls" do
+      code = <<-CR
+        enum Section
+          Sched
+        end
+
+        def trace(section : Section, **metadata)
+        end
+
+        trace :sched, foo: 1
+      CR
+
+      converter = lower_program_with_main(code)
+      text = converter.module.to_s
+
+      text.should contain("literal 0 : Int32")
+      text.should contain("call trace$Int32_NamedTuple")
+    end
+
+    it "resolves module-qualified enum types in context" do
+      code = <<-CR
+        module Crystal
+          module Tracing
+            enum Section
+              Sched
+            end
+          end
+
+          def self.trace(section : Tracing::Section, **metadata)
+          end
+        end
+
+        Crystal.trace :sched, foo: 1
+      CR
+
+      converter = lower_program_with_main(code)
+      text = converter.module.to_s
+
+      text.should contain("call Crystal.trace$Int32_NamedTuple")
     end
   end
 

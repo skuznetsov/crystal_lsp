@@ -1289,12 +1289,25 @@ module Crystal::HIR
       resolved
     end
 
-    private def normalize_declared_type_name(type_name : String) : String
+    private def normalize_declared_type_name(type_name : String, context : String? = nil) : String
       resolved = resolve_typeof_in_type_string(type_name)
       @type_param_map.each do |param, actual|
         resolved = substitute_type_param(resolved, param, actual)
       end
-      resolved
+
+      old_class = @current_class
+      @current_class = context if context
+      begin
+        if resolved.includes?("|")
+          resolved.split("|").map do |part|
+            resolve_type_name_in_context(part.strip)
+          end.join(" | ")
+        else
+          resolve_type_name_in_context(resolved)
+        end
+      ensure
+        @current_class = old_class if context
+      end
     end
 
     private def update_typeof_local(name : String, type_ref : TypeRef) : Nil
@@ -1620,6 +1633,8 @@ module Crystal::HIR
                       end
                       param_type = if ta = param.type_annotation
                                      type_ref_for_name(String.new(ta))
+                                   elsif param.is_double_splat
+                                     type_ref_for_name("NamedTuple")
                                    else
                                      TypeRef::VOID
                                    end
@@ -1976,9 +1991,12 @@ module Crystal::HIR
           end
         end
         # PASS 2: Register functions and classes (now that aliases are available)
-        body.each do |expr_id|
-          member = unwrap_visibility_member(@arena[expr_id])
-          case member
+        old_class = @current_class
+        @current_class = module_name
+        begin
+          body.each do |expr_id|
+            member = unwrap_visibility_member(@arena[expr_id])
+            case member
           when CrystalV2::Compiler::Frontend::DefNode
             method_name = String.new(member.name)
             # In Crystal, `def self.foo` defines a module (class) method,
@@ -2010,6 +2028,8 @@ module Crystal::HIR
                 end
                 param_type = if ta = param.type_annotation
                                type_ref_for_name(String.new(ta))
+                             elsif param.is_double_splat
+                               type_ref_for_name("NamedTuple")
                              else
                                TypeRef::VOID
                              end
@@ -2073,7 +2093,10 @@ module Crystal::HIR
           when CrystalV2::Compiler::Frontend::MacroLiteralNode
             # Handle macro literal (may contain def/class inside)
             process_macro_literal_in_module(member, module_name)
+            end
           end
+        ensure
+          @current_class = old_class
         end
       end
     end
@@ -2343,6 +2366,8 @@ module Crystal::HIR
           end
           param_type = if ta = param.type_annotation
                          type_ref_for_name(String.new(ta))
+                       elsif param.is_double_splat
+                         type_ref_for_name("NamedTuple")
                        else
                          TypeRef::VOID
                        end
@@ -2448,9 +2473,12 @@ module Crystal::HIR
           end
         end
         # PASS 2: Register functions and other members (now that aliases are available)
-        body.each do |expr_id|
-          member = unwrap_visibility_member(@arena[expr_id])
-          case member
+        old_class = @current_class
+        @current_class = full_name
+        begin
+          body.each do |expr_id|
+            member = unwrap_visibility_member(@arena[expr_id])
+            case member
           when CrystalV2::Compiler::Frontend::DefNode
             method_name = String.new(member.name)
             is_class_method = if recv = member.receiver
@@ -2483,6 +2511,8 @@ module Crystal::HIR
                 end
                 param_type = if ta = param.type_annotation
                                type_ref_for_name(String.new(ta))
+                             elsif param.is_double_splat
+                               type_ref_for_name("NamedTuple")
                              else
                                TypeRef::VOID
                              end
@@ -2518,7 +2548,10 @@ module Crystal::HIR
             struct_name = String.new(member.name)
             full_struct_name = "#{full_name}::#{struct_name}"
             register_struct_with_name(member, full_struct_name)
+            end
           end
+        ensure
+          @current_class = old_class
         end
       end
     end
@@ -2658,6 +2691,8 @@ module Crystal::HIR
           param_name = param.name.nil? ? "_" : String.new(param.name.not_nil!)
           param_type = if ta = param.type_annotation
                          type_ref_for_name(String.new(ta))
+                       elsif param.is_double_splat
+                         type_ref_for_name("NamedTuple")
                        else
                          TypeRef::VOID
                        end
@@ -2678,11 +2713,11 @@ module Crystal::HIR
           if param.is_block
             has_block = true
           else
-            if param.is_splat || param.is_double_splat
+            if param.is_splat
               splat_param_info_index = param_infos.size - 1
               splat_param_types_index = param_types.size
               splat_param_name = param_name
-            else
+            elsif !param.is_double_splat
               call_index += 1
             end
             param_types << param_type
@@ -2954,6 +2989,8 @@ module Crystal::HIR
                 end
                 param_type = if ta = param.type_annotation
                                type_ref_for_name(String.new(ta))
+                             elsif param.is_double_splat
+                               type_ref_for_name("NamedTuple")
                              else
                                TypeRef::VOID
                              end
@@ -2999,11 +3036,13 @@ module Crystal::HIR
                   next if named_only_separator?(param)
                   param_name = param.name.nil? ? "_" : String.new(param.name.not_nil!)
                   ta_str = param.type_annotation ? String.new(param.type_annotation.not_nil!) : nil
-                  param_type = if ta = param.type_annotation
-                                 type_ref_for_name(String.new(ta))
-                               else
-                                 TypeRef::VOID
-                               end
+                param_type = if ta = param.type_annotation
+                               type_ref_for_name(String.new(ta))
+                             elsif param.is_double_splat
+                               type_ref_for_name("NamedTuple")
+                             else
+                               TypeRef::VOID
+                             end
                   # Debug disabled for performance
                   # if class_name.includes?("Slice(UInt8)")
                   #   STDERR.puts "  param #{param_name}: annotation=#{ta_str}, resolved=#{param_type.id}"
@@ -4305,6 +4344,8 @@ module Crystal::HIR
           param_name = param.name.nil? ? "_" : String.new(param.name.not_nil!)
           param_type = if ta = param.type_annotation
                          type_ref_for_name(String.new(ta))
+                       elsif param.is_double_splat
+                         type_ref_for_name("NamedTuple")
                        else
                          TypeRef::VOID
                        end
@@ -4325,11 +4366,11 @@ module Crystal::HIR
           if param.is_block
             has_block = true
           else
-            if param.is_splat || param.is_double_splat
+            if param.is_splat
               splat_param_info_index = param_infos.size - 1
               splat_param_types_index = param_types.size
               splat_param_name = param_name
-            else
+            elsif !param.is_double_splat
               call_index += 1
             end
             param_types << param_type
@@ -5176,6 +5217,8 @@ module Crystal::HIR
           param_name = param.name.nil? ? "_" : String.new(param.name.not_nil!)
           param_type = if ta = param.type_annotation
                          type_ref_for_name(String.new(ta))
+                       elsif param.is_double_splat
+                         type_ref_for_name("NamedTuple")
                        else
                          TypeRef::VOID
                        end
@@ -5351,7 +5394,50 @@ module Crystal::HIR
     end
 
     private def type_name_exists?(name : String) : Bool
-      @class_info.has_key?(name) || @generic_templates.has_key?(name)
+      @class_info.has_key?(name) ||
+        @generic_templates.has_key?(name) ||
+        @type_aliases.has_key?(name) ||
+        (@enum_info && @enum_info.not_nil!.has_key?(name)) ||
+        @module_defs.has_key?(name)
+    end
+
+    private def resolve_type_name_in_context(name : String) : String
+      return name if name.empty?
+      return name if name.starts_with?("::")
+
+      if info = split_generic_base_and_args(name)
+        resolved_base = resolve_type_name_in_context(info[:base])
+        return resolved_base == info[:base] ? name : "#{resolved_base}(#{info[:args]})"
+      end
+
+      return resolve_class_name_in_context(name) unless name.includes?("::")
+      return name if type_name_exists?(name)
+
+      if current = @current_class
+        parts = current.split("::")
+        while parts.size > 0
+          qualified_name = (parts + [name]).join("::")
+          return qualified_name if type_name_exists?(qualified_name)
+          parts.pop
+        end
+      end
+
+      name
+    end
+
+    private def function_context_from_name(name : String) : String?
+      base = name
+      if dollar = base.index('$')
+        base = base[0, dollar]
+      end
+
+      if hash = base.index('#')
+        return base[0, hash]
+      elsif dot = base.index('.')
+        return base[0, dot]
+      end
+
+      nil
     end
 
     # Resolve method name with inheritance: look in class and all parent classes
@@ -6061,6 +6147,8 @@ module Crystal::HIR
           param_name = param.name.nil? ? "_" : String.new(param.name.not_nil!)
           param_type = if ta = param.type_annotation
                          type_ref_for_name(String.new(ta))
+                       elsif param.is_double_splat
+                         type_ref_for_name("NamedTuple")
                        else
                          TypeRef::VOID  # Unknown type
                        end
@@ -6082,11 +6170,11 @@ module Crystal::HIR
           if param.is_block
             has_block = true
           else
-            if param.is_splat || param.is_double_splat
+            if param.is_splat
               splat_param_info_index = param_infos.size - 1
               splat_param_types_index = param_types.size
               splat_param_name = param_name
-            else
+            elsif !param.is_double_splat
               call_index += 1
             end
             param_types << param_type
@@ -7311,12 +7399,6 @@ module Crystal::HIR
       builder = String::Builder.new
       bytesize = source.bytesize
       node.pieces.each do |piece|
-        if piece.kind == CrystalV2::Compiler::Frontend::MacroPiece::Kind::Text
-          if text = piece.text
-            builder << text
-            next
-          end
-        end
         if span = piece.span
           start = span.start_offset
           length = span.end_offset - span.start_offset
@@ -10490,13 +10572,17 @@ module Crystal::HIR
       # Handle named arguments by reordering them to match parameter positions
       # Also expand splat arguments (*array -> individual elements)
       has_block_call = !node.block.nil?
+      has_splat = node.args.any? { |arg_id| @arena[arg_id].is_a?(CrystalV2::Compiler::Frontend::SplatNode) }
       args = if named_args = node.named_args
                reorder_named_args(ctx, node.args, named_args, method_name, full_method_name, has_block_call)
-             else
+             elsif has_splat
                expand_splat_args(ctx, node.args)
+             else
+               lower_args_with_expected_types(ctx, node.args, method_name, full_method_name, has_block_call)
              end
       args = apply_default_args(ctx, args, method_name, full_method_name, has_block_call)
       args = pack_splat_args_for_call(ctx, args, method_name, full_method_name, has_block_call)
+      args = ensure_double_splat_arg(ctx, args, method_name, full_method_name, has_block_call)
 
       # Special handling for Tuple#size - return compile-time constant based on type parameters
       if method_name == "size" && receiver_id && args.empty?
@@ -11316,6 +11402,51 @@ module Crystal::HIR
       fixed + [tuple_alloc.id]
     end
 
+    private def ensure_double_splat_arg(
+      ctx : LoweringContext,
+      args : Array(ValueId),
+      method_name : String,
+      full_method_name : String?,
+      has_block_call : Bool
+    ) : Array(ValueId)
+      func_name = if full_method_name
+                    full_method_name
+                  elsif current = @current_class
+                    sep = @current_method_is_class ? "." : "#"
+                    "#{current}#{sep}#{method_name}"
+                  else
+                    method_name
+                  end
+      entry = lookup_function_def_for_call(func_name, args.size, has_block_call)
+      return args unless entry
+
+      func_def = entry[1]
+      return args unless params = func_def.params
+
+      double_splat_index : Int32? = nil
+      param_index = 0
+      params.each do |param|
+        next if param.is_block || named_only_separator?(param)
+        if param.is_double_splat
+          double_splat_index = param_index
+          break
+        end
+        param_index += 1
+      end
+
+      return args unless double_splat_index
+      return args if args.size > double_splat_index
+
+      result = args.dup
+      while result.size < double_splat_index
+        nil_lit = Literal.new(ctx.next_id, TypeRef::NIL, nil)
+        ctx.emit(nil_lit)
+        result << nil_lit.id
+      end
+      result << allocate_named_tuple(ctx, [] of ValueId)
+      result
+    end
+
     # Coerce arguments to match parameter types (e.g., wrap concrete types in unions)
     # This is needed when passing Int32 to a parameter of type Int32 | Nil
     private def coerce_args_to_param_types(
@@ -11490,6 +11621,125 @@ module Crystal::HIR
       {best_name, best}
     end
 
+    private def underscore_lower(name : String) : String
+      name.downcase.gsub("_", "")
+    end
+
+    private def enum_members_for_type_name(type_name : String, context : String? = nil) : Hash(String, Int64)?
+      return nil unless enum_info = @enum_info
+      normalized = normalize_declared_type_name(type_name, context)
+      candidates = [] of String
+      candidates << normalized
+      if normalized.ends_with?("?")
+        candidates << normalized[0...-1]
+      end
+      if normalized.includes?("|")
+        normalized.split("|").each do |part|
+          candidates << part.strip
+        end
+      end
+
+      candidates.uniq.each do |candidate|
+        lookup = resolve_type_alias_chain(candidate)
+        return enum_info[lookup]? if enum_info.has_key?(lookup)
+        short_name = lookup.split("::").last?
+        return enum_info[short_name]? if short_name && enum_info.has_key?(short_name)
+      end
+      nil
+    end
+
+    private def enum_member_value(type_name : String, symbol_name : String, context : String? = nil) : Int64?
+      members = enum_members_for_type_name(type_name, context)
+      return nil unless members
+      clean_symbol = symbol_name.starts_with?(":") ? symbol_name[1..] : symbol_name
+      target = underscore_lower(clean_symbol)
+      members.each do |member_name, value|
+        return value if underscore_lower(member_name) == target
+      end
+      nil
+    end
+
+    private def lower_arg_with_expected_type(
+      ctx : LoweringContext,
+      arg_expr : ExprId,
+      expected_type : TypeRef,
+      expected_type_name : String?,
+      context : String? = nil
+    ) : ValueId
+      arg_node = @arena[arg_expr]
+      if expected_type_name && arg_node.is_a?(CrystalV2::Compiler::Frontend::SymbolNode)
+        if value = enum_member_value(expected_type_name, String.new(arg_node.name), context)
+          lit = Literal.new(ctx.next_id, TypeRef::INT32, value)
+          ctx.emit(lit)
+          ctx.register_type(lit.id, TypeRef::INT32)
+          return lit.id
+        end
+      end
+
+      lower_expr(ctx, arg_expr)
+    end
+
+    private def allocate_named_tuple(ctx : LoweringContext, values : Array(ValueId)) : ValueId
+      named_tuple_type = ctx.get_type("NamedTuple")
+      alloc = Allocate.new(ctx.next_id, named_tuple_type, values)
+      ctx.emit(alloc)
+      alloc.id
+    end
+
+    private def lower_args_with_expected_types(
+      ctx : LoweringContext,
+      positional_args : Array(ExprId),
+      method_name : String,
+      full_method_name : String?,
+      has_block_call : Bool
+    ) : Array(ValueId)
+      func_name = full_method_name || method_name
+      func_entry = lookup_function_def_for_call(func_name, positional_args.size, has_block_call)
+      func_def = func_entry ? func_entry[1] : nil
+      func_context = func_entry ? function_context_from_name(func_entry[0]) : nil
+      return positional_args.map { |arg| lower_expr(ctx, arg) } unless func_def
+
+      param_types = [] of TypeRef
+      param_type_names = [] of String?
+
+      if params = func_def.params
+        params.each do |param|
+          next if param.is_block
+          next if named_only_separator?(param)
+
+          param_type_name = if ta = param.type_annotation
+                              normalize_declared_type_name(String.new(ta), func_context)
+                            else
+                              nil
+                            end
+
+          param_type = if param.is_double_splat
+                         param_type_name ? type_ref_for_name(param_type_name) : type_ref_for_name("NamedTuple")
+                       else
+                         if param_type_name
+                           type_ref_for_name(param_type_name)
+                         else
+                           TypeRef::VOID
+                         end
+                       end
+
+          param_types << param_type
+          param_type_names << param_type_name
+        end
+      end
+
+      result = [] of ValueId
+      positional_args.each_with_index do |arg_expr, idx|
+        if idx < param_types.size
+          result << lower_arg_with_expected_type(ctx, arg_expr, param_types[idx], param_type_names[idx], func_context)
+        else
+          result << lower_expr(ctx, arg_expr)
+        end
+      end
+
+      result
+    end
+
     # Reorder named arguments to match parameter positions
     private def reorder_named_args(
       ctx : LoweringContext,
@@ -11499,14 +11749,11 @@ module Crystal::HIR
       full_method_name : String?,
       has_block_call : Bool
     ) : Array(ValueId)
-      # First, lower positional args
-      result = positional_args.map { |arg| lower_expr(ctx, arg) }
-      provided = Array(Bool).new(result.size, true)
-
       # Get parameter names from function definition
       func_name = full_method_name || method_name
       func_entry = lookup_function_def_for_call(func_name, positional_args.size + named_args.size, has_block_call)
       func_def = func_entry ? func_entry[1] : nil
+      func_context = func_entry ? function_context_from_name(func_entry[0]) : nil
       def_arena = func_entry ? (@function_def_arenas[func_entry[0]]? || @arena) : @arena
 
       if func_def && (params = func_def.params)
@@ -11514,6 +11761,9 @@ module Crystal::HIR
         param_local_names = [] of String
         param_defaults = [] of ExprId?
         param_types = [] of TypeRef
+        param_type_names = [] of String?
+        double_splat_index : Int32? = nil
+
         params.each do |p|
           next if p.is_block
           next if named_only_separator?(p)
@@ -11525,20 +11775,45 @@ module Crystal::HIR
                         ""
                       end
           local_name = p.name ? String.new(p.name.not_nil!) : ""
+          param_type_name = if ta = p.type_annotation
+                              normalize_declared_type_name(String.new(ta), func_context)
+                            else
+                              nil
+                            end
+          param_type = if p.is_double_splat
+                         param_type_name ? type_ref_for_name(param_type_name) : type_ref_for_name("NamedTuple")
+                       elsif param_type_name
+                         type_ref_for_name(param_type_name)
+                       else
+                         TypeRef::VOID
+                       end
           param_call_names << call_name
           param_local_names << local_name
           param_defaults << p.default_value
-          if ta = p.type_annotation
-            param_types << type_ref_for_name(String.new(ta))
-          else
-            param_types << TypeRef::VOID
+          param_types << param_type
+          param_type_names << param_type_name
+          if p.is_double_splat
+            double_splat_index = param_types.size - 1
           end
         end
+
+        result = [] of ValueId
+        provided = [] of Bool
+
+        positional_args.each_with_index do |arg_expr, idx|
+          if idx < param_types.size
+            result << lower_arg_with_expected_type(ctx, arg_expr, param_types[idx], param_type_names[idx], func_context)
+          else
+            result << lower_expr(ctx, arg_expr)
+          end
+          provided << true
+        end
+
+        extra_named = [] of CrystalV2::Compiler::Frontend::NamedArgument
 
         # Process named args
         named_args.each do |named_arg|
           arg_name = String.new(named_arg.name)
-          arg_value = lower_expr(ctx, named_arg.value)
 
           # Find position of this parameter
           idx = param_call_names.index(arg_name)
@@ -11551,13 +11826,32 @@ module Crystal::HIR
               result << nil_lit.id
               provided << false
             end
-            result[idx] = arg_value
+            result[idx] = lower_arg_with_expected_type(ctx, named_arg.value, param_types[idx], param_type_names[idx], func_context)
             provided[idx] = true
           else
-            # Unknown parameter name - just append
-            result << arg_value
-            provided << true
+            extra_named << named_arg
           end
+        end
+
+        if double_splat_index
+          while result.size <= double_splat_index
+            nil_lit = Literal.new(ctx.next_id, TypeRef::NIL, nil)
+            ctx.emit(nil_lit)
+            result << nil_lit.id
+            provided << false
+          end
+
+          unless provided[double_splat_index]
+            tuple_values = extra_named.map { |arg| lower_expr(ctx, arg.value) }
+            result[double_splat_index] = allocate_named_tuple(ctx, tuple_values)
+            provided[double_splat_index] = true
+            extra_named.clear
+          end
+        end
+
+        extra_named.each do |named_arg|
+          result << lower_expr(ctx, named_arg.value)
+          provided << true
         end
 
         # Fill missing args with defaults (evaluate in a param-local context)
@@ -11597,6 +11891,7 @@ module Crystal::HIR
         end
       else
         # No function definition found - just append named args in order
+        result = positional_args.map { |arg| lower_expr(ctx, arg) }
         named_args.each do |named_arg|
           result << lower_expr(ctx, named_arg.value)
         end
@@ -11616,6 +11911,7 @@ module Crystal::HIR
       func_entry = lookup_function_def_for_call(func_name, args.size, has_block_call)
       return args unless func_entry
       func_def = func_entry[1]
+      func_context = function_context_from_name(func_entry[0])
       def_arena = @function_def_arenas[func_entry[0]]? || @arena
       params = func_def.params
       return args unless params
@@ -11631,7 +11927,8 @@ module Crystal::HIR
         param_local_names << local_name
         param_defaults << p.default_value
         if ta = p.type_annotation
-          param_types << type_ref_for_name(String.new(ta))
+          param_type_name = normalize_declared_type_name(String.new(ta), func_context)
+          param_types << type_ref_for_name(param_type_name)
         else
           param_types << TypeRef::VOID
         end
@@ -14565,10 +14862,10 @@ module Crystal::HIR
           return result
         end
       end
-      # Resolve unqualified type names in the current namespace before cache lookup.
-      # This avoids poisoning the cache with short names that can resolve differently per scope.
-      if !lookup_name.includes?("|") && !lookup_name.includes?("::") && lookup_name.size > 0 && lookup_name[0].uppercase?
-        lookup_name = resolve_class_name_in_context(lookup_name)
+      # Resolve type names in the current namespace before cache lookup.
+      # This avoids poisoning the cache with names that resolve differently per scope.
+      if !lookup_name.includes?("|")
+        lookup_name = resolve_type_name_in_context(lookup_name)
       end
 
       if cached = @type_cache[lookup_name]?
