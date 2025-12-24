@@ -278,6 +278,7 @@ module CrystalV2
         getter name_span : Span         # Just "name" for rename
         getter type_span : Span?        # Just "String" for hover (optional)
         getter default_span : Span?     # Span of default value expression (optional)
+        getter predicate : Bool         # true for getter?/property? (adds ? to getter name)
 
         def initialize(
           @name : Slice(UInt8),
@@ -285,7 +286,8 @@ module CrystalV2
           @default_value : ExprId? = nil,
           @name_span : Span = Span.zero,
           @type_span : Span? = nil,
-          @default_span : Span? = nil
+          @default_span : Span? = nil,
+          @predicate : Bool = false
         )
         end
 

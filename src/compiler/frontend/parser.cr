@@ -5758,6 +5758,7 @@ module CrystalV2
 
               if is_accessor && accessor_macro_callee?(token)
                 name = token.slice
+                predicate = name.size > 0 && name[name.size - 1] == '?'.ord.to_u8
                 base = if name.size > 0 && name[name.size - 1] == '?'.ord.to_u8
                   Slice.new(name.to_unsafe, name.size - 1)
                 else
@@ -5772,7 +5773,7 @@ module CrystalV2
                 else
                   :property
                 end
-                expr = parse_accessor_macro(kind, is_class)
+                expr = parse_accessor_macro(kind, is_class, predicate)
               elsif definition_start?
                 expr = case current_token.kind
                   when Token::Kind::Def
@@ -5935,6 +5936,7 @@ module CrystalV2
             is_accessor = (next_token.kind == Token::Kind::Identifier || is_keyword_identifier?(next_token))
             if is_accessor && accessor_macro_callee?(current_token)
               name = current_token.slice
+              predicate = name.size > 0 && name[name.size - 1] == '?'.ord.to_u8
               base = if name.size > 0 && name[name.size - 1] == '?'.ord.to_u8
                 Slice.new(name.to_unsafe, name.size - 1)
               else
@@ -5948,7 +5950,7 @@ module CrystalV2
               else
                 :property
               end
-              return parse_accessor_macro(kind, is_class)
+              return parse_accessor_macro(kind, is_class, predicate)
             end
           end
 
@@ -6011,24 +6013,25 @@ module CrystalV2
           if current_token.kind == Token::Kind::Identifier
             next_token = peek_next_non_trivia
             is_accessor = (next_token.kind == Token::Kind::Identifier || is_keyword_identifier?(next_token))
-            if is_accessor && accessor_macro_callee?(current_token)
-              name = current_token.slice
-              base = if name.size > 0 && name[name.size - 1] == '?'.ord.to_u8
-                Slice.new(name.to_unsafe, name.size - 1)
-              else
-                name
-              end
+          if is_accessor && accessor_macro_callee?(current_token)
+            name = current_token.slice
+            predicate = name.size > 0 && name[name.size - 1] == '?'.ord.to_u8
+            base = if name.size > 0 && name[name.size - 1] == '?'.ord.to_u8
+              Slice.new(name.to_unsafe, name.size - 1)
+            else
+              name
+            end
               is_class = slice_starts_with?(base, "class_")
               kind = if slice_eq?(base, "getter") || slice_eq?(base, "class_getter")
                 :getter
               elsif slice_eq?(base, "setter") || slice_eq?(base, "class_setter")
                 :setter
-              else
-                :property
-              end
-              return parse_accessor_macro(kind, is_class)
+            else
+              :property
             end
+            return parse_accessor_macro(kind, is_class, predicate)
           end
+        end
 
           # Special case: protected def (definition needs separate handling)
           if current_token.kind == Token::Kind::Def
@@ -6471,7 +6474,7 @@ module CrystalV2
         # Grammar: getter name [: Type] [= value] [, name2 [: Type2] [= value2]]
         # Returns GetterNode/SetterNode/PropertyNode
         # is_class: true for class_getter/class_setter/class_property
-        private def parse_accessor_macro(kind : Symbol, is_class : Bool = false) : ExprId
+        private def parse_accessor_macro(kind : Symbol, is_class : Bool = false, predicate : Bool = false) : ExprId
           start_token = current_token
           advance  # consume getter/setter/property keyword
           skip_trivia
@@ -6527,7 +6530,8 @@ module CrystalV2
               default_value: default_value,
               name_span: name_span,
               type_span: type_span,
-              default_span: default_span
+              default_span: default_span,
+              predicate: predicate
             )
 
             skip_trivia
@@ -6578,7 +6582,8 @@ module CrystalV2
               default_value: block_id,
               name_span: spec.name_span,
               type_span: spec.type_span,
-              default_span: node_span(block_id.not_nil!)
+              default_span: node_span(block_id.not_nil!),
+              predicate: spec.predicate
             )
           end
 
@@ -6668,6 +6673,7 @@ module CrystalV2
 
               if is_accessor && accessor_macro_callee?(token)
                 name = token.slice
+                predicate = name.size > 0 && name[name.size - 1] == '?'.ord.to_u8
                 base = if name.size > 0 && name[name.size - 1] == '?'.ord.to_u8
                   Slice.new(name.to_unsafe, name.size - 1)
                 else
@@ -6682,7 +6688,7 @@ module CrystalV2
                 else
                   :property
                 end
-                expr = parse_accessor_macro(kind, is_class)
+                expr = parse_accessor_macro(kind, is_class, predicate)
               elsif definition_start?
                 expr = case current_token.kind
                   when Token::Kind::Def

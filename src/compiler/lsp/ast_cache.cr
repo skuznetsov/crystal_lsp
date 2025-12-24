@@ -119,7 +119,7 @@ module CrystalV2
 
       class AstCache
         MAGIC   = "CV2A"
-        VERSION = 6_u32
+        VERSION = 7_u32
 
         getter arena : Frontend::AstArena
         getter roots : Array(Frontend::ExprId)
@@ -1315,6 +1315,7 @@ module CrystalV2
             write_span(io, s.name_span)
             write_optional_span(io, s.type_span)
             write_optional_span(io, s.default_span)
+            io.write_byte(s.predicate ? 1_u8 : 0_u8)
           end
         end
 
@@ -2118,7 +2119,8 @@ module CrystalV2
             name_span = read_span(io)
             type_span = read_optional_span(io)
             default_span = read_optional_span(io)
-            Frontend::AccessorSpec.new(name, type_annotation, default_value, name_span, type_span, default_span)
+            predicate = io.read_byte.not_nil! == 1_u8
+            Frontend::AccessorSpec.new(name, type_annotation, default_value, name_span, type_span, default_span, predicate)
           end
         end
 

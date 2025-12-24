@@ -458,7 +458,11 @@ module CrystalV2
           ivar_id = @arena.add_typed(ivar_node)
 
           # Create def node with instance variable as body
-          method_name_bytes = spec.name  # Already Slice(UInt8)
+          method_name_bytes = if spec.predicate
+                                "#{spec_name_str}?".to_slice
+                              else
+                                spec.name  # Already Slice(UInt8)
+                              end
           return_type_bytes = spec.type_annotation  # Already Slice(UInt8)?
 
           Frontend::DefNode.new(

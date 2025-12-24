@@ -1434,14 +1434,14 @@ module Crystal::HIR
           defined << full_name
         when CrystalV2::Compiler::Frontend::GetterNode
           member.specs.each do |spec|
-            accessor_name = String.new(spec.name)
+            accessor_name = accessor_method_name(spec)
             base_name = "#{class_name}##{accessor_name}"
             full_name = mangle_function_name(base_name, [] of TypeRef)
             defined << full_name
           end
         when CrystalV2::Compiler::Frontend::SetterNode
           member.specs.each do |spec|
-            accessor_name = String.new(spec.name)
+            accessor_name = accessor_storage_name(spec)
             base_name = "#{class_name}##{accessor_name}="
             param_type = if ta = spec.type_annotation
                            type_ref_for_name(String.new(ta))
@@ -1453,9 +1453,10 @@ module Crystal::HIR
           end
         when CrystalV2::Compiler::Frontend::PropertyNode
           member.specs.each do |spec|
-            accessor_name = String.new(spec.name)
-            getter_base = "#{class_name}##{accessor_name}"
-            setter_base = "#{class_name}##{accessor_name}="
+            getter_name = accessor_method_name(spec)
+            setter_name = accessor_storage_name(spec)
+            getter_base = "#{class_name}##{getter_name}"
+            setter_base = "#{class_name}##{setter_name}="
             getter_full = mangle_function_name(getter_base, [] of TypeRef)
             param_type = if ta = spec.type_annotation
                            type_ref_for_name(String.new(ta))
@@ -1471,6 +1472,15 @@ module Crystal::HIR
       defined
     end
 
+    private def accessor_method_name(spec : CrystalV2::Compiler::Frontend::AccessorSpec) : String
+      name = String.new(spec.name)
+      spec.predicate ? "#{name}?" : name
+    end
+
+    private def accessor_storage_name(spec : CrystalV2::Compiler::Frontend::AccessorSpec) : String
+      String.new(spec.name)
+    end
+
     private def register_accessor_from_module(
       class_name : String,
       spec : CrystalV2::Compiler::Frontend::AccessorSpec,
@@ -1481,10 +1491,15 @@ module Crystal::HIR
       include_getter : Bool,
       include_setter : Bool
     ) : Int32
-      accessor_name = String.new(spec.name)
-      ivar_name = "@#{accessor_name}"
+      storage_name = accessor_storage_name(spec)
+      getter_name = accessor_method_name(spec)
+      ivar_name = "@#{storage_name}"
       ivar_type = if ta = spec.type_annotation
                     type_ref_for_name(String.new(ta))
+                  elsif spec.predicate
+                    TypeRef::BOOL
+                  elsif default_value = spec.default_value
+                    infer_type_from_expr(default_value, class_name) || TypeRef::VOID
                   else
                     TypeRef::VOID
                   end
@@ -1495,15 +1510,15 @@ module Crystal::HIR
       end
 
       if include_getter
-        getter_name = "#{class_name}##{accessor_name}"
-        getter_full = mangle_function_name(getter_name, [] of TypeRef)
+        getter_base = "#{class_name}##{getter_name}"
+        getter_full = mangle_function_name(getter_base, [] of TypeRef)
         unless defined_full_names.includes?(getter_full)
           register_function_type(getter_full, ivar_type)
         end
       end
 
       if include_setter
-        setter_name = "#{class_name}##{accessor_name}="
+        setter_name = "#{class_name}##{storage_name}="
         setter_full = mangle_function_name(setter_name, [ivar_type])
         unless defined_full_names.includes?(setter_full)
           setter_return = is_struct ? TypeRef::VOID : ivar_type
@@ -2910,10 +2925,15 @@ module Crystal::HIR
             else
               specs = member.specs
               specs.each do |spec|
-                accessor_name = String.new(spec.name)
-                ivar_name = "@#{accessor_name}"
+                storage_name = accessor_storage_name(spec)
+                getter_name = accessor_method_name(spec)
+                ivar_name = "@#{storage_name}"
                 ivar_type = if ta = spec.type_annotation
                               type_ref_for_name(String.new(ta))
+                            elsif spec.predicate
+                              TypeRef::BOOL
+                            elsif default_value = spec.default_value
+                              infer_type_from_expr(default_value, class_name) || TypeRef::VOID
                             else
                               TypeRef::VOID
                             end
@@ -2923,8 +2943,8 @@ module Crystal::HIR
                   offset += type_size(ivar_type)
                 end
                 # Register getter method: def name : Type
-                getter_name = "#{class_name}##{accessor_name}"
-                full_name = mangle_function_name(getter_name, [] of TypeRef)
+                getter_base = "#{class_name}##{getter_name}"
+                full_name = mangle_function_name(getter_base, [] of TypeRef)
                 register_function_type(full_name, ivar_type)
               end
             end
@@ -2939,10 +2959,14 @@ module Crystal::HIR
             else
               specs = member.specs
               specs.each do |spec|
-                accessor_name = String.new(spec.name)
-                ivar_name = "@#{accessor_name}"
+                storage_name = accessor_storage_name(spec)
+                ivar_name = "@#{storage_name}"
                 ivar_type = if ta = spec.type_annotation
                               type_ref_for_name(String.new(ta))
+                            elsif spec.predicate
+                              TypeRef::BOOL
+                            elsif default_value = spec.default_value
+                              infer_type_from_expr(default_value, class_name) || TypeRef::VOID
                             else
                               TypeRef::VOID
                             end
@@ -2952,7 +2976,7 @@ module Crystal::HIR
                   offset += type_size(ivar_type)
                 end
                 # Register setter method: def name=(value : Type) : Type
-                setter_name = "#{class_name}##{accessor_name}="
+                setter_name = "#{class_name}##{storage_name}="
                 full_name = mangle_function_name(setter_name, [ivar_type])
                 register_function_type(full_name, ivar_type)
               end
@@ -2969,10 +2993,15 @@ module Crystal::HIR
             else
               specs = member.specs
               specs.each do |spec|
-                accessor_name = String.new(spec.name)
-                ivar_name = "@#{accessor_name}"
+                storage_name = accessor_storage_name(spec)
+                getter_name = accessor_method_name(spec)
+                ivar_name = "@#{storage_name}"
                 ivar_type = if ta = spec.type_annotation
                               type_ref_for_name(String.new(ta))
+                            elsif spec.predicate
+                              TypeRef::BOOL
+                            elsif default_value = spec.default_value
+                              infer_type_from_expr(default_value, class_name) || TypeRef::VOID
                             else
                               TypeRef::VOID
                             end
@@ -2982,11 +3011,11 @@ module Crystal::HIR
                   offset += type_size(ivar_type)
                 end
                 # Register getter method
-                getter_name = "#{class_name}##{accessor_name}"
-                getter_full = mangle_function_name(getter_name, [] of TypeRef)
+                getter_base = "#{class_name}##{getter_name}"
+                getter_full = mangle_function_name(getter_base, [] of TypeRef)
                 register_function_type(getter_full, ivar_type)
                 # Register setter method
-                setter_name = "#{class_name}##{accessor_name}="
+                setter_name = "#{class_name}##{storage_name}="
                 setter_full = mangle_function_name(setter_name, [ivar_type])
                 register_function_type(setter_full, ivar_type)
               end
@@ -3302,10 +3331,15 @@ module Crystal::HIR
               end
             else
               member.specs.each do |spec|
-                accessor_name = String.new(spec.name)
-                ivar_name = "@#{accessor_name}"
+                storage_name = accessor_storage_name(spec)
+                getter_name = accessor_method_name(spec)
+                ivar_name = "@#{storage_name}"
                 ivar_type = if ta = spec.type_annotation
                               type_ref_for_name(String.new(ta))
+                            elsif spec.predicate
+                              TypeRef::BOOL
+                            elsif default_value = spec.default_value
+                              infer_type_from_expr(default_value, struct_name) || TypeRef::VOID
                             else
                               TypeRef::VOID
                             end
@@ -3313,8 +3347,8 @@ module Crystal::HIR
                   ivars << IVarInfo.new(ivar_name, ivar_type, offset)
                   offset += type_size(ivar_type)
                 end
-                getter_name = "#{struct_name}##{accessor_name}"
-                full_name = mangle_function_name(getter_name, [] of TypeRef)
+                getter_base = "#{struct_name}##{getter_name}"
+                full_name = mangle_function_name(getter_base, [] of TypeRef)
                 register_function_type(full_name, ivar_type)
               end
             end
@@ -3326,10 +3360,14 @@ module Crystal::HIR
               end
             else
               member.specs.each do |spec|
-                accessor_name = String.new(spec.name)
-                ivar_name = "@#{accessor_name}"
+                storage_name = accessor_storage_name(spec)
+                ivar_name = "@#{storage_name}"
                 ivar_type = if ta = spec.type_annotation
                               type_ref_for_name(String.new(ta))
+                            elsif spec.predicate
+                              TypeRef::BOOL
+                            elsif default_value = spec.default_value
+                              infer_type_from_expr(default_value, struct_name) || TypeRef::VOID
                             else
                               TypeRef::VOID
                             end
@@ -3337,7 +3375,7 @@ module Crystal::HIR
                   ivars << IVarInfo.new(ivar_name, ivar_type, offset)
                   offset += type_size(ivar_type)
                 end
-                setter_name = "#{struct_name}##{accessor_name}="
+                setter_name = "#{struct_name}##{storage_name}="
                 full_name = mangle_function_name(setter_name, [ivar_type])
                 register_function_type(full_name, TypeRef::VOID)
               end
@@ -3351,10 +3389,15 @@ module Crystal::HIR
               end
             else
               member.specs.each do |spec|
-                accessor_name = String.new(spec.name)
-                ivar_name = "@#{accessor_name}"
+                storage_name = accessor_storage_name(spec)
+                getter_name = accessor_method_name(spec)
+                ivar_name = "@#{storage_name}"
                 ivar_type = if ta = spec.type_annotation
                               type_ref_for_name(String.new(ta))
+                            elsif spec.predicate
+                              TypeRef::BOOL
+                            elsif default_value = spec.default_value
+                              infer_type_from_expr(default_value, struct_name) || TypeRef::VOID
                             else
                               TypeRef::VOID
                             end
@@ -3362,12 +3405,24 @@ module Crystal::HIR
                   ivars << IVarInfo.new(ivar_name, ivar_type, offset)
                   offset += type_size(ivar_type)
                 end
-                getter_name = "#{struct_name}##{accessor_name}"
-                getter_full = mangle_function_name(getter_name, [] of TypeRef)
+                getter_base = "#{struct_name}##{getter_name}"
+                getter_full = mangle_function_name(getter_base, [] of TypeRef)
                 register_function_type(getter_full, ivar_type)
-                setter_name = "#{struct_name}##{accessor_name}="
+                setter_name = "#{struct_name}##{storage_name}="
                 setter_full = mangle_function_name(setter_name, [ivar_type])
                 register_function_type(setter_full, TypeRef::VOID)
+              end
+            end
+
+          when CrystalV2::Compiler::Frontend::AssignNode
+            target_node = @arena[member.target]
+            if target_node.is_a?(CrystalV2::Compiler::Frontend::InstanceVarNode)
+              ivar_name = String.new(target_node.name)
+              value_node = @arena[member.value]
+              ivar_type = infer_type_from_class_ivar_assign(value_node)
+              unless ivars.any? { |iv| iv.name == ivar_name }
+                ivars << IVarInfo.new(ivar_name, ivar_type, offset)
+                offset += type_size(ivar_type)
               end
             end
           end
@@ -3842,12 +3897,13 @@ module Crystal::HIR
 
     # Generate synthetic getter method: def name; @name; end
     private def generate_getter_method(class_name : String, class_info : ClassInfo, spec : CrystalV2::Compiler::Frontend::AccessorSpec)
-      accessor_name = String.new(spec.name)
-      ivar_name = "@#{accessor_name}"
+      storage_name = accessor_storage_name(spec)
+      getter_name = accessor_method_name(spec)
+      ivar_name = "@#{storage_name}"
       ivar_info = class_info.ivars.find { |iv| iv.name == ivar_name }
       return unless ivar_info
 
-      generate_getter_method_for_ivar(class_name, class_info, ivar_info)
+      generate_getter_method_for_ivar(class_name, class_info, ivar_info, getter_name)
     end
 
     # Generate synthetic setter method: def name=(value); @name = value; end
@@ -3860,8 +3916,13 @@ module Crystal::HIR
       generate_setter_method_for_ivar(class_name, class_info, ivar_info)
     end
 
-    private def generate_getter_method_for_ivar(class_name : String, class_info : ClassInfo, ivar_info : IVarInfo)
-      accessor_name = ivar_info.name.lstrip('@')
+    private def generate_getter_method_for_ivar(
+      class_name : String,
+      class_info : ClassInfo,
+      ivar_info : IVarInfo,
+      accessor_name : String? = nil
+    )
+      accessor_name = accessor_name || ivar_info.name.lstrip('@')
       ivar_type = ivar_info.type
 
       base_name = "#{class_name}##{accessor_name}"
@@ -3908,23 +3969,24 @@ module Crystal::HIR
     end
 
     private def generate_class_getter_method(owner_name : String, spec : CrystalV2::Compiler::Frontend::AccessorSpec, arena : CrystalV2::Compiler::Frontend::ArenaLike)
-      accessor_name = String.new(spec.name)
+      storage_name = accessor_storage_name(spec)
+      method_name = accessor_method_name(spec)
       old_class = @current_class
       old_method = @current_method
       old_method_is_class = @current_method_is_class
 
-      base_name = "#{owner_name}.#{accessor_name}"
+      base_name = "#{owner_name}.#{method_name}"
       full_name = mangle_function_name(base_name, [] of TypeRef)
       return if @module.has_function?(full_name)
 
       @current_class = owner_name
-      @current_method = accessor_name
+      @current_method = method_name
       @current_method_is_class = true
 
       return_type = begin
         if ta = spec.type_annotation
           type_ref_for_name(String.new(ta))
-        elsif accessor_name.ends_with?("?")
+        elsif spec.predicate
           TypeRef::BOOL
         elsif default_value = spec.default_value
           inferred = infer_type_from_expr(default_value, owner_name)
@@ -3938,7 +4000,7 @@ module Crystal::HIR
       ctx = LoweringContext.new(func, @module, arena)
 
       if default_value = spec.default_value
-        flag_name = class_accessor_init_flag_name(accessor_name)
+        flag_name = class_accessor_init_flag_name(storage_name)
         flag_get = ClassVarGet.new(ctx.next_id, TypeRef::BOOL, owner_name, flag_name)
         ctx.emit(flag_get)
 
@@ -3948,13 +4010,13 @@ module Crystal::HIR
         ctx.terminate(Branch.new(flag_get.id, then_block, else_block))
 
         ctx.switch_to_block(then_block)
-        cached_get = ClassVarGet.new(ctx.next_id, return_type, owner_name, accessor_name)
+        cached_get = ClassVarGet.new(ctx.next_id, return_type, owner_name, storage_name)
         ctx.emit(cached_get)
         ctx.terminate(Jump.new(merge_block))
 
         ctx.switch_to_block(else_block)
         init_value = with_arena(arena) { lower_accessor_default_value(ctx, default_value) }
-        class_var_set = ClassVarSet.new(ctx.next_id, return_type, owner_name, accessor_name, init_value)
+        class_var_set = ClassVarSet.new(ctx.next_id, return_type, owner_name, storage_name, init_value)
         ctx.emit(class_var_set)
         flag_lit = Literal.new(ctx.next_id, TypeRef::BOOL, true)
         ctx.emit(flag_lit)
@@ -3969,7 +4031,7 @@ module Crystal::HIR
         ctx.emit(phi)
         ctx.terminate(Return.new(phi.id))
       else
-        value_id = ClassVarGet.new(ctx.next_id, return_type, owner_name, accessor_name)
+        value_id = ClassVarGet.new(ctx.next_id, return_type, owner_name, storage_name)
         ctx.emit(value_id)
         ctx.terminate(Return.new(value_id.id))
       end
@@ -3980,13 +4042,13 @@ module Crystal::HIR
     end
 
     private def generate_class_setter_method(owner_name : String, spec : CrystalV2::Compiler::Frontend::AccessorSpec)
-      accessor_name = String.new(spec.name)
+      storage_name = accessor_storage_name(spec)
       param_type = if ta = spec.type_annotation
                      type_ref_for_name(String.new(ta))
                    else
                      TypeRef::VOID
                    end
-      base_name = "#{owner_name}.#{accessor_name}="
+      base_name = "#{owner_name}.#{storage_name}="
       full_name = mangle_function_name(base_name, [param_type])
       return if @module.has_function?(full_name)
 
@@ -3996,9 +4058,9 @@ module Crystal::HIR
       ctx.register_local("value", value_param.id)
       ctx.register_type(value_param.id, param_type)
 
-      class_var_set = ClassVarSet.new(ctx.next_id, param_type, owner_name, accessor_name, value_param.id)
+      class_var_set = ClassVarSet.new(ctx.next_id, param_type, owner_name, storage_name, value_param.id)
       ctx.emit(class_var_set)
-      flag_name = class_accessor_init_flag_name(accessor_name)
+      flag_name = class_accessor_init_flag_name(storage_name)
       flag_lit = Literal.new(ctx.next_id, TypeRef::BOOL, true)
       ctx.emit(flag_lit)
       flag_set = ClassVarSet.new(ctx.next_id, TypeRef::BOOL, owner_name, flag_name, flag_lit.id)
@@ -4502,9 +4564,9 @@ module Crystal::HIR
         return base_method_name
       end
 
-      # If the receiver is module-like (e.g., Iterator(T)), resolve only when a unique includer
-      # matches the call signature. Avoid heuristic picks that can point to wrong types.
-      if !class_name.empty? && module_like_type_name?(class_name)
+      # If the receiver is module-like (e.g., Iterator(T)) or maps to a known includer,
+      # resolve only when a unique includer matches the call signature.
+      if !class_name.empty? && (module_like_type_name?(class_name) || module_includers_match?(class_name))
         if resolved = resolve_module_typed_method(method_name, arg_types, class_name, false, @current_class)
           return resolved
         end
@@ -4587,12 +4649,24 @@ module Crystal::HIR
                       module_type_name
                     end
       includers = @module_includers[module_base]?
+      if includers.nil? || includers.empty?
+        matches = @module_includers.keys.select { |key| key.ends_with?("::#{module_base}") }
+        module_base = matches.first if matches.size == 1
+        includers = @module_includers[module_base]?
+      end
       # Fallback: try short name if full name has no includers
       # e.g., "Crystal::EventLoop::FileDescriptor" -> "FileDescriptor"
       if includers.nil? || includers.empty?
         short_name = module_base.split("::").last
         if short_name != module_base
           includers = @module_includers[short_name]?
+          if includers.nil? || includers.empty?
+            matches = @module_includers.keys.select { |key| key.ends_with?("::#{short_name}") }
+            if matches.size == 1
+              module_base = matches.first
+              includers = @module_includers[module_base]?
+            end
+          end
         end
       end
       # RESOLVE_DEBUG disabled
@@ -4670,6 +4744,19 @@ module Crystal::HIR
         return preferred if preferred
       end
       nil
+    end
+
+    private def module_includers_match?(name : String) : Bool
+      return true if @module_includers.has_key?(name)
+
+      if @module_includers.keys.any? { |key| key.ends_with?("::#{name}") }
+        return true
+      end
+
+      short_name = name.split("::").last
+      return true if @module_includers.has_key?(short_name)
+
+      @module_includers.keys.any? { |key| key.ends_with?("::#{short_name}") }
     end
 
     private def resolve_module_typed_ivar(
@@ -9738,11 +9825,12 @@ module Crystal::HIR
           return true
         end
       else
-        ivar_name = "@#{method_name}"
+        accessor = method_name.ends_with?("?") ? method_name[0, method_name.size - 1] : method_name
+        ivar_name = "@#{accessor}"
         if ivar_info = class_info.ivars.find { |iv| iv.name == ivar_name }
           expected_name = mangle_function_name(base_name, [] of TypeRef)
           return false if name.includes?("$") && expected_name != name
-          generate_getter_method_for_ivar(owner, class_info, ivar_info)
+          generate_getter_method_for_ivar(owner, class_info, ivar_info, method_name)
           return true
         end
       end
@@ -9755,20 +9843,21 @@ module Crystal::HIR
       spec : CrystalV2::Compiler::Frontend::AccessorSpec,
       kind : Symbol
     ) : Nil
-      accessor_name = String.new(spec.name)
+      storage_name = accessor_storage_name(spec)
+      method_name = accessor_method_name(spec)
 
       case kind
       when :getter
         return_type = if ta = spec.type_annotation
                         type_ref_for_name(String.new(ta))
-                      elsif accessor_name.ends_with?("?")
+                      elsif spec.predicate
                         TypeRef::BOOL
                       elsif default_value = spec.default_value
                         infer_type_from_expr(default_value, owner_name) || TypeRef::VOID
                       else
                         TypeRef::VOID
                       end
-        base_name = "#{owner_name}.#{accessor_name}"
+        base_name = "#{owner_name}.#{method_name}"
         full_name = mangle_function_name(base_name, [] of TypeRef)
         register_function_type(full_name, return_type)
         entry = ClassAccessorEntry.new(owner_name, spec, @arena, :getter)
@@ -9780,7 +9869,7 @@ module Crystal::HIR
                      else
                        TypeRef::VOID
                      end
-        base_name = "#{owner_name}.#{accessor_name}="
+        base_name = "#{owner_name}.#{storage_name}="
         full_name = mangle_function_name(base_name, [param_type])
         register_function_type(full_name, param_type)
         entry = ClassAccessorEntry.new(owner_name, spec, @arena, :setter)
