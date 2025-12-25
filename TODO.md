@@ -1011,7 +1011,7 @@ r2 = maybe(false)  # => nil
 **Prelude build progress (with stdlib/prelude):**
 - Reaches LLVM IR emission and `opt -O1` successfully; link still fails due to missing runtime/stdlib symbols (expected at this stage).
 - Timing snapshot (release + `--stats --no-llvm-opt --no-llvm-metadata`): parse prelude ~167ms, HIR ~2.0s, MIR ~0.3ms, LLVM ~1.8ms, total ~2.2s; link failure is the current blocker.
-- Linker missing symbols (recent minimal unicode_use run): `_Crystal__System__Thread_current_thread`, `_EncodingOptions___Nil_name`, `_Exception__CallStack_load_debug_info`, `_Exception_callstack_`, `_Fiber__StackPool_sleep`, `_Int64_remainder`, `_Nil_iconv_close`, `_Pointer_String__swap`, `_Proc_Pointer_Void___new`, `_RuntimeError_from_errno_String`, `_Thread_scheduler`, `___`, `___fixint_impl`, `___float_impl`, `___mul_impl_Int32`, `_raise_without_backtrace`, `_synchronize`, `_write_IO__FileDescriptor_Slice_UInt8_`.
+- Linker missing symbols (recent minimal unicode_use run): `_Crystal__System__Thread_current_thread`, `_EncodingOptions___Nil_name`, `_Exception__CallStack_load_debug_info`, `_Exception_callstack_`, `_Fiber__StackPool_sleep`, `_Int64_remainder`, `_Nil_iconv_close`, `_Pointer_String__swap`, `_Proc_Pointer_Void___new`, `_RuntimeError_from_errno_String`, `___`, `___fixint_impl`, `___float_impl`, `___mul_impl_Int32`, `_raise_without_backtrace`, `_synchronize`, `_write_IO__FileDescriptor_Slice_UInt8_`.
 
 **Stdlib requires advanced features not yet implemented:**
 
