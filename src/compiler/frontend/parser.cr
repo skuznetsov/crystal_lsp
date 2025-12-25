@@ -111,8 +111,9 @@ module CrystalV2
           return false unless callee_token.kind == Token::Kind::Identifier
           slice = callee_token.slice
           # Allow optional '?' suffix for predicate accessors (e.g., property?)
+          # Allow optional '!' suffix for nilable accessors (e.g., property!) - returns non-nil, stores T|Nil
           base = slice
-          if base.size > 0 && base[base.size - 1] == '?'.ord.to_u8
+          if base.size > 0 && (base[base.size - 1] == '?'.ord.to_u8 || base[base.size - 1] == '!'.ord.to_u8)
             base = Slice.new(base.to_unsafe, base.size - 1)
           end
           slice_eq?(base, "getter") || slice_eq?(base, "setter") || slice_eq?(base, "property") ||
@@ -5739,7 +5740,8 @@ module CrystalV2
               if is_accessor && accessor_macro_callee?(token)
                 name = token.slice
                 predicate = name.size > 0 && name[name.size - 1] == '?'.ord.to_u8
-                base = if name.size > 0 && name[name.size - 1] == '?'.ord.to_u8
+                # Strip ? or ! suffix from name to get base accessor type
+                base = if name.size > 0 && (name[name.size - 1] == '?'.ord.to_u8 || name[name.size - 1] == '!'.ord.to_u8)
                   Slice.new(name.to_unsafe, name.size - 1)
                 else
                   name
@@ -6657,7 +6659,8 @@ module CrystalV2
               if is_accessor && accessor_macro_callee?(token)
                 name = token.slice
                 predicate = name.size > 0 && name[name.size - 1] == '?'.ord.to_u8
-                base = if name.size > 0 && name[name.size - 1] == '?'.ord.to_u8
+                # Strip ? or ! suffix from name to get base accessor type
+                base = if name.size > 0 && (name[name.size - 1] == '?'.ord.to_u8 || name[name.size - 1] == '!'.ord.to_u8)
                   Slice.new(name.to_unsafe, name.size - 1)
                 else
                   name
