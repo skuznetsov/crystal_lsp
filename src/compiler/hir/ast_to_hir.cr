@@ -474,8 +474,35 @@ module Crystal::HIR
 
     # Enum info: name -> {member_name -> value}
     @enum_info : Hash(String, Hash(String, Int64))?
+    # Enum base types: name -> underlying type
+    @enum_base_types : Hash(String, TypeRef)?
     # Map enum value literals to their enum type names (for method resolution).
     @enum_value_types : Hash(ValueId, String)?
+
+    private def enum_base_type_for_node(node : CrystalV2::Compiler::Frontend::EnumNode) : TypeRef
+      if base = node.base_type
+        type_ref_for_name(String.new(base))
+      else
+        TypeRef::INT32
+      end
+    end
+
+    private def register_enum_base_type(enum_name : String, base_type : TypeRef)
+      enum_base_types = @enum_base_types ||= {} of String => TypeRef
+      enum_base_types[enum_name] = base_type
+    end
+
+    private def enum_base_type(enum_name : String) : TypeRef
+      @enum_base_types.try(&.[enum_name]?) || TypeRef::INT32
+    end
+
+    private def resolve_enum_name(name : String) : String?
+      return nil unless enum_info = @enum_info
+      return name if enum_info.has_key?(name)
+      short_name = name.split("::").last?
+      return short_name if short_name && enum_info.has_key?(short_name)
+      nil
+    end
 
     # Register an enum type (pass 1)
     def register_enum(node : CrystalV2::Compiler::Frontend::EnumNode)
@@ -499,6 +526,7 @@ module Crystal::HIR
       end
 
       @enum_info.not_nil![enum_name] = members
+      register_enum_base_type(enum_name, enum_base_type_for_node(node))
       register_enum_methods(node, enum_name)
     end
 
@@ -526,6 +554,9 @@ module Crystal::HIR
       # Also register by short name for lookups
       short_name = String.new(node.name)
       @enum_info.not_nil![short_name] = members
+      base_type = enum_base_type_for_node(node)
+      register_enum_base_type(full_enum_name, base_type)
+      register_enum_base_type(short_name, base_type)
       register_enum_methods(node, full_enum_name)
       if short_name != full_enum_name
         register_enum_methods(node, short_name)
@@ -8691,7 +8722,8 @@ module Crystal::HIR
             if right_name[0]?.try(&.uppercase?)
               value = members[right_name]? || 0_i64
               # Found enum value - emit as Int32 literal but remember enum type.
-              lit = Literal.new(ctx.next_id, TypeRef::INT32, value)
+              enum_type = enum_base_type(left_name)
+              lit = Literal.new(ctx.next_id, enum_type, value)
               ctx.emit(lit)
               (@enum_value_types ||= {} of ValueId => String)[lit.id] = left_name
               return lit.id
@@ -10917,6 +10949,7 @@ module Crystal::HIR
       receiver_id : ValueId? = nil
       method_name : String
       full_method_name : String? = nil
+      static_class_name : String? = nil
 
       case callee_node
       when CrystalV2::Compiler::Frontend::IdentifierNode
@@ -11135,6 +11168,7 @@ module Crystal::HIR
           # Class method call like Counter.new()
           full_method_name = "#{class_name_str}.#{method_name}"
           receiver_id = nil  # Static call, no receiver
+          static_class_name = class_name_str
           if method_name == "new"
             if class_info = @class_info[class_name_str]?
               generate_allocator(class_name_str, class_info)
@@ -11204,6 +11238,25 @@ module Crystal::HIR
       args = apply_default_args(ctx, args, method_name, full_method_name, has_block_call)
       args = pack_splat_args_for_call(ctx, args, method_name, full_method_name, has_block_call)
       args = ensure_double_splat_arg(ctx, args, method_name, full_method_name, has_block_call)
+
+      if static_class_name && method_name == "new"
+        if enum_name = resolve_enum_name(static_class_name)
+          enum_type = enum_base_type(enum_name)
+          if args.size == 1
+            value_id = args.first
+            value_type = ctx.type_of(value_id)
+            if value_type != enum_type
+              cast = Cast.new(ctx.next_id, enum_type, value_id, enum_type, safe: false)
+              ctx.emit(cast)
+              ctx.register_type(cast.id, enum_type)
+              (@enum_value_types ||= {} of ValueId => String)[cast.id] = enum_name
+              return cast.id
+            end
+            (@enum_value_types ||= {} of ValueId => String)[value_id] = enum_name
+            return value_id
+          end
+        end
+      end
 
       # Special handling for Tuple#size - return compile-time constant based on type parameters
       if method_name == "size" && receiver_id && args.empty?
@@ -14262,9 +14315,9 @@ module Crystal::HIR
         end
         if resolved_name[0].uppercase?
           resolved_name = resolve_class_name_in_context(resolved_name)
-          if @class_info.has_key?(resolved_name)
-            class_name_str = resolved_name
-          elsif is_module_method?(resolved_name, member_name)
+          if @class_info.has_key?(resolved_name) ||
+             @enum_info.try(&.has_key?(resolved_name)) ||
+             is_module_method?(resolved_name, member_name)
             class_name_str = resolved_name
           end
         end
@@ -14355,7 +14408,26 @@ module Crystal::HIR
           return cast.id
         end
 
+        enum_name = resolve_enum_name(class_name_str)
+
         args = apply_default_args(ctx, [] of ValueId, member_name, full_method_name, false)
+        if enum_name && member_name == "new"
+          enum_type = enum_base_type(enum_name)
+          if args.size == 1
+            value_id = args.first
+            value_type = ctx.type_of(value_id)
+            if value_type != enum_type
+              cast = Cast.new(ctx.next_id, enum_type, value_id, enum_type, safe: false)
+              ctx.emit(cast)
+              ctx.register_type(cast.id, enum_type)
+              (@enum_value_types ||= {} of ValueId => String)[cast.id] = enum_name
+              return cast.id
+            end
+            (@enum_value_types ||= {} of ValueId => String)[value_id] = enum_name
+            return value_id
+          end
+        end
+
         arg_types = args.map { |arg_id| ctx.type_of(arg_id) }
         mangled_name = mangle_function_name(full_method_name, arg_types)
         actual_name = if @function_types.has_key?(mangled_name) || @module.has_function?(mangled_name)
@@ -14366,21 +14438,11 @@ module Crystal::HIR
                         mangled_name
                       end
 
-        enum_name = nil
-        if enum_info = @enum_info
-          if enum_info.has_key?(class_name_str)
-            enum_name = class_name_str
-          else
-            short_name = class_name_str.split("::").last?
-            enum_name = short_name if short_name && enum_info.has_key?(short_name)
-          end
-        end
-
         return_type = get_function_return_type(actual_name)
         # For .new, use class type_ref as return type
         if member_name == "new" && return_type == TypeRef::VOID
           if enum_name
-            return_type = TypeRef::INT32
+            return_type = enum_base_type(enum_name)
           elsif class_info = @class_info[class_name_str]?
             return_type = class_info.type_ref
           else
@@ -14927,6 +14989,16 @@ module Crystal::HIR
         # Get the object's type to resolve the setter method
         object_type = ctx.type_of(object_id)
         type_desc = @module.get_type_descriptor(object_type)
+
+        if field_name == "value"
+          is_pointer_type = object_type == TypeRef::POINTER ||
+                            (type_desc && type_desc.name.starts_with?("Pointer"))
+          if is_pointer_type
+            store_node = PointerStore.new(ctx.next_id, TypeRef::VOID, object_id, value_id, nil)
+            ctx.emit(store_node)
+            return store_node.id
+          end
+        end
 
         # Try direct field access if we know the class layout
         class_name = type_desc ? type_desc.name : nil
