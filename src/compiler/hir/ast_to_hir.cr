@@ -2155,10 +2155,6 @@ module Crystal::HIR
             register_class_with_name(member, full_class_name)
           when CrystalV2::Compiler::Frontend::EnumNode
             # Already registered in PASS 1.5 - skip
-          when CrystalV2::Compiler::Frontend::StructNode
-            struct_name = String.new(member.name)
-            full_struct_name = "#{module_name}::#{struct_name}"
-            register_struct_with_name(member, full_struct_name)
           when CrystalV2::Compiler::Frontend::MacroIfNode
             # Handle macro conditionals inside module body
             process_macro_if_in_module(member, module_name)
@@ -2190,10 +2186,6 @@ module Crystal::HIR
                     class_name = String.new(expr_node.name)
                     full_class_name = "#{module_name}::#{class_name}"
                     register_class_with_name(expr_node, full_class_name)
-                  when CrystalV2::Compiler::Frontend::StructNode
-                    struct_name = String.new(expr_node.name)
-                    full_struct_name = "#{module_name}::#{struct_name}"
-                    register_struct_with_name(expr_node, full_struct_name)
                   when CrystalV2::Compiler::Frontend::ModuleNode
                     nested_name = String.new(expr_node.name)
                     full_nested_name = "#{module_name}::#{nested_name}"
@@ -2265,10 +2257,6 @@ module Crystal::HIR
                 class_name = String.new(expr_node.name)
                 full_class_name = "#{module_name}::#{class_name}"
                 register_class_with_name(expr_node, full_class_name)
-              when CrystalV2::Compiler::Frontend::StructNode
-                struct_name = String.new(expr_node.name)
-                full_struct_name = "#{module_name}::#{struct_name}"
-                register_struct_with_name(expr_node, full_struct_name)
               when CrystalV2::Compiler::Frontend::ModuleNode
                 nested_name = String.new(expr_node.name)
                 full_nested_name = "#{module_name}::#{nested_name}"
@@ -2298,10 +2286,6 @@ module Crystal::HIR
               class_name = String.new(expr_node.name)
               full_class_name = "#{module_name}::#{class_name}"
               register_class_with_name(expr_node, full_class_name)
-            when CrystalV2::Compiler::Frontend::StructNode
-              struct_name = String.new(expr_node.name)
-              full_struct_name = "#{module_name}::#{struct_name}"
-              register_struct_with_name(expr_node, full_struct_name)
             when CrystalV2::Compiler::Frontend::ModuleNode
               nested_name = String.new(expr_node.name)
               full_nested_name = "#{module_name}::#{nested_name}"
@@ -2331,10 +2315,6 @@ module Crystal::HIR
                 class_name = String.new(expr_node.name)
                 full_class_name = "#{module_name}::#{class_name}"
                 register_class_with_name(expr_node, full_class_name)
-              when CrystalV2::Compiler::Frontend::StructNode
-                struct_name = String.new(expr_node.name)
-                full_struct_name = "#{module_name}::#{struct_name}"
-                register_struct_with_name(expr_node, full_struct_name)
               when CrystalV2::Compiler::Frontend::ModuleNode
                 nested_name = String.new(expr_node.name)
                 full_nested_name = "#{module_name}::#{nested_name}"
@@ -2739,10 +2719,6 @@ module Crystal::HIR
                     nested_name = String.new(expr_node.name)
                     full_nested_name = "#{class_name}::#{nested_name}"
                     register_class_with_name(expr_node, full_nested_name)
-                  when CrystalV2::Compiler::Frontend::StructNode
-                    nested_name = String.new(expr_node.name)
-                    full_nested_name = "#{class_name}::#{nested_name}"
-                    register_struct_with_name(expr_node, full_nested_name)
                   when CrystalV2::Compiler::Frontend::EnumNode
                     nested_name = String.new(expr_node.name)
                     full_nested_name = "#{class_name}::#{nested_name}"
@@ -2860,10 +2836,6 @@ module Crystal::HIR
               nested_name = String.new(expr_node.name)
               full_nested_name = "#{class_name}::#{nested_name}"
               register_class_with_name(expr_node, full_nested_name)
-            when CrystalV2::Compiler::Frontend::StructNode
-              nested_name = String.new(expr_node.name)
-              full_nested_name = "#{class_name}::#{nested_name}"
-              register_struct_with_name(expr_node, full_nested_name)
             when CrystalV2::Compiler::Frontend::EnumNode
               nested_name = String.new(expr_node.name)
               full_nested_name = "#{class_name}::#{nested_name}"
@@ -2904,10 +2876,6 @@ module Crystal::HIR
                 nested_name = String.new(expr_node.name)
                 full_nested_name = "#{class_name}::#{nested_name}"
                 register_class_with_name(expr_node, full_nested_name)
-              when CrystalV2::Compiler::Frontend::StructNode
-                nested_name = String.new(expr_node.name)
-                full_nested_name = "#{class_name}::#{nested_name}"
-                register_struct_with_name(expr_node, full_nested_name)
               when CrystalV2::Compiler::Frontend::EnumNode
                 nested_name = String.new(expr_node.name)
                 full_nested_name = "#{class_name}::#{nested_name}"

@@ -1024,6 +1024,7 @@ r2 = maybe(false)  # => nil
 - Coerce integer args to `i128` in LLVM backend for mismatch widths.
 - Track enum value types for `.new`/`.value` and propagate via assignments/identifiers in HIR lowering.
 - Register MacroIf/MacroLiteral nodes inside nested modules during HIR lowering.
+- Remove `StructNode` handling from macro-parsed class bodies; rely on `ClassNode.is_struct` (2026-01-02).
 
 **Stdlib requires advanced features not yet implemented:**
 
@@ -1038,6 +1039,7 @@ r2 = maybe(false)  # => nil
 - Top-level `{% if flag? %}` bodies now use raw source spans to parse defs/modules for simple flag branches; general macro expansion for complex bodies is still missing.
 - [x] Enum method bodies are captured and registered (enum defs now emitted for `Signal#reset` etc.) (2025-01-02)
 - [x] Macro `flag?` branches inside class/struct bodies now register defs (e.g., `Crystal::Scheduler.init`). (2025-01-02)
+- [ ] Replace remaining `StructNode` checks with `ClassNode.is_struct` (parser does not emit StructNode).
 
 ### 8.3 Known Limitations
 
