@@ -6,6 +6,7 @@
 # See docs/codegen_architecture.md for full specification.
 
 require "./hir"
+require "./debug_hooks"
 require "../frontend/ast"
 require "../mir/mir"
 
@@ -460,6 +461,16 @@ module Crystal::HIR
           @function_base_return_types[base_name] = return_type
         end
       end
+      # Debug hook: extract class and method from base_name (Class#method or Class.method)
+      if base_name.includes?("#")
+        parts = base_name.split("#", 2)
+        debug_hook_method_register(full_name, parts[0], parts[1])
+      elsif base_name.includes?(".")
+        parts = base_name.split(".", 2)
+        debug_hook_method_register(full_name, parts[0], parts[1])
+      else
+        debug_hook_method_register(full_name, "", base_name)
+      end
     end
 
     # Check if a function exists with given base name (fast O(1) lookup)
@@ -565,6 +576,7 @@ module Crystal::HIR
       base_type = enum_base_type_for_node(node)
       register_enum_base_type(full_enum_name, base_type)
       register_enum_base_type(short_name, base_type)
+      debug_hook_enum_register(full_enum_name, @module.get_type_descriptor(base_type).try(&.name) || "?")
       register_enum_methods(node, full_enum_name)
       if short_name != full_enum_name
         register_enum_methods(node, short_name)
@@ -2039,7 +2051,20 @@ module Crystal::HIR
             register_type_alias(struct_name, full_struct_name)
           end
         end
-        # PASS 2: Register functions and classes (now that aliases are available)
+        # PASS 1.5: Register enums BEFORE classes/structs so type resolution works
+        # (e.g., IO::Seek must exist before IO::FileDescriptor methods reference "Seek")
+        old_class = @current_class
+        @current_class = module_name
+        body.each do |expr_id|
+          member = unwrap_visibility_member(@arena[expr_id])
+          if member.is_a?(CrystalV2::Compiler::Frontend::EnumNode)
+            enum_name = String.new(member.name)
+            full_enum_name = "#{module_name}::#{enum_name}"
+            register_enum_with_name(member, full_enum_name)
+          end
+        end
+        @current_class = old_class
+        # PASS 2: Register functions and classes (now that aliases and enums are available)
         old_class = @current_class
         @current_class = module_name
         begin
@@ -2129,9 +2154,7 @@ module Crystal::HIR
             end
             register_class_with_name(member, full_class_name)
           when CrystalV2::Compiler::Frontend::EnumNode
-            enum_name = String.new(member.name)
-            full_enum_name = "#{module_name}::#{enum_name}"
-            register_enum_with_name(member, full_enum_name)
+            # Already registered in PASS 1.5 - skip
           when CrystalV2::Compiler::Frontend::StructNode
             struct_name = String.new(member.name)
             full_struct_name = "#{module_name}::#{struct_name}"
@@ -3510,7 +3533,16 @@ module Crystal::HIR
           STDERR.puts "[MONO] #{class_name} pass0 nested types #{elapsed.round(1)}ms"
         end
 
+        # Set current class context BEFORE collecting method signatures
+        # so type lookups resolve in the correct namespace
+        old_class = @current_class
+        @current_class = class_name
+
         defined_start = Time.monotonic if mono_debug
+        if ENV.has_key?("DEBUG_TYPE_RESOLVE") && class_name == "IO"
+          STDERR.puts "[DEBUG_IO] About to collect_defined_instance_method_full_names for IO"
+          STDERR.puts "[DEBUG_IO]   enum_info Seek keys: #{@enum_info.try(&.keys.select { |k| k.includes?("Seek") }) || "nil"}"
+        end
         defined_instance_method_full_names = collect_defined_instance_method_full_names(class_name, body)
         if mono_debug && defined_start
           elapsed = (Time.monotonic - defined_start).total_milliseconds
@@ -3518,8 +3550,6 @@ module Crystal::HIR
         end
         include_nodes = [] of CrystalV2::Compiler::Frontend::IncludeNode
 
-        old_class = @current_class
-        @current_class = class_name
         begin
         body_start = Time.monotonic if mono_debug
         body.each do |expr_id|
@@ -3905,6 +3935,7 @@ module Crystal::HIR
                    end
                  end
       @class_info[class_name] = ClassInfo.new(class_name, type_ref, ivars, class_vars, offset, is_struct, parent_name)
+      debug_hook_class_register(class_name, parent_name)
 
       # Store initialize params for allocator generation
       # Preserve existing init params on class reopening; otherwise inherit from parent.
@@ -3948,6 +3979,10 @@ module Crystal::HIR
 
       # Initialize constructor params
       init_params = [] of {String, TypeRef}
+
+      # Set current class context for type resolution within this struct
+      old_class = @current_class
+      @current_class = struct_name
 
       if body = node.body
         # PASS 0: Register nested types first so method signatures and bodies can resolve them
@@ -4223,6 +4258,7 @@ module Crystal::HIR
 
       # Create struct info (is_struct = true)
       @class_info[struct_name] = ClassInfo.new(struct_name, type_ref, ivars, class_vars, size, true, nil)
+      debug_hook_class_register(struct_name, nil)
 
       if init_params.empty?
         if existing_params = @init_params.not_nil![struct_name]?
@@ -4231,6 +4267,9 @@ module Crystal::HIR
       end
       @init_params.not_nil![struct_name] = init_params
       register_function_type("#{struct_name}.new", type_ref)
+
+      # Restore current class context
+      @current_class = old_class
     end
 
     # Flush all pending monomorphizations (call after all templates are registered)
@@ -6078,8 +6117,12 @@ module Crystal::HIR
       # reconstruct with the original type args.
       if info = split_generic_base_and_args(name)
         resolved_base = resolve_class_name_in_context(info[:base])
-        return resolved_base == info[:base] ? name : "#{resolved_base}(#{info[:args]})"
+        result = resolved_base == info[:base] ? name : "#{resolved_base}(#{info[:args]})"
+        debug_hook_type_resolve(name, @current_class || "", result)
+        return result
       end
+
+      result = name  # Default fallback
 
       # Prefer the current namespace first (nested types shadow outer/global ones).
       if current = @current_class
@@ -6089,32 +6132,33 @@ module Crystal::HIR
         # Try full namespace first (e.g., Foo::Bar::Baz::Name), then increasingly shorter
         # This handles cases where we're inside module Foo::Bar and reference Name
         # which should resolve to Foo::Bar::Name before trying Foo::Name
+        found = false
         while parts.size > 0
           qualified_name = (parts + [name]).join("::")
           if type_name_exists?(qualified_name)
-            return qualified_name
+            result = qualified_name
+            found = true
+            break
           end
           parts.pop
         end
 
-        # All namespace prefixes tried and failed - continue with other checks below
-      end
-
-      # Fall back to a top-level type
-      return name if type_name_exists?(name)
-
-      # Also try the exact class name if current class matches
-      # E.g., inside Span, "Span" should resolve to the same class
-      if current = @current_class
-        # Check if name is the last component of current class
-        last_part = current.split("::").last
-        if last_part == name && type_name_exists?(current)
-          return current
+        unless found
+          # Fall back to a top-level type
+          if type_name_exists?(name)
+            result = name
+          # Also try the exact class name if current class matches
+          # E.g., inside Span, "Span" should resolve to the same class
+          elsif (last_part = current.split("::").last) && last_part == name && type_name_exists?(current)
+            result = current
+          end
         end
+      elsif type_name_exists?(name)
+        result = name
       end
 
-      # Fallback to original name
-      name
+      debug_hook_type_resolve(name, @current_class || "", result)
+      result
     end
 
     private def resolve_type_alias_chain(name : String) : String
@@ -11378,6 +11422,14 @@ module Crystal::HIR
             unless full_method_name
               if type_desc = @module.get_type_descriptor(receiver_type)
                 type_name = type_desc.name
+                # DEBUG: Detect type name mismatches
+                if ENV.has_key?("DEBUG_TYPE_RESOLVE") && (type_name == "Seek" || type_name == "LoadCommand")
+                  STDERR.puts "[DEBUG_TYPE_RESOLVE] method=#{method_name}, receiver_type_id=#{receiver_type.id}, type_name=#{type_name}"
+                  STDERR.puts "[DEBUG_TYPE_RESOLVE] all class_info type_refs:"
+                  @class_info.each do |name, info|
+                    STDERR.puts "  #{name}: type_ref.id=#{info.type_ref.id}"
+                  end
+                end
                 unless type_name.empty? || module_like_type_name?(type_name)
                   # Try to find method with this type name
                   test_method = "#{type_name}##{method_name}"
@@ -16004,7 +16056,16 @@ module Crystal::HIR
                    return info.type_ref
                  end
 
-                 @module.intern_type(TypeDescriptor.new(TypeKind::Class, lookup_name))
+                 # For short names (no ::), use qualified name from context to avoid
+                 # creating wrong types when the actual type will be registered later.
+                 # E.g., when inside IO and referencing "Seek", create "IO::Seek" descriptor
+                 # instead of just "Seek" - this ensures proper name resolution.
+                 final_name = if !lookup_name.includes?("::") && (current = @current_class)
+                                "#{current}::#{lookup_name}"
+                              else
+                                lookup_name
+                              end
+                 @module.intern_type(TypeDescriptor.new(TypeKind::Class, final_name))
                end
       # Cache the result to avoid VOID placeholder being returned on subsequent calls
       @type_cache[lookup_name] = result
