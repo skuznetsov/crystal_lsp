@@ -954,7 +954,7 @@ module CrystalV2
 
       private def require_cache_path(file_path : String) : String
         cache_dir = ENV["XDG_CACHE_HOME"]? || File.join(ENV["HOME"]? || "/tmp", ".cache")
-        hash = digest_string(file_path)
+        hash = digest_string("v3:#{file_path}")
         File.join(cache_dir, "crystal_v2", "requires", "#{hash}.req")
       end
 
@@ -1912,6 +1912,7 @@ module CrystalV2
                       nil
                     end
         return nil unless flag_name
+        flag_name = flag_name.strip.gsub(/^[:"']|["']$/, "")
         flags.includes?(flag_name)
       end
 

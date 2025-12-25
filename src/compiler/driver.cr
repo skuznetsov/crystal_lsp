@@ -1289,6 +1289,7 @@ module Crystal::V2
                     nil
                   end
       return nil unless flag_name
+      flag_name = flag_name.strip.gsub(/^[:"']|["']$/, "")
       flags.includes?(flag_name)
     end
 
