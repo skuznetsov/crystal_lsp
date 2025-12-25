@@ -4541,6 +4541,27 @@ module Crystal::MIR
                    @cond_counter += 1
                    emit "%trunc_to_i8.#{c} = trunc #{actual_llvm_type} #{val} to i8"
                    "i8 %trunc_to_i8.#{c}"
+                 elsif expected_llvm_type.starts_with?("i") && actual_llvm_type.starts_with?("i") && expected_llvm_type != actual_llvm_type
+                   expected_bits = expected_llvm_type[1..].to_i?
+                   actual_bits = actual_llvm_type[1..].to_i?
+                   if expected_bits && actual_bits
+                     val = value_ref(a)
+                     c = @cond_counter
+                     @cond_counter += 1
+                     if expected_bits > actual_bits
+                       unsigned = param_type == TypeRef::UINT8 || param_type == TypeRef::UINT16 ||
+                                  param_type == TypeRef::UINT32 || param_type == TypeRef::UINT64 ||
+                                  param_type == TypeRef::UINT128
+                       op = unsigned ? "zext" : "sext"
+                       emit "%int_ext.#{c} = #{op} #{actual_llvm_type} #{val} to #{expected_llvm_type}"
+                       "#{expected_llvm_type} %int_ext.#{c}"
+                     else
+                       emit "%int_trunc.#{c} = trunc #{actual_llvm_type} #{val} to #{expected_llvm_type}"
+                       "#{expected_llvm_type} %int_trunc.#{c}"
+                     end
+                   else
+                     "#{expected_llvm_type} #{value_ref(a)}"
+                   end
                  elsif expected_llvm_type.starts_with?("i") && actual_llvm_type.includes?(".union")
                    # Coerce union to int: extract payload as int
                    # Union layout: { type_id : i32, payload : [N x i8] }
