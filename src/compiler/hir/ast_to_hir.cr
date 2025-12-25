@@ -2648,22 +2648,50 @@ module Crystal::HIR
       return if parsed_any
     end
 
-    private def process_macro_if_in_class(node : CrystalV2::Compiler::Frontend::MacroIfNode, class_name : String)
+    private def process_macro_if_in_class(
+      node : CrystalV2::Compiler::Frontend::MacroIfNode,
+      class_name : String,
+      ivars : Array(IVarInfo)? = nil,
+      offset_ref : Pointer(Int32)? = nil
+    )
       if raw_text = macro_if_raw_text(node)
         nested_macro_end = raw_text.scan(/\{%\s*end\s*%\}/).size > 1
         unless nested_macro_end
           if expanded = expand_flag_macro_text(raw_text)
-            if program = parse_macro_literal_program(expanded)
+            if parsed = parse_macro_literal_class_body(expanded)
+              program, body_ids = parsed
               with_arena(program.arena) do
-                program.roots.each do |expr_id|
+                body_ids.each do |expr_id|
                   expr_node = @arena[expr_id]
                   case expr_node
                   when CrystalV2::Compiler::Frontend::DefNode
                     register_type_method_from_def(expr_node, class_name)
                   when CrystalV2::Compiler::Frontend::MacroIfNode
-                    process_macro_if_in_class(expr_node, class_name)
+                    process_macro_if_in_class(expr_node, class_name, ivars, offset_ref)
                   when CrystalV2::Compiler::Frontend::MacroLiteralNode
-                    process_macro_literal_in_class(expr_node, class_name)
+                    process_macro_literal_in_class(expr_node, class_name, ivars, offset_ref)
+                  when CrystalV2::Compiler::Frontend::ClassNode
+                    nested_name = String.new(expr_node.name)
+                    full_nested_name = "#{class_name}::#{nested_name}"
+                    register_class_with_name(expr_node, full_nested_name)
+                  when CrystalV2::Compiler::Frontend::StructNode
+                    nested_name = String.new(expr_node.name)
+                    full_nested_name = "#{class_name}::#{nested_name}"
+                    register_struct_with_name(expr_node, full_nested_name)
+                  when CrystalV2::Compiler::Frontend::EnumNode
+                    nested_name = String.new(expr_node.name)
+                    full_nested_name = "#{class_name}::#{nested_name}"
+                    register_enum_with_name(expr_node, full_nested_name)
+                  when CrystalV2::Compiler::Frontend::ModuleNode
+                    nested_name = String.new(expr_node.name)
+                    full_nested_name = "#{class_name}::#{nested_name}"
+                    register_nested_module(expr_node, full_nested_name)
+                  when CrystalV2::Compiler::Frontend::GetterNode
+                    register_accessors_in_class(expr_node, class_name, ivars, offset_ref)
+                  when CrystalV2::Compiler::Frontend::SetterNode
+                    register_accessors_in_class(expr_node, class_name, ivars, offset_ref)
+                  when CrystalV2::Compiler::Frontend::PropertyNode
+                    register_accessors_in_class(expr_node, class_name, ivars, offset_ref)
                   end
                 end
               end
@@ -2675,38 +2703,54 @@ module Crystal::HIR
 
       result = try_evaluate_macro_condition(node.condition)
       if result == true
-        process_macro_body_in_class(node.then_body, class_name)
+        process_macro_body_in_class(node.then_body, class_name, ivars, offset_ref)
       elsif result == false
         if else_node = node.else_body
           else_ast = @arena[else_node]
           case else_ast
           when CrystalV2::Compiler::Frontend::MacroIfNode
-            process_macro_if_in_class(else_ast, class_name)
+            process_macro_if_in_class(else_ast, class_name, ivars, offset_ref)
           else
-            process_macro_body_in_class(else_node, class_name)
+            process_macro_body_in_class(else_node, class_name, ivars, offset_ref)
           end
         end
       else
-        process_macro_body_in_class(node.then_body, class_name)
+        process_macro_body_in_class(node.then_body, class_name, ivars, offset_ref)
         if else_node = node.else_body
-          process_macro_body_in_class(else_node, class_name)
+          process_macro_body_in_class(else_node, class_name, ivars, offset_ref)
         end
       end
     end
 
-    private def process_macro_body_in_class(body_id : ExprId, class_name : String)
+    private def process_macro_body_in_class(
+      body_id : ExprId,
+      class_name : String,
+      ivars : Array(IVarInfo)? = nil,
+      offset_ref : Pointer(Int32)? = nil
+    )
       body_node = @arena[body_id]
       case body_node
       when CrystalV2::Compiler::Frontend::MacroLiteralNode
-        process_macro_literal_in_class(body_node, class_name)
+        process_macro_literal_in_class(body_node, class_name, ivars, offset_ref)
       when CrystalV2::Compiler::Frontend::DefNode
         register_type_method_from_def(body_node, class_name)
       when CrystalV2::Compiler::Frontend::MacroIfNode
-        process_macro_if_in_class(body_node, class_name)
+        process_macro_if_in_class(body_node, class_name, ivars, offset_ref)
+      when CrystalV2::Compiler::Frontend::GetterNode
+        register_accessors_in_class(body_node, class_name, ivars, offset_ref)
+      when CrystalV2::Compiler::Frontend::SetterNode
+        register_accessors_in_class(body_node, class_name, ivars, offset_ref)
+      when CrystalV2::Compiler::Frontend::PropertyNode
+        register_accessors_in_class(body_node, class_name, ivars, offset_ref)
       end
     end
 
-    private def process_macro_literal_in_class(node : CrystalV2::Compiler::Frontend::MacroLiteralNode, class_name : String)
+    private def process_macro_literal_in_class(
+      node : CrystalV2::Compiler::Frontend::MacroLiteralNode,
+      class_name : String,
+      ivars : Array(IVarInfo)? = nil,
+      offset_ref : Pointer(Int32)? = nil
+    )
       if raw_text = macro_literal_raw_text(node)
         expanded = expand_flag_macro_text(raw_text) || raw_text
         if program = parse_macro_literal_program(expanded)
@@ -2717,9 +2761,15 @@ module Crystal::HIR
               when CrystalV2::Compiler::Frontend::DefNode
                 register_type_method_from_def(expr_node, class_name)
               when CrystalV2::Compiler::Frontend::MacroIfNode
-                process_macro_if_in_class(expr_node, class_name)
+                process_macro_if_in_class(expr_node, class_name, ivars, offset_ref)
               when CrystalV2::Compiler::Frontend::MacroLiteralNode
-                process_macro_literal_in_class(expr_node, class_name)
+                process_macro_literal_in_class(expr_node, class_name, ivars, offset_ref)
+              when CrystalV2::Compiler::Frontend::GetterNode
+                register_accessors_in_class(expr_node, class_name, ivars, offset_ref)
+              when CrystalV2::Compiler::Frontend::SetterNode
+                register_accessors_in_class(expr_node, class_name, ivars, offset_ref)
+              when CrystalV2::Compiler::Frontend::PropertyNode
+                register_accessors_in_class(expr_node, class_name, ivars, offset_ref)
               end
             end
           end
@@ -2729,17 +2779,40 @@ module Crystal::HIR
 
       texts = macro_literal_active_texts(node)
       combined = texts.join("\n")
-      if program = parse_macro_literal_program(combined)
+      if parsed = parse_macro_literal_class_body(combined)
+        program, body_ids = parsed
         with_arena(program.arena) do
-          program.roots.each do |expr_id|
+          body_ids.each do |expr_id|
             expr_node = @arena[expr_id]
             case expr_node
             when CrystalV2::Compiler::Frontend::DefNode
               register_type_method_from_def(expr_node, class_name)
             when CrystalV2::Compiler::Frontend::MacroIfNode
-              process_macro_if_in_class(expr_node, class_name)
+              process_macro_if_in_class(expr_node, class_name, ivars, offset_ref)
             when CrystalV2::Compiler::Frontend::MacroLiteralNode
-              process_macro_literal_in_class(expr_node, class_name)
+              process_macro_literal_in_class(expr_node, class_name, ivars, offset_ref)
+            when CrystalV2::Compiler::Frontend::ClassNode
+              nested_name = String.new(expr_node.name)
+              full_nested_name = "#{class_name}::#{nested_name}"
+              register_class_with_name(expr_node, full_nested_name)
+            when CrystalV2::Compiler::Frontend::StructNode
+              nested_name = String.new(expr_node.name)
+              full_nested_name = "#{class_name}::#{nested_name}"
+              register_struct_with_name(expr_node, full_nested_name)
+            when CrystalV2::Compiler::Frontend::EnumNode
+              nested_name = String.new(expr_node.name)
+              full_nested_name = "#{class_name}::#{nested_name}"
+              register_enum_with_name(expr_node, full_nested_name)
+            when CrystalV2::Compiler::Frontend::ModuleNode
+              nested_name = String.new(expr_node.name)
+              full_nested_name = "#{class_name}::#{nested_name}"
+              register_nested_module(expr_node, full_nested_name)
+            when CrystalV2::Compiler::Frontend::GetterNode
+              register_accessors_in_class(expr_node, class_name, ivars, offset_ref)
+            when CrystalV2::Compiler::Frontend::SetterNode
+              register_accessors_in_class(expr_node, class_name, ivars, offset_ref)
+            when CrystalV2::Compiler::Frontend::PropertyNode
+              register_accessors_in_class(expr_node, class_name, ivars, offset_ref)
             end
           end
         end
@@ -2749,24 +2822,142 @@ module Crystal::HIR
       parsed_any = false
       texts.each do |text|
         next if text.strip.empty?
-        if program = parse_macro_literal_program(text)
+        if parsed = parse_macro_literal_class_body(text)
           parsed_any = true
+          program, body_ids = parsed
           with_arena(program.arena) do
-            program.roots.each do |expr_id|
+            body_ids.each do |expr_id|
               expr_node = @arena[expr_id]
               case expr_node
               when CrystalV2::Compiler::Frontend::DefNode
                 register_type_method_from_def(expr_node, class_name)
               when CrystalV2::Compiler::Frontend::MacroIfNode
-                process_macro_if_in_class(expr_node, class_name)
+                process_macro_if_in_class(expr_node, class_name, ivars, offset_ref)
               when CrystalV2::Compiler::Frontend::MacroLiteralNode
-                process_macro_literal_in_class(expr_node, class_name)
+                process_macro_literal_in_class(expr_node, class_name, ivars, offset_ref)
+              when CrystalV2::Compiler::Frontend::ClassNode
+                nested_name = String.new(expr_node.name)
+                full_nested_name = "#{class_name}::#{nested_name}"
+                register_class_with_name(expr_node, full_nested_name)
+              when CrystalV2::Compiler::Frontend::StructNode
+                nested_name = String.new(expr_node.name)
+                full_nested_name = "#{class_name}::#{nested_name}"
+                register_struct_with_name(expr_node, full_nested_name)
+              when CrystalV2::Compiler::Frontend::EnumNode
+                nested_name = String.new(expr_node.name)
+                full_nested_name = "#{class_name}::#{nested_name}"
+                register_enum_with_name(expr_node, full_nested_name)
+              when CrystalV2::Compiler::Frontend::ModuleNode
+                nested_name = String.new(expr_node.name)
+                full_nested_name = "#{class_name}::#{nested_name}"
+                register_nested_module(expr_node, full_nested_name)
+              when CrystalV2::Compiler::Frontend::GetterNode
+                register_accessors_in_class(expr_node, class_name, ivars, offset_ref)
+              when CrystalV2::Compiler::Frontend::SetterNode
+                register_accessors_in_class(expr_node, class_name, ivars, offset_ref)
+              when CrystalV2::Compiler::Frontend::PropertyNode
+                register_accessors_in_class(expr_node, class_name, ivars, offset_ref)
               end
             end
           end
         end
       end
       return if parsed_any
+    end
+
+    private def register_accessors_in_class(
+      member : CrystalV2::Compiler::Frontend::GetterNode | CrystalV2::Compiler::Frontend::SetterNode | CrystalV2::Compiler::Frontend::PropertyNode,
+      class_name : String,
+      ivars : Array(IVarInfo)?,
+      offset_ref : Pointer(Int32)?
+    )
+      return unless ivars && offset_ref
+
+      if member.is_class?
+        case member
+        when CrystalV2::Compiler::Frontend::GetterNode
+          member.specs.each { |spec| register_class_accessor_entry(class_name, spec, :getter) }
+        when CrystalV2::Compiler::Frontend::SetterNode
+          member.specs.each { |spec| register_class_accessor_entry(class_name, spec, :setter) }
+        when CrystalV2::Compiler::Frontend::PropertyNode
+          member.specs.each do |spec|
+            register_class_accessor_entry(class_name, spec, :getter)
+            register_class_accessor_entry(class_name, spec, :setter)
+          end
+        end
+        return
+      end
+
+      case member
+      when CrystalV2::Compiler::Frontend::GetterNode
+        member.specs.each do |spec|
+          storage_name = accessor_storage_name(spec)
+          getter_name = accessor_method_name(spec)
+          ivar_name = "@#{storage_name}"
+          ivar_type = if ta = spec.type_annotation
+                        type_ref_for_name(String.new(ta))
+                      elsif spec.predicate
+                        TypeRef::BOOL
+                      elsif default_value = spec.default_value
+                        infer_type_from_expr(default_value, class_name) || TypeRef::VOID
+                      else
+                        TypeRef::VOID
+                      end
+          unless ivars.any? { |iv| iv.name == ivar_name }
+            ivars << IVarInfo.new(ivar_name, ivar_type, offset_ref.value)
+            offset_ref.value += type_size(ivar_type)
+          end
+          getter_base = "#{class_name}##{getter_name}"
+          full_name = mangle_function_name(getter_base, [] of TypeRef)
+          register_function_type(full_name, ivar_type)
+        end
+      when CrystalV2::Compiler::Frontend::SetterNode
+        member.specs.each do |spec|
+          storage_name = accessor_storage_name(spec)
+          ivar_name = "@#{storage_name}"
+          ivar_type = if ta = spec.type_annotation
+                        type_ref_for_name(String.new(ta))
+                      elsif spec.predicate
+                        TypeRef::BOOL
+                      elsif default_value = spec.default_value
+                        infer_type_from_expr(default_value, class_name) || TypeRef::VOID
+                      else
+                        TypeRef::VOID
+                      end
+          unless ivars.any? { |iv| iv.name == ivar_name }
+            ivars << IVarInfo.new(ivar_name, ivar_type, offset_ref.value)
+            offset_ref.value += type_size(ivar_type)
+          end
+          setter_name = "#{class_name}##{storage_name}="
+          full_name = mangle_function_name(setter_name, [ivar_type])
+          register_function_type(full_name, ivar_type)
+        end
+      when CrystalV2::Compiler::Frontend::PropertyNode
+        member.specs.each do |spec|
+          storage_name = accessor_storage_name(spec)
+          getter_name = accessor_method_name(spec)
+          ivar_name = "@#{storage_name}"
+          ivar_type = if ta = spec.type_annotation
+                        type_ref_for_name(String.new(ta))
+                      elsif spec.predicate
+                        TypeRef::BOOL
+                      elsif default_value = spec.default_value
+                        infer_type_from_expr(default_value, class_name) || TypeRef::VOID
+                      else
+                        TypeRef::VOID
+                      end
+          unless ivars.any? { |iv| iv.name == ivar_name }
+            ivars << IVarInfo.new(ivar_name, ivar_type, offset_ref.value)
+            offset_ref.value += type_size(ivar_type)
+          end
+          getter_base = "#{class_name}##{getter_name}"
+          getter_full = mangle_function_name(getter_base, [] of TypeRef)
+          register_function_type(getter_full, ivar_type)
+          setter_name = "#{class_name}##{storage_name}="
+          setter_full = mangle_function_name(setter_name, [ivar_type])
+          register_function_type(setter_full, ivar_type)
+        end
+      end
     end
 
     # Register a nested module with full path
@@ -3431,9 +3622,9 @@ module Crystal::HIR
             end
 
           when CrystalV2::Compiler::Frontend::MacroIfNode
-            process_macro_if_in_class(member, class_name)
+            process_macro_if_in_class(member, class_name, ivars, pointerof(offset))
           when CrystalV2::Compiler::Frontend::MacroLiteralNode
-            process_macro_literal_in_class(member, class_name)
+            process_macro_literal_in_class(member, class_name, ivars, pointerof(offset))
 
           when CrystalV2::Compiler::Frontend::GetterNode
             # Getter declarations: getter name : Type
@@ -3849,9 +4040,9 @@ module Crystal::HIR
             end
 
           when CrystalV2::Compiler::Frontend::MacroIfNode
-            process_macro_if_in_class(member, struct_name)
+            process_macro_if_in_class(member, struct_name, ivars, pointerof(offset))
           when CrystalV2::Compiler::Frontend::MacroLiteralNode
-            process_macro_literal_in_class(member, struct_name)
+            process_macro_literal_in_class(member, struct_name, ivars, pointerof(offset))
 
           when CrystalV2::Compiler::Frontend::GetterNode
             if member.is_class?
@@ -7823,6 +8014,27 @@ module Crystal::HIR
       program = parser.parse_program
       return nil if program.roots.empty?
       program
+    end
+
+    private def parse_macro_literal_class_body(code : String) : Tuple(CrystalV2::Compiler::Frontend::Program, Array(ExprId))?
+      trimmed = code.strip
+      return nil if trimmed.empty?
+      return nil if trimmed.includes?("{%") || trimmed.includes?("{{")
+
+      wrapped = "class __MacroContext__\n#{trimmed}\nend\n"
+      lexer = CrystalV2::Compiler::Frontend::Lexer.new(wrapped)
+      parser = CrystalV2::Compiler::Frontend::Parser.new(lexer, recovery_mode: true)
+      program = parser.parse_program
+      return nil if program.roots.empty?
+
+      class_node = program.roots.map { |id| program.arena[id] }
+        .find(&.is_a?(CrystalV2::Compiler::Frontend::ClassNode))
+      return nil unless class_node
+
+      body = class_node.as(CrystalV2::Compiler::Frontend::ClassNode).body
+      return nil unless body
+
+      {program, body}
     end
 
     # Lower expanded macro code by parsing and lowering it
