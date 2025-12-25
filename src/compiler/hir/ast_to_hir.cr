@@ -3278,6 +3278,11 @@ module Crystal::HIR
       call_arg_types : Array(TypeRef)? = nil,
       full_name_override : String? = nil
     )
+      # CRITICAL: Clear enum value tracking at start of each function.
+      # ValueIds are local to each function's LoweringContext, so we must not carry over
+      # mappings from previous functions.
+      @enum_value_types.try(&.clear)
+
       method_name = String.new(node.name)
       base_name = "#{module_name}.#{method_name}"
 
@@ -3935,6 +3940,12 @@ module Crystal::HIR
                    end
                  end
       @class_info[class_name] = ClassInfo.new(class_name, type_ref, ivars, class_vars, offset, is_struct, parent_name)
+      # DEBUG: track type_ref.id for problematic types
+      if ENV.has_key?("DEBUG_TYPE_ID") &&
+         (class_name.includes?("Sequence") || class_name.includes?("LoadCommand") ||
+          class_name.includes?("Section") || class_name.includes?("Seek"))
+        STDERR.puts "[TYPE_ID] class_info[#{class_name}] type_ref.id=#{type_ref.id}"
+      end
       debug_hook_class_register(class_name, parent_name)
 
       # Store initialize params for allocator generation
@@ -4258,6 +4269,12 @@ module Crystal::HIR
 
       # Create struct info (is_struct = true)
       @class_info[struct_name] = ClassInfo.new(struct_name, type_ref, ivars, class_vars, size, true, nil)
+      # DEBUG: track type_ref.id for problematic types
+      if ENV.has_key?("DEBUG_TYPE_ID") &&
+         (struct_name.includes?("Sequence") || struct_name.includes?("LoadCommand") ||
+          struct_name.includes?("Section") || struct_name.includes?("Seek"))
+        STDERR.puts "[TYPE_ID] struct_info[#{struct_name}] type_ref.id=#{type_ref.id}"
+      end
       debug_hook_class_register(struct_name, nil)
 
       if init_params.empty?
@@ -4947,6 +4964,11 @@ module Crystal::HIR
       call_arg_types : Array(TypeRef)? = nil,
       full_name_override : String? = nil
     )
+      # CRITICAL: Clear enum value tracking at start of each function.
+      # ValueIds are local to each function's LoweringContext, so we must not carry over
+      # mappings from previous functions.
+      @enum_value_types.try(&.clear)
+
       method_name = String.new(node.name)
 
       # Check if this is a class method (def self.method_name)
@@ -5391,6 +5413,13 @@ module Crystal::HIR
       # Get the class name from the type descriptor
       enum_type_name = @enum_value_types.try(&.[receiver_id]?)
       class_name = enum_type_name || type_desc.try(&.name) || ""
+
+      # DEBUG: Track where short names come from in method resolution
+      if ENV.has_key?("DEBUG_METHOD_RESOLVE") && !class_name.includes?("::") &&
+         (method_name == "file_names" || method_name == "version" || method_name == "include_directories" ||
+          class_name == "LoadCommand" || class_name == "Seek" || class_name == "Section")
+        STDERR.puts "[METHOD_RESOLVE] method=#{method_name}, receiver_id=#{receiver_id}, receiver_type.id=#{receiver_type.id}, type_desc_name=#{type_desc.try(&.name) || "nil"}, class_name=#{class_name}"
+      end
 
       # RESOLVE_CALL debug disabled
 
@@ -11188,6 +11217,11 @@ module Crystal::HIR
 
         # If inside a class/module, check if this is a method call on self or module
         if current = @current_class
+          # Debug: track when @current_class is a short name
+          if ENV.has_key?("DEBUG_SHORT_NAMES") && !current.includes?("::") &&
+             (current == "Seek" || current == "Section" || current == "LoadCommand" || current == "Sequence")
+            STDERR.puts "[SHORT_CLASS] @current_class=#{current}, method=#{method_name}"
+          end
           # Check if method exists in current class (instance method: Class#method)
           class_method_name = "#{current}##{method_name}"
           # O(1) lookup: check exact match or mangled version exists
@@ -11410,6 +11444,10 @@ module Crystal::HIR
             # Look up class name from type, then resolve method with inheritance
             @class_info.each do |name, info|
               if info.type_ref.id == receiver_type.id
+                # Debug: track when short names are matched
+                if ENV.has_key?("DEBUG_CLASS_MATCH") && !name.includes?("::")
+                  STDERR.puts "[CLASS_MATCH] method=#{method_name}, receiver_id=#{receiver_type.id}, name=#{name}"
+                end
                 # Use inheritance-aware method resolution
                 full_method_name = resolve_method_with_inheritance(name, method_name)
                 full_method_name ||= "#{name}##{method_name}"
@@ -11422,13 +11460,14 @@ module Crystal::HIR
             unless full_method_name
               if type_desc = @module.get_type_descriptor(receiver_type)
                 type_name = type_desc.name
-                # DEBUG: Detect type name mismatches
-                if ENV.has_key?("DEBUG_TYPE_RESOLVE") && (type_name == "Seek" || type_name == "LoadCommand")
-                  STDERR.puts "[DEBUG_TYPE_RESOLVE] method=#{method_name}, receiver_type_id=#{receiver_type.id}, type_name=#{type_name}"
-                  STDERR.puts "[DEBUG_TYPE_RESOLVE] all class_info type_refs:"
-                  @class_info.each do |name, info|
-                    STDERR.puts "  #{name}: type_ref.id=#{info.type_ref.id}"
-                  end
+                # DEBUG: Detect type name mismatches for any type that doesn't include ::
+                if ENV.has_key?("DEBUG_TYPE_RESOLVE") && !type_name.includes?("::")
+                  STDERR.puts "[DEBUG_TYPE] method=#{method_name}, receiver_type_id=#{receiver_type.id}, type_name=#{type_name}"
+                end
+                # DEBUG: Catch specifically problematic short names
+                if ENV.has_key?("DEBUG_SHORT_NAMES") &&
+                   (type_name == "Seek" || type_name == "Section" || type_name == "LoadCommand" || type_name == "Sequence")
+                  STDERR.puts "[SHORT_NAME_FALLBACK] type=#{type_name}, method=#{method_name}, receiver_id=#{receiver_type.id}"
                 end
                 unless type_name.empty? || module_like_type_name?(type_name)
                   # Try to find method with this type name
@@ -14663,6 +14702,13 @@ module Crystal::HIR
 
         arg_types = args.map { |arg_id| ctx.type_of(arg_id) }
         mangled_name = mangle_function_name(full_method_name, arg_types)
+        # DEBUG: Catch short names being used for method calls
+        if ENV.has_key?("DEBUG_SHORT_NAMES") && full_method_name &&
+           (full_method_name.starts_with?("Seek#") || full_method_name.starts_with?("Seek.") ||
+            full_method_name.starts_with?("Section#") || full_method_name.starts_with?("Section.") ||
+            full_method_name.starts_with?("LoadCommand#") || full_method_name.starts_with?("LoadCommand."))
+          STDERR.puts "[SHORT_NAME_CALL] full_method_name=#{full_method_name}, mangled=#{mangled_name}"
+        end
         actual_name = if @function_types.has_key?(mangled_name) || @module.has_function?(mangled_name)
                         mangled_name
                       elsif has_function_base?(full_method_name)
