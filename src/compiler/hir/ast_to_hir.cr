@@ -8307,6 +8307,10 @@ module Crystal::HIR
         # Return a copy/reference to the local
         copy = Copy.new(ctx.next_id, ctx.type_of(local_id), local_id)
         ctx.emit(copy)
+        if enum_name = @enum_value_types.try(&.[local_id]?)
+          enum_map = @enum_value_types ||= {} of ValueId => String
+          enum_map[copy.id] = enum_name
+        end
         return copy.id
       end
 
@@ -14362,10 +14366,22 @@ module Crystal::HIR
                         mangled_name
                       end
 
+        enum_name = nil
+        if enum_info = @enum_info
+          if enum_info.has_key?(class_name_str)
+            enum_name = class_name_str
+          else
+            short_name = class_name_str.split("::").last?
+            enum_name = short_name if short_name && enum_info.has_key?(short_name)
+          end
+        end
+
         return_type = get_function_return_type(actual_name)
         # For .new, use class type_ref as return type
         if member_name == "new" && return_type == TypeRef::VOID
-          if class_info = @class_info[class_name_str]?
+          if enum_name
+            return_type = TypeRef::INT32
+          elsif class_info = @class_info[class_name_str]?
             return_type = class_info.type_ref
           else
             return_type = TypeRef::POINTER
@@ -14381,6 +14397,9 @@ module Crystal::HIR
         call = Call.new(ctx.next_id, return_type, nil, actual_name, args)
         ctx.emit(call)
         ctx.register_type(call.id, return_type)
+        if enum_name && member_name == "new"
+          (@enum_value_types ||= {} of ValueId => String)[call.id] = enum_name
+        end
         return call.id
       end
 
@@ -14390,6 +14409,12 @@ module Crystal::HIR
       # Check for pointer.value -> PointerLoad
       receiver_type = ctx.type_of(object_id)
       ensure_monomorphized_type(receiver_type) unless receiver_type == TypeRef::VOID
+
+      if member_name == "value"
+        if @enum_value_types.try(&.[object_id]?)
+          return object_id
+        end
+      end
 
       # Direct ivar access on another object (obj.@ivar) - use field get.
       if member_name.starts_with?("@")
@@ -14773,6 +14798,10 @@ module Crystal::HIR
           copy = Copy.new(ctx.next_id, value_type, value_id)
           ctx.emit(copy)
           ctx.register_local(name, copy.id)
+          if enum_name = @enum_value_types.try(&.[value_id]?)
+            enum_map = @enum_value_types ||= {} of ValueId => String
+            enum_map[copy.id] = enum_name
+          end
           update_typeof_local(name, value_type)
           if concrete_name = concrete_type_name_for(value_type)
             existing_name = lookup_typeof_local_name(name)
@@ -14790,6 +14819,11 @@ module Crystal::HIR
           copy = Copy.new(ctx.next_id, value_type, value_id)
           ctx.emit(copy)
           ctx.register_local(name, copy.id)
+          if enum_name = @enum_value_types.try(&.[value_id]?)
+            enum_map = @enum_value_types ||= {} of ValueId => String
+            enum_map[local.id] = enum_name
+            enum_map[copy.id] = enum_name
+          end
           update_typeof_local(name, value_type)
           if concrete_name = concrete_type_name_for(value_type)
             update_typeof_local_name(name, concrete_name)
