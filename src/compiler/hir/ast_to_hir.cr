@@ -2220,8 +2220,39 @@ module Crystal::HIR
       end
 
       # Fallback: evaluate active text pieces (handles nested macro controls).
+      texts = macro_literal_active_texts(node)
+      combined = texts.join("\n")
+      if program = parse_macro_literal_program(combined)
+        with_arena(program.arena) do
+          program.roots.each do |expr_id|
+            expr_node = @arena[expr_id]
+            case expr_node
+            when CrystalV2::Compiler::Frontend::DefNode
+              register_module_method_from_def(expr_node, module_name)
+            when CrystalV2::Compiler::Frontend::ClassNode
+              class_name = String.new(expr_node.name)
+              full_class_name = "#{module_name}::#{class_name}"
+              register_class_with_name(expr_node, full_class_name)
+            when CrystalV2::Compiler::Frontend::StructNode
+              struct_name = String.new(expr_node.name)
+              full_struct_name = "#{module_name}::#{struct_name}"
+              register_struct_with_name(expr_node, full_struct_name)
+            when CrystalV2::Compiler::Frontend::ModuleNode
+              nested_name = String.new(expr_node.name)
+              full_nested_name = "#{module_name}::#{nested_name}"
+              register_nested_module(expr_node, full_nested_name)
+            when CrystalV2::Compiler::Frontend::MacroIfNode
+              process_macro_if_in_module(expr_node, module_name)
+            when CrystalV2::Compiler::Frontend::MacroLiteralNode
+              process_macro_literal_in_module(expr_node, module_name)
+            end
+          end
+        end
+        return
+      end
+
       parsed_any = false
-      macro_literal_active_texts(node).each do |text|
+      texts.each do |text|
         next if text.strip.empty?
         if program = parse_macro_literal_program(text)
           parsed_any = true
@@ -2280,11 +2311,23 @@ module Crystal::HIR
       texts = [] of String
       control_stack = [] of {Bool, Bool, Bool} # {parent_active, branch_taken, active}
       active = true
+      source = @sources_by_arena[@arena]?
+      bytesize = source ? source.bytesize : 0
 
       node.pieces.each do |piece|
         case piece.kind
         when CrystalV2::Compiler::Frontend::MacroPiece::Kind::Text
-          if active && (text = piece.text)
+          next unless active
+          if source && (span = piece.span)
+            start = span.start_offset
+            length = span.end_offset - span.start_offset
+            next if length <= 0
+            next if start < 0 || start >= bytesize
+            if start + length > bytesize
+              length = bytesize - start
+            end
+            texts << source.byte_slice(start, length)
+          elsif text = piece.text
             texts << text
           end
         when CrystalV2::Compiler::Frontend::MacroPiece::Kind::ControlStart
@@ -2563,8 +2606,27 @@ module Crystal::HIR
         end
       end
 
+      texts = macro_literal_active_texts(node)
+      combined = texts.join("\n")
+      if program = parse_macro_literal_program(combined)
+        with_arena(program.arena) do
+          program.roots.each do |expr_id|
+            expr_node = @arena[expr_id]
+            case expr_node
+            when CrystalV2::Compiler::Frontend::DefNode
+              register_type_method_from_def(expr_node, enum_name)
+            when CrystalV2::Compiler::Frontend::MacroIfNode
+              process_macro_if_in_enum(expr_node, enum_name)
+            when CrystalV2::Compiler::Frontend::MacroLiteralNode
+              process_macro_literal_in_enum(expr_node, enum_name)
+            end
+          end
+        end
+        return
+      end
+
       parsed_any = false
-      macro_literal_active_texts(node).each do |text|
+      texts.each do |text|
         next if text.strip.empty?
         if program = parse_macro_literal_program(text)
           parsed_any = true
@@ -2665,8 +2727,27 @@ module Crystal::HIR
         end
       end
 
+      texts = macro_literal_active_texts(node)
+      combined = texts.join("\n")
+      if program = parse_macro_literal_program(combined)
+        with_arena(program.arena) do
+          program.roots.each do |expr_id|
+            expr_node = @arena[expr_id]
+            case expr_node
+            when CrystalV2::Compiler::Frontend::DefNode
+              register_type_method_from_def(expr_node, class_name)
+            when CrystalV2::Compiler::Frontend::MacroIfNode
+              process_macro_if_in_class(expr_node, class_name)
+            when CrystalV2::Compiler::Frontend::MacroLiteralNode
+              process_macro_literal_in_class(expr_node, class_name)
+            end
+          end
+        end
+        return
+      end
+
       parsed_any = false
-      macro_literal_active_texts(node).each do |text|
+      texts.each do |text|
         next if text.strip.empty?
         if program = parse_macro_literal_program(text)
           parsed_any = true
@@ -7667,7 +7748,7 @@ module Crystal::HIR
       # Pattern: {% if flag?(:name) %} then_code {% else %} else_code {% end %}
       # Or:      {% if flag?(:name) %} then_code {% end %}
       # Or:      {% unless flag?(:name) %} unless_code {% else %} else_code {% end %}
-      if_match = text.match(/\{%\s*if\s+flag\?\s*\(\s*:(\w+)\s*\)\s*%\}(.*?)(?:\{%\s*else\s*%\}(.*?))?\{%\s*end\s*%\}/m)
+      if_match = text.match(/\A\s*\{%\s*if\s+flag\?\s*\(\s*:(\w+)\s*\)\s*%\}(.*?)(?:\{%\s*else\s*%\}(.*?))?\{%\s*end\s*%\}\s*\z/m)
       if if_match
         flag_name = if_match[1]
         then_code = if_match[2]?.try(&.strip) || ""
@@ -7679,7 +7760,7 @@ module Crystal::HIR
         end
       end
 
-      unless_match = text.match(/\{%\s*unless\s+flag\?\s*\(\s*:(\w+)\s*\)\s*%\}(.*?)(?:\{%\s*else\s*%\}(.*?))?\{%\s*end\s*%\}/m)
+      unless_match = text.match(/\A\s*\{%\s*unless\s+flag\?\s*\(\s*:(\w+)\s*\)\s*%\}(.*?)(?:\{%\s*else\s*%\}(.*?))?\{%\s*end\s*%\}\s*\z/m)
       if unless_match
         flag_name = unless_match[1]
         unless_code = unless_match[2]?.try(&.strip) || ""
