@@ -1011,7 +1011,19 @@ r2 = maybe(false)  # => nil
 **Prelude build progress (with stdlib/prelude):**
 - Reaches LLVM IR emission and `opt -O1` successfully; link still fails due to missing runtime/stdlib symbols (expected at this stage).
 - Timing snapshot (release + `--stats --no-llvm-opt --no-llvm-metadata`): parse prelude ~167ms, HIR ~2.0s, MIR ~0.3ms, LLVM ~1.8ms, total ~2.2s; link failure is the current blocker.
-- Linker missing symbols (recent minimal unicode_use run): `_Crystal__System__Thread_current_thread`, `_EncodingOptions___Nil_name`, `_Exception__CallStack_load_debug_info`, `_Exception_callstack_`, `_Fiber__StackPool_sleep`, `_Int64_remainder`, `_Nil_iconv_close`, `_Pointer_String__swap`, `_Proc_Pointer_Void___new`, `_RuntimeError_from_errno_String`, `___`, `___fixint_impl`, `___float_impl`, `___mul_impl_Int32`, `_raise_without_backtrace`, `_synchronize`, `_write_IO__FileDescriptor_Slice_UInt8_`.
+- Linker missing symbols (recent unicode_use run; full list in `/tmp/unicode_use.link.log`):
+  - DWARF enums/helpers: `_Crystal__DWARF__TAG_new_UInt32`, `_AT_new_UInt32`, `_FORM_new_UInt32`, `_LNS_new_UInt8`, `_LNE_new_UInt8`, `_LineNumbers_*`, `_Strings_*`, `_read_*_leb128`.
+  - MachO accessors: `_Crystal__MachO__LoadCommand_new_Pointer`, `_Section64_*`, `_Nlist64__Type_*`, `_MachO_endianness`, `_read_segments_and_sections`.
+  - IO/EventLoop/Errno: `_Crystal__EventLoop__FileDescriptor_{read,write}_IO__FileDescriptor_Slice_UInt8_`, `_IO__FileDescriptor_*`, `_Errno_*`.
+  - FastFloat/ParseOptions: `_Float__FastFloat_*`, `_FromCharsResultT_UInt8_*`, `_ParseOptionsT_UInt8_*`.
+  - Runtime intrinsics: `___fixint_impl`, `___float_impl`, `___mul_impl_Int32`, `_raise_without_backtrace`, `_synchronize`, `_Proc_Pointer_Void___new`, `_UInt128_new`.
+  - Misc: `_Attribute_new_Pointer_Pointer_Int32`, `_Math_min/max`, `_Tuple_bsearch_*`, `_Bytes___Nil_*`, `_Seek_*`, `_LoadCommand_*`, `_value__Int32`.
+
+**Recent fixes (prelude bootstrap path):**
+- Normalize `flag?` macro arguments (strip leading `:`) + require cache v3; pthread requires now load.
+- Coerce integer args to `i128` in LLVM backend for mismatch widths.
+- Track enum value types for `.new`/`.value` and propagate via assignments/identifiers in HIR lowering.
+- Register MacroIf/MacroLiteral nodes inside nested modules during HIR lowering.
 
 **Stdlib requires advanced features not yet implemented:**
 
