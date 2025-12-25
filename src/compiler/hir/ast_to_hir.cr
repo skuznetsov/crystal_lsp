@@ -504,6 +504,14 @@ module Crystal::HIR
       nil
     end
 
+    # Track a value as an enum type if the type name is a known enum
+    # Call this after registering a local/param to associate it with its enum type
+    private def track_enum_value(value_id : ValueId, type_name : String)
+      if enum_name = resolve_enum_name(type_name)
+        (@enum_value_types ||= {} of ValueId => String)[value_id] = enum_name
+      end
+    end
+
     # Register an enum type (pass 1)
     def register_enum(node : CrystalV2::Compiler::Frontend::EnumNode)
       enum_name = String.new(node.name)
@@ -3265,6 +3273,7 @@ module Crystal::HIR
 
       # Collect parameter types for name mangling
       param_infos = [] of Tuple(String, TypeRef)
+      param_type_names = [] of String?  # Track type annotation names for enum detection
       param_types = [] of TypeRef
       has_block = false
       param_type_map = {} of String => TypeRef
@@ -3282,8 +3291,10 @@ module Crystal::HIR
         params.each do |param|
           next if named_only_separator?(param)
           param_name = param.name.nil? ? "_" : String.new(param.name.not_nil!)
+          type_ann_str : String? = nil
           param_type = if ta = param.type_annotation
-                         type_ref_for_name(String.new(ta))
+                         type_ann_str = String.new(ta)
+                         type_ref_for_name(type_ann_str)
                        elsif param.is_double_splat
                          type_ref_for_name("NamedTuple")
                        else
@@ -3300,6 +3311,7 @@ module Crystal::HIR
           end
           param_type_map[param_name] = param_type
           param_infos << {param_name, param_type}
+          param_type_names << type_ann_str
           if ta = param.type_annotation
             update_typeof_local_name(param_name, String.new(ta))
           end
@@ -3339,10 +3351,14 @@ module Crystal::HIR
       ctx = LoweringContext.new(func, @module, @arena)
 
       # Lower parameters (no self for module methods)
-      param_infos.each do |(param_name, param_type)|
+      param_infos.each_with_index do |(param_name, param_type), idx|
         hir_param = func.add_param(param_name, param_type)
         ctx.register_local(param_name, hir_param.id)
         ctx.register_type(hir_param.id, param_type)
+        # Track enum types for predicate method resolution
+        if type_name = param_type_names[idx]?
+          track_enum_value(hir_param.id, type_name)
+        end
       end
 
       # Lower body
@@ -6742,6 +6758,7 @@ module Crystal::HIR
       # Lower parameters
       param_infos = [] of Tuple(String, TypeRef)
       param_types = [] of TypeRef
+      param_type_names = [] of String?  # Track type annotation names for enum detection
       has_block = false
       param_type_map = {} of String => TypeRef
       old_typeof_locals = @current_typeof_locals
@@ -6777,6 +6794,8 @@ module Crystal::HIR
 
           param_type_map[param_name] = param_type
           param_infos << {param_name, param_type}
+          # Track type annotation name for enum detection
+          param_type_names << (param.type_annotation ? String.new(param.type_annotation.not_nil!) : nil)
           if ta = param.type_annotation
             update_typeof_local_name(param_name, String.new(ta))
           end
@@ -6842,10 +6861,14 @@ module Crystal::HIR
       func = @module.create_function(full_name, return_type)
       ctx = LoweringContext.new(func, @module, @arena)
 
-      param_infos.each do |(param_name, param_type)|
+      param_infos.each_with_index do |(param_name, param_type), idx|
         hir_param = func.add_param(param_name, param_type)
         ctx.register_local(param_name, hir_param.id)
         ctx.register_type(hir_param.id, param_type)  # Track param type for inference
+        # Track enum type for predicate method inlining
+        if type_name = param_type_names[idx]?
+          track_enum_value(hir_param.id, type_name)
+        end
       end
 
       # Lower body
@@ -9988,6 +10011,164 @@ module Crystal::HIR
           ctx.emit(eq)
           eq.id
         end
+
+      when CrystalV2::Compiler::Frontend::MemberAccessNode
+        # Check for implicit receiver pattern: .method? → subject.method?
+        obj_node = @arena[cond_node.object]
+        member_name = String.new(cond_node.member)
+
+        if obj_node.is_a?(CrystalV2::Compiler::Frontend::ImplicitObjNode)
+          # Implicit receiver: .data1?, .block?, etc.
+          # This is "subject.method?" - check if it's an enum predicate
+          if member_name.ends_with?("?")
+            # Try to find enum type from subject
+            enum_name = @enum_value_types.try(&.[subject_id]?)
+
+            # If not directly tracked, try to infer from type descriptor
+            if enum_name.nil?
+              subject_type = ctx.type_of(subject_id)
+              if type_desc = @module.get_type_descriptor(subject_type)
+                type_name = type_desc.name
+                if @enum_info.try(&.has_key?(type_name))
+                  enum_name = type_name
+                end
+              end
+              # Also try direct lookup by type_ref id in enum_base_types
+              # For primitive types that map to enums (e.g., UInt8 for Color : UInt8)
+              if enum_name.nil? && @enum_base_types
+                @enum_base_types.not_nil!.each do |name, base_type|
+                  if base_type == subject_type
+                    # Found an enum with matching base type - check if it has the member
+                    if members = @enum_info.try(&.[name]?)
+                      base_name = member_name[0...-1]
+                      if members.keys.any? { |m| m.downcase == base_name.downcase }
+                        enum_name = name
+                        break
+                      end
+                    end
+                  end
+                end
+              end
+            end
+
+            if enum_name && (enum_info = @enum_info)
+              if members = enum_info[enum_name]?
+                # Try to match the predicate to an enum member
+                # e.g., "data1?" -> "Data1", "block?" -> "Block"
+                base_name = member_name[0...-1]  # Remove trailing ?
+                member_match = members.keys.find { |m| m.downcase == base_name.downcase }
+                if member_match
+                  member_value = members[member_match]
+                  # Emit: subject_id == member_value
+                  enum_type = enum_base_type(enum_name)
+                  lit = Literal.new(ctx.next_id, enum_type, member_value)
+                  ctx.emit(lit)
+                  ctx.register_type(lit.id, enum_type)
+                  cmp = BinaryOperation.new(ctx.next_id, TypeRef::BOOL, BinaryOp::Eq, subject_id, lit.id)
+                  ctx.emit(cmp)
+                  ctx.register_type(cmp.id, TypeRef::BOOL)
+                  return cmp.id
+                end
+              end
+            end
+          end
+
+          # Fall through: call the method on subject and use boolean result
+          call = Call.new(ctx.next_id, TypeRef::BOOL, subject_id, member_name, [] of ValueId)
+          ctx.emit(call)
+          ctx.register_type(call.id, TypeRef::BOOL)
+          return call.id
+        else
+          # Non-implicit receiver: lower normally and compare
+          cond_val = lower_expr(ctx, cond_expr)
+          eq = BinaryOperation.new(ctx.next_id, TypeRef::BOOL, BinaryOp::Eq, subject_id, cond_val)
+          ctx.emit(eq)
+          eq.id
+        end
+
+      when CrystalV2::Compiler::Frontend::CallNode
+        # Check for implicit receiver pattern: .method?() → subject.method?()
+        # CallNode.callee is a MemberAccessNode with ImplicitObjNode
+        callee_node = @arena[cond_node.callee]
+        if callee_node.is_a?(CrystalV2::Compiler::Frontend::MemberAccessNode)
+          obj_node = @arena[callee_node.object]
+          member_name = String.new(callee_node.member)
+
+          # Check for implicit receiver OR explicit receiver that's an identifier or member access
+          is_implicit = obj_node.is_a?(CrystalV2::Compiler::Frontend::ImplicitObjNode)
+          is_identifier = obj_node.is_a?(CrystalV2::Compiler::Frontend::IdentifierNode)
+          is_member_access = obj_node.is_a?(CrystalV2::Compiler::Frontend::MemberAccessNode)
+          if (is_implicit || is_identifier || is_member_access) && member_name.ends_with?("?")
+            # Implicit receiver call OR explicit subject call: .data1?(), c.red?(), format.format.data1?()
+            # The parser expands "when .data1?" to "subject.data1?()" so the callee's object
+            # represents the SAME expression as the case subject. Use subject_id directly.
+            #
+            # For is_member_access: obj_node is a MemberAccessNode representing subject expression
+            # This is the same expression that was already lowered to subject_id, so reuse it.
+            actual_object_id = subject_id
+
+            # Find enum type by matching predicate name against known enum members
+            enum_name = nil.as(String?)
+            base_name = member_name[0...-1]  # Remove trailing ?
+
+            if enum_info = @enum_info
+              # Search all enums for one that has this member
+              enum_info.each do |name, members|
+                if members.keys.any? { |m| m.downcase == base_name.downcase }
+                  enum_name = name
+                  break
+                end
+              end
+            end
+
+            # If no match, try to disambiguate using type info
+            if enum_name.nil?
+              obj_type = ctx.type_of(actual_object_id)
+              if type_desc = @module.get_type_descriptor(obj_type)
+                type_name = type_desc.name
+                if @enum_info.try(&.has_key?(type_name))
+                  enum_name = type_name
+                end
+              end
+            end
+
+            # Fall back to enum_value_types tracking
+            if enum_name.nil?
+              enum_name = @enum_value_types.try(&.[actual_object_id]?)
+            end
+
+            if enum_name && (enum_info = @enum_info)
+              if members = enum_info[enum_name]?
+                base_name = member_name[0...-1]  # Remove trailing ?
+                member_match = members.keys.find { |m| m.downcase == base_name.downcase }
+                if member_match
+                  member_value = members[member_match]
+                  enum_type = enum_base_type(enum_name)
+                  lit = Literal.new(ctx.next_id, enum_type, member_value)
+                  ctx.emit(lit)
+                  ctx.register_type(lit.id, enum_type)
+                  # Compare against actual_object_id (which may differ from subject_id for member access)
+                  cmp = BinaryOperation.new(ctx.next_id, TypeRef::BOOL, BinaryOp::Eq, actual_object_id, lit.id)
+                  ctx.emit(cmp)
+                  ctx.register_type(cmp.id, TypeRef::BOOL)
+                  return cmp.id
+                end
+              end
+            end
+
+            # Fall through: call the method on actual object
+            call = Call.new(ctx.next_id, TypeRef::BOOL, actual_object_id, member_name, [] of ValueId)
+            ctx.emit(call)
+            ctx.register_type(call.id, TypeRef::BOOL)
+            return call.id
+          end
+        end
+
+        # Default: lower the call expression and compare
+        cond_val = lower_expr(ctx, cond_expr)
+        eq = BinaryOperation.new(ctx.next_id, TypeRef::BOOL, BinaryOp::Eq, subject_id, cond_val)
+        ctx.emit(eq)
+        eq.id
 
       else
         # Default: call === method (when we have method calls working)
@@ -14475,6 +14656,34 @@ module Crystal::HIR
       if member_name == "value"
         if @enum_value_types.try(&.[object_id]?)
           return object_id
+        end
+      end
+
+      # Handle enum predicate methods (.data1?, .block?, etc.)
+      # These should compile to `value == Enum::Member` comparisons, not function calls
+      if member_name.ends_with?("?")
+        if enum_name = @enum_value_types.try(&.[object_id]?)
+          if enum_info = @enum_info
+            if members = enum_info[enum_name]?
+              # Try to match the predicate to an enum member
+              # e.g., "data1?" -> "Data1", "block?" -> "Block"
+              base_name = member_name[0...-1]  # Remove trailing ?
+              # Try exact match first (case-insensitive for first char)
+              member_match = members.keys.find { |m| m.downcase == base_name.downcase }
+              if member_match
+                member_value = members[member_match]
+                # Emit: object_id == member_value
+                enum_type = enum_base_type(enum_name)
+                lit = Literal.new(ctx.next_id, enum_type, member_value)
+                ctx.emit(lit)
+                ctx.register_type(lit.id, enum_type)
+                cmp = BinaryOperation.new(ctx.next_id, TypeRef::BOOL, BinaryOp::Eq, object_id, lit.id)
+                ctx.emit(cmp)
+                ctx.register_type(cmp.id, TypeRef::BOOL)
+                return cmp.id
+              end
+            end
+          end
         end
       end
 
