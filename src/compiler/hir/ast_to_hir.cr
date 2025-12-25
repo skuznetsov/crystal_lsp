@@ -8384,7 +8384,8 @@ module Crystal::HIR
       if left_name && right_name
         if enum_info = @enum_info
           if members = enum_info[left_name]?
-            if value = members[right_name]?
+            if right_name[0]?.try(&.uppercase?)
+              value = members[right_name]? || 0_i64
               # Found enum value - emit as Int32 literal but remember enum type.
               lit = Literal.new(ctx.next_id, TypeRef::INT32, value)
               ctx.emit(lit)
@@ -10400,6 +10401,16 @@ module Crystal::HIR
                 lower_method(owner, class_info, func_def, call_arg_types, override)
               end
               @current_class = old_class
+            elsif enum_info = @enum_info
+              if enum_info.has_key?(owner)
+                old_class = @current_class
+                @current_class = owner
+                dummy_info = ClassInfo.new(owner, TypeRef::INT32, [] of IVarInfo, [] of ClassVarInfo, 0, false, nil)
+                lower_method(owner, dummy_info, func_def, call_arg_types, name)
+                @current_class = old_class
+              elsif target_name.includes?("from_chars")
+                STDERR.puts "[LOWERING] No class_info for #{owner}"
+              end
             elsif target_name.includes?("from_chars")
               STDERR.puts "[LOWERING] No class_info for #{owner}"
             end
@@ -10427,6 +10438,16 @@ module Crystal::HIR
                 lower_method(owner, class_info, func_def, call_arg_types, target_name)
               end
               @current_class = old_class
+            elsif enum_info = @enum_info
+              if enum_info.has_key?(owner)
+                old_class = @current_class
+                @current_class = owner
+                dummy_info = ClassInfo.new(owner, TypeRef::INT32, [] of IVarInfo, [] of ClassVarInfo, 0, false, nil)
+                lower_method(owner, dummy_info, func_def, call_arg_types, target_name)
+                @current_class = old_class
+              else
+                lower_module_method(owner, func_def, call_arg_types, target_name)
+              end
             else
               lower_module_method(owner, func_def, call_arg_types, target_name)
             end
@@ -13998,12 +14019,8 @@ module Crystal::HIR
 
         if left_name && right_name
           if enum_info = @enum_info
-            if members = enum_info[left_name]?
-              if members.has_key?(right_name)
-                class_name_str = nil
-              else
-                class_name_str = full_path
-              end
+            if enum_info.has_key?(left_name) && right_name[0]?.try(&.uppercase?)
+              class_name_str = nil
             else
               class_name_str = full_path
             end
