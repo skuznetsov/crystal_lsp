@@ -1939,7 +1939,10 @@ module Crystal::HIR
     # Modules are like classes but with only class methods (self.method)
     # Also handles nested classes: module Foo; class Bar; end; end -> Foo::Bar
     def register_module(node : CrystalV2::Compiler::Frontend::ModuleNode)
-      module_name = String.new(node.name)
+      register_module_with_name(node, String.new(node.name))
+    end
+
+    private def register_module_with_name(node : CrystalV2::Compiler::Frontend::ModuleNode, module_name : String)
       if ENV.has_key?("DEBUG_NESTED_CLASS") && (module_name == "IO" || module_name.includes?("FileDescriptor"))
         STDERR.puts "[DEBUG_MODULE] Processing module: #{module_name}, body_size=#{node.body.try(&.size) || 0}"
       end
@@ -1980,7 +1983,7 @@ module Crystal::HIR
             # Nested module: Foo::Bar (as module)
             nested_name = String.new(member.name)
             full_nested_name = "#{module_name}::#{nested_name}"
-            register_nested_module(member, full_nested_name)
+            register_module_with_name(member, full_nested_name)
           elsif member.is_a?(CrystalV2::Compiler::Frontend::ClassNode)
             # Register class/struct type alias and any aliases inside the class
             class_name = String.new(member.name)
@@ -3103,6 +3106,10 @@ module Crystal::HIR
             struct_name = String.new(member.name)
             full_struct_name = "#{full_name}::#{struct_name}"
             register_struct_with_name(member, full_struct_name)
+          when CrystalV2::Compiler::Frontend::MacroIfNode
+            process_macro_if_in_module(member, full_name)
+          when CrystalV2::Compiler::Frontend::MacroLiteralNode
+            process_macro_literal_in_module(member, full_name)
             end
           end
         ensure
