@@ -379,16 +379,6 @@ module CrystalV2
                         when .extend?
                           # Phase 31: Extend module
                           infer_extend(node)
-                        when .struct?
-                          # Phase 32: Struct definition (value type)
-                          # At parsing stage, handled identically to class; be tolerant to AST nuances
-                          if node.is_a?(Frontend::StructNode)
-                            infer_struct(node.as(Frontend::StructNode), expr_id)
-                          elsif node.is_a?(Frontend::ClassNode)
-                            infer_class(node.as(Frontend::ClassNode), expr_id)
-                          else
-                            @context.nil_type
-                          end
                         when .union?
                           # Phase 97: Union definition (C bindings)
                           # At parsing stage, handled identically to class
@@ -545,8 +535,6 @@ module CrystalV2
             (node.body || [] of ExprId).each { |e| children << e }
           when Frontend::ModuleNode
             (node.body || [] of ExprId).each { |e| children << e }
-          when Frontend::StructNode
-            (node.body || [] of ExprId).each { |e| children << e }
           when Frontend::UnionNode
             (node.body || [] of ExprId).each { |e| children << e }
           when Frontend::ConstantNode
@@ -701,7 +689,7 @@ module CrystalV2
                Frontend::MacroExpressionNode
             # Pure statements that don't need body processing
             @context.nil_type
-          # Note: DefNode, ClassNode, ModuleNode, StructNode need recursive path
+          # Note: DefNode, ClassNode, ModuleNode need recursive path
           # because they have special body processing (infer_def, infer_class, etc.)
           else
             # Unknown/complex node - return nil to trigger recursive fallback
@@ -911,16 +899,6 @@ module CrystalV2
           @current_class = previous_class
 
           # Class definitions don't have value types
-          @context.nil_type
-        end
-
-        private def infer_struct(node : Frontend::StructNode, expr_id : ExprId) : Type
-          guard_watchdog!
-
-          (node.body || [] of ExprId).each do |body_expr_id|
-            infer_expression(body_expr_id)
-          end
-
           @context.nil_type
         end
 

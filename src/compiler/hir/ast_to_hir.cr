@@ -629,8 +629,8 @@ module Crystal::HIR
             enum_name = String.new(body_node.name)
             full_enum_name = "#{lib_name}::#{enum_name}"
             register_enum_with_name(body_node, full_enum_name)
-          when CrystalV2::Compiler::Frontend::StructNode
-            # Structs within lib - skip for now
+          when CrystalV2::Compiler::Frontend::ClassNode
+            # Struct/union within lib are parsed as ClassNode with flags - skip for now
           # Annotations, nested libs, etc. - ignored for now
           end
         end
@@ -2043,12 +2043,6 @@ module Crystal::HIR
             # Also register short name -> full name for local resolution (for both classes and structs)
             register_type_alias(class_name, full_class_name)
             register_class_aliases(member, full_class_name)
-          elsif member.is_a?(CrystalV2::Compiler::Frontend::StructNode)
-            # Register struct type alias - both short and full names (for actual StructNode type)
-            struct_name = String.new(member.name)
-            full_struct_name = "#{module_name}::#{struct_name}"
-            register_type_alias(full_struct_name, full_struct_name)
-            register_type_alias(struct_name, full_struct_name)
           end
         end
         # PASS 1.5: Register enums BEFORE classes/structs so type resolution works
@@ -3051,13 +3045,6 @@ module Crystal::HIR
             # Also register short name -> full name for local resolution (for both classes and structs)
             register_type_alias(class_name, full_class_name)
             register_class_aliases(member, full_class_name)
-          elsif member.is_a?(CrystalV2::Compiler::Frontend::StructNode)
-            # Register struct type alias - both short and full names
-            struct_name = String.new(member.name)
-            full_struct_name = "#{full_name}::#{struct_name}"
-            register_type_alias(full_struct_name, full_struct_name)
-            # Also register short name -> full name for local resolution
-            register_type_alias(struct_name, full_struct_name)
           end
         end
         # PASS 2: Register functions and other members (now that aliases are available)
@@ -3132,10 +3119,6 @@ module Crystal::HIR
             enum_name = String.new(member.name)
             full_enum_name = "#{full_name}::#{enum_name}"
             register_enum_with_name(member, full_enum_name)
-          when CrystalV2::Compiler::Frontend::StructNode
-            struct_name = String.new(member.name)
-            full_struct_name = "#{full_name}::#{struct_name}"
-            register_struct_with_name(member, full_struct_name)
           when CrystalV2::Compiler::Frontend::MacroIfNode
             process_macro_if_in_module(member, full_name)
           when CrystalV2::Compiler::Frontend::MacroLiteralNode
@@ -3229,11 +3212,6 @@ module Crystal::HIR
             nested_name = String.new(member.name)
             full_nested_name = "#{module_name}::#{nested_name}"
             lower_module_with_name(member, full_nested_name)
-          when CrystalV2::Compiler::Frontend::StructNode
-            # Lower nested struct with full name
-            struct_name = String.new(member.name)
-            full_struct_name = "#{module_name}::#{struct_name}"
-            lower_struct_with_name(member, full_struct_name)
           end
         end
       end
@@ -3487,10 +3465,6 @@ module Crystal::HIR
             nested_name = String.new(member.name)
             full_nested_name = "#{class_name}::#{nested_name}"
             register_class_with_name(member, full_nested_name)
-          when CrystalV2::Compiler::Frontend::StructNode
-            nested_name = String.new(member.name)
-            full_nested_name = "#{class_name}::#{nested_name}"
-            register_struct_with_name(member, full_nested_name)
           when CrystalV2::Compiler::Frontend::EnumNode
             enum_name = String.new(member.name)
             full_enum_name = "#{class_name}::#{enum_name}"
@@ -3934,329 +3908,6 @@ module Crystal::HIR
       register_function_type("#{class_name}.new", type_ref)
     end
 
-    # Register a struct type and its methods (pass 1)
-    # Structs are value types, similar to classes but without inheritance
-    def register_struct(node : CrystalV2::Compiler::Frontend::StructNode)
-      struct_name = String.new(node.name)
-      register_struct_with_name(node, struct_name)
-    end
-
-    # Register a struct with a specific name (for nested structs like Foo::Bar)
-    def register_struct_with_name(node : CrystalV2::Compiler::Frontend::StructNode, struct_name : String)
-      # Collect instance variables and their types
-      # Structs have no type_id header (value type), so offset starts at 0
-      ivars = [] of IVarInfo
-      class_vars = [] of ClassVarInfo
-      offset = 0
-
-      # Check if struct already exists (reopening)
-      if existing_info = @class_info[struct_name]?
-        existing_info.ivars.each { |iv| ivars << iv.dup }
-        existing_info.class_vars.each { |cv| class_vars << cv.dup }
-        offset = existing_info.size
-      end
-
-      # Initialize constructor params
-      init_params = [] of {String, TypeRef}
-
-      # Set current class context for type resolution within this struct
-      old_class = @current_class
-      @current_class = struct_name
-
-      if body = node.body
-        # PASS 0: Register nested types first so method signatures and bodies can resolve them
-        body.each do |expr_id|
-          member = unwrap_visibility_member(@arena[expr_id])
-          case member
-          when CrystalV2::Compiler::Frontend::ClassNode
-            nested_name = String.new(member.name)
-            full_nested_name = "#{struct_name}::#{nested_name}"
-            register_class_with_name(member, full_nested_name)
-          when CrystalV2::Compiler::Frontend::StructNode
-            nested_name = String.new(member.name)
-            full_nested_name = "#{struct_name}::#{nested_name}"
-            register_struct_with_name(member, full_nested_name)
-          when CrystalV2::Compiler::Frontend::EnumNode
-            enum_name = String.new(member.name)
-            full_enum_name = "#{struct_name}::#{enum_name}"
-            register_enum_with_name(member, full_enum_name)
-          when CrystalV2::Compiler::Frontend::ModuleNode
-            nested_name = String.new(member.name)
-            full_nested_name = "#{struct_name}::#{nested_name}"
-            register_nested_module(member, full_nested_name)
-          end
-        end
-
-        defined_instance_method_full_names = collect_defined_instance_method_full_names(struct_name, body)
-        include_nodes = [] of CrystalV2::Compiler::Frontend::IncludeNode
-        body.each do |expr_id|
-          member = unwrap_visibility_member(@arena[expr_id])
-          include_nodes << member if member.is_a?(CrystalV2::Compiler::Frontend::IncludeNode)
-        end
-
-        body.each do |expr_id|
-          member = unwrap_visibility_member(@arena[expr_id])
-          case member
-          when CrystalV2::Compiler::Frontend::InstanceVarDeclNode
-            ivar_name = String.new(member.name)
-            ivar_type = type_ref_for_name(String.new(member.type))
-            ivars << IVarInfo.new(ivar_name, ivar_type, offset)
-            offset += type_size(ivar_type)
-
-          when CrystalV2::Compiler::Frontend::ClassVarDeclNode
-            raw_name = String.new(member.name)
-            cvar_name = raw_name.lstrip('@')
-            cvar_type = type_ref_for_name(String.new(member.type))
-            initial_value : Int64? = nil
-            if val_id = member.value
-              val_node = @arena[val_id]
-              if val_node.is_a?(CrystalV2::Compiler::Frontend::NumberNode)
-                num_str = String.new(val_node.value)
-                initial_value = num_str.to_i64?
-              end
-            end
-            class_vars << ClassVarInfo.new(cvar_name, cvar_type, initial_value)
-
-          when CrystalV2::Compiler::Frontend::DefNode
-            method_name = String.new(member.name)
-            is_class_method = if recv = member.receiver
-                                String.new(recv) == "self"
-                              else
-                                false
-                              end
-            base_name = if is_class_method
-                          "#{struct_name}.#{method_name}"
-                        else
-                          "#{struct_name}##{method_name}"
-                        end
-            param_types = [] of TypeRef
-            has_block = false
-            if params = member.params
-              params.each do |param|
-                next if named_only_separator?(param)
-                if param.is_block
-                  has_block = true
-                  next
-                end
-                if param.is_instance_var
-                  param_name = "@#{String.new(param.name.not_nil!)}"
-                  existing_ivar = ivars.find { |iv| iv.name == param_name }
-                  if existing_ivar
-                    param_types << existing_ivar.type
-                  elsif ta = param.type_annotation
-                    param_types << type_ref_for_name(String.new(ta))
-                  else
-                    param_types << TypeRef::VOID
-                  end
-                elsif ta = param.type_annotation
-                  param_types << type_ref_for_name(String.new(ta))
-                else
-                  param_types << TypeRef::VOID
-                end
-              end
-            end
-            full_name = mangle_function_name(base_name, param_types, has_block)
-            return_type = if rta = member.return_type
-                           type_ref_for_name(String.new(rta))
-                         else
-                           TypeRef::VOID
-                         end
-            register_function_type(full_name, return_type)
-            @function_defs[full_name] = member
-            @function_def_arenas[full_name] = @arena
-
-            # Track yield-functions for inline expansion (struct methods).
-            # MIR lowering removes yield-containing functions (inline-only), so we must inline them.
-            if body = member.body
-              if contains_yield?(body)
-                @yield_functions.add(full_name)
-                unless @function_defs.has_key?(base_name)
-                  @function_defs[base_name] = member
-                  @function_def_arenas[base_name] = @arena
-                end
-                @function_defs[full_name] = member
-                @function_def_arenas[full_name] = @arena
-              end
-            end
-
-            if method_name == "initialize"
-              if params = member.params
-                params.each do |param|
-                  next if param.is_block
-                  next if named_only_separator?(param)
-                  if param.is_instance_var
-                    param_name = String.new(param.name.not_nil!)
-                    ivar_name = "@#{param_name}"
-                    ivar_type = if ta = param.type_annotation
-                                  type_ref_for_name(String.new(ta))
-                                else
-                                  existing_iv = ivars.find { |iv| iv.name == ivar_name }
-                                  existing_iv ? existing_iv.type : TypeRef::VOID
-                                end
-                    unless ivars.any? { |iv| iv.name == ivar_name }
-                      ivars << IVarInfo.new(ivar_name, ivar_type, offset)
-                      offset += type_size(ivar_type)
-                    end
-                    init_params << {param_name, ivar_type}
-                  elsif ta = param.type_annotation
-                    param_name = String.new(param.name.not_nil!)
-                    param_type = type_ref_for_name(String.new(ta))
-                    init_params << {param_name, param_type}
-                  end
-                end
-              end
-            end
-
-          when CrystalV2::Compiler::Frontend::MacroIfNode
-            process_macro_if_in_class(member, struct_name, ivars, pointerof(offset))
-          when CrystalV2::Compiler::Frontend::MacroLiteralNode
-            process_macro_literal_in_class(member, struct_name, ivars, pointerof(offset))
-
-          when CrystalV2::Compiler::Frontend::GetterNode
-            if member.is_class?
-              member.specs.each do |spec|
-                register_class_accessor_entry(struct_name, spec, :getter)
-              end
-            else
-              member.specs.each do |spec|
-                storage_name = accessor_storage_name(spec)
-                getter_name = accessor_method_name(spec)
-                ivar_name = "@#{storage_name}"
-                ivar_type = if ta = spec.type_annotation
-                              type_ref_for_name(String.new(ta))
-                            elsif spec.predicate
-                              TypeRef::BOOL
-                            elsif default_value = spec.default_value
-                              infer_type_from_expr(default_value, struct_name) || TypeRef::VOID
-                            else
-                              TypeRef::VOID
-                            end
-                unless ivars.any? { |iv| iv.name == ivar_name }
-                  ivars << IVarInfo.new(ivar_name, ivar_type, offset)
-                  offset += type_size(ivar_type)
-                end
-                getter_base = "#{struct_name}##{getter_name}"
-                full_name = mangle_function_name(getter_base, [] of TypeRef)
-                register_function_type(full_name, ivar_type)
-              end
-            end
-
-          when CrystalV2::Compiler::Frontend::SetterNode
-            if member.is_class?
-              member.specs.each do |spec|
-                register_class_accessor_entry(struct_name, spec, :setter)
-              end
-            else
-              member.specs.each do |spec|
-                storage_name = accessor_storage_name(spec)
-                ivar_name = "@#{storage_name}"
-                ivar_type = if ta = spec.type_annotation
-                              type_ref_for_name(String.new(ta))
-                            elsif spec.predicate
-                              TypeRef::BOOL
-                            elsif default_value = spec.default_value
-                              infer_type_from_expr(default_value, struct_name) || TypeRef::VOID
-                            else
-                              TypeRef::VOID
-                            end
-                unless ivars.any? { |iv| iv.name == ivar_name }
-                  ivars << IVarInfo.new(ivar_name, ivar_type, offset)
-                  offset += type_size(ivar_type)
-                end
-                setter_name = "#{struct_name}##{storage_name}="
-                full_name = mangle_function_name(setter_name, [ivar_type])
-                register_function_type(full_name, TypeRef::VOID)
-              end
-            end
-
-          when CrystalV2::Compiler::Frontend::PropertyNode
-            if member.is_class?
-              member.specs.each do |spec|
-                register_class_accessor_entry(struct_name, spec, :getter)
-                register_class_accessor_entry(struct_name, spec, :setter)
-              end
-            else
-              member.specs.each do |spec|
-                storage_name = accessor_storage_name(spec)
-                getter_name = accessor_method_name(spec)
-                ivar_name = "@#{storage_name}"
-                ivar_type = if ta = spec.type_annotation
-                              type_ref_for_name(String.new(ta))
-                            elsif spec.predicate
-                              TypeRef::BOOL
-                            elsif default_value = spec.default_value
-                              infer_type_from_expr(default_value, struct_name) || TypeRef::VOID
-                            else
-                              TypeRef::VOID
-                            end
-                unless ivars.any? { |iv| iv.name == ivar_name }
-                  ivars << IVarInfo.new(ivar_name, ivar_type, offset)
-                  offset += type_size(ivar_type)
-                end
-                getter_base = "#{struct_name}##{getter_name}"
-                getter_full = mangle_function_name(getter_base, [] of TypeRef)
-                register_function_type(getter_full, ivar_type)
-                setter_name = "#{struct_name}##{storage_name}="
-                setter_full = mangle_function_name(setter_name, [ivar_type])
-                register_function_type(setter_full, TypeRef::VOID)
-              end
-            end
-
-          when CrystalV2::Compiler::Frontend::AssignNode
-            target_node = @arena[member.target]
-            if target_node.is_a?(CrystalV2::Compiler::Frontend::InstanceVarNode)
-              ivar_name = String.new(target_node.name)
-              value_node = @arena[member.value]
-              ivar_type = infer_type_from_class_ivar_assign(value_node)
-              unless ivars.any? { |iv| iv.name == ivar_name }
-                ivars << IVarInfo.new(ivar_name, ivar_type, offset)
-                offset += type_size(ivar_type)
-              end
-            end
-          end
-        end
-
-        # Expand module mixins: register included module instance method signatures.
-        visited_modules = Set(String).new
-        include_nodes.each do |inc|
-          offset = register_module_instance_methods_for(
-            struct_name,
-            inc,
-            defined_instance_method_full_names,
-            visited_modules,
-            ivars,
-            offset,
-            true
-          )
-        end
-      end
-
-      # Calculate final size
-      size = offset > 0 ? offset : 1
-      type_ref = type_ref_for_name(struct_name)
-
-      # Create struct info (is_struct = true)
-      @class_info[struct_name] = ClassInfo.new(struct_name, type_ref, ivars, class_vars, size, true, nil)
-      # DEBUG: track type_ref.id for problematic types
-      if ENV.has_key?("DEBUG_TYPE_ID") &&
-         (struct_name.includes?("Sequence") || struct_name.includes?("LoadCommand") ||
-          struct_name.includes?("Section") || struct_name.includes?("Seek"))
-        STDERR.puts "[TYPE_ID] struct_info[#{struct_name}] type_ref.id=#{type_ref.id}"
-      end
-      debug_hook_class_register(struct_name, nil)
-
-      if init_params.empty?
-        if existing_params = @init_params.not_nil![struct_name]?
-          init_params = existing_params
-        end
-      end
-      @init_params.not_nil![struct_name] = init_params
-      register_function_type("#{struct_name}.new", type_ref)
-
-      # Restore current class context
-      @current_class = old_class
-    end
-
     # Flush all pending monomorphizations (call after all templates are registered)
     def flush_pending_monomorphizations
       @defer_monomorphization = false
@@ -4428,9 +4079,6 @@ module Crystal::HIR
           when CrystalV2::Compiler::Frontend::ClassNode
             nested_name = String.new(member.name)
             lower_class_with_name(member, "#{class_name}::#{nested_name}")
-          when CrystalV2::Compiler::Frontend::StructNode
-            nested_name = String.new(member.name)
-            lower_struct_with_name(member, "#{class_name}::#{nested_name}")
           when CrystalV2::Compiler::Frontend::ModuleNode
             nested_name = String.new(member.name)
             lower_module_with_name(member, "#{class_name}::#{nested_name}")
@@ -4490,101 +4138,6 @@ module Crystal::HIR
               member.specs.each do |spec|
                 generate_getter_method(class_name, class_info, spec)
                 generate_setter_method(class_name, class_info, spec)
-              end
-            end
-          end
-        end
-      end
-
-      @current_class = old_class
-    end
-
-    # Lower a struct and all its methods (pass 3)
-    def lower_struct(node : CrystalV2::Compiler::Frontend::StructNode)
-      struct_name = String.new(node.name)
-      lower_struct_with_name(node, struct_name)
-    end
-
-    # Lower a struct with a specific name (for nested structs like Foo::Bar)
-    def lower_struct_with_name(node : CrystalV2::Compiler::Frontend::StructNode, struct_name : String)
-      struct_info = @class_info[struct_name]? || return
-      old_class = @current_class
-      @current_class = struct_name
-
-      # Generate allocator function: StructName.new
-      generate_allocator(struct_name, struct_info)
-
-      # Lower each method
-      if body = node.body
-        # Lower nested types first (classes/structs/modules inside the struct body).
-        body.each do |expr_id|
-          member = unwrap_visibility_member(@arena[expr_id])
-          case member
-          when CrystalV2::Compiler::Frontend::ClassNode
-            nested_name = String.new(member.name)
-            lower_class_with_name(member, "#{struct_name}::#{nested_name}")
-          when CrystalV2::Compiler::Frontend::StructNode
-            nested_name = String.new(member.name)
-            lower_struct_with_name(member, "#{struct_name}::#{nested_name}")
-          when CrystalV2::Compiler::Frontend::ModuleNode
-            nested_name = String.new(member.name)
-            lower_module_with_name(member, "#{struct_name}::#{nested_name}")
-          end
-        end
-
-        defined_full_names = collect_defined_instance_method_full_names(struct_name, body)
-        include_nodes = [] of CrystalV2::Compiler::Frontend::IncludeNode
-
-        body.each do |expr_id|
-          member = unwrap_visibility_member(@arena[expr_id])
-          include_nodes << member if member.is_a?(CrystalV2::Compiler::Frontend::IncludeNode)
-        end
-
-        visited_modules = Set(String).new
-        include_nodes.each do |inc|
-          lower_module_instance_methods_for(struct_name, struct_info, inc, defined_full_names, visited_modules)
-        end
-
-        body.each do |expr_id|
-          member = unwrap_visibility_member(@arena[expr_id])
-          case member
-          when CrystalV2::Compiler::Frontend::IncludeNode
-            # Handled above via mixin expansion.
-          when CrystalV2::Compiler::Frontend::DefNode
-            lower_method(struct_name, struct_info, member)
-          when CrystalV2::Compiler::Frontend::GetterNode
-            # Generate synthetic getter methods
-            if member.is_class?
-              member.specs.each do |spec|
-                generate_class_getter_method(struct_name, spec, @arena)
-              end
-            else
-              member.specs.each do |spec|
-                generate_getter_method(struct_name, struct_info, spec)
-              end
-            end
-          when CrystalV2::Compiler::Frontend::SetterNode
-            # Generate synthetic setter methods
-            if member.is_class?
-              member.specs.each do |spec|
-                generate_class_setter_method(struct_name, spec)
-              end
-            else
-              member.specs.each do |spec|
-                generate_setter_method(struct_name, struct_info, spec)
-              end
-            end
-          when CrystalV2::Compiler::Frontend::PropertyNode
-            # Generate both getter and setter methods
-            if member.is_class?
-              member.specs.each do |spec|
-                generate_class_getter_method(struct_name, spec, @arena)
-                generate_class_setter_method(struct_name, spec)
-              end
-            else
-              member.specs.each do |spec|
-                generate_getter_method(struct_name, struct_info, spec)
-                generate_setter_method(struct_name, struct_info, spec)
               end
             end
           end
@@ -7409,12 +6962,6 @@ module Crystal::HIR
         ctx.emit(nil_lit)
         nil_lit.id
 
-      when CrystalV2::Compiler::Frontend::StructNode
-        # Struct declarations are processed during registration phase
-        nil_lit = Literal.new(ctx.next_id, TypeRef::NIL, nil)
-        ctx.emit(nil_lit)
-        nil_lit.id
-
       when CrystalV2::Compiler::Frontend::GetterNode,
            CrystalV2::Compiler::Frontend::SetterNode,
            CrystalV2::Compiler::Frontend::PropertyNode
@@ -7707,8 +7254,8 @@ module Crystal::HIR
             enum_name = String.new(body_node.name)
             full_enum_name = "#{lib_name}::#{enum_name}"
             register_enum_with_name(body_node, full_enum_name)
-          when CrystalV2::Compiler::Frontend::StructNode
-            # Structs within lib - skip for now (handled separately)
+          when CrystalV2::Compiler::Frontend::ClassNode
+            # Struct/union within lib are parsed as ClassNode with flags - skip for now.
           else
             # Other declarations - process recursively
             lower_node(ctx, body_node)

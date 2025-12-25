@@ -17,7 +17,6 @@ private def lower_named_function(code : String, name : String) : {Crystal::HIR::
   converter = Crystal::HIR::AstToHir.new(arena)
 
   class_nodes = [] of CrystalV2::Compiler::Frontend::ClassNode
-  struct_nodes = [] of CrystalV2::Compiler::Frontend::StructNode
   enum_nodes = [] of CrystalV2::Compiler::Frontend::EnumNode
   def_nodes = [] of CrystalV2::Compiler::Frontend::DefNode
 
@@ -26,8 +25,6 @@ private def lower_named_function(code : String, name : String) : {Crystal::HIR::
     case node
     when CrystalV2::Compiler::Frontend::ClassNode
       class_nodes << node
-    when CrystalV2::Compiler::Frontend::StructNode
-      struct_nodes << node
     when CrystalV2::Compiler::Frontend::EnumNode
       enum_nodes << node
     when CrystalV2::Compiler::Frontend::DefNode
@@ -36,7 +33,6 @@ private def lower_named_function(code : String, name : String) : {Crystal::HIR::
   end
 
   enum_nodes.each { |node| converter.register_enum(node) }
-  struct_nodes.each { |node| converter.register_struct(node) }
   class_nodes.each { |node| converter.register_class(node) }
   def_nodes.each { |node| converter.register_function(node) }
 

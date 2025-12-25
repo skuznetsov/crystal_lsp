@@ -565,7 +565,7 @@ module CrystalV2
         end
 
         # Resolve symbol for type definition names (struct Foo, class Bar, module Baz)
-        # expr_id might point to the identifier node (ConstantNode) rather than the StructNode
+        # expr_id might point to the identifier node (ConstantNode) rather than the class/module node
         private def resolve_type_definition_symbol(doc_state : DocumentState, expr_id : Frontend::ExprId) : Semantic::Symbol?
           symbol_table = doc_state.symbol_table
           return nil unless symbol_table
@@ -573,10 +573,8 @@ module CrystalV2
           arena = doc_state.program.arena
           node = arena[expr_id]
 
-          # Extract type name from struct/class/module/union node OR from their name identifier
+          # Extract type name from class/module/union node OR from their name identifier
           type_name = case node
-                      when Frontend::StructNode
-                        String.new(node.name)
                       when Frontend::ClassNode
                         String.new(node.name)
                       when Frontend::ModuleNode
@@ -751,15 +749,6 @@ module CrystalV2
                 return result
               end
             end
-          when Frontend::StructNode
-            name = String.new(node.name)
-            path = current + [name]
-            return path if expr_id == target
-            (node.body || [] of Frontend::ExprId).each do |child|
-              if result = symbol_path_segments_within(arena, child, target, path)
-                return result
-              end
-            end
           when Frontend::UnionNode, Frontend::EnumNode
             if node.responds_to?(:name)
               name = String.new(node.name)
@@ -832,17 +821,6 @@ module CrystalV2
               end
             end
           when Frontend::ClassNode
-            name = String.new(node.name)
-            path = current + [name]
-            if path.size >= segments.size && path[-segments.size, segments.size] == segments
-              return Location.new(uri: uri, range: Range.from_span(node.span))
-            end
-            (node.body || [] of Frontend::ExprId).each do |child|
-              if location = find_location_node(arena, child, path, segments, uri)
-                return location
-              end
-            end
-          when Frontend::StructNode
             name = String.new(node.name)
             path = current + [name]
             if path.size >= segments.size && path[-segments.size, segments.size] == segments
@@ -956,8 +934,6 @@ module CrystalV2
             end
 
             super_name ||= node.super_name.try { |slice| String.new(slice) }
-          when Frontend::StructNode
-            prefix = "struct"
           when Frontend::UnionNode
             prefix = "union"
           end
@@ -1660,9 +1636,6 @@ module CrystalV2
               index.add_scoped_const(String.new(node.name), current_scopes.last?, node.span)
               current_scopes = current_scopes + [node.span]
             when Frontend::ModuleNode
-              index.add_scoped_const(String.new(node.name), current_scopes.last?, node.span)
-              current_scopes = current_scopes + [node.span]
-            when Frontend::StructNode
               index.add_scoped_const(String.new(node.name), current_scopes.last?, node.span)
               current_scopes = current_scopes + [node.span]
             when Frontend::EnumNode
@@ -2825,8 +2798,6 @@ module CrystalV2
             record_prelude_symbol_origin(node.expression, arena, current_table, origins, program, uri)
           when Frontend::ClassNode
             record_class_like_origin(node.name, node.body, current_table, origins, program, uri, arena)
-          when Frontend::StructNode
-            record_class_like_origin(node.name, node.body, current_table, origins, program, uri, arena)
           when Frontend::ModuleNode
             record_module_origin(node.name, node.body, current_table, origins, program, uri, arena)
           when Frontend::DefNode
@@ -3834,7 +3805,7 @@ module CrystalV2
             if body = node.body
               body.each { |expr| yield expr }
             end
-          when Frontend::ClassNode, Frontend::ModuleNode, Frontend::StructNode, Frontend::UnionNode
+          when Frontend::ClassNode, Frontend::ModuleNode, Frontend::UnionNode
             (node.body || [] of Frontend::ExprId).each { |expr| yield expr }
           when Frontend::EnumNode
             node.members.each do |member|
@@ -6246,7 +6217,7 @@ module CrystalV2
           when Frontend::AnnotationNode
             # @[JSON::Field(key: "foo")] - resolve the annotation name
             definition_from_annotation(node, doc_state, uri, depth, target_offset)
-          when Frontend::ClassNode, Frontend::ModuleNode, Frontend::StructNode, Frontend::EnumNode
+          when Frontend::ClassNode, Frontend::ModuleNode, Frontend::EnumNode
             Location.new(uri: doc_state.text_document.uri, range: Range.from_span(node.span))
           when Frontend::IfNode
             # Regular if - find cursor position in condition/then/else
@@ -8718,7 +8689,7 @@ module CrystalV2
               end
               body.each { |expr_id| collect_folding_ranges_recursive(arena, expr_id, ranges) }
             end
-          when Frontend::ModuleNode, Frontend::StructNode, Frontend::UnionNode
+          when Frontend::ModuleNode, Frontend::UnionNode
             if body = node.body
               unless body.empty?
                 start_line = node.span.start_line - 1
@@ -9138,18 +9109,20 @@ module CrystalV2
             collect_tokens_recursive(context, node.base_type, tokens)
             node.type_args.each { |arg| collect_tokens_recursive(context, arg, tokens) }
           when Frontend::ClassNode
-            emit_name_token(context, node.span, node.name, SemanticTokenType::Class.value, tokens)
+            token_type = if node.class_is_struct
+                           SemanticTokenType::Struct.value
+                         elsif node.class_is_union
+                           SemanticTokenType::Type.value
+                         else
+                           SemanticTokenType::Class.value
+                         end
+            emit_name_token(context, node.span, node.name, token_type, tokens)
 
             if body = node.body
               body.each { |expr_id| collect_tokens_recursive(context, expr_id, tokens) }
             end
           when Frontend::ModuleNode
             emit_name_token(context, node.span, node.name, SemanticTokenType::Namespace.value, tokens)
-            if body = node.body
-              body.each { |expr_id| collect_tokens_recursive(context, expr_id, tokens) }
-            end
-          when Frontend::StructNode
-            emit_name_token(context, node.span, node.name, SemanticTokenType::Struct.value, tokens)
             if body = node.body
               body.each { |expr_id| collect_tokens_recursive(context, expr_id, tokens) }
             end

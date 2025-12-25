@@ -18,7 +18,6 @@ private def build_mir_module(code : String) : Crystal::MIR::Module
   converter = Crystal::HIR::AstToHir.new(arena)
 
   class_nodes = [] of CrystalV2::Compiler::Frontend::ClassNode
-  struct_nodes = [] of CrystalV2::Compiler::Frontend::StructNode
   enum_nodes = [] of CrystalV2::Compiler::Frontend::EnumNode
 
   exprs.each do |expr_id|
@@ -26,15 +25,12 @@ private def build_mir_module(code : String) : Crystal::MIR::Module
     case node
     when CrystalV2::Compiler::Frontend::ClassNode
       class_nodes << node
-    when CrystalV2::Compiler::Frontend::StructNode
-      struct_nodes << node
     when CrystalV2::Compiler::Frontend::EnumNode
       enum_nodes << node
     end
   end
 
   enum_nodes.each { |n| converter.register_enum(n) }
-  struct_nodes.each { |n| converter.register_struct(n) }
   class_nodes.each { |n| converter.register_class(n) }
 
   mir_lowering = Crystal::MIR::HIRToMIRLowering.new(converter.module)

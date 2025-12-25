@@ -289,10 +289,6 @@ module CrystalV2
             n = node.as(ModuleNode)
             (n.body || [] of ExprId).to_a
 
-          when NodeKind::Struct
-            n = node.as(StructNode)
-            (n.body || [] of ExprId).to_a
-
           when NodeKind::Union
             n = node.as(UnionNode)
             (n.body || [] of ExprId).to_a

@@ -190,23 +190,30 @@ module CrystalV2
               Position.new(span.start_line - 1, name_col + name_len)
             )
           when Frontend::ClassNode
-            # "class Foo" -> name starts at column + 6 ("class ".size)
+            # "class Foo"/"struct Foo"/"union Foo"/"abstract class Foo" -> prefix length varies
             name = symbol.name
-            name_col = span.start_column + 6 - 1
+            prefix = if node.class_is_abstract
+                       if node.class_is_struct
+                         "abstract struct "
+                       elsif node.class_is_union
+                         "abstract union "
+                       else
+                         "abstract class "
+                       end
+                     elsif node.class_is_struct
+                       "struct "
+                     elsif node.class_is_union
+                       "union "
+                     else
+                       "class "
+                     end
+            name_col = span.start_column + prefix.size - 1
             Range.new(
               Position.new(span.start_line - 1, name_col),
               Position.new(span.start_line - 1, name_col + name.size)
             )
           when Frontend::ModuleNode
             # "module Foo" -> name starts at column + 7 ("module ".size)
-            name = symbol.name
-            name_col = span.start_column + 7 - 1
-            Range.new(
-              Position.new(span.start_line - 1, name_col),
-              Position.new(span.start_line - 1, name_col + name.size)
-            )
-          when Frontend::StructNode
-            # "struct Foo" -> name starts at column + 7 ("struct ".size)
             name = symbol.name
             name_col = span.start_column + 7 - 1
             Range.new(

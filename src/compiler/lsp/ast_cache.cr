@@ -323,9 +323,6 @@ module CrystalV2
             mod_node = node.as(Frontend::ModuleNode)
             yield String.new(mod_node.name)
             mod_node.type_params.try &.each { |tp| yield String.new(tp) }
-          when Frontend::NodeKind::Struct
-            struct_node = node.as(Frontend::StructNode)
-            yield String.new(struct_node.name)
           when Frontend::NodeKind::Getter
             getter_node = node.as(Frontend::GetterNode)
             getter_node.specs.each do |spec|
@@ -793,13 +790,6 @@ module CrystalV2
             write_string_ref(io, String.new(mod_node.name), string_table)
             write_optional_expr_id_array(io, mod_node.body)
             write_optional_string_array(io, mod_node.type_params.try { |tp| tp.map { |t| String.new(t) } }, string_table)
-
-          when Frontend::NodeKind::Struct
-            struct_node = node.as(Frontend::StructNode)
-            io.write_byte(AstNodeTag::StructNode.value)
-            write_span(io, struct_node.span)
-            write_string_ref(io, String.new(struct_node.name), string_table)
-            write_optional_expr_id_array(io, struct_node.body)
 
           when Frontend::NodeKind::Enum
             enum_node = node.as(Frontend::EnumNode)
@@ -1666,7 +1656,7 @@ module CrystalV2
             span = read_span(io)
             name = pool.intern(strings[read_string_idx(io)].to_slice)
             body = read_optional_expr_id_array(io)
-            Frontend::StructNode.new(span, name, body)
+            Frontend::ClassNode.new(span, name, nil, body, false, true, false, nil)
 
           when .enum_node?
             span = read_span(io)
