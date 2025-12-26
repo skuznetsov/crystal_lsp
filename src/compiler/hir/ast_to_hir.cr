@@ -8849,6 +8849,52 @@ module Crystal::HIR
       nil_lit.id
     end
 
+    private def truthy_narrowing_targets(condition_id : ExprId) : Array(String)
+      return [] of String if condition_id.invalid?
+
+      node = @arena[condition_id]
+      case node
+      when CrystalV2::Compiler::Frontend::GroupingNode
+        truthy_narrowing_targets(node.expression)
+      when CrystalV2::Compiler::Frontend::IdentifierNode
+        [String.new(node.name)]
+      when CrystalV2::Compiler::Frontend::AssignNode
+        target = @arena[node.target]
+        if target.is_a?(CrystalV2::Compiler::Frontend::IdentifierNode)
+          [String.new(target.name)]
+        else
+          [] of String
+        end
+      when CrystalV2::Compiler::Frontend::BinaryNode
+        op = String.new(node.operator)
+        if op == "&&"
+          left = truthy_narrowing_targets(node.left)
+          right = truthy_narrowing_targets(node.right)
+          left.concat(right)
+        else
+          [] of String
+        end
+      else
+        [] of String
+      end
+    end
+
+    private def apply_truthy_narrowing(ctx : LoweringContext, targets : Array(String)) : Nil
+      return if targets.empty?
+
+      targets.each do |name|
+        local_id = ctx.lookup_local(name)
+        next unless local_id
+        local_type = ctx.type_of(local_id)
+        next unless is_union_or_nilable_type?(local_type)
+
+        unwrapped = lower_not_nil_intrinsic(ctx, local_id, local_type)
+        next if unwrapped == local_id
+
+        ctx.register_local(name, unwrapped)
+      end
+    end
+
     private def union_type_for_values(left_type : TypeRef, right_type : TypeRef) : TypeRef
       return left_type if left_type == right_type
       left_name = get_type_name_from_ref(left_type)
@@ -8967,6 +9013,7 @@ module Crystal::HIR
 
       # Save locals state before branching
       pre_branch_locals = ctx.save_locals
+      truthy_targets = truthy_narrowing_targets(node.condition)
 
       # Collect all branches: (exit_block, value, locals, flows_to_merge)
       branches = [] of {BlockId, ValueId, Hash(String, ValueId), Bool}
@@ -8991,6 +9038,7 @@ module Crystal::HIR
       # Process "then" branch
       ctx.current_block = then_block
       ctx.push_scope(ScopeKind::Block)
+      apply_truthy_narrowing(ctx, truthy_targets)
       then_value = lower_body(ctx, node.then_body)
       then_exit_block = ctx.current_block
       then_locals = ctx.save_locals
@@ -9014,6 +9062,7 @@ module Crystal::HIR
           ctx.current_block = next_test_block
 
           # Lower elsif condition
+          elsif_truthy_targets = truthy_narrowing_targets(elsif_branch.condition)
           elsif_cond_id = lower_expr(ctx, elsif_branch.condition)
 
           # Create body block and next block
@@ -9030,6 +9079,7 @@ module Crystal::HIR
           # Process elsif body
           ctx.current_block = elsif_body_block
           ctx.push_scope(ScopeKind::Block)
+          apply_truthy_narrowing(ctx, elsif_truthy_targets)
           elsif_value = lower_body(ctx, elsif_branch.body)
           elsif_exit_block = ctx.current_block
           elsif_locals = ctx.save_locals
