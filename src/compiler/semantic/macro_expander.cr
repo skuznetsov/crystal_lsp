@@ -40,12 +40,13 @@ module CrystalV2
 
         getter diagnostics : Array(Diagnostic)
 
-        def initialize(@program : Program, @arena : Frontend::ArenaLike, flags : Set(String)? = nil, *, recovery_mode : Bool = false)
+        def initialize(@program : Program, @arena : Frontend::ArenaLike, flags : Set(String)? = nil, *, recovery_mode : Bool = false, source_provider : Proc(ExprId, String?)? = nil)
           @diagnostics = [] of Diagnostic
           @depth = 0
           @macro_var_counter = 0
           @flags = flags || Set(String).new
           @recovery_mode = recovery_mode
+          @source_provider = source_provider
         end
 
         # Expansion context for macro evaluation
@@ -56,6 +57,7 @@ module CrystalV2
           getter owner_type : ClassSymbol?
           getter depth : Int32
           getter flags : Set(String)
+          getter block_id : ExprId?
 
           def initialize(
             @variables = {} of String => MacroValue,
@@ -63,21 +65,26 @@ module CrystalV2
             @owner_type : ClassSymbol? = nil,
             @depth = 0,
             @flags = Set(String).new,
+            @block_id : ExprId? = nil,
           )
           end
 
           def with_depth(new_depth : Int32) : Context
-            Context.new(@variables, @macro_vars, @owner_type, new_depth, @flags)
+            Context.new(@variables, @macro_vars, @owner_type, new_depth, @flags, @block_id)
           end
 
           def with_variable(name : String, value : MacroValue) : Context
             new_vars = @variables.dup
             new_vars[name] = value
-            Context.new(new_vars, @macro_vars, @owner_type, @depth, @flags)
+            Context.new(new_vars, @macro_vars, @owner_type, @depth, @flags, @block_id)
           end
 
           def with_owner_type(owner : ClassSymbol?) : Context
-            Context.new(@variables, @macro_vars, owner, @depth, @flags)
+            Context.new(@variables, @macro_vars, owner, @depth, @flags, @block_id)
+          end
+
+          def with_block(block_id : ExprId?) : Context
+            Context.new(@variables, @macro_vars, @owner_type, @depth, @flags, block_id)
           end
 
           def set_macro_var(name : String, value : String)
@@ -107,7 +114,7 @@ module CrystalV2
         # Takes a MacroSymbol and arguments, returns expanded AST node.
         # Optional owner_type is the class in which the macro is expanded and
         # is used to support @type.* reflection macros.
-        def expand(macro_symbol : MacroSymbol, args : Array(ExprId), owner_type : ClassSymbol? = nil) : ExprId
+        def expand(macro_symbol : MacroSymbol, args : Array(ExprId), owner_type : ClassSymbol? = nil, *, named_args : Array(Frontend::NamedArgument)? = nil, block_id : ExprId? = nil) : ExprId
           # Clear diagnostics from previous expansions
           @diagnostics.clear
 
@@ -120,7 +127,7 @@ module CrystalV2
           @depth += 1
           begin
             # Bind parameters to arguments
-            context = build_context(macro_symbol, args, owner_type)
+            context = build_context(macro_symbol, args, owner_type, named_args, block_id)
 
             # Evaluate macro body
             output = evaluate_macro_body(macro_symbol.body, context)
@@ -132,23 +139,59 @@ module CrystalV2
           end
         end
 
-        private def build_context(macro_symbol : MacroSymbol, args : Array(ExprId), owner_type : ClassSymbol?) : Context
+        private def build_context(
+          macro_symbol : MacroSymbol,
+          args : Array(ExprId),
+          owner_type : ClassSymbol?,
+          named_args : Array(Frontend::NamedArgument)?,
+          block_id : ExprId?
+        ) : Context
           variables = {} of String => MacroValue
           params = macro_symbol.params || [] of String
+          named_values = {} of String => MacroValue
 
-          # Bind each parameter to its argument value
-          params.each_with_index do |param_name, index|
-            if index < args.size
-              # Evaluate argument to MacroValue
-              arg_value = expr_to_macro_value(args[index])
-              variables[param_name] = arg_value
-            else
-              # Missing argument - nil value
-              variables[param_name] = MACRO_NIL
+          named_args.try do |list|
+            list.each do |named_arg|
+              named_values[String.new(named_arg.name)] = expr_to_macro_value(named_arg.value)
             end
           end
 
-          Context.new(variables, {} of String => String, owner_type, @depth, @flags)
+          # Bind parameters to arguments (supports *args and **kwargs).
+          arg_index = 0
+          params.each do |raw_name|
+            if raw_name.starts_with?("**")
+              name = raw_name[2..]
+              variables[name] = MacroNamedTupleValue.new(named_values)
+              named_values.clear
+              next
+            end
+
+            if raw_name.starts_with?("*")
+              name = raw_name[1..]
+              values = [] of MacroValue
+              while arg_index < args.size
+                values << expr_to_macro_value(args[arg_index])
+                arg_index += 1
+              end
+              variables[name] = MacroArrayValue.new(values)
+              next
+            end
+
+            if value = named_values[raw_name]?
+              variables[raw_name] = value
+              named_values.delete(raw_name)
+            elsif arg_index < args.size
+              variables[raw_name] = expr_to_macro_value(args[arg_index])
+              arg_index += 1
+            else
+              variables[raw_name] = MACRO_NIL
+            end
+          end
+
+          # Provide a truthy `block` variable when macro call includes a block.
+          variables["block"] = block_id ? MacroBoolValue.new(true) : MACRO_NIL
+
+          Context.new(variables, {} of String => String, owner_type, @depth, @flags, block_id)
         end
 
         # Convert expression to string representation (for legacy/simple use)
@@ -193,8 +236,15 @@ module CrystalV2
           when .identifier?
             MacroIdValue.new(Frontend.node_literal_string(node) || "")
           else
-            # Complex expressions - return as MacroId
-            MacroIdValue.new(Frontend.node_literal_string(node) || "")
+            if node.is_a?(Frontend::TypeDeclarationNode) || node.is_a?(Frontend::AssignNode)
+              MacroNodeValue.new(expr_id, @arena)
+            elsif node.is_a?(Frontend::PathNode)
+              name = path_to_string(node)
+              name.empty? ? MacroIdValue.new("") : MacroIdValue.new(name)
+            else
+              # Complex expressions - return as MacroId
+              MacroIdValue.new(Frontend.node_literal_string(node) || "")
+            end
           end
         end
 
@@ -206,6 +256,14 @@ module CrystalV2
           # Unwrap MacroExpressionNode
           if node.is_a?(Frontend::MacroExpressionNode)
             return evaluate_to_macro_value(node.expression, context)
+          end
+
+          if node.is_a?(Frontend::MacroVarNode)
+            literal = Frontend.node_literal_string(node)
+            if literal && (value = context.macro_var(literal))
+              return MacroIdValue.new(value)
+            end
+            return MacroIdValue.new(literal || "")
           end
 
           case Frontend.node_kind(node)
@@ -235,18 +293,95 @@ module CrystalV2
               MacroIdValue.new(name || "")
             end
           else
-            # Handle CallNode for annotation queries
-            if node.is_a?(Frontend::CallNode)
+            if node.is_a?(Frontend::StringInterpolationNode)
+              return MacroStringValue.new(evaluate_string_interpolation(node, context))
+            elsif node.is_a?(Frontend::ArrayLiteralNode)
+              values = node.elements.map { |elem| evaluate_to_macro_value(elem, context) }
+              return MacroArrayValue.new(values)
+            elsif node.is_a?(Frontend::NamedTupleLiteralNode)
+              entries = {} of String => MacroValue
+              node.entries.each do |entry|
+                key = String.new(entry.key)
+                entries[key] = evaluate_to_macro_value(entry.value, context)
+              end
+              return MacroNamedTupleValue.new(entries)
+            elsif node.is_a?(Frontend::BinaryNode)
+              return evaluate_binary_to_macro_value(node, context)
+            elsif node.is_a?(Frontend::MemberAccessNode)
+              return evaluate_member_access_to_macro_value(node, context)
+            elsif node.is_a?(Frontend::CallNode)
               return evaluate_call_to_macro_value(node, context)
+            elsif node.is_a?(Frontend::YieldNode)
+              text = macro_block_text(context)
+              return text.empty? ? MACRO_NIL : MacroIdValue.new(text)
+            elsif node.is_a?(Frontend::TypeDeclarationNode) || node.is_a?(Frontend::AssignNode)
+              return MacroNodeValue.new(expr_id, @arena)
+            elsif node.is_a?(Frontend::PathNode)
+              name = path_to_string(node)
+              return name.empty? ? MACRO_NIL : MacroIdValue.new(name)
             end
-            # Fallback to string evaluation wrapped as MacroId
-            str_val = evaluate_expression(expr_id, context)
-            if str_val.empty?
-              MACRO_NIL
-            else
-              MacroIdValue.new(str_val)
+
+            MacroNodeValue.new(expr_id, @arena)
+          end
+        end
+
+        private def evaluate_string_interpolation(node : Frontend::StringInterpolationNode, context : Context) : String
+          String.build do |io|
+            node.pieces.each do |piece|
+              case piece.kind
+              when Frontend::StringPiece::Kind::Text
+                io << (piece.text || "")
+              when Frontend::StringPiece::Kind::Expression
+                if expr_id = piece.expr
+                  value = evaluate_to_macro_value(expr_id, context)
+                  if value.is_a?(MacroStringValue)
+                    io << value.value
+                  else
+                    io << value.to_id
+                  end
+                end
+              end
             end
           end
+        end
+
+        private def evaluate_member_access_to_macro_value(node : Frontend::MemberAccessNode, context : Context) : MacroValue
+          obj = @arena[node.object]
+          member = String.new(node.member)
+
+          base_value = if obj.is_a?(Frontend::IdentifierNode)
+                         name = Frontend.node_literal_string(obj)
+                         name ? context.variables[name]? : nil
+                       else
+                         evaluate_to_macro_value(node.object, context)
+                       end
+
+          if base_value
+            result = base_value.call_method(member, [] of MacroValue, nil)
+            return result
+          end
+
+          fallback = evaluate_member_access_expression(node, context)
+          fallback.empty? ? MACRO_NIL : MacroIdValue.new(fallback)
+        end
+
+        private def evaluate_binary_to_macro_value(node : Frontend::BinaryNode, context : Context) : MacroValue
+          left = evaluate_to_macro_value(node.left, context)
+          right = evaluate_to_macro_value(node.right, context)
+          op = String.new(node.operator)
+
+          case op
+          when "+"
+            if left.is_a?(MacroArrayValue) && right.is_a?(MacroArrayValue)
+              return MacroArrayValue.new(left.elements + right.elements)
+            end
+            if left.is_a?(MacroStringValue) && right.is_a?(MacroStringValue)
+              return MacroStringValue.new(left.value + right.value)
+            end
+          end
+
+          # Delegate numeric operations to MacroNumberValue when possible.
+          left.call_method(op, [right], nil)
         end
 
         # Evaluate call expression and return MacroValue
@@ -264,6 +399,27 @@ module CrystalV2
             if member == "annotation" || member == "annotations"
               return evaluate_annotation_to_macro_value(obj, node, member, context)
             end
+
+            # General MacroValue method calls (properties.map, kwargs.empty?, etc.)
+            receiver = evaluate_to_macro_value(obj, context)
+            if !receiver.is_a?(MacroNilValue)
+              args = node.args.map { |arg| evaluate_to_macro_value(arg, context) }
+              named_arg_values = node.named_args.try do |named|
+                values = {} of String => MacroValue
+                named.each do |named_arg|
+                  values[String.new(named_arg.name)] = evaluate_to_macro_value(named_arg.value, context)
+                end
+                values
+              end
+
+              if blk_id = node.block
+                blk_node = @arena[blk_id].as(Frontend::BlockNode)
+                return evaluate_blocked_macro_call(receiver, member, args, named_arg_values, blk_node, context)
+              end
+
+              result = receiver.call_method(member, args, named_arg_values)
+              return result unless result.is_a?(MacroNilValue)
+            end
           end
 
           # Fallback: evaluate as string and wrap
@@ -273,6 +429,96 @@ module CrystalV2
           else
             MacroIdValue.new(str_val)
           end
+        end
+
+        private def evaluate_blocked_macro_call(
+          receiver : MacroValue,
+          member : String,
+          args : Array(MacroValue),
+          named_args : Hash(String, MacroValue)?,
+          block : Frontend::BlockNode,
+          context : Context
+        ) : MacroValue
+          case member
+          when "map", "select", "reject"
+            return evaluate_macro_block_map(receiver, member, block, context)
+          else
+            receiver.call_method(member, args, named_args)
+          end
+        end
+
+        private def evaluate_macro_block_map(
+          receiver : MacroValue,
+          member : String,
+          block : Frontend::BlockNode,
+          context : Context
+        ) : MacroValue
+          case receiver
+          when MacroArrayValue
+            results = [] of MacroValue
+            receiver.elements.each_with_index do |elem, idx|
+              values = [elem] of MacroValue
+              if block.params && block.params.not_nil!.size > 1
+                values << MacroNumberValue.new(idx.to_i64)
+              end
+              predicate = evaluate_block_body(block, context, values)
+              case member
+              when "map"
+                results << predicate
+              when "select"
+                results << elem if predicate.truthy?
+              when "reject"
+                results << elem unless predicate.truthy?
+              end
+            end
+            return MacroArrayValue.new(results)
+          when MacroNamedTupleValue
+            results = [] of MacroValue
+            receiver.entries.each do |key, value|
+              values = [MacroIdValue.new(key).as(MacroValue), value]
+              predicate = evaluate_block_body(block, context, values)
+              case member
+              when "map"
+                results << predicate
+              when "select"
+                results << value if predicate.truthy?
+              when "reject"
+                results << value unless predicate.truthy?
+              end
+            end
+            return MacroArrayValue.new(results)
+          else
+            return MACRO_NIL
+          end
+        end
+
+        private def evaluate_block_body(
+          block : Frontend::BlockNode,
+          context : Context,
+          values : Array(MacroValue)
+        ) : MacroValue
+          scoped = context
+          if params = block.params
+            params.each_with_index do |param, idx|
+              next unless param_name = param.name
+              value = values[idx]? || MACRO_NIL
+              scoped = scoped.with_variable(String.new(param_name), value)
+            end
+          end
+
+          result = MACRO_NIL
+          block.body.each do |expr_id|
+            result = evaluate_to_macro_value(expr_id, scoped)
+          end
+          result
+        end
+
+        private def macro_block_text(context : Context) : String
+          return "" unless block_id = context.block_id
+          provider = @source_provider
+          return "" unless provider
+
+          provider.call(block_id) || ""
         end
 
         # Evaluate annotation() call and return MacroAnnotationValue or MacroArrayValue
@@ -441,10 +687,8 @@ module CrystalV2
           # Create parser with existing arena (uses Phase 87B-2 constructor)
           parser = Frontend::Parser.new(lexer, @arena, recovery_mode: @recovery_mode)
 
-          # Parse as expression
-          # Use precedence 0 to parse full expression
           begin
-            result_id = parser.parse_expression(0)
+            program = parser.parse_program
 
             # Check for parse errors
             if parser.diagnostics.any?
@@ -454,7 +698,15 @@ module CrystalV2
               return ExprId.new(-1)
             end
 
-            result_id
+            roots = program.roots
+            if roots.empty?
+              ExprId.new(-1)
+            elsif roots.size == 1
+              roots.first
+            else
+              block = Frontend::BlockNode.new(Frontend::Span.zero, nil, roots)
+              @arena.add_typed(block)
+            end
           rescue ex
             # Catch any parser exceptions
             emit_error("Failed to parse macro expansion: #{ex.message}. Generated code: \"#{output}\"", location)
@@ -468,6 +720,13 @@ module CrystalV2
           # Unwrap MacroExpressionNode ({{ expr }}) to get inner expression
           if node.is_a?(Frontend::MacroExpressionNode)
             return evaluate_expression(node.expression, context)
+          end
+
+          # Complex nodes that benefit from MacroValue evaluation
+          if node.is_a?(Frontend::StringInterpolationNode) ||
+             node.is_a?(Frontend::BinaryNode) ||
+             node.is_a?(Frontend::CallNode)
+            return evaluate_to_macro_value(expr_id, context).to_macro_output
           end
 
           case Frontend.node_kind(node)
@@ -520,8 +779,6 @@ module CrystalV2
               evaluate_instance_var_expression(node, context)
             elsif node.is_a?(Frontend::MemberAccessNode)
               evaluate_member_access_expression(node, context)
-            elsif node.is_a?(Frontend::CallNode)
-              evaluate_call_expression(node, context)
             elsif node.is_a?(Frontend::PathNode)
               path_to_string(node)
             elsif node.is_a?(Frontend::IndexNode)
@@ -650,6 +907,11 @@ module CrystalV2
                                          else
                                            {"", nil}
                                          end
+
+          if base_macro_value
+            result = base_macro_value.call_method(member, [] of MacroValue, nil)
+            return result.to_macro_output unless result.is_a?(MacroNilValue)
+          end
 
           # For @type.name and chained calls, just return the type name
           if base_value != "" && context.owner_type && member == "name"
@@ -1093,6 +1355,13 @@ module CrystalV2
             end
           end
 
+          if node.is_a?(Frontend::IsANode)
+            receiver = evaluate_to_macro_value(node.expression, context)
+            type_name = String.new(node.target_type)
+            result = receiver.call_method("is_a?", [MacroIdValue.new(type_name)], nil)
+            return {result.truthy?, context}
+          end
+
           # Handle boolean connectives && / || at the AST level so we can
           # compose more precise conditions from simpler ones.
           if node.is_a?(Frontend::BinaryNode)
@@ -1429,10 +1698,23 @@ module CrystalV2
           case iterable_node
           when Frontend::ArrayLiteralNode
             # Array literal: [1, 2, 3]
-            iterable_node.elements.map { |elem_id| expr_to_macro_value(elem_id) }
+            iterable_node.elements.map { |elem_id| evaluate_to_macro_value(elem_id, context) }
           when Frontend::RangeNode
             # Range: 1..10
             expand_range_to_macro_values(iterable_node)
+          when Frontend::IdentifierNode
+            name = Frontend.node_literal_string(iterable_node)
+            if name && (macro_val = context.variables[name]?)
+              if macro_val.is_a?(MacroArrayValue)
+                macro_val.elements
+              else
+                emit_error("For loop iterable #{name} is not an ArrayLiteral")
+                nil
+              end
+            else
+              emit_error("For loop requires ArrayLiteral, Range, or @type.instance_vars/@type.methods")
+              nil
+            end
           when Frontend::MemberAccessNode
             # Support for @type.instance_vars and @type.methods
             evaluate_member_iterable(iterable_node, context)

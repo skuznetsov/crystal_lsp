@@ -127,6 +127,8 @@ private def lower_program_with_sources(code : String) : Crystal::HIR::AstToHir
   module_nodes = [] of CrystalV2::Compiler::Frontend::ModuleNode
   class_nodes = [] of CrystalV2::Compiler::Frontend::ClassNode
   def_nodes = [] of CrystalV2::Compiler::Frontend::DefNode
+  macro_nodes = [] of CrystalV2::Compiler::Frontend::MacroDefNode
+  main_exprs = [] of Tuple(CrystalV2::Compiler::Frontend::ExprId, CrystalV2::Compiler::Frontend::ArenaLike)
 
   exprs.each do |expr_id|
     node = arena[expr_id]
@@ -137,16 +139,22 @@ private def lower_program_with_sources(code : String) : Crystal::HIR::AstToHir
       class_nodes << node
     when CrystalV2::Compiler::Frontend::DefNode
       def_nodes << node
+    when CrystalV2::Compiler::Frontend::MacroDefNode
+      macro_nodes << node
+    when CrystalV2::Compiler::Frontend::CallNode
+      main_exprs << {expr_id, arena}
     end
   end
 
   module_nodes.each { |node| converter.register_module(node) }
   class_nodes.each { |node| converter.register_class(node) }
+  macro_nodes.each { |node| converter.register_macro(node) }
   def_nodes.each { |node| converter.register_function(node) }
 
   module_nodes.each { |node| converter.lower_module(node) }
   class_nodes.each { |node| converter.lower_class(node) }
   def_nodes.each { |node| converter.lower_def(node) }
+  converter.lower_main(main_exprs) if main_exprs.size > 0
 
   converter
 end
@@ -1395,6 +1403,60 @@ describe Crystal::HIR::AstToHir do
 
       converter = lower_program_with_sources(code)
       converter.module.has_function?("M.foo").should be_true
+    end
+  end
+
+  describe "macro expansion in HIR" do
+    it "binds named args with external names" do
+      code = <<-CRYSTAL
+        macro delegate(*methods, to object)
+          {% for method in methods %}
+            def {{method.id}}
+              {{object.id}}
+            end
+          {% end %}
+        end
+
+        class Wrapper
+          def initialize(@value : Int32)
+          end
+
+          delegate size, to: @value
+        end
+      CRYSTAL
+
+      converter = lower_program_with_sources(code)
+      converter.module.has_function?("Wrapper#size").should be_true
+    end
+
+    it "expands record-style macros with assign/type declarations" do
+      code = <<-CRYSTAL
+        macro getter(name)
+          def {{name.id}}
+            @{{name.id}}
+          end
+        end
+
+        macro record(__name name, *properties, **kwargs)
+          struct {{name.id}}
+            {% for property in properties %}
+              {% if property.is_a?(Assign) %}
+                getter {{property.target.id}}
+              {% elsif property.is_a?(TypeDeclaration) %}
+                getter {{property}}
+              {% else %}
+                getter :{{property.id}}
+              {% end %}
+            {% end %}
+          end
+        end
+
+        record Point, x : Int32, y = 2
+      CRYSTAL
+
+      converter = lower_program_with_sources(code)
+      converter.module.has_function?("Point#x").should be_true
+      converter.module.has_function?("Point#y").should be_true
     end
   end
 

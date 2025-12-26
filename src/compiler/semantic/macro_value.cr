@@ -326,6 +326,142 @@ module CrystalV2
         end
       end
 
+      # AST node value (Assign, TypeDeclaration, Identifier, etc.)
+      # Used by macros like `record` and `getter` that inspect AST node kinds.
+      class MacroNodeValue < MacroValue
+        getter node_id : Frontend::ExprId
+        getter arena : Frontend::ArenaLike
+
+        def initialize(@node_id : Frontend::ExprId, @arena : Frontend::ArenaLike)
+        end
+
+        def to_macro_output : String
+          stringify_node(@arena[@node_id])
+        end
+
+        def class_name : String
+          Frontend.node_kind(@arena[@node_id]).to_s
+        end
+
+        def call_method(name : String, args : Array(MacroValue), named_args : Hash(String, MacroValue)?) : MacroValue
+          node = @arena[@node_id]
+          case name
+          when "id"
+            if id_name = node_identifier_name(node)
+              MacroIdValue.new(id_name)
+            else
+              MacroIdValue.new(to_macro_output)
+            end
+          when "target"
+            if node.is_a?(Frontend::AssignNode)
+              MacroNodeValue.new(node.target, @arena)
+            else
+              MacroNilValue.new
+            end
+          when "var"
+            if node.is_a?(Frontend::TypeDeclarationNode)
+              MacroIdValue.new(String.new(node.name))
+            else
+              MacroNilValue.new
+            end
+          when "type"
+            if node.is_a?(Frontend::TypeDeclarationNode)
+              MacroIdValue.new(String.new(node.declared_type))
+            else
+              MacroNilValue.new
+            end
+          when "value"
+            if node.is_a?(Frontend::TypeDeclarationNode)
+              if value_id = node.value
+                MacroNodeValue.new(value_id, @arena)
+              else
+                MacroNilValue.new
+              end
+            elsif node.is_a?(Frontend::AssignNode)
+              MacroNodeValue.new(node.value, @arena)
+            else
+              MacroNilValue.new
+            end
+          when "is_a?"
+            if expected = args[0]?
+              MacroBoolValue.new(class_name == expected.to_id)
+            else
+              MacroBoolValue.new(false)
+            end
+          else
+            super
+          end
+        end
+
+        private def node_identifier_name(node) : String?
+          case node
+          when Frontend::IdentifierNode
+            String.new(node.name)
+          when Frontend::ConstantNode
+            String.new(node.name)
+          when Frontend::InstanceVarNode
+            String.new(node.name)
+          when Frontend::TypeDeclarationNode
+            String.new(node.name)
+          when Frontend::AssignNode
+            node_identifier_name(@arena[node.target])
+          when Frontend::PathNode
+            parts = [] of String
+            current = node
+            loop do
+              right = current.right
+              right_name = node_identifier_name(@arena[right])
+              parts << right_name if right_name
+              left_id = current.left
+              break unless left_id
+              left_node = @arena[left_id.not_nil!]
+              break unless left_node.is_a?(Frontend::PathNode)
+              current = left_node
+            end
+            if left_id = current.left
+              left_name = node_identifier_name(@arena[left_id.not_nil!])
+              parts << left_name if left_name
+            end
+            parts.reverse.join("::")
+          else
+            nil
+          end
+        end
+
+        private def stringify_node(node) : String
+          case node
+          when Frontend::NumberNode
+            String.new(node.value)
+          when Frontend::StringNode
+            String.new(node.value).inspect
+          when Frontend::CharNode
+            literal = Frontend.node_literal_string(node) || ""
+            literal.empty? ? "" : "'#{literal}'"
+          when Frontend::SymbolNode
+            literal = Frontend.node_literal_string(node) || ""
+            literal.starts_with?(":") ? literal : ":#{literal}"
+          when Frontend::IdentifierNode
+            String.new(node.name)
+          when Frontend::ConstantNode
+            String.new(node.name)
+          when Frontend::InstanceVarNode
+            String.new(node.name)
+        when Frontend::TypeDeclarationNode
+          type_name = String.new(node.declared_type)
+          type_name = type_name[1..] if type_name.starts_with?(':')
+          "#{String.new(node.name)} : #{type_name}"
+          when Frontend::PathNode
+            node_identifier_name(node) || ""
+          when Frontend::AssignNode
+            target = stringify_node(@arena[node.target])
+            value = stringify_node(@arena[node.value])
+            "#{target} = #{value}"
+          else
+            Frontend.node_literal_string(node) || ""
+          end
+        end
+      end
+
       # Array value
       class MacroArrayValue < MacroValue
         getter elements : Array(MacroValue)
@@ -347,6 +483,9 @@ module CrystalV2
             MacroNumberValue.new(@elements.size.to_i64)
           when "empty?"
             MacroBoolValue.new(@elements.empty?)
+          when "splat"
+            # Expand array elements as comma-separated identifiers.
+            MacroIdValue.new(@elements.map(&.to_id).join(", "))
           when "first"
             @elements.first? || MacroNilValue.new
           when "last"

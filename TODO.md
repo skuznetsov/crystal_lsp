@@ -34,6 +34,8 @@ about syntax or types and should match what the original compiler would report.
 - [x] HIR macro condition evaluation: tri-state merge + duplicate module method guard (2025-12-23)
 - [x] Driver trace logging gated via `CRYSTAL_V2_DRIVER_TRACE` (2025-12-23)
 - [x] Resolve module method calls without parens (`M.foo`) to static dispatch (2025-12-23)
+- [x] Macro expansion in HIR handles class/module body calls and main macro calls (2025-12-26)
+- [x] MacroExpander reparse uses parse_program; macro is_a? and macro literal gap fixes (2025-12-26)
 
 ### Pending (1 test)
 - 1 invalid ASM syntax test (intentionally pending)
@@ -668,6 +670,7 @@ The key insight is: **Don't compete with LLVM, complement it.**
 - [x] ABI harness (offset/align/union) (2025-12-26)
 - [x] RC/taint inline audit
 - [x] ThreadShared→atomic/GC enforcement
+- [ ] Benchmark LavinMQ (post-bootstrap): compare v2 vs official compiler on compile time, binary size, and runtime perf
 
 ---
 

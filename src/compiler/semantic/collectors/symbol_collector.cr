@@ -571,7 +571,13 @@ module CrystalV2
             owner_type = @class_stack.empty? ? nil : @class_stack.last
 
             # Expand macro with optional owner_type
-            expanded_id = @macro_expander.expand(symbol, args, owner_type)
+            expanded_id = @macro_expander.expand(
+              symbol,
+              args,
+              owner_type,
+              named_args: node.named_args,
+              block_id: node.block
+            )
 
             # Collect diagnostics from expander
             @diagnostics.concat(@macro_expander.diagnostics)

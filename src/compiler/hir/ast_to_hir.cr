@@ -9,6 +9,9 @@ require "./hir"
 require "./debug_hooks"
 require "../frontend/ast"
 require "../mir/mir"
+require "../../runtime"
+require "../semantic/macro_expander"
+require "../semantic/symbol_table"
 
 module Crystal::HIR
   # Error raised during AST to HIR conversion
@@ -188,6 +191,9 @@ module Crystal::HIR
   # Class type info (is_struct=true for value types)
   record ClassInfo, name : String, type_ref : TypeRef, ivars : Array(IVarInfo), class_vars : Array(ClassVarInfo), size : Int32, is_struct : Bool = false, parent_name : String? = nil
 
+  # Macro parameter metadata (internal/external names + prefix).
+  record MacroParamInfo, name : String, external_name : String? = nil, prefix : String = ""
+
   # Class-level accessor entry (class_getter/class_setter/class_property)
   record ClassAccessorEntry,
     owner : String,
@@ -327,8 +333,10 @@ module Crystal::HIR
     # Locals available for resolving typeof(...) in type positions (per def)
     @current_typeof_locals : Hash(String, TypeRef)?
 
-    # Macro definitions (name -> MacroDefNode)
-    @macro_defs : Hash(String, CrystalV2::Compiler::Frontend::MacroDefNode)
+    # Macro definitions (name -> {MacroDefNode, arena})
+    @macro_defs : Hash(String, {CrystalV2::Compiler::Frontend::MacroDefNode, CrystalV2::Compiler::Frontend::ArenaLike})
+    # Macro parameter lists (name -> MacroParamInfo)
+    @macro_params : Hash(String, Array(MacroParamInfo))
 
     # Class-level accessors (full method name -> entry)
     @class_accessor_entries : Hash(String, ClassAccessorEntry)
@@ -379,6 +387,8 @@ module Crystal::HIR
 
     # Track declared type names for locals (used to resolve module-typed receivers).
     @current_typeof_local_names : Hash(String, String)?
+    # Short name index for class/struct lookups (short -> full names).
+    @short_type_index : Hash(String, Set(String))
 
     # Track top-level `def main` so we can remap calls and avoid entrypoint collisions.
     @top_level_main_defined : Bool
@@ -413,7 +423,8 @@ module Crystal::HIR
       @suppress_monomorphization = false
       @eager_monomorphization = ENV.has_key?("CRYSTAL_V2_EAGER_MONO")
       @type_param_map = {} of String => String
-      @macro_defs = {} of String => CrystalV2::Compiler::Frontend::MacroDefNode
+      @macro_defs = {} of String => {CrystalV2::Compiler::Frontend::MacroDefNode, CrystalV2::Compiler::Frontend::ArenaLike}
+      @macro_params = {} of String => Array(MacroParamInfo)
       @class_accessor_entries = {} of String => ClassAccessorEntry
       @module_defs = {} of String => Array({CrystalV2::Compiler::Frontend::ModuleNode, CrystalV2::Compiler::Frontend::ArenaLike})
       @module_includers = {} of String => Set(String)
@@ -422,6 +433,7 @@ module Crystal::HIR
       @type_aliases = {} of String => String
       @generated_allocators = Set(String).new
       @type_cache = {} of String => TypeRef
+      @short_type_index = {} of String => Set(String)
       @current_typeof_local_names = nil
       @top_level_main_defined = false
       @block_captures = {} of BlockId => Array(CapturedVar)
@@ -580,23 +592,119 @@ module Crystal::HIR
       end
 
       @enum_info.not_nil![full_enum_name] = members
-      # Also register by short name for lookups
-      short_name = String.new(node.name)
-      @enum_info.not_nil![short_name] = members
       base_type = enum_base_type_for_node(node)
       register_enum_base_type(full_enum_name, base_type)
-      register_enum_base_type(short_name, base_type)
       debug_hook_enum_register(full_enum_name, @module.get_type_descriptor(base_type).try(&.name) || "?")
       register_enum_methods(node, full_enum_name)
-      if short_name != full_enum_name
-        register_enum_methods(node, short_name)
-      end
     end
 
     # Register a macro definition (pass 1)
     def register_macro(node : CrystalV2::Compiler::Frontend::MacroDefNode)
       macro_name = String.new(node.name)
-      @macro_defs[macro_name] = node
+      @macro_defs[macro_name] = {node, @arena}
+      @macro_params[macro_name] = extract_macro_params(node)
+    end
+
+    private def extract_macro_params(node : CrystalV2::Compiler::Frontend::MacroDefNode) : Array(MacroParamInfo)
+      source = @sources_by_arena[@arena]?
+      return [] of MacroParamInfo unless source
+
+      span = node.span
+      start = span.start_offset
+      length = span.end_offset - span.start_offset
+      return [] of MacroParamInfo if length <= 0
+      return [] of MacroParamInfo if start < 0 || start >= source.bytesize
+      if start + length > source.bytesize
+        length = source.bytesize - start
+      end
+
+      snippet = source.byte_slice(start, length)
+      lexer = CrystalV2::Compiler::Frontend::Lexer.new(snippet)
+
+      params = [] of MacroParamInfo
+      seen_macro = false
+      seen_name = false
+      depth = 0
+      current_tokens = [] of CrystalV2::Compiler::Frontend::Token
+
+      loop do
+        token = lexer.next_token
+        break if token.kind == CrystalV2::Compiler::Frontend::Token::Kind::EOF
+        next if token.kind == CrystalV2::Compiler::Frontend::Token::Kind::Whitespace ||
+                token.kind == CrystalV2::Compiler::Frontend::Token::Kind::Comment
+
+        case token.kind
+        when CrystalV2::Compiler::Frontend::Token::Kind::Macro
+          seen_macro = true
+        when CrystalV2::Compiler::Frontend::Token::Kind::Identifier
+          name = String.new(token.slice)
+          if seen_macro && !seen_name
+            seen_name = true
+          elsif depth == 1
+            current_tokens << token
+          end
+        when CrystalV2::Compiler::Frontend::Token::Kind::LParen
+          if seen_name && depth == 0
+            depth = 1
+          elsif depth > 0
+            depth += 1
+          end
+        when CrystalV2::Compiler::Frontend::Token::Kind::RParen
+          if depth == 1
+            if info = parse_macro_param_tokens(current_tokens)
+              params << info
+            end
+            current_tokens.clear
+            depth = 0
+            break
+          elsif depth > 1
+            depth -= 1
+          end
+        when CrystalV2::Compiler::Frontend::Token::Kind::Comma
+          if depth == 1
+            if info = parse_macro_param_tokens(current_tokens)
+              params << info
+            end
+            current_tokens.clear
+          end
+        when CrystalV2::Compiler::Frontend::Token::Kind::StarStar
+          current_tokens << token if depth == 1
+        when CrystalV2::Compiler::Frontend::Token::Kind::Star
+          current_tokens << token if depth == 1
+        else
+          current_tokens << token if depth == 1
+        end
+      end
+
+      params
+    end
+
+    private def parse_macro_param_tokens(tokens : Array(CrystalV2::Compiler::Frontend::Token)) : MacroParamInfo?
+      return nil if tokens.empty?
+
+      prefix = ""
+      names = [] of String
+
+      tokens.each do |token|
+        case token.kind
+        when CrystalV2::Compiler::Frontend::Token::Kind::StarStar
+          prefix = "**"
+        when CrystalV2::Compiler::Frontend::Token::Kind::Star
+          prefix = "*"
+        when CrystalV2::Compiler::Frontend::Token::Kind::Identifier
+          names << String.new(token.slice)
+        end
+      end
+
+      return nil if names.empty?
+      if names.first? == "__name"
+        names.shift
+      end
+      return nil if names.empty?
+
+      internal = names.last
+      external = names.size > 1 ? names.first : nil
+      MacroParamInfo.new(internal, external, prefix)
     end
 
     # Register a type alias (pass 1)
@@ -633,7 +741,6 @@ module Crystal::HIR
             @current_class = old_class
             full_alias_name = "#{lib_name}::#{alias_name}"
             register_type_alias(full_alias_name, target_name)
-            register_type_alias(alias_name, target_name)
           when CrystalV2::Compiler::Frontend::EnumNode
             # Enums within lib - register with lib prefix
             enum_name = String.new(body_node.name)
@@ -647,149 +754,285 @@ module Crystal::HIR
       end
     end
 
-    # Expand a macro call inline
-    # For simple macros, parse the body text as Crystal code and lower it
-    private def expand_macro(ctx : LoweringContext, macro_def : CrystalV2::Compiler::Frontend::MacroDefNode, args : Array(ExprId)) : ValueId
-      body_node = @arena[macro_def.body]
+    private def expand_macro_expr(
+      macro_def : CrystalV2::Compiler::Frontend::MacroDefNode,
+      macro_arena : CrystalV2::Compiler::Frontend::ArenaLike,
+      args : Array(ExprId),
+      named_args : Array(CrystalV2::Compiler::Frontend::NamedArgument)?,
+      block_id : ExprId?
+    ) : ExprId
+      macro_name = String.new(macro_def.name)
+      params = @macro_params[macro_name]? || [] of MacroParamInfo
 
-      case body_node
-      when CrystalV2::Compiler::Frontend::MacroLiteralNode
-        # First pass: collect macro parameter names from Expression pieces
-        # In order of first appearance (first unique identifier = first param)
-        param_names = [] of String
-        body_node.pieces.each do |piece|
-          if piece.kind == CrystalV2::Compiler::Frontend::MacroPiece::Kind::Expression
-            if expr_id = piece.expr
-              param_name = extract_macro_param_name(@arena[expr_id])
-              if param_name && !param_names.includes?(param_name)
-                param_names << param_name
-              end
-            end
-          end
+      normalized_args, normalized_named = normalize_macro_call_args(params, args, named_args)
+      if macro_arena != @arena
+        normalized_args = normalized_args.map do |expr_id|
+          reparse_expr_for_macro(expr_id, @arena, macro_arena)
         end
-
-        # Build parameter -> argument value mapping
-        param_values = {} of String => String
-        param_names.each_with_index do |name, idx|
-          if idx < args.size
-            # Stringify the argument node
-            arg_node = @arena[args[idx]]
-            param_values[name] = stringify_ast_node(arg_node)
-          end
+        normalized_named = normalized_named.try do |list|
+          list.map { |named_arg| reparse_named_arg_for_macro(named_arg, @arena, macro_arena) }
         end
+      end
+      return ExprId.new(-1) if normalized_args.any?(&.invalid?) || normalized_named.try(&.any? { |arg| arg.value.invalid? })
 
-        # Second pass: expand pieces with parameter substitution
-        expanded_text = String.build do |io|
-          body_node.pieces.each do |piece|
-            case piece.kind
-            when CrystalV2::Compiler::Frontend::MacroPiece::Kind::Text
-              if text = piece.text
-                io << text
-              end
-            when CrystalV2::Compiler::Frontend::MacroPiece::Kind::Expression
-              # {{ expr }} - substitute parameter or evaluate expression
-              if expr_id = piece.expr
-                expr_node = @arena[expr_id]
-                param_name = extract_macro_param_name(expr_node)
-                if param_name && (value = param_values[param_name]?)
-                  io << value
-                else
-                  # Not a parameter - try to stringify the expression
-                  io << stringify_ast_node(expr_node)
-                end
-              end
-            else
-              # Control structures - handle in future
-            end
-          end
+      macro_params = params.map { |param| "#{param.prefix}#{param.name}" }
+      macro_symbol = CrystalV2::Compiler::Semantic::MacroSymbol.new(
+        macro_name,
+        macro_def.body,
+        macro_def.body,
+        macro_params
+      )
+
+      program = CrystalV2::Compiler::Frontend::Program.new(macro_arena, [] of ExprId)
+      expander = CrystalV2::Compiler::Semantic::MacroExpander.new(
+        program,
+        macro_arena,
+        CrystalV2::Runtime.target_flags,
+        recovery_mode: true,
+        source_provider: ->(expr_id : ExprId) : String? { macro_block_body_text(expr_id) }
+      )
+
+      owner_type = @current_class ? macro_owner_type_for(@current_class.not_nil!) : nil
+      expander.expand(
+        macro_symbol,
+        normalized_args,
+        owner_type,
+        named_args: normalized_named,
+        block_id: block_id
+      )
+    end
+
+    # Expand a macro call inline using the full macro expander.
+    private def expand_macro(
+      ctx : LoweringContext,
+      macro_def : CrystalV2::Compiler::Frontend::MacroDefNode,
+      macro_arena : CrystalV2::Compiler::Frontend::ArenaLike,
+      args : Array(ExprId),
+      named_args : Array(CrystalV2::Compiler::Frontend::NamedArgument)?,
+      block_id : ExprId?
+    ) : ValueId
+      expanded_id = expand_macro_expr(macro_def, macro_arena, args, named_args, block_id)
+      if expanded_id.invalid?
+        nil_lit = Literal.new(ctx.next_id, TypeRef::NIL, nil)
+        ctx.emit(nil_lit)
+        return nil_lit.id
+      end
+
+      old_arena = @arena
+      @arena = macro_arena
+      begin
+        last_id = lower_expanded_macro_expr(ctx, expanded_id)
+        last_id || begin
+          nil_lit = Literal.new(ctx.next_id, TypeRef::NIL, nil)
+          ctx.emit(nil_lit)
+          nil_lit.id
         end
-
-        # Parse the expanded text as Crystal code
-        expanded_text = expanded_text.strip
-        if expanded_text.empty?
-          # Empty macro - return void
-          noop = Literal.new(ctx.next_id, TypeRef::VOID, nil)
-          ctx.emit(noop)
-          return noop.id
-        end
-
-        lexer = CrystalV2::Compiler::Frontend::Lexer.new(expanded_text)
-        parser = CrystalV2::Compiler::Frontend::Parser.new(lexer)
-        program = parser.parse_program
-
-        if program.roots.empty?
-          noop = Literal.new(ctx.next_id, TypeRef::VOID, nil)
-          ctx.emit(noop)
-          return noop.id
-        end
-
-        # Lower the parsed expression using the macro's arena
-        old_arena = @arena
-        @arena = program.arena
-        begin
-          # Lower all expressions, return last one
-          last_id : ValueId? = nil
-          program.roots.each do |expr_id|
-            last_id = lower_expr(ctx, expr_id)
-          end
-          last_id || begin
-            noop = Literal.new(ctx.next_id, TypeRef::VOID, nil)
-            ctx.emit(noop)
-            noop.id
-          end
-        ensure
-          @arena = old_arena
-        end
-      else
-        # Unsupported macro body type
-        noop = Literal.new(ctx.next_id, TypeRef::VOID, nil)
-        ctx.emit(noop)
-        noop.id
+      ensure
+        @arena = old_arena
       end
     end
 
-    # Extract parameter name from macro expression node
-    private def extract_macro_param_name(node) : String?
-      case node
-      when CrystalV2::Compiler::Frontend::MacroExpressionNode
-        inner = @arena[node.expression]
-        extract_macro_param_name(inner)
-      when CrystalV2::Compiler::Frontend::IdentifierNode
-        String.new(node.name)
-      else
-        nil
+    private def normalize_macro_call_args(
+      params : Array(MacroParamInfo),
+      args : Array(ExprId),
+      named_args : Array(CrystalV2::Compiler::Frontend::NamedArgument)?
+    ) : {Array(ExprId), Array(CrystalV2::Compiler::Frontend::NamedArgument)?}
+      external_to_internal = {} of String => String
+      params.each do |param|
+        if ext = param.external_name
+          external_to_internal[ext] = param.name
+        end
       end
+
+      normalized_named = [] of CrystalV2::Compiler::Frontend::NamedArgument
+      named_args.try do |list|
+        list.each do |named_arg|
+          external = String.new(named_arg.name)
+          internal = external_to_internal[external]? || external
+          normalized_named << CrystalV2::Compiler::Frontend::NamedArgument.new(
+            internal.to_slice,
+            named_arg.value,
+            named_arg.name_span,
+            named_arg.value_span
+          )
+        end
+      end
+
+      {args, normalized_named.empty? ? nil : normalized_named}
     end
 
-    # Stringify an AST node for macro expansion
-    private def stringify_ast_node(node) : String
+    private def reparse_expr_for_macro(
+      expr_id : ExprId,
+      source_arena : CrystalV2::Compiler::Frontend::ArenaLike,
+      target_arena : CrystalV2::Compiler::Frontend::ArenaLike
+    ) : ExprId
+      return expr_id if source_arena == target_arena
+      source = @sources_by_arena[source_arena]?
+      return ExprId.new(-1) unless source
+
+      text = slice_source_for_expr_in_arena(expr_id, source_arena, source)
+      return ExprId.new(-1) unless text
+
+      lexer = CrystalV2::Compiler::Frontend::Lexer.new(text)
+      parser = CrystalV2::Compiler::Frontend::Parser.new(lexer, target_arena, recovery_mode: true)
+      program = parser.parse_program
+      program.roots.first? || ExprId.new(-1)
+    end
+
+    private def reparse_named_arg_for_macro(
+      named_arg : CrystalV2::Compiler::Frontend::NamedArgument,
+      source_arena : CrystalV2::Compiler::Frontend::ArenaLike,
+      target_arena : CrystalV2::Compiler::Frontend::ArenaLike
+    ) : CrystalV2::Compiler::Frontend::NamedArgument
+      value_id = reparse_expr_for_macro(named_arg.value, source_arena, target_arena)
+      CrystalV2::Compiler::Frontend::NamedArgument.new(
+        named_arg.name,
+        value_id,
+        named_arg.name_span,
+        named_arg.value_span
+      )
+    end
+
+    private def macro_block_body_text(block_id : ExprId) : String
+      return "" if block_id.invalid?
+      block_node = @arena[block_id]
+      return "" unless block_node.is_a?(CrystalV2::Compiler::Frontend::BlockNode)
+      return "" if block_node.body.empty?
+
+      source = @sources_by_arena[@arena]?
+      return "" unless source
+
+      texts = [] of String
+      block_node.body.each do |expr_id|
+        snippet = slice_source_for_expr_in_arena(expr_id, @arena, source)
+        texts << snippet if snippet
+      end
+      texts.join("\n")
+    end
+
+    private def slice_source_for_expr_in_arena(
+      expr_id : ExprId,
+      arena : CrystalV2::Compiler::Frontend::ArenaLike,
+      source : String
+    ) : String?
+      return nil if expr_id.invalid?
+      node = arena[expr_id]
+
+      span = node.span
+      start = span.start_offset
+      length = span.end_offset - span.start_offset
+      return nil if length <= 0
+      return nil if start < 0 || start >= source.bytesize
+      if start + length > source.bytesize
+        length = source.bytesize - start
+      end
+      source.byte_slice(start, length)
+    end
+
+    private def macro_owner_type_for(class_name : String) : CrystalV2::Compiler::Semantic::ClassSymbol?
+      info = @class_info[class_name]?
+      return nil unless info
+
+      scope = CrystalV2::Compiler::Semantic::SymbolTable.new
+      class_scope = CrystalV2::Compiler::Semantic::SymbolTable.new
+
+      symbol = CrystalV2::Compiler::Semantic::ClassSymbol.new(
+        class_name,
+        ExprId.new(-1),
+        scope: scope,
+        class_scope: class_scope,
+        superclass_name: info.parent_name,
+        type_parameters: nil,
+        is_struct: info.is_struct,
+        is_abstract: false
+      )
+
+      info.ivars.each do |ivar|
+        type_name = type_name_for_macro(ivar.type)
+        ivar_name = ivar.name
+        ivar_name = ivar_name[1..-1] if ivar_name.starts_with?("@")
+        symbol.add_instance_var(ivar_name, type_name, nil, false)
+      end
+
+      instance_method_names_for_class(class_name).each do |method_name|
+        method_scope = CrystalV2::Compiler::Semantic::SymbolTable.new(scope)
+        method_symbol = CrystalV2::Compiler::Semantic::MethodSymbol.new(
+          method_name,
+          ExprId.new(-1),
+          scope: method_scope
+        )
+        scope.redefine(method_name, method_symbol)
+      end
+
+      symbol
+    end
+
+    private def instance_method_names_for_class(class_name : String) : Array(String)
+      prefix = "#{class_name}#"
+      names = Set(String).new
+      @function_defs.each_key do |key|
+        next unless key.starts_with?(prefix)
+        raw = key[prefix.size..]
+        method_name = raw.split("(").first
+        names.add(method_name)
+      end
+      names.to_a
+    end
+
+    private def type_name_for_macro(type_ref : TypeRef) : String?
+      if name = concrete_type_name_for(type_ref)
+        return name
+      end
+      if desc = @module.get_type_descriptor(type_ref)
+        return desc.name
+      end
+      nil
+    end
+
+    private def lower_expanded_macro_expr(ctx : LoweringContext, expr_id : ExprId) : ValueId
+      if expr_id.invalid?
+        nil_lit = Literal.new(ctx.next_id, TypeRef::NIL, nil)
+        ctx.emit(nil_lit)
+        return nil_lit.id
+      end
+
+      node = @arena[expr_id]
       case node
-      when CrystalV2::Compiler::Frontend::NumberNode
-        String.new(node.value)
-      when CrystalV2::Compiler::Frontend::StringNode
-        # Return with quotes for string literals
-        "\"#{String.new(node.value)}\""
-      when CrystalV2::Compiler::Frontend::IdentifierNode
-        String.new(node.name)
-      when CrystalV2::Compiler::Frontend::MacroExpressionNode
-        stringify_ast_node(@arena[node.expression])
-      when CrystalV2::Compiler::Frontend::BinaryNode
-        left = stringify_ast_node(@arena[node.left])
-        right = stringify_ast_node(@arena[node.right])
-        "#{left} #{String.new(node.operator)} #{right}"
-      when CrystalV2::Compiler::Frontend::CallNode
-        # Simple call stringify
-        callee = @arena[node.callee]
-        name = case callee
-               when CrystalV2::Compiler::Frontend::IdentifierNode
-                 String.new(callee.name)
-               else
-                 "?"
-               end
-        args_str = node.args.map { |arg| stringify_ast_node(@arena[arg]) }.join(", ")
-        "#{name}(#{args_str})"
+      when CrystalV2::Compiler::Frontend::ClassNode
+        name = String.new(node.name)
+        full_name = resolve_class_name_in_context(name)
+        register_class_with_name(node, full_name)
+        lower_class_with_name(node, full_name)
+        nil_lit = Literal.new(ctx.next_id, TypeRef::NIL, nil)
+        ctx.emit(nil_lit)
+        nil_lit.id
+      when CrystalV2::Compiler::Frontend::ModuleNode
+        name = String.new(node.name)
+        full_name = resolve_class_name_in_context(name)
+        register_module_with_name(node, full_name)
+        lower_module_with_name(node, full_name)
+        nil_lit = Literal.new(ctx.next_id, TypeRef::NIL, nil)
+        ctx.emit(nil_lit)
+        nil_lit.id
+      when CrystalV2::Compiler::Frontend::EnumNode
+        name = String.new(node.name)
+        full_name = resolve_class_name_in_context(name)
+        register_enum_with_name(node, full_name)
+        nil_lit = Literal.new(ctx.next_id, TypeRef::NIL, nil)
+        ctx.emit(nil_lit)
+        nil_lit.id
+      when CrystalV2::Compiler::Frontend::BlockNode
+        last_id : ValueId? = nil
+        node.body.each do |child_id|
+          last_id = lower_expanded_macro_expr(ctx, child_id)
+        end
+        last_id || begin
+          nil_lit = Literal.new(ctx.next_id, TypeRef::NIL, nil)
+          ctx.emit(nil_lit)
+          nil_lit.id
+        end
       else
-        ""
+        lower_expr(ctx, expr_id)
       end
     end
 
@@ -1572,6 +1815,90 @@ module Crystal::HIR
         end
       end
       defined
+    end
+
+    private def add_defined_instance_methods_from_expr(
+      class_name : String,
+      defined_full_names : Set(String),
+      expr_id : ExprId
+    )
+      return if expr_id.invalid?
+
+      member = unwrap_visibility_member(@arena[expr_id])
+      case member
+      when CrystalV2::Compiler::Frontend::BlockNode
+        member.body.each do |child_id|
+          add_defined_instance_methods_from_expr(class_name, defined_full_names, child_id)
+        end
+      when CrystalV2::Compiler::Frontend::DefNode
+        return if member.is_abstract
+        if recv = member.receiver
+          return if String.new(recv) == "self"
+        end
+
+        method_name = String.new(member.name)
+        base_name = "#{class_name}##{method_name}"
+
+        param_types = [] of TypeRef
+        has_block = false
+        if params = member.params
+          params.each do |param|
+            next if named_only_separator?(param)
+            if param.is_block
+              has_block = true
+              next
+            end
+            if ta = param.type_annotation
+              param_types << type_ref_for_name(String.new(ta))
+            else
+              param_types << TypeRef::VOID
+            end
+          end
+        end
+
+        full_name = mangle_function_name(base_name, param_types, has_block)
+        defined_full_names << full_name
+      when CrystalV2::Compiler::Frontend::GetterNode
+        return if member.is_class?
+        member.specs.each do |spec|
+          accessor_name = accessor_method_name(spec)
+          base_name = "#{class_name}##{accessor_name}"
+          full_name = mangle_function_name(base_name, [] of TypeRef)
+          defined_full_names << full_name
+        end
+      when CrystalV2::Compiler::Frontend::SetterNode
+        return if member.is_class?
+        member.specs.each do |spec|
+          accessor_name = accessor_storage_name(spec)
+          base_name = "#{class_name}##{accessor_name}="
+          param_type = if ta = spec.type_annotation
+                         type_ref_for_name(String.new(ta))
+                       else
+                         TypeRef::VOID
+                       end
+          full_name = mangle_function_name(base_name, [param_type])
+          defined_full_names << full_name
+        end
+      when CrystalV2::Compiler::Frontend::PropertyNode
+        return if member.is_class?
+        member.specs.each do |spec|
+          getter_name = accessor_method_name(spec)
+          setter_name = accessor_storage_name(spec)
+          getter_base = "#{class_name}##{getter_name}"
+          setter_base = "#{class_name}##{setter_name}="
+          getter_full = mangle_function_name(getter_base, [] of TypeRef)
+          param_type = if ta = spec.type_annotation
+                         type_ref_for_name(String.new(ta))
+                       else
+                         TypeRef::VOID
+                       end
+          setter_full = mangle_function_name(setter_base, [param_type])
+          defined_full_names << getter_full
+          defined_full_names << setter_full
+        end
+      when CrystalV2::Compiler::Frontend::VisibilityModifierNode
+        add_defined_instance_methods_from_expr(class_name, defined_full_names, member.expression)
+      end
     end
 
     private def accessor_method_name(spec : CrystalV2::Compiler::Frontend::AccessorSpec) : String
@@ -3143,10 +3470,8 @@ module Crystal::HIR
             @current_class = old_class
             full_alias_name = "#{full_name}::#{alias_name}"
             register_type_alias(full_alias_name, target_name)
-            # Also register short name for local resolution within module
-            register_type_alias(alias_name, target_name)
             if ENV.has_key?("DEBUG_ALIAS")
-              STDERR.puts "[ALIAS] Registered: #{full_alias_name} => #{target_name}, also: #{alias_name} => #{target_name}"
+              STDERR.puts "[ALIAS] Registered: #{full_alias_name} => #{target_name}"
             end
           elsif member.is_a?(CrystalV2::Compiler::Frontend::ModuleNode)
             # Recursively register nested module aliases first
@@ -3158,8 +3483,6 @@ module Crystal::HIR
             class_name = String.new(member.name)
             full_class_name = "#{full_name}::#{class_name}"
             register_type_alias(full_class_name, full_class_name)
-            # Also register short name -> full name for local resolution (for both classes and structs)
-            register_type_alias(class_name, full_class_name)
             register_class_aliases(member, full_class_name)
           end
         end
@@ -3329,8 +3652,85 @@ module Crystal::HIR
             nested_name = String.new(member.name)
             full_nested_name = "#{module_name}::#{nested_name}"
             lower_module_with_name(member, full_nested_name)
+          when CrystalV2::Compiler::Frontend::CallNode
+            lower_macro_call_in_module_body(module_name, member)
           end
         end
+      end
+    end
+
+    private def lower_module_body_expr(module_name : String, expr_id : ExprId)
+      return if expr_id.invalid?
+
+      member = unwrap_visibility_member(@arena[expr_id])
+      case member
+      when CrystalV2::Compiler::Frontend::BlockNode
+        member.body.each do |child_id|
+          lower_module_body_expr(module_name, child_id)
+        end
+      when CrystalV2::Compiler::Frontend::DefNode
+        is_class_method = if recv = member.receiver
+                            String.new(recv) == "self"
+                          else
+                            false
+                          end
+        lower_module_method(module_name, member) if is_class_method
+      when CrystalV2::Compiler::Frontend::GetterNode
+        return unless member.is_class?
+        member.specs.each do |spec|
+          generate_class_getter_method(module_name, spec, @arena)
+        end
+      when CrystalV2::Compiler::Frontend::SetterNode
+        return unless member.is_class?
+        member.specs.each do |spec|
+          generate_class_setter_method(module_name, spec)
+        end
+      when CrystalV2::Compiler::Frontend::PropertyNode
+        return unless member.is_class?
+        member.specs.each do |spec|
+          generate_class_getter_method(module_name, spec, @arena)
+          generate_class_setter_method(module_name, spec)
+        end
+      when CrystalV2::Compiler::Frontend::ClassNode
+        class_name = String.new(member.name)
+        full_class_name = "#{module_name}::#{class_name}"
+        register_class_with_name(member, full_class_name)
+        lower_class_with_name(member, full_class_name)
+      when CrystalV2::Compiler::Frontend::ModuleNode
+        nested_name = String.new(member.name)
+        full_nested_name = "#{module_name}::#{nested_name}"
+        register_module_with_name(member, full_nested_name)
+        lower_module_with_name(member, full_nested_name)
+      when CrystalV2::Compiler::Frontend::EnumNode
+        enum_name = String.new(member.name)
+        full_enum_name = "#{module_name}::#{enum_name}"
+        register_enum_with_name(member, full_enum_name)
+      when CrystalV2::Compiler::Frontend::CallNode
+        lower_macro_call_in_module_body(module_name, member)
+      end
+    end
+
+    private def lower_macro_call_in_module_body(
+      module_name : String,
+      node : CrystalV2::Compiler::Frontend::CallNode
+    )
+      callee_node = @arena[node.callee]
+      return unless callee_node.is_a?(CrystalV2::Compiler::Frontend::IdentifierNode)
+
+      method_name = String.new(callee_node.name)
+      macro_entry = @macro_defs[method_name]?
+      return unless macro_entry
+
+      macro_def, macro_arena = macro_entry
+      expanded_id = expand_macro_expr(macro_def, macro_arena, node.args, node.named_args, node.block)
+      return if expanded_id.invalid?
+
+      old_arena = @arena
+      @arena = macro_arena
+      begin
+        lower_module_body_expr(module_name, expanded_id)
+      ensure
+        @arena = old_arena
       end
     end
 
@@ -4025,6 +4425,9 @@ module Crystal::HIR
                    end
                  end
       @class_info[class_name] = ClassInfo.new(class_name, type_ref, ivars, class_vars, offset, is_struct, parent_name)
+      if short_name = class_name.split("::").last?
+        (@short_type_index[short_name] ||= Set(String).new) << class_name
+      end
       # DEBUG: track type_ref.id for problematic types
       if ENV.has_key?("DEBUG_TYPE_ID") &&
          (class_name.includes?("Sequence") || class_name.includes?("LoadCommand") ||
@@ -4266,6 +4669,7 @@ module Crystal::HIR
             # Handled above via mixin expansion.
           when CrystalV2::Compiler::Frontend::DefNode
             lower_method(class_name, class_info, member)
+            add_defined_instance_methods_from_expr(class_name, defined_full_names, expr_id)
           when CrystalV2::Compiler::Frontend::GetterNode
             # Generate synthetic getter methods
             if member.is_class?
@@ -4277,6 +4681,7 @@ module Crystal::HIR
                 generate_getter_method(class_name, class_info, spec)
               end
             end
+            add_defined_instance_methods_from_expr(class_name, defined_full_names, expr_id)
           when CrystalV2::Compiler::Frontend::SetterNode
             # Generate synthetic setter methods
             if member.is_class?
@@ -4288,6 +4693,7 @@ module Crystal::HIR
                 generate_setter_method(class_name, class_info, spec)
               end
             end
+            add_defined_instance_methods_from_expr(class_name, defined_full_names, expr_id)
           when CrystalV2::Compiler::Frontend::PropertyNode
             # Generate both getter and setter methods
             if member.is_class?
@@ -4301,11 +4707,115 @@ module Crystal::HIR
                 generate_setter_method(class_name, class_info, spec)
               end
             end
+            add_defined_instance_methods_from_expr(class_name, defined_full_names, expr_id)
+          when CrystalV2::Compiler::Frontend::CallNode
+            lower_macro_call_in_class_body(class_name, class_info, member, defined_full_names, visited_modules)
           end
         end
       end
 
       @current_class = old_class
+    end
+
+    private def lower_class_body_expr(
+      class_name : String,
+      class_info : ClassInfo,
+      expr_id : ExprId,
+      defined_full_names : Set(String),
+      visited_modules : Set(String)
+    )
+      return if expr_id.invalid?
+
+      member = unwrap_visibility_member(@arena[expr_id])
+      case member
+      when CrystalV2::Compiler::Frontend::BlockNode
+        member.body.each do |child_id|
+          lower_class_body_expr(class_name, class_info, child_id, defined_full_names, visited_modules)
+        end
+      when CrystalV2::Compiler::Frontend::IncludeNode
+        lower_module_instance_methods_for(class_name, class_info, member, defined_full_names, visited_modules)
+      when CrystalV2::Compiler::Frontend::DefNode
+        lower_method(class_name, class_info, member)
+        add_defined_instance_methods_from_expr(class_name, defined_full_names, expr_id)
+      when CrystalV2::Compiler::Frontend::GetterNode
+        if member.is_class?
+          member.specs.each do |spec|
+            generate_class_getter_method(class_name, spec, @arena)
+          end
+        else
+          member.specs.each do |spec|
+            generate_getter_method(class_name, class_info, spec)
+          end
+        end
+        add_defined_instance_methods_from_expr(class_name, defined_full_names, expr_id)
+      when CrystalV2::Compiler::Frontend::SetterNode
+        if member.is_class?
+          member.specs.each do |spec|
+            generate_class_setter_method(class_name, spec)
+          end
+        else
+          member.specs.each do |spec|
+            generate_setter_method(class_name, class_info, spec)
+          end
+        end
+        add_defined_instance_methods_from_expr(class_name, defined_full_names, expr_id)
+      when CrystalV2::Compiler::Frontend::PropertyNode
+        if member.is_class?
+          member.specs.each do |spec|
+            generate_class_getter_method(class_name, spec, @arena)
+            generate_class_setter_method(class_name, spec)
+          end
+        else
+          member.specs.each do |spec|
+            generate_getter_method(class_name, class_info, spec)
+            generate_setter_method(class_name, class_info, spec)
+          end
+        end
+        add_defined_instance_methods_from_expr(class_name, defined_full_names, expr_id)
+      when CrystalV2::Compiler::Frontend::ClassNode
+        nested_name = String.new(member.name)
+        full_name = "#{class_name}::#{nested_name}"
+        register_class_with_name(member, full_name)
+        lower_class_with_name(member, full_name)
+      when CrystalV2::Compiler::Frontend::ModuleNode
+        nested_name = String.new(member.name)
+        full_name = "#{class_name}::#{nested_name}"
+        register_module_with_name(member, full_name)
+        lower_module_with_name(member, full_name)
+      when CrystalV2::Compiler::Frontend::EnumNode
+        nested_name = String.new(member.name)
+        full_name = "#{class_name}::#{nested_name}"
+        register_enum_with_name(member, full_name)
+      when CrystalV2::Compiler::Frontend::CallNode
+        lower_macro_call_in_class_body(class_name, class_info, member, defined_full_names, visited_modules)
+      end
+    end
+
+    private def lower_macro_call_in_class_body(
+      class_name : String,
+      class_info : ClassInfo,
+      node : CrystalV2::Compiler::Frontend::CallNode,
+      defined_full_names : Set(String),
+      visited_modules : Set(String)
+    )
+      callee_node = @arena[node.callee]
+      return unless callee_node.is_a?(CrystalV2::Compiler::Frontend::IdentifierNode)
+
+      method_name = String.new(callee_node.name)
+      macro_entry = @macro_defs[method_name]?
+      return unless macro_entry
+
+      macro_def, macro_arena = macro_entry
+      expanded_id = expand_macro_expr(macro_def, macro_arena, node.args, node.named_args, node.block)
+      return if expanded_id.invalid?
+
+      old_arena = @arena
+      @arena = macro_arena
+      begin
+        lower_class_body_expr(class_name, class_info, expanded_id, defined_full_names, visited_modules)
+      ensure
+        @arena = old_arena
+      end
     end
 
     # Generate allocator: ClassName.new(...) -> allocates and returns instance
@@ -6100,6 +6610,13 @@ module Crystal::HIR
         end
       elsif type_name_exists?(name)
         result = name
+      end
+
+      # Final fallback: resolve unique short-name matches (avoids short-name leakage)
+      if result == name && (candidates = @short_type_index[name]?)
+        if candidates.size == 1
+          result = candidates.first
+        end
       end
 
       debug_hook_type_resolve(name, @current_class || "", result)
@@ -11436,8 +11953,9 @@ module Crystal::HIR
         method_name = String.new(callee_node.name)
 
         # Check if this is a macro call - expand inline instead of generating Call
-        if macro_def = @macro_defs[method_name]?
-          return expand_macro(ctx, macro_def, node.args)
+        if macro_entry = @macro_defs[method_name]?
+          macro_def, macro_arena = macro_entry
+          return expand_macro(ctx, macro_def, macro_arena, node.args, node.named_args, node.block)
         end
 
         # If inside a class/module, check if this is a method call on self or module

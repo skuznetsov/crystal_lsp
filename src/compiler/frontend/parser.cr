@@ -7145,6 +7145,9 @@ module CrystalV2
                 left_trim = macro_control_left_trim?
                 already_empty = pieces.empty?
                 trim_applied = left_trim
+                if buffer_end_token
+                  trim_gap = append_macro_gap(buffer, buffer_end_token, token, trim_gap)
+                end
                 flush_macro_text(buffer, pieces, trim_applied, buffer_start_token, buffer_end_token)
                 buffer_start_token = nil
                 buffer_end_token = nil
@@ -7200,6 +7203,9 @@ module CrystalV2
                 left_trim = macro_expression_left_trim?
                 already_empty = pieces.empty?
                 trim_applied = left_trim
+                if buffer_end_token
+                  trim_gap = append_macro_gap(buffer, buffer_end_token, token, trim_gap)
+                end
                 flush_macro_text(buffer, pieces, trim_applied, buffer_start_token, buffer_end_token)
                 buffer_start_token = nil
                 buffer_end_token = nil
@@ -7212,6 +7218,9 @@ module CrystalV2
                 next
               elsif macro_variable_start?
                 already_empty = pieces.empty?
+                if buffer_end_token
+                  trim_gap = append_macro_gap(buffer, buffer_end_token, token, trim_gap)
+                end
                 flush_macro_text(buffer, pieces, false, buffer_start_token, buffer_end_token)
                 buffer_start_token = nil
                 buffer_end_token = nil
@@ -7534,6 +7543,9 @@ module CrystalV2
           when Token::Kind::RBrace, Token::Kind::RParen, Token::Kind::RBracket
             # Closing delimiters are never arguments
             return PREFIX_ERROR
+          when Token::Kind::Operator
+            # Do not treat implicit-receiver calls (.foo) as call arguments.
+            return PREFIX_ERROR if slice_eq?(current_token.slice, ".")
           when Token::Kind::LParen
             # Regular call with parentheses, handled separately
             return PREFIX_ERROR
