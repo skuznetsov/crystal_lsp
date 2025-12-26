@@ -1011,12 +1011,13 @@ r2 = maybe(false)  # => nil
 **Prelude build progress (with stdlib/prelude):**
 - Reaches LLVM IR emission and `opt -O1` successfully; link still fails due to missing runtime/stdlib symbols (expected at this stage).
 - Timing snapshot (release + `--stats --no-llvm-opt --no-llvm-metadata`): parse prelude ~167ms, HIR ~2.0s, MIR ~0.3ms, LLVM ~1.8ms, total ~2.2s; link failure is the current blocker.
-- Linker missing symbols (recent unicode_use run; full list in `/tmp/unicode_use.link.log`):
-  - DWARF enums/helpers: `_Crystal__DWARF__TAG_new_UInt32`, `_AT_new_UInt32`, `_FORM_new_UInt32`, `_LNS_new_UInt8`, `_LNE_new_UInt8`, `_LineNumbers_*`, `_Strings_*`, `_read_*_leb128`.
-  - MachO accessors: `_Crystal__MachO__LoadCommand_new_Pointer`, `_Section64_*`, `_Nlist64__Type_*`, `_MachO_endianness`, `_read_segments_and_sections`.
-  - IO/EventLoop/Errno: `_Crystal__EventLoop__FileDescriptor_{read,write}_IO__FileDescriptor_Slice_UInt8_`, `_IO__FileDescriptor_*`, `_Errno_*`.
-  - FastFloat/ParseOptions: `_Float__FastFloat_*`, `_FromCharsResultT_UInt8_*`, `_ParseOptionsT_UInt8_*`.
-  - Misc: `_Attribute_new_Pointer_Pointer_Int32`, `_Math_min/max`, `_Tuple_bsearch_*`, `_Bytes___Nil_*`, `_Seek_*`, `_LoadCommand_*`, `_value__Int32`.
+- Linker missing symbols (unicode_use run 2025-12-25; full list in `/private/tmp/unicode_use.link.log`):
+  - DWARF: `LineNumbers_*` helpers, `FORM_implicit_const`, `Row_new`, `Sequence::FileEntry_*`.
+  - IO/Decoder/Bytes: `IO_gets_*`, `Decoder_*`, `Bytes___Nil_*`, `IO__FileDescriptor_*`, `IO_read_*`.
+  - System/Thread: `Thread::Mutex_*`, `Signal_*`, `Scheduler::Thread_scheduler`.
+  - FastFloat: `FromCharsResult*`, `ParseOptions*`, `Char.in?`, `UInt64_unsafe_shr`, `UInt8_in?`.
+  - String/Array helpers: `String::Builder_*`, `String::Grapheme_*`, `Tuple_bsearch_*`, `Pointer_*`, `Int32_hash`.
+  - Exceptions: `Exception_callstack`, `CallStack_printable_backtrace`, `_exception_class_`, `_exception_cleanup_`.
 
 **Recent fixes (prelude bootstrap path):**
 - Normalize `flag?` macro arguments (strip leading `:`) + require cache v3; pthread requires now load.
@@ -1027,6 +1028,7 @@ r2 = maybe(false)  # => nil
 - Remove `StructNode` from AST + LSP AST cache; structs are `ClassNode.is_struct` (cache version bump) (2025-12-25).
 - Register module instance methods as class methods when `extend self` is present (fixes `Math.min/max`) (2025-12-25).
 - Propagate `extend self` through macro-literal/module branches when registering module methods (2025-12-25).
+- Infer class var types from `uninitialized` and typed literals (Array/Hash/NamedTuple) to avoid VOID globals (fixes `Thread@@threads`, `Hasher@@seed`, `Time::Location@@location_cache`) (2025-12-25).
 
 **Stdlib requires advanced features not yet implemented:**
 

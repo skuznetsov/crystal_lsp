@@ -831,6 +831,16 @@ module Crystal::HIR
         right_name = stringify_type_expr(node.right)
         return nil unless right_name
         left_name ? "#{left_name}::#{right_name}" : right_name
+      when CrystalV2::Compiler::Frontend::CallNode
+        base = resolve_path_like_name(node.callee) || stringify_type_expr(node.callee)
+        return nil unless base
+        args = [] of String
+        node.args.each do |arg|
+          if str = stringify_type_expr(arg)
+            args << str
+          end
+        end
+        "#{base}(#{args.join(", ")})"
       when CrystalV2::Compiler::Frontend::GenericNode
         base = stringify_type_expr(node.base_type)
         return nil unless base
@@ -841,6 +851,17 @@ module Crystal::HIR
           end
         end
         "#{base}(#{args.join(", ")})"
+      when CrystalV2::Compiler::Frontend::IndexNode
+        base = stringify_type_expr(node.object)
+        return nil unless base
+        if node.indexes.size == 1
+          idx_node = @arena[node.indexes.first]
+          if idx_node.is_a?(CrystalV2::Compiler::Frontend::NumberNode)
+            idx_str = String.new(idx_node.value)
+            return "StaticArray(#{base}, #{idx_str})"
+          end
+        end
+        nil
       when CrystalV2::Compiler::Frontend::UnaryNode
         base = stringify_type_expr(node.operand)
         return nil unless base
@@ -1962,6 +1983,10 @@ module Crystal::HIR
               return type_ref_for_name(type_str)
             end
           end
+        end
+      when CrystalV2::Compiler::Frontend::UninitializedNode
+        if type_str = stringify_type_expr(expr_node.type)
+          return type_ref_for_name(type_str)
         end
       end
 
@@ -6305,6 +6330,11 @@ module Crystal::HIR
         return TypeRef::VOID
       when CrystalV2::Compiler::Frontend::ArrayLiteralNode
         # Array literal - infer element type from first element
+        if of_type = value_node.of_type
+          if type_name = stringify_type_expr(of_type)
+            return type_ref_for_name("Array(#{normalize_declared_type_name(type_name)})")
+          end
+        end
         if elements = value_node.elements
           if first_id = elements.first?
             first_node = @arena[first_id]
@@ -6314,6 +6344,34 @@ module Crystal::HIR
           end
         end
         return type_ref_for_name("Array(String)")  # Default
+      when CrystalV2::Compiler::Frontend::HashLiteralNode
+        if key_type = value_node.of_key_type
+          value_type = value_node.of_value_type
+          if value_type
+            key_name = normalize_declared_type_name(String.new(key_type))
+            value_name = normalize_declared_type_name(String.new(value_type))
+            value_name = "NamedTuple" if value_name.starts_with?("NamedTuple")
+            return type_ref_for_name("Hash(#{key_name}, #{value_name})")
+          end
+        end
+        if entries = value_node.entries
+          if first_entry = entries.first?
+            key_node = @arena[first_entry.key]
+            value_node_inner = @arena[first_entry.value]
+            key_type = infer_type_from_expr(key_node)
+            value_type = infer_type_from_expr(value_node_inner)
+            if key_type && value_type
+              return type_ref_for_name("Hash(#{key_type}, #{value_type})")
+            end
+          end
+        end
+        return type_ref_for_name("Hash(String, String)")
+      when CrystalV2::Compiler::Frontend::NamedTupleLiteralNode
+        return type_ref_for_name("NamedTuple")
+      when CrystalV2::Compiler::Frontend::UninitializedNode
+        if type_str = stringify_type_expr(value_node.type)
+          return type_ref_for_name(normalize_declared_type_name(type_str))
+        end
       end
       TypeRef::VOID  # Default to VOID if we can't infer
     end
