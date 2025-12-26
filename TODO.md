@@ -1011,13 +1011,13 @@ r2 = maybe(false)  # => nil
 **Prelude build progress (with stdlib/prelude):**
 - Reaches LLVM IR emission and `opt -O1` successfully; link still fails due to missing runtime/stdlib symbols (expected at this stage).
 - Timing snapshot (release + `--stats --no-llvm-opt --no-llvm-metadata`): parse prelude ~167ms, HIR ~2.0s, MIR ~0.3ms, LLVM ~1.8ms, total ~2.2s; link failure is the current blocker.
-- Linker missing symbols (unicode_use run 2025-12-26; full list in `/private/tmp/unicode_use.link.log`):
-  - DWARF: `LineNumbers_*`, `FORM_implicit_const`, `Row_new`, `Sequence::FileEntry_*`, `line_strp`, `lnct`, `strp_sup`.
-  - IO/Decoder/Bytes: `IO_gets_*`, `Decoder_*`, `IO__FileDescriptor_*`, `IO_read_*`, `from_io(IO, IO::ByteFormat)`.
-  - System/Thread: `Thread::Mutex_*`, `Signal_*`, `Scheduler::Thread_scheduler`.
-  - FastFloat/Numeric: `FromCharsResult*`, `ParseOptions*`, `UInt64_unsafe_shr`, `UInt8_in?`, `UInt32_in?`, `UInt8#bits_set?`, `Char#to_i`, `UInt8#downcase`, `UInt8#to_s`, `UInt32#to_s`, `_to_i32/_to_u16/_to_u32/_to_u64/_to_u8`, `unsafe_chr`.
-  - String/Array helpers: `String::Builder_*`, `String::Grapheme_*`, `Tuple_bsearch_*`, `Pointer_*`, `Int32_hash`.
-  - Exceptions: `Exception_callstack`, `CallStack_printable_backtrace`, `_exception_class_`, `_exception_cleanup_`, `_exception_object_`, `_exception_type_id_`.
+- Linker missing symbols (unicode_use run; full list in `/private/tmp/unicode_use.link.log`):
+  - DWARF: `Crystal::DWARF::FORM_implicit_const`, `Crystal::DWARF::LineNumbers_*`, `Crystal::DWARF::Info_read_attribute_value`, `FORM_close`, `FORM::Tuple`, `Row_new`, `Sequence::FileEntry_*`, `line_strp`, `strp_sup`.
+  - IO/EventLoop: `Crystal::EventLoop::FileDescriptor_read/write`, `IO__FileDescriptor_system_*`, `IO_read_*`, `IO_gets_*`, `IO::Error.from_errno`, `Error_current`, `Error_initialize`, `IO::ARGF_read_*`, `IO__EOFError_initialize`.
+  - Scheduler/Threads/Signal: `Scheduler::Thread_scheduler`, `Scheduler_enqueue`, `SpinLock_sync_block`, `Thread::Mutex_synchronize_block`, `Fiber::StackPool_*`, `Signal_*`, `Sigset_clear`.
+  - Pointer/Memory: `Pointer(UInt8)#new/size/first/read_byte/close`, `Pointer(UInt8)#as` (`____Pointer/____String/____Tuple`), `_realloc_Int32`.
+  - Numeric/String: `UInt8#to_s(Int32)`, `UInt32#to_s(Int32)`, `Object#to_i`, `Nil#to_i32`, `String::Builder#[]/<< (Char/Nil)`.
+  - Collections/Misc: `Array(Abbrev)#attributes`, `Attribute.new`, `Tuple#bsearch(_index)`, `Hash(LibC::PidT, Int32)#pointer`, `Float::Printer::Range_*`, `File::Info_system_size`, `_st_size`, `__crystal_main`.
 
 **Recent fixes (prelude bootstrap path):**
 - Normalize `flag?` macro arguments (strip leading `:`) + require cache v3; pthread requires now load.
@@ -1029,6 +1029,11 @@ r2 = maybe(false)  # => nil
 - Register module instance methods as class methods when `extend self` is present (fixes `Math.min/max`) (2025-12-25).
 - Propagate `extend self` through macro-literal/module branches when registering module methods (2025-12-25).
 - Infer class var types from `uninitialized` and typed literals (Array/Hash/NamedTuple) to avoid VOID globals (fixes `Thread@@threads`, `Hasher@@seed`, `Time::Location@@location_cache`) (2025-12-25).
+- Preserve generic class reopenings during monomorphization (fixes `Range#bsearch` defs) (2025-12-26).
+- Resolve bare method calls inside class context to top-level when the class does not define the method (fixes `bsearch_internal`) (2025-12-26).
+- Primitive template fallback for numeric receivers (Int/Float method bodies) to avoid missing defs in stdlib (2025-12-26).
+- Pointer/new + mem intrinsics lowering hardened (ptr/int casts, llvm.mem* width selection) (2025-12-26).
+- Treat `T.size` macro patterns as `Int32` during lightweight return-type inference (2025-12-26).
 
 **Stdlib requires advanced features not yet implemented:**
 
@@ -1041,6 +1046,7 @@ r2 = maybe(false)  # => nil
 
 **Additional codegen gaps (observed):**
 - Top-level `{% if flag? %}` bodies now use raw source spans to parse defs/modules for simple flag branches; general macro expansion for complex bodies is still missing.
+- Mixed-width primitive calls in untyped methods (e.g., `Math.min` with `Int64` + `Int32`) can emit LLVM phis with mismatched integer widths; needs numeric promotion/common-type coercion (2025-12-26).
 - [x] Enum method bodies are captured and registered (enum defs now emitted for `Signal#reset` etc.) (2025-01-02)
 - [x] Macro `flag?` branches inside class/struct bodies now register defs (e.g., `Crystal::Scheduler.init`). (2025-01-02)
 - [x] Replace remaining `StructNode` checks with `ClassNode.is_struct` (parser does not emit StructNode). (2025-12-25)
