@@ -15,6 +15,7 @@ require "./types/pointer_type"
 require "./types/module_type"
 require "./types/enum_type"
 require "./types/virtual_type"
+require "../hir/debug_hooks"
 require "./analyzer"
 require "../frontend/ast"
 
@@ -74,6 +75,7 @@ module CrystalV2
         # Debug helper
         private def debug(msg : String)
           STDERR.puts "[TYPE_INFERENCE_DEBUG] #{msg}" if @debug_enabled
+          debug_hook("infer.debug", msg)
         end
 
         # Centralized watchdog guard to ensure we don't miss deadlines inside
@@ -84,10 +86,13 @@ module CrystalV2
 
         # Main entry point: Infer types for all root expressions
         def infer_types
+          debug_hook("infer.start", "roots=#{@program.roots.size}")
           @program.roots.each do |root_id|
+            debug_hook("infer.root", "expr_id=#{root_id}")
             type = infer_expression(root_id)
             @context.set_type(root_id, type)
           end
+          debug_hook("infer.finish", "roots=#{@program.roots.size} diagnostics=#{@diagnostics.size}")
         end
 
         # Recursive type inference for a single expression
@@ -122,6 +127,7 @@ module CrystalV2
                   # Cycle detected; assign nil_type to break it
                   # EXCEPTION: Don't set Nil for IdentifierNode - it needs to check @assignments
                   child_node = @program.arena[child]
+                  debug_hook("infer.cycle", "expr_id=#{child} node=#{child_node.class.name}")
                   unless child_node.is_a?(Frontend::IdentifierNode)
                     @context.set_type(child, @context.nil_type)
                   end
@@ -164,8 +170,10 @@ module CrystalV2
             node = @program.arena[expr_id]
             debug("FALLBACK TO RECURSIVE: #{node.class.name.split("::").last}")
           end
+          debug_hook("infer.fallback", "expr_id=#{expr_id}")
           if @depth > MAX_DEPTH
             debug("max recursion depth reached at expr #{expr_id}") if @debug_enabled
+            debug_hook("infer.max_depth", "expr_id=#{expr_id}")
             return @context.nil_type
           end
           @depth += 1
@@ -1038,6 +1046,7 @@ module CrystalV2
 
           # Remove @ prefix
           clean_name = var_name.starts_with?("@") ? var_name[1..-1] : var_name
+          debug_hook("infer.instance_var", "name=#{clean_name} current_class=#{@current_class.try(&.name)} receiver=#{@receiver_type_context.try(&.class_symbol.name)}")
 
           if ENV["DEBUG"]?
             puts "DEBUG infer_instance_var:"
@@ -1049,6 +1058,7 @@ module CrystalV2
           # Phase 5C: Check explicit type annotation from ClassSymbol first
           if current_class = @current_class
             if type_annotation = current_class.get_instance_var_type(clean_name)
+              debug_hook("infer.instance_var.annotated", "name=#{clean_name} type=#{type_annotation}")
               if ENV["DEBUG"]?
                 puts "  type_annotation: #{type_annotation}"
               end
@@ -1060,6 +1070,7 @@ module CrystalV2
                 end
                 if (type_args = receiver.type_args) && (type_params = receiver.class_symbol.type_parameters)
                   result = substitute_type_parameters(type_annotation, type_args, type_params)
+                  debug_hook("infer.instance_var.substitute", "name=#{clean_name} result=#{result}")
                   if ENV["DEBUG"]?
                     puts "  substituted result: #{result.class} = #{result.inspect}"
                   end
@@ -1076,6 +1087,7 @@ module CrystalV2
 
           # Check if we have inferred type from assignment
           if inferred_type = @instance_var_types[clean_name]?
+            debug_hook("infer.instance_var.inferred", "name=#{clean_name} type=#{inferred_type}")
             return inferred_type
           end
 
@@ -1083,6 +1095,7 @@ module CrystalV2
           if ENV["DEBUG"]?
             puts "  returning Nil (not found)"
           end
+          debug_hook("infer.instance_var.nil", "name=#{clean_name}")
           @context.nil_type
         end
 
@@ -2270,6 +2283,7 @@ module CrystalV2
         private def infer_generic(node : Frontend::GenericNode, expr_id : ExprId) : Type
           # Infer base type (should be ClassType for user-defined generics)
           base_type = infer_expression(node.base_type)
+          debug_hook("infer.generic.start", "base=#{base_type} args=#{node.type_args.size}")
 
           if ENV["DEBUG"]?
             puts "DEBUG infer_generic:"
@@ -2294,11 +2308,14 @@ module CrystalV2
 
           # If base is a class (Box), create ClassType with type args
           if base_type.is_a?(ClassType)
-            return ClassType.new(base_type.symbol, type_args)
+            result = ClassType.new(base_type.symbol, type_args)
+            debug_hook("infer.generic.result", "base=#{base_type.symbol.name} result=#{result}")
+            return result
           end
 
           # Otherwise return base type (for built-in types like Array, Hash)
           # Future: handle Array(Int32), Hash(String, Int32)
+          debug_hook("infer.generic.result", "base=#{base_type} result=#{base_type}")
           base_type
         end
 
@@ -2327,8 +2344,10 @@ module CrystalV2
             if ENV["DEBUG"]?
               puts "  → normalized to: #{result.class} = #{result.inspect}"
             end
+            debug_hook("infer.normalize_type_arg", "input=#{type} result=#{result}")
             result
           else
+            debug_hook("infer.normalize_type_arg", "input=#{type} result=#{type}")
             type
           end
         end
@@ -2843,6 +2862,7 @@ module CrystalV2
           callee_node = @program.arena[node.callee]
 
           debug("infer_call: callee_node type = #{callee_node.class.name}")
+          debug_hook("infer.call.start", "expr_id=#{expr_id} callee_node=#{callee_node.class.name}")
 
           receiver_type : Type?
           method_name : String?
@@ -2943,6 +2963,7 @@ module CrystalV2
           end
 
           return @context.nil_type unless receiver_type && method_name
+          debug_hook("infer.call.receiver", "method=#{method_name} receiver=#{receiver_type}")
 
           # If receiver is unknown (Nil placeholder), use heuristics and skip lookup
           if receiver_type.is_a?(PrimitiveType) && receiver_type.name == "Nil"
@@ -3298,8 +3319,12 @@ module CrystalV2
         # 3. Filter by parameter types (if annotated)
         # 4. Return best match
         private def lookup_method(receiver_type : Type, method_name : String, arg_types : Array(Type)) : MethodSymbol?
+          debug_hook("infer.lookup.start", "method=#{method_name} receiver=#{receiver_type} args=#{arg_types.size}")
           candidates = find_all_methods(receiver_type, method_name)
-          return nil if candidates.empty?
+          if candidates.empty?
+            debug_hook("infer.lookup.miss", "method=#{method_name} receiver=#{receiver_type} stage=candidates")
+            return nil
+          end
 
           # Filter by parameter count (accounting for default values, splat, double_splat)
           actual_count = arg_types.size
@@ -3309,21 +3334,32 @@ module CrystalV2
             max = has_splat ? Int32::MAX : m.params.count { |p| !p.is_block }
             actual_count >= required && actual_count <= max
           end
-          return nil if matching_count.empty?
+          if matching_count.empty?
+            debug_hook("infer.lookup.miss", "method=#{method_name} receiver=#{receiver_type} stage=arity")
+            return nil
+          end
 
           # Filter by parameter types (for typed parameters)
           matches = matching_count.select do |method|
             parameters_match?(method, arg_types)
           end
 
-          return nil if matches.empty?
-          return matches.first if matches.size == 1
+          if matches.empty?
+            debug_hook("infer.lookup.miss", "method=#{method_name} receiver=#{receiver_type} stage=types")
+            return nil
+          end
+          if matches.size == 1
+            debug_hook("infer.lookup.hit", "method=#{method_name} receiver=#{receiver_type} selected=#{matches.first.name}")
+            return matches.first
+          end
 
           # Phase 98: Specificity ranking - prefer more specific overload
           #
           # Sort by specificity score (highest first) and return best match
           # Ties are resolved by order of definition (first defined wins)
-          matches.max_by { |m| specificity_score(m, arg_types) }
+          selected = matches.max_by { |m| specificity_score(m, arg_types) }
+          debug_hook("infer.lookup.hit", "method=#{method_name} receiver=#{receiver_type} selected=#{selected.name} overloads=#{matches.size}")
+          selected
         end
 
         # Find all methods with given name on receiver type
@@ -4426,15 +4462,18 @@ module CrystalV2
 
           # If we've already inferred this method body, reuse it to prevent cycles
           if cached = @method_body_cache[method]?
+            debug_hook("infer.method_body.cache", "method=#{method.name} receiver=#{receiver_type}")
             return cached
           end
 
           # Break recursive inference cycles gracefully
           if @method_body_in_progress.includes?(method)
+            debug_hook("infer.method_body.cycle", "method=#{method.name} receiver=#{receiver_type}")
             return @context.nil_type
           end
 
           @method_body_in_progress << method
+          debug_hook("infer.method_body.start", "method=#{method.name} receiver=#{receiver_type}")
 
           if ENV["DEBUG"]?
             puts "DEBUG infer_method_body_type:"
@@ -4446,6 +4485,7 @@ module CrystalV2
           def_node = @program.arena[method.node_id]
           unless def_node.is_a?(Frontend::DefNode)
             puts "  ERROR: def_node is not DefNode!" if ENV["DEBUG"]?
+            debug_hook("infer.method_body.error", "method=#{method.name} error=not_def_node")
             return @context.nil_type
           end
 
@@ -4453,6 +4493,7 @@ module CrystalV2
           body = def_node.body
           unless body && !body.empty?
             puts "  ERROR: body is empty!" if ENV["DEBUG"]?
+            debug_hook("infer.method_body.error", "method=#{method.name} error=empty_body")
             return @context.nil_type
           end
 
@@ -4481,6 +4522,7 @@ module CrystalV2
           if ENV["DEBUG"]?
             puts "  result_type: #{result_type.class} = #{result_type.inspect}"
           end
+          debug_hook("infer.method_body.done", "method=#{method.name} result=#{result_type}")
 
           # Restore context
           @receiver_type_context = previous_receiver_context

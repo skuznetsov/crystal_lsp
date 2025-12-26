@@ -5,6 +5,7 @@ require "./collectors/symbol_collector"
 require "./resolvers/name_resolver"
 require "./type_inference_engine"
 require "./diagnostic"
+require "../hir/debug_hooks"
 
 module CrystalV2
   module Compiler
@@ -26,22 +27,28 @@ module CrystalV2
         end
 
         def collect_symbols
+          debug_hook("analyzer.symbols.start", "roots=#{@program.roots.size}")
           collector = SymbolCollector.new(@program, @global_context)
           collector.collect
           @semantic_diagnostics = collector.diagnostics
+          debug_hook("analyzer.symbols.finish", "diagnostics=#{@semantic_diagnostics.size}")
           self
         end
 
         def resolve_names
+          debug_hook("analyzer.resolve.start", "roots=#{@program.roots.size}")
           result = NameResolver.new(@program, @global_context.symbol_table).resolve
           @name_resolver_diagnostics = result.diagnostics
+          debug_hook("analyzer.resolve.finish", "diagnostics=#{@name_resolver_diagnostics.size}")
           result
         end
 
         def infer_types(identifier_symbols : Hash(ExprId, Symbol))
+          debug_hook("analyzer.infer.start", "symbols=#{identifier_symbols.size}")
           engine = TypeInferenceEngine.new(@program, identifier_symbols, @global_context.symbol_table)
           engine.infer_types
           @type_inference_diagnostics = engine.diagnostics
+          debug_hook("analyzer.infer.finish", "diagnostics=#{@type_inference_diagnostics.size}")
           engine
         end
 
