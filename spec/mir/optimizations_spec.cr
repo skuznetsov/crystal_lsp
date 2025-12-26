@@ -244,6 +244,46 @@ describe Crystal::MIR do
       result.value.should eq(true)
     end
 
+    it "folds UInt64 addition" do
+      mod = Crystal::MIR::Module.new
+      func = mod.create_function("test", Crystal::MIR::TypeRef::UINT64)
+      builder = Crystal::MIR::Builder.new(func)
+
+      a = builder.const_uint(10_u64, Crystal::MIR::TypeRef::UINT64)
+      b = builder.const_uint(20_u64, Crystal::MIR::TypeRef::UINT64)
+      sum = builder.add(a, b, Crystal::MIR::TypeRef::UINT64)
+      builder.ret(sum)
+
+      pass = Crystal::MIR::ConstantFoldingPass.new(func)
+      folded = pass.run
+
+      folded.should eq(1)
+
+      block = func.get_block(func.entry_block)
+      result = block.instructions[2].as(Crystal::MIR::Constant)
+      result.value.should eq(30_u64)
+    end
+
+    it "folds Bool ops" do
+      mod = Crystal::MIR::Module.new
+      func = mod.create_function("test", Crystal::MIR::TypeRef::BOOL)
+      builder = Crystal::MIR::Builder.new(func)
+
+      a = builder.const_bool(true)
+      b = builder.const_bool(false)
+      and_val = builder.bit_and(a, b, Crystal::MIR::TypeRef::BOOL)
+      builder.ret(and_val)
+
+      pass = Crystal::MIR::ConstantFoldingPass.new(func)
+      folded = pass.run
+
+      folded.should eq(1)
+
+      block = func.get_block(func.entry_block)
+      result = block.instructions[2].as(Crystal::MIR::Constant)
+      result.value.should eq(false)
+    end
+
     it "folds multiple operations" do
       mod = Crystal::MIR::Module.new
       func = mod.create_function("test", Crystal::MIR::TypeRef::INT64)
@@ -372,6 +412,29 @@ describe Crystal::MIR do
       block = func.get_block(func.entry_block)
       rc_inc = block.instructions.find { |inst| inst.is_a?(Crystal::MIR::RCIncrement) }.as(Crystal::MIR::RCIncrement)
       rc_inc.ptr.should eq(ptr)
+    end
+
+    it "propagates algebraic identities" do
+      mod = Crystal::MIR::Module.new
+      func = mod.create_function("test", Crystal::MIR::TypeRef::INT32)
+      builder = Crystal::MIR::Builder.new(func)
+
+      x = builder.const_int(7_i64, Crystal::MIR::TypeRef::INT32)
+      zero = builder.const_int(0_i64, Crystal::MIR::TypeRef::INT32)
+      one = builder.const_int(1_i64, Crystal::MIR::TypeRef::INT32)
+
+      sum = builder.add(x, zero, Crystal::MIR::TypeRef::INT32)   # x + 0 -> x
+      prod = builder.mul(sum, one, Crystal::MIR::TypeRef::INT32) # x * 1 -> x
+      builder.ret(prod)
+
+      pass = Crystal::MIR::CopyPropagationPass.new(func)
+      propagated = pass.run
+
+      propagated.should be > 0
+
+      block = func.get_block(func.entry_block)
+      ret = block.terminator.as(Crystal::MIR::Return)
+      ret.value.should eq(x)
     end
   end
 

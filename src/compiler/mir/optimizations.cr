@@ -410,14 +410,16 @@ module Crystal::MIR
     private def try_fold(inst : Value, constants : Hash(ValueId, Int64 | UInt64 | Float64 | Bool | Nil)) : Value?
       case inst
       when BinaryOp
-        left_const = constants[inst.left]?
-        right_const = constants[inst.right]?
+        return nil unless constants.has_key?(inst.left) && constants.has_key?(inst.right)
 
-        if left_const && right_const
-          result = fold_binary(inst.op, left_const, right_const)
-          if result
-            return Constant.new(inst.id, inst.type, result)
-          end
+        left_const = constants[inst.left]
+        right_const = constants[inst.right]
+        result = fold_binary(inst.op, left_const, right_const)
+        if ENV["MIR_CF_DEBUG"]?
+          STDERR.puts "[MIR_CF] op=#{inst.op} left=#{left_const} left_class=#{left_const.class} right=#{right_const} right_class=#{right_const.class} result=#{result.inspect}"
+        end
+        if !result.nil?
+          return Constant.new(inst.id, inst.type, result)
         end
 
       when Select
@@ -438,8 +440,12 @@ module Crystal::MIR
       case {left, right}
       when {Int64, Int64}
         fold_int_op(op, left, right)
+      when {UInt64, UInt64}
+        fold_uint_op(op, left, right)
       when {Float64, Float64}
         fold_float_op(op, left, right)
+      when {Bool, Bool}
+        fold_bool_op(op, left, right)
       else
         nil
       end
@@ -467,6 +473,28 @@ module Crystal::MIR
       end
     end
 
+    private def fold_uint_op(op : BinOp, left : UInt64, right : UInt64) : (UInt64 | Bool)?
+      case op
+      when .add? then left + right
+      when .sub? then left - right
+      when .mul? then left * right
+      when .div? then right != 0_u64 ? left // right : nil
+      when .rem? then right != 0_u64 ? left % right : nil
+      when .shl? then left << right
+      when .shr? then left >> right
+      when .and? then left & right
+      when .or?  then left | right
+      when .xor? then left ^ right
+      when .eq?  then left == right
+      when .ne?  then left != right
+      when .lt?  then left < right
+      when .le?  then left <= right
+      when .gt?  then left > right
+      when .ge?  then left >= right
+      else nil
+      end
+    end
+
     private def fold_float_op(op : BinOp, left : Float64, right : Float64) : (Float64 | Bool)?
       case op
       when .add? then left + right
@@ -479,6 +507,17 @@ module Crystal::MIR
       when .le?  then left <= right
       when .gt?  then left > right
       when .ge?  then left >= right
+      else nil
+      end
+    end
+
+    private def fold_bool_op(op : BinOp, left : Bool, right : Bool) : (Bool)?
+      case op
+      when .and? then left && right
+      when .or?  then left || right
+      when .xor? then left != right
+      when .eq?  then left == right
+      when .ne?  then left != right
       else nil
       end
     end
@@ -790,6 +829,73 @@ module Crystal::MIR
               next if node.is_a?(Undef)
               replacements[inst.id] = candidate
             end
+          when BinaryOp
+            left_id = canonical(inst.left, replacements)
+            right_id = canonical(inst.right, replacements)
+            left_const = constants[left_id]?
+            right_const = constants[right_id]?
+            next unless left_const || right_const
+
+            bool_type = inst.type == TypeRef::BOOL
+
+            case inst.op
+            when .add?
+              if const_zero?(left_const)
+                replacements[inst.id] = right_id if right_id != inst.id
+              elsif const_zero?(right_const)
+                replacements[inst.id] = left_id if left_id != inst.id
+              end
+            when .mul?
+              if const_zero?(left_const)
+                replacements[inst.id] = left_id if left_id != inst.id
+              elsif const_zero?(right_const)
+                replacements[inst.id] = right_id if right_id != inst.id
+              elsif const_one?(left_const)
+                replacements[inst.id] = right_id if right_id != inst.id
+              elsif const_one?(right_const)
+                replacements[inst.id] = left_id if left_id != inst.id
+              end
+            when .or?
+              if bool_type
+                if bool_true?(left_const)
+                  replacements[inst.id] = left_id if left_id != inst.id
+                elsif bool_true?(right_const)
+                  replacements[inst.id] = right_id if right_id != inst.id
+                elsif bool_false?(left_const)
+                  replacements[inst.id] = right_id if right_id != inst.id
+                elsif bool_false?(right_const)
+                  replacements[inst.id] = left_id if left_id != inst.id
+                end
+              else
+                if const_zero?(left_const)
+                  replacements[inst.id] = right_id if right_id != inst.id
+                elsif const_zero?(right_const)
+                  replacements[inst.id] = left_id if left_id != inst.id
+                end
+              end
+            when .and?
+              if bool_type
+                if bool_true?(left_const)
+                  replacements[inst.id] = right_id if right_id != inst.id
+                elsif bool_true?(right_const)
+                  replacements[inst.id] = left_id if left_id != inst.id
+                elsif bool_false?(left_const)
+                  replacements[inst.id] = left_id if left_id != inst.id
+                elsif bool_false?(right_const)
+                  replacements[inst.id] = right_id if right_id != inst.id
+                end
+              else
+                if const_zero?(left_const)
+                  replacements[inst.id] = left_id if left_id != inst.id
+                elsif const_zero?(right_const)
+                  replacements[inst.id] = right_id if right_id != inst.id
+                elsif const_all_ones?(left_const)
+                  replacements[inst.id] = right_id if right_id != inst.id
+                elsif const_all_ones?(right_const)
+                  replacements[inst.id] = left_id if left_id != inst.id
+                end
+              end
+            end
           end
         end
       end
@@ -797,6 +903,9 @@ module Crystal::MIR
       return 0 if replacements.empty?
 
       @propagated = replacements.size
+      if ENV["MIR_CP_DEBUG"]?
+        STDERR.puts "[MIR_CP] replacements=#{replacements}"
+      end
 
       @function.blocks.each do |block|
         new_instructions = [] of Value
@@ -806,6 +915,9 @@ module Crystal::MIR
         block.instructions.clear
         new_instructions.each { |i| block.add(i) }
         block.terminator = rewrite_terminator(block.terminator, replacements)
+        if ENV["MIR_CP_DEBUG"]?
+          STDERR.puts "[MIR_CP] block=#{block.id} terminator=#{block.terminator}"
+        end
       end
 
       @propagated
@@ -824,6 +936,55 @@ module Crystal::MIR
 
       replacements[id] = current if current != id
       current
+    end
+
+    private def const_zero?(value) : Bool
+      case value
+      when Int64
+        value == 0_i64
+      when UInt64
+        value == 0_u64
+      when Float64
+        value == 0.0
+      when Bool
+        value == false
+      else
+        false
+      end
+    end
+
+    private def const_one?(value) : Bool
+      case value
+      when Int64
+        value == 1_i64
+      when UInt64
+        value == 1_u64
+      when Float64
+        value == 1.0
+      when Bool
+        value == true
+      else
+        false
+      end
+    end
+
+    private def const_all_ones?(value) : Bool
+      case value
+      when Int64
+        value == -1_i64
+      when UInt64
+        value == UInt64::MAX
+      else
+        false
+      end
+    end
+
+    private def bool_true?(value) : Bool
+      value.is_a?(Bool) && value
+    end
+
+    private def bool_false?(value) : Bool
+      value.is_a?(Bool) && !value
     end
 
     private def rewrite_instruction(inst : Value, replacements : Hash(ValueId, ValueId)) : Value
@@ -1004,8 +1165,11 @@ module Crystal::MIR
       when Return
         if value = term.value
           new_value = canonical(value, replacements)
+          if ENV["MIR_CP_DEBUG"]?
+            STDERR.puts "[MIR_CP] ret value=#{value} new_value=#{new_value}"
+          end
           return term if new_value == value
-          Return.new(new_value)
+          return Return.new(new_value)
         end
         term
       when Branch
