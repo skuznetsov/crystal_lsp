@@ -1013,9 +1013,9 @@ r2 = maybe(false)  # => nil
 - Timing snapshot (release + `--stats --no-llvm-opt --no-llvm-metadata`): parse prelude ~167ms, HIR ~2.0s, MIR ~0.3ms, LLVM ~1.8ms, total ~2.2s; link failure is the current blocker.
 - Linker missing symbols (unicode_use run 2025-12-26; full list in `/private/tmp/unicode_use.link.log`):
   - DWARF: `LineNumbers_*`, `FORM_implicit_const`, `Row_new`, `Sequence::FileEntry_*`, `line_strp`, `lnct`, `strp_sup`.
-  - IO/Decoder/Bytes: `IO_gets_*`, `Decoder_*`, `Slice(UInt8)#[]` (UInt8/Char), `IO__FileDescriptor_*`, `IO_read_*`, `from_io(IO, IO::ByteFormat)`.
+  - IO/Decoder/Bytes: `IO_gets_*`, `Decoder_*`, `IO__FileDescriptor_*`, `IO_read_*`, `from_io(IO, IO::ByteFormat)`.
   - System/Thread: `Thread::Mutex_*`, `Signal_*`, `Scheduler::Thread_scheduler`.
-  - FastFloat/Numeric: `FromCharsResult*`, `ParseOptions*`, `UInt64_unsafe_shr`, `UInt8_in?`, `UInt32_in?`, `UInt8#bits_set?`, `_to_i32/_to_u16/_to_u32/_to_u64/_to_u8`, `unsafe_chr`.
+  - FastFloat/Numeric: `FromCharsResult*`, `ParseOptions*`, `UInt64_unsafe_shr`, `UInt8_in?`, `UInt32_in?`, `UInt8#bits_set?`, `Char#to_i`, `UInt8#downcase`, `UInt8#to_s`, `UInt32#to_s`, `_to_i32/_to_u16/_to_u32/_to_u64/_to_u8`, `unsafe_chr`.
   - String/Array helpers: `String::Builder_*`, `String::Grapheme_*`, `Tuple_bsearch_*`, `Pointer_*`, `Int32_hash`.
   - Exceptions: `Exception_callstack`, `CallStack_printable_backtrace`, `_exception_class_`, `_exception_cleanup_`, `_exception_object_`, `_exception_type_id_`.
 
