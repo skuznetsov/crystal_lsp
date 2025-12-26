@@ -1011,13 +1011,13 @@ r2 = maybe(false)  # => nil
 **Prelude build progress (with stdlib/prelude):**
 - Reaches LLVM IR emission and `opt -O1` successfully; link still fails due to missing runtime/stdlib symbols (expected at this stage).
 - Timing snapshot (release + `--stats --no-llvm-opt --no-llvm-metadata`): parse prelude ~167ms, HIR ~2.0s, MIR ~0.3ms, LLVM ~1.8ms, total ~2.2s; link failure is the current blocker.
-- Linker missing symbols (unicode_use run 2025-12-25; full list in `/private/tmp/unicode_use.link.log`):
-  - DWARF: `LineNumbers_*` helpers, `FORM_implicit_const`, `Row_new`, `Sequence::FileEntry_*`.
-  - IO/Decoder/Bytes: `IO_gets_*`, `Decoder_*`, `Bytes___Nil_*`, `IO__FileDescriptor_*`, `IO_read_*`.
+- Linker missing symbols (unicode_use run 2025-12-26; full list in `/private/tmp/unicode_use.link.log`):
+  - DWARF: `LineNumbers_*`, `FORM_implicit_const`, `Row_new`, `Sequence::FileEntry_*`, `line_strp`, `lnct`, `strp_sup`.
+  - IO/Decoder/Bytes: `IO_gets_*`, `Decoder_*`, `Slice(UInt8)#[]` (UInt8/Char), `IO__FileDescriptor_*`, `IO_read_*`, `from_io(IO, IO::ByteFormat)`.
   - System/Thread: `Thread::Mutex_*`, `Signal_*`, `Scheduler::Thread_scheduler`.
-  - FastFloat: `FromCharsResult*`, `ParseOptions*`, `Char.in?`, `UInt64_unsafe_shr`, `UInt8_in?`.
+  - FastFloat/Numeric: `FromCharsResult*`, `ParseOptions*`, `UInt64_unsafe_shr`, `UInt8_in?`, `UInt32_in?`, `UInt8#bits_set?`, `_to_i32/_to_u16/_to_u32/_to_u64/_to_u8`, `unsafe_chr`.
   - String/Array helpers: `String::Builder_*`, `String::Grapheme_*`, `Tuple_bsearch_*`, `Pointer_*`, `Int32_hash`.
-  - Exceptions: `Exception_callstack`, `CallStack_printable_backtrace`, `_exception_class_`, `_exception_cleanup_`.
+  - Exceptions: `Exception_callstack`, `CallStack_printable_backtrace`, `_exception_class_`, `_exception_cleanup_`, `_exception_object_`, `_exception_type_id_`.
 
 **Recent fixes (prelude bootstrap path):**
 - Normalize `flag?` macro arguments (strip leading `:`) + require cache v3; pthread requires now load.
