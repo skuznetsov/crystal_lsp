@@ -38,6 +38,36 @@ module CrystalV2
       def initialize(@args : Array(String))
       end
 
+      {% if flag?(:debug_hooks) %}
+      private def setup_debug_hooks : Nil
+        return unless ENV["CRYSTAL_V2_DEBUG_HOOKS"]?
+
+        filter = ENV["CRYSTAL_V2_DEBUG_HOOKS_FILTER"]?
+        io = STDERR
+        emit = ->(event : String, data : String) do
+          if filter && !event.includes?(filter) && !data.includes?(filter)
+            nil
+          else
+            io.puts "[HOOK] #{event} #{data}"
+          end
+        end
+
+        DebugHooks.on_debug = ->(event : String, data : String) { emit.call(event, data) }
+        DebugHooks.on_method_register = ->(full_name : String, class_name : String, method_name : String) do
+          emit.call("method.register", "full=#{full_name} class=#{class_name} name=#{method_name}")
+        end
+        DebugHooks.on_type_resolve = ->(name : String, context : String, result : String) do
+          emit.call("type.resolve", "name=#{name} context=#{context} result=#{result}")
+        end
+        DebugHooks.on_class_register = ->(class_name : String, parent : String?) do
+          emit.call("class.register", "class=#{class_name} parent=#{parent}")
+        end
+        DebugHooks.on_enum_register = ->(enum_name : String, base_type : String) do
+          emit.call("enum.register", "enum=#{enum_name} base=#{base_type}")
+        end
+      end
+      {% end %}
+
       def run(*, out_io : IO = STDOUT, err_io : IO = STDERR) : Int32
         options = Options.new
         mm_stack_threshold_invalid = false
@@ -115,6 +145,11 @@ module CrystalV2
           err_io.puts parser
           return 1
         end
+
+        {% if flag?(:debug_hooks) %}
+          setup_debug_hooks
+        {% end %}
+
         if mm_stack_threshold_invalid
           err_io.puts "Error: --mm-stack-threshold expects an integer"
           err_io.puts parser

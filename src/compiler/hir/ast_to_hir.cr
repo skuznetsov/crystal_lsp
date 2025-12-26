@@ -298,6 +298,8 @@ module Crystal::HIR
 
     # Generic class templates (base name -> template)
     @generic_templates : Hash(String, GenericClassTemplate)
+    # Additional generic class reopenings (base name -> templates)
+    @generic_reopenings : Hash(String, Array(GenericClassTemplate))
 
     # Already monomorphized generic classes (specialized name -> true)
     @monomorphized : Set(String)
@@ -404,6 +406,7 @@ module Crystal::HIR
       @lowering_functions = Set(String).new
       @pending_arg_types = {} of String => Array(TypeRef)
       @generic_templates = {} of String => GenericClassTemplate
+      @generic_reopenings = {} of String => Array(GenericClassTemplate)
       @monomorphized = Set(String).new
       @pending_monomorphizations = [] of {String, Array(String), String}
       @defer_monomorphization = true  # Start in deferred mode
@@ -447,6 +450,7 @@ module Crystal::HIR
         new_set
       end
       class_set.add(module_name)
+      debug_hook("module.include", "#{class_name} <= #{module_name}")
     end
 
     private def named_only_separator?(param : CrystalV2::Compiler::Frontend::Parameter) : Bool
@@ -1730,22 +1734,23 @@ module Crystal::HIR
                   full_name = mangle_function_name(base_name, param_types, has_block)
                   next if defined_full_names.includes?(full_name)
 
-                  # MOD_INCLUDE debug disabled
+                  debug_hook("module.instance_method.register", "class=#{class_name} module=#{module_full_name} method=#{method_name} full=#{full_name}")
                   register_function_type(full_name, return_type)
                   @function_defs[full_name] = member
                   @function_def_arenas[full_name] = @arena
 
-                  if body = member.body
-                    if contains_yield?(body)
-                      @yield_functions.add(full_name)
-                      unless @function_defs.has_key?(base_name)
-                        @function_defs[base_name] = member
-                        @function_def_arenas[base_name] = @arena
+                    if body = member.body
+                      if contains_yield?(body)
+                        @yield_functions.add(full_name)
+                        debug_hook("yield.register", full_name)
+                        unless @function_defs.has_key?(base_name)
+                          @function_defs[base_name] = member
+                          @function_def_arenas[base_name] = @arena
+                        end
+                        @function_defs[full_name] = member
+                        @function_def_arenas[full_name] = @arena
                       end
-                      @function_defs[full_name] = member
-                      @function_def_arenas[full_name] = @arena
                     end
-                  end
                 when CrystalV2::Compiler::Frontend::GetterNode
                   member.specs.each do |spec|
                     offset = register_accessor_from_module(
@@ -1955,6 +1960,20 @@ module Crystal::HIR
         return infer_type_from_expr(expr_node.expression, self_type_name)
       when CrystalV2::Compiler::Frontend::MacroExpressionNode
         return infer_type_from_expr(expr_node.expression, self_type_name)
+      when CrystalV2::Compiler::Frontend::MemberAccessNode
+        member_name = String.new(expr_node.member)
+        if member_name == "size"
+          object_node = @arena[expr_node.object]
+          if object_node.is_a?(CrystalV2::Compiler::Frontend::IdentifierNode)
+            object_name = String.new(object_node.name)
+            # Macro patterns like {{T.size}} use type params; treat as Int32 for signature inference.
+            if object_name == "T" || object_name == "U" || object_name == "V" ||
+               object_name == "K" || object_name == "E" || object_name == "B" ||
+               object_name == "L" || object_name == "W"
+              return TypeRef::INT32
+            end
+          end
+        end
       when CrystalV2::Compiler::Frontend::ReturnNode
         value = expr_node.value
         return nil unless value
@@ -1991,6 +2010,10 @@ module Crystal::HIR
       end
 
       nil
+    end
+
+    private def infer_arg_types_for_call(args : Array(ExprId), self_type_name : String?) : Array(TypeRef)
+      args.map { |arg| infer_type_from_expr(arg, self_type_name) || TypeRef::VOID }
     end
 
     private def infer_local_type_from_body(
@@ -2183,6 +2206,7 @@ module Crystal::HIR
             if body = member.body
               if contains_yield?(body)
                 @yield_functions.add(full_name)
+                debug_hook("yield.register", full_name)
                 unless @function_defs.has_key?(base_name)
                   @function_defs[base_name] = member
                   @function_def_arenas[base_name] = @arena
@@ -2546,7 +2570,10 @@ module Crystal::HIR
       end
       if @function_defs.has_key?(full_name)
         if body = member.body
-          @yield_functions.add(full_name) if contains_yield?(body)
+          if contains_yield?(body)
+            @yield_functions.add(full_name)
+            debug_hook("yield.register", full_name)
+          end
         end
         if ENV.has_key?("DEBUG_DUP_FUNCTION")
           STDERR.puts "[DEBUG_DUP_FUNCTION] Skipping duplicate module method: #{full_name}"
@@ -2561,6 +2588,7 @@ module Crystal::HIR
       if body = member.body
         if contains_yield?(body)
           @yield_functions.add(full_name)
+          debug_hook("yield.register", full_name)
           unless @function_defs.has_key?(base_name)
             @function_defs[base_name] = member
             @function_def_arenas[base_name] = @arena
@@ -2643,6 +2671,7 @@ module Crystal::HIR
       if body = member.body
         if contains_yield?(body)
           @yield_functions.add(full_name)
+          debug_hook("yield.register", full_name)
           unless @function_defs.has_key?(base_name)
             @function_defs[base_name] = member
             @function_def_arenas[base_name] = @arena
@@ -3188,16 +3217,17 @@ module Crystal::HIR
 
             # Track yield-functions for inline expansion (nested module methods).
             if body = member.body
-              if contains_yield?(body)
-                @yield_functions.add(full_method_name)
-                unless @function_defs.has_key?(base_name)
-                  @function_defs[base_name] = member
-                  @function_def_arenas[base_name] = @arena
+                if contains_yield?(body)
+                  @yield_functions.add(full_method_name)
+                  debug_hook("yield.register", full_method_name)
+                  unless @function_defs.has_key?(base_name)
+                    @function_defs[base_name] = member
+                    @function_def_arenas[base_name] = @arena
+                  end
+                  @function_defs[full_method_name] = member
+                  @function_def_arenas[full_method_name] = @arena
                 end
-                @function_defs[full_method_name] = member
-                @function_def_arenas[full_method_name] = @arena
               end
-            end
           when CrystalV2::Compiler::Frontend::ClassNode
             class_name = String.new(member.name)
             full_class_name = "#{full_name}::#{class_name}"
@@ -3474,19 +3504,24 @@ module Crystal::HIR
       # Check if this is a generic class (has type parameters)
       if type_params = node.type_params
         if type_params.size > 0
-          # Store as generic template - don't create ClassInfo yet
-          # Keep the template with the LARGEST body (main definition, not reopenings)
+          # Store as generic template - don't create ClassInfo yet.
+          # Keep the template with the LARGEST body as primary, but preserve reopenings
+          # so additional methods (e.g., Range#bsearch) are not lost.
           new_body_size = node.body.try(&.size) || 0
+          param_names = type_params.map { |p| String.new(p) }
+          new_template = GenericClassTemplate.new(class_name, param_names, node, @arena, is_struct)
+
           if existing = @generic_templates[class_name]?
             existing_body_size = existing.node.body.try(&.size) || 0
-            if new_body_size <= existing_body_size
-              return  # Existing template has larger body, skip this reopening
+            if new_body_size > existing_body_size
+              (@generic_reopenings[class_name] ||= [] of GenericClassTemplate) << existing
+              @generic_templates[class_name] = new_template
+            else
+              (@generic_reopenings[class_name] ||= [] of GenericClassTemplate) << new_template
             end
+          else
+            @generic_templates[class_name] = new_template
           end
-          param_names = type_params.map { |p| String.new(p) }
-          @generic_templates[class_name] = GenericClassTemplate.new(
-            class_name, param_names, node, @arena, is_struct
-          )
           return  # Don't register as concrete class
         end
       end
@@ -3643,11 +3678,19 @@ module Crystal::HIR
                           elsif method_name.ends_with?("?")
                             self_type = type_ref_for_name(class_name)
                             infer_unannotated_query_return_type(method_name, self_type) || TypeRef::BOOL
-                          else
-                            # Try to infer return type from getter-style methods (single ivar access)
-                            inferred = infer_getter_return_type(member, ivars)
-                            inferred || TypeRef::VOID
-                          end
+          else
+            # Try to infer return type from getter-style methods (single ivar access).
+            inferred = infer_getter_return_type(member, ivars)
+            if inferred.nil?
+              if body = member.body
+                # Lightweight macro-body inference for methods like Tuple#size.
+                if body.any? { |expr_id| @arena[expr_id].is_a?(CrystalV2::Compiler::Frontend::MacroExpressionNode) }
+                  inferred = infer_concrete_return_type_from_body(member, class_name)
+                end
+              end
+            end
+            inferred || TypeRef::VOID
+          end
             return_elapsed = return_start ? (Time.monotonic - return_start).total_milliseconds : nil
             # Collect parameter types for mangling
             method_param_types = [] of TypeRef
@@ -3686,6 +3729,7 @@ module Crystal::HIR
             if body = member.body
               if contains_yield?(body)
                 @yield_functions.add(full_name)
+                debug_hook("yield.register", full_name)
                 unless @function_defs.has_key?(base_name)
                   @function_defs[base_name] = member
                   @function_def_arenas[base_name] = @arena
@@ -4057,6 +4101,7 @@ module Crystal::HIR
 
       # Double-check inside the method (belt and suspenders)
       if @monomorphized.includes?(specialized_name)
+        debug_hook("mono.skip", "name=#{specialized_name} reason=already_monomorphized")
         return
       end
 
@@ -4065,12 +4110,14 @@ module Crystal::HIR
         if ENV.has_key?("DEBUG_MONO")
           STDERR.puts "[MONO] Skipping unresolved: #{specialized_name}"
         end
+        debug_hook("mono.skip", "name=#{specialized_name} reason=unresolved_type_args")
         return
       end
 
       # Mark as monomorphized BEFORE processing to prevent infinite recursion
       # (e.g., Array(String) method calls something that creates Array(String) again)
       @monomorphized.add(specialized_name)
+      debug_hook("mono.start", "base=#{base_name} name=#{specialized_name} args=#{type_args}")
       mono_start = nil
       if ENV.has_key?("DEBUG_MONO")
         mono_start = Time.monotonic
@@ -4096,6 +4143,13 @@ module Crystal::HIR
       # The type_ref_for_name calls will now substitute T => Int32
       register_concrete_class(template.node, specialized_name, template.is_struct)
 
+      if reopenings = @generic_reopenings[base_name]?
+        reopenings.each do |reopen|
+          @arena = reopen.arena
+          register_concrete_class(reopen.node, specialized_name, reopen.is_struct)
+        end
+      end
+
       if mono_start && ENV.has_key?("DEBUG_MONO")
         elapsed_ms = (Time.monotonic - mono_start).total_milliseconds
         STDERR.puts "[MONO] done #{specialized_name} in #{elapsed_ms.round(1)}ms"
@@ -4111,28 +4165,34 @@ module Crystal::HIR
 
           generate_allocator(specialized_name, class_info)
 
-          # Lower methods with type substitutions
-          if body = template.node.body
-            body.each do |expr_id|
-              member = @arena[expr_id]
-              case member
-              when CrystalV2::Compiler::Frontend::DefNode
-                lower_method(specialized_name, class_info, member)
-              when CrystalV2::Compiler::Frontend::GetterNode
-                # Generate synthetic getter methods
-                member.specs.each do |spec|
-                  generate_getter_method(specialized_name, class_info, spec)
-                end
-              when CrystalV2::Compiler::Frontend::SetterNode
-                # Generate synthetic setter methods
-                member.specs.each do |spec|
-                  generate_setter_method(specialized_name, class_info, spec)
-                end
-              when CrystalV2::Compiler::Frontend::PropertyNode
-                # Generate both getter and setter methods
-                member.specs.each do |spec|
-                  generate_getter_method(specialized_name, class_info, spec)
-                  generate_setter_method(specialized_name, class_info, spec)
+          # Lower methods with type substitutions across all template bodies.
+          templates = [template] of GenericClassTemplate
+          if reopenings = @generic_reopenings[base_name]?
+            templates.concat(reopenings)
+          end
+          templates.each do |tmpl|
+            @arena = tmpl.arena
+            if body = tmpl.node.body
+              body.each do |expr_id|
+                member = @arena[expr_id]
+                case member
+                when CrystalV2::Compiler::Frontend::DefNode
+                  lower_method(specialized_name, class_info, member)
+                when CrystalV2::Compiler::Frontend::GetterNode
+                  # Generate synthetic getter methods
+                  member.specs.each do |spec|
+                    generate_getter_method(specialized_name, class_info, spec)
+                  end
+                when CrystalV2::Compiler::Frontend::SetterNode
+                  member.specs.each do |spec|
+                    generate_setter_method(specialized_name, class_info, spec)
+                  end
+                when CrystalV2::Compiler::Frontend::PropertyNode
+                  # Generate both getter and setter methods
+                  member.specs.each do |spec|
+                    generate_getter_method(specialized_name, class_info, spec)
+                    generate_setter_method(specialized_name, class_info, spec)
+                  end
                 end
               end
             end
@@ -4141,6 +4201,8 @@ module Crystal::HIR
           @current_class = old_class
         end
       end
+
+      debug_hook("mono.done", "base=#{base_name} name=#{specialized_name}")
 
       # Restore arena and type param map
       @arena = old_arena
@@ -4625,9 +4687,9 @@ module Crystal::HIR
         return
       end
 
-      # Skip methods for Pointer types - they're all primitives handled at call sites
+      # Skip pointer primitives with no body (handled via call-site intrinsics).
       if class_name.starts_with?("Pointer(") || class_name.starts_with?("Pointer_")
-        return
+        return if node.body.nil?
       end
 
       # Track current method for super calls
@@ -4831,6 +4893,64 @@ module Crystal::HIR
       when "Float64" then TypeRef::FLOAT64
       when "Char"    then TypeRef::CHAR
       else                nil
+      end
+    end
+
+    private def primitive_class_name(type_ref : TypeRef) : String?
+      case type_ref
+      when TypeRef::NIL     then "Nil"
+      when TypeRef::BOOL    then "Bool"
+      when TypeRef::INT8    then "Int8"
+      when TypeRef::INT16   then "Int16"
+      when TypeRef::INT32   then "Int32"
+      when TypeRef::INT64   then "Int64"
+      when TypeRef::INT128  then "Int128"
+      when TypeRef::UINT8   then "UInt8"
+      when TypeRef::UINT16  then "UInt16"
+      when TypeRef::UINT32  then "UInt32"
+      when TypeRef::UINT64  then "UInt64"
+      when TypeRef::UINT128 then "UInt128"
+      when TypeRef::FLOAT32 then "Float32"
+      when TypeRef::FLOAT64 then "Float64"
+      when TypeRef::CHAR    then "Char"
+      when TypeRef::STRING  then "String"
+      when TypeRef::SYMBOL  then "Symbol"
+      when TypeRef::POINTER then "Pointer(UInt8)"
+      else                      nil
+      end
+    end
+
+    private def numeric_primitive_class_name?(name : String) : Bool
+      case name
+      when "Int8", "Int16", "Int32", "Int64", "Int128",
+           "UInt8", "UInt16", "UInt32", "UInt64", "UInt128",
+           "Float32", "Float64", "Char"
+        true
+      else
+        false
+      end
+    end
+
+    private def primitive_template_owner(class_name : String) : String?
+      case class_name
+      when "Int8", "Int16", "Int32", "Int64", "Int128",
+           "UInt8", "UInt16", "UInt32", "UInt64", "UInt128"
+        "Int"
+      when "Float32", "Float64"
+        "Float"
+      else
+        nil
+      end
+    end
+
+    private def primitive_template_type_map(template_owner : String, primitive_owner : String) : Hash(String, String)
+      case template_owner
+      when "Int"
+        {"Int" => "Int32"}
+      when "Float"
+        {"Float" => primitive_owner}
+      else
+        {} of String => String
       end
     end
 
@@ -5042,7 +5162,7 @@ module Crystal::HIR
 
       # Get the class name from the type descriptor
       enum_type_name = @enum_value_types.try(&.[receiver_id]?)
-      class_name = enum_type_name || type_desc.try(&.name) || ""
+      class_name = enum_type_name || type_desc.try(&.name) || primitive_class_name(receiver_type) || ""
 
       # DEBUG: Track where short names come from in method resolution
       if ENV.has_key?("DEBUG_METHOD_RESOLVE") && !class_name.includes?("::") &&
@@ -5065,6 +5185,7 @@ module Crystal::HIR
       # Many valid methods return `Nil` (VOID) in our IR, and treating VOID as "missing"
       # causes qualified calls to degrade into unqualified extern calls.
       if @function_types.has_key?(mangled_name)
+        debug_hook("method.resolve", "base=#{base_method_name} resolved=#{mangled_name} reason=mangled_exact")
         return mangled_name
       end
 
@@ -5075,6 +5196,7 @@ module Crystal::HIR
           if ivar_info = info.ivars.find { |iv| iv.name == ivar_name }
             expected_name = mangle_function_name(base_method_name, [ivar_info.type])
             if @function_types.has_key?(expected_name)
+              debug_hook("method.resolve", "base=#{base_method_name} resolved=#{expected_name} reason=setter_accessor")
               return expected_name
             end
           end
@@ -5084,11 +5206,13 @@ module Crystal::HIR
       # If any overload exists for the base name, return the base name and let
       # the MIR lowering do fuzzy matching to pick a concrete overload.
       if !class_name.empty? && has_function_base?(base_method_name)
+        debug_hook("method.resolve", "base=#{base_method_name} resolved=#{base_method_name} reason=base_overload")
         return base_method_name
       end
 
       if !class_name.empty? && class_name.includes?("|")
         if resolved = resolve_union_method_call(class_name, method_name, arg_types)
+          debug_hook("method.resolve", "base=#{base_method_name} resolved=#{resolved} reason=union")
           return resolved
         end
       end
@@ -5097,6 +5221,7 @@ module Crystal::HIR
       # resolve only when a unique includer matches the call signature.
       if !class_name.empty? && (module_like_type_name?(class_name) || module_includers_match?(class_name))
         if resolved = resolve_module_typed_method(method_name, arg_types, class_name, false, @current_class)
+          debug_hook("method.resolve", "base=#{base_method_name} resolved=#{resolved} reason=module_typed")
           return resolved
         end
       end
@@ -5108,8 +5233,10 @@ module Crystal::HIR
           test_base = "#{klass_name}##{method_name}"
           test_mangled = mangle_function_name(test_base, arg_types)
           if @function_types.has_key?(test_mangled)
+            debug_hook("method.resolve", "base=#{base_method_name} resolved=#{test_mangled} reason=fallback_scan")
             return test_mangled
           elsif has_function_base?(test_base)
+            debug_hook("method.resolve", "base=#{base_method_name} resolved=#{test_base} reason=fallback_scan_base")
             return test_base
           end
         end
@@ -5123,11 +5250,13 @@ module Crystal::HIR
           test_base = "#{array_class}#<<"
           test_mangled = mangle_function_name(test_base, arg_types)
           if @function_types[test_mangled]?
+            debug_hook("method.resolve", "base=#{base_method_name} resolved=#{test_mangled} reason=operator_array")
             return test_mangled
           end
           # Also try without arg types mangling
           @function_types.each_key do |key|
             if key.starts_with?("#{test_base}$")
+              debug_hook("method.resolve", "base=#{base_method_name} resolved=#{key} reason=operator_array_prefix")
               return key
             end
           end
@@ -5137,6 +5266,7 @@ module Crystal::HIR
           test_base = "#{io_class}#<<"
           @function_types.each_key do |key|
             if key.starts_with?("#{test_base}$") || key == test_base
+              debug_hook("method.resolve", "base=#{base_method_name} resolved=#{key} reason=operator_io")
               return key
             end
           end
@@ -5144,6 +5274,7 @@ module Crystal::HIR
       end
 
       # Fallback to mangled name
+      debug_hook("method.resolve", "base=#{base_method_name} resolved=#{mangled_name} reason=fallback")
       mangled_name
     end
 
@@ -5255,9 +5386,10 @@ module Crystal::HIR
       candidates.each do |candidate|
         base = "#{candidate}##{method_name}"
         # Filter by arity/defaults first to avoid picking mismatched overloads.
-        if entry = lookup_function_def_for_call(base, arg_count, has_block)
+        if entry = lookup_function_def_for_call(base, arg_count, has_block, arg_types)
           def_node = entry[1]
-          next unless params_compatible_with_args?(def_node, arg_types)
+          func_context = function_context_from_name(entry[0])
+          next unless params_compatible_with_args?(def_node, arg_types, func_context)
           mangled = mangle_function_name(base, arg_types, has_block)
           if @function_types.has_key?(mangled) || @module.has_function?(mangled)
             matches << mangled
@@ -5361,7 +5493,8 @@ module Crystal::HIR
 
     private def params_compatible_with_args?(
       def_node : CrystalV2::Compiler::Frontend::DefNode,
-      arg_types : Array(TypeRef)
+      arg_types : Array(TypeRef),
+      context : String? = nil
     ) : Bool
       params = def_node.params
       return true unless params
@@ -5376,6 +5509,9 @@ module Crystal::HIR
         break if arg_idx >= arg_types.size
 
         param_type_name = param.type_annotation ? String.new(param.type_annotation.not_nil!) : ""
+        if !param_type_name.empty? && context
+          param_type_name = normalize_declared_type_name(param_type_name, context)
+        end
         arg_type = arg_types[arg_idx]
 
         if !param_type_name.empty?
@@ -5394,6 +5530,16 @@ module Crystal::HIR
 
         if param_type != TypeRef::VOID && arg_type != TypeRef::VOID
           if param_type != arg_type && !needs_union_coercion?(arg_type, param_type)
+            if numeric_compatible?(arg_type, param_type)
+              arg_idx += 1
+              next
+            end
+            if !param_type_name.empty?
+              if numeric_param_target_type(param_type_name, arg_type)
+                arg_idx += 1
+                next
+              end
+            end
             # Also check if arg type's name matches after alias resolution
             arg_desc = @module.get_type_descriptor(arg_type)
             # PARAMS_COMPAT debug disabled
@@ -5422,6 +5568,54 @@ module Crystal::HIR
       true
     end
 
+    private def params_match_score(
+      def_node : CrystalV2::Compiler::Frontend::DefNode,
+      arg_types : Array(TypeRef),
+      context : String? = nil
+    ) : Int32
+      params = def_node.params
+      return 0 unless params
+
+      score = 0
+      arg_idx = 0
+      params.each do |param|
+        next if param.is_block
+        next if named_only_separator?(param)
+        break if arg_idx >= arg_types.size
+        if param.is_splat || param.is_double_splat
+          arg_idx += 1
+          next
+        end
+
+        param_type_name = param.type_annotation ? String.new(param.type_annotation.not_nil!) : ""
+        if !param_type_name.empty? && context
+          param_type_name = normalize_declared_type_name(param_type_name, context)
+        end
+
+        arg_type = arg_types[arg_idx]
+        if !param_type_name.empty? && arg_type != TypeRef::VOID
+          resolved_name = resolve_type_alias_chain(param_type_name)
+          param_type = type_ref_for_name(resolved_name)
+          if param_type != TypeRef::VOID
+            if param_type == arg_type
+              score += 2
+            elsif needs_union_coercion?(arg_type, param_type)
+              score += 1
+            elsif numeric_compatible?(arg_type, param_type)
+              score += 1
+            else
+              numeric_target = numeric_param_target_type(param_type_name, arg_type)
+              score += 1 if numeric_target
+            end
+          end
+        end
+
+        arg_idx += 1
+      end
+
+      score
+    end
+
     private def primitive_type?(type : TypeRef) : Bool
       case type
       when TypeRef::VOID, TypeRef::NIL, TypeRef::BOOL, TypeRef::CHAR,
@@ -5432,6 +5626,87 @@ module Crystal::HIR
       else
         false
       end
+    end
+
+    private def integer_bit_width(type : TypeRef) : Int32?
+      case type
+      when TypeRef::INT8, TypeRef::UINT8
+        8
+      when TypeRef::INT16, TypeRef::UINT16
+        16
+      when TypeRef::INT32, TypeRef::UINT32, TypeRef::CHAR
+        32
+      when TypeRef::INT64, TypeRef::UINT64
+        64
+      when TypeRef::INT128, TypeRef::UINT128
+        128
+      else
+        nil
+      end
+    end
+
+    private def signed_integer_type_for_width(bits : Int32) : TypeRef
+      case bits
+      when 8
+        TypeRef::INT8
+      when 16
+        TypeRef::INT16
+      when 32
+        TypeRef::INT32
+      when 64
+        TypeRef::INT64
+      when 128
+        TypeRef::INT128
+      else
+        TypeRef::VOID
+      end
+    end
+
+    private def unsigned_integer_type_for_width(bits : Int32) : TypeRef
+      case bits
+      when 8
+        TypeRef::UINT8
+      when 16
+        TypeRef::UINT16
+      when 32
+        TypeRef::UINT32
+      when 64
+        TypeRef::UINT64
+      when 128
+        TypeRef::UINT128
+      else
+        TypeRef::VOID
+      end
+    end
+
+    private def numeric_compatible?(arg_type : TypeRef, param_type : TypeRef) : Bool
+      arg_bits = integer_bit_width(arg_type)
+      param_bits = integer_bit_width(param_type)
+      return false unless arg_bits && param_bits
+      arg_bits == param_bits
+    end
+
+    private def numeric_param_target_type(param_type_name : String, arg_type : TypeRef) : TypeRef?
+      bits = integer_bit_width(arg_type)
+      case param_type_name
+      when "Int::Primitive", "Int::Signed"
+        return signed_integer_type_for_width(bits) if bits
+      when "Int::Unsigned"
+        return unsigned_integer_type_for_width(bits) if bits
+      end
+
+      short_name = param_type_name.split("::").last
+      case short_name
+      when "Int"
+        return signed_integer_type_for_width(bits) if bits
+      when "UInt"
+        return unsigned_integer_type_for_width(bits) if bits
+      when "Float"
+        return arg_type if arg_type == TypeRef::FLOAT32 || arg_type == TypeRef::FLOAT64
+      when "Number"
+        return arg_type if numeric_primitive?(arg_type)
+      end
+      nil
     end
 
     # Fallback for yield-function inlining when receiver type is unknown (often due to untyped params).
@@ -5581,6 +5856,7 @@ module Crystal::HIR
       if body = node.body
         if contains_yield?(body)
           @yield_functions.add(full_name)
+          debug_hook("yield.register", full_name)
         end
       end
     end
@@ -5598,10 +5874,16 @@ module Crystal::HIR
         true
       when CrystalV2::Compiler::Frontend::AssignNode
         contains_yield_in_expr?(node.target) || contains_yield_in_expr?(node.value)
+      when CrystalV2::Compiler::Frontend::ReturnNode
+        node.value ? contains_yield_in_expr?(node.value.not_nil!) : false
       when CrystalV2::Compiler::Frontend::MemberAccessNode
         contains_yield_in_expr?(node.object)
       when CrystalV2::Compiler::Frontend::CallNode
         if callee_id = node.callee
+          callee_node = @arena[callee_id]
+          if callee_node.is_a?(CrystalV2::Compiler::Frontend::IdentifierNode)
+            return true if String.new(callee_node.name) == "yield"
+          end
           return true if contains_yield_in_expr?(callee_id)
         end
         node.args.each do |arg|
@@ -6164,6 +6446,18 @@ module Crystal::HIR
           end
         else
           break
+        end
+      end
+      if template_owner = primitive_template_owner(class_name)
+        template_method = "#{template_owner}##{method_name}"
+        if @function_types.has_key?(template_method) || has_function_base?(template_method)
+          return "#{class_name}##{method_name}"
+        end
+      end
+      if class_name != "Object"
+        object_method = "Object##{method_name}"
+        if @function_types.has_key?(object_method) || has_function_base?(object_method)
+          return "#{class_name}##{method_name}"
         end
       end
       nil
@@ -8059,6 +8353,69 @@ module Crystal::HIR
       ctx.emit(extern_call)
       ctx.register_type(extern_call.id, extern_func.return_type)
       extern_call.id
+    end
+
+    private def emit_mem_intrinsic(ctx : LoweringContext, method_name : String, arg_ids : Array(ValueId)) : ValueId
+      return emit_extern_call(ctx, ExternFunction.new(method_name, method_name, nil, Array(TypeRef).new, TypeRef::VOID), arg_ids) if arg_ids.size < 4
+
+      len_id = arg_ids[2]
+      len_type = ctx.type_of(len_id)
+      use_i32 = len_type == TypeRef::UINT32 || len_type == TypeRef::INT32 ||
+                len_type == TypeRef::UINT16 || len_type == TypeRef::INT16 ||
+                len_type == TypeRef::UINT8 || len_type == TypeRef::INT8
+      target_len_type = use_i32 ? TypeRef::UINT32 : TypeRef::UINT64
+
+      if len_type != target_len_type && len_type != TypeRef::VOID
+        cast = Cast.new(ctx.next_id, target_len_type, len_id, target_len_type)
+        ctx.emit(cast)
+        ctx.register_type(cast.id, target_len_type)
+        len_id = cast.id
+      end
+
+      intrinsic_name = case method_name
+                       when "memcpy"
+                         use_i32 ? "llvm.memcpy.p0.p0.i32" : "llvm.memcpy.p0.p0.i64"
+                       when "memmove"
+                         use_i32 ? "llvm.memmove.p0.p0.i32" : "llvm.memmove.p0.p0.i64"
+                       else
+                         use_i32 ? "llvm.memset.p0.i32" : "llvm.memset.p0.i64"
+                       end
+
+      extern_call = ExternCall.new(
+        ctx.next_id,
+        TypeRef::VOID,
+        intrinsic_name,
+        [arg_ids[0], arg_ids[1], len_id, arg_ids[3]],
+        false
+      )
+      ctx.emit(extern_call)
+      ctx.register_type(extern_call.id, TypeRef::VOID)
+      extern_call.id
+    end
+
+    private def lower_pointer_new_intrinsic(ctx : LoweringContext, arg_ids : Array(ValueId)) : ValueId?
+      return nil unless arg_ids.size == 1
+
+      addr_id = arg_ids[0]
+      addr_type = ctx.type_of(addr_id)
+      if addr_type == TypeRef::VOID
+        addr_cast = Cast.new(ctx.next_id, TypeRef::UINT64, addr_id, TypeRef::UINT64)
+        ctx.emit(addr_cast)
+        ctx.register_type(addr_cast.id, TypeRef::UINT64)
+        addr_id = addr_cast.id
+        addr_type = TypeRef::UINT64
+      end
+
+      return addr_id if addr_type == TypeRef::POINTER
+
+      if numeric_primitive?(addr_type)
+        cast = Cast.new(ctx.next_id, TypeRef::POINTER, addr_id, TypeRef::POINTER)
+        ctx.emit(cast)
+        ctx.register_type(cast.id, TypeRef::POINTER)
+        return cast.id
+      end
+
+      nil
     end
 
     # Resolve annotation name from ExprId to string
@@ -10545,13 +10902,18 @@ module Crystal::HIR
       return if @module.has_function?(name)
 
       target_name = name
+      primitive_template_map : Hash(String, String)? = nil
+      debug_hook("function.lookup.start", name)
       func_def = @function_defs[target_name]?
       arena = @function_def_arenas[target_name]?
+      lookup_branch : String? = func_def ? "direct" : nil
       unless func_def
         if maybe_generate_class_accessor_for_name(name)
+          debug_hook("function.lookup.generated", "name=#{name} kind=class_accessor")
           return
         end
         if maybe_generate_accessor_for_name(name)
+          debug_hook("function.lookup.generated", "name=#{name} kind=ivar_accessor")
           return
         end
         base_name = name.split("$").first
@@ -10559,6 +10921,7 @@ module Crystal::HIR
           func_def = @function_defs[base_name]?
           arena = @function_def_arenas[base_name]? if func_def
           target_name = base_name if func_def
+          lookup_branch = "base_name" if func_def
         end
         # If still not found, search for any mangled variant of the base name
         # This handles methods with default parameters where call-site arg count < defined param count
@@ -10575,6 +10938,7 @@ module Crystal::HIR
               func_def = @function_defs[key]
               arena = @function_def_arenas[key]
               target_name = key
+              lookup_branch = "mangled_prefix"
               break
             end
           end
@@ -10598,6 +10962,7 @@ module Crystal::HIR
                   arena = @function_def_arenas[module_method]
                   # Keep target_name as class method name - will generate with class prefix
                   target_name = base_name
+                  lookup_branch = "included_module"
                   break
                 end
                 # Also try mangled versions
@@ -10606,6 +10971,7 @@ module Crystal::HIR
                     func_def = @function_defs[key]
                     arena = @function_def_arenas[key]
                     target_name = base_name
+                    lookup_branch = "included_module_mangled"
                     break
                   end
                 end
@@ -10640,6 +11006,7 @@ module Crystal::HIR
                   # DON'T override target_name - let lower_method compute correct mangled name
                   target_name = base_name
                   deferred_lookup_used = true
+                  lookup_branch = "deferred_module"
                   if method_part.includes?("from_chars")
                     STDERR.puts "[DEFERRED_LOOKUP] Found #{method_base} in module #{base_module} for #{base_name}"
                   end
@@ -10669,6 +11036,84 @@ module Crystal::HIR
               arena = found[1]
               target_name = base_name
               deferred_lookup_used = true
+              lookup_branch = "deferred_module_class"
+            end
+          end
+        end
+
+        # PRIMITIVE TEMPLATE FALLBACK: use Int/Float method bodies for primitive receivers.
+        unless func_def
+          if base_name.includes?("#")
+            owner, method_part = base_name.split("#", 2)
+            if template_owner = primitive_template_owner(owner)
+              template_base = "#{template_owner}##{method_part}"
+              if candidate = @function_defs[template_base]?
+                func_def = candidate
+                arena = @function_def_arenas[template_base]
+                target_name = base_name
+                primitive_template_map = primitive_template_type_map(template_owner, owner)
+                lookup_branch = "primitive_template"
+              elsif name.includes?("$")
+                suffix = name.split("$", 2)[1]
+                template_mangled = "#{template_base}$#{suffix}"
+                if candidate = @function_defs[template_mangled]?
+                  func_def = candidate
+                  arena = @function_def_arenas[template_mangled]
+                  target_name = base_name
+                  primitive_template_map = primitive_template_type_map(template_owner, owner)
+                  lookup_branch = "primitive_template_mangled"
+                end
+              end
+              unless func_def
+                mangled_prefix = "#{template_base}$"
+                @function_defs.each_key do |key|
+                  if key.starts_with?(mangled_prefix)
+                    func_def = @function_defs[key]
+                    arena = @function_def_arenas[key]
+                    target_name = base_name
+                    primitive_template_map = primitive_template_type_map(template_owner, owner)
+                    lookup_branch = "primitive_template_prefix"
+                    break
+                  end
+                end
+              end
+            end
+          end
+        end
+
+        # OBJECT FALLBACK: use Object method bodies when classes omit explicit parents.
+        unless func_def
+          if base_name.includes?("#")
+            owner, method_part = base_name.split("#", 2)
+            if owner != "Object"
+              object_base = "Object##{method_part}"
+              if candidate = @function_defs[object_base]?
+                func_def = candidate
+                arena = @function_def_arenas[object_base]
+                target_name = base_name
+                lookup_branch = "object_fallback"
+              elsif name.includes?("$")
+                suffix = name.split("$", 2)[1]
+                object_mangled = "#{object_base}$#{suffix}"
+                if candidate = @function_defs[object_mangled]?
+                  func_def = candidate
+                  arena = @function_def_arenas[object_mangled]
+                  target_name = base_name
+                  lookup_branch = "object_fallback_mangled"
+                end
+              end
+              unless func_def
+                mangled_prefix = "#{object_base}$"
+                @function_defs.each_key do |key|
+                  if key.starts_with?(mangled_prefix)
+                    func_def = @function_defs[key]
+                    arena = @function_def_arenas[key]
+                    target_name = base_name
+                    lookup_branch = "object_fallback_prefix"
+                    break
+                  end
+                end
+              end
             end
           end
         end
@@ -10688,8 +11133,15 @@ module Crystal::HIR
               target_name = qualified_base
             end
             name = target_name
+            lookup_branch = "qualified_current"
           end
         end
+      end
+
+      if func_def
+        debug_hook("function.lookup.hit", "name=#{name} target=#{target_name} branch=#{lookup_branch || "unknown"}")
+      else
+        debug_hook("function.lookup.miss", name)
       end
 
       return unless func_def
@@ -10730,6 +11182,7 @@ module Crystal::HIR
 
       target_name = resolved_target_name
       @lowering_functions.add(target_name)
+      debug_hook("function.lower.start", "name=#{target_name} requested=#{name}")
       if target_name.includes?("from_chars")
         STDERR.puts "[LOWERING] Starting lower for #{target_name}, arena=#{arena.class}"
       end
@@ -10749,12 +11202,11 @@ module Crystal::HIR
               # site uses concrete types (like Pointer).
               # The `name` variable contains the full mangled name from the call site.
               override = name
-              # Add forall type param bindings for FastFloat methods (UC is always UInt8 per stdlib constraints)
-              extra_params = if target_name.includes?("FastFloat")
-                               {"UC" => "UInt8", "T" => "Float64"}
-                             else
-                               {} of String => String
-                             end
+              # Add forall type param bindings for primitive templates and FastFloat methods.
+              extra_params = primitive_template_map || {} of String => String
+              if target_name.includes?("FastFloat")
+                extra_params = extra_params.merge({"UC" => "UInt8", "T" => "Float64"})
+              end
               merged_params = extra_type_params ? extra_params.merge(extra_type_params) : extra_params
               with_type_param_map(merged_params) do
                 lower_method(owner, class_info, func_def, call_arg_types, override)
@@ -10819,6 +11271,7 @@ module Crystal::HIR
       ensure
         @lowering_functions.delete(target_name)
         @lowered_functions.add(target_name)
+        debug_hook("function.lower.done", "name=#{target_name}")
       end
     end
 
@@ -11194,12 +11647,26 @@ module Crystal::HIR
         end
 
         if class_name_str
+          # Intrinsics.* macros lower to LibIntrinsics.* extern calls. In codegen
+          # we bypass macro expansion and rewrite the target here to avoid missing symbols.
+          if class_name_str == "Intrinsics"
+            if method_name == "memcpy" || method_name == "memmove" || method_name == "memset"
+              class_name_str = "LibIntrinsics"
+            end
+          end
           # Check if this is a lib function call (e.g., LibC.puts)
           if extern_func = @module.get_extern_function(class_name_str, method_name)
             # This is a call to an extern C function
             # Lower args and emit extern call with real C name
             arg_ids = expand_splat_args(ctx, node.args)
             return emit_extern_call(ctx, extern_func, arg_ids)
+          end
+          # Fallback for LibIntrinsics mem* when lib macro branches aren't expanded.
+          if class_name_str == "LibIntrinsics"
+            if method_name == "memcpy" || method_name == "memmove" || method_name == "memset"
+              arg_ids = expand_splat_args(ctx, node.args)
+              return emit_mem_intrinsic(ctx, method_name, arg_ids)
+            end
           end
           # Class method call like Counter.new()
           full_method_name = "#{class_name_str}.#{method_name}"
@@ -11310,7 +11777,12 @@ module Crystal::HIR
       # Special handling for Tuple#size - return compile-time constant based on type parameters
       if method_name == "size" && receiver_id && args.empty?
         if type_desc = @module.get_type_descriptor(ctx.type_of(receiver_id))
-          if tuple_size = tuple_size_from_type_name(type_desc.name)
+          tuple_size = tuple_size_from_type_name(type_desc.name)
+          if tuple_size.nil?
+            base_name = type_desc.name.split("(").first
+            tuple_size = type_desc.type_params.size if base_name == "Tuple" && !type_desc.type_params.empty?
+          end
+          if tuple_size
             lit = Literal.new(ctx.next_id, TypeRef::INT32, tuple_size.to_i64)
             ctx.emit(lit)
             ctx.register_type(lit.id, TypeRef::INT32)
@@ -11388,6 +11860,10 @@ module Crystal::HIR
         end
         if is_union_or_nilable_type?(declared_type)
           return lower_not_nil_intrinsic(ctx, receiver_id, declared_type)
+        end
+        if declared_type == TypeRef::VOID
+          ctx.register_type(receiver_id, TypeRef::POINTER)
+          return receiver_id
         end
       end
 
@@ -11502,6 +11978,15 @@ module Crystal::HIR
         end
       end
 
+      # Fallback: treat bare unsafe_* calls inside numeric primitives as self-calls.
+      if receiver_id.nil? && (current_class = @current_class) && numeric_primitive_class_name?(current_class)
+        if method_name == "unsafe_div" || method_name == "unsafe_mod" ||
+           method_name == "unsafe_shl" || method_name == "unsafe_shr"
+          receiver_id = emit_self(ctx)
+          full_method_name = "#{current_class}##{method_name}"
+        end
+      end
+
       # Handle Array#reduce { |acc, elem| ... } intrinsic
       if method_name == "reduce"
         if receiver_id
@@ -11522,8 +12007,7 @@ module Crystal::HIR
       base_method_name = if full_method_name
                            full_method_name
                          elsif receiver_id.nil? && (current = @current_class)
-                           # Bare method call inside a class/module - could be self.method()
-                           # Use class method separator when in a class method context.
+                           # Bare calls inside a class/module always resolve as self.<method>.
                            sep = @current_method_is_class ? "." : "#"
                            "#{current}#{sep}#{method_name}"
                          else
@@ -11531,6 +12015,15 @@ module Crystal::HIR
                          end
       if receiver_id.nil? && full_method_name.nil? && method_name == "main" && @top_level_main_defined
         base_method_name = TOP_LEVEL_MAIN_BASE
+      end
+
+      if receiver_id.nil? && method_name == "new"
+        target_name = full_method_name || base_method_name
+        if target_name == "Pointer.new" || target_name.starts_with?("Pointer(")
+          if lowered = lower_pointer_new_intrinsic(ctx, args)
+            return lowered
+          end
+        end
       end
       mangled_method_name = mangle_function_name(base_method_name, arg_types)
       if has_block_call
@@ -11554,7 +12047,7 @@ module Crystal::HIR
       end
 
       if full_method_name && !@function_defs.has_key?(mangled_method_name)
-        if entry = lookup_function_def_for_call(full_method_name, args.size, has_block_call)
+        if entry = lookup_function_def_for_call(full_method_name, args.size, has_block_call, arg_types)
           mangled_method_name = entry[0]
           base_method_name = mangled_method_name.split("$").first
         end
@@ -11576,6 +12069,22 @@ module Crystal::HIR
         end
       end
       primary_mangled_name = mangled_method_name
+      receiver_name = ""
+      if receiver_id
+        if desc = @module.get_type_descriptor(ctx.type_of(receiver_id))
+          receiver_name = desc.name
+        end
+      end
+      arg_names = arg_types.map { |t| type_name_for_mangling(t) }
+      debug_hook("call.resolve", "method=#{method_name} base=#{base_method_name} mangled=#{mangled_method_name} receiver=#{receiver_name} args=#{arg_names} current=#{@current_class || ""}")
+
+      if receiver_id.nil? && method_name == "new" && args.size == 1
+        if mangled_method_name.starts_with?("Pointer_") && mangled_method_name.ends_with?("__new")
+          if lowered = lower_pointer_new_intrinsic(ctx, args)
+            return lowered
+          end
+        end
+      end
 
       # Handle yield-functions with inline expansion FIRST (before lowering block)
       # Must check with mangled name since that's how yield functions are registered
@@ -11623,6 +12132,7 @@ module Crystal::HIR
             # Check if this is a call to a yield-function using mangled name
             if @yield_functions.includes?(mangled_method_name)
               if func_def = @function_defs[mangled_method_name]?
+                debug_hook("call.inline.yield", "callee=#{mangled_method_name} current=#{@current_class || ""}")
                 callee_arena = @function_def_arenas[mangled_method_name]? || @arena
                 return inline_yield_function(ctx, func_def, mangled_method_name, receiver_id, call_args, block_cast, callee_arena)
               end
@@ -11630,6 +12140,7 @@ module Crystal::HIR
             # Also try base method name (for functions without overloading)
             if @yield_functions.includes?(base_method_name)
               if func_def = @function_defs[base_method_name]?
+                debug_hook("call.inline.yield", "callee=#{base_method_name} current=#{@current_class || ""}")
                 callee_arena = @function_def_arenas[base_method_name]? || @arena
                 return inline_yield_function(ctx, func_def, base_method_name, receiver_id, call_args, block_cast, callee_arena)
               end
@@ -11641,6 +12152,7 @@ module Crystal::HIR
             if receiver_id
               if yield_key = find_yield_method_fallback(method_name, call_args.size)
                 if func_def = @function_defs[yield_key]?
+                  debug_hook("call.inline.yield", "callee=#{yield_key} current=#{@current_class || ""}")
                   callee_arena = @function_def_arenas[yield_key]? || @arena
                   return inline_yield_function(ctx, func_def, yield_key, receiver_id, call_args, block_cast, callee_arena)
                 end
@@ -11821,6 +12333,130 @@ module Crystal::HIR
         end
       end
 
+      # Primitive numeric conversions (to_i*, to_u*, to_f*).
+      if receiver_id && args.empty?
+        receiver_type = ctx.type_of(receiver_id)
+        target_type = case method_name
+                      when "to_i", "to_i32", "to_i32!"
+                        TypeRef::INT32
+                      when "to_i8", "to_i8!"
+                        TypeRef::INT8
+                      when "to_i16", "to_i16!"
+                        TypeRef::INT16
+                      when "to_i64", "to_i64!"
+                        TypeRef::INT64
+                      when "to_i128", "to_i128!"
+                        TypeRef::INT128
+                      when "to_u", "to_u32", "to_u32!"
+                        TypeRef::UINT32
+                      when "to_u8", "to_u8!"
+                        TypeRef::UINT8
+                      when "to_u16", "to_u16!"
+                        TypeRef::UINT16
+                      when "to_u64", "to_u64!"
+                        TypeRef::UINT64
+                      when "to_u128", "to_u128!"
+                        TypeRef::UINT128
+                      when "to_f", "to_f64", "to_f64!"
+                        TypeRef::FLOAT64
+                      when "to_f32", "to_f32!"
+                        TypeRef::FLOAT32
+                      else
+                        nil
+                      end
+        if target_type
+          if receiver_type == TypeRef::VOID
+            receiver_type = TypeRef::POINTER
+            ctx.register_type(receiver_id, receiver_type)
+          end
+          if numeric_primitive?(receiver_type) || receiver_type == TypeRef::POINTER
+            return receiver_id if receiver_type == target_type
+            cast = Cast.new(ctx.next_id, target_type, receiver_id, target_type)
+            ctx.emit(cast)
+            ctx.register_type(cast.id, target_type)
+            return cast.id
+          end
+        end
+      end
+
+      # Primitive numeric predicates and shifts.
+      if receiver_id && numeric_primitive?(ctx.type_of(receiver_id))
+        receiver_type = ctx.type_of(receiver_id)
+        if method_name == "zero?" && args.empty?
+          zero = Literal.new(ctx.next_id, receiver_type, 0_i64)
+          ctx.emit(zero)
+          ctx.register_type(zero.id, receiver_type)
+          cmp = BinaryOperation.new(ctx.next_id, TypeRef::BOOL, BinaryOp::Eq, receiver_id, zero.id)
+          ctx.emit(cmp)
+          ctx.register_type(cmp.id, TypeRef::BOOL)
+          return cmp.id
+        end
+        if receiver_type == TypeRef::UINT8 && method_name == "ascii?" && args.empty?
+          limit = Literal.new(ctx.next_id, TypeRef::UINT8, 128_i64)
+          ctx.emit(limit)
+          ctx.register_type(limit.id, TypeRef::UINT8)
+          cmp = BinaryOperation.new(ctx.next_id, TypeRef::BOOL, BinaryOp::Lt, receiver_id, limit.id)
+          ctx.emit(cmp)
+          ctx.register_type(cmp.id, TypeRef::BOOL)
+          return cmp.id
+        end
+        if receiver_type == TypeRef::UINT8 && method_name == "ord" && args.empty?
+          cast = Cast.new(ctx.next_id, TypeRef::INT32, receiver_id, TypeRef::INT32)
+          ctx.emit(cast)
+          ctx.register_type(cast.id, TypeRef::INT32)
+          return cast.id
+        end
+        if (method_name == "unsafe_shl" || method_name == "unsafe_shr") && args.size == 1
+          op = method_name == "unsafe_shl" ? BinaryOp::Shl : BinaryOp::Shr
+          shift = BinaryOperation.new(ctx.next_id, receiver_type, op, receiver_id, args[0])
+          ctx.emit(shift)
+          ctx.register_type(shift.id, receiver_type)
+          return shift.id
+        end
+        if method_name == "unsafe_div" && args.size == 1
+          div = BinaryOperation.new(ctx.next_id, receiver_type, BinaryOp::Div, receiver_id, args[0])
+          ctx.emit(div)
+          ctx.register_type(div.id, receiver_type)
+          return div.id
+        end
+        if method_name == "unsafe_mod" && args.size == 1
+          rem = BinaryOperation.new(ctx.next_id, receiver_type, BinaryOp::Mod, receiver_id, args[0])
+          ctx.emit(rem)
+          ctx.register_type(rem.id, receiver_type)
+          return rem.id
+        end
+      end
+
+      # Pointer address conversions.
+      if receiver_id && args.empty?
+        receiver_type = ctx.type_of(receiver_id)
+        recv_type_desc = @module.get_type_descriptor(receiver_type)
+        is_pointer_type = receiver_type == TypeRef::POINTER ||
+                          (recv_type_desc && recv_type_desc.name.starts_with?("Pointer"))
+        if is_pointer_type
+          case method_name
+          when "address", "to_u64"
+            cast = Cast.new(ctx.next_id, TypeRef::UINT64, receiver_id, TypeRef::UINT64)
+            ctx.emit(cast)
+            ctx.register_type(cast.id, TypeRef::UINT64)
+            return cast.id
+          when "to_i", "to_i64"
+            cast = Cast.new(ctx.next_id, TypeRef::INT64, receiver_id, TypeRef::INT64)
+            ctx.emit(cast)
+            ctx.register_type(cast.id, TypeRef::INT64)
+            return cast.id
+          when "to_f64"
+            int_cast = Cast.new(ctx.next_id, TypeRef::UINT64, receiver_id, TypeRef::UINT64)
+            ctx.emit(int_cast)
+            ctx.register_type(int_cast.id, TypeRef::UINT64)
+            float_cast = Cast.new(ctx.next_id, TypeRef::FLOAT64, int_cast.id, TypeRef::FLOAT64)
+            ctx.emit(float_cast)
+            ctx.register_type(float_cast.id, TypeRef::FLOAT64)
+            return float_cast.id
+          end
+        end
+      end
+
       # Check for pointer primitive operations
       # Pointer(T).malloc(count) -> PointerMalloc
       if full_method_name && full_method_name.starts_with?("Pointer(") && method_name == "malloc" && args.size == 1
@@ -11829,6 +12465,12 @@ module Crystal::HIR
         ctx.emit(malloc_node)
         ctx.register_type(malloc_node.id, TypeRef::POINTER)
         return malloc_node.id
+      end
+
+      if full_method_name && (full_method_name == "Pointer.new" || full_method_name.starts_with?("Pointer(")) && method_name == "new" && args.size == 1
+        if lowered = lower_pointer_new_intrinsic(ctx, args)
+          return lowered
+        end
       end
 
       if full_method_name && full_method_name.starts_with?("Pointer(") && method_name == "null" && args.empty?
@@ -11861,7 +12503,7 @@ module Crystal::HIR
                          element_type_name = recv_type_desc.name[8...-1]
                          type_ref_for_name(element_type_name)
                        else
-                         TypeRef::INT32  # Fallback for untyped pointers
+                         TypeRef::UINT8  # Fallback for untyped pointers
                        end
           load_node = PointerLoad.new(ctx.next_id, deref_type, receiver_id, index_id)
           ctx.emit(load_node)
@@ -12092,7 +12734,8 @@ module Crystal::HIR
                   else
                     method_name
                   end
-      entry = lookup_function_def_for_call(func_name, args.size, has_block_call)
+      arg_types = args.map { |arg_id| ctx.type_of(arg_id) }
+      entry = lookup_function_def_for_call(func_name, args.size, has_block_call, arg_types)
       return args unless entry
 
       func_def = entry[1]
@@ -12146,7 +12789,8 @@ module Crystal::HIR
                   else
                     method_name
                   end
-      entry = lookup_function_def_for_call(func_name, args.size, has_block_call)
+      arg_types = args.map { |arg_id| ctx.type_of(arg_id) }
+      entry = lookup_function_def_for_call(func_name, args.size, has_block_call, arg_types)
       return args unless entry
 
       func_def = entry[1]
@@ -12224,11 +12868,12 @@ module Crystal::HIR
       # Receiver counts as first implicit parameter for instance methods
       # The function params include self for instance methods
       params = target_func.params
+      param_offset = params.first?.try(&.name) == "self" ? 1 : 0
 
       # Coerce each argument
       result = [] of ValueId
       args.each_with_index do |arg_id, idx|
-        param = params[idx]?
+        param = params[idx + param_offset]?
         if param.nil?
           # No more params - just pass through
           result << arg_id
@@ -12237,6 +12882,7 @@ module Crystal::HIR
 
         arg_type = ctx.type_of(arg_id)
         param_type = param.type
+        param_type_name = @module.get_type_descriptor(param_type).try(&.name) || ""
 
         # Check if we need to coerce: arg is concrete type, param is union containing that type
         if needs_union_coercion?(arg_type, param_type)
@@ -12246,6 +12892,22 @@ module Crystal::HIR
           ctx.emit(wrap)
           ctx.register_type(wrap.id, param_type)
           result << wrap.id
+        elsif arg_type != TypeRef::VOID && param_type != TypeRef::VOID && arg_type != param_type
+          target_type = nil
+          if numeric_primitive?(param_type) && numeric_primitive?(arg_type)
+            target_type = param_type
+          elsif !param_type_name.empty?
+            target_type = numeric_param_target_type(param_type_name, arg_type)
+          end
+
+          if target_type && target_type != TypeRef::VOID && target_type != arg_type
+            cast = Cast.new(ctx.next_id, target_type, arg_id, target_type)
+            ctx.emit(cast)
+            ctx.register_type(cast.id, target_type)
+            result << cast.id
+          else
+            result << arg_id
+          end
         else
           result << arg_id
         end
@@ -12308,7 +12970,8 @@ module Crystal::HIR
     private def lookup_function_def_for_call(
       func_name : String,
       arg_count : Int32,
-      has_block : Bool
+      has_block : Bool,
+      arg_types : Array(TypeRef)? = nil
     ) : Tuple(String, CrystalV2::Compiler::Frontend::DefNode)?
       if func_def = @function_defs[func_name]?
         return {func_name, func_def}
@@ -12317,6 +12980,7 @@ module Crystal::HIR
       best : CrystalV2::Compiler::Frontend::DefNode? = nil
       best_name : String? = nil
       best_param_count = Int32::MAX
+      best_score = Int32::MIN
 
       @function_defs.each do |name, def_node|
         next unless name == func_name || name.starts_with?("#{func_name}$")
@@ -12339,10 +13003,18 @@ module Crystal::HIR
         next if arg_count < required
         next if arg_count > param_count && !has_splat && !has_double_splat
 
-        if param_count < best_param_count
+        score = 0
+        if arg_types
+          func_context = function_context_from_name(name)
+          next unless params_compatible_with_args?(def_node, arg_types, func_context)
+          score = params_match_score(def_node, arg_types, func_context)
+        end
+
+        if param_count < best_param_count || (param_count == best_param_count && score > best_score)
           best = def_node
           best_name = name
           best_param_count = param_count
+          best_score = score
         end
       end
 
@@ -12423,7 +13095,8 @@ module Crystal::HIR
       has_block_call : Bool
     ) : Array(ValueId)
       func_name = full_method_name || method_name
-      func_entry = lookup_function_def_for_call(func_name, positional_args.size, has_block_call)
+      arg_types = infer_arg_types_for_call(positional_args, @current_class)
+      func_entry = lookup_function_def_for_call(func_name, positional_args.size, has_block_call, arg_types)
       func_def = func_entry ? func_entry[1] : nil
       func_context = func_entry ? function_context_from_name(func_entry[0]) : nil
       return positional_args.map { |arg| lower_expr(ctx, arg) } unless func_def
@@ -12637,7 +13310,8 @@ module Crystal::HIR
       has_block_call : Bool
     ) : Array(ValueId)
       func_name = full_method_name || method_name
-      func_entry = lookup_function_def_for_call(func_name, args.size, has_block_call)
+      arg_types = args.map { |arg_id| ctx.type_of(arg_id) }
+      func_entry = lookup_function_def_for_call(func_name, args.size, has_block_call, arg_types)
       return args unless func_entry
       func_def = func_entry[1]
       func_context = function_context_from_name(func_entry[0])
@@ -14597,6 +15271,10 @@ module Crystal::HIR
       if member_name == "not_nil!" && is_union_or_nilable_type?(receiver_type)
         return lower_not_nil_intrinsic(ctx, object_id, receiver_type)
       end
+      if member_name == "not_nil!" && receiver_type == TypeRef::VOID
+        ctx.register_type(object_id, TypeRef::POINTER)
+        return object_id
+      end
 
       if receiver_type == TypeRef::CHAR && member_name == "ord"
         cast = Cast.new(ctx.next_id, TypeRef::INT32, object_id, TypeRef::INT32)
@@ -14647,6 +15325,102 @@ module Crystal::HIR
         end
       end
 
+      # Primitive numeric conversions and predicates for member access (no-arg calls).
+      target_type = case member_name
+                    when "to_i", "to_i32", "to_i32!"
+                      TypeRef::INT32
+                    when "to_i8", "to_i8!"
+                      TypeRef::INT8
+                    when "to_i16", "to_i16!"
+                      TypeRef::INT16
+                    when "to_i64", "to_i64!"
+                      TypeRef::INT64
+                    when "to_i128", "to_i128!"
+                      TypeRef::INT128
+                    when "to_u", "to_u32", "to_u32!"
+                      TypeRef::UINT32
+                    when "to_u8", "to_u8!"
+                      TypeRef::UINT8
+                    when "to_u16", "to_u16!"
+                      TypeRef::UINT16
+                    when "to_u64", "to_u64!"
+                      TypeRef::UINT64
+                    when "to_u128", "to_u128!"
+                      TypeRef::UINT128
+                    when "to_f", "to_f64", "to_f64!"
+                      TypeRef::FLOAT64
+                    when "to_f32", "to_f32!"
+                      TypeRef::FLOAT32
+                    else
+                      nil
+                    end
+      if target_type
+        if receiver_type == TypeRef::VOID
+          receiver_type = TypeRef::INT32
+          ctx.register_type(object_id, receiver_type)
+        end
+        if numeric_primitive?(receiver_type)
+          return object_id if receiver_type == target_type
+          cast = Cast.new(ctx.next_id, target_type, object_id, target_type)
+          ctx.emit(cast)
+          ctx.register_type(cast.id, target_type)
+          return cast.id
+        end
+      end
+      if numeric_primitive?(receiver_type)
+        if member_name == "zero?"
+          zero = Literal.new(ctx.next_id, receiver_type, 0_i64)
+          ctx.emit(zero)
+          ctx.register_type(zero.id, receiver_type)
+          cmp = BinaryOperation.new(ctx.next_id, TypeRef::BOOL, BinaryOp::Eq, object_id, zero.id)
+          ctx.emit(cmp)
+          ctx.register_type(cmp.id, TypeRef::BOOL)
+          return cmp.id
+        end
+        if receiver_type == TypeRef::UINT8 && member_name == "ascii?"
+          limit = Literal.new(ctx.next_id, TypeRef::UINT8, 128_i64)
+          ctx.emit(limit)
+          ctx.register_type(limit.id, TypeRef::UINT8)
+          cmp = BinaryOperation.new(ctx.next_id, TypeRef::BOOL, BinaryOp::Lt, object_id, limit.id)
+          ctx.emit(cmp)
+          ctx.register_type(cmp.id, TypeRef::BOOL)
+          return cmp.id
+        end
+        if receiver_type == TypeRef::UINT8 && member_name == "ord"
+          cast = Cast.new(ctx.next_id, TypeRef::INT32, object_id, TypeRef::INT32)
+          ctx.emit(cast)
+          ctx.register_type(cast.id, TypeRef::INT32)
+          return cast.id
+        end
+      end
+
+      # Pointer address conversions for member access (no-arg calls).
+      recv_type_desc = @module.get_type_descriptor(receiver_type)
+      is_pointer_type = receiver_type == TypeRef::POINTER ||
+                        (recv_type_desc && recv_type_desc.name.starts_with?("Pointer"))
+      if is_pointer_type
+        case member_name
+        when "address", "to_u64"
+          cast = Cast.new(ctx.next_id, TypeRef::UINT64, object_id, TypeRef::UINT64)
+          ctx.emit(cast)
+          ctx.register_type(cast.id, TypeRef::UINT64)
+          return cast.id
+        when "to_i", "to_i64"
+          cast = Cast.new(ctx.next_id, TypeRef::INT64, object_id, TypeRef::INT64)
+          ctx.emit(cast)
+          ctx.register_type(cast.id, TypeRef::INT64)
+          return cast.id
+        when "to_f64"
+          int_cast = Cast.new(ctx.next_id, TypeRef::UINT64, object_id, TypeRef::UINT64)
+          ctx.emit(int_cast)
+          ctx.register_type(int_cast.id, TypeRef::UINT64)
+          float_cast = Cast.new(ctx.next_id, TypeRef::FLOAT64, int_cast.id, TypeRef::FLOAT64)
+          ctx.emit(float_cast)
+          ctx.register_type(float_cast.id, TypeRef::FLOAT64)
+          return float_cast.id
+        end
+      end
+
       # Handle pointer.value -> PointerLoad for typed pointers (Pointer(T))
       type_desc = @module.get_type_descriptor(receiver_type)
       is_pointer_type = receiver_type == TypeRef::POINTER ||
@@ -14657,7 +15431,7 @@ module Crystal::HIR
                        element_type_name = type_desc.name[8...-1]
                        type_ref_for_name(element_type_name)
                      else
-                       TypeRef::INT32  # Fallback for untyped pointers
+                       TypeRef::UINT8  # Fallback for untyped pointers
                      end
         load_node = PointerLoad.new(ctx.next_id, deref_type, object_id, nil)
         ctx.emit(load_node)
@@ -14848,7 +15622,12 @@ module Crystal::HIR
       # Special handling for Tuple#size - return compile-time constant based on type parameters
       if member_name == "size"
         if type_desc = @module.get_type_descriptor(receiver_type)
-          if tuple_size = tuple_size_from_type_name(type_desc.name)
+          tuple_size = tuple_size_from_type_name(type_desc.name)
+          if tuple_size.nil?
+            base_name = type_desc.name.split("(").first
+            tuple_size = type_desc.type_params.size if base_name == "Tuple" && !type_desc.type_params.empty?
+          end
+          if tuple_size
             lit = Literal.new(ctx.next_id, TypeRef::INT32, tuple_size.to_i64)
             ctx.emit(lit)
             ctx.register_type(lit.id, TypeRef::INT32)
@@ -15476,7 +16255,15 @@ module Crystal::HIR
       excl_lit = Literal.new(ctx.next_id, TypeRef::BOOL, node.exclusive)
       ctx.emit(excl_lit)
 
-      range_type = ctx.get_type("Range")
+      begin_name = get_type_name_from_ref(ctx.type_of(begin_id))
+      end_name = get_type_name_from_ref(ctx.type_of(end_id))
+      range_type_name = if begin_name == "Unknown" || end_name == "Unknown" ||
+                           begin_name.includes?("|") || end_name.includes?("|")
+                          "Range"
+                        else
+                          "Range(#{begin_name}, #{end_name})"
+                        end
+      range_type = type_ref_for_name(range_type_name)
       alloc = Allocate.new(ctx.next_id, range_type, [begin_id, end_id, excl_lit.id])
       ctx.emit(alloc)
       alloc.id
@@ -15866,15 +16653,6 @@ module Crystal::HIR
                when "Char"    then TypeRef::CHAR
                when "String"  then TypeRef::STRING
                when "Symbol"  then TypeRef::SYMBOL
-               # Abstract/stdlib types that should be treated as pointers
-               when "IO"         then TypeRef::POINTER
-               when "Object"     then TypeRef::POINTER
-               when "Reference"  then TypeRef::POINTER
-               when "Exception"  then TypeRef::POINTER
-               when "Enumerable" then TypeRef::POINTER
-               when "Indexable"  then TypeRef::POINTER
-               when "Comparable" then TypeRef::POINTER
-               when "Iterable"   then TypeRef::POINTER
                else
                  # Check if this is an enum type - enums are stored as Int32
                  if enum_info = @enum_info
@@ -15890,16 +16668,9 @@ module Crystal::HIR
                    return info.type_ref
                  end
 
-                 # For short names (no ::), use qualified name from context to avoid
-                 # creating wrong types when the actual type will be registered later.
-                 # E.g., when inside IO and referencing "Seek", create "IO::Seek" descriptor
-                 # instead of just "Seek" - this ensures proper name resolution.
-                 final_name = if !lookup_name.includes?("::") && (current = @current_class)
-                                "#{current}::#{lookup_name}"
-                              else
-                                lookup_name
-                              end
-                 @module.intern_type(TypeDescriptor.new(TypeKind::Class, final_name))
+                 # For unknown types, keep the unqualified name to avoid poisoning
+                 # the cache with a context-specific namespace.
+                 @module.intern_type(TypeDescriptor.new(TypeKind::Class, lookup_name))
                end
       # Cache the result to avoid VOID placeholder being returned on subsequent calls
       @type_cache[lookup_name] = result
