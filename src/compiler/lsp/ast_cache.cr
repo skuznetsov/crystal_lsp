@@ -69,7 +69,6 @@ module CrystalV2
         DefNode
         ClassNode
         ModuleNode
-        StructNode
         UnionNode
         EnumNode
         AliasNode
@@ -119,7 +118,7 @@ module CrystalV2
 
       class AstCache
         MAGIC   = "CV2A"
-        VERSION = 12_u32
+        VERSION = 13_u32
 
         getter arena : Frontend::AstArena
         getter roots : Array(Frontend::ExprId)
@@ -1651,12 +1650,6 @@ module CrystalV2
             body = read_optional_expr_id_array(io)
             type_params = read_optional_string_array(io, strings, pool)
             Frontend::ModuleNode.new(span, name, body, type_params)
-
-          when .struct_node?
-            span = read_span(io)
-            name = pool.intern(strings[read_string_idx(io)].to_slice)
-            body = read_optional_expr_id_array(io)
-            Frontend::ClassNode.new(span, name, nil, body, false, true, false, nil)
 
           when .enum_node?
             span = read_span(io)

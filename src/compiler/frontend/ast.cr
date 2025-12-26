@@ -1278,19 +1278,6 @@ module CrystalV2
         end
       end
 
-      class StructNode < Node
-        getter span : Span
-        def node_kind : NodeKind
-          NodeKind::Struct
-        end
-
-        getter name : Slice(UInt8)
-        getter body : Array(ExprId)?
-
-        def initialize(@span : Span, @name : Slice(UInt8), @body : Array(ExprId)?)
-        end
-      end
-
       class UnionNode < Node
         getter span : Span
         def node_kind : NodeKind
@@ -1419,7 +1406,7 @@ module CrystalV2
           NodeKind::AnnotationDef
         end
 
-        getter name : Slice(UInt8)    # Simple identifier (like ClassNode, StructNode)
+        getter name : Slice(UInt8)    # Simple identifier (like ClassNode)
 
         def initialize(@span : Span, @name : Slice(UInt8))
         end
@@ -2111,10 +2098,6 @@ module CrystalV2
 
       def self.node_kind(node : ModuleNode) : NodeKind
         NodeKind::Module
-      end
-
-      def self.node_kind(node : StructNode) : NodeKind
-        NodeKind::Struct
       end
 
       def self.node_kind(node : UnionNode) : NodeKind
@@ -2851,10 +2834,6 @@ def self.node_class_body(node : ClassNode)
   node.body
 end
 
-def self.node_class_body(node : StructNode)
-  node.body
-end
-
 def self.node_class_body(node : UnionNode)
   node.body
 end
@@ -2894,10 +2873,6 @@ end
 # class_name
 
 def self.node_class_name(node : ClassNode)
-  node.name
-end
-
-def self.node_class_name(node : StructNode)
   node.name
 end
 
