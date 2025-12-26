@@ -271,6 +271,8 @@ module Crystal::HIR
 
     # Class type information
     getter class_info : Hash(String, ClassInfo)
+    # Module-level class vars (modules don't have ClassInfo entries)
+    @module_class_vars : Hash(String, Array(ClassVarInfo))
 
     # Initialize parameters for each class (for new() generation)
     @init_params : Hash(String, Array({String, TypeRef}))
@@ -386,6 +388,7 @@ module Crystal::HIR
       @function_base_names = Set(String).new
       @function_base_return_types = {} of String => TypeRef
       @class_info = {} of String => ClassInfo
+      @module_class_vars = {} of String => Array(ClassVarInfo)
       @init_params = {} of String => Array({String, TypeRef})
       @current_class = nil
       @current_method = nil
@@ -2065,6 +2068,28 @@ module Crystal::HIR
           body.each do |expr_id|
             member = unwrap_visibility_member(@arena[expr_id])
             case member
+          when CrystalV2::Compiler::Frontend::ClassVarDeclNode
+            raw_name = String.new(member.name)
+            cvar_name = raw_name.lstrip('@')
+            cvar_type = type_ref_for_name(String.new(member.type))
+            initial_value : Int64? = nil
+            if val_id = member.value
+              val_node = @arena[val_id]
+              if val_node.is_a?(CrystalV2::Compiler::Frontend::NumberNode)
+                num_str = String.new(val_node.value)
+                initial_value = num_str.to_i64?
+              end
+            end
+            record_class_var_type(module_name, cvar_name, cvar_type, initial_value)
+          when CrystalV2::Compiler::Frontend::AssignNode
+            target_node = @arena[member.target]
+            if target_node.is_a?(CrystalV2::Compiler::Frontend::ClassVarNode)
+              raw_name = String.new(target_node.name)
+              cvar_name = raw_name.lstrip('@')
+              value_node = @arena[member.value]
+              cvar_type = infer_type_from_class_ivar_assign(value_node)
+              record_class_var_type(module_name, cvar_name, cvar_type)
+            end
           when CrystalV2::Compiler::Frontend::DefNode
             method_name = String.new(member.name)
             # In Crystal, `def self.foo` defines a module (class) method,
@@ -3781,6 +3806,18 @@ module Crystal::HIR
                 ivars << IVarInfo.new(ivar_name, ivar_type, offset)
                 offset += type_size(ivar_type)
               end
+            elsif target_node.is_a?(CrystalV2::Compiler::Frontend::ClassVarNode)
+              raw_name = String.new(target_node.name)
+              cvar_name = raw_name.lstrip('@')
+              value_node = @arena[member.value]
+              cvar_type = infer_type_from_class_ivar_assign(value_node)
+              if idx = class_vars.index { |cv| cv.name == cvar_name }
+                if class_vars[idx].type == TypeRef::VOID && cvar_type != TypeRef::VOID
+                  class_vars[idx] = ClassVarInfo.new(cvar_name, cvar_type, class_vars[idx].initial_value)
+                end
+              else
+                class_vars << ClassVarInfo.new(cvar_name, cvar_type, nil)
+              end
             end
           when CrystalV2::Compiler::Frontend::AliasNode
             # Type alias within class: alias Handle = Int32
@@ -5469,6 +5506,10 @@ module Crystal::HIR
       # Store AST for potential inline expansion (use mangled name)
       @function_defs[full_name] = node
       @function_def_arenas[full_name] = @arena
+      unless @function_defs.has_key?(base_name)
+        @function_defs[base_name] = node
+        @function_def_arenas[base_name] = @arena
+      end
 
       # Check if function contains yield
       if body = node.body
@@ -6262,6 +6303,8 @@ module Crystal::HIR
         else
           base_name
         end
+      when CrystalV2::Compiler::Frontend::PathNode
+        collect_path_string(node)
       when CrystalV2::Compiler::Frontend::MemberAccessNode
         # Nested::Class - reconstruct qualified name
         obj_node = @arena[node.object]
@@ -6336,8 +6379,43 @@ module Crystal::HIR
             return cvar.type if cvar.name == name
           end
         end
+        if module_vars = @module_class_vars[class_name]?
+          module_vars.each do |cvar|
+            return cvar.type if cvar.name == name
+          end
+        end
       end
       TypeRef::VOID
+    end
+
+    private def record_class_var_type(owner_name : String, cvar_name : String, cvar_type : TypeRef, initial_value : Int64? = nil) : Nil
+      return if owner_name.empty?
+      return if cvar_type == TypeRef::VOID
+
+      if class_info = @class_info[owner_name]?
+        if idx = class_info.class_vars.index { |cv| cv.name == cvar_name }
+          if class_info.class_vars[idx].type == TypeRef::VOID
+            class_info.class_vars[idx] = ClassVarInfo.new(cvar_name, cvar_type, class_info.class_vars[idx].initial_value)
+          end
+        else
+          class_info.class_vars << ClassVarInfo.new(cvar_name, cvar_type, initial_value)
+        end
+        return
+      end
+
+      return unless @module_defs.has_key?(owner_name)
+      vars = @module_class_vars[owner_name]? || begin
+        new_vars = [] of ClassVarInfo
+        @module_class_vars[owner_name] = new_vars
+        new_vars
+      end
+      if idx = vars.index { |cv| cv.name == cvar_name }
+        if vars[idx].type == TypeRef::VOID
+          vars[idx] = ClassVarInfo.new(cvar_name, cvar_type, vars[idx].initial_value)
+        end
+      else
+        vars << ClassVarInfo.new(cvar_name, cvar_type, initial_value)
+      end
     end
 
     # Lower a function definition
@@ -7797,9 +7875,28 @@ module Crystal::HIR
     private def lower_top_level_def(ctx : LoweringContext, node : CrystalV2::Compiler::Frontend::DefNode) : ValueId
       # Top-level methods are global functions
       method_name = String.new(node.name)
+      param_types = [] of TypeRef
+      has_block = false
+      if params = node.params
+        params.each do |param|
+          next if named_only_separator?(param)
+          if param.is_block
+            has_block = true
+            next
+          end
+          param_type = if ta = param.type_annotation
+                         type_ref_for_name(String.new(ta))
+                       elsif param.is_double_splat
+                         type_ref_for_name("NamedTuple")
+                       else
+                         TypeRef::VOID
+                       end
+          param_types << param_type
+        end
+      end
 
-      # Skip if already registered
-      if @function_defs.has_key?(method_name)
+      full_name = mangle_function_name(method_name, param_types, has_block)
+      if @function_defs.has_key?(full_name)
         nil_lit = Literal.new(ctx.next_id, TypeRef::NIL, nil)
         ctx.emit(nil_lit)
         return nil_lit.id
@@ -7814,13 +7911,15 @@ module Crystal::HIR
                       TypeRef::VOID
                     end
 
-      # Create function
-      func = @module.create_function(method_name, return_type)
-      @function_defs[method_name] = node
-      @function_def_arenas[method_name] = @arena
+      register_function_type(full_name, return_type) unless @function_types[full_name]?
+      register_function_type(method_name, return_type) unless @function_types[method_name]?
 
-      # Register return type
-      register_function_type(method_name, return_type)
+      @function_defs[full_name] = node
+      @function_def_arenas[full_name] = @arena
+      unless @function_defs.has_key?(method_name)
+        @function_defs[method_name] = node
+        @function_def_arenas[method_name] = @arena
+      end
 
       # Method definitions don't produce a value
       nil_lit = Literal.new(ctx.next_id, TypeRef::NIL, nil)
@@ -14771,6 +14870,11 @@ module Crystal::HIR
         name = raw_name.lstrip('@')
         cvar_type = get_class_var_type(name)
         class_name = @current_class || ""
+        if cvar_type == TypeRef::VOID
+          value_type = ctx.type_of(value_id)
+          record_class_var_type(class_name, name, value_type)
+          cvar_type = value_type unless value_type == TypeRef::VOID
+        end
         class_var_set = ClassVarSet.new(ctx.next_id, cvar_type, class_name, name, value_id)
         ctx.emit(class_var_set)
         class_var_set.id
