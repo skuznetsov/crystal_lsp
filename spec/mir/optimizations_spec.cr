@@ -483,6 +483,55 @@ describe Crystal::MIR do
     end
   end
 
+  describe "PeepholePass" do
+    it "simplifies constant branches to jumps" do
+      mod = Crystal::MIR::Module.new
+      func = mod.create_function("test", Crystal::MIR::TypeRef::VOID)
+      builder = Crystal::MIR::Builder.new(func)
+
+      cond = builder.const_bool(true)
+      then_block = func.create_block
+      else_block = func.create_block
+
+      builder.branch(cond, then_block, else_block)
+
+      builder.current_block = then_block
+      builder.ret(nil)
+
+      builder.current_block = else_block
+      builder.ret(nil)
+
+      pass = Crystal::MIR::PeepholePass.new(func)
+      simplified = pass.run
+
+      simplified.should be > 0
+
+      entry = func.get_block(func.entry_block)
+      term = entry.terminator.as(Crystal::MIR::Jump)
+      term.target.should eq(then_block)
+    end
+
+    it "removes redundant casts with identical types" do
+      mod = Crystal::MIR::Module.new
+      func = mod.create_function("test", Crystal::MIR::TypeRef::INT32)
+      builder = Crystal::MIR::Builder.new(func)
+
+      value = builder.const_int(7_i64, Crystal::MIR::TypeRef::INT32)
+      cast = builder.cast(Crystal::MIR::CastKind::Trunc, value, Crystal::MIR::TypeRef::INT32)
+      sum = builder.add(cast, value, Crystal::MIR::TypeRef::INT32)
+      builder.ret(sum)
+
+      pass = Crystal::MIR::PeepholePass.new(func)
+      simplified = pass.run
+
+      simplified.should be > 0
+
+      block = func.get_block(func.entry_block)
+      add = block.instructions.find { |inst| inst.is_a?(Crystal::MIR::BinaryOp) }.as(Crystal::MIR::BinaryOp)
+      add.left.should eq(value)
+    end
+  end
+
   # ═══════════════════════════════════════════════════════════════════════════
   # OPTIMIZATION PIPELINE
   # ═══════════════════════════════════════════════════════════════════════════

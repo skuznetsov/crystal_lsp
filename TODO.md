@@ -348,10 +348,13 @@ Goal: v2 LSP must report only real errors and match original compiler behavior.
 - [x] **M2.3** Taint propagation (`src/compiler/hir/taint_analysis.cr`) - 17 tests
 - [x] **M2.4** Memory strategy integration (`src/compiler/hir/memory_strategy.cr`) - 15 tests
 - [x] **M3.1** MIR data structures (`src/compiler/mir/mir.cr`) - 20 tests
-- [x] **M3.1b** MIR optimizations (`src/compiler/mir/optimizations.cr`) - 17 tests
+- [x] **M3.1b** MIR optimizations (`src/compiler/mir/optimizations.cr`) - 44 tests
   - RC elision (remove redundant rc_inc/rc_dec pairs)
   - Dead code elimination
   - Constant folding
+  - Copy propagation (algebraic identities, store→load forwarding)
+  - Local CSE (pure ops within a block)
+  - Peephole simplifications (no-op casts, constant branches)
 - [x] **M3.2** HIR → MIR lowering (`src/compiler/mir/hir_to_mir.cr`) - 19 tests
   - Full HIR to MIR SSA transformation
   - Memory strategy assignment based on escape/taint analysis

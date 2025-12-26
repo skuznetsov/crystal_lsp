@@ -1331,6 +1331,106 @@ module Crystal::MIR
   end
 
   # ═══════════════════════════════════════════════════════════════════════════
+  # PEEPHOLE (small local cleanups)
+  # ═══════════════════════════════════════════════════════════════════════════
+  #
+  # Removes trivial no-op casts/phis and turns constant branches into jumps.
+  class PeepholePass
+    getter function : Function
+    getter simplified : Int32 = 0
+
+    def initialize(@function : Function)
+    end
+
+    def run : Int32
+      @simplified = 0
+      value_types = {} of ValueId => TypeRef
+      value_nodes = {} of ValueId => Value
+      constants = {} of ValueId => (Int64 | UInt64 | Float64 | Bool | Nil | String)
+
+      @function.params.each do |param|
+        value_types[param.index] = param.type
+      end
+
+      @function.blocks.each do |block|
+        block.instructions.each do |inst|
+          value_types[inst.id] = inst.type
+          value_nodes[inst.id] = inst
+          if inst.is_a?(Constant)
+            case v = inst.value
+            when Int64, UInt64, Float64, Bool, Nil, String
+              constants[inst.id] = v
+            end
+          end
+        end
+      end
+
+      replacements = {} of ValueId => ValueId
+
+      @function.blocks.each do |block|
+        block.instructions.each do |inst|
+          case inst
+          when Cast
+            src_id = canonical(inst.value, replacements)
+            src_type = value_types[src_id]?
+            if src_type == inst.type && src_id != inst.id
+              replacements[inst.id] = src_id
+            end
+          when Phi
+            incoming = inst.incoming.map { |(_, v)| canonical(v, replacements) }
+            next if incoming.empty?
+            if incoming.uniq.size == 1
+              candidate = incoming.first
+              next if candidate == inst.id
+              node = value_nodes[candidate]?
+              next if node.is_a?(Undef)
+              replacements[inst.id] = candidate
+            end
+          end
+        end
+      end
+
+      unless replacements.empty?
+        if ENV["MIR_PEEPHOLE_DEBUG"]?
+          STDERR.puts "[MIR_PEEPHOLE] replacements=#{replacements}"
+        end
+        @simplified += replacements.size
+        CopyPropagationPass.new(@function).apply_replacements(replacements)
+      end
+
+      @function.blocks.each do |block|
+        case term = block.terminator
+        when Branch
+          cond_id = term.condition
+          cond_value = constants[cond_id]?
+          next unless cond_value.is_a?(Bool)
+
+          target = cond_value ? term.then_block : term.else_block
+          block.terminator = Jump.new(target)
+          @simplified += 1
+        end
+      end
+
+      @simplified
+    end
+
+    private def canonical(id : ValueId, replacements : Hash(ValueId, ValueId)) : ValueId
+      current = id
+      seen = Set(ValueId).new
+
+      while next_id = replacements[current]?
+        break if next_id == current
+        return current if seen.includes?(current)
+        seen << current
+        current = next_id
+      end
+
+      replacements[id] = current if current != id
+      current
+    end
+  end
+
+  # ═══════════════════════════════════════════════════════════════════════════
   # OPTIMIZATION PIPELINE
   # ═══════════════════════════════════════════════════════════════════════════
 
@@ -1340,10 +1440,11 @@ module Crystal::MIR
     property constants_folded : Int32 = 0
     property copies_propagated : Int32 = 0
     property cse_eliminated : Int32 = 0
+    property peephole_simplified : Int32 = 0
     property locks_elided : Int32 = 0
 
     def total : Int32
-      rc_eliminated + dead_eliminated + constants_folded + copies_propagated + cse_eliminated + locks_elided
+      rc_eliminated + dead_eliminated + constants_folded + copies_propagated + cse_eliminated + peephole_simplified + locks_elided
     end
 
     def to_s(io : IO)
@@ -1353,6 +1454,7 @@ module Crystal::MIR
       io << constants_folded << " constants folded, "
       io << copies_propagated << " copies propagated, "
       io << cse_eliminated << " CSEs, "
+      io << peephole_simplified << " peephole, "
       io << locks_elided << " locks elided"
     end
   end
@@ -1382,6 +1484,10 @@ module Crystal::MIR
       # Pass 2.5: Copy propagation (light)
       cp = CopyPropagationPass.new(@function)
       @stats.copies_propagated = cp.run
+
+      # Pass 2.75: Peephole simplifications
+      ph = PeepholePass.new(@function)
+      @stats.peephole_simplified = ph.run
 
       # Pass 3: Lock elision (thread-safety optimization)
       le = LockElisionPass.new(@function)
@@ -1413,6 +1519,10 @@ module Crystal::MIR
 
     def run_cse : Int32
       LocalCSEPass.new(@function).run
+    end
+
+    def run_peephole : Int32
+      PeepholePass.new(@function).run
     end
 
     def run_lock_elision : Int32
