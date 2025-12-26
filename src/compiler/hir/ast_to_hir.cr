@@ -5018,12 +5018,16 @@ module Crystal::HIR
       # Prefer non-nil variants when selecting a concrete method target.
       ordered = variants.sort_by { |v| v == "Nil" ? 1 : 0 }
       ordered.each do |variant|
-        base_name = resolve_method_with_inheritance(variant, method_name) || "#{variant}##{method_name}"
-        mangled = mangle_function_name(base_name, arg_types)
-        if @function_types.has_key?(mangled)
-          return mangled
-        elsif has_function_base?(base_name)
-          return base_name
+        resolved_variant = resolve_type_alias_chain(variant)
+        candidates = resolved_variant == variant ? [variant] : [resolved_variant, variant]
+        candidates.uniq.each do |candidate|
+          base_name = resolve_method_with_inheritance(candidate, method_name) || "#{candidate}##{method_name}"
+          mangled = mangle_function_name(base_name, arg_types)
+          if @function_types.has_key?(mangled)
+            return mangled
+          elsif has_function_base?(base_name)
+            return base_name
+          end
         end
       end
 
