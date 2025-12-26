@@ -3693,6 +3693,18 @@ module Crystal::MIR
         end
       end
 
+      # Guard: bitcast between different-width integers is invalid in LLVM.
+      if op == "bitcast" && is_src_int && is_dst_int && src_type != dst_type
+        src_bits = src_type[1..].to_i
+        dst_bits = dst_type[1..].to_i
+        if dst_bits < src_bits
+          op = "trunc"
+        else
+          signed_src = @module.type_registry.get(src_type_ref).try(&.kind).try(&.signed_integer?) || false
+          op = signed_src ? "sext" : "zext"
+        end
+      end
+
       # Guard: sext/zext/trunc can't be used with ptr - use ptrtoint instead
       if (op == "sext" || op == "zext" || op == "trunc") && src_type == "ptr"
         # ptr to int - use ptrtoint
@@ -4275,6 +4287,21 @@ module Crystal::MIR
                       undefined_name
                     end
 
+      if callee_name.starts_with?("Pointer_") && callee_name.ends_with?("__new") && inst.args.size == 1
+        arg_id = inst.args[0]
+        arg = value_ref(arg_id)
+        arg_type = lookup_value_llvm_type(arg_id)
+        if arg_type == "ptr"
+          emit "#{name} = bitcast ptr #{arg} to ptr"
+        elsif arg_type.starts_with?("i")
+          emit "#{name} = inttoptr #{arg_type} #{arg} to ptr"
+        else
+          emit "#{name} = bitcast ptr #{arg} to ptr"
+        end
+        @value_types[inst.id] = TypeRef::POINTER
+        return
+      end
+
       # Use callee's return type instead of inst.type for correct ABI
       # But if callee returns void and inst.type is not void, use inst.type
       # (this handles cases where method resolution found wrong overload)
@@ -4819,6 +4846,21 @@ module Crystal::MIR
 
       # Mangle the extern name to be a valid LLVM identifier
       mangled_extern_name = @type_mapper.mangle_name(inst.extern_name)
+
+      if mangled_extern_name.starts_with?("Pointer_") && mangled_extern_name.ends_with?("__new") && inst.args.size == 1
+        arg_id = inst.args[0]
+        arg = value_ref(arg_id)
+        arg_type = lookup_value_llvm_type(arg_id)
+        if arg_type == "ptr"
+          emit "#{name} = bitcast ptr #{arg} to ptr"
+        elsif arg_type.starts_with?("i")
+          emit "#{name} = inttoptr #{arg_type} #{arg} to ptr"
+        else
+          emit "#{name} = bitcast ptr #{arg} to ptr"
+        end
+        @value_types[inst.id] = TypeRef::POINTER
+        return
+      end
 
       # Special handling for LLVM intrinsics - need correct argument types
       if mangled_extern_name.starts_with?("llvm.")
