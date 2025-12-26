@@ -1025,6 +1025,7 @@ r2 = maybe(false)  # => nil
 - Register MacroIf/MacroLiteral nodes inside nested modules during HIR lowering.
 - Remove `StructNode` handling from macro-parsed class bodies; rely on `ClassNode.is_struct` (2026-01-02).
 - Remove `StructNode` from AST + LSP AST cache; structs are `ClassNode.is_struct` (cache version bump) (2025-12-25).
+- Register module instance methods as class methods when `extend self` is present (fixes `Math.min/max`) (2025-12-25).
 
 **Stdlib requires advanced features not yet implemented:**
 

@@ -2018,6 +2018,19 @@ module Crystal::HIR
 
       # Register module methods (def self.foo) and nested classes
       if body = node.body
+        extend_self = false
+        body.each do |expr_id|
+          member = unwrap_visibility_member(@arena[expr_id])
+          next unless member.is_a?(CrystalV2::Compiler::Frontend::ExtendNode)
+          target_node = @arena[member.target]
+          case target_node
+          when CrystalV2::Compiler::Frontend::SelfNode
+            extend_self = true
+          when CrystalV2::Compiler::Frontend::IdentifierNode
+            extend_self = String.new(target_node.name) == "self"
+          end
+        end
+
         # PASS 1: Register aliases and nested modules first (so they're available for function type resolution)
         body.each do |expr_id|
           member = unwrap_visibility_member(@arena[expr_id])
@@ -2097,7 +2110,7 @@ module Crystal::HIR
             is_class_method = if recv = member.receiver
                                 String.new(recv) == "self"
                               else
-                                false
+                                extend_self
                               end
             next unless is_class_method
             base_name = "#{module_name}.#{method_name}"
