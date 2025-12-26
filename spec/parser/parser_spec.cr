@@ -115,6 +115,56 @@ bar")
     pieces.map(&.kind).should contain(CrystalV2::Compiler::Frontend::MacroPiece::Kind::ControlEnd)
   end
 
+  it "treats escaped macro control as text in macro bodies" do
+    source = <<-'CR'
+      macro outer
+        {% for n in [1, 2] %}
+          \{% if Int{{n}} == 1 %}
+            {{n}}
+          \{% end %}
+        {% end %}
+      end
+    CR
+
+    parser = CrystalV2::Compiler::Frontend::Parser.new(CrystalV2::Compiler::Frontend::Lexer.new(source))
+    program = parser.parse_program
+
+    program.roots.size.should eq(1)
+    arena = program.arena
+    macro_def = arena[program.roots.first]
+    body = arena[CrystalV2::Compiler::Frontend.node_left(macro_def).not_nil!]
+    pieces = CrystalV2::Compiler::Frontend.node_macro_pieces(body).not_nil!
+
+    control_keywords = pieces.map(&.control_keyword).compact
+    control_keywords.should contain("for")
+    control_keywords.should contain("end")
+    control_keywords.should_not contain("if")
+
+    pieces.any? { |piece| piece.kind.text? && piece.text.try(&.includes?("{% if")) }.should be_true
+    pieces.any? { |piece| piece.kind.expression? }.should be_true
+  end
+
+  it "treats escaped macro expressions as text in macro bodies" do
+    source = <<-'CR'
+      macro outer
+        \{{ foo }}
+        {{ bar }}
+      end
+    CR
+
+    parser = CrystalV2::Compiler::Frontend::Parser.new(CrystalV2::Compiler::Frontend::Lexer.new(source))
+    program = parser.parse_program
+
+    program.roots.size.should eq(1)
+    arena = program.arena
+    macro_def = arena[program.roots.first]
+    body = arena[CrystalV2::Compiler::Frontend.node_left(macro_def).not_nil!]
+    pieces = CrystalV2::Compiler::Frontend.node_macro_pieces(body).not_nil!
+
+    pieces.any? { |piece| piece.kind.text? && piece.text.try(&.includes?("{{ foo }}")) }.should be_true
+    pieces.count { |piece| piece.kind.expression? }.should eq(1)
+  end
+
   # ECR feature, not Crystal macros
   it "trims whitespace around macro expressions" do
     source = <<-'CR'

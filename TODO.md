@@ -51,7 +51,7 @@ about syntax or types and should match what the original compiler would report.
 
 ### Remaining Edge Cases (Low Priority)
 - [x] Macro whitespace trimming (`{%- -%}`, `{%~ ~%}`) - web templates only
-- [ ] Full `{% ... %}` complex nested cases (rare in practice)
+- [x] Full `{% ... %}` complex nested cases (escaped `\{%`/`\{{}` inside macro bodies) (2025-12-25)
 
 ---
 

@@ -7091,16 +7091,46 @@ module CrystalV2
             macro_trim_right = false
             trim_next_left = false
             trim_final = false
+            trim_gap = false
 
             loop do
               if trim_next_left
                 skip_macro_whitespace_after_escape
                 trim_final = true  # Remember for final flush
                 trim_next_left = false
+                trim_gap = true
               end
 
               token = current_token
               break if token.kind == Token::Kind::EOF
+
+              if macro_escape_sequence?
+                buffer_start_token ||= token
+                if buffer_end_token
+                  trim_gap = append_macro_gap(buffer, buffer_end_token, token, trim_gap)
+                else
+                  trim_gap = false
+                end
+                buffer_end_token = token
+                advance
+                escaped_start = current_token
+                case escaped_start.kind
+                when Token::Kind::LBracePercent, Token::Kind::MacroExprStart
+                  buffer_end_token, trim_gap = append_macro_text_token(buffer, escaped_start, buffer_end_token, trim_gap)
+                  advance
+                  next
+                when Token::Kind::LBrace
+                  buffer_end_token, trim_gap = append_macro_text_token(buffer, escaped_start, buffer_end_token, trim_gap)
+                  advance
+                  if current_token.kind.in?(Token::Kind::Percent, Token::Kind::LBrace)
+                    buffer_end_token, trim_gap = append_macro_text_token(buffer, current_token, buffer_end_token, trim_gap)
+                    advance
+                  end
+                  next
+                else
+                  # Not a macro escape after all; fall through and treat '\' as text.
+                end
+              end
 
               if macro_control_start?
                 keyword = peek_macro_keyword
@@ -7229,6 +7259,11 @@ module CrystalV2
                 end
               end
 
+              if buffer_end_token
+                trim_gap = append_macro_gap(buffer, buffer_end_token, token, trim_gap)
+              else
+                trim_gap = false
+              end
               buffer.write(token.slice)
               buffer_end_token = token
               advance
@@ -12086,6 +12121,16 @@ module CrystalV2
           end
         end
 
+        private def macro_escape_sequence? : Bool
+          return false unless operator_token?(current_token, "\\")
+          next_token = peek_token
+          return true if next_token.kind.in?(Token::Kind::LBracePercent, Token::Kind::MacroExprStart)
+          if next_token.kind == Token::Kind::LBrace
+            return peek_token(2).kind.in?(Token::Kind::Percent, Token::Kind::LBrace)
+          end
+          false
+        end
+
         private def macro_expression_left_trim?
           if current_token.kind == Token::Kind::MacroExprStart
             macro_trim_token?(peek_token)
@@ -12524,6 +12569,44 @@ module CrystalV2
               advance
             end
           end
+        end
+
+        private def append_macro_text_token(
+          buffer : IO::Memory,
+          token : Token,
+          previous_token : Token?,
+          trim_gap : Bool
+        ) : {Token, Bool}
+          if previous_token
+            trim_gap = append_macro_gap(buffer, previous_token, token, trim_gap)
+          else
+            trim_gap = false
+          end
+          buffer.write(token.slice)
+          {token, trim_gap}
+        end
+
+        private def append_macro_gap(buffer : IO::Memory, previous_token : Token, next_token : Token, trim_gap : Bool) : Bool
+          gap = next_token.span.start_offset - previous_token.span.end_offset
+          return false if gap <= 0
+          slice = @source.to_slice[previous_token.span.end_offset, gap]
+          slice = trim_macro_gap_slice(slice) if trim_gap
+          buffer.write(slice) unless slice.empty?
+          false
+        end
+
+        private def trim_macro_gap_slice(slice : Slice(UInt8)) : Slice(UInt8)
+          return slice if slice.empty?
+          return slice unless slice[0] == '\n'.ord.to_u8
+          index = 1
+          while index < slice.size
+            byte = slice[index]
+            break unless byte == ' '.ord.to_u8 || byte == '\t'.ord.to_u8
+            index += 1
+          end
+          remaining = slice.size - index
+          return Slice(UInt8).new(0) if remaining <= 0
+          Slice.new(slice.to_unsafe + index, remaining)
         end
 
         private def whitespace_token?(token : Token)
