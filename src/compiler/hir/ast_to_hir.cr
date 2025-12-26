@@ -338,6 +338,8 @@ module Crystal::HIR
     @module_includers : Hash(String, Set(String))
     # Reverse mapping: track which modules each class includes (for method lookup)
     @class_included_modules : Hash(String, Set(String))
+    # Modules that have `extend self` applied (treat defs without receiver as class methods).
+    @module_extend_self : Set(String)
 
     # Type aliases (alias_name -> target_type_name)
     @type_aliases : Hash(String, String)
@@ -413,6 +415,7 @@ module Crystal::HIR
       @module_defs = {} of String => Array({CrystalV2::Compiler::Frontend::ModuleNode, CrystalV2::Compiler::Frontend::ArenaLike})
       @module_includers = {} of String => Set(String)
       @class_included_modules = {} of String => Set(String)
+      @module_extend_self = Set(String).new
       @type_aliases = {} of String => String
       @generated_allocators = Set(String).new
       @type_cache = {} of String => TypeRef
@@ -2030,6 +2033,7 @@ module Crystal::HIR
             extend_self = String.new(target_node.name) == "self"
           end
         end
+        @module_extend_self.add(module_name) if extend_self
 
         # PASS 1: Register aliases and nested modules first (so they're available for function type resolution)
         body.each do |expr_id|
@@ -2222,6 +2226,8 @@ module Crystal::HIR
                     nested_name = String.new(expr_node.name)
                     full_nested_name = "#{module_name}::#{nested_name}"
                     register_nested_module(expr_node, full_nested_name)
+                  when CrystalV2::Compiler::Frontend::ExtendNode
+                    mark_module_extend_self(expr_node, module_name)
                   when CrystalV2::Compiler::Frontend::MacroIfNode
                     process_macro_if_in_module(expr_node, module_name)
                   when CrystalV2::Compiler::Frontend::MacroLiteralNode
@@ -2269,6 +2275,8 @@ module Crystal::HIR
         class_name = String.new(body_node.name)
         full_class_name = "#{module_name}::#{class_name}"
         register_class_with_name(body_node, full_class_name)
+      when CrystalV2::Compiler::Frontend::ExtendNode
+        mark_module_extend_self(body_node, module_name)
       when CrystalV2::Compiler::Frontend::MacroIfNode
         process_macro_if_in_module(body_node, module_name)
       end
@@ -2293,6 +2301,8 @@ module Crystal::HIR
                 nested_name = String.new(expr_node.name)
                 full_nested_name = "#{module_name}::#{nested_name}"
                 register_nested_module(expr_node, full_nested_name)
+              when CrystalV2::Compiler::Frontend::ExtendNode
+                mark_module_extend_self(expr_node, module_name)
               when CrystalV2::Compiler::Frontend::MacroIfNode
                 process_macro_if_in_module(expr_node, module_name)
               when CrystalV2::Compiler::Frontend::MacroLiteralNode
@@ -2322,6 +2332,8 @@ module Crystal::HIR
               nested_name = String.new(expr_node.name)
               full_nested_name = "#{module_name}::#{nested_name}"
               register_nested_module(expr_node, full_nested_name)
+            when CrystalV2::Compiler::Frontend::ExtendNode
+              mark_module_extend_self(expr_node, module_name)
             when CrystalV2::Compiler::Frontend::MacroIfNode
               process_macro_if_in_module(expr_node, module_name)
             when CrystalV2::Compiler::Frontend::MacroLiteralNode
@@ -2351,6 +2363,8 @@ module Crystal::HIR
                 nested_name = String.new(expr_node.name)
                 full_nested_name = "#{module_name}::#{nested_name}"
                 register_nested_module(expr_node, full_nested_name)
+              when CrystalV2::Compiler::Frontend::ExtendNode
+                mark_module_extend_self(expr_node, module_name)
               when CrystalV2::Compiler::Frontend::MacroIfNode
                 process_macro_if_in_module(expr_node, module_name)
               when CrystalV2::Compiler::Frontend::MacroLiteralNode
@@ -2469,7 +2483,7 @@ module Crystal::HIR
       is_class_method = if recv = member.receiver
                           String.new(recv) == "self"
                         else
-                          false
+                          @module_extend_self.includes?(module_name)
                         end
       return unless is_class_method
       base_name = "#{module_name}.#{method_name}"
@@ -2529,6 +2543,16 @@ module Crystal::HIR
           @function_defs[full_name] = member
           @function_def_arenas[full_name] = @arena
         end
+      end
+    end
+
+    private def mark_module_extend_self(node : CrystalV2::Compiler::Frontend::ExtendNode, module_name : String) : Nil
+      target_node = @arena[node.target]
+      case target_node
+      when CrystalV2::Compiler::Frontend::SelfNode
+        @module_extend_self.add(module_name)
+      when CrystalV2::Compiler::Frontend::IdentifierNode
+        @module_extend_self.add(module_name) if String.new(target_node.name) == "self"
       end
     end
 
