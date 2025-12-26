@@ -2054,7 +2054,7 @@ module Crystal::HIR
 
       # Keep module AST around for mixin expansion (`include Foo` in classes/structs).
       (@module_defs[module_name] ||= [] of {CrystalV2::Compiler::Frontend::ModuleNode, CrystalV2::Compiler::Frontend::ArenaLike}) << {node, @arena}
-      if module_name.includes?("BinaryFormat")
+      if ENV.has_key?("DEBUG_MODULE_BINARY_FORMAT") && module_name.includes?("BinaryFormat")
         STDERR.puts "[REG_MODULE_TOP] #{module_name}, now has #{@module_defs[module_name].size} defs"
       end
       if ENV.has_key?("DEBUG_MODULE_THREAD") && module_name.includes?("Thread")
