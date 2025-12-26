@@ -438,6 +438,37 @@ describe Crystal::MIR do
       rc_inc.ptr.should eq(ptr)
     end
 
+    it "propagates across dominated blocks" do
+      mod = Crystal::MIR::Module.new
+      func = mod.create_function("test", Crystal::MIR::TypeRef::INT32)
+      builder = Crystal::MIR::Builder.new(func)
+
+      value = builder.const_int(7_i64, Crystal::MIR::TypeRef::INT32)
+      cast = builder.bitcast(value, Crystal::MIR::TypeRef::INT32)
+      cond = builder.const_bool(true)
+
+      then_block = func.create_block
+      else_block = func.create_block
+
+      builder.branch(cond, then_block, else_block)
+
+      builder.current_block = then_block
+      sum = builder.add(cast, value, Crystal::MIR::TypeRef::INT32)
+      builder.ret(sum)
+
+      builder.current_block = else_block
+      builder.ret(value)
+
+      pass = Crystal::MIR::CopyPropagationPass.new(func)
+      propagated = pass.run
+
+      propagated.should be > 0
+
+      then_bb = func.get_block(then_block)
+      add = then_bb.instructions.find { |inst| inst.is_a?(Crystal::MIR::BinaryOp) }.as(Crystal::MIR::BinaryOp)
+      add.left.should eq(value)
+    end
+
     it "propagates algebraic identities" do
       mod = Crystal::MIR::Module.new
       func = mod.create_function("test", Crystal::MIR::TypeRef::INT32)

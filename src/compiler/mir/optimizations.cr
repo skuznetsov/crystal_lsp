@@ -1051,14 +1051,21 @@ module Crystal::MIR
         STDERR.puts "[MIR_CP] replacements=#{replacements}"
       end
 
+      def_blocks, def_index = build_def_maps
+      dominators = compute_dominators
+      block_sizes = {} of BlockId => Int32
+      @function.blocks.each do |block|
+        block_sizes[block.id] = block.instructions.size
+      end
+
       @function.blocks.each do |block|
         new_instructions = [] of Value
-        block.instructions.each do |inst|
-          new_instructions << rewrite_instruction(inst, replacements)
+        block.instructions.each_with_index do |inst, idx|
+          new_instructions << rewrite_instruction(inst, replacements, block.id, idx, def_blocks, def_index, dominators, block_sizes)
         end
         block.instructions.clear
         new_instructions.each { |i| block.add(i) }
-        block.terminator = rewrite_terminator(block.terminator, replacements)
+        block.terminator = rewrite_terminator(block.terminator, replacements, block.id, block.instructions.size, def_blocks, def_index, dominators)
         if ENV["MIR_CP_DEBUG"]?
           STDERR.puts "[MIR_CP] block=#{block.id} terminator=#{block.terminator}"
         end
@@ -1131,172 +1138,182 @@ module Crystal::MIR
       value.is_a?(Bool) && !value
     end
 
-    private def rewrite_instruction(inst : Value, replacements : Hash(ValueId, ValueId)) : Value
+    private def rewrite_instruction(
+      inst : Value,
+      replacements : Hash(ValueId, ValueId),
+      block_id : BlockId,
+      inst_index : Int32,
+      def_blocks : Hash(ValueId, BlockId),
+      def_index : Hash(ValueId, Int32),
+      dominators : Hash(BlockId, Set(BlockId)),
+      block_sizes : Hash(BlockId, Int32)
+    ) : Value
       case inst
       when Free
-        ptr = canonical(inst.ptr, replacements)
+        ptr = resolve(inst.ptr, replacements, block_id, inst_index, def_blocks, def_index, dominators)
         return inst if ptr == inst.ptr
         Free.new(inst.id, ptr, inst.strategy)
       when RCIncrement
-        ptr = canonical(inst.ptr, replacements)
+        ptr = resolve(inst.ptr, replacements, block_id, inst_index, def_blocks, def_index, dominators)
         return inst if ptr == inst.ptr
         RCIncrement.new(inst.id, ptr, inst.atomic)
       when RCDecrement
-        ptr = canonical(inst.ptr, replacements)
+        ptr = resolve(inst.ptr, replacements, block_id, inst_index, def_blocks, def_index, dominators)
         return inst if ptr == inst.ptr
         RCDecrement.new(inst.id, ptr, inst.atomic, inst.destructor)
       when AtomicLoad
-        ptr = canonical(inst.ptr, replacements)
+        ptr = resolve(inst.ptr, replacements, block_id, inst_index, def_blocks, def_index, dominators)
         return inst if ptr == inst.ptr
         AtomicLoad.new(inst.id, inst.type, ptr, inst.ordering)
       when AtomicStore
-        ptr = canonical(inst.ptr, replacements)
-        val = canonical(inst.value, replacements)
+        ptr = resolve(inst.ptr, replacements, block_id, inst_index, def_blocks, def_index, dominators)
+        val = resolve(inst.value, replacements, block_id, inst_index, def_blocks, def_index, dominators)
         return inst if ptr == inst.ptr && val == inst.value
         AtomicStore.new(inst.id, ptr, val, inst.ordering)
       when AtomicCAS
-        ptr = canonical(inst.ptr, replacements)
-        expected = canonical(inst.expected, replacements)
-        desired = canonical(inst.desired, replacements)
+        ptr = resolve(inst.ptr, replacements, block_id, inst_index, def_blocks, def_index, dominators)
+        expected = resolve(inst.expected, replacements, block_id, inst_index, def_blocks, def_index, dominators)
+        desired = resolve(inst.desired, replacements, block_id, inst_index, def_blocks, def_index, dominators)
         return inst if ptr == inst.ptr && expected == inst.expected && desired == inst.desired
         AtomicCAS.new(inst.id, inst.type, ptr, expected, desired, inst.success_ordering, inst.failure_ordering)
       when AtomicRMW
-        ptr = canonical(inst.ptr, replacements)
-        val = canonical(inst.value, replacements)
+        ptr = resolve(inst.ptr, replacements, block_id, inst_index, def_blocks, def_index, dominators)
+        val = resolve(inst.value, replacements, block_id, inst_index, def_blocks, def_index, dominators)
         return inst if ptr == inst.ptr && val == inst.value
         AtomicRMW.new(inst.id, inst.type, inst.op, ptr, val, inst.ordering)
       when MutexLock
-        ptr = canonical(inst.mutex_ptr, replacements)
+        ptr = resolve(inst.mutex_ptr, replacements, block_id, inst_index, def_blocks, def_index, dominators)
         return inst if ptr == inst.mutex_ptr
         MutexLock.new(inst.id, ptr)
       when MutexUnlock
-        ptr = canonical(inst.mutex_ptr, replacements)
+        ptr = resolve(inst.mutex_ptr, replacements, block_id, inst_index, def_blocks, def_index, dominators)
         return inst if ptr == inst.mutex_ptr
         MutexUnlock.new(inst.id, ptr)
       when MutexTryLock
-        ptr = canonical(inst.mutex_ptr, replacements)
+        ptr = resolve(inst.mutex_ptr, replacements, block_id, inst_index, def_blocks, def_index, dominators)
         return inst if ptr == inst.mutex_ptr
         MutexTryLock.new(inst.id, ptr)
       when ChannelSend
-        chan = canonical(inst.channel_ptr, replacements)
-        val = canonical(inst.value, replacements)
+        chan = resolve(inst.channel_ptr, replacements, block_id, inst_index, def_blocks, def_index, dominators)
+        val = resolve(inst.value, replacements, block_id, inst_index, def_blocks, def_index, dominators)
         return inst if chan == inst.channel_ptr && val == inst.value
         ChannelSend.new(inst.id, chan, val)
       when ChannelReceive
-        chan = canonical(inst.channel_ptr, replacements)
+        chan = resolve(inst.channel_ptr, replacements, block_id, inst_index, def_blocks, def_index, dominators)
         return inst if chan == inst.channel_ptr
         ChannelReceive.new(inst.id, inst.type, chan)
       when ChannelClose
-        chan = canonical(inst.channel_ptr, replacements)
+        chan = resolve(inst.channel_ptr, replacements, block_id, inst_index, def_blocks, def_index, dominators)
         return inst if chan == inst.channel_ptr
         ChannelClose.new(inst.id, chan)
       when Load
-        ptr = canonical(inst.ptr, replacements)
+        ptr = resolve(inst.ptr, replacements, block_id, inst_index, def_blocks, def_index, dominators)
         return inst if ptr == inst.ptr
         new_inst = Load.new(inst.id, inst.type, ptr)
         new_inst.no_alias = inst.no_alias
         new_inst
       when Store
-        ptr = canonical(inst.ptr, replacements)
-        val = canonical(inst.value, replacements)
+        ptr = resolve(inst.ptr, replacements, block_id, inst_index, def_blocks, def_index, dominators)
+        val = resolve(inst.value, replacements, block_id, inst_index, def_blocks, def_index, dominators)
         return inst if ptr == inst.ptr && val == inst.value
         Store.new(inst.id, ptr, val)
       when GetElementPtr
-        base = canonical(inst.base, replacements)
+        base = resolve(inst.base, replacements, block_id, inst_index, def_blocks, def_index, dominators)
         return inst if base == inst.base
         GetElementPtr.new(inst.id, inst.type, base, inst.indices, inst.base_type)
       when GetElementPtrDynamic
-        base = canonical(inst.base, replacements)
-        index = canonical(inst.index, replacements)
+        base = resolve(inst.base, replacements, block_id, inst_index, def_blocks, def_index, dominators)
+        index = resolve(inst.index, replacements, block_id, inst_index, def_blocks, def_index, dominators)
         return inst if base == inst.base && index == inst.index
         GetElementPtrDynamic.new(inst.id, inst.type, base, index, inst.element_type)
       when BinaryOp
-        left = canonical(inst.left, replacements)
-        right = canonical(inst.right, replacements)
+        left = resolve(inst.left, replacements, block_id, inst_index, def_blocks, def_index, dominators)
+        right = resolve(inst.right, replacements, block_id, inst_index, def_blocks, def_index, dominators)
         return inst if left == inst.left && right == inst.right
         BinaryOp.new(inst.id, inst.type, inst.op, left, right)
       when UnaryOp
-        operand = canonical(inst.operand, replacements)
+        operand = resolve(inst.operand, replacements, block_id, inst_index, def_blocks, def_index, dominators)
         return inst if operand == inst.operand
         UnaryOp.new(inst.id, inst.type, inst.op, operand)
       when Cast
-        value = canonical(inst.value, replacements)
+        value = resolve(inst.value, replacements, block_id, inst_index, def_blocks, def_index, dominators)
         return inst if value == inst.value
         Cast.new(inst.id, inst.type, inst.kind, value)
       when Phi
         changed = false
         phi = Phi.new(inst.id, inst.type)
         inst.incoming.each do |block_id, val|
-          new_val = canonical(val, replacements)
+          use_index = block_sizes[block_id]? || 0
+          new_val = resolve(val, replacements, block_id, use_index, def_blocks, def_index, dominators)
           changed ||= new_val != val
           phi.add_incoming(block_id, new_val)
         end
         return inst unless changed
         phi
       when Select
-        cond = canonical(inst.condition, replacements)
-        then_val = canonical(inst.then_value, replacements)
-        else_val = canonical(inst.else_value, replacements)
+        cond = resolve(inst.condition, replacements, block_id, inst_index, def_blocks, def_index, dominators)
+        then_val = resolve(inst.then_value, replacements, block_id, inst_index, def_blocks, def_index, dominators)
+        else_val = resolve(inst.else_value, replacements, block_id, inst_index, def_blocks, def_index, dominators)
         return inst if cond == inst.condition && then_val == inst.then_value && else_val == inst.else_value
         Select.new(inst.id, inst.type, cond, then_val, else_val)
       when UnionWrap
-        val = canonical(inst.value, replacements)
+        val = resolve(inst.value, replacements, block_id, inst_index, def_blocks, def_index, dominators)
         return inst if val == inst.value
         UnionWrap.new(inst.id, inst.type, val, inst.variant_type_id, inst.union_type)
       when UnionUnwrap
-        val = canonical(inst.union_value, replacements)
+        val = resolve(inst.union_value, replacements, block_id, inst_index, def_blocks, def_index, dominators)
         return inst if val == inst.union_value
         UnionUnwrap.new(inst.id, inst.type, val, inst.variant_type_id, inst.safe)
       when UnionTypeIdGet
-        val = canonical(inst.union_value, replacements)
+        val = resolve(inst.union_value, replacements, block_id, inst_index, def_blocks, def_index, dominators)
         return inst if val == inst.union_value
         UnionTypeIdGet.new(inst.id, val)
       when UnionIs
-        val = canonical(inst.union_value, replacements)
+        val = resolve(inst.union_value, replacements, block_id, inst_index, def_blocks, def_index, dominators)
         return inst if val == inst.union_value
         UnionIs.new(inst.id, val, inst.variant_type_id)
       when ArrayLiteral
-        new_elements = inst.elements.map { |e| canonical(e, replacements) }
+        new_elements = inst.elements.map { |e| resolve(e, replacements, block_id, inst_index, def_blocks, def_index, dominators) }
         return inst if new_elements == inst.elements
         ArrayLiteral.new(inst.id, inst.element_type, new_elements)
       when ArraySize
-        array_val = canonical(inst.array_value, replacements)
+        array_val = resolve(inst.array_value, replacements, block_id, inst_index, def_blocks, def_index, dominators)
         return inst if array_val == inst.array_value
         ArraySize.new(inst.id, array_val)
       when ArrayGet
-        array_val = canonical(inst.array_value, replacements)
-        index_val = canonical(inst.index_value, replacements)
+        array_val = resolve(inst.array_value, replacements, block_id, inst_index, def_blocks, def_index, dominators)
+        index_val = resolve(inst.index_value, replacements, block_id, inst_index, def_blocks, def_index, dominators)
         return inst if array_val == inst.array_value && index_val == inst.index_value
         ArrayGet.new(inst.id, inst.element_type, array_val, index_val)
       when ArraySet
-        array_val = canonical(inst.array_value, replacements)
-        index_val = canonical(inst.index_value, replacements)
-        value_id = canonical(inst.value_id, replacements)
+        array_val = resolve(inst.array_value, replacements, block_id, inst_index, def_blocks, def_index, dominators)
+        index_val = resolve(inst.index_value, replacements, block_id, inst_index, def_blocks, def_index, dominators)
+        value_id = resolve(inst.value_id, replacements, block_id, inst_index, def_blocks, def_index, dominators)
         return inst if array_val == inst.array_value && index_val == inst.index_value && value_id == inst.value_id
         ArraySet.new(inst.id, inst.element_type, array_val, index_val, value_id)
       when StringInterpolation
-        new_parts = inst.parts.map { |p| canonical(p, replacements) }
+        new_parts = inst.parts.map { |p| resolve(p, replacements, block_id, inst_index, def_blocks, def_index, dominators) }
         return inst if new_parts == inst.parts
         StringInterpolation.new(inst.id, new_parts)
       when GlobalStore
-        value = canonical(inst.value, replacements)
+        value = resolve(inst.value, replacements, block_id, inst_index, def_blocks, def_index, dominators)
         return inst if value == inst.value
         GlobalStore.new(inst.id, inst.type, inst.global_name, value)
       when Call
-        new_args = inst.args.map { |a| canonical(a, replacements) }
+        new_args = inst.args.map { |a| resolve(a, replacements, block_id, inst_index, def_blocks, def_index, dominators) }
         return inst if new_args == inst.args
         Call.new(inst.id, inst.type, inst.callee, new_args)
       when ExternCall
-        new_args = inst.args.map { |a| canonical(a, replacements) }
+        new_args = inst.args.map { |a| resolve(a, replacements, block_id, inst_index, def_blocks, def_index, dominators) }
         return inst if new_args == inst.args
         ExternCall.new(inst.id, inst.type, inst.extern_name, new_args)
       when AddressOf
-        operand = canonical(inst.operand, replacements)
+        operand = resolve(inst.operand, replacements, block_id, inst_index, def_blocks, def_index, dominators)
         return inst if operand == inst.operand
         AddressOf.new(inst.id, inst.type, operand)
       when IndirectCall
-        callee_ptr = canonical(inst.callee_ptr, replacements)
-        new_args = inst.args.map { |a| canonical(a, replacements) }
+        callee_ptr = resolve(inst.callee_ptr, replacements, block_id, inst_index, def_blocks, def_index, dominators)
+        new_args = inst.args.map { |a| resolve(a, replacements, block_id, inst_index, def_blocks, def_index, dominators) }
         return inst if callee_ptr == inst.callee_ptr && new_args == inst.args
         IndirectCall.new(inst.id, inst.type, callee_ptr, new_args)
       else
@@ -1304,11 +1321,19 @@ module Crystal::MIR
       end
     end
 
-    private def rewrite_terminator(term : Terminator, replacements : Hash(ValueId, ValueId)) : Terminator
+    private def rewrite_terminator(
+      term : Terminator,
+      replacements : Hash(ValueId, ValueId),
+      block_id : BlockId,
+      use_index : Int32,
+      def_blocks : Hash(ValueId, BlockId),
+      def_index : Hash(ValueId, Int32),
+      dominators : Hash(BlockId, Set(BlockId))
+    ) : Terminator
       case term
       when Return
         if value = term.value
-          new_value = canonical(value, replacements)
+          new_value = resolve(value, replacements, block_id, use_index, def_blocks, def_index, dominators)
           if ENV["MIR_CP_DEBUG"]?
             STDERR.puts "[MIR_CP] ret value=#{value} new_value=#{new_value}"
           end
@@ -1317,16 +1342,126 @@ module Crystal::MIR
         end
         term
       when Branch
-        cond = canonical(term.condition, replacements)
+        cond = resolve(term.condition, replacements, block_id, use_index, def_blocks, def_index, dominators)
         return term if cond == term.condition
         Branch.new(cond, term.then_block, term.else_block)
       when Switch
-        value = canonical(term.value, replacements)
+        value = resolve(term.value, replacements, block_id, use_index, def_blocks, def_index, dominators)
         return term if value == term.value
         Switch.new(value, term.cases, term.default_block)
       else
         term
       end
+    end
+
+    private def resolve(
+      id : ValueId,
+      replacements : Hash(ValueId, ValueId),
+      use_block : BlockId,
+      use_index : Int32,
+      def_blocks : Hash(ValueId, BlockId),
+      def_index : Hash(ValueId, Int32),
+      dominators : Hash(BlockId, Set(BlockId))
+    ) : ValueId
+      current = id
+      seen = Set(ValueId).new
+
+      while next_id = replacements[current]?
+        break if next_id == current
+        return current if seen.includes?(current)
+        break unless dominates_use?(next_id, use_block, use_index, def_blocks, def_index, dominators)
+        seen << current
+        current = next_id
+      end
+
+      current
+    end
+
+    private def dominates_use?(
+      def_id : ValueId,
+      use_block : BlockId,
+      use_index : Int32,
+      def_blocks : Hash(ValueId, BlockId),
+      def_index : Hash(ValueId, Int32),
+      dominators : Hash(BlockId, Set(BlockId))
+    ) : Bool
+      def_block = def_blocks[def_id]?
+      return false unless def_block
+
+      if def_block == use_block
+        idx = def_index[def_id]?
+        return false unless idx
+        return idx < use_index
+      end
+
+      dominators[use_block].includes?(def_block)
+    end
+
+    private def build_def_maps : Tuple(Hash(ValueId, BlockId), Hash(ValueId, Int32))
+      def_blocks = {} of ValueId => BlockId
+      def_index = {} of ValueId => Int32
+      entry = @function.entry_block
+
+      @function.params.each do |param|
+        def_blocks[param.index] = entry
+        def_index[param.index] = -1
+      end
+
+      @function.blocks.each do |block|
+        block.instructions.each_with_index do |inst, idx|
+          def_blocks[inst.id] = block.id
+          def_index[inst.id] = idx
+        end
+      end
+
+      {def_blocks, def_index}
+    end
+
+    private def compute_dominators : Hash(BlockId, Set(BlockId))
+      @function.compute_predecessors
+
+      block_ids = @function.blocks.map(&.id)
+      all_blocks = Set(BlockId).new
+      block_ids.each { |id| all_blocks << id }
+
+      dom = {} of BlockId => Set(BlockId)
+      entry = @function.entry_block
+      block_ids.each do |id|
+        if id == entry
+          dom[id] = Set(BlockId).new([id])
+        else
+          dom[id] = all_blocks.dup
+        end
+      end
+
+      changed = true
+      while changed
+        changed = false
+        @function.blocks.each do |block|
+          next if block.id == entry
+          preds = block.predecessors
+          new_dom = Set(BlockId).new
+
+          if preds.empty?
+            new_dom << block.id
+          else
+            intersection = dom[preds.first].dup
+            preds.each_with_index do |pred, idx|
+              next if idx == 0
+              intersection = intersection & dom[pred]
+            end
+            new_dom = intersection
+            new_dom << block.id
+          end
+
+          if new_dom != dom[block.id]
+            dom[block.id] = new_dom
+            changed = true
+          end
+        end
+      end
+
+      dom
     end
   end
 

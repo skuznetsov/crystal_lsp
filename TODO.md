@@ -348,7 +348,7 @@ Goal: v2 LSP must report only real errors and match original compiler behavior.
 - [x] **M2.3** Taint propagation (`src/compiler/hir/taint_analysis.cr`) - 17 tests
 - [x] **M2.4** Memory strategy integration (`src/compiler/hir/memory_strategy.cr`) - 15 tests
 - [x] **M3.1** MIR data structures (`src/compiler/mir/mir.cr`) - 20 tests
-- [x] **M3.1b** MIR optimizations (`src/compiler/mir/optimizations.cr`) - 44 tests
+- [x] **M3.1b** MIR optimizations (`src/compiler/mir/optimizations.cr`) - 45 tests
   - RC elision (remove redundant rc_inc/rc_dec pairs)
   - Dead code elimination
   - Constant folding
@@ -628,9 +628,9 @@ The key insight is: **Don't compete with LLVM, complement it.**
 - [x] Algebraic simplifications in MIR (x + 0, x * 1, x * 0, x | 0, x & -1)
 - [x] Extend constant folding to UInt64 and Bool ops (comparisons + bitwise)
 - [x] Local store→load forwarding in a block for no_alias (no full alias analysis)
-- [ ] Copy propagation: real def-use replacement beyond cast/select/phi (cross-block where safe)
+- [x] Copy propagation: real def-use replacement beyond cast/select/phi (cross-block where safe)
 - [x] Local CSE for pure ops (arith/compare/bitcast/gep) within a block
-- [ ] Peephole simplifications: redundant casts, constant-branch to jump, phi with identical incoming
+- [x] Peephole simplifications: redundant casts, constant-branch to jump, phi with identical incoming
 
 #### 5.3.4 Platform Support
 - [ ] macOS (arm64, x86_64)
