@@ -10719,6 +10719,7 @@ module Crystal::HIR
       method_name : String
       full_method_name : String? = nil
       static_class_name : String? = nil
+      proc_return_type_name : String? = nil
 
       case callee_node
       when CrystalV2::Compiler::Frontend::IdentifierNode
@@ -10903,9 +10904,14 @@ module Crystal::HIR
             class_name_str = "#{base_name}(#{type_args.join(", ")})"
             class_name_str = substitute_type_params_in_type_name(class_name_str)
 
-            # Monomorphize generic class if not already done
-            if !@monomorphized.includes?(class_name_str)
-              monomorphize_generic_class(base_name, type_args, class_name_str)
+            if base_name == "Proc"
+              proc_return_type_name = class_name_str
+              class_name_str = "Proc"
+            else
+              # Monomorphize generic class if not already done
+              if !@monomorphized.includes?(class_name_str)
+                monomorphize_generic_class(base_name, type_args, class_name_str)
+              end
             end
           end
         elsif obj_node.is_a?(CrystalV2::Compiler::Frontend::PathNode)
@@ -11444,6 +11450,12 @@ module Crystal::HIR
           if inferred = resolve_block_dependent_return_type(mangled_method_name, base_method_name, block_return_name)
             return_type = inferred
           end
+        end
+      end
+
+      if proc_return_type_name && method_name == "new"
+        if proc_ref = proc_type_ref_for_name(proc_return_type_name.not_nil!)
+          return_type = proc_ref
         end
       end
 
