@@ -777,6 +777,8 @@ module Crystal::MIR
       value_types = {} of ValueId => TypeRef
       value_nodes = {} of ValueId => Value
       constants = {} of ValueId => (Int64 | UInt64 | Float64 | Bool | Nil)
+      alloc_site = {} of ValueId => ValueId
+      no_alias_sites = Set(ValueId).new
 
       @function.params.each do |param|
         value_types[param.index] = param.type
@@ -792,20 +794,65 @@ module Crystal::MIR
               constants[inst.id] = v
             end
           end
+          if inst.is_a?(Alloc) && inst.no_alias
+            no_alias_sites << inst.id
+            alloc_site[inst.id] = inst.id
+          end
         end
       end
 
       replacements = {} of ValueId => ValueId
 
       @function.blocks.each do |block|
+        last_store = {} of ValueId => ValueId
         block.instructions.each do |inst|
           case inst
+          when Alloc
+            if inst.no_alias
+              no_alias_sites << inst.id
+              alloc_site[inst.id] = inst.id
+            end
+          when GetElementPtr
+            base_id = canonical(inst.base, replacements)
+            if site = alloc_site[base_id]?
+              alloc_site[inst.id] = site
+            end
+          when GetElementPtrDynamic
+            base_id = canonical(inst.base, replacements)
+            if site = alloc_site[base_id]?
+              alloc_site[inst.id] = site
+            end
           when Cast
             src_id = canonical(inst.value, replacements)
             src_type = value_types[src_id]?
+            if inst.kind.bitcast?
+              if site = alloc_site[src_id]?
+                alloc_site[inst.id] = site
+              end
+            end
             if inst.kind.bitcast? && src_type == inst.type && src_id != inst.id
               replacements[inst.id] = src_id
             end
+          when Store
+            ptr_id = canonical(inst.ptr, replacements)
+            value_id = canonical(inst.value, replacements)
+            if site = alloc_site[ptr_id]?
+              if no_alias_sites.includes?(site)
+                last_store.reject! { |key, _| alloc_site[key]? == site }
+              else
+                last_store.clear
+              end
+            else
+              last_store.clear
+            end
+            last_store[ptr_id] = value_id
+          when Load
+            ptr_id = canonical(inst.ptr, replacements)
+            if stored = last_store[ptr_id]?
+              replacements[inst.id] = stored if stored != inst.id
+            end
+          when Call, IndirectCall, ExternCall, AtomicStore, AtomicRMW, AtomicCAS
+            last_store.clear
           when Select
             then_val = canonical(inst.then_value, replacements)
             else_val = canonical(inst.else_value, replacements)

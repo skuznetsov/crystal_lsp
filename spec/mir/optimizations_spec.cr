@@ -436,6 +436,27 @@ describe Crystal::MIR do
       ret = block.terminator.as(Crystal::MIR::Return)
       ret.value.should eq(x)
     end
+
+    it "forwards load after store in the same block" do
+      mod = Crystal::MIR::Module.new
+      func = mod.create_function("test", Crystal::MIR::TypeRef::INT32)
+      builder = Crystal::MIR::Builder.new(func)
+
+      ptr = builder.alloc(Crystal::MIR::MemoryStrategy::Stack, Crystal::MIR::TypeRef::INT32)
+      val = builder.const_int(42_i64, Crystal::MIR::TypeRef::INT32)
+      builder.store(ptr, val)
+      load = builder.load(ptr, Crystal::MIR::TypeRef::INT32)
+      builder.ret(load)
+
+      pass = Crystal::MIR::CopyPropagationPass.new(func)
+      propagated = pass.run
+
+      propagated.should be > 0
+
+      block = func.get_block(func.entry_block)
+      ret = block.terminator.as(Crystal::MIR::Return)
+      ret.value.should eq(val)
+    end
   end
 
   # ═══════════════════════════════════════════════════════════════════════════
