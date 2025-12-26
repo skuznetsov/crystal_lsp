@@ -333,6 +333,30 @@ describe Crystal::MIR do
   # COPY PROPAGATION
   # ═══════════════════════════════════════════════════════════════════════════
 
+  describe "LocalCSEPass" do
+    it "deduplicates identical binary ops in a block" do
+      mod = Crystal::MIR::Module.new
+      func = mod.create_function("test", Crystal::MIR::TypeRef::INT32)
+      builder = Crystal::MIR::Builder.new(func)
+
+      a = builder.const_int(1_i64, Crystal::MIR::TypeRef::INT32)
+      b = builder.const_int(2_i64, Crystal::MIR::TypeRef::INT32)
+
+      sum1 = builder.add(a, b, Crystal::MIR::TypeRef::INT32)
+      sum2 = builder.add(a, b, Crystal::MIR::TypeRef::INT32)
+      builder.ret(sum2)
+
+      pass = Crystal::MIR::LocalCSEPass.new(func)
+      eliminated = pass.run
+
+      eliminated.should be > 0
+
+      block = func.get_block(func.entry_block)
+      ret = block.terminator.as(Crystal::MIR::Return)
+      ret.value.should eq(sum1)
+    end
+  end
+
   describe "CopyPropagationPass" do
     it "propagates trivial phi nodes" do
       mod = Crystal::MIR::Module.new

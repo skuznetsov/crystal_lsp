@@ -626,7 +626,7 @@ The key insight is: **Don't compete with LLVM, complement it.**
 - [x] Extend constant folding to UInt64 and Bool ops (comparisons + bitwise)
 - [x] Local store→load forwarding in a block for no_alias (no full alias analysis)
 - [ ] Copy propagation: real def-use replacement beyond cast/select/phi (cross-block where safe)
-- [ ] Local CSE for pure ops (arith/compare/bitcast/gep) within a block
+- [x] Local CSE for pure ops (arith/compare/bitcast/gep) within a block
 - [ ] Peephole simplifications: redundant casts, constant-branch to jump, phi with identical incoming
 
 #### 5.3.4 Platform Support

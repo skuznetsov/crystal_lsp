@@ -760,6 +760,99 @@ module Crystal::MIR
   end
 
   # ═══════════════════════════════════════════════════════════════════════════
+  # LOCAL CSE (pure ops within a block)
+  # ═══════════════════════════════════════════════════════════════════════════
+  #
+  # Identifies duplicate pure instructions within the same block and rewrites
+  # later uses to the first occurrence. DCE removes redundant instructions.
+  class LocalCSEPass
+    getter function : Function
+    getter eliminated : Int32 = 0
+
+    def initialize(@function : Function)
+    end
+
+    def run : Int32
+      @eliminated = 0
+      replacements = {} of ValueId => ValueId
+
+      @function.blocks.each do |block|
+        binary_seen = {} of Tuple(BinOp, TypeRef, ValueId, ValueId) => ValueId
+        unary_seen = {} of Tuple(UnOp, TypeRef, ValueId) => ValueId
+        cast_seen = {} of Tuple(CastKind, TypeRef, ValueId) => ValueId
+        gep_seen = {} of Tuple(TypeRef, TypeRef, ValueId, Array(UInt32)) => ValueId
+        gepd_seen = {} of Tuple(TypeRef, TypeRef, ValueId, ValueId) => ValueId
+
+        block.instructions.each do |inst|
+          case inst
+          when BinaryOp
+            left_id = canonical(inst.left, replacements)
+            right_id = canonical(inst.right, replacements)
+            key = {inst.op, inst.type, left_id, right_id}
+            if existing = binary_seen[key]?
+              replacements[inst.id] = existing if existing != inst.id
+            else
+              binary_seen[key] = inst.id
+            end
+          when UnaryOp
+            value_id = canonical(inst.operand, replacements)
+            key = {inst.op, inst.type, value_id}
+            if existing = unary_seen[key]?
+              replacements[inst.id] = existing if existing != inst.id
+            else
+              unary_seen[key] = inst.id
+            end
+          when Cast
+            value_id = canonical(inst.value, replacements)
+            key = {inst.kind, inst.type, value_id}
+            if existing = cast_seen[key]?
+              replacements[inst.id] = existing if existing != inst.id
+            else
+              cast_seen[key] = inst.id
+            end
+          when GetElementPtr
+            base_id = canonical(inst.base, replacements)
+            key = {inst.type, inst.base_type, base_id, inst.indices}
+            if existing = gep_seen[key]?
+              replacements[inst.id] = existing if existing != inst.id
+            else
+              gep_seen[key] = inst.id
+            end
+          when GetElementPtrDynamic
+            base_id = canonical(inst.base, replacements)
+            index_id = canonical(inst.index, replacements)
+            key = {inst.type, inst.element_type, base_id, index_id}
+            if existing = gepd_seen[key]?
+              replacements[inst.id] = existing if existing != inst.id
+            else
+              gepd_seen[key] = inst.id
+            end
+          end
+        end
+      end
+
+      @eliminated = replacements.size
+      CopyPropagationPass.new(@function).apply_replacements(replacements)
+      @eliminated
+    end
+
+    private def canonical(id : ValueId, replacements : Hash(ValueId, ValueId)) : ValueId
+      current = id
+      seen = Set(ValueId).new
+
+      while next_id = replacements[current]?
+        break if next_id == current
+        return current if seen.includes?(current)
+        seen << current
+        current = next_id
+      end
+
+      replacements[id] = current if current != id
+      current
+    end
+  end
+
+  # ═══════════════════════════════════════════════════════════════════════════
   # COPY PROPAGATION (light stub)
   # ═══════════════════════════════════════════════════════════════════════════
   #
@@ -947,6 +1040,10 @@ module Crystal::MIR
         end
       end
 
+      apply_replacements(replacements)
+    end
+
+    def apply_replacements(replacements : Hash(ValueId, ValueId)) : Int32
       return 0 if replacements.empty?
 
       @propagated = replacements.size
@@ -1242,10 +1339,11 @@ module Crystal::MIR
     property dead_eliminated : Int32 = 0
     property constants_folded : Int32 = 0
     property copies_propagated : Int32 = 0
+    property cse_eliminated : Int32 = 0
     property locks_elided : Int32 = 0
 
     def total : Int32
-      rc_eliminated + dead_eliminated + constants_folded + copies_propagated + locks_elided
+      rc_eliminated + dead_eliminated + constants_folded + copies_propagated + cse_eliminated + locks_elided
     end
 
     def to_s(io : IO)
@@ -1254,6 +1352,7 @@ module Crystal::MIR
       io << dead_eliminated << " dead insts, "
       io << constants_folded << " constants folded, "
       io << copies_propagated << " copies propagated, "
+      io << cse_eliminated << " CSEs, "
       io << locks_elided << " locks elided"
     end
   end
@@ -1271,6 +1370,10 @@ module Crystal::MIR
       # Pass 1: Constant folding (enables more DCE)
       cf = ConstantFoldingPass.new(@function)
       @stats.constants_folded = cf.run
+
+      # Pass 1.5: Local CSE for pure ops within blocks
+      cse = LocalCSEPass.new(@function)
+      @stats.cse_eliminated = cse.run
 
       # Pass 2: RC elision (Crystal-specific)
       rc = RCElisionPass.new(@function)
@@ -1306,6 +1409,10 @@ module Crystal::MIR
 
     def run_constant_folding : Int32
       ConstantFoldingPass.new(@function).run
+    end
+
+    def run_cse : Int32
+      LocalCSEPass.new(@function).run
     end
 
     def run_lock_elision : Int32
