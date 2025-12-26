@@ -1016,7 +1016,7 @@ r2 = maybe(false)  # => nil
   - MachO accessors: `_Crystal__MachO__LoadCommand_new_Pointer`, `_Section64_*`, `_Nlist64__Type_*`, `_MachO_endianness`, `_read_segments_and_sections`.
   - IO/EventLoop/Errno: `_Crystal__EventLoop__FileDescriptor_{read,write}_IO__FileDescriptor_Slice_UInt8_`, `_IO__FileDescriptor_*`, `_Errno_*`.
   - FastFloat/ParseOptions: `_Float__FastFloat_*`, `_FromCharsResultT_UInt8_*`, `_ParseOptionsT_UInt8_*`.
-  - Runtime intrinsics: `___fixint_impl`, `___float_impl`, `___mul_impl_Int32`, `_raise_without_backtrace`, `_synchronize`, `_UInt128_new`.
+  - Runtime intrinsics: `___fixint_impl`, `___float_impl`, `___mul_impl_Int32`, `_raise_without_backtrace`, `_synchronize`.
   - Misc: `_Attribute_new_Pointer_Pointer_Int32`, `_Math_min/max`, `_Tuple_bsearch_*`, `_Bytes___Nil_*`, `_Seek_*`, `_LoadCommand_*`, `_value__Int32`.
 
 **Recent fixes (prelude bootstrap path):**

@@ -4251,6 +4251,12 @@ module Crystal::HIR
       ctx.terminate(Return.new(alloc.id))
     end
 
+    private def allocator_supported?(class_name : String) : Bool
+      return false if class_name.starts_with?("Pointer(") || class_name.starts_with?("Pointer_")
+      return false if primitive_self_type(class_name)
+      true
+    end
+
     # Generate synthetic getter method: def name; @name; end
     private def generate_getter_method(class_name : String, class_info : ClassInfo, spec : CrystalV2::Compiler::Frontend::AccessorSpec)
       storage_name = accessor_storage_name(spec)
@@ -10527,9 +10533,11 @@ module Crystal::HIR
             # This ensures correct init_params from the initialize method are used
             if method && method.split("$", 2)[0] == "new"
               if class_info = @class_info[owner]?
-                generate_allocator(owner, class_info)
-                # The function was just generated (or already existed), return
-                return
+                if allocator_supported?(owner)
+                  generate_allocator(owner, class_info)
+                  # The function was just generated (or already existed), return
+                  return
+                end
               end
             end
             if class_info = @class_info[owner]?
