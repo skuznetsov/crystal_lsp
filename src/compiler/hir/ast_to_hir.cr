@@ -371,6 +371,8 @@ module Crystal::HIR
     @inline_caller_class_stack : Array(String?) = [] of String?
     @inline_caller_method_stack : Array(String?) = [] of String?
     @inline_caller_method_is_class_stack : Array(Bool) = [] of Bool
+    # Preserve caller type-parameter bindings for block bodies during yield inlining.
+    @inline_caller_type_param_map_stack : Array(Hash(String, String)) = [] of Hash(String, String)
     # Loop-carried locals for inline yield contexts (used to keep phi-bound values stable).
     @inline_loop_vars_stack : Array(Set(String)) = [] of Set(String)
 
@@ -1928,7 +1930,13 @@ module Crystal::HIR
 
       arg_strings = [] of String
       target_node = include_arena[include_target]
-      return extra unless target_node.is_a?(CrystalV2::Compiler::Frontend::GenericNode)
+      unless target_node.is_a?(CrystalV2::Compiler::Frontend::GenericNode)
+        if DebugHooks::ENABLED
+          module_name = String.new(module_node.name)
+          debug_hook("include.param.missing", "module=#{module_name} target=#{target_node.class.name}")
+        end
+        return extra
+      end
       with_arena(include_arena) do
         target_node.type_args.each do |arg|
           if str = stringify_type_expr(arg)
@@ -1936,7 +1944,14 @@ module Crystal::HIR
           end
         end
       end
-      return extra if arg_strings.empty?
+      if arg_strings.empty?
+        if DebugHooks::ENABLED
+          module_name = String.new(module_node.name)
+          base_name = resolve_path_like_name(target_node.base_type) || "unknown"
+          debug_hook("include.param.empty", "module=#{module_name} target=#{base_name}")
+        end
+        return extra
+      end
 
       type_params.each_with_index do |tp, idx|
         break if idx >= arg_strings.size
@@ -5472,9 +5487,18 @@ module Crystal::HIR
         sep = is_class_method ? "." : "#"
         STDERR.puts "[DEBUG_LOWER_METHOD] #{class_name}#{sep}#{method_name} (class_method=#{is_class_method}, receiver=#{node.receiver})"
       end
+      if DebugHooks::ENABLED && class_name.includes?("(") && @type_param_map.empty?
+        debug_hook("method.lower.missing_type_params", "class=#{class_name} method=#{method_name} override=#{full_name_override || ""}")
+      end
       if ENV.has_key?("DEBUG_STRING_METHOD_LOWER") && class_name == "String" && (method_name == "[]" || method_name == "char_index_to_byte_index")
         sep = is_class_method ? "." : "#"
         STDERR.puts "[DEBUG_LOWER_METHOD] #{class_name}#{sep}#{method_name} override=#{full_name_override || "(none)"}"
+      end
+      if DebugHooks::ENABLED && class_name.starts_with?("Array(") && method_name == "new" && is_class_method
+        debug_hook("method.lower.array_new", "class=#{class_name} map=#{type_param_map_debug_string} override=#{full_name_override || ""}")
+      end
+      if DebugHooks::ENABLED && method_name == "map" && !is_class_method
+        debug_hook("method.lower.map", "class=#{class_name} map=#{type_param_map_debug_string} override=#{full_name_override || ""}")
       end
 
       # Class methods use "." separator, instance methods use "#"
@@ -5965,6 +5989,16 @@ module Crystal::HIR
       # Get the class name from the type descriptor
       enum_type_name = @enum_value_types.try(&.[receiver_id]?)
       class_name = enum_type_name || type_desc.try(&.name) || primitive_class_name(receiver_type) || ""
+      if !class_name.empty? && !@type_param_map.empty?
+        substituted = substitute_type_params_in_type_name(class_name)
+        if substituted != class_name
+          debug_hook("method.resolve.substitute", "before=#{class_name} after=#{substituted} method=#{method_name}")
+          class_name = substituted
+        end
+      end
+      if DebugHooks::ENABLED && unresolved_generic_receiver?(class_name)
+        debug_hook("method.resolve.unresolved", "method=#{method_name} receiver=#{class_name} args=#{arg_types.map { |t| type_name_for_mangling(t) }.join(",")} current=#{@current_class || ""}")
+      end
 
       # DEBUG: Track where short names come from in method resolution
       if ENV.has_key?("DEBUG_METHOD_RESOLVE") && !class_name.includes?("::") &&
@@ -7244,6 +7278,32 @@ module Crystal::HIR
       return type_name if param_name.empty? || actual_name.empty?
       pattern = /(^|[^A-Za-z0-9_:])#{Regex.escape(param_name)}([^A-Za-z0-9_:]|$)/
       type_name.gsub(pattern, "\\1#{actual_name}\\2")
+    end
+
+    private def type_param_map_debug_string : String
+      return "" if @type_param_map.empty?
+      @type_param_map.map { |param, actual| "#{param}=#{actual}" }.join(",")
+    end
+
+    private def type_name_includes_param?(type_name : String, param_name : String) : Bool
+      return false if param_name.empty?
+      pattern = /(^|[^A-Za-z0-9_:])#{Regex.escape(param_name)}([^A-Za-z0-9_:]|$)/
+      !!type_name.match(pattern)
+    end
+
+    private def unresolved_generic_receiver?(type_name : String) : Bool
+      info = split_generic_base_and_args(type_name)
+      return false unless info
+
+      template = @generic_templates[info[:base]]?
+      return false unless template
+
+      args = split_generic_type_args(info[:args]).map(&.strip)
+      return false unless args.size == template.type_params.size
+
+      template.type_params.any? do |param|
+        args.any? { |arg| type_name_includes_param?(arg, param) }
+      end
     end
 
     private def substitute_type_params(type_name : String, param_map : Hash(String, String)) : String
@@ -12207,6 +12267,12 @@ module Crystal::HIR
           if target_name.includes?("#")
             owner = resolved_owner || target_name.split("#", 2)[0]
             if class_info = @class_info[owner]?
+              if DebugHooks::ENABLED && unresolved_generic_receiver?(owner)
+                debug_hook(
+                  "lower.class_receiver.unresolved",
+                  "owner=#{owner} target=#{target_name} requested=#{name} map=#{type_param_map_debug_string}"
+                )
+              end
               old_class = @current_class
               @current_class = owner
               if target_name.includes?("from_chars")
@@ -12693,6 +12759,12 @@ module Crystal::HIR
         end
 
         if class_name_str
+          if DebugHooks::ENABLED && unresolved_generic_receiver?(class_name_str)
+            debug_hook(
+              "call.class_receiver.unresolved",
+              "owner=#{class_name_str} method=#{method_name} current=#{@current_class || ""} current_method=#{@current_method || ""} class_method=#{@current_method_is_class} map=#{type_param_map_debug_string}"
+            )
+          end
           # Intrinsics.* macros lower to LibIntrinsics.* extern calls. In codegen
           # we bypass macro expansion and rewrite the target here to avoid missing symbols.
           if class_name_str == "Intrinsics"
@@ -15766,9 +15838,9 @@ module Crystal::HIR
         STDERR.puts "[INLINE_YIELD] inline #{inline_key} in #{ctx.function.name}"
       end
 
-      if body = func_def.body
-        unless body.empty?
-          max_index = body.max_of(&.index)
+      if func_body = func_def.body
+        unless func_body.empty?
+          max_index = func_body.max_of(&.index)
           if max_index < 0 || max_index >= callee_arena.size
             debug_hook("inline.yield.arena_mismatch", "callee=#{inline_key} max=#{max_index} arena=#{callee_arena.size}")
             return inline_yield_fallback_call(ctx, inline_key, receiver_id, call_args, block)
@@ -15803,6 +15875,7 @@ module Crystal::HIR
         @inline_caller_class_stack << old_current_class
         @inline_caller_method_stack << old_current_method
         @inline_caller_method_is_class_stack << old_current_method_is_class
+        @inline_caller_type_param_map_stack << @type_param_map.dup
         base_inline_name = inline_key.split("$", 2)[0]
         if base_inline_name.includes?("#")
           owner, method = base_inline_name.split("#", 2)
@@ -15819,29 +15892,38 @@ module Crystal::HIR
             @current_method_is_class = true
           end
         end
+        inline_param_map = type_param_map_for_receiver_name(base_inline_name)
+        result_value = nil_value(ctx)
+        apply_inline = -> do
+          # If inlining an instance method, bind the receiver as `self`.
+          if receiver_id
+            ctx.register_local("self", receiver_id)
+            ctx.register_type(receiver_id, ctx.type_of(receiver_id))
+          end
 
-        # If inlining an instance method, bind the receiver as `self`.
-        if receiver_id
-          ctx.register_local("self", receiver_id)
-          ctx.register_type(receiver_id, ctx.type_of(receiver_id))
-        end
-
-        # Bind function parameters to call arguments
-        if params = func_def.params
-          params.each_with_index do |param, idx|
-            if pname = param.name
-              param_name = String.new(pname)
-              if idx < call_args.size
-                ctx.register_local(param_name, call_args[idx])
+          # Bind function parameters to call arguments
+          if params = func_def.params
+            params.each_with_index do |param, idx|
+              if pname = param.name
+                param_name = String.new(pname)
+                if idx < call_args.size
+                  ctx.register_local(param_name, call_args[idx])
+                end
               end
             end
           end
-        end
 
-        # Lower function body with yield substitution
-        result_value = nil_value(ctx)
-        if body = func_def.body
-          result_value = lower_body(ctx, body)
+          # Lower function body with yield substitution
+          if inline_body = func_def.body
+            result_value = lower_body(ctx, inline_body)
+          end
+        end
+        if inline_param_map.empty?
+          apply_inline.call
+        else
+          with_type_param_map(inline_param_map) do
+            apply_inline.call
+          end
         end
 
         if ctx.get_block(ctx.current_block).terminator.is_a?(Unreachable)
@@ -15924,6 +16006,7 @@ module Crystal::HIR
         @inline_caller_class_stack.pop?
         @inline_caller_method_stack.pop?
         @inline_caller_method_is_class_stack.pop?
+        @inline_caller_type_param_map_stack.pop?
         @inline_yield_block_stack.pop? if pushed_block
         @inline_yield_block_arena_stack.pop? if pushed_block
         @inline_yield_name_stack.pop? if pushed_name
@@ -15961,9 +16044,13 @@ module Crystal::HIR
         old_inline_class = @current_class
         old_inline_method = @current_method
         old_inline_method_is_class = @current_method_is_class
+        old_type_param_map = @type_param_map
         @current_class = @inline_caller_class_stack.last?
         @current_method = @inline_caller_method_stack.last?
         @current_method_is_class = @inline_caller_method_is_class_stack.last? || false
+        if caller_type_map = @inline_caller_type_param_map_stack.last?
+          @type_param_map = caller_type_map
+        end
         begin
           saved_callee_locals = ctx.save_locals
           ctx.restore_locals(caller_locals)
@@ -16049,6 +16136,7 @@ module Crystal::HIR
           @current_class = old_inline_class
           @current_method = old_inline_method
           @current_method_is_class = old_inline_method_is_class || false
+          @type_param_map = old_type_param_map
         end
       else
         # No yield inlining context; just lower block normally.

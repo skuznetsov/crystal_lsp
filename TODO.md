@@ -1037,6 +1037,8 @@ r2 = maybe(false)  # => nil
 - Use array element types for `each`/`each_with_index` block params to avoid Array(T)#field fallbacks.
 - Infer `find`/`find_index` return types from element types (nullable) during member access lowering.
 - Guard yield inlining when callee arena mismatches (fallback to non-inline call to avoid OOB).
+- Substitute type params in receiver names during method resolution; log unresolved generic receivers via debug hooks (2026-01-05).
+- Log unresolved generic receivers for class method calls and lowering paths (Array(T).build tracing) (2026-01-05).
 - Remove `StructNode` from AST + LSP AST cache; structs are `ClassNode.is_struct` (cache version bump) (2025-12-25).
 - Register module instance methods as class methods when `extend self` is present (fixes `Math.min/max`) (2025-12-25).
 - Propagate `extend self` through macro-literal/module branches when registering module methods (2025-12-25).
