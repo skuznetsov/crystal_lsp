@@ -6938,6 +6938,14 @@ module Crystal::HIR
         node.indexes.any? { |idx| contains_yield_in_expr?(idx) }
       when CrystalV2::Compiler::Frontend::RangeNode
         contains_yield_in_expr?(node.begin_expr) || contains_yield_in_expr?(node.end_expr)
+      when CrystalV2::Compiler::Frontend::BeginNode
+        return true if contains_yield?(node.body)
+        if clauses = node.rescue_clauses
+          return true if clauses.any? { |cl| contains_yield?(cl.body) }
+        end
+        return true if node.else_body && contains_yield?(node.else_body.not_nil!)
+        return true if node.ensure_body && contains_yield?(node.ensure_body.not_nil!)
+        false
       else
         false
       end
@@ -7005,6 +7013,14 @@ module Crystal::HIR
         node.indexes.any? { |idx| contains_return_in_expr?(idx) }
       when CrystalV2::Compiler::Frontend::RangeNode
         contains_return_in_expr?(node.begin_expr) || contains_return_in_expr?(node.end_expr)
+      when CrystalV2::Compiler::Frontend::BeginNode
+        return true if contains_return?(node.body)
+        if clauses = node.rescue_clauses
+          return true if clauses.any? { |cl| contains_return?(cl.body) }
+        end
+        return true if node.else_body && contains_return?(node.else_body.not_nil!)
+        return true if node.ensure_body && contains_return?(node.ensure_body.not_nil!)
+        false
       else
         false
       end
@@ -13340,9 +13356,15 @@ module Crystal::HIR
       base_method_name = if full_method_name
                            full_method_name
                          elsif receiver_id.nil? && (current = @current_class)
-                           # Bare calls inside a class/module always resolve as self.<method>.
+                           # Bare calls inside a class/module resolve to self.<method> only
+                           # when that method exists; otherwise fall back to top-level.
                            sep = @current_method_is_class ? "." : "#"
-                           "#{current}#{sep}#{method_name}"
+                           candidate = "#{current}#{sep}#{method_name}"
+                           if @function_types.has_key?(candidate) || has_function_base?(candidate)
+                             candidate
+                           else
+                             method_name
+                           end
                          else
                            method_name
                          end
@@ -13381,6 +13403,12 @@ module Crystal::HIR
 
       if full_method_name && !@function_defs.has_key?(mangled_method_name)
         if entry = lookup_function_def_for_call(full_method_name, args.size, has_block_call, arg_types)
+          mangled_method_name = entry[0]
+          base_method_name = mangled_method_name.split("$").first
+        end
+      end
+      if !@function_defs.has_key?(mangled_method_name)
+        if entry = lookup_function_def_for_call(base_method_name, args.size, has_block_call, arg_types)
           mangled_method_name = entry[0]
           base_method_name = mangled_method_name.split("$").first
         end

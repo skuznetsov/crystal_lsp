@@ -2,6 +2,7 @@
 
 Purpose: fast, high-level recall of core architecture, workflows, and current focus.
 This is a living summary for rapid context reload, not exhaustive documentation.
+See `notes/business_logic/README.md` for the index of focused snapshots.
 
 ## Entry Points
 - CLI: `src/compiler/cli.cr` -> parses options, wires debug hooks, runs driver.
