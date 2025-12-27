@@ -1020,11 +1020,12 @@ r2 = maybe(false)  # => nil
 - Timing snapshot (release + `--stats --no-llvm-opt --no-llvm-metadata`): parse prelude ~167ms, HIR ~2.0s, MIR ~0.3ms, LLVM ~1.8ms, total ~2.2s; link failure is the current blocker.
 - Linker missing symbols (bootstrap_array full-prelude run; full list in `/tmp/bootstrap_array_full.link.log`):
   - DWARF: `Crystal::DWARF::FORM_implicit_const`, `Crystal::DWARF::LineNumbers::Sequence::FileEntry.new`, `Array(LNCTFormat)#format/lnct`, `Row.new`, `line_strp`, `strp_sup`, `FileEntry#path`.
-  - IO/EventLoop: `Crystal::EventLoop::FileDescriptor_read/write`, `IO__FileDescriptor_system_*`, `IO_read_*`, `IO__Error.from_errno`, `IO__Seek_current`.
+  - MachO: `Crystal::MachO.open {}`.
+  - IO/EventLoop: `Crystal::EventLoop::FileDescriptor_read/write`, `Crystal::EventLoop.open`, `IO__FileDescriptor_system_*`, `IO_read_*`, `IO__Error.from_errno`, `IO__Seek_current`, `FileDescriptor_initialize`, `File_close`, `File_set_encoding`.
   - Scheduler/Threads/Signal: `SpinLock_sync_block`, `Thread::Mutex_synchronize_block`, `Fiber::StackPool_sleep`, `Crystal::System::Signal_spawn`, `Crystal::System::Signal_set`, `SignalChildHandler` closures.
-  - Pointer/Memory: `Pointer(UInt8)#__*` (`____Pointer`, `____String`, `____Tuple`), `Pointer(UInt8)#close/enqueue/key`.
-  - Numeric/String: `Int32_at/form/reentrant/unchecked`, `UInt32#value`, `UInt8_exception_*`, `Nil_to_i32`, `String#char_at` block form, `__to_s(IO)`.
-  - Collections/Misc: `Attribute.new`, `Hash(LibC::PidT, Int32)#pointer`, `Hash(c/signal, Signal::Handler)#each_entry_with_index_block`, `Deque(Int32)#size`, `Sender(Int32).new`, `STDERR.puts(String)`, `File::Info_system_size` (`_st_size`), `Slice(UInt8)#fetch(Int32, &block)`, `call` (missing Proc call target).
+  - Pointer/Memory/String: `GC_realloc`, `Pointer(UInt8)#__*` (`____Pointer`, `____String`, `____Tuple`), `Pointer(UInt8)#copy_from/size/to_unsafe/enqueue`, `String_join`, `String_null`, `String_set_crystal_type_id`, `String_inspect_with_backtrace`, `__to_s(IO)`.
+  - Exceptions/Runtime: `Exception#callstack`, `Int32_exception_*`, `RuntimeError.from_errno`, `LibC::SizeT.zero`, `Nil_to_i32`.
+  - Collections/Misc: `Array(T)#build` (+ `UInt32` variant), `Attribute.new`, `Hash(LibC::PidT, Int32)#pointer`, `Hash(c/signal, Signal::Handler)#*`, `Deque(Int32)#size`, `Sender(Int32).new`, `STDERR.puts(String)`, `File::Info_system_size` (`_st_size`), `call` (missing Proc call target).
 
 **Recent fixes (prelude bootstrap path):**
 - Normalize `flag?` macro arguments (strip leading `:`) + require cache v3; pthread requires now load.
@@ -1033,6 +1034,7 @@ r2 = maybe(false)  # => nil
 - Register MacroIf/MacroLiteral nodes inside nested modules during HIR lowering.
 - Remove `StructNode` handling from macro-parsed class bodies; rely on `ClassNode.is_struct` (2026-01-02).
 - Handle inline returns during yield inlining (guard proc/block bodies + safe block bounds) to preserve Enumerable semantics.
+- Use array element types for `each`/`each_with_index` block params to avoid Array(T)#field fallbacks.
 - Infer `find`/`find_index` return types from element types (nullable) during member access lowering.
 - Guard yield inlining when callee arena mismatches (fallback to non-inline call to avoid OOB).
 - Remove `StructNode` from AST + LSP AST cache; structs are `ClassNode.is_struct` (cache version bump) (2025-12-25).
