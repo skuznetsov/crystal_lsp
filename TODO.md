@@ -1003,6 +1003,7 @@ enum:      64  ← ✅ DONE
 | Enum symbol arg coercion | Coerce symbol literals to enum values + pack double splat NamedTuple in call lowering (fixes Crystal.trace in prelude) (2025-12-31) |
 | Block pass + try return | Extract &. / &block arguments as blocks; try returns block type with nilable receiver union (2026-01-03) |
 | Block capture in parens | Preserve `foo(&block)` args + inline yield for block-pass blocks (2025-12-27) |
+| Yield in literals | Detect yield/return inside tuple/array/hash/named tuple/string interpolation (2025-12-27) |
 
 ### 8.2 Current Status
 

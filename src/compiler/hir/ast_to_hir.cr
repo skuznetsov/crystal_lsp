@@ -6933,6 +6933,22 @@ module Crystal::HIR
       when CrystalV2::Compiler::Frontend::CaseNode
         node.when_branches.any? { |w| contains_yield?(w.body) } ||
           (node.else_branch ? contains_yield?(node.else_branch.not_nil!) : false)
+      when CrystalV2::Compiler::Frontend::ArrayLiteralNode
+        return true if node.elements.any? { |el| contains_yield_in_expr?(el) }
+        node.of_type ? contains_yield_in_expr?(node.of_type.not_nil!) : false
+      when CrystalV2::Compiler::Frontend::TupleLiteralNode
+        node.elements.any? { |el| contains_yield_in_expr?(el) }
+      when CrystalV2::Compiler::Frontend::HashLiteralNode
+        node.entries.any? do |entry|
+          contains_yield_in_expr?(entry.key) || contains_yield_in_expr?(entry.value)
+        end
+      when CrystalV2::Compiler::Frontend::NamedTupleLiteralNode
+        node.entries.any? { |entry| contains_yield_in_expr?(entry.value) }
+      when CrystalV2::Compiler::Frontend::StringInterpolationNode
+        node.pieces.any? do |piece|
+          piece.kind == CrystalV2::Compiler::Frontend::StringPiece::Kind::Expression &&
+            piece.expr && contains_yield_in_expr?(piece.expr.not_nil!)
+        end
       when CrystalV2::Compiler::Frontend::IndexNode
         return true if contains_yield_in_expr?(node.object)
         node.indexes.any? { |idx| contains_yield_in_expr?(idx) }
@@ -7008,6 +7024,22 @@ module Crystal::HIR
       when CrystalV2::Compiler::Frontend::CaseNode
         node.when_branches.any? { |w| contains_return?(w.body) } ||
           (node.else_branch ? contains_return?(node.else_branch.not_nil!) : false)
+      when CrystalV2::Compiler::Frontend::ArrayLiteralNode
+        return true if node.elements.any? { |el| contains_return_in_expr?(el) }
+        node.of_type ? contains_return_in_expr?(node.of_type.not_nil!) : false
+      when CrystalV2::Compiler::Frontend::TupleLiteralNode
+        node.elements.any? { |el| contains_return_in_expr?(el) }
+      when CrystalV2::Compiler::Frontend::HashLiteralNode
+        node.entries.any? do |entry|
+          contains_return_in_expr?(entry.key) || contains_return_in_expr?(entry.value)
+        end
+      when CrystalV2::Compiler::Frontend::NamedTupleLiteralNode
+        node.entries.any? { |entry| contains_return_in_expr?(entry.value) }
+      when CrystalV2::Compiler::Frontend::StringInterpolationNode
+        node.pieces.any? do |piece|
+          piece.kind == CrystalV2::Compiler::Frontend::StringPiece::Kind::Expression &&
+            piece.expr && contains_return_in_expr?(piece.expr.not_nil!)
+        end
       when CrystalV2::Compiler::Frontend::IndexNode
         return true if contains_return_in_expr?(node.object)
         node.indexes.any? { |idx| contains_return_in_expr?(idx) }
