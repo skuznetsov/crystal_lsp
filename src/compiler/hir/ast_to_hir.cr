@@ -301,6 +301,10 @@ module Crystal::HIR
     @lowering_functions : Set(String)
     # Call-site argument types for lazily lowered functions (mangled name -> arg types).
     @pending_arg_types : Hash(String, Array(TypeRef))
+    # Call-site type parameter bindings for lazily lowered functions (mangled name -> map).
+    @pending_type_param_maps : Hash(String, Hash(String, String))
+    # Captured type parameter bindings for module methods copied into concrete classes.
+    @function_type_param_maps : Hash(String, Hash(String, String))
 
     # Generic class templates (base name -> template)
     @generic_templates : Hash(String, GenericClassTemplate)
@@ -433,6 +437,8 @@ module Crystal::HIR
       @lowered_functions = Set(String).new
       @lowering_functions = Set(String).new
       @pending_arg_types = {} of String => Array(TypeRef)
+      @pending_type_param_maps = {} of String => Hash(String, String)
+      @function_type_param_maps = {} of String => Hash(String, String)
       @generic_templates = {} of String => GenericClassTemplate
       @generic_reopenings = {} of String => Array(GenericClassTemplate)
       @monomorphized = Set(String).new
@@ -1919,6 +1925,39 @@ module Crystal::HIR
       end
     end
 
+    private def record_pending_type_param_map(name : String, params : Hash(String, String)) : Nil
+      return if name.empty? || params.empty?
+      if existing = @pending_type_param_maps[name]?
+        @pending_type_param_maps[name] = existing.merge(params)
+      else
+        @pending_type_param_maps[name] = params.dup
+      end
+    end
+
+    private def consume_pending_type_param_map(name : String) : Hash(String, String)?
+      return nil if name.empty?
+      map = @pending_type_param_maps[name]?
+      @pending_type_param_maps.delete(name) if map
+      map
+    end
+
+    private def store_function_type_param_map(full_name : String, base_name : String, params : Hash(String, String)) : Nil
+      return if params.empty?
+      stored = params.dup
+      @function_type_param_maps[full_name] = stored
+      @function_type_param_maps[base_name] = stored unless @function_type_param_maps.has_key?(base_name)
+    end
+
+    private def function_type_param_map_for(*names : String) : Hash(String, String)?
+      names.each do |name|
+        next if name.empty?
+        if map = @function_type_param_maps[name]?
+          return map
+        end
+      end
+      nil
+    end
+
     private def include_type_param_map(
       module_node : CrystalV2::Compiler::Frontend::ModuleNode,
       include_target : ExprId,
@@ -2282,23 +2321,28 @@ module Crystal::HIR
                   full_name = mangle_function_name(base_name, param_types, has_block)
                   next if defined_full_names.includes?(full_name)
 
+                  store_function_type_param_map(full_name, base_name, extra_map)
                   debug_hook("module.instance_method.register", "class=#{class_name} module=#{module_full_name} method=#{method_name} full=#{full_name}")
                   register_function_type(full_name, return_type)
                   @function_defs[full_name] = member
                   @function_def_arenas[full_name] = @arena
 
-                    if body = member.body
-                      if contains_yield?(body)
-                        @yield_functions.add(full_name)
-                        debug_hook("yield.register", full_name)
-                        unless @function_defs.has_key?(base_name)
-                          @function_defs[base_name] = member
-                          @function_def_arenas[base_name] = @arena
-                        end
-                        @function_defs[full_name] = member
-                        @function_def_arenas[full_name] = @arena
+                  if body = member.body
+                    contains_yield = contains_yield?(body)
+                    if !contains_yield && @yield_functions.includes?(full_name)
+                      @yield_functions.delete(full_name)
+                      debug_hook("yield.unregister", full_name)
+                    elsif contains_yield
+                      @yield_functions.add(full_name)
+                      debug_hook("yield.register", full_name)
+                      unless @function_defs.has_key?(base_name)
+                        @function_defs[base_name] = member
+                        @function_def_arenas[base_name] = @arena
                       end
+                      @function_defs[full_name] = member
+                      @function_def_arenas[full_name] = @arena
                     end
+                  end
                 when CrystalV2::Compiler::Frontend::GetterNode
                   member.specs.each do |spec|
                     offset = register_accessor_from_module(
@@ -2360,6 +2404,8 @@ module Crystal::HIR
       return if visited.includes?(module_full_name)
       visited << module_full_name
 
+      debug_hook("mixin.lower", "class=#{class_name} module=#{module_full_name}")
+
       defs = @module_defs[module_full_name]? || return
       include_arena = @arena
       defs.each do |mod_node, mod_arena|
@@ -2378,6 +2424,37 @@ module Crystal::HIR
 
                   method_name = String.new(member.name)
                   base_name = "#{class_name}##{method_name}"
+
+                  if DebugHooks::ENABLED && method_name == "map"
+                    block_type = ""
+                    if params = member.params
+                      if blk = params.find(&.is_block)
+                        block_type = blk.type_annotation ? String.new(blk.type_annotation.not_nil!) : ""
+                      end
+                    end
+                    debug_hook("method.lower.inspect", "class=#{class_name} method=#{method_name} block_type=#{block_type} map=#{type_param_map_debug_string}")
+                  end
+
+                  block_unbound = false
+                  if params = member.params
+                    params.each do |param|
+                      next unless param.is_block
+                      if ta = param.type_annotation
+                        if type_param_name = extract_proc_return_type_name(String.new(ta))
+                          if type_param_like?(type_param_name) && !@type_param_map.has_key?(type_param_name)
+                            block_unbound = true
+                            break
+                          end
+                        end
+                      end
+                    end
+                  end
+
+                  if block_unbound || def_has_unbound_type_params?(member)
+                    reason = block_unbound ? "block_return_type_param" : "unbound_type_params"
+                    debug_hook("method.lower.defer", "class=#{class_name} method=#{method_name} reason=#{reason}")
+                    next
+                  end
 
                   param_types = [] of TypeRef
                   has_block = false
@@ -7285,6 +7362,68 @@ module Crystal::HIR
       @type_param_map.map { |param, actual| "#{param}=#{actual}" }.join(",")
     end
 
+    private def type_param_like?(name : String) : Bool
+      return false if name.empty?
+      return false if name.includes?("::")
+      return false if primitive_self_type(name)
+      return false if @class_info.has_key?(name)
+      return false if @module_defs.has_key?(name)
+      return false if @type_aliases.has_key?(name)
+      return false if LIBC_TYPE_ALIASES.has_key?(name)
+      name[0].uppercase?
+    end
+
+    private def known_type_name?(name : String) : Bool
+      return true if name.empty?
+      return true if primitive_self_type(name)
+      return true if @class_info.has_key?(name)
+      return true if @module_defs.has_key?(name)
+      return true if @type_aliases.has_key?(name)
+      return true if LIBC_TYPE_ALIASES.has_key?(name)
+      false
+    end
+
+    private def unbound_type_params_from_type_name(type_name : String) : Set(String)
+      return Set(String).new if type_name.empty?
+      tokens = [] of String
+      type_name.scan(/[A-Z][A-Za-z0-9_]*/) do |match|
+        tokens << match[0]
+      end
+      return Set(String).new if tokens.empty?
+
+      unbound = Set(String).new
+      tokens.each do |token|
+        next if @type_param_map.has_key?(token)
+        next if known_type_name?(token)
+        unbound.add(token)
+      end
+
+      unbound
+    end
+
+    private def def_has_unbound_type_params?(node : CrystalV2::Compiler::Frontend::DefNode) : Bool
+      if params = node.params
+        params.each do |param|
+          if ta = param.type_annotation
+            if param.is_block
+              if type_param_name = extract_proc_return_type_name(String.new(ta))
+                if type_param_like?(type_param_name) && !@type_param_map.has_key?(type_param_name)
+                  return true
+                end
+              end
+            end
+            return true unless unbound_type_params_from_type_name(String.new(ta)).empty?
+          end
+        end
+      end
+
+      if rt = node.return_type
+        return true unless unbound_type_params_from_type_name(String.new(rt)).empty?
+      end
+
+      false
+    end
+
     private def type_name_includes_param?(type_name : String, param_name : String) : Bool
       return false if param_name.empty?
       pattern = /(^|[^A-Za-z0-9_:])#{Regex.escape(param_name)}([^A-Za-z0-9_:]|$)/
@@ -7386,6 +7525,25 @@ module Crystal::HIR
       type_ref_for_name(substituted)
     end
 
+    private def block_return_type_param_name(
+      mangled_method_name : String,
+      base_method_name : String
+    ) : String?
+      func_def = @function_defs[mangled_method_name]? || @function_defs[base_method_name]?
+      return nil unless func_def
+
+      block_param = func_def.params.try(&.find(&.is_block))
+      return nil unless block_param
+
+      block_type = block_param.type_annotation
+      return nil unless block_type
+
+      type_param_name = extract_proc_return_type_name(String.new(block_type))
+      return nil unless type_param_name && type_param_like?(type_param_name)
+
+      type_param_name
+    end
+
     private def block_param_types_for_call(
       mangled_method_name : String,
       base_method_name : String
@@ -7402,12 +7560,39 @@ module Crystal::HIR
       input_names = proc_input_type_names(String.new(type_slice))
       return nil unless input_names && !input_names.empty?
 
-      param_map = type_param_map_for_receiver_name(base_method_name)
-      resolved_names = if param_map.empty?
+      param_map = function_type_param_map_for(mangled_method_name, base_method_name)
+      if param_map && !param_map.empty?
+        param_map = param_map.dup
+      else
+        param_map = nil
+      end
+
+      receiver_map = type_param_map_for_receiver_name(base_method_name)
+      if param_map.nil? || param_map.empty?
+        param_map = receiver_map
+      end
+
+      if !@type_param_map.empty?
+        if param_map && !param_map.empty?
+          param_map = @type_param_map.merge(param_map)
+        else
+          param_map = @type_param_map.dup
+        end
+      end
+
+      resolved_names = if param_map.nil? || param_map.empty?
                          input_names
                        else
-                         input_names.map { |name| substitute_type_params(name, param_map) }
+                         input_names.map { |name| substitute_type_params(name, param_map.not_nil!) }
                        end
+
+      if DebugHooks::ENABLED && (base_method_name.includes?("map") || mangled_method_name.includes?("map"))
+        map_str = param_map ? param_map.not_nil!.map { |k, v| "#{k}=#{v}" }.join(",") : ""
+        debug_hook(
+          "block.param.types",
+          "method=#{base_method_name} mangled=#{mangled_method_name} inputs=#{input_names.join(",")} resolved=#{resolved_names.join(",")} map=#{map_str}"
+        )
+      end
 
       resolved_names.map { |name| type_ref_for_name(name) }
     end
@@ -12253,6 +12438,36 @@ module Crystal::HIR
         end
       end
 
+      if registered_params = function_type_param_map_for(target_name, base_target_name, name)
+        if DebugHooks::ENABLED && base_target_name.includes?("map")
+          params_str = registered_params.map { |k, v| "#{k}=#{v}" }.join(",")
+          debug_hook("function.lower.type_params", "target=#{target_name} base=#{base_target_name} params=#{params_str}")
+        end
+        extra_type_params = extra_type_params ? extra_type_params.merge(registered_params) : registered_params.dup
+      elsif DebugHooks::ENABLED && base_target_name.includes?("map")
+        debug_hook("function.lower.type_params", "target=#{target_name} base=#{base_target_name} params=")
+      end
+
+      if pending_params = consume_pending_type_param_map(name)
+        if DebugHooks::ENABLED && base_target_name.includes?("map")
+          params_str = pending_params.map { |k, v| "#{k}=#{v}" }.join(",")
+          debug_hook("function.lower.pending_params", "target=#{target_name} name=#{name} params=#{params_str}")
+        end
+        extra_type_params = extra_type_params ? extra_type_params.merge(pending_params) : pending_params.dup
+      elsif pending_params = consume_pending_type_param_map(target_name)
+        if DebugHooks::ENABLED && base_target_name.includes?("map")
+          params_str = pending_params.map { |k, v| "#{k}=#{v}" }.join(",")
+          debug_hook("function.lower.pending_params", "target=#{target_name} name=#{target_name} params=#{params_str}")
+        end
+        extra_type_params = extra_type_params ? extra_type_params.merge(pending_params) : pending_params.dup
+      elsif pending_params = consume_pending_type_param_map(base_target_name)
+        if DebugHooks::ENABLED && base_target_name.includes?("map")
+          params_str = pending_params.map { |k, v| "#{k}=#{v}" }.join(",")
+          debug_hook("function.lower.pending_params", "target=#{target_name} name=#{base_target_name} params=#{params_str}")
+        end
+        extra_type_params = extra_type_params ? extra_type_params.merge(pending_params) : pending_params.dup
+      end
+
       return if @module.has_function?(resolved_target_name)
       return if @lowering_functions.includes?(resolved_target_name)
 
@@ -13233,8 +13448,16 @@ module Crystal::HIR
             block_cast = blk_node.as(CrystalV2::Compiler::Frontend::BlockNode)
             call_args = args
 
+            skip_inline = false
+            if type_param_name = block_return_type_param_name(mangled_method_name, base_method_name)
+              unless @type_param_map.has_key?(type_param_name)
+                debug_hook("call.inline.skip", "callee=#{mangled_method_name} missing=#{type_param_name}")
+                skip_inline = true
+              end
+            end
+
             # Check if this is a call to a yield-function using mangled name
-            if @yield_functions.includes?(mangled_method_name)
+            if !skip_inline && @yield_functions.includes?(mangled_method_name)
               if func_def = @function_defs[mangled_method_name]?
                 debug_hook("call.inline.yield", "callee=#{mangled_method_name} current=#{@current_class || ""}")
                 callee_arena = @function_def_arenas[mangled_method_name]? || @arena
@@ -13242,7 +13465,7 @@ module Crystal::HIR
               end
             end
             # Also try base method name (for functions without overloading)
-            if @yield_functions.includes?(base_method_name)
+            if !skip_inline && @yield_functions.includes?(base_method_name)
               if func_def = @function_defs[base_method_name]?
                 debug_hook("call.inline.yield", "callee=#{base_method_name} current=#{@current_class || ""}")
                 callee_arena = @function_def_arenas[base_method_name]? || @arena
@@ -13298,6 +13521,10 @@ module Crystal::HIR
                      if block_param_types.nil? && method_name == "try" && receiver_id
                        block_param_types = [ctx.type_of(receiver_id)]
                      end
+                     if DebugHooks::ENABLED && method_name == "map"
+                       types_str = block_param_types ? block_param_types.map { |t| get_type_name_from_ref(t) }.join(",") : ""
+                       debug_hook("block.param.result", "method=#{base_method_name} mangled=#{mangled_method_name} types=#{types_str}")
+                     end
                      lower_block_to_block_id(ctx, blk_node, block_param_types)
                    else
                      # Block is some other expression - should not happen in well-formed AST
@@ -13340,6 +13567,9 @@ module Crystal::HIR
 
       if block_id
         if block_return_name = block_return_type_name(ctx, block_id)
+          if type_param_name = block_return_type_param_name(mangled_method_name, base_method_name)
+            record_pending_type_param_map(mangled_method_name, {type_param_name => block_return_name})
+          end
           if inferred = resolve_block_dependent_return_type(mangled_method_name, base_method_name, block_return_name)
             return_type = inferred
           end
