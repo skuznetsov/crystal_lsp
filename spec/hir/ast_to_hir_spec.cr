@@ -672,6 +672,35 @@ describe Crystal::HIR::AstToHir do
       call.not_nil!.as(Crystal::HIR::Call).args.size.should eq(2)
     end
 
+    it "prefers non-block overload when no block is passed" do
+      code = <<-CRYSTAL
+        class Foo
+          def self.malloc(size : Int32 = 1)
+            size
+          end
+
+          def self.malloc(size : Int32, & : Int32 -> Int32)
+            yield size
+          end
+        end
+
+        def bar
+          Foo.malloc
+        end
+      CRYSTAL
+
+      converter = lower_program(code)
+      func = converter.module.functions.find { |f| f.name.split("$").first == "bar" }
+      func.should_not be_nil
+
+      call = func.not_nil!.blocks.flat_map(&.instructions)
+        .find { |inst| inst.is_a?(Crystal::HIR::Call) }
+      call.should_not be_nil
+      call_name = call.not_nil!.as(Crystal::HIR::Call).method_name
+      call_name.should contain("Foo.malloc$Int32")
+      call_name.should_not contain("block")
+    end
+
     it "lowers method call with args" do
       func = lower_function("def foo; x.bar(1, 2); end")
       text = hir_text(func)

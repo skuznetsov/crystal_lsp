@@ -14411,8 +14411,10 @@ module Crystal::HIR
       has_block : Bool,
       arg_types : Array(TypeRef)? = nil
     ) : Tuple(String, CrystalV2::Compiler::Frontend::DefNode)?
-      if func_def = @function_defs[func_name]?
-        return {func_name, func_def}
+      if func_name.includes?("$")
+        if func_def = @function_defs[func_name]?
+          return {func_name, func_def}
+        end
       end
 
       best : CrystalV2::Compiler::Frontend::DefNode? = nil
