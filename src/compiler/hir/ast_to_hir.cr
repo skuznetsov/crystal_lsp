@@ -13091,6 +13091,10 @@ module Crystal::HIR
 
       # Handle named arguments by reordering them to match parameter positions
       # Also expand splat arguments (*array -> individual elements)
+      if DebugHooks::ENABLED && block_pass_expr
+        kind = CrystalV2::Compiler::Frontend.node_kind(@arena[block_pass_expr])
+        debug_hook("call.block_pass", "method=#{method_name} kind=#{kind}")
+      end
       has_block_call = !!block_expr || !!block_pass_expr
       has_splat = call_args.any? { |arg_id| @arena[arg_id].is_a?(CrystalV2::Compiler::Frontend::SplatNode) }
       args = if named_args = node.named_args
@@ -13449,31 +13453,41 @@ module Crystal::HIR
 
       # Handle yield-functions with inline expansion FIRST (before lowering block)
       # Must check with mangled name since that's how yield functions are registered.
+      block_for_inline : CrystalV2::Compiler::Frontend::BlockNode? = nil
+      proc_for_inline : CrystalV2::Compiler::Frontend::ProcLiteralNode? = nil
       if block_expr
         blk_node = @arena[block_expr]
-        is_block_node = blk_node.is_a?(CrystalV2::Compiler::Frontend::BlockNode)
-        is_proc_node = blk_node.is_a?(CrystalV2::Compiler::Frontend::ProcLiteralNode)
+        if blk_node.is_a?(CrystalV2::Compiler::Frontend::BlockNode)
+          block_for_inline = blk_node
+        elsif blk_node.is_a?(CrystalV2::Compiler::Frontend::ProcLiteralNode)
+          proc_for_inline = blk_node
+        end
+      elsif block_pass_expr
+        block_param_types = block_param_types_for_call(mangled_method_name, base_method_name)
+        if block_param_types.nil? && method_name == "try" && receiver_id
+          block_param_types = [ctx.type_of(receiver_id)]
+        end
+        block_for_inline = build_block_from_block_pass(block_pass_expr, block_param_types, node.span)
+      end
 
-        if is_block_node || is_proc_node
+      if block_for_inline || proc_for_inline
           if ENV["DEBUG_YIELD_TRACE"]? && (method_name == "char_at" || method_name == "fetch" || method_name == "upto" ||
               base_method_name.includes?("char_at") || base_method_name.includes?("fetch") || base_method_name.includes?("upto") ||
               mangled_method_name.includes?("char_at") || mangled_method_name.includes?("fetch") || mangled_method_name.includes?("upto"))
-            STDERR.puts "[YIELD_TRACE] method=#{method_name} base=#{base_method_name} mangled=#{mangled_method_name} in_set=#{@yield_functions.includes?(mangled_method_name)} block=#{is_block_node} current=#{@current_class || ""}"
+            STDERR.puts "[YIELD_TRACE] method=#{method_name} base=#{base_method_name} mangled=#{mangled_method_name} in_set=#{@yield_functions.includes?(mangled_method_name)} block=#{!!block_for_inline} current=#{@current_class || ""}"
           end
           # For Object#tap, inline directly when we have a receiver
           # tap yields self to the block then returns self
           if receiver_id && method_name == "tap"
-            if is_block_node
-              block_cast = blk_node.as(CrystalV2::Compiler::Frontend::BlockNode)
-              return inline_tap_with_block(ctx, receiver_id, block_cast)
-            elsif is_proc_node
-              proc_node = blk_node.as(CrystalV2::Compiler::Frontend::ProcLiteralNode)
-              return inline_tap_with_proc(ctx, receiver_id, proc_node)
+            if block_for_inline
+              return inline_tap_with_block(ctx, receiver_id, block_for_inline)
+            elsif proc_for_inline
+              return inline_tap_with_proc(ctx, receiver_id, proc_for_inline)
             end
           end
 
-          if is_block_node
-            block_cast = blk_node.as(CrystalV2::Compiler::Frontend::BlockNode)
+          if block_for_inline
+            block_cast = block_for_inline
             call_args = args
 
             skip_inline = false
@@ -13525,7 +13539,6 @@ module Crystal::HIR
                 end
               end
             end
-          end
         end
       end
 
@@ -17804,6 +17817,43 @@ module Crystal::HIR
       body_block
     ensure
       @inline_yield_proc_depth -= 1
+    end
+
+    # Build a synthetic BlockNode for block pass (&block) so yield inlining can substitute it.
+    # The block body calls proc.call(__arg0, __arg1, ...)
+    private def build_block_from_block_pass(
+      proc_expr : ExprId,
+      param_types : Array(TypeRef)?,
+      span : CrystalV2::Compiler::Frontend::Span
+    ) : CrystalV2::Compiler::Frontend::BlockNode
+      proc_node = @arena[proc_expr]
+      param_count = if param_types
+                      param_types.size
+                    elsif proc_node.is_a?(CrystalV2::Compiler::Frontend::ProcLiteralNode) && (params = proc_node.params)
+                      params.size
+                    else
+                      1
+                    end
+
+      params = [] of CrystalV2::Compiler::Frontend::Parameter
+      arg_ids = [] of CrystalV2::Compiler::Frontend::ExprId
+      if param_count > 0
+        param_count.times do |idx|
+          name = "__arg#{idx}"
+          name_slice = name.to_slice
+          params << CrystalV2::Compiler::Frontend::Parameter.new(name_slice, span: span, name_span: span)
+          arg_ids << @arena.add_typed(CrystalV2::Compiler::Frontend::IdentifierNode.new(span, name_slice))
+        end
+      end
+
+      call_member = @arena.add_typed(
+        CrystalV2::Compiler::Frontend::MemberAccessNode.new(span, proc_expr, "call".to_slice)
+      )
+      call_expr = @arena.add_typed(
+        CrystalV2::Compiler::Frontend::CallNode.new(span, call_member, arg_ids, nil)
+      )
+
+      CrystalV2::Compiler::Frontend::BlockNode.new(span, params.empty? ? nil : params, [call_expr])
     end
 
     private def lower_proc_literal(ctx : LoweringContext, node : CrystalV2::Compiler::Frontend::ProcLiteralNode) : ValueId

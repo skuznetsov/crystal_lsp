@@ -10265,6 +10265,10 @@ module CrystalV2
                   @no_type_declaration -= 1
                   return PREFIX_ERROR if arg_expr.invalid?
                 end
+                if arg_expr && !arg_expr.invalid? && !pushed
+                  args_b << arg_expr
+                  pushed = true
+                end
               elsif current_token.kind == Token::Kind::AmpDot
                 # Phase 101: Block shorthand without space: try &.method (AmpDot token)
                 # In argument context, AmpDot is block shorthand, not safe navigation
