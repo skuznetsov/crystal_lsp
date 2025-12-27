@@ -15757,6 +15757,16 @@ module Crystal::HIR
         STDERR.puts "[INLINE_YIELD] inline #{inline_key} in #{ctx.function.name}"
       end
 
+      if body = func_def.body
+        unless body.empty?
+          max_index = body.max_of(&.index)
+          if max_index < 0 || max_index >= callee_arena.size
+            debug_hook("inline.yield.arena_mismatch", "callee=#{inline_key} max=#{max_index} arena=#{callee_arena.size}")
+            return inline_yield_fallback_call(ctx, inline_key, receiver_id, call_args, block)
+          end
+        end
+      end
+
       old_inline_arenas = @inline_arenas
       @inline_arenas = {caller_arena, callee_arena}
       @arena = callee_arena
