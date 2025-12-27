@@ -1736,6 +1736,21 @@ module Crystal::HIR
       nil
     end
 
+    private def array_element_type_for_value(
+      ctx : LoweringContext,
+      array_id : ValueId,
+      default_type : TypeRef
+    ) : TypeRef
+      element_type = ctx.type_of(array_id)
+      if type_desc = @module.get_type_descriptor(element_type)
+        if elem_name = element_type_for_type_name(type_desc.name)
+          return type_ref_for_name(elem_name)
+        end
+      end
+      return default_type if element_type == TypeRef::VOID
+      element_type
+    end
+
     private def apply_index_to_type_name(type_name : String, index : Int32?) : String
       return type_name unless index
       name = type_name.strip
@@ -14798,10 +14813,7 @@ module Crystal::HIR
       ctx.push_scope(ScopeKind::Block)
 
       # Get element: arr[i]
-      element_type = ctx.type_of(array_id)
-      if element_type == TypeRef::VOID
-        element_type = TypeRef::INT32
-      end
+      element_type = array_element_type_for_value(ctx, array_id, TypeRef::INT32)
       index_get = IndexGet.new(ctx.next_id, element_type, array_id, index_phi.id)
       ctx.emit(index_get)
       ctx.register_type(index_get.id, element_type)
@@ -14955,10 +14967,7 @@ module Crystal::HIR
       ctx.push_scope(ScopeKind::Block)
 
       # Get element: arr[i]
-      element_type = ctx.type_of(array_id)
-      if element_type == TypeRef::VOID
-        element_type = TypeRef::INT32
-      end
+      element_type = array_element_type_for_value(ctx, array_id, TypeRef::INT32)
       index_get = IndexGet.new(ctx.next_id, element_type, array_id, index_phi.id)
       ctx.emit(index_get)
       ctx.register_type(index_get.id, element_type)
@@ -15113,7 +15122,7 @@ module Crystal::HIR
       ctx.push_scope(ScopeKind::Block)
 
       # Get element: arr[i] - element type should be POINTER for array of strings/objects
-      element_type = TypeRef::POINTER  # Arrays typically contain objects
+      element_type = array_element_type_for_value(ctx, array_id, TypeRef::POINTER)
       index_get = IndexGet.new(ctx.next_id, element_type, array_id, index_phi.id)
       ctx.emit(index_get)
       ctx.register_type(index_get.id, element_type)
