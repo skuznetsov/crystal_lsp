@@ -285,6 +285,8 @@ module Crystal::HIR
 
     # Current class being lowered (for ivar access)
     @current_class : String?
+    # Override namespace used for resolving short type names (module mixins).
+    @current_namespace_override : String?
 
     # Union type descriptors for debug info (keyed by MIR::TypeRef)
     getter union_descriptors : Hash(MIR::TypeRef, MIR::UnionDescriptor)
@@ -305,6 +307,8 @@ module Crystal::HIR
     @pending_type_param_maps : Hash(String, Hash(String, String))
     # Captured type parameter bindings for module methods copied into concrete classes.
     @function_type_param_maps : Hash(String, Hash(String, String))
+    # Namespace overrides for module instance methods copied into concrete classes.
+    @function_namespace_overrides : Hash(String, String)
 
     # Generic class templates (base name -> template)
     @generic_templates : Hash(String, GenericClassTemplate)
@@ -427,6 +431,7 @@ module Crystal::HIR
       @module_class_vars = {} of String => Array(ClassVarInfo)
       @init_params = {} of String => Array({String, TypeRef})
       @current_class = nil
+      @current_namespace_override = nil
       @current_method = nil
       @current_method_is_class = false
       @current_typeof_locals = nil
@@ -439,6 +444,7 @@ module Crystal::HIR
       @pending_arg_types = {} of String => Array(TypeRef)
       @pending_type_param_maps = {} of String => Hash(String, String)
       @function_type_param_maps = {} of String => Hash(String, String)
+      @function_namespace_overrides = {} of String => String
       @generic_templates = {} of String => GenericClassTemplate
       @generic_reopenings = {} of String => Array(GenericClassTemplate)
       @monomorphized = Set(String).new
@@ -1925,6 +1931,16 @@ module Crystal::HIR
       end
     end
 
+    private def with_namespace_override(namespace : String, &)
+      old_namespace = @current_namespace_override
+      @current_namespace_override = namespace
+      begin
+        yield
+      ensure
+        @current_namespace_override = old_namespace
+      end
+    end
+
     private def record_pending_type_param_map(name : String, params : Hash(String, String)) : Nil
       return if name.empty? || params.empty?
       if existing = @pending_type_param_maps[name]?
@@ -1953,6 +1969,22 @@ module Crystal::HIR
         next if name.empty?
         if map = @function_type_param_maps[name]?
           return map
+        end
+      end
+      nil
+    end
+
+    private def store_function_namespace_override(full_name : String, base_name : String, namespace : String) : Nil
+      return if namespace.empty?
+      @function_namespace_overrides[full_name] = namespace
+      @function_namespace_overrides[base_name] = namespace unless @function_namespace_overrides.has_key?(base_name)
+    end
+
+    private def function_namespace_override_for(*names : String) : String?
+      names.each do |name|
+        next if name.empty?
+        if ns = @function_namespace_overrides[name]?
+          return ns
         end
       end
       nil
@@ -2322,6 +2354,7 @@ module Crystal::HIR
                   next if defined_full_names.includes?(full_name)
 
                   store_function_type_param_map(full_name, base_name, extra_map)
+                  store_function_namespace_override(full_name, base_name, module_full_name)
                   debug_hook("module.instance_method.register", "class=#{class_name} module=#{module_full_name} method=#{method_name} full=#{full_name}")
                   register_function_type(full_name, return_type)
                   @function_defs[full_name] = member
@@ -2413,83 +2446,85 @@ module Crystal::HIR
           extra_map = include_type_param_map(mod_node, include_node.target, include_arena)
           with_type_param_map(extra_map) do
             if body = mod_node.body
-              body.each do |member_id|
-                member = unwrap_visibility_member(@arena[member_id])
-                case member
-                when CrystalV2::Compiler::Frontend::IncludeNode
-                  lower_module_instance_methods_for(class_name, class_info, member, defined_full_names, visited)
-                when CrystalV2::Compiler::Frontend::DefNode
-                  next if (recv = member.receiver) && String.new(recv) == "self"
-                  next if member.is_abstract
+              with_namespace_override(module_full_name) do
+                body.each do |member_id|
+                  member = unwrap_visibility_member(@arena[member_id])
+                  case member
+                  when CrystalV2::Compiler::Frontend::IncludeNode
+                    lower_module_instance_methods_for(class_name, class_info, member, defined_full_names, visited)
+                  when CrystalV2::Compiler::Frontend::DefNode
+                    next if (recv = member.receiver) && String.new(recv) == "self"
+                    next if member.is_abstract
 
-                  method_name = String.new(member.name)
-                  base_name = "#{class_name}##{method_name}"
+                    method_name = String.new(member.name)
+                    base_name = "#{class_name}##{method_name}"
 
-                  if DebugHooks::ENABLED && method_name == "map"
-                    block_type = ""
-                    if params = member.params
-                      if blk = params.find(&.is_block)
-                        block_type = blk.type_annotation ? String.new(blk.type_annotation.not_nil!) : ""
+                    if DebugHooks::ENABLED && method_name == "map"
+                      block_type = ""
+                      if params = member.params
+                        if blk = params.find(&.is_block)
+                          block_type = blk.type_annotation ? String.new(blk.type_annotation.not_nil!) : ""
+                        end
                       end
+                      debug_hook("method.lower.inspect", "class=#{class_name} method=#{method_name} block_type=#{block_type} map=#{type_param_map_debug_string}")
                     end
-                    debug_hook("method.lower.inspect", "class=#{class_name} method=#{method_name} block_type=#{block_type} map=#{type_param_map_debug_string}")
-                  end
 
-                  block_unbound = false
-                  if params = member.params
-                    params.each do |param|
-                      next unless param.is_block
-                      if ta = param.type_annotation
-                        if type_param_name = extract_proc_return_type_name(String.new(ta))
-                          if type_param_like?(type_param_name) && !@type_param_map.has_key?(type_param_name)
-                            block_unbound = true
-                            break
+                    block_unbound = false
+                    if params = member.params
+                      params.each do |param|
+                        next unless param.is_block
+                        if ta = param.type_annotation
+                          if type_param_name = extract_proc_return_type_name(String.new(ta))
+                            if type_param_like?(type_param_name) && !@type_param_map.has_key?(type_param_name)
+                              block_unbound = true
+                              break
+                            end
                           end
                         end
                       end
                     end
-                  end
 
-                  if block_unbound || def_has_unbound_type_params?(member)
-                    reason = block_unbound ? "block_return_type_param" : "unbound_type_params"
-                    debug_hook("method.lower.defer", "class=#{class_name} method=#{method_name} reason=#{reason}")
-                    next
-                  end
+                    if block_unbound || def_has_unbound_type_params?(member)
+                      reason = block_unbound ? "block_return_type_param" : "unbound_type_params"
+                      debug_hook("method.lower.defer", "class=#{class_name} method=#{method_name} reason=#{reason}")
+                      next
+                    end
 
-                  param_types = [] of TypeRef
-                  has_block = false
-                  if params = member.params
-                    params.each do |param|
-                      next if named_only_separator?(param)
-                      if param.is_block
-                        has_block = true
-                        next
-                      end
-                      if ta = param.type_annotation
-                        param_types << type_ref_for_name(String.new(ta))
-                      else
-                        param_types << TypeRef::VOID
+                    param_types = [] of TypeRef
+                    has_block = false
+                    if params = member.params
+                      params.each do |param|
+                        next if named_only_separator?(param)
+                        if param.is_block
+                          has_block = true
+                          next
+                        end
+                        if ta = param.type_annotation
+                          param_types << type_ref_for_name(String.new(ta))
+                        else
+                          param_types << TypeRef::VOID
+                        end
                       end
                     end
-                  end
 
-                  full_name = mangle_function_name(base_name, param_types, has_block)
-                  next if defined_full_names.includes?(full_name)
-                  next if @module.has_function?(full_name)
+                    full_name = mangle_function_name(base_name, param_types, has_block)
+                    next if defined_full_names.includes?(full_name)
+                    next if @module.has_function?(full_name)
 
-                  lower_method(class_name, class_info, member)
-                when CrystalV2::Compiler::Frontend::GetterNode
-                  member.specs.each do |spec|
-                    generate_getter_method(class_name, class_info, spec)
-                  end
-                when CrystalV2::Compiler::Frontend::SetterNode
-                  member.specs.each do |spec|
-                    generate_setter_method(class_name, class_info, spec)
-                  end
-                when CrystalV2::Compiler::Frontend::PropertyNode
-                  member.specs.each do |spec|
-                    generate_getter_method(class_name, class_info, spec)
-                    generate_setter_method(class_name, class_info, spec)
+                    lower_method(class_name, class_info, member)
+                  when CrystalV2::Compiler::Frontend::GetterNode
+                    member.specs.each do |spec|
+                      generate_getter_method(class_name, class_info, spec)
+                    end
+                  when CrystalV2::Compiler::Frontend::SetterNode
+                    member.specs.each do |spec|
+                      generate_setter_method(class_name, class_info, spec)
+                    end
+                  when CrystalV2::Compiler::Frontend::PropertyNode
+                    member.specs.each do |spec|
+                      generate_getter_method(class_name, class_info, spec)
+                      generate_setter_method(class_name, class_info, spec)
+                    end
                   end
                 end
               end
@@ -7202,15 +7237,23 @@ module Crystal::HIR
 
       result = name  # Default fallback
 
-      # Prefer the current namespace first (nested types shadow outer/global ones).
+      namespaces = [] of String
+      if override = @current_namespace_override
+        namespaces << override
+      end
       if current = @current_class
+        namespaces << current unless namespaces.includes?(current)
+      end
+
+      found = false
+      # Prefer the override namespace (module mixins), then the current class namespace.
+      namespaces.each do |namespace|
         # Extract namespace: "Foo::Bar::Baz" -> "Foo::Bar"
-        parts = current.split("::")
+        parts = namespace.split("::")
 
         # Try full namespace first (e.g., Foo::Bar::Baz::Name), then increasingly shorter
         # This handles cases where we're inside module Foo::Bar and reference Name
         # which should resolve to Foo::Bar::Name before trying Foo::Name
-        found = false
         while parts.size > 0
           qualified_name = (parts + [name]).join("::")
           if type_name_exists?(qualified_name)
@@ -7220,19 +7263,21 @@ module Crystal::HIR
           end
           parts.pop
         end
+        break if found
+      end
 
-        unless found
-          # Fall back to a top-level type
-          if type_name_exists?(name)
-            result = name
-          # Also try the exact class name if current class matches
-          # E.g., inside Span, "Span" should resolve to the same class
-          elsif (last_part = current.split("::").last) && last_part == name && type_name_exists?(current)
-            result = current
-          end
+      unless found
+        # Fall back to a top-level type
+        if type_name_exists?(name)
+          result = name
+        # Resolve to the override namespace if it matches the short name.
+        elsif (override = @current_namespace_override) && (last_part = override.split("::").last) && last_part == name && type_name_exists?(override)
+          result = override
+        # Also try the exact class name if current class matches
+        # E.g., inside Span, "Span" should resolve to the same class
+        elsif (current = @current_class) && (last_part = current.split("::").last) && last_part == name && type_name_exists?(current)
+          result = current
         end
-      elsif type_name_exists?(name)
-        result = name
       end
 
       # Final fallback: resolve unique short-name matches (avoids short-name leakage)
@@ -12547,6 +12592,7 @@ module Crystal::HIR
               # site uses concrete types (like Pointer).
               # The `name` variable contains the full mangled name from the call site.
               override = name
+              namespace_override = function_namespace_override_for(target_name, base_target_name, name)
               # Add forall type param bindings for primitive templates and FastFloat methods.
               extra_params = primitive_template_map || {} of String => String
               if target_name.includes?("FastFloat")
@@ -12554,7 +12600,13 @@ module Crystal::HIR
               end
               merged_params = extra_type_params ? extra_params.merge(extra_type_params) : extra_params
               with_type_param_map(merged_params) do
-                lower_method(owner, class_info, func_def, call_arg_types, override)
+                if namespace_override
+                  with_namespace_override(namespace_override) do
+                    lower_method(owner, class_info, func_def, call_arg_types, override)
+                  end
+                else
+                  lower_method(owner, class_info, func_def, call_arg_types, override)
+                end
               end
               @current_class = old_class
             elsif enum_info = @enum_info
@@ -12574,6 +12626,7 @@ module Crystal::HIR
             parts = target_name.split(".", 2)
             owner = resolved_owner || parts[0]
             method = parts[1]?
+            namespace_override = function_namespace_override_for(target_name, base_target_name, name)
             # For .new on classes/structs, use generate_allocator (not lower_method)
             # This ensures correct init_params from the initialize method are used
             if method && method.split("$", 2)[0] == "new"
@@ -12590,10 +12643,22 @@ module Crystal::HIR
               @current_class = owner
               if extra_type_params
                 with_type_param_map(extra_type_params) do
-                  lower_method(owner, class_info, func_def, call_arg_types, target_name)
+                  if namespace_override
+                    with_namespace_override(namespace_override) do
+                      lower_method(owner, class_info, func_def, call_arg_types, target_name)
+                    end
+                  else
+                    lower_method(owner, class_info, func_def, call_arg_types, target_name)
+                  end
                 end
               else
-                lower_method(owner, class_info, func_def, call_arg_types, target_name)
+                if namespace_override
+                  with_namespace_override(namespace_override) do
+                    lower_method(owner, class_info, func_def, call_arg_types, target_name)
+                  end
+                else
+                  lower_method(owner, class_info, func_def, call_arg_types, target_name)
+                end
               end
               @current_class = old_class
             elsif enum_info = @enum_info
@@ -12896,34 +12961,18 @@ module Crystal::HIR
         class_name_str : String? = nil
         if obj_node.is_a?(CrystalV2::Compiler::Frontend::ConstantNode)
           name = String.new(obj_node.name)
-          # Resolve type alias with chain resolution (check both @type_aliases and LIBC_TYPE_ALIASES)
-          resolved = @type_aliases[name]? || LIBC_TYPE_ALIASES[name]? || name
-          # Chain resolve (e.g., LibCrypto::ULong -> LibC::ULong -> UInt64) - max 10 iterations to prevent cycles
-          depth = 0
-          while (next_resolved = @type_aliases[resolved]? || LIBC_TYPE_ALIASES[resolved]?) && next_resolved != resolved && depth < 10
-            resolved = next_resolved
-            depth += 1
-          end
+          resolved = resolve_class_name_in_context(name)
+          resolved = resolve_type_alias_chain(resolved)
           class_name_str = resolved
-          # If the short name isn't a known class, try to resolve using current namespace
-          unless @class_info.has_key?(class_name_str) || resolved != name
-            class_name_str = resolve_class_name_in_context(name)
-          end
         elsif obj_node.is_a?(CrystalV2::Compiler::Frontend::IdentifierNode)
           name = String.new(obj_node.name)
-          # Resolve type alias with chain resolution (check both @type_aliases and LIBC_TYPE_ALIASES)
-          resolved_name = @type_aliases[name]? || LIBC_TYPE_ALIASES[name]? || name
-          # Chain resolve (e.g., LibCrypto::ULong -> LibC::ULong -> UInt64) - max 10 iterations
-          depth = 0
-          while (next_resolved = @type_aliases[resolved_name]? || LIBC_TYPE_ALIASES[resolved_name]?) && next_resolved != resolved_name && depth < 10
-            resolved_name = next_resolved
-            depth += 1
-          end
+          resolved_name = resolve_class_name_in_context(name)
+          resolved_name = resolve_type_alias_chain(resolved_name)
           # Check if it's a class name (starts with uppercase and is known class)
           # OR a module name (check if Module.method exists in function_types)
           if resolved_name[0].uppercase?
             # Prefer nested types in the current namespace over top-level types.
-            resolved_name = resolve_class_name_in_context(resolved_name)
+            resolved_name = resolve_class_name_in_context(resolved_name) unless resolved_name.includes?("::")
             if @class_info.has_key?(resolved_name)
               class_name_str = resolved_name
             elsif is_module_method?(resolved_name, method_name)
