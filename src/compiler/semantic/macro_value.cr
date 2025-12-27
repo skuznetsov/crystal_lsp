@@ -384,6 +384,9 @@ module CrystalV2
             end
           when "is_a?"
             if expected = args[0]?
+              if ENV["DEBUG_MACRO_ISA"]?
+                STDERR.puts "[MACRO_ISA] node=#{class_name} expected=#{expected.to_id}"
+              end
               MacroBoolValue.new(class_name == expected.to_id)
             else
               MacroBoolValue.new(false)

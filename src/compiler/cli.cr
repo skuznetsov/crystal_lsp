@@ -413,6 +413,13 @@ module CrystalV2
         lib_nodes.each { |n, a| hir_converter.arena = a; hir_converter.register_lib(n) }
         log(options, out_io, "    Aliases: #{alias_nodes.size}")
         alias_nodes.each { |n, a| hir_converter.arena = a; hir_converter.register_alias(n) }
+        log(options, out_io, "    Macros: #{macro_nodes.size}")
+        macro_nodes.each_with_index do |(n, a), i|
+          STDERR.print "\r    Registered macro #{i+1}/#{macro_nodes.size}" if options.progress
+          hir_converter.arena = a
+          hir_converter.register_macro(n)
+        end
+        STDERR.puts if options.progress
         log(options, out_io, "    Modules: #{module_nodes.size}")
         module_nodes.each { |n, a| hir_converter.arena = a; hir_converter.register_module(n) }
         log(options, out_io, "    Classes: #{class_nodes.size}")
@@ -420,13 +427,6 @@ module CrystalV2
           hir_converter.arena = a
           hir_converter.register_class(n)
           STDERR.print "\r    Registered class #{i+1}/#{class_nodes.size}" if options.progress && (i % 10 == 0 || i == class_nodes.size - 1)
-        end
-        STDERR.puts if options.progress
-        log(options, out_io, "    Macros: #{macro_nodes.size}")
-        macro_nodes.each_with_index do |(n, a), i|
-          STDERR.print "\r    Registered macro #{i+1}/#{macro_nodes.size}" if options.progress
-          hir_converter.arena = a
-          hir_converter.register_macro(n)
         end
         STDERR.puts if options.progress
 

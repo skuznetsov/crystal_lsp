@@ -222,6 +222,10 @@ module Crystal::V2
         hir_converter.arena = arena
         hir_converter.register_enum(enum_node)
       end
+      macro_nodes.each do |macro_node, arena|
+        hir_converter.arena = arena
+        hir_converter.register_macro(macro_node)
+      end
       trace_driver("[DRIVER_TRACE] total module_nodes to register: #{module_nodes.size}")
       module_nodes.each do |module_node, arena|
         mod_name = String.new(module_node.name)
@@ -234,10 +238,6 @@ module Crystal::V2
       class_nodes.each do |class_node, arena|
         hir_converter.arena = arena
         hir_converter.register_class(class_node)
-      end
-      macro_nodes.each do |macro_node, arena|
-        hir_converter.arena = arena
-        hir_converter.register_macro(macro_node)
       end
 
       # Flush pending monomorphizations now that all templates are registered

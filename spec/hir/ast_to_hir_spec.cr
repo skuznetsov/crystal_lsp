@@ -1448,6 +1448,44 @@ describe Crystal::HIR::AstToHir do
                 getter :{{property.id}}
               {% end %}
             {% end %}
+
+            def copy_with({{
+                            properties.map do |property|
+                              if property.is_a?(Assign)
+                                "\#{property.target.id} _\#{property.target.id} = @\#{property.target.id}".id
+                              elsif property.is_a?(TypeDeclaration)
+                                "\#{property.var.id} _\#{property.var.id} = @\#{property.var.id}".id
+                              else
+                                "\#{property.id} _\#{property.id} = @\#{property.id}".id
+                              end
+                            end.splat
+                          }})
+              self.class.new({{
+                               properties.map do |property|
+                                if property.is_a?(Assign)
+                                  "_\#{property.target.id}".id
+                                elsif property.is_a?(TypeDeclaration)
+                                  "_\#{property.var.id}".id
+                                else
+                                  "_\#{property.id}".id
+                                end
+                               end.splat
+                             }})
+            end
+
+            def clone
+              self.class.new({{
+                               properties.map do |property|
+                                if property.is_a?(Assign)
+                                  "@\#{property.target.id}.clone".id
+                                elsif property.is_a?(TypeDeclaration)
+                                  "@\#{property.var.id}.clone".id
+                                else
+                                  "@\#{property.id}.clone".id
+                                end
+                               end.splat
+                             }})
+            end
           end
         end
 
@@ -1457,6 +1495,13 @@ describe Crystal::HIR::AstToHir do
       converter = lower_program_with_sources(code)
       converter.module.has_function?("Point#x").should be_true
       converter.module.has_function?("Point#y").should be_true
+      copy_with = converter.module.functions.find { |func| func.name.starts_with?("Point#copy_with") }
+      copy_with.should_not be_nil
+      if func = copy_with
+        param_names = func.params.map(&.name)
+        param_names.should contain("_x")
+        param_names.should contain("_y")
+      end
     end
   end
 

@@ -1040,6 +1040,8 @@ r2 = maybe(false)  # => nil
 - Primitive template fallback for numeric receivers (Int/Float method bodies) to avoid missing defs in stdlib (2025-12-26).
 - Pointer/new + mem intrinsics lowering hardened (ptr/int casts, llvm.mem* width selection) (2025-12-26).
 - Treat `T.size` macro patterns as `Int32` during lightweight return-type inference (2025-12-26).
+- Macro interpolation uses source spans for text pieces; `record` copy_with/clone expansion fixed (2025-12-27).
+- HIR spec asserts `record` macro copy_with params (`_x`, `_y`) (2025-12-27).
 
 **Stdlib requires advanced features not yet implemented:**
 

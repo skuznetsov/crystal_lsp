@@ -39,14 +39,24 @@ module CrystalV2
         MAX_RANGE_SIZE = 10000
 
         getter diagnostics : Array(Diagnostic)
+        getter last_output : String? = nil
 
-        def initialize(@program : Program, @arena : Frontend::ArenaLike, flags : Set(String)? = nil, *, recovery_mode : Bool = false, source_provider : Proc(ExprId, String?)? = nil)
+        def initialize(
+          @program : Program,
+          @arena : Frontend::ArenaLike,
+          flags : Set(String)? = nil,
+          *,
+          recovery_mode : Bool = false,
+          source_provider : Proc(ExprId, String?)? = nil,
+          macro_source : String? = nil
+        )
           @diagnostics = [] of Diagnostic
           @depth = 0
           @macro_var_counter = 0
           @flags = flags || Set(String).new
           @recovery_mode = recovery_mode
           @source_provider = source_provider
+          @macro_source = macro_source
         end
 
         # Expansion context for macro evaluation
@@ -117,6 +127,7 @@ module CrystalV2
         def expand(macro_symbol : MacroSymbol, args : Array(ExprId), owner_type : ClassSymbol? = nil, *, named_args : Array(Frontend::NamedArgument)? = nil, block_id : ExprId? = nil) : ExprId
           # Clear diagnostics from previous expansions
           @diagnostics.clear
+          @last_output = nil
 
           # Check recursion depth
           if @depth >= MAX_DEPTH
@@ -131,6 +142,7 @@ module CrystalV2
 
             # Evaluate macro body
             output = evaluate_macro_body(macro_symbol.body, context)
+            @last_output = output
 
             # Parse result back to AST
             reparse(output, macro_symbol.node_id)
@@ -314,6 +326,23 @@ module CrystalV2
             elsif node.is_a?(Frontend::YieldNode)
               text = macro_block_text(context)
               return text.empty? ? MACRO_NIL : MacroIdValue.new(text)
+            elsif node.is_a?(Frontend::IfNode)
+              cond_result, cond_ctx = evaluate_condition(node.condition, context)
+              if cond_result
+                return evaluate_body_expressions(node.then_body, cond_ctx)
+              end
+              if elsifs = node.elsifs
+                elsifs.each do |elsif_branch|
+                  branch_result, branch_ctx = evaluate_condition(elsif_branch.condition, context)
+                  if branch_result
+                    return evaluate_body_expressions(elsif_branch.body, branch_ctx)
+                  end
+                end
+              end
+              if else_body = node.else_body
+                return evaluate_body_expressions(else_body, context)
+              end
+              return MACRO_NIL
             elsif node.is_a?(Frontend::TypeDeclarationNode) || node.is_a?(Frontend::AssignNode)
               return MacroNodeValue.new(expr_id, @arena)
             elsif node.is_a?(Frontend::PathNode)
@@ -326,23 +355,120 @@ module CrystalV2
         end
 
         private def evaluate_string_interpolation(node : Frontend::StringInterpolationNode, context : Context) : String
-          String.build do |io|
+          source_segments = nil
+          if source = @macro_source
+            span = node.span
+            start = span.start_offset
+            length = span.end_offset - span.start_offset
+            if length > 2 && start >= 0 && start < source.bytesize
+              length = source.bytesize - start if start + length > source.bytesize
+              raw = source.byte_slice(start, length)
+              if raw.starts_with?('"') && raw.ends_with?('"') && raw.size >= 2
+                content = raw[1..-2]
+                segments = [] of String
+                i = 0
+                while i < content.size
+                  text_start = i
+                  while i < content.size
+                    break if i + 1 < content.size && content[i] == '#' && content[i + 1] == '{'
+                    i += 1
+                  end
+                  segments << content[text_start...i]
+                  break if i >= content.size
+                  i += 2
+                  brace_depth = 1
+                while i < content.size && brace_depth > 0
+                  if content[i] == '{'
+                    brace_depth += 1
+                  elsif content[i] == '}'
+                    brace_depth -= 1
+                  end
+                  i += 1 if brace_depth > 0
+                end
+                i += 1 if brace_depth == 0 && i < content.size
+              end
+                text_piece_count = node.pieces.count { |piece| piece.kind.text? }
+                source_segments = segments if segments.size >= text_piece_count
+              end
+            end
+          end
+
+          text_index_start = 0
+          if source_segments && (first_piece = node.pieces.first?)
+            text_index_start = first_piece.kind.expression? ? 1 : 0
+          end
+          value = String.build do |io|
+            text_index = text_index_start
             node.pieces.each do |piece|
               case piece.kind
               when Frontend::StringPiece::Kind::Text
-                io << (piece.text || "")
+                text = source_segments ? source_segments[text_index]? : piece.text
+                text_index += 1
+                io << (text || "")
               when Frontend::StringPiece::Kind::Expression
                 if expr_id = piece.expr
-                  value = evaluate_to_macro_value(expr_id, context)
-                  if value.is_a?(MacroStringValue)
-                    io << value.value
+                  piece_value = evaluate_to_macro_value(expr_id, context)
+                  if piece_value.is_a?(MacroStringValue)
+                    io << piece_value.value
                   else
-                    io << value.to_id
+                    io << piece_value.to_id
                   end
                 end
               end
             end
           end
+          if ENV["DEBUG_MACRO_INTERP"]?
+            pieces = node.pieces.map_with_index do |piece, idx|
+              case piece.kind
+              when Frontend::StringPiece::Kind::Text
+                "text#{idx}=#{piece.text.inspect}"
+              when Frontend::StringPiece::Kind::Expression
+                expr_id = piece.expr
+                expr = expr_id ? @arena[expr_id] : nil
+                literal = expr ? Frontend.node_literal_string(expr) : nil
+                detail = "expr#{idx}=#{expr.class} literal=#{literal.inspect}"
+                if expr.is_a?(Frontend::MemberAccessNode)
+                  detail += " member=#{String.new(expr.member)}"
+                  obj = @arena[expr.object]
+                  detail += " obj=#{obj.class}"
+                elsif expr.is_a?(Frontend::CallNode)
+                  callee = @arena[expr.callee]
+                  detail += " callee=#{callee.class} args=#{expr.args.size}"
+                  expr.args.each_with_index do |arg_id, arg_idx|
+                    arg_node = @arena[arg_id]
+                    detail += " arg#{arg_idx}=#{arg_node.class}"
+                    if arg_node.is_a?(Frontend::CallNode)
+                      inner_callee = @arena[arg_node.callee]
+                      detail += " inner_callee=#{inner_callee.class}"
+                      if inner_callee.is_a?(Frontend::MemberAccessNode)
+                        detail += " inner_member=#{String.new(inner_callee.member)}"
+                        inner_obj = @arena[inner_callee.object]
+                        detail += " inner_obj=#{inner_obj.class}"
+                      end
+                    elsif arg_node.is_a?(Frontend::MemberAccessNode)
+                      detail += " arg_member=#{String.new(arg_node.member)}"
+                    end
+                  end
+                end
+                detail
+              else
+                "piece#{idx}=unknown"
+              end
+            end
+            span = node.span
+            source_slice = nil
+            if source = @macro_source
+              start = span.start_offset
+              length = span.end_offset - span.start_offset
+              if length > 0 && start >= 0 && start < source.bytesize
+                length = source.bytesize - start if start + length > source.bytesize
+                source_slice = source.byte_slice(start, length)
+              end
+            end
+            segments_debug = source_segments ? source_segments.map(&.inspect).join(",") : "nil"
+            STDERR.puts "[MACRO_INTERP] span=#{span.start_offset}-#{span.end_offset} src=#{source_slice.inspect} value=#{value.inspect} text_index_start=#{text_index_start} segments=[#{segments_debug}] pieces=#{pieces.join(" | ")}"
+          end
+          value
         end
 
         private def evaluate_member_access_to_macro_value(node : Frontend::MemberAccessNode, context : Context) : MacroValue
@@ -355,6 +481,9 @@ module CrystalV2
                        else
                          evaluate_to_macro_value(node.object, context)
                        end
+          if ENV["DEBUG_MACRO_SPLAT"]? && member == "splat"
+            STDERR.puts "[MACRO_SPLAT] obj=#{obj.class} base=#{base_value.class_name if base_value}"
+          end
 
           if base_value
             result = base_value.call_method(member, [] of MacroValue, nil)
@@ -390,6 +519,22 @@ module CrystalV2
           callee_id = node.callee
           return MACRO_NIL unless callee_id
           callee = @arena[callee_id]
+          if ENV["DEBUG_MACRO_CALL"]?
+            literal = Frontend.node_literal_string(callee) if callee.is_a?(Frontend::IdentifierNode)
+            STDERR.puts "[MACRO_CALL] callee=#{callee.class} literal=#{literal.inspect if literal}"
+            if callee.is_a?(Frontend::MemberAccessNode)
+              STDERR.puts "[MACRO_CALL] member=#{String.new(callee.member)}"
+            end
+          end
+
+          if implicit = unwrap_implicit_receiver_call(node, context)
+            receiver, member, args, named_arg_values, block = implicit
+            if block
+              return evaluate_blocked_macro_call(receiver, member, args, named_arg_values, block, context)
+            end
+            result = receiver.call_method(member, args, named_arg_values)
+            return result unless result.is_a?(MacroNilValue)
+          end
 
           if callee.is_a?(Frontend::MemberAccessNode)
             obj = callee.object
@@ -429,6 +574,38 @@ module CrystalV2
           else
             MacroIdValue.new(str_val)
           end
+        end
+
+        private def unwrap_implicit_receiver_call(
+          node : Frontend::CallNode,
+          context : Context
+        ) : {MacroValue, String, Array(MacroValue), Hash(String, MacroValue)?, Frontend::BlockNode?}?
+          callee = @arena[node.callee]
+          return nil unless callee.is_a?(Frontend::IdentifierNode)
+          return nil unless node.args.size == 1
+
+          inner_node = @arena[node.args[0]]
+          return nil unless inner_node.is_a?(Frontend::CallNode)
+
+          inner_callee = @arena[inner_node.callee]
+          return nil unless inner_callee.is_a?(Frontend::MemberAccessNode)
+
+          inner_obj = @arena[inner_callee.object]
+          return nil unless inner_obj.is_a?(Frontend::ImplicitObjNode)
+
+          receiver = evaluate_to_macro_value(node.callee, context)
+          member = String.new(inner_callee.member)
+          args = inner_node.args.map { |arg| evaluate_to_macro_value(arg, context) }
+          named_arg_values = inner_node.named_args.try do |named|
+            values = {} of String => MacroValue
+            named.each do |named_arg|
+              values[String.new(named_arg.name)] = evaluate_to_macro_value(named_arg.value, context)
+            end
+            values
+          end
+          block_node = inner_node.block.try { |blk| @arena[blk].as(Frontend::BlockNode) }
+
+          {receiver, member, args, named_arg_values, block_node}
         end
 
         private def evaluate_blocked_macro_call(
@@ -471,6 +648,10 @@ module CrystalV2
                 results << elem unless predicate.truthy?
               end
             end
+            if ENV["DEBUG_MACRO_MAP"]? && member == "map"
+              mapped = results.map(&.to_id)
+              STDERR.puts "[MACRO_MAP] size=#{mapped.size} values=#{mapped.inspect}"
+            end
             return MacroArrayValue.new(results)
           when MacroNamedTupleValue
             results = [] of MacroValue
@@ -506,9 +687,46 @@ module CrystalV2
             end
           end
 
+          if ENV["DEBUG_MACRO_BLOCK"]?
+            names = block.params.try(&.map do |param|
+              name = param.name
+              case name
+              when Slice(UInt8)
+                String.new(name)
+              when String
+                name
+              else
+                ""
+              end
+            end) || [] of String
+            value_desc = values.map(&.to_macro_output)
+            STDERR.puts "[MACRO_BLOCK] params=#{names.join(",")} values=#{value_desc.inspect}"
+            block.body.each_with_index do |expr_id, idx|
+              expr = @arena[expr_id]
+              literal = Frontend.node_literal_string(expr)
+              STDERR.puts "[MACRO_BLOCK] body#{idx}=#{expr.class} literal=#{literal.inspect}"
+              if expr.is_a?(Frontend::CallNode)
+                callee = @arena[expr.callee]
+                callee_lit = Frontend.node_literal_string(callee)
+                STDERR.puts "[MACRO_BLOCK]   call callee=#{callee.class} literal=#{callee_lit.inspect} args=#{expr.args.size}"
+              elsif expr.is_a?(Frontend::MemberAccessNode)
+                obj = @arena[expr.object]
+                STDERR.puts "[MACRO_BLOCK]   member=#{String.new(expr.member)} obj=#{obj.class}"
+              end
+            end
+          end
+
           result = MACRO_NIL
           block.body.each do |expr_id|
             result = evaluate_to_macro_value(expr_id, scoped)
+          end
+          result
+        end
+
+        private def evaluate_body_expressions(exprs : Array(ExprId), context : Context) : MacroValue
+          result = MACRO_NIL
+          exprs.each do |expr_id|
+            result = evaluate_to_macro_value(expr_id, context)
           end
           result
         end
@@ -519,6 +737,22 @@ module CrystalV2
           return "" unless provider
 
           provider.call(block_id) || ""
+        end
+
+        private def macro_piece_text(piece : MacroPiece) : String?
+          if source = @macro_source
+            if span = piece.span
+              start = span.start_offset
+              length = span.end_offset - span.start_offset
+              if length > 0 && start >= 0 && start < source.bytesize
+                if start + length > source.bytesize
+                  length = source.bytesize - start
+                end
+                return source.byte_slice(start, length)
+              end
+            end
+          end
+          piece.text
         end
 
         # Evaluate annotation() call and return MacroAnnotationValue or MacroArrayValue
@@ -623,6 +857,8 @@ module CrystalV2
           body_node = @arena[body_id]
           return "" unless body_node.is_a?(Frontend::MacroLiteralNode)
           pieces = body_node.pieces
+          source = @macro_source
+          prev_span_end : Int32? = nil
 
           # Phase 87B-3: Use indexed loop to handle control flow jumps
           String.build do |str|
@@ -630,11 +866,25 @@ module CrystalV2
 
             while index < pieces.size
               piece = pieces[index]
+              span = source ? piece.span : nil
+              if source && span && prev_span_end
+                gap = span.start_offset - prev_span_end
+                if gap > 0 && prev_span_end < source.bytesize
+                  length = gap
+                  if prev_span_end + length > source.bytesize
+                    length = source.bytesize - prev_span_end
+                  end
+                  gap_slice = source.byte_slice(prev_span_end, length)
+                  str << gap_slice if gap_slice.bytes.all? { |byte| byte <= 32 }
+                end
+              end
 
               case piece.kind
               when .text?
                 # Plain text - append as-is
-                str << piece.text if piece.text
+                if text = macro_piece_text(piece)
+                  str << text
+                end
                 index += 1
               when .expression?
                 # {{ expr }} - evaluate and stringify
@@ -676,6 +926,7 @@ module CrystalV2
                 # These are handled inside evaluate_if_block
                 index += 1
               end
+              prev_span_end = span.end_offset if source && span
             end
           end
         end
@@ -759,6 +1010,13 @@ module CrystalV2
           when .identifier?
             # Variable reference: look up in context
             if name = Frontend.node_literal_string(node)
+              if ENV["DEBUG_MACRO_VAR"]? && name == "property"
+                if macro_val = context.variables[name]?
+                  STDERR.puts "[MACRO_VAR] property type=#{macro_val.class_name} value=#{macro_val.to_macro_output.inspect}"
+                else
+                  STDERR.puts "[MACRO_VAR] property missing"
+                end
+              end
               if macro_val = context.variables[name]?
                 macro_val.to_macro_output
               else
@@ -902,6 +1160,9 @@ module CrystalV2
                                            else
                                              {"", nil}
                                            end
+                                         when Frontend::CallNode
+                                           mv = evaluate_call_to_macro_value(obj, context)
+                                           {mv.to_macro_output, mv}
                                          when Frontend::MemberAccessNode
                                            {evaluate_member_access_expression(obj, context), nil}
                                          else
@@ -1359,6 +1620,9 @@ module CrystalV2
             receiver = evaluate_to_macro_value(node.expression, context)
             type_name = String.new(node.target_type)
             result = receiver.call_method("is_a?", [MacroIdValue.new(type_name)], nil)
+            if ENV["DEBUG_MACRO_COND"]?
+              STDERR.puts "[MACRO_COND] is_a? recv=#{receiver.class_name} expected=#{type_name} -> #{result.truthy?}"
+            end
             return {result.truthy?, context}
           end
 
@@ -1392,6 +1656,26 @@ module CrystalV2
                          else           false
                          end
                 return {result, context}
+              end
+            end
+          end
+
+          if ENV["DEBUG_MACRO_CALL_COND"]? && node.is_a?(Frontend::CallNode)
+            callee = @arena[node.callee]
+            callee_literal = Frontend.node_literal_string(callee)
+            STDERR.puts "[MACRO_COND] call callee=#{callee.class} literal=#{callee_literal.inspect} args=#{node.args.size}"
+            node.args.each_with_index do |arg, idx|
+              arg_node = @arena[arg]
+              STDERR.puts "[MACRO_COND]   arg#{idx}=#{arg_node.class} literal=#{Frontend.node_literal_string(arg_node).inspect}"
+              if arg_node.is_a?(Frontend::CallNode)
+                inner_callee = @arena[arg_node.callee]
+                inner_lit = Frontend.node_literal_string(inner_callee)
+                STDERR.puts "[MACRO_COND]     inner callee=#{inner_callee.class} literal=#{inner_lit.inspect} args=#{arg_node.args.size}"
+                if inner_callee.is_a?(Frontend::MemberAccessNode)
+                  STDERR.puts "[MACRO_COND]     inner member=#{String.new(inner_callee.member)}"
+                  inner_obj = @arena[inner_callee.object]
+                  STDERR.puts "[MACRO_COND]     inner object=#{inner_obj.class} literal=#{Frontend.node_literal_string(inner_obj).inspect}"
+                end
               end
             end
           end
@@ -1517,13 +1801,29 @@ module CrystalV2
         ) : String
           String.build do |str|
             index = start
+            source = @macro_source
+            prev_span_end : Int32? = nil
 
             while index <= end_index && index < pieces.size
               piece = pieces[index]
+              span = source ? piece.span : nil
+              if source && span && prev_span_end
+                gap = span.start_offset - prev_span_end
+                if gap > 0 && prev_span_end < source.bytesize
+                  length = gap
+                  if prev_span_end + length > source.bytesize
+                    length = source.bytesize - prev_span_end
+                  end
+                  gap_slice = source.byte_slice(prev_span_end, length)
+                  str << gap_slice if gap_slice.bytes.all? { |byte| byte <= 32 }
+                end
+              end
 
               case piece.kind
               when .text?
-                str << piece.text if piece.text
+                if text = macro_piece_text(piece)
+                  str << text
+                end
                 index += 1
               when .expression?
                 if expr_id = piece.expr
@@ -1561,6 +1861,7 @@ module CrystalV2
                 # Skip control flow markers (elsif, else, end)
                 index += 1
               end
+              prev_span_end = span.end_offset if source && span
             end
           end
         end
@@ -1679,6 +1980,11 @@ module CrystalV2
           body_end = end_index - 1
 
           # Iterate over MacroValue elements
+          if ENV["DEBUG_MACRO_FOR"]? && value_var == "property"
+            elem_values.each_with_index do |elem_value, idx|
+              STDERR.puts "[MACRO_FOR] var=#{value_var} idx=#{idx} type=#{elem_value.class_name} value=#{elem_value.to_macro_output.inspect}"
+            end
+          end
           output = String.build do |str|
             elem_values.each_with_index do |elem_value, idx|
               loop_context = context.with_variable(value_var, elem_value)

@@ -573,6 +573,7 @@ module Crystal::HIR
 
     # Register an enum type with explicit name (for nested enums)
     def register_enum_with_name(node : CrystalV2::Compiler::Frontend::EnumNode, full_enum_name : String)
+      full_enum_name = resolve_class_name_for_definition(full_enum_name)
       @enum_info ||= {} of String => Hash(String, Int64)
 
       members = {} of String => Int64
@@ -599,10 +600,104 @@ module Crystal::HIR
     end
 
     # Register a macro definition (pass 1)
-    def register_macro(node : CrystalV2::Compiler::Frontend::MacroDefNode)
+    def register_macro(node : CrystalV2::Compiler::Frontend::MacroDefNode, scope_name : String? = nil)
       macro_name = String.new(node.name)
-      @macro_defs[macro_name] = {node, @arena}
-      @macro_params[macro_name] = extract_macro_params(node)
+      key = scope_name ? "#{scope_name}::#{macro_name}" : macro_name
+      @macro_defs[key] = {node, @arena}
+      @macro_params[key] = extract_macro_params(node)
+    end
+
+    private def lookup_macro_entry(method_name : String, scope_name : String? = nil)
+      if scope = scope_name
+        scoped = "#{scope}::#{method_name}"
+        if ENV["DEBUG_RECORD_LOOKUP"]? && method_name == "record"
+          STDERR.puts "[DEBUG_RECORD_LOOKUP] scope=#{scope} scoped=#{scoped} has_scoped=#{@macro_defs.has_key?(scoped)} has_global=#{@macro_defs.has_key?(method_name)}"
+        end
+        if entry = @macro_defs[scoped]?
+          return {entry, scoped}
+        end
+      end
+      if entry = @macro_defs[method_name]?
+        if ENV["DEBUG_RECORD_LOOKUP"]? && method_name == "record"
+          STDERR.puts "[DEBUG_RECORD_LOOKUP] scope=(none) has_global=true"
+        end
+        return {entry, method_name}
+      end
+      if ENV["DEBUG_RECORD_LOOKUP"]? && method_name == "record"
+        STDERR.puts "[DEBUG_RECORD_LOOKUP] scope=#{scope_name || "(none)"} has_global=false"
+      end
+      nil
+    end
+
+    private def macro_def_maybe_defines_type?(
+      macro_def : CrystalV2::Compiler::Frontend::MacroDefNode,
+      macro_arena : CrystalV2::Compiler::Frontend::ArenaLike
+    ) : Bool
+      old_arena = @arena
+      @arena = macro_arena
+      begin
+        body = @arena[macro_def.body]
+        if body.is_a?(CrystalV2::Compiler::Frontend::MacroLiteralNode)
+          if raw_text = macro_literal_raw_text(body)
+            return raw_text.includes?("class") || raw_text.includes?("struct") ||
+                   raw_text.includes?("module") || raw_text.includes?("enum")
+          end
+        end
+      ensure
+        @arena = old_arena
+      end
+      false
+    end
+
+    private def register_nested_types_from_macro_expansion(class_name : String, expr_id : ExprId)
+      return if expr_id.invalid?
+      member = unwrap_visibility_member(@arena[expr_id])
+      if ENV["DEBUG_MACRO_TYPE_REG"]?
+        STDERR.puts "[DEBUG_MACRO_TYPE_REG] expanded root=#{member.class}"
+      end
+      case member
+      when CrystalV2::Compiler::Frontend::BlockNode
+        member.body.each do |child_id|
+          register_nested_types_from_macro_expansion(class_name, child_id)
+        end
+      when CrystalV2::Compiler::Frontend::ClassNode
+        nested_name = String.new(member.name)
+        full_name = "#{class_name}::#{nested_name}"
+        if ENV["DEBUG_MACRO_TYPE_REG"]?
+          STDERR.puts "[DEBUG_MACRO_TYPE_REG] register class #{full_name}"
+        end
+        register_class_with_name(member, full_name)
+      when CrystalV2::Compiler::Frontend::ModuleNode
+        nested_name = String.new(member.name)
+        full_name = "#{class_name}::#{nested_name}"
+        if ENV["DEBUG_MACRO_TYPE_REG"]?
+          STDERR.puts "[DEBUG_MACRO_TYPE_REG] register module #{full_name}"
+        end
+        register_module_with_name(member, full_name)
+      when CrystalV2::Compiler::Frontend::EnumNode
+        nested_name = String.new(member.name)
+        full_name = "#{class_name}::#{nested_name}"
+        if ENV["DEBUG_MACRO_TYPE_REG"]?
+          STDERR.puts "[DEBUG_MACRO_TYPE_REG] register enum #{full_name}"
+        end
+        register_enum_with_name(member, full_name)
+      when CrystalV2::Compiler::Frontend::MacroIfNode
+        result = try_evaluate_macro_condition(member.condition)
+        if result == true
+          register_nested_types_from_macro_expansion(class_name, member.then_body)
+        elsif result == false
+          if else_body = member.else_body
+            register_nested_types_from_macro_expansion(class_name, else_body)
+          end
+        else
+          register_nested_types_from_macro_expansion(class_name, member.then_body)
+          if else_body = member.else_body
+            register_nested_types_from_macro_expansion(class_name, else_body)
+          end
+        end
+      when CrystalV2::Compiler::Frontend::MacroLiteralNode
+        process_macro_literal_in_class(member, class_name)
+      end
     end
 
     private def extract_macro_params(node : CrystalV2::Compiler::Frontend::MacroDefNode) : Array(MacroParamInfo)
@@ -759,13 +854,78 @@ module Crystal::HIR
       macro_arena : CrystalV2::Compiler::Frontend::ArenaLike,
       args : Array(ExprId),
       named_args : Array(CrystalV2::Compiler::Frontend::NamedArgument)?,
-      block_id : ExprId?
+      block_id : ExprId?,
+      macro_key : String
     ) : ExprId
       macro_name = String.new(macro_def.name)
-      params = @macro_params[macro_name]? || [] of MacroParamInfo
+      params = @macro_params[macro_key]? || @macro_params[macro_name]? || [] of MacroParamInfo
+      if ENV["DEBUG_MACRO_EXPAND"]?
+        STDERR.puts "[MACRO_EXPAND] name=#{macro_name} key=#{macro_key} args=#{args.size} named=#{named_args.try(&.size) || 0}"
+      end
+      if ENV["DEBUG_MACRO_PIECES"]? && macro_name == "record"
+        body_node = macro_arena[macro_def.body]
+        if body_node.is_a?(CrystalV2::Compiler::Frontend::MacroLiteralNode)
+          body_node.pieces.each_with_index do |piece, idx|
+            next unless piece.kind.text?
+            next unless text = piece.text
+            if text.includes?("struct")
+              STDERR.puts "[MACRO_PIECES] idx=#{idx} text=#{text.inspect}"
+            end
+          end
+          body_node.pieces.each_with_index do |piece, idx|
+            next unless piece.kind.expression?
+            expr_id = piece.expr
+            expr_class = expr_id ? macro_arena[expr_id].class : Nil
+            detail = nil
+            if expr_id
+              expr_node = macro_arena[expr_id]
+              if expr_node.is_a?(CrystalV2::Compiler::Frontend::MacroExpressionNode)
+                inner = macro_arena[expr_node.expression]
+                detail = "inner=#{inner.class}"
+                if literal = CrystalV2::Compiler::Frontend.node_literal_string(inner)
+                  detail += " literal=#{literal.inspect}"
+                end
+                if inner.is_a?(CrystalV2::Compiler::Frontend::MemberAccessNode)
+                  obj = macro_arena[inner.object]
+                  detail += " member=#{String.new(inner.member)} obj=#{obj.class}"
+                  if obj_lit = CrystalV2::Compiler::Frontend.node_literal_string(obj)
+                    detail += " obj_lit=#{obj_lit.inspect}"
+                  end
+                elsif inner.is_a?(CrystalV2::Compiler::Frontend::CallNode)
+                  callee = macro_arena[inner.callee]
+                  detail += " callee=#{callee.class}"
+                  if callee_lit = CrystalV2::Compiler::Frontend.node_literal_string(callee)
+                    detail += " callee_lit=#{callee_lit.inspect}"
+                  end
+                end
+              end
+            end
+            STDERR.puts "[MACRO_PIECES] expr idx=#{idx} trim_left=#{piece.trim_left} trim_right=#{piece.trim_right} class=#{expr_class} #{detail}".rstrip
+          end
+          body_node.pieces.each_with_index do |piece, idx|
+            next unless piece.kind.control_start?
+            next unless keyword = piece.control_keyword
+            expr_id = piece.expr
+            expr_class = expr_id ? macro_arena[expr_id].class : Nil
+            STDERR.puts "[MACRO_PIECES] control idx=#{idx} keyword=#{keyword} expr=#{expr_class}"
+          end
+        end
+      end
+      if ENV["DEBUG_MACRO_ARGS"]? && macro_name == "record"
+        param_desc = params.map { |param| "#{param.prefix}#{param.name}" }
+        STDERR.puts "[MACRO_ARGS] params=#{param_desc.join(",")}"
+      end
 
       normalized_args, normalized_named = normalize_macro_call_args(params, args, named_args)
       if macro_arena != @arena
+        if ENV["DEBUG_MACRO_ARGS"]? && macro_name == "record"
+          if source = @sources_by_arena[@arena]?
+            args.each_with_index do |expr_id, idx|
+              snippet = slice_source_for_expr_in_arena(expr_id, @arena, source)
+              STDERR.puts "[MACRO_ARGS] raw#{idx}=#{snippet.inspect}"
+            end
+          end
+        end
         normalized_args = normalized_args.map do |expr_id|
           reparse_expr_for_macro(expr_id, @arena, macro_arena)
         end
@@ -774,6 +934,12 @@ module Crystal::HIR
         end
       end
       return ExprId.new(-1) if normalized_args.any?(&.invalid?) || normalized_named.try(&.any? { |arg| arg.value.invalid? })
+      if ENV["DEBUG_MACRO_ARGS"]? && macro_name == "record"
+        normalized_args.each_with_index do |expr_id, idx|
+          node = macro_arena[expr_id]
+          STDERR.puts "[MACRO_ARGS] #{macro_name} arg#{idx}=#{node.class}"
+        end
+      end
 
       macro_params = params.map { |param| "#{param.prefix}#{param.name}" }
       macro_symbol = CrystalV2::Compiler::Semantic::MacroSymbol.new(
@@ -789,17 +955,25 @@ module Crystal::HIR
         macro_arena,
         CrystalV2::Runtime.target_flags,
         recovery_mode: true,
-        source_provider: ->(expr_id : ExprId) : String? { macro_block_body_text(expr_id) }
+        source_provider: ->(expr_id : ExprId) : String? { macro_block_body_text(expr_id) },
+        macro_source: @sources_by_arena[macro_arena]?
       )
 
       owner_type = @current_class ? macro_owner_type_for(@current_class.not_nil!) : nil
-      expander.expand(
+      expanded_id = expander.expand(
         macro_symbol,
         normalized_args,
         owner_type,
         named_args: normalized_named,
         block_id: block_id
       )
+      if ENV["DEBUG_MACRO_OUTPUT"]? && macro_name == "record"
+        if output = expander.last_output
+          snippet = output.size > 400 ? "#{output[0, 400]}..." : output
+          STDERR.puts "[MACRO_OUTPUT] name=#{macro_name} len=#{output.bytesize} snippet=#{snippet.inspect}"
+        end
+      end
+      expanded_id
     end
 
     # Expand a macro call inline using the full macro expander.
@@ -809,9 +983,10 @@ module Crystal::HIR
       macro_arena : CrystalV2::Compiler::Frontend::ArenaLike,
       args : Array(ExprId),
       named_args : Array(CrystalV2::Compiler::Frontend::NamedArgument)?,
-      block_id : ExprId?
+      block_id : ExprId?,
+      macro_key : String
     ) : ValueId
-      expanded_id = expand_macro_expr(macro_def, macro_arena, args, named_args, block_id)
+      expanded_id = expand_macro_expr(macro_def, macro_arena, args, named_args, block_id, macro_key)
       if expanded_id.invalid?
         nil_lit = Literal.new(ctx.next_id, TypeRef::NIL, nil)
         ctx.emit(nil_lit)
@@ -1000,7 +1175,7 @@ module Crystal::HIR
       case node
       when CrystalV2::Compiler::Frontend::ClassNode
         name = String.new(node.name)
-        full_name = resolve_class_name_in_context(name)
+        full_name = resolve_class_name_for_definition(name)
         register_class_with_name(node, full_name)
         lower_class_with_name(node, full_name)
         nil_lit = Literal.new(ctx.next_id, TypeRef::NIL, nil)
@@ -1008,7 +1183,7 @@ module Crystal::HIR
         nil_lit.id
       when CrystalV2::Compiler::Frontend::ModuleNode
         name = String.new(node.name)
-        full_name = resolve_class_name_in_context(name)
+        full_name = resolve_class_name_for_definition(name)
         register_module_with_name(node, full_name)
         lower_module_with_name(node, full_name)
         nil_lit = Literal.new(ctx.next_id, TypeRef::NIL, nil)
@@ -1016,7 +1191,7 @@ module Crystal::HIR
         nil_lit.id
       when CrystalV2::Compiler::Frontend::EnumNode
         name = String.new(node.name)
-        full_name = resolve_class_name_in_context(name)
+        full_name = resolve_class_name_for_definition(name)
         register_enum_with_name(node, full_name)
         nil_lit = Literal.new(ctx.next_id, TypeRef::NIL, nil)
         ctx.emit(nil_lit)
@@ -2375,6 +2550,7 @@ module Crystal::HIR
     end
 
     private def register_module_with_name(node : CrystalV2::Compiler::Frontend::ModuleNode, module_name : String)
+      module_name = resolve_class_name_for_definition(module_name)
       if ENV.has_key?("DEBUG_NESTED_CLASS") && (module_name == "IO" || module_name.includes?("FileDescriptor"))
         STDERR.puts "[DEBUG_MODULE] Processing module: #{module_name}, body_size=#{node.body.try(&.size) || 0}"
       end
@@ -2473,6 +2649,8 @@ module Crystal::HIR
               end
             end
             record_class_var_type(module_name, cvar_name, cvar_type, initial_value)
+          when CrystalV2::Compiler::Frontend::MacroDefNode
+            register_macro(member, module_name)
           when CrystalV2::Compiler::Frontend::AssignNode
             target_node = @arena[member.target]
             if target_node.is_a?(CrystalV2::Compiler::Frontend::ClassVarNode)
@@ -2944,6 +3122,8 @@ module Crystal::HIR
         case member
         when CrystalV2::Compiler::Frontend::DefNode
           register_type_method_from_def(member, enum_name)
+        when CrystalV2::Compiler::Frontend::MacroDefNode
+          register_macro(member, enum_name)
         when CrystalV2::Compiler::Frontend::MacroIfNode
           process_macro_if_in_enum(member, enum_name)
         when CrystalV2::Compiler::Frontend::MacroLiteralNode
@@ -3606,55 +3786,61 @@ module Crystal::HIR
       end
       # DEBUG_MODULE_THREAD disabled
       if body = node.body
-        body.each_with_index do |expr_id, idx|
-          member = unwrap_visibility_member(@arena[expr_id])
-          if ENV.has_key?("DEBUG_NESTED_CLASS") && (module_name == "IO" || module_name.includes?("FileDescriptor"))
-            STDERR.puts "[DEBUG_LOWER_MOD] #{module_name} member #{idx}: #{member.class}"
+        old_class = @current_class
+        @current_class = module_name
+        begin
+          body.each_with_index do |expr_id, idx|
+            member = unwrap_visibility_member(@arena[expr_id])
+            if ENV.has_key?("DEBUG_NESTED_CLASS") && (module_name == "IO" || module_name.includes?("FileDescriptor"))
+              STDERR.puts "[DEBUG_LOWER_MOD] #{module_name} member #{idx}: #{member.class}"
+            end
+            case member
+            when CrystalV2::Compiler::Frontend::DefNode
+              method_name = String.new(member.name)
+              is_class_method = if recv = member.receiver
+                                  String.new(recv) == "self"
+                                else
+                                  false
+                                end
+              next unless is_class_method
+              STDERR.puts "      [#{module_name}] Method #{idx}: #{method_name}" if ENV["HIR_DEBUG"]?
+              STDERR.flush if ENV["HIR_DEBUG"]?
+              lower_module_method(module_name, member)
+            when CrystalV2::Compiler::Frontend::GetterNode
+              next unless member.is_class?
+              member.specs.each do |spec|
+                generate_class_getter_method(module_name, spec, @arena)
+              end
+            when CrystalV2::Compiler::Frontend::SetterNode
+              next unless member.is_class?
+              member.specs.each do |spec|
+                generate_class_setter_method(module_name, spec)
+              end
+            when CrystalV2::Compiler::Frontend::PropertyNode
+              next unless member.is_class?
+              member.specs.each do |spec|
+                generate_class_getter_method(module_name, spec, @arena)
+                generate_class_setter_method(module_name, spec)
+              end
+            when CrystalV2::Compiler::Frontend::ClassNode
+              # Lower nested class with full name
+              class_name = String.new(member.name)
+              full_class_name = "#{module_name}::#{class_name}"
+              if ENV.has_key?("DEBUG_NESTED_CLASS") && (module_name == "IO" || class_name.includes?("FileDescriptor"))
+                STDERR.puts "[DEBUG_LOWER_MOD] lowering nested class: #{full_class_name}"
+              end
+              lower_class_with_name(member, full_class_name)
+            when CrystalV2::Compiler::Frontend::ModuleNode
+              # Recursively lower nested module
+              nested_name = String.new(member.name)
+              full_nested_name = "#{module_name}::#{nested_name}"
+              lower_module_with_name(member, full_nested_name)
+            when CrystalV2::Compiler::Frontend::CallNode
+              lower_macro_call_in_module_body(module_name, member)
+            end
           end
-          case member
-          when CrystalV2::Compiler::Frontend::DefNode
-            method_name = String.new(member.name)
-            is_class_method = if recv = member.receiver
-                                String.new(recv) == "self"
-                              else
-                                false
-                              end
-            next unless is_class_method
-            STDERR.puts "      [#{module_name}] Method #{idx}: #{method_name}" if ENV["HIR_DEBUG"]?
-            STDERR.flush if ENV["HIR_DEBUG"]?
-            lower_module_method(module_name, member)
-          when CrystalV2::Compiler::Frontend::GetterNode
-            next unless member.is_class?
-            member.specs.each do |spec|
-              generate_class_getter_method(module_name, spec, @arena)
-            end
-          when CrystalV2::Compiler::Frontend::SetterNode
-            next unless member.is_class?
-            member.specs.each do |spec|
-              generate_class_setter_method(module_name, spec)
-            end
-          when CrystalV2::Compiler::Frontend::PropertyNode
-            next unless member.is_class?
-            member.specs.each do |spec|
-              generate_class_getter_method(module_name, spec, @arena)
-              generate_class_setter_method(module_name, spec)
-            end
-          when CrystalV2::Compiler::Frontend::ClassNode
-            # Lower nested class with full name
-            class_name = String.new(member.name)
-            full_class_name = "#{module_name}::#{class_name}"
-            if ENV.has_key?("DEBUG_NESTED_CLASS") && (module_name == "IO" || class_name.includes?("FileDescriptor"))
-              STDERR.puts "[DEBUG_LOWER_MOD] lowering nested class: #{full_class_name}"
-            end
-            lower_class_with_name(member, full_class_name)
-          when CrystalV2::Compiler::Frontend::ModuleNode
-            # Recursively lower nested module
-            nested_name = String.new(member.name)
-            full_nested_name = "#{module_name}::#{nested_name}"
-            lower_module_with_name(member, full_nested_name)
-          when CrystalV2::Compiler::Frontend::CallNode
-            lower_macro_call_in_module_body(module_name, member)
-          end
+        ensure
+          @current_class = old_class
         end
       end
     end
@@ -3718,11 +3904,12 @@ module Crystal::HIR
       return unless callee_node.is_a?(CrystalV2::Compiler::Frontend::IdentifierNode)
 
       method_name = String.new(callee_node.name)
-      macro_entry = @macro_defs[method_name]?
-      return unless macro_entry
+      macro_lookup = lookup_macro_entry(method_name, module_name)
+      return unless macro_lookup
 
+      macro_entry, macro_key = macro_lookup
       macro_def, macro_arena = macro_entry
-      expanded_id = expand_macro_expr(macro_def, macro_arena, node.args, node.named_args, node.block)
+      expanded_id = expand_macro_expr(macro_def, macro_arena, node.args, node.named_args, node.block, macro_key)
       return if expanded_id.invalid?
 
       old_arena = @arena
@@ -3899,6 +4086,10 @@ module Crystal::HIR
 
     # Register a class with a specific name (for nested classes like Foo::Bar)
     def register_class_with_name(node : CrystalV2::Compiler::Frontend::ClassNode, class_name : String)
+      class_name = resolve_class_name_for_definition(class_name)
+      if ENV["DEBUG_RECORD_CLASS"]? && class_name.ends_with?("FileEntry")
+        STDERR.puts "[DEBUG_RECORD_CLASS] class_name=#{class_name} current=#{@current_class || "(none)"}"
+      end
       is_struct = node.is_struct == true
 
       # Check if this is a generic class (has type parameters)
@@ -3995,6 +4186,8 @@ module Crystal::HIR
             nested_name = String.new(member.name)
             full_nested_name = "#{class_name}::#{nested_name}"
             register_nested_module(member, full_nested_name)
+          when CrystalV2::Compiler::Frontend::MacroDefNode
+            register_macro(member, class_name)
           end
         end
         if mono_debug && pass0_start
@@ -4187,6 +4380,33 @@ module Crystal::HIR
             process_macro_if_in_class(member, class_name, ivars, pointerof(offset))
           when CrystalV2::Compiler::Frontend::MacroLiteralNode
             process_macro_literal_in_class(member, class_name, ivars, pointerof(offset))
+          when CrystalV2::Compiler::Frontend::CallNode
+            callee = @arena[member.callee]
+            if callee.is_a?(CrystalV2::Compiler::Frontend::IdentifierNode)
+              method_name = String.new(callee.name)
+              if ENV["DEBUG_CLASS_BODY_CALLS"]? && class_name.includes?("LineNumbers")
+                STDERR.puts "[DEBUG_CLASS_BODY_CALLS] #{class_name} call=#{method_name}"
+              end
+              if macro_lookup = lookup_macro_entry(method_name, class_name)
+                macro_entry, macro_key = macro_lookup
+                macro_def, macro_arena = macro_entry
+                if macro_def_maybe_defines_type?(macro_def, macro_arena)
+                  if ENV["DEBUG_MACRO_TYPE_REG"]?
+                    STDERR.puts "[DEBUG_MACRO_TYPE_REG] expand name=#{method_name} in #{class_name}"
+                  end
+                  expanded_id = expand_macro_expr(macro_def, macro_arena, member.args, member.named_args, member.block, macro_key)
+                  unless expanded_id.invalid?
+                    old_arena = @arena
+                    @arena = macro_arena
+                    begin
+                      register_nested_types_from_macro_expansion(class_name, expanded_id)
+                    ensure
+                      @arena = old_arena
+                    end
+                  end
+                end
+              end
+            end
 
           when CrystalV2::Compiler::Frontend::GetterNode
             # Getter declarations: getter name : Type
@@ -4635,6 +4855,20 @@ module Crystal::HIR
 
       # Lower each method
       if body = node.body
+        if ENV["DEBUG_SEQ_LOWER"]? && class_name.includes?("LineNumbers")
+          STDERR.puts "[DEBUG_SEQ_LOWER] class=#{class_name} body_size=#{body.size}"
+          body.each do |expr_id|
+            member_dbg = unwrap_visibility_member(@arena[expr_id])
+            label = member_dbg.class.to_s.split("::").last
+            if member_dbg.is_a?(CrystalV2::Compiler::Frontend::CallNode)
+              callee_dbg = @arena[member_dbg.callee]
+              if callee_dbg.is_a?(CrystalV2::Compiler::Frontend::IdentifierNode)
+                label += " callee=#{String.new(callee_dbg.name)}"
+              end
+            end
+            STDERR.puts "[DEBUG_SEQ_LOWER]   member=#{label}"
+          end
+        end
         # Lower nested types first (classes/structs/modules inside the class body).
         # These can be referenced unqualified from within the class (e.g., `EntryIterator.new` inside `Dir`).
         body.each do |expr_id|
@@ -4709,6 +4943,13 @@ module Crystal::HIR
             end
             add_defined_instance_methods_from_expr(class_name, defined_full_names, expr_id)
           when CrystalV2::Compiler::Frontend::CallNode
+            if ENV["DEBUG_RECORD_LOWER"]?
+              callee = @arena[member.callee]
+              if callee.is_a?(CrystalV2::Compiler::Frontend::IdentifierNode) &&
+                 String.new(callee.name) == "record"
+                STDERR.puts "[DEBUG_RECORD_LOWER] class=#{class_name}"
+              end
+            end
             lower_macro_call_in_class_body(class_name, class_info, member, defined_full_names, visited_modules)
           end
         end
@@ -4787,6 +5028,13 @@ module Crystal::HIR
         full_name = "#{class_name}::#{nested_name}"
         register_enum_with_name(member, full_name)
       when CrystalV2::Compiler::Frontend::CallNode
+        if ENV["DEBUG_RECORD_LOWER"]?
+          callee = @arena[member.callee]
+          if callee.is_a?(CrystalV2::Compiler::Frontend::IdentifierNode) &&
+             String.new(callee.name) == "record"
+            STDERR.puts "[DEBUG_RECORD_LOWER] class=#{class_name}"
+          end
+        end
         lower_macro_call_in_class_body(class_name, class_info, member, defined_full_names, visited_modules)
       end
     end
@@ -4802,11 +5050,12 @@ module Crystal::HIR
       return unless callee_node.is_a?(CrystalV2::Compiler::Frontend::IdentifierNode)
 
       method_name = String.new(callee_node.name)
-      macro_entry = @macro_defs[method_name]?
-      return unless macro_entry
+      macro_lookup = lookup_macro_entry(method_name, class_name)
+      return unless macro_lookup
 
+      macro_entry, macro_key = macro_lookup
       macro_def, macro_arena = macro_entry
-      expanded_id = expand_macro_expr(macro_def, macro_arena, node.args, node.named_args, node.block)
+      expanded_id = expand_macro_expr(macro_def, macro_arena, node.args, node.named_args, node.block, macro_key)
       return if expanded_id.invalid?
 
       old_arena = @arena
@@ -6548,6 +6797,20 @@ module Crystal::HIR
       name
     end
 
+    private def resolve_path_string_in_context(path : String) : String
+      return path if path.empty?
+      return path if path.starts_with?("::")
+      return resolve_type_name_in_context(path) unless path.includes?("::")
+
+      parts = path.split("::")
+      return path if parts.empty?
+
+      resolved_head = resolve_class_name_in_context(parts.first)
+      return path if resolved_head == parts.first
+
+      ([resolved_head] + parts[1..]).join("::")
+    end
+
     private def function_context_from_name(name : String) : String?
       base = name
       if dollar = base.index('$')
@@ -6621,6 +6884,14 @@ module Crystal::HIR
 
       debug_hook_type_resolve(name, @current_class || "", result)
       result
+    end
+
+    private def resolve_class_name_for_definition(name : String) : String
+      return name if name.includes?("::")
+      if current = @current_class
+        return "#{current}::#{name}"
+      end
+      name
     end
 
     private def resolve_type_alias_chain(name : String) : String
@@ -8610,14 +8881,14 @@ module Crystal::HIR
     end
 
     private def macro_literal_raw_text(node : CrystalV2::Compiler::Frontend::MacroLiteralNode) : String?
-      source = @sources_by_arena[@arena]?
-      return nil unless source
       return nil if node.pieces.empty?
 
+      source = @sources_by_arena[@arena]?
+      bytesize = source ? source.bytesize : 0
       builder = String::Builder.new
-      bytesize = source.bytesize
+
       node.pieces.each do |piece|
-        if span = piece.span
+        if source && (span = piece.span)
           start = span.start_offset
           length = span.end_offset - span.start_offset
           next if length <= 0
@@ -8630,7 +8901,9 @@ module Crystal::HIR
           builder << text
         end
       end
-      builder.to_s
+
+      text = builder.to_s
+      text.empty? ? nil : text
     end
 
     private def macro_if_raw_text(node : CrystalV2::Compiler::Frontend::MacroIfNode) : String?
@@ -11952,10 +12225,14 @@ module Crystal::HIR
         # Simple function call: foo()
         method_name = String.new(callee_node.name)
 
-        # Check if this is a macro call - expand inline instead of generating Call
-        if macro_entry = @macro_defs[method_name]?
-          macro_def, macro_arena = macro_entry
-          return expand_macro(ctx, macro_def, macro_arena, node.args, node.named_args, node.block)
+        # Check if this is a macro call - expand inline instead of generating Call.
+        # Skip spawn macro when lowering SpawnNode-generated calls (block + no args).
+        unless method_name == "spawn" && node.block && node.args.empty? && node.named_args.nil?
+          if macro_lookup = lookup_macro_entry(method_name, @current_class)
+            macro_entry, macro_key = macro_lookup
+            macro_def, macro_arena = macro_entry
+            return expand_macro(ctx, macro_def, macro_arena, node.args, node.named_args, node.block, macro_key)
+          end
         end
 
         # If inside a class/module, check if this is a method call on self or module
@@ -12143,7 +12420,7 @@ module Crystal::HIR
           end
         elsif obj_node.is_a?(CrystalV2::Compiler::Frontend::PathNode)
           # Path like Foo::Bar for nested classes/modules
-          full_path = collect_path_string(obj_node)
+          full_path = resolve_path_string_in_context(collect_path_string(obj_node))
           # Check if this path is a known class
           if @class_info.has_key?(full_path)
             class_name_str = full_path
