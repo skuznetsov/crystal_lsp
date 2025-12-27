@@ -1001,6 +1001,7 @@ enum:      64  ← ✅ DONE
 | IndexNode lazy lowering | IndexNode now triggers lazy lowering for []/[]? calls (fix missing Slice(UInt8)#[] defs) (2025-12-30) |
 | Module-typed ivar access | Lower `obj.@ivar` for module-typed receivers via includer ivars (fixes FileDescriptor timeouts) (2025-12-30) |
 | Enum symbol arg coercion | Coerce symbol literals to enum values + pack double splat NamedTuple in call lowering (fixes Crystal.trace in prelude) (2025-12-31) |
+| Block pass + try return | Extract &. / &block arguments as blocks; try returns block type with nilable receiver union (2026-01-03) |
 
 ### 8.2 Current Status
 
@@ -1017,13 +1018,13 @@ r2 = maybe(false)  # => nil
 **Prelude build progress (with stdlib/prelude):**
 - Reaches LLVM IR emission and `opt -O1` successfully; link still fails due to missing runtime/stdlib symbols (expected at this stage).
 - Timing snapshot (release + `--stats --no-llvm-opt --no-llvm-metadata`): parse prelude ~167ms, HIR ~2.0s, MIR ~0.3ms, LLVM ~1.8ms, total ~2.2s; link failure is the current blocker.
-- Linker missing symbols (unicode_use run; full list in `/private/tmp/unicode_use.link.log`):
-  - DWARF: `Crystal::DWARF::FORM_implicit_const`, `Crystal::DWARF::LineNumbers_*`, `Crystal::DWARF::Info_read_attribute_value`, `FORM_close`, `FORM::Tuple`, `Row_new`, `Sequence::FileEntry_*`, `line_strp`, `strp_sup`.
-  - IO/EventLoop: `Crystal::EventLoop::FileDescriptor_read/write`, `IO__FileDescriptor_system_*`, `IO_read_*`, `IO_gets_*`, `IO::Error.from_errno`, `Error_current`, `Error_initialize`, `IO::ARGF_read_*`, `IO__EOFError_initialize`.
-  - Scheduler/Threads/Signal: `Scheduler::Thread_scheduler`, `Scheduler_enqueue`, `SpinLock_sync_block`, `Thread::Mutex_synchronize_block`, `Fiber::StackPool_*`, `Signal_*`, `Sigset_clear`.
-  - Pointer/Memory: `Pointer(UInt8)#new/size/first/read_byte/close`, `Pointer(UInt8)#as` (`____Pointer/____String/____Tuple`), `_realloc_Int32`.
-  - Numeric/String: `UInt8#to_s(Int32)`, `UInt32#to_s(Int32)`, `Object#to_i`, `Nil#to_i32`, `String::Builder#[]/<< (Char/Nil)`.
-  - Collections/Misc: `Array(Abbrev)#attributes`, `Attribute.new`, `Tuple#bsearch(_index)`, `Hash(LibC::PidT, Int32)#pointer`, `Float::Printer::Range_*`, `File::Info_system_size`, `_st_size`, `__crystal_main`.
+- Linker missing symbols (bootstrap_array full-prelude run; full list in `/tmp/bootstrap_array_full.link.log`):
+  - DWARF: `Crystal::DWARF::FORM_implicit_const`, `Crystal::DWARF::LineNumbers::Sequence::FileEntry.new`, `Array(LNCTFormat)#format/lnct`, `Row.new`, `line_strp`, `strp_sup`, `FileEntry#path`.
+  - IO/EventLoop: `Crystal::EventLoop::FileDescriptor_read/write`, `IO__FileDescriptor_system_*`, `IO_read_*`, `IO__Error.from_errno`, `IO__Seek_current`.
+  - Scheduler/Threads/Signal: `SpinLock_sync_block`, `Thread::Mutex_synchronize_block`, `Fiber::StackPool_sleep`, `Crystal::System::Signal_spawn`, `Crystal::System::Signal_set`, `SignalChildHandler` closures.
+  - Pointer/Memory: `Pointer(UInt8)#__*` (`____Pointer`, `____String`, `____Tuple`), `Pointer(UInt8)#close/enqueue/key`.
+  - Numeric/String: `Int32_at/form/reentrant/unchecked`, `UInt32#value`, `UInt8_exception_*`, `Nil_to_i32`, `String#char_at` block form, `__to_s(IO)`.
+  - Collections/Misc: `Attribute.new`, `Hash(LibC::PidT, Int32)#pointer`, `Hash(c/signal, Signal::Handler)#each_entry_with_index_block`, `Deque(Int32)#size`, `Sender(Int32).new`, `STDERR.puts(String)`, `File::Info_system_size` (`_st_size`), `Slice(UInt8)#fetch(Int32, &block)`, `call` (missing Proc call target).
 
 **Recent fixes (prelude bootstrap path):**
 - Normalize `flag?` macro arguments (strip leading `:`) + require cache v3; pthread requires now load.
@@ -1031,6 +1032,8 @@ r2 = maybe(false)  # => nil
 - Track enum value types for `.new`/`.value` and propagate via assignments/identifiers in HIR lowering.
 - Register MacroIf/MacroLiteral nodes inside nested modules during HIR lowering.
 - Remove `StructNode` handling from macro-parsed class bodies; rely on `ClassNode.is_struct` (2026-01-02).
+- Handle inline returns during yield inlining (guard proc/block bodies + safe block bounds) to preserve Enumerable semantics.
+- Infer `find`/`find_index` return types from element types (nullable) during member access lowering.
 - Remove `StructNode` from AST + LSP AST cache; structs are `ClassNode.is_struct` (cache version bump) (2025-12-25).
 - Register module instance methods as class methods when `extend self` is present (fixes `Math.min/max`) (2025-12-25).
 - Propagate `extend self` through macro-literal/module branches when registering module methods (2025-12-25).
@@ -1042,6 +1045,7 @@ r2 = maybe(false)  # => nil
 - Treat `T.size` macro patterns as `Int32` during lightweight return-type inference (2025-12-26).
 - Macro interpolation uses source spans for text pieces; `record` copy_with/clone expansion fixed (2025-12-27).
 - HIR spec asserts `record` macro copy_with params (`_x`, `_y`) (2025-12-27).
+- Block-pass handling for `&.`/`&block` + `try` return type union fixes `Indexable#[]` lowering (Array(Abbrev)#attributes no longer missing) (2026-01-03).
 
 **Stdlib requires advanced features not yet implemented:**
 
