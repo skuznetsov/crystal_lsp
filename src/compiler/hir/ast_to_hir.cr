@@ -14812,6 +14812,14 @@ module Crystal::HIR
           return_type = get_function_return_type(base_method_name)
         end
       end
+      # If we still have a fallback type, prefer a registered function type when available.
+      resolved_return_type = get_function_return_type(mangled_method_name)
+      if resolved_return_type == TypeRef::VOID && mangled_method_name != base_method_name
+        resolved_return_type = get_function_return_type(base_method_name)
+      end
+      if resolved_return_type != TypeRef::VOID && resolved_return_type != return_type
+        return_type = resolved_return_type
+      end
 
       # Coerce arguments to union types if needed
       # This handles cases like passing Int32 to a parameter of type Int32 | Nil

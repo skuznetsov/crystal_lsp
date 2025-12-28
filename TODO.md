@@ -1049,7 +1049,6 @@ r2 = maybe(false)  # => nil
   _Hash_LibC__PidT__Int32______Pointer_Pointer
   _in__Object
   _inspect_with_backtrace_String__Builder
-  _Int32____Int32
   _Int32_close
   _Int32_exception_class_
   _Int32_exception_cleanup_
@@ -1075,13 +1074,10 @@ r2 = maybe(false)  # => nil
   _Pointer_UInt8_____String
   _Pointer_UInt8__copy_from_Pointer_UInt8_
   _Pointer_UInt8__enqueue
-  _Pointer_UInt8__size
-  _Pointer_UInt8__to_unsafe
   _push_Pointer
   _read_lnct
   _self____Int32
   _self_empty_
-  _self_enqueue
   _self_size
   _self_to_unsafe
   _Sigset____Int32
@@ -1105,6 +1101,7 @@ r2 = maybe(false)  # => nil
 - Remove `StructNode` handling from macro-parsed class bodies; rely on `ClassNode.is_struct` (2026-01-02).
 - Handle inline returns during yield inlining (guard proc/block bodies + safe block bounds) to preserve Enumerable semantics.
 - Fix inline-yield return override so `return` inside block targets caller (removes `Nil#offset`/`Nil#size` in prelude HIR) (2026-01-05).
+- Recheck registered return types after lowering to avoid fallback pointer returns (fixes `Crystal::System.to_string_slice` -> `Slice(UInt8)`) (2026-01-05).
 - Use array element types for `each`/`each_with_index` block params to avoid Array(T)#field fallbacks.
 - Infer `find`/`find_index` return types from element types (nullable) during member access lowering.
 - Guard yield inlining when callee arena mismatches (fallback to non-inline call to avoid OOB).
