@@ -1085,7 +1085,6 @@ r2 = maybe(false)  # => nil
   _Slice_sort_
   _st_size
   _STDERR_puts_String
-  _String_null_
   _String_set_crystal_type_id_Pointer_UInt8_
   _Tuple_IO__FileDescriptor__IO__FileDescriptor_____Int32
   _Tuple_ord
@@ -1102,6 +1101,7 @@ r2 = maybe(false)  # => nil
 - Handle inline returns during yield inlining (guard proc/block bodies + safe block bounds) to preserve Enumerable semantics.
 - Fix inline-yield return override so `return` inside block targets caller (removes `Nil#offset`/`Nil#size` in prelude HIR) (2026-01-05).
 - Recheck registered return types after lowering to avoid fallback pointer returns (fixes `Crystal::System.to_string_slice` -> `Slice(UInt8)`) (2026-01-05).
+- Narrow locals for `is_a?` conditions in if/elsif branches (avoids `String#null?` in `to_string_slice`) (2026-01-08).
 - Use array element types for `each`/`each_with_index` block params to avoid Array(T)#field fallbacks.
 - Infer `find`/`find_index` return types from element types (nullable) during member access lowering.
 - Guard yield inlining when callee arena mismatches (fallback to non-inline call to avoid OOB).

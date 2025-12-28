@@ -11036,6 +11036,51 @@ module Crystal::HIR
       end
     end
 
+    private def is_a_narrowing_targets(condition_id : ExprId) : Array(Tuple(String, TypeRef))
+      return [] of Tuple(String, TypeRef) if condition_id.invalid?
+
+      node = @arena[condition_id]
+      case node
+      when CrystalV2::Compiler::Frontend::GroupingNode
+        is_a_narrowing_targets(node.expression)
+      when CrystalV2::Compiler::Frontend::BinaryNode
+        op = String.new(node.operator)
+        if op == "&&"
+          left = is_a_narrowing_targets(node.left)
+          right = is_a_narrowing_targets(node.right)
+          left.concat(right)
+        else
+          [] of Tuple(String, TypeRef)
+        end
+      when CrystalV2::Compiler::Frontend::IsANode
+        target_name = resolve_typeof_in_type_string(String.new(node.target_type))
+        target_type = type_ref_for_name(target_name)
+        expr_node = @arena[node.expression]
+        if expr_node.is_a?(CrystalV2::Compiler::Frontend::IdentifierNode)
+          [{String.new(expr_node.name), target_type}]
+        else
+          [] of Tuple(String, TypeRef)
+        end
+      when CrystalV2::Compiler::Frontend::CallNode
+        callee_node = @arena[node.callee]
+        if callee_node.is_a?(CrystalV2::Compiler::Frontend::MemberAccessNode) &&
+           String.new(callee_node.member) == "is_a?" &&
+           node.args.size == 1
+          obj_node = @arena[callee_node.object]
+          if obj_node.is_a?(CrystalV2::Compiler::Frontend::IdentifierNode)
+            if type_str = stringify_type_expr(node.args.first)
+              type_str = resolve_typeof_in_type_string(type_str)
+              target_type = type_ref_for_name(type_str)
+              return [{String.new(obj_node.name), target_type}]
+            end
+          end
+        end
+        [] of Tuple(String, TypeRef)
+      else
+        [] of Tuple(String, TypeRef)
+      end
+    end
+
     private def apply_truthy_narrowing(ctx : LoweringContext, targets : Array(String)) : Nil
       return if targets.empty?
 
@@ -11049,6 +11094,34 @@ module Crystal::HIR
         next if unwrapped == local_id
 
         ctx.register_local(name, unwrapped)
+      end
+    end
+
+    private def apply_is_a_narrowing(ctx : LoweringContext, targets : Array(Tuple(String, TypeRef))) : Nil
+      return if targets.empty?
+
+      targets.each do |(name, target_type)|
+        next if target_type == TypeRef::VOID
+        local_id = ctx.lookup_local(name)
+        next unless local_id
+        local_type = ctx.type_of(local_id)
+        next if local_type == target_type
+
+        if is_union_type?(local_type)
+          variant_id = get_union_variant_id(local_type, target_type)
+          if variant_id >= 0
+            unwrap = UnionUnwrap.new(ctx.next_id, target_type, local_id, variant_id, false)
+            ctx.emit(unwrap)
+            ctx.register_type(unwrap.id, target_type)
+            ctx.register_local(name, unwrap.id)
+            next
+          end
+        end
+
+        cast = Cast.new(ctx.next_id, target_type, local_id, target_type, safe: false)
+        ctx.emit(cast)
+        ctx.register_type(cast.id, target_type)
+        ctx.register_local(name, cast.id)
       end
     end
 
@@ -11171,6 +11244,7 @@ module Crystal::HIR
       # Save locals state before branching
       pre_branch_locals = ctx.save_locals
       truthy_targets = truthy_narrowing_targets(node.condition)
+      is_a_targets = is_a_narrowing_targets(node.condition)
 
       # Collect all branches: (exit_block, value, locals, flows_to_merge)
       branches = [] of {BlockId, ValueId, Hash(String, ValueId), Bool}
@@ -11196,6 +11270,7 @@ module Crystal::HIR
       ctx.current_block = then_block
       ctx.push_scope(ScopeKind::Block)
       apply_truthy_narrowing(ctx, truthy_targets)
+      apply_is_a_narrowing(ctx, is_a_targets)
       then_value = lower_body(ctx, node.then_body)
       then_exit_block = ctx.current_block
       then_locals = ctx.save_locals
@@ -11220,6 +11295,7 @@ module Crystal::HIR
 
           # Lower elsif condition
           elsif_truthy_targets = truthy_narrowing_targets(elsif_branch.condition)
+          elsif_is_a_targets = is_a_narrowing_targets(elsif_branch.condition)
           elsif_cond_id = lower_expr(ctx, elsif_branch.condition)
 
           # Create body block and next block
@@ -11237,6 +11313,7 @@ module Crystal::HIR
           ctx.current_block = elsif_body_block
           ctx.push_scope(ScopeKind::Block)
           apply_truthy_narrowing(ctx, elsif_truthy_targets)
+          apply_is_a_narrowing(ctx, elsif_is_a_targets)
           elsif_value = lower_body(ctx, elsif_branch.body)
           elsif_exit_block = ctx.current_block
           elsif_locals = ctx.save_locals
