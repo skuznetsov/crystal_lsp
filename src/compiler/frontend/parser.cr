@@ -7118,13 +7118,81 @@ module CrystalV2
                 when Token::Kind::LBracePercent, Token::Kind::MacroExprStart
                   buffer_end_token, trim_gap = append_macro_text_token(buffer, escaped_start, buffer_end_token, trim_gap)
                   advance
+                  if escaped_start.kind == Token::Kind::LBracePercent
+                    # Consume until %} so escaped macro controls don't affect nesting.
+                    loop do
+                      break if current_token.kind == Token::Kind::EOF
+                      buffer_end_token, trim_gap = append_macro_text_token(buffer, current_token, buffer_end_token, trim_gap)
+                      if current_token.kind == Token::Kind::PercentRBrace
+                        advance
+                        break
+                      elsif current_token.kind == Token::Kind::Percent && peek_token.kind == Token::Kind::RBrace
+                        advance
+                        buffer_end_token, trim_gap = append_macro_text_token(buffer, current_token, buffer_end_token, trim_gap)
+                        advance
+                        break
+                      end
+                      advance
+                    end
+                  else
+                    # Consume until }} for escaped macro expressions.
+                    loop do
+                      break if current_token.kind == Token::Kind::EOF
+                      buffer_end_token, trim_gap = append_macro_text_token(buffer, current_token, buffer_end_token, trim_gap)
+                      if current_token.kind == Token::Kind::MacroExprEnd
+                        advance
+                        break
+                      elsif current_token.kind == Token::Kind::RBrace && peek_token.kind == Token::Kind::RBrace
+                        advance
+                        buffer_end_token, trim_gap = append_macro_text_token(buffer, current_token, buffer_end_token, trim_gap)
+                        advance
+                        break
+                      end
+                      advance
+                    end
+                  end
                   next
                 when Token::Kind::LBrace
                   buffer_end_token, trim_gap = append_macro_text_token(buffer, escaped_start, buffer_end_token, trim_gap)
                   advance
-                  if current_token.kind.in?(Token::Kind::Percent, Token::Kind::LBrace)
+                  if current_token.kind == Token::Kind::Percent
                     buffer_end_token, trim_gap = append_macro_text_token(buffer, current_token, buffer_end_token, trim_gap)
                     advance
+                    # Consume until %} for escaped \{% ... %}.
+                    loop do
+                      break if current_token.kind == Token::Kind::EOF
+                      buffer_end_token, trim_gap = append_macro_text_token(buffer, current_token, buffer_end_token, trim_gap)
+                      if current_token.kind == Token::Kind::PercentRBrace
+                        advance
+                        break
+                      elsif current_token.kind == Token::Kind::Percent && peek_token.kind == Token::Kind::RBrace
+                        advance
+                        buffer_end_token, trim_gap = append_macro_text_token(buffer, current_token, buffer_end_token, trim_gap)
+                        advance
+                        break
+                      end
+                      advance
+                    end
+                    next
+                  elsif current_token.kind == Token::Kind::LBrace
+                    buffer_end_token, trim_gap = append_macro_text_token(buffer, current_token, buffer_end_token, trim_gap)
+                    advance
+                    # Consume until }} for escaped \{{ ... }}.
+                    loop do
+                      break if current_token.kind == Token::Kind::EOF
+                      buffer_end_token, trim_gap = append_macro_text_token(buffer, current_token, buffer_end_token, trim_gap)
+                      if current_token.kind == Token::Kind::MacroExprEnd
+                        advance
+                        break
+                      elsif current_token.kind == Token::Kind::RBrace && peek_token.kind == Token::Kind::RBrace
+                        advance
+                        buffer_end_token, trim_gap = append_macro_text_token(buffer, current_token, buffer_end_token, trim_gap)
+                        advance
+                        break
+                      end
+                      advance
+                    end
+                    next
                   end
                   next
                 else
@@ -11166,6 +11234,15 @@ module CrystalV2
         end
 
         private def call_without_parens_disallowed?(token : Token) : Bool
+          if token.kind == Token::Kind::Star || token.kind == Token::Kind::StarStar
+            next_tok = peek_token(1)
+            return true if next_tok.kind == Token::Kind::Whitespace
+            if next_tok.span.start_line == token.span.end_line &&
+               next_tok.span.start_offset > token.span.end_offset
+              return true
+            end
+            return false
+          end
           case token.kind
           when Token::Kind::Newline, Token::Kind::EOF,
                Token::Kind::Semicolon, Token::Kind::Then,
@@ -11186,7 +11263,7 @@ module CrystalV2
                Token::Kind::CaretEq, Token::Kind::LShiftEq, Token::Kind::RShiftEq,
                Token::Kind::NilCoalesceEq,
                Token::Kind::NilCoalesce,
-               Token::Kind::Plus, Token::Kind::Minus, Token::Kind::Star, Token::Kind::StarStar,
+               Token::Kind::Plus, Token::Kind::Minus,
                Token::Kind::Slash, Token::Kind::FloorDiv, Token::Kind::Percent,
                Token::Kind::PercentRBrace,
                Token::Kind::OrOr, Token::Kind::AndAnd,
