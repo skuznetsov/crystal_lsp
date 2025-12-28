@@ -12807,6 +12807,7 @@ module Crystal::HIR
       resolved_owner : String? = nil
       resolved_target_name = target_name
       base_target_name = target_name.split("$", 2)[0]
+      force_class_method = base_target_name.includes?(".")
       if base_target_name.includes?("#") || base_target_name.includes?(".")
         sep = base_target_name.includes?("#") ? "#" : "."
         owner, method = base_target_name.split(sep, 2)
@@ -12899,10 +12900,10 @@ module Crystal::HIR
               with_type_param_map(merged_params) do
                 if namespace_override
                   with_namespace_override(namespace_override) do
-                    lower_method(owner, class_info, func_def, call_arg_types, override)
+                    lower_method(owner, class_info, func_def, call_arg_types, override, force_class_method: force_class_method)
                   end
                 else
-                  lower_method(owner, class_info, func_def, call_arg_types, override)
+                  lower_method(owner, class_info, func_def, call_arg_types, override, force_class_method: force_class_method)
                 end
               end
               @current_class = old_class
@@ -12911,7 +12912,7 @@ module Crystal::HIR
                 old_class = @current_class
                 @current_class = owner
                 dummy_info = ClassInfo.new(owner, TypeRef::INT32, [] of IVarInfo, [] of ClassVarInfo, 0, false, nil)
-                lower_method(owner, dummy_info, func_def, call_arg_types, name)
+                lower_method(owner, dummy_info, func_def, call_arg_types, name, force_class_method: force_class_method)
                 @current_class = old_class
               elsif target_name.includes?("from_chars")
                 STDERR.puts "[LOWERING] No class_info for #{owner}"
@@ -12942,19 +12943,19 @@ module Crystal::HIR
                 with_type_param_map(extra_type_params) do
                   if namespace_override
                     with_namespace_override(namespace_override) do
-                      lower_method(owner, class_info, func_def, call_arg_types, target_name)
+                      lower_method(owner, class_info, func_def, call_arg_types, target_name, force_class_method: force_class_method)
                     end
                   else
-                    lower_method(owner, class_info, func_def, call_arg_types, target_name)
+                    lower_method(owner, class_info, func_def, call_arg_types, target_name, force_class_method: force_class_method)
                   end
                 end
               else
                 if namespace_override
                   with_namespace_override(namespace_override) do
-                    lower_method(owner, class_info, func_def, call_arg_types, target_name)
+                    lower_method(owner, class_info, func_def, call_arg_types, target_name, force_class_method: force_class_method)
                   end
                 else
-                  lower_method(owner, class_info, func_def, call_arg_types, target_name)
+                  lower_method(owner, class_info, func_def, call_arg_types, target_name, force_class_method: force_class_method)
                 end
               end
               @current_class = old_class
@@ -13256,7 +13257,9 @@ module Crystal::HIR
         # Check if it's a class/module method call (ClassName.new() or Module.method())
         # Can be ConstantNode, IdentifierNode starting with uppercase, or GenericNode
         class_name_str : String? = nil
-        if obj_node.is_a?(CrystalV2::Compiler::Frontend::ConstantNode)
+        if obj_node.is_a?(CrystalV2::Compiler::Frontend::SelfNode) && @current_method_is_class
+          class_name_str = @current_class
+        elsif obj_node.is_a?(CrystalV2::Compiler::Frontend::ConstantNode)
           name = String.new(obj_node.name)
           resolved = resolve_class_name_in_context(name)
           resolved = resolve_type_alias_chain(resolved)
