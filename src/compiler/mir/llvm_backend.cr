@@ -275,6 +275,27 @@ module Crystal::MIR
     @string_counter : Int32 = 0
     @cond_counter : Int32 = 0  # For unique branch condition variable names
 
+    C_LIBRARY_FUNCTIONS = Set{
+      "printf", "sprintf", "snprintf", "fprintf", "vprintf",
+      "vsprintf", "vsnprintf", "vfprintf", "scanf", "sscanf",
+      "fscanf", "puts", "fputs", "fgets", "gets",
+      "malloc", "calloc", "realloc", "free",
+      "memcpy", "memmove", "memset", "memcmp",
+      "strlen", "strcpy", "strncpy", "strcat", "strncat",
+      "strcmp", "strncmp", "strchr", "strrchr", "strstr",
+      "exit", "abort", "atexit", "_exit",
+      "setjmp", "longjmp", "sigsetjmp", "siglongjmp",
+      "open", "close", "read", "write", "lseek",
+      "fopen", "fclose", "fread", "fwrite", "fseek", "ftell",
+      "getenv", "setenv", "unsetenv", "system"
+    }
+
+    private def mangle_function_name(name : String) : String
+      mangled = @type_mapper.mangle_name(name)
+      return "__crystal_v2_fn_#{mangled}" if C_LIBRARY_FUNCTIONS.includes?(mangled)
+      mangled
+    end
+
     # Cross-block value tracking for dominance fix
     @value_def_block : Hash(ValueId, BlockId) = {} of ValueId => BlockId  # value → block where defined
     @cross_block_values : Set(ValueId) = Set(ValueId).new  # values that need alloca slots
@@ -908,7 +929,7 @@ module Crystal::MIR
       # Build set of function names to avoid conflict
       function_names = Set(String).new
       @module.functions.each do |func|
-        function_names << @type_mapper.mangle_name(func.name)
+        function_names << mangle_function_name(func.name)
       end
 
       # Emit defined globals
@@ -1473,7 +1494,7 @@ module Crystal::MIR
       prepass_collect_constants(func)
 
       # Set current func name BEFORE prepass
-      @current_func_name = @type_mapper.mangle_name(func.name)
+      @current_func_name = mangle_function_name(func.name)
 
       # Pre-pass: detect cross-block values that need alloca slots for dominance
       prepass_detect_cross_block_values(func)
@@ -1511,23 +1532,6 @@ module Crystal::MIR
       mangled_name = @current_func_name
       @current_func_params = func.params
       @current_slab_frame = func.slab_frame
-
-      # Skip functions that would conflict with C library declarations
-      c_library_functions = Set{"printf", "sprintf", "snprintf", "fprintf", "vprintf",
-                                "vsprintf", "vsnprintf", "vfprintf", "scanf", "sscanf",
-                                "fscanf", "puts", "fputs", "fgets", "gets",
-                                "malloc", "calloc", "realloc", "free",
-                                "memcpy", "memmove", "memset", "memcmp",
-                                "strlen", "strcpy", "strncpy", "strcat", "strncat",
-                                "strcmp", "strncmp", "strchr", "strrchr", "strstr",
-                                "exit", "abort", "atexit", "_exit",
-                                "setjmp", "longjmp", "sigsetjmp", "siglongjmp",
-                                "open", "close", "read", "write", "lseek",
-                                "fopen", "fclose", "fread", "fwrite", "fseek", "ftell",
-                                "getenv", "setenv", "unsetenv", "system"}
-      if c_library_functions.includes?(mangled_name)
-        return
-      end
 
       # Skip duplicate function definitions
       if @emitted_functions.includes?(mangled_name)
@@ -1635,7 +1639,7 @@ module Crystal::MIR
     # Pre-pass to collect constant values AND all value types before emitting IR
     # This resolves forward reference issues with phi nodes
     private def prepass_collect_constants(func : Function)
-      func_name = @type_mapper.mangle_name(func.name)
+      func_name = mangle_function_name(func.name)
       # First pass: collect constants and initial types
       func.blocks.each do |block|
         block.instructions.each do |inst|
@@ -1658,7 +1662,7 @@ module Crystal::MIR
             callee_func = @module.functions.find { |f| f.id == inst.callee }
             if callee_func
               callee_ret_type = @type_mapper.llvm_type(callee_func.return_type)
-              callee_name = @type_mapper.mangle_name(callee_func.name)
+              callee_name = mangle_function_name(callee_func.name)
               # Known void functions (inspect, puts, print, etc.)
               # Check various naming patterns since functions can be mangled differently
               is_known_void = callee_name == "inspect" ||
@@ -4277,7 +4281,7 @@ module Crystal::MIR
       # Look up callee function for name and param types
       callee_func = @module.functions.find { |f| f.id == inst.callee }
       callee_name = if callee_func
-                      @type_mapper.mangle_name(callee_func.name)
+                      mangle_function_name(callee_func.name)
                     else
                       # Undefined internal function - track for declaration
                       undefined_name = "func#{inst.callee}"

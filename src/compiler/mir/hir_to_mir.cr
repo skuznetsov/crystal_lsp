@@ -689,7 +689,6 @@ module Crystal
         return builder.extern_call(call.method_name, args, convert_type(call.type))
       end
 
-      # Handle built-in print functions
       # Method name may be mangled as "puts$Int32" or "puts:Int32" etc, so extract base name
       # We use $ as separator (: is not valid in LLVM identifiers)
       # Avoid regex by extracting up to first : or $
@@ -702,6 +701,37 @@ module Crystal
                          else
                            method_name_str
                          end
+
+      # Look up function by name - try exact match first, then fuzzy match
+      func = @mir_module.get_function(call.method_name)
+
+      # If not found, try fuzzy matching to handle type variations (e.g., String vs String | Nil)
+      unless func
+        # Only apply fuzzy matching for qualified method names (containing . or #)
+        if call.method_name.includes?(".") || call.method_name.includes?("#")
+          # Extract base name (before $ type suffix)
+          base_name = call.method_name.split("$").first
+
+          # Search for any function that starts with the base name
+          func = @mir_module.functions.find do |f|
+            f.name.split("$").first == base_name
+          end
+        end
+        # NOTE: Unqualified method names are left as extern calls
+        # The proper fix is to qualify names at HIR generation time
+      end
+
+      if func
+        callee_id = func.id
+        # Debug disabled for performance:
+        # if call.method_name.includes?("format_gutter")
+        #   STDERR.puts "[MIR-COERCE] func=#{func.name} params=#{func.params.map(&.type.id).join(",")}"
+        # end
+        coerced_args = coerce_call_args(builder, args, call.args, func)
+        return builder.call(callee_id, coerced_args, convert_type(call.type))
+      end
+
+      # Built-in print functions (fallback only when no user-defined function exists).
       if base_method_name == "puts"
         # Determine the actual extern based on argument type
         if args.size == 1
@@ -756,47 +786,11 @@ module Crystal
         return builder.extern_call("exit", args, TypeRef::VOID)
       end
 
-      # Look up function by name - try exact match first, then fuzzy match
-      func = @mir_module.get_function(call.method_name)
-
-      # If not found, try fuzzy matching to handle type variations (e.g., String vs String | Nil)
-      unless func
-        # Only apply fuzzy matching for qualified method names (containing . or #)
-        if call.method_name.includes?(".") || call.method_name.includes?("#")
-          # Extract base name (before $ type suffix)
-          base_name = call.method_name.split("$").first
-
-          # Search for any function that starts with the base name
-          func = @mir_module.functions.find do |f|
-            f.name.split("$").first == base_name
-          end
-        end
-        # NOTE: Unqualified method names are left as extern calls
-        # The proper fix is to qualify names at HIR generation time
+      # Unknown function - emit as extern call
+      if ENV.has_key?("DEBUG_CALLS")
+        STDERR.puts "[UNRESOLVED CALL] #{call.method_name} in #{@current_lowering_func_name}"
       end
-
-      callee_id = if func
-                    func.id
-                  else
-                    # Unknown function - emit as extern call
-                    # Debug: log unresolved call
-                    if ENV.has_key?("DEBUG_CALLS")
-                      STDERR.puts "[UNRESOLVED CALL] #{call.method_name} in #{@current_lowering_func_name}"
-                    end
-                    return builder.extern_call(call.method_name, args, convert_type(call.type))
-                  end
-
-      # Coerce arguments to match parameter types (handle concrete type -> union coercion)
-      if func
-        # Debug disabled for performance:
-        # if call.method_name.includes?("format_gutter")
-        #   STDERR.puts "[MIR-COERCE] func=#{func.name} params=#{func.params.map(&.type.id).join(",")}"
-        # end
-        coerced_args = coerce_call_args(builder, args, call.args, func)
-        return builder.call(callee_id, coerced_args, convert_type(call.type))
-      end
-
-      builder.call(callee_id, args, convert_type(call.type))
+      builder.extern_call(call.method_name, args, convert_type(call.type))
     end
 
     # Helper to get the MIR type of a HIR value by finding it in the function
