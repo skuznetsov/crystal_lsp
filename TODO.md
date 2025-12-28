@@ -1022,18 +1022,9 @@ r2 = maybe(false)  # => nil
 - Timing snapshot (release + `--stats --no-llvm-opt --no-llvm-metadata`): parse prelude ~167ms, HIR ~2.0s, MIR ~0.3ms, LLVM ~1.8ms, total ~2.2s; link failure is the current blocker.
 - Linker missing symbols (bootstrap_array full-prelude run 2026-01-05; full list in `/tmp/bootstrap_array_full.link.log`):
   ```
-  _____UInt32___UInt64
-  ___to_s_IO
   _Atomic_Handle____Pointer_get
   _Atomic_new_Pointer_Void_
-  _atomicrmw_Symbol_Pointer_Int32_Int32
   _Bool_pointer
-  _c_signal_hash
-  _c_signal_object_id
-  _check_div_argument_Int32
-  _copy_from_Pointer
-  _copy_from_Pointer_Int32
-  _Crystal__DWARF__FORM_implicit_const_
   _Crystal__EventLoop__FileDescriptor_read_IO__FileDescriptor_Slice_UInt8_
   _Crystal__EventLoop__FileDescriptor_write_IO__FileDescriptor_Slice_UInt8_
   _Crystal__System__File__Info_new_LibC__Stat
@@ -1042,13 +1033,11 @@ r2 = maybe(false)  # => nil
   _Error_initialize
   _Exception_callstack_
   _File_open_String
-  _from_io_IO_IO__ByteFormat
   _GC_realloc
-  _Hash_____Int64_Array_Abbrev_
-  _hash_Crystal__Hasher
   _Hash_LibC__PidT__Int32______Pointer_Pointer
-  _in__Object
-  _inspect_with_backtrace_String__Builder
+  _Hash_____Int64_Array_Abbrev_
+  _IO__Seek_current_
+  _IO_read_Slice_UInt8_
   _Int32_close
   _Int32_exception_class_
   _Int32_exception_cleanup_
@@ -1057,37 +1046,46 @@ r2 = maybe(false)  # => nil
   _Int32_first
   _Int32_reentrant_
   _Int32_unchecked_
-  _IO__Seek_current_
-  _IO_read_Slice_UInt8_
-  _join_String__Builder
   _LibC__SizeT_zero
   _Nil___
   _Nil_____U
   _Nil_to_i32
   _Nil_value
-  _parse_function_names_from_dwarf_Crystal__DWARF__Info
   _Pointer_Entry_c_signal__Crystal__System__Signal__Handler___null_
   _Pointer_UInt8_____Crystal__DWARF__LineNumbers__Sequence__FileEntry
   _Pointer_UInt8_____Int32
   _Pointer_UInt8_____String
   _Pointer_UInt8__copy_from_Pointer_UInt8_
   _Pointer_UInt8__enqueue
+  _Sigset____Int32
+  _Sigset_delete_Int32
+  _Slice_sort_
+  _String_ends_with_
+  _TupleTupleTupleString__String___Nil___String__String____Int32
+  _Tuple_IO__FileDescriptor__IO__FileDescriptor_____Int32
+  _Tuple_ord
+  _UInt8___Pointe_to_i32_
+  _____UInt32___UInt64
+  ___to_s_IO
+  _atomicrmw_Symbol_Pointer_Int32_Int32
+  _c_signal_hash
+  _c_signal_object_id
+  _check_div_argument_Int32
+  _copy_from_Pointer
+  _copy_from_Pointer_Int32
+  _from_io_IO_IO__ByteFormat
+  _hash_Crystal__Hasher
+  _in__Object
+  _inspect_with_backtrace_String__Builder
+  _join_String__Builder
+  _parse_function_names_from_dwarf_Crystal__DWARF__Info
   _push_Pointer
   _read_lnct
   _self____Int32
   _self_empty_
   _self_size
   _self_to_unsafe
-  _Sigset____Int32
-  _Sigset_delete_Int32
-  _Slice_sort_
   _st_size
-  _STDERR_puts_String
-  _String_set_crystal_type_id_Pointer_UInt8_
-  _Tuple_IO__FileDescriptor__IO__FileDescriptor_____Int32
-  _Tuple_ord
-  _TupleTupleTupleString__String___Nil___String__String____Int32
-  _UInt8___Pointe_to_i32_
   ```
 
 **Recent fixes (prelude bootstrap path):**
@@ -1101,6 +1099,10 @@ r2 = maybe(false)  # => nil
 - Recheck registered return types after lowering to avoid fallback pointer returns (fixes `Crystal::System.to_string_slice` -> `Slice(UInt8)`) (2026-01-05).
 - Narrow locals for `is_a?` conditions in if/elsif branches (avoids `String#null?` in `to_string_slice`) (2026-01-08).
 - Lower `is_a?` calls to intrinsic checks (UnionIs/IsA) and guard missing type args (2026-01-08).
+- Lower inherited class methods via Object fallback in codegen (fixes `String.set_crystal_type_id`) (2026-01-xx).
+- Fix escaped macro controls in macro bodies to avoid false `{% for %}` nesting errors (restores `Object.set_crystal_type_id`) (2026-01-xx).
+- Bump AST cache version for macro parse changes (2026-01-xx).
+- Lower inherited instance methods via parent fallback in codegen (fixes `IO::FileDescriptor#puts` resolution) (2025-12-28).
 - Use array element types for `each`/`each_with_index` block params to avoid Array(T)#field fallbacks.
 - Infer `find`/`find_index` return types from element types (nullable) during member access lowering.
 - Guard yield inlining when callee arena mismatches (fallback to non-inline call to avoid OOB).
