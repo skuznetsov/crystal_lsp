@@ -1601,15 +1601,23 @@ module CrystalV2
         end
 
         # Phase 96: Extract nil narrowing from truthy check
-        # If condition is a simple identifier with nilable type, narrow to non-nil in then branch
+        # If condition is a simple identifier (or assignment to identifier) with nilable type,
+        # narrow to non-nil in then branch.
         # Returns {variable_name, narrowed_type} or nil if not applicable
         private def extract_nil_narrowing(condition_id : ExprId, condition_type : Type) : {String, Type}?
           condition_node = @program.arena[condition_id]
 
           # Only narrow if condition is a simple variable (identifier)
-          return nil unless condition_node.is_a?(Frontend::IdentifierNode)
-
-          var_name = String.new(condition_node.name)
+          var_name = case condition_node
+                     when Frontend::IdentifierNode
+                       String.new(condition_node.name)
+                     when Frontend::AssignNode
+                       target_node = @program.arena[condition_node.target]
+                       return nil unless target_node.is_a?(Frontend::IdentifierNode)
+                       String.new(target_node.name)
+                     else
+                       return nil
+                     end
 
           # Check if type includes Nil
           narrowed = remove_nil_from_type(condition_type)
@@ -3063,6 +3071,13 @@ module CrystalV2
               return ArrayType.new(mapped)
             when "select", "reject", "filter"
               return ArrayType.new(elem_type)
+            when "find"
+              if_none_type = arg_types.first? || @context.nil_type
+              return @context.union_of([elem_type, if_none_type])
+            when "find_index"
+              return @context.union_of([@context.int32_type, @context.nil_type])
+            when "find!"
+              return elem_type
             when "each", "each_with_index"
               return receiver_type
             when "to_a"
@@ -3173,7 +3188,8 @@ module CrystalV2
                 parse_type_name(ann)
               end
             else
-              @context.nil_type
+              debug("  No return annotation - inferring from method body")
+              infer_method_body_type(method, receiver_type)
             end
           else
             # Fallback heuristic for unknown collection receivers
