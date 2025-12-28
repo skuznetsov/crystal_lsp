@@ -730,6 +730,54 @@ module Crystal::HIR
       end
     end
 
+    private def register_class_members_from_expansion(
+      class_name : String,
+      expr_id : ExprId,
+      defined_class_method_full_names : Set(String),
+      visited_extends : Set(String)
+    ) : Nil
+      return if expr_id.invalid?
+      member = unwrap_visibility_member(@arena[expr_id])
+      case member
+      when CrystalV2::Compiler::Frontend::BlockNode
+        member.body.each do |child_id|
+          register_class_members_from_expansion(class_name, child_id, defined_class_method_full_names, visited_extends)
+        end
+      when CrystalV2::Compiler::Frontend::ExtendNode
+        register_module_class_methods_for(class_name, member.target, defined_class_method_full_names, visited_extends)
+      when CrystalV2::Compiler::Frontend::MacroDefNode
+        register_macro(member, class_name)
+      when CrystalV2::Compiler::Frontend::MacroIfNode
+        result = try_evaluate_macro_condition(member.condition)
+        if result == true
+          register_class_members_from_expansion(class_name, member.then_body, defined_class_method_full_names, visited_extends)
+        elsif result == false
+          if else_body = member.else_body
+            else_node = @arena[else_body]
+            if else_node.is_a?(CrystalV2::Compiler::Frontend::MacroIfNode)
+              register_class_members_from_expansion(class_name, else_body, defined_class_method_full_names, visited_extends)
+            else
+              register_class_members_from_expansion(class_name, else_body, defined_class_method_full_names, visited_extends)
+            end
+          end
+        else
+          register_class_members_from_expansion(class_name, member.then_body, defined_class_method_full_names, visited_extends)
+          if else_body = member.else_body
+            register_class_members_from_expansion(class_name, else_body, defined_class_method_full_names, visited_extends)
+          end
+        end
+      when CrystalV2::Compiler::Frontend::MacroLiteralNode
+        if raw_text = macro_literal_raw_text(member)
+          expanded = expand_flag_macro_text(raw_text) || raw_text
+          if program = parse_macro_literal_program(expanded)
+            program.roots.each do |child_id|
+              register_class_members_from_expansion(class_name, child_id, defined_class_method_full_names, visited_extends)
+            end
+          end
+        end
+      end
+    end
+
     private def extract_macro_params(node : CrystalV2::Compiler::Frontend::MacroDefNode) : Array(MacroParamInfo)
       source = @sources_by_arena[@arena]?
       return [] of MacroParamInfo unless source
@@ -2109,6 +2157,78 @@ module Crystal::HIR
       defined
     end
 
+    private def collect_defined_class_method_full_names(class_name : String, body : Array(ExprId)) : Set(String)
+      defined = Set(String).new
+      body.each do |expr_id|
+        member = unwrap_visibility_member(@arena[expr_id])
+        case member
+        when CrystalV2::Compiler::Frontend::DefNode
+          next if member.is_abstract
+          next unless (recv = member.receiver) && String.new(recv) == "self"
+
+          method_name = String.new(member.name)
+          base_name = "#{class_name}.#{method_name}"
+
+          param_types = [] of TypeRef
+          has_block = false
+          if params = member.params
+            params.each do |param|
+              next if named_only_separator?(param)
+              if param.is_block
+                has_block = true
+                next
+              end
+              if ta = param.type_annotation
+                param_types << type_ref_for_name(String.new(ta))
+              else
+                param_types << TypeRef::VOID
+              end
+            end
+          end
+
+          full_name = mangle_function_name(base_name, param_types, has_block)
+          defined << full_name
+        when CrystalV2::Compiler::Frontend::GetterNode
+          next unless member.is_class?
+          member.specs.each do |spec|
+            accessor_name = accessor_method_name(spec)
+            base_name = "#{class_name}.#{accessor_name}"
+            full_name = mangle_function_name(base_name, [] of TypeRef)
+            defined << full_name
+          end
+        when CrystalV2::Compiler::Frontend::SetterNode
+          next unless member.is_class?
+          member.specs.each do |spec|
+            accessor_name = accessor_storage_name(spec)
+            base_name = "#{class_name}.#{accessor_name}="
+            param_type = if ta = spec.type_annotation
+                           type_ref_for_name(String.new(ta))
+                         else
+                           TypeRef::VOID
+                         end
+            full_name = mangle_function_name(base_name, [param_type])
+            defined << full_name
+          end
+        when CrystalV2::Compiler::Frontend::PropertyNode
+          next unless member.is_class?
+          member.specs.each do |spec|
+            getter_name = accessor_method_name(spec)
+            getter_base = "#{class_name}.#{getter_name}"
+            defined << mangle_function_name(getter_base, [] of TypeRef)
+
+            setter_name = "#{class_name}.#{accessor_storage_name(spec)}="
+            setter_type = if ta = spec.type_annotation
+                            type_ref_for_name(String.new(ta))
+                          else
+                            TypeRef::VOID
+                          end
+            defined << mangle_function_name(setter_name, [setter_type])
+          end
+        end
+      end
+      defined
+    end
+
     private def add_defined_instance_methods_from_expr(
       class_name : String,
       defined_full_names : Set(String),
@@ -2254,7 +2374,9 @@ module Crystal::HIR
       class_name : String,
       include_node : CrystalV2::Compiler::Frontend::IncludeNode,
       defined_full_names : Set(String),
+      defined_class_method_full_names : Set(String),
       visited : Set(String),
+      visited_extends : Set(String),
       ivars : Array(IVarInfo),
       offset : Int32,
       is_struct : Bool
@@ -2299,6 +2421,25 @@ module Crystal::HIR
         with_arena(mod_arena) do
           extra_map = include_type_param_map(mod_node, include_node.target, include_arena)
           with_type_param_map(extra_map) do
+            if macro_lookup = lookup_macro_entry("included", module_full_name)
+              macro_entry, macro_key = macro_lookup
+              macro_def, macro_arena = macro_entry
+              expanded_id = expand_macro_expr(macro_def, macro_arena, [] of ExprId, nil, nil, macro_key)
+              unless expanded_id.invalid?
+                old_arena = @arena
+                @arena = macro_arena
+                begin
+                  register_class_members_from_expansion(
+                    class_name,
+                    expanded_id,
+                    defined_class_method_full_names,
+                    visited_extends
+                  )
+                ensure
+                  @arena = old_arena
+                end
+              end
+            end
             if body = mod_node.body
               body.each do |member_id|
                 member = unwrap_visibility_member(@arena[member_id])
@@ -2308,7 +2449,9 @@ module Crystal::HIR
                     class_name,
                     member,
                     defined_full_names,
+                    defined_class_method_full_names,
                     visited,
+                    visited_extends,
                     ivars,
                     offset,
                     is_struct
@@ -2424,6 +2567,88 @@ module Crystal::HIR
       offset
     end
 
+    private def register_module_class_methods_for(
+      class_name : String,
+      extend_target : ExprId,
+      defined_full_names : Set(String),
+      visited : Set(String)
+    ) : Nil
+      class_name = sanitize_type_name(class_name)
+
+      module_full_name = resolve_path_like_name(extend_target)
+      return unless module_full_name
+      return if visited.includes?(module_full_name)
+      visited << module_full_name
+
+      defs = @module_defs[module_full_name]? || return
+      include_arena = @arena
+      defs.each do |mod_node, mod_arena|
+        with_arena(mod_arena) do
+          extra_map = include_type_param_map(mod_node, extend_target, include_arena)
+          with_type_param_map(extra_map) do
+            if body = mod_node.body
+              with_namespace_override(module_full_name) do
+                body.each do |member_id|
+                  member = unwrap_visibility_member(@arena[member_id])
+                  case member
+                  when CrystalV2::Compiler::Frontend::IncludeNode
+                    register_module_class_methods_for(class_name, member.target, defined_full_names, visited)
+                  when CrystalV2::Compiler::Frontend::DefNode
+                    next if (recv = member.receiver) && String.new(recv) == "self"
+                    next if member.is_abstract
+
+                    method_name = String.new(member.name)
+                    base_name = "#{class_name}.#{method_name}"
+
+                    return_type = if rt = member.return_type
+                                    rt_name = String.new(rt)
+                                    inferred = module_like_type_name?(rt_name) ? infer_concrete_return_type_from_body(member, class_name) : nil
+                                    inferred || type_ref_for_name(rt_name)
+                                  elsif method_name.ends_with?("?")
+                                    infer_unannotated_query_return_type(method_name, type_ref_for_name(class_name)) || TypeRef::BOOL
+                                  else
+                                    TypeRef::VOID
+                                  end
+
+                    param_types = [] of TypeRef
+                    has_block = false
+                    if params = member.params
+                      params.each do |param|
+                        next if named_only_separator?(param)
+                        if param.is_block
+                          has_block = true
+                          next
+                        end
+                        param_type = if ta = param.type_annotation
+                                       type_ref_for_name(String.new(ta))
+                                     elsif param.is_double_splat
+                                       type_ref_for_name("NamedTuple")
+                                     else
+                                       TypeRef::VOID
+                                     end
+                        param_types << param_type
+                      end
+                    end
+
+                    full_name = mangle_function_name(base_name, param_types, has_block)
+                    next if defined_full_names.includes?(full_name)
+                    next if @function_types.has_key?(full_name)
+
+                    store_function_type_param_map(full_name, base_name, extra_map)
+                    store_function_namespace_override(full_name, base_name, module_full_name)
+                    debug_hook("module.class_method.register", "class=#{class_name} module=#{module_full_name} method=#{method_name} full=#{full_name}")
+                    register_function_type(full_name, return_type)
+                    @function_defs[full_name] = member
+                    @function_def_arenas[full_name] = @arena
+                  end
+                end
+              end
+            end
+          end
+        end
+      end
+    end
+
     private def lower_module_instance_methods_for(
       class_name : String,
       class_info : ClassInfo,
@@ -2445,6 +2670,20 @@ module Crystal::HIR
         with_arena(mod_arena) do
           extra_map = include_type_param_map(mod_node, include_node.target, include_arena)
           with_type_param_map(extra_map) do
+            if macro_lookup = lookup_macro_entry("included", module_full_name)
+              macro_entry, macro_key = macro_lookup
+              macro_def, macro_arena = macro_entry
+              expanded_id = expand_macro_expr(macro_def, macro_arena, [] of ExprId, nil, nil, macro_key)
+              unless expanded_id.invalid?
+                old_arena = @arena
+                @arena = macro_arena
+                begin
+                  lower_class_body_expr(class_name, class_info, expanded_id, defined_full_names, visited)
+                ensure
+                  @arena = old_arena
+                end
+              end
+            end
             if body = mod_node.body
               with_namespace_override(module_full_name) do
                 body.each do |member_id|
@@ -2525,6 +2764,43 @@ module Crystal::HIR
                       generate_getter_method(class_name, class_info, spec)
                       generate_setter_method(class_name, class_info, spec)
                     end
+                  end
+                end
+              end
+            end
+          end
+        end
+      end
+    end
+
+    private def lower_module_class_methods_for(
+      class_name : String,
+      class_info : ClassInfo,
+      extend_target : ExprId,
+      visited : Set(String)
+    )
+      module_full_name = resolve_path_like_name(extend_target)
+      return unless module_full_name
+      return if visited.includes?(module_full_name)
+      visited << module_full_name
+
+      defs = @module_defs[module_full_name]? || return
+      include_arena = @arena
+      defs.each do |mod_node, mod_arena|
+        with_arena(mod_arena) do
+          extra_map = include_type_param_map(mod_node, extend_target, include_arena)
+          with_type_param_map(extra_map) do
+            if body = mod_node.body
+              with_namespace_override(module_full_name) do
+                body.each do |member_id|
+                  member = unwrap_visibility_member(@arena[member_id])
+                  case member
+                  when CrystalV2::Compiler::Frontend::IncludeNode
+                    lower_module_class_methods_for(class_name, class_info, member.target, visited)
+                  when CrystalV2::Compiler::Frontend::DefNode
+                    next if (recv = member.receiver) && String.new(recv) == "self"
+                    next if member.is_abstract
+                    lower_method(class_name, class_info, member, force_class_method: true)
                   end
                 end
               end
@@ -4409,11 +4685,13 @@ module Crystal::HIR
           STDERR.puts "[DEBUG_IO]   enum_info Seek keys: #{@enum_info.try(&.keys.select { |k| k.includes?("Seek") }) || "nil"}"
         end
         defined_instance_method_full_names = collect_defined_instance_method_full_names(class_name, body)
+        defined_class_method_full_names = collect_defined_class_method_full_names(class_name, body)
         if mono_debug && defined_start
           elapsed = (Time.monotonic - defined_start).total_milliseconds
           STDERR.puts "[MONO] #{class_name} collect_defined_instance_methods #{elapsed.round(1)}ms"
         end
         include_nodes = [] of CrystalV2::Compiler::Frontend::IncludeNode
+        extend_nodes = [] of CrystalV2::Compiler::Frontend::ExtendNode
 
         begin
         body_start = Time.monotonic if mono_debug
@@ -4426,6 +4704,8 @@ module Crystal::HIR
           case member
           when CrystalV2::Compiler::Frontend::IncludeNode
             include_nodes << member
+          when CrystalV2::Compiler::Frontend::ExtendNode
+            extend_nodes << member
           when CrystalV2::Compiler::Frontend::InstanceVarDeclNode
             # Instance variable declaration: @value : Int32
             ivar_name = String.new(member.name)
@@ -4785,15 +5065,26 @@ module Crystal::HIR
         # Expand module mixins: register included module instance method signatures.
         include_start = Time.monotonic if mono_debug
         visited_modules = Set(String).new
+        visited_extends = Set(String).new
         include_nodes.each do |inc|
           offset = register_module_instance_methods_for(
             class_name,
             inc,
             defined_instance_method_full_names,
+            defined_class_method_full_names,
             visited_modules,
+            visited_extends,
             ivars,
             offset,
             is_struct
+          )
+        end
+        extend_nodes.each do |ext|
+          register_module_class_methods_for(
+            class_name,
+            ext.target,
+            defined_class_method_full_names,
+            visited_extends
           )
         end
         if mono_debug && include_start
@@ -5145,6 +5436,9 @@ module Crystal::HIR
         end
       when CrystalV2::Compiler::Frontend::IncludeNode
         lower_module_instance_methods_for(class_name, class_info, member, defined_full_names, visited_modules)
+      when CrystalV2::Compiler::Frontend::ExtendNode
+        visited_extends = Set(String).new
+        lower_module_class_methods_for(class_name, class_info, member.target, visited_extends)
       when CrystalV2::Compiler::Frontend::DefNode
         lower_method(class_name, class_info, member)
         add_defined_instance_methods_from_expr(class_name, defined_full_names, expr_id)
@@ -5197,6 +5491,8 @@ module Crystal::HIR
         nested_name = String.new(member.name)
         full_name = "#{class_name}::#{nested_name}"
         register_enum_with_name(member, full_name)
+      when CrystalV2::Compiler::Frontend::MacroDefNode
+        register_macro(member, class_name)
       when CrystalV2::Compiler::Frontend::CallNode
         if ENV["DEBUG_RECORD_LOWER"]?
           callee = @arena[member.callee]
@@ -5579,7 +5875,8 @@ module Crystal::HIR
       class_info : ClassInfo,
       node : CrystalV2::Compiler::Frontend::DefNode,
       call_arg_types : Array(TypeRef)? = nil,
-      full_name_override : String? = nil
+      full_name_override : String? = nil,
+      force_class_method : Bool = false
     )
       # CRITICAL: Clear enum value tracking at start of each function.
       # ValueIds are local to each function's LoweringContext, so we must not carry over
@@ -5589,11 +5886,11 @@ module Crystal::HIR
       method_name = String.new(node.name)
 
       # Check if this is a class method (def self.method_name)
-      is_class_method = if recv = node.receiver
-                          String.new(recv) == "self"
-                        else
-                          false
-                        end
+      is_class_method = force_class_method || if recv = node.receiver
+        String.new(recv) == "self"
+      else
+        false
+      end
 
       if ENV.has_key?("DEBUG_NESTED_CLASS") && (class_name.includes?("FileDescriptor") && method_name.includes?("from_stdio"))
         sep = is_class_method ? "." : "#"
@@ -13083,6 +13380,11 @@ module Crystal::HIR
             if method_name == "memcpy" || method_name == "memmove" || method_name == "memset"
               class_name_str = "LibIntrinsics"
             end
+          end
+          if macro_lookup = lookup_macro_entry(method_name, class_name_str)
+            macro_entry, macro_key = macro_lookup
+            macro_def, macro_arena = macro_entry
+            return expand_macro(ctx, macro_def, macro_arena, call_args, node.named_args, block_expr, macro_key)
           end
           # Check if this is a lib function call (e.g., LibC.puts)
           if extern_func = @module.get_extern_function(class_name_str, method_name)

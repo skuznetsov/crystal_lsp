@@ -1023,11 +1023,11 @@ r2 = maybe(false)  # => nil
 - Linker missing symbols (bootstrap_array full-prelude run; full list in `/tmp/bootstrap_array_full.link.log`):
   - DWARF: `Crystal::DWARF::FORM_implicit_const`, `Crystal::DWARF::LineNumbers::Sequence::FileEntry.new`, `Array(LNCTFormat)#format/lnct`, `Row.new`, `line_strp`, `strp_sup`, `FileEntry#path`.
   - MachO: `Crystal::MachO.open {}`.
-  - IO/EventLoop: `Crystal::EventLoop::FileDescriptor_read/write`, `Crystal::EventLoop.open`, `IO__FileDescriptor_system_*`, `IO_read_*`, `IO__Error.from_errno`, `IO__Seek_current`, `FileDescriptor_initialize`, `File_close`, `File_set_encoding`.
+  - IO/EventLoop: `Crystal::EventLoop::FileDescriptor_read/write`, `IO_read_*`, `IO__Seek_current`, `IO::FileDescriptor` self helpers (`self_size`, `self_to_unsafe`, `self_empty`, `self_enqueue`).
   - Scheduler/Threads/Signal: `SpinLock_sync_block`, `Thread::Mutex_synchronize_block`, `Fiber::StackPool_sleep`, `Crystal::System::Signal_spawn`, `Crystal::System::Signal_set`, `SignalChildHandler` closures.
   - Pointer/Memory/String: `GC_realloc`, `Pointer(UInt8)#__*` (`____Pointer`, `____String`, `____Tuple`), `Pointer(UInt8)#copy_from/size/to_unsafe/enqueue`, `String_join`, `String_null`, `String_set_crystal_type_id`, `String_inspect_with_backtrace`, `__to_s(IO)`.
-  - Exceptions/Runtime: `Exception#callstack`, `Int32_exception_*`, `RuntimeError.from_errno`, `LibC::SizeT.zero`, `Nil_to_i32`.
-  - Collections/Misc: `Array(T)#build` (+ `UInt32` variant), `Attribute.new`, `Hash(LibC::PidT, Int32)#pointer`, `Hash(c/signal, Signal::Handler)#*`, `Deque(Int32)#size`, `Sender(Int32).new`, `STDERR.puts(String)`, `File::Info_system_size` (`_st_size`), `call` (missing Proc call target).
+  - Exceptions/Runtime: `Error#initialize`, `Exception#callstack`, `RuntimeError.build_message`, `RuntimeError.new_from_os_error`, `Int32_exception_*`, `LibC::SizeT.zero`, `Nil_to_i32`.
+  - Collections/Misc: `Atomic::Handle(Float64)#get`, `Array(T)#build` (+ `UInt32` variant), `Attribute.new`, `Hash(LibC::PidT, Int32)#pointer`, `Hash(c/signal, Signal::Handler)#*`, `Deque(Int32)#size`, `Sender(Int32).new`, `STDERR.puts(String)`, `File::Info_system_size` (`_st_size`), `call` (missing Proc call target).
 
 **Recent fixes (prelude bootstrap path):**
 - Normalize `flag?` macro arguments (strip leading `:`) + require cache v3; pthread requires now load.
@@ -1043,6 +1043,8 @@ r2 = maybe(false)  # => nil
 - Log unresolved generic receivers for class method calls and lowering paths (Array(T).build tracing) (2026-01-05).
 - Resolve overloads via full scan when call uses base name (avoid picking block overloads without blocks; removes missing func451 in raise_without_backtrace) (2026-01-06).
 - Prefer module namespace over top-level aliases for mixin instance methods; carry module namespace into lazy lowering (fixes `FileDescriptor.system_info` resolving to `Crystal::System::FileDescriptor`) (2026-01-07).
+- Expand macro calls for static member access (class/module) during call lowering (fixes macro-only class methods like `IO::Error.from_errno`) (2026-01-07).
+- Run `macro included` during include registration/lowering; register macros + `extend` class methods from included modules (fixes `SystemError`-style class methods) (2026-01-07).
 - Remove `StructNode` from AST + LSP AST cache; structs are `ClassNode.is_struct` (cache version bump) (2025-12-25).
 - Register module instance methods as class methods when `extend self` is present (fixes `Math.min/max`) (2025-12-25).
 - Propagate `extend self` through macro-literal/module branches when registering module methods (2025-12-25).
