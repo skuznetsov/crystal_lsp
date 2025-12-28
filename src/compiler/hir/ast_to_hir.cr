@@ -11125,6 +11125,89 @@ module Crystal::HIR
       end
     end
 
+    private def emit_is_a_check(ctx : LoweringContext, value_id : ValueId, type_name : String) : ValueId
+      resolved = resolve_typeof_in_type_string(type_name)
+      if resolved.includes?("|")
+        emit_is_a_check_for_type(ctx, value_id, type_ref_for_name(resolved))
+      else
+        resolved = resolve_type_name_in_context(resolved)
+        resolved = resolve_type_alias_chain(resolved)
+        emit_is_a_check_for_type(ctx, value_id, type_ref_for_name(resolved))
+      end
+    end
+
+    private def emit_is_a_check_for_type(ctx : LoweringContext, value_id : ValueId, check_type : TypeRef) : ValueId
+      if is_union_type?(check_type)
+        if type_desc = @module.get_type_descriptor(check_type)
+          checks = type_desc.type_params.map { |variant| emit_is_a_check_for_type(ctx, value_id, variant) }
+          return combine_boolean_checks(ctx, checks)
+        end
+      end
+
+      value_type = ctx.type_of(value_id)
+      if is_union_type?(value_type)
+        variant_id = get_union_variant_id(value_type, check_type)
+        if variant_id >= 0
+          union_is = UnionIs.new(ctx.next_id, value_id, variant_id)
+          ctx.emit(union_is)
+          ctx.register_type(union_is.id, TypeRef::BOOL)
+          return union_is.id
+        end
+      end
+
+      if static = statically_is_a_type?(value_type, check_type)
+        lit = Literal.new(ctx.next_id, TypeRef::BOOL, static)
+        ctx.emit(lit)
+        return lit.id
+      end
+
+      is_a = IsA.new(ctx.next_id, value_id, check_type)
+      ctx.emit(is_a)
+      is_a.id
+    end
+
+    private def statically_is_a_type?(value_type : TypeRef, check_type : TypeRef) : Bool?
+      return true if value_type == check_type
+      return nil if value_type == TypeRef::VOID || check_type == TypeRef::VOID
+
+      value_desc = @module.get_type_descriptor(value_type)
+      check_desc = @module.get_type_descriptor(check_type)
+      return nil unless value_desc && check_desc
+      return nil if value_desc.kind == TypeKind::Union || check_desc.kind == TypeKind::Union
+      return false if value_desc.kind == TypeKind::Primitive && check_desc.kind == TypeKind::Primitive
+
+      value_name = value_desc.name
+      check_name = check_desc.name
+      return true if value_name == check_name
+
+      current = @class_info[value_name]?
+      while current
+        parent = current.parent_name
+        return false unless parent
+        return true if parent == check_name
+        current = @class_info[parent]?
+      end
+
+      false
+    end
+
+    private def combine_boolean_checks(ctx : LoweringContext, checks : Array(ValueId)) : ValueId
+      if checks.empty?
+        lit = Literal.new(ctx.next_id, TypeRef::BOOL, false)
+        ctx.emit(lit)
+        return lit.id
+      end
+
+      result = checks.first
+      checks[1..].each do |check_id|
+        merged = BinaryOperation.new(ctx.next_id, TypeRef::BOOL, BinaryOp::Or, result, check_id)
+        ctx.emit(merged)
+        ctx.register_type(merged.id, TypeRef::BOOL)
+        result = merged.id
+      end
+      result
+    end
+
     private def union_type_for_values(left_type : TypeRef, right_type : TypeRef) : TypeRef
       return left_type if left_type == right_type
       left_name = get_type_name_from_ref(left_type)
@@ -13415,6 +13498,33 @@ module Crystal::HIR
       # - Other: chained/complex calls
 
       callee_node = @arena[node.callee]
+
+      # Intrinsic: obj.is_a?(Type) should lower to IsA/UnionIs without a runtime method call.
+      if node.named_args.nil?
+        if callee_node.is_a?(CrystalV2::Compiler::Frontend::MemberAccessNode) &&
+           String.new(callee_node.member) == "is_a?"
+          if node.args.empty?
+            debug_hook("is_a.missing_type", "receiver=#{stringify_type_expr(callee_node.object) || "unknown"}")
+            lit = Literal.new(ctx.next_id, TypeRef::BOOL, true)
+            ctx.emit(lit)
+            return lit.id
+          elsif type_str = stringify_type_expr(node.args.first)
+            is_a_receiver_id = lower_expr(ctx, callee_node.object)
+            return emit_is_a_check(ctx, is_a_receiver_id, type_str)
+          end
+        elsif callee_node.is_a?(CrystalV2::Compiler::Frontend::IdentifierNode) &&
+              String.new(callee_node.name) == "is_a?"
+          if node.args.empty?
+            debug_hook("is_a.missing_type", "receiver=self")
+            lit = Literal.new(ctx.next_id, TypeRef::BOOL, true)
+            ctx.emit(lit)
+            return lit.id
+          elsif type_str = stringify_type_expr(node.args.first)
+            is_a_receiver_id = emit_self(ctx)
+            return emit_is_a_check(ctx, is_a_receiver_id, type_str)
+          end
+        end
+      end
 
       call_args = node.args
       block_expr = node.block

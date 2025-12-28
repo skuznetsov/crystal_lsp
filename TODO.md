@@ -1059,8 +1059,6 @@ r2 = maybe(false)  # => nil
   _Int32_unchecked_
   _IO__Seek_current_
   _IO_read_Slice_UInt8_
-  _is_a_
-  _is_a__Int32
   _join_String__Builder
   _LibC__SizeT_zero
   _Nil___
@@ -1102,6 +1100,7 @@ r2 = maybe(false)  # => nil
 - Fix inline-yield return override so `return` inside block targets caller (removes `Nil#offset`/`Nil#size` in prelude HIR) (2026-01-05).
 - Recheck registered return types after lowering to avoid fallback pointer returns (fixes `Crystal::System.to_string_slice` -> `Slice(UInt8)`) (2026-01-05).
 - Narrow locals for `is_a?` conditions in if/elsif branches (avoids `String#null?` in `to_string_slice`) (2026-01-08).
+- Lower `is_a?` calls to intrinsic checks (UnionIs/IsA) and guard missing type args (2026-01-08).
 - Use array element types for `each`/`each_with_index` block params to avoid Array(T)#field fallbacks.
 - Infer `find`/`find_index` return types from element types (nullable) during member access lowering.
 - Guard yield inlining when callee arena mismatches (fallback to non-inline call to avoid OOB).
