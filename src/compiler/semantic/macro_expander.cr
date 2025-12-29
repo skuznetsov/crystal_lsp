@@ -48,7 +48,8 @@ module CrystalV2
           *,
           recovery_mode : Bool = false,
           source_provider : Proc(ExprId, String?)? = nil,
-          macro_source : String? = nil
+          macro_source : String? = nil,
+          source_sink : Proc(String, Nil)? = nil
         )
           @diagnostics = [] of Diagnostic
           @depth = 0
@@ -57,6 +58,7 @@ module CrystalV2
           @recovery_mode = recovery_mode
           @source_provider = source_provider
           @macro_source = macro_source
+          @source_sink = source_sink
         end
 
         # Expansion context for macro evaluation
@@ -932,6 +934,7 @@ module CrystalV2
         end
 
         private def reparse(output : String, location : ExprId) : ExprId
+          @source_sink.try(&.call(output))
           # Create lexer from generated string
           lexer = Frontend::Lexer.new(output)
 

@@ -52,10 +52,11 @@ module CrystalV2
           @index = 0
           # Choose arena implementation (default: AstArena; PageArena via env)
           if ENV["CRYSTAL_V2_PAGE_ARENA"]?
-            @arena = PageArena.new
+            @arena = AstArena.new
           else
             @arena = AstArena.new
           end
+          @arena.retain_source(@source)
           @diagnostics = [] of Diagnostic
           @macro_terminator = nil
           @previous_token = nil
@@ -160,6 +161,7 @@ module CrystalV2
           @source = lexer.source
           @tokens = [] of Token
           @index = 0
+          @arena.retain_source(@source)
           @diagnostics = [] of Diagnostic
           @macro_terminator = nil
           @previous_token = nil
@@ -10245,6 +10247,7 @@ module CrystalV2
         private def parse_interpolation_expression(expr_text : String) : ExprId
           # Create sub-parser that adds nodes to OUR arena
           sub_lexer = Lexer.new(expr_text)
+          @arena.retain_source(expr_text)
           sub_parser = Parser.new(sub_lexer, @arena)  # Share arena!
 
           # Parse expression - nodes go directly into our arena

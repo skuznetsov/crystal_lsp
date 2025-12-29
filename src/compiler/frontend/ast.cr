@@ -3618,9 +3618,11 @@ end
 
       class AstArena
         getter nodes : Array(TypedNode)
+        getter extra_sources : Array(String)
 
         def initialize(capacity : Int32 = 0)
           @nodes = capacity > 0 ? Array(TypedNode).new(capacity) : [] of TypedNode
+          @extra_sources = [] of String
         end
 
         @[AlwaysInline]
@@ -3628,6 +3630,12 @@ end
           id = ExprId.new(@nodes.size)
           @nodes << node
           id
+        end
+
+        # Keep source strings alive for slices stored in nodes.
+        def retain_source(source : String) : Nil
+          return if source.empty?
+          @extra_sources << source
         end
 
         # Compatibility shim while callers migrate off add_typed
@@ -3672,12 +3680,14 @@ end
       class VirtualArena
         getter file_arenas : Array(AstArena)
         getter file_paths : Array(String)  # arena index → file path
+        getter extra_sources : Array(String)
         @offsets : Array(Int32)  # offsets[i] = global start for arena[i]
         @generated_arena : AstArena  # For newly created nodes (macro expansion, etc)
 
         def initialize
           @file_arenas = [] of AstArena
           @file_paths = [] of String
+          @extra_sources = [] of String
           @offsets = [0]
           @generated_arena = AstArena.new
         end
@@ -3694,6 +3704,12 @@ end
           local_id = @generated_arena.add(node)
           # Offset by all file arenas
           ExprId.new(local_id.index + @offsets.last)
+        end
+
+        # Keep source strings alive for slices stored in nodes.
+        def retain_source(source : String) : Nil
+          return if source.empty?
+          @extra_sources << source
         end
 
         # Compatibility shim
@@ -3789,10 +3805,12 @@ end
         PAGE = 1024
         @pages : Array(StaticArray(TypedNode, PAGE))
         @count : Int32
+        @extra_sources : Array(String)
 
         def initialize
           @pages = [] of StaticArray(TypedNode, PAGE)
           @count = 0
+          @extra_sources = [] of String
         end
 
         @[AlwaysInline]
@@ -3818,9 +3836,18 @@ end
         @[AlwaysInline]
         def [](id : ExprId) : TypedNode
           idx = id.index
+          if idx < 0 || idx >= @count
+            raise IndexError.new("PageArena index out of bounds: #{idx} (size #{@count})")
+          end
           page_index = idx // PAGE
           offset = idx % PAGE
           @pages[page_index][offset]
+        end
+
+        # Keep source strings alive for slices stored in nodes.
+        def retain_source(source : String) : Nil
+          return if source.empty?
+          @extra_sources << source
         end
 
         def size
