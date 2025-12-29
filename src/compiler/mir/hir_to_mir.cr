@@ -956,6 +956,25 @@ module Crystal
       src_type = convert_type(src_hir_type)
       dst_type = convert_type(dst_hir_type)
 
+      # Union unwrap: cast union to concrete variant
+      if is_union_type?(src_type) && !is_union_type?(dst_type)
+        if descriptor = @mir_module.get_union_descriptor(src_type)
+          if variant = descriptor.variants.find { |v| v.type_ref == dst_type }
+            unwrap = UnionUnwrap.new(builder.next_id, dst_type, value, variant.type_id, cast.safe)
+            return builder.emit(unwrap)
+          end
+        end
+      end
+
+      # Union wrap: cast concrete value into union variant
+      if !is_union_type?(src_type) && is_union_type?(dst_type)
+        if descriptor = @mir_module.get_union_descriptor(dst_type)
+          if variant = descriptor.variants.find { |v| v.type_ref == src_type }
+            return builder.union_wrap(value, variant.type_id, dst_type)
+          end
+        end
+      end
+
       # No-op cast
       return value if src_type == dst_type
 

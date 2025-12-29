@@ -314,6 +314,7 @@ module Crystal::MIR
     # in predecessor blocks before terminators. Maps (pred_block, value_id) -> loaded_name
     @phi_predecessor_loads : Hash({BlockId, ValueId}, String) = {} of {BlockId, ValueId} => String
     @current_func_blocks : Hash(BlockId, BasicBlock) = {} of BlockId => BasicBlock
+    @current_block_id : BlockId? = nil
 
     # Track phi nodes that have nil incoming values (for union return type handling)
     # Maps phi value_id -> set of blocks that contribute nil
@@ -935,6 +936,7 @@ module Crystal::MIR
       # Emit defined globals
       @module.globals.each do |global|
         llvm_type = @type_mapper.llvm_type(global.type)
+        llvm_type = "ptr" if llvm_type == "void"
         initial = global.initial_value || 0_i64
         mangled_name = @type_mapper.mangle_name(global.name)
         actual_name = mangled_name
@@ -1874,6 +1876,7 @@ module Crystal::MIR
           phi_llvm_type = @type_mapper.llvm_type(phi_type)
           next if phi_llvm_type == "void"
           next unless phi_llvm_type.starts_with?("i") && !phi_llvm_type.includes?(".")
+          next if phi_llvm_type == "i1"
           phi_bits = phi_llvm_type[1..-1].to_i? || 32
 
           inst.incoming.each do |(_, val)|
@@ -2364,6 +2367,7 @@ module Crystal::MIR
     private def emit_block(block : BasicBlock, func : Function)
       emit_raw "#{@block_names[block.id]}:\n"
       @indent = 1
+      @current_block_id = block.id
 
       # LLVM requires all phi nodes to be at the top of the basic block.
       # Emit phi nodes first, then other instructions.
@@ -2410,6 +2414,7 @@ module Crystal::MIR
 
       emit_terminator(block.terminator)
       @indent = 0
+      @current_block_id = nil
     end
 
     # Emit loads from slots for cross-block values used in phi nodes
@@ -3802,6 +3807,44 @@ module Crystal::MIR
       phi_type = @type_mapper.llvm_type(inst.type)
       prepass_type_ref = @value_types[inst.id]?
 
+      incoming_pairs = inst.incoming
+      missing_preds = [] of BlockId
+      if current_block_id = @current_block_id
+        if block = @current_func_blocks[current_block_id]?
+          preds = block.predecessors
+          if preds.any?
+            incoming_map = {} of BlockId => ValueId
+            inst.incoming.each { |(block_id, val)| incoming_map[block_id] = val }
+            incoming_pairs = [] of Tuple(BlockId, ValueId)
+            preds.each do |pred|
+              if val = incoming_map[pred]?
+                incoming_pairs << {pred, val}
+              else
+                missing_preds << pred
+              end
+            end
+          end
+        end
+      end
+
+      default_phi_value = ->(llvm_type : String) do
+        if llvm_type == "ptr"
+          "null"
+        elsif llvm_type == "float" || llvm_type == "double"
+          "0.0"
+        elsif llvm_type.includes?(".union")
+          "zeroinitializer"
+        else
+          "0"
+        end
+      end
+
+      append_missing = ->(entries : Array(String), llvm_type : String) do
+        missing_preds.each do |pred|
+          entries << "[#{default_phi_value.call(llvm_type)}, %#{@block_names[pred]}]"
+        end
+      end
+
       # Enable phi mode to prevent value_ref from emitting loads
       # (phi nodes must be grouped at top of basic block)
       @in_phi_mode = true
@@ -3810,7 +3853,7 @@ module Crystal::MIR
       # Note: prepass_type_ref already retrieved above
       if prepass_type_ref == TypeRef::POINTER && phi_type.includes?(".union")
         # Prepass determined this union phi should be ptr - emit as ptr phi
-        incoming = inst.incoming.map do |(block, val)|
+        incoming = incoming_pairs.map do |(block, val)|
           # Check for predecessor load first (cross-block SSA fix)
           if pred_ref = phi_incoming_ref(block, val, "ptr")
             next "[#{pred_ref}, %#{@block_names[block]}]"
@@ -3836,6 +3879,7 @@ module Crystal::MIR
             end
           end
         end
+        append_missing.call(incoming, "ptr")
         emit "#{name} = phi ptr #{incoming.join(", ")}"
         # @value_types already set by prepass
         @in_phi_mode = false
@@ -3845,9 +3889,10 @@ module Crystal::MIR
       # Void type phi nodes are invalid in LLVM - emit as ptr with null values
       if phi_type == "void"
         # Emit as ptr phi with null values so the register exists for downstream use
-        incoming = inst.incoming.map do |(block, val)|
+        incoming = incoming_pairs.map do |(block, val)|
           "[null, %#{@block_names[block]}]"
         end
+        append_missing.call(incoming, "ptr")
         emit "#{name} = phi ptr #{incoming.join(", ")}"
         @value_types[inst.id] = TypeRef::POINTER
         @in_phi_mode = false
@@ -3862,13 +3907,13 @@ module Crystal::MIR
 
       # Check if i1 phi has type-mismatched incoming values (union, ptr, larger int, float)
       if is_bool_type
-        has_mismatched_incoming = inst.incoming.any? do |(block, val)|
+        has_mismatched_incoming = incoming_pairs.any? do |(block, val)|
           val_type = @value_types[val]?
           val_type_str = val_type ? @type_mapper.llvm_type(val_type) : nil
           val_type_str && val_type_str != "i1" && val_type_str != "void"
         end
         if has_mismatched_incoming
-          incoming = inst.incoming.map do |(block, val)|
+          incoming = incoming_pairs.map do |(block, val)|
             # Check for predecessor load first (cross-block SSA fix) - but only if types match
             pred_ref = phi_incoming_ref(block, val, "i1")
             if pred_ref
@@ -3904,6 +3949,7 @@ module Crystal::MIR
               end
             end
           end
+          append_missing.call(incoming, "i1")
           emit "#{name} = phi i1 #{incoming.join(", ")}"
           @value_types[inst.id] = TypeRef::BOOL
           @in_phi_mode = false
@@ -3916,7 +3962,7 @@ module Crystal::MIR
       # 3) values with no type (forward references to calls)
       if is_int_type
         phi_bits = phi_type[1..-1].to_i? || 32
-        has_mismatched_int_incoming = inst.incoming.any? do |(block, val)|
+        has_mismatched_int_incoming = incoming_pairs.any? do |(block, val)|
           val_type = @value_types[val]?
           # No type = unknown, treat as potentially mismatched for non-emitted values
           if !val_type
@@ -3937,7 +3983,7 @@ module Crystal::MIR
           val_bits != phi_bits
         end
         if has_mismatched_int_incoming
-          incoming = inst.incoming.map do |(block, val)|
+          incoming = incoming_pairs.map do |(block, val)|
             # Check for predecessor load first (cross-block SSA fix)
             if pred_ref = phi_incoming_ref(block, val, phi_type)
               next "[#{pred_ref}, %#{@block_names[block]}]"
@@ -3982,6 +4028,7 @@ module Crystal::MIR
               end
             end
           end
+          append_missing.call(incoming, phi_type)
           emit "#{name} = phi #{phi_type} #{incoming.join(", ")}"
           @value_types[inst.id] = inst.type
           @in_phi_mode = false
@@ -3992,7 +4039,7 @@ module Crystal::MIR
       # Check if ptr phi has incompatible incoming (union, int, float) - use null for them
       # Can't extract/convert in current block for phi, so use null (lossy but compiles)
       if is_ptr_type
-        has_incompatible_incoming = inst.incoming.any? do |(block, val)|
+        has_incompatible_incoming = incoming_pairs.any? do |(block, val)|
           val_type = @value_types[val]?
           next false unless val_type
           val_type_str = @type_mapper.llvm_type(val_type)
@@ -4004,7 +4051,7 @@ module Crystal::MIR
             val_type_str == "void"
         end
         if has_incompatible_incoming
-          incoming = inst.incoming.map do |(block, val)|
+          incoming = incoming_pairs.map do |(block, val)|
             # Check for predecessor load first (cross-block SSA fix)
             if pred_ref = phi_incoming_ref(block, val, "ptr")
               next "[#{pred_ref}, %#{@block_names[block]}]"
@@ -4036,6 +4083,7 @@ module Crystal::MIR
               end
             end
           end
+          append_missing.call(incoming, "ptr")
           emit "#{name} = phi ptr #{incoming.join(", ")}"
           @value_types[inst.id] = TypeRef::POINTER
           @in_phi_mode = false
@@ -4047,7 +4095,7 @@ module Crystal::MIR
       # Unknown types might be forward-referenced ptrs, so emit as ptr phi to be safe
       # This is a MIR type mismatch - handle by emitting as ptr phi with null for union values
       if is_union_type
-        has_ptr_or_unknown_incoming = inst.incoming.any? do |(block, val)|
+        has_ptr_or_unknown_incoming = incoming_pairs.any? do |(block, val)|
           val_type = @value_types[val]?
           const_val = @constant_values[val]?
           val_llvm_type = val_type ? @type_mapper.llvm_type(val_type) : nil
@@ -4062,7 +4110,7 @@ module Crystal::MIR
         if has_ptr_or_unknown_incoming
           # Emit as ptr phi - for union/int values use null (lossy but compiles)
           # This handles MIR bugs where array literal (ptr) and union flow to same phi
-          incoming = inst.incoming.map do |(block, val)|
+          incoming = incoming_pairs.map do |(block, val)|
             # Check for predecessor load first (cross-block SSA fix)
             if pred_ref = phi_incoming_ref(block, val, "ptr")
               next "[#{pred_ref}, %#{@block_names[block]}]"
@@ -4090,6 +4138,7 @@ module Crystal::MIR
               end
             end
           end
+          append_missing.call(incoming, "ptr")
           emit "#{name} = phi ptr #{incoming.join(", ")}"
           @value_types[inst.id] = TypeRef::POINTER
           @in_phi_mode = false
@@ -4099,14 +4148,14 @@ module Crystal::MIR
         # Check if any incoming value is a non-union type (like plain i32) when phi expects union
         # OR if any incoming value is a DIFFERENT union type
         # This happens when MIR doesn't properly wrap values in unions before phi
-        has_non_union_incoming = inst.incoming.any? do |(block, val)|
+        has_non_union_incoming = incoming_pairs.any? do |(block, val)|
           val_type = @value_types[val]?
           val_llvm_type = val_type ? @type_mapper.llvm_type(val_type) : nil
           # Value has a type but it's not a union and not ptr (ptr handled above)
           val_llvm_type && !val_llvm_type.includes?(".union") && val_llvm_type != "ptr"
         end
         # Also check for different union types (e.g., UInt8___Nil.union vs String___Nil.union)
-        has_different_union_incoming = inst.incoming.any? do |(block, val)|
+        has_different_union_incoming = incoming_pairs.any? do |(block, val)|
           val_type = @value_types[val]?
           val_llvm_type = val_type ? @type_mapper.llvm_type(val_type) : nil
           # Value is a union but different from phi type
@@ -4115,7 +4164,7 @@ module Crystal::MIR
         if has_non_union_incoming || has_different_union_incoming
           # Emit union phi with zeroinitializer for non-union or different union values
           # We can't convert between union types in phi instruction, so use zeroinitializer (nil case)
-          incoming = inst.incoming.map do |(block, val)|
+          incoming = incoming_pairs.map do |(block, val)|
             # Check for predecessor load first (cross-block SSA fix)
             if pred_ref = phi_incoming_ref(block, val, phi_type)
               next "[#{pred_ref}, %#{@block_names[block]}]"
@@ -4133,6 +4182,7 @@ module Crystal::MIR
               "[zeroinitializer, %#{@block_names[block]}]"
             end
           end
+          append_missing.call(incoming, phi_type)
           emit "#{name} = phi #{phi_type} #{incoming.join(", ")}"
           @value_types[inst.id] = inst.type
           @in_phi_mode = false
@@ -4140,7 +4190,7 @@ module Crystal::MIR
         end
       end
 
-      incoming = inst.incoming.map do |(block, val)|
+      incoming = incoming_pairs.map do |(block, val)|
         # FIRST: Check if we have a predecessor-loaded value for cross-block SSA fix
         # This handles cases where phi says [%val, %predBlock] but %val is defined
         # in a different block (pass-through situation causing SSA dominance errors)
@@ -4253,6 +4303,7 @@ module Crystal::MIR
           end
         end
       end
+      append_missing.call(incoming, phi_type)
       emit "#{name} = phi #{phi_type} #{incoming.join(", ")}"
       @value_types[inst.id] = inst.type
       @in_phi_mode = false
