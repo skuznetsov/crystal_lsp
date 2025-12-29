@@ -1102,6 +1102,7 @@ r2 = maybe(false)  # => nil
 - Lower inherited class methods via Object fallback in codegen (fixes `String.set_crystal_type_id`) (2026-01-xx).
 - Fix escaped macro controls in macro bodies to avoid false `{% for %}` nesting errors (restores `Object.set_crystal_type_id`) (2026-01-xx).
 - Bump AST cache version for macro parse changes (2026-01-xx).
+- Release build uses `-O2` by default (`CRYSTAL_V2_OPT_LEVEL` override) after `-O3` segfaults during deep yield inlining; root cause TBD (2026-01-xx).
 - Lower inherited instance methods via parent fallback in codegen (fixes `IO::FileDescriptor#puts` resolution) (2025-12-28).
 - Use array element types for `each`/`each_with_index` block params to avoid Array(T)#field fallbacks.
 - Infer `find`/`find_index` return types from element types (nullable) during member access lowering.

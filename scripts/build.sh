@@ -22,9 +22,11 @@ case "$MODE" in
 
   release|r)
     echo "Building in RELEASE mode (optimized)..."
+    OPT_LEVEL="${CRYSTAL_V2_OPT_LEVEL:-2}"
+    echo "Using -O${OPT_LEVEL} (O3 unstable in deep yield inlining)"
     crystal build "$PROJECT_ROOT/src/crystal_v2.cr" \
       -o "$BIN_DIR/crystal_v2" \
-      --release \
+      -O"${OPT_LEVEL}" \
       2>&1
     echo "Done: $BIN_DIR/crystal_v2"
     ;;
