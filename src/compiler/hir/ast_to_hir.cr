@@ -394,7 +394,7 @@ module Crystal::HIR
 
     # Temporary arena switching context for cross-file yield inlining:
     # {caller_arena, callee_arena}
-    @inline_arenas : {CrystalV2::Compiler::Frontend::ArenaLike, CrystalV2::Compiler::Frontend::ArenaLike}? = nil
+    @inline_arenas : Array(CrystalV2::Compiler::Frontend::ArenaLike)? = nil
 
     # While inlining yield-functions, we must preserve caller locals for the block body.
     # Otherwise callee locals (especially `self`) can leak into the caller and break ivar access.
@@ -443,6 +443,8 @@ module Crystal::HIR
 
     # Captures computed for block literals (body_block -> captures).
     @block_captures : Hash(BlockId, Array(CapturedVar)) = {} of BlockId => Array(CapturedVar)
+    # Map block node object ids to the arena they were created in.
+    @block_node_arenas : Hash(UInt64, CrystalV2::Compiler::Frontend::ArenaLike) = {} of UInt64 => CrystalV2::Compiler::Frontend::ArenaLike
 
     # Track declared type names for locals (used to resolve module-typed receivers).
     @current_typeof_local_names : Hash(String, String)?
@@ -508,6 +510,7 @@ module Crystal::HIR
       @current_typeof_local_names = nil
       @top_level_main_defined = false
       @block_captures = {} of BlockId => Array(CapturedVar)
+      @block_node_arenas = {} of UInt64 => CrystalV2::Compiler::Frontend::ArenaLike
       @sources_by_arena = sources_by_arena || {} of CrystalV2::Compiler::Frontend::ArenaLike => String
       @extra_sources_by_arena = {} of CrystalV2::Compiler::Frontend::ArenaLike => Array(String)
       @last_splat_context = nil
@@ -9578,8 +9581,19 @@ module Crystal::HIR
           end
         end
       end
-      node = @arena[expr_id]
-      lower_node(ctx, node)
+      arena = arena_for_expr?(expr_id) || @arena
+      if expr_id.index < 0 || expr_id.index >= arena.size
+        raise "ExprId out of bounds: #{expr_id.index} (arena=#{arena.class}:#{arena.size})"
+      end
+      if arena == @arena
+        node = @arena[expr_id]
+        lower_node(ctx, node)
+      else
+        with_arena(arena) do
+          node = @arena[expr_id]
+          lower_node(ctx, node)
+        end
+      end
     end
 
     # Lower an AST node to HIR
@@ -15443,6 +15457,9 @@ module Crystal::HIR
       end
 
       if block_for_inline || proc_for_inline
+        if block_for_inline
+          @block_node_arenas[block_for_inline.object_id] = @arena
+        end
           if ENV["DEBUG_YIELD_TRACE"]? && (method_name == "char_at" || method_name == "fetch" || method_name == "upto" ||
               base_method_name.includes?("char_at") || base_method_name.includes?("fetch") || base_method_name.includes?("upto") ||
               mangled_method_name.includes?("char_at") || mangled_method_name.includes?("fetch") || mangled_method_name.includes?("upto"))
@@ -18347,7 +18364,14 @@ module Crystal::HIR
       end
 
       old_inline_arenas = @inline_arenas
-      @inline_arenas = {caller_arena, callee_arena}
+      if old_inline_arenas
+        combined = old_inline_arenas.dup
+        combined << caller_arena unless combined.includes?(caller_arena)
+        combined << callee_arena unless combined.includes?(callee_arena)
+        @inline_arenas = combined
+      else
+        @inline_arenas = [caller_arena, callee_arena]
+      end
       @arena = callee_arena
 
       # Isolate callee locals from caller locals, but keep caller locals available for block bodies.
@@ -18603,10 +18627,12 @@ module Crystal::HIR
 
             old_arena = @arena
             begin
-              chosen_arena = popped_arena || @inline_yield_block_arena_stack.last? || old_arena
+              block_arena = @block_node_arenas[block.object_id]?
+              chosen_arena = block_arena || popped_arena || @inline_yield_block_arena_stack.last? || old_arena
               unless block.body.empty?
                 max_index = block.body.max_of(&.index)
                 candidates = [] of CrystalV2::Compiler::Frontend::ArenaLike
+                candidates << block_arena if block_arena
                 candidates << popped_arena if popped_arena
                 if peek = @inline_yield_block_arena_stack.last?
                   candidates << peek unless candidates.includes?(peek)
@@ -19976,6 +20002,7 @@ module Crystal::HIR
       param_types : Array(TypeRef)? = nil
     ) : BlockId
       saved_block = ctx.current_block
+      @block_node_arenas[node.object_id] = @arena
       # Save locals before lowering block body - block-local vars shouldn't leak
       saved_locals = ctx.save_locals
       assigned_vars = collect_assigned_vars(node.body).to_set
@@ -20150,7 +20177,9 @@ module Crystal::HIR
         CrystalV2::Compiler::Frontend::CallNode.new(span, call_member, arg_ids, nil)
       )
 
-      CrystalV2::Compiler::Frontend::BlockNode.new(span, params.empty? ? nil : params, [call_expr])
+      block_node = CrystalV2::Compiler::Frontend::BlockNode.new(span, params.empty? ? nil : params, [call_expr])
+      @block_node_arenas[block_node.object_id] = @arena
+      block_node
     end
 
     private def lower_proc_literal(ctx : LoweringContext, node : CrystalV2::Compiler::Frontend::ProcLiteralNode) : ValueId
