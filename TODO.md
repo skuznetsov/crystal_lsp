@@ -846,6 +846,7 @@ The key insight is: **Don't compete with LLVM, complement it.**
 - Namespace resolution for nested structs/classes in modules
 - Getter/setter monomorphization for generics
 - Stdlib compilation blocked on: typeof in types, generic blocks, module mixins
+- Yield inlining: removed Slice#fetch skip; block missing symbols now 0 in `/tmp/bootstrap_array_full.link.log` (2026-01-xx)
 
 ---
 
@@ -1020,77 +1021,14 @@ r2 = maybe(false)  # => nil
 **Prelude build progress (with stdlib/prelude):**
 - Reaches LLVM IR emission and `opt -O1` successfully; link still fails due to missing runtime/stdlib symbols (expected at this stage).
 - Timing snapshot (release + `--stats --no-llvm-opt --no-llvm-metadata`): parse prelude ~167ms, HIR ~2.0s, MIR ~0.3ms, LLVM ~1.8ms, total ~2.2s; link failure is the current blocker.
-- Linker missing symbols (bootstrap_array full-prelude run 2026-01-05; full list in `/tmp/bootstrap_array_full.link.log`):
-  ```
-  _Atomic_Handle____Pointer_get
-  _Atomic_new_Pointer_Void_
-  _Bool_pointer
-  _Crystal__EventLoop__FileDescriptor_read_IO__FileDescriptor_Slice_UInt8_
-  _Crystal__EventLoop__FileDescriptor_write_IO__FileDescriptor_Slice_UInt8_
-  _Crystal__System__File__Info_new_LibC__Stat
-  _Crystal__System__Process_executable_path
-  _Deque_Int32____Nil_size
-  _Error_initialize
-  _Exception_callstack_
-  _File_open_String
-  _GC_realloc
-  _Hash_LibC__PidT__Int32______Pointer_Pointer
-  _Hash_____Int64_Array_Abbrev_
-  _IO__Seek_current_
-  _IO_read_Slice_UInt8_
-  _Int32_close
-  _Int32_exception_class_
-  _Int32_exception_cleanup_
-  _Int32_exception_object__Pointer_Void_
-  _Int32_exception_type_id_
-  _Int32_first
-  _Int32_reentrant_
-  _Int32_unchecked_
-  _LibC__SizeT_zero
-  _Nil___
-  _Nil_____U
-  _Nil_to_i32
-  _Nil_value
-  _Pointer_Entry_c_signal__Crystal__System__Signal__Handler___null_
-  _Pointer_UInt8_____Crystal__DWARF__LineNumbers__Sequence__FileEntry
-  _Pointer_UInt8_____Int32
-  _Pointer_UInt8_____String
-  _Pointer_UInt8__copy_from_Pointer_UInt8_
-  _Pointer_UInt8__enqueue
-  _Sigset____Int32
-  _Sigset_delete_Int32
-  _Slice_sort_
-  _String_ends_with_
-  _TupleTupleTupleString__String___Nil___String__String____Int32
-  _Tuple_IO__FileDescriptor__IO__FileDescriptor_____Int32
-  _Tuple_ord
-  _UInt8___Pointe_to_i32_
-  _____UInt32___UInt64
-  ___to_s_IO
-  _atomicrmw_Symbol_Pointer_Int32_Int32
-  _c_signal_hash
-  _c_signal_object_id
-  _check_div_argument_Int32
-  _copy_from_Pointer
-  _copy_from_Pointer_Int32
-  _from_io_IO_IO__ByteFormat
-  _hash_Crystal__Hasher
-  _in__Object
-  _inspect_with_backtrace_String__Builder
-  _join_String__Builder
-  _parse_function_names_from_dwarf_Crystal__DWARF__Info
-  _push_Pointer
-  _read_lnct
-  _self____Int32
-  _self_empty_
-  _self_size
-  _self_to_unsafe
-  _st_size
-  ```
+- Linker missing symbols (bootstrap_array full-prelude run 2026-01-xx; 112 entries; full list in `/tmp/missing_symbols_latest.txt`).
+  - ByteFormat decode/from_io resolved (no `_IO__ByteFormat_decode_UInt32_IO`).
 
 **Recent fixes (prelude bootstrap path):**
 - Normalize `flag?` macro arguments (strip leading `:`) + require cache v3; pthread requires now load.
 - Coerce integer args to `i128` in LLVM backend for mismatch widths.
+- Treat module names as `TypeKind::Module`; module-typed params refine to concrete defaults (IO::ByteFormat → SystemEndian), removing `_IO__ByteFormat_decode_UInt32_IO` (2026-01-xx).
+- Fix module class-method deferred lookup to use the module arena (prevents `Index out of bounds` in `find_module_class_def`) (2026-01-xx).
 - Track enum value types for `.new`/`.value` and propagate via assignments/identifiers in HIR lowering.
 - Register MacroIf/MacroLiteral nodes inside nested modules during HIR lowering.
 - Remove `StructNode` handling from macro-parsed class bodies; rely on `ClassNode.is_struct` (2026-01-02).
@@ -1115,9 +1053,36 @@ r2 = maybe(false)  # => nil
 - Expand macro calls for static member access (class/module) during call lowering (fixes macro-only class methods like `IO::Error.from_errno`) (2026-01-07).
 - Run `macro included` during include registration/lowering; register macros + `extend` class methods from included modules (fixes `SystemError`-style class methods) (2026-01-07).
 - Force class-method lowering for module `extend self` methods when called as `Module.method` (fixes `self.*` calls inside class methods) (2026-01-xx).
+- Capture callsite arg types by base+arity to survive `_splat`/`$arity` name shifts (2026-01-xx).
 - Remove `StructNode` from AST + LSP AST cache; structs are `ClassNode.is_struct` (cache version bump) (2025-12-25).
 - Register module instance methods as class methods when `extend self` is present (fixes `Math.min/max`) (2025-12-25).
 - Propagate `extend self` through macro-literal/module branches when registering module methods (2025-12-25).
+
+### Holistic risk scan (2026-01-xx)
+
+- [x] Module macro-for expansion registered during HIR module processing (ByteFormat now emits `self.decode`/`self.encode`) (2026-01-xx).
+- [x] Module class-method registration honors macro-generated defs across `{% for %}` / `{% if %}` branches (ByteFormat canary) (2026-01-xx).
+- [x] Type literal flags survive `LocalRef` copies and module-type literals (avoid losing `T.class` / module dispatch) (2026-01-xx).
+- [ ] Module-typed method resolution should prefer `Module.method` (.) and only fall back to includer lookup when uniquely resolvable (dynamic dispatch still missing).
+- [ ] Module class methods defined by `extend self` in macro bodies must be added to class-method tables consistently.
+
+### Bootstrap Stabilization Plan (prioritized, 2026-01-xx)
+
+1) Call-resolution pipeline unification (highest impact)
+   - [ ] Introduce a CallSignature abstraction (base name, mangled name, arg types, block info).
+   - [ ] Normalize splat/double-splat before overload selection.
+   - [ ] Ensure callsite arg types survive `_splat`/`_double_splat` name mutations.
+   - DoD: missing symbol count in `/tmp/bootstrap_array_full.link.log` drops vs 112 baseline; no `String_first` for `Char.in_set?`.
+
+2) Cache poisoning / namespace resolution hardening
+   - [ ] Include namespace + owner + type params in type/function cache keys.
+   - [ ] Invalidate caches on module reopen/macro reparse.
+   - DoD: repeated hover/definition stable; no “first hover works, second fails” on key paths.
+
+3) Yield inlining arena safety
+   - [ ] Single source of truth for arena ownership during inline.
+   - [ ] Guard inliner against cross-arena AST and fallback to non-inline call.
+   - DoD: no OOB/segfault during prelude builds; guard logs eliminated.
 - Infer class var types from `uninitialized` and typed literals (Array/Hash/NamedTuple) to avoid VOID globals (fixes `Thread@@threads`, `Hasher@@seed`, `Time::Location@@location_cache`) (2025-12-25).
 - Preserve generic class reopenings during monomorphization (fixes `Range#bsearch` defs) (2025-12-26).
 - Resolve bare method calls inside class context to top-level when the class does not define the method (fixes `bsearch_internal`) (2025-12-26).

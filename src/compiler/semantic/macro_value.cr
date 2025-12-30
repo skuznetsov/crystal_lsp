@@ -158,6 +158,26 @@ module CrystalV2
               end
             end
             MacroNilValue.new
+          when "//"
+            if arg = args[0]?
+              if arg.is_a?(MacroNumberValue)
+                if @value.is_a?(Int64) && arg.value.is_a?(Int64)
+                  return MacroNumberValue.new(to_i // arg.to_i)
+                end
+                return MacroNumberValue.new((to_f / arg.to_f).floor)
+              end
+            end
+            MacroNilValue.new
+          when "**"
+            if arg = args[0]?
+              if arg.is_a?(MacroNumberValue)
+                if @value.is_a?(Int64) && arg.value.is_a?(Int64)
+                  return MacroNumberValue.new(to_i ** arg.to_i)
+                end
+                return MacroNumberValue.new(to_f ** arg.to_f)
+              end
+            end
+            MacroNilValue.new
           when ">", ">=", "<", "<=", "==", "!="
             if arg = args[0]?
               if arg.is_a?(MacroNumberValue)

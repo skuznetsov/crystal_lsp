@@ -153,6 +153,28 @@ module CrystalV2
           end
         end
 
+        # Expand a standalone MacroLiteral with a provided variable context.
+        # Returns the expanded text (no AST reparse).
+        def expand_literal(body_id : ExprId, *, variables : Hash(String, MacroValue), owner_type : ClassSymbol? = nil) : String
+          @diagnostics.clear
+          @last_output = nil
+
+          if @depth >= MAX_DEPTH
+            emit_error("Macro recursion depth exceeded (#{MAX_DEPTH})")
+            return ""
+          end
+
+          @depth += 1
+          begin
+            context = Context.new(variables, {} of String => String, owner_type, @depth, @flags, nil)
+            output = evaluate_macro_body(body_id, context)
+            @last_output = output
+            output
+          ensure
+            @depth -= 1
+          end
+        end
+
         private def build_context(
           macro_symbol : MacroSymbol,
           args : Array(ExprId),
@@ -269,6 +291,10 @@ module CrystalV2
 
           # Unwrap MacroExpressionNode
           if node.is_a?(Frontend::MacroExpressionNode)
+            return evaluate_to_macro_value(node.expression, context)
+          end
+
+          if node.is_a?(Frontend::GroupingNode)
             return evaluate_to_macro_value(node.expression, context)
           end
 
@@ -500,6 +526,10 @@ module CrystalV2
           left = evaluate_to_macro_value(node.left, context)
           right = evaluate_to_macro_value(node.right, context)
           op = String.new(node.operator)
+
+          if ENV["DEBUG_MACRO_ASSIGN"]? && (op == "**" || op == "//")
+            STDERR.puts "[MACRO_BIN] op=#{op} left=#{left.class_name} right=#{right.class_name}"
+          end
 
           case op
           when "+"
@@ -976,6 +1006,24 @@ module CrystalV2
             return evaluate_expression(node.expression, context)
           end
 
+          if node.is_a?(Frontend::GroupingNode)
+            return evaluate_expression(node.expression, context)
+          end
+
+          # Handle assignment in macro expressions: {% var = expr %}
+          if node.is_a?(Frontend::AssignNode)
+            target = @arena[node.target]
+            if target.is_a?(Frontend::IdentifierNode)
+              if name = Frontend.node_literal_string(target)
+                context.variables[name] = evaluate_to_macro_value(node.value, context)
+                if ENV["DEBUG_MACRO_ASSIGN"]? && name == "bytesize"
+                  STDERR.puts "[MACRO_ASSIGN] bytesize=#{context.variables[name].to_macro_output}"
+                end
+              end
+            end
+            return ""
+          end
+
           # Complex nodes that benefit from MacroValue evaluation
           if node.is_a?(Frontend::StringInterpolationNode) ||
              node.is_a?(Frontend::BinaryNode) ||
@@ -1018,6 +1066,13 @@ module CrystalV2
                   STDERR.puts "[MACRO_VAR] property type=#{macro_val.class_name} value=#{macro_val.to_macro_output.inspect}"
                 else
                   STDERR.puts "[MACRO_VAR] property missing"
+                end
+              end
+              if ENV["DEBUG_MACRO_ASSIGN"]? && name == "bytesize"
+                if macro_val = context.variables[name]?
+                  STDERR.puts "[MACRO_VAR] bytesize=#{macro_val.to_macro_output}"
+                else
+                  STDERR.puts "[MACRO_VAR] bytesize missing"
                 end
               end
               if macro_val = context.variables[name]?
