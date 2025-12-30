@@ -240,6 +240,15 @@ module Crystal::HIR
     alias AstNode = CrystalV2::Compiler::Frontend::Node
     alias ExprId = CrystalV2::Compiler::Frontend::ExprId
 
+    private struct CallSignature
+      getter base_name : String
+      getter arity : Int32
+      getter has_block : Bool
+
+      def initialize(@base_name : String, @arity : Int32, @has_block : Bool)
+      end
+    end
+
     # Platform-specific LibC type aliases (fallback for unevaluated macro conditionals)
     # On 64-bit systems (aarch64-darwin, x86_64-*):
     # Includes both LibC:: prefixed and bare names for direct use
@@ -332,9 +341,11 @@ module Crystal::HIR
     # Call-site argument types for lazily lowered functions (mangled name -> arg types).
     @pending_arg_types : Hash(String, Array(TypeRef))
     @pending_arg_types_by_arity : Hash(String, Hash(Int32, Array(TypeRef)))
+    @pending_arg_types_by_signature : Hash(CallSignature, Array(TypeRef))
     # Call-site type-literal flags for lazily lowered functions (mangled name -> arg literal flags).
     @pending_arg_type_literals : Hash(String, Array(Bool))
     @pending_arg_type_literals_by_arity : Hash(String, Hash(Int32, Array(Bool)))
+    @pending_arg_type_literals_by_signature : Hash(CallSignature, Array(Bool))
     # Call-site type parameter bindings for lazily lowered functions (mangled name -> map).
     @pending_type_param_maps : Hash(String, Hash(String, String))
     # Captured type parameter bindings for module methods copied into concrete classes.
@@ -497,8 +508,10 @@ module Crystal::HIR
       @lowering_functions = Set(String).new
       @pending_arg_types = {} of String => Array(TypeRef)
       @pending_arg_types_by_arity = {} of String => Hash(Int32, Array(TypeRef))
+      @pending_arg_types_by_signature = {} of CallSignature => Array(TypeRef)
       @pending_arg_type_literals = {} of String => Array(Bool)
       @pending_arg_type_literals_by_arity = {} of String => Hash(Int32, Array(Bool))
+      @pending_arg_type_literals_by_signature = {} of CallSignature => Array(Bool)
       @pending_type_param_maps = {} of String => Hash(String, String)
       @function_type_param_maps = {} of String => Hash(String, String)
       @function_namespace_overrides = {} of String => String
@@ -14330,10 +14343,36 @@ module Crystal::HIR
     # CALLS
     # ═══════════════════════════════════════════════════════════════════════
 
+    private def call_signature_for_base(base_name : String, arity : Int32, has_block : Bool) : CallSignature?
+      return nil if base_name.empty?
+      CallSignature.new(base_name, arity, has_block)
+    end
+
+    private def call_signature_for_call(name : String, arg_count : Int32, has_block : Bool) : CallSignature?
+      base = base_callsite_key(name)
+      call_signature_for_base(base, arg_count, has_block)
+    end
+
+    private def call_signature_for_def(
+      func_def : CrystalV2::Compiler::Frontend::DefNode,
+      name : String,
+      target_name : String
+    ) : CallSignature?
+      base = base_callsite_key(target_name.empty? ? name : target_name)
+      return nil if base.empty?
+      params = func_def.params
+      return nil unless params
+
+      has_block = params.any?(&.is_block)
+      param_count = params.count { |p| !p.is_block && !named_only_separator?(p) }
+      call_signature_for_base(base, param_count, has_block)
+    end
+
     private def remember_callsite_arg_types(
       name : String,
       arg_types : Array(TypeRef),
-      arg_literals : Array(Bool)? = nil
+      arg_literals : Array(Bool)? = nil,
+      has_block : Bool = false
     ) : Nil
       return if name.empty?
       @pending_arg_types[name] = arg_types.dup
@@ -14352,6 +14391,9 @@ module Crystal::HIR
           "name=#{name} types=#{arg_types.map(&.id).join(",")} literals=#{literal_payload}"
         )
       end
+      if signature = call_signature_for_call(name, arg_types.size, has_block)
+        @pending_arg_types_by_signature[signature] = arg_types.dup
+      end
       return unless arg_literals
 
       @pending_arg_type_literals[name] = arg_literals.dup
@@ -14361,6 +14403,9 @@ module Crystal::HIR
         new_map
       end
       by_literal_arity[arg_literals.size] = arg_literals.dup
+      if signature = call_signature_for_call(name, arg_literals.size, has_block)
+        @pending_arg_type_literals_by_signature[signature] = arg_literals.dup
+      end
     end
 
     private def base_callsite_key(name : String) : String
@@ -14393,6 +14438,13 @@ module Crystal::HIR
       candidates.each do |key|
         if types = @pending_arg_types[key]?
           @pending_arg_types.delete(key)
+          base = base_callsite_key(key)
+          if signature = call_signature_for_base(base, types.size, true)
+            @pending_arg_types_by_signature.delete(signature)
+          end
+          if signature = call_signature_for_base(base, types.size, false)
+            @pending_arg_types_by_signature.delete(signature)
+          end
           return types
         end
       end
@@ -14423,6 +14475,13 @@ module Crystal::HIR
       candidates.each do |key|
         if literals = @pending_arg_type_literals[key]?
           @pending_arg_type_literals.delete(key)
+          base = base_callsite_key(key)
+          if signature = call_signature_for_base(base, literals.size, true)
+            @pending_arg_type_literals_by_signature.delete(signature)
+          end
+          if signature = call_signature_for_base(base, literals.size, false)
+            @pending_arg_type_literals_by_signature.delete(signature)
+          end
           return literals
         end
       end
@@ -14460,6 +14519,12 @@ module Crystal::HIR
         by_arity.delete(param_count)
         @pending_arg_types_by_arity.delete(base_key) if by_arity.empty?
         return types
+      end
+
+      if signature = call_signature_for_def(func_def, name, target_name)
+        if types = @pending_arg_types_by_signature.delete(signature)
+          return types
+        end
       end
 
       fallback_key = if has_splat
@@ -14503,6 +14568,12 @@ module Crystal::HIR
         by_arity.delete(param_count)
         @pending_arg_type_literals_by_arity.delete(base_key) if by_arity.empty?
         return literals
+      end
+
+      if signature = call_signature_for_def(func_def, name, target_name)
+        if literals = @pending_arg_type_literals_by_signature.delete(signature)
+          return literals
+        end
       end
 
       fallback_key = if has_splat
@@ -17210,9 +17281,9 @@ module Crystal::HIR
         STDERR.puts "[CALL_TRACE] stage=before_lower_function method=#{method_name} mangled=#{mangled_method_name} primary=#{primary_mangled_name} return=#{return_type.id}"
       end
       # Lazily lower target function bodies (avoid full stdlib lowering).
-      remember_callsite_arg_types(primary_mangled_name, arg_types, arg_literals)
+      remember_callsite_arg_types(primary_mangled_name, arg_types, arg_literals, has_block_call)
       if mangled_method_name != primary_mangled_name
-        remember_callsite_arg_types(mangled_method_name, arg_types, arg_literals)
+        remember_callsite_arg_types(mangled_method_name, arg_types, arg_literals, has_block_call)
       end
       if ENV["DEBUG_CALL_TRACE"]? && method_name == "copy_to"
         STDERR.puts "[CALL_TRACE] stage=after_remember method=#{method_name} mangled=#{mangled_method_name} primary=#{primary_mangled_name}"

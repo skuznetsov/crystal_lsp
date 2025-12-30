@@ -1054,6 +1054,7 @@ r2 = maybe(false)  # => nil
 - Expand macro calls for static member access (class/module) during call lowering (fixes macro-only class methods like `IO::Error.from_errno`) (2026-01-07).
 - Run `macro included` during include registration/lowering; register macros + `extend` class methods from included modules (fixes `SystemError`-style class methods) (2026-01-07).
 - Prefer mangled def names during method resolution when a definition exists (avoid base fallback) (2026-01-xx).
+- Store callsite arg types by CallSignature (base+arity+block) to reduce `$arity`/`_splat` collisions (2026-01-xx).
 - Force class-method lowering for module `extend self` methods when called as `Module.method` (fixes `self.*` calls inside class methods) (2026-01-xx).
 - Capture callsite arg types by base+arity to survive `_splat`/`$arity` name shifts (2026-01-xx).
 - Prefer typed overloads during mangled-prefix lookup in `lower_function_if_needed` to avoid wrong overload selection (2026-01-xx).
