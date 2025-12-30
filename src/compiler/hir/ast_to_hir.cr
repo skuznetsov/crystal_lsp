@@ -14570,16 +14570,66 @@ module Crystal::HIR
           if ENV.has_key?("DEBUG_LOOKUP")
             STDERR.puts "[DEBUG_LOOKUP] Searching for prefix '#{mangled_prefix}' for name '#{name}'"
           end
-          @function_defs.each_key do |key|
-            if key.starts_with?(mangled_prefix)
-              if ENV.has_key?("DEBUG_LOOKUP")
-                STDERR.puts "[DEBUG_LOOKUP]   Found match: '#{key}'"
+          callsite_by_arity = @pending_arg_types_by_arity[base_callsite_key(name)]?
+          best_def : CrystalV2::Compiler::Frontend::DefNode? = nil
+          best_name : String? = nil
+          best_param_count = Int32::MAX
+          best_score = Int32::MIN
+          if callsite_by_arity && !callsite_by_arity.empty?
+            @function_defs.each do |key, def_node|
+              next unless key.starts_with?(mangled_prefix)
+              params = def_node.params
+              next unless params
+
+              param_count = params.count { |p| !p.is_block && !named_only_separator?(p) }
+              has_splat = params.any? { |p| p.is_splat && !named_only_separator?(p) }
+              has_double_splat = params.any? { |p| p.is_double_splat }
+              required = params.count do |p|
+                !p.is_block && !named_only_separator?(p) && p.default_value.nil? && !p.is_splat && !p.is_double_splat
               end
-              func_def = @function_defs[key]
-              arena = @function_def_arenas[key]
-              target_name = key
-              lookup_branch = "mangled_prefix"
-              break
+              block_penalty = params.any?(&.is_block) ? 1 : 0
+
+              callsite_by_arity.each do |arity, call_arg_types|
+                next if call_arg_types.all? { |t| t == TypeRef::VOID }
+                next if arity < required
+                next if arity > param_count && !has_splat && !has_double_splat
+
+                func_context = function_context_from_name(key)
+                next unless params_compatible_with_args?(def_node, call_arg_types, func_context)
+                score = params_match_score(def_node, call_arg_types, func_context)
+                score -= 1 if has_splat || has_double_splat
+                score -= block_penalty
+
+                if param_count < best_param_count || (param_count == best_param_count && score > best_score)
+                  best_def = def_node
+                  best_name = key
+                  best_param_count = param_count
+                  best_score = score
+                end
+              end
+            end
+          end
+
+          if best_def && best_name
+            if ENV.has_key?("DEBUG_LOOKUP")
+              STDERR.puts "[DEBUG_LOOKUP]   Found match: '#{best_name}' (typed)"
+            end
+            func_def = best_def
+            arena = @function_def_arenas[best_name]
+            target_name = best_name
+            lookup_branch = "mangled_prefix_typed"
+          else
+            @function_defs.each_key do |key|
+              if key.starts_with?(mangled_prefix)
+                if ENV.has_key?("DEBUG_LOOKUP")
+                  STDERR.puts "[DEBUG_LOOKUP]   Found match: '#{key}'"
+                end
+                func_def = @function_defs[key]
+                arena = @function_def_arenas[key]
+                target_name = key
+                lookup_branch = "mangled_prefix"
+                break
+              end
             end
           end
           if ENV.has_key?("DEBUG_LOOKUP") && !func_def
