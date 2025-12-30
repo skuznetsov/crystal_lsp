@@ -997,12 +997,10 @@ module Crystal::HIR
       lib_name = String.new(node.name)
 
       if body = node.body
+        # First pass: register lib-local types so extern param/return types resolve correctly.
         body.each do |expr_id|
           body_node = @arena[expr_id]
           case body_node
-          when CrystalV2::Compiler::Frontend::FunNode
-            # Register external function
-            register_extern_fun(lib_name, body_node)
           when CrystalV2::Compiler::Frontend::AliasNode
             # type aliases within lib
             alias_name = String.new(body_node.name)
@@ -1024,6 +1022,16 @@ module Crystal::HIR
             register_class_with_name(body_node, full_struct_name)
             @lib_structs.add(full_struct_name)
           # Annotations, nested libs, etc. - ignored for now
+          end
+        end
+
+        # Second pass: register extern functions after types are available.
+        body.each do |expr_id|
+          body_node = @arena[expr_id]
+          case body_node
+          when CrystalV2::Compiler::Frontend::FunNode
+            # Register external function
+            register_extern_fun(lib_name, body_node)
           end
         end
       end
@@ -5287,6 +5295,9 @@ module Crystal::HIR
     # Register a class with a specific name (for nested classes like Foo::Bar)
     def register_class_with_name(node : CrystalV2::Compiler::Frontend::ClassNode, class_name : String)
       class_name = resolve_class_name_for_definition(class_name)
+      if ENV["DEBUG_LIBC_EXTERN"]? && class_name.ends_with?("DlInfo")
+        STDERR.puts "[DEBUG_LIBC_EXTERN] register_class #{class_name}"
+      end
       if ENV["DEBUG_RECORD_CLASS"]? && class_name.ends_with?("FileEntry")
         STDERR.puts "[DEBUG_RECORD_CLASS] class_name=#{class_name} current=#{@current_class || "(none)"}"
       end
@@ -9057,6 +9068,7 @@ module Crystal::HIR
       return false unless name.matches?(/\A[A-Z][A-Za-z0-9_]*\z/)
       return false if primitive_self_type(name)
       return false if @class_info.has_key?(name)
+      return false if @short_type_index.has_key?(name)
       return false if @module_defs.has_key?(name)
       return false if @type_aliases.has_key?(name)
       return false if LIBC_TYPE_ALIASES.has_key?(name)
@@ -10746,12 +10758,10 @@ module Crystal::HIR
       lib_name = String.new(node.name)
 
       if body = node.body
+        # Pass 1: process annotations and register lib-local types before externs.
         body.each do |expr_id|
           body_node = @arena[expr_id]
           case body_node
-          when CrystalV2::Compiler::Frontend::FunNode
-            # Register external function
-            register_extern_fun(lib_name, body_node)
           when CrystalV2::Compiler::Frontend::AnnotationNode
             # Process annotations within lib (e.g., @[Link])
             lower_annotation(ctx, body_node)
@@ -10777,6 +10787,21 @@ module Crystal::HIR
             register_class_with_name(body_node, full_struct_name)
             lower_class_with_name(body_node, full_struct_name)
             @lib_structs.add(full_struct_name)
+          end
+        end
+
+        # Pass 2: register externs after types are available.
+        body.each do |expr_id|
+          body_node = @arena[expr_id]
+          case body_node
+          when CrystalV2::Compiler::Frontend::FunNode
+            # Register external function
+            register_extern_fun(lib_name, body_node)
+          when CrystalV2::Compiler::Frontend::AnnotationNode,
+               CrystalV2::Compiler::Frontend::AliasNode,
+               CrystalV2::Compiler::Frontend::EnumNode,
+               CrystalV2::Compiler::Frontend::ClassNode
+            # Already handled in pass 1.
           else
             # Other declarations - process recursively
             lower_node(ctx, body_node)
@@ -10812,25 +10837,37 @@ module Crystal::HIR
         return
       end
 
+      old_class = @current_class
+      @current_class = lib_name if lib_name
       # Build parameter types
       param_types = [] of TypeRef
-      if params = node.params
-        params.each do |param|
-          if type_ann = param.type_annotation
-            type_name = String.new(type_ann)
-            param_types << type_ref_for_c_type(type_name)
-          else
-            param_types << TypeRef::POINTER  # Default to pointer for untyped params
+      return_type = TypeRef::VOID
+      begin
+        if params = node.params
+          params.each do |param|
+            if type_ann = param.type_annotation
+              type_name = String.new(type_ann)
+              param_types << type_ref_for_c_type(type_name)
+            else
+              param_types << TypeRef::POINTER  # Default to pointer for untyped params
+            end
           end
         end
+
+        # Return type
+        return_type = if ret = node.return_type
+                        type_ref_for_c_type(String.new(ret))
+                      else
+                        TypeRef::VOID
+                      end
+      ensure
+        @current_class = old_class
       end
 
-      # Return type
-      return_type = if ret = node.return_type
-                      type_ref_for_c_type(String.new(ret))
-                    else
-                      TypeRef::VOID
-                    end
+      if ENV["DEBUG_LIBC_EXTERN"]? && lib_name == "LibC" && fun_name == "dladdr"
+        param_names = param_types.map { |t| get_type_name_from_ref(t) }.join(", ")
+        STDERR.puts "[DEBUG_LIBC_EXTERN] #{lib_name}.#{fun_name} params=[#{param_names}] return=#{get_type_name_from_ref(return_type)}"
+      end
 
       # Register the external function
       @module.add_extern_function(ExternFunction.new(
@@ -10845,9 +10882,29 @@ module Crystal::HIR
 
     # Convert Crystal type notation to C-compatible TypeRef
     private def type_ref_for_c_type(type_name : String) : TypeRef
+      type_name = type_name.strip
+
+      if type_name.ends_with?("*")
+        base_name = type_name
+        star_count = 0
+        while base_name.ends_with?("*")
+          base_name = base_name[0...-1]
+          star_count += 1
+        end
+        base_name = base_name.strip
+        base_ref = type_ref_for_c_type(base_name)
+        pointer_name = get_type_name_from_ref(base_ref)
+        star_count.times { pointer_name = "Pointer(#{pointer_name})" }
+        return type_ref_for_name(pointer_name)
+      end
+
+      if type_name.starts_with?("Pointer(")
+        return type_ref_for_name(type_name)
+      end
+
       case type_name
-      when "Void", "Void*", "Pointer(Void)", "Pointer"
-        TypeRef::POINTER
+      when "Void"
+        TypeRef::VOID
       when "Int8", "SChar"
         TypeRef::INT8
       when "UInt8", "Char", "UChar"
@@ -10872,12 +10929,11 @@ module Crystal::HIR
         TypeRef::BOOL
       when "NoReturn"
         TypeRef::VOID  # NoReturn functions still have void return in LLVM
-      when .ends_with?("*")
-        TypeRef::POINTER
-      when .starts_with?("Pointer(")
+      when "Pointer"
         TypeRef::POINTER
       else
-        TypeRef::POINTER  # Default to pointer for unknown types
+        resolved = type_ref_for_name(type_name)
+        resolved == TypeRef::VOID ? TypeRef::POINTER : resolved
       end
     end
 
@@ -15869,7 +15925,14 @@ module Crystal::HIR
           if extern_func = @module.get_extern_function(class_name_str, method_name)
             # This is a call to an extern C function
             # Lower args and emit extern call with real C name
-            arg_ids = expand_splat_args(ctx, call_args, call_arena)
+            has_splat = call_args.any? do |arg_expr|
+              call_arena[arg_expr].is_a?(CrystalV2::Compiler::Frontend::SplatNode)
+            end
+            arg_ids = if has_splat
+                        expand_splat_args(ctx, call_args, call_arena)
+                      else
+                        expand_extern_args(ctx, call_args, call_arena, extern_func)
+                      end
             return emit_extern_call(ctx, extern_func, arg_ids)
           end
           # Fallback for LibIntrinsics mem* when lib macro branches aren't expanded.
@@ -17204,6 +17267,62 @@ module Crystal::HIR
 
     # Expand splat arguments in a call
     # *array becomes individual elements at compile time (if array is literal)
+    private def out_alloc_type_for_param(param_type : TypeRef) : TypeRef
+      if desc = @module.get_type_descriptor(param_type)
+        if desc.kind == TypeKind::Pointer
+          elem_type = pointer_element_type(desc.name)
+          return elem_type unless elem_type == TypeRef::VOID
+        end
+      end
+      param_type == TypeRef::POINTER ? TypeRef::POINTER : param_type
+    end
+
+    private def lower_out_arg(
+      ctx : LoweringContext,
+      node : CrystalV2::Compiler::Frontend::OutNode,
+      param_type : TypeRef
+    ) : ValueId
+      var_name = String.new(node.identifier)
+      var_id = ctx.lookup_local(var_name)
+      if var_id.nil?
+        alloc_type = out_alloc_type_for_param(param_type)
+        alloc = Allocate.new(ctx.next_id, alloc_type, [] of ValueId, true)
+        ctx.emit(alloc)
+        ctx.register_local(var_name, alloc.id)
+        var_id = alloc.id
+      end
+      ptr = AddressOf.new(ctx.next_id, TypeRef::POINTER, var_id)
+      ctx.emit(ptr)
+      ptr.id
+    end
+
+    private def expand_extern_args(
+      ctx : LoweringContext,
+      arg_exprs : Array(ExprId),
+      call_arena : CrystalV2::Compiler::Frontend::ArenaLike,
+      extern_func : ExternFunction
+    ) : Array(ValueId)
+      result = [] of ValueId
+      param_types = extern_func.param_types
+      old_arena = @arena
+      begin
+        arg_exprs.each_with_index do |arg_expr, idx|
+          @arena = call_arena
+          arg_node = @arena[arg_expr]
+          if arg_node.is_a?(CrystalV2::Compiler::Frontend::OutNode)
+            expected_type = param_types[idx]? || TypeRef::POINTER
+            result << lower_out_arg(ctx, arg_node, expected_type)
+          else
+            result << lower_expr(ctx, arg_expr)
+          end
+        end
+      ensure
+        @arena = old_arena
+      end
+
+      result
+    end
+
     private def expand_splat_args(
       ctx : LoweringContext,
       arg_exprs : Array(ExprId),
