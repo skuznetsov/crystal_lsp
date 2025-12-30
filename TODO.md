@@ -1040,6 +1040,7 @@ r2 = maybe(false)  # => nil
 - Lower inherited class methods via Object fallback in codegen (fixes `String.set_crystal_type_id`) (2026-01-xx).
 - Fix escaped macro controls in macro bodies to avoid false `{% for %}` nesting errors (restores `Object.set_crystal_type_id`) (2026-01-xx).
 - Resolve lib out-struct types via `short_type_index` guard in `type_param_like?` (fixes `DlInfo` resolution; removes `Pointer(UInt8)#dli_*` missing symbols) (2026-01-xx).
+- Normalize union type names using resolved variant names (avoid namespace cache poisoning across contexts) (2026-01-xx).
 - Bump AST cache version for macro parse changes (2026-01-xx).
 - Release build uses `-O2` by default (`CRYSTAL_V2_OPT_LEVEL` override) after `-O3` segfaults during deep yield inlining; root cause TBD (2026-01-xx).
 - Lower inherited instance methods via parent fallback in codegen (fixes `IO::FileDescriptor#puts` resolution) (2025-12-28).

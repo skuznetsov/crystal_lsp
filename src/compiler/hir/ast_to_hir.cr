@@ -21850,11 +21850,7 @@ module Crystal::HIR
       # Resolve type parameters (including nested generics) before cache and namespace resolution.
       if !@type_param_map.empty?
         substituted_name = substitute_type_params_in_type_name(lookup_name)
-        if substituted_name != lookup_name
-          result = type_ref_for_name(substituted_name)
-          @type_cache[lookup_name] = result
-          return result
-        end
+        lookup_name = substituted_name if substituted_name != lookup_name
       end
       if type_param_like?(lookup_name) && !@type_param_map.has_key?(lookup_name)
         return TypeRef::VOID
@@ -21909,7 +21905,6 @@ module Crystal::HIR
       # NOTE: Don't set placeholder here - create_union_type handles its own caching
       if lookup_name.includes?("|")
         result = create_union_type(lookup_name)
-        @type_cache[lookup_name] = result
         return result
       end
 
@@ -22096,21 +22091,31 @@ module Crystal::HIR
 
     # Create a union type from "Type1 | Type2 | Type3" syntax
     private def create_union_type(name : String) : TypeRef
-      # Check cache first to prevent infinite recursion
-      if cached = @type_cache[name]?
-        return cached
-      end
-      # Mark as being processed with placeholder to break cycles
-      @type_cache[name] = TypeRef::VOID
-
       # Parse variant type names (handle both "Type1 | Type2" and "Type1|Type2")
       variant_names = name.split("|").map(&.strip).reject(&.empty?)
       if variant_names.empty?
         return TypeRef::VOID
       end
 
+      resolved_variant_names = variant_names.map do |variant|
+        resolved = variant
+        if !@type_param_map.empty?
+          resolved = substitute_type_params_in_type_name(resolved)
+        end
+        resolved = resolve_type_name_in_context(resolved)
+        resolved
+      end
+      normalized_name = resolved_variant_names.join(" | ")
+
+      # Check cache first to prevent infinite recursion
+      if cached = @type_cache[normalized_name]?
+        return cached
+      end
+      # Mark as being processed with placeholder to break cycles
+      @type_cache[normalized_name] = TypeRef::VOID
+
       # Get TypeRefs for each variant (recursive to handle nested unions)
-      variant_refs = variant_names.map { |vn| type_ref_for_name(vn) }
+      variant_refs = resolved_variant_names.map { |vn| type_ref_for_name(vn) }
 
       # Calculate union layout
       variants = [] of MIR::UnionVariantDescriptor
@@ -22129,7 +22134,7 @@ module Crystal::HIR
         variants << MIR::UnionVariantDescriptor.new(
           type_id: idx,
           type_ref: mir_type_ref,
-          full_name: variant_names[idx],
+          full_name: resolved_variant_names[idx],
           size: vsize,
           alignment: valign,
           field_offsets: nil
@@ -22141,14 +22146,14 @@ module Crystal::HIR
       total_size = payload_offset + max_size
 
       # Create union type and register descriptor
-      type_ref = @module.intern_type(TypeDescriptor.new(TypeKind::Union, name))
+      type_ref = @module.intern_type(TypeDescriptor.new(TypeKind::Union, normalized_name))
 
       # Convert to MIR::TypeRef for the descriptor key
       mir_union_type_ref = hir_to_mir_type_ref(type_ref)
 
       # Create union descriptor
       descriptor = MIR::UnionDescriptor.new(
-        name: name,
+        name: normalized_name,
         variants: variants,
         total_size: total_size,
         alignment: max_align
@@ -22158,7 +22163,7 @@ module Crystal::HIR
       @union_descriptors[mir_union_type_ref] = descriptor
 
       # Update cache with real value (replacing placeholder)
-      @type_cache[name] = type_ref
+      @type_cache[normalized_name] = type_ref
 
       type_ref
     end
