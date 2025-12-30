@@ -598,7 +598,11 @@ module Crystal::MIR
 
         # LLVM intrinsics need proper signatures (not varargs)
         if name.starts_with?("llvm.")
-          decl = emit_llvm_intrinsic_declaration(name)
+          # Normalize old typed pointer format (p0i8) to opaque pointer format (p0) for LLVM 15+
+          normalized_name = name
+            .gsub("p0i8.p0i8", "p0.p0")
+            .gsub("p0i8", "p0")
+          decl = emit_llvm_intrinsic_declaration(normalized_name)
           emit_raw "#{decl}\n" if decl
         else
           # Declare with varargs to accept any arguments
@@ -4919,12 +4923,16 @@ module Crystal::MIR
 
       # Special handling for LLVM intrinsics - need correct argument types
       if mangled_extern_name.starts_with?("llvm.")
-        args, return_type = emit_llvm_intrinsic_call_args(inst, name, mangled_extern_name)
+        # Normalize old typed pointer format (p0i8) to opaque pointer format (p0) for LLVM 15+
+        normalized_intrinsic = mangled_extern_name
+          .gsub("p0i8.p0i8", "p0.p0")  # memcpy/memmove: llvm.memcpy.p0i8.p0i8.i32 → llvm.memcpy.p0.p0.i32
+          .gsub("p0i8", "p0")          # memset: llvm.memset.p0i8.i32 → llvm.memset.p0.i32
+        args, return_type = emit_llvm_intrinsic_call_args(inst, name, normalized_intrinsic)
         if return_type == "void"
-          emit "call void @#{mangled_extern_name}(#{args})"
+          emit "call void @#{normalized_intrinsic}(#{args})"
           @void_values << inst.id
         else
-          emit "#{name} = call #{return_type} @#{mangled_extern_name}(#{args})"
+          emit "#{name} = call #{return_type} @#{normalized_intrinsic}(#{args})"
           actual_type = case return_type
                         when "i1" then TypeRef::BOOL
                         when "i8" then TypeRef::INT8
