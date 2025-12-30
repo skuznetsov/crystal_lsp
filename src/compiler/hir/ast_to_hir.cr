@@ -305,6 +305,8 @@ module Crystal::HIR
     getter class_info : Hash(String, ClassInfo)
     # Module-level class vars (modules don't have ClassInfo entries)
     @module_class_vars : Hash(String, Array(ClassVarInfo))
+    # Track lib struct/union types for field access lowering.
+    @lib_structs : Set(String)
 
     # Initialize parameters for each class (for new() generation)
     @init_params : Hash(String, Array({String, TypeRef}))
@@ -479,6 +481,7 @@ module Crystal::HIR
       @function_base_return_types = {} of String => TypeRef
       @class_info = {} of String => ClassInfo
       @module_class_vars = {} of String => Array(ClassVarInfo)
+      @lib_structs = Set(String).new
       @init_params = {} of String => Array({String, TypeRef})
       @current_class = nil
       @current_namespace_override = nil
@@ -1015,7 +1018,11 @@ module Crystal::HIR
             full_enum_name = "#{lib_name}::#{enum_name}"
             register_enum_with_name(body_node, full_enum_name)
           when CrystalV2::Compiler::Frontend::ClassNode
-            # Struct/union within lib are parsed as ClassNode with flags - skip for now
+            # Struct/union within lib are parsed as ClassNode with flags.
+            struct_name = String.new(body_node.name)
+            full_struct_name = "#{lib_name}::#{struct_name}"
+            register_class_with_name(body_node, full_struct_name)
+            @lib_structs.add(full_struct_name)
           # Annotations, nested libs, etc. - ignored for now
           end
         end
@@ -5504,6 +5511,18 @@ module Crystal::HIR
             ivar_type = type_ref_for_name(String.new(member.type))
             ivars << IVarInfo.new(ivar_name, ivar_type, offset)
             offset += type_size(ivar_type)
+
+          when CrystalV2::Compiler::Frontend::TypeDeclarationNode
+            # Lib struct field declaration: value : Type
+            if is_struct
+              field_name = String.new(member.name)
+              ivar_name = field_name.starts_with?("@") ? field_name : "@#{field_name}"
+              ivar_type = type_ref_for_name(String.new(member.declared_type))
+              unless ivars.any? { |iv| iv.name == ivar_name }
+                ivars << IVarInfo.new(ivar_name, ivar_type, offset)
+                offset += type_size(ivar_type)
+              end
+            end
 
           when CrystalV2::Compiler::Frontend::ClassVarDeclNode
             # Class variable declaration: @@total : Int32 = 0
@@ -10713,7 +10732,12 @@ module Crystal::HIR
             full_enum_name = "#{lib_name}::#{enum_name}"
             register_enum_with_name(body_node, full_enum_name)
           when CrystalV2::Compiler::Frontend::ClassNode
-            # Struct/union within lib are parsed as ClassNode with flags - skip for now.
+            # Struct/union within lib are parsed as ClassNode with flags.
+            struct_name = String.new(body_node.name)
+            full_struct_name = "#{lib_name}::#{struct_name}"
+            register_class_with_name(body_node, full_struct_name)
+            lower_class_with_name(body_node, full_struct_name)
+            @lib_structs.add(full_struct_name)
           else
             # Other declarations - process recursively
             lower_node(ctx, body_node)
@@ -20092,6 +20116,18 @@ module Crystal::HIR
         end
       end
 
+      # Lib struct field access (action.sa_mask) should lower to a direct field get.
+      if info = class_info_for_type(receiver_type)
+        if info.is_struct && @lib_structs.includes?(info.name)
+          if ivar_info = info.ivars.find { |iv| iv.name == member_name || iv.name == "@#{member_name}" }
+            field_get = FieldGet.new(ctx.next_id, ivar_info.type, object_id, member_name, ivar_info.offset)
+            ctx.emit(field_get)
+            ctx.register_type(field_get.id, ivar_info.type)
+            return field_get.id
+          end
+        end
+      end
+
       # Handle nil? intrinsic for union types (T | Nil)
       if member_name == "nil?" && is_union_or_nilable_type?(receiver_type)
         return lower_nil_check_intrinsic(ctx, object_id, receiver_type)
@@ -20800,6 +20836,12 @@ module Crystal::HIR
             field_set = FieldSet.new(ctx.next_id, TypeRef::VOID, object_id, ivar_name, value_id, ivar_info.offset)
             ctx.emit(field_set)
             return field_set.id
+          elsif class_info.is_struct && @lib_structs.includes?(class_name)
+            if ivar_info = class_info.ivars.find { |iv| iv.name == field_name }
+              field_set = FieldSet.new(ctx.next_id, TypeRef::VOID, object_id, field_name, value_id, ivar_info.offset)
+              ctx.emit(field_set)
+              return field_set.id
+            end
           end
         end
 
