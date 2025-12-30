@@ -249,6 +249,8 @@ module Crystal::HIR
       end
     end
 
+    private record CallsiteArgs, types : Array(TypeRef), literals : Array(Bool)?
+
     # Platform-specific LibC type aliases (fallback for unevaluated macro conditionals)
     # On 64-bit systems (aarch64-darwin, x86_64-*):
     # Includes both LibC:: prefixed and bare names for direct use
@@ -340,12 +342,10 @@ module Crystal::HIR
     @lowering_functions : Set(String)
     # Call-site argument types for lazily lowered functions (mangled name -> arg types).
     @pending_arg_types : Hash(String, Array(TypeRef))
-    @pending_arg_types_by_arity : Hash(String, Hash(Int32, Array(TypeRef)))
-    @pending_arg_types_by_signature : Hash(CallSignature, Array(TypeRef))
+    @pending_arg_types_by_arity : Hash(String, Hash(Int32, Array(CallsiteArgs)))
+    @pending_arg_types_by_signature : Hash(CallSignature, Array(CallsiteArgs))
     # Call-site type-literal flags for lazily lowered functions (mangled name -> arg literal flags).
     @pending_arg_type_literals : Hash(String, Array(Bool))
-    @pending_arg_type_literals_by_arity : Hash(String, Hash(Int32, Array(Bool)))
-    @pending_arg_type_literals_by_signature : Hash(CallSignature, Array(Bool))
     # Call-site type parameter bindings for lazily lowered functions (mangled name -> map).
     @pending_type_param_maps : Hash(String, Hash(String, String))
     # Captured type parameter bindings for module methods copied into concrete classes.
@@ -507,11 +507,9 @@ module Crystal::HIR
       @lowered_functions = Set(String).new
       @lowering_functions = Set(String).new
       @pending_arg_types = {} of String => Array(TypeRef)
-      @pending_arg_types_by_arity = {} of String => Hash(Int32, Array(TypeRef))
-      @pending_arg_types_by_signature = {} of CallSignature => Array(TypeRef)
+      @pending_arg_types_by_arity = {} of String => Hash(Int32, Array(CallsiteArgs))
+      @pending_arg_types_by_signature = {} of CallSignature => Array(CallsiteArgs)
       @pending_arg_type_literals = {} of String => Array(Bool)
-      @pending_arg_type_literals_by_arity = {} of String => Hash(Int32, Array(Bool))
-      @pending_arg_type_literals_by_signature = {} of CallSignature => Array(Bool)
       @pending_type_param_maps = {} of String => Hash(String, String)
       @function_type_param_maps = {} of String => Hash(String, String)
       @function_namespace_overrides = {} of String => String
@@ -14419,14 +14417,18 @@ module Crystal::HIR
     ) : Nil
       return if name.empty?
       @pending_arg_types[name] = arg_types.dup
+      @pending_arg_type_literals[name] = arg_literals.dup if arg_literals
       base_key = base_callsite_key(name)
       return if base_key.empty?
       by_arity = @pending_arg_types_by_arity[base_key]? || begin
-        new_map = {} of Int32 => Array(TypeRef)
+        new_map = {} of Int32 => Array(CallsiteArgs)
         @pending_arg_types_by_arity[base_key] = new_map
         new_map
       end
-      by_arity[arg_types.size] = arg_types.dup
+      callsite = CallsiteArgs.new(arg_types.dup, arg_literals ? arg_literals.dup : nil)
+      bucket = by_arity[arg_types.size]? || [] of CallsiteArgs
+      bucket << callsite
+      by_arity[arg_types.size] = bucket
       if DebugHooks::ENABLED && name.includes?("read_bytes")
         literal_payload = arg_literals ? arg_literals.join(",") : "nil"
         debug_hook(
@@ -14435,19 +14437,9 @@ module Crystal::HIR
         )
       end
       if signature = call_signature_for_call(name, arg_types.size, has_block)
-        @pending_arg_types_by_signature[signature] = arg_types.dup
-      end
-      return unless arg_literals
-
-      @pending_arg_type_literals[name] = arg_literals.dup
-      by_literal_arity = @pending_arg_type_literals_by_arity[base_key]? || begin
-        new_map = {} of Int32 => Array(Bool)
-        @pending_arg_type_literals_by_arity[base_key] = new_map
-        new_map
-      end
-      by_literal_arity[arg_literals.size] = arg_literals.dup
-      if signature = call_signature_for_call(name, arg_literals.size, has_block)
-        @pending_arg_type_literals_by_signature[signature] = arg_literals.dup
+        sig_bucket = @pending_arg_types_by_signature[signature]? || [] of CallsiteArgs
+        sig_bucket << callsite
+        @pending_arg_types_by_signature[signature] = sig_bucket
       end
     end
 
@@ -14458,7 +14450,7 @@ module Crystal::HIR
       base
     end
 
-    private def pop_pending_arg_types(name : String, target_name : String) : Array(TypeRef)?
+    private def pop_pending_callsite_args(name : String, target_name : String) : CallsiteArgs?
       candidates = [] of String
       {name, target_name}.each do |key|
         next if key.empty?
@@ -14480,63 +14472,82 @@ module Crystal::HIR
       candidates.uniq!
       candidates.each do |key|
         if types = @pending_arg_types[key]?
+          literals = @pending_arg_type_literals[key]?
           @pending_arg_types.delete(key)
-          base = base_callsite_key(key)
-          if signature = call_signature_for_base(base, types.size, true)
-            @pending_arg_types_by_signature.delete(signature)
-          end
-          if signature = call_signature_for_base(base, types.size, false)
-            @pending_arg_types_by_signature.delete(signature)
-          end
-          return types
-        end
-      end
-
-      nil
-    end
-
-    private def pop_pending_arg_literals(name : String, target_name : String) : Array(Bool)?
-      candidates = [] of String
-      {name, target_name}.each do |key|
-        next if key.empty?
-        candidates << key
-
-        if key.ends_with?("_splat") || key.ends_with?("_double_splat")
-          stripped = key.sub(/_(double_)?splat$/, "")
-          candidates << stripped if stripped != key
-        end
-
-        base = key.split("$", 2)[0]
-        candidates << base if base != key
-        if base.ends_with?("_splat") || base.ends_with?("_double_splat")
-          stripped_base = base.sub(/_(double_)?splat$/, "")
-          candidates << stripped_base if stripped_base != base
-        end
-      end
-
-      candidates.uniq!
-      candidates.each do |key|
-        if literals = @pending_arg_type_literals[key]?
           @pending_arg_type_literals.delete(key)
           base = base_callsite_key(key)
-          if signature = call_signature_for_base(base, literals.size, true)
-            @pending_arg_type_literals_by_signature.delete(signature)
-          end
-          if signature = call_signature_for_base(base, literals.size, false)
-            @pending_arg_type_literals_by_signature.delete(signature)
-          end
-          return literals
+          remove_callsite_from_pending_maps(base, types, literals)
+          return CallsiteArgs.new(types, literals)
         end
       end
 
       nil
     end
 
-    private def pending_arg_types_for_def(
+    private def consume_callsite_args(base_key : String, entry : CallsiteArgs) : Nil
+      remove_callsite_from_pending_maps(base_key, entry.types, entry.literals)
+    end
+
+    private def remove_callsite_from_pending_maps(
+      base_key : String,
+      types : Array(TypeRef),
+      literals : Array(Bool)?
+    ) : Nil
+      return if base_key.empty?
+
+      if by_arity = @pending_arg_types_by_arity[base_key]?
+        if bucket = by_arity[types.size]?
+          idx = bucket.index do |candidate|
+            candidate.types == types && (literals.nil? || candidate.literals == literals)
+          end
+          if idx
+            bucket.delete_at(idx)
+            by_arity.delete(types.size) if bucket.empty?
+            @pending_arg_types_by_arity.delete(base_key) if by_arity.empty?
+          end
+        end
+      end
+
+      {true, false}.each do |has_block|
+        if signature = call_signature_for_base(base_key, types.size, has_block)
+          if sig_bucket = @pending_arg_types_by_signature[signature]?
+            idx = sig_bucket.index do |candidate|
+              candidate.types == types && (literals.nil? || candidate.literals == literals)
+            end
+            if idx
+              sig_bucket.delete_at(idx)
+              @pending_arg_types_by_signature.delete(signature) if sig_bucket.empty?
+            end
+          end
+        end
+      end
+    end
+
+    private def select_best_callsite_args(
+      func_def : CrystalV2::Compiler::Frontend::DefNode,
+      candidates : Array(CallsiteArgs),
+      context : String?
+    ) : CallsiteArgs?
+      best : CallsiteArgs? = nil
+      best_score = Int32::MIN
+      candidates.each do |entry|
+        call_types = entry.types
+        next if call_types.all? { |t| t == TypeRef::VOID }
+        next unless params_compatible_with_args?(func_def, call_types, context)
+        score = params_match_score(func_def, call_types, context)
+        if score > best_score
+          best = entry
+          best_score = score
+        end
+      end
+      best
+    end
+
+    private def pending_callsite_args_for_def(
       func_def : CrystalV2::Compiler::Frontend::DefNode,
       name : String,
       target_name : String
-    ) : Array(TypeRef)?
+    ) : CallsiteArgs?
       base_key = base_callsite_key(target_name.empty? ? name : target_name)
       return nil if base_key.empty?
       by_arity = @pending_arg_types_by_arity[base_key]?
@@ -14558,15 +14569,20 @@ module Crystal::HIR
         required_count += 1 unless param.default_value
       end
 
-      if types = by_arity[param_count]?
-        by_arity.delete(param_count)
-        @pending_arg_types_by_arity.delete(base_key) if by_arity.empty?
-        return types
+      func_context = function_context_from_name(target_name.empty? ? name : target_name)
+      if bucket = by_arity[param_count]?
+        if match = select_best_callsite_args(func_def, bucket, func_context) || bucket.first?
+          consume_callsite_args(base_key, match)
+          return match
+        end
       end
 
       if signature = call_signature_for_def(func_def, name, target_name)
-        if types = @pending_arg_types_by_signature.delete(signature)
-          return types
+        if sig_bucket = @pending_arg_types_by_signature[signature]?
+          if match = select_best_callsite_args(func_def, sig_bucket, func_context) || sig_bucket.first?
+            consume_callsite_args(base_key, match)
+            return match
+          end
         end
       end
 
@@ -14576,58 +14592,11 @@ module Crystal::HIR
                        by_arity.keys.select { |key| key >= required_count && key <= param_count }.max?
                      end
       return nil unless fallback_key
-      types = by_arity.delete(fallback_key)
-      @pending_arg_types_by_arity.delete(base_key) if by_arity.empty?
-      types
-    end
-
-    private def pending_arg_literals_for_def(
-      func_def : CrystalV2::Compiler::Frontend::DefNode,
-      name : String,
-      target_name : String
-    ) : Array(Bool)?
-      base_key = base_callsite_key(target_name.empty? ? name : target_name)
-      return nil if base_key.empty?
-      by_arity = @pending_arg_type_literals_by_arity[base_key]?
-      return nil unless by_arity
-
-      params = func_def.params
-      return nil unless params
-      param_count = 0
-      required_count = 0
-      has_splat = false
-      params.each do |param|
-        next if named_only_separator?(param) || param.is_block || param.is_double_splat
-        if param.is_splat
-          has_splat = true
-          param_count += 1
-          next
-        end
-        param_count += 1
-        required_count += 1 unless param.default_value
-      end
-
-      if literals = by_arity[param_count]?
-        by_arity.delete(param_count)
-        @pending_arg_type_literals_by_arity.delete(base_key) if by_arity.empty?
-        return literals
-      end
-
-      if signature = call_signature_for_def(func_def, name, target_name)
-        if literals = @pending_arg_type_literals_by_signature.delete(signature)
-          return literals
-        end
-      end
-
-      fallback_key = if has_splat
-                       by_arity.keys.select { |key| key >= required_count }.max?
-                     else
-                       by_arity.keys.select { |key| key >= required_count && key <= param_count }.max?
-                     end
-      return nil unless fallback_key
-      literals = by_arity.delete(fallback_key)
-      @pending_arg_type_literals_by_arity.delete(base_key) if by_arity.empty?
-      literals
+      bucket = by_arity[fallback_key]
+      match = select_best_callsite_args(func_def, bucket, func_context) || bucket.first?
+      return nil unless match
+      consume_callsite_args(base_key, match)
+      match
     end
 
     private def generic_owner_info(owner : String) : NamedTuple(base: String, owner: String, args: Array(String), map: Hash(String, String))?
@@ -14828,22 +14797,25 @@ module Crystal::HIR
               end
               block_penalty = params.any?(&.is_block) ? 1 : 0
 
-              callsite_by_arity.each do |arity, call_arg_types|
-                next if call_arg_types.all? { |t| t == TypeRef::VOID }
+              callsite_by_arity.each do |arity, call_entries|
                 next if arity < required
                 next if arity > param_count && !has_splat && !has_double_splat
+                call_entries.each do |entry|
+                  call_arg_types = entry.types
+                  next if call_arg_types.all? { |t| t == TypeRef::VOID }
 
-                func_context = function_context_from_name(key)
-                next unless params_compatible_with_args?(def_node, call_arg_types, func_context)
-                score = params_match_score(def_node, call_arg_types, func_context)
-                score -= 1 if has_splat || has_double_splat
-                score -= block_penalty
+                  func_context = function_context_from_name(key)
+                  next unless params_compatible_with_args?(def_node, call_arg_types, func_context)
+                  score = params_match_score(def_node, call_arg_types, func_context)
+                  score -= 1 if has_splat || has_double_splat
+                  score -= block_penalty
 
-                if param_count < best_param_count || (param_count == best_param_count && score > best_score)
-                  best_def = def_node
-                  best_name = key
-                  best_param_count = param_count
-                  best_score = score
+                  if param_count < best_param_count || (param_count == best_param_count && score > best_score)
+                    best_def = def_node
+                    best_name = key
+                    best_param_count = param_count
+                    best_score = score
+                  end
                 end
               end
             end
@@ -15264,14 +15236,12 @@ module Crystal::HIR
         end
       end
 
-      call_arg_types = pop_pending_arg_types(name, target_name)
-      if call_arg_types.nil? && func_def
-        call_arg_types = pending_arg_types_for_def(func_def, name, target_name)
+      callsite_args = pop_pending_callsite_args(name, target_name)
+      if callsite_args.nil? && func_def
+        callsite_args = pending_callsite_args_for_def(func_def, name, target_name)
       end
-      call_arg_literals = pop_pending_arg_literals(name, target_name)
-      if call_arg_literals.nil? && func_def
-        call_arg_literals = pending_arg_literals_for_def(func_def, name, target_name)
-      end
+      call_arg_types = callsite_args ? callsite_args.types : nil
+      call_arg_literals = callsite_args ? callsite_args.literals : nil
 
       extra_type_params : Hash(String, String)? = nil
       resolved_owner : String? = nil

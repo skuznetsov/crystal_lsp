@@ -1044,6 +1044,7 @@ r2 = maybe(false)  # => nil
 - Normalize tuple literal type args inside generics (`Array({Int32, Int32})` → `Array(Tuple(Int32, Int32))`) to align mangling (2026-01-xx).
 - Prefer allocator base `Class.new` when no explicit overload matches (ignore block-only `new` for no-block calls); ensures `Array(Tuple...).new` is generated (2026-01-xx).
 - Infer bsearch/bsearch_index returns for unannotated methods and prefer arity-specific overloads in member access (fixes `Array(Row)#address` in LineNumbers find) (2026-01-xx).
+- Preserve callsite arg types per signature and consume consistently during lazy lowering (reduces base-name collisions; missing symbols now 96) (2026-01-xx).
 - Bump AST cache version for macro parse changes (2026-01-xx).
 - Release build uses `-O2` by default (`CRYSTAL_V2_OPT_LEVEL` override) after `-O3` segfaults during deep yield inlining; root cause TBD (2026-01-xx).
 - Lower inherited instance methods via parent fallback in codegen (fixes `IO::FileDescriptor#puts` resolution) (2025-12-28).
@@ -1089,11 +1090,11 @@ r2 = maybe(false)  # => nil
 
 ### Bootstrap Stabilization Plan (prioritized, 2026-01-xx)
 
-1) Call-resolution pipeline unification (highest impact)
-   - [ ] Introduce a CallSignature abstraction (base name, mangled name, arg types, block info).
-   - [ ] Normalize splat/double-splat before overload selection.
-   - [ ] Ensure callsite arg types survive `_splat`/`_double_splat` name mutations.
-   - DoD: missing symbol count in `/tmp/bootstrap_array_full.link.log` drops vs 112 baseline; no `String_first` for `Char.in_set?`.
+1) Call-resolution pipeline unification (highest impact) - DONE (2026-01-xx)
+   - [x] Preserve callsite arg types per signature (base+arity+block) and consume consistently.
+   - [x] Normalize splat/double-splat callsite keys before overload selection (base key strip).
+   - [x] Keep multiple callsites per signature to avoid arg-type collisions.
+   - DoD: missing symbol count in `/tmp/bootstrap_array_full.link.log` dropped to 96 (from 112 baseline); no `String_first` for `Char.in_set?` (2026-01-xx).
 
 2) Cache poisoning / namespace resolution hardening
    - [ ] Include namespace + owner + type params in type/function cache keys.
