@@ -1021,7 +1021,7 @@ r2 = maybe(false)  # => nil
 **Prelude build progress (with stdlib/prelude):**
 - Reaches LLVM IR emission and `opt -O1` successfully; link still fails due to missing runtime/stdlib symbols (expected at this stage).
 - Timing snapshot (release + `--stats --no-llvm-opt --no-llvm-metadata`): parse prelude ~167ms, HIR ~2.0s, MIR ~0.3ms, LLVM ~1.8ms, total ~2.2s; link failure is the current blocker.
-- Linker missing symbols (bootstrap_array full-prelude run 2026-01-xx; 112 entries; full list in `/tmp/missing_symbols_latest.txt`).
+- Linker missing symbols (bootstrap_array full-prelude run 2026-01-xx; 104 entries; full list in `/tmp/missing_symbols_latest.txt`).
   - ByteFormat decode/from_io resolved (no `_IO__ByteFormat_decode_UInt32_IO`).
 
 **Recent fixes (prelude bootstrap path):**
@@ -1055,6 +1055,10 @@ r2 = maybe(false)  # => nil
 - Force class-method lowering for module `extend self` methods when called as `Module.method` (fixes `self.*` calls inside class methods) (2026-01-xx).
 - Capture callsite arg types by base+arity to survive `_splat`/`$arity` name shifts (2026-01-xx).
 - Prefer typed overloads during mangled-prefix lookup in `lower_function_if_needed` to avoid wrong overload selection (2026-01-xx).
+- Register and lower `lib` structs/unions as `ClassNode` (enable `LibC::Sigaction.new` and field accessors) (2026-01-xx).
+- Lower lib struct field access (`action.sa_mask`) to direct field get/set (avoid `_LibC__Sigaction__sa_mask`) (2026-01-xx).
+- Treat `TypeDeclarationNode` inside structs as lib field declarations (`field : Type`) (2026-01-xx).
+- Unwrap pointer unions for `value/[]/+=` intrinsics to avoid llc type mismatch in Array(String) buffer stores (2026-01-xx).
 - Remove `StructNode` from AST + LSP AST cache; structs are `ClassNode.is_struct` (cache version bump) (2025-12-25).
 - Register module instance methods as class methods when `extend self` is present (fixes `Math.min/max`) (2025-12-25).
 - Propagate `extend self` through macro-literal/module branches when registering module methods (2025-12-25).
