@@ -21824,6 +21824,15 @@ module Crystal::HIR
       name
     end
 
+    private def normalize_tuple_literal_type_name(name : String) : String
+      trimmed = name.strip
+      return trimmed unless trimmed.starts_with?("{") && trimmed.ends_with?("}")
+
+      inner = trimmed[1, trimmed.size - 2]
+      tuple_args = split_generic_type_args(inner)
+      "Tuple(#{tuple_args.join(", ")})"
+    end
+
     private def type_ref_for_name(name : String) : TypeRef
       # Sanitize malformed type names (extra parens etc)
       name = sanitize_type_name(name)
@@ -21941,7 +21950,8 @@ module Crystal::HIR
         # Substitute each type parameter
         substituted_params = split_generic_type_args(params_str).map do |param|
           param = param.strip
-          @type_param_map[param]? || param
+          param = @type_param_map[param]? || param
+          normalize_tuple_literal_type_name(param)
         end
 
         # Reconstruct with substituted params
