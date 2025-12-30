@@ -2219,6 +2219,32 @@ module Crystal::HIR
       fallback
     end
 
+    private def resolve_arena_for_block(
+      block : CrystalV2::Compiler::Frontend::BlockNode,
+      fallback : CrystalV2::Compiler::Frontend::ArenaLike
+    ) : CrystalV2::Compiler::Frontend::ArenaLike?
+      if cached = @block_node_arenas[block.object_id]?
+        return cached
+      end
+
+      max_index = block.body.empty? ? -1 : block.body.max_of(&.index)
+      candidates = [] of CrystalV2::Compiler::Frontend::ArenaLike
+      candidates << fallback
+      if arenas = @inline_arenas
+        arenas.each { |arena| candidates << arena }
+      end
+      @function_def_arenas.each_value { |arena| candidates << arena }
+
+      candidates.each do |arena|
+        next if max_index >= 0 && max_index >= arena.size
+        next unless span_fits_source?(arena, block.span)
+        @block_node_arenas[block.object_id] = arena
+        return arena
+      end
+
+      nil
+    end
+
     private def with_type_param_map(extra : Hash(String, String), &)
       old_map = @type_param_map
       @type_param_map = old_map.merge(extra)
@@ -19616,8 +19642,11 @@ module Crystal::HIR
         STDERR.puts "[INLINE_CRASH] callee=#{inline_key} caller=#{ctx.function.name} arena=#{callee_arena.size}"
       end
 
-      block_arena = @block_node_arenas[block.object_id]? || caller_arena
-      @block_node_arenas[block.object_id] = block_arena
+      block_arena = resolve_arena_for_block(block, caller_arena)
+      unless block_arena
+        debug_hook("inline.yield.block_arena_missing", "callee=#{inline_key} caller=#{ctx.function.name}")
+        return inline_yield_fallback_call(ctx, inline_key, receiver_id, call_args, block)
+      end
       unless block.body.empty?
         max_index = block.body.max_of(&.index)
         if max_index < 0 || max_index >= block_arena.size
@@ -19647,9 +19676,10 @@ module Crystal::HIR
         combined = old_inline_arenas.dup
         combined << caller_arena unless combined.includes?(caller_arena)
         combined << callee_arena unless combined.includes?(callee_arena)
+        combined << block_arena unless combined.includes?(block_arena)
         @inline_arenas = combined
       else
-        @inline_arenas = [caller_arena, callee_arena]
+        @inline_arenas = [caller_arena, callee_arena, block_arena]
       end
       @arena = callee_arena
 
@@ -19906,7 +19936,7 @@ module Crystal::HIR
 
             old_arena = @arena
             begin
-              block_arena = @block_node_arenas[block.object_id]?
+              block_arena = resolve_arena_for_block(block, old_arena)
               chosen_arena = block_arena || popped_arena || @inline_yield_block_arena_stack.last? || old_arena
               @arena = chosen_arena
               begin

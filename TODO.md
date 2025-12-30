@@ -1103,9 +1103,9 @@ r2 = maybe(false)  # => nil
    - DoD: missing symbol count dropped to 95 in `/private/tmp/bootstrap_array_full.link.log`; LSP stability spot-check pending.
 
 3) Yield inlining arena safety
-   - [ ] Single source of truth for arena ownership during inline.
-   - [ ] Guard inliner against cross-arena AST and fallback to non-inline call.
-   - DoD: no OOB/segfault during prelude builds; guard logs eliminated.
+   - [x] Single source of truth for arena ownership during inline.
+   - [x] Guard inliner against cross-arena AST and fallback to non-inline call.
+   - DoD: `./bin/crystal_v2 examples/bootstrap_array.cr -o /tmp/bootstrap_array_full 2> /private/tmp/bootstrap_array_full.link.log` runs without OOB/segfault; no inline-yield guard logs present (2026-01-xx).
 - Infer class var types from `uninitialized` and typed literals (Array/Hash/NamedTuple) to avoid VOID globals (fixes `Thread@@threads`, `Hasher@@seed`, `Time::Location@@location_cache`) (2025-12-25).
 - Preserve generic class reopenings during monomorphization (fixes `Range#bsearch` defs) (2025-12-26).
 - Resolve bare method calls inside class context to top-level when the class does not define the method (fixes `bsearch_internal`) (2025-12-26).
