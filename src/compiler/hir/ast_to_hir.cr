@@ -7384,6 +7384,45 @@ module Crystal::HIR
       end
     end
 
+    private def unwrap_pointer_union(
+      ctx : LoweringContext,
+      receiver_id : ValueId,
+      receiver_type : TypeRef,
+      value_type : TypeRef? = nil
+    ) : {ValueId, TypeRef}?
+      desc = @module.get_type_descriptor(receiver_type)
+      return nil unless desc && desc.kind == TypeKind::Union
+
+      variants = split_union_type_name(desc.name)
+      best_idx : Int32? = nil
+      best_type : TypeRef? = nil
+
+      variants.each_with_index do |variant, idx|
+        next unless variant.starts_with?("Pointer")
+        variant_type = type_ref_for_name(variant)
+        if value_type
+          elem_type = pointer_element_type(variant)
+          next if elem_type == TypeRef::VOID
+          if elem_type == value_type
+            best_idx = idx
+            best_type = variant_type
+            break
+          end
+        end
+        if best_idx.nil?
+          best_idx = idx
+          best_type = variant_type
+        end
+      end
+
+      return nil unless best_idx && best_type
+
+      unwrap = UnionUnwrap.new(ctx.next_id, best_type, receiver_id, best_idx, false)
+      ctx.emit(unwrap)
+      ctx.register_type(unwrap.id, best_type)
+      {unwrap.id, best_type}
+    end
+
     # Mangle function name with parameter types for overloading.
     #
     # Examples:
@@ -16886,8 +16925,14 @@ module Crystal::HIR
       if receiver_id && (method_name == "value" || method_name == "[]")
         receiver_type = ctx.type_of(receiver_id)
         recv_type_desc = @module.get_type_descriptor(receiver_type)
+        if recv_type_desc && recv_type_desc.kind == TypeKind::Union
+          if unwrapped = unwrap_pointer_union(ctx, receiver_id, receiver_type)
+            receiver_id, receiver_type = unwrapped
+            recv_type_desc = @module.get_type_descriptor(receiver_type)
+          end
+        end
         is_pointer_type = receiver_type == TypeRef::POINTER ||
-                          (recv_type_desc && recv_type_desc.name.starts_with?("Pointer"))
+                          (recv_type_desc && recv_type_desc.kind == TypeKind::Pointer)
         if ENV.has_key?("DEBUG_PTR_VALUE")
           STDERR.puts "[DEBUG_PTR_VALUE] method=#{method_name} receiver_type.id=#{receiver_type.id} desc=#{recv_type_desc.try(&.name)} is_pointer=#{is_pointer_type}"
         end
@@ -16915,8 +16960,16 @@ module Crystal::HIR
       if receiver_id && (method_name == "value=" || method_name == "[]=")
         receiver_type = ctx.type_of(receiver_id)
         recv_type_desc = @module.get_type_descriptor(receiver_type)
+        if recv_type_desc && recv_type_desc.kind == TypeKind::Union
+          if value_type = args.first?
+            if unwrapped = unwrap_pointer_union(ctx, receiver_id, receiver_type, ctx.type_of(value_type))
+              receiver_id, receiver_type = unwrapped
+              recv_type_desc = @module.get_type_descriptor(receiver_type)
+            end
+          end
+        end
         is_pointer_type = receiver_type == TypeRef::POINTER ||
-                          (recv_type_desc && recv_type_desc.name.starts_with?("Pointer"))
+                          (recv_type_desc && recv_type_desc.kind == TypeKind::Pointer)
         if is_pointer_type
           if method_name == "value=" && args.size == 1
             store_node = PointerStore.new(ctx.next_id, TypeRef::VOID, receiver_id, args[0], nil)
@@ -16934,8 +16987,14 @@ module Crystal::HIR
       if receiver_id && (method_name == "+" || method_name == "-") && args.size == 1
         receiver_type = ctx.type_of(receiver_id)
         recv_type_desc = @module.get_type_descriptor(receiver_type)
+        if recv_type_desc && recv_type_desc.kind == TypeKind::Union
+          if unwrapped = unwrap_pointer_union(ctx, receiver_id, receiver_type)
+            receiver_id, receiver_type = unwrapped
+            recv_type_desc = @module.get_type_descriptor(receiver_type)
+          end
+        end
         is_pointer_type = receiver_type == TypeRef::POINTER ||
-                          (recv_type_desc && recv_type_desc.name.starts_with?("Pointer"))
+                          (recv_type_desc && recv_type_desc.kind == TypeKind::Pointer)
         if is_pointer_type
           offset_id = args[0]
           # For subtraction, negate the offset
@@ -20764,9 +20823,14 @@ module Crystal::HIR
         # Check if this is pointer indexing (ptr[i] = val)
         object_type = ctx.type_of(object_id)
         type_desc = @module.get_type_descriptor(object_type)
+        if type_desc && type_desc.kind == TypeKind::Union
+          if unwrapped = unwrap_pointer_union(ctx, object_id, object_type, ctx.type_of(value_id))
+            object_id, object_type = unwrapped
+            type_desc = @module.get_type_descriptor(object_type)
+          end
+        end
         is_pointer_type = object_type == TypeRef::POINTER ||
-                          (type_desc && type_desc.kind == TypeKind::Pointer) ||
-                          (type_desc && type_desc.name.starts_with?("Pointer"))
+                          (type_desc && type_desc.kind == TypeKind::Pointer)
 
         if is_pointer_type && index_ids.size == 1
           # Pointer store: ptr[i] = val -> PointerStore with index
@@ -20815,8 +20879,14 @@ module Crystal::HIR
         type_desc = @module.get_type_descriptor(object_type)
 
         if field_name == "value"
+          if type_desc && type_desc.kind == TypeKind::Union
+            if unwrapped = unwrap_pointer_union(ctx, object_id, object_type, ctx.type_of(value_id))
+              object_id, object_type = unwrapped
+              type_desc = @module.get_type_descriptor(object_type)
+            end
+          end
           is_pointer_type = object_type == TypeRef::POINTER ||
-                            (type_desc && type_desc.name.starts_with?("Pointer"))
+                            (type_desc && type_desc.kind == TypeKind::Pointer)
           if is_pointer_type
             store_node = PointerStore.new(ctx.next_id, TypeRef::VOID, object_id, value_id, nil)
             ctx.emit(store_node)
