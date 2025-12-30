@@ -1067,6 +1067,7 @@ r2 = maybe(false)  # => nil
 - Register module instance methods as class methods when `extend self` is present (fixes `Math.min/max`) (2025-12-25).
 - Propagate `extend self` through macro-literal/module branches when registering module methods (2025-12-25).
 - Parse no-parens calls with multiple args + `do` blocks by treating `do` as an expression boundary (fixes `return bsearch_internal ... do`) (2026-01-xx).
+- Inline yield uses block arena ownership guard; fallback when block body arena mismatches (2026-01-xx).
 
 ### Holistic risk scan (2026-01-xx)
 

@@ -19592,6 +19592,19 @@ module Crystal::HIR
         STDERR.puts "[INLINE_CRASH] callee=#{inline_key} caller=#{ctx.function.name} arena=#{callee_arena.size}"
       end
 
+      block_arena = @block_node_arenas[block.object_id]? || caller_arena
+      @block_node_arenas[block.object_id] = block_arena
+      unless block.body.empty?
+        max_index = block.body.max_of(&.index)
+        if max_index < 0 || max_index >= block_arena.size
+          debug_hook(
+            "inline.yield.block_arena_mismatch",
+            "callee=#{inline_key} max=#{max_index} arena=#{block_arena.size}"
+          )
+          return inline_yield_fallback_call(ctx, inline_key, receiver_id, call_args, block)
+        end
+      end
+
       if func_body = func_def.body
         unless func_body.empty?
           max_index = func_body.max_of(&.index)
@@ -19633,7 +19646,7 @@ module Crystal::HIR
           pushed_override = true
         end
         @inline_yield_block_stack << block
-        @inline_yield_block_arena_stack << caller_arena
+        @inline_yield_block_arena_stack << block_arena
         pushed_block = true
         inline_return = InlineReturnContext.new(ctx.create_block, [] of {BlockId, ValueId}, ctx.function.id)
         @inline_yield_return_stack << inline_return
@@ -19871,26 +19884,6 @@ module Crystal::HIR
             begin
               block_arena = @block_node_arenas[block.object_id]?
               chosen_arena = block_arena || popped_arena || @inline_yield_block_arena_stack.last? || old_arena
-              unless block.body.empty?
-                max_index = block.body.max_of(&.index)
-                candidates = [] of CrystalV2::Compiler::Frontend::ArenaLike
-                candidates << block_arena if block_arena
-                candidates << popped_arena if popped_arena
-                if peek = @inline_yield_block_arena_stack.last?
-                  candidates << peek unless candidates.includes?(peek)
-                end
-                candidates << old_arena unless candidates.includes?(old_arena)
-                if arenas = @inline_arenas
-                  arenas.each do |arena|
-                    candidates << arena unless candidates.includes?(arena)
-                  end
-                end
-                if max_index >= 0
-                  if match = candidates.find { |arena| max_index < arena.size }
-                    chosen_arena = match
-                  end
-                end
-              end
               @arena = chosen_arena
               begin
                 lower_body(ctx, block.body)
