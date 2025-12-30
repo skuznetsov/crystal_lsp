@@ -602,6 +602,9 @@ module Crystal::HIR
       else
         debug_hook_method_register(full_name, "", base_name)
       end
+      if DebugHooks::ENABLED && (full_name.includes?("bsearch") || base_name.ends_with?("#first") || base_name.ends_with?(".first"))
+        debug_hook("method.return", "name=#{full_name} type=#{get_type_name_from_ref(return_type)}")
+      end
     end
 
     # Check if a function exists with given base name (fast O(1) lookup)
@@ -2748,7 +2751,7 @@ module Crystal::HIR
                                 elsif method_name.ends_with?("?")
                                   infer_unannotated_query_return_type(method_name, type_ref_for_name(class_name)) || TypeRef::BOOL
                                 else
-                                  TypeRef::VOID
+                                  infer_unannotated_search_return_type(method_name, type_ref_for_name(class_name)) || TypeRef::VOID
                                 end
 
                   param_types = [] of TypeRef
@@ -2892,7 +2895,7 @@ module Crystal::HIR
                                   elsif method_name.ends_with?("?")
                                     infer_unannotated_query_return_type(method_name, type_ref_for_name(class_name)) || TypeRef::BOOL
                                   else
-                                    TypeRef::VOID
+                                    infer_unannotated_search_return_type(method_name, type_ref_for_name(class_name)) || TypeRef::VOID
                                   end
 
                     param_types = [] of TypeRef
@@ -3154,6 +3157,22 @@ module Crystal::HIR
       else
         nil
       end
+    end
+
+    private def infer_unannotated_search_return_type(method_name : String, self_type : TypeRef) : TypeRef?
+      return nil if self_type == TypeRef::VOID
+      case method_name
+      when "bsearch"
+        if desc = @module.get_type_descriptor(self_type)
+          if elem_name = element_type_for_type_name(desc.name)
+            elem_ref = type_ref_for_name(elem_name)
+            return create_union_type_for_nullable(elem_ref) if elem_ref != TypeRef::VOID
+          end
+        end
+      when "bsearch_index"
+        return create_union_type_for_nullable(TypeRef::INT32)
+      end
+      nil
     end
 
     private def infer_concrete_return_type_from_body(
@@ -5611,6 +5630,7 @@ module Crystal::HIR
             # Try to infer return type from getter-style methods (single ivar access).
             inferred = infer_getter_return_type(member, ivars)
             inferred = infer_concrete_return_type_from_body(member, class_name) if inferred.nil?
+            inferred ||= infer_unannotated_search_return_type(method_name, type_ref_for_name(class_name))
             inferred || TypeRef::VOID
           end
             return_elapsed = return_start ? (Time.monotonic - return_start).total_milliseconds : nil
@@ -20764,6 +20784,9 @@ module Crystal::HIR
                     else
                       resolve_method_call(ctx, object_id, member_name, arg_types)
                     end
+      if entry = lookup_function_def_for_call(base_method_name, args.size, false, arg_types)
+        actual_name = entry[0]
+      end
 
       # Special handling for Tuple#size - return compile-time constant based on type parameters
       if member_name == "size"
@@ -20790,6 +20813,11 @@ module Crystal::HIR
           actual_name = base_method_name
         end
       end
+      if DebugHooks::ENABLED && (member_name == "first" || member_name == "last" || member_name == "address")
+        recv_name = receiver_type == TypeRef::VOID ? "Void" : get_type_name_from_ref(receiver_type)
+        ret_name = return_type == TypeRef::VOID ? "Void" : get_type_name_from_ref(return_type)
+        debug_hook("member.access", "member=#{member_name} recv=#{recv_name} actual=#{actual_name} return=#{ret_name}")
+      end
       if tuple_return = tuple_return_type_for_method(receiver_type, member_name)
         return_type = tuple_return
       end
@@ -20811,6 +20839,11 @@ module Crystal::HIR
           end
         elsif member_name == "find_index"
           return_type = create_union_type_for_nullable(TypeRef::INT32)
+        end
+        if return_type == TypeRef::VOID
+          if inferred = infer_unannotated_search_return_type(member_name, ctx.type_of(object_id))
+            return_type = inferred
+          end
         end
 
         # Methods returning Bool (predicate methods)
