@@ -64,6 +64,26 @@ bar")
     CrystalV2::Compiler::Frontend.node_member(member).try { |m| String.new(m) }.should eq("bar")
   end
 
+  it "parses no-parens call with multiple args and block" do
+    source = <<-CR
+      foo 1, 2 do |value|
+        value
+      end
+    CR
+
+    parser = CrystalV2::Compiler::Frontend::Parser.new(CrystalV2::Compiler::Frontend::Lexer.new(source))
+    program = parser.parse_program
+
+    program.roots.size.should eq(1)
+    arena = program.arena
+    root = arena[program.roots.first]
+
+    root.should be_a(CrystalV2::Compiler::Frontend::CallNode)
+    call = root.as(CrystalV2::Compiler::Frontend::CallNode)
+    call.args.size.should eq(2)
+    call.block.should_not be_nil
+  end
+
   it "parses macro definitions with expression pieces" do
     source = <<-CR
       macro my_macro

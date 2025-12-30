@@ -8024,6 +8024,11 @@ module CrystalV2
             end
             token = current_token
             debug("parse_expression(#{precedence}): postfix loop, token=#{token.kind}")
+            # Treat do..end blocks as a statement boundary during expression parsing.
+            # This allows outer call parsing to consume the block (e.g., foo 1, 2 do ... end).
+            if token.kind == Token::Kind::Do
+              break
+            end
             # Statement boundary guard: if a new '{' starts on a new line (or after ';')
             # and we're not inside delimiters, treat it as the start of a new statement,
             # not as a block attachment to the current expression.
@@ -11990,7 +11995,7 @@ module CrystalV2
         # Check if token is an end token (following original parser logic)
         private def end_token?(token : Token) : Bool
           case token.kind
-          when Token::Kind::RBrace, Token::Kind::RBracket, Token::Kind::RParen, Token::Kind::EOF
+          when Token::Kind::RBrace, Token::Kind::RBracket, Token::Kind::RParen, Token::Kind::EOF, Token::Kind::Do
             return true
           when Token::Kind::End, Token::Kind::Else, Token::Kind::Elsif,
                Token::Kind::When, Token::Kind::Ensure
