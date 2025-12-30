@@ -1476,6 +1476,19 @@ module Crystal::HIR
           end
         end
         "#{base}(#{args.join(", ")})"
+      when CrystalV2::Compiler::Frontend::TupleLiteralNode
+        args = [] of String
+        node.elements.each do |elem|
+          args << (stringify_type_expr(elem) || "Unknown")
+        end
+        "Tuple(#{args.join(", ")})"
+      when CrystalV2::Compiler::Frontend::NamedTupleLiteralNode
+        entries = node.entries.map do |entry|
+          key = String.new(entry.key)
+          value = stringify_type_expr(entry.value) || "Unknown"
+          "#{key}: #{value}"
+        end
+        "NamedTuple(#{entries.join(", ")})"
       when CrystalV2::Compiler::Frontend::IndexNode
         base = stringify_type_expr(node.object)
         return nil unless base
@@ -6417,6 +6430,9 @@ module Crystal::HIR
 
       # Get initialize parameters for this class
       init_params = @init_params[class_name]? || [] of {String, TypeRef}
+      if DebugHooks::ENABLED
+        debug_hook("allocator.generate", "class=#{class_name} init_params=#{init_params.size}")
+      end
 
       # Return type is the class type (semantically)
       # LLVM backend converts to ptr for ABI
@@ -8771,7 +8787,7 @@ module Crystal::HIR
       if info = split_generic_base_and_args(name)
         resolved_base = resolve_type_name_in_context(info[:base])
         resolved_args = split_generic_type_args(info[:args]).map do |arg|
-          resolve_type_name_in_context(arg.strip)
+          normalize_tuple_literal_type_name(resolve_type_name_in_context(arg.strip))
         end.join(", ")
         return resolved_base == info[:base] && resolved_args == info[:args] ? name : "#{resolved_base}(#{resolved_args})"
       end
@@ -9004,7 +9020,9 @@ module Crystal::HIR
 
       if info = split_generic_base_and_args(name)
         args = split_generic_type_args(info[:args])
-        new_args = args.map { |arg| substitute_type_params_in_type_name(arg.strip) }
+        new_args = args.map do |arg|
+          normalize_tuple_literal_type_name(substitute_type_params_in_type_name(arg.strip))
+        end
         return "#{info[:base]}(#{new_args.join(", ")})"
       end
 
@@ -9189,7 +9207,9 @@ module Crystal::HIR
       return {} of String => String unless info
 
       base = info[:base]
-      args = split_generic_type_args(info[:args])
+      args = split_generic_type_args(info[:args]).map do |arg|
+        normalize_tuple_literal_type_name(arg.strip)
+      end
       template = @generic_templates[base]?
       return {} of String => String unless template && template.type_params.size == args.size
 
@@ -12219,7 +12239,8 @@ module Crystal::HIR
         arg_name = resolve_typeof_in_type_string(arg_name)
         arg_name = normalize_typeof_name.call(arg_name)
         arg_name = resolve_type_name_in_context(arg_name)
-        substitute_type_params_in_type_name(arg_name)
+        arg_name = substitute_type_params_in_type_name(arg_name)
+        normalize_tuple_literal_type_name(arg_name)
       end
 
       # Create specialized class name like Array(Int32)
@@ -12251,7 +12272,8 @@ module Crystal::HIR
       if info = split_generic_base_and_args(type_name)
         base_name = resolve_type_alias_chain(info[:base])
         type_args = split_generic_type_args(info[:args]).map do |arg|
-          substitute_type_params_in_type_name(arg)
+          arg = substitute_type_params_in_type_name(arg)
+          normalize_tuple_literal_type_name(arg)
         end
         type_name = "#{base_name}(#{type_args.join(", ")})"
         if base_name != "Proc" && !@monomorphized.includes?(type_name)
@@ -12285,7 +12307,8 @@ module Crystal::HIR
       if info = split_generic_base_and_args(base_name)
         generic_base = resolve_type_alias_chain(info[:base])
         type_args = split_generic_type_args(info[:args]).map do |arg|
-          substitute_type_params_in_type_name(arg)
+          arg = substitute_type_params_in_type_name(arg)
+          normalize_tuple_literal_type_name(arg)
         end
         class_name = "#{generic_base}(#{type_args.join(", ")})"
         class_name = substitute_type_params_in_type_name(class_name)
@@ -14595,7 +14618,9 @@ module Crystal::HIR
       template = @generic_templates[base]?
       return nil unless template
 
-      raw_args = split_generic_type_args(info[:args]).map(&.strip)
+      raw_args = split_generic_type_args(info[:args]).map do |arg|
+        normalize_tuple_literal_type_name(arg.strip)
+      end
       return nil unless raw_args.size == template.type_params.size
 
       substituted_args = raw_args.map { |arg| @type_param_map[arg]? || arg }
@@ -15872,7 +15897,8 @@ module Crystal::HIR
               arg_name = resolve_typeof_in_type_string(arg_name)
               arg_name = normalize_typeof_name.call(arg_name)
               arg_name = resolve_type_name_in_context(arg_name)
-              substitute_type_params_in_type_name(arg_name)
+              arg_name = substitute_type_params_in_type_name(arg_name)
+              normalize_tuple_literal_type_name(arg_name)
             end
 
             # Create specialized class name like Box(Int32)
@@ -15896,7 +15922,8 @@ module Crystal::HIR
               if info = split_generic_base_and_args(type_name)
                 base_name = resolve_type_alias_chain(info[:base])
                 type_args = split_generic_type_args(info[:args]).map do |arg|
-                  substitute_type_params_in_type_name(arg)
+                  arg = substitute_type_params_in_type_name(arg)
+                  normalize_tuple_literal_type_name(arg)
                 end
                 class_name_str = "#{base_name}(#{type_args.join(", ")})"
                 if base_name == "Proc"
@@ -15946,7 +15973,8 @@ module Crystal::HIR
               if info = split_generic_base_and_args(type_name)
                 base_name = resolve_type_alias_chain(info[:base])
                 type_args = split_generic_type_args(info[:args]).map do |arg|
-                  substitute_type_params_in_type_name(arg)
+                  arg = substitute_type_params_in_type_name(arg)
+                  normalize_tuple_literal_type_name(arg)
                 end
                 class_name_str = "#{base_name}(#{type_args.join(", ")})"
                 if base_name == "Proc"
@@ -16537,16 +16565,12 @@ module Crystal::HIR
         end
       end
       if method_name == "new" && full_method_name
-        explicit_new = @function_defs.has_key?(full_method_name)
-        unless explicit_new
-          prefix = "#{full_method_name}$"
-          @function_defs.each_key do |key|
-            if key.starts_with?(prefix)
-              explicit_new = true
-              break
-            end
+        if class_name = full_method_name.split(".", 2).first?
+          if class_info = @class_info[class_name]?
+            generate_allocator(class_name, class_info)
           end
         end
+        explicit_new = !!lookup_function_def_for_call(full_method_name, args.size, has_block_call, arg_types)
         if !explicit_new && @module.has_function?(full_method_name) && !@module.has_function?(mangled_method_name)
           mangled_method_name = full_method_name
           base_method_name = full_method_name
