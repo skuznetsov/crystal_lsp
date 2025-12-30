@@ -1015,38 +1015,181 @@ module Crystal::HIR
         # First pass: register lib-local types so extern param/return types resolve correctly.
         body.each do |expr_id|
           body_node = @arena[expr_id]
-          case body_node
-          when CrystalV2::Compiler::Frontend::AliasNode
-            # type aliases within lib
-            alias_name = String.new(body_node.name)
-            old_class = @current_class
-            @current_class = lib_name
-            target_name = resolve_alias_target(String.new(body_node.value))
-            @current_class = old_class
-            full_alias_name = "#{lib_name}::#{alias_name}"
-            register_type_alias(full_alias_name, target_name)
-          when CrystalV2::Compiler::Frontend::EnumNode
-            # Enums within lib - register with lib prefix
-            enum_name = String.new(body_node.name)
-            full_enum_name = "#{lib_name}::#{enum_name}"
-            register_enum_with_name(body_node, full_enum_name)
-          when CrystalV2::Compiler::Frontend::ClassNode
-            # Struct/union within lib are parsed as ClassNode with flags.
-            struct_name = String.new(body_node.name)
-            full_struct_name = "#{lib_name}::#{struct_name}"
-            register_class_with_name(body_node, full_struct_name)
-            @lib_structs.add(full_struct_name)
-          # Annotations, nested libs, etc. - ignored for now
-          end
+          register_lib_member(body_node, lib_name, :types)
         end
 
         # Second pass: register extern functions after types are available.
         body.each do |expr_id|
           body_node = @arena[expr_id]
-          case body_node
-          when CrystalV2::Compiler::Frontend::FunNode
-            # Register external function
-            register_extern_fun(lib_name, body_node)
+          register_lib_member(body_node, lib_name, :externs)
+        end
+      end
+    end
+
+    private def register_lib_member(node : AstNode, lib_name : String, pass : Symbol)
+      case node
+      when CrystalV2::Compiler::Frontend::AliasNode
+        return unless pass == :types
+        alias_name = String.new(node.name)
+        old_class = @current_class
+        @current_class = lib_name
+        target_name = resolve_alias_target(String.new(node.value))
+        @current_class = old_class
+        full_alias_name = "#{lib_name}::#{alias_name}"
+        register_type_alias(full_alias_name, target_name)
+      when CrystalV2::Compiler::Frontend::EnumNode
+        return unless pass == :types
+        enum_name = String.new(node.name)
+        full_enum_name = "#{lib_name}::#{enum_name}"
+        register_enum_with_name(node, full_enum_name)
+      when CrystalV2::Compiler::Frontend::ClassNode
+        return unless pass == :types
+        struct_name = String.new(node.name)
+        full_struct_name = "#{lib_name}::#{struct_name}"
+        register_class_with_name(node, full_struct_name)
+        @lib_structs.add(full_struct_name)
+      when CrystalV2::Compiler::Frontend::FunNode
+        return unless pass == :externs
+        register_extern_fun(lib_name, node)
+      when CrystalV2::Compiler::Frontend::MacroIfNode
+        process_macro_if_in_lib(node, lib_name, pass)
+      when CrystalV2::Compiler::Frontend::MacroForNode
+        process_macro_for_in_lib(node, lib_name, pass)
+      when CrystalV2::Compiler::Frontend::MacroLiteralNode
+        process_macro_literal_in_lib(node, lib_name, pass)
+      end
+    end
+
+    private def process_macro_if_in_lib(node : CrystalV2::Compiler::Frontend::MacroIfNode, lib_name : String, pass : Symbol)
+      if raw_text = macro_if_raw_text(node)
+        nested_macro_end = raw_text.scan(/\{%\s*end\s*%\}/).size > 1
+        unless nested_macro_end
+          if expanded = expand_flag_macro_text(raw_text)
+            if parsed = parse_macro_literal_lib_body(expanded)
+              program, body = parsed
+              with_arena(program.arena) do
+                body.each do |expr_id|
+                  register_lib_member(@arena[expr_id], lib_name, pass)
+                end
+              end
+              return
+            end
+          end
+        end
+      end
+
+      result = try_evaluate_macro_condition(node.condition)
+      if result == true
+        process_macro_body_in_lib(node.then_body, lib_name, pass)
+      elsif result == false
+        if else_node = node.else_body
+          else_ast = @arena[else_node]
+          case else_ast
+          when CrystalV2::Compiler::Frontend::MacroIfNode
+            process_macro_if_in_lib(else_ast, lib_name, pass)
+          else
+            process_macro_body_in_lib(else_node, lib_name, pass)
+          end
+        end
+      else
+        process_macro_body_in_lib(node.then_body, lib_name, pass)
+        if else_node = node.else_body
+          process_macro_body_in_lib(else_node, lib_name, pass)
+        end
+      end
+    end
+
+    private def process_macro_body_in_lib(body_id : ExprId, lib_name : String, pass : Symbol)
+      body_node = @arena[body_id]
+      case body_node
+      when CrystalV2::Compiler::Frontend::MacroLiteralNode
+        process_macro_literal_in_lib(body_node, lib_name, pass)
+      when CrystalV2::Compiler::Frontend::MacroIfNode
+        process_macro_if_in_lib(body_node, lib_name, pass)
+      when CrystalV2::Compiler::Frontend::MacroForNode
+        process_macro_for_in_lib(body_node, lib_name, pass)
+      else
+        register_lib_member(body_node, lib_name, pass)
+      end
+    end
+
+    private def process_macro_for_in_lib(node : CrystalV2::Compiler::Frontend::MacroForNode, lib_name : String, pass : Symbol)
+      iter_vars = node.iter_vars.map { |name| String.new(name) }
+      return if iter_vars.empty?
+
+      values = macro_for_iterable_values(node.iterable)
+      return unless values
+
+      source = @sources_by_arena[@arena]?
+      program = CrystalV2::Compiler::Frontend::Program.new(@arena, [] of ExprId)
+      expander = CrystalV2::Compiler::Semantic::MacroExpander.new(
+        program,
+        @arena,
+        CrystalV2::Runtime.target_flags,
+        recovery_mode: true,
+        macro_source: source
+      )
+      owner_type = macro_owner_type_for(lib_name)
+
+      expanded = String.build do |io|
+        values.each_with_index do |value, idx|
+          vars = {} of String => CrystalV2::Compiler::Semantic::MacroValue
+          vars[iter_vars[0]] = value
+          if idx_name = iter_vars[1]?
+            vars[idx_name] = CrystalV2::Compiler::Semantic::MacroNumberValue.new(idx.to_i64)
+          end
+          if body_output = expander.expand_literal(node.body, variables: vars, owner_type: owner_type)
+            io << body_output
+            io << "\n"
+          end
+        end
+      end
+
+      sanitized = strip_macro_lines(expanded)
+      if parsed = parse_macro_literal_lib_body(sanitized)
+        program, body = parsed
+        with_arena(program.arena) do
+          body.each do |expr_id|
+            register_lib_member(@arena[expr_id], lib_name, pass)
+          end
+        end
+      end
+    end
+
+    private def process_macro_literal_in_lib(node : CrystalV2::Compiler::Frontend::MacroLiteralNode, lib_name : String, pass : Symbol)
+      if raw_text = macro_literal_raw_text(node)
+        expanded = expand_flag_macro_text(raw_text) || raw_text
+        if parsed = parse_macro_literal_lib_body(expanded)
+          program, body = parsed
+          with_arena(program.arena) do
+            body.each do |expr_id|
+              register_lib_member(@arena[expr_id], lib_name, pass)
+            end
+          end
+          return
+        end
+      end
+
+      texts = macro_literal_active_texts(node)
+      combined = texts.join("\n")
+      if parsed = parse_macro_literal_lib_body(combined)
+        program, body = parsed
+        with_arena(program.arena) do
+          body.each do |expr_id|
+            register_lib_member(@arena[expr_id], lib_name, pass)
+          end
+        end
+        return
+      end
+
+      texts.each do |text|
+        next if text.strip.empty?
+        if parsed = parse_macro_literal_lib_body(text)
+          program, body = parsed
+          with_arena(program.arena) do
+            body.each do |expr_id|
+              register_lib_member(@arena[expr_id], lib_name, pass)
+            end
           end
         end
       end
@@ -8742,7 +8885,8 @@ module Crystal::HIR
         @generic_templates.has_key?(name) ||
         @type_aliases.has_key?(name) ||
         (@enum_info && @enum_info.not_nil!.has_key?(name)) ||
-        @module_defs.has_key?(name)
+        @module_defs.has_key?(name) ||
+        @module.is_lib?(name)
     end
 
     private def constant_name_exists?(name : String) : Bool
@@ -10969,6 +11113,10 @@ module Crystal::HIR
         return_type: return_type,
         varargs: node.varargs
       ))
+
+      if ENV["DEBUG_LIB_REG"]? && lib_name == "LibUnwind" && fun_name == "raise_exception"
+        STDERR.puts "[LIB_REG] extern lib=#{lib_name} fun=#{fun_name} real=#{real_name}"
+      end
     end
 
     # Convert Crystal type notation to C-compatible TypeRef
@@ -11426,6 +11574,28 @@ module Crystal::HIR
       program
     end
 
+    private def parse_macro_literal_lib_body(code : String) : Tuple(CrystalV2::Compiler::Frontend::Program, Array(ExprId))?
+      trimmed = code.strip
+      return nil if trimmed.empty?
+      return nil if trimmed.includes?("{%") || trimmed.includes?("{{")
+
+      wrapped = "lib __MacroContext__\n#{trimmed}\nend\n"
+      lexer = CrystalV2::Compiler::Frontend::Lexer.new(wrapped)
+      parser = CrystalV2::Compiler::Frontend::Parser.new(lexer, recovery_mode: true)
+      program = parser.parse_program
+      return nil if program.roots.empty?
+      @sources_by_arena[program.arena] = wrapped
+
+      lib_node = program.roots.map { |id| program.arena[id] }
+        .find(&.is_a?(CrystalV2::Compiler::Frontend::LibNode))
+      return nil unless lib_node
+
+      body = lib_node.as(CrystalV2::Compiler::Frontend::LibNode).body
+      return nil unless body
+
+      {program, body}
+    end
+
     private def parse_macro_literal_class_body(code : String) : Tuple(CrystalV2::Compiler::Frontend::Program, Array(ExprId))?
       trimmed = code.strip
       return nil if trimmed.empty?
@@ -11663,7 +11833,12 @@ module Crystal::HIR
     end
 
     private def emit_mem_intrinsic(ctx : LoweringContext, method_name : String, arg_ids : Array(ValueId)) : ValueId
-      return emit_extern_call(ctx, ExternFunction.new(method_name, method_name, nil, Array(TypeRef).new, TypeRef::VOID), arg_ids) if arg_ids.size < 4
+      if arg_ids.size < 4
+        if ENV["DEBUG_MEM_INTRINSIC"]?
+          STDERR.puts "[MEM_INTRINSIC] emit method=#{method_name} args=#{arg_ids.size} func=#{ctx.function.name}"
+        end
+        return emit_extern_call(ctx, ExternFunction.new(method_name, method_name, nil, Array(TypeRef).new, TypeRef::VOID), arg_ids)
+      end
 
       len_id = arg_ids[2]
       len_type = ctx.type_of(len_id)
@@ -15827,7 +16002,11 @@ module Crystal::HIR
         elsif obj_node.is_a?(CrystalV2::Compiler::Frontend::ConstantNode)
           name = String.new(obj_node.name)
           if resolve_constant_name_in_context(name)
-            constant_receiver = true
+            if @module.is_lib?(name)
+              class_name_str = name
+            else
+              constant_receiver = true
+            end
           else
             resolved = resolve_class_name_in_context(name)
             resolved = resolve_type_alias_chain(resolved)
@@ -15841,7 +16020,11 @@ module Crystal::HIR
         elsif obj_node.is_a?(CrystalV2::Compiler::Frontend::IdentifierNode)
           name = String.new(obj_node.name)
           if resolve_constant_name_in_context(name)
-            constant_receiver = true
+            if @module.is_lib?(name)
+              class_name_str = name
+            else
+              constant_receiver = true
+            end
           else
             if type_name = lookup_typeof_local_name(name)
               if ENV["DEBUG_TYPE_CLASS"]? && type_name.ends_with?(".class")
@@ -15969,7 +16152,11 @@ module Crystal::HIR
           # Path like Foo::Bar for nested classes/modules
           full_path = resolve_path_string_in_context(collect_path_string(obj_node))
           if constant_name_exists?(full_path)
-            constant_receiver = true
+            if @module.is_lib?(full_path)
+              class_name_str = full_path
+            else
+              constant_receiver = true
+            end
           else
             # Check if this path is a known class
             if @class_info.has_key?(full_path)
@@ -16051,7 +16238,11 @@ module Crystal::HIR
             return expand_macro(ctx, macro_def, macro_arena, call_args, node.named_args, block_expr, macro_key)
           end
           # Check if this is a lib function call (e.g., LibC.puts)
-          if extern_func = @module.get_extern_function(class_name_str, method_name)
+          extern_func = @module.get_extern_function(class_name_str, method_name)
+          if ENV["DEBUG_EXTERN_CALL"]? && class_name_str == "LibUnwind"
+            STDERR.puts "[EXTERN_CALL] lib=#{class_name_str} method=#{method_name} hit=#{!!extern_func}"
+          end
+          if extern_func
             # This is a call to an extern C function
             # Lower args and emit extern call with real C name
             has_splat = call_args.any? do |arg_expr|
@@ -16062,11 +16253,17 @@ module Crystal::HIR
                       else
                         expand_extern_args(ctx, call_args, call_arena, extern_func)
                       end
+            if ENV["DEBUG_MEM_INTRINSIC"]? && class_name_str == "LibIntrinsics"
+              STDERR.puts "[MEM_INTRINSIC] extern method=#{method_name} call_args=#{call_args.size} lowered=#{arg_ids.size}"
+            end
             return emit_extern_call(ctx, extern_func, arg_ids)
           end
           # Fallback for LibIntrinsics mem* when lib macro branches aren't expanded.
           if class_name_str == "LibIntrinsics"
             if method_name == "memcpy" || method_name == "memmove" || method_name == "memset"
+              if ENV["DEBUG_MEM_INTRINSIC"]?
+                STDERR.puts "[MEM_INTRINSIC] call method=#{method_name} args=#{call_args.size} named=#{node.named_args.try(&.size) || 0} arena=#{call_arena.class}:#{call_arena.size}"
+              end
               arg_ids = expand_splat_args(ctx, call_args, call_arena)
               return emit_mem_intrinsic(ctx, method_name, arg_ids)
             end
