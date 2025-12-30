@@ -7566,6 +7566,10 @@ module Crystal::HIR
         debug_hook("method.resolve", "base=#{base_method_name} resolved=#{mangled_name} reason=mangled_exact")
         return mangled_name
       end
+      if @function_defs.has_key?(mangled_name) || @module.has_function?(mangled_name)
+        debug_hook("method.resolve", "base=#{base_method_name} resolved=#{mangled_name} reason=mangled_def")
+        return mangled_name
+      end
 
       if !class_name.empty? && method_name.ends_with?("=")
         if info = @class_info[class_name]?

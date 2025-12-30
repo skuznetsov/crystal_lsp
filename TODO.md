@@ -1053,6 +1053,7 @@ r2 = maybe(false)  # => nil
 - Prefer module namespace over top-level aliases for mixin instance methods; carry module namespace into lazy lowering (fixes `FileDescriptor.system_info` resolving to `Crystal::System::FileDescriptor`) (2026-01-07).
 - Expand macro calls for static member access (class/module) during call lowering (fixes macro-only class methods like `IO::Error.from_errno`) (2026-01-07).
 - Run `macro included` during include registration/lowering; register macros + `extend` class methods from included modules (fixes `SystemError`-style class methods) (2026-01-07).
+- Prefer mangled def names during method resolution when a definition exists (avoid base fallback) (2026-01-xx).
 - Force class-method lowering for module `extend self` methods when called as `Module.method` (fixes `self.*` calls inside class methods) (2026-01-xx).
 - Capture callsite arg types by base+arity to survive `_splat`/`$arity` name shifts (2026-01-xx).
 - Prefer typed overloads during mangled-prefix lookup in `lower_function_if_needed` to avoid wrong overload selection (2026-01-xx).
@@ -1072,6 +1073,13 @@ r2 = maybe(false)  # => nil
 - [x] Type literal flags survive `LocalRef` copies and module-type literals (avoid losing `T.class` / module dispatch) (2026-01-xx).
 - [ ] Module-typed method resolution should prefer `Module.method` (.) and only fall back to includer lookup when uniquely resolvable (dynamic dispatch still missing).
 - [ ] Module class methods defined by `extend self` in macro bodies must be added to class-method tables consistently.
+
+### Holistic findings (2026-01-xx)
+
+- Call-resolution still mixes base/mangled names across HIR lowering and def lookup; missing symbol spikes correlate with fallback-to-base calls.
+- Callsite argument typing uses string keys (`$arity`, `_splat`) that shift during lowering; needs a single CallSignature representation.
+- Cache keys in type/function lookup still elide namespace/owner in some paths; collisions remain a regression risk.
+- Yield inlining is guarded but still touches cross-arena defs; a single ownership source + fallback path is needed.
 
 ### Bootstrap Stabilization Plan (prioritized, 2026-01-xx)
 
