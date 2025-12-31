@@ -43,6 +43,7 @@ module Crystal
     @current_lowering_func_name : String = ""
     @slab_frame_enabled : Bool
     @current_slab_frame : Bool = false
+    @class_children : Hash(String, Array(String))
 
     # Memory strategy (note: we use inline selection, not global assigner)
 
@@ -56,6 +57,11 @@ module Crystal
       @block_map = {} of HIR::BlockId => BlockId
       @pending_phis = [] of Tuple(Phi, HIR::Phi)
       @slab_frame_enabled = slab_frame
+      @class_children = {} of String => Array(String)
+      @hir_module.class_parents.each do |name, parent|
+        next unless parent
+        (@class_children[parent] ||= [] of String) << name
+      end
     end
 
     # ─────────────────────────────────────────────────────────────────────────
@@ -706,6 +712,12 @@ module Crystal
         return builder.extern_call(call.method_name, args, convert_type(call.type))
       end
 
+      if call.virtual
+        if dispatched = lower_virtual_dispatch(call, args)
+          return dispatched
+        end
+      end
+
       # Method name may be mangled as "puts$Int32" or "puts:Int32" etc, so extract base name
       # We use $ as separator (: is not valid in LLVM identifiers)
       # Avoid regex by extracting up to first : or $
@@ -811,6 +823,169 @@ module Crystal
         STDERR.puts "[UNRESOLVED CALL] #{call.method_name} in #{@current_lowering_func_name}"
       end
       builder.extern_call(call.method_name, args, convert_type(call.type))
+    end
+
+    private def lower_virtual_dispatch(call : HIR::Call, args : Array(ValueId)) : ValueId?
+      recv_id = call.receiver
+      return nil unless recv_id
+
+      recv_type = @hir_value_types[recv_id]? || return nil
+      recv_desc = @hir_module.get_type_descriptor(recv_type)
+      return nil unless recv_desc
+
+      method_suffix = extract_method_suffix(call.method_name)
+      return nil unless method_suffix
+
+      candidates = virtual_dispatch_candidates(recv_desc, recv_type, method_suffix)
+      return nil if candidates.empty?
+
+      dispatch_name = "__vdispatch__#{call.method_name}"
+      if existing = @mir_module.get_function(dispatch_name)
+        return @builder.not_nil!.call(existing.id, args, convert_type(call.type))
+      end
+
+      dispatch_func = @mir_module.create_function(dispatch_name, convert_type(call.type))
+      param_values = [] of ValueId
+
+      # Receiver param
+      recv_param_type = convert_type(recv_type)
+      dispatch_func.add_param("recv", recv_param_type)
+      param_values << 0_u32
+
+      # Other params
+      call.args.each_with_index do |arg_id, idx|
+        arg_type = @hir_value_types[arg_id]? || HIR::TypeRef::POINTER
+        dispatch_func.add_param("arg#{idx}", convert_type(arg_type))
+        param_values << (idx + 1).to_u32
+      end
+
+      dispatch_builder = Builder.new(dispatch_func)
+
+      type_id_val = if recv_desc.kind == HIR::TypeKind::Union
+                      dispatch_builder.emit(MIR::UnionTypeIdGet.new(dispatch_builder.next_id, param_values[0]))
+                    else
+                      header_ptr = dispatch_builder.gep(param_values[0], [0_u32], TypeRef::POINTER)
+                      dispatch_builder.load(header_ptr, TypeRef::INT32)
+                    end
+
+      end_block = dispatch_func.create_block
+      phi = nil
+      if dispatch_func.return_type != TypeRef::VOID
+        dispatch_builder.current_block = end_block
+        phi = dispatch_builder.phi(dispatch_func.return_type)
+      end
+
+      default_block = dispatch_func.create_block
+
+      cases = [] of Tuple(Int64, BlockId)
+      candidates.each do |candidate|
+        case_block = dispatch_func.create_block
+        cases << {candidate[:type_id].to_i64, case_block}
+      end
+
+      dispatch_builder.current_block = dispatch_func.entry_block
+      dispatch_func.get_block(dispatch_func.entry_block).terminator = Switch.new(type_id_val, cases, default_block)
+
+      candidates.each_with_index do |candidate, idx|
+        case_block = cases[idx][1]
+        dispatch_builder.current_block = case_block
+
+        cand_args = param_values.dup
+        if recv_desc.kind == HIR::TypeKind::Union
+          unwrap = MIR::UnionUnwrap.new(
+            dispatch_builder.next_id,
+            candidate[:type_ref],
+            param_values[0],
+            candidate[:variant_id].to_i32,
+            false
+          )
+          dispatch_builder.emit(unwrap)
+          cand_args[0] = unwrap.id
+        end
+
+        hir_args_with_receiver = [recv_id] + call.args
+        callee_args = coerce_call_args(dispatch_builder, cand_args, hir_args_with_receiver, candidate[:func])
+        call_val = dispatch_builder.call(candidate[:func].id, callee_args, dispatch_func.return_type)
+
+        if phi
+          phi.add_incoming(case_block, call_val)
+        end
+        dispatch_func.get_block(case_block).terminator = Jump.new(end_block)
+      end
+
+      if phi
+        dispatch_builder.current_block = end_block
+        dispatch_func.get_block(end_block).terminator = Return.new(phi.id)
+      else
+        dispatch_func.get_block(end_block).terminator = Return.new(nil)
+      end
+
+      dispatch_func.get_block(default_block).terminator = Unreachable.new
+
+      @builder.not_nil!.call(dispatch_func.id, args, convert_type(call.type))
+    end
+
+    private def extract_method_suffix(full_name : String) : String?
+      if idx = full_name.index('#')
+        return full_name[(idx + 1)..-1]
+      end
+      nil
+    end
+
+    private def subclasses_for(base : String) : Array(String)
+      result = [] of String
+      queue = @class_children[base]?.dup || [] of String
+      until queue.empty?
+        name = queue.shift
+        next if result.includes?(name)
+        result << name
+        if children = @class_children[name]?
+          children.each { |child| queue << child }
+        end
+      end
+      result
+    end
+
+    private def virtual_dispatch_candidates(
+      recv_desc : HIR::TypeDescriptor,
+      recv_type : HIR::TypeRef,
+      method_suffix : String
+    ) : Array(NamedTuple(type_id: Int32, type_ref: TypeRef, variant_id: Int32, func: Function))
+      candidates = [] of NamedTuple(type_id: Int32, type_ref: TypeRef, variant_id: Int32, func: Function)
+
+      if recv_desc.kind == HIR::TypeKind::Union
+        mir_union_ref = convert_type(recv_type)
+        if union_desc = @mir_module.get_union_descriptor(mir_union_ref)
+          union_desc.variants.each do |variant|
+            if variant.full_name == "Nil"
+              next
+            end
+            if func = @mir_module.get_function("#{variant.full_name}##{method_suffix}")
+              candidates << {
+                type_id: variant.type_id,
+                type_ref: variant.type_ref,
+                variant_id: variant.type_id,
+                func: func
+              }
+            end
+          end
+        end
+      elsif recv_desc.kind == HIR::TypeKind::Class
+        base = recv_desc.name
+        ([base] + subclasses_for(base)).each do |class_name|
+          func_name = "#{class_name}##{method_suffix}"
+          next unless func = @mir_module.get_function(func_name)
+          next unless mir_type = @mir_module.type_registry.get_by_name(class_name)
+          candidates << {
+            type_id: mir_type.id.to_i32,
+            type_ref: TypeRef.new(mir_type.id),
+            variant_id: mir_type.id.to_i32,
+            func: func
+          }
+        end
+      end
+
+      candidates
     end
 
     private def hir_type_name(type_ref : HIR::TypeRef?) : String

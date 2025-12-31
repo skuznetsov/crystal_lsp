@@ -6483,10 +6483,12 @@ module Crystal::MIR
       when Switch
         val = value_ref(term.value)
         default = @block_names[term.default_block]
-        emit "switch i64 #{val}, label %#{default} ["
+        val_type = @value_types[term.value]? || TypeRef::INT64
+        val_llvm_type = @type_mapper.llvm_type(val_type)
+        emit "switch #{val_llvm_type} #{val}, label %#{default} ["
         @indent += 1
         term.cases.each do |(case_val, block)|
-          emit "i64 #{case_val}, label %#{@block_names[block]}"
+          emit "#{val_llvm_type} #{case_val}, label %#{@block_names[block]}"
         end
         @indent -= 1
         emit "]"

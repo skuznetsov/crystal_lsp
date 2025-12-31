@@ -1203,6 +1203,7 @@ module Crystal::HIR
     getter link_libraries : Array(String)
     getter extern_functions : Array(ExternFunction)
     getter method_effects : Hash(String, MethodEffectSummary)
+    getter class_parents : Hash(String, String?)
 
     @next_function_id : FunctionId = 0_u32
     @next_type_id : TypeId = TypeRef::FIRST_USER_TYPE
@@ -1216,6 +1217,11 @@ module Crystal::HIR
       @link_libraries = [] of String
       @extern_functions = [] of ExternFunction
       @method_effects = {} of String => MethodEffectSummary
+      @class_parents = {} of String => String?
+    end
+
+    def register_class_parent(name : String, parent : String?) : Nil
+      @class_parents[name] = parent
     end
 
     def add_method_effect(name : String, summary : MethodEffectSummary) : Nil

@@ -789,6 +789,14 @@ module Crystal::HIR
       def_node.body.nil?
     end
 
+    private def class_has_subclasses?(class_name : String) : Bool
+      @class_info.each_value.any? do |info|
+        parent = info.parent_name
+        next false unless parent
+        parent == class_name || parent.ends_with?("::#{class_name}")
+      end
+    end
+
     # Get class info by name
     def get_class_info(name : String) : ClassInfo?
       @class_info[name]?
@@ -6455,6 +6463,10 @@ module Crystal::HIR
       end
 
       @class_info[class_name] = ClassInfo.new(class_name, type_ref, ivars, class_vars, offset, is_struct, parent_name)
+      if ENV.has_key?("DEBUG_CLASS_PARENTS") && (class_name == "Base" || class_name == "Child")
+        STDERR.puts "[CLASS_PARENT] class=#{class_name} parent=#{parent_name || "nil"}"
+      end
+      @module.register_class_parent(class_name, parent_name)
       if ENV.has_key?("DEBUG_CLASS_INFO") &&
          (class_name == "Crystal::MachO" || class_name == "IO" || class_name.includes?("FileDescriptor"))
         ivar_dump = ivars.map { |iv| "#{iv.name}:#{get_type_name_from_ref(iv.type)}@#{iv.offset}" }.join(", ")
@@ -18203,6 +18215,11 @@ module Crystal::HIR
       if receiver_id
         if type_desc = @module.get_type_descriptor(ctx.type_of(receiver_id))
           call_virtual = type_desc.kind.in?(TypeKind::Union, TypeKind::Module)
+          if !call_virtual && type_desc.kind == TypeKind::Class
+            call_virtual = class_has_subclasses?(type_desc.name) ||
+              abstract_def?(mangled_method_name) ||
+              (mangled_method_name != primary_mangled_name && abstract_def?(primary_mangled_name))
+          end
         end
       end
       if ENV.has_key?("DEBUG_VIRTUAL_CALLS") && receiver_id
@@ -21811,6 +21828,16 @@ module Crystal::HIR
       call_virtual = false
       if type_desc = @module.get_type_descriptor(ctx.type_of(object_id))
         call_virtual = type_desc.kind.in?(TypeKind::Union, TypeKind::Module)
+        if !call_virtual && type_desc.kind == TypeKind::Class
+          abstract_base = base_method_name ? abstract_def?(base_method_name) : false
+          call_virtual = class_has_subclasses?(type_desc.name) || abstract_base
+        end
+      end
+      if ENV.has_key?("DEBUG_VIRTUAL_CALLS") && object_id
+        recv_type = ctx.type_of(object_id)
+        recv_desc = @module.get_type_descriptor(recv_type)
+        recv_name = recv_desc ? "#{recv_desc.name}(#{recv_desc.kind})" : recv_type.id.to_s
+        STDERR.puts "[HIR_VIRTUAL_CALL] method=#{member_name} recv=#{recv_name} virtual=#{call_virtual}"
       end
 
       primary_name = if resolved_method_name
