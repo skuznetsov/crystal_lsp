@@ -2217,10 +2217,14 @@ module Crystal::HIR
         case base
         when "Array", "StaticArray", "Slice", "Deque", "Set", "Indexable", "Enumerable", "Iterator", "Iterable", "Range"
           return args.first?
+        when "Tuple"
+          return args.join(" | ") unless args.empty?
         when "Hash"
           return "Tuple(#{args[0]}, #{args[1]})" if args.size >= 2
         end
       end
+
+      return "Char" if name == "String"
 
       nil
     end
@@ -6553,7 +6557,37 @@ module Crystal::HIR
           when CrystalV2::Compiler::Frontend::IncludeNode
             # Handled above via mixin expansion.
           when CrystalV2::Compiler::Frontend::DefNode
-            lower_method(class_name, class_info, member)
+            method_name = String.new(member.name)
+            is_class_method = if recv = member.receiver
+                                String.new(recv) == "self"
+                              else
+                                false
+                              end
+            base_name = is_class_method ? "#{class_name}.#{method_name}" : "#{class_name}##{method_name}"
+            param_types = [] of TypeRef
+            has_block = false
+            if params = member.params
+              params.each do |param|
+                next if named_only_separator?(param)
+                if param.is_block
+                  has_block = true
+                  next
+                end
+                param_type = if ta = param.type_annotation
+                               type_ref_for_name(String.new(ta))
+                             elsif param.is_double_splat
+                               type_ref_for_name("NamedTuple")
+                             else
+                               TypeRef::VOID
+                             end
+                param_types << param_type
+              end
+            end
+            full_name = function_full_name_for_def(base_name, param_types, member.params, has_block)
+            callsite_args = pending_callsite_args_for_def(member, base_name, full_name)
+            call_arg_types = callsite_args ? callsite_args.types : nil
+            call_arg_literals = callsite_args ? callsite_args.literals : nil
+            lower_method(class_name, class_info, member, call_arg_types, call_arg_literals)
             add_defined_instance_methods_from_expr(class_name, defined_full_names, expr_id)
           when CrystalV2::Compiler::Frontend::GetterNode
             # Generate synthetic getter methods
@@ -9791,7 +9825,8 @@ module Crystal::HIR
 
     private def block_param_types_for_call(
       mangled_method_name : String,
-      base_method_name : String
+      base_method_name : String,
+      receiver_type : TypeRef?
     ) : Array(TypeRef)?
       func_def = @function_defs[mangled_method_name]? || @function_defs[base_method_name]?
       return nil unless func_def
@@ -9822,6 +9857,22 @@ module Crystal::HIR
           param_map = @type_param_map.merge(param_map)
         else
           param_map = @type_param_map.dup
+        end
+      end
+
+      if receiver_type && receiver_type != TypeRef::VOID
+        needs_fallback = param_map.nil? || param_map.empty? ||
+                         input_names.any? { |name| type_param_like?(name) && !param_map.try(&.has_key?(name)) }
+        if needs_fallback
+          if type_desc = @module.get_type_descriptor(receiver_type)
+            if element_name = element_type_for_type_name(type_desc.name)
+              param_map = param_map ? param_map.not_nil!.dup : {} of String => String
+              input_names.each do |name|
+                next unless type_param_like?(name)
+                param_map[name] ||= element_name
+              end
+            end
+          end
         end
       end
 
@@ -17299,7 +17350,7 @@ module Crystal::HIR
           proc_for_inline = blk_node
         end
       elsif block_pass_expr
-        block_param_types = block_param_types_for_call(mangled_method_name, base_method_name)
+        block_param_types = block_param_types_for_call(mangled_method_name, base_method_name, receiver_id ? ctx.type_of(receiver_id) : nil)
         if block_param_types.nil? && method_name == "try" && receiver_id
           block_param_types = [ctx.type_of(receiver_id)]
         end
@@ -17398,7 +17449,7 @@ module Crystal::HIR
       block_id = if block_expr
                    blk_node = @arena[block_expr]
                    if blk_node.is_a?(CrystalV2::Compiler::Frontend::BlockNode)
-                     block_param_types = block_param_types_for_call(mangled_method_name, base_method_name)
+                     block_param_types = block_param_types_for_call(mangled_method_name, base_method_name, receiver_id ? ctx.type_of(receiver_id) : nil)
                      if block_param_types.nil? && method_name == "try" && receiver_id
                        block_param_types = [ctx.type_of(receiver_id)]
                      end
@@ -17412,7 +17463,7 @@ module Crystal::HIR
                      nil
                    end
                  elsif block_pass_expr
-                   block_param_types = block_param_types_for_call(mangled_method_name, base_method_name)
+                   block_param_types = block_param_types_for_call(mangled_method_name, base_method_name, receiver_id ? ctx.type_of(receiver_id) : nil)
                    if block_param_types.nil? && method_name == "try" && receiver_id
                      block_param_types = [ctx.type_of(receiver_id)]
                    end
