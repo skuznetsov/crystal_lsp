@@ -12720,6 +12720,10 @@ module Crystal::HIR
         return lower_type_literal_from_name(ctx, full_path)
       end
 
+      if full_name = resolve_constant_name_in_context(full_path)
+        return emit_constant_get(ctx, full_name)
+      end
+
       # Fallback: treat as constant or module access (for future expansion)
       # For now, just return 0
       lit = Literal.new(ctx.next_id, TypeRef::INT32, 0_i64)
@@ -20882,6 +20886,7 @@ module Crystal::HIR
       elsif obj_node.is_a?(CrystalV2::Compiler::Frontend::PathNode)
         # Path like Crystal::EventLoop for nested module/class method calls
         full_path = collect_path_string(obj_node)
+        is_constant_path = resolve_constant_name_in_context(full_path) != nil
         left_name = nil
         if left_id = obj_node.left
           left_node = @arena[left_id]
@@ -20906,7 +20911,7 @@ module Crystal::HIR
                        nil
                      end
 
-        if left_name && right_name
+        if !is_constant_path && left_name && right_name
           if enum_info = @enum_info
             if enum_info.has_key?(left_name) && right_name[0]?.try(&.uppercase?)
               class_name_str = nil
@@ -20916,7 +20921,7 @@ module Crystal::HIR
           else
             class_name_str = full_path
           end
-        else
+        elsif !is_constant_path
           class_name_str = full_path
         end
       end
