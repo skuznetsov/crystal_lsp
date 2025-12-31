@@ -46,19 +46,37 @@ class LSPTimingProbe
 
     return nil if content_length == 0
 
+    t0 = Time.monotonic
     body = Bytes.new(content_length)
     @output.read_fully(body)
-    JSON.parse(String.new(body))
+    t1 = Time.monotonic
+    str = String.new(body)
+    t2 = Time.monotonic
+    result = JSON.parse(str)
+    t3 = Time.monotonic
+
+    if content_length > 100_000
+      STDERR.puts "  [PROBE] large response: #{content_length} bytes, read=#{(t1-t0).total_milliseconds.round(1)}ms, string=#{(t2-t1).total_milliseconds.round(1)}ms, parse=#{(t3-t2).total_milliseconds.round(1)}ms"
+    end
+
+    result
   end
 
-  def wait_for_response(id : Int32) : JSON::Any?
+  def wait_for_response(id : Int32, debug = false) : JSON::Any?
+    msg_count = 0
     loop do
+      t0 = Time.monotonic
       msg = read_message
+      t1 = Time.monotonic
       return nil unless msg
+      msg_count += 1
 
       # Handle notifications (no id)
       if msg["method"]?
         method = msg["method"].as_s
+        if debug
+          STDERR.puts "  [WAIT] notification ##{msg_count}: #{method} (#{(t1-t0).total_milliseconds.round(1)}ms)"
+        end
         # Respond to server requests
         if msg["id"]?
           send_message({"jsonrpc" => "2.0", "id" => msg["id"], "result" => nil})
@@ -68,6 +86,9 @@ class LSPTimingProbe
 
       # Check if this is our response
       if msg["id"]? && msg["id"].as_i == id
+        if debug
+          STDERR.puts "  [WAIT] response ##{msg_count} for id=#{id} (#{(t1-t0).total_milliseconds.round(1)}ms)"
+        end
         return msg["result"]?
       end
     end
@@ -157,7 +178,7 @@ class LSPTimingProbe
           "textDocument" => {"uri" => file_uri}
         }
       })
-      result = wait_for_response(@next_id)
+      result = wait_for_response(@next_id, debug: true)
       @next_id += 1
       result
     end

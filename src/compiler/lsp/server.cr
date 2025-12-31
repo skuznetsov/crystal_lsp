@@ -1482,21 +1482,31 @@ module CrystalV2
 
         # Handle initialize request
         private def handle_initialize(id : JSON::Any, params : JSON::Any?)
+          t0 = Time.monotonic
           capabilities = ServerCapabilities.new # Use default capabilities with all features enabled
           result = InitializeResult.new(capabilities: capabilities)
+          t1 = Time.monotonic
 
           # Extract project root from initialize params
           if params
             if root_uri = params["rootUri"]?.try(&.as_s?)
               @project_root = uri_to_path(root_uri)
               debug("Project root: #{@project_root}")
+              t2 = Time.monotonic
               try_load_project_cache
+              t3 = Time.monotonic
               start_background_project_index
+              t4 = Time.monotonic
+              STDERR.puts "[INIT] caps=#{(t1-t0).total_milliseconds.round(1)}ms cache=#{(t3-t2).total_milliseconds.round(1)}ms bg_index=#{(t4-t3).total_milliseconds.round(1)}ms" if ENV["LSP_DEBUG"]?
             elsif root_path = params["rootPath"]?.try(&.as_s?)
               @project_root = root_path
               debug("Project root (from rootPath): #{@project_root}")
+              t2 = Time.monotonic
               try_load_project_cache
+              t3 = Time.monotonic
               start_background_project_index
+              t4 = Time.monotonic
+              STDERR.puts "[INIT] caps=#{(t1-t0).total_milliseconds.round(1)}ms cache=#{(t3-t2).total_milliseconds.round(1)}ms bg_index=#{(t4-t3).total_milliseconds.round(1)}ms" if ENV["LSP_DEBUG"]?
             end
           end
 
@@ -1769,7 +1779,15 @@ module CrystalV2
             end
 
             infer_ms = 0.0
-            if should_infer
+
+            # Fast path: use cached types if available (skip expensive type inference)
+            have_cached_types = path && @cached_expr_types[path]? && !@cached_expr_types[path].empty?
+            if have_cached_types && should_infer
+              debug("Using cached types for #{path}, skipping type inference")
+              type_context = build_type_context_from_cache(path.not_nil!)
+              infer_ms = 0.0
+              debug("Loaded #{type_context.try(&.expression_types.size) || 0} cached expression types")
+            elsif should_infer
               debug("Starting type inference")
               infer_start = Time.monotonic
               engine = analyzer.infer_types(result.identifier_symbols)
@@ -2371,6 +2389,7 @@ module CrystalV2
         end
 
         # Background indexing of project files to populate the project cache.
+        # Uses fast-path (parse + symbols only, no type inference) for speed.
         private def start_background_project_index
           return unless root = @project_root
           return unless @config.project_cache
@@ -2381,15 +2400,25 @@ module CrystalV2
             begin
               paths = Dir.glob(File.join(root, "src", "**", "*.cr"))
               indexed = 0
+              batch_count = 0
 
               paths.each do |path|
                 next if @project.files.has_key?(path)
                 begin
                   source = File.read(path)
-                  @project.update_file(path, source, 0)
-                  indexed += 1
+                  # Use fast-path: parse + symbols only, no type inference
+                  if @project.index_file_fast(path, source)
+                    indexed += 1
+                  end
                 rescue ex
                   debug("Background index failed for #{path}: #{ex.message}")
+                end
+
+                # Yield to other fibers every 10 files to prevent blocking
+                batch_count += 1
+                if batch_count >= 10
+                  Fiber.yield
+                  batch_count = 0
                 end
               end
 
@@ -4296,6 +4325,21 @@ module CrystalV2
           nil
         end
 
+        # Build a TypeContext from cached expression types (skip inference)
+        private def build_type_context_from_cache(path : String) : Semantic::TypeContext?
+          expr_types = @cached_expr_types[path]?
+          return nil unless expr_types && !expr_types.empty?
+
+          context = Semantic::TypeContext.new
+          expr_types.each do |expr_idx, type_str|
+            # Create a PrimitiveType placeholder for the cached type string
+            ptype = Semantic::PrimitiveType.new(type_str)
+            expr_id = Frontend::ExprId.new(expr_idx)
+            context.set_type(expr_id, ptype)
+          end
+          context
+        end
+
         # Resolve type name for an identifier string
         private def resolve_type_name_for_identifier(doc_state : DocumentState, ident : String) : String?
           if symbol_table = doc_state.symbol_table
@@ -5072,18 +5116,24 @@ module CrystalV2
             doc_state.path
           )
 
-          elapsed_ms = (Time.monotonic - start_time).total_milliseconds
+          collect_ms = (Time.monotonic - start_time).total_milliseconds
 
           # Cache the result
           @semantic_token_cache[uri] = {version, tokens}
 
-          if ENV["LSP_DEBUG"]? || @config.debug_log_path
+          # Serialize to JSON
+          json_start = Time.monotonic
+          json = tokens.to_json
+          json_ms = (Time.monotonic - json_start).total_milliseconds
+
+          if ENV["LSP_DEBUG"]? || @config.debug_log_path || ENV["LSP_PROFILE_TOKENS"]?
             sample = semantic_token_sample(tokens)
-            debug("Semantic tokens count=#{tokens.data.size // 5} uri=#{uri} sample=#{sample} took=#{elapsed_ms.round(1)}ms")
+            debug("Semantic tokens count=#{tokens.data.size // 5} uri=#{uri} sample=#{sample} collect=#{collect_ms.round(1)}ms json=#{json_ms.round(1)}ms")
+            STDERR.puts "[PROFILE] handle_semantic_tokens: collect=#{collect_ms.round(1)}ms json=#{json_ms.round(1)}ms total=#{(collect_ms + json_ms).round(1)}ms" if ENV["LSP_PROFILE_TOKENS"]?
           else
-            debug("Generated semantic tokens in #{elapsed_ms.round(1)}ms")
+            debug("Generated semantic tokens in #{collect_ms.round(1)}ms")
           end
-          send_response(id, tokens.to_json)
+          send_response(id, json)
         end
 
         # Handle textDocument/prepareCallHierarchy request
@@ -8981,6 +9031,9 @@ module CrystalV2
           symbol_table : Semantic::SymbolTable? = nil,
           target_path : String? = nil,
         ) : SemanticTokens
+          profile = ENV["LSP_PROFILE_TOKENS"]?
+          t0 = Time.monotonic
+
           raw_tokens = [] of RawToken
           context = SemanticTokenContext.new(
             program,
@@ -8992,21 +9045,46 @@ module CrystalV2
             target_path
           )
 
+          t1 = Time.monotonic
+
           # Collect tokens from all root nodes (AST-driven semantics)
+          roots_processed = 0
+          roots_skipped = 0
           program.roots.each do |root_id|
-            next if target_path && !context.expr_in_target_file?(root_id)
+            if target_path && !context.expr_in_target_file?(root_id)
+              roots_skipped += 1
+              next
+            end
+            roots_processed += 1
             collect_tokens_recursive(context, root_id, raw_tokens)
           end
 
+          t2 = Time.monotonic
+
           # Single-pass lexical scan for keywords and string-like tokens
           collect_lexical_tokens_single_pass(source, raw_tokens)
+
+          t3 = Time.monotonic
 
           # Sort tokens by position and prefer higher-priority classifications on ties
           raw_tokens.sort_by! { |t| {t.line, t.start_char, -token_type_priority(t.token_type), -t.length} }
           raw_tokens = deduplicate_tokens(raw_tokens)
 
+          t4 = Time.monotonic
+
           # Delta-encode tokens
           data = delta_encode_tokens(raw_tokens)
+
+          t5 = Time.monotonic
+
+          if profile
+            STDERR.puts "[PROFILE] semantic tokens: setup=#{(t1-t0).total_milliseconds.round(1)}ms " \
+                        "ast_walk=#{(t2-t1).total_milliseconds.round(1)}ms (roots: #{roots_processed} processed, #{roots_skipped} skipped) " \
+                        "lexical=#{(t3-t2).total_milliseconds.round(1)}ms " \
+                        "sort+dedup=#{(t4-t3).total_milliseconds.round(1)}ms " \
+                        "encode=#{(t5-t4).total_milliseconds.round(1)}ms " \
+                        "total=#{(t5-t0).total_milliseconds.round(1)}ms tokens=#{raw_tokens.size}"
+          end
 
           SemanticTokens.new(data: data)
         end

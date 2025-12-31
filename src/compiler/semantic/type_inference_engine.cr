@@ -55,6 +55,9 @@ module CrystalV2
         @method_body_cache : Hash(MethodSymbol, Type) = {} of MethodSymbol => Type
         @method_body_in_progress : Set(MethodSymbol) = Set(MethodSymbol).new
 
+        # Instance-level cycle guard for expression inference (prevents infinite recursion)
+        @expr_in_progress : Set(Int32) = Set(Int32).new
+
         def initialize(
           @program : Frontend::Program,
           @identifier_symbols : Hash(ExprId, Symbol),
@@ -176,6 +179,16 @@ module CrystalV2
             debug_hook("infer.max_depth", "expr_id=#{expr_id}")
             return @context.nil_type
           end
+
+          # Instance-level cycle guard: prevent infinite recursion across recursive calls
+          expr_idx = expr_id.index
+          if @expr_in_progress.includes?(expr_idx)
+            debug("cycle detected at expr #{expr_id}, breaking with Nil") if @debug_enabled
+            debug_hook("infer.cycle_guard", "expr_id=#{expr_id}")
+            return @context.nil_type
+          end
+          @expr_in_progress.add(expr_idx)
+
           @depth += 1
           node = @program.arena[expr_id]
 
@@ -426,6 +439,7 @@ module CrystalV2
           @context.nil_type
         ensure
           @depth -= 1
+          @expr_in_progress.delete(expr_id.index)
         end
 
         private def infer_splat(node : Frontend::SplatNode, expr_id : ExprId) : Type

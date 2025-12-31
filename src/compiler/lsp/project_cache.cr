@@ -197,37 +197,55 @@ module CrystalV2
           nil
         end
 
+        # Maximum cache size (100MB) - if larger, something is wrong
+        MAX_CACHE_SIZE = 100_000_000
+
         # Save cache to disk
         def save
           path = ProjectCache.cache_path(@project_root)
           Dir.mkdir_p(File.dirname(path))
 
-          File.open(path, "wb") do |io|
-            # Write header
-            io.write(MAGIC.to_slice)
-            io.write_bytes(VERSION, IO::ByteFormat::LittleEndian)
+          # Write to memory first to check size
+          mem_io = IO::Memory.new
 
-            # Write hash
-            io.write_bytes(@root_hash, IO::ByteFormat::LittleEndian)
+          # Write header
+          mem_io.write(MAGIC.to_slice)
+          mem_io.write_bytes(VERSION, IO::ByteFormat::LittleEndian)
 
-            # Write files
-            io.write_bytes(@files.size.to_u32, IO::ByteFormat::LittleEndian)
-            @files.each(&.to_bytes(io))
+          # Write hash
+          mem_io.write_bytes(@root_hash, IO::ByteFormat::LittleEndian)
 
-            # Write TypeIndex
-            if type_idx = @type_index
-              # Serialize to memory first to get size
-              type_index_io = IO::Memory.new
-              type_idx.write(type_index_io)
-              type_index_data = type_index_io.to_slice
+          # Write files
+          mem_io.write_bytes(@files.size.to_u32, IO::ByteFormat::LittleEndian)
+          @files.each(&.to_bytes(mem_io))
 
-              io.write_bytes(type_index_data.size.to_u32, IO::ByteFormat::LittleEndian)
-              io.write(type_index_data)
-            else
-              # No TypeIndex
-              io.write_bytes(0_u32, IO::ByteFormat::LittleEndian)
-            end
+          files_size = mem_io.size
+
+          # Write TypeIndex
+          if type_idx = @type_index
+            # Serialize to memory first to get size
+            type_index_io = IO::Memory.new
+            type_idx.write(type_index_io)
+            type_index_data = type_index_io.to_slice
+
+            mem_io.write_bytes(type_index_data.size.to_u32, IO::ByteFormat::LittleEndian)
+            mem_io.write(type_index_data)
+          else
+            # No TypeIndex
+            mem_io.write_bytes(0_u32, IO::ByteFormat::LittleEndian)
           end
+
+          total_size = mem_io.size
+          type_index_size = total_size - files_size - 4 # subtract header for type_index_size field
+
+          # Sanity check: reject giant caches
+          if total_size > MAX_CACHE_SIZE
+            STDERR.puts "[ProjectCache] WARNING: Cache too large (#{total_size} bytes, files=#{files_size}, typeindex=#{type_index_size}), not saving"
+            return
+          end
+
+          # Write to file
+          File.write(path, mem_io.to_slice)
         end
 
         # Get valid cached files (those that haven't changed)

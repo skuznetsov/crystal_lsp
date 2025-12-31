@@ -761,6 +761,48 @@ module CrystalV2
           diagnostics
         end
 
+        # Fast-path for background indexing: parse + symbols only, NO type inference.
+        # This is ~10-20x faster than full update_file since we skip semantic analysis.
+        def index_file_fast(path : String, source : String) : Bool
+          # Skip if already indexed
+          return false if @files.has_key?(path)
+
+          # Phase 1: Parse the file
+          lexer = Frontend::Lexer.new(source)
+          file_arena = Frontend::AstArena.new
+          parser = Frontend::Parser.new(lexer, file_arena)
+          program = parser.parse_program
+
+          # Phase 2: Update arena
+          @arena.add_file_arena(path, file_arena)
+          @file_order << path
+
+          # Phase 3: Collect symbols from this file (fast - no inference)
+          file_symbols = collect_file_symbols(program, path)
+
+          # Phase 4: Build symbol summaries (without type info - faster)
+          symbol_summaries = file_symbols.map { |sym| SymbolSummaryUtils.summarize_symbol(sym, program, nil) }
+
+          # Phase 5: Collect requires
+          requires = collect_requires(program, path)
+          update_dependencies(path, requires)
+
+          # Phase 6: Update file state (no diagnostics, no type info)
+          @files[path] = FileAnalysisState.new(
+            path: path,
+            version: 0,
+            mtime: File.info?(path).try(&.modification_time) || Time.utc,
+            root_ids: program.roots,
+            symbols: file_symbols.map(&.name),
+            diagnostics: [] of Diagnostic,
+            requires: requires,
+            symbol_summaries: symbol_summaries,
+            from_cache: false
+          )
+
+          true
+        end
+
         # Remove a file from the project
         def remove_file(path : String)
           return unless @files.has_key?(path)
