@@ -1036,6 +1036,7 @@ r2 = maybe(false)  # => nil
 - Normalize `flag?` macro arguments (strip leading `:`) + require cache v3; pthread requires now load.
 - Coerce integer args to `i128` in LLVM backend for mismatch widths.
 - Treat module names as `TypeKind::Module`; module-typed params refine to concrete defaults (IO::ByteFormat → SystemEndian), removing `_IO__ByteFormat_decode_UInt32_IO` (2026-01-xx).
+- EventLoop interface dispatch: force EventLoop::FileDescriptor/Socket to module kind and map instance calls to Polling/IOCP/Wasi (removes EventLoop__FileDescriptor_* missing symbols) (2026-01-xx).
 - Fix module class-method deferred lookup to use the module arena (prevents `Index out of bounds` in `find_module_class_def`) (2026-01-xx).
 - Track enum value types for `.new`/`.value` and propagate via assignments/identifiers in HIR lowering.
 - Register MacroIf/MacroLiteral nodes inside nested modules during HIR lowering.

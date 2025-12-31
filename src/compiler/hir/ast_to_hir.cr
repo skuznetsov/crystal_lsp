@@ -653,6 +653,12 @@ module Crystal::HIR
       @function_base_names.includes?(base_name)
     end
 
+    private def abstract_def?(full_name : String) : Bool
+      def_node = @function_defs[full_name]?
+      return false unless def_node
+      def_node.body.nil?
+    end
+
     # Get class info by name
     def get_class_info(name : String) : ClassInfo?
       @class_info[name]?
@@ -7923,20 +7929,25 @@ module Crystal::HIR
 
       # Build the base method name as ClassName#method
       base_method_name = class_name.empty? ? method_name : "#{class_name}##{method_name}"
+      base_method_name = rewrite_event_loop_method_name(base_method_name)
 
       # Mangle with argument types
       mangled_name = mangle_function_name(base_method_name, arg_types)
+      preferred_module_class = preferred_module_typed_class_for(class_name)
+      type_is_module = type_desc.try(&.kind) == TypeKind::Module
+      module_like_receiver = !class_name.empty? && (type_is_module || module_like_type_name?(class_name) || module_includers_match?(class_name) || !preferred_module_class.nil?)
 
       # Try to find the function in the module.
       #
       # IMPORTANT: Don't use return type as an existence check.
       # Many valid methods return `Nil` (VOID) in our IR, and treating VOID as "missing"
       # causes qualified calls to degrade into unqualified extern calls.
-      if @function_types.has_key?(mangled_name)
+      if @function_types.has_key?(mangled_name) && !(module_like_receiver && abstract_def?(mangled_name))
         debug_hook("method.resolve", "base=#{base_method_name} resolved=#{mangled_name} reason=mangled_exact")
         return mangled_name
       end
-      if @function_defs.has_key?(mangled_name) || @module.has_function?(mangled_name)
+      if (@function_defs.has_key?(mangled_name) && !(module_like_receiver && abstract_def?(mangled_name))) ||
+         @module.has_function?(mangled_name)
         debug_hook("method.resolve", "base=#{base_method_name} resolved=#{mangled_name} reason=mangled_def")
         return mangled_name
       end
@@ -7955,13 +7966,6 @@ module Crystal::HIR
         end
       end
 
-      # If any overload exists for the base name, return the base name and let
-      # the MIR lowering do fuzzy matching to pick a concrete overload.
-      if !class_name.empty? && has_function_base?(base_method_name)
-        debug_hook("method.resolve", "base=#{base_method_name} resolved=#{base_method_name} reason=base_overload")
-        return base_method_name
-      end
-
       if !class_name.empty? && class_name.includes?("|")
         if resolved = resolve_union_method_call(class_name, method_name, arg_types)
           debug_hook("method.resolve", "base=#{base_method_name} resolved=#{resolved} reason=union")
@@ -7971,11 +7975,18 @@ module Crystal::HIR
 
       # If the receiver is module-like (e.g., Iterator(T)) or maps to a known includer,
       # resolve only when a unique includer matches the call signature.
-      if !class_name.empty? && (module_like_type_name?(class_name) || module_includers_match?(class_name))
+      if module_like_receiver
         if resolved = resolve_module_typed_method(method_name, arg_types, class_name, false, @current_class)
           debug_hook("method.resolve", "base=#{base_method_name} resolved=#{resolved} reason=module_typed")
           return resolved
         end
+      end
+
+      # If any overload exists for the base name, return the base name and let
+      # the MIR lowering do fuzzy matching to pick a concrete overload.
+      if !class_name.empty? && has_function_base?(base_method_name)
+        debug_hook("method.resolve", "base=#{base_method_name} resolved=#{base_method_name} reason=base_overload")
+        return base_method_name
       end
 
       # Search through all class info for matching method (O(n) fallback).
@@ -8048,6 +8059,110 @@ module Crystal::HIR
       nil
     end
 
+    private def preferred_module_typed_class_for(module_type_name : String) : String?
+      base = if paren = module_type_name.index('(')
+               module_type_name[0, paren]
+             else
+               module_type_name
+             end
+      case base
+      when "Crystal::EventLoop", "EventLoop"
+        preferred_event_loop_backend_class
+      when "Crystal::EventLoop::FileDescriptor", "EventLoop::FileDescriptor",
+           "Crystal::EventLoop::Socket", "EventLoop::Socket"
+        preferred_event_loop_interface_class
+      else
+        nil
+      end
+    end
+
+    private def preferred_event_loop_backend_class : String?
+      flags = CrystalV2::Runtime.target_flags
+      return "Crystal::EventLoop::Wasi" if flags.includes?("wasi")
+      return "Crystal::EventLoop::IOCP" if flags.includes?("win32") || flags.includes?("windows")
+
+      return nil unless flags.includes?("unix") || flags.includes?("linux") || flags.includes?("android") ||
+                        flags.includes?("darwin") || flags.includes?("freebsd") || flags.includes?("openbsd") ||
+                        flags.includes?("netbsd") || flags.includes?("dragonfly")
+
+      if evloop = flags.find { |flag| flag.starts_with?("evloop=") }
+        case evloop
+        when "evloop=libevent"
+          return "Crystal::EventLoop::LibEvent"
+        when "evloop=epoll"
+          return "Crystal::EventLoop::Epoll"
+        when "evloop=kqueue"
+          return "Crystal::EventLoop::Kqueue"
+        end
+      end
+
+      return "Crystal::EventLoop::Epoll" if flags.includes?("linux") || flags.includes?("android")
+      return "Crystal::EventLoop::Kqueue" if flags.includes?("darwin") || flags.includes?("freebsd")
+
+      "Crystal::EventLoop::LibEvent"
+    end
+
+    private def preferred_event_loop_interface_class : String?
+      flags = CrystalV2::Runtime.target_flags
+      return "Crystal::EventLoop::Wasi" if flags.includes?("wasi")
+      return "Crystal::EventLoop::IOCP" if flags.includes?("win32") || flags.includes?("windows")
+
+      if flags.includes?("unix") || flags.includes?("linux") || flags.includes?("android") ||
+         flags.includes?("darwin") || flags.includes?("freebsd") || flags.includes?("openbsd") ||
+         flags.includes?("netbsd") || flags.includes?("dragonfly")
+        return "Crystal::EventLoop::Polling"
+      end
+      nil
+    end
+
+    private def event_loop_interface_module_name?(name : String) : Bool
+      name.ends_with?("EventLoop::FileDescriptor") || name.ends_with?("EventLoop::Socket")
+    end
+
+    private def rewrite_event_loop_method_name(base_method_name : String) : String
+      parts = base_method_name.split("#", 2)
+      return base_method_name if parts.size != 2
+
+      owner = parts[0]
+      method = parts[1]
+
+      file_descriptor_method = case method
+                               when "pipe", "open", "read", "wait_readable", "write", "wait_writable", "reopened", "close"
+                                 true
+                               else
+                                 false
+                               end
+      socket_method = case method
+                      when "socket", "socketpair", "read", "wait_readable", "write", "wait_writable",
+                           "accept", "connect", "send_to", "receive_from", "close"
+                        true
+                      else
+                        false
+                      end
+
+      if owner == "Crystal::EventLoop::FileDescriptor"
+        if impl = preferred_event_loop_interface_class
+          return "#{impl}##{method}"
+        end
+      elsif owner == "Crystal::EventLoop::Socket"
+        if impl = preferred_event_loop_interface_class
+          return "#{impl}##{method}"
+        end
+      elsif owner == "Crystal::EventLoop"
+        if file_descriptor_method || socket_method
+          if impl = preferred_event_loop_interface_class
+            return "#{impl}##{method}"
+          end
+        else
+          if impl = preferred_event_loop_backend_class
+            return "#{impl}##{method}"
+          end
+        end
+      end
+
+      base_method_name
+    end
+
     private def resolve_module_typed_method(
       method_name : String,
       arg_types : Array(TypeRef),
@@ -8055,6 +8170,9 @@ module Crystal::HIR
       has_block : Bool,
       prefer_class : String?
     ) : String?
+      if preferred = preferred_module_typed_class_for(module_type_name)
+        prefer_class = preferred
+      end
       module_base = if paren = module_type_name.index('(')
                       module_type_name[0, paren]
                     else
@@ -8081,12 +8199,22 @@ module Crystal::HIR
           end
         end
       end
-      # RESOLVE_DEBUG disabled
-      return nil unless includers && !includers.empty?
+      if includers.nil? || includers.empty?
+        if prefer_class
+          includers = Set(String).new
+          includers << prefer_class
+        else
+          # RESOLVE_DEBUG disabled
+          return nil
+        end
+      end
 
       candidates = includers.to_a
       if module_like_type_name?(module_base) && !candidates.includes?(module_base)
         candidates << module_base
+      end
+      if prefer_class && !candidates.includes?(prefer_class)
+        candidates << prefer_class
       end
       # Also add subclasses of includers (for abstract classes like Crystal::EventLoop)
       # The concrete implementation may be in a subclass (e.g., Polling, Kqueue)
@@ -8210,8 +8338,12 @@ module Crystal::HIR
 
     private def resolve_module_typed_ivar(
       module_type_name : String,
-      ivar_name : String
+      ivar_name : String,
+      prefer_class : String? = nil
     ) : {ClassInfo, IVarInfo}?
+      if preferred = preferred_module_typed_class_for(module_type_name)
+        prefer_class = preferred
+      end
       module_base = if paren = module_type_name.index('(')
                       module_type_name[0, paren]
                     else
@@ -8236,7 +8368,14 @@ module Crystal::HIR
           end
         end
       end
-      return nil unless includers && !includers.empty?
+      if includers.nil? || includers.empty?
+        if prefer_class
+          includers = Set(String).new
+          includers << prefer_class
+        else
+          return nil
+        end
+      end
 
       candidates = includers.to_a
       subclasses = [] of String
@@ -8266,6 +8405,17 @@ module Crystal::HIR
         end
       end
       subclasses.each { |name| candidates << name unless candidates.includes?(name) }
+      if prefer_class && !candidates.includes?(prefer_class)
+        candidates << prefer_class
+      end
+
+      if prefer_class
+        candidates.delete(prefer_class)
+        candidates.sort!
+        candidates.unshift(prefer_class)
+      else
+        candidates.sort!
+      end
 
       matches = [] of {ClassInfo, IVarInfo}
       candidates.each do |name|
@@ -16515,7 +16665,10 @@ module Crystal::HIR
           receiver_id ||= lower_expr(ctx, callee_node.object)
           receiver_type = ctx.type_of(receiver_id)
           receiver_is_module = module_type_ref?(receiver_type)
-          ctx.mark_type_literal(receiver_id) if receiver_is_module
+          if receiver_is_module && (obj_node.is_a?(CrystalV2::Compiler::Frontend::ConstantNode) ||
+             obj_node.is_a?(CrystalV2::Compiler::Frontend::PathNode))
+            ctx.mark_type_literal(receiver_id)
+          end
           receiver_is_type_literal = receiver_type.id >= TypeRef::FIRST_USER_TYPE &&
                                      ctx.type_literal?(receiver_id)
           ensure_monomorphized_type(receiver_type) unless receiver_type == TypeRef::VOID
@@ -16568,7 +16721,7 @@ module Crystal::HIR
                         generate_allocator(type_name, class_info)
                       end
                     end
-                  elsif !module_like_type_name?(type_name)
+                  elsif type_desc.kind != TypeKind::Module
                     # Try to find method with this type name
                     test_method = "#{type_name}##{method_name}"
                     if @function_types.has_key?(test_method) || has_function_base?(test_method)
@@ -16964,6 +17117,7 @@ module Crystal::HIR
                          else
                            method_name
                          end
+      base_method_name = rewrite_event_loop_method_name(base_method_name)
       if receiver_id.nil? && full_method_name.nil? && method_name == "main" && @top_level_main_defined
         base_method_name = TOP_LEVEL_MAIN_BASE
       end
@@ -17054,12 +17208,12 @@ module Crystal::HIR
 
       if receiver_id && full_method_name.nil? && callee_node.is_a?(CrystalV2::Compiler::Frontend::MemberAccessNode)
         receiver_type = ctx.type_of(receiver_id)
-        if type_desc = @module.get_type_descriptor(receiver_type)
-          # LOWER_CALL_DEBUG disabled
-          if module_like_type_name?(type_desc.name)
-            # Try to get module type name from AST, fall back to type_desc.name
-            # This handles cases where the receiver is a call result (e.g., event_loop().write())
-            module_type_name = module_receiver_type_name(callee_node) || type_desc.name
+          if type_desc = @module.get_type_descriptor(receiver_type)
+            # LOWER_CALL_DEBUG disabled
+            if type_desc.kind == TypeKind::Module || module_like_type_name?(type_desc.name)
+              # Try to get module type name from AST, fall back to type_desc.name
+              # This handles cases where the receiver is a call result (e.g., event_loop().write())
+              module_type_name = module_receiver_type_name(callee_node) || type_desc.name
             if resolved = resolve_module_typed_method(method_name, arg_types, module_type_name, has_block_call, @current_class)
               mangled_method_name = resolved
               base_method_name = resolved.split("$").first
@@ -22604,6 +22758,12 @@ module Crystal::HIR
         # Pointer(T) or just Pointer -> pointer type
         @type_cache[cache_key] = TypeRef::POINTER
         return TypeRef::POINTER
+      end
+
+      if event_loop_interface_module_name?(lookup_name)
+        result = @module.intern_type(TypeDescriptor.new(TypeKind::Module, lookup_name))
+        @type_cache[cache_key] = result
+        return result
       end
 
       result = case lookup_name
