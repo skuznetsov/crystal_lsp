@@ -133,6 +133,7 @@ class Deque(T)
   end
 
   # Alias for `push`.
+  @[Transfer]
   def <<(value : T)
     push(value)
   end
@@ -412,6 +413,7 @@ class Deque(T)
   # a = Deque{0, 1, 2}
   # a.insert(1, 7) # => Deque{0, 7, 1, 2}
   # ```
+  @[Transfer]
   def insert(index : Int, value : T) : self
     if index < 0
       index += @size + 1
@@ -532,6 +534,7 @@ class Deque(T)
   # a = Deque{1, 2}
   # a.push 3 # => Deque{1, 2, 3}
   # ```
+  @[Transfer]
   def push(value : T)
     resize_if_cant_insert
     index = @start + @size
@@ -614,6 +617,7 @@ class Deque(T)
   # a = Deque{1, 2}
   # a.unshift 0 # => Deque{0, 1, 2}
   # ```
+  @[Transfer]
   def unshift(value : T) : self
     resize_if_cant_insert
     @start -= 1
