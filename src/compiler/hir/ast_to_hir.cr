@@ -832,6 +832,12 @@ module Crystal::HIR
       return name if enum_info.has_key?(name)
       short_name = name.split("::").last?
       return short_name if short_name && enum_info.has_key?(short_name)
+      if short_name
+        matches = enum_info.keys.select { |key| key.ends_with?("::#{short_name}") }
+        return matches.first if matches.size == 1
+      end
+      matches = enum_info.keys.select { |key| key.ends_with?("::#{name}") }
+      return matches.first if matches.size == 1
       nil
     end
 
@@ -881,6 +887,7 @@ module Crystal::HIR
       end
 
       @enum_info.not_nil![enum_name] = members
+      invalidate_type_cache_for_namespace(enum_name)
       register_enum_base_type(enum_name, enum_base_type_for_node(node))
       register_enum_methods(node, enum_name)
     end
@@ -907,6 +914,7 @@ module Crystal::HIR
       end
 
       @enum_info.not_nil![full_enum_name] = members
+      invalidate_type_cache_for_namespace(full_enum_name)
       base_type = enum_base_type_for_node(node)
       register_enum_base_type(full_enum_name, base_type)
       debug_hook_enum_register(full_enum_name, @module.get_type_descriptor(base_type).try(&.name) || "?")
