@@ -470,6 +470,8 @@ end
 
 #### 5.1.2a Escape Analysis Robustness (edge cases)
 - [ ] Refine virtual-call detection: treat final/struct/monomorphic receivers as non-virtual; avoid blanket HeapEscape on method calls.
+- [ ] Method effect summaries: cache per-signature effects (`no_escape`, `transfer`, `thread_shared`, `ffi_exposed`, `returns_alias`) to replace name-based heuristics.
+- [ ] Apply effect summaries during Call handling; for unknown effects treat as analysis boundary (ARC/GC locally, without poisoning the whole graph).
 - [ ] Add stdlib-only annotations: `@[NoEscape]`, `@[Transfer]`, `@[Taints(...)]`, `@[Arena("name")]` to override heuristics.
 - [ ] Builder/borrow region: tie child lifetimes to owner; only escape when owner escapes.
 - [ ] Closure capture in loops: copy/move captured loop vars when closure escapes (avoid last-iteration capture/UAF).
