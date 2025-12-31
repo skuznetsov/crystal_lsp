@@ -1047,6 +1047,7 @@ r2 = maybe(false)  # => nil
 - Resolve superclass name in context when registering classes (fixes `FileDescriptor_initialize_Int32` super call).
 - Register MacroIf/MacroLiteral nodes inside nested modules during HIR lowering.
 - Remove `StructNode` handling from macro-parsed class bodies; rely on `ClassNode.is_struct` (2026-01-02).
+- Attach trailing `do` blocks to parenthesized/member-access calls (fixes `Array(T).build(size) do` + `times do` in stdlib) (2026-01-xx).
 - Handle inline returns during yield inlining (guard proc/block bodies + safe block bounds) to preserve Enumerable semantics.
 - Fix inline-yield return override so `return` inside block targets caller (removes `Nil#offset`/`Nil#size` in prelude HIR) (2026-01-05).
 - Recheck registered return types after lowering to avoid fallback pointer returns (fixes `Crystal::System.to_string_slice` -> `Slice(UInt8)`) (2026-01-05).
