@@ -5920,7 +5920,11 @@ module Crystal::HIR
       # Only do this for new class definitions, not reopened classes
       parent_name : String? = nil
       if !existing_info && (super_name_slice = node.super_name)
-        parent_name = String.new(super_name_slice)
+        raw_parent = String.new(super_name_slice)
+        old_class = @current_class
+        @current_class = class_name
+        parent_name = resolve_type_name_in_context(raw_parent)
+        @current_class = old_class
         if parent_info = @class_info[parent_name]?
           # Copy all ivars from parent, preserving their offsets
           parent_info.ivars.each do |parent_ivar|
