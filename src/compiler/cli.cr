@@ -518,7 +518,7 @@ module CrystalV2
           end
           escape = HIR::EscapeAnalyzer.new(func)
           escape.analyze
-          ms = HIR::MemoryStrategyAssigner.new(func, memory_config, type_provider)
+          ms = HIR::MemoryStrategyAssigner.new(func, memory_config, type_provider, hir_module)
           result = ms.assign
           stats = result.stats
           total_ms_stats.stack_count += stats.stack_count

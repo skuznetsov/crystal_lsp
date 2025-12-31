@@ -128,6 +128,7 @@ module Crystal::HIR
     # Cached analysis results
     @escape_summary : EscapeSummary?
     @taint_analyzer : TaintAnalyzer?
+    @effect_provider : MethodEffectProvider?
 
     # Type size estimates (in bytes) - would come from type system in real impl
     TYPE_SIZE_ESTIMATES = {
@@ -157,7 +158,8 @@ module Crystal::HIR
     def initialize(
       @function : Function,
       @config : MemoryConfig = MemoryConfig.balanced,
-      type_info : TypeInfoProvider? = nil
+      type_info : TypeInfoProvider? = nil,
+      @effect_provider : MethodEffectProvider? = nil
     )
       @result = MemoryStrategyResult.new
       @type_info = type_info
@@ -166,11 +168,11 @@ module Crystal::HIR
     # Run strategy assignment
     def assign : MemoryStrategyResult
       # Run escape analysis
-      escape_analyzer = EscapeAnalyzer.new(@function, @type_info)
+      escape_analyzer = EscapeAnalyzer.new(@function, @type_info, @effect_provider)
       @escape_summary = escape_analyzer.analyze
 
       # Run taint analysis
-      @taint_analyzer = TaintAnalyzer.new(@function, @type_info)
+      @taint_analyzer = TaintAnalyzer.new(@function, @type_info, @effect_provider)
       @taint_analyzer.not_nil!.analyze
 
       # Assign strategy to each allocation
@@ -330,9 +332,10 @@ module Crystal::HIR
   class Function
     def assign_memory_strategies(
       config : MemoryConfig = MemoryConfig.balanced,
-      type_info : TypeInfoProvider? = nil
+      type_info : TypeInfoProvider? = nil,
+      effect_provider : MethodEffectProvider? = nil
     ) : MemoryStrategyResult
-      assigner = MemoryStrategyAssigner.new(self, config, type_info)
+      assigner = MemoryStrategyAssigner.new(self, config, type_info, effect_provider)
       assigner.assign
     end
   end

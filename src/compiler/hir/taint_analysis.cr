@@ -54,8 +54,13 @@ module Crystal::HIR
 
     # Optional: type info provider for cycle detection
     @type_info : TypeInfoProvider?
+    @effect_provider : MethodEffectProvider?
 
-    def initialize(@function : Function, @type_info : TypeInfoProvider? = nil)
+    def initialize(
+      @function : Function,
+      @type_info : TypeInfoProvider? = nil,
+      @effect_provider : MethodEffectProvider? = nil
+    )
       @cyclic_types = Set(String).new
       @worklist = Deque(ValueId).new
       @definitions = Hash(ValueId, Value).new
@@ -69,7 +74,11 @@ module Crystal::HIR
     end
 
     # Alternative: initialize with explicit cyclic types (for testing)
-    def initialize(@function : Function, @cyclic_types : Set(String))
+    def initialize(
+      @function : Function,
+      @cyclic_types : Set(String),
+      @effect_provider : MethodEffectProvider? = nil
+    )
       @type_info = nil
       @worklist = Deque(ValueId).new
       @definitions = Hash(ValueId, Value).new
@@ -244,6 +253,21 @@ module Crystal::HIR
 
         # Calls that might expose to FFI or spawn
         when Call
+          if effects = @effect_provider.try(&.method_effects_for(value.method_name))
+            if effects.thread_shared
+              if recv = value.receiver
+                mark_taint(recv, Taint::ThreadShared)
+              end
+              value.args.each { |arg| mark_taint(arg, Taint::ThreadShared) }
+            end
+            if effects.ffi_exposed
+              if recv = value.receiver
+                mark_taint(recv, Taint::FFIExposed)
+              end
+              value.args.each { |arg| mark_taint(arg, Taint::FFIExposed) }
+            end
+          end
+
           if is_ffi_method?(value.method_name)
             # to_unsafe-style methods expose the receiver to FFI
             if recv = value.receiver

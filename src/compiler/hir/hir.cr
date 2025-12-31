@@ -1175,6 +1175,7 @@ module Crystal::HIR
     getter strings : Array(String)
     getter link_libraries : Array(String)
     getter extern_functions : Array(ExternFunction)
+    getter method_effects : Hash(String, MethodEffectSummary)
 
     @next_function_id : FunctionId = 0_u32
     @next_type_id : TypeId = TypeRef::FIRST_USER_TYPE
@@ -1187,6 +1188,21 @@ module Crystal::HIR
       @string_intern = {} of String => StringId
       @link_libraries = [] of String
       @extern_functions = [] of ExternFunction
+      @method_effects = {} of String => MethodEffectSummary
+    end
+
+    def add_method_effect(name : String, summary : MethodEffectSummary) : Nil
+      return if summary.empty?
+      if existing = @method_effects[name]?
+        existing.merge!(summary)
+        @method_effects[name] = existing
+      else
+        @method_effects[name] = summary
+      end
+    end
+
+    def method_effects_for(name : String) : MethodEffectSummary?
+      @method_effects[name]?
     end
 
     def add_link_library(lib_name : String)
@@ -1366,6 +1382,39 @@ module Crystal::HIR
     Hash
     Pointer
     Generic
+  end
+
+  struct MethodEffectSummary
+    property no_escape : Bool
+    property transfer : Bool
+    property thread_shared : Bool
+    property ffi_exposed : Bool
+    property returns_alias : Bool
+
+    def initialize(
+      @no_escape : Bool = false,
+      @transfer : Bool = false,
+      @thread_shared : Bool = false,
+      @ffi_exposed : Bool = false,
+      @returns_alias : Bool = false
+    )
+    end
+
+    def empty? : Bool
+      !@no_escape && !@transfer && !@thread_shared && !@ffi_exposed && !@returns_alias
+    end
+
+    def merge!(other : MethodEffectSummary) : Nil
+      @no_escape ||= other.no_escape
+      @transfer ||= other.transfer
+      @thread_shared ||= other.thread_shared
+      @ffi_exposed ||= other.ffi_exposed
+      @returns_alias ||= other.returns_alias
+    end
+  end
+
+  module MethodEffectProvider
+    abstract def method_effects_for(method_name : String) : MethodEffectSummary?
   end
 
   # ═══════════════════════════════════════════════════════════════════════════

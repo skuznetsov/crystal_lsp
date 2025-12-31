@@ -485,6 +485,7 @@ module Crystal::HIR
     @last_splat_context : String?
     @type_literal_values : Set(ValueId)
     @debug_callsite : String?
+    @pending_def_annotations : Array(Tuple(CrystalV2::Compiler::Frontend::AnnotationNode, CrystalV2::Compiler::Frontend::ArenaLike))
 
     def initialize(@arena, module_name : String = "main", sources_by_arena : Hash(CrystalV2::Compiler::Frontend::ArenaLike, String)? = nil)
       @module = Module.new(module_name)
@@ -544,6 +545,7 @@ module Crystal::HIR
       @constant_defs = Set(String).new
       @constant_types = {} of String => TypeRef
       @debug_callsite = nil
+      @pending_def_annotations = [] of Tuple(CrystalV2::Compiler::Frontend::AnnotationNode, CrystalV2::Compiler::Frontend::ArenaLike)
     end
 
     private def with_debug_callsite(label : String?, &)
@@ -556,6 +558,52 @@ module Crystal::HIR
       ensure
         @debug_callsite = previous
       end
+    end
+
+    private def clear_pending_effect_annotations : Nil
+      @pending_def_annotations.clear
+    end
+
+    private def effect_annotation_name(node : CrystalV2::Compiler::Frontend::AnnotationNode) : String?
+      name = resolve_annotation_name(node.name)
+      return nil unless name
+      return name if name.in?("NoEscape", "Transfer", "ThreadShared", "FFIExposed", "ReturnsAlias")
+      nil
+    end
+
+    private def remember_effect_annotation(
+      node : CrystalV2::Compiler::Frontend::AnnotationNode,
+      arena : CrystalV2::Compiler::Frontend::ArenaLike
+    ) : Nil
+      with_arena(arena) do
+        return unless effect_annotation_name(node)
+      end
+      @pending_def_annotations << {node, arena}
+    end
+
+    private def register_pending_method_effects(full_name : String, _param_count : Int32) : Nil
+      return if @pending_def_annotations.empty?
+
+      summary = MethodEffectSummary.new
+      @pending_def_annotations.each do |annotation_node, annotation_arena|
+        with_arena(annotation_arena) do
+          case effect_annotation_name(annotation_node)
+          when "NoEscape"
+            summary.no_escape = true
+          when "Transfer"
+            summary.transfer = true
+          when "ThreadShared"
+            summary.thread_shared = true
+          when "FFIExposed"
+            summary.ffi_exposed = true
+          when "ReturnsAlias"
+            summary.returns_alias = true
+          end
+        end
+      end
+
+      clear_pending_effect_annotations
+      @module.add_method_effect(full_name, summary) unless summary.empty?
     end
 
     private def fun_def?(node : CrystalV2::Compiler::Frontend::DefNode) : Bool
@@ -913,6 +961,10 @@ module Crystal::HIR
     ) : Nil
       return if expr_id.invalid?
       member = unwrap_visibility_member(@arena[expr_id])
+      if !member.is_a?(CrystalV2::Compiler::Frontend::AnnotationNode) &&
+         !member.is_a?(CrystalV2::Compiler::Frontend::DefNode)
+        clear_pending_effect_annotations
+      end
       case member
       when CrystalV2::Compiler::Frontend::BlockNode
         member.body.each do |child_id|
@@ -3283,6 +3335,12 @@ module Crystal::HIR
               with_namespace_override(module_full_name) do
                 body.each do |member_id|
                   member = unwrap_visibility_member(@arena[member_id])
+                  if member.is_a?(CrystalV2::Compiler::Frontend::AnnotationNode)
+                    remember_effect_annotation(member, @arena)
+                    next
+                  elsif !member.is_a?(CrystalV2::Compiler::Frontend::DefNode)
+                    clear_pending_effect_annotations
+                  end
                   case member
                   when CrystalV2::Compiler::Frontend::IncludeNode
                     lower_module_instance_methods_for(class_name, class_info, member, defined_full_names, visited)
@@ -3395,6 +3453,12 @@ module Crystal::HIR
               with_namespace_override(module_full_name) do
                 body.each do |member_id|
                   member = unwrap_visibility_member(@arena[member_id])
+                  if member.is_a?(CrystalV2::Compiler::Frontend::AnnotationNode)
+                    remember_effect_annotation(member, @arena)
+                    next
+                  elsif !member.is_a?(CrystalV2::Compiler::Frontend::DefNode)
+                    clear_pending_effect_annotations
+                  end
                   case member
                   when CrystalV2::Compiler::Frontend::IncludeNode
                     lower_module_class_methods_for(class_name, class_info, member.target, visited)
@@ -5316,10 +5380,18 @@ module Crystal::HIR
       # DEBUG_MODULE_THREAD disabled
       if body = node.body
         old_class = @current_class
+        old_pending = @pending_def_annotations
         @current_class = module_name
         begin
+          @pending_def_annotations = [] of Tuple(CrystalV2::Compiler::Frontend::AnnotationNode, CrystalV2::Compiler::Frontend::ArenaLike)
           body.each_with_index do |expr_id, idx|
             member = unwrap_visibility_member(@arena[expr_id])
+            if member.is_a?(CrystalV2::Compiler::Frontend::AnnotationNode)
+              remember_effect_annotation(member, @arena)
+              next
+            elsif !member.is_a?(CrystalV2::Compiler::Frontend::DefNode)
+              clear_pending_effect_annotations
+            end
             if ENV.has_key?("DEBUG_NESTED_CLASS") && (module_name == "IO" || module_name.includes?("FileDescriptor"))
               STDERR.puts "[DEBUG_LOWER_MOD] #{module_name} member #{idx}: #{member.class}"
             end
@@ -5370,6 +5442,7 @@ module Crystal::HIR
           end
         ensure
           @current_class = old_class
+          @pending_def_annotations = old_pending
         end
       end
     end
@@ -5378,11 +5451,17 @@ module Crystal::HIR
       return if expr_id.invalid?
 
       member = unwrap_visibility_member(@arena[expr_id])
+      if !member.is_a?(CrystalV2::Compiler::Frontend::AnnotationNode) &&
+         !member.is_a?(CrystalV2::Compiler::Frontend::DefNode)
+        clear_pending_effect_annotations
+      end
       case member
       when CrystalV2::Compiler::Frontend::BlockNode
         member.body.each do |child_id|
           lower_module_body_expr(module_name, child_id)
         end
+      when CrystalV2::Compiler::Frontend::AnnotationNode
+        remember_effect_annotation(member, @arena)
       when CrystalV2::Compiler::Frontend::DefNode
         is_class_method = if recv = member.receiver
                             String.new(recv) == "self"
@@ -5582,6 +5661,8 @@ module Crystal::HIR
 
       # Mangle function name with parameter types
       full_name = full_name_override || function_full_name_for_def(base_name, param_types, node.params, has_block)
+
+      register_pending_method_effects(full_name, param_types.size)
 
       func = @module.create_function(full_name, return_type)
       ctx = LoweringContext.new(func, @module, @arena)
@@ -6498,149 +6579,160 @@ module Crystal::HIR
 
       class_info = @class_info[class_name]? || return
       old_class = @current_class
+      old_pending = @pending_def_annotations
       @current_class = class_name
+      @pending_def_annotations = [] of Tuple(CrystalV2::Compiler::Frontend::AnnotationNode, CrystalV2::Compiler::Frontend::ArenaLike)
 
       # Generate allocator function: ClassName.new
       generate_allocator(class_name, class_info)
 
-      # Lower each method
-      if body = node.body
-        if ENV["DEBUG_SEQ_LOWER"]? && class_name.includes?("LineNumbers")
-          STDERR.puts "[DEBUG_SEQ_LOWER] class=#{class_name} body_size=#{body.size}"
-          body.each do |expr_id|
-            member_dbg = unwrap_visibility_member(@arena[expr_id])
-            label = member_dbg.class.to_s.split("::").last
-            if member_dbg.is_a?(CrystalV2::Compiler::Frontend::CallNode)
-              callee_dbg = @arena[member_dbg.callee]
-              if callee_dbg.is_a?(CrystalV2::Compiler::Frontend::IdentifierNode)
-                label += " callee=#{String.new(callee_dbg.name)}"
-              end
-            end
-            STDERR.puts "[DEBUG_SEQ_LOWER]   member=#{label}"
-          end
-        end
-        # Lower nested types first (classes/structs/modules inside the class body).
-        # These can be referenced unqualified from within the class (e.g., `EntryIterator.new` inside `Dir`).
-        nested_prefix = if info = split_generic_base_and_args(class_name)
-                          info[:base]
-                        else
-                          class_name
-                        end
-        body.each do |expr_id|
-          member = unwrap_visibility_member(@arena[expr_id])
-          case member
-          when CrystalV2::Compiler::Frontend::ClassNode
-            nested_name = String.new(member.name)
-            lower_class_with_name(member, "#{nested_prefix}::#{nested_name}")
-          when CrystalV2::Compiler::Frontend::ModuleNode
-            nested_name = String.new(member.name)
-            lower_module_with_name(member, "#{nested_prefix}::#{nested_name}")
-          end
-        end
-
-        defined_full_names = collect_defined_instance_method_full_names(class_name, body)
-        include_nodes = [] of CrystalV2::Compiler::Frontend::IncludeNode
-
-        body.each do |expr_id|
-          member = unwrap_visibility_member(@arena[expr_id])
-          include_nodes << member if member.is_a?(CrystalV2::Compiler::Frontend::IncludeNode)
-        end
-
-        visited_modules = Set(String).new
-        include_nodes.each do |inc|
-          lower_module_instance_methods_for(class_name, class_info, inc, defined_full_names, visited_modules)
-        end
-
-        body.each do |expr_id|
-          member = unwrap_visibility_member(@arena[expr_id])
-          case member
-          when CrystalV2::Compiler::Frontend::IncludeNode
-            # Handled above via mixin expansion.
-          when CrystalV2::Compiler::Frontend::DefNode
-            method_name = String.new(member.name)
-            is_class_method = if recv = member.receiver
-                                String.new(recv) == "self"
-                              else
-                                false
-                              end
-            base_name = is_class_method ? "#{class_name}.#{method_name}" : "#{class_name}##{method_name}"
-            param_types = [] of TypeRef
-            has_block = false
-            if params = member.params
-              params.each do |param|
-                next if named_only_separator?(param)
-                if param.is_block
-                  has_block = true
-                  next
+      begin
+        # Lower each method
+        if body = node.body
+          if ENV["DEBUG_SEQ_LOWER"]? && class_name.includes?("LineNumbers")
+            STDERR.puts "[DEBUG_SEQ_LOWER] class=#{class_name} body_size=#{body.size}"
+            body.each do |expr_id|
+              member_dbg = unwrap_visibility_member(@arena[expr_id])
+              label = member_dbg.class.to_s.split("::").last
+              if member_dbg.is_a?(CrystalV2::Compiler::Frontend::CallNode)
+                callee_dbg = @arena[member_dbg.callee]
+                if callee_dbg.is_a?(CrystalV2::Compiler::Frontend::IdentifierNode)
+                  label += " callee=#{String.new(callee_dbg.name)}"
                 end
-                param_type = if ta = param.type_annotation
-                               type_ref_for_name(String.new(ta))
-                             elsif param.is_double_splat
-                               type_ref_for_name("NamedTuple")
-                             else
-                               TypeRef::VOID
-                             end
-                param_types << param_type
               end
+              STDERR.puts "[DEBUG_SEQ_LOWER]   member=#{label}"
             end
-            full_name = function_full_name_for_def(base_name, param_types, member.params, has_block)
-            callsite_args = pending_callsite_args_for_def(member, base_name, full_name)
-            call_arg_types = callsite_args ? callsite_args.types : nil
-            call_arg_literals = callsite_args ? callsite_args.literals : nil
-            lower_method(class_name, class_info, member, call_arg_types, call_arg_literals)
-            add_defined_instance_methods_from_expr(class_name, defined_full_names, expr_id)
-          when CrystalV2::Compiler::Frontend::GetterNode
-            # Generate synthetic getter methods
-            if member.is_class?
-              member.specs.each do |spec|
-                generate_class_getter_method(class_name, spec, @arena)
-              end
-            else
-              member.specs.each do |spec|
-                generate_getter_method(class_name, class_info, spec)
-              end
+          end
+          # Lower nested types first (classes/structs/modules inside the class body).
+          # These can be referenced unqualified from within the class (e.g., `EntryIterator.new` inside `Dir`).
+          nested_prefix = if info = split_generic_base_and_args(class_name)
+                            info[:base]
+                          else
+                            class_name
+                          end
+          body.each do |expr_id|
+            member = unwrap_visibility_member(@arena[expr_id])
+            case member
+            when CrystalV2::Compiler::Frontend::ClassNode
+              nested_name = String.new(member.name)
+              lower_class_with_name(member, "#{nested_prefix}::#{nested_name}")
+            when CrystalV2::Compiler::Frontend::ModuleNode
+              nested_name = String.new(member.name)
+              lower_module_with_name(member, "#{nested_prefix}::#{nested_name}")
             end
-            add_defined_instance_methods_from_expr(class_name, defined_full_names, expr_id)
-          when CrystalV2::Compiler::Frontend::SetterNode
-            # Generate synthetic setter methods
-            if member.is_class?
-              member.specs.each do |spec|
-                generate_class_setter_method(class_name, spec)
-              end
-            else
-              member.specs.each do |spec|
-                generate_setter_method(class_name, class_info, spec)
-              end
+          end
+
+          defined_full_names = collect_defined_instance_method_full_names(class_name, body)
+          include_nodes = [] of CrystalV2::Compiler::Frontend::IncludeNode
+
+          body.each do |expr_id|
+            member = unwrap_visibility_member(@arena[expr_id])
+            include_nodes << member if member.is_a?(CrystalV2::Compiler::Frontend::IncludeNode)
+          end
+
+          visited_modules = Set(String).new
+          include_nodes.each do |inc|
+            lower_module_instance_methods_for(class_name, class_info, inc, defined_full_names, visited_modules)
+          end
+
+          body.each do |expr_id|
+            member = unwrap_visibility_member(@arena[expr_id])
+            if member.is_a?(CrystalV2::Compiler::Frontend::AnnotationNode)
+              remember_effect_annotation(member, @arena)
+              next
+            elsif !member.is_a?(CrystalV2::Compiler::Frontend::DefNode)
+              clear_pending_effect_annotations
             end
-            add_defined_instance_methods_from_expr(class_name, defined_full_names, expr_id)
-          when CrystalV2::Compiler::Frontend::PropertyNode
-            # Generate both getter and setter methods
-            if member.is_class?
-              member.specs.each do |spec|
-                generate_class_getter_method(class_name, spec, @arena)
-                generate_class_setter_method(class_name, spec)
+            case member
+            when CrystalV2::Compiler::Frontend::IncludeNode
+              # Handled above via mixin expansion.
+            when CrystalV2::Compiler::Frontend::DefNode
+              method_name = String.new(member.name)
+              is_class_method = if recv = member.receiver
+                                  String.new(recv) == "self"
+                                else
+                                  false
+                                end
+              base_name = is_class_method ? "#{class_name}.#{method_name}" : "#{class_name}##{method_name}"
+              param_types = [] of TypeRef
+              has_block = false
+              if params = member.params
+                params.each do |param|
+                  next if named_only_separator?(param)
+                  if param.is_block
+                    has_block = true
+                    next
+                  end
+                  param_type = if ta = param.type_annotation
+                                 type_ref_for_name(String.new(ta))
+                               elsif param.is_double_splat
+                                 type_ref_for_name("NamedTuple")
+                               else
+                                 TypeRef::VOID
+                               end
+                  param_types << param_type
+                end
               end
-            else
-              member.specs.each do |spec|
-                generate_getter_method(class_name, class_info, spec)
-                generate_setter_method(class_name, class_info, spec)
+              full_name = function_full_name_for_def(base_name, param_types, member.params, has_block)
+              callsite_args = pending_callsite_args_for_def(member, base_name, full_name)
+              call_arg_types = callsite_args ? callsite_args.types : nil
+              call_arg_literals = callsite_args ? callsite_args.literals : nil
+              lower_method(class_name, class_info, member, call_arg_types, call_arg_literals)
+              add_defined_instance_methods_from_expr(class_name, defined_full_names, expr_id)
+            when CrystalV2::Compiler::Frontend::GetterNode
+              # Generate synthetic getter methods
+              if member.is_class?
+                member.specs.each do |spec|
+                  generate_class_getter_method(class_name, spec, @arena)
+                end
+              else
+                member.specs.each do |spec|
+                  generate_getter_method(class_name, class_info, spec)
+                end
               end
+              add_defined_instance_methods_from_expr(class_name, defined_full_names, expr_id)
+            when CrystalV2::Compiler::Frontend::SetterNode
+              # Generate synthetic setter methods
+              if member.is_class?
+                member.specs.each do |spec|
+                  generate_class_setter_method(class_name, spec)
+                end
+              else
+                member.specs.each do |spec|
+                  generate_setter_method(class_name, class_info, spec)
+                end
+              end
+              add_defined_instance_methods_from_expr(class_name, defined_full_names, expr_id)
+            when CrystalV2::Compiler::Frontend::PropertyNode
+              # Generate both getter and setter methods
+              if member.is_class?
+                member.specs.each do |spec|
+                  generate_class_getter_method(class_name, spec, @arena)
+                  generate_class_setter_method(class_name, spec)
+                end
+              else
+                member.specs.each do |spec|
+                  generate_getter_method(class_name, class_info, spec)
+                  generate_setter_method(class_name, class_info, spec)
+                end
+              end
+              add_defined_instance_methods_from_expr(class_name, defined_full_names, expr_id)
+            when CrystalV2::Compiler::Frontend::CallNode
+              if ENV["DEBUG_RECORD_LOWER"]?
+                callee = @arena[member.callee]
+                if callee.is_a?(CrystalV2::Compiler::Frontend::IdentifierNode) &&
+                   String.new(callee.name) == "record"
+                  STDERR.puts "[DEBUG_RECORD_LOWER] class=#{class_name}"
+                end
+              end
+              lower_macro_call_in_class_body(class_name, class_info, member, defined_full_names, visited_modules)
             end
-            add_defined_instance_methods_from_expr(class_name, defined_full_names, expr_id)
-          when CrystalV2::Compiler::Frontend::CallNode
-            if ENV["DEBUG_RECORD_LOWER"]?
-              callee = @arena[member.callee]
-              if callee.is_a?(CrystalV2::Compiler::Frontend::IdentifierNode) &&
-                 String.new(callee.name) == "record"
-                STDERR.puts "[DEBUG_RECORD_LOWER] class=#{class_name}"
-              end
-            end
-            lower_macro_call_in_class_body(class_name, class_info, member, defined_full_names, visited_modules)
           end
         end
+      ensure
+        @current_class = old_class
+        @pending_def_annotations = old_pending
       end
-
-      @current_class = old_class
     end
 
     private def lower_class_body_expr(
@@ -6654,6 +6746,11 @@ module Crystal::HIR
 
       member = unwrap_visibility_member(@arena[expr_id])
       case member
+      when CrystalV2::Compiler::Frontend::AnnotationNode
+        remember_effect_annotation(member, @arena)
+      when CrystalV2::Compiler::Frontend::DefNode
+        lower_method(class_name, class_info, member)
+        add_defined_instance_methods_from_expr(class_name, defined_full_names, expr_id)
       when CrystalV2::Compiler::Frontend::BlockNode
         member.body.each do |child_id|
           lower_class_body_expr(class_name, class_info, child_id, defined_full_names, visited_modules)
@@ -6663,9 +6760,6 @@ module Crystal::HIR
       when CrystalV2::Compiler::Frontend::ExtendNode
         visited_extends = Set(String).new
         lower_module_class_methods_for(class_name, class_info, member.target, visited_extends)
-      when CrystalV2::Compiler::Frontend::DefNode
-        lower_method(class_name, class_info, member)
-        add_defined_instance_methods_from_expr(class_name, defined_full_names, expr_id)
       when CrystalV2::Compiler::Frontend::GetterNode
         if member.is_class?
           member.specs.each do |spec|
@@ -7322,6 +7416,8 @@ module Crystal::HIR
 
       # Mangle function name with parameter types for overloading
       full_name = full_name_override || function_full_name_for_def(base_name, param_types, node.params, has_block)
+
+      register_pending_method_effects(full_name, param_types.size)
 
       if base_name.includes?("from_chars")
         STDERR.puts "[LOWER_METHOD] base_name=#{base_name}, full_name=#{full_name}, param_types=#{param_types.map(&.to_s)}, override=#{full_name_override}"
@@ -10735,6 +10831,12 @@ module Crystal::HIR
 
     # Lower an AST node to HIR
     def lower_node(ctx : LoweringContext, node : AstNode) : ValueId
+      if !@pending_def_annotations.empty? &&
+         !node.is_a?(CrystalV2::Compiler::Frontend::AnnotationNode) &&
+         !node.is_a?(CrystalV2::Compiler::Frontend::DefNode)
+        clear_pending_effect_annotations
+      end
+
       case node
       # ═══════════════════════════════════════════════════════════════════
       # LITERALS
@@ -10973,6 +11075,7 @@ module Crystal::HIR
       when CrystalV2::Compiler::Frontend::AnnotationNode
         # Annotations like @[Link("c")] - store for later processing
         # For now, just return nil (annotations are metadata, not values)
+        remember_effect_annotation(node, @arena)
         lower_annotation(ctx, node)
 
       when CrystalV2::Compiler::Frontend::LibNode
@@ -12127,6 +12230,7 @@ module Crystal::HIR
       end
 
       full_name = function_full_name_for_def(method_name, param_types, node.params, has_block)
+      register_pending_method_effects(full_name, param_types.size)
       if @function_defs.has_key?(full_name)
         nil_lit = Literal.new(ctx.next_id, TypeRef::NIL, nil)
         ctx.emit(nil_lit)

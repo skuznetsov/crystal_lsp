@@ -338,10 +338,10 @@ module Crystal::V2
       gc_functions = [] of Tuple(String, Int32)
       total_gc = 0
       hir_module.functions.each do |func|
-        escape = HIR::EscapeAnalyzer.new(func)
+        escape = HIR::EscapeAnalyzer.new(func, type_provider, hir_module)
         escape.analyze
         # Memory strategy (includes taint/thread_shared)
-        ms = HIR::MemoryStrategyAssigner.new(func, mm_config, type_provider)
+        ms = HIR::MemoryStrategyAssigner.new(func, mm_config, type_provider, hir_module)
         result = ms.assign
         stats = result.stats
         total_ms_stats.stack_count += stats.stack_count

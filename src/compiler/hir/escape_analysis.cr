@@ -47,7 +47,13 @@ module Crystal::HIR
     # Track value definitions
     @definitions : Hash(ValueId, Value)
 
-    def initialize(@function : Function, @type_info : TypeInfoProvider? = nil)
+    @effect_provider : MethodEffectProvider?
+
+    def initialize(
+      @function : Function,
+      @type_info : TypeInfoProvider? = nil,
+      @effect_provider : MethodEffectProvider? = nil
+    )
       @summary = EscapeSummary.new(@function.params.size)
       @worklist = Deque(ValueId).new
       @users = Hash(ValueId, Array(ValueId)).new { |h, k| h[k] = [] of ValueId }
@@ -169,15 +175,24 @@ module Crystal::HIR
       @definitions.each_value do |value|
         case value
         when Call
-          if is_container_add?(value.method_name)
-            # Arguments escape into the container
-            value.args.each do |arg|
-              mark_escape(arg, LifetimeTag::ArgEscape)
+          if effects = @effect_provider.try(&.method_effects_for(value.method_name))
+            if effects.transfer
+              value.args.each do |arg|
+                mark_escape(arg, LifetimeTag::ArgEscape)
+              end
             end
-          elsif is_virtual_call?(value)
-            # Conservative: args may escape through virtual call
-            value.args.each do |arg|
-              mark_escape(arg, LifetimeTag::HeapEscape)
+            # NoEscape means "do nothing" here; trust the effect summary.
+          else
+            if is_container_add?(value.method_name)
+              # Arguments escape into the container
+              value.args.each do |arg|
+                mark_escape(arg, LifetimeTag::ArgEscape)
+              end
+            elsif is_virtual_call?(value)
+              # Conservative: args may escape through virtual call
+              value.args.each do |arg|
+                mark_escape(arg, LifetimeTag::HeapEscape)
+              end
             end
           end
 
@@ -317,10 +332,16 @@ module Crystal::HIR
     end
 
     private def container_method_base(method_name : String) : String
-      if idx = method_name.index('$')
-        method_name[0, idx]
+      base = method_name
+      if idx = base.rindex('#')
+        base = base[(idx + 1)..]
+      elsif idx = base.rindex('.')
+        base = base[(idx + 1)..]
+      end
+      if idx = base.index('$')
+        base[0, idx]
       else
-        method_name
+        base
       end
     end
 
@@ -420,8 +441,11 @@ module Crystal::HIR
 
   # Convenience method on Function
   class Function
-    def analyze_escapes(type_info : TypeInfoProvider? = nil) : EscapeSummary
-      analyzer = EscapeAnalyzer.new(self, type_info)
+    def analyze_escapes(
+      type_info : TypeInfoProvider? = nil,
+      effect_provider : MethodEffectProvider? = nil
+    ) : EscapeSummary
+      analyzer = EscapeAnalyzer.new(self, type_info, effect_provider)
       analyzer.analyze
     end
   end
