@@ -485,6 +485,7 @@ module CrystalV2
         @indexing_active : Bool
         @indexing_message : String?
         @indexing_last_sent : Time::Span
+        @semantic_token_cache : Hash(String, {Int32, SemanticTokens})  # URI -> {version, tokens}
 
         def initialize(@input = STDIN, @output = STDOUT, config : ServerConfig = ServerConfig.load)
           @config = config
@@ -529,6 +530,7 @@ module CrystalV2
           @indexing_active = false
           @indexing_message = nil
           @indexing_last_sent = Time.monotonic
+          @semantic_token_cache = {} of String => {Int32, SemanticTokens}
           if @config.background_indexing
             load_prelude_background
           else
@@ -1571,6 +1573,7 @@ module CrystalV2
           # Only remove from legacy @documents
           unregister_document_symbols(uri)
           @documents.delete(uri)
+          @semantic_token_cache.delete(uri)  # Clear cached tokens
         end
 
         private def build_document_index(program : Frontend::Program, path : String?) : DocumentIndex
@@ -3327,6 +3330,7 @@ module CrystalV2
           doc = TextDocumentItem.new(uri: uri, language_id: language_id, version: version, text: new_text)
           @documents[uri] = DocumentState.new(doc, program, type_context, identifier_symbols, symbol_table, requires, index, doc_path)
           register_document_symbols(uri, @documents[uri])
+          @semantic_token_cache.delete(uri)  # Invalidate cache on content change
 
           publish_diagnostics(uri, diagnostics, version)
           request_semantic_tokens_refresh
@@ -5045,6 +5049,19 @@ module CrystalV2
           doc_state = @documents[uri]?
           return send_response(id, SemanticTokens.new(data: [] of Int32).to_json) unless doc_state
 
+          version = doc_state.text_document.version
+
+          # Check cache first - use cached tokens if version matches
+          if cached = @semantic_token_cache[uri]?
+            cached_version, cached_tokens = cached
+            if cached_version == version
+              debug("Semantic tokens cache HIT for #{uri} v#{version}")
+              return send_response(id, cached_tokens.to_json)
+            end
+          end
+
+          start_time = Time.monotonic
+
           # Collect semantic tokens from AST
           tokens = collect_semantic_tokens(
             doc_state.program,
@@ -5055,11 +5072,16 @@ module CrystalV2
             doc_state.path
           )
 
+          elapsed_ms = (Time.monotonic - start_time).total_milliseconds
+
+          # Cache the result
+          @semantic_token_cache[uri] = {version, tokens}
+
           if ENV["LSP_DEBUG"]? || @config.debug_log_path
             sample = semantic_token_sample(tokens)
-            debug("Semantic tokens count=#{tokens.data.size // 5} uri=#{uri} sample=#{sample}")
+            debug("Semantic tokens count=#{tokens.data.size // 5} uri=#{uri} sample=#{sample} took=#{elapsed_ms.round(1)}ms")
           else
-            debug("Generated semantic tokens")
+            debug("Generated semantic tokens in #{elapsed_ms.round(1)}ms")
           end
           send_response(id, tokens.to_json)
         end
