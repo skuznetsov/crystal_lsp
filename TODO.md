@@ -468,6 +468,14 @@ def create
 end
 ```
 
+#### 5.1.2a Escape Analysis Robustness (edge cases)
+- [ ] Refine virtual-call detection: treat final/struct/monomorphic receivers as non-virtual; avoid blanket HeapEscape on method calls.
+- [ ] Add stdlib-only annotations: `@[NoEscape]`, `@[Transfer]`, `@[Taints(...)]`, `@[Arena("name")]` to override heuristics.
+- [ ] Builder/borrow region: tie child lifetimes to owner; only escape when owner escapes.
+- [ ] Closure capture in loops: copy/move captured loop vars when closure escapes (avoid last-iteration capture/UAF).
+- [ ] Any/Union boundary: treat as analysis boundary; force ARC/GC or slab to avoid stack UAF.
+- [ ] `--no-gc` diagnostics: report allocation site + reason (cycle/ffi/thread_shared).
+
 #### 5.1.3 Alias Analysis
 - [ ] Region-based alias analysis
 - [ ] Track pointer aliasing
