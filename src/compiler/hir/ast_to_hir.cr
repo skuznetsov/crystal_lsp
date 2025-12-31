@@ -12957,7 +12957,8 @@ module Crystal::HIR
       # Check for shovel operator << on non-integer types (IO, Array, etc.)
       # If left operand is pointer or union type and operator is <<, emit as method call
       # This handles io << value and arr << elem, which are NOT bit-shift but append
-      is_integer_type = left_type.id >= TypeRef::INT8.id && left_type.id <= TypeRef::INT128.id
+      is_integer_type = (left_type.id >= TypeRef::INT8.id && left_type.id <= TypeRef::INT128.id) ||
+                        (left_type.id >= TypeRef::UINT8.id && left_type.id <= TypeRef::UINT128.id)
       if !is_integer_type && op_str == "<<"
         # Emit as method call: left.<<(right)
         # The method is registered as "#<<" in the function_types
@@ -20780,8 +20781,9 @@ module Crystal::HIR
         arg_types = index_ids.map { |idx| ctx.type_of(idx) }
         method_name = resolve_method_call(ctx, object_id, "[]", arg_types)
         # Ensure the target function is lowered (IndexNode bypasses lower_call).
-        type_desc = @module.get_type_descriptor(ctx.type_of(object_id))
-        class_name = type_desc.try(&.name) || ""
+        object_type = ctx.type_of(object_id)
+        type_desc = @module.get_type_descriptor(object_type)
+        class_name = type_desc.try(&.name) || primitive_class_name(object_type) || ""
         class_name = normalize_method_owner_name(class_name)
         base_method_name = class_name.empty? ? "[]" : "#{class_name}#[]"
         primary_mangled_name = mangle_function_name(base_method_name, arg_types)
@@ -22256,9 +22258,11 @@ module Crystal::HIR
       element_ids = node.elements.map { |e| lower_expr(ctx, e) }
 
       # Determine element type from explicit `of` type, or from first element (or Int32 default)
+      element_type_name = nil
       element_type = if of_type = node.of_type
                        if type_str = stringify_type_expr(of_type)
-                         type_ref_for_name(type_str)
+                         element_type_name = normalize_declared_type_name(type_str)
+                         type_ref_for_name(element_type_name)
                        else
                          element_ids.size > 0 ? ctx.type_of(element_ids.first) : TypeRef::INT32
                        end
@@ -22272,8 +22276,14 @@ module Crystal::HIR
       arr = ArrayLiteral.new(ctx.next_id, element_type, element_ids)
       arr.lifetime = LifetimeTag::StackLocal  # Default to stack until escape analysis
       ctx.emit(arr)
-      # Register as POINTER type - arrays are pointer-like for indexing purposes
-      ctx.register_type(arr.id, TypeRef::POINTER)
+      element_type_name ||= get_type_name_from_ref(element_type)
+      if element_type_name != "Unknown" && element_type_name != "Void"
+        array_type = type_ref_for_name("Array(#{element_type_name})")
+        ctx.register_type(arr.id, array_type)
+      else
+        # Fallback when element type is unresolved.
+        ctx.register_type(arr.id, TypeRef::POINTER)
+      end
       arr.id
     end
 
@@ -22287,7 +22297,31 @@ module Crystal::HIR
         args << value_id
       end
 
-      hash_type = ctx.get_type("Hash")
+      key_type = if key_type_expr = node.of_key_type
+                   type_ref_for_name(normalize_declared_type_name(String.new(key_type_expr)))
+                 elsif args.size >= 2
+                   ctx.type_of(args[0])
+                 else
+                   TypeRef::VOID
+                 end
+      value_type = if value_type_expr = node.of_value_type
+                     type_ref_for_name(normalize_declared_type_name(String.new(value_type_expr)))
+                   elsif args.size >= 2
+                     ctx.type_of(args[1])
+                   else
+                     TypeRef::VOID
+                   end
+      hash_type = if key_type != TypeRef::VOID && value_type != TypeRef::VOID
+                    key_name = get_type_name_from_ref(key_type)
+                    value_name = get_type_name_from_ref(value_type)
+                    if key_name != "Unknown" && value_name != "Unknown"
+                      type_ref_for_name("Hash(#{key_name}, #{value_name})")
+                    else
+                      ctx.get_type("Hash")
+                    end
+                  else
+                    ctx.get_type("Hash")
+                  end
       alloc = Allocate.new(ctx.next_id, hash_type, args)
       ctx.emit(alloc)
       alloc.id
@@ -22296,7 +22330,12 @@ module Crystal::HIR
     private def lower_tuple_literal(ctx : LoweringContext, node : CrystalV2::Compiler::Frontend::TupleLiteralNode) : ValueId
       element_ids = node.elements.map { |e| lower_expr(ctx, e) }
 
-      tuple_type = ctx.get_type("Tuple")
+      element_names = element_ids.map { |id| get_type_name_from_ref(ctx.type_of(id)) }
+      tuple_type = if element_names.any? { |name| name == "Unknown" || name == "Void" }
+                     ctx.get_type("Tuple")
+                   else
+                     type_ref_for_name("Tuple(#{element_names.join(", ")})")
+                   end
       alloc = Allocate.new(ctx.next_id, tuple_type, element_ids)
       ctx.emit(alloc)
       alloc.id
