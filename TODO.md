@@ -1032,7 +1032,7 @@ r2 = maybe(false)  # => nil
 **Prelude build progress (with stdlib/prelude):**
 - Reaches LLVM IR emission and `opt -O1` successfully; link still fails due to missing runtime/stdlib symbols (expected at this stage).
 - Timing snapshot (release + `--stats --no-llvm-opt --no-llvm-metadata`): parse prelude ~167ms, HIR ~2.0s, MIR ~0.3ms, LLVM ~1.8ms, total ~2.2s; link failure is the current blocker.
-- Linker missing symbols (bootstrap_array full-prelude run 2025-12-31; 136 entries; full list in `/tmp/missing_symbols_latest.txt`).
+- Linker missing symbols (bootstrap_array full-prelude run 2025-12-31; 135 entries; full list in `/tmp/missing_symbols_latest.txt`).
   - ByteFormat decode/from_io resolved (no `_IO__ByteFormat_decode_UInt32_IO`).
 
 **Recent fixes (prelude bootstrap path):**
@@ -1042,6 +1042,7 @@ r2 = maybe(false)  # => nil
 - EventLoop interface dispatch: force EventLoop::FileDescriptor/Socket to module kind and map instance calls to Polling/IOCP/Wasi (removes EventLoop__FileDescriptor_* missing symbols) (2026-01-xx).
 - Fix module class-method deferred lookup to use the module arena (prevents `Index out of bounds` in `find_module_class_def`) (2026-01-xx).
 - Track enum value types for `.new`/`.value` and propagate via assignments/identifiers in HIR lowering.
+- Invalidate type cache on enum registration to prevent enum names from collapsing to Class; IO::Seek predicate now lowers to compare (removes `_IO__Seek_current_`).
 - Register MacroIf/MacroLiteral nodes inside nested modules during HIR lowering.
 - Remove `StructNode` handling from macro-parsed class bodies; rely on `ClassNode.is_struct` (2026-01-02).
 - Handle inline returns during yield inlining (guard proc/block bodies + safe block bounds) to preserve Enumerable semantics.
