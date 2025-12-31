@@ -8294,6 +8294,70 @@ module Crystal::HIR
       mangled_name
     end
 
+    # Resolve a single overload when argument types are unknown (all VOID).
+    # Uses arity + block presence to avoid calling an unmangled base name.
+    private def resolve_untyped_overload(base_method_name : String, arg_count : Int32, has_block_call : Bool) : String?
+      return nil if base_method_name.empty?
+
+      if base_method_name.includes?("#") || base_method_name.includes?(".")
+        sep = base_method_name.includes?("#") ? "#" : "."
+        owner, _method_part = base_method_name.split(sep, 2)
+        if info = generic_owner_info(owner)
+          if !@monomorphized.includes?(info[:owner]) && concrete_type_args?(info[:args]) && !@suppress_monomorphization
+            monomorphize_generic_class(info[:base], info[:args], info[:owner])
+          end
+        end
+      end
+
+      best_name : String? = nil
+      best_param_count = Int32::MAX
+      best_score = Int32::MIN
+
+      @function_defs.each do |name, def_node|
+        next unless name == base_method_name || name.starts_with?("#{base_method_name}$")
+        params = def_node.params
+        next unless params
+
+        param_count = 0
+        required = 0
+        has_splat = false
+        has_double_splat = false
+        def_has_block = false
+        params.each do |param|
+          next if named_only_separator?(param)
+          if param.is_block
+            def_has_block = true
+            next
+          end
+          param_count += 1
+          has_splat ||= param.is_splat
+          has_double_splat ||= param.is_double_splat
+          if param.default_value.nil? && !param.is_splat && !param.is_double_splat
+            required += 1
+          end
+        end
+
+        next if has_block_call && !def_has_block
+        next if !has_block_call && def_has_block
+        next if arg_count < required
+        next if arg_count > param_count && !has_splat && !has_double_splat
+
+        score = 0
+        score += 2 if param_count == arg_count
+        score -= 1 if has_splat
+        score -= 1 if has_double_splat
+        score += 1 if name.includes?("$")
+
+        if param_count < best_param_count || (param_count == best_param_count && score > best_score)
+          best_name = name
+          best_param_count = param_count
+          best_score = score
+        end
+      end
+
+      best_name
+    end
+
     private def module_receiver_type_name(node : CrystalV2::Compiler::Frontend::MemberAccessNode) : String?
       obj_node = @arena[node.object]
       case obj_node
@@ -9847,6 +9911,7 @@ module Crystal::HIR
       return false if name.includes?("::")
       return false unless name.matches?(/\A[A-Z][A-Za-z0-9_]*\z/)
       return false if primitive_self_type(name)
+      return false if builtin_alias_target?(name)
       return false if @class_info.has_key?(name)
       return false if @short_type_index.has_key?(name)
       return false if @module_defs.has_key?(name)
@@ -13229,6 +13294,14 @@ module Crystal::HIR
       is_integer_type = (left_type.id >= TypeRef::INT8.id && left_type.id <= TypeRef::INT128.id) ||
                         (left_type.id >= TypeRef::UINT8.id && left_type.id <= TypeRef::UINT128.id)
       if !is_integer_type && op_str == "<<"
+        if right_type == TypeRef::VOID && left_desc && left_desc.kind == TypeKind::Array
+          if inferred = left_desc.type_params.first?
+            if inferred != TypeRef::VOID
+              right_type = inferred
+              ctx.register_type(right_id, right_type)
+            end
+          end
+        end
         # Emit as method call: left.<<(right)
         # The method is registered as "#<<" in the function_types
         ensure_monomorphized_type(left_type) unless left_type == TypeRef::VOID
@@ -15574,6 +15647,34 @@ module Crystal::HIR
                 arena = @function_def_arenas[resolved_base]
                 target_name = resolved_base
                 lookup_branch = "generic_owner_base"
+              else
+                template_base = "#{info[:base]}#{sep}#{method_part}"
+                if candidate = @function_defs[template_base]?
+                  func_def = candidate
+                  arena = @function_def_arenas[template_base]
+                  target_name = name
+                  lookup_branch = "generic_owner_template"
+                elsif name.includes?("$")
+                  suffix = name.split("$", 2)[1]
+                  template_mangled = "#{template_base}$#{suffix}"
+                  if candidate = @function_defs[template_mangled]?
+                    func_def = candidate
+                    arena = @function_def_arenas[template_mangled]
+                    target_name = name
+                    lookup_branch = "generic_owner_template_mangled"
+                  else
+                    mangled_prefix = "#{template_base}$"
+                    @function_defs.each_key do |key|
+                      if key.starts_with?(mangled_prefix)
+                        func_def = @function_defs[key]
+                        arena = @function_def_arenas[key]
+                        target_name = name
+                        lookup_branch = "generic_owner_template_prefix"
+                        break
+                      end
+                    end
+                  end
+                end
               end
             end
           end
@@ -17490,6 +17591,18 @@ module Crystal::HIR
              (resolved_name.includes?("$") || @function_types.has_key?(resolved_name) || @module.has_function?(resolved_name))
             mangled_method_name = resolved_name
             base_method_name = resolved_name.split("$").first
+          end
+        end
+
+        # When argument types are unknown (all VOID), try to select a single
+        # overload by arity to avoid falling back to an unmangled base name.
+        if !mangled_method_name.includes?("$") &&
+           arg_types.all? { |t| t == TypeRef::VOID } &&
+           node.named_args.nil? &&
+           !node.args.any? { |arg_id| @arena[arg_id].is_a?(CrystalV2::Compiler::Frontend::SplatNode) }
+          if resolved_untyped = resolve_untyped_overload(base_method_name, args.size, has_block_call)
+            mangled_method_name = resolved_untyped
+            base_method_name = resolved_untyped.split("$").first
           end
         end
       end
