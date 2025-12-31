@@ -278,22 +278,24 @@ module Crystal::HIR
           end
 
           case value.method_name
-          when "spawn"
-            # spawn shares captured values; only treat closure arguments as shared
-            if value.receiver.nil?
-              value.args.each do |arg|
-                if defn = @definitions[arg]?
-                  if defn.is_a?(MakeClosure)
-                    mark_taint(arg, Taint::ThreadShared)
-                  end
-                end
-              end
-              if blk = value.block
-                block_capture_values(blk).each do |captured|
-                  mark_taint(captured, Taint::ThreadShared)
+        when "spawn"
+          # spawn shares values across fibers; treat args and captures as shared
+          if value.receiver.nil?
+            value.args.each do |arg|
+              # Any value passed to spawn can cross fiber boundaries.
+              mark_taint(arg, Taint::ThreadShared)
+              if defn = @definitions[arg]?
+                if defn.is_a?(MakeClosure)
+                  mark_taint(arg, Taint::ThreadShared)
                 end
               end
             end
+            if blk = value.block
+              block_capture_values(blk).each do |captured|
+                mark_taint(captured, Taint::ThreadShared)
+              end
+            end
+          end
           when "send"
             # Channel send shares the argument across fibers
             if recv = value.receiver
