@@ -90,3 +90,21 @@ end
 # ```
 annotation Experimental
 end
+
+# Effect annotations for escape/taint analysis (stdlib-only).
+#
+# These provide compiler hints about argument and ownership behavior.
+annotation NoEscape
+end
+
+annotation Transfer
+end
+
+annotation ThreadShared
+end
+
+annotation FFIExposed
+end
+
+annotation ReturnsAlias
+end
