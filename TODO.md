@@ -1125,10 +1125,11 @@ r2 = maybe(false)  # => nil
    - [x] Single source of truth for arena ownership during inline.
    - [x] Guard inliner against cross-arena AST and fallback to non-inline call.
    - DoD: `./bin/crystal_v2 examples/bootstrap_array.cr -o /tmp/bootstrap_array_full 2> /private/tmp/bootstrap_array_full.link.log` runs without OOB/segfault; no inline-yield guard logs present (2026-01-xx).
-4) Virtual dispatch lowering (IO/abstract receivers) - TODO
-   - [ ] Lower HIR `Call.virtual` into MIR `IndirectCall` (or type-id switch) instead of extern fallback.
-   - [ ] Emit vtables (or direct dispatch table) for concrete classes; store vtable ptr in class layout.
-   - [ ] Ensure abstract defs are never emitted as extern calls unless explicitly annotated.
+4) Virtual dispatch lowering (IO/abstract receivers) - IN PROGRESS (2025-12-31)
+   - [x] Lower HIR `Call.virtual` into MIR type-id switch for class/union receivers.
+   - [ ] Module-typed dispatch still missing (see item 1100).
+   - [ ] Emit vtables (or direct dispatch table) for concrete classes; store vtable ptr in class layout (deferred; type-id switch in use).
+   - [x] Treat abstract defs as virtual in HIR call marking.
    - DoD: missing `_IO_read_Slice_UInt8_` / `_IO_write_Slice_UInt8_` / `_FileDescriptor_*` removed from `/tmp/missing_symbols_latest.txt` after full-prelude bootstrap.
 - Infer class var types from `uninitialized` and typed literals (Array/Hash/NamedTuple) to avoid VOID globals (fixes `Thread@@threads`, `Hasher@@seed`, `Time::Location@@location_cache`) (2025-12-25).
 - Preserve generic class reopenings during monomorphization (fixes `Range#bsearch` defs) (2025-12-26).
