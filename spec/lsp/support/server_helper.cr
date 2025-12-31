@@ -1,9 +1,18 @@
 require "../../../src/compiler/lsp/server"
+require "../../../src/compiler/frontend/watchdog"
+
+# Default spec timeout for LSP operations (catches infinite loops in parser/type inference)
+LSP_SPEC_TIMEOUT = 10.seconds
 
 module CrystalV2::Compiler::LSP
   class Server
     def spec_analyze_document(source : String, base_dir : String?, path : String?)
-      analyze_document(source, base_dir, path)
+      Frontend::Watchdog.enable!("LSP spec analyze_document", LSP_SPEC_TIMEOUT)
+      begin
+        analyze_document(source, base_dir, path)
+      ensure
+        Frontend::Watchdog.disable!
+      end
     end
 
     # Prepare and cache a DocumentState for testing.

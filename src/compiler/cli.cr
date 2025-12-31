@@ -2326,5 +2326,5 @@ module CrystalV2
   end
 end
 
-# Main entry point
-exit CrystalV2::Compiler::CLI.new(ARGV).run
+# Main entry point - only run when this file is the entry point, not when loaded as a library
+# Use crystal_v2.cr or main.cr as entry points instead
