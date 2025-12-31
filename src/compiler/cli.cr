@@ -350,10 +350,12 @@ module CrystalV2
 
         first_arena = all_arenas[0][0]
         sources_by_arena = {} of Frontend::ArenaLike => String
-        all_arenas.each do |arena, _exprs, _path, source|
+        paths_by_arena = {} of Frontend::ArenaLike => String
+        all_arenas.each do |arena, _exprs, path, source|
           sources_by_arena[arena] = source
+          paths_by_arena[arena] = path
         end
-        hir_converter = HIR::AstToHir.new(first_arena, input_file, sources_by_arena)
+        hir_converter = HIR::AstToHir.new(first_arena, input_file, sources_by_arena, paths_by_arena)
         link_libs.each { |lib_name| hir_converter.module.add_link_library(lib_name) }
 
         # Collect nodes by type
@@ -2137,7 +2139,9 @@ module CrystalV2
             next unless result[value.id].gc?
             type_name = type_name_for(value.type, hir_module)
             reason = gc_reason_for(value, config)
-            details << "#{func.name}: alloc %#{value.id} #{type_name} reason=#{reason} lifetime=#{value.lifetime} taints=#{value.taints}"
+            location = func.value_location(value.id)
+            loc_prefix = location ? "#{location} " : ""
+            details << "#{func.name}: #{loc_prefix}alloc %#{value.id} #{type_name} reason=#{reason} lifetime=#{value.lifetime} taints=#{value.taints}"
           end
         end
         details

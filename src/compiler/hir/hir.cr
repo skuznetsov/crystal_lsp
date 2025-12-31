@@ -112,6 +112,23 @@ module Crystal::HIR
   end
 
   # ═══════════════════════════════════════════════════════════════════════════
+  # SOURCE LOCATIONS
+  # ═══════════════════════════════════════════════════════════════════════════
+
+  struct SourceLocation
+    getter path : String
+    getter line : Int32
+    getter column : Int32
+
+    def initialize(@path : String, @line : Int32, @column : Int32)
+    end
+
+    def to_s(io : IO) : Nil
+      io << @path << ":" << @line << ":" << @column
+    end
+  end
+
+  # ═══════════════════════════════════════════════════════════════════════════
   # VALUES (Instructions that produce a result)
   # ═══════════════════════════════════════════════════════════════════════════
 
@@ -1081,11 +1098,13 @@ module Crystal::HIR
     @next_value_id : ValueId = 0_u32
     @next_block_id : BlockId = 0_u32
     @next_scope_id : ScopeId = 0_u32
+    @value_locations : Hash(ValueId, SourceLocation)
 
     def initialize(@id : FunctionId, @name : String, @return_type : TypeRef)
       @params = [] of Parameter
       @scopes = [] of Scope
       @blocks = [] of Block
+      @value_locations = {} of ValueId => SourceLocation
 
       # Create entry block and function scope
       @entry_block = create_block(create_scope(ScopeKind::Function))
@@ -1125,6 +1144,14 @@ module Crystal::HIR
       param = Parameter.new(next_value_id, type, @params.size, name)
       @params << param
       param
+    end
+
+    def record_value_location(value_id : ValueId, location : SourceLocation) : Nil
+      @value_locations[value_id] = location
+    end
+
+    def value_location(value_id : ValueId) : SourceLocation?
+      @value_locations[value_id]?
     end
 
     def to_s(io : IO) : Nil

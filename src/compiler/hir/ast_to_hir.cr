@@ -480,6 +480,8 @@ module Crystal::HIR
 
     # Source text per arena (used to reconstruct macro literal text from spans).
     @sources_by_arena : Hash(CrystalV2::Compiler::Frontend::ArenaLike, String)
+    # Source path per arena (used for diagnostics).
+    @paths_by_arena : Hash(CrystalV2::Compiler::Frontend::ArenaLike, String)
     # Extra source snippets (macro expansion/reparse) to keep slices alive.
     @extra_sources_by_arena : Hash(CrystalV2::Compiler::Frontend::ArenaLike, Array(String))
     @last_splat_context : String?
@@ -487,7 +489,12 @@ module Crystal::HIR
     @debug_callsite : String?
     @pending_def_annotations : Array(Tuple(CrystalV2::Compiler::Frontend::AnnotationNode, CrystalV2::Compiler::Frontend::ArenaLike))
 
-    def initialize(@arena, module_name : String = "main", sources_by_arena : Hash(CrystalV2::Compiler::Frontend::ArenaLike, String)? = nil)
+    def initialize(
+      @arena,
+      module_name : String = "main",
+      sources_by_arena : Hash(CrystalV2::Compiler::Frontend::ArenaLike, String)? = nil,
+      paths_by_arena : Hash(CrystalV2::Compiler::Frontend::ArenaLike, String)? = nil
+    )
       @module = Module.new(module_name)
       @function_types = {} of String => TypeRef
       @function_base_names = Set(String).new
@@ -539,6 +546,7 @@ module Crystal::HIR
       @block_captures = {} of BlockId => Array(CapturedVar)
       @block_node_arenas = {} of UInt64 => CrystalV2::Compiler::Frontend::ArenaLike
       @sources_by_arena = sources_by_arena || {} of CrystalV2::Compiler::Frontend::ArenaLike => String
+      @paths_by_arena = paths_by_arena || {} of CrystalV2::Compiler::Frontend::ArenaLike => String
       @extra_sources_by_arena = {} of CrystalV2::Compiler::Frontend::ArenaLike => Array(String)
       @last_splat_context = nil
       @type_literal_values = Set(ValueId).new
@@ -2563,6 +2571,22 @@ module Crystal::HIR
       else
         true
       end
+    end
+
+    private def source_path_for(arena : CrystalV2::Compiler::Frontend::ArenaLike) : String?
+      @paths_by_arena[arena]?
+    end
+
+    private def record_allocation_location(
+      ctx : LoweringContext,
+      value_id : ValueId,
+      arena : CrystalV2::Compiler::Frontend::ArenaLike,
+      node : CrystalV2::Compiler::Frontend::Node
+    ) : Nil
+      path = source_path_for(arena)
+      return unless path
+      span = node.span
+      ctx.function.record_value_location(value_id, SourceLocation.new(path, span.start_line, span.start_column))
     end
 
     private def store_extra_source(arena : CrystalV2::Compiler::Frontend::ArenaLike, text : String) : Nil
@@ -11232,6 +11256,7 @@ module Crystal::HIR
           # Create uninitialized variable
           alloc = Allocate.new(ctx.next_id, TypeRef::POINTER, [] of ValueId, true)
           ctx.emit(alloc)
+          record_allocation_location(ctx, alloc.id, @arena, node)
           ctx.register_local(var_name, alloc.id)
           var_id = alloc.id
         end
@@ -18275,6 +18300,7 @@ module Crystal::HIR
         alloc_type = out_alloc_type_for_param(param_type)
         alloc = Allocate.new(ctx.next_id, alloc_type, [] of ValueId, true)
         ctx.emit(alloc)
+        record_allocation_location(ctx, alloc.id, @arena, node)
         ctx.register_local(var_name, alloc.id)
         var_id = alloc.id
       end
@@ -22544,6 +22570,7 @@ module Crystal::HIR
                   end
       alloc = Allocate.new(ctx.next_id, hash_type, args)
       ctx.emit(alloc)
+      record_allocation_location(ctx, alloc.id, @arena, node)
       alloc.id
     end
 
@@ -22558,6 +22585,7 @@ module Crystal::HIR
                    end
       alloc = Allocate.new(ctx.next_id, tuple_type, element_ids)
       ctx.emit(alloc)
+      record_allocation_location(ctx, alloc.id, @arena, node)
       alloc.id
     end
 
@@ -22572,6 +22600,7 @@ module Crystal::HIR
       named_tuple_type = ctx.get_type("NamedTuple")
       alloc = Allocate.new(ctx.next_id, named_tuple_type, element_ids)
       ctx.emit(alloc)
+      record_allocation_location(ctx, alloc.id, @arena, node)
       alloc.id
     end
 
@@ -22594,6 +22623,7 @@ module Crystal::HIR
       range_type = type_ref_for_name(range_type_name)
       alloc = Allocate.new(ctx.next_id, range_type, [begin_id, end_id, excl_lit.id])
       ctx.emit(alloc)
+      record_allocation_location(ctx, alloc.id, @arena, node)
       alloc.id
     end
 

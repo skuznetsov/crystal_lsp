@@ -164,10 +164,12 @@ module Crystal::V2
       # Use first file's arena for the converter (it merges all)
       first_arena = all_arenas[0][0]
       sources_by_arena = {} of CrystalV2::Compiler::Frontend::ArenaLike => String
-      all_arenas.each do |arena, _exprs, _path, source|
+      paths_by_arena = {} of CrystalV2::Compiler::Frontend::ArenaLike => String
+      all_arenas.each do |arena, _exprs, path, source|
         sources_by_arena[arena] = source
+        paths_by_arena[arena] = path
       end
-      hir_converter = HIR::AstToHir.new(first_arena, @input_file, sources_by_arena)
+      hir_converter = HIR::AstToHir.new(first_arena, @input_file, sources_by_arena, paths_by_arena)
 
       # Collect all DefNodes, ClassNodes, ModuleNodes, EnumNodes, MacroDefNodes, and top-level expressions
       def_nodes = [] of Tuple(CrystalV2::Compiler::Frontend::DefNode, CrystalV2::Compiler::Frontend::ArenaLike)
@@ -627,7 +629,9 @@ module Crystal::V2
           next unless result[value.id].gc?
           type_name = type_name_for(value.type, hir_module)
           reason = gc_reason_for(value, config)
-          details << "#{func.name}: alloc %#{value.id} #{type_name} reason=#{reason} lifetime=#{value.lifetime} taints=#{value.taints}"
+          location = func.value_location(value.id)
+          loc_prefix = location ? "#{location} " : ""
+          details << "#{func.name}: #{loc_prefix}alloc %#{value.id} #{type_name} reason=#{reason} lifetime=#{value.lifetime} taints=#{value.taints}"
         end
       end
       details
