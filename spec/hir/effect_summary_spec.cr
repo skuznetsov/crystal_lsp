@@ -119,4 +119,34 @@ describe "method effect summaries" do
     call = find_call_by_prefix(func, "Data.new")
     call.taints.thread_shared?.should be_true
   end
+
+  it "uses @[Taints(:thread_shared)] to taint call arguments" do
+    code = <<-CRYSTAL
+      annotation Taints
+      end
+
+      class Bus
+        @[Taints(:thread_shared)]
+        def publish(value)
+        end
+      end
+
+      class Data
+      end
+
+      def foo
+        bus = Bus.new
+        item = Data.new
+        bus.publish(item)
+        bus
+      end
+    CRYSTAL
+
+    hir_mod, func = lower_named_function(code, "foo")
+    analyzer = Crystal::HIR::TaintAnalyzer.new(func, nil, hir_mod)
+    analyzer.analyze
+
+    call = find_call_by_prefix(func, "Data.new")
+    call.taints.thread_shared?.should be_true
+  end
 end

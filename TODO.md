@@ -473,7 +473,7 @@ end
 - [x] Method effect summaries: cache per-signature effects (`no_escape`, `transfer`, `thread_shared`, `ffi_exposed`, `returns_alias`) to replace name-based heuristics (2025-12-31).
 - [x] Apply effect summaries during Call handling (escape/taint honoring `NoEscape`/`Transfer`/`ThreadShared`/`FFIExposed`) (2025-12-31).
 - [x] Unknown-effect boundary: limit propagation and pick safe local strategy without poisoning the full escape/taint graph (2025-12-31).
-- [ ] Add stdlib-only annotations: `@[NoEscape]`, `@[Transfer]`, `@[Taints(...)]`, `@[Arena("name")]` to override heuristics (Array/Hash/Set/Channel/Deque/SmallDeque/PointerLinkedList/Thread::LinkedList/PointerPairingHeap/Once::Operation partial coverage done).
+- [ ] Add stdlib-only annotations: `@[NoEscape]`, `@[Transfer]`, `@[Taints(...)]`, `@[Arena("name")]` to override heuristics (Taints support added; Arena pending; Array/Hash/Set/Channel/Deque/SmallDeque/PointerLinkedList/Thread::LinkedList/PointerPairingHeap/Once::Operation partial coverage done).
 - [ ] Builder/borrow region: tie child lifetimes to owner; only escape when owner escapes.
 - [ ] Closure capture in loops: copy/move captured loop vars when closure escapes (avoid last-iteration capture/UAF).
 - [ ] Any/Union boundary: treat as analysis boundary; force ARC/GC or slab to avoid stack UAF.

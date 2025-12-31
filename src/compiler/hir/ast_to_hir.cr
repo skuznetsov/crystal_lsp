@@ -567,8 +567,66 @@ module Crystal::HIR
     private def effect_annotation_name(node : CrystalV2::Compiler::Frontend::AnnotationNode) : String?
       name = resolve_annotation_name(node.name)
       return nil unless name
-      return name if name.in?("NoEscape", "Transfer", "ThreadShared", "FFIExposed", "ReturnsAlias")
+      return name if name.in?("NoEscape", "Transfer", "ThreadShared", "FFIExposed", "ReturnsAlias", "Taints")
       nil
+    end
+
+    private def taint_tag_from_expr(expr_id : CrystalV2::Compiler::Frontend::ExprId) : String?
+      node = @arena[expr_id]
+      case node
+      when CrystalV2::Compiler::Frontend::SymbolNode
+        tag = String.new(node.name)
+        tag.starts_with?(":") ? tag[1..] : tag
+      when CrystalV2::Compiler::Frontend::StringNode
+        String.new(node.value)
+      when CrystalV2::Compiler::Frontend::IdentifierNode
+        String.new(node.name)
+      else
+        nil
+      end
+    end
+
+    private def taint_named_arg_truthy?(expr_id : CrystalV2::Compiler::Frontend::ExprId) : Bool
+      node = @arena[expr_id]
+      case node
+      when CrystalV2::Compiler::Frontend::BoolNode
+        node.value
+      when CrystalV2::Compiler::Frontend::NilNode
+        false
+      else
+        true
+      end
+    end
+
+    private def apply_taint_tag(summary : MethodEffectSummary, tag : String) : MethodEffectSummary
+      normalized = tag.downcase
+      case normalized
+      when "thread_shared", "threadshared", "thread-shared"
+        summary.thread_shared = true
+      when "ffi_exposed", "ffiexposed", "ffi-exposed", "ffi"
+        summary.ffi_exposed = true
+      end
+      summary
+    end
+
+    private def apply_taints_annotation(
+      node : CrystalV2::Compiler::Frontend::AnnotationNode,
+      summary : MethodEffectSummary
+    ) : MethodEffectSummary
+      node.args.each do |arg_id|
+        if tag = taint_tag_from_expr(arg_id)
+          summary = apply_taint_tag(summary, tag)
+        end
+      end
+
+      if named_args = node.named_args
+        named_args.each do |named_arg|
+          next unless taint_named_arg_truthy?(named_arg.value)
+          summary = apply_taint_tag(summary, String.new(named_arg.name))
+        end
+      end
+
+      summary
     end
 
     private def remember_effect_annotation(
@@ -598,6 +656,8 @@ module Crystal::HIR
             summary.ffi_exposed = true
           when "ReturnsAlias"
             summary.returns_alias = true
+          when "Taints"
+            summary = apply_taints_annotation(annotation_node, summary)
           end
         end
       end

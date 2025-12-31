@@ -108,3 +108,9 @@ end
 
 annotation ReturnsAlias
 end
+
+annotation Taints
+end
+
+annotation Arena
+end
