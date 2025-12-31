@@ -336,6 +336,7 @@ module Crystal::V2
       type_provider = HIR::ClassInfoTypeProvider.new(hir_module, hir_converter.class_info, acyclic_types)
       total_ms_stats = HIR::MemoryStrategyResult::Stats.new
       gc_functions = [] of Tuple(String, Int32)
+      gc_details = [] of String
       total_gc = 0
       hir_module.functions.each do |func|
         escape = HIR::EscapeAnalyzer.new(func, type_provider, hir_module)
@@ -352,6 +353,7 @@ module Crystal::V2
         if @no_gc && stats.gc_count > 0
           total_gc += stats.gc_count
           gc_functions << {func.name, stats.gc_count}
+          gc_details.concat(gc_allocation_details(func, result, hir_module, mm_config))
         end
       end
       log "  Memory strategies: #{format_memory_stats(total_ms_stats)}"
@@ -359,6 +361,12 @@ module Crystal::V2
         STDERR.puts "error: --no-gc requested but #{total_gc} allocation(s) require GC"
         gc_functions.sort_by { |(_, count)| -count }.first(10).each do |(name, count)|
           STDERR.puts "  #{name}: #{count}"
+        end
+        gc_details.first(20).each do |detail|
+          STDERR.puts "  #{detail}"
+        end
+        if gc_details.size > 20
+          STDERR.puts "  ... #{gc_details.size - 20} more GC allocation(s)"
         end
         exit 1
       end
@@ -604,6 +612,69 @@ module Crystal::V2
 
     private def format_memory_stats(stats : HIR::MemoryStrategyResult::Stats) : String
       String.build { |io| stats.to_s(io) }
+    end
+
+    private def gc_allocation_details(
+      func : HIR::Function,
+      result : HIR::MemoryStrategyResult,
+      hir_module : HIR::Module,
+      config : HIR::MemoryConfig
+    ) : Array(String)
+      details = [] of String
+      func.blocks.each do |block|
+        block.instructions.each do |value|
+          next unless value.is_a?(HIR::Allocate)
+          next unless result[value.id].gc?
+          type_name = type_name_for(value.type, hir_module)
+          reason = gc_reason_for(value, config)
+          details << "#{func.name}: alloc %#{value.id} #{type_name} reason=#{reason} lifetime=#{value.lifetime} taints=#{value.taints}"
+        end
+      end
+      details
+    end
+
+    private def gc_reason_for(alloc : HIR::Allocate, config : HIR::MemoryConfig) : String
+      reasons = [] of String
+      reasons << "cyclic" if alloc.taints.cyclic?
+      reasons << "ffi_exposed" if alloc.taints.ffi_exposed?
+      reasons << "thread_shared" if alloc.taints.thread_shared?
+      if reasons.empty?
+        if config.mode.conservative?
+          reasons << "conservative"
+        else
+          reasons << "lifetime=#{alloc.lifetime}"
+        end
+      end
+      reasons.join("+")
+    end
+
+    private def type_name_for(type_ref : HIR::TypeRef, hir_module : HIR::Module) : String
+      if desc = hir_module.get_type_descriptor(type_ref)
+        return desc.name
+      end
+      case type_ref
+      when HIR::TypeRef::VOID then "Void"
+      when HIR::TypeRef::NIL then "Nil"
+      when HIR::TypeRef::BOOL then "Bool"
+      when HIR::TypeRef::INT8 then "Int8"
+      when HIR::TypeRef::INT16 then "Int16"
+      when HIR::TypeRef::INT32 then "Int32"
+      when HIR::TypeRef::INT64 then "Int64"
+      when HIR::TypeRef::INT128 then "Int128"
+      when HIR::TypeRef::UINT8 then "UInt8"
+      when HIR::TypeRef::UINT16 then "UInt16"
+      when HIR::TypeRef::UINT32 then "UInt32"
+      when HIR::TypeRef::UINT64 then "UInt64"
+      when HIR::TypeRef::UINT128 then "UInt128"
+      when HIR::TypeRef::FLOAT32 then "Float32"
+      when HIR::TypeRef::FLOAT64 then "Float64"
+      when HIR::TypeRef::CHAR then "Char"
+      when HIR::TypeRef::STRING then "String"
+      when HIR::TypeRef::SYMBOL then "Symbol"
+      when HIR::TypeRef::POINTER then "Pointer"
+      else
+        "TypeRef(#{type_ref.id})"
+      end
     end
 
     private def trace_driver(message : String) : Nil

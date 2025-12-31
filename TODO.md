@@ -477,7 +477,7 @@ end
 - [ ] Builder/borrow region: tie child lifetimes to owner; only escape when owner escapes.
 - [ ] Closure capture in loops: copy/move captured loop vars when closure escapes (avoid last-iteration capture/UAF).
 - [ ] Any/Union boundary: treat as analysis boundary; force ARC/GC or slab to avoid stack UAF.
-- [ ] `--no-gc` diagnostics: report allocation site + reason (cycle/ffi/thread_shared).
+- [ ] `--no-gc` diagnostics: report allocation site + reason (cycle/ffi/thread_shared). (Reason/type reported; location still pending.)
 
 #### 5.1.3 Alias Analysis
 - [ ] Region-based alias analysis
