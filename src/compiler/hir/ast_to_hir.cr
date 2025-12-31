@@ -484,6 +484,7 @@ module Crystal::HIR
     @extra_sources_by_arena : Hash(CrystalV2::Compiler::Frontend::ArenaLike, Array(String))
     @last_splat_context : String?
     @type_literal_values : Set(ValueId)
+    @debug_callsite : String?
 
     def initialize(@arena, module_name : String = "main", sources_by_arena : Hash(CrystalV2::Compiler::Frontend::ArenaLike, String)? = nil)
       @module = Module.new(module_name)
@@ -542,6 +543,19 @@ module Crystal::HIR
       @type_literal_values = Set(ValueId).new
       @constant_defs = Set(String).new
       @constant_types = {} of String => TypeRef
+      @debug_callsite = nil
+    end
+
+    private def with_debug_callsite(label : String?, &)
+      return yield unless DebugHooks::ENABLED && label
+
+      previous = @debug_callsite
+      @debug_callsite = label
+      begin
+        yield
+      ensure
+        @debug_callsite = previous
+      end
     end
 
     private def fun_def?(node : CrystalV2::Compiler::Frontend::DefNode) : Bool
@@ -12967,9 +12981,17 @@ module Crystal::HIR
         if method_name != primary_mangled_name
           remember_callsite_arg_types(method_name, [right_type])
         end
-        lower_function_if_needed(primary_mangled_name)
-        if method_name != primary_mangled_name
-          lower_function_if_needed(method_name)
+        callsite_label = nil
+        if DebugHooks::ENABLED
+          span = node.span
+          receiver_name = type_name_for_mangling(left_type)
+          callsite_label = "func=#{ctx.function.name} method=<< full=#{method_name} class=#{@current_class || ""} recv=#{receiver_name} span=#{span.start_line}:#{span.start_column}-#{span.end_line}:#{span.end_column}"
+        end
+        with_debug_callsite(callsite_label) do
+          lower_function_if_needed(primary_mangled_name)
+          if method_name != primary_mangled_name
+            lower_function_if_needed(method_name)
+          end
         end
         call = Call.new(ctx.next_id, left_type, left_id, method_name, [right_id])
         ctx.emit(call)
@@ -15728,9 +15750,17 @@ module Crystal::HIR
       end
 
       if func_def
-        debug_hook("function.lookup.hit", "name=#{name} target=#{target_name} branch=#{lookup_branch || "unknown"}")
+        data = "name=#{name} target=#{target_name} branch=#{lookup_branch || "unknown"}"
+        if callsite = @debug_callsite
+          data += " callsite=#{callsite}"
+        end
+        debug_hook("function.lookup.hit", data)
       else
-        debug_hook("function.lookup.miss", name)
+        data = "name=#{name}"
+        if callsite = @debug_callsite
+          data += " callsite=#{callsite}"
+        end
+        debug_hook("function.lookup.miss", data)
       end
 
       if ENV.has_key?("DEBUG_DEFERRED") && name.includes?("byte_range")
@@ -17942,14 +17972,22 @@ module Crystal::HIR
       if ENV["DEBUG_CALL_TRACE"]? && method_name == "copy_to"
         STDERR.puts "[CALL_TRACE] stage=after_remember method=#{method_name} mangled=#{mangled_method_name} primary=#{primary_mangled_name}"
       end
+      callsite_label = nil
+      if DebugHooks::ENABLED
+        span = node.span
+        receiver_type_name = receiver_id ? type_name_for_mangling(ctx.type_of(receiver_id)) : "nil"
+        callsite_label = "func=#{ctx.function.name} method=#{method_name} full=#{full_method_name || ""} class=#{@current_class || ""} recv=#{receiver_type_name} span=#{span.start_line}:#{span.start_column}-#{span.end_line}:#{span.end_column}"
+      end
       # Debug disabled for performance
       # if mangled_method_name.includes?("from_chars") || mangled_method_name == "ec" || mangled_method_name == "ptr" || mangled_method_name == "current" || (method_name == "write" && base_method_name.includes?("FileDescriptor")) || mangled_method_name.includes?("Slice") && method_name == "new"
       #   arg_type_names = arg_types.map { |t| type_name_for_mangling(t) }
       #   STDERR.puts "[CALL_DEBUG] method=#{method_name}, base=#{base_method_name}, mangled=#{mangled_method_name}, primary=#{primary_mangled_name}, return_type=#{return_type}, arg_types=#{arg_type_names}, full=#{full_method_name}"
       # end
-      lower_function_if_needed(primary_mangled_name)
-      if mangled_method_name != primary_mangled_name
-        lower_function_if_needed(mangled_method_name)
+      with_debug_callsite(callsite_label) do
+        lower_function_if_needed(primary_mangled_name)
+        if mangled_method_name != primary_mangled_name
+          lower_function_if_needed(mangled_method_name)
+        end
       end
       if ENV["DEBUG_CALL_TRACE"]? && method_name == "copy_to"
         STDERR.puts "[CALL_TRACE] stage=after_lower_function method=#{method_name} mangled=#{mangled_method_name} primary=#{primary_mangled_name}"
@@ -20744,9 +20782,17 @@ module Crystal::HIR
         if method_name != primary_mangled_name
           remember_callsite_arg_types(method_name, arg_types)
         end
-        lower_function_if_needed(primary_mangled_name)
-        if method_name != primary_mangled_name
-          lower_function_if_needed(method_name)
+        callsite_label = nil
+        if DebugHooks::ENABLED
+          span = node.span
+          receiver_name = type_name_for_mangling(ctx.type_of(object_id))
+          callsite_label = "func=#{ctx.function.name} method=[] full=#{method_name} class=#{@current_class || ""} recv=#{receiver_name} span=#{span.start_line}:#{span.start_column}-#{span.end_line}:#{span.end_column}"
+        end
+        with_debug_callsite(callsite_label) do
+          lower_function_if_needed(primary_mangled_name)
+          if method_name != primary_mangled_name
+            lower_function_if_needed(method_name)
+          end
         end
         return_type = get_function_return_type(method_name)
         # Fallback: [] typically returns a value (element or subslice)
