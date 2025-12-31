@@ -1204,6 +1204,7 @@ module Crystal::HIR
     getter extern_functions : Array(ExternFunction)
     getter method_effects : Hash(String, MethodEffectSummary)
     getter class_parents : Hash(String, String?)
+    getter module_includers : Hash(String, Array(String))
 
     @next_function_id : FunctionId = 0_u32
     @next_type_id : TypeId = TypeRef::FIRST_USER_TYPE
@@ -1218,10 +1219,20 @@ module Crystal::HIR
       @extern_functions = [] of ExternFunction
       @method_effects = {} of String => MethodEffectSummary
       @class_parents = {} of String => String?
+      @module_includers = {} of String => Array(String)
     end
 
     def register_class_parent(name : String, parent : String?) : Nil
       @class_parents[name] = parent
+    end
+
+    def register_module_includer(module_name : String, class_name : String) : Nil
+      includers = @module_includers[module_name]?
+      unless includers
+        includers = [] of String
+        @module_includers[module_name] = includers
+      end
+      includers << class_name unless includers.includes?(class_name)
     end
 
     def add_method_effect(name : String, summary : MethodEffectSummary) : Nil

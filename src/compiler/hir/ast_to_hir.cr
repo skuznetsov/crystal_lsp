@@ -694,6 +694,7 @@ module Crystal::HIR
         new_set
       end
       set.add(class_name)
+      @module.register_module_includer(resolved_module_name, class_name)
       # Also record reverse mapping (class -> modules it includes)
       class_set = @class_included_modules[class_name]? || begin
         new_set = Set(String).new

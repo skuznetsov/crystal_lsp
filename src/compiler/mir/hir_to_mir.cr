@@ -946,6 +946,25 @@ module Crystal
       result
     end
 
+    private def module_includers_for(module_name : String) : Array(String)
+      includers = @hir_module.module_includers[module_name]?
+      if includers.nil? || includers.empty?
+        matches = @hir_module.module_includers.keys.select { |key| key.ends_with?("::#{module_name}") }
+        includers = @hir_module.module_includers[matches.first]? if matches.size == 1
+      end
+
+      if (includers.nil? || includers.empty?) && module_name.includes?("::")
+        short_name = module_name.split("::").last
+        includers = @hir_module.module_includers[short_name]?
+        if includers.nil? || includers.empty?
+          matches = @hir_module.module_includers.keys.select { |key| key.ends_with?("::#{short_name}") }
+          includers = @hir_module.module_includers[matches.first]? if matches.size == 1
+        end
+      end
+
+      includers ? includers.dup : [] of String
+    end
+
     private def virtual_dispatch_candidates(
       recv_desc : HIR::TypeDescriptor,
       recv_type : HIR::TypeRef,
@@ -982,6 +1001,24 @@ module Crystal
             variant_id: mir_type.id.to_i32,
             func: func
           }
+        end
+      elsif recv_desc.kind == HIR::TypeKind::Module
+        seen = Set(String).new
+        module_includers_for(recv_desc.name).each do |includer|
+          ([includer] + subclasses_for(includer)).each do |class_name|
+            next if seen.includes?(class_name)
+            seen.add(class_name)
+            func_name = "#{class_name}##{method_suffix}"
+            next unless func = @mir_module.get_function(func_name)
+            next unless mir_type = @mir_module.type_registry.get_by_name(class_name)
+            next if mir_type.is_value_type?
+            candidates << {
+              type_id: mir_type.id.to_i32,
+              type_ref: TypeRef.new(mir_type.id),
+              variant_id: mir_type.id.to_i32,
+              func: func
+            }
+          end
         end
       end
 
