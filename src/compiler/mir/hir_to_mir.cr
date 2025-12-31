@@ -671,6 +671,7 @@ module Crystal
 
     private def lower_call(call : HIR::Call) : ValueId
       builder = @builder.not_nil!
+      debug_virtual = ENV.has_key?("DEBUG_VIRTUAL_CALLS")
 
       # Get arguments
       begin
@@ -682,6 +683,11 @@ module Crystal
       # Add receiver as first arg if present
       if recv = call.receiver
         args.unshift(get_value(recv))
+      end
+      if debug_virtual && call.virtual
+        recv_type = call.receiver ? @hir_value_types[call.receiver.not_nil!]? : nil
+        recv_type_name = hir_type_name(recv_type)
+        STDERR.puts "[VIRTUAL_CALL] method=#{call.method_name} receiver=#{recv_type_name} args=#{call.args.size} func=#{@current_lowering_func_name}"
       end
 
       # Check if this is an external/runtime call
@@ -707,6 +713,9 @@ module Crystal
 
       # If not found, try fuzzy matching to handle type variations (e.g., String vs String | Nil)
       unless func
+        if debug_virtual && call.virtual
+          STDERR.puts "[VIRTUAL_CALL] unresolved method=#{call.method_name} base=#{base_method_name} func=#{@current_lowering_func_name}"
+        end
         # Only apply fuzzy matching for qualified method names (containing . or #)
         if call.method_name.includes?(".") || call.method_name.includes?("#")
           # Extract base name (before $ type suffix)
@@ -791,6 +800,14 @@ module Crystal
         STDERR.puts "[UNRESOLVED CALL] #{call.method_name} in #{@current_lowering_func_name}"
       end
       builder.extern_call(call.method_name, args, convert_type(call.type))
+    end
+
+    private def hir_type_name(type_ref : HIR::TypeRef?) : String
+      return "unknown" unless type_ref
+      if desc = @hir_module.get_type_descriptor(type_ref)
+        return desc.name
+      end
+      type_ref.id.to_s
     end
 
     # Helper to get the MIR type of a HIR value by finding it in the function

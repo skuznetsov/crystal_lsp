@@ -18205,6 +18205,12 @@ module Crystal::HIR
           call_virtual = type_desc.kind.in?(TypeKind::Union, TypeKind::Module)
         end
       end
+      if ENV.has_key?("DEBUG_VIRTUAL_CALLS") && receiver_id
+        recv_type = ctx.type_of(receiver_id)
+        recv_desc = @module.get_type_descriptor(recv_type)
+        recv_name = recv_desc ? "#{recv_desc.name}(#{recv_desc.kind})" : recv_type.id.to_s
+        STDERR.puts "[HIR_VIRTUAL_CALL] method=#{method_name} recv=#{recv_name} virtual=#{call_virtual}"
+      end
 
       if ENV["DEBUG_CALL_TRACE"]? && method_name == "copy_to"
         STDERR.puts "[CALL_TRACE] stage=before_lower_function method=#{method_name} mangled=#{mangled_method_name} primary=#{primary_mangled_name} return=#{return_type.id}"
