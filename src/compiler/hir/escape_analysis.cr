@@ -189,9 +189,10 @@ module Crystal::HIR
                 mark_escape(arg, LifetimeTag::ArgEscape)
               end
             elsif is_virtual_call?(value)
-              # Conservative: args may escape through virtual call
+              # Unknown-effect boundary: mark args as escaping without
+              # propagating through the entire data-flow graph.
               value.args.each do |arg|
-                mark_escape(arg, LifetimeTag::HeapEscape)
+                mark_escape_boundary(arg, LifetimeTag::HeapEscape)
               end
             end
           end
@@ -311,6 +312,47 @@ module Crystal::HIR
       if tag.escapes_more_than?(value.lifetime)
         value.lifetime = tag
         @worklist << value_id
+      end
+    end
+
+    # Mark escape for unknown-effect boundaries without propagating across the
+    # full worklist graph. This keeps the escape local to the value flow that
+    # reaches the call site.
+    private def mark_escape_boundary(
+      value_id : ValueId,
+      tag : LifetimeTag,
+      visited : Set(ValueId)? = nil
+    ) : Nil
+      visited ||= Set(ValueId).new
+      return if visited.includes?(value_id)
+      visited.add(value_id)
+
+      param = @function.params.find { |p| p.id == value_id }
+      if param
+        if tag.escapes_more_than?(param.lifetime)
+          param.lifetime = tag
+        end
+        return
+      end
+
+      value = @definitions[value_id]?
+      return unless value
+
+      if tag.escapes_more_than?(value.lifetime)
+        value.lifetime = tag
+      end
+
+      case value
+      when Copy
+        mark_escape_boundary(value.source, tag, visited)
+      when Phi
+        value.incoming.each { |(_, val)| mark_escape_boundary(val, tag, visited) }
+      when Allocate
+        if tag.escapes_more_than?(LifetimeTag::StackLocal)
+          value.constructor_args.each do |arg|
+            mark_escape_boundary(arg, LifetimeTag::ArgEscape, visited)
+          end
+        end
       end
     end
 
