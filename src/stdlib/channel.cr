@@ -128,6 +128,7 @@ class Channel(T)
   # Otherwise, this method blocks the calling fiber until another fiber calls `#receive` on the channel.
   #
   # Raises `ClosedError` if the channel is closed or closes while waiting on a full channel.
+  @[ThreadShared]
   def send(value : T) : self
     sender = Sender(T).new
 
@@ -313,6 +314,7 @@ class Channel(T)
   end
 
   # :nodoc:
+  @[ThreadShared]
   def send_select_action(value : T)
     SendAction.new(self, value)
   end

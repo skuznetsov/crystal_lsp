@@ -406,6 +406,7 @@ class Array(T)
   # a = [1, 2]
   # a << 3 # => [1,2,3]
   # ```
+  @[Transfer]
   def <<(value : T) : self
     push(value)
   end
@@ -427,6 +428,7 @@ class Array(T)
   # a[1, 0] = 6
   # a # => [1, 6, 2, 3, 4, 5]
   # ```
+  @[Transfer]
   def []=(start : Int, count : Int, value : T) : T
     start, count = normalize_start_and_count(start, count)
 
@@ -471,6 +473,7 @@ class Array(T)
 
   # :ditto:
   @[Deprecated("Use `#[]=(start, count, value)` instead")]
+  @[Transfer]
   def []=(value : T, *, index start : Int, count : Int)
     self[start, count] = value
   end
@@ -490,6 +493,7 @@ class Array(T)
   # a[2...] = 6
   # a # => [1, 2, 6]
   # ```
+  @[Transfer]
   def []=(range : Range, value : T)
     self[*Indexable.range_to_index_and_count(range, size) || raise IndexError.new] = value
   end
@@ -509,6 +513,7 @@ class Array(T)
   # a[1, 3] = [6, 7, 8, 9, 10]
   # a # => [1, 6, 7, 8, 9, 10, 5]
   # ```
+  @[Transfer]
   def []=(start : Int, count : Int, values : Array(T))
     start, count = normalize_start_and_count(start, count)
     diff = values.size - count
@@ -536,6 +541,7 @@ class Array(T)
 
   # :ditto:
   @[Deprecated("Use `#[]=(start, count, values)` instead")]
+  @[Transfer]
   def []=(values : Array(T), *, index start : Int, count : Int)
     self[start, count] = values
   end
@@ -559,6 +565,7 @@ class Array(T)
   # a[2..] = [6, 7, 8, 9, 10]
   # a # => [1, 2, 6, 7, 8, 9, 10]
   # ```
+  @[Transfer]
   def []=(range : Range, values : Array(T))
     self[*Indexable.range_to_index_and_count(range, size) || raise IndexError.new] = values
   end
@@ -1004,6 +1011,7 @@ class Array(T)
   # a.insert(2, "y")  # => ["x", "a", "y", "b", "c"]
   # a.insert(-1, "z") # => ["x", "a", "y", "b", "c", "z"]
   # ```
+  @[Transfer]
   def insert(index : Int, object : T) : self
     if index == 0
       return unshift(object)
@@ -1411,6 +1419,7 @@ class Array(T)
   # a.push("c") # => ["a", "b", "c"]
   # a.push(1)   # => ["a", "b", "c", 1]
   # ```
+  @[Transfer]
   def push(value : T) : self
     check_needs_resize
     @buffer[@size] = value
@@ -1425,6 +1434,7 @@ class Array(T)
   # a = ["a"]
   # a.push("b", "c") # => ["a", "b", "c"]
   # ```
+  @[Transfer]
   def push(*values : T) : self
     resize_if_cant_insert(values.size)
 
@@ -1997,6 +2007,7 @@ class Array(T)
   # a.unshift("c") # => ["c", "a", "b"]
   # a.unshift(1)   # => [1, "c", "a", "b"]
   # ```
+  @[Transfer]
   def unshift(object : T) : self
     check_needs_resize_for_unshift
     shift_buffer_by(-1)
@@ -2008,6 +2019,7 @@ class Array(T)
 
   # Prepend multiple values. The same as `unshift`, but takes an arbitrary number
   # of values to add to the array. Returns `self`.
+  @[Transfer]
   def unshift(*values : T) : self
     values.reverse_each do |value|
       unshift(value)

@@ -81,6 +81,7 @@ struct Set(T)
   end
 
   # Alias for `add`
+  @[Transfer]
   def <<(object : T) : self
     add object
   end
@@ -93,6 +94,7 @@ struct Set(T)
   # s.add(8)
   # s.includes? 8 # => true
   # ```
+  @[Transfer]
   def add(object : T) : self
     @hash[object] = nil
     self
@@ -106,6 +108,7 @@ struct Set(T)
   # s.add? 8 # => true
   # s.add? 8 # => false
   # ```
+  @[Transfer]
   def add?(object : T) : Bool
     @hash.put(object, nil) { return true }
     false

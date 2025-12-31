@@ -1069,6 +1069,7 @@ class Hash(K, V)
   # h["foo"] = "bar"
   # h["foo"] # => "bar"
   # ```
+  @[Transfer]
   def []=(key : K, value : V) : V
     upsert(key, value)
     value
@@ -1086,6 +1087,7 @@ class Hash(K, V)
   # h.put(2, "two") { |key| key.to_s } # => "2"
   # h                                  # => {1 => "one", 2 => "two"}
   # ```
+  @[Transfer]
   def put(key : K, value : V, &)
     updated_entry = upsert(key, value)
     updated_entry ? updated_entry.value : yield key
@@ -1104,6 +1106,7 @@ class Hash(K, V)
   # h.put_if_absent(2, "two") # => "two"
   # h                         # => {1 => "one", 2 => "two"}
   # ```
+  @[Transfer]
   def put_if_absent(key : K, value : V) : V
     put_if_absent(key) { value }
   end
@@ -1125,6 +1128,7 @@ class Hash(K, V)
   # `hash.put_if_absent(key) { value }` is a more performant alternative to
   # `hash[key] ||= value` that also works correctly when the hash may contain
   # falsey values.
+  @[Transfer]
   def put_if_absent(key : K, & : K -> V) : V
     if entry = find_entry(key)
       entry.value
