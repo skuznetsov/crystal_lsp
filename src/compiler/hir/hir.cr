@@ -1193,16 +1193,29 @@ module Crystal::HIR
 
     def add_method_effect(name : String, summary : MethodEffectSummary) : Nil
       return if summary.empty?
-      if existing = @method_effects[name]?
-        existing.merge!(summary)
-        @method_effects[name] = existing
-      else
-        @method_effects[name] = summary
+      add_method_effect_for_name(name, summary)
+      if dollar = name.index('$')
+        add_method_effect_for_name(name[0, dollar], summary)
       end
     end
 
-    def method_effects_for(name : String) : MethodEffectSummary?
-      @method_effects[name]?
+    private def add_method_effect_for_name(name : String, summary : MethodEffectSummary) : Nil
+      if existing = @method_effects[name]?
+        existing.merge!(summary)
+        @method_effects[name] = existing
+        return
+      end
+      cloned = MethodEffectSummary.new
+      cloned.merge!(summary)
+      @method_effects[name] = cloned
+    end
+
+    def method_effects_for(method_name : String) : MethodEffectSummary?
+      @method_effects[method_name]? || begin
+        if dollar = method_name.index('$')
+          @method_effects[method_name[0, dollar]]?
+        end
+      end
     end
 
     def add_link_library(lib_name : String)
@@ -1415,6 +1428,10 @@ module Crystal::HIR
 
   module MethodEffectProvider
     abstract def method_effects_for(method_name : String) : MethodEffectSummary?
+  end
+
+  class Module
+    include MethodEffectProvider
   end
 
   # ═══════════════════════════════════════════════════════════════════════════
