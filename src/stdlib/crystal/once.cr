@@ -24,6 +24,7 @@ module Crystal
         @waiting = PointerLinkedList(Fiber::PointerLinkedListNode).new
       end
 
+      @[Transfer]
       def add_waiter(node) : Nil
         @waiting.push(node)
       end

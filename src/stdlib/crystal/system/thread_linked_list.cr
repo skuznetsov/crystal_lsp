@@ -35,6 +35,7 @@ class Thread
     #
     # There are no guarantees that a node being pushed will be iterated by
     # `#unsafe_each` until the method has returned.
+    @[Transfer]
     def push(node : T) : Nil
       @mutex.synchronize do
         node.previous = nil

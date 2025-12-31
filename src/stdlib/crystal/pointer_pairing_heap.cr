@@ -43,6 +43,7 @@ class Crystal::PointerPairingHeap(T)
     end
   end
 
+  @[Transfer]
   def add(node : Pointer(T)) : Nil
     if node.value.heap_previous? || node.value.heap_next? || node.value.heap_child?
       raise ArgumentError.new("The node is already in a Pairing Heap tree")

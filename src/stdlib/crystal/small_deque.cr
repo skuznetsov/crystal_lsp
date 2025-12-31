@@ -18,6 +18,7 @@ module Crystal
       index_to_ptr(index).value = value
     end
 
+    @[Transfer]
     def <<(value : T)
       check_capacity_for_insert
       unsafe_put(@size, value)

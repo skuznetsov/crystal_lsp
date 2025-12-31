@@ -32,6 +32,7 @@ struct Crystal::PointerLinkedList(T)
   end
 
   # Appends a node to the tail of the list.
+  @[Transfer]
   def push(node : Pointer(T)) : Nil
     if empty?
       node.value.previous = node
