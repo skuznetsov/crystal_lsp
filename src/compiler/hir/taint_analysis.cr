@@ -20,6 +20,10 @@ module Crystal::HIR
     def type_name_for(type_ref : TypeRef) : String?
       nil
     end
+
+    def type_kind_for(type_ref : TypeRef) : TypeKind?
+      nil
+    end
   end
 
   # Taint analyzer using worklist algorithm

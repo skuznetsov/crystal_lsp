@@ -166,7 +166,7 @@ module Crystal::HIR
     # Run strategy assignment
     def assign : MemoryStrategyResult
       # Run escape analysis
-      escape_analyzer = EscapeAnalyzer.new(@function)
+      escape_analyzer = EscapeAnalyzer.new(@function, @type_info)
       @escape_summary = escape_analyzer.analyze
 
       # Run taint analysis

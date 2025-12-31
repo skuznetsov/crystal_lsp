@@ -6,6 +6,7 @@
 # See docs/codegen_architecture.md Section 5 for full specification.
 
 require "./hir"
+require "./taint_analysis"
 
 module Crystal::HIR
   # Result of escape analysis for a function
@@ -46,7 +47,7 @@ module Crystal::HIR
     # Track value definitions
     @definitions : Hash(ValueId, Value)
 
-    def initialize(@function : Function)
+    def initialize(@function : Function, @type_info : TypeInfoProvider? = nil)
       @summary = EscapeSummary.new(@function.params.size)
       @worklist = Deque(ValueId).new
       @users = Hash(ValueId, Array(ValueId)).new { |h, k| h[k] = [] of ValueId }
@@ -324,9 +325,19 @@ module Crystal::HIR
     end
 
     private def is_virtual_call?(call : Call) : Bool
-      # For now, treat all method calls on receivers as potentially virtual
-      # In a real implementation, we'd check the type hierarchy
-      call.receiver != nil
+      # Conservative by default: treat as virtual unless we can prove otherwise.
+      return false unless call.receiver
+      return true if call.virtual
+
+      if type_info = @type_info
+        if recv = @definitions[call.receiver]?
+          if kind = type_info.type_kind_for(recv.type)
+            return false if kind.in?(TypeKind::Struct, TypeKind::Primitive)
+          end
+        end
+      end
+
+      true
     end
 
     private def build_summary
@@ -409,8 +420,8 @@ module Crystal::HIR
 
   # Convenience method on Function
   class Function
-    def analyze_escapes : EscapeSummary
-      analyzer = EscapeAnalyzer.new(self)
+    def analyze_escapes(type_info : TypeInfoProvider? = nil) : EscapeSummary
+      analyzer = EscapeAnalyzer.new(self, type_info)
       analyzer.analyze
     end
   end

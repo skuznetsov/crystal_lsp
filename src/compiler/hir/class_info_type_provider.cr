@@ -45,6 +45,20 @@ module Crystal::HIR
       end
     end
 
+    def type_kind_for(type_ref : TypeRef) : TypeKind?
+      case type_ref
+      when TypeRef::VOID, TypeRef::NIL, TypeRef::BOOL,
+           TypeRef::INT8, TypeRef::INT16, TypeRef::INT32, TypeRef::INT64, TypeRef::INT128,
+           TypeRef::UINT8, TypeRef::UINT16, TypeRef::UINT32, TypeRef::UINT64, TypeRef::UINT128,
+           TypeRef::FLOAT32, TypeRef::FLOAT64, TypeRef::CHAR, TypeRef::SYMBOL
+        TypeKind::Primitive
+      when TypeRef::POINTER
+        TypeKind::Pointer
+      else
+        @hir_module.get_type_descriptor(type_ref).try(&.kind)
+      end
+    end
+
     private def primitive_type_name(type_ref : TypeRef) : String?
       case type_ref
       when TypeRef::VOID    then "Void"
