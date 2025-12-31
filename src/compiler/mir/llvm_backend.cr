@@ -4835,6 +4835,9 @@ module Crystal::MIR
     end
 
     private def emit_extern_call(inst : ExternCall, name : String)
+      if ENV.has_key?("DEBUG_EXTERN_CALL") && inst.extern_name.includes?("byte_range")
+        STDERR.puts "[EXTERN_CALL] extern_name=#{inst.extern_name} args=#{inst.args.size}"
+      end
       return_type = @type_mapper.llvm_type(inst.type)
 
       # IMPORTANT: Check if prepass determined a different type (e.g., from phi usage)

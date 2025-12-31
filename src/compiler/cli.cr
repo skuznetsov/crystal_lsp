@@ -363,7 +363,7 @@ module CrystalV2
         enum_nodes = [] of Tuple(Frontend::EnumNode, Frontend::ArenaLike)
         macro_nodes = [] of Tuple(Frontend::MacroDefNode, Frontend::ArenaLike)
         alias_nodes = [] of Tuple(Frontend::AliasNode, Frontend::ArenaLike)
-        lib_nodes = [] of Tuple(Frontend::LibNode, Frontend::ArenaLike)
+        lib_nodes = [] of Tuple(Frontend::LibNode, Frontend::ArenaLike, Array(Tuple(Frontend::AnnotationNode, Frontend::ArenaLike)))
         constant_exprs = [] of Tuple(Frontend::ExprId, Frontend::ArenaLike)
         main_exprs = [] of Tuple(Frontend::ExprId, Frontend::ArenaLike)
         acyclic_types = Set(String).new
@@ -371,7 +371,7 @@ module CrystalV2
         flags = Runtime.target_flags
         all_arenas.each do |arena, exprs, file_path, source|
           next if skip_file_directive?(source, flags)
-          pending_annotations = [] of String
+          pending_annotations = [] of Tuple(Frontend::AnnotationNode, Frontend::ArenaLike)
           exprs.each do |expr_id|
             collect_top_level_nodes(
               arena,
@@ -412,7 +412,7 @@ module CrystalV2
         log(options, out_io, "    Enums: #{enum_nodes.size}")
         enum_nodes.each { |n, a| hir_converter.arena = a; hir_converter.register_enum(n) }
         log(options, out_io, "    Libs: #{lib_nodes.size}")
-        lib_nodes.each { |n, a| hir_converter.arena = a; hir_converter.register_lib(n) }
+        lib_nodes.each { |n, a, annotations| hir_converter.arena = a; hir_converter.register_lib(n, annotations) }
         log(options, out_io, "    Aliases: #{alias_nodes.size}")
         alias_nodes.each { |n, a| hir_converter.arena = a; hir_converter.register_alias(n) }
         log(options, out_io, "    Macros: #{macro_nodes.size}")
@@ -1098,10 +1098,10 @@ module CrystalV2
         enum_nodes : Array(Tuple(Frontend::EnumNode, Frontend::ArenaLike)),
         macro_nodes : Array(Tuple(Frontend::MacroDefNode, Frontend::ArenaLike)),
         alias_nodes : Array(Tuple(Frontend::AliasNode, Frontend::ArenaLike)),
-        lib_nodes : Array(Tuple(Frontend::LibNode, Frontend::ArenaLike)),
+        lib_nodes : Array(Tuple(Frontend::LibNode, Frontend::ArenaLike, Array(Tuple(Frontend::AnnotationNode, Frontend::ArenaLike)))),
         constant_exprs : Array(Tuple(Frontend::ExprId, Frontend::ArenaLike)),
         main_exprs : Array(Tuple(Frontend::ExprId, Frontend::ArenaLike)),
-        pending_annotations : Array(String),
+        pending_annotations : Array(Tuple(Frontend::AnnotationNode, Frontend::ArenaLike)),
         acyclic_types : Set(String),
         flags : Set(String),
         sources_by_arena : Hash(Frontend::ArenaLike, String),
@@ -1116,7 +1116,7 @@ module CrystalV2
           pending_annotations.clear
         when Frontend::ClassNode
           class_nodes << {node, arena}
-          if pending_annotations.includes?("Acyclic")
+          if pending_annotation_has?(pending_annotations, "Acyclic")
             acyclic_types << String.new(node.name)
           end
           pending_annotations.clear
@@ -1137,10 +1137,10 @@ module CrystalV2
           alias_nodes << {node, arena}
           pending_annotations.clear
         when Frontend::LibNode
-          lib_nodes << {node, arena}
+          lib_nodes << {node, arena, pending_annotations.dup}
           pending_annotations.clear
         when Frontend::AnnotationNode
-          pending_annotations << annotation_name_from_expr(arena, node.name)
+          pending_annotations << {node, arena}
         when Frontend::RequireNode
           # Skip - already processed
         when Frontend::MacroExpressionNode
@@ -2089,6 +2089,15 @@ module CrystalV2
           elsif entry.ends_with?(".cr")
             accumulator << File.expand_path(full_path)
           end
+        end
+      end
+
+      private def pending_annotation_has?(
+        pending_annotations : Array(Tuple(Frontend::AnnotationNode, Frontend::ArenaLike)),
+        name : String
+      ) : Bool
+        pending_annotations.any? do |ann_node, ann_arena|
+          annotation_name_from_expr(ann_arena, ann_node.name) == name
         end
       end
 

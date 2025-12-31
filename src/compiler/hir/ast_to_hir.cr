@@ -553,12 +553,14 @@ module Crystal::HIR
     end
 
     private def record_module_inclusion(module_name : String, class_name : String) : Nil
-      if ENV["DEBUG_MODULE_INCLUDE"]? && (module_name.includes?("FileDescriptor") || class_name.includes?("EventLoop"))
-        STDERR.puts "[DEBUG_MODULE_INCLUDE] #{class_name} <= #{module_name}"
+      # Resolve type aliases in the module name (e.g., Engine::MatchData -> PCRE2::MatchData)
+      resolved_module_name = resolve_module_alias_for_include(module_name)
+      if ENV["DEBUG_MODULE_INCLUDE"]? && (module_name.includes?("FileDescriptor") || class_name.includes?("EventLoop") || module_name.includes?("MatchData"))
+        STDERR.puts "[DEBUG_MODULE_INCLUDE] #{class_name} <= #{module_name} (resolved: #{resolved_module_name})"
       end
-      set = @module_includers[module_name]? || begin
+      set = @module_includers[resolved_module_name]? || begin
         new_set = Set(String).new
-        @module_includers[module_name] = new_set
+        @module_includers[resolved_module_name] = new_set
         new_set
       end
       set.add(class_name)
@@ -568,8 +570,49 @@ module Crystal::HIR
         @class_included_modules[class_name] = new_set
         new_set
       end
-      class_set.add(module_name)
-      debug_hook("module.include", "#{class_name} <= #{module_name}")
+      class_set.add(resolved_module_name)
+      debug_hook("module.include", "#{class_name} <= #{resolved_module_name}")
+    end
+
+    # Resolve type aliases for module names like Engine::MatchData -> Regex::PCRE::MatchData
+    private def resolve_module_alias_for_include(module_name : String) : String
+      return module_name if module_name.empty?
+
+      candidates = [] of String
+      candidates << module_name
+
+      if current = @current_class
+        if current.includes?("::")
+          parts = current.split("::")
+          parts.pop
+          while parts.size > 0
+            candidates << "#{parts.join("::")}::#{module_name}"
+            parts.pop
+          end
+        end
+      end
+
+      candidates.each do |candidate|
+        resolved = resolve_module_alias_prefix(candidate)
+        return resolved if @module_defs.has_key?(resolved)
+      end
+
+      module_name
+    end
+
+    private def resolve_module_alias_prefix(module_name : String) : String
+      return resolve_type_alias_chain(module_name) unless module_name.includes?("::")
+
+      parts = module_name.split("::")
+      (parts.size - 1).downto(1) do |i|
+        prefix = parts[0, i].join("::")
+        resolved_prefix = resolve_type_alias_chain(prefix)
+        if resolved_prefix != prefix
+          return ([resolved_prefix] + parts[i..]).join("::")
+        end
+      end
+
+      resolve_type_alias_chain(module_name)
     end
 
     private def named_only_separator?(param : CrystalV2::Compiler::Frontend::Parameter) : Bool
@@ -996,11 +1039,50 @@ module Crystal::HIR
     # e.g., alias HIR = Crystal::HIR
     def register_alias(node : CrystalV2::Compiler::Frontend::AliasNode)
       alias_name = String.new(node.name)
+      full_alias_name = alias_full_name_from_span(node) || alias_name
+      context = if full_alias_name.includes?("::")
+                  parts = full_alias_name.split("::")
+                  parts.size > 1 ? parts[0...-1].join("::") : nil
+                else
+                  nil
+                end
+      old_class = @current_class
+      @current_class = context if context
       target_name = resolve_alias_target(String.new(node.value))
-      register_type_alias(alias_name, target_name)
+      @current_class = old_class if context
+      previous = @type_aliases[full_alias_name]?
+      register_type_alias(full_alias_name, target_name)
+      if ENV.has_key?("DEBUG_ALIAS") && @type_aliases[full_alias_name]? == target_name && previous != target_name
+        STDERR.puts "[ALIAS] Registered (top): #{full_alias_name} => #{target_name}"
+      end
+    end
+
+    private def alias_full_name_from_span(node : CrystalV2::Compiler::Frontend::AliasNode) : String?
+      source = @sources_by_arena[@arena]?
+      return nil unless source
+
+      span = node.span
+      start = span.start_offset
+      finish = span.end_offset
+      return nil if start < 0 || finish <= start || finish > source.bytesize
+
+      snippet = source.byte_slice(start, finish - start)
+      if match = snippet.match(/alias\s+([A-Za-z0-9_:]+)\s*=/)
+        return match[1]
+      end
+
+      nil
     end
 
     private def register_type_alias(alias_name : String, target_name : String)
+      if existing = @type_aliases[alias_name]?
+        if existing != target_name
+          if ENV.has_key?("DEBUG_ALIAS")
+            STDERR.puts "[ALIAS] Skipping redefinition: #{alias_name} already #{existing}, new #{target_name}"
+          end
+          return
+        end
+      end
       @type_aliases[alias_name] = target_name
       @type_cache.delete(alias_name)
       invalidate_type_cache_for_namespace(alias_name)
@@ -1008,7 +1090,19 @@ module Crystal::HIR
 
     # Register a C library binding (pass 1)
     # e.g., lib LibC ... end
-    def register_lib(node : CrystalV2::Compiler::Frontend::LibNode)
+    def register_lib(
+      node : CrystalV2::Compiler::Frontend::LibNode,
+      annotations : Array(Tuple(CrystalV2::Compiler::Frontend::AnnotationNode, CrystalV2::Compiler::Frontend::ArenaLike))? = nil
+    )
+      if annotations
+        old_arena = @arena
+        annotations.each do |annotation_node, annotation_arena|
+          @arena = annotation_arena
+          register_link_libraries_from_annotation(annotation_node)
+        end
+        @arena = old_arena
+      end
+
       lib_name = String.new(node.name)
 
       if body = node.body
@@ -2199,6 +2293,15 @@ module Crystal::HIR
     private def resolve_alias_target(target_name : String) : String
       resolved = normalize_declared_type_name(target_name)
       return target_name if resolved.includes?("Pointer(Void)") || resolved.includes?("Unknown")
+
+      # If the alias target is an unqualified constant and nothing is registered yet,
+      # keep it relative to the current namespace so later lookup resolves correctly.
+      if current = @current_class
+        if resolved.matches?(/\A[A-Za-z_][A-Za-z0-9_]*\z/) && !type_name_exists?(resolved) && !builtin_alias_target?(resolved)
+          return "#{current}::#{resolved}"
+        end
+      end
+
       resolved
     end
 
@@ -2834,6 +2937,7 @@ module Crystal::HIR
         # STDERR.puts "[INC_DEBUG] after resolution: module_full_name=#{module_full_name}"
       end
 
+      module_full_name = resolve_module_alias_for_include(module_full_name)
       record_module_inclusion(module_full_name, class_name)
       return offset if visited.includes?(module_full_name)
       visited << module_full_name
@@ -3035,6 +3139,7 @@ module Crystal::HIR
         nested_name = "#{base_owner}::#{module_full_name}"
         module_full_name = nested_name if @module_defs.has_key?(nested_name)
       end
+      module_full_name = resolve_module_alias_for_include(module_full_name)
       record_module_inclusion(module_full_name, class_name)
       return if visited.includes?(module_full_name)
       visited << module_full_name
@@ -3123,6 +3228,7 @@ module Crystal::HIR
         nested_name = "#{base_owner}::#{module_full_name}"
         module_full_name = nested_name if @module_defs.has_key?(nested_name)
       end
+      module_full_name = resolve_module_alias_for_include(module_full_name)
       record_module_inclusion(module_full_name, class_name)
       return if visited.includes?(module_full_name)
       visited << module_full_name
@@ -3246,6 +3352,12 @@ module Crystal::HIR
     )
       module_full_name = resolve_path_like_name(extend_target)
       return unless module_full_name
+      if !module_full_name.includes?("::")
+        base_owner = class_name.split('(').first
+        nested_name = "#{base_owner}::#{module_full_name}"
+        module_full_name = nested_name if @module_defs.has_key?(nested_name)
+      end
+      module_full_name = resolve_module_alias_for_include(module_full_name)
       return if visited.includes?(module_full_name)
       visited << module_full_name
 
@@ -6970,6 +7082,9 @@ module Crystal::HIR
       @enum_value_types.try(&.clear)
 
       method_name = String.new(node.name)
+      if ENV.has_key?("DEBUG_LOWER_BYTE") && (method_name == "byte_begin" || method_name == "byte_range")
+        STDERR.puts "[LOWER_METHOD] START class=#{class_name} method=#{method_name} override=#{full_name_override || "nil"} arena=#{@arena.class}:#{@arena.size} modules=#{@class_included_modules[class_name]?.try(&.to_a.join(",")) || "nil"}"
+      end
 
       # Check if this is a class method (def self.method_name)
       is_class_method = force_class_method || if recv = node.receiver
@@ -7213,6 +7328,17 @@ module Crystal::HIR
       # Lower body
       last_value : ValueId? = nil
       if body = node.body
+        if ENV.has_key?("DEBUG_LOWER_BYTE") && (method_name == "byte_begin" || method_name == "byte_range")
+          STDERR.puts "[LOWER_METHOD] BODY size=#{body.size} expressions"
+          body.each_with_index do |expr_id, i|
+            begin
+              expr_node = @arena[expr_id]
+              STDERR.puts "[LOWER_METHOD]   [#{i}] expr=#{expr_id.index} type=#{expr_node.class.name.split("::").last}"
+            rescue
+              STDERR.puts "[LOWER_METHOD]   [#{i}] expr=#{expr_id.index} (OOB)"
+            end
+          end
+        end
         body.each_with_index do |expr_id, idx|
           if ENV["DEBUG_CALL_TRACE"]? && method_name == "copy_to"
             STDERR.puts "[LOWER_METHOD] expr=#{expr_id.index} idx=#{idx} arena=#{@arena.size}"
@@ -7290,6 +7416,19 @@ module Crystal::HIR
       when "Float64" then TypeRef::FLOAT64
       when "Char"    then TypeRef::CHAR
       else                nil
+      end
+    end
+
+    private def builtin_alias_target?(name : String) : Bool
+      return true if primitive_self_type(name)
+
+      case name
+      when "Nil", "Void", "NoReturn", "String", "Symbol", "Pointer", "Slice", "Array",
+           "Hash", "Tuple", "NamedTuple", "Proc", "Range", "Regex", "IO", "Bytes",
+           "Object", "Reference", "Class", "Struct", "Enum", "Module"
+        true
+      else
+        false
       end
     end
 
@@ -7776,6 +7915,11 @@ module Crystal::HIR
       end
 
       # RESOLVE_CALL debug disabled
+
+      # DEBUG: Trace empty class names for specific methods
+      if ENV.has_key?("DEBUG_EMPTY_CLASS") && class_name.empty?
+        STDERR.puts "[EMPTY_CLASS] method=#{method_name} receiver_id=#{receiver_id} receiver_type.id=#{receiver_type.id} type_desc=#{type_desc.try(&.name) || "nil"} enum_type=#{enum_type_name || "nil"}"
+      end
 
       # Build the base method name as ClassName#method
       base_method_name = class_name.empty? ? method_name : "#{class_name}##{method_name}"
@@ -10948,43 +11092,45 @@ module Crystal::HIR
     private def lower_annotation(ctx : LoweringContext, node : CrystalV2::Compiler::Frontend::AnnotationNode) : ValueId
       # Annotations like @[Link("c")] are metadata
       # Store Link annotations for the linker
-      # node.name is an ExprId pointing to IdentifierNode or PathNode
-      annotation_name = resolve_annotation_name(node.name)
-
-      if annotation_name == "Link"
-        # Extract library name from annotation arguments
-        # Positional args: @[Link("c")]
-        node.args.each do |arg_id|
-          arg_node = @arena[arg_id]
-          if arg_node.is_a?(CrystalV2::Compiler::Frontend::StringNode)
-            lib_name = String.new(arg_node.value)
-            @module.add_link_library(lib_name)
-          end
-        end
-
-        # Named args: @[Link(framework: "Cocoa")] or @[Link(pkg_config: "libfoo")]
-        if named_args = node.named_args
-          named_args.each do |named_arg|
-            value_node = @arena[named_arg.value]
-            if value_node.is_a?(CrystalV2::Compiler::Frontend::StringNode)
-              named_lib_name = String.new(value_node.value)
-              named_key = String.new(named_arg.name)
-              prefix = case named_key
-                       when "pkg_config" then "pkg_config:"
-                       when "framework"  then "framework:"
-                       when "dll"        then "dll:"
-                       else "#{named_key}:"
-                       end
-              @module.add_link_library("#{prefix}#{named_lib_name}")
-            end
-          end
-        end
-      end
+      register_link_libraries_from_annotation(node)
 
       # Annotations don't produce values
       nil_lit = Literal.new(ctx.next_id, TypeRef::NIL, nil)
       ctx.emit(nil_lit)
       nil_lit.id
+    end
+
+    private def register_link_libraries_from_annotation(node : CrystalV2::Compiler::Frontend::AnnotationNode) : Nil
+      # node.name is an ExprId pointing to IdentifierNode or PathNode
+      annotation_name = resolve_annotation_name(node.name)
+      return unless annotation_name == "Link"
+
+      # Positional args: @[Link("c")]
+      node.args.each do |arg_id|
+        arg_node = @arena[arg_id]
+        if arg_node.is_a?(CrystalV2::Compiler::Frontend::StringNode)
+          lib_name = String.new(arg_node.value)
+          @module.add_link_library(lib_name)
+        end
+      end
+
+      # Named args: @[Link(framework: "Cocoa")] or @[Link(pkg_config: "libfoo")]
+      if named_args = node.named_args
+        named_args.each do |named_arg|
+          value_node = @arena[named_arg.value]
+          if value_node.is_a?(CrystalV2::Compiler::Frontend::StringNode)
+            named_lib_name = String.new(value_node.value)
+            named_key = String.new(named_arg.name)
+            prefix = case named_key
+                     when "pkg_config" then "pkg_config:"
+                     when "framework"  then "framework:"
+                     when "dll"        then "dll:"
+                     else "#{named_key}:"
+                     end
+            @module.add_link_library("#{prefix}#{named_lib_name}")
+          end
+        end
+      end
     end
 
     private def lower_lib(ctx : LoweringContext, node : CrystalV2::Compiler::Frontend::LibNode) : ValueId
@@ -14843,6 +14989,10 @@ module Crystal::HIR
       visited << module_name
 
       mod_defs = @module_defs[module_name]?
+      if ENV.has_key?("DEBUG_FIND_MODULE") && method_base == "byte_range"
+        has_defs = !mod_defs.nil?
+        STDERR.puts "[FIND_MODULE] module=#{module_name} method=#{method_base} has_defs=#{has_defs} num_defs=#{mod_defs.try(&.size) || 0}"
+      end
       return nil unless mod_defs
 
       mod_defs.each do |mod_node, mod_arena|
@@ -14925,7 +15075,11 @@ module Crystal::HIR
 
     private def lower_function_if_needed(name : String) : Nil
       return if name.empty?
-      return if @yield_functions.includes?(name)
+      is_yield = @yield_functions.includes?(name)
+      if ENV.has_key?("DEBUG_YIELD_SKIP") && name.includes?("byte_range")
+        STDERR.puts "[YIELD_SKIP] name=#{name} is_yield=#{is_yield}"
+      end
+      return if is_yield
       return if @lowering_functions.includes?(name)
       return if @module.has_function?(name)
 
@@ -15119,6 +15273,9 @@ module Crystal::HIR
                   target_name = base_name
                   deferred_lookup_used = true
                   lookup_branch = "deferred_module"
+                  if ENV.has_key?("DEBUG_DEFERRED") && method_base == "byte_range"
+                    STDERR.puts "[DEFERRED_LOOKUP] Found #{method_base} in module #{base_module} for #{base_name} target=#{target_name} func_def=#{func_def.class} arena=#{arena.class}:#{arena.size}"
+                  end
                   if method_part.includes?("from_chars")
                     STDERR.puts "[DEFERRED_LOOKUP] Found #{method_base} in module #{base_module} for #{base_name}"
                   end
@@ -15426,9 +15583,17 @@ module Crystal::HIR
         debug_hook("function.lookup.miss", name)
       end
 
+      if ENV.has_key?("DEBUG_DEFERRED") && name.includes?("byte_range")
+        STDERR.puts "[DEFERRED_FUNC] func_def=#{!func_def.nil?} name=#{name} target=#{target_name} lookup=#{lookup_branch || "none"}"
+      end
       return unless func_def
-      return if @yield_functions.includes?(target_name)
-      return if @lowering_functions.includes?(target_name)
+      is_yield_target = @yield_functions.includes?(target_name)
+      is_lowering_target = @lowering_functions.includes?(target_name)
+      if ENV.has_key?("DEBUG_DEFERRED") && name.includes?("byte_range")
+        STDERR.puts "[DEFERRED_CHECK] is_yield=#{is_yield_target} is_lowering=#{is_lowering_target}"
+      end
+      return if is_yield_target
+      return if is_lowering_target
 
       if arena.nil?
         arena = resolve_arena_for_def(func_def, @arena)
@@ -15510,12 +15675,22 @@ module Crystal::HIR
         extra_type_params = extra_type_params ? extra_type_params.merge(pending_params) : pending_params.dup
       end
 
-      return if @module.has_function?(resolved_target_name)
-      return if @lowering_functions.includes?(resolved_target_name)
+      has_in_module = @module.has_function?(resolved_target_name)
+      is_lowering_resolved = @lowering_functions.includes?(resolved_target_name)
+      if ENV.has_key?("DEBUG_DEFERRED") && name.includes?("byte_range")
+        STDERR.puts "[DEFERRED_FINAL] resolved=#{resolved_target_name} has_in_module=#{has_in_module} is_lowering=#{is_lowering_resolved}"
+      end
+      return if has_in_module
+      return if is_lowering_resolved
 
       target_name = resolved_target_name
       @lowering_functions.add(target_name)
       debug_hook("function.lower.start", "name=#{target_name} requested=#{name}")
+      if ENV.has_key?("DEBUG_CLASS_MODULES") && (target_name.includes?("byte_begin") || target_name.includes?("MatchData"))
+        owner = target_name.split("#", 2)[0]
+        modules = @class_included_modules[owner]?
+        STDERR.puts "[CLASS_MODULES] target=#{target_name} owner=#{owner} modules=#{modules ? modules.to_a.join(",") : "nil"}"
+      end
       if target_name.includes?("from_chars")
         STDERR.puts "[LOWERING] Starting lower for #{target_name}, arena=#{arena.class}"
       end
@@ -15790,6 +15965,20 @@ module Crystal::HIR
     end
 
     private def lower_call(ctx : LoweringContext, node : CrystalV2::Compiler::Frontend::CallNode) : ValueId
+      if ENV["DEBUG_ALL_CALLS"]? || ENV["DEBUG_LOWER_CALL"]?
+        callee_node = @arena[node.callee]
+        callee_name = case callee_node
+                      when CrystalV2::Compiler::Frontend::IdentifierNode
+                        String.new(callee_node.name)
+                      when CrystalV2::Compiler::Frontend::MemberAccessNode
+                        String.new(callee_node.member)
+                      else
+                        "(other)"
+                      end
+        if ENV["DEBUG_ALL_CALLS"]? || callee_name == "byte_range"
+          STDERR.puts "[LOWER_CALL] method=#{callee_name} callee_type=#{callee_node.class.name.split("::").last} current_class=#{@current_class || "nil"} block=#{node.block.nil? ? "no" : "yes"} func=#{ctx.function.name}"
+        end
+      end
       if ENV["DEBUG_INLINE_CRASH"]?
         if @inline_yield_name_stack.any? { |name| name.includes?("Char::Reader#decode_char_at") }
           stack = @inline_yield_name_stack.join(" -> ")
@@ -15905,6 +16094,9 @@ module Crystal::HIR
         end
 
         # If inside a class/module, check if this is a method call on self or module
+        if ENV.has_key?("DEBUG_CALL_PATH") && method_name == "byte_range"
+          STDERR.puts "[CALL_PATH] IdentifierNode method=#{method_name} @current_class=#{@current_class || "nil"}"
+        end
         if current = @current_class
           # Debug: track when @current_class is a short name
           if ENV.has_key?("DEBUG_SHORT_NAMES") && !current.includes?("::") &&
@@ -15920,16 +16112,57 @@ module Crystal::HIR
             receiver_id = emit_self(ctx)
             full_method_name = class_method_name
           else
-            # Also check for module-style method (Module.method)
-            module_method_name = "#{current}.#{method_name}"
-            # O(1) lookup: check exact match or mangled version exists
-            has_module_method = @function_types.has_key?(module_method_name) || has_function_base?(module_method_name)
-            if has_module_method
-              # This is a module method call (no receiver)
-              receiver_id = nil
-              full_method_name = module_method_name
-            else
-              receiver_id = nil
+            # Check if method exists in included modules
+            included_method_found = false
+            if modules = @class_included_modules[current]?
+              if ENV.has_key?("DEBUG_INCLUDED") && method_name == "byte_range"
+                STDERR.puts "[INCLUDED] class=#{current} method=#{method_name} modules=#{modules.to_a.join(",")}"
+              end
+              modules.each do |mod_name|
+                mod_method_name = "#{mod_name}##{method_name}"
+                has_in_types = @function_types.has_key?(mod_method_name)
+                has_in_base = has_function_base?(mod_method_name)
+                if ENV.has_key?("DEBUG_INCLUDED") && method_name == "byte_range"
+                  STDERR.puts "[INCLUDED_LOOKUP] mod_method=#{mod_method_name} has_in_types=#{has_in_types} has_in_base=#{has_in_base}"
+                end
+                if has_in_types || has_in_base
+                  receiver_id = emit_self(ctx)
+                  full_method_name = mod_method_name
+                  included_method_found = true
+                  break
+                end
+                # If not found in function_types, try to find in module def AST
+                # This handles instance methods (def foo) that aren't pre-registered
+                unless included_method_found
+                  base_module = mod_name.split('(').first
+                  visited = Set(String).new
+                  if found = find_module_def_recursive(base_module, method_name, 0, visited)
+                    if ENV.has_key?("DEBUG_INCLUDED") && method_name == "byte_range"
+                      STDERR.puts "[INCLUDED_FOUND_IN_AST] mod=#{base_module} method=#{method_name}"
+                    end
+                    receiver_id = emit_self(ctx)
+                    # Use class#method name for lowering (will use deferred lookup)
+                    full_method_name = "#{current}##{method_name}"
+                    included_method_found = true
+                    break
+                  end
+                end
+              end
+            elsif ENV.has_key?("DEBUG_INCLUDED") && method_name == "byte_range"
+              STDERR.puts "[INCLUDED] class=#{current} method=#{method_name} no_modules"
+            end
+            unless included_method_found
+              # Also check for module-style method (Module.method)
+              module_method_name = "#{current}.#{method_name}"
+              # O(1) lookup: check exact match or mangled version exists
+              has_module_method = @function_types.has_key?(module_method_name) || has_function_base?(module_method_name)
+              if has_module_method
+                # This is a module method call (no receiver)
+                receiver_id = nil
+                full_method_name = module_method_name
+              else
+                receiver_id = nil
+              end
             end
           end
         else
@@ -16697,6 +16930,9 @@ module Crystal::HIR
 
       # Compute mangled name based on base name + argument types
       # If no explicit receiver and we're inside a class, try class#method first
+      if ENV.has_key?("DEBUG_BASE_METHOD") && method_name == "byte_range"
+        STDERR.puts "[BASE_METHOD] method=#{method_name} full_method_name=#{full_method_name || "nil"} receiver_id=#{receiver_id.nil? ? "nil" : receiver_id.to_s} @current_class=#{@current_class || "nil"}"
+      end
       base_method_name = if full_method_name
                            full_method_name
                          elsif receiver_id.nil? && (current = @current_class)
@@ -16707,7 +16943,23 @@ module Crystal::HIR
                            if @function_types.has_key?(candidate) || has_function_base?(candidate)
                              candidate
                            else
-                             method_name
+                             # Check if method exists in included modules
+                             included_candidate : String? = nil
+                             if modules = @class_included_modules[current]?
+                               if ENV.has_key?("DEBUG_INCLUDED_BASE") && method_name == "byte_range"
+                                 STDERR.puts "[INCLUDED_BASE] class=#{current} modules=#{modules.to_a.join(",")}"
+                               end
+                               modules.each do |mod_name|
+                                 mod_candidate = "#{mod_name}##{method_name}"
+                                 if @function_types.has_key?(mod_candidate) || has_function_base?(mod_candidate)
+                                   included_candidate = mod_candidate
+                                   break
+                                 end
+                               end
+                             elsif ENV.has_key?("DEBUG_INCLUDED_BASE") && method_name == "byte_range"
+                               STDERR.puts "[INCLUDED_BASE] class=#{current} NO_MODULES"
+                             end
+                             included_candidate || method_name
                            end
                          else
                            method_name
@@ -16870,6 +17122,7 @@ module Crystal::HIR
           @block_node_arenas[block_for_inline.object_id] = @arena
         end
           if ENV["DEBUG_YIELD_TRACE"]? && (method_name == "char_at" || method_name == "fetch" || method_name == "upto" ||
+              method_name == "byte_range" ||
               base_method_name.includes?("char_at") || base_method_name.includes?("fetch") || base_method_name.includes?("upto") ||
               mangled_method_name.includes?("char_at") || mangled_method_name.includes?("fetch") || mangled_method_name.includes?("upto"))
             STDERR.puts "[YIELD_TRACE] method=#{method_name} base=#{base_method_name} mangled=#{mangled_method_name} in_set=#{@yield_functions.includes?(mangled_method_name)} block=#{!!block_for_inline} current=#{@current_class || ""}"

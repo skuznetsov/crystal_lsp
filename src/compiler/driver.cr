@@ -175,6 +175,12 @@ module Crystal::V2
       module_nodes = [] of Tuple(CrystalV2::Compiler::Frontend::ModuleNode, CrystalV2::Compiler::Frontend::ArenaLike)
       enum_nodes = [] of Tuple(CrystalV2::Compiler::Frontend::EnumNode, CrystalV2::Compiler::Frontend::ArenaLike)
       macro_nodes = [] of Tuple(CrystalV2::Compiler::Frontend::MacroDefNode, CrystalV2::Compiler::Frontend::ArenaLike)
+      alias_nodes = [] of Tuple(CrystalV2::Compiler::Frontend::AliasNode, CrystalV2::Compiler::Frontend::ArenaLike)
+      lib_nodes = [] of Tuple(
+        CrystalV2::Compiler::Frontend::LibNode,
+        CrystalV2::Compiler::Frontend::ArenaLike,
+        Array(Tuple(CrystalV2::Compiler::Frontend::AnnotationNode, CrystalV2::Compiler::Frontend::ArenaLike))
+      )
       constant_exprs = [] of Tuple(CrystalV2::Compiler::Frontend::ExprId, CrystalV2::Compiler::Frontend::ArenaLike)
       # Top-level expressions that form the main function
       main_exprs = [] of Tuple(CrystalV2::Compiler::Frontend::ExprId, CrystalV2::Compiler::Frontend::ArenaLike)
@@ -182,7 +188,7 @@ module Crystal::V2
 
       flags = CrystalV2::Runtime.target_flags
       all_arenas.each do |arena, exprs, file_path, source|
-        pending_annotations = [] of String
+        pending_annotations = [] of Tuple(CrystalV2::Compiler::Frontend::AnnotationNode, CrystalV2::Compiler::Frontend::ArenaLike)
         exprs.each do |expr_id|
             collect_top_level_nodes(
               arena,
@@ -192,6 +198,8 @@ module Crystal::V2
               module_nodes,
               enum_nodes,
               macro_nodes,
+              alias_nodes,
+              lib_nodes,
               constant_exprs,
               main_exprs,
               pending_annotations,
@@ -224,9 +232,17 @@ module Crystal::V2
         hir_converter.arena = arena
         hir_converter.register_enum(enum_node)
       end
+      lib_nodes.each do |lib_node, arena, annotations|
+        hir_converter.arena = arena
+        hir_converter.register_lib(lib_node, annotations)
+      end
       macro_nodes.each do |macro_node, arena|
         hir_converter.arena = arena
         hir_converter.register_macro(macro_node)
+      end
+      alias_nodes.each do |alias_node, arena|
+        hir_converter.arena = arena
+        hir_converter.register_alias(alias_node)
       end
       trace_driver("[DRIVER_TRACE] total module_nodes to register: #{module_nodes.size}")
       module_nodes.each do |module_node, arena|
@@ -701,9 +717,11 @@ module Crystal::V2
       module_nodes : Array(Tuple(CrystalV2::Compiler::Frontend::ModuleNode, CrystalV2::Compiler::Frontend::ArenaLike)),
       enum_nodes : Array(Tuple(CrystalV2::Compiler::Frontend::EnumNode, CrystalV2::Compiler::Frontend::ArenaLike)),
       macro_nodes : Array(Tuple(CrystalV2::Compiler::Frontend::MacroDefNode, CrystalV2::Compiler::Frontend::ArenaLike)),
+      alias_nodes : Array(Tuple(CrystalV2::Compiler::Frontend::AliasNode, CrystalV2::Compiler::Frontend::ArenaLike)),
+      lib_nodes : Array(Tuple(CrystalV2::Compiler::Frontend::LibNode, CrystalV2::Compiler::Frontend::ArenaLike, Array(Tuple(CrystalV2::Compiler::Frontend::AnnotationNode, CrystalV2::Compiler::Frontend::ArenaLike)))),
       constant_exprs : Array(Tuple(CrystalV2::Compiler::Frontend::ExprId, CrystalV2::Compiler::Frontend::ArenaLike)),
       main_exprs : Array(Tuple(CrystalV2::Compiler::Frontend::ExprId, CrystalV2::Compiler::Frontend::ArenaLike)),
-      pending_annotations : Array(String),
+      pending_annotations : Array(Tuple(CrystalV2::Compiler::Frontend::AnnotationNode, CrystalV2::Compiler::Frontend::ArenaLike)),
       acyclic_types : Set(String),
       flags : Set(String),
       sources_by_arena : Hash(CrystalV2::Compiler::Frontend::ArenaLike, String),
@@ -718,7 +736,7 @@ module Crystal::V2
         pending_annotations.clear
       when CrystalV2::Compiler::Frontend::ClassNode
         class_nodes << {node, arena}
-        if pending_annotations.includes?("Acyclic")
+        if pending_annotation_has?(pending_annotations, "Acyclic")
           acyclic_types << String.new(node.name)
         end
         pending_annotations.clear
@@ -731,16 +749,22 @@ module Crystal::V2
       when CrystalV2::Compiler::Frontend::MacroDefNode
         macro_nodes << {node, arena}
         pending_annotations.clear
+      when CrystalV2::Compiler::Frontend::AliasNode
+        alias_nodes << {node, arena}
+        pending_annotations.clear
+      when CrystalV2::Compiler::Frontend::LibNode
+        lib_nodes << {node, arena, pending_annotations.dup}
+        pending_annotations.clear
       when CrystalV2::Compiler::Frontend::ConstantNode
         constant_exprs << {expr_id, arena}
         main_exprs << {expr_id, arena}
         pending_annotations.clear
       when CrystalV2::Compiler::Frontend::AnnotationNode
-        pending_annotations << annotation_name_from_expr(arena, node.name)
+        pending_annotations << {node, arena}
       when CrystalV2::Compiler::Frontend::RequireNode
         # Skip require nodes - already processed
       when CrystalV2::Compiler::Frontend::MacroExpressionNode
-        collect_top_level_nodes(arena, node.expression, def_nodes, class_nodes, module_nodes, enum_nodes, macro_nodes, constant_exprs, main_exprs, pending_annotations, acyclic_types, flags, sources_by_arena, source, depth)
+        collect_top_level_nodes(arena, node.expression, def_nodes, class_nodes, module_nodes, enum_nodes, macro_nodes, alias_nodes, lib_nodes, constant_exprs, main_exprs, pending_annotations, acyclic_types, flags, sources_by_arena, source, depth)
       when CrystalV2::Compiler::Frontend::MacroIfNode
         if raw_text = macro_if_raw_text(node, source)
           parsed_any = false
@@ -751,7 +775,7 @@ module Crystal::V2
               parsed_any = true
               sources_by_arena[program.arena] = text
               program.roots.each do |inner_id|
-                collect_top_level_nodes(program.arena, inner_id, def_nodes, class_nodes, module_nodes, enum_nodes, macro_nodes, constant_exprs, main_exprs, pending_annotations, acyclic_types, flags, sources_by_arena, text, depth + 1)
+                collect_top_level_nodes(program.arena, inner_id, def_nodes, class_nodes, module_nodes, enum_nodes, macro_nodes, alias_nodes, lib_nodes, constant_exprs, main_exprs, pending_annotations, acyclic_types, flags, sources_by_arena, text, depth + 1)
               end
             end
           end
@@ -759,20 +783,20 @@ module Crystal::V2
         end
         condition = evaluate_macro_condition(arena, node.condition, flags)
         if condition == true
-          collect_top_level_nodes(arena, node.then_body, def_nodes, class_nodes, module_nodes, enum_nodes, macro_nodes, constant_exprs, main_exprs, pending_annotations, acyclic_types, flags, sources_by_arena, source, depth)
+          collect_top_level_nodes(arena, node.then_body, def_nodes, class_nodes, module_nodes, enum_nodes, macro_nodes, alias_nodes, lib_nodes, constant_exprs, main_exprs, pending_annotations, acyclic_types, flags, sources_by_arena, source, depth)
         elsif condition == false
           if else_body = node.else_body
-            collect_top_level_nodes(arena, else_body, def_nodes, class_nodes, module_nodes, enum_nodes, macro_nodes, constant_exprs, main_exprs, pending_annotations, acyclic_types, flags, sources_by_arena, source, depth)
+            collect_top_level_nodes(arena, else_body, def_nodes, class_nodes, module_nodes, enum_nodes, macro_nodes, alias_nodes, lib_nodes, constant_exprs, main_exprs, pending_annotations, acyclic_types, flags, sources_by_arena, source, depth)
           end
         else
-          collect_top_level_nodes(arena, node.then_body, def_nodes, class_nodes, module_nodes, enum_nodes, macro_nodes, constant_exprs, main_exprs, pending_annotations, acyclic_types, flags, sources_by_arena, source, depth)
+          collect_top_level_nodes(arena, node.then_body, def_nodes, class_nodes, module_nodes, enum_nodes, macro_nodes, alias_nodes, lib_nodes, constant_exprs, main_exprs, pending_annotations, acyclic_types, flags, sources_by_arena, source, depth)
           if else_body = node.else_body
-            collect_top_level_nodes(arena, else_body, def_nodes, class_nodes, module_nodes, enum_nodes, macro_nodes, constant_exprs, main_exprs, pending_annotations, acyclic_types, flags, sources_by_arena, source, depth)
+            collect_top_level_nodes(arena, else_body, def_nodes, class_nodes, module_nodes, enum_nodes, macro_nodes, alias_nodes, lib_nodes, constant_exprs, main_exprs, pending_annotations, acyclic_types, flags, sources_by_arena, source, depth)
           end
         end
       when CrystalV2::Compiler::Frontend::MacroLiteralNode
         collect_macro_literal_exprs(arena, node, flags).each do |expr|
-          collect_top_level_nodes(arena, expr, def_nodes, class_nodes, module_nodes, enum_nodes, macro_nodes, constant_exprs, main_exprs, pending_annotations, acyclic_types, flags, sources_by_arena, source, depth)
+          collect_top_level_nodes(arena, expr, def_nodes, class_nodes, module_nodes, enum_nodes, macro_nodes, alias_nodes, lib_nodes, constant_exprs, main_exprs, pending_annotations, acyclic_types, flags, sources_by_arena, source, depth)
         end
         if raw_text = macro_literal_raw_text(node, source)
           macro_literal_texts_from_raw(raw_text, flags).each do |text|
@@ -781,7 +805,7 @@ module Crystal::V2
             if program = parse_macro_literal_program(text)
               sources_by_arena[program.arena] = text
               program.roots.each do |inner_id|
-                collect_top_level_nodes(program.arena, inner_id, def_nodes, class_nodes, module_nodes, enum_nodes, macro_nodes, constant_exprs, main_exprs, pending_annotations, acyclic_types, flags, sources_by_arena, text, depth + 1)
+                collect_top_level_nodes(program.arena, inner_id, def_nodes, class_nodes, module_nodes, enum_nodes, macro_nodes, alias_nodes, lib_nodes, constant_exprs, main_exprs, pending_annotations, acyclic_types, flags, sources_by_arena, text, depth + 1)
               end
             end
           end
@@ -794,6 +818,15 @@ module Crystal::V2
         main_exprs << {expr_id, arena}
       else
         main_exprs << {expr_id, arena}
+      end
+    end
+
+    private def pending_annotation_has?(
+      pending_annotations : Array(Tuple(CrystalV2::Compiler::Frontend::AnnotationNode, CrystalV2::Compiler::Frontend::ArenaLike)),
+      name : String
+    ) : Bool
+      pending_annotations.any? do |ann_node, ann_arena|
+        annotation_name_from_expr(ann_arena, ann_node.name) == name
       end
     end
 
