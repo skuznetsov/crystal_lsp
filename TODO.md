@@ -1106,6 +1106,7 @@ r2 = maybe(false)  # => nil
 - Callsite argument typing uses string keys (`$arity`, `_splat`) that shift during lowering; needs a single CallSignature representation.
 - Cache keys in type/function lookup still elide namespace/owner in some paths; collisions remain a regression risk.
 - Yield inlining is guarded but still touches cross-arena defs; a single ownership source + fallback path is needed.
+- Unions of unrelated class types collapse to the first class in HIR (no UnionType), so dynamic dispatch is bypassed and calls become unsound.
 
 ### Bootstrap Stabilization Plan (prioritized, 2026-01-xx)
 
