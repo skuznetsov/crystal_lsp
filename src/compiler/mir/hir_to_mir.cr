@@ -481,6 +481,17 @@ module Crystal
       # Create allocation with proper size
       ptr = builder.alloc(strategy, mir_type_ref, alloc_size)
 
+      # Stamp class allocations with their type_id in the header (vtable slot).
+      if !alloc.is_value_type
+        if mir_type = @mir_module.type_registry.get(mir_type_ref)
+          if mir_type.kind.reference?
+            type_id_value = builder.const_int(mir_type_ref.id.to_i64, TypeRef::INT32)
+            header_ptr = builder.gep(ptr, [0_u32], TypeRef::POINTER)
+            builder.store(header_ptr, type_id_value)
+          end
+        end
+      end
+
       # Insert RC increment for ARC allocations
       case strategy
       when MemoryStrategy::ARC
