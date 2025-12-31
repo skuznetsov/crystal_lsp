@@ -469,11 +469,11 @@ end
 ```
 
 #### 5.1.2a Escape Analysis Robustness (edge cases)
-- [ ] Refine virtual-call detection: treat final/struct/monomorphic receivers as non-virtual; avoid blanket HeapEscape on method calls.
-- [x] Method effect summaries: cache per-signature effects (`no_escape`, `transfer`, `thread_shared`, `ffi_exposed`, `returns_alias`) to replace name-based heuristics (2026-01-xx).
-- [x] Apply effect summaries during Call handling (escape/taint honoring `NoEscape`/`Transfer`/`ThreadShared`/`FFIExposed`) (2026-01-xx).
+- [x] Refine virtual-call detection: treat final/struct/monomorphic receivers as non-virtual; avoid blanket HeapEscape on method calls (2025-12-31).
+- [x] Method effect summaries: cache per-signature effects (`no_escape`, `transfer`, `thread_shared`, `ffi_exposed`, `returns_alias`) to replace name-based heuristics (2025-12-31).
+- [x] Apply effect summaries during Call handling (escape/taint honoring `NoEscape`/`Transfer`/`ThreadShared`/`FFIExposed`) (2025-12-31).
 - [ ] Unknown-effect boundary: limit propagation and pick safe local strategy without poisoning the full escape/taint graph.
-- [ ] Add stdlib-only annotations: `@[NoEscape]`, `@[Transfer]`, `@[Taints(...)]`, `@[Arena("name")]` to override heuristics.
+- [ ] Add stdlib-only annotations: `@[NoEscape]`, `@[Transfer]`, `@[Taints(...)]`, `@[Arena("name")]` to override heuristics (Array/Hash/Set/Channel partial coverage done).
 - [ ] Builder/borrow region: tie child lifetimes to owner; only escape when owner escapes.
 - [ ] Closure capture in loops: copy/move captured loop vars when closure escapes (avoid last-iteration capture/UAF).
 - [ ] Any/Union boundary: treat as analysis boundary; force ARC/GC or slab to avoid stack UAF.
@@ -1077,6 +1077,7 @@ r2 = maybe(false)  # => nil
 - Capture callsite arg types by base+arity to survive `_splat`/`$arity` name shifts (2026-01-xx).
 - Prefer typed overloads during mangled-prefix lookup in `lower_function_if_needed` to avoid wrong overload selection (2026-01-xx).
 - Register and lower `lib` structs/unions as `ClassNode` (enable `LibC::Sigaction.new` and field accessors) (2026-01-xx).
+- Preserve `@[Link(...)]` annotations on top-level `lib` defs and lower them into link libraries (driver collect_top_level_nodes + HIR register_lib path) (2026-01-xx).
 - Lower lib struct field access (`action.sa_mask`) to direct field get/set (avoid `_LibC__Sigaction__sa_mask`) (2026-01-xx).
 - Treat `TypeDeclarationNode` inside structs as lib field declarations (`field : Type`) (2026-01-xx).
 - Unwrap pointer unions for `value/[]/+=` intrinsics to avoid llc type mismatch in Array(String) buffer stores (2026-01-xx).
