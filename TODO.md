@@ -1032,7 +1032,7 @@ r2 = maybe(false)  # => nil
 **Prelude build progress (with stdlib/prelude):**
 - Reaches LLVM IR emission and `opt -O1` successfully; link still fails due to missing runtime/stdlib symbols (expected at this stage).
 - Timing snapshot (release + `--stats --no-llvm-opt --no-llvm-metadata`): parse prelude ~167ms, HIR ~2.0s, MIR ~0.3ms, LLVM ~1.8ms, total ~2.2s; link failure is the current blocker.
-- Linker missing symbols (bootstrap_array full-prelude run 2026-01-xx; 92 entries; full list in `/tmp/missing_symbols_latest.txt`).
+- Linker missing symbols (bootstrap_array full-prelude run 2025-12-31; 136 entries; full list in `/tmp/missing_symbols_latest.txt`).
   - ByteFormat decode/from_io resolved (no `_IO__ByteFormat_decode_UInt32_IO`).
 
 **Recent fixes (prelude bootstrap path):**
@@ -1127,7 +1127,7 @@ r2 = maybe(false)  # => nil
    - DoD: `./bin/crystal_v2 examples/bootstrap_array.cr -o /tmp/bootstrap_array_full 2> /private/tmp/bootstrap_array_full.link.log` runs without OOB/segfault; no inline-yield guard logs present (2026-01-xx).
 4) Virtual dispatch lowering (IO/abstract receivers) - IN PROGRESS (2025-12-31)
    - [x] Lower HIR `Call.virtual` into MIR type-id switch for class/union receivers.
-   - [ ] Module-typed dispatch still missing (see item 1100).
+   - [x] Module-typed dispatch uses includer set + subclasses in MIR (method resolution still governed by item 1100).
    - [ ] Emit vtables (or direct dispatch table) for concrete classes; store vtable ptr in class layout (deferred; type-id switch in use).
    - [x] Treat abstract defs as virtual in HIR call marking.
    - DoD: missing `_IO_read_Slice_UInt8_` / `_IO_write_Slice_UInt8_` / `_FileDescriptor_*` removed from `/tmp/missing_symbols_latest.txt` after full-prelude bootstrap.
