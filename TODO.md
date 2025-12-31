@@ -1077,7 +1077,7 @@ r2 = maybe(false)  # => nil
 - Capture callsite arg types by base+arity to survive `_splat`/`$arity` name shifts (2026-01-xx).
 - Prefer typed overloads during mangled-prefix lookup in `lower_function_if_needed` to avoid wrong overload selection (2026-01-xx).
 - Register and lower `lib` structs/unions as `ClassNode` (enable `LibC::Sigaction.new` and field accessors) (2026-01-xx).
-- Preserve `@[Link(...)]` annotations on top-level `lib` defs and lower them into link libraries (driver collect_top_level_nodes + HIR register_lib path) (2026-01-xx).
+- [x] Preserve `@[Link(...)]` annotations on top-level `lib` defs and lower them into link libraries (driver collect_top_level_nodes + HIR register_lib path) (2025-12-31).
 - Lower lib struct field access (`action.sa_mask`) to direct field get/set (avoid `_LibC__Sigaction__sa_mask`) (2026-01-xx).
 - Treat `TypeDeclarationNode` inside structs as lib field declarations (`field : Type`) (2026-01-xx).
 - Unwrap pointer unions for `value/[]/+=` intrinsics to avoid llc type mismatch in Array(String) buffer stores (2026-01-xx).
