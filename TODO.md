@@ -1029,7 +1029,7 @@ r2 = maybe(false)  # => nil
 **Prelude build progress (with stdlib/prelude):**
 - Reaches LLVM IR emission and `opt -O1` successfully; link still fails due to missing runtime/stdlib symbols (expected at this stage).
 - Timing snapshot (release + `--stats --no-llvm-opt --no-llvm-metadata`): parse prelude ~167ms, HIR ~2.0s, MIR ~0.3ms, LLVM ~1.8ms, total ~2.2s; link failure is the current blocker.
-- Linker missing symbols (bootstrap_array full-prelude run 2026-01-xx; 93 entries; full list in `/tmp/missing_symbols_latest.txt`).
+- Linker missing symbols (bootstrap_array full-prelude run 2026-01-xx; 92 entries; full list in `/tmp/missing_symbols_latest.txt`).
   - ByteFormat decode/from_io resolved (no `_IO__ByteFormat_decode_UInt32_IO`).
 
 **Recent fixes (prelude bootstrap path):**
@@ -1086,6 +1086,7 @@ r2 = maybe(false)  # => nil
 - Array/Hash/Tuple literal lowering registers concrete generic types (fixes Array << Tuple in DWARF; missing symbols now 93) (2026-01-xx).
 - Index lowering uses primitive class names for `[]`; unsigned integers treated as bitshift for `<<` (2026-01-xx).
 - Debug callsite context added for `function.lookup.*` hooks (2026-01-xx).
+- Resolve PathNode constants to values before member access (fixes `Char::REPLACEMENT.ord`) (2026-01-xx).
 
 ### Holistic risk scan (2026-01-xx)
 
