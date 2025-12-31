@@ -8024,10 +8024,12 @@ module CrystalV2
             end
             token = current_token
             debug("parse_expression(#{precedence}): postfix loop, token=#{token.kind}")
-            # Treat do..end blocks as a statement boundary during expression parsing.
-            # This allows outer call parsing to consume the block (e.g., foo 1, 2 do ... end).
+            # Treat do..end blocks as a statement boundary during expression parsing,
+            # unless the current expression can accept a trailing block.
+            # This allows outer call parsing to consume the block for non-call expressions,
+            # while still attaching blocks to call-like nodes (foo.bar do ... end).
             if token.kind == Token::Kind::Do
-              break
+              break unless can_attach_block_to?(left)
             end
             # Statement boundary guard: if a new '{' starts on a new line (or after ';')
             # and we're not inside delimiters, treat it as the start of a new statement,
@@ -10627,6 +10629,32 @@ module CrystalV2
             end
             new_span = call_span.cover(last_span)
             result = @arena.add_typed(CallNode.new(new_span, callee, accu_args, nil, accu_named.empty? ? nil : accu_named))
+          end
+
+          # Parse optional block after parenthesized call: foo(args) do ... end
+          # Allow newlines before the block to match Crystal's call syntax.
+          consume_newlines
+          if current_token.kind == Token::Kind::Do || current_token.kind == Token::Kind::LBrace
+            # Temporarily release the call-args guard to allow nested DSL calls inside the block.
+            @parsing_call_args -= 1
+            block_expr = parse_block
+            @parsing_call_args += 1
+            if block_expr.invalid?
+              return PREFIX_ERROR
+            end
+
+            call_node = @arena[result]
+            if call_node.is_a?(CallNode)
+              block_span = @arena[block_expr].span
+              call_span = call_node.span.cover(block_span)
+              result = @arena.add_typed(CallNode.new(
+                call_span,
+                call_node.callee,
+                call_node.args,
+                block_expr,
+                call_node.named_args
+              ))
+            end
           end
 
           result
