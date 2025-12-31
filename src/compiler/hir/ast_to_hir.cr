@@ -17383,7 +17383,7 @@ module Crystal::HIR
         if blk_expr = block_expr
           blk_node = @arena[blk_expr]
           if blk_node.is_a?(CrystalV2::Compiler::Frontend::BlockNode)
-            return lower_string_build_intrinsic(ctx, blk_node)
+            return lower_string_build_intrinsic(ctx, blk_node, args.first?)
           end
         end
       end
@@ -20097,7 +20097,8 @@ module Crystal::HIR
     # This creates a StringBuilder, passes it to the block, and returns the final string
     private def lower_string_build_intrinsic(
       ctx : LoweringContext,
-      block : CrystalV2::Compiler::Frontend::BlockNode
+      block : CrystalV2::Compiler::Frontend::BlockNode,
+      capacity_id : ValueId?
     ) : ValueId
       # Extract block parameter name (typically "io")
       io_name = "io"
@@ -20109,28 +20110,31 @@ module Crystal::HIR
         end
       end
 
-      # Allocate a string buffer (StringBuilder)
-      # For bootstrap, we use a simple approach: allocate a buffer via malloc
-      # The buffer pointer serves as both the StringBuilder and the IO-like object
-      buffer_size = Literal.new(ctx.next_id, TypeRef::INT64, 4096_i64)
-      ctx.emit(buffer_size)
-      ctx.register_type(buffer_size.id, TypeRef::INT64)
+      builder_type = type_ref_for_name("String::Builder")
+      capacity_value = capacity_id
+      unless capacity_value
+        default_capacity = Literal.new(ctx.next_id, TypeRef::INT32, 64_i64)
+        ctx.emit(default_capacity)
+        ctx.register_type(default_capacity.id, TypeRef::INT32)
+        capacity_value = default_capacity.id
+      end
 
-      # Call malloc to allocate the buffer
-      malloc_call = Call.new(ctx.next_id, TypeRef::POINTER, nil, "__crystal_v2_malloc64", [buffer_size.id])
-      ctx.emit(malloc_call)
-      ctx.register_type(malloc_call.id, TypeRef::POINTER)
+      builder_ctor = mangle_function_name("String::Builder.new", [ctx.type_of(capacity_value)])
+      remember_callsite_arg_types(builder_ctor, [ctx.type_of(capacity_value)])
+      lower_function_if_needed(builder_ctor)
 
-      # Initialize buffer with empty string (write null terminator at start)
-      # Call __crystal_v2_init_buffer to write '\0' at position 0
-      init_call = Call.new(ctx.next_id, TypeRef::VOID, nil, "__crystal_v2_init_buffer", [malloc_call.id])
-      ctx.emit(init_call)
+      builder_call = Call.new(ctx.next_id, builder_type, nil, builder_ctor, [capacity_value])
+      ctx.emit(builder_call)
+      ctx.register_type(builder_call.id, builder_type)
 
       # Create a scope for the block
       ctx.push_scope(ScopeKind::Block)
 
-      # Register the block parameter "io" as the buffer pointer
-      ctx.register_local(io_name, malloc_call.id)
+      # Register the block parameter "io" as the builder instance
+      ctx.register_local(io_name, builder_call.id)
+      ctx.register_type(builder_call.id, builder_type)
+      update_typeof_local(io_name, builder_type)
+      update_typeof_local_name(io_name, "String::Builder")
 
       # Lower the block body
       # The block will contain operations like io << "text"
@@ -20138,10 +20142,13 @@ module Crystal::HIR
 
       ctx.pop_scope
 
-      # Return the buffer as the result string
-      # In a real implementation, this would call StringBuilder#to_s
-      # For bootstrap, we return the buffer directly (it's already a string pointer)
-      malloc_call.id
+      to_s_name = resolve_method_call(ctx, builder_call.id, "to_s", [] of TypeRef)
+      remember_callsite_arg_types(to_s_name, [] of TypeRef)
+      lower_function_if_needed(to_s_name)
+      to_s_call = Call.new(ctx.next_id, TypeRef::STRING, builder_call.id, to_s_name, [] of ValueId)
+      ctx.emit(to_s_call)
+      ctx.register_type(to_s_call.id, TypeRef::STRING)
+      to_s_call.id
     end
 
     # Inline Object#tap with a BlockNode
