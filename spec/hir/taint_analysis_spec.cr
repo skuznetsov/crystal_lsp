@@ -309,7 +309,7 @@ describe Crystal::HIR::TaintAnalyzer do
   end
 
   describe "thread sharing detection" do
-    it "does not mark spawn non-closure args as ThreadShared" do
+    it "marks spawn args as ThreadShared" do
       mod, func = create_function
 
       entry = func.get_block(func.entry_block)
@@ -327,7 +327,8 @@ describe Crystal::HIR::TaintAnalyzer do
       analyzer = Crystal::HIR::TaintAnalyzer.new(func)
       analyzer.analyze
 
-      data.taints.thread_shared?.should be_false
+      # All spawn args cross fiber boundaries and are thread-shared
+      data.taints.thread_shared?.should be_true
     end
 
     it "propagates ThreadShared back through copies" do
