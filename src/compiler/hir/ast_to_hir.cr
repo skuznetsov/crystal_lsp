@@ -13620,7 +13620,8 @@ module Crystal::HIR
         end
       end
 
-      if static = statically_is_a_type?(value_type, check_type)
+      static = statically_is_a_type?(value_type, check_type)
+      unless static.nil?
         lit = Literal.new(ctx.next_id, TypeRef::BOOL, static)
         ctx.emit(lit)
         return lit.id
@@ -13634,6 +13635,17 @@ module Crystal::HIR
     private def statically_is_a_type?(value_type : TypeRef, check_type : TypeRef) : Bool?
       return true if value_type == check_type
       return nil if value_type == TypeRef::VOID || check_type == TypeRef::VOID
+
+      if value_type == TypeRef::NIL
+        return check_type == TypeRef::NIL
+      end
+      if check_type == TypeRef::NIL
+        return false
+      end
+
+      if value_type.primitive? && check_type.primitive?
+        return value_type == check_type
+      end
 
       value_desc = @module.get_type_descriptor(value_type)
       check_desc = @module.get_type_descriptor(check_type)
@@ -17998,10 +18010,12 @@ module Crystal::HIR
                       end
         if target_type
           if receiver_type == TypeRef::VOID
-            receiver_type = TypeRef::POINTER
-            ctx.register_type(receiver_id, receiver_type)
+            # Treat unknown receivers as target type to avoid invalid pointer casts.
+            # Call-site coercion will handle the actual conversion when needed.
+            ctx.register_type(receiver_id, target_type)
+            return receiver_id
           end
-          if numeric_primitive?(receiver_type) || receiver_type == TypeRef::POINTER
+          if numeric_primitive?(receiver_type)
             return receiver_id if receiver_type == target_type
             cast = Cast.new(ctx.next_id, target_type, receiver_id, target_type)
             ctx.emit(cast)
