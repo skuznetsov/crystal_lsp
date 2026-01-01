@@ -712,6 +712,23 @@ module Crystal
         return builder.extern_call(call.method_name, args, convert_type(call.type))
       end
 
+      # Special handling for Proc#call - emit indirect call through function pointer
+      # Proc calls have format "call$Type" or just "call" and receiver is a Proc type
+      if call.receiver && (call.method_name == "call" || call.method_name.starts_with?("call$") ||
+                           call.method_name == "Proc#call" || call.method_name.starts_with?("Proc#call$"))
+        recv_type = @hir_value_types[call.receiver.not_nil!]?
+        if recv_type
+          recv_desc = @hir_module.get_type_descriptor(recv_type)
+          if recv_desc && recv_desc.kind == HIR::TypeKind::Proc
+            # Proc is a function pointer - emit indirect call
+            # The first arg is the proc/closure, remaining are call arguments
+            # For now, we emit an indirect_call MIR instruction
+            # The proc value contains: {function_ptr, closure_context}
+            return builder.call_indirect(args[0], args[1..].to_a, convert_type(call.type))
+          end
+        end
+      end
+
       if call.virtual
         if dispatched = lower_virtual_dispatch(call, args)
           return dispatched
