@@ -7960,12 +7960,16 @@ module Crystal::HIR
 
       return arg_types if candidates.empty?
 
+      known_types = arg_types.reject { |t| t == TypeRef::VOID }
+      common_numeric = common_numeric_type(known_types)
+
       # For each VOID position, try to find a consistent type from overloads
       refined = arg_types.dup
       void_positions = arg_types.each_index.select { |i| arg_types[i] == TypeRef::VOID }.to_a
 
       void_positions.each do |pos|
         inferred_types = Set(TypeRef).new
+        untyped_position = false
 
         candidates.each do |func_def|
           next unless params = func_def.params
@@ -7980,16 +7984,29 @@ module Crystal::HIR
               if ta = param.type_annotation
                 type_str = String.new(ta)
                 # Skip generic type parameters like T, E, B
-                unless type_str.size == 1 && type_str[0].uppercase?
+                if type_str.size == 1 && type_str[0].uppercase?
+                  untyped_position = true
+                else
                   inferred_type = type_ref_for_name(type_str)
-                  inferred_types << inferred_type if inferred_type != TypeRef::VOID
+                  if inferred_type == TypeRef::VOID
+                    untyped_position = true
+                  else
+                    inferred_types << inferred_type
+                  end
                 end
+              else
+                untyped_position = true
               end
               break
             end
 
             param_index += 1 unless param.is_splat || param.is_double_splat
           end
+        end
+
+        if untyped_position
+          refined[pos] = common_numeric if common_numeric
+          next
         end
 
         # If all overloads agree on a single type, use it
@@ -19115,6 +19132,47 @@ module Crystal::HIR
       best_name : String? = nil
       best_param_count = Int32::MAX
       best_score = Int32::MIN
+      prefer_untyped = false
+      if arg_types && arg_types.any? { |t| t == TypeRef::VOID }
+        @function_defs.each do |name, def_node|
+          next unless name == func_name || name.starts_with?("#{func_name}$")
+          params = def_node.params
+          next unless params
+
+          if has_block
+            next unless params.any?(&.is_block)
+          else
+            next if params.any?(&.is_block)
+          end
+
+          param_count = params.count { |p| !p.is_block && !named_only_separator?(p) }
+          has_splat = params.any? { |p| p.is_splat && !named_only_separator?(p) }
+          has_double_splat = params.any? { |p| p.is_double_splat }
+          required = params.count do |p|
+            !p.is_block && !named_only_separator?(p) && p.default_value.nil? && !p.is_splat && !p.is_double_splat
+          end
+
+          next if arg_count < required
+          next if arg_count > param_count && !has_splat && !has_double_splat
+
+          untyped_candidate = true
+          params.each do |param|
+            next if param.is_block || named_only_separator?(param)
+            next if param.is_splat || param.is_double_splat
+            if ta = param.type_annotation
+              type_name = String.new(ta)
+              if !type_param_like?(type_name) || @type_param_map.has_key?(type_name)
+                untyped_candidate = false
+                break
+              end
+            end
+          end
+          if untyped_candidate
+            prefer_untyped = true
+            break
+          end
+        end
+      end
 
       @function_defs.each do |name, def_node|
         next unless name == func_name || name.starts_with?("#{func_name}$")
@@ -19136,6 +19194,20 @@ module Crystal::HIR
 
         next if arg_count < required
         next if arg_count > param_count && !has_splat && !has_double_splat
+
+        untyped_candidate = true
+        params.each do |param|
+          next if param.is_block || named_only_separator?(param)
+          next if param.is_splat || param.is_double_splat
+          if ta = param.type_annotation
+            type_name = String.new(ta)
+            if !type_param_like?(type_name) || @type_param_map.has_key?(type_name)
+              untyped_candidate = false
+              break
+            end
+          end
+        end
+        next if prefer_untyped && !untyped_candidate
 
         score = 0
         if arg_types

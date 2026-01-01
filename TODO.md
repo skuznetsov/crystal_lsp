@@ -1303,10 +1303,10 @@ The return_type=16 (NIL) for `to_s` methods is incorrect - should be String type
 - **Fix applied**: disable `in` operator while parsing `case` value (`@allow_in_operator` guard) so `case ... in` branches parse correctly; `class String` now spans full file and includes `to_s`.
 - **Cache invalidation**: bumped AST cache version to 17 to invalidate stale parsed ASTs after parser fix.
 - **Result**: `String#to_s` is registered; union `String | Nil#to_s` resolves to `String#to_s`; `Nil#empty?`/`Nil#bytesize`/`Nil#check_no_null_byte` no longer appear in `/tmp/bootstrap_array_full.hir`.
+- **Fix applied**: avoid refining VOID args to Float64 when untyped overloads exist; prefer untyped overloads for VOID arg sets. `Math.min/max` now lower to integer paths and `llc` no longer errors on `Slice_UInt8_____Int32_Int32` (2026-01-02).
 
 **Next steps for GPT-5.2**:
-1. **Fix codegen type mismatch**: llc error `Slice_UInt8_____Int32_Int32` expects `i32` but gets `double` (see `/tmp/bootstrap_array_full.ll` around the failing call). Verify arg coercion in HIR→MIR lowering.
-2. **Flow typing for variable reassignment**: Track variable type changes through reassignment in HIR context (related to Issue 3 above).
+1. **Flow typing for variable reassignment**: Track variable type changes through reassignment in HIR context (related to Issue 3 above).
 
 **Files to investigate**:
 - `src/compiler/hir/ast_to_hir.cr`:
