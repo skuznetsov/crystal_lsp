@@ -18430,11 +18430,21 @@ module Crystal::HIR
         end
       end
 
-      # Methods that return the same type as the receiver
+      # Methods that return the same type as the receiver.
+      # Handle this even if return_type is NIL (often incorrectly registered for abstract modules).
       methods_returning_receiver_type = ["tap", "clamp", "abs", "ceil", "floor", "round", "truncate",
                                          "remainder", "tdiv", "unsafe_mod", "unsafe_div", "gcd", "lcm"]
-      if return_type == TypeRef::VOID && receiver_id && methods_returning_receiver_type.includes?(method_name)
-        return_type = ctx.type_of(receiver_id)
+      if receiver_id && methods_returning_receiver_type.includes?(method_name)
+        recv_type = ctx.type_of(receiver_id)
+        # Only override if receiver is not Nil (these methods don't make sense on Nil)
+        if recv_type != TypeRef::NIL && recv_type != TypeRef::VOID
+          if ENV.has_key?("DEBUG_RECV_TYPE") && (method_name == "abs" || method_name == "remainder")
+            STDERR.puts "[RECV_TYPE_CALL] method=#{method_name} recv_type=#{recv_type.id} old_return=#{return_type.id} current_class=#{@current_class || ""} current_method=#{@current_method || ""}"
+          end
+          return_type = recv_type
+        elsif ENV.has_key?("DEBUG_RECV_TYPE") && (method_name == "abs" || method_name == "remainder")
+          STDERR.puts "[RECV_TYPE_CALL_SKIP] method=#{method_name} recv_type=#{recv_type.id} return=#{return_type.id} current_class=#{@current_class || ""} current_method=#{@current_method || ""}"
+        end
       end
 
       # For unqualified method calls (no class prefix in the call name),
@@ -18548,11 +18558,12 @@ module Crystal::HIR
         end
       end
       # If we still have a fallback type, prefer a registered function type when available.
+      # But don't override a concrete receiver-derived type with NIL.
       resolved_return_type = get_function_return_type(mangled_method_name)
       if resolved_return_type == TypeRef::VOID && mangled_method_name != base_method_name
         resolved_return_type = get_function_return_type(base_method_name)
       end
-      if resolved_return_type != TypeRef::VOID && resolved_return_type != return_type
+      if resolved_return_type != TypeRef::VOID && resolved_return_type != TypeRef::NIL && resolved_return_type != return_type
         return_type = resolved_return_type
       end
 
@@ -22108,11 +22119,20 @@ module Crystal::HIR
         end
       end
 
-      if return_type == TypeRef::VOID
-        methods_returning_receiver_type = ["tap", "clamp", "abs", "ceil", "floor", "round", "truncate",
-                                           "remainder", "tdiv", "unsafe_mod", "unsafe_div", "gcd", "lcm"]
-        if methods_returning_receiver_type.includes?(member_name)
-          return_type = ctx.type_of(object_id)
+      # Methods that return the same type as the receiver.
+      # Handle this even if return_type is NIL (often incorrectly registered for abstract modules).
+      methods_returning_receiver_type = ["tap", "clamp", "abs", "ceil", "floor", "round", "truncate",
+                                         "remainder", "tdiv", "unsafe_mod", "unsafe_div", "gcd", "lcm"]
+      if methods_returning_receiver_type.includes?(member_name)
+        recv_type = ctx.type_of(object_id)
+        # Only override if receiver is not Nil (these methods don't make sense on Nil)
+        if recv_type != TypeRef::NIL && recv_type != TypeRef::VOID
+          if ENV.has_key?("DEBUG_RECV_TYPE") && (member_name == "abs" || member_name == "remainder")
+            STDERR.puts "[RECV_TYPE] member=#{member_name} recv_type=#{recv_type.id} old_return=#{return_type.id} current_class=#{@current_class || ""} current_method=#{@current_method || ""}"
+          end
+          return_type = recv_type
+        elsif ENV.has_key?("DEBUG_RECV_TYPE") && (member_name == "abs" || member_name == "remainder")
+          STDERR.puts "[RECV_TYPE_SKIP] member=#{member_name} recv_type=#{recv_type.id} return=#{return_type.id} current_class=#{@current_class || ""} current_method=#{@current_method || ""}"
         end
       end
 

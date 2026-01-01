@@ -1256,3 +1256,54 @@ r2 = maybe(false)  # => nil
 - `DEBUG_GENERIC_TEMPLATE=1` - traces generic template registration (shows body_size)
 - `DEBUG_TEMPLATE_LOOKUP=1` - traces generic template body searches
 - `DEBUG_LOOKUP=1` - traces function name lookups
+
+### 8.6 Bootstrap Session Notes (2026-01-01 - Session 2)
+
+#### Issue 5: Nil method calls from incorrect type inference - IN PROGRESS
+
+**Symptom**: 112 missing symbols including many `Nil_*` methods (`Nil_bytesize`, `Nil_empty_`, `Nil_check_no_null_byte`, etc.)
+
+**Investigation findings**:
+1. `resolve_method_call` returns `Nil#method` when `ctx.type_of(receiver_id)` returns `TypeRef::NIL (id=16)`
+2. This happens in functions like `Path#join` where a parameter like `part` should be typed as `String` after `part = part.to_s`, but is still typed as `Nil`
+3. The return type of `to_s` is being registered as `NIL` (id=16) instead of the String type
+
+**Root cause analysis**:
+- Debug output shows `[NIL_METHOD] Nil#bytesize receiver_id=36 recv_type=16 type_desc=nil func=Path#join$Pointer`
+- `recv_type=16` is `TypeRef::NIL`, and `type_desc=nil` means no type descriptor was found
+- The issue is that `ctx.register_type(call.id, return_type)` is being called with `return_type=NIL` for `to_s` calls
+- This comes from `get_function_return_type()` returning NIL because the registered function type for `Pointer#to_s` or similar is NIL
+
+**Debug flags added**:
+- `DEBUG_NIL_METHODS=1` - shows Nil method calls with receiver_id, recv_type, and type_desc
+- `DEBUG_TO_S_TYPE=1` - shows return types for all `to_s` calls
+
+**Sample debug output**:
+```
+[TO_S_TYPE] return_type=16 mangled=Int#to_s$IO_Int32_Int32_Bool func=Reference#to_s
+[TO_S_TYPE] return_type=16 mangled=Int#to_s$IO_Int32_Int32_Bool func=Pointer(UInt8)#to_s
+```
+
+The return_type=16 (NIL) for `to_s` methods is incorrect - should be String type.
+
+**Fixes applied (partial)**:
+1. Line 18569 - Added check to prevent NIL from overriding concrete receiver-derived return types:
+   ```crystal
+   if resolved_return_type != TypeRef::VOID && resolved_return_type != TypeRef::NIL && resolved_return_type != return_type
+     return_type = resolved_return_type
+   end
+   ```
+2. Lines 18437-18448 and 22116-22133 - Updated `methods_returning_receiver_type` to apply even when return_type is NIL
+
+**Next steps for GPT-5.2**:
+1. **Find why `to_s` returns NIL**: The function type registration for `to_s` methods returns TypeRef::NIL. Need to trace `get_function_return_type()` and the function type registration to understand why.
+2. **Add String return type for `to_s`**: The `to_s` method should always return String. Consider adding `to_s` to a hardcoded list of methods that return String (like how `methods_returning_receiver_type` works for methods returning receiver type).
+3. **Flow typing for variable reassignment**: Track variable type changes through reassignment in HIR context (related to Issue 3 above).
+
+**Files to investigate**:
+- `src/compiler/hir/ast_to_hir.cr`:
+  - `get_function_return_type()` - where function return types are looked up
+  - `lower_call()` around lines 18400-18600 - where return types are determined
+  - `register_function_type()` - where function types are registered
+
+**Current missing symbol count**: 112 (down from 149 baseline)

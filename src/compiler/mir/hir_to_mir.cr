@@ -714,8 +714,19 @@ module Crystal
 
       # Special handling for Proc#call - emit indirect call through function pointer
       # Proc calls have format "call$Type" or just "call" and receiver is a Proc type
-      if call.receiver && (call.method_name == "call" || call.method_name.starts_with?("call$") ||
-                           call.method_name == "Proc#call" || call.method_name.starts_with?("Proc#call$"))
+      # Also match "call(...)" patterns from typed proc calls
+      is_proc_call = call.method_name == "call" ||
+                     call.method_name.starts_with?("call$") ||
+                     call.method_name.starts_with?("call(") ||
+                     call.method_name == "Proc#call" ||
+                     call.method_name.starts_with?("Proc#call$") ||
+                     call.method_name.starts_with?("Proc#call(")
+      if ENV.has_key?("DEBUG_PROC_CALL") && call.method_name.includes?("call")
+        recv_type = call.receiver ? @hir_value_types[call.receiver.not_nil!]? : nil
+        recv_desc = recv_type ? @hir_module.get_type_descriptor(recv_type) : nil
+        STDERR.puts "[PROC_CALL] func=#{@current_lowering_func_name} method=#{call.method_name} receiver=#{call.receiver} recv_type=#{recv_type.try(&.id)} recv_desc=#{recv_desc.try(&.name)} kind=#{recv_desc.try(&.kind)}"
+      end
+      if call.receiver && is_proc_call
         recv_type = @hir_value_types[call.receiver.not_nil!]?
         if recv_type
           recv_desc = @hir_module.get_type_descriptor(recv_type)

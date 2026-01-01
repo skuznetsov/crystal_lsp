@@ -8052,6 +8052,19 @@ module CrystalV2
 
             case token.kind
             when Token::Kind::LParen
+              # Statement boundary guard: if '(' starts on a new line (or after ';')
+              # and we're not inside delimiters, treat it as the start of a new statement,
+              # not as call arguments to the previous expression.
+              if !inside_delimiters?
+                if prev = previous_token
+                  if prev.kind == Token::Kind::Newline || prev.kind == Token::Kind::Semicolon ||
+                     token.span.start_line > prev.span.end_line
+                    break
+                  end
+                else
+                  break
+                end
+              end
               left = parse_parenthesized_call(left)
               next
             when Token::Kind::LBracket
