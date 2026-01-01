@@ -1236,10 +1236,18 @@ r2 = maybe(false)  # => nil
 
 #### Missing Symbols Snapshot:
 - **Before fix**: 149 entries (`/tmp/missing_symbols_new.txt`)
-- **After fix** (2026-01-01): 107 entries (`/tmp/missing_symbols_after.txt`)
-- Main categories remaining:
-  - `call_Pointer_*` functions - realloc callbacks (12 entries)
-  - `Crystal__System__*` functions - system module stubs (8 entries)
+- **After AST cache fix** (2026-01-01): 107 entries
+- **After Proc#call fix** (2026-01-01): 81 entries (`/tmp/missing_symbols_now.txt`)
+  - Fixed: Proc#call now emits indirect call through function pointer
+  - Eliminated: 26 symbols including all `call_Pointer_*` for Proc types
+
+**Remaining categories (81 symbols):**
+- `Crystal__System__*` functions - system module stubs (7 entries)
+- `String_*` functions - instance method dispatch (13 entries)
+- `Nil_*` functions - union type method dispatch (9 entries)
+- `Int32_exception_*` - exception handling (8 entries)
+- `call_Pointer_*` - remaining non-Proc pointer calls (6 entries)
+- Type conversion issues - union coercion (various)
   - `Nil_*` functions - nil method calls on unions (7 entries)
   - `bsearch_internal_Float64_Float64` - flow typing issue
   - Various DWARF/debug functions
