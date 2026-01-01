@@ -7920,6 +7920,80 @@ module Crystal::HIR
       param_type
     end
 
+    # Refine VOID arg types by looking at overload parameter annotations.
+    # When an arg has VOID type but the target method has overloads with type
+    # restrictions for that parameter, infer the type from those restrictions.
+    private def refine_void_args_from_overloads(base_method_name : String, arg_types : Array(TypeRef)) : Array(TypeRef)
+      return arg_types unless arg_types.any? { |t| t == TypeRef::VOID }
+
+      # Look for function definitions with this base name (may have multiple overloads)
+      overload_prefix = "#{base_method_name}$"
+      candidates = [] of CrystalV2::Compiler::Frontend::DefNode
+
+      # Direct match
+      if func_def = @function_defs[base_method_name]?
+        candidates << func_def
+      end
+
+      # Mangled variants
+      @function_defs.each_key do |key|
+        if key.starts_with?(overload_prefix)
+          if def_node = @function_defs[key]?
+            candidates << def_node
+          end
+        end
+      end
+
+      return arg_types if candidates.empty?
+
+      # For each VOID position, try to find a consistent type from overloads
+      refined = arg_types.dup
+      void_positions = arg_types.each_index.select { |i| arg_types[i] == TypeRef::VOID }.to_a
+
+      void_positions.each do |pos|
+        inferred_types = Set(TypeRef).new
+
+        candidates.each do |func_def|
+          next unless params = func_def.params
+
+          # Map position to param (accounting for block params)
+          param_index = 0
+          params.each do |param|
+            next if named_only_separator?(param)
+            next if param.is_block
+
+            if param_index == pos
+              if ta = param.type_annotation
+                type_str = String.new(ta)
+                # Skip generic type parameters like T, E, B
+                unless type_str.size == 1 && type_str[0].uppercase?
+                  inferred_type = type_ref_for_name(type_str)
+                  inferred_types << inferred_type if inferred_type != TypeRef::VOID
+                end
+              end
+              break
+            end
+
+            param_index += 1 unless param.is_splat || param.is_double_splat
+          end
+        end
+
+        # If all overloads agree on a single type, use it
+        if inferred_types.size == 1
+          refined[pos] = inferred_types.first
+        elsif inferred_types.size > 1
+          # Multiple types - prefer Float64 over Float32 (common pattern)
+          if inferred_types.includes?(TypeRef::FLOAT64)
+            refined[pos] = TypeRef::FLOAT64
+          elsif inferred_types.includes?(TypeRef::FLOAT32)
+            refined[pos] = TypeRef::FLOAT32
+          end
+        end
+      end
+
+      refined
+    end
+
     # Map operator method name to BinaryOp for primitive inlining
     # Returns nil if the method is not a binary operator
     private def binary_op_for_method(method_name : String) : BinaryOp?
@@ -15483,6 +15557,31 @@ module Crystal::HIR
       match
     end
 
+    # Search a generic template's body for a method definition by name.
+    # Returns {DefNode, Arena} if found, nil otherwise.
+    private def find_method_in_generic_template(
+      template : GenericClassTemplate,
+      method_name : String
+    ) : Tuple(CrystalV2::Compiler::Frontend::DefNode, CrystalV2::Compiler::Frontend::ArenaLike)?
+      body = template.node.body
+      return nil unless body
+
+      body.each do |expr_id|
+        member = template.arena[expr_id]
+        member = unwrap_visibility_member(member)
+
+        case member
+        when CrystalV2::Compiler::Frontend::DefNode
+          def_name = member.name.nil? ? "" : String.new(member.name.not_nil!)
+          if def_name == method_name
+            return {member, template.arena}
+          end
+        end
+      end
+
+      nil
+    end
+
     private def generic_owner_info(owner : String) : NamedTuple(base: String, owner: String, args: Array(String), map: Hash(String, String))?
       info = split_generic_base_and_args(owner)
       return nil unless info
@@ -15683,6 +15782,34 @@ module Crystal::HIR
                         target_name = name
                         lookup_branch = "generic_owner_template_prefix"
                         break
+                      end
+                    end
+                  end
+                end
+                # Fallback: search the generic template's body for the method
+                unless func_def
+                  if template = @generic_templates[info[:base]]?
+                    method_name_part = method_part.split("$").first
+                    found_in_template = find_method_in_generic_template(template, method_name_part)
+                    if found_in_template
+                      func_def = found_in_template[0]
+                      arena = found_in_template[1]
+                      target_name = name
+                      lookup_branch = "generic_template_body"
+                    end
+                    # Also search reopenings
+                    unless func_def
+                      if reopenings = @generic_reopenings[info[:base]]?
+                        reopenings.each do |reopen_template|
+                          found_in_reopen = find_method_in_generic_template(reopen_template, method_name_part)
+                          if found_in_reopen
+                            func_def = found_in_reopen[0]
+                            arena = found_in_reopen[1]
+                            target_name = name
+                            lookup_branch = "generic_reopen_body"
+                            break
+                          end
+                        end
                       end
                     end
                   end
@@ -17534,6 +17661,9 @@ module Crystal::HIR
       if receiver_id.nil? && full_method_name.nil? && method_name == "main" && @top_level_main_defined
         base_method_name = TOP_LEVEL_MAIN_BASE
       end
+
+      # Refine VOID arg types by looking at overload parameter annotations
+      arg_types = refine_void_args_from_overloads(base_method_name, arg_types)
 
       if receiver_id.nil? && method_name == "new"
         target_name = full_method_name || base_method_name
