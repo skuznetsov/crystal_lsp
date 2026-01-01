@@ -118,7 +118,9 @@ module CrystalV2
 
       class AstCache
         MAGIC   = "CV2A"
-        VERSION = 15_u32
+        # Bump this version whenever the parser or AST format changes
+        # to invalidate all cached ASTs
+        VERSION = 16_u32
 
         getter arena : Frontend::AstArena
         getter roots : Array(Frontend::ExprId)
@@ -134,8 +136,9 @@ module CrystalV2
         def self.cache_path(file_path : String) : String
           cache_dir = ENV["XDG_CACHE_HOME"]? || File.join(ENV["HOME"]? || "/tmp", ".cache")
           # Stable hash for cache key (avoid randomized String#hash).
+          # Include VERSION in directory path so old caches are automatically orphaned
           hash = fnv_hash(file_path).to_s(16)
-          File.join(cache_dir, "crystal_v2_lsp", "ast", "#{hash}.ast")
+          File.join(cache_dir, "crystal_v2_lsp", "ast", "v#{VERSION}", "#{hash}.ast")
         end
 
         def self.load(file_path : String) : AstCache?

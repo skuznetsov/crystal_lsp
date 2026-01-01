@@ -1197,15 +1197,18 @@ r2 = maybe(false)  # => nil
 - **Fix**: Added `refine_void_args_from_overloads()` in `ast_to_hir.cr:7923-7995` to infer VOID types from overload parameter annotations.
 - **Verified**: HIR now shows `bsearch_internal$Float64_Float64_Bool` with correct types.
 
-#### Issue 2: Array/Hash generic method instantiation - PARTIAL
+#### Issue 2: Array/Hash generic method instantiation - FIXED
 - **Symptom**: 150+ missing symbols like `Array_String_____String` (mangled `Array(String)#<<$String`)
 - **Observation**: Generic template for Array only has 14 nodes, should have 100+
-- **Root cause**: Array class methods not being found because:
-  1. Generic class methods aren't pre-registered in `@function_defs`
-  2. Added `find_method_in_generic_template()` fallback but it only finds 14 nodes
-  3. The FULL Array class body isn't being captured in the template (possibly prelude stub issue or incomplete parsing)
-- **Partial fix**: Added `find_method_in_generic_template()` in `ast_to_hir.cr:15560-15583` and fallback lookup in `lower_function_if_needed`. Works for some methods (e.g., `Pointer#copy_to`) but Array template is truncated.
-- **Next step**: Investigate why `@generic_templates["Array"]` only has 14 nodes when array.cr has 100+ methods. Check if prelude loading is using a stub instead of full stdlib file.
+- **Root cause**: **AST cache corruption**. The LSP AST cache was saving/loading stale data with corrupted body node counts.
+  1. Parser correctly produces body_size=174 for Array
+  2. Cache serialization/deserialization was working correctly
+  3. BUT: Old cache files from previous versions were being loaded (version check passes but data was from incompatible parser output)
+- **Fix** (2026-01-01, commit pending):
+  1. Bumped AST cache VERSION from 15 to 16 to invalidate old caches
+  2. Added VERSION to cache path (`~/.cache/crystal_v2_lsp/ast/v16/...`) so old caches are automatically orphaned
+  3. Fixed `find_method_in_generic_template()` to use template's arena instead of `@arena` for visibility unwrapping
+- **Verified**: Array now has body_size=174 (all methods), missing symbols reduced from 149 to 107
 
 #### Issue 3: Flow typing for variable reassignment - NOT FIXED
 - **Symptom**: `bsearch_internal_Float64_Float64` still in missing symbols
@@ -1231,14 +1234,17 @@ r2 = maybe(false)  # => nil
   - `find_method_in_generic_template()` at lines 15560-15583
   - Generic template body fallback in `lower_function_if_needed` at lines 15789-15815
 
-#### Missing Symbols Snapshot (2026-01-01):
-- `/tmp/missing_symbols_new.txt` has 149 entries
-- Main categories:
-  - `Array_*` functions (generic method instantiation)
-  - `Nil_*` functions (nil method calls on unions)
-  - `bsearch_internal_Float64_Float64` (flow typing issue)
-  - Various `Hash_*`, `Deque_*` (similar to Array)
+#### Missing Symbols Snapshot:
+- **Before fix**: 149 entries (`/tmp/missing_symbols_new.txt`)
+- **After fix** (2026-01-01): 107 entries (`/tmp/missing_symbols_after.txt`)
+- Main categories remaining:
+  - `call_Pointer_*` functions - realloc callbacks (12 entries)
+  - `Crystal__System__*` functions - system module stubs (8 entries)
+  - `Nil_*` functions - nil method calls on unions (7 entries)
+  - `bsearch_internal_Float64_Float64` - flow typing issue
+  - Various DWARF/debug functions
 
 #### Debug Environment Variables:
+- `DEBUG_GENERIC_TEMPLATE=1` - traces generic template registration (shows body_size)
 - `DEBUG_TEMPLATE_LOOKUP=1` - traces generic template body searches
 - `DEBUG_LOOKUP=1` - traces function name lookups

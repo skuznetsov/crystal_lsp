@@ -5848,6 +5848,10 @@ module Crystal::HIR
           # Keep the template with the LARGEST body as primary, but preserve reopenings
           # so additional methods (e.g., Range#bsearch) are not lost.
           new_body_size = node.body.try(&.size) || 0
+          if ENV.has_key?("DEBUG_GENERIC_TEMPLATE")
+            current_path = @paths_by_arena[@arena]? || "(unknown)"
+            STDERR.puts "[GENERIC_TEMPLATE] #{class_name}: body_size=#{new_body_size} file=#{File.basename(current_path)}"
+          end
           param_names = type_params.map { |p| String.new(p) }
           new_template = GenericClassTemplate.new(class_name, param_names, node, @arena, is_struct)
 
@@ -15568,7 +15572,10 @@ module Crystal::HIR
 
       body.each do |expr_id|
         member = template.arena[expr_id]
-        member = unwrap_visibility_member(member)
+        # Unwrap visibility modifier using template's arena, not @arena
+        while member.is_a?(CrystalV2::Compiler::Frontend::VisibilityModifierNode)
+          member = template.arena[member.expression]
+        end
 
         case member
         when CrystalV2::Compiler::Frontend::DefNode
