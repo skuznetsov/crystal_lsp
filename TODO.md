@@ -1186,3 +1186,59 @@ r2 = maybe(false)  # => nil
      - Restrict class-scan fallbacks to unknown receiver types
      - Module-typed fallback only for module-like receiver names
 4. [x] **Macro expansion for `getter`/`property`** - Compile-time accessor generation (module mixins) (2025-12-20)
+
+### 8.5 Bootstrap Debugging Notes (2026-01-01)
+
+**Session findings for next developer:**
+
+#### Issue 1: bsearch_internal param type (ptr vs double) - FIXED
+- **Symptom**: LLVM error `bitcast ptr to double` in `bsearch_internal_Float64_Bool`
+- **Root cause**: When arg type is VOID at call site, it's filtered from mangled name. `bsearch_internal(Float64, ???, Bool)` mangles to `bsearch_internal$Float64_Bool` (missing type for param 1). When function is lowered, params don't align with types.
+- **Fix**: Added `refine_void_args_from_overloads()` in `ast_to_hir.cr:7923-7995` to infer VOID types from overload parameter annotations.
+- **Verified**: HIR now shows `bsearch_internal$Float64_Float64_Bool` with correct types.
+
+#### Issue 2: Array/Hash generic method instantiation - PARTIAL
+- **Symptom**: 150+ missing symbols like `Array_String_____String` (mangled `Array(String)#<<$String`)
+- **Observation**: Generic template for Array only has 14 nodes, should have 100+
+- **Root cause**: Array class methods not being found because:
+  1. Generic class methods aren't pre-registered in `@function_defs`
+  2. Added `find_method_in_generic_template()` fallback but it only finds 14 nodes
+  3. The FULL Array class body isn't being captured in the template (possibly prelude stub issue or incomplete parsing)
+- **Partial fix**: Added `find_method_in_generic_template()` in `ast_to_hir.cr:15560-15583` and fallback lookup in `lower_function_if_needed`. Works for some methods (e.g., `Pointer#copy_to`) but Array template is truncated.
+- **Next step**: Investigate why `@generic_templates["Array"]` only has 14 nodes when array.cr has 100+ methods. Check if prelude loading is using a stub instead of full stdlib file.
+
+#### Issue 3: Flow typing for variable reassignment - NOT FIXED
+- **Symptom**: `bsearch_internal_Float64_Float64` still in missing symbols
+- **Root cause**: In stdlib `bsearch.cr:38-45`:
+  ```crystal
+  def bsearch_internal(from : Float64, to : Float64, exclusive)
+    from = float_as_int from  # After this, from should be Int64, not Float64
+    to = float_as_int to
+    bsearch_internal(from, to, false) { ... }  # Call should use Int64 types
+  end
+  ```
+  Variable reassignment doesn't update the type in our type inference. The call is still mangled with Float64 types instead of Int64.
+- **Fix needed**: Track variable type changes through reassignment in HIR context.
+
+#### Issue 4: Macro expansion for {% begin %} blocks with {{@type}} - NOT FIXED
+- **Symptom**: `Int#remainder` returns Nil because macro body isn't expanded
+- **Root cause**: Macro blocks like `{% begin %} ... {{@type}} ... {% end %}` with `@type` references aren't being properly expanded.
+- **Impact**: Methods with macro-generated bodies become empty, returning nil.
+
+#### Files Modified (commit 0a2444b):
+- `src/compiler/hir/ast_to_hir.cr`:
+  - `refine_void_args_from_overloads()` at lines 7923-7995
+  - `find_method_in_generic_template()` at lines 15560-15583
+  - Generic template body fallback in `lower_function_if_needed` at lines 15789-15815
+
+#### Missing Symbols Snapshot (2026-01-01):
+- `/tmp/missing_symbols_new.txt` has 149 entries
+- Main categories:
+  - `Array_*` functions (generic method instantiation)
+  - `Nil_*` functions (nil method calls on unions)
+  - `bsearch_internal_Float64_Float64` (flow typing issue)
+  - Various `Hash_*`, `Deque_*` (similar to Array)
+
+#### Debug Environment Variables:
+- `DEBUG_TEMPLATE_LOOKUP=1` - traces generic template body searches
+- `DEBUG_LOOKUP=1` - traces function name lookups
