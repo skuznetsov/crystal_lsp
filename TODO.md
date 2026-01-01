@@ -1294,11 +1294,19 @@ The return_type=16 (NIL) for `to_s` methods is incorrect - should be String type
    end
    ```
 2. Lines 18437-18448 and 22116-22133 - Updated `methods_returning_receiver_type` to apply even when return_type is NIL
+3. `get_function_return_type()` now treats VOID/NIL base names as unknown and falls back to cached base return types (prevents `Tuple#to_s()` returning NIL via a mismatched overload)
+4. `register_function_type()` and `lower_def()` now allow NIL base return types to be replaced by non-NIL return types for the same base name
+5. `resolve_method_call()` now prefers an overload with matching arity and falls back to ancestor overloads before using the base name (fixes `Tuple#to_s()` resolving to `Tuple#to_s(io)`).
+
+**Progress note**:
+- **Root cause found**: parser treated `in` as a binary operator while parsing `case VALUE` and truncated `class String` at `unicode_normalized?`. As a result, `String#to_s` was parsed as top-level def, not a method.
+- **Fix applied**: disable `in` operator while parsing `case` value (`@allow_in_operator` guard) so `case ... in` branches parse correctly; `class String` now spans full file and includes `to_s`.
+- **Cache invalidation**: bumped AST cache version to 17 to invalidate stale parsed ASTs after parser fix.
+- **Result**: `String#to_s` is registered; union `String | Nil#to_s` resolves to `String#to_s`; `Nil#empty?`/`Nil#bytesize`/`Nil#check_no_null_byte` no longer appear in `/tmp/bootstrap_array_full.hir`.
 
 **Next steps for GPT-5.2**:
-1. **Find why `to_s` returns NIL**: The function type registration for `to_s` methods returns TypeRef::NIL. Need to trace `get_function_return_type()` and the function type registration to understand why.
-2. **Add String return type for `to_s`**: The `to_s` method should always return String. Consider adding `to_s` to a hardcoded list of methods that return String (like how `methods_returning_receiver_type` works for methods returning receiver type).
-3. **Flow typing for variable reassignment**: Track variable type changes through reassignment in HIR context (related to Issue 3 above).
+1. **Fix codegen type mismatch**: llc error `Slice_UInt8_____Int32_Int32` expects `i32` but gets `double` (see `/tmp/bootstrap_array_full.ll` around the failing call). Verify arg coercion in HIR→MIR lowering.
+2. **Flow typing for variable reassignment**: Track variable type changes through reassignment in HIR context (related to Issue 3 above).
 
 **Files to investigate**:
 - `src/compiler/hir/ast_to_hir.cr`:
@@ -1306,4 +1314,4 @@ The return_type=16 (NIL) for `to_s` methods is incorrect - should be String type
   - `lower_call()` around lines 18400-18600 - where return types are determined
   - `register_function_type()` - where function types are registered
 
-**Current missing symbol count**: 112 (down from 149 baseline)
+**Current missing symbol count**: needs refresh after AST cache version bump

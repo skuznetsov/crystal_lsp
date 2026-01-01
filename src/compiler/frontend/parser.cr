@@ -31,6 +31,7 @@ module CrystalV2
         @macro_mode : Int32
         @in_macro_expression : Bool  # Flag to track parsing inside {% ... %} expressions
         @allow_pointer_suffix : Int32  # Allow parsing pointer suffixes like Void* in type-ish contexts
+        @allow_in_operator : Bool  # Disable `in` operator when parsing case value
         # Streaming tokenization support
         @streaming : Bool
         @lexer : Lexer?
@@ -71,6 +72,7 @@ module CrystalV2
           @macro_mode = 0
           @in_macro_expression = false  # Not in macro expression initially
           @allow_pointer_suffix = 0
+          @allow_in_operator = true
           @streaming = ENV["CRYSTAL_V2_PARSER_STREAM"]? != nil
           @expect_context = nil
           @parsing_method_params = false
@@ -176,6 +178,7 @@ module CrystalV2
           @macro_mode = 0
           @in_macro_expression = false  # Not in macro expression initially
           @allow_pointer_suffix = 0
+          @allow_in_operator = true
           @streaming = ENV["CRYSTAL_V2_PARSER_STREAM"]? != nil
           @expect_context = nil
           @parsing_method_params = false
@@ -2961,7 +2964,10 @@ module CrystalV2
           value : ExprId? = nil
           if current_token.kind != Token::Kind::When && current_token.kind != Token::Kind::End
             # Has value: case EXPR (can be assignment like: case x = foo())
+            old_allow_in = @allow_in_operator
+            @allow_in_operator = false
             val = parse_op_assign
+            @allow_in_operator = old_allow_in
             return PREFIX_ERROR if val.invalid?
             value = val
             skip_statement_end
@@ -12029,6 +12035,9 @@ module CrystalV2
           if token.kind == Token::Kind::Rescue && !@allow_inline_rescue
             return false
           end
+          if token.kind == Token::Kind::In && !@allow_in_operator
+            return false
+          end
           return true if token.kind == Token::Kind::Operator && slice_eq?(token.slice, "?")
           BINARY_PRECEDENCE.has_key?(token.kind)
         end
@@ -12048,6 +12057,9 @@ module CrystalV2
         private def precedence_for(token : Token) : Int32
           if token.kind == Token::Kind::Operator && slice_eq?(token.slice, "?")
             return 2  # Ternary operator precedence
+          end
+          if token.kind == Token::Kind::In && !@allow_in_operator
+            return 0
           end
           BINARY_PRECEDENCE[token.kind]? || 0
         end

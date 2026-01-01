@@ -760,7 +760,7 @@ module Crystal::HIR
       # Prefer a non-VOID return type when available.
       if return_type != TypeRef::VOID
         cached = @function_base_return_types[base_name]?
-        if cached.nil? || cached == TypeRef::VOID
+        if cached.nil? || cached == TypeRef::VOID || (cached == TypeRef::NIL && return_type != TypeRef::NIL)
           @function_base_return_types[base_name] = return_type
         end
       end
@@ -776,6 +776,9 @@ module Crystal::HIR
       end
       if DebugHooks::ENABLED && (full_name.includes?("bsearch") || base_name.ends_with?("#first") || base_name.ends_with?(".first"))
         debug_hook("method.return", "name=#{full_name} type=#{get_type_name_from_ref(return_type)}")
+      end
+      if ENV["DEBUG_TO_S_REGISTER"]? && base_name.ends_with?("#to_s")
+        STDERR.puts "[TO_S_REGISTER] full=#{full_name} base=#{base_name} ret=#{get_type_name_from_ref(return_type)}"
       end
     end
 
@@ -5833,6 +5836,9 @@ module Crystal::HIR
     # Register a class with a specific name (for nested classes like Foo::Bar)
     def register_class_with_name(node : CrystalV2::Compiler::Frontend::ClassNode, class_name : String)
       class_name = resolve_class_name_for_definition(class_name)
+      if ENV["DEBUG_STRING_CLASS"]? && class_name == "String"
+        STDERR.puts "[STRING_CLASS_REG] class=#{class_name} span=#{node.span.start_line}-#{node.span.end_line}"
+      end
       if ENV["DEBUG_LIBC_EXTERN"]? && class_name.ends_with?("DlInfo")
         STDERR.puts "[DEBUG_LIBC_EXTERN] register_class #{class_name}"
       end
@@ -6104,6 +6110,10 @@ module Crystal::HIR
           when CrystalV2::Compiler::Frontend::DefNode
             # Register method signature
             method_name = String.new(member.name)
+            if ENV["DEBUG_TO_S_CLASS_REG"]? && class_name.includes?("String") && method_name == "to_s"
+              span = member.span
+              STDERR.puts "[STRING_TO_S_REG] class=#{class_name} span=#{span.start_line}-#{span.end_line} return_type=#{member.return_type ? String.new(member.return_type.not_nil!) : "(nil)"}"
+            end
             # Check if this is a class method (def self.method) or instance method (def method)
             is_class_method = if recv = member.receiver
                                 String.new(recv) == "self"
@@ -8208,7 +8218,9 @@ module Crystal::HIR
           if @function_types.has_key?(mangled)
             return mangled
           elsif has_function_base?(base_name)
-            return base_name
+            if resolved = resolve_untyped_overload(base_name, arg_types.size, false)
+              return resolved
+            end
           end
         end
       end
@@ -8261,6 +8273,10 @@ module Crystal::HIR
       # Build the base method name as ClassName#method
       base_method_name = class_name.empty? ? method_name : "#{class_name}##{method_name}"
       base_method_name = rewrite_event_loop_method_name(base_method_name)
+      if ENV["DEBUG_TO_S_RESOLVE"]? && method_name == "to_s"
+        recv_name = type_desc ? "#{type_desc.name}(#{type_desc.kind})" : "id=#{receiver_type.id}"
+        STDERR.puts "[TO_S_RESOLVE] recv=#{recv_name} class_name=#{class_name} base=#{base_method_name}"
+      end
 
       # Mangle with argument types
       mangled_name = mangle_function_name(base_method_name, arg_types)
@@ -8299,6 +8315,9 @@ module Crystal::HIR
 
       if !class_name.empty? && class_name.includes?("|")
         if resolved = resolve_union_method_call(class_name, method_name, arg_types)
+          if ENV["DEBUG_TO_S_RESOLVE"]? && method_name == "to_s"
+            STDERR.puts "[TO_S_RESOLVE] union resolved=#{resolved}"
+          end
           debug_hook("method.resolve", "base=#{base_method_name} resolved=#{resolved} reason=union")
           return resolved
         end
@@ -8316,6 +8335,14 @@ module Crystal::HIR
       # If any overload exists for the base name, return the base name and let
       # the MIR lowering do fuzzy matching to pick a concrete overload.
       if !class_name.empty? && has_function_base?(base_method_name)
+        if resolved = resolve_untyped_overload(base_method_name, arg_types.size, false)
+          debug_hook("method.resolve", "base=#{base_method_name} resolved=#{resolved} reason=base_overload_arity")
+          return resolved
+        end
+        if resolved = resolve_ancestor_overload(class_name, method_name, arg_types.size)
+          debug_hook("method.resolve", "base=#{base_method_name} resolved=#{resolved} reason=ancestor_overload_arity")
+          return resolved
+        end
         debug_hook("method.resolve", "base=#{base_method_name} resolved=#{base_method_name} reason=base_overload")
         return base_method_name
       end
@@ -8434,6 +8461,35 @@ module Crystal::HIR
       end
 
       best_name
+    end
+
+    private def non_nil_type_for_union(type_ref : TypeRef) : TypeRef?
+      type_desc = @module.get_type_descriptor(type_ref)
+      return nil unless type_desc && type_desc.kind == TypeKind::Union
+
+      variants = split_union_type_name(type_desc.name)
+      non_nil = variants.reject { |name| name == "Nil" }
+      return nil if non_nil.empty?
+      return type_ref_for_name(non_nil.first) if non_nil.size == 1
+
+      create_union_type(non_nil.join(" | "))
+    end
+
+    private def resolve_ancestor_overload(owner : String, method_name : String, arg_count : Int32) : String?
+      visited = Set(String).new
+      current = @class_info[owner]?.try(&.parent_name)
+      while current
+        break if visited.includes?(current)
+        visited.add(current)
+        base = "#{current}##{method_name}"
+        if has_function_base?(base)
+          if resolved = resolve_untyped_overload(base, arg_count, false)
+            return resolved
+          end
+        end
+        current = @class_info[current]?.try(&.parent_name)
+      end
+      nil
     end
 
     private def module_receiver_type_name(node : CrystalV2::Compiler::Frontend::MemberAccessNode) : String?
@@ -9513,7 +9569,12 @@ module Crystal::HIR
     private def get_function_return_type(name : String) : TypeRef
       # First check pre-registered signatures (for forward references)
       if type = @function_types[name]?
-        return type
+        # For base names (no $ suffix), treat VOID/NIL as unknown and fall back
+        # to cached base return types from other overloads.
+        if name.includes?("$")
+          return type
+        end
+        return type unless type == TypeRef::VOID || type == TypeRef::NIL
       end
       # If this is a base name (no $ suffix), use cached return type if available.
       if cached = @function_base_return_types[name]?
@@ -10828,14 +10889,14 @@ module Crystal::HIR
 
       # Ensure function type is registered even when caller skipped register_function (e.g. conditional defs).
       if existing = @function_types[full_name]?
-        if existing == TypeRef::VOID && return_type != TypeRef::VOID
+        if existing == TypeRef::VOID || (existing == TypeRef::NIL && return_type != TypeRef::NIL)
           register_function_type(full_name, return_type)
         end
       else
         register_function_type(full_name, return_type)
       end
       if existing = @function_types[base_name]?
-        if existing == TypeRef::VOID && return_type != TypeRef::VOID
+        if existing == TypeRef::VOID || (existing == TypeRef::NIL && return_type != TypeRef::NIL)
           register_function_type(base_name, return_type)
         end
       else
@@ -17484,6 +17545,12 @@ module Crystal::HIR
         end
       end
 
+      if ENV["DEBUG_TRY_CALL"]? && method_name == "try"
+        recv_type = receiver_id ? ctx.type_of(receiver_id) : TypeRef::VOID
+        recv_name = receiver_id ? get_type_name_from_ref(recv_type) : "nil"
+        STDERR.puts "[TRY_CALL] receiver=#{recv_name} block=#{!block_expr.nil?} block_pass=#{!block_pass_expr.nil?}"
+      end
+
       # Handle Range#each { |i| body } and Array#each { |x| body } intrinsics
       if method_name == "each"
         # Check if callee is (range).each - MemberAccessNode on RangeNode
@@ -17827,8 +17894,12 @@ module Crystal::HIR
         end
       elsif block_pass_expr
         block_param_types = block_param_types_for_call(mangled_method_name, base_method_name, receiver_id ? ctx.type_of(receiver_id) : nil)
-        if block_param_types.nil? && method_name == "try" && receiver_id
-          block_param_types = [ctx.type_of(receiver_id)]
+        if method_name == "try" && receiver_id
+          if non_nil = non_nil_type_for_union(ctx.type_of(receiver_id))
+            block_param_types = [non_nil]
+          elsif block_param_types.nil?
+            block_param_types = [ctx.type_of(receiver_id)]
+          end
         end
         block_for_inline = build_block_from_block_pass(block_pass_expr, block_param_types, node.span)
       end
@@ -17864,6 +17935,16 @@ module Crystal::HIR
                 skip_inline = true
               end
             end
+            if !skip_inline && method_name == "try" && receiver_id
+              recv_type = ctx.type_of(receiver_id)
+              if ENV["DEBUG_TRY_INLINE"]?
+                STDERR.puts "[TRY_INLINE] recv_type=#{get_type_name_from_ref(recv_type)} union=#{is_union_or_nilable_type?(recv_type)}"
+              end
+              # Avoid inlining try on unions so nil variants can short-circuit in dispatch.
+              if is_union_or_nilable_type?(recv_type)
+                skip_inline = true
+              end
+            end
 
             # Check if this is a call to a yield-function using mangled name
             if !skip_inline && @yield_functions.includes?(mangled_method_name)
@@ -17884,7 +17965,7 @@ module Crystal::HIR
 
             # Fallback: resolve the def node by arity/signature and inline if it yields,
             # even if @yield_functions didn't capture the mangled name.
-            if entry = lookup_block_function_def_for_call(base_method_name, call_args.size, arg_types)
+            if !skip_inline && (entry = lookup_block_function_def_for_call(base_method_name, call_args.size, arg_types))
               yield_name, yield_def = entry
               callee_arena = @function_def_arenas[yield_name]? || @arena
               if def_contains_yield?(yield_def, callee_arena)
@@ -17897,7 +17978,7 @@ module Crystal::HIR
             # Fallback: try to find yield method by name + arity.
             # This handles inherited methods like Object#tap called on any class.
             # Example: `fd.tap { |x| x.something }` where tap is defined in Object.
-            if receiver_id
+            if !skip_inline && receiver_id
               if yield_key = find_yield_method_fallback(method_name, call_args.size)
                 if func_def = @function_defs[yield_key]?
                   debug_hook("call.inline.yield", "callee=#{yield_key} current=#{@current_class || ""}")
@@ -17926,8 +18007,12 @@ module Crystal::HIR
                    blk_node = @arena[block_expr]
                    if blk_node.is_a?(CrystalV2::Compiler::Frontend::BlockNode)
                      block_param_types = block_param_types_for_call(mangled_method_name, base_method_name, receiver_id ? ctx.type_of(receiver_id) : nil)
-                     if block_param_types.nil? && method_name == "try" && receiver_id
-                       block_param_types = [ctx.type_of(receiver_id)]
+                     if method_name == "try" && receiver_id
+                       if non_nil = non_nil_type_for_union(ctx.type_of(receiver_id))
+                         block_param_types = [non_nil]
+                       elsif block_param_types.nil?
+                         block_param_types = [ctx.type_of(receiver_id)]
+                       end
                      end
                      if DebugHooks::ENABLED && method_name == "map"
                        types_str = block_param_types ? block_param_types.map { |t| get_type_name_from_ref(t) }.join(",") : ""
@@ -17940,8 +18025,12 @@ module Crystal::HIR
                    end
                  elsif block_pass_expr
                    block_param_types = block_param_types_for_call(mangled_method_name, base_method_name, receiver_id ? ctx.type_of(receiver_id) : nil)
-                   if block_param_types.nil? && method_name == "try" && receiver_id
-                     block_param_types = [ctx.type_of(receiver_id)]
+                   if method_name == "try" && receiver_id
+                     if non_nil = non_nil_type_for_union(ctx.type_of(receiver_id))
+                       block_param_types = [non_nil]
+                     elsif block_param_types.nil?
+                       block_param_types = [ctx.type_of(receiver_id)]
+                     end
                    end
                    lower_block_pass_proc(ctx, block_pass_expr, block_param_types)
                  else
@@ -19053,6 +19142,12 @@ module Crystal::HIR
           func_context = function_context_from_name(name)
           next unless params_compatible_with_args?(def_node, arg_types, func_context)
           score = params_match_score(def_node, arg_types, func_context)
+        end
+        if arg_types && arg_types.any? { |t| t == TypeRef::VOID }
+          typed_param_count = params.count do |p|
+            !p.is_block && !named_only_separator?(p) && !p.type_annotation.nil?
+          end
+          score -= typed_param_count
         end
         if has_splat
           score -= 1
