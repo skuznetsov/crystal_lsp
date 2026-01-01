@@ -1,480 +1,286 @@
-# Crystal V2 Compiler Initiative
+# Crystal V2 Compiler
 
 **A ground-up redesign of the Crystal compiler focused on developer experience, performance, and maintainability.**
 
 ---
 
-## Vision: Why V2?
+## Vision
 
-The Crystal language is semantically rich and elegant, combining Ruby's expressiveness with static typing and native performance. However, the current compiler has architectural limitations that impact the development experience:
+The Crystal language combines Ruby's expressiveness with static typing and native performance. However, the current compiler has architectural limitations that impact the development experience:
 
-### Current Pain Points
+- **Slow compilation times** - Full recompilation on small changes
+- **Limited incremental compilation** - No fine-grained dependency tracking
+- **Poor LSP experience** - Slow response times for large files
+- **Monolithic architecture** - Tight coupling between phases
 
-1. **Slow compilation times** - Full recompilation on small changes
-2. **Limited incremental compilation** - No fine-grained dependency tracking
-3. **Poor LSP experience** - Crystalline is slow (3-5 seconds for large files)
-4. **Monolithic architecture** - Tight coupling between phases
-5. **Hard to extend** - Adding new features requires deep compiler knowledge
+**Crystal V2 aims to match Go's developer experience while keeping Crystal's superior language design.**
 
-### The Go Paradox
-
-Go's success teaches us something profound: **Developer Experience trumps language features.**
-
-Despite Crystal's superior syntax and semantics compared to Go, Go dominates because:
-
-- **Fast compilation** (< 1 second for most projects)
-- **Instant feedback** (go fmt, go test, go build - all blazingly fast)
-- **Excellent tooling** (gopls LSP, go mod, integrated testing)
-- **Simple mental model** (explicit, predictable, no magic)
-- **Fast edit-compile-test cycle** (the most important metric!)
-
-**Crystal V2 aims to match Go's DX while keeping Crystal's superior language design.**
+Go's success teaches us: **Developer Experience trumps language features.** Fast compilation, instant feedback, and excellent tooling matter more than syntax elegance.
 
 ---
 
-## What We Built
+## Current Capabilities
 
-### Core Philosophy
+### Parser (Production Ready)
 
-1. **Incremental by default** - Never recompute what hasn't changed
-2. **LSP-first architecture** - Real-time feedback without full compilation
-3. **Modular design** - Clear separation of concerns
-4. **Performance matters** - Sub-second response times for typical edits
-5. **Zero-copy where possible** - Memory efficiency through smart data structures
+Fast, parallel parsing with comprehensive error recovery.
 
-### Architecture Overview
+- **97.6% parity** with original Crystal parser (1390/1390 tests)
+- **Parallel file loading** with perfect deduplication
+- **Zero-copy VirtualArena** for multi-file AST management (0.04% memory overhead)
+- **Error recovery** - continues parsing after errors
 
+**Parser performance (--release build):**
 ```
-┌─────────────────────────────────────────────────┐
-│                   LSP Server                    │
-│  (Real-time diagnostics, hover, completion)     │
-└────────────┬────────────────────────┬───────────┘
-             │                        │
-      ┌──────▼──────┐          ┌─────▼──────┐
-      │  Frontend   │          │  Semantic  │
-      │   (Fast)    │          │  Analysis  │
-      └──────┬──────┘          └─────┬──────┘
-             │                        │
-      ┌──────▼──────────────────────┬─▼──────┐
-      │      VirtualArena           │ Type   │
-      │  (Zero-copy multi-file)     │ Infer  │
-      └─────────────────────────────┴────────┘
-                     │
-              ┌──────▼──────┐
-              │   Codegen   │
-              │   (Future)  │
-              └─────────────┘
+parser.cr (14K nodes):     ~3ms
+compiler.cr (463 files):   99ms parallel (1.7x speedup)
+prelude.cr (325 files):    64ms parallel (2.4x speedup)
 ```
 
-### 1. Frontend - Lightning Fast Parsing
+### Semantic Analysis (Complete)
 
-**Goal:** Parse entire projects in < 100ms
+Full symbol table, name resolution, and type inference.
 
-**Key Innovations:**
+- **Symbol collector** - classes, modules, methods, variables, annotations
+- **Name resolver** - finds definitions across files
+- **Type inference engine** - literals, variables, methods, generics
+- **Flow typing** - union narrowing, nil checks, is_a? narrowing
+- **Overload resolution** - based on argument types with specificity ranking
+- **Module system** - include/extend mixins with MRO resolution
 
-- **Streaming lexer** - No buffering, processes tokens on-demand
-- **Pratt parser** - Clean precedence handling, easy to extend
-- **Zero-copy string handling** - StringPool for deduplication
-- **Comprehensive error recovery** - Keep parsing after errors
+### Macro System (Complete)
 
-**Performance (with --release flag):**
-- `parser.cr` (14,377 nodes): **~3ms** (production-optimized build)
-- `compiler.cr` (463 files, 280K nodes): **169ms** sequential, **99ms** parallel (1.71x speedup)
-- `prelude.cr` (325 files, 314K nodes): **151ms** sequential, **64ms** parallel (2.36x speedup)
+Full compile-time macro expansion with @type API.
 
-**Status:** ✅ **Production-ready**
+- **Control flow:** `{% if/elsif/else/end %}`, `{% for %}` loops
+- **@type API:** `.name`, `.instance_vars`, `.methods`, `.superclass`, `.has_method?`
+- **Instance var introspection:** `.type`, `.has_default_value?`, `.default_value`, `.nilable?`
+- **Annotations:** collection and access via `ivar.annotation(Foo)`
+- **Compile-time operators:** `typeof`, `sizeof`, `alignof`, `instance_alignof`
+- **Type predicates:** `.class?`, `.struct?`, `.module?`, `.abstract?`
+- **Generic support:** full @type.* on generic classes
 
-### 2. VirtualArena - Multi-File AST Management
+### LSP Server (Production Ready)
 
-**Problem:** How to efficiently manage ASTs from hundreds of files?
+Fast, feature-rich language server with project caching.
 
-**Solution:** Zero-copy virtual addressing with O(log N) lookup
+**26 LSP methods implemented:**
+- General: initialize, shutdown
+- Sync: didOpen, didChange, didClose, didChangeWatchedFiles
+- Language: hover, definition, typeDefinition, completion, signatureHelp, documentSymbol, references, documentHighlight, rename, prepareRename, codeAction, formatting, rangeFormatting, foldingRange, semanticTokens/full, inlayHint
+- Workspace: symbol
+- Call Hierarchy: prepare, incomingCalls, outgoingCalls
 
-```crystal
-# Traditional approach: Copy all nodes to one arena (slow, wasteful)
-global_arena = AstArena.new
-files.each { |f| global_arena.concat(parse(f).arena) }
-
-# V2 approach: Keep per-file arenas, virtual addressing
-virtual = VirtualArena.new
-files.each { |f| virtual.add_file_arena(f.path, parse(f).arena) }
-# Zero copies! Just offset mapping
+**Performance (after recent optimizations):**
 ```
+driver.cr (1480 lines):   473ms total (was 15+ seconds) - 30x faster
+server.cr (10K lines):    ~1.2s total (was minutes) - 50x faster
+```
+
+**Features:**
+- Project cache with binary TypeIndex (5.6x faster than JSON)
+- Background indexing with Fiber.yield (non-blocking)
+- Type inference cache skip (avoids re-inference for cached files)
+- Stub-first prelude with background loading
+- Navigation to stdlib/prelude symbols
+- VSCode extension with indexing status indicator
+
+### Codegen (In Development)
+
+Multi-stage compilation pipeline with hybrid memory management.
+
+**HIR (High-level IR):**
+- AST → HIR lowering (87 tests)
+- Escape analysis - tracks value lifetime and ownership
+- Taint analysis - thread-shared, ffi-exposed, cyclic detection
+- Memory strategy assignment - Stack/Slab/ARC/GC per allocation
+
+**MIR (Mid-level IR):**
+- HIR → MIR SSA transformation (19 tests)
+- Optimizations: RC elision, dead code elimination, constant folding, copy propagation, local CSE, peephole (45 tests)
+- Profile-guided optimizations: devirtualization, cross-function RC elision (26 tests)
+
+**LLVM Backend:**
+- Basic LLVM IR generation
+- End-to-end compilation works in `--no-prelude` mode
+- Full prelude/stdlib bootstrap in progress
+
+### LTP/WBA Optimization Framework
+
+A novel optimization approach based on mathematical theory from combinatorial geometry.
+
+**Core Concept:** LTP (Local Trigger → Transport → Potential) uses a lexicographic potential function that strictly decreases with each optimization move, guaranteeing termination and optimal local decisions.
+
+**Potential Function Φ = (I, -M, P, |Δ|):**
+- **I** (Window Overlap) - count of exposed RC operations
+- **M** (Tie Plateau) - count of tied optimization windows
+- **P** (Corner Mismatch) - conflicts at window endpoints
+- **|Δ|** (Area) - total instruction count
+
+**Legal Moves (priority order):**
+- **Spike** - rc_inc/rc_dec pair cancellation (length-2)
+- **Ladder** - short corridor elimination
+- **Diamond** - confluent resolution of critical pairs
+- **Collapse** - dead code removal when no other move exists
+
+**Dual Frame Fallback:** Automatically switches between Primary and Curvature frames when potential plateaus, enabling optimizations that span different abstraction levels.
 
 **Benefits:**
-- **0.04% memory overhead** (just offset array)
-- **O(log N) node lookup** (binary search by file)
-- **Incremental updates** - Replace single file arena without touching others
-- **Perfect for LSP** - Update changed file, keep rest intact
-
-**Performance:**
-- Kemal (244 files, 106K nodes): **~25ms** load time (--release, estimated)
-- **Perfect deduplication** - 0% duplicate parsing
-- **1.7-2.4x speedup** with multi-threading
-
-**Status:** ✅ **Production-ready**
-
-### 3. FileLoader - Intelligent Multi-File Loading
-
-**Features:**
-- **Parallel loading** with Crystal fibers
-- **Perfect deduplication** - Each file parsed exactly once
-- **Circular dependency detection**
-- **Shard support** - Automatically finds dependencies in `lib/`
-- **Deadlock-free** - Buffered channels prevent blocking
-
-**Real-world validation:**
-- ✅ spec (19 files, 45ms)
-- ✅ reply (10 files, 18ms)
-- ✅ Kemal (244 files, 371ms)
-- ✅ compiler.cr (463 files, 1.19s)
-
-**Status:** ✅ **Production-ready**
-
-### 4. Type Inference Engine (In Progress)
-
-**Goal:** Fast, incremental type inference for LSP
-
-**Current Status:**
-- ✅ Basic type inference (literals, variables, simple methods)
-- ✅ Symbol table with scope tracking
-- ⚠️ Partial generic support
-- ⚠️ Partial union type support
-- ❌ Full constraint solving (needed for codegen)
-
-**Next Steps:**
-- Generic type instantiation
-- Union type narrowing
-- Method overload resolution
-- Type constraint satisfaction
-
-**Status:** 🚧 **70% complete**
-
-### 5. Semantic Analysis (Partial)
-
-**Components:**
-- ✅ Symbol collector (classes, methods, variables)
-- ✅ Name resolver (finds definitions)
-- ✅ Diagnostic formatter (beautiful error messages)
-- ⚠️ Type checker (basic, needs enhancement)
-- ❌ Macro expander (placeholder only)
-
-**Status:** 🚧 **50% complete**
-
-### 6. LSP Server (Developer Experience First)
-
-- **Capabilities:** hover, definition/typeDefinition, references, rename (prepare), code actions, formatting, semantic tokens (full), folding ranges, inlay hints, call hierarchy.
-- **Caching:** project cache stores symbol summaries and inferred expression types; hover/definition can respond instantly from cache while indexing; background indexing keeps cache warm. Out-of-root files still fall back to live analysis.
-- **Indexing guard:** soft-fails hover/definition when indexing; VS Code extension shows “Indexing…” and logs request/response traffic.
-- **Debugging:** `./build_lsp_debug.sh` builds the server; `tools/lsp_probe.py path.cr --position LINE:COL` sends hover/definition/tokens in one session (set `LSP_DEBUG=1` for verbose logs).
+- Guaranteed termination (monotone non-increasing potential)
+- Optimal local decisions (lexicographic ordering)
+- Composable with traditional passes (DCE, constant folding)
+- Particularly effective for ARC reference counting optimization
 
 ---
 
-## What Makes V2 Different?
+## Test Coverage
 
-### vs. Original Crystal Compiler
+| Component | Tests | Status |
+|-----------|-------|--------|
+| Parser | 1390 | All passing |
+| Lexer | 93 specs | All passing |
+| Semantic | 434 | 433 passing, 1 pending |
+| LSP | 203 | All passing |
+| HIR | 203 | 197 passing, 6 in progress |
+| MIR | 241 | 240 passing, 1 error |
 
-| Aspect | Original | V2 | Advantage |
-|--------|----------|-----|-----------|
-| **Parse Speed** | 65ms (parser.cr) | 43ms | **34% faster** |
-| **Multi-file** | Sequential + copies | Parallel + zero-copy | **1.73x faster** |
-| **Memory** | Monolithic arena | Virtual arena | **0.04% overhead** |
-| **Incremental** | Full recompile | File-level replace | **100x faster edits** |
-| **LSP readiness** | Not designed for it | LSP-first | **Real-time feedback** |
-| **Architecture** | Monolithic | Modular | **Easy to extend** |
-
-### Key Architectural Improvements
-
-#### 1. Separation of Concerns
-
-**Original:** Tightly coupled parsing → semantic → codegen
-**V2:** Independent phases with clear interfaces
-
-```crystal
-# V2: Each phase is standalone
-program = Parser.new(lexer).parse_program
-symbols = SymbolCollector.new.collect(program)
-types = TypeInferenceEngine.new.infer(program, symbols)
-# Can stop here for LSP - no codegen needed!
-```
-
-#### 2. Incremental by Design
-
-**Original:** Full recompilation on any change
-**V2:** Replace only changed files
-
-```crystal
-# Update single file in LSP
-arena.replace_file_arena(file_path, new_arena)
-# Only this file's types need re-inference
-```
-
-#### 3. Memory Efficiency
-
-**Original:** Copy AST nodes during processing
-**V2:** Zero-copy virtual addressing
-
-**Result:** 8% more compact AST (14,377 vs 15,631 nodes for parser.cr)
-
-#### 4. Error Recovery
-
-**Original:** Stop at first error in file
-**V2:** Continue parsing, report all errors
-
-**Result:** Better DX - fix multiple errors at once
+**Total: 3400+ tests**
 
 ---
 
-## The DX Vision: Matching Go's Success
+## Architecture
 
-### Current Status: Parser Foundation ✅
+```
+┌─────────────────────────────────────────────────────────────┐
+│                      LSP Server                             │
+│  (Real-time diagnostics, hover, completion, navigation)     │
+└────────────────────────┬────────────────────────────────────┘
+                         │
+         ┌───────────────┼───────────────┐
+         │               │               │
+   ┌─────▼─────┐   ┌─────▼─────┐   ┌─────▼─────┐
+   │  Parser   │   │  Semantic │   │   Macro   │
+   │ (Frontend)│   │ Analysis  │   │  Expander │
+   └─────┬─────┘   └─────┬─────┘   └─────┬─────┘
+         │               │               │
+   ┌─────▼───────────────▼───────────────▼─────┐
+   │              VirtualArena                 │
+   │       (Zero-copy multi-file AST)          │
+   └─────────────────────┬─────────────────────┘
+                         │
+   ┌─────────────────────▼─────────────────────┐
+   │                  Codegen                  │
+   │  HIR → Escape/Taint → MIR → LLVM → Binary │
+   └───────────────────────────────────────────┘
+```
 
-What we have now:
-- Fast, parallel file loading
-- Zero-copy multi-file AST
-- Comprehensive test coverage (30 regression tests, 93 spec files)
-- Ready for LSP integration
+### Key Design Principles
 
-### LSP Server: Current Capabilities
-
-- Protocol: initialize, didOpen/didChange/didClose, hover, definition, references, rename, code actions (basic), folding ranges, semantic tokens, inlay hints, signature help, document symbols, call hierarchy.
-- Accuracy: segment-aware path resolution, macro call navigation, navigation into stdlib/prelude; rename is guarded for stdlib/prelude symbols.
-- Performance: stub-first prelude with background real load; project cache v2 (symbol summaries) merged on didOpen to avoid reloading requires; timing breakdown logs (parse/requires/symbols/resolve/infer) and indexing notifications (`Indexing…`/`Ready`) surfaced to UI.
-- VSCode: dedicated “Crystal V2 LSP Messages” output channel with request/response logging; status bar shows indexing state.
-- DX guardrails: hover/definition soft-fail while indexing; folding for begin/rescue/else/ensure without overfold; semantic tokens keep require strings as strings and symbol literals as full-span enumMember tokens.
-
-### Phase 2: Complete Type Inference (Week 5-7)
-
-**Requirements for codegen:**
-- Generic type instantiation
-- Union type narrowing
-- Method overload resolution
-- Constraint satisfaction
-
-**Also enables better LSP:**
-- Accurate type on hover
-- Smarter auto-completion
-- Precise go-to-definition
-
-### Phase 3: CrystalGuard Security Tool (Week 1-6, Parallel)
-
-**Why:** Security is a competitive advantage
-
-**Features:**
-- Secrets detection (hardcoded API keys, passwords)
-- Injection vulnerabilities (SQL, command, XSS)
-- Taint analysis (track user input → dangerous sinks)
-- Crypto mistakes (MD5 usage, weak random)
-
-**Output formats:**
-- Terminal (for developers)
-- SARIF (for GitHub Code Scanning)
-- JSON (for CI/CD)
-
-**Impact:** No other Crystal tool does this!
-
-### Phase 4: Code Generation (Week 8-12)
-
-**Goal:** Full compiler, self-hosting
-
-**Components:**
-- LLVM IR generation
-- Memory management (GC integration)
-- Virtual method tables
-- Closure compilation
-
-**Milestone:** Compile Crystal V2 with Crystal V2
+1. **Incremental by default** - Replace single file, invalidate only dependents
+2. **LSP-first** - Real-time feedback without full compilation
+3. **Zero-copy** - VirtualArena with O(log N) lookup, 0.04% overhead
+4. **Modular** - Clear phase separation, each phase standalone
+5. **Error recovery** - Parse continues after errors, report all issues
 
 ---
 
-## Why Crystal Can Win
-
-### Crystal's Strengths
-
-1. **Superior syntax** - Ruby-inspired, elegant, readable
-2. **Rich type system** - Union types, generics, macros
-3. **Native performance** - Zero-cost abstractions
-4. **Garbage collection** - No manual memory management
-5. **Metaprogramming** - Compile-time macros, not runtime reflection
-
-### What Crystal Needs (V2 Provides)
-
-1. ✅ **Fast compilation** - Parallel loading, incremental updates
-2. ✅ **Great tooling** - LSP server (in progress)
-3. 🚧 **Simple mental model** - Clear error messages, predictable behavior
-4. 🚧 **Quick feedback loop** - Sub-second edit-compile-test
-5. ❌ **Package ecosystem** - (Separate from compiler)
-
-### The V2 Difference
-
-**Go's killer feature isn't syntax - it's the ~1 second edit-compile-test cycle.**
-
-Crystal V2 targets:
-- **< 50ms** LSP response (syntax errors, hover)
-- **< 500ms** incremental compile (for changed file)
-- **< 2s** full project compile (for small projects)
-
-**This makes Crystal development feel as responsive as Go, while keeping Crystal's superior language design.**
-
----
-
-## Technical Achievements
-
-### Performance Benchmarks
-
-**Parser Performance (--release build):**
-```
-parser.cr:     ~3ms (14,377 nodes) ⚡ ~15x faster than debug
-compiler.cr:   99ms parallel (463 files, 280K nodes) ⚡ 12x faster than debug
-prelude.cr:    64ms parallel (325 files, 314K nodes) ⚡ 15x faster than debug
-Kemal:         ~25ms (244 files, 106K nodes, estimated) ⚡
-```
-
-**Multi-threading Gains (--release):**
-```
-compiler.cr:   169ms sequential → 99ms parallel (1.71x speedup)
-prelude.cr:    151ms sequential → 64ms parallel (2.36x speedup)
-```
-
-**Note:** Debug builds are ~12-15x slower. Always use `--release` for production and benchmarking!
-
-**Memory Efficiency:**
-```
-VirtualArena:  0.04% overhead
-AST compactness: 8% better than original (14,377 vs 15,631 nodes)
-Deduplication: 100% (0% duplicate parsing)
-```
-
-### Code Quality
-
-**Test Coverage:**
-- 30 regression tests (parser.cr baseline)
-- 93 spec files (comprehensive parser coverage)
-- All major Crystal constructs covered
-- Edge cases tested (Unicode, escapes, operators)
-
-**Architecture:**
-- Modular design (clear separation of concerns)
-- Zero-copy where possible
-- Incremental by default
-- LSP-first thinking
-
----
-
-## Roadmap to Production
-
-For the authoritative, frequently-updated roadmap and current progress, see `TODO.md`.
-
-### ✅ Completed (high level)
-
-- Parser: ~97.6% parity with Crystal (error recovery, macros, annotations, inline asm, etc.)
-- LSP server: core navigation + IDE features (hover/definition/references/rename/formatting/folding/semantic tokens/inlay hints/signature help/call hierarchy) with DX guardrails and a VSCode extension.
-- Semantic + macros: symbol table + name resolution, type inference engine, macro expander (see `TODO.md` for detail).
-
-### 🚧 In Progress
-
-- Codegen (`codegen` branch): HIR → MIR → LLVM pipeline; end-to-end compilation works in `--no-prelude` mode (see `spec/mir/codegen_integration_spec.cr`); full prelude/stdlib bootstrap ongoing.
-
----
-
-## Contributing
-
-This is a ground-up redesign with clear architecture. Each phase is independent:
-
-- **Frontend hackers:** Parser is production-ready, extensible
-- **Type system nerds:** Type inference needs completion
-- **Security folks:** CrystalGuard is greenfield
-- **LSP enthusiasts:** Server implementation starting soon
-- **LLVM experts:** Codegen phase needs you
-
-### Getting Started
+## Getting Started
 
 ```bash
-# Clone and setup
-git clone https://github.com/crystal-lang/crystal.git
-cd crystal
-git checkout new_crystal_parser
+# Build the compiler (debug mode - fast compile)
+./scripts/build.sh
+
+# Build the compiler (release mode - optimized)
+./scripts/build.sh release
+
+# Build the LSP server
+./build_lsp.sh
 
 # Run tests
-cd crystal_v2
 crystal spec
 
-# Run regression tests
-crystal run debug_tests/parser_regression_test.cr
-
-# Try benchmarks
-crystal run benchmarks/benchmark_parser.cr
+# Run the LSP timing probe
+crystal run tools/lsp_timing.cr -- path/to/file.cr line:col
 ```
 
-### Architecture Docs
+### VSCode Extension
 
-- `docs/architecture_overview.md` - High-level design
-- `docs/parser_design.md` - Parser implementation
-- `docs/original_parser_analysis.md` - Comparison with original
+The `vscode-extension/` directory contains a dedicated Crystal V2 LSP extension with:
+- Request/response logging channel
+- Indexing status indicator
+- Automatic LSP binary detection
 
-### Project Structure
+---
+
+## Project Structure
 
 ```
 crystal_v2/
 ├── src/
 │   ├── compiler/
-│   │   ├── frontend/          # Lexer, Parser, AST
-│   │   │   ├── lexer.cr
-│   │   │   ├── parser.cr
-│   │   │   └── ast.cr         # VirtualArena here
-│   │   ├── semantic/          # Type inference, analysis
-│   │   │   ├── type_inference_engine.cr
-│   │   │   ├── symbol_table.cr
-│   │   │   └── collectors/
-│   │   └── file_loader.cr     # Multi-file loading
-│   └── crystal_v2.cr          # Main entry point
-├── spec/                       # Test suite (93 files)
-├── benchmarks/                 # Performance tests
-└── debug_tests/                # Regression tests
+│   │   ├── frontend/          # Lexer, Parser, AST, VirtualArena
+│   │   ├── semantic/          # Symbol table, type inference, analysis
+│   │   ├── lsp/               # LSP server, protocol, caching
+│   │   ├── hir/               # High-level IR, escape/taint analysis
+│   │   └── mir/               # Mid-level IR, optimizations, LLVM
+│   └── runtime/               # Runtime support
+├── spec/                      # Test suite (3400+ tests)
+├── tools/                     # Development tools (lsp_timing, lsp_probe)
+├── vscode-extension/          # VSCode integration
+└── docs/                      # Architecture documentation
 ```
 
 ---
 
-## Why This Matters
+## Future Developments
 
-Crystal is a **beautiful language** with a **slow compiler**. This limits adoption.
+### Codegen Completion
+- Full prelude/stdlib bootstrap
+- Self-hosting compilation (compile Crystal V2 with Crystal V2)
+- Complete LLVM IR generation for all language features
 
-Go is a **mediocre language** with a **fast compiler**. This drives adoption.
+### Memory Management Refinements
+- Profile-guided memory strategy selection
+- Arena allocator for fiber-local allocations
+- Weak reference support for cycle breaking
 
-**Crystal V2 aims to give Crystal the tooling it deserves.**
+### CrystalGuard Security Tool
+Static analysis for security vulnerabilities:
+- Secrets detection (hardcoded API keys, passwords)
+- Injection vulnerabilities (SQL, command, XSS)
+- Taint analysis (user input → dangerous sinks)
+- Crypto mistakes (MD5 usage, weak random)
 
-When Crystal has:
-- Sub-second compilation
-- Real-time LSP feedback
-- Security analysis tools
-- Great error messages
+### Performance Targets
+- < 50ms LSP response for hover/completion
+- < 500ms incremental compile for single file change
+- < 2s full project compile for small projects
 
-...developers will choose Crystal over Go for new projects.
+---
 
-**Because Crystal is already better - it just needs better tools.**
+## Contributing
+
+Each component is independent and well-tested:
+
+- **Frontend** - Parser is production-ready, easy to extend
+- **Semantic** - Type inference and symbol table complete
+- **LSP** - Server works, always room for new features
+- **Codegen** - HIR/MIR pipeline active development
+
+See `TODO.md` for detailed task lists and current progress.
 
 ---
 
 ## Team
 
-**Lead:** Sergey Kuznetsov <crystal@rigelstar.com>
+**Lead:** Sergey Kuznetsov <crystal@rigelstar.com> - Architecture
 
 **Contributors:**
-- Claude (Anthropic AI Assistant) - Architecture, implementation
-- GPT-5 (OpenAI AI Assistant) - Design, optimization
+- Claude (Anthropic AI Assistant) - Architecture, implementation, bug fixing
+- GPT-5 (OpenAI AI Assistant) - Design, implementation, optimization, bug fixing
 
 ---
 
 ## License
 
 MIT (same as Crystal)
-
----
-
-## Status: Ready for LSP Phase
-
-The foundation is solid. Parser is fast. Multi-file support works. Tests pass.
-
-**Time to build the LSP server and give Crystal developers the experience they deserve.**
-
-🚀 Let's make Crystal compilation as fast as Go, while keeping Crystal's superior language design.

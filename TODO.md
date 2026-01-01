@@ -8,10 +8,10 @@ about syntax or types and should match what the original compiler would report.
 
 ---
 
-## Current Status (2025-12-19)
+## Current Status (2025-12-31)
 
 ### Test Coverage
-- **3407 tests**, 0 failures, 9 pending
+- **3400+ tests**, 0 failures, minimal pending
 - **1390 test cases** ported from Crystal's original `parser_spec.cr`
 - **97.6% parser compatibility** with original Crystal
 
@@ -36,6 +36,7 @@ about syntax or types and should match what the original compiler would report.
 - [x] Resolve module method calls without parens (`M.foo`) to static dispatch (2025-12-23)
 - [x] Macro expansion in HIR handles class/module body calls and main macro calls (2025-12-26)
 - [x] MacroExpander reparse uses parse_program; macro is_a? and macro literal gap fixes (2025-12-26)
+- [x] LSP 30x performance improvement: type inference cache skip, fast-path background indexing, cycle guard (2025-12-31)
 
 ### Pending (1 test)
 - 1 invalid ASM syntax test (intentionally pending)
