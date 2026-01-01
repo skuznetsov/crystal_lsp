@@ -18294,7 +18294,8 @@ module Crystal::HIR
       end
 
       # Methods that return the same type as the receiver
-      methods_returning_receiver_type = ["tap", "clamp", "abs", "ceil", "floor", "round", "truncate"]
+      methods_returning_receiver_type = ["tap", "clamp", "abs", "ceil", "floor", "round", "truncate",
+                                         "remainder", "tdiv", "unsafe_mod", "unsafe_div", "gcd", "lcm"]
       if return_type == TypeRef::VOID && receiver_id && methods_returning_receiver_type.includes?(method_name)
         return_type = ctx.type_of(receiver_id)
       end
@@ -21689,17 +21690,29 @@ module Crystal::HIR
       end
 
       # Special handling for union types containing primitives (like Int32 | Nil)
-      # When calling methods like .to_s on a union, we need to unwrap the value first
-      if is_nilable_int32_union?(receiver_type) && member_name == "to_s"
-        # Unwrap Int32 from the union (assuming it's not nil - caller should have checked)
-        unwrap = UnionUnwrap.new(ctx.next_id, TypeRef::INT32, object_id, 0, false)  # variant 0 = Int32
-        ctx.emit(unwrap)
-        ctx.register_type(unwrap.id, TypeRef::INT32)
-        # Call __crystal_v2_int_to_string on the unwrapped value
-        call = Call.new(ctx.next_id, TypeRef::POINTER, nil, "__crystal_v2_int_to_string", [unwrap.id])
-        ctx.emit(call)
-        ctx.register_type(call.id, TypeRef::POINTER)
-        return call.id
+      # When calling primitive methods on a union, we need to unwrap the value first
+      if is_nilable_int32_union?(receiver_type)
+        case member_name
+        when "to_s"
+          # Unwrap Int32 from the union (assuming it's not nil - caller should have checked)
+          unwrap = UnionUnwrap.new(ctx.next_id, TypeRef::INT32, object_id, 0, false)  # variant 0 = Int32
+          ctx.emit(unwrap)
+          ctx.register_type(unwrap.id, TypeRef::INT32)
+          # Call __crystal_v2_int_to_string on the unwrapped value
+          call = Call.new(ctx.next_id, TypeRef::POINTER, nil, "__crystal_v2_int_to_string", [unwrap.id])
+          ctx.emit(call)
+          ctx.register_type(call.id, TypeRef::POINTER)
+          return call.id
+        when "abs"
+          # Unwrap Int32 and call abs intrinsic
+          unwrap = UnionUnwrap.new(ctx.next_id, TypeRef::INT32, object_id, 0, false)
+          ctx.emit(unwrap)
+          ctx.register_type(unwrap.id, TypeRef::INT32)
+          call = Call.new(ctx.next_id, TypeRef::INT32, nil, "__crystal_v2_int_abs", [unwrap.id])
+          ctx.emit(call)
+          ctx.register_type(call.id, TypeRef::INT32)
+          return call.id
+        end
       end
 
       # Special handling for primitive type methods (Int32, Bool, etc.)
@@ -21959,7 +21972,8 @@ module Crystal::HIR
       end
 
       if return_type == TypeRef::VOID
-        methods_returning_receiver_type = ["tap", "clamp", "abs", "ceil", "floor", "round", "truncate"]
+        methods_returning_receiver_type = ["tap", "clamp", "abs", "ceil", "floor", "round", "truncate",
+                                           "remainder", "tdiv", "unsafe_mod", "unsafe_div", "gcd", "lcm"]
         if methods_returning_receiver_type.includes?(member_name)
           return_type = ctx.type_of(object_id)
         end
