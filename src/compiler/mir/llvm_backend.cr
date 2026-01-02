@@ -3751,6 +3751,22 @@ module Crystal::MIR
         return
       end
 
+      # Guard: union to scalar cast - extract payload as the destination scalar type.
+      # This avoids invalid LLVM bitcasts (union struct -> iN/float/double).
+      if src_type.includes?(".union")
+        is_dst_int = dst_type.starts_with?("i") && !dst_type.includes?(".union")
+        is_dst_float = dst_type == "float" || dst_type == "double"
+        if is_dst_int || is_dst_float
+          base_name = name.lstrip('%')
+          emit "%#{base_name}.union_ptr = alloca #{src_type}, align 8"
+          emit "store #{src_type} #{normalize_union_value(value, src_type)}, ptr %#{base_name}.union_ptr"
+          emit "%#{base_name}.payload_ptr = getelementptr #{src_type}, ptr %#{base_name}.union_ptr, i32 0, i32 1"
+          emit "#{name} = load #{dst_type}, ptr %#{base_name}.payload_ptr"
+          @value_types[inst.id] = inst.type
+          return
+        end
+      end
+
       # Guard: detect integer literal used with ptr type (type mismatch)
       # This happens when @value_types defaults to POINTER but actual value is int
       is_int_literal = value.match(/^-?\d+$/) && value != "null"
