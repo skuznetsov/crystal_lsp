@@ -958,6 +958,12 @@ module CrystalV2
       )
         node = arena[expr_id]
         case node
+        when Frontend::ModuleNode
+          if body = node.body
+            body.each do |child_id|
+              process_require_node(arena, child_id, base_dir, input_file, results, loaded, options, out_io, requires_out)
+            end
+          end
         when Frontend::RequireNode
           path_node = arena[node.path]
           if path_node.is_a?(Frontend::StringNode)

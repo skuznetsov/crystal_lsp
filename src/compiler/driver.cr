@@ -736,6 +736,12 @@ module Crystal::V2
       node = arena[expr_id]
       # Uncomment for debug: STDERR.puts "[DRIVER_TRACE] process_require_node: #{node.class}"
       case node
+      when CrystalV2::Compiler::Frontend::ModuleNode
+        if body = node.body
+          body.each do |child_id|
+            process_require_node(arena, child_id, base_dir, results, loaded)
+          end
+        end
       when CrystalV2::Compiler::Frontend::RequireNode
         path_node = arena[node.path]
         if path_node.is_a?(CrystalV2::Compiler::Frontend::StringNode)
