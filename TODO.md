@@ -1114,8 +1114,8 @@ r2 = maybe(false)  # => nil
 - [x] Module macro-for expansion registered during HIR module processing (ByteFormat now emits `self.decode`/`self.encode`) (2026-01-xx).
 - [x] Module class-method registration honors macro-generated defs across `{% for %}` / `{% if %}` branches (ByteFormat canary) (2026-01-xx).
 - [x] Type literal flags survive `LocalRef` copies and module-type literals (avoid losing `T.class` / module dispatch) (2026-01-xx).
-- [ ] Module-typed method resolution should prefer `Module.method` (.) and only fall back to includer lookup when uniquely resolvable (dynamic dispatch still missing).
-- [ ] Module class methods defined by `extend self` in macro bodies must be added to class-method tables consistently.
+- [x] Module-typed method resolution prefers `Module.method` (.) and falls back to includer lookup when uniquely resolvable (dynamic dispatch still missing) (2026-01-xx).
+- [x] Module class methods defined by `extend self` in macro bodies are added to class-method tables consistently (2026-01-xx).
 
 ### Holistic findings (2026-01-xx)
 
