@@ -14863,17 +14863,30 @@ module Crystal::HIR
               end
               # Also try direct lookup by type_ref id in enum_base_types
               # For primitive types that map to enums (e.g., UInt8 for Color : UInt8)
-              if enum_name.nil? && @enum_base_types
-                @enum_base_types.not_nil!.each do |name, base_type|
-                  if base_type == subject_type
-                    # Found an enum with matching base type - check if it has the member
-                    if members = @enum_info.try(&.[name]?)
-                      base_name = member_name[0...-1]
-                      if members.keys.any? { |m| m.downcase == base_name.downcase }
-                        enum_name = name
-                        break
-                      end
+            if enum_name.nil? && @enum_base_types
+              @enum_base_types.not_nil!.each do |name, base_type|
+                if base_type == subject_type
+                  # Found an enum with matching base type - check if it has the member
+                  if members = @enum_info.try(&.[name]?)
+                    base_name = member_name[0...-1]
+                    if members.keys.any? { |m| underscore_lower(m) == underscore_lower(base_name) }
+                      enum_name = name
+                      break
                     end
+                  end
+                end
+                end
+              end
+            end
+            # As a fallback, search all enums for a matching member.
+            # This mirrors the CallNode path and avoids unqualified predicate calls.
+            if enum_name.nil?
+              base_name = member_name[0...-1]
+              if enum_info = @enum_info
+                enum_info.each do |name, members|
+                  if members.keys.any? { |m| underscore_lower(m) == underscore_lower(base_name) }
+                    enum_name = name
+                    break
                   end
                 end
               end
@@ -14884,7 +14897,7 @@ module Crystal::HIR
                 # Try to match the predicate to an enum member
                 # e.g., "data1?" -> "Data1", "block?" -> "Block"
                 base_name = member_name[0...-1]  # Remove trailing ?
-                member_match = members.keys.find { |m| m.downcase == base_name.downcase }
+                member_match = members.keys.find { |m| underscore_lower(m) == underscore_lower(base_name) }
                 if member_match
                   member_value = members[member_match]
                   # Emit: subject_id == member_value
@@ -14942,7 +14955,7 @@ module Crystal::HIR
             if enum_info = @enum_info
               # Search all enums for one that has this member
               enum_info.each do |name, members|
-                if members.keys.any? { |m| m.downcase == base_name.downcase }
+                if members.keys.any? { |m| underscore_lower(m) == underscore_lower(base_name) }
                   enum_name = name
                   break
                 end
@@ -14968,7 +14981,7 @@ module Crystal::HIR
             if enum_name && (enum_info = @enum_info)
               if members = enum_info[enum_name]?
                 base_name = member_name[0...-1]  # Remove trailing ?
-                member_match = members.keys.find { |m| m.downcase == base_name.downcase }
+                member_match = members.keys.find { |m| underscore_lower(m) == underscore_lower(base_name) }
                 if member_match
                   member_value = members[member_match]
                   enum_type = enum_base_type(enum_name)
