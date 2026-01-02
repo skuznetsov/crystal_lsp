@@ -1091,6 +1091,7 @@ r2 = maybe(false)  # => nil
 - Lower lib struct field access (`action.sa_mask`) to direct field get/set (avoid `_LibC__Sigaction__sa_mask`) (2026-01-xx).
 - Treat `TypeDeclarationNode` inside structs as lib field declarations (`field : Type`) (2026-01-xx).
 - Unwrap pointer unions for `value/[]/+=` intrinsics to avoid llc type mismatch in Array(String) buffer stores (2026-01-xx).
+- Union-to-scalar casts now extract union payload instead of bitcast (fixes `Char::Reader#previous_char` union→i8 llc error) (2026-01-xx).
 - Remove `StructNode` from AST + LSP AST cache; structs are `ClassNode.is_struct` (cache version bump) (2025-12-25).
 - Case/when enum predicate matching now ignores underscores (e.g., `.character_device?`), lowering to enum == literal and removing `_character_device_` missing symbol (2026-01-02).
 - Full-prelude bootstrap_array now links cleanly (no missing symbols in `/private/tmp/bootstrap_array_full.link.log`) (2026-01-02).
