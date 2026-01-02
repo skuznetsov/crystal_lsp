@@ -1126,7 +1126,7 @@ r2 = maybe(false)  # => nil
 - Cache keys in type/function lookup still elide namespace/owner in some paths; collisions remain a regression risk.
 - Yield inlining is guarded but still touches cross-arena defs; a single ownership source + fallback path is needed.
 - Unions of unrelated class types collapse to the first class in HIR (no UnionType), so dynamic dispatch is bypassed and calls become unsound.
-- Self-host compile still stalls in `__crystal_main` at `driver.compile` call; `DEBUG_MAIN=1` + `DEBUG_LOWER_PROGRESS=CompilerDriver#compile` shows slowdown inside `all_arenas.each` block. Needs profiling or incremental lowering to avoid 60s+ stalls. (2026-01-xx)
+- Self-host compile still stalls in `__crystal_main` at `driver.compile` call; `DEBUG_MAIN=1` + `DEBUG_LOWER_PROGRESS=CompilerDriver#compile` shows slowdown inside `all_arenas.each` block. Follow-up shows `parse_file_recursive` lowering `Parser#parse_program` is the hotspot (~40s) during compiler self-compile; needs profiling/incremental lowering or caching for self-host speedups. (2026-01-xx)
 
 ### Bootstrap Stabilization Plan (prioritized, 2026-01-xx)
 
