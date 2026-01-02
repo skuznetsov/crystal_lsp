@@ -1227,10 +1227,14 @@ r2 = maybe(false)  # => nil
   - infer_type_from_expr handles `as` casts to preserve target type.
   - Result: `bsearch_internal(from : Float, to : Float)` reassignment to Int no longer mangles as Float.
 
-#### Issue 4: Macro expansion for {% begin %} blocks with {{@type}} - NOT FIXED
+#### Issue 4: Macro expansion for {% begin %} blocks with {{@type}} - FIXED (2026-01-xx)
 - **Symptom**: `Int#remainder` returns Nil because macro body isn't expanded
 - **Root cause**: Macro blocks like `{% begin %} ... {{@type}} ... {% end %}` with `@type` references aren't being properly expanded.
 - **Impact**: Methods with macro-generated bodies become empty, returning nil.
+ - **Fix applied**:
+   - MacroExpander now handles `{% begin %}` in MacroLiteral control flow (evaluates nested pieces like an always-true block).
+   - Added `evaluate_begin_block` and wired into `evaluate_macro_body` / `evaluate_pieces_range`.
+ - **Verification**: `/tmp/macro_begin_test.cr` compiled with `--no-link` (no undefined method errors).
 
 #### Files Modified (commit 0a2444b):
 - `src/compiler/hir/ast_to_hir.cr`:

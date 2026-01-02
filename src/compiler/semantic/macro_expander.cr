@@ -937,7 +937,7 @@ module CrystalV2
                 end
                 index += 1
               when .control_start?
-                # {% if %} or {% for %} - delegate to specialized handlers
+                # {% if %}, {% for %}, {% begin %} - delegate to specialized handlers
                 keyword = piece.control_keyword
 
                 if keyword == "if"
@@ -946,6 +946,10 @@ module CrystalV2
                   index = new_index
                 elsif keyword == "for"
                   output_part, new_index = evaluate_for_block(pieces, index, context)
+                  str << output_part
+                  index = new_index
+                elsif keyword == "begin"
+                  output_part, new_index = evaluate_begin_block(pieces, index, context)
                   str << output_part
                   index = new_index
                 else
@@ -1912,6 +1916,10 @@ module CrystalV2
                   output_part, new_index = evaluate_for_block(pieces, index, context)
                   str << output_part
                   index = new_index
+                elsif keyword == "begin"
+                  output_part, new_index = evaluate_begin_block(pieces, index, context)
+                  str << output_part
+                  index = new_index
                 else
                   index += 1
                 end
@@ -1922,6 +1930,18 @@ module CrystalV2
               prev_span_end = span.end_offset if source && span
             end
           end
+        end
+
+        # Evaluate {% begin %} ... {% end %} block
+        # Returns {output, next_index} where next_index points AFTER {% end %}
+        private def evaluate_begin_block(
+          pieces : Array(MacroPiece),
+          start_index : Int32,
+          context : Context,
+        ) : {String, Int32}
+          end_index = find_matching_end(pieces, start_index)
+          output = evaluate_pieces_range(pieces, start_index + 1, end_index - 1, context)
+          {output, end_index + 1}
         end
 
         # Evaluate {% if %} / {% elsif %} / {% else %} / {% end %} structure
