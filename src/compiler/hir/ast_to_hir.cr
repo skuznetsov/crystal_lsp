@@ -4500,8 +4500,43 @@ module Crystal::HIR
           when CrystalV2::Compiler::Frontend::MacroLiteralNode
             # Handle macro literal (may contain def/class inside)
             process_macro_literal_in_module(member, module_name)
+          when CrystalV2::Compiler::Frontend::CallNode
+            callee = @arena[member.callee]
+            if callee.is_a?(CrystalV2::Compiler::Frontend::IdentifierNode)
+              method_name = String.new(callee.name)
+              if macro_lookup = lookup_macro_entry(method_name, module_name)
+                macro_entry, macro_key = macro_lookup
+                macro_def, macro_arena = macro_entry
+                expanded_id = expand_macro_expr(macro_def, macro_arena, member.args, member.named_args, member.block, macro_key)
+                unless expanded_id.invalid?
+                  old_arena = @arena
+                  @arena = macro_arena
+                  begin
+                    register_module_members_from_macro_expansion(module_name, expanded_id)
+                  ensure
+                    @arena = old_arena
+                  end
+                end
+              end
+            end
+          when CrystalV2::Compiler::Frontend::IdentifierNode
+            method_name = String.new(member.name)
+            if macro_lookup = lookup_macro_entry(method_name, module_name)
+              macro_entry, macro_key = macro_lookup
+              macro_def, macro_arena = macro_entry
+              expanded_id = expand_macro_expr(macro_def, macro_arena, [] of ExprId, nil, nil, macro_key)
+              unless expanded_id.invalid?
+                old_arena = @arena
+                @arena = macro_arena
+                begin
+                  register_module_members_from_macro_expansion(module_name, expanded_id)
+                ensure
+                  @arena = old_arena
+                end
+              end
             end
           end
+        end
           visited_extends = Set(String).new
           extend_nodes.each do |ext|
             register_module_class_methods_for(
@@ -4525,6 +4560,7 @@ module Crystal::HIR
           if expanded = expand_flag_macro_text(raw_text)
             if program = parse_macro_literal_program(expanded)
               with_arena(program.arena) do
+                scan_module_extend_self_in_program(program, module_name)
                 program.roots.each do |expr_id|
                   expr_node = @arena[expr_id]
                   case expr_node
@@ -4633,6 +4669,7 @@ module Crystal::HIR
       sanitized = strip_macro_lines(expanded)
       if program = parse_macro_literal_program(sanitized)
         with_arena(program.arena) do
+          scan_module_extend_self_in_program(program, module_name)
           program.roots.each do |expr_id|
             expr_node = @arena[expr_id]
             case expr_node
@@ -4666,6 +4703,7 @@ module Crystal::HIR
         expanded = expand_flag_macro_text(raw_text) || raw_text
         if program = parse_macro_literal_program(expanded)
           with_arena(program.arena) do
+            scan_module_extend_self_in_program(program, module_name)
             program.roots.each do |expr_id|
               expr_node = @arena[expr_id]
               case expr_node
@@ -4699,6 +4737,7 @@ module Crystal::HIR
       combined = texts.join("\n")
       if program = parse_macro_literal_program(combined)
         with_arena(program.arena) do
+          scan_module_extend_self_in_program(program, module_name)
           program.roots.each do |expr_id|
             expr_node = @arena[expr_id]
             case expr_node
@@ -4779,6 +4818,17 @@ module Crystal::HIR
             end
           end
         end
+      end
+    end
+
+    private def scan_module_extend_self_in_program(
+      program : CrystalV2::Compiler::Frontend::Program,
+      module_name : String
+    ) : Nil
+      program.roots.each do |expr_id|
+        expr_node = @arena[expr_id]
+        next unless expr_node.is_a?(CrystalV2::Compiler::Frontend::ExtendNode)
+        mark_module_extend_self(expr_node, module_name)
       end
     end
 
@@ -4940,6 +4990,46 @@ module Crystal::HIR
           @function_defs[full_name] = member
           @function_def_arenas[full_name] = @arena
         end
+      end
+    end
+
+    private def register_module_members_from_macro_expansion(module_name : String, expr_id : ExprId)
+      return if expr_id.invalid?
+      member = unwrap_visibility_member(@arena[expr_id])
+      case member
+      when CrystalV2::Compiler::Frontend::BlockNode
+        member.body.each do |child_id|
+          child = unwrap_visibility_member(@arena[child_id])
+          next unless child.is_a?(CrystalV2::Compiler::Frontend::ExtendNode)
+          mark_module_extend_self(child, module_name)
+        end
+        member.body.each do |child_id|
+          register_module_members_from_macro_expansion(module_name, child_id)
+        end
+      when CrystalV2::Compiler::Frontend::DefNode
+        register_module_method_from_def(member, module_name)
+      when CrystalV2::Compiler::Frontend::ClassNode
+        class_name = String.new(member.name)
+        full_class_name = "#{module_name}::#{class_name}"
+        register_class_with_name(member, full_class_name)
+      when CrystalV2::Compiler::Frontend::ModuleNode
+        nested_name = String.new(member.name)
+        full_nested_name = "#{module_name}::#{nested_name}"
+        register_nested_module(member, full_nested_name)
+      when CrystalV2::Compiler::Frontend::EnumNode
+        enum_name = String.new(member.name)
+        full_enum_name = "#{module_name}::#{enum_name}"
+        register_enum_with_name(member, full_enum_name)
+      when CrystalV2::Compiler::Frontend::ExtendNode
+        mark_module_extend_self(member, module_name)
+      when CrystalV2::Compiler::Frontend::MacroDefNode
+        register_macro(member, module_name)
+      when CrystalV2::Compiler::Frontend::MacroIfNode
+        process_macro_if_in_module(member, module_name)
+      when CrystalV2::Compiler::Frontend::MacroForNode
+        process_macro_for_in_module(member, module_name)
+      when CrystalV2::Compiler::Frontend::MacroLiteralNode
+        process_macro_literal_in_module(member, module_name)
       end
     end
 
@@ -8949,6 +9039,21 @@ module Crystal::HIR
         end
       end
 
+      arg_count = arg_types.size
+      module_method_base = "#{module_base}.#{method_name}"
+      if entry = lookup_function_def_for_call(module_method_base, arg_count, has_block, arg_types)
+        def_node = entry[1]
+        func_context = function_context_from_name(entry[0])
+        if params_compatible_with_args?(def_node, arg_types, func_context)
+          mangled = mangle_function_name(module_method_base, arg_types, has_block)
+          if @function_types.has_key?(mangled) || @module.has_function?(mangled)
+            return mangled unless abstract_def?(mangled)
+          elsif has_function_base?(module_method_base)
+            return module_method_base unless abstract_def?(module_method_base)
+          end
+        end
+      end
+
       candidates = includers.to_a
       if module_like_type_name?(module_base) && !candidates.includes?(module_base)
         candidates << module_base
@@ -9014,7 +9119,6 @@ module Crystal::HIR
       end
 
       matches = [] of String
-      arg_count = arg_types.size
       candidates.each do |candidate|
         sep = module_like_type_name?(candidate) ? "." : "#"
         base = "#{candidate}#{sep}#{method_name}"

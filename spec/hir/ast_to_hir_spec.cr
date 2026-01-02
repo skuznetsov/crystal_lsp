@@ -1182,6 +1182,41 @@ describe Crystal::HIR::AstToHir do
       call_name.should_not contain("Bag#value")
     end
 
+    it "prefers module class methods for module-typed receivers" do
+      code = <<-CRYSTAL
+        module M
+          extend self
+
+          def foo : Int32
+            1
+          end
+        end
+
+        class Box
+          include M
+
+          def foo : Int32
+            2
+          end
+        end
+
+        def foo(x : M)
+          x.foo
+        end
+      CRYSTAL
+
+      converter = lower_program(code)
+      func = converter.module.functions.find { |f| f.name.split("$").first == "foo" }
+      func.should_not be_nil
+
+      call = func.not_nil!.blocks.flat_map(&.instructions)
+        .find { |inst| inst.is_a?(Crystal::HIR::Call) }
+      call.should_not be_nil
+
+      call_name = call.not_nil!.as(Crystal::HIR::Call).method_name
+      call_name.should contain("M.foo")
+    end
+
     # TODO: Module-typed receiver resolution needs virtual dispatch enhancements
     pending "prefers includers that match arity for module-typed params" do
       code = <<-CRYSTAL
@@ -1429,6 +1464,29 @@ describe Crystal::HIR::AstToHir do
               1
             end
           {% end %}
+        end
+
+        def use
+          M.foo
+        end
+      CRYSTAL
+
+      converter = lower_program_with_sources(code)
+      converter.module.has_function?("M.foo").should be_true
+    end
+
+    it "registers extend self methods from macro bodies" do
+      code = <<-CRYSTAL
+        module M
+          macro add
+            extend self
+
+            def foo
+              1
+            end
+          end
+
+          add
         end
 
         def use
