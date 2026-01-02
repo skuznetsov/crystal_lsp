@@ -36,6 +36,10 @@ module Crystal
     # Pending phi nodes that need incoming resolution after all blocks are lowered
     @pending_phis : Array(Tuple(Phi, HIR::Phi))
 
+    # Stack slots (mutable locals / block params) that require loads on reads
+    @stack_slot_values : Set(ValueId)
+    @stack_slot_types : Hash(ValueId, TypeRef)
+
     # Current function being lowered
     @current_hir_func : HIR::Function?
     @current_mir_func : Function?
@@ -56,6 +60,8 @@ module Crystal
       @hir_value_types = {} of HIR::ValueId => HIR::TypeRef
       @block_map = {} of HIR::BlockId => BlockId
       @pending_phis = [] of Tuple(Phi, HIR::Phi)
+      @stack_slot_values = Set(ValueId).new
+      @stack_slot_types = {} of ValueId => TypeRef
       @slab_frame_enabled = slab_frame
       @class_children = {} of String => Array(String)
       @hir_module.class_parents.each do |name, parent|
@@ -241,6 +247,8 @@ module Crystal
       @hir_value_types.clear
       @block_map.clear
       @pending_phis.clear
+      @stack_slot_values.clear
+      @stack_slot_types.clear
       @builder = Builder.new(mir_func)
 
       # Map HIR params to MIR params (already added in stub)
@@ -332,10 +340,13 @@ module Crystal
                    # Block parameter - allocate stack slot for it
                    builder = @builder.not_nil!
                    param_type = convert_type(hir_value.type)
-                   alloc = MIR::Alloc.new(builder.next_id, param_type, MIR::MemoryStrategy::Stack, param_type, 0_u64, 8_u32)
-                   builder.emit(alloc)
-                   @value_map[hir_value.id] = alloc.id
-                   alloc.id
+                   slot = builder.alloc(MemoryStrategy::Stack, param_type)
+                   record_stack_slot(slot, param_type)
+                   if (default_id = default_value_for_type(builder, param_type))
+                     builder.store(slot, default_id)
+                   end
+                   @value_map[hir_value.id] = slot
+                   slot
                  end
                when HIR::Allocate
                  lower_allocate(hir_value)
@@ -458,6 +469,7 @@ module Crystal
       if local.mutable
         # Allocate space on stack
         ptr = builder.alloc(MemoryStrategy::Stack, convert_type(local.type))
+        record_stack_slot(ptr, convert_type(local.type))
         @stats.stack_allocations += 1
         ptr
       else
@@ -1218,6 +1230,9 @@ module Crystal
     private def lower_cast(cast : HIR::Cast) : ValueId
       builder = @builder.not_nil!
       value = get_value(cast.value)
+      if slot_type = @stack_slot_types[value]?
+        value = builder.load(value, slot_type)
+      end
       src_hir_type = @hir_value_types[cast.value]? || HIR::TypeRef::POINTER
       dst_hir_type = cast.target_type
 
@@ -1328,8 +1343,13 @@ module Crystal
     # ─────────────────────────────────────────────────────────────────────────
 
     private def lower_copy(copy : HIR::Copy) : ValueId
-      # In SSA, copy is just value forwarding
-      get_value(copy.source)
+      # Load from stack slot when copy reads a mutable local / block param.
+      source = get_value(copy.source)
+      if slot_type = @stack_slot_types[source]?
+        builder = @builder.not_nil!
+        return builder.load(source, slot_type)
+      end
+      source
     end
 
     # ─────────────────────────────────────────────────────────────────────────
@@ -1726,6 +1746,28 @@ module Crystal
 
     private def get_value(hir_id : HIR::ValueId) : ValueId
       @value_map[hir_id]? || 0_u32
+    end
+
+    private def record_stack_slot(slot : ValueId, type : TypeRef)
+      @stack_slot_values.add(slot)
+      @stack_slot_types[slot] = type
+    end
+
+    private def default_value_for_type(builder : Builder, type : TypeRef) : ValueId?
+      case type
+      when TypeRef::BOOL
+        builder.const_bool(false)
+      when TypeRef::INT8, TypeRef::INT16, TypeRef::INT32, TypeRef::INT64, TypeRef::INT128,
+           TypeRef::UINT8, TypeRef::UINT16, TypeRef::UINT32, TypeRef::UINT64, TypeRef::UINT128,
+           TypeRef::CHAR
+        builder.const_int(0_i64, type)
+      when TypeRef::FLOAT32, TypeRef::FLOAT64
+        builder.const_float(0.0, type)
+      when TypeRef::POINTER
+        builder.const_nil_typed(TypeRef::POINTER)
+      else
+        nil
+      end
     end
 
     private def convert_type(hir_type : HIR::TypeRef) : TypeRef
