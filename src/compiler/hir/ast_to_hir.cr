@@ -7988,7 +7988,21 @@ module Crystal::HIR
           if progress_match
             begin
               expr_node = @arena[expr_id]
-              STDERR.puts "[LOWER_PROGRESS] method=#{base_name} idx=#{idx} node=#{expr_node.class.name}"
+              snippet = nil
+              if source = @sources_by_arena[@arena]?
+                span = expr_node.span
+                start = span.start_offset
+                length = span.end_offset - span.start_offset
+                if length > 0 && start >= 0 && start < source.bytesize
+                  slice_len = length > 120 ? 120 : length
+                  snippet = source.byte_slice(start, slice_len).gsub(/\s+/, " ").strip
+                end
+              end
+              if snippet
+                STDERR.puts "[LOWER_PROGRESS] method=#{base_name} idx=#{idx} node=#{expr_node.class.name} offs=#{expr_node.span.start_offset} \"#{snippet}\""
+              else
+                STDERR.puts "[LOWER_PROGRESS] method=#{base_name} idx=#{idx} node=#{expr_node.class.name}"
+              end
             rescue
               STDERR.puts "[LOWER_PROGRESS] method=#{base_name} idx=#{idx} node=(OOB)"
             end
