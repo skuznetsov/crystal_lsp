@@ -5164,62 +5164,72 @@ module CrystalV2
           else_body : Array(ExprId)? = nil
           ensure_body : Array(ExprId)? = nil
 
-          if is_brace_form
-            # Brace-form blocks: preserve existing tolerant parsing (no rescue/else)
-            body_b = SmallVec(ExprId, 4).new
-            loop do
-              skip_trivia
+          previous_parsing_call_args = @parsing_call_args
+          begin
+            # Block bodies should not inherit outer call-argument parsing state.
+            # This avoids treating nested `{ ... }` as tuple/hash literals when
+            # the block itself is parsed while collecting call arguments.
+            @parsing_call_args = 0
 
-              # Skip newlines in block body
-              while current_token.kind == Token::Kind::Newline
-                advance
+            if is_brace_form
+              # Brace-form blocks: preserve existing tolerant parsing (no rescue/else)
+              body_b = SmallVec(ExprId, 4).new
+              loop do
                 skip_trivia
-              end
 
-              # Skip newlines in block body
-              # Special-case: typed empty hash literal inside block: {} of K => V
-              if current_token.kind == Token::Kind::LBrace
-                save_idx = @index
-                lbrace_tok = current_token
-                advance
-                if current_token.kind == Token::Kind::RBrace
+                # Skip newlines in block body
+                while current_token.kind == Token::Kind::Newline
                   advance
                   skip_trivia
-                  if current_token.kind == Token::Kind::Of || (current_token.kind == Token::Kind::Identifier && slice_eq?(current_token.slice, "of"))
+                end
+
+                # Skip newlines in block body
+                # Special-case: typed empty hash literal inside block: {} of K => V
+                if current_token.kind == Token::Kind::LBrace
+                  save_idx = @index
+                  lbrace_tok = current_token
+                  advance
+                  if current_token.kind == Token::Kind::RBrace
                     advance
                     skip_trivia
-                    key_type = parse_type_annotation
-                    skip_trivia
-                    if current_token.kind == Token::Kind::Arrow || (current_token.kind == Token::Kind::Operator && slice_eq?(current_token.slice, "=>"))
+                    if current_token.kind == Token::Kind::Of || (current_token.kind == Token::Kind::Identifier && slice_eq?(current_token.slice, "of"))
                       advance
                       skip_trivia
-                      value_type = parse_type_annotation
-                      # Build node and append
-                      span = lbrace_tok.span
-                      hash_node = @arena.add_typed(HashLiteralNode.new(span, [] of HashEntry, key_type, value_type))
-                      body_b << hash_node
-                      next
+                      key_type = parse_type_annotation
+                      skip_trivia
+                      if current_token.kind == Token::Kind::Arrow || (current_token.kind == Token::Kind::Operator && slice_eq?(current_token.slice, "=>"))
+                        advance
+                        skip_trivia
+                        value_type = parse_type_annotation
+                        # Build node and append
+                        span = lbrace_tok.span
+                        hash_node = @arena.add_typed(HashLiteralNode.new(span, [] of HashEntry, key_type, value_type))
+                        body_b << hash_node
+                        next
+                      end
                     end
                   end
+                  # Not a typed empty hash; rewind and parse normally
+                  @index = save_idx
                 end
-                # Not a typed empty hash; rewind and parse normally
-                @index = save_idx
+
+                # Check for block terminator
+                break if current_token.kind == Token::Kind::RBrace
+                break if current_token.kind == Token::Kind::EOF
+
+                stmt = parse_statement
+                return PREFIX_ERROR if stmt.invalid?
+                body_b << stmt
+                # Allow semicolons/newlines between statements inside blocks
+                skip_statement_end
               end
 
-              # Check for block terminator
-              break if current_token.kind == Token::Kind::RBrace
-              break if current_token.kind == Token::Kind::EOF
-
-              stmt = parse_statement
-              return PREFIX_ERROR if stmt.invalid?
-              body_b << stmt
-              # Allow semicolons/newlines between statements inside blocks
-              skip_statement_end
+              block_body_ids = body_b.to_a
+            else
+              block_body_ids, rescue_clauses, else_body, ensure_body = parse_block_body_with_optional_rescue
             end
-
-            block_body_ids = body_b.to_a
-          else
-            block_body_ids, rescue_clauses, else_body, ensure_body = parse_block_body_with_optional_rescue
+          ensure
+            @parsing_call_args = previous_parsing_call_args
           end
 
           # Consume closing delimiter
@@ -11316,6 +11326,10 @@ module CrystalV2
             end
             return false
           end
+          if token.kind == Token::Kind::AmpMinus
+            next_tok = peek_token(1)
+            return next_tok.kind != Token::Kind::Greater
+          end
           case token.kind
           when Token::Kind::Newline, Token::Kind::EOF,
                Token::Kind::Semicolon, Token::Kind::Then,
@@ -11334,6 +11348,8 @@ module CrystalV2
                Token::Kind::SlashEq, Token::Kind::FloorDivEq, Token::Kind::PercentEq,
                Token::Kind::StarStarEq, Token::Kind::AmpEq, Token::Kind::PipeEq,
                Token::Kind::CaretEq, Token::Kind::LShiftEq, Token::Kind::RShiftEq,
+               Token::Kind::AmpPlusEq, Token::Kind::AmpMinusEq, Token::Kind::AmpStarEq,
+               Token::Kind::AmpStarStarEq,
                Token::Kind::NilCoalesceEq,
                Token::Kind::NilCoalesce,
                Token::Kind::Plus, Token::Kind::Minus,
@@ -11351,6 +11367,7 @@ module CrystalV2
                Token::Kind::Match, Token::Kind::NotMatch,
                Token::Kind::In,
                Token::Kind::As, Token::Kind::AsQuestion,
+               Token::Kind::AmpPlus, Token::Kind::AmpStar, Token::Kind::AmpStarStar,
                Token::Kind::LParen
             true
           else
