@@ -1093,6 +1093,8 @@ r2 = maybe(false)  # => nil
 - Full-prelude bootstrap_array now links cleanly (no missing symbols in `/private/tmp/bootstrap_array_full.link.log`) (2026-01-02).
 - Macro body parsing: skip block depth for `abstract def` inside macro bodies to avoid false `{% end %}` errors (2026-01-02).
 - Bump AST cache version to 20 for macro-parse + enum predicate matching fixes (2026-01-02).
+- Bump AST cache version to 21 for block/command-call parsing fixes (2026-01-03).
+- Parser: don't treat wrapping ops/compound assignments as command-call args; allow nested blocks inside call-arg parsing (fixes `am.mantissa &+= ...` and `ticks.to_u64! &* ...` parsing, `&.each { ... { |e| ... } }` block params) (2026-01-03).
 - Register module instance methods as class methods when `extend self` is present (fixes `Math.min/max`) (2025-12-25).
 - Propagate `extend self` through macro-literal/module branches when registering module methods (2025-12-25).
 - Parse no-parens calls with multiple args + `do` blocks by treating `do` as an expression boundary (fixes `return bsearch_internal ... do`) (2026-01-xx).
