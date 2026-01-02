@@ -25,9 +25,18 @@ function activate(context) {
         const fs = require('fs');
         const path = require('path');
         try {
-            const expanded = debugLogPathRaw.startsWith('~')
+            let expanded = debugLogPathRaw.startsWith('~')
                 ? path.join(process.env.HOME || '', debugLogPathRaw.slice(1))
                 : debugLogPathRaw;
+            if (!path.isAbsolute(expanded)) {
+                const workspaceRoot = vscode.workspace.workspaceFolders?.[0]?.uri?.fsPath;
+                if (workspaceRoot) {
+                    const hasDir = path.dirname(expanded) !== '.';
+                    expanded = hasDir
+                        ? path.join(workspaceRoot, expanded)
+                        : path.join(workspaceRoot, 'logs', expanded);
+                }
+            }
             const dir = path.dirname(expanded)
             fs.mkdirSync(dir, { recursive: true });
             fs.writeFileSync(tmpConfigPath, JSON.stringify({ debug_log_path: expanded }));
