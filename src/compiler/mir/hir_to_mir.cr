@@ -1287,6 +1287,16 @@ module Crystal
         end
       end
 
+      # Unsafe bitcast for numeric types of the same size (unsafe_as semantics).
+      if !cast.safe
+        if (int_like.call(src_hir_type) && float_like.call(dst_hir_type)) ||
+           (float_like.call(src_hir_type) && int_like.call(dst_hir_type))
+          if type_size(src_hir_type) == type_size(dst_hir_type)
+            return builder.cast(CastKind::Bitcast, value, dst_type)
+          end
+        end
+      end
+
       kind = if src_type == TypeRef::POINTER && int_like.call(dst_hir_type)
                CastKind::PtrToInt
              elsif dst_type == TypeRef::POINTER && int_like.call(src_hir_type)

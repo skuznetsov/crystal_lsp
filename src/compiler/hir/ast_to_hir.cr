@@ -16993,6 +16993,22 @@ module Crystal::HIR
           end
         end
 
+        # Intrinsic: unsafe_as(Type) should lower to a raw cast without a method call.
+        if method_name == "unsafe_as" && node.named_args.nil? && block_expr.nil? && block_pass_expr.nil?
+          if arg = call_args.first?
+            if type_str = stringify_type_expr(arg)
+              receiver_id = lower_expr(ctx, obj_expr)
+              target_type = type_ref_for_name(type_str)
+              if target_type != TypeRef::VOID
+                cast = Cast.new(ctx.next_id, target_type, receiver_id, target_type, safe: false)
+                ctx.emit(cast)
+                ctx.register_type(cast.id, target_type)
+                return cast.id
+              end
+            end
+          end
+        end
+
         # Direct ivar access on another object: obj.@ivar
         # Lower as field get when no args/block are present.
         if method_name.starts_with?("@") && call_args.empty? && block_expr.nil? && block_pass_expr.nil?
