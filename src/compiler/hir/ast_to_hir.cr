@@ -16862,6 +16862,19 @@ module Crystal::HIR
               callsite_by_arity.each do |arity, call_entries|
                 next if arity < required
                 next if arity > param_count && !has_splat && !has_double_splat
+                void_only = call_entries.all? { |entry| entry.types.all? { |t| t == TypeRef::VOID } }
+                if void_only
+                  score = param_count == arity ? 1 : 0
+                  score -= 1 if has_splat || has_double_splat
+                  score -= block_penalty
+                  if param_count < best_param_count || (param_count == best_param_count && score > best_score)
+                    best_def = def_node
+                    best_name = key
+                    best_param_count = param_count
+                    best_score = score
+                  end
+                  next
+                end
                 call_entries.each do |entry|
                   call_arg_types = entry.types
                   next if call_arg_types.all? { |t| t == TypeRef::VOID }
@@ -16960,14 +16973,20 @@ module Crystal::HIR
                                      else
                                        0
                                      end
+              if expected_param_count == 0
+                if callsite = @pending_arg_types[name]? || @pending_arg_types[target_name]?
+                  expected_param_count = callsite.size
+                end
+              end
               included.each do |module_name|
                 base_module = module_name.split('(').first
                 visited = Set(String).new
                 if found = find_module_def_recursive(base_module, method_base, expected_param_count, visited)
                   func_def = found[0]
                   arena = found[1]
-                  # DON'T override target_name - let lower_method compute correct mangled name
-                  target_name = base_name
+                  # When the call site already carries a mangled name, preserve it so
+                  # overloads don't collapse onto the base during deferred lookup.
+                  target_name = name.includes?("$") ? name : base_name
                   deferred_lookup_used = true
                   lookup_branch = "deferred_module"
                   if ENV.has_key?("DEBUG_DEFERRED") && method_base == "byte_range"
@@ -20155,6 +20174,7 @@ module Crystal::HIR
       has_block : Bool,
       arg_types : Array(TypeRef)? = nil
     ) : Tuple(String, CrystalV2::Compiler::Frontend::DefNode)?
+      unknown_args = arg_types && arg_types.all? { |t| t == TypeRef::VOID }
       if func_name.includes?("$")
         if func_def = @function_defs[func_name]?
           return {func_name, func_def}
@@ -20243,12 +20263,12 @@ module Crystal::HIR
         next if prefer_untyped && !untyped_candidate
 
         score = 0
-        if arg_types
+        if arg_types && !unknown_args
           func_context = function_context_from_name(name)
           next unless params_compatible_with_args?(def_node, arg_types, func_context)
           score = params_match_score(def_node, arg_types, func_context)
         end
-        if arg_types && arg_types.any? { |t| t == TypeRef::VOID }
+        if arg_types && !unknown_args && arg_types.any? { |t| t == TypeRef::VOID }
           typed_param_count = params.count do |p|
             !p.is_block && !named_only_separator?(p) && !p.type_annotation.nil?
           end
