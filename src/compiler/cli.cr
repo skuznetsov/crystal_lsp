@@ -1116,7 +1116,8 @@ module CrystalV2
         flags : Set(String),
         sources_by_arena : Hash(Frontend::ArenaLike, String),
         source : String,
-        depth : Int32 = 0
+        depth : Int32 = 0,
+        collect_main_exprs : Bool = true
       ) : Nil
         return if depth > 4
         node = arena[expr_id]
@@ -1141,7 +1142,7 @@ module CrystalV2
           pending_annotations.clear
         when Frontend::ConstantNode
           constant_exprs << {expr_id, arena}
-          main_exprs << {expr_id, arena}
+          main_exprs << {expr_id, arena} if collect_main_exprs
           pending_annotations.clear
         when Frontend::AliasNode
           alias_nodes << {node, arena}
@@ -1154,18 +1155,18 @@ module CrystalV2
         when Frontend::RequireNode
           # Skip - already processed
         when Frontend::MacroExpressionNode
-          collect_top_level_nodes(arena, node.expression, def_nodes, class_nodes, module_nodes, enum_nodes, macro_nodes, alias_nodes, lib_nodes, constant_exprs, main_exprs, pending_annotations, acyclic_types, flags, sources_by_arena, source, depth)
+          collect_top_level_nodes(arena, node.expression, def_nodes, class_nodes, module_nodes, enum_nodes, macro_nodes, alias_nodes, lib_nodes, constant_exprs, main_exprs, pending_annotations, acyclic_types, flags, sources_by_arena, source, depth, collect_main_exprs)
         when Frontend::MacroIfNode
           if raw_text = macro_if_raw_text(node, source)
             parsed_any = false
-            macro_literal_texts_from_raw(raw_text, flags).each do |text|
-              next if text.strip.empty?
-              next if text.includes?("{%") || text.includes?("{{")
-              if program = parse_macro_literal_program(text)
+            combined = macro_literal_texts_from_raw(raw_text, flags).join
+            unless combined.strip.empty? || combined.includes?("{%")
+              if parsed = parse_macro_literal_program(combined)
+                program, sanitized = parsed
                 parsed_any = true
-                sources_by_arena[program.arena] = text
+                sources_by_arena[program.arena] = sanitized
                 program.roots.each do |inner_id|
-                  collect_top_level_nodes(program.arena, inner_id, def_nodes, class_nodes, module_nodes, enum_nodes, macro_nodes, alias_nodes, lib_nodes, constant_exprs, main_exprs, pending_annotations, acyclic_types, flags, sources_by_arena, text, depth + 1)
+                  collect_top_level_nodes(program.arena, inner_id, def_nodes, class_nodes, module_nodes, enum_nodes, macro_nodes, alias_nodes, lib_nodes, constant_exprs, main_exprs, pending_annotations, acyclic_types, flags, sources_by_arena, sanitized, depth + 1, false)
                 end
               end
             end
@@ -1173,29 +1174,26 @@ module CrystalV2
           end
           condition = evaluate_macro_condition(arena, node.condition, flags)
           if condition == true
-            collect_top_level_nodes(arena, node.then_body, def_nodes, class_nodes, module_nodes, enum_nodes, macro_nodes, alias_nodes, lib_nodes, constant_exprs, main_exprs, pending_annotations, acyclic_types, flags, sources_by_arena, source, depth)
+            collect_top_level_nodes(arena, node.then_body, def_nodes, class_nodes, module_nodes, enum_nodes, macro_nodes, alias_nodes, lib_nodes, constant_exprs, main_exprs, pending_annotations, acyclic_types, flags, sources_by_arena, source, depth, collect_main_exprs)
           elsif condition == false
             if else_body = node.else_body
-              collect_top_level_nodes(arena, else_body, def_nodes, class_nodes, module_nodes, enum_nodes, macro_nodes, alias_nodes, lib_nodes, constant_exprs, main_exprs, pending_annotations, acyclic_types, flags, sources_by_arena, source, depth)
+              collect_top_level_nodes(arena, else_body, def_nodes, class_nodes, module_nodes, enum_nodes, macro_nodes, alias_nodes, lib_nodes, constant_exprs, main_exprs, pending_annotations, acyclic_types, flags, sources_by_arena, source, depth, collect_main_exprs)
             end
           else
-            collect_top_level_nodes(arena, node.then_body, def_nodes, class_nodes, module_nodes, enum_nodes, macro_nodes, alias_nodes, lib_nodes, constant_exprs, main_exprs, pending_annotations, acyclic_types, flags, sources_by_arena, source, depth)
+            collect_top_level_nodes(arena, node.then_body, def_nodes, class_nodes, module_nodes, enum_nodes, macro_nodes, alias_nodes, lib_nodes, constant_exprs, main_exprs, pending_annotations, acyclic_types, flags, sources_by_arena, source, depth, collect_main_exprs)
             if else_body = node.else_body
-              collect_top_level_nodes(arena, else_body, def_nodes, class_nodes, module_nodes, enum_nodes, macro_nodes, alias_nodes, lib_nodes, constant_exprs, main_exprs, pending_annotations, acyclic_types, flags, sources_by_arena, source, depth)
+              collect_top_level_nodes(arena, else_body, def_nodes, class_nodes, module_nodes, enum_nodes, macro_nodes, alias_nodes, lib_nodes, constant_exprs, main_exprs, pending_annotations, acyclic_types, flags, sources_by_arena, source, depth, collect_main_exprs)
             end
           end
         when Frontend::MacroLiteralNode
-          collect_macro_literal_exprs(arena, node, flags).each do |expr|
-            collect_top_level_nodes(arena, expr, def_nodes, class_nodes, module_nodes, enum_nodes, macro_nodes, alias_nodes, lib_nodes, constant_exprs, main_exprs, pending_annotations, acyclic_types, flags, sources_by_arena, source, depth)
-          end
           if raw_text = macro_literal_raw_text(node, source)
-            macro_literal_texts_from_raw(raw_text, flags).each do |text|
-              next if text.strip.empty?
-              next if text.includes?("{%") || text.includes?("{{")
-              if program = parse_macro_literal_program(text)
-                sources_by_arena[program.arena] = text
+            combined = macro_literal_texts_from_raw(raw_text, flags).join
+            unless combined.strip.empty? || combined.includes?("{%")
+              if parsed = parse_macro_literal_program(combined)
+                program, sanitized = parsed
+                sources_by_arena[program.arena] = sanitized
                 program.roots.each do |inner_id|
-                  collect_top_level_nodes(program.arena, inner_id, def_nodes, class_nodes, module_nodes, enum_nodes, macro_nodes, alias_nodes, lib_nodes, constant_exprs, main_exprs, pending_annotations, acyclic_types, flags, sources_by_arena, text, depth + 1)
+                  collect_top_level_nodes(program.arena, inner_id, def_nodes, class_nodes, module_nodes, enum_nodes, macro_nodes, alias_nodes, lib_nodes, constant_exprs, main_exprs, pending_annotations, acyclic_types, flags, sources_by_arena, sanitized, depth + 1, false)
                 end
               end
             end
@@ -1205,9 +1203,9 @@ module CrystalV2
           if target.is_a?(Frontend::ConstantNode)
             constant_exprs << {expr_id, arena}
           end
-          main_exprs << {expr_id, arena}
+          main_exprs << {expr_id, arena} if collect_main_exprs
         else
-          main_exprs << {expr_id, arena}
+          main_exprs << {expr_id, arena} if collect_main_exprs
         end
       end
 
@@ -1598,16 +1596,39 @@ module CrystalV2
         source.byte_slice(start, length)
       end
 
-      private def parse_macro_literal_program(text : String) : Frontend::Program?
-        trimmed = text.strip
+      private def parse_macro_literal_program(text : String) : {Frontend::Program, String}?
+        sanitized = sanitize_macro_literal_text(text)
+        trimmed = sanitized.strip
         return nil if trimmed.empty?
-        return nil if trimmed.includes?("{%") || trimmed.includes?("{{")
+        return nil if sanitized.includes?("{%") || sanitized.includes?("{{")
 
-        lexer = Frontend::Lexer.new(trimmed)
+        lexer = Frontend::Lexer.new(sanitized)
         parser = Frontend::Parser.new(lexer, recovery_mode: true)
         program = parser.parse_program
         return nil if program.roots.empty?
-        program
+        {program, sanitized}
+      end
+
+      private def sanitize_macro_literal_text(text : String) : String
+        return text unless text.includes?("{{")
+        builder = String::Builder.new
+        idx = 0
+        while idx < text.size
+          start = text.index("{{", idx)
+          break unless start
+          builder << text[idx, start - idx] if start > idx
+          stop = text.index("}}", start + 2)
+          if stop.nil?
+            builder << text[start, text.size - start]
+            idx = text.size
+            break
+          end
+          placeholder_len = stop + 2 - start
+          builder << (" " * placeholder_len)
+          idx = stop + 2
+        end
+        builder << text[idx, text.size - idx] if idx < text.size
+        builder.to_s
       end
 
       private def macro_literal_texts_from_raw(text : String, flags : Set(String)) : Array(String)

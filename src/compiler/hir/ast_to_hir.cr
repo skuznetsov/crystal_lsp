@@ -311,6 +311,8 @@ module Crystal::HIR
     # Cached return type for a function base name (without $ suffix).
     # This is used for method resolution when only the base name is known.
     @function_base_return_types : Hash(String, TypeRef)
+    # Enum return type names for functions whose declared return is an enum.
+    @function_enum_return_names : Hash(String, String)
 
     # Class type information
     getter class_info : Hash(String, ClassInfo)
@@ -499,6 +501,7 @@ module Crystal::HIR
       @function_types = {} of String => TypeRef
       @function_base_names = Set(String).new
       @function_base_return_types = {} of String => TypeRef
+      @function_enum_return_names = {} of String => String
       @class_info = {} of String => ClassInfo
       @module_class_vars = {} of String => Array(ClassVarInfo)
       @lib_structs = Set(String).new
@@ -16751,6 +16754,27 @@ module Crystal::HIR
       nil
     end
 
+    private def ivar_type_for_setter(
+      ctx : LoweringContext,
+      receiver_id : ValueId,
+      method_name : String
+    ) : TypeRef?
+      return nil unless method_name.ends_with?("=")
+      receiver_type = ctx.type_of(receiver_id)
+      class_name = get_type_name_from_ref(receiver_type)
+      return nil if class_name.empty?
+
+      if class_info = @class_info[class_name]?
+        accessor_name = method_name[0, method_name.size - 1]
+        ivar_name = "@#{accessor_name}"
+        if ivar_info = class_info.ivars.find { |iv| iv.name == ivar_name }
+          return ivar_info.type
+        end
+      end
+
+      nil
+    end
+
     private def lower_spawn(ctx : LoweringContext, node : CrystalV2::Compiler::Frontend::SpawnNode) : ValueId
       body_exprs = if body = node.body
                      body
@@ -17754,6 +17778,12 @@ module Crystal::HIR
       # Collect argument types for name mangling (overloading support)
       arg_types = args.map { |arg_id| ctx.type_of(arg_id) }
       arg_literals = args.map { |arg_id| ctx.type_literal?(arg_id) }
+      if receiver_id && method_name.ends_with?("=") && args.size == 1 &&
+         arg_types.all? { |t| t == TypeRef::VOID }
+        if inferred = ivar_type_for_setter(ctx, receiver_id, method_name)
+          arg_types = [inferred]
+        end
+      end
       if ENV["DEBUG_CALL_TRACE"]? && method_name == "copy_to"
         type_ids = arg_types.map(&.id)
         STDERR.puts "[CALL_TRACE] stage=after_arg_types method=#{method_name} arg_types=#{type_ids.join(",")}"
