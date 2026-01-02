@@ -7324,6 +7324,8 @@ module CrystalV2
               if !starts_statement && prev_tok
                 starts_statement = prev_tok.kind.in?(Token::Kind::Private, Token::Kind::Protected, Token::Kind::Abstract)
               end
+              abstract_def = starts_statement && token.kind == Token::Kind::Def &&
+                             prev_tok && prev_tok.kind == Token::Kind::Abstract
               case token.kind
               when Token::Kind::Begin, Token::Kind::Do
                 # begin/do always introduce a block that must be closed with end,
@@ -7334,7 +7336,10 @@ module CrystalV2
                    Token::Kind::If, Token::Kind::Unless, Token::Kind::While,
                    Token::Kind::Until, Token::Kind::Case, Token::Kind::Select,
                    Token::Kind::Lib, Token::Kind::Macro
-                block_depth += 1 if starts_statement
+                # Abstract defs have no body/end; don't advance block depth for them.
+                if !abstract_def && starts_statement
+                  block_depth += 1
+                end
               when Token::Kind::End
                 if !stop_on_branch && control_depth == 0 && block_depth == 0 && starts_statement
                   # Do not consume macro-def 'end'; leave it for caller
@@ -8169,6 +8174,15 @@ module CrystalV2
               # Fall through to let Amp be processed as infix bitwise AND operator
             when Token::Kind::ColonColon
               # Phase 63: Path expression (::)
+              left_node = @arena[left]
+              left_kind = Frontend.node_kind(left_node)
+              unless left_kind.in?(Frontend::NodeKind::Identifier,
+                                   Frontend::NodeKind::Constant,
+                                   Frontend::NodeKind::Path,
+                                   Frontend::NodeKind::Self,
+                                   Frontend::NodeKind::Generic)
+                break
+              end
               left = parse_path(left)
               next
             when Token::Kind::Operator
