@@ -1044,6 +1044,8 @@ r2 = maybe(false)  # => nil
 - EventLoop interface dispatch: force EventLoop::FileDescriptor/Socket to module kind and map instance calls to Polling/IOCP/Wasi (removes EventLoop__FileDescriptor_* missing symbols) (2026-01-xx).
 - Fix module class-method deferred lookup to use the module arena (prevents `Index out of bounds` in `find_module_class_def`) (2026-01-xx).
 - Track enum value types for `.new`/`.value` and propagate via assignments/identifiers in HIR lowering.
+- Propagate enum return types from method calls into enum predicate lowering (e.g., `File::Info#type` predicates) (2026-01-xx).
+- Track functions that return type literals; mark call results as type literals and resolve absolute `::` paths in HIR (fixes `EventLoop.backend_class`/nested class lookups) (2026-01-xx).
 - Invalidate type cache on enum registration to prevent enum names from collapsing to Class; IO::Seek predicate now lowers to compare (removes `_IO__Seek_current_`).
 - Resolve superclass name in context when registering classes (fixes `FileDescriptor_initialize_Int32` super call).
 - Register MacroIf/MacroLiteral nodes inside nested modules during HIR lowering.
@@ -1078,6 +1080,7 @@ r2 = maybe(false)  # => nil
 - Prefer module namespace over top-level aliases for mixin instance methods; carry module namespace into lazy lowering (fixes `FileDescriptor.system_info` resolving to `Crystal::System::FileDescriptor`) (2026-01-07).
 - Expand macro calls for static member access (class/module) during call lowering (fixes macro-only class methods like `IO::Error.from_errno`) (2026-01-07).
 - Run `macro included` during include registration/lowering; register macros + `extend` class methods from included modules (fixes `SystemError`-style class methods) (2026-01-07).
+- Capture `initialize` params from included modules for `new` signature inference (2026-01-xx).
 - Prefer mangled def names during method resolution when a definition exists (avoid base fallback) (2026-01-xx).
 - Store callsite arg types by CallSignature (base+arity+block) to reduce `$arity`/`_splat` collisions (2026-01-xx).
 - Force class-method lowering for module `extend self` methods when called as `Module.method` (fixes `self.*` calls inside class methods) (2026-01-xx).
@@ -1092,6 +1095,7 @@ r2 = maybe(false)  # => nil
 - Case/when enum predicate matching now ignores underscores (e.g., `.character_device?`), lowering to enum == literal and removing `_character_device_` missing symbol (2026-01-02).
 - Full-prelude bootstrap_array now links cleanly (no missing symbols in `/private/tmp/bootstrap_array_full.link.log`) (2026-01-02).
 - Macro body parsing: skip block depth for `abstract def` inside macro bodies to avoid false `{% end %}` errors (2026-01-02).
+- Macro `flag?` expansion handles nested if/elsif/else/unless branches and strips leading comments in macro bodies (2026-01-xx).
 - Bump AST cache version to 20 for macro-parse + enum predicate matching fixes (2026-01-02).
 - Bump AST cache version to 21 for block/command-call parsing fixes (2026-01-03).
 - Parser: don't treat wrapping ops/compound assignments as command-call args; allow nested blocks inside call-arg parsing (fixes `am.mantissa &+= ...` and `ticks.to_u64! &* ...` parsing, `&.each { ... { |e| ... } }` block params) (2026-01-03).
