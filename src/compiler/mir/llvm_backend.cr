@@ -3672,8 +3672,12 @@ module Crystal::MIR
           @value_types[inst.id] = TypeRef::POINTER
           return
         else
-          # Non-ptr destination - use 0
-          emit "#{name} = add #{dst_type} 0, 0"
+          # Non-ptr destination - use 0/0.0 as appropriate
+          if dst_type == "float" || dst_type == "double"
+            emit "#{name} = fadd #{dst_type} 0.0, 0.0"
+          else
+            emit "#{name} = add #{dst_type} 0, 0"
+          end
           @value_types[inst.id] = inst.type
           return
         end
