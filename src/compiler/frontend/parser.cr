@@ -10253,6 +10253,10 @@ module CrystalV2
         # Only calls and member accesses (and identifiers that can form calls)
         # are valid block receivers. Literals like Nil/Number/etc. are not.
         private def can_attach_block_to?(expr : ExprId) : Bool
+          # When parsing no-parens call arguments, a trailing `do` should bind
+          # to the outer call, not to the last argument expression.
+          # Allow block attachment inside parenthesized expressions.
+          return false if @parsing_call_args > 0 && @paren_depth == 0
           node = @arena[expr]
           case Frontend.node_kind(node)
           when Frontend::NodeKind::Call
