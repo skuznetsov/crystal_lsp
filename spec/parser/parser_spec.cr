@@ -185,7 +185,9 @@ bar")
     value_id.should_not be_nil
     value_node = arena[value_id.not_nil!]
     value_node.should be_a(CrystalV2::Compiler::Frontend::YieldNode)
-    value_node.as(CrystalV2::Compiler::Frontend::YieldNode).args.size.should eq(3)
+    args = value_node.as(CrystalV2::Compiler::Frontend::YieldNode).args
+    args.should_not be_nil
+    args.not_nil!.size.should eq(3)
   end
 
   it "treats escaped macro control as text in macro bodies" do
