@@ -1089,6 +1089,10 @@ r2 = maybe(false)  # => nil
 - Treat `TypeDeclarationNode` inside structs as lib field declarations (`field : Type`) (2026-01-xx).
 - Unwrap pointer unions for `value/[]/+=` intrinsics to avoid llc type mismatch in Array(String) buffer stores (2026-01-xx).
 - Remove `StructNode` from AST + LSP AST cache; structs are `ClassNode.is_struct` (cache version bump) (2025-12-25).
+- Case/when enum predicate matching now ignores underscores (e.g., `.character_device?`), lowering to enum == literal and removing `_character_device_` missing symbol (2026-01-02).
+- Full-prelude bootstrap_array now links cleanly (no missing symbols in `/private/tmp/bootstrap_array_full.link.log`) (2026-01-02).
+- Macro body parsing: skip block depth for `abstract def` inside macro bodies to avoid false `{% end %}` errors (2026-01-02).
+- Bump AST cache version to 20 for macro-parse + enum predicate matching fixes (2026-01-02).
 - Register module instance methods as class methods when `extend self` is present (fixes `Math.min/max`) (2025-12-25).
 - Propagate `extend self` through macro-literal/module branches when registering module methods (2025-12-25).
 - Parse no-parens calls with multiple args + `do` blocks by treating `do` as an expression boundary (fixes `return bsearch_internal ... do`) (2026-01-xx).
@@ -1132,12 +1136,12 @@ r2 = maybe(false)  # => nil
    - [x] Single source of truth for arena ownership during inline.
    - [x] Guard inliner against cross-arena AST and fallback to non-inline call.
    - DoD: `./bin/crystal_v2 examples/bootstrap_array.cr -o /tmp/bootstrap_array_full 2> /private/tmp/bootstrap_array_full.link.log` runs without OOB/segfault; no inline-yield guard logs present (2026-01-xx).
-4) Virtual dispatch lowering (IO/abstract receivers) - IN PROGRESS (2025-12-31)
+4) Virtual dispatch lowering (IO/abstract receivers) - DONE (2026-01-02)
    - [x] Lower HIR `Call.virtual` into MIR type-id switch for class/union receivers.
    - [x] Module-typed dispatch uses includer set + subclasses in MIR (method resolution still governed by item 1100).
    - [ ] Emit vtables (or direct dispatch table) for concrete classes; store vtable ptr in class layout (deferred; type-id switch in use).
    - [x] Treat abstract defs as virtual in HIR call marking.
-   - DoD: missing `_IO_read_Slice_UInt8_` / `_IO_write_Slice_UInt8_` / `_FileDescriptor_*` removed from `/tmp/missing_symbols_latest.txt` after full-prelude bootstrap.
+   - DoD: missing `_IO_read_Slice_UInt8_` / `_IO_write_Slice_UInt8_` / `_FileDescriptor_*` removed from `/private/tmp/missing_symbols_latest.txt` after full-prelude bootstrap (2026-01-02).
 - Infer class var types from `uninitialized` and typed literals (Array/Hash/NamedTuple) to avoid VOID globals (fixes `Thread@@threads`, `Hasher@@seed`, `Time::Location@@location_cache`) (2025-12-25).
 - Preserve generic class reopenings during monomorphization (fixes `Range#bsearch` defs) (2025-12-26).
 - Resolve bare method calls inside class context to top-level when the class does not define the method (fixes `bsearch_internal`) (2025-12-26).
@@ -1325,4 +1329,4 @@ The return_type=16 (NIL) for `to_s` methods is incorrect - should be String type
   - `lower_call()` around lines 18400-18600 - where return types are determined
   - `register_function_type()` - where function types are registered
 
-**Current missing symbol count**: 84 (`/tmp/missing_symbols_latest.txt`, built from `/tmp/bootstrap_array_full.link.log` on 2026-01-xx).
+**Current missing symbol count**: 0 (`/private/tmp/missing_symbols_latest.txt`, built from `/private/tmp/bootstrap_array_full.link.log` on 2026-01-02).
