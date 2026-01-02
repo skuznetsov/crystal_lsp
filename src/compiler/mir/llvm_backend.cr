@@ -6495,7 +6495,11 @@ module Crystal::MIR
             # Non-bool type: compare against 0 to get boolean
             c = @cond_counter
             @cond_counter += 1
-            emit "%cond#{c}.not_zero = icmp ne #{cond_llvm_type} #{cond}, 0"
+            if cond_llvm_type == "double" || cond_llvm_type == "float"
+              emit "%cond#{c}.not_zero = fcmp one #{cond_llvm_type} #{cond}, 0.0"
+            else
+              emit "%cond#{c}.not_zero = icmp ne #{cond_llvm_type} #{cond}, 0"
+            end
             emit "br i1 %cond#{c}.not_zero, label %#{then_block}, label %#{else_block}"
           else
             emit "br i1 #{cond}, label %#{then_block}, label %#{else_block}"
