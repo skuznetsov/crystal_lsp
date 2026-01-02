@@ -1339,6 +1339,15 @@ The return_type=16 (NIL) for `to_s` methods is incorrect - should be String type
   - Added parser spec to ensure `union` works as a local identifier.
 - **Result**: `inspect_invalid_expr` finds no invalid expr ids under `inline_loop_vars_union`. Full self-host compile still slow; confirm completion in long run.
 
+#### Issue 7: from_chars_advanced overload collapse during deferred module lookup - FIXED (2026-01-xx)
+- **Symptom**: self-host compile stalled while lowering `Float::FastFloat::BinaryFormat_Float64#from_chars_advanced`; call to `from_chars_advanced(pns, value)` kept resolving to the 4-arg overload.
+- **Root cause**: deferred module lookup used base names with `expected_param_count=0`, so the first matching def was picked; overloads collapsed to the base name, and `@lowering_functions` couldn't distinguish overloads.
+- **Fix applied**:
+  - Use callsite arg count to set `expected_param_count` when the name has no `$`.
+  - Preserve mangled callsite name (`$...`) as `target_name` so overloads are lowered under distinct keys.
+  - Emit `fcmp one` for float truthiness in LLVM backend to avoid `icmp ne double ... 0` errors when non-bool float conditions slip through.
+- **Verification**: `DEBUG_FROM_CHARS=1 DEBUG_LOWER_PROGRESS=from_chars_advanced ./bin/crystal_v2 --no-llvm-opt --no-llvm-metadata --no-link /tmp/ff_test2.cr -o /tmp/ff_test2` completes, and both overloads are lowered.
+
 **Next steps for GPT-5.2**:
 1. **Flow typing for variable reassignment**: DONE (see Issue 3).
 
