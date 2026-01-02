@@ -135,6 +135,33 @@ bar")
     pieces.map(&.kind).should contain(CrystalV2::Compiler::Frontend::MacroPiece::Kind::ControlEnd)
   end
 
+  it "parses return yield with grouped first arg and extra args" do
+    source = <<-CR
+      def foo
+        return yield (1 << 18) &+ (2 << 12) &+ (3 << 6) &+ (4 &- 5), 4, nil
+      end
+    CR
+
+    parser = CrystalV2::Compiler::Frontend::Parser.new(CrystalV2::Compiler::Frontend::Lexer.new(source))
+    program = parser.parse_program
+
+    program.roots.size.should eq(1)
+    arena = program.arena
+    def_node = arena[program.roots.first]
+    def_node.should be_a(CrystalV2::Compiler::Frontend::DefNode)
+
+    body = def_node.as(CrystalV2::Compiler::Frontend::DefNode).body
+    body.should_not be_nil
+    return_node = arena[body.not_nil!.first]
+    return_node.should be_a(CrystalV2::Compiler::Frontend::ReturnNode)
+
+    value_id = return_node.as(CrystalV2::Compiler::Frontend::ReturnNode).value
+    value_id.should_not be_nil
+    value_node = arena[value_id.not_nil!]
+    value_node.should be_a(CrystalV2::Compiler::Frontend::YieldNode)
+    value_node.as(CrystalV2::Compiler::Frontend::YieldNode).args.size.should eq(3)
+  end
+
   it "treats escaped macro control as text in macro bodies" do
     source = <<-'CR'
       macro outer

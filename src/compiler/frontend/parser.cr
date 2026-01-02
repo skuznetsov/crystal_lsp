@@ -3996,7 +3996,13 @@ module CrystalV2
           skip_trivia
 
           # Parenthesized argument list: yield(...)
+          # Only treat as yield(...) when `(` is adjacent to `yield` (yield(…)).
+          # If there's whitespace (yield (…)), treat it as a grouped first argument.
+          paren_adjacent = false
           if current_token.kind == Token::Kind::LParen
+            paren_adjacent = current_token.span.start_offset == yield_token.span.end_offset
+          end
+          if current_token.kind == Token::Kind::LParen && paren_adjacent
             advance  # consume (
             skip_trivia
 
