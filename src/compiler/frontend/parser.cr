@@ -234,7 +234,7 @@ module CrystalV2
             when Token::Kind::Class    then node = parse_class
             when Token::Kind::Module   then node = parse_module
             when Token::Kind::Struct   then node = parse_struct
-            when Token::Kind::Union    then node = parse_union
+            when Token::Kind::Union    then node = union_definition_start?(token) ? parse_union : nil
             when Token::Kind::Enum     then node = parse_enum
             when Token::Kind::Alias    then node = parse_alias
             when Token::Kind::Annotation then node = parse_annotation_def
@@ -266,7 +266,7 @@ module CrystalV2
                 when Token::Kind::Struct
                   parse_struct
                 when Token::Kind::Union
-                  parse_union
+                  union_definition_start?(current_token) ? parse_union : PREFIX_ERROR
                 when Token::Kind::Enum
                   parse_enum
                 when Token::Kind::Alias
@@ -1688,6 +1688,12 @@ module CrystalV2
           current_token.kind == Token::Kind::Macro
         end
 
+        private def union_definition_start?(token : Token) : Bool
+          return false unless token.kind == Token::Kind::Union
+          next_tok = peek_next_non_trivia
+          next_tok.kind == Token::Kind::Identifier
+        end
+
         # Phase 100: Added Macro to definition_start?
         private def definition_start?
           token = current_token
@@ -1703,7 +1709,7 @@ module CrystalV2
             return false if next_tok.kind == Token::Kind::Colon
           end
 
-          token.kind == Token::Kind::Def || token.kind == Token::Kind::Macro || token.kind == Token::Kind::Class || token.kind == Token::Kind::Module || token.kind == Token::Kind::Struct || token.kind == Token::Kind::Union || token.kind == Token::Kind::Enum || token.kind == Token::Kind::Alias || token.kind == Token::Kind::Annotation || token.kind == Token::Kind::Abstract || token.kind == Token::Kind::Private || token.kind == Token::Kind::Protected || token.kind == Token::Kind::Lib || token.kind == Token::Kind::Fun
+          token.kind == Token::Kind::Def || token.kind == Token::Kind::Macro || token.kind == Token::Kind::Class || token.kind == Token::Kind::Module || token.kind == Token::Kind::Struct || union_definition_start?(token) || token.kind == Token::Kind::Enum || token.kind == Token::Kind::Alias || token.kind == Token::Kind::Annotation || token.kind == Token::Kind::Abstract || token.kind == Token::Kind::Private || token.kind == Token::Kind::Protected || token.kind == Token::Kind::Lib || token.kind == Token::Kind::Fun
         end
 
         # Phase 35: Check if identifier is a constant (uppercase first letter)

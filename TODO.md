@@ -1329,6 +1329,16 @@ The return_type=16 (NIL) for `to_s` methods is incorrect - should be String type
 - **Fix applied**: avoid refining VOID args to Float64 when untyped overloads exist; prefer untyped overloads for VOID arg sets. `Math.min/max` now lower to integer paths and `llc` no longer errors on `Slice_UInt8_____Int32_Int32` (2026-01-02).
 - **Fix applied**: inline `try` for union receivers (nil-check + block inlining) to avoid generating union `try` symbols; `*_try` entries removed from missing list (2026-01-xx).
 
+#### Issue 6: ExprId -1 in inline_loop_vars_union (union keyword) - FIXED (2026-01-xx)
+- **Symptom**: self-host compile crashed with `ExprId out of bounds: -1` while lowering `AstToHir#inline_loop_vars_union`.
+- **Root cause**: `union` token was always treated as a definition start. In `inline_loop_vars_union`, `union = Set(String).new` was mis-parsed as `Set(String).new`, and `union.add(...)` had an invalid receiver.
+- **Fix applied**:
+  - `definition_start?` now treats `union` as a definition only when followed by an identifier.
+  - `parse_program` fast-path now guards `union` the same way.
+  - AST cache version bumped to 22 to invalidate stale cached ASTs.
+  - Added parser spec to ensure `union` works as a local identifier.
+- **Result**: `inspect_invalid_expr` finds no invalid expr ids under `inline_loop_vars_union`. Full self-host compile still slow; confirm completion in long run.
+
 **Next steps for GPT-5.2**:
 1. **Flow typing for variable reassignment**: DONE (see Issue 3).
 

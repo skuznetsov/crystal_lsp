@@ -64,6 +64,32 @@ bar")
     CrystalV2::Compiler::Frontend.node_member(member).try { |m| String.new(m) }.should eq("bar")
   end
 
+  it "parses keyword identifiers like union in expressions" do
+    source = <<-CR
+      def test
+        union = Set(String).new
+        union.add(1)
+      end
+    CR
+
+    parser = CrystalV2::Compiler::Frontend::Parser.new(CrystalV2::Compiler::Frontend::Lexer.new(source))
+    program = parser.parse_program
+
+    program.roots.size.should eq(1)
+    arena = program.arena
+    def_node = arena[program.roots.first].as(CrystalV2::Compiler::Frontend::DefNode)
+    body = def_node.body.not_nil!
+
+    assign = arena[body[0]].as(CrystalV2::Compiler::Frontend::AssignNode)
+    target = arena[assign.target].as(CrystalV2::Compiler::Frontend::IdentifierNode)
+    String.new(target.name).should eq("union")
+
+    call = arena[body[1]].as(CrystalV2::Compiler::Frontend::CallNode)
+    callee = arena[call.callee].as(CrystalV2::Compiler::Frontend::MemberAccessNode)
+    obj = arena[callee.object].as(CrystalV2::Compiler::Frontend::IdentifierNode)
+    String.new(obj.name).should eq("union")
+  end
+
   it "parses no-parens call with multiple args and block" do
     source = <<-CR
       foo 1, 2 do |value|
