@@ -3426,6 +3426,9 @@ module Crystal::MIR
                 emit "%binop#{inst.id}.raw_ext = sext #{result_type} #{raw_name} to #{payload_type}"
                 payload_val = "%binop#{inst.id}.raw_ext"
               end
+            elsif (payload_type == "float" || payload_type == "double") && result_type.starts_with?("i")
+              emit "%binop#{inst.id}.raw_itof = sitofp #{result_type} #{raw_name} to #{payload_type}"
+              payload_val = "%binop#{inst.id}.raw_itof"
             elsif payload_type == "ptr" && result_type.starts_with?("i")
               emit "%binop#{inst.id}.raw_inttoptr = inttoptr #{result_type} #{raw_name} to ptr"
               payload_val = "%binop#{inst.id}.raw_inttoptr"
