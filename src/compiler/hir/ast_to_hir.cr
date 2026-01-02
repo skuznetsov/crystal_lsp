@@ -3847,6 +3847,8 @@ module Crystal::HIR
         return infer_type_from_expr(expr_node.expression, self_type_name)
       when CrystalV2::Compiler::Frontend::MacroExpressionNode
         return infer_type_from_expr(expr_node.expression, self_type_name)
+      when CrystalV2::Compiler::Frontend::AsNode
+        return type_ref_for_name(String.new(expr_node.target_type))
       when CrystalV2::Compiler::Frontend::MemberAccessNode
         member_name = String.new(expr_node.member)
         if member_name == "size"
@@ -3883,19 +3885,35 @@ module Crystal::HIR
       when CrystalV2::Compiler::Frontend::AssignNode
         value_id = expr_node.value
         value_node = node_for_expr(value_id)
+        value_type = nil
         if value_node.is_a?(CrystalV2::Compiler::Frontend::BinaryNode)
           op = value_node.operator_string
           if op == "&&" || op == "||"
             left_type = infer_type_from_expr(value_node.left, self_type_name)
             right_type = infer_type_from_expr(value_node.right, self_type_name)
             if left_type && right_type
-              return union_type_for_values(left_type, right_type)
+              value_type = union_type_for_values(left_type, right_type)
             end
-            return left_type if left_type && left_type != TypeRef::VOID
-            return right_type if right_type && right_type != TypeRef::VOID
+            value_type ||= left_type if left_type && left_type != TypeRef::VOID
+            value_type ||= right_type if right_type && right_type != TypeRef::VOID
           end
         end
-        return infer_type_from_expr(value_id, self_type_name)
+        value_type ||= infer_type_from_expr(value_id, self_type_name)
+        if value_type && value_type != TypeRef::VOID
+          if target = node_for_expr(expr_node.target)
+            if target.is_a?(CrystalV2::Compiler::Frontend::IdentifierNode)
+              name = String.new(target.name)
+              update_typeof_local(name, value_type)
+              if concrete_name = concrete_type_name_for(value_type)
+                existing_name = lookup_typeof_local_name(name)
+                if existing_name.nil? || module_like_type_name?(existing_name)
+                  update_typeof_local_name(name, concrete_name)
+                end
+              end
+            end
+          end
+        end
+        return value_type
       when CrystalV2::Compiler::Frontend::InstanceVarNode
         if self_type_name
           if info = @class_info[self_type_name]?
@@ -3909,6 +3927,13 @@ module Crystal::HIR
         callee_node = node_for_expr(expr_node.callee)
         if callee_node.is_a?(CrystalV2::Compiler::Frontend::MemberAccessNode)
           member_name = String.new(callee_node.member)
+          if member_name == "unsafe_as"
+            if arg = expr_node.args.first?
+              if type_str = stringify_type_expr(arg)
+                return type_ref_for_name(type_str)
+              end
+            end
+          end
           if member_name == "new"
             if type_str = stringify_type_expr(callee_node.object)
               if type_str == "Range" && expr_node.args.size >= 2
@@ -3937,6 +3962,12 @@ module Crystal::HIR
             return cached if cached != TypeRef::VOID
           end
         end
+      when CrystalV2::Compiler::Frontend::UnaryNode
+        op = String.new(expr_node.operator)
+        if op == "!"
+          return TypeRef::BOOL
+        end
+        return infer_type_from_expr(expr_node.operand, self_type_name)
       when CrystalV2::Compiler::Frontend::UninitializedNode
         if type_str = stringify_type_expr(expr_node.type)
           return type_ref_for_name(type_str)

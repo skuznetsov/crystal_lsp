@@ -1210,7 +1210,7 @@ r2 = maybe(false)  # => nil
   3. Fixed `find_method_in_generic_template()` to use template's arena instead of `@arena` for visibility unwrapping
 - **Verified**: Array now has body_size=174 (all methods), missing symbols reduced from 149 to 107
 
-#### Issue 3: Flow typing for variable reassignment - NOT FIXED
+#### Issue 3: Flow typing for variable reassignment - FIXED (2026-01-xx)
 - **Symptom**: `bsearch_internal_Float64_Float64` still in missing symbols
 - **Root cause**: In stdlib `bsearch.cr:38-45`:
   ```crystal
@@ -1221,7 +1221,11 @@ r2 = maybe(false)  # => nil
   end
   ```
   Variable reassignment doesn't update the type in our type inference. The call is still mangled with Float64 types instead of Int64.
-- **Fix needed**: Track variable type changes through reassignment in HIR context.
+- **Fix applied**:
+  - infer_type_from_expr now flow-updates locals on assignment when inferred type is concrete.
+  - infer_type_from_expr handles unary ops (+/-/!) and `unsafe_as` return types for branch inference.
+  - infer_type_from_expr handles `as` casts to preserve target type.
+  - Result: `bsearch_internal(from : Float, to : Float)` reassignment to Int no longer mangles as Float.
 
 #### Issue 4: Macro expansion for {% begin %} blocks with {{@type}} - NOT FIXED
 - **Symptom**: `Int#remainder` returns Nil because macro body isn't expanded
@@ -1306,7 +1310,7 @@ The return_type=16 (NIL) for `to_s` methods is incorrect - should be String type
 - **Fix applied**: avoid refining VOID args to Float64 when untyped overloads exist; prefer untyped overloads for VOID arg sets. `Math.min/max` now lower to integer paths and `llc` no longer errors on `Slice_UInt8_____Int32_Int32` (2026-01-02).
 
 **Next steps for GPT-5.2**:
-1. **Flow typing for variable reassignment**: Track variable type changes through reassignment in HIR context (related to Issue 3 above).
+1. **Flow typing for variable reassignment**: DONE (see Issue 3).
 
 **Files to investigate**:
 - `src/compiler/hir/ast_to_hir.cr`:
