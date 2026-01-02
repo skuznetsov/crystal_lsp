@@ -350,6 +350,9 @@ module Crystal::HIR
 
     # Functions that contain yield (candidates for inline)
     @yield_functions : Set(String)
+    # Functions whose explicit returns are all `return yield` (block-return-dependent).
+    @yield_return_functions : Set(String)
+    @yield_return_checked : Set(String)
 
     # Track functions lowered lazily to avoid re-entrancy/duplication.
     @lowered_functions : Set(String)
@@ -529,6 +532,8 @@ module Crystal::HIR
       @function_defs = {} of String => CrystalV2::Compiler::Frontend::DefNode
       @function_def_arenas = {} of String => CrystalV2::Compiler::Frontend::ArenaLike
       @yield_functions = Set(String).new
+      @yield_return_functions = Set(String).new
+      @yield_return_checked = Set(String).new
       @lowered_functions = Set(String).new
       @lowering_functions = Set(String).new
       @pending_arg_types = {} of String => Array(TypeRef)
@@ -9692,6 +9697,208 @@ module Crystal::HIR
     # Check if expression list contains a return
     private def contains_return?(body : Array(ExprId)) : Bool
       body.any? { |expr_id| contains_return_in_expr?(expr_id) }
+    end
+
+    private def yield_return_only?(body : Array(ExprId)) : Bool
+      return false if body.empty?
+      return false unless tail_is_return?(body)
+      saw_return = false
+      ok = true
+      body.each do |expr_id|
+        saw, good = scan_return_yield(expr_id)
+        saw_return ||= saw
+        ok &&= good
+        break unless ok
+      end
+      saw_return && ok
+    end
+
+    private def tail_is_return?(body : Array(ExprId)) : Bool
+      return false if body.empty?
+      expr_id = body.last
+      loop do
+        expr_node = @arena[expr_id]
+        case expr_node
+        when CrystalV2::Compiler::Frontend::GroupingNode
+          expr_id = expr_node.expression
+        when CrystalV2::Compiler::Frontend::MacroExpressionNode
+          expr_id = expr_node.expression
+        else
+          return expr_node.is_a?(CrystalV2::Compiler::Frontend::ReturnNode)
+        end
+      end
+    end
+
+    private def yield_return_expr?(expr_id : ExprId) : Bool
+      loop do
+        expr_node = @arena[expr_id]
+        case expr_node
+        when CrystalV2::Compiler::Frontend::GroupingNode
+          expr_id = expr_node.expression
+        when CrystalV2::Compiler::Frontend::MacroExpressionNode
+          expr_id = expr_node.expression
+        when CrystalV2::Compiler::Frontend::YieldNode
+          return true
+        when CrystalV2::Compiler::Frontend::CallNode
+          callee = @arena[expr_node.callee]
+          return callee.is_a?(CrystalV2::Compiler::Frontend::IdentifierNode) &&
+                   String.new(callee.name) == "yield"
+        else
+          return false
+        end
+      end
+    end
+
+    private def scan_return_yield(expr_id : ExprId) : {Bool, Bool}
+      expr_node = @arena[expr_id]
+      case expr_node
+      when CrystalV2::Compiler::Frontend::ReturnNode
+        if value = expr_node.value
+          return {true, yield_return_expr?(value)}
+        end
+        return {true, false}
+      when CrystalV2::Compiler::Frontend::IfNode
+        saw = false
+        ok = true
+        expr_node.then_body.each do |child|
+          child_saw, child_ok = scan_return_yield(child)
+          saw ||= child_saw
+          ok &&= child_ok
+        end
+        if elsifs = expr_node.elsifs
+          elsifs.each do |branch|
+            branch.body.each do |child|
+              child_saw, child_ok = scan_return_yield(child)
+              saw ||= child_saw
+              ok &&= child_ok
+            end
+          end
+        end
+        if else_body = expr_node.else_body
+          else_body.each do |child|
+            child_saw, child_ok = scan_return_yield(child)
+            saw ||= child_saw
+            ok &&= child_ok
+          end
+        end
+        return {saw, ok}
+      when CrystalV2::Compiler::Frontend::CaseNode
+        saw = false
+        ok = true
+        expr_node.when_branches.each do |branch|
+          branch.body.each do |child|
+            child_saw, child_ok = scan_return_yield(child)
+            saw ||= child_saw
+            ok &&= child_ok
+          end
+        end
+        if else_branch = expr_node.else_branch
+          else_branch.each do |child|
+            child_saw, child_ok = scan_return_yield(child)
+            saw ||= child_saw
+            ok &&= child_ok
+          end
+        end
+        if in_branches = expr_node.in_branches
+          in_branches.each do |branch|
+            branch.body.each do |child|
+              child_saw, child_ok = scan_return_yield(child)
+              saw ||= child_saw
+              ok &&= child_ok
+            end
+          end
+        end
+        return {saw, ok}
+      when CrystalV2::Compiler::Frontend::BeginNode
+        saw = false
+        ok = true
+        expr_node.body.each do |child|
+          child_saw, child_ok = scan_return_yield(child)
+          saw ||= child_saw
+          ok &&= child_ok
+        end
+        if clauses = expr_node.rescue_clauses
+          clauses.each do |clause|
+            clause.body.each do |child|
+              child_saw, child_ok = scan_return_yield(child)
+              saw ||= child_saw
+              ok &&= child_ok
+            end
+          end
+        end
+        if else_body = expr_node.else_body
+          else_body.each do |child|
+            child_saw, child_ok = scan_return_yield(child)
+            saw ||= child_saw
+            ok &&= child_ok
+          end
+        end
+        if ensure_body = expr_node.ensure_body
+          ensure_body.each do |child|
+            child_saw, child_ok = scan_return_yield(child)
+            saw ||= child_saw
+            ok &&= child_ok
+          end
+        end
+        return {saw, ok}
+      when CrystalV2::Compiler::Frontend::BlockNode
+        if body = expr_node.body
+          saw = false
+          ok = true
+          body.each do |child|
+            child_saw, child_ok = scan_return_yield(child)
+            saw ||= child_saw
+            ok &&= child_ok
+          end
+          return {saw, ok}
+        end
+      when CrystalV2::Compiler::Frontend::LoopNode
+        saw = false
+        ok = true
+        expr_node.body.each do |child|
+          child_saw, child_ok = scan_return_yield(child)
+          saw ||= child_saw
+          ok &&= child_ok
+        end
+        return {saw, ok}
+      when CrystalV2::Compiler::Frontend::ForNode
+        saw = false
+        ok = true
+        expr_node.body.each do |child|
+          child_saw, child_ok = scan_return_yield(child)
+          saw ||= child_saw
+          ok &&= child_ok
+        end
+        return {saw, ok}
+      end
+      {false, true}
+    end
+
+    private def yield_return_function?(name : String) : Bool
+      return true if @yield_return_functions.includes?(name)
+      return false if @yield_return_checked.includes?(name)
+      @yield_return_checked.add(name)
+      if def_node = @function_defs[name]?
+        if body = def_node.body
+          arena = @function_def_arenas[name]? || @arena
+          with_arena(arena) do
+            if yield_return_only?(body)
+              @yield_return_functions.add(name)
+              STDERR.puts "[YIELD_RETURN] mark=#{name}" if ENV["DEBUG_YIELD_RETURN"]?
+            end
+          end
+        end
+      end
+      @yield_return_functions.includes?(name)
+    end
+
+    private def yield_return_function_for_call(mangled_name : String, base_name : String) : Bool
+      result = yield_return_function?(mangled_name) || yield_return_function?(base_name)
+      if mangled_base = mangled_name.split("$", 2)[0]?
+        result ||= yield_return_function?(mangled_base)
+      end
+      STDERR.puts "[YIELD_RETURN] call mangled=#{mangled_name} base=#{base_name} result=#{result}" if ENV["DEBUG_YIELD_RETURN"]?
+      result
     end
 
     private def infer_ivars_from_body(body : Array(ExprId), ivars : Array(IVarInfo), offset_ref : Pointer(Int32)) : Nil
@@ -18859,8 +19066,10 @@ module Crystal::HIR
         end
       end
 
+      block_return_name = nil
       if block_id
-        if block_return_name = block_return_type_name(ctx, block_id)
+        block_return_name = block_return_type_name(ctx, block_id)
+        if block_return_name
           if type_param_name = block_return_type_param_name(mangled_method_name, base_method_name)
             record_pending_type_param_map(mangled_method_name, {type_param_name => block_return_name})
           end
@@ -18870,12 +19079,17 @@ module Crystal::HIR
         end
       end
 
-      if block_id && method_name == "try"
-        if block_return_name = block_return_type_name(ctx, block_id)
+      if block_id && method_name == "try" && block_return_name
+        inferred = type_ref_for_name(block_return_name)
+        if receiver_id && is_union_or_nilable_type?(ctx.type_of(receiver_id))
+          inferred = create_union_type_for_nullable(inferred)
+        end
+        return_type = inferred if inferred != TypeRef::VOID
+      end
+
+      if block_id && block_return_name
+        if yield_return_function_for_call(mangled_method_name, base_method_name)
           inferred = type_ref_for_name(block_return_name)
-          if receiver_id && is_union_or_nilable_type?(ctx.type_of(receiver_id))
-            inferred = create_union_type_for_nullable(inferred)
-          end
           return_type = inferred if inferred != TypeRef::VOID
         end
       end
@@ -22309,6 +22523,15 @@ module Crystal::HIR
         end
       end
 
+      if ENV["DEBUG_INLINE_BLOCK_RESULT"]?
+        inline_name = @inline_yield_name_stack.last? || ""
+        if inline_name.includes?("decode_char_before")
+          result_type = result ? ctx.type_of(result) : TypeRef::VOID
+          yield_types = yield_args.map { |arg_id| get_type_name_from_ref(ctx.type_of(arg_id)) }
+          STDERR.puts "[INLINE_BLOCK_RESULT] callee=#{inline_name} result=#{get_type_name_from_ref(result_type)} yield=#{yield_types.join(",")}"
+        end
+      end
+
       # If the block body didn't infer a result type, fall back to a non-void arg type.
       if result && ctx.type_of(result) == TypeRef::VOID
         yield_args.each do |arg_id|
@@ -22627,6 +22850,9 @@ module Crystal::HIR
       ensure_monomorphized_type(receiver_type) unless receiver_type == TypeRef::VOID
       receiver_is_type_literal = receiver_type.id >= TypeRef::FIRST_USER_TYPE &&
                                  ctx.type_literal?(object_id)
+      if member_name == "unsafe_chr" && ENV["DEBUG_UNSAFE_CHR"]?
+        STDERR.puts "[UNSAFE_CHR] receiver=#{get_type_name_from_ref(receiver_type)}"
+      end
       if receiver_is_type_literal
         class_name = nil
         if info = class_info_for_type(receiver_type)
@@ -22716,6 +22942,7 @@ module Crystal::HIR
               cast = Cast.new(ctx.next_id, TypeRef::CHAR, unwrapped, TypeRef::CHAR)
               ctx.emit(cast)
               ctx.register_type(cast.id, TypeRef::CHAR)
+              STDERR.puts "[UNSAFE_CHR] cast union->Char" if ENV["DEBUG_UNSAFE_CHR"]?
               return cast.id
             end
           elsif type_desc = @module.get_type_descriptor(receiver_type)
@@ -22733,6 +22960,7 @@ module Crystal::HIR
                 cast = Cast.new(ctx.next_id, TypeRef::CHAR, unwrapped.id, TypeRef::CHAR)
                 ctx.emit(cast)
                 ctx.register_type(cast.id, TypeRef::CHAR)
+                STDERR.puts "[UNSAFE_CHR] cast unwrap->Char" if ENV["DEBUG_UNSAFE_CHR"]?
                 return cast.id
               end
             end
@@ -22744,6 +22972,7 @@ module Crystal::HIR
           cast = Cast.new(ctx.next_id, TypeRef::CHAR, object_id, TypeRef::CHAR)
           ctx.emit(cast)
           ctx.register_type(cast.id, TypeRef::CHAR)
+          STDERR.puts "[UNSAFE_CHR] cast primitive->Char" if ENV["DEBUG_UNSAFE_CHR"]?
           return cast.id
         end
       end
@@ -23343,14 +23572,14 @@ module Crystal::HIR
             # Store the wrapped union value
             field_set = FieldSet.new(ctx.next_id, TypeRef::VOID, self_id, name, union_wrap.id, ivar_offset)
             ctx.emit(field_set)
-            return field_set.id
+            return value_id
           end
         end
 
         # Regular (non-union) field assignment
         field_set = FieldSet.new(ctx.next_id, TypeRef::VOID, self_id, name, value_id, ivar_offset)
         ctx.emit(field_set)
-        field_set.id
+        value_id
 
       when CrystalV2::Compiler::Frontend::ClassVarNode
         # Name includes @@ prefix, strip it

@@ -1053,6 +1053,7 @@ r2 = maybe(false)  # => nil
 - Attach trailing `do` blocks to parenthesized/member-access calls (fixes `Array(T).build(size) do` + `times do` in stdlib) (2026-01-xx).
 - Handle inline returns during yield inlining (guard proc/block bodies + safe block bounds) to preserve Enumerable semantics.
 - Fix inline-yield return override so `return` inside block targets caller (removes `Nil#offset`/`Nil#size` in prelude HIR) (2026-01-05).
+- Fix ivar assignment lowering to return RHS value (not void) so inline-yield blocks infer `Char` instead of `Tuple` (fixes `Char::Reader#decode_char_before` result typing) (2026-01-xx).
 - Recheck registered return types after lowering to avoid fallback pointer returns (fixes `Crystal::System.to_string_slice` -> `Slice(UInt8)`) (2026-01-05).
 - Narrow locals for `is_a?` conditions in if/elsif branches (avoids `String#null?` in `to_string_slice`) (2026-01-08).
 - Lower `is_a?` calls to intrinsic checks (UnionIs/IsA) and guard missing type args (2026-01-08).
