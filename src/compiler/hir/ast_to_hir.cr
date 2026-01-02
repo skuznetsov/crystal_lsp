@@ -7973,6 +7973,10 @@ module Crystal::HIR
         if progress_filter
           progress_match = progress_filter == "1" || base_name.includes?(progress_filter)
         end
+        slow_ms = nil
+        if progress_match
+          slow_ms = ENV["DEBUG_LOWER_SLOW_MS"]?.try(&.to_f) || 50.0
+        end
         if ENV.has_key?("DEBUG_LOWER_BYTE") && (method_name == "byte_begin" || method_name == "byte_range")
           STDERR.puts "[LOWER_METHOD] BODY size=#{body.size} expressions"
           body.each_with_index do |expr_id, i|
@@ -7985,21 +7989,21 @@ module Crystal::HIR
           end
         end
         body.each_with_index do |expr_id, idx|
+          expr_snippet = nil
           if progress_match
             begin
               expr_node = @arena[expr_id]
-              snippet = nil
               if source = @sources_by_arena[@arena]?
                 span = expr_node.span
                 start = span.start_offset
                 length = span.end_offset - span.start_offset
                 if length > 0 && start >= 0 && start < source.bytesize
                   slice_len = length > 120 ? 120 : length
-                  snippet = source.byte_slice(start, slice_len).gsub(/\s+/, " ").strip
+                  expr_snippet = source.byte_slice(start, slice_len).gsub(/\s+/, " ").strip
                 end
               end
-              if snippet
-                STDERR.puts "[LOWER_PROGRESS] method=#{base_name} idx=#{idx} node=#{expr_node.class.name} offs=#{expr_node.span.start_offset} \"#{snippet}\""
+              if expr_snippet
+                STDERR.puts "[LOWER_PROGRESS] method=#{base_name} idx=#{idx} node=#{expr_node.class.name} offs=#{expr_node.span.start_offset} \"#{expr_snippet}\""
               else
                 STDERR.puts "[LOWER_PROGRESS] method=#{base_name} idx=#{idx} node=#{expr_node.class.name}"
               end
@@ -8007,6 +8011,7 @@ module Crystal::HIR
               STDERR.puts "[LOWER_PROGRESS] method=#{base_name} idx=#{idx} node=(OOB)"
             end
           end
+          expr_start = slow_ms ? Time.monotonic : nil
           if ENV["DEBUG_CALL_TRACE"]? && method_name == "copy_to"
             STDERR.puts "[LOWER_METHOD] expr=#{expr_id.index} idx=#{idx} arena=#{@arena.size}"
             begin
@@ -8030,6 +8035,13 @@ module Crystal::HIR
             end
           end
           last_value = lower_expr(ctx, expr_id)
+          if slow_ms && expr_start
+            elapsed = (Time.monotonic - expr_start).total_milliseconds
+            if elapsed >= slow_ms
+              snippet_label = expr_snippet ? " \"#{expr_snippet}\"" : ""
+              STDERR.puts "[LOWER_SLOW] method=#{base_name} idx=#{idx} #{elapsed.round(1)}ms#{snippet_label}"
+            end
+          end
         end
       end
 
