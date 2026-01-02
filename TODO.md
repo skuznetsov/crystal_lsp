@@ -1054,6 +1054,8 @@ r2 = maybe(false)  # => nil
 - Recheck registered return types after lowering to avoid fallback pointer returns (fixes `Crystal::System.to_string_slice` -> `Slice(UInt8)`) (2026-01-05).
 - Narrow locals for `is_a?` conditions in if/elsif branches (avoids `String#null?` in `to_string_slice`) (2026-01-08).
 - Lower `is_a?` calls to intrinsic checks (UnionIs/IsA) and guard missing type args (2026-01-08).
+- Lower `unsafe_as(T)` calls as intrinsic casts (no method call) and bitcast same-size float/int in MIR cast lowering (fixes `float_as_int`/`Object#unsafe_as(Int64)` returning ptr; removes `llc` phi type mismatches) (2026-01-01).
+- Convert integer arithmetic results to float payloads when wrapping union math into float variants (fixes `store double %binop.raw` llc error in `LineNumbers#find`) (2026-01-01).
 - Lower inherited class methods via Object fallback in codegen (fixes `String.set_crystal_type_id`) (2026-01-xx).
 - Fix escaped macro controls in macro bodies to avoid false `{% for %}` nesting errors (restores `Object.set_crystal_type_id`) (2026-01-xx).
 - Resolve lib out-struct types via `short_type_index` guard in `type_param_like?` (fixes `DlInfo` resolution; removes `Pointer(UInt8)#dli_*` missing symbols) (2026-01-xx).
@@ -1063,7 +1065,7 @@ r2 = maybe(false)  # => nil
 - Infer bsearch/bsearch_index returns for unannotated methods and prefer arity-specific overloads in member access (fixes `Array(Row)#address` in LineNumbers find) (2026-01-xx).
 - Preserve callsite arg types per signature and consume consistently during lazy lowering (reduces base-name collisions; missing symbols now 96) (2026-01-xx).
 - Context-aware type cache keys + invalidation on module/class reopen and macro reparse output (missing symbols now 95) (2026-01-xx).
-- Bump AST cache version for macro parse changes (2026-01-xx).
+- Bump AST cache version to 18 for parser/macro parse changes (2026-01-01).
 - Release build uses `-O2` by default (`CRYSTAL_V2_OPT_LEVEL` override) after `-O3` segfaults during deep yield inlining; root cause TBD (2026-01-xx).
 - Lower inherited instance methods via parent fallback in codegen (fixes `IO::FileDescriptor#puts` resolution) (2025-12-28).
 - Use array element types for `each`/`each_with_index` block params to avoid Array(T)#field fallbacks.
