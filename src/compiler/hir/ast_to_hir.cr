@@ -17987,6 +17987,16 @@ module Crystal::HIR
               return inline_tap_with_proc(ctx, receiver_id, proc_for_inline)
             end
           end
+          if receiver_id && method_name == "try"
+            recv_type = ctx.type_of(receiver_id)
+            if is_union_or_nilable_type?(recv_type)
+              if block_for_inline
+                return inline_try_with_block(ctx, receiver_id, recv_type, block_for_inline)
+              elsif proc_for_inline
+                return inline_try_with_proc(ctx, receiver_id, recv_type, proc_for_inline)
+              end
+            end
+          end
 
           if block_for_inline
             block_cast = block_for_inline
@@ -20999,6 +21009,138 @@ module Crystal::HIR
       ctx.pop_scope
       # tap returns self
       receiver_id
+    end
+
+    private def inline_try_with_block(
+      ctx : LoweringContext,
+      receiver_id : ValueId,
+      receiver_type : TypeRef,
+      block_node : CrystalV2::Compiler::Frontend::BlockNode
+    ) : ValueId
+      inline_try_core(ctx, receiver_id, receiver_type) do |non_nil_id|
+        ctx.push_scope(ScopeKind::Block)
+
+        if params = block_node.params
+          params.each_with_index do |param, i|
+            param_name = if param.name
+                           String.new(param.name.not_nil!)
+                         else
+                           "_block_param_#{i}"
+                         end
+            ctx.register_local(param_name, non_nil_id)
+            ctx.register_type(non_nil_id, ctx.type_of(non_nil_id))
+          end
+        end
+
+        value_id = if body = block_node.body
+                     lower_body(ctx, body)
+                   else
+                     nil_lit = Literal.new(ctx.next_id, TypeRef::NIL, nil)
+                     ctx.emit(nil_lit)
+                     nil_lit.id
+                   end
+
+        ctx.pop_scope
+        value_id
+      end
+    end
+
+    private def inline_try_with_proc(
+      ctx : LoweringContext,
+      receiver_id : ValueId,
+      receiver_type : TypeRef,
+      proc_node : CrystalV2::Compiler::Frontend::ProcLiteralNode
+    ) : ValueId
+      inline_try_core(ctx, receiver_id, receiver_type) do |non_nil_id|
+        ctx.push_scope(ScopeKind::Block)
+
+        if params = proc_node.params
+          params.each_with_index do |param, i|
+            param_name = if param.name
+                           String.new(param.name.not_nil!)
+                         else
+                           "_block_param_#{i}"
+                         end
+            ctx.register_local(param_name, non_nil_id)
+            ctx.register_type(non_nil_id, ctx.type_of(non_nil_id))
+          end
+        end
+
+        value_id = if body = proc_node.body
+                     lower_body(ctx, body)
+                   else
+                     nil_lit = Literal.new(ctx.next_id, TypeRef::NIL, nil)
+                     ctx.emit(nil_lit)
+                     nil_lit.id
+                   end
+
+        ctx.pop_scope
+        value_id
+      end
+    end
+
+    private def inline_try_core(
+      ctx : LoweringContext,
+      receiver_id : ValueId,
+      receiver_type : TypeRef
+    ) : ValueId
+      nil_check = lower_nil_check_intrinsic(ctx, receiver_id, receiver_type)
+      nil_block = ctx.create_block
+      value_block = ctx.create_block
+      merge_block = ctx.create_block
+
+      ctx.terminate(Branch.new(nil_check, nil_block, value_block))
+
+      # Nil branch
+      ctx.current_block = nil_block
+      nil_lit = Literal.new(ctx.next_id, TypeRef::NIL, nil)
+      ctx.emit(nil_lit)
+      nil_exit_block = ctx.current_block
+      ctx.terminate(Jump.new(merge_block))
+
+      # Non-nil branch
+      ctx.current_block = value_block
+      non_nil_id = lower_not_nil_intrinsic(ctx, receiver_id, receiver_type)
+      non_nil_type = non_nil_type_for_union(receiver_type)
+      original_type : TypeRef? = nil
+      if non_nil_type && non_nil_type != receiver_type
+        original_type = ctx.type_of(receiver_id)
+        ctx.register_type(receiver_id, non_nil_type)
+      end
+
+      value_id = yield non_nil_id
+
+      if original_type
+        ctx.register_type(receiver_id, original_type.not_nil!)
+      end
+
+      value_exit_block = ctx.current_block
+      block_data = ctx.get_block(value_exit_block)
+      value_has_noreturn = block_data.instructions.any? { |inst| inst.is_a?(Raise) || inst.is_a?(Return) }
+      value_flows_to_merge = block_data.terminator.is_a?(Unreachable) && !value_has_noreturn
+      if value_flows_to_merge
+        ctx.terminate(Jump.new(merge_block))
+      end
+
+      # Merge
+      ctx.current_block = merge_block
+
+      unless value_flows_to_merge
+        return nil_lit.id
+      end
+
+      value_type = ctx.type_of(value_id)
+      if value_type == TypeRef::VOID || value_type == TypeRef::NIL
+        return nil_lit.id
+      end
+
+      phi_type = is_union_or_nilable_type?(value_type) ? value_type : create_union_type_for_nullable(value_type)
+      phi = Phi.new(ctx.next_id, phi_type)
+      phi.add_incoming(nil_exit_block, nil_lit.id)
+      phi.add_incoming(value_exit_block, value_id)
+      ctx.emit(phi)
+      ctx.register_type(phi.id, phi_type)
+      phi.id
     end
 
     # Emit a normal call for yield functions when inlining is unsafe.

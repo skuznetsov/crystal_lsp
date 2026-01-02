@@ -1314,6 +1314,7 @@ The return_type=16 (NIL) for `to_s` methods is incorrect - should be String type
 - **Cache invalidation**: bumped AST cache version to 17 to invalidate stale parsed ASTs after parser fix.
 - **Result**: `String#to_s` is registered; union `String | Nil#to_s` resolves to `String#to_s`; `Nil#empty?`/`Nil#bytesize`/`Nil#check_no_null_byte` no longer appear in `/tmp/bootstrap_array_full.hir`.
 - **Fix applied**: avoid refining VOID args to Float64 when untyped overloads exist; prefer untyped overloads for VOID arg sets. `Math.min/max` now lower to integer paths and `llc` no longer errors on `Slice_UInt8_____Int32_Int32` (2026-01-02).
+- **Fix applied**: inline `try` for union receivers (nil-check + block inlining) to avoid generating union `try` symbols; `*_try` entries removed from missing list (2026-01-xx).
 
 **Next steps for GPT-5.2**:
 1. **Flow typing for variable reassignment**: DONE (see Issue 3).
@@ -1324,4 +1325,4 @@ The return_type=16 (NIL) for `to_s` methods is incorrect - should be String type
   - `lower_call()` around lines 18400-18600 - where return types are determined
   - `register_function_type()` - where function types are registered
 
-**Current missing symbol count**: needs refresh after AST cache version bump
+**Current missing symbol count**: 84 (`/tmp/missing_symbols_latest.txt`, built from `/tmp/bootstrap_array_full.link.log` on 2026-01-xx).
