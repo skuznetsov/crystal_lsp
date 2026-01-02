@@ -7963,6 +7963,11 @@ module Crystal::HIR
       # Lower body
       last_value : ValueId? = nil
       if body = node.body
+        progress_filter = ENV["DEBUG_LOWER_PROGRESS"]?
+        progress_match = false
+        if progress_filter
+          progress_match = progress_filter == "1" || base_name.includes?(progress_filter)
+        end
         if ENV.has_key?("DEBUG_LOWER_BYTE") && (method_name == "byte_begin" || method_name == "byte_range")
           STDERR.puts "[LOWER_METHOD] BODY size=#{body.size} expressions"
           body.each_with_index do |expr_id, i|
@@ -7975,6 +7980,14 @@ module Crystal::HIR
           end
         end
         body.each_with_index do |expr_id, idx|
+          if progress_match
+            begin
+              expr_node = @arena[expr_id]
+              STDERR.puts "[LOWER_PROGRESS] method=#{base_name} idx=#{idx} node=#{expr_node.class.name}"
+            rescue
+              STDERR.puts "[LOWER_PROGRESS] method=#{base_name} idx=#{idx} node=(OOB)"
+            end
+          end
           if ENV["DEBUG_CALL_TRACE"]? && method_name == "copy_to"
             STDERR.puts "[LOWER_METHOD] expr=#{expr_id.index} idx=#{idx} arena=#{@arena.size}"
             begin
@@ -16459,12 +16472,20 @@ module Crystal::HIR
 
     private def lower_function_if_needed(name : String) : Nil
       return if name.empty?
+      if ENV["DEBUG_FROM_CHARS"]? && name.includes?("from_chars_advanced")
+        STDERR.puts "[DEBUG_FROM_CHARS] lower_function_if_needed name=#{name}"
+      end
       is_yield = @yield_functions.includes?(name)
       if ENV.has_key?("DEBUG_YIELD_SKIP") && name.includes?("byte_range")
         STDERR.puts "[YIELD_SKIP] name=#{name} is_yield=#{is_yield}"
       end
       return if is_yield
-      return if @lowering_functions.includes?(name)
+      if @lowering_functions.includes?(name)
+        if ENV["DEBUG_FROM_CHARS"]? && name.includes?("from_chars_advanced")
+          STDERR.puts "[DEBUG_FROM_CHARS] skip already lowering name=#{name}"
+        end
+        return
+      end
       return if @module.has_function?(name)
 
       target_name = name
@@ -16582,6 +16603,9 @@ module Crystal::HIR
           mangled_prefix = "#{base_name}$"
           if ENV.has_key?("DEBUG_LOOKUP")
             STDERR.puts "[DEBUG_LOOKUP] Searching for prefix '#{mangled_prefix}' for name '#{name}'"
+          end
+          if ENV["DEBUG_FROM_CHARS"]? && name.includes?("from_chars_advanced")
+            STDERR.puts "[DEBUG_FROM_CHARS] scan_prefix start prefix=#{mangled_prefix} defs=#{@function_defs.size}"
           end
           callsite_by_arity = @pending_arg_types_by_arity[base_callsite_key(name)]?
           best_def : CrystalV2::Compiler::Frontend::DefNode? = nil
@@ -17029,6 +17053,9 @@ module Crystal::HIR
           data += " callsite=#{callsite}"
         end
         debug_hook("function.lookup.miss", data)
+      end
+      if ENV["DEBUG_FROM_CHARS"]? && name.includes?("from_chars_advanced")
+        STDERR.puts "[DEBUG_FROM_CHARS] lookup_result branch=#{lookup_branch || "none"} target=#{target_name} func_def=#{!func_def.nil?}"
       end
 
       if ENV.has_key?("DEBUG_DEFERRED") && name.includes?("byte_range")
@@ -19436,6 +19463,10 @@ module Crystal::HIR
 
       if ENV["DEBUG_CALL_TRACE"]? && method_name == "copy_to"
         STDERR.puts "[CALL_TRACE] stage=before_emit method=#{method_name} mangled=#{mangled_method_name} return=#{return_type.id}"
+      end
+      if ENV["DEBUG_FROM_CHARS"]? && method_name == "from_chars_advanced"
+        arg_names = args.map { |arg_id| get_type_name_from_ref(ctx.type_of(arg_id)) }
+        STDERR.puts "[DEBUG_FROM_CHARS] base=#{base_method_name} mangled=#{mangled_method_name} args=#{arg_names.join(",")}"
       end
       call = Call.new(ctx.next_id, return_type, receiver_id, mangled_method_name, args, block_id, call_virtual)
       ctx.emit(call)
@@ -24187,8 +24218,18 @@ module Crystal::HIR
 
     private def lower_body(ctx : LoweringContext, body : Array(ExprId)) : ValueId
       last_value : ValueId? = nil
-      body.each do |expr_id|
+      progress_filter = ENV["DEBUG_LOWER_PROGRESS"]?
+      progress_match = nil
+      if progress_filter && @current_class && @current_method
+        method_name = "#{@current_class}##{@current_method}"
+        progress_match = progress_filter == "1" || method_name.includes?(progress_filter)
+      end
+      body.each_with_index do |expr_id, idx|
         next if expr_id.invalid?
+        if progress_match
+          node = @arena[expr_id]
+          STDERR.puts "[LOWER_PROGRESS] method=#{@current_class}##{@current_method} idx=#{idx} node=#{node.class.name}"
+        end
         last_value = lower_expr(ctx, expr_id)
       end
 
