@@ -37,9 +37,11 @@ module CrystalV2
       class StringPool
         # Hash mapping string content to canonical slice
         @pool : Hash(String, Slice(UInt8))
+        @string_cache : Hash(Slice(UInt8), String)
 
         def initialize
           @pool = {} of String => Slice(UInt8)
+          @string_cache = {} of Slice(UInt8) => String
         end
 
         # Intern a slice, returning canonical copy
@@ -67,6 +69,30 @@ module CrystalV2
           # Store this slice as canonical
           @pool[str] = slice
           slice
+        end
+
+        # Intern a slice and return a canonical String (no repeated allocations).
+        #
+        # The slice bytes must remain valid for the duration of the pool.
+        def intern_string(slice : Slice(UInt8)) : String
+          if cached = @string_cache[slice]?
+            return cached
+          end
+          str = String.new(slice)
+          @string_cache[slice] = str
+          @pool[str] = slice unless @pool.has_key?(str)
+          str
+        end
+
+        # Intern a String value and return a canonical String.
+        def intern_string(str : String) : String
+          slice = str.to_slice
+          if cached = @string_cache[slice]?
+            return cached
+          end
+          @string_cache[slice] = str
+          @pool[str] = slice unless @pool.has_key?(str)
+          str
         end
 
         # Statistics for memory analysis

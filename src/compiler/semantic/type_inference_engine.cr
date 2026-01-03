@@ -59,7 +59,6 @@ module CrystalV2
         @expr_in_progress : Set(Int32) = Set(Int32).new
         @identifier_name_cache : Array(String?)
         @member_name_cache : Array(String?)
-        @name_intern : Hash(Slice(UInt8), String)
 
         def initialize(
           @program : Frontend::Program,
@@ -74,7 +73,6 @@ module CrystalV2
           @children_cache = Array(Array(ExprId)?).new(@program.arena.size)
           @identifier_name_cache = Array(String?).new(@program.arena.size)
           @member_name_cache = Array(String?).new(@program.arena.size)
-          @name_intern = {} of Slice(UInt8) => String
           @current_class = nil
           @current_module = nil
           @receiver_type_context = nil
@@ -900,11 +898,7 @@ module CrystalV2
         end
 
         private def intern_name(slice : Slice(UInt8)) : String
-          @name_intern[slice]? || begin
-            name = String.new(slice)
-            @name_intern[slice] = name
-            name
-          end
+          @program.string_pool.intern_string(slice)
         end
 
         # ============================================================

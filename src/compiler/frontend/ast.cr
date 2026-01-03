@@ -1,4 +1,5 @@
 require "./span"
+require "./string_pool"
 
 module CrystalV2
   module Compiler
@@ -3870,8 +3871,13 @@ end
       struct Program
         getter arena : ArenaLike
         getter roots : Array(ExprId)
+        getter string_pool : StringPool
 
-        def initialize(@arena : ArenaLike, @roots : Array(ExprId))
+        def initialize(
+          @arena : ArenaLike,
+          @roots : Array(ExprId),
+          @string_pool : StringPool = StringPool.new,
+        )
         end
       end
     end

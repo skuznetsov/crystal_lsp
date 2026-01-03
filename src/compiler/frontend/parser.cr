@@ -298,7 +298,7 @@ module CrystalV2
             roots_builder << expr unless expr.invalid?
             skip_statement_end
           end
-          Program.new(@arena, roots_builder.to_a)
+          Program.new(@arena, roots_builder.to_a, @string_pool)
         end
 
         # Parse a statement (assignment or expression)
