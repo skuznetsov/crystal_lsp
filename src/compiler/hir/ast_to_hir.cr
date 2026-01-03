@@ -444,7 +444,7 @@ module Crystal::HIR
     @function_defs_cache_size : Int32
     @function_param_stats : Hash(String, DefParamStats)
     @function_type_keys_by_base : Hash(String, Array(String))
-    @function_type_keys_by_base_version : Int32
+    @function_type_keys_by_base_size : Int32
 
     # Functions that contain yield (candidates for inline)
     @yield_functions : Set(String)
@@ -666,7 +666,7 @@ module Crystal::HIR
       @function_defs_cache_size = 0
       @function_param_stats = {} of String => DefParamStats
       @function_type_keys_by_base = {} of String => Array(String)
-      @function_type_keys_by_base_version = 0
+      @function_type_keys_by_base_size = 0
       @yield_functions = Set(String).new
       @yield_return_functions = Set(String).new
       @yield_return_checked = Set(String).new
@@ -9131,19 +9131,19 @@ module Crystal::HIR
         base = key.split("$", 2).first
         (@function_type_keys_by_base[base] ||= [] of String) << key
       end
-      @function_type_keys_by_base_version = @function_defs_cache_size
+      @function_type_keys_by_base_size = @function_types.size
       @function_defs_cache_size = @function_defs.size
     end
 
     private def function_type_keys_for_base(base_name : String) : Array(String)
       rebuild_function_def_overloads if @function_defs_cache_size != @function_defs.size
-      if @function_type_keys_by_base_version != @function_defs_cache_size
+      if @function_type_keys_by_base_size != @function_types.size
         @function_type_keys_by_base.clear
         @function_types.each_key do |key|
           base = key.split("$", 2).first
           (@function_type_keys_by_base[base] ||= [] of String) << key
         end
-        @function_type_keys_by_base_version = @function_defs_cache_size
+        @function_type_keys_by_base_size = @function_types.size
       end
       @function_type_keys_by_base[base_name]? || [] of String
     end
