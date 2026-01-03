@@ -1043,6 +1043,12 @@ r2 = maybe(false)  # => nil
 - Linker missing symbols (bootstrap_array full-prelude run 2025-12-31; 132 entries; full list in `/tmp/missing_symbols_latest.txt`).
   - ByteFormat decode/from_io resolved (no `_IO__ByteFormat_decode_UInt32_IO`).
 
+**Regressions (open):**
+- [ ] GH #10 (crystal_lsp): prelude build with `puts` fails to link on minimal `fib.cr` (`__to_s_IO`/`IO_puts*` unresolved); build without `puts` links but segfaults on run. Repro:
+  - `./bin/crystal_v2 build --release --no-llvm-metadata fib.cr`
+  - `./bin/crystal_v2 build --no-prelude --release --no-llvm-metadata fib.cr` works
+  - Track: ensure prelude path emits `IO#puts` + `IO#to_s` and runtime init entrypoint is correct.
+
 **Recent fixes (prelude bootstrap path):**
 - Normalize `flag?` macro arguments (strip leading `:`) + require cache v3; pthread requires now load.
 - Coerce integer args to `i128` in LLVM backend for mismatch widths.
