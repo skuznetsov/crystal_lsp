@@ -521,6 +521,10 @@ module Crystal::HIR
     @class_included_modules : Hash(String, Set(String))
     # Modules that have `extend self` applied (treat defs without receiver as class methods).
     @module_extend_self : Set(String)
+    @module_defs_cache_version : Int32
+    @module_def_lookup_cache_version : Int32
+    @module_def_lookup_cache : Hash(String, Tuple(CrystalV2::Compiler::Frontend::DefNode, CrystalV2::Compiler::Frontend::ArenaLike)?)
+    @module_class_def_lookup_cache : Hash(String, Tuple(CrystalV2::Compiler::Frontend::DefNode, CrystalV2::Compiler::Frontend::ArenaLike)?)
 
     # Type aliases (alias_name -> target_type_name)
     @type_aliases : Hash(String, String)
@@ -675,6 +679,10 @@ module Crystal::HIR
       @module_includers = {} of String => Set(String)
       @class_included_modules = {} of String => Set(String)
       @module_extend_self = Set(String).new
+      @module_defs_cache_version = 0
+      @module_def_lookup_cache_version = 0
+      @module_def_lookup_cache = {} of String => Tuple(CrystalV2::Compiler::Frontend::DefNode, CrystalV2::Compiler::Frontend::ArenaLike)?
+      @module_class_def_lookup_cache = {} of String => Tuple(CrystalV2::Compiler::Frontend::DefNode, CrystalV2::Compiler::Frontend::ArenaLike)?
       @type_aliases = {} of String => String
       @generated_allocators = Set(String).new
       @type_cache = {} of String => TypeRef
@@ -4482,6 +4490,7 @@ module Crystal::HIR
       # Keep module AST around for mixin expansion (`include Foo` in classes/structs).
       existing_defs = @module_defs.has_key?(module_name)
       (@module_defs[module_name] ||= [] of {CrystalV2::Compiler::Frontend::ModuleNode, CrystalV2::Compiler::Frontend::ArenaLike}) << {node, @arena}
+      @module_defs_cache_version += 1
       invalidate_type_cache_for_namespace(module_name) if existing_defs
       if ENV.has_key?("DEBUG_MODULE_BINARY_FORMAT") && module_name.includes?("BinaryFormat")
         STDERR.puts "[REG_MODULE_TOP] #{module_name}, now has #{@module_defs[module_name].size} defs"
@@ -9105,6 +9114,13 @@ module Crystal::HIR
     private def untyped_candidate_for?(stats : DefParamStats) : Bool
       return false if stats.has_non_type_param_annotation
       stats.type_param_names.none? { |name| @type_param_map.has_key?(name) }
+    end
+
+    private def ensure_module_def_lookup_cache
+      return if @module_def_lookup_cache_version == @module_defs_cache_version
+      @module_def_lookup_cache.clear
+      @module_class_def_lookup_cache.clear
+      @module_def_lookup_cache_version = @module_defs_cache_version
     end
 
     private def resolve_untyped_overload(base_method_name : String, arg_count : Int32, has_block_call : Bool) : String?
@@ -16915,6 +16931,11 @@ module Crystal::HIR
       expected_param_count : Int32,
       visited : Set(String)
     ) : Tuple(CrystalV2::Compiler::Frontend::DefNode, CrystalV2::Compiler::Frontend::ArenaLike)?
+      ensure_module_def_lookup_cache
+      cache_key = "#{module_name}##{method_base}@#{expected_param_count}"
+      if @module_def_lookup_cache.has_key?(cache_key)
+        return @module_def_lookup_cache[cache_key]
+      end
       return nil if visited.includes?(module_name)
       visited << module_name
 
@@ -16937,6 +16958,7 @@ module Crystal::HIR
               include_name = resolve_path_like_name(member.target)
               next unless include_name
               if found = find_module_def_recursive(include_name, method_base, expected_param_count, visited)
+                @module_def_lookup_cache[cache_key] = found
                 return found
               end
             when CrystalV2::Compiler::Frontend::DefNode
@@ -16954,13 +16976,16 @@ module Crystal::HIR
               end
 
               if expected_param_count == 0 || expected_param_count == actual_param_count
-                return {member, mod_arena}
+                result = {member, mod_arena}
+                @module_def_lookup_cache[cache_key] = result
+                return result
               end
             end
           end
         end
       end
 
+      @module_def_lookup_cache[cache_key] = nil
       nil
     end
 
@@ -16969,6 +16994,12 @@ module Crystal::HIR
       method_base : String,
       expected_param_count : Int32
     ) : Tuple(CrystalV2::Compiler::Frontend::DefNode, CrystalV2::Compiler::Frontend::ArenaLike)?
+      ensure_module_def_lookup_cache
+      cache_key = "#{module_name}.#{method_base}@#{expected_param_count}"
+      if @module_class_def_lookup_cache.has_key?(cache_key)
+        return @module_class_def_lookup_cache[cache_key]
+      end
+
       entries = @module_defs[module_name]?
       return nil unless entries
 
@@ -16994,12 +17025,15 @@ module Crystal::HIR
             end
 
             if expected_param_count == 0 || expected_param_count == actual_param_count
-              return {member, mod_arena}
+              result = {member, mod_arena}
+              @module_class_def_lookup_cache[cache_key] = result
+              return result
             end
           end
         end
       end
 
+      @module_class_def_lookup_cache[cache_key] = nil
       nil
     end
 

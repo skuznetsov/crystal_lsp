@@ -1373,6 +1373,7 @@ The return_type=16 (NIL) for `to_s` methods is incorrect - should be String type
   - Pre-index function definition overloads by base name (single scan on cache rebuild, avoids per-lookup full map scans) (2026-01-xx).
   - Use overload index in block-function lookup (avoid full function_defs scan for block overloads) (2026-01-xx).
   - Cache def param stats (counts/splats/block/type params) for overload scoring (avoids repeated param scans) (2026-01-xx).
+  - Cache module def lookups (module/class methods) to avoid repeated include/def scans during lowering (2026-01-xx).
 - **Next**:
   - Profile for hotspots inside lowering (resolve_method_call / infer_type_from_expr / lower_function_if_needed).
   - Consider caching/memoization or an indexed lookup to avoid repeated full-map scans.
