@@ -39,6 +39,16 @@ module CrystalV2
         end
       end
 
+      struct ExprSpanIndex
+        getter roots : Array(Frontend::ExprId)
+        getter children : Hash(Frontend::ExprId, Array(Frontend::ExprId))
+
+        def initialize
+          @roots = [] of Frontend::ExprId
+          @children = {} of Frontend::ExprId => Array(Frontend::ExprId)
+        end
+      end
+
       struct DocumentIndex
         getter scoped_vars : Array(ScopedVarDecl)
         getter scoped_consts : Array(ScopedConstDecl)
@@ -47,6 +57,7 @@ module CrystalV2
         getter global_vars : Hash(String, Array(Frontend::Span))
         getter defs : Hash(String, Array(Frontend::Span))
         getter constants : Hash(String, Array(Frontend::Span))
+        property expr_index : ExprSpanIndex?
 
         def initialize
           @scoped_vars = [] of ScopedVarDecl
@@ -56,6 +67,7 @@ module CrystalV2
           @global_vars = Hash(String, Array(Frontend::Span)).new { |h, k| h[k] = [] of Frontend::Span }
           @defs = Hash(String, Array(Frontend::Span)).new { |h, k| h[k] = [] of Frontend::Span }
           @constants = Hash(String, Array(Frontend::Span)).new { |h, k| h[k] = [] of Frontend::Span }
+          @expr_index = nil
         end
 
         def add_scoped_var(name : String, scope_span : Frontend::Span, decl_span : Frontend::Span)
@@ -671,7 +683,7 @@ module CrystalV2
                 type_context = Semantic::TypeContext.new
                 identifier_symbols = @project.identifier_symbols_for_file(path)
                 requires = cached.requires
-                index = build_document_index(program, path)
+                index = build_document_index(program, path, build_expr_index: false)
                 dep_state = DocumentState.new(text_doc, program, type_context, identifier_symbols, symbol_table, requires, index, path)
                 @dependency_documents[uri] = dep_state
                 workspace.try { |ws| ws.cache[path] = dep_state }
@@ -692,7 +704,7 @@ module CrystalV2
           end
           base_dir = File.dirname(path)
           workspace ||= DependencyWorkspace.new
-          diagnostics, program, type_context, identifier_symbols, symbol_table, requires, index = analyze_document(source, base_dir, path, load_requires: recursive, workspace: workspace)
+          diagnostics, program, type_context, identifier_symbols, symbol_table, requires, index = analyze_document(source, base_dir, path, load_requires: recursive, workspace: workspace, build_expr_index: false)
 
           text_doc = TextDocumentItem.new(uri: uri, language_id: "crystal", version: 0, text: source)
           dep_state = DocumentState.new(text_doc, program, type_context, identifier_symbols, symbol_table, requires, index, path)
@@ -1586,8 +1598,9 @@ module CrystalV2
           @semantic_token_cache.delete(uri)  # Clear cached tokens
         end
 
-        private def build_document_index(program : Frontend::Program, path : String?) : DocumentIndex
+        private def build_document_index(program : Frontend::Program, path : String?, build_expr_index : Bool = true) : DocumentIndex
           index = DocumentIndex.new
+          expr_index = build_expr_index ? ExprSpanIndex.new : nil
           arena = program.arena
           target_path = path
           stack = [] of {Frontend::ExprId, Array(Frontend::Span), Array(Frontend::Span)}
@@ -1596,6 +1609,7 @@ module CrystalV2
             next if root_id.invalid?
             next unless expr_in_document?(program, root_id, target_path)
             stack << {root_id, [] of Frontend::Span, [] of Frontend::Span}
+            expr_index.try &.roots << root_id
           end
 
           while item = stack.pop?
@@ -1660,18 +1674,25 @@ module CrystalV2
               end
             end
 
+            child_ids = expr_index ? [] of Frontend::ExprId : nil
             each_child_expr(arena, expr_id) do |child_id|
               next if child_id.invalid?
               next unless expr_in_document?(program, child_id, target_path)
               stack << {child_id, current_callables, current_scopes}
+              child_ids << child_id if child_ids
+            end
+
+            if child_ids && child_ids.any?
+              expr_index.not_nil!.children[expr_id] = child_ids
             end
           end
 
+          index.expr_index = expr_index if expr_index
           index
         end
 
         # Analyze document and return diagnostics, program, type context, identifier symbols, and symbol table
-        private def analyze_document(source : String, base_dir : String? = nil, path : String? = nil, load_requires : Bool = true, workspace : DependencyWorkspace? = nil) : {Array(Diagnostic), Frontend::Program, Semantic::TypeContext?, Hash(Frontend::ExprId, Semantic::Symbol)?, Semantic::SymbolTable?, Array(String), DocumentIndex?}
+        private def analyze_document(source : String, base_dir : String? = nil, path : String? = nil, load_requires : Bool = true, workspace : DependencyWorkspace? = nil, build_expr_index : Bool = true) : {Array(Diagnostic), Frontend::Program, Semantic::TypeContext?, Hash(Frontend::ExprId, Semantic::Symbol)?, Semantic::SymbolTable?, Array(String), DocumentIndex?}
           debug("Analyzing document: #{source.lines.size} lines, #{source.size} bytes")
           ensure_prelude_loaded
           notify_indexing("Indexing… loading document") if @config.background_indexing
@@ -1840,7 +1861,7 @@ module CrystalV2
           end
           requires.each { |req| debug("  require => #{req}") }
           notify_indexed if @config.background_indexing
-          index = build_document_index(analysis_program, path)
+          index = build_document_index(analysis_program, path, build_expr_index: build_expr_index)
           {diagnostics, analysis_program, type_context, identifier_symbols, symbol_table, requires, index}
         end
 
@@ -3388,16 +3409,26 @@ module CrystalV2
           # Find the smallest (most specific) node that contains this offset
           best_match : Frontend::ExprId? = nil
           best_match_size = Int32::MAX
-
-          target_path = doc_state.path
-          doc_state.program.roots.each do |root_id|
-            next unless expr_in_document?(doc_state.program, root_id, target_path)
-            if match = find_expr_in_tree(arena, root_id, offset)
+          if expr_index = doc_state.index.try(&.expr_index)
+            if match = find_expr_in_index(arena, expr_index, offset)
               match_node = arena[match]
               match_size = match_node.span.end_offset - match_node.span.start_offset
-              if match_size < best_match_size
-                best_match = match
-                best_match_size = match_size
+              best_match = match
+              best_match_size = match_size
+            end
+          end
+
+          if best_match.nil?
+            target_path = doc_state.path
+            doc_state.program.roots.each do |root_id|
+              next unless expr_in_document?(doc_state.program, root_id, target_path)
+              if match = find_expr_in_tree(arena, root_id, offset)
+                match_node = arena[match]
+                match_size = match_node.span.end_offset - match_node.span.start_offset
+                if match_size < best_match_size
+                  best_match = match
+                  best_match_size = match_size
+                end
               end
             end
           end
@@ -3421,7 +3452,7 @@ module CrystalV2
             each_child_expr(arena, expr_id) do |child_id|
               next if child_id.invalid?
               child = arena[child_id]
-              next unless span_contains_offset?(child.span, offset) || offset == child.span.end_offset && child.span.end_offset > child.span.start_offset
+              next unless span_contains_offset?(child.span, offset)
               if child.is_a?(Frontend::MemberAccessNode) || child.is_a?(Frontend::IdentifierNode) || child.is_a?(Frontend::PathNode)
                 return child_id
               end
@@ -3619,6 +3650,62 @@ module CrystalV2
           nil
         rescue
           nil
+        end
+
+        # Search for expression at position using cached child lists.
+        private def find_expr_in_index(arena : Frontend::ArenaLike, expr_index : ExprSpanIndex, offset : Int32) : Frontend::ExprId?
+          best_match : Frontend::ExprId? = nil
+          best_match_size = Int32::MAX
+
+          expr_index.roots.each do |root_id|
+            Watchdog.check!
+            if match = find_expr_in_index_tree(arena, expr_index, root_id, offset)
+              match_node = arena[match]
+              match_size = match_node.span.end_offset - match_node.span.start_offset
+              if match_size < best_match_size
+                best_match = match
+                best_match_size = match_size
+              end
+            end
+          end
+
+          best_match
+        end
+
+        private def find_expr_in_index_tree(
+          arena : Frontend::ArenaLike,
+          expr_index : ExprSpanIndex,
+          expr_id : Frontend::ExprId,
+          offset : Int32,
+        ) : Frontend::ExprId?
+          Watchdog.check!
+          node = arena[expr_id]
+          return nil unless span_contains_offset?(node.span, offset)
+
+          best_match = expr_id
+          best_match_size = node.span.end_offset - node.span.start_offset
+
+          # Don't descend into PathNode children - PathNode handles segment resolution.
+          return best_match if node.is_a?(Frontend::PathNode)
+
+          if child_ids = expr_index.children[expr_id]?
+            child_ids.each do |child_id|
+              Watchdog.check!
+              next if child_id.invalid?
+              child = arena[child_id]
+              next unless span_contains_offset?(child.span, offset) || offset == child.span.end_offset && child.span.end_offset > child.span.start_offset
+              if match = find_expr_in_index_tree(arena, expr_index, child_id, offset)
+                match_node = arena[match]
+                match_size = match_node.span.end_offset - match_node.span.start_offset
+                if match_size < best_match_size || (match_size == best_match_size && match != best_match)
+                  best_match = match
+                  best_match_size = match_size
+                end
+              end
+            end
+          end
+
+          best_match
         end
 
         # Recursively search for expression at position in AST
