@@ -30,6 +30,7 @@ about syntax or types and should match what the original compiler would report.
 - [x] LSP semantic tokens: symbol literals emit full-span enumMember tokens (no overlaps)
 - [x] Hover/definition fallback to cached expr types (scoped lookup fixes; e.g., `cas` → `Array(Atom)`)
 - [x] LSP expr span index cached per document to avoid full AST scans on hover/definition (2026-01-xx)
+- [x] LSP line offset cache for position→offset lookup (reduces per-request line scans) (2026-01-xx)
 - [x] lsp_probe speaks correct binary Content-Length (no dropped responses)
 - [x] TypeIndex binary storage (5.6x faster than JSON)
 - [x] HIR macro condition evaluation: tri-state merge + duplicate module method guard (2025-12-23)

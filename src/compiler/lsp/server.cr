@@ -110,6 +110,7 @@ module CrystalV2
         getter requires : Array(String)
         getter path : String?
         getter index : DocumentIndex?
+        getter line_offsets : Array(Int32)
 
         def initialize(
           @text_document : TextDocumentItem,
@@ -119,6 +120,7 @@ module CrystalV2
           @symbol_table : Semantic::SymbolTable? = nil,
           @requires : Array(String) = [] of String,
           @index : DocumentIndex? = nil,
+          @line_offsets : Array(Int32) = [] of Int32,
           path : String? = nil,
         )
           @path = path ? File.expand_path(path) : nil
@@ -410,6 +412,7 @@ module CrystalV2
                 context.symbol_table,
                 task.requires,
                 ds.index,
+                line_offsets: ds.line_offsets,
                 path: task.path
               )
               @documents[uri] = new_state
@@ -422,6 +425,7 @@ module CrystalV2
                 context.symbol_table,
                 task.requires,
                 ds.index,
+                line_offsets: ds.line_offsets,
                 path: task.path
               )
               @dependency_documents[uri] = new_state
@@ -684,7 +688,8 @@ module CrystalV2
                 identifier_symbols = @project.identifier_symbols_for_file(path)
                 requires = cached.requires
                 index = build_document_index(program, path, build_expr_index: false)
-                dep_state = DocumentState.new(text_doc, program, type_context, identifier_symbols, symbol_table, requires, index, path)
+                line_offsets = build_line_offsets(source)
+                dep_state = DocumentState.new(text_doc, program, type_context, identifier_symbols, symbol_table, requires, index, line_offsets, path: path)
                 @dependency_documents[uri] = dep_state
                 workspace.try { |ws| ws.cache[path] = dep_state }
                 ensure_dependencies_loaded(dep_state, workspace: workspace) if recursive
@@ -707,7 +712,8 @@ module CrystalV2
           diagnostics, program, type_context, identifier_symbols, symbol_table, requires, index = analyze_document(source, base_dir, path, load_requires: recursive, workspace: workspace, build_expr_index: false)
 
           text_doc = TextDocumentItem.new(uri: uri, language_id: "crystal", version: 0, text: source)
-          dep_state = DocumentState.new(text_doc, program, type_context, identifier_symbols, symbol_table, requires, index, path)
+          line_offsets = build_line_offsets(source)
+          dep_state = DocumentState.new(text_doc, program, type_context, identifier_symbols, symbol_table, requires, index, line_offsets, path: path)
 
           @dependency_documents[uri] = dep_state
           workspace.cache[path] = dep_state if workspace
@@ -1576,7 +1582,8 @@ module CrystalV2
           diagnostics, program, type_context, identifier_symbols, symbol_table, requires, index = analyze_document(text, base_dir, doc_path, workspace: DependencyWorkspace.new)
 
           # Store document state (legacy)
-          @documents[uri] = DocumentState.new(doc, program, type_context, identifier_symbols, symbol_table, requires, index, doc_path)
+          line_offsets = build_line_offsets(text)
+          @documents[uri] = DocumentState.new(doc, program, type_context, identifier_symbols, symbol_table, requires, index, line_offsets, path: doc_path)
           register_document_symbols(uri, @documents[uri])
           warm_dependencies(doc_path, @documents[uri]) if doc_path
 
@@ -3378,7 +3385,8 @@ module CrystalV2
           diagnostics, program, type_context, identifier_symbols, symbol_table, requires, index = analyze_document(new_text, base_dir, doc_path, workspace: DependencyWorkspace.new)
 
           doc = TextDocumentItem.new(uri: uri, language_id: language_id, version: version, text: new_text)
-          @documents[uri] = DocumentState.new(doc, program, type_context, identifier_symbols, symbol_table, requires, index, doc_path)
+          line_offsets = build_line_offsets(new_text)
+          @documents[uri] = DocumentState.new(doc, program, type_context, identifier_symbols, symbol_table, requires, index, line_offsets, path: doc_path)
           register_document_symbols(uri, @documents[uri])
           @semantic_token_cache.delete(uri)  # Invalidate cache on content change
 
@@ -3401,7 +3409,7 @@ module CrystalV2
         # Find expression at the given position (LSP 0-indexed -> Span 1-indexed)
         private def find_expr_at_position(doc_state : DocumentState, line : Int32, character : Int32, precomputed_offset : Int32? = nil) : Frontend::ExprId?
           return nil if comment_position?(doc_state.text_document.text, line, character)
-          offset = precomputed_offset || position_to_offset(doc_state.text_document.text, line, character)
+          offset = precomputed_offset || position_to_offset(doc_state, line, character)
           return nil unless offset
 
           arena = doc_state.program.arena
@@ -3464,8 +3472,42 @@ module CrystalV2
           nil
         end
 
-        private def position_to_offset(text : String, line : Int32, character : Int32) : Int32?
+        private def build_line_offsets(text : String) : Array(Int32)
+          offsets = [] of Int32
+          offsets << 0
+          text.each_byte_with_index do |byte, idx|
+            offsets << (idx + 1) if byte == '\n'.ord
+          end
+          offsets
+        end
+
+        private def position_to_offset(doc_state : DocumentState, line : Int32, character : Int32) : Int32?
+          position_to_offset(doc_state.text_document.text, line, character, doc_state.line_offsets)
+        end
+
+        private def position_to_offset(text : String, line : Int32, character : Int32, line_offsets : Array(Int32)? = nil) : Int32?
           return nil if line < 0 || character < 0
+          if line_offsets && line < line_offsets.size
+            line_start = line_offsets[line]
+            line_end = if line + 1 < line_offsets.size
+                         line_offsets[line + 1]
+                       else
+                         text.bytesize
+                       end
+            line_text = text.byte_slice(line_start, line_end - line_start)
+            byte_index = 0
+            char_index = 0
+            line_text.each_char do |ch|
+              break if char_index == character
+              byte_index += ch.bytesize
+              char_index += 1
+            end
+            if character > char_index
+              byte_index = line_text.bytesize
+              byte_index -= 1 if byte_index > 0
+            end
+            return line_start + byte_index
+          end
 
           offset = 0
           current_line = 0
@@ -3992,7 +4034,7 @@ module CrystalV2
           end
 
           expr_id = find_expr_at_position(doc_state, line, character)
-          if expr_id.nil? && (alt_offset = position_to_offset(doc_state.text_document.text, line, character - 1))
+          if expr_id.nil? && (alt_offset = position_to_offset(doc_state, line, character - 1))
             expr_id = find_expr_at_position(doc_state, line, character - 1, alt_offset)
           end
           debug("Found expr_id=#{expr_id.inspect}")
@@ -4009,7 +4051,7 @@ module CrystalV2
           when Frontend::PathNode
             # For PathNode, resolve the specific segment under cursor
             # e.g., hovering on M in M::A should show module M, not class A
-            target_offset = position_to_offset(doc_state.text_document.text, line, character)
+            target_offset = position_to_offset(doc_state, line, character)
             if target_offset
               symbol = resolve_path_segment_symbol(node, doc_state, target_offset)
             end
@@ -4179,7 +4221,7 @@ module CrystalV2
             return
           end
 
-          offset = position_to_offset(doc_state.text_document.text, line, character)
+          offset = position_to_offset(doc_state, line, character)
           unless offset
             debug("Definition offset not found for line=#{line} char=#{character}")
             return send_response(id, "null")
@@ -4333,7 +4375,7 @@ module CrystalV2
           doc_state = @documents[uri]?
           return send_response(id, "null") unless doc_state
 
-          offset = position_to_offset(doc_state.text_document.text, line, character)
+          offset = position_to_offset(doc_state, line, character)
           return send_response(id, "null") unless offset
 
           # Find expression at position
@@ -5416,7 +5458,7 @@ module CrystalV2
           # Find expression at position just before dot
           # First, skip back over any prefix we extracted
           # Then look for the identifier/expression before the dot
-          offset = position_to_offset(doc_state.text_document.text, line, dot_pos)
+          offset = position_to_offset(doc_state, line, dot_pos)
           return nil unless offset
 
           # Simple approach: look for member access node at this position
