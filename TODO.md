@@ -1394,6 +1394,7 @@ The return_type=16 (NIL) for `to_s` methods is incorrect - should be String type
   - `tmp/profile_parser.cr` with `DEBUG_LOWER_METHOD_TIME=1` shows ~2.1–2.3s self-time per Parser parse_* method (parse_program/parse_macro_*), resolve/infer time ≈ 0. Cost is raw lowering, not lookup/inference.
   - `DEBUG_LOWER_PROGRESS=Parser#parse_program DEBUG_LOWER_SLOW_MS=50` shows slowest node is the `parse_macro_definition` call (dominant cost inside parse_program).
   - Chain from `parse_program` slow node: `parse_macro_definition` → `parse_macro_body` → `parse_macro_control_piece` → `parse_macro_for_header` → `parse_expression(0)` (all ~2.1s self-time). Root cost is `parse_expression` lowering itself.
+  - `parse_expression` slow node is `parse_prefix`; `parse_prefix` slow node is its large `case token.kind` dispatch. Cost scales with method body size; suggests HIR caching/pre-lowered blobs for compiler frontend would be higher leverage than more lookup caching.
 - **Next**:
   - Profile for hotspots inside lowering (resolve_method_call / infer_type_from_expr / lower_function_if_needed).
   - Consider caching/memoization or an indexed lookup to avoid repeated full-map scans.
