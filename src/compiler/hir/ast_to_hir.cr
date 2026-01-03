@@ -418,7 +418,7 @@ module Crystal::HIR
 
     # Class type information
     getter class_info : Hash(String, ClassInfo)
-    @class_info_by_type_id : Hash(Int32, ClassInfo)
+    @class_info_by_type_id : Hash(TypeId, ClassInfo)
     @class_info_version : Int32
     @classes_with_subclasses : Set(String)
     @children_by_parent : Hash(String, Set(String))
@@ -650,7 +650,7 @@ module Crystal::HIR
       @function_enum_return_names = {} of String => String
       @function_return_type_literals = Set(String).new
       @class_info = {} of String => ClassInfo
-      @class_info_by_type_id = {} of Int32 => ClassInfo
+      @class_info_by_type_id = {} of TypeId => ClassInfo
       @class_info_version = 0
       @classes_with_subclasses = Set(String).new
       @children_by_parent = {} of String => Set(String)
