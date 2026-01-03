@@ -419,6 +419,7 @@ module Crystal::HIR
     # Class type information
     getter class_info : Hash(String, ClassInfo)
     @class_info_by_type_id : Hash(Int32, ClassInfo)
+    @class_info_version : Int32
     @classes_with_subclasses : Set(String)
     @children_by_parent : Hash(String, Set(String))
     # Module-level class vars (modules don't have ClassInfo entries)
@@ -487,7 +488,7 @@ module Crystal::HIR
     @method_inheritance_cache : Hash(String, String?)
     @class_method_inheritance_cache : Hash(String, String?)
     @method_inheritance_cache_function_size : Int32
-    @method_inheritance_cache_class_info_size : Int32
+    @method_inheritance_cache_class_info_version : Int32
     @method_inheritance_cache_module_version : Int32
 
     # Pending monomorphizations (deferred until after all templates are registered)
@@ -650,6 +651,7 @@ module Crystal::HIR
       @function_return_type_literals = Set(String).new
       @class_info = {} of String => ClassInfo
       @class_info_by_type_id = {} of Int32 => ClassInfo
+      @class_info_version = 0
       @classes_with_subclasses = Set(String).new
       @children_by_parent = {} of String => Set(String)
       @module_class_vars = {} of String => Array(ClassVarInfo)
@@ -698,7 +700,7 @@ module Crystal::HIR
       @method_inheritance_cache = {} of String => String?
       @class_method_inheritance_cache = {} of String => String?
       @method_inheritance_cache_function_size = 0
-      @method_inheritance_cache_class_info_size = 0
+      @method_inheritance_cache_class_info_version = 0
       @method_inheritance_cache_module_version = 0
       @type_param_map = {} of String => String
       @macro_defs = {} of String => {CrystalV2::Compiler::Frontend::MacroDefNode, CrystalV2::Compiler::Frontend::ArenaLike}
@@ -6681,6 +6683,7 @@ module Crystal::HIR
       )
       @class_info[class_name] = provisional_info
       @class_info_by_type_id[type_ref.id] = provisional_info
+      @class_info_version += 1
 
         defined_start = Time.monotonic if mono_debug
         if ENV.has_key?("DEBUG_TYPE_RESOLVE") && class_name == "IO"
@@ -7130,6 +7133,7 @@ module Crystal::HIR
       final_info = ClassInfo.new(class_name, type_ref, ivars, class_vars, offset, is_struct, parent_name)
       @class_info[class_name] = final_info
       @class_info_by_type_id[type_ref.id] = final_info
+      @class_info_version += 1
       record_class_parent(class_name, parent_name)
       if ENV.has_key?("DEBUG_CLASS_PARENTS") && (class_name == "Base" || class_name == "Child")
         STDERR.puts "[CLASS_PARENT] class=#{class_name} parent=#{parent_name || "nil"}"
@@ -9247,12 +9251,12 @@ module Crystal::HIR
 
     private def ensure_method_inheritance_cache
       if @method_inheritance_cache_function_size != @function_types.size ||
-         @method_inheritance_cache_class_info_size != @class_info.size ||
+         @method_inheritance_cache_class_info_version != @class_info_version ||
          @method_inheritance_cache_module_version != @module_includers_version
         @method_inheritance_cache.clear
         @class_method_inheritance_cache.clear
         @method_inheritance_cache_function_size = @function_types.size
-        @method_inheritance_cache_class_info_size = @class_info.size
+        @method_inheritance_cache_class_info_version = @class_info_version
         @method_inheritance_cache_module_version = @module_includers_version
       end
     end
@@ -24021,6 +24025,7 @@ module Crystal::HIR
                 class_info.parent_name
               )
               @class_info_by_type_id[class_info.type_ref.id] = @class_info[class_name]
+              @class_info_version += 1
               ivar_type = value_type
               ivar_offset = new_offset
             end
