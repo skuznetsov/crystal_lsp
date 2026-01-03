@@ -1375,6 +1375,7 @@ The return_type=16 (NIL) for `to_s` methods is incorrect - should be String type
   - Cache def param stats (counts/splats/block/type params) for overload scoring (avoids repeated param scans) (2026-01-xx).
   - Cache module def lookups (module/class methods) to avoid repeated include/def scans during lowering (2026-01-xx).
   - Use overload index in `lower_super` to avoid full function_defs prefix scans (2026-01-xx).
+  - Cache instance method name lists per class for macro symbol tables (avoid full function_defs scans) (2026-01-xx).
 - **Next**:
   - Profile for hotspots inside lowering (resolve_method_call / infer_type_from_expr / lower_function_if_needed).
   - Consider caching/memoization or an indexed lookup to avoid repeated full-map scans.

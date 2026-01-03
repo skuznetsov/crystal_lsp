@@ -525,6 +525,8 @@ module Crystal::HIR
     @module_def_lookup_cache_version : Int32
     @module_def_lookup_cache : Hash(String, Tuple(CrystalV2::Compiler::Frontend::DefNode, CrystalV2::Compiler::Frontend::ArenaLike)?)
     @module_class_def_lookup_cache : Hash(String, Tuple(CrystalV2::Compiler::Frontend::DefNode, CrystalV2::Compiler::Frontend::ArenaLike)?)
+    @instance_method_names_cache : Hash(String, Array(String))
+    @instance_method_names_cache_version : Int32
 
     # Type aliases (alias_name -> target_type_name)
     @type_aliases : Hash(String, String)
@@ -683,6 +685,8 @@ module Crystal::HIR
       @module_def_lookup_cache_version = 0
       @module_def_lookup_cache = {} of String => Tuple(CrystalV2::Compiler::Frontend::DefNode, CrystalV2::Compiler::Frontend::ArenaLike)?
       @module_class_def_lookup_cache = {} of String => Tuple(CrystalV2::Compiler::Frontend::DefNode, CrystalV2::Compiler::Frontend::ArenaLike)?
+      @instance_method_names_cache = {} of String => Array(String)
+      @instance_method_names_cache_version = 0
       @type_aliases = {} of String => String
       @generated_allocators = Set(String).new
       @type_cache = {} of String => TypeRef
@@ -1941,6 +1945,10 @@ module Crystal::HIR
     end
 
     private def instance_method_names_for_class(class_name : String) : Array(String)
+      ensure_instance_method_names_cache
+      if cached = @instance_method_names_cache[class_name]?
+        return cached
+      end
       prefix = "#{class_name}#"
       names = Set(String).new
       @function_defs.each_key do |key|
@@ -1949,7 +1957,9 @@ module Crystal::HIR
         method_name = raw.split("(").first
         names.add(method_name)
       end
-      names.to_a
+      result = names.to_a
+      @instance_method_names_cache[class_name] = result
+      result
     end
 
     private def type_name_for_macro(type_ref : TypeRef) : String?
@@ -9121,6 +9131,13 @@ module Crystal::HIR
       @module_def_lookup_cache.clear
       @module_class_def_lookup_cache.clear
       @module_def_lookup_cache_version = @module_defs_cache_version
+    end
+
+    private def ensure_instance_method_names_cache
+      rebuild_function_def_overloads if @function_defs_cache_size != @function_defs.size
+      return if @instance_method_names_cache_version == @function_defs_cache_size
+      @instance_method_names_cache.clear
+      @instance_method_names_cache_version = @function_defs_cache_size
     end
 
     private def resolve_untyped_overload(base_method_name : String, arg_count : Int32, has_block_call : Bool) : String?
