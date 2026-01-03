@@ -607,6 +607,7 @@ module Crystal::HIR
 
     @inline_yield_return_stack : Array(InlineReturnContext) = [] of InlineReturnContext
     @inline_yield_return_override_stack : Array(InlineReturnOverride) = [] of InlineReturnOverride
+    @virtual_targets_lowered : Set(String) = Set(String).new
 
     # Captures computed for block literals (body_block -> captures).
     @block_captures : Hash(BlockId, Array(CapturedVar)) = {} of BlockId => Array(CapturedVar)
@@ -2965,6 +2966,16 @@ module Crystal::HIR
     end
 
     private def with_namespace_override(namespace : String, &)
+      old_namespace = @current_namespace_override
+      @current_namespace_override = namespace
+      begin
+        yield
+      ensure
+        @current_namespace_override = old_namespace
+      end
+    end
+
+    private def with_namespace_override_or_clear(namespace : String?, &)
       old_namespace = @current_namespace_override
       @current_namespace_override = namespace
       begin
@@ -8206,13 +8217,25 @@ module Crystal::HIR
       func = @module.create_function(full_name, return_type)
       ctx = LoweringContext.new(func, @module, @arena)
 
-      # Add implicit 'self' parameter first
-      # For primitive types (Int32, Bool, etc.), use primitive TypeRef so LLVM passes by value
-      # For structs with fields, use class_info.type_ref (passed as pointer)
-      self_type = primitive_self_type(class_name) || class_info.type_ref
-      self_param = func.add_param("self", self_type)
-      ctx.register_local("self", self_param.id)
-      ctx.register_type(self_param.id, self_type)
+      # Add implicit 'self' binding.
+      # Instance methods receive a runtime self parameter.
+      # Class/module methods bind self to a type literal (no runtime param).
+      if is_class_method
+        self_type = class_info.type_ref
+        self_literal = Literal.new(ctx.next_id, self_type, nil)
+        ctx.emit(self_literal)
+        ctx.register_local("self", self_literal.id)
+        ctx.register_type(self_literal.id, self_type)
+        ctx.mark_type_literal(self_literal.id)
+        @type_literal_values.add(self_literal.id)
+      else
+        # For primitive types (Int32, Bool, etc.), use primitive TypeRef so LLVM passes by value
+        # For structs with fields, use class_info.type_ref (passed as pointer)
+        self_type = primitive_self_type(class_name) || class_info.type_ref
+        self_param = func.add_param("self", self_type)
+        ctx.register_local("self", self_param.id)
+        ctx.register_type(self_param.id, self_type)
+      end
 
       # Lower explicit parameters
       # Track @param style for auto-assignment
@@ -9052,8 +9075,9 @@ module Crystal::HIR
         end
       end
 
-      if !class_name.empty? && class_name.includes?("|")
-        if resolved = resolve_union_method_call(class_name, method_name, arg_types)
+      if !class_name.empty? && (class_name.includes?("|") || class_name.includes?("___"))
+        union_name = class_name.includes?("___") ? class_name.gsub("___", "|") : class_name
+        if resolved = resolve_union_method_call(union_name, method_name, arg_types)
           if ENV["DEBUG_TO_S_RESOLVE"]? && method_name == "to_s"
             STDERR.puts "[TO_S_RESOLVE] union resolved=#{resolved}"
           end
@@ -11530,6 +11554,14 @@ module Crystal::HIR
               return infer_type_from_expr(last_expr)
             end
           end
+        end
+      end
+
+      # For Atomic.new(value), infer from the value type.
+      if class_name == "Atomic" && args && args.size >= 1
+        arg_node = @arena[args[0]]
+        if inferred = infer_type_from_expr(arg_node)
+          return inferred
         end
       end
 
@@ -14073,6 +14105,9 @@ module Crystal::HIR
       if name[0].uppercase?
         resolved = resolve_type_name_in_context(name)
         resolved = resolve_type_alias_chain(resolved)
+        if ENV["DEBUG_THREAD_NAME"]? && name == "Thread"
+          STDERR.puts "[DEBUG_THREAD_NAME] name=#{name} resolved=#{resolved} current=#{@current_class || "nil"} ns_override=#{@current_namespace_override || "nil"} type_exists=#{type_name_exists?(resolved)}"
+        end
         return lower_type_literal_from_name(ctx, resolved) if type_name_exists?(resolved)
       end
 
@@ -17992,11 +18027,7 @@ module Crystal::HIR
               end
               merged_params = extra_type_params ? extra_params.merge(extra_type_params) : extra_params
               with_type_param_map(merged_params) do
-                if namespace_override
-                  with_namespace_override(namespace_override) do
-                    lower_method(owner, class_info, func_def, call_arg_types, call_arg_literals, override, force_class_method: force_class_method)
-                  end
-                else
+                with_namespace_override_or_clear(namespace_override) do
                   lower_method(owner, class_info, func_def, call_arg_types, call_arg_literals, override, force_class_method: force_class_method)
                 end
               end
@@ -18042,20 +18073,12 @@ module Crystal::HIR
               @current_class = owner
               if extra_type_params
                 with_type_param_map(extra_type_params) do
-                  if namespace_override
-                    with_namespace_override(namespace_override) do
-                      lower_method(owner, class_info, func_def, call_arg_types, call_arg_literals, target_for_lower, force_class_method: force_class_method)
-                    end
-                  else
+                  with_namespace_override_or_clear(namespace_override) do
                     lower_method(owner, class_info, func_def, call_arg_types, call_arg_literals, target_for_lower, force_class_method: force_class_method)
                   end
                 end
               else
-                if namespace_override
-                  with_namespace_override(namespace_override) do
-                    lower_method(owner, class_info, func_def, call_arg_types, call_arg_literals, target_for_lower, force_class_method: force_class_method)
-                  end
-                else
+                with_namespace_override_or_clear(namespace_override) do
                   lower_method(owner, class_info, func_def, call_arg_types, call_arg_literals, target_for_lower, force_class_method: force_class_method)
                 end
               end
@@ -18568,30 +18591,40 @@ module Crystal::HIR
           class_name_str = @current_class
         elsif obj_node.is_a?(CrystalV2::Compiler::Frontend::ConstantNode)
           name = String.new(obj_node.name)
-          if resolve_constant_name_in_context(name)
-            if @module.is_lib?(name)
-              class_name_str = name
-            else
-              constant_receiver = true
-            end
+          if @module.is_lib?(name)
+            class_name_str = name
           else
             resolved = resolve_class_name_in_context(name)
             resolved = resolve_type_alias_chain(resolved)
-            # Only treat constants as type/module names when they resolve to known types.
-            if type_name_exists?(resolved) || primitive_self_type(resolved)
+            # Prefer type/module resolution for constant receivers that are actually types.
+            if class_name_str.nil? && @generic_templates.has_key?(resolved) && method_name == "new"
+              inferred_type = infer_generic_type_arg(resolved, call_args, block_expr, ctx)
+              if inferred_type
+                specialized_name = "#{resolved}(#{inferred_type})"
+                if !@monomorphized.includes?(specialized_name)
+                  monomorphize_generic_class(resolved, [inferred_type], specialized_name)
+                end
+                class_name_str = specialized_name
+              elsif resolved == "Array"
+                specialized_name = "Array(String)"
+                if !@monomorphized.includes?(specialized_name)
+                  monomorphize_generic_class(resolved, ["String"], specialized_name)
+                end
+                class_name_str = specialized_name
+              end
+            end
+            if class_name_str.nil? &&
+               (type_name_exists?(resolved) || primitive_self_type(resolved) ||
+                @enum_info.try(&.has_key?(resolved)) || is_module_method?(resolved, method_name))
               class_name_str = resolved
-            elsif is_module_method?(resolved, method_name)
-              class_name_str = resolved
+            elsif class_name_str.nil? && resolve_constant_name_in_context(name)
+              constant_receiver = true
             end
           end
         elsif obj_node.is_a?(CrystalV2::Compiler::Frontend::IdentifierNode)
           name = String.new(obj_node.name)
-          if resolve_constant_name_in_context(name)
-            if @module.is_lib?(name)
-              class_name_str = name
-            else
-              constant_receiver = true
-            end
+          if @module.is_lib?(name)
+            class_name_str = name
           else
             if type_name = lookup_typeof_local_name(name)
               if ENV["DEBUG_TYPE_CLASS"]? && type_name.ends_with?(".class")
@@ -18603,46 +18636,71 @@ module Crystal::HIR
             end
             resolved_name = resolve_class_name_in_context(name)
             resolved_name = resolve_type_alias_chain(resolved_name)
-            # Check if it's a class name (starts with uppercase and is known class)
-            # OR a module name (check if Module.method exists in function_types)
-            if class_name_str.nil? && resolved_name[0].uppercase?
-              # Prefer nested types in the current namespace over top-level types.
-              resolved_name = resolve_class_name_in_context(resolved_name) unless resolved_name.includes?("::")
-              if @class_info.has_key?(resolved_name) ||
-                 @enum_info.try(&.has_key?(resolved_name))
-                class_name_str = resolved_name
-              elsif is_module_method?(resolved_name, method_name)
-                # It's a module method call
-                class_name_str = resolved_name
-              elsif @generic_templates.has_key?(resolved_name) && method_name == "new"
-                # Calling .new on a generic template (e.g., Array.new, Hash.new)
-                # Try to infer type argument from constructor arguments or block
-                inferred_type = infer_generic_type_arg(resolved_name, call_args, block_expr, ctx)
-                if inferred_type
-                  specialized_name = "#{resolved_name}(#{inferred_type})"
-                  # Monomorphize if not already done
-                  if !@monomorphized.includes?(specialized_name)
-                    monomorphize_generic_class(resolved_name, [inferred_type], specialized_name)
-                  end
-                  class_name_str = specialized_name
-                else
-                  # Can't infer type - use fallback or report error
-                  # For now, use String as default for Array (common case)
-                  if resolved_name == "Array"
-                    specialized_name = "Array(String)"
+            if class_name_str.nil? && @generic_templates.has_key?(resolved_name) && method_name == "new"
+              inferred_type = infer_generic_type_arg(resolved_name, call_args, block_expr, ctx)
+              if inferred_type
+                specialized_name = "#{resolved_name}(#{inferred_type})"
+                if !@monomorphized.includes?(specialized_name)
+                  monomorphize_generic_class(resolved_name, [inferred_type], specialized_name)
+                end
+                class_name_str = specialized_name
+              elsif resolved_name == "Array"
+                specialized_name = "Array(String)"
+                if !@monomorphized.includes?(specialized_name)
+                  monomorphize_generic_class(resolved_name, ["String"], specialized_name)
+                end
+                class_name_str = specialized_name
+              end
+            end
+            # Prefer class/module resolution when the identifier maps to a known type.
+            if class_name_str.nil? &&
+               (type_name_exists?(resolved_name) || @enum_info.try(&.has_key?(resolved_name)) ||
+                is_module_method?(resolved_name, method_name) || primitive_self_type(resolved_name))
+              class_name_str = resolved_name
+            elsif resolve_constant_name_in_context(name)
+              constant_receiver = true
+            else
+              # Check if it's a class name (starts with uppercase and is known class)
+              # OR a module name (check if Module.method exists in function_types)
+              if class_name_str.nil? && resolved_name[0].uppercase?
+                # Prefer nested types in the current namespace over top-level types.
+                resolved_name = resolve_class_name_in_context(resolved_name) unless resolved_name.includes?("::")
+                if @class_info.has_key?(resolved_name) ||
+                   @enum_info.try(&.has_key?(resolved_name))
+                  class_name_str = resolved_name
+                elsif is_module_method?(resolved_name, method_name)
+                  # It's a module method call
+                  class_name_str = resolved_name
+                elsif @generic_templates.has_key?(resolved_name) && method_name == "new"
+                  # Calling .new on a generic template (e.g., Array.new, Hash.new)
+                  # Try to infer type argument from constructor arguments or block
+                  inferred_type = infer_generic_type_arg(resolved_name, call_args, block_expr, ctx)
+                  if inferred_type
+                    specialized_name = "#{resolved_name}(#{inferred_type})"
+                    # Monomorphize if not already done
                     if !@monomorphized.includes?(specialized_name)
-                      monomorphize_generic_class(resolved_name, ["String"], specialized_name)
+                      monomorphize_generic_class(resolved_name, [inferred_type], specialized_name)
                     end
                     class_name_str = specialized_name
+                  else
+                    # Can't infer type - use fallback or report error
+                    # For now, use String as default for Array (common case)
+                    if resolved_name == "Array"
+                      specialized_name = "Array(String)"
+                      if !@monomorphized.includes?(specialized_name)
+                        monomorphize_generic_class(resolved_name, ["String"], specialized_name)
+                      end
+                      class_name_str = specialized_name
+                    end
                   end
-                end
-              else
-                # For primitive types and aliases not in class_info, use the resolved name directly.
-                # Avoid treating value constants (like STDERR) as type names.
-                if primitive_self_type(resolved_name)
-                  class_name_str = resolved_name
-                elsif @type_aliases.has_key?(resolved_name) || LIBC_TYPE_ALIASES.has_key?(resolved_name)
-                  class_name_str = resolved_name
+                else
+                  # For primitive types and aliases not in class_info, use the resolved name directly.
+                  # Avoid treating value constants (like STDERR) as type names.
+                  if primitive_self_type(resolved_name)
+                    class_name_str = resolved_name
+                  elsif @type_aliases.has_key?(resolved_name) || LIBC_TYPE_ALIASES.has_key?(resolved_name)
+                    class_name_str = resolved_name
+                  end
                 end
               end
             end
@@ -18792,6 +18850,27 @@ module Crystal::HIR
         end
 
         if class_name_str
+          if !@class_info.has_key?(class_name_str) && @module_defs.has_key?(class_name_str)
+            module_method_name = "#{class_name_str}.#{method_name}"
+            unless @function_types.has_key?(module_method_name) || has_function_base?(module_method_name)
+              if short_name = class_name_str.split("::").last?
+                if candidates = @short_type_index[short_name]?
+                  if candidates.size == 1
+                    candidate = candidates.first
+                    candidate_method = "#{candidate}.#{method_name}"
+                    if @function_types.has_key?(candidate_method) || has_function_base?(candidate_method)
+                      class_name_str = candidate
+                    end
+                  end
+                end
+              end
+            end
+          end
+          if ENV["DEBUG_THREAD_CURRENT"]? &&
+             class_name_str.includes?("Thread") &&
+             method_name.starts_with?("current")
+            STDERR.puts "[DEBUG_THREAD_CURRENT] owner=#{class_name_str} method=#{method_name} current_class=#{@current_class || "nil"} current_method=#{@current_method || "nil"}"
+          end
           if DebugHooks::ENABLED && unresolved_generic_receiver?(class_name_str)
             debug_hook(
               "call.class_receiver.unresolved",
@@ -20224,6 +20303,25 @@ module Crystal::HIR
         recv_desc = @module.get_type_descriptor(recv_type)
         recv_name = recv_desc ? "#{recv_desc.name}(#{recv_desc.kind})" : recv_type.id.to_s
         STDERR.puts "[HIR_VIRTUAL_CALL] method=#{method_name} recv=#{recv_name} virtual=#{call_virtual}"
+      end
+
+      # Ensure virtual dispatch targets are lowered so MIR can build vdispatch tables.
+      if call_virtual && receiver_id
+        if type_desc = @module.get_type_descriptor(ctx.type_of(receiver_id))
+          if type_desc.kind == TypeKind::Class
+            key = "#{type_desc.name}|#{method_name}|#{arg_types.map(&.id).join(",")}|#{has_block_call ? 1 : 0}"
+            unless @virtual_targets_lowered.includes?(key)
+              @virtual_targets_lowered.add(key)
+              owners = [type_desc.name] + collect_subclasses([type_desc.name])
+              owners.each do |owner|
+                base_name = "#{owner}##{method_name}"
+                candidate = mangle_function_name(base_name, arg_types, has_block_call)
+                lower_function_if_needed(candidate)
+                lower_function_if_needed(base_name) unless candidate == base_name
+              end
+            end
+          end
+        end
       end
 
       if ENV["DEBUG_CALL_TRACE"]? && method_name == "copy_to"
@@ -25367,6 +25465,10 @@ module Crystal::HIR
       else
         name
       end
+
+      # "_" is a wildcard type in Crystal (untyped parameter).
+      # Treat it as VOID to allow callsite-driven specialization.
+      return TypeRef::VOID if normalized_name == "_"
 
       lookup_name = normalized_name
       if BUILTIN_TYPE_NAMES.includes?(lookup_name)
