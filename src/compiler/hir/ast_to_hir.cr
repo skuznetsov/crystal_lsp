@@ -440,6 +440,8 @@ module Crystal::HIR
     @function_def_overloads : Hash(String, Array(String))
     @function_defs_cache_size : Int32
     @function_param_stats : Hash(String, DefParamStats)
+    @function_type_keys_by_base : Hash(String, Array(String))
+    @function_type_keys_by_base_version : Int32
 
     # Functions that contain yield (candidates for inline)
     @yield_functions : Set(String)
@@ -656,6 +658,8 @@ module Crystal::HIR
       @function_def_overloads = {} of String => Array(String)
       @function_defs_cache_size = 0
       @function_param_stats = {} of String => DefParamStats
+      @function_type_keys_by_base = {} of String => Array(String)
+      @function_type_keys_by_base_version = 0
       @yield_functions = Set(String).new
       @yield_return_functions = Set(String).new
       @yield_return_checked = Set(String).new
@@ -9030,21 +9034,21 @@ module Crystal::HIR
             return cache_method_resolution(cache_key, test_mangled)
           end
           # Also try without arg types mangling
-          @function_types.each_key do |key|
-            if key.starts_with?("#{test_base}$")
-              debug_hook("method.resolve", "base=#{base_method_name} resolved=#{key} reason=operator_array_prefix")
-              return cache_method_resolution(cache_key, key)
-            end
+          function_type_keys_for_base(test_base).each do |key|
+            debug_hook("method.resolve", "base=#{base_method_name} resolved=#{key} reason=operator_array_prefix")
+            return cache_method_resolution(cache_key, key)
           end
         end
         # Try IO#<<
         ["IO", "IO::Memory", "String::Builder"].each do |io_class|
           test_base = "#{io_class}#<<"
-          @function_types.each_key do |key|
-            if key.starts_with?("#{test_base}$") || key == test_base
-              debug_hook("method.resolve", "base=#{base_method_name} resolved=#{key} reason=operator_io")
-              return cache_method_resolution(cache_key, key)
-            end
+          function_type_keys_for_base(test_base).each do |key|
+            debug_hook("method.resolve", "base=#{base_method_name} resolved=#{key} reason=operator_io")
+            return cache_method_resolution(cache_key, key)
+          end
+          if @function_types.has_key?(test_base)
+            debug_hook("method.resolve", "base=#{base_method_name} resolved=#{test_base} reason=operator_io")
+            return cache_method_resolution(cache_key, test_base)
           end
         end
       end
@@ -9069,12 +9073,31 @@ module Crystal::HIR
     private def rebuild_function_def_overloads
       @function_def_overloads.clear
       @function_param_stats.clear
+      @function_type_keys_by_base.clear
       @function_defs.each do |key, def_node|
         base = key.split("$", 2).first
         (@function_def_overloads[base] ||= [] of String) << key
         @function_param_stats[key] = build_param_stats(def_node)
       end
+      @function_types.each_key do |key|
+        base = key.split("$", 2).first
+        (@function_type_keys_by_base[base] ||= [] of String) << key
+      end
+      @function_type_keys_by_base_version = @function_defs_cache_size
       @function_defs_cache_size = @function_defs.size
+    end
+
+    private def function_type_keys_for_base(base_name : String) : Array(String)
+      rebuild_function_def_overloads if @function_defs_cache_size != @function_defs.size
+      if @function_type_keys_by_base_version != @function_defs_cache_size
+        @function_type_keys_by_base.clear
+        @function_types.each_key do |key|
+          base = key.split("$", 2).first
+          (@function_type_keys_by_base[base] ||= [] of String) << key
+        end
+        @function_type_keys_by_base_version = @function_defs_cache_size
+      end
+      @function_type_keys_by_base[base_name]? || [] of String
     end
 
     private def function_param_stats(name : String, def_node : CrystalV2::Compiler::Frontend::DefNode) : DefParamStats

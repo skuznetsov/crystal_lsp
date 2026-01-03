@@ -1379,6 +1379,7 @@ The return_type=16 (NIL) for `to_s` methods is incorrect - should be String type
   - Track classes with subclasses in a set for virtual-call checks (avoid scanning class_info each call) (2026-01-xx).
   - Cache `class_info_for_type` by type id (avoid linear scan over class_info for each lookup) (2026-01-xx).
   - Index HIR module functions by name (O(1) `has_function?`, avoid array scans) (2026-01-xx).
+  - Index function_type keys by base for operator lookup (avoid scanning all function types on `<<` fallback) (2026-01-xx).
 - **Next**:
   - Profile for hotspots inside lowering (resolve_method_call / infer_type_from_expr / lower_function_if_needed).
   - Consider caching/memoization or an indexed lookup to avoid repeated full-map scans.
