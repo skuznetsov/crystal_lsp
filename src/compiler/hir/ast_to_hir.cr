@@ -416,6 +416,7 @@ module Crystal::HIR
 
     # Class type information
     getter class_info : Hash(String, ClassInfo)
+    @class_info_by_type_id : Hash(Int32, ClassInfo)
     @classes_with_subclasses : Set(String)
     # Module-level class vars (modules don't have ClassInfo entries)
     @module_class_vars : Hash(String, Array(ClassVarInfo))
@@ -633,6 +634,7 @@ module Crystal::HIR
       @function_enum_return_names = {} of String => String
       @function_return_type_literals = Set(String).new
       @class_info = {} of String => ClassInfo
+      @class_info_by_type_id = {} of Int32 => ClassInfo
       @classes_with_subclasses = Set(String).new
       @module_class_vars = {} of String => Array(ClassVarInfo)
       @lib_structs = Set(String).new
@@ -6596,15 +6598,17 @@ module Crystal::HIR
         record_constants_in_body(class_name, body)
         # Seed provisional class info so return-type inference can see ivars
         # collected during registration (initialize assignments, ivar decls, etc.).
-        @class_info[class_name] = ClassInfo.new(
-          class_name,
-          type_ref,
-          ivars,
-          class_vars,
-          offset,
-          is_struct,
-          parent_name
-        )
+      provisional_info = ClassInfo.new(
+        class_name,
+        type_ref,
+        ivars,
+        class_vars,
+        offset,
+        is_struct,
+        parent_name
+      )
+      @class_info[class_name] = provisional_info
+      @class_info_by_type_id[type_ref.id] = provisional_info
 
         defined_start = Time.monotonic if mono_debug
         if ENV.has_key?("DEBUG_TYPE_RESOLVE") && class_name == "IO"
@@ -7051,7 +7055,9 @@ module Crystal::HIR
         end
       end
 
-      @class_info[class_name] = ClassInfo.new(class_name, type_ref, ivars, class_vars, offset, is_struct, parent_name)
+      final_info = ClassInfo.new(class_name, type_ref, ivars, class_vars, offset, is_struct, parent_name)
+      @class_info[class_name] = final_info
+      @class_info_by_type_id[type_ref.id] = final_info
       record_class_parent(parent_name)
       if ENV.has_key?("DEBUG_CLASS_PARENTS") && (class_name == "Base" || class_name == "Child")
         STDERR.puts "[CLASS_PARENT] class=#{class_name} parent=#{parent_name || "nil"}"
@@ -10562,8 +10568,8 @@ module Crystal::HIR
     private def class_info_for_type(receiver_type : TypeRef) : ClassInfo?
       return nil if receiver_type == TypeRef::VOID
 
-      @class_info.each_value do |info|
-        return info if info.type_ref.id == receiver_type.id
+      if info = @class_info_by_type_id[receiver_type.id]?
+        return info
       end
 
       if desc = @module.get_type_descriptor(receiver_type)
@@ -23945,6 +23951,7 @@ module Crystal::HIR
                 class_info.is_struct,
                 class_info.parent_name
               )
+              @class_info_by_type_id[class_info.type_ref.id] = @class_info[class_name]
               ivar_type = value_type
               ivar_offset = new_offset
             end
