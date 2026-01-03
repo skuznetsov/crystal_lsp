@@ -1297,6 +1297,7 @@ r2 = maybe(false)  # => nil
 - `DEBUG_MAIN_SLOW_MS=NN` - threshold for slow main expr logging (default 50ms)
 - `DEBUG_MAIN_PROGRESS_EVERY=N` - progress interval for main lowering (default 500)
 - `DEBUG_LOWER_SLOW_ONLY=1` - only log slow expressions in lower_def when DEBUG_LOWER_PROGRESS matches
+- `DEBUG_LOWER_METHOD_SLOW_MS=NN` - log method lowering times only when >= NN ms
 
 ### 8.6 Bootstrap Session Notes (2026-01-01 - Session 2)
 

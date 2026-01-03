@@ -17944,9 +17944,11 @@ module Crystal::HIR
         STDERR.puts "[LOWERING] Starting lower for #{target_name}, arena=#{arena.class}"
       end
       time_filter = ENV["DEBUG_LOWER_METHOD_TIME"]?
+      slow_threshold = ENV["DEBUG_LOWER_METHOD_SLOW_MS"]?.try(&.to_f)
+      slow_enabled = !slow_threshold.nil?
       time_match = time_filter && (time_filter == "1" || target_name.includes?(time_filter) || name.includes?(time_filter))
       start_time = nil
-      if time_match
+      if time_match || slow_enabled
         start_time = Time.monotonic
         @lower_method_time_stack << LowerMethodTiming.new(target_name, name, start_time, 0.0)
         if ENV["DEBUG_LOWER_METHOD_STATS"]?
@@ -18082,11 +18084,19 @@ module Crystal::HIR
           if parent = @lower_method_time_stack.last?
             parent.child_ms += elapsed_ms
           end
-          stats = @lower_method_stats_stack.pop?
-          if stats
-            STDERR.puts "[LOWER_METHOD_TIME] name=#{target_name} requested=#{name} total=#{elapsed_ms.round(1)}ms self=#{self_ms.round(1)}ms child=#{child_ms.round(1)}ms resolve=#{stats.resolve_ms.round(1)}ms/#{stats.resolve_calls} infer=#{stats.infer_ms.round(1)}ms/#{stats.infer_calls}"
-          else
-            STDERR.puts "[LOWER_METHOD_TIME] name=#{target_name} requested=#{name} total=#{elapsed_ms.round(1)}ms self=#{self_ms.round(1)}ms child=#{child_ms.round(1)}ms"
+          should_log = time_match
+          if slow_threshold
+            should_log ||= elapsed_ms >= slow_threshold
+          end
+          if should_log
+            stats = @lower_method_stats_stack.pop?
+            if stats
+              STDERR.puts "[LOWER_METHOD_TIME] name=#{target_name} requested=#{name} total=#{elapsed_ms.round(1)}ms self=#{self_ms.round(1)}ms child=#{child_ms.round(1)}ms resolve=#{stats.resolve_ms.round(1)}ms/#{stats.resolve_calls} infer=#{stats.infer_ms.round(1)}ms/#{stats.infer_calls}"
+            else
+              STDERR.puts "[LOWER_METHOD_TIME] name=#{target_name} requested=#{name} total=#{elapsed_ms.round(1)}ms self=#{self_ms.round(1)}ms child=#{child_ms.round(1)}ms"
+            end
+          elsif ENV["DEBUG_LOWER_METHOD_STATS"]?
+            @lower_method_stats_stack.pop?
           end
         end
       end
