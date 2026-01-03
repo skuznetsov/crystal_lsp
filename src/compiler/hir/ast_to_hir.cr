@@ -24671,7 +24671,11 @@ module Crystal::HIR
           start_time = Time.monotonic
           last_value = lower_expr(ctx, expr_id)
           elapsed_ms = (Time.monotonic - start_time).total_milliseconds
-          if elapsed_ms >= 200.0
+          slow_threshold = 200.0
+          if threshold_str = ENV["DEBUG_LOWER_SLOW_MS"]?
+            slow_threshold = threshold_str.to_f? || 200.0
+          end
+          if elapsed_ms >= slow_threshold
             node = @arena[expr_id]
             call_name = nil
             if node.is_a?(CrystalV2::Compiler::Frontend::CallNode)
