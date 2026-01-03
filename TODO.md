@@ -1370,6 +1370,7 @@ The return_type=16 (NIL) for `to_s` methods is incorrect - should be String type
 - **Next**:
   - Profile for hotspots inside lowering (resolve_method_call / infer_type_from_expr / lower_function_if_needed).
   - Consider caching/memoization or an indexed lookup to avoid repeated full-map scans.
+  - `DEBUG_LOWER_METHOD_STATS=1 DEBUG_LOWER_METHOD_TIME=register_enum` shows resolve/infer time = 0; register_enum time is dominated by raw lowering cost, not inference (2026-01-xx).
 
 **Next steps for GPT-5.2**:
 1. **Flow typing for variable reassignment**: DONE (see Issue 3).
