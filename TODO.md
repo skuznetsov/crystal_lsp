@@ -1176,6 +1176,7 @@ r2 = maybe(false)  # => nil
 **Additional codegen gaps (observed):**
 - Top-level `{% if flag? %}` bodies now use raw source spans to parse defs/modules for simple flag branches; general macro expansion for complex bodies is still missing.
 - Mixed-width primitive calls in untyped methods (e.g., `Math.min` with `Int64` + `Int32`) can emit LLVM phis with mismatched integer widths; needs numeric promotion/common-type coercion (2025-12-26).
+- Pointer null comparisons can emit invalid IR (`icmp ne ptr 0, null`); ensure pointer constants are typed or use `ptrtoint` + integer compare (2026-01-xx).
 - [x] Enum method bodies are captured and registered (enum defs now emitted for `Signal#reset` etc.) (2025-01-02)
 - [x] Macro `flag?` branches inside class/struct bodies now register defs (e.g., `Crystal::Scheduler.init`). (2025-01-02)
 - [x] Replace remaining `StructNode` checks with `ClassNode.is_struct` (parser does not emit StructNode). (2025-12-25)
@@ -1389,6 +1390,8 @@ The return_type=16 (NIL) for `to_s` methods is incorrect - should be String type
   - Cache method inheritance resolution (class+method) with invalidation on function/module/class changes (2026-01-xx).
   - Track class_info mutation version to invalidate method inheritance cache on in-place updates (2026-01-xx).
   - Index HIR functions by base name (avoid scanning module.functions for fuzzy matches) (2026-01-xx).
+- **Profile check** (2026-01-xx):
+  - `tmp/profile_parser.cr` with `DEBUG_LOWER_METHOD_TIME=1` shows ~2.1–2.3s self-time per Parser parse_* method (parse_program/parse_macro_*), resolve/infer time ≈ 0. Cost is raw lowering, not lookup/inference.
 - **Next**:
   - Profile for hotspots inside lowering (resolve_method_call / infer_type_from_expr / lower_function_if_needed).
   - Consider caching/memoization or an indexed lookup to avoid repeated full-map scans.
