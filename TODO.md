@@ -1392,6 +1392,7 @@ The return_type=16 (NIL) for `to_s` methods is incorrect - should be String type
   - Index HIR functions by base name (avoid scanning module.functions for fuzzy matches) (2026-01-xx).
 - **Profile check** (2026-01-xx):
   - `tmp/profile_parser.cr` with `DEBUG_LOWER_METHOD_TIME=1` shows ~2.1–2.3s self-time per Parser parse_* method (parse_program/parse_macro_*), resolve/infer time ≈ 0. Cost is raw lowering, not lookup/inference.
+  - `DEBUG_LOWER_PROGRESS=Parser#parse_program DEBUG_LOWER_SLOW_MS=50` shows slowest node is the `parse_macro_definition` call (dominant cost inside parse_program).
 - **Next**:
   - Profile for hotspots inside lowering (resolve_method_call / infer_type_from_expr / lower_function_if_needed).
   - Consider caching/memoization or an indexed lookup to avoid repeated full-map scans.
