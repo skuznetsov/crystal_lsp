@@ -1348,6 +1348,23 @@ The return_type=16 (NIL) for `to_s` methods is incorrect - should be String type
   - Emit `fcmp one` for float truthiness in LLVM backend to avoid `icmp ne double ... 0` errors when non-bool float conditions slip through.
 - **Verification**: `DEBUG_FROM_CHARS=1 DEBUG_LOWER_PROGRESS=from_chars_advanced ./bin/crystal_v2 --no-llvm-opt --no-llvm-metadata --no-link /tmp/ff_test2.cr -o /tmp/ff_test2` completes, and both overloads are lowered.
 
+#### Issue 8: Parser lowering time spikes (parse_expression / macro parsing) - IN PROGRESS (2026-01-xx)
+- **Symptom**: self-host compile appears to stall; `DEBUG_LOWER_METHOD_TIME=Parser#` shows large lowering times:
+  - `Parser#parse_expression` ~45s
+  - `Parser#parse_prefix` ~44s
+  - `Parser#parse_macro_body` / `parse_macro_control_piece` / `parse_macro_definition` ~46–48s
+  - `Parser#parse_program` ~49s
+- **Finding**: `DEBUG_LOWER_PROGRESS=Parser#parse_macro_for_header` shows the slow call is `parse_expression(0)` (CallNode); the slowdown is in lowering parse_expression and its dependencies (inclusive).
+- **Instrumentation added**:
+  - `DEBUG_LOWER_METHOD_TIME` logs per-method lowering time.
+  - `LOWER_SLOW_BODY` now includes call target (CallNode callee name).
+- **Fix applied**:
+  - `lookup_function_def_for_call` now uses a per-base overload index instead of scanning `@function_defs` for every call.
+  - Result: `Parser#parse_expression` lowering dropped from ~49s → ~3.3s (see `logs/lower_method_time_parser.log`).
+- **Next**:
+  - Profile for hotspots inside lowering (resolve_method_call / infer_type_from_expr / lower_function_if_needed).
+  - Consider caching/memoization or an indexed lookup to avoid repeated full-map scans.
+
 **Next steps for GPT-5.2**:
 1. **Flow typing for variable reassignment**: DONE (see Issue 3).
 

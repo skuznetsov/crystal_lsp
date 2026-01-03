@@ -220,6 +220,31 @@ module Crystal::HIR
   # Macro parameter metadata (internal/external names + prefix).
   record MacroParamInfo, name : String, external_name : String? = nil, prefix : String = ""
 
+  # Lowering timing entry (used for exclusive time accounting).
+  private struct LowerMethodTiming
+    getter name : String
+    getter requested : String
+    getter start : Time::Span
+    property child_ms : Float64
+
+    def initialize(@name : String, @requested : String, @start : Time::Span, @child_ms : Float64)
+    end
+  end
+
+  private struct LowerMethodStats
+    property resolve_ms : Float64
+    property resolve_calls : Int32
+    property infer_ms : Float64
+    property infer_calls : Int32
+
+    def initialize
+      @resolve_ms = 0.0
+      @resolve_calls = 0
+      @infer_ms = 0.0
+      @infer_calls = 0
+    end
+  end
+
   # Class-level accessor entry (class_getter/class_setter/class_property)
   record ClassAccessorEntry,
     owner : String,
@@ -347,6 +372,8 @@ module Crystal::HIR
     # AST of function definitions for inline expansion
     @function_defs : Hash(String, CrystalV2::Compiler::Frontend::DefNode)
     @function_def_arenas : Hash(String, CrystalV2::Compiler::Frontend::ArenaLike)
+    @function_def_overloads : Hash(String, Array(String))
+    @function_defs_cache_size : Int32
 
     # Functions that contain yield (candidates for inline)
     @yield_functions : Set(String)
@@ -382,6 +409,10 @@ module Crystal::HIR
     @template_reg_counter : Int32?
     @mono_counter : Int32?
 
+    # Method resolution cache (per-lowering scope).
+    @method_resolution_cache : Hash(String, String)
+    @method_resolution_cache_scope : String?
+
     # Pending monomorphizations (deferred until after all templates are registered)
     @pending_monomorphizations : Array({String, Array(String), String})
     @defer_monomorphization : Bool
@@ -402,6 +433,12 @@ module Crystal::HIR
     @current_typeof_locals : Hash(String, TypeRef)?
     # Guard against recursive inference loops (arena object_id + expr index).
     @infer_expr_stack : Set(UInt64)
+    @infer_type_cache : Hash(UInt64, {Int32, TypeRef})
+    @infer_type_cache_version : Int32
+    @infer_type_cache_scope : String?
+    # Optional lowering timing stack (only used when DEBUG_LOWER_METHOD_TIME is set).
+    @lower_method_time_stack : Array(LowerMethodTiming)
+    @lower_method_stats_stack : Array(LowerMethodStats)
 
     # Macro definitions (name -> {MacroDefNode, arena})
     @macro_defs : Hash(String, {CrystalV2::Compiler::Frontend::MacroDefNode, CrystalV2::Compiler::Frontend::ArenaLike})
@@ -528,9 +565,16 @@ module Crystal::HIR
       @current_method_is_class = false
       @current_typeof_locals = nil
       @infer_expr_stack = Set(UInt64).new
+      @infer_type_cache = {} of UInt64 => {Int32, TypeRef}
+      @infer_type_cache_version = 0
+      @infer_type_cache_scope = nil
+      @lower_method_time_stack = [] of LowerMethodTiming
+      @lower_method_stats_stack = [] of LowerMethodStats
       @union_descriptors = {} of MIR::TypeRef => MIR::UnionDescriptor
       @function_defs = {} of String => CrystalV2::Compiler::Frontend::DefNode
       @function_def_arenas = {} of String => CrystalV2::Compiler::Frontend::ArenaLike
+      @function_def_overloads = {} of String => Array(String)
+      @function_defs_cache_size = 0
       @yield_functions = Set(String).new
       @yield_return_functions = Set(String).new
       @yield_return_checked = Set(String).new
@@ -550,6 +594,8 @@ module Crystal::HIR
       @defer_monomorphization = true  # Start in deferred mode
       @suppress_monomorphization = false
       @eager_monomorphization = ENV.has_key?("CRYSTAL_V2_EAGER_MONO")
+      @method_resolution_cache = {} of String => String
+      @method_resolution_cache_scope = nil
       @type_param_map = {} of String => String
       @macro_defs = {} of String => {CrystalV2::Compiler::Frontend::MacroDefNode, CrystalV2::Compiler::Frontend::ArenaLike}
       @macro_params = {} of String => Array(MacroParamInfo)
@@ -2539,6 +2585,7 @@ module Crystal::HIR
     private def update_typeof_local(name : String, type_ref : TypeRef) : Nil
       return unless locals = @current_typeof_locals
       locals[name] = type_ref
+      @infer_type_cache_version += 1
     end
 
     private def update_typeof_local_name(name : String, type_name : String) : Nil
@@ -2548,6 +2595,7 @@ module Crystal::HIR
         STDERR.puts "[DEBUG_TYPE_CLASS] local=#{name} type_name=#{normalized}"
       end
       locals[name] = normalized
+      @infer_type_cache_version += 1
     end
 
     private def concrete_type_name_for(type_ref : TypeRef) : String?
@@ -4003,6 +4051,8 @@ module Crystal::HIR
     end
 
     private def infer_type_from_expr(expr_id : ExprId, self_type_name : String?) : TypeRef?
+      stats = ENV["DEBUG_LOWER_METHOD_STATS"]? ? @lower_method_stats_stack.last? : nil
+      stats_start = stats ? Time.monotonic : nil
       if ENV["DEBUG_INFER_CRASH"]?
         STDERR.puts "[INFER_CALL] expr=#{expr_id.index} current=#{@arena.class}:#{@arena.size}"
       end
@@ -4010,16 +4060,60 @@ module Crystal::HIR
       return nil unless arena
       return nil if expr_id.index >= arena.size
 
+      if @current_class && @current_method
+        scope = "#{@current_class}##{@current_method}"
+        if scope != @infer_type_cache_scope
+          @infer_type_cache.clear
+          @infer_type_cache_version = 0
+          @infer_type_cache_scope = scope
+        end
+      elsif @infer_type_cache_scope
+        @infer_type_cache.clear
+        @infer_type_cache_version = 0
+        @infer_type_cache_scope = nil
+      end
+
       old_arena = @arena
       @arena = arena
       key = (arena.object_id.to_u64 << 32) ^ expr_id.index.to_u64
+      if cached = @infer_type_cache[key]?
+        cached_version, cached_type = cached
+        if cached_version == @infer_type_cache_version
+          if stats && stats_start
+            stats.infer_ms += (Time.monotonic - stats_start).total_milliseconds
+            stats.infer_calls += 1
+          end
+          @arena = old_arena
+          return cached_type
+        end
+      end
       if @infer_expr_stack.includes?(key)
+        if stats && stats_start
+          stats.infer_ms += (Time.monotonic - stats_start).total_milliseconds
+          stats.infer_calls += 1
+        end
         @arena = old_arena
         return nil
       end
       @infer_expr_stack.add(key)
       begin
-        expr_node = @arena[expr_id]
+        result = infer_type_from_expr_inner(expr_id, self_type_name)
+        if result
+          @infer_type_cache[key] = {@infer_type_cache_version, result}
+        end
+        if stats && stats_start
+          stats.infer_ms += (Time.monotonic - stats_start).total_milliseconds
+          stats.infer_calls += 1
+        end
+        result
+      ensure
+        @infer_expr_stack.delete(key)
+        @arena = old_arena
+      end
+    end
+
+    private def infer_type_from_expr_inner(expr_id : ExprId, self_type_name : String?) : TypeRef?
+      expr_node = @arena[expr_id]
       case expr_node
       when CrystalV2::Compiler::Frontend::NumberNode
         return type_ref_for_number_kind(expr_node.kind)
@@ -4224,11 +4318,7 @@ module Crystal::HIR
         end
       end
 
-        nil
-      ensure
-        @infer_expr_stack.delete(key)
-        @arena = old_arena
-      end
+      nil
     end
 
     private def infer_type_from_branch(
@@ -8346,21 +8436,11 @@ module Crystal::HIR
     private def refine_void_args_from_overloads(base_method_name : String, arg_types : Array(TypeRef)) : Array(TypeRef)
       return arg_types unless arg_types.any? { |t| t == TypeRef::VOID }
 
-      # Look for function definitions with this base name (may have multiple overloads)
-      overload_prefix = "#{base_method_name}$"
       candidates = [] of CrystalV2::Compiler::Frontend::DefNode
 
-      # Direct match
-      if func_def = @function_defs[base_method_name]?
-        candidates << func_def
-      end
-
-      # Mangled variants
-      @function_defs.each_key do |key|
-        if key.starts_with?(overload_prefix)
-          if def_node = @function_defs[key]?
-            candidates << def_node
-          end
+      function_def_overloads(base_method_name).each do |key|
+        if def_node = @function_defs[key]?
+          candidates << def_node
         end
       end
 
@@ -8660,9 +8740,40 @@ module Crystal::HIR
       name
     end
 
+    private def method_resolution_cache_key(
+      receiver_type : TypeRef,
+      method_name : String,
+      arg_types : Array(TypeRef),
+      type_literal : Bool
+    ) : String
+      arg_key = arg_types.map(&.id).join(",")
+      "#{receiver_type.id}|#{method_name}|#{arg_key}|#{type_literal ? 1 : 0}"
+    end
+
+    private def cache_method_resolution(cache_key : String?, resolved : String) : String
+      if cache_key && !cache_key.empty?
+        @method_resolution_cache[cache_key] = resolved
+      end
+      resolved
+    end
+
     private def resolve_method_call(ctx : LoweringContext, receiver_id : ValueId, method_name : String, arg_types : Array(TypeRef)) : String
+      stats = ENV["DEBUG_LOWER_METHOD_STATS"]? ? @lower_method_stats_stack.last? : nil
+      stats_start = stats ? Time.monotonic : nil
       receiver_type = ctx.type_of(receiver_id)
       type_desc = @module.get_type_descriptor(receiver_type)
+      cache_key : String? = nil
+      if @method_resolution_cache
+        scope = "#{@current_class}|#{@current_method}|#{@current_method_is_class ? 1 : 0}|#{@type_param_map.hash}"
+        if scope != @method_resolution_cache_scope
+          @method_resolution_cache.clear
+          @method_resolution_cache_scope = scope
+        end
+        cache_key = method_resolution_cache_key(receiver_type, method_name, arg_types, ctx.type_literal?(receiver_id))
+        if cached = @method_resolution_cache[cache_key]?
+          return cached
+        end
+      end
 
       # Get the class name from the type descriptor
       enum_type_name = @enum_value_types.try(&.[receiver_id]?)
@@ -8714,12 +8825,12 @@ module Crystal::HIR
       # causes qualified calls to degrade into unqualified extern calls.
       if @function_types.has_key?(mangled_name) && !(module_like_receiver && abstract_def?(mangled_name))
         debug_hook("method.resolve", "base=#{base_method_name} resolved=#{mangled_name} reason=mangled_exact")
-        return mangled_name
+        return cache_method_resolution(cache_key, mangled_name)
       end
       if (@function_defs.has_key?(mangled_name) && !(module_like_receiver && abstract_def?(mangled_name))) ||
          @module.has_function?(mangled_name)
         debug_hook("method.resolve", "base=#{base_method_name} resolved=#{mangled_name} reason=mangled_def")
-        return mangled_name
+        return cache_method_resolution(cache_key, mangled_name)
       end
 
       if !class_name.empty? && method_name.ends_with?("=")
@@ -8730,7 +8841,7 @@ module Crystal::HIR
             expected_name = mangle_function_name(base_method_name, [ivar_info.type])
             if @function_types.has_key?(expected_name)
               debug_hook("method.resolve", "base=#{base_method_name} resolved=#{expected_name} reason=setter_accessor")
-              return expected_name
+              return cache_method_resolution(cache_key, expected_name)
             end
           end
         end
@@ -8742,7 +8853,7 @@ module Crystal::HIR
             STDERR.puts "[TO_S_RESOLVE] union resolved=#{resolved}"
           end
           debug_hook("method.resolve", "base=#{base_method_name} resolved=#{resolved} reason=union")
-          return resolved
+          return cache_method_resolution(cache_key, resolved)
         end
       end
 
@@ -8751,7 +8862,7 @@ module Crystal::HIR
       if module_like_receiver
         if resolved = resolve_module_typed_method(method_name, arg_types, class_name, false, @current_class)
           debug_hook("method.resolve", "base=#{base_method_name} resolved=#{resolved} reason=module_typed")
-          return resolved
+          return cache_method_resolution(cache_key, resolved)
         end
       end
 
@@ -8760,14 +8871,14 @@ module Crystal::HIR
       if !class_name.empty? && has_function_base?(base_method_name)
         if resolved = resolve_untyped_overload(base_method_name, arg_types.size, false)
           debug_hook("method.resolve", "base=#{base_method_name} resolved=#{resolved} reason=base_overload_arity")
-          return resolved
+          return cache_method_resolution(cache_key, resolved)
         end
         if resolved = resolve_ancestor_overload(class_name, method_name, arg_types.size)
           debug_hook("method.resolve", "base=#{base_method_name} resolved=#{resolved} reason=ancestor_overload_arity")
-          return resolved
+          return cache_method_resolution(cache_key, resolved)
         end
         debug_hook("method.resolve", "base=#{base_method_name} resolved=#{base_method_name} reason=base_overload")
-        return base_method_name
+        return cache_method_resolution(cache_key, base_method_name)
       end
 
       # Search through all class info for matching method (O(n) fallback).
@@ -8778,10 +8889,10 @@ module Crystal::HIR
           test_mangled = mangle_function_name(test_base, arg_types)
           if @function_types.has_key?(test_mangled)
             debug_hook("method.resolve", "base=#{base_method_name} resolved=#{test_mangled} reason=fallback_scan")
-            return test_mangled
+            return cache_method_resolution(cache_key, test_mangled)
           elsif has_function_base?(test_base)
             debug_hook("method.resolve", "base=#{base_method_name} resolved=#{test_base} reason=fallback_scan_base")
-            return test_base
+            return cache_method_resolution(cache_key, test_base)
           end
         end
       end
@@ -8795,13 +8906,13 @@ module Crystal::HIR
           test_mangled = mangle_function_name(test_base, arg_types)
           if @function_types[test_mangled]?
             debug_hook("method.resolve", "base=#{base_method_name} resolved=#{test_mangled} reason=operator_array")
-            return test_mangled
+            return cache_method_resolution(cache_key, test_mangled)
           end
           # Also try without arg types mangling
           @function_types.each_key do |key|
             if key.starts_with?("#{test_base}$")
               debug_hook("method.resolve", "base=#{base_method_name} resolved=#{key} reason=operator_array_prefix")
-              return key
+              return cache_method_resolution(cache_key, key)
             end
           end
         end
@@ -8811,7 +8922,7 @@ module Crystal::HIR
           @function_types.each_key do |key|
             if key.starts_with?("#{test_base}$") || key == test_base
               debug_hook("method.resolve", "base=#{base_method_name} resolved=#{key} reason=operator_io")
-              return key
+              return cache_method_resolution(cache_key, key)
             end
           end
         end
@@ -8819,11 +8930,37 @@ module Crystal::HIR
 
       # Fallback to mangled name
       debug_hook("method.resolve", "base=#{base_method_name} resolved=#{mangled_name} reason=fallback")
-      mangled_name
+      resolved = cache_method_resolution(cache_key, mangled_name)
+      if stats && stats_start
+        stats.resolve_ms += (Time.monotonic - stats_start).total_milliseconds
+        stats.resolve_calls += 1
+      end
+      resolved
     end
 
     # Resolve a single overload when argument types are unknown (all VOID).
     # Uses arity + block presence to avoid calling an unmangled base name.
+    private def function_def_overloads(base_name : String) : Array(String)
+      if @function_defs_cache_size != @function_defs.size
+        @function_def_overloads.clear
+        @function_defs_cache_size = @function_defs.size
+      end
+
+      if cached = @function_def_overloads[base_name]?
+        return cached
+      end
+
+      prefix = "#{base_name}$"
+      overloads = [] of String
+      @function_defs.each_key do |key|
+        if key == base_name || key.starts_with?(prefix)
+          overloads << key
+        end
+      end
+      @function_def_overloads[base_name] = overloads
+      overloads
+    end
+
     private def resolve_untyped_overload(base_method_name : String, arg_count : Int32, has_block_call : Bool) : String?
       return nil if base_method_name.empty?
 
@@ -8841,8 +8978,9 @@ module Crystal::HIR
       best_param_count = Int32::MAX
       best_score = Int32::MIN
 
-      @function_defs.each do |name, def_node|
-        next unless name == base_method_name || name.starts_with?("#{base_method_name}$")
+      function_def_overloads(base_method_name).each do |name|
+        def_node = @function_defs[name]?
+        next unless def_node
         params = def_node.params
         next unless params
 
@@ -16787,14 +16925,14 @@ module Crystal::HIR
                     lookup_branch = "generic_owner_template_mangled"
                   else
                     mangled_prefix = "#{template_base}$"
-                    @function_defs.each_key do |key|
-                      if key.starts_with?(mangled_prefix)
-                        func_def = @function_defs[key]
-                        arena = @function_def_arenas[key]
-                        target_name = name
-                        lookup_branch = "generic_owner_template_prefix"
-                        break
-                      end
+                    function_def_overloads(template_base).each do |key|
+                      next if key == template_base
+                      next unless key.starts_with?(mangled_prefix)
+                      func_def = @function_defs[key]
+                      arena = @function_def_arenas[key]
+                      target_name = name
+                      lookup_branch = "generic_owner_template_prefix"
+                      break
                     end
                   end
                 end
@@ -16840,14 +16978,17 @@ module Crystal::HIR
           if ENV["DEBUG_FROM_CHARS"]? && name.includes?("from_chars_advanced")
             STDERR.puts "[DEBUG_FROM_CHARS] scan_prefix start prefix=#{mangled_prefix} defs=#{@function_defs.size}"
           end
+          overload_keys = function_def_overloads(base_name)
           callsite_by_arity = @pending_arg_types_by_arity[base_callsite_key(name)]?
           best_def : CrystalV2::Compiler::Frontend::DefNode? = nil
           best_name : String? = nil
           best_param_count = Int32::MAX
           best_score = Int32::MIN
           if callsite_by_arity && !callsite_by_arity.empty?
-            @function_defs.each do |key, def_node|
+            overload_keys.each do |key|
               next unless key.starts_with?(mangled_prefix)
+              def_node = @function_defs[key]?
+              next unless def_node
               params = def_node.params
               next unless params
 
@@ -16905,17 +17046,16 @@ module Crystal::HIR
             target_name = best_name
             lookup_branch = "mangled_prefix_typed"
           else
-            @function_defs.each_key do |key|
-              if key.starts_with?(mangled_prefix)
-                if ENV.has_key?("DEBUG_LOOKUP")
-                  STDERR.puts "[DEBUG_LOOKUP]   Found match: '#{key}'"
-                end
-                func_def = @function_defs[key]
-                arena = @function_def_arenas[key]
-                target_name = key
-                lookup_branch = "mangled_prefix"
-                break
+            overload_keys.each do |key|
+              next unless key.starts_with?(mangled_prefix)
+              if ENV.has_key?("DEBUG_LOOKUP")
+                STDERR.puts "[DEBUG_LOOKUP]   Found match: '#{key}'"
               end
+              func_def = @function_defs[key]
+              arena = @function_def_arenas[key]
+              target_name = key
+              lookup_branch = "mangled_prefix"
+              break
             end
           end
           if ENV.has_key?("DEBUG_LOOKUP") && !func_def
@@ -16942,14 +17082,13 @@ module Crystal::HIR
                   break
                 end
                 # Also try mangled versions
-                @function_defs.each_key do |key|
-                  if key.starts_with?("#{module_method}$")
-                    func_def = @function_defs[key]
-                    arena = @function_def_arenas[key]
-                    target_name = base_name
-                    lookup_branch = "included_module_mangled"
-                    break
-                  end
+                function_def_overloads(module_method).each do |key|
+                  next if key == module_method
+                  func_def = @function_defs[key]
+                  arena = @function_def_arenas[key]
+                  target_name = base_name
+                  lookup_branch = "included_module_mangled"
+                  break
                 end
                 break if func_def
               end
@@ -17034,15 +17173,15 @@ module Crystal::HIR
                 end
                 unless func_def
                   mangled_prefix = "#{parent_base}$"
-                  @function_defs.each_key do |key|
-                    if key.starts_with?(mangled_prefix)
-                      func_def = @function_defs[key]
-                      arena = @function_def_arenas[key]
-                      target_name = base_name
-                      lookup_branch = "parent_fallback_prefix"
-                      matched_parent = parent
-                      break
-                    end
+                  function_def_overloads(parent_base).each do |key|
+                    next if key == parent_base
+                    next unless key.starts_with?(mangled_prefix)
+                    func_def = @function_defs[key]
+                    arena = @function_def_arenas[key]
+                    target_name = base_name
+                    lookup_branch = "parent_fallback_prefix"
+                    matched_parent = parent
+                    break
                   end
                 end
                 break if func_def
@@ -17101,15 +17240,15 @@ module Crystal::HIR
               end
               unless func_def
                 mangled_prefix = "#{template_base}$"
-                @function_defs.each_key do |key|
-                  if key.starts_with?(mangled_prefix)
-                    func_def = @function_defs[key]
-                    arena = @function_def_arenas[key]
-                    target_name = base_name
-                    primitive_template_map = primitive_template_type_map(template_owner, owner)
-                    lookup_branch = "primitive_template_prefix"
-                    break
-                  end
+                function_def_overloads(template_base).each do |key|
+                  next if key == template_base
+                  next unless key.starts_with?(mangled_prefix)
+                  func_def = @function_defs[key]
+                  arena = @function_def_arenas[key]
+                  target_name = base_name
+                  primitive_template_map = primitive_template_type_map(template_owner, owner)
+                  lookup_branch = "primitive_template_prefix"
+                  break
                 end
               end
             end
@@ -17139,14 +17278,14 @@ module Crystal::HIR
               end
               unless func_def
                 mangled_prefix = "#{object_base}$"
-                @function_defs.each_key do |key|
-                  if key.starts_with?(mangled_prefix)
-                    func_def = @function_defs[key]
-                    arena = @function_def_arenas[key]
-                    target_name = base_name
-                    lookup_branch = "object_fallback_prefix"
-                    break
-                  end
+                function_def_overloads(object_base).each do |key|
+                  next if key == object_base
+                  next unless key.starts_with?(mangled_prefix)
+                  func_def = @function_defs[key]
+                  arena = @function_def_arenas[key]
+                  target_name = base_name
+                  lookup_branch = "object_fallback_prefix"
+                  break
                 end
               end
             end
@@ -17182,14 +17321,14 @@ module Crystal::HIR
             end
             unless func_def
               mangled_prefix = "#{parent_base}$"
-              @function_defs.each_key do |key|
-                if key.starts_with?(mangled_prefix)
-                  func_def = @function_defs[key]
-                  arena = @function_def_arenas[key]
-                  target_name = name
-                  lookup_branch = "parent_class_fallback_prefix"
-                  break
-                end
+              function_def_overloads(parent_base).each do |key|
+                next if key == parent_base
+                next unless key.starts_with?(mangled_prefix)
+                func_def = @function_defs[key]
+                arena = @function_def_arenas[key]
+                target_name = name
+                lookup_branch = "parent_class_fallback_prefix"
+                break
               end
             end
             break if func_def
@@ -17221,14 +17360,14 @@ module Crystal::HIR
             end
             unless func_def
               mangled_prefix = "#{template_base}$"
-              @function_defs.each_key do |key|
-                if key.starts_with?(mangled_prefix)
-                  func_def = @function_defs[key]
-                  arena = @function_def_arenas[key]
-                  target_name = name
-                  lookup_branch = "primitive_class_fallback_prefix"
-                  break
-                end
+              function_def_overloads(template_base).each do |key|
+                next if key == template_base
+                next unless key.starts_with?(mangled_prefix)
+                func_def = @function_defs[key]
+                arena = @function_def_arenas[key]
+                target_name = name
+                lookup_branch = "primitive_class_fallback_prefix"
+                break
               end
             end
           end
@@ -17259,14 +17398,14 @@ module Crystal::HIR
               end
               unless func_def
                 mangled_prefix = "#{object_base}$"
-                @function_defs.each_key do |key|
-                  if key.starts_with?(mangled_prefix)
-                    func_def = @function_defs[key]
-                    arena = @function_def_arenas[key]
-                    target_name = name
-                    lookup_branch = "object_class_fallback_prefix"
-                    break
-                  end
+                function_def_overloads(object_base).each do |key|
+                  next if key == object_base
+                  next unless key.starts_with?(mangled_prefix)
+                  func_def = @function_defs[key]
+                  arena = @function_def_arenas[key]
+                  target_name = name
+                  lookup_branch = "object_class_fallback_prefix"
+                  break
                 end
               end
             end
@@ -17421,6 +17560,16 @@ module Crystal::HIR
       if target_name.includes?("from_chars")
         STDERR.puts "[LOWERING] Starting lower for #{target_name}, arena=#{arena.class}"
       end
+      time_filter = ENV["DEBUG_LOWER_METHOD_TIME"]?
+      time_match = time_filter && (time_filter == "1" || target_name.includes?(time_filter) || name.includes?(time_filter))
+      start_time = nil
+      if time_match
+        start_time = Time.monotonic
+        @lower_method_time_stack << LowerMethodTiming.new(target_name, name, start_time, 0.0)
+        if ENV["DEBUG_LOWER_METHOD_STATS"]?
+          @lower_method_stats_stack << LowerMethodStats.new
+        end
+      end
       begin
         with_arena(arena || @arena) do
           if target_name.includes?("#")
@@ -17487,13 +17636,7 @@ module Crystal::HIR
                 base_new = "#{owner}.new"
                 explicit_new = @function_defs.has_key?(base_new)
                 unless explicit_new
-                  prefix = "#{base_new}$"
-                  @function_defs.each_key do |key|
-                    if key.starts_with?(prefix)
-                      explicit_new = true
-                      break
-                    end
-                  end
+                  explicit_new = function_def_overloads(base_new).any? { |key| key != base_new }
                 end
                 if allocator_supported?(owner) && !explicit_new
                   generate_allocator(owner, class_info)
@@ -17547,6 +17690,22 @@ module Crystal::HIR
         @lowering_functions.delete(target_name)
         @lowered_functions.add(target_name)
         debug_hook("function.lower.done", "name=#{target_name}")
+        if start_time
+          elapsed_ms = (Time.monotonic - start_time).total_milliseconds
+          entry = @lower_method_time_stack.pop?
+          child_ms = entry ? entry.child_ms : 0.0
+          self_ms = elapsed_ms - child_ms
+          self_ms = 0.0 if self_ms < 0.0
+          if parent = @lower_method_time_stack.last?
+            parent.child_ms += elapsed_ms
+          end
+          stats = @lower_method_stats_stack.pop?
+          if stats
+            STDERR.puts "[LOWER_METHOD_TIME] name=#{target_name} requested=#{name} total=#{elapsed_ms.round(1)}ms self=#{self_ms.round(1)}ms child=#{child_ms.round(1)}ms resolve=#{stats.resolve_ms.round(1)}ms/#{stats.resolve_calls} infer=#{stats.infer_ms.round(1)}ms/#{stats.infer_calls}"
+          else
+            STDERR.puts "[LOWER_METHOD_TIME] name=#{target_name} requested=#{name} total=#{elapsed_ms.round(1)}ms self=#{self_ms.round(1)}ms child=#{child_ms.round(1)}ms"
+          end
+        end
       end
     end
 
@@ -20181,14 +20340,16 @@ module Crystal::HIR
         end
       end
 
+      overload_keys = function_def_overloads(func_name)
       best : CrystalV2::Compiler::Frontend::DefNode? = nil
       best_name : String? = nil
       best_param_count = Int32::MAX
       best_score = Int32::MIN
       prefer_untyped = false
       if arg_types && arg_types.any? { |t| t == TypeRef::VOID }
-        @function_defs.each do |name, def_node|
-          next unless name == func_name || name.starts_with?("#{func_name}$")
+        overload_keys.each do |name|
+          def_node = @function_defs[name]?
+          next unless def_node
           params = def_node.params
           next unless params
 
@@ -20227,8 +20388,9 @@ module Crystal::HIR
         end
       end
 
-      @function_defs.each do |name, def_node|
-        next unless name == func_name || name.starts_with?("#{func_name}$")
+      overload_keys.each do |name|
+        def_node = @function_defs[name]?
+        next unless def_node
         params = def_node.params
         next unless params
 
@@ -24505,7 +24667,49 @@ module Crystal::HIR
           node = @arena[expr_id]
           STDERR.puts "[LOWER_PROGRESS] method=#{@current_class}##{@current_method} idx=#{idx} node=#{node.class.name}"
         end
-        last_value = lower_expr(ctx, expr_id)
+        if progress_match
+          start_time = Time.monotonic
+          last_value = lower_expr(ctx, expr_id)
+          elapsed_ms = (Time.monotonic - start_time).total_milliseconds
+          if elapsed_ms >= 200.0
+            node = @arena[expr_id]
+            call_name = nil
+            if node.is_a?(CrystalV2::Compiler::Frontend::CallNode)
+              callee_node = @arena[node.callee]
+              case callee_node
+              when CrystalV2::Compiler::Frontend::IdentifierNode
+                call_name = String.new(callee_node.name)
+              when CrystalV2::Compiler::Frontend::PathNode
+                right_node = @arena[callee_node.right]
+                case right_node
+                when CrystalV2::Compiler::Frontend::IdentifierNode
+                  call_name = String.new(right_node.name)
+                when CrystalV2::Compiler::Frontend::ConstantNode
+                  call_name = String.new(right_node.name)
+                end
+              end
+            end
+            if source = @sources_by_arena[@arena]?
+              span = node.span
+              start = span.start_offset
+              length = span.end_offset - span.start_offset
+              if length > 0 && start >= 0 && start < source.bytesize
+                slice_len = length > 80 ? 80 : length
+                snippet = source.byte_slice(start, slice_len).gsub(/\s+/, " ").strip
+                extra = call_name ? " call=#{call_name}" : ""
+                STDERR.puts "[LOWER_SLOW_BODY] method=#{@current_class}##{@current_method} idx=#{idx} #{elapsed_ms.round(1)}ms node=#{node.class.name}#{extra} \"#{snippet}\""
+              else
+                extra = call_name ? " call=#{call_name}" : ""
+                STDERR.puts "[LOWER_SLOW_BODY] method=#{@current_class}##{@current_method} idx=#{idx} #{elapsed_ms.round(1)}ms node=#{node.class.name}#{extra}"
+              end
+            else
+              extra = call_name ? " call=#{call_name}" : ""
+              STDERR.puts "[LOWER_SLOW_BODY] method=#{@current_class}##{@current_method} idx=#{idx} #{elapsed_ms.round(1)}ms node=#{node.class.name}#{extra}"
+            end
+          end
+        else
+          last_value = lower_expr(ctx, expr_id)
+        end
       end
 
       last_value || begin
