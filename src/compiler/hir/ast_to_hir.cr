@@ -10595,8 +10595,10 @@ module Crystal::HIR
         if info = @class_info[desc.name]?
           return info
         end
-        @class_info.each do |name, info|
-          return info if name.ends_with?("::#{desc.name}") || name == desc.name
+        if candidates = @short_type_index[desc.name]?
+          if candidate = candidates.first?
+            return @class_info[candidate]?
+          end
         end
       end
 
@@ -19557,17 +19559,18 @@ module Crystal::HIR
         receiver_type = ctx.type_of(receiver_id)
         type_desc = @module.get_type_descriptor(receiver_type)
         if receiver_type == TypeRef::VOID || type_desc.nil?
-          @class_info.each do |class_name, info|
-            test_base = "#{class_name}##{method_name}"
-            test_mangled = mangle_function_name(test_base, arg_types)
-            if type = @function_types[test_mangled]?
-              return_type = type
-              mangled_method_name = test_mangled
-              break
-            elsif type = @function_types[test_base]?
-              return_type = type
-              mangled_method_name = test_base
-              break
+          if candidates = @method_bases_by_name[method_name]?
+            candidates.each do |test_base|
+              test_mangled = mangle_function_name(test_base, arg_types)
+              if type = @function_types[test_mangled]?
+                return_type = type
+                mangled_method_name = test_mangled
+                break
+              elsif type = @function_types[test_base]?
+                return_type = type
+                mangled_method_name = test_base
+                break
+              end
             end
           end
         end
@@ -23637,14 +23640,11 @@ module Crystal::HIR
 
       # Try to find method by receiver type with inheritance support
       if receiver_type.id > 0
-        @class_info.each do |class_name, info|
-          if info.type_ref.id == receiver_type.id
-            # Use inheritance-aware method resolution
-            if base_method = resolve_method_with_inheritance(class_name, member_name)
-              resolved_method_name = base_method
-              return_type = get_function_return_type(base_method)
-            end
-            break
+        if info = @class_info_by_type_id[receiver_type.id]?
+          # Use inheritance-aware method resolution
+          if base_method = resolve_method_with_inheritance(info.name, member_name)
+            resolved_method_name = base_method
+            return_type = get_function_return_type(base_method)
           end
         end
       end
@@ -23662,12 +23662,11 @@ module Crystal::HIR
           else
             # Try to find a class that ends with the type name (handle namespacing)
             # e.g., type_name="Span" matches "CrystalV2::Compiler::Frontend::Span"
-            @class_info.each do |class_name, info|
-              if class_name.ends_with?("::#{type_name}") || class_name == type_name
-                if base_method = resolve_method_with_inheritance(class_name, member_name)
+            if candidates = @short_type_index[type_name]?
+              if candidate = candidates.first?
+                if base_method = resolve_method_with_inheritance(candidate, member_name)
                   resolved_method_name = base_method
                   return_type = get_function_return_type(base_method)
-                  break
                 end
               end
             end
@@ -23677,12 +23676,10 @@ module Crystal::HIR
 
       # Fallback 2: search all classes for this method (only when receiver type is unknown)
       if resolved_method_name.nil? && receiver_type.id == 0
-        @class_info.each do |class_name, info|
-          test_name = "#{class_name}##{member_name}"
-          if has_function_base?(test_name)
+        if candidates = @method_bases_by_name[member_name]?
+          if test_name = candidates.first?
             resolved_method_name = test_name
             return_type = get_function_return_type(test_name)
-            break
           end
         end
       end
