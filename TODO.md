@@ -40,6 +40,9 @@ about syntax or types and should match what the original compiler would report.
 - [x] Macro expansion in HIR handles class/module body calls and main macro calls (2025-12-26)
 - [x] MacroExpander reparse uses parse_program; macro is_a? and macro literal gap fixes (2025-12-26)
 - [x] LSP 30x performance improvement: type inference cache skip, fast-path background indexing, cycle guard (2025-12-31)
+- [x] If-condition short-circuit lowering branches directly (avoids phi use-before-def) (2026-01-xx)
+- [x] HIR->MIR lowering uses CFG order to avoid forward references (2026-01-xx)
+- [x] LLVM union returns treat null as nil union (2026-01-xx)
 
 ### Pending (1 test)
 - 1 invalid ASM syntax test (intentionally pending)
