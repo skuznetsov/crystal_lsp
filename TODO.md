@@ -1361,6 +1361,7 @@ The return_type=16 (NIL) for `to_s` methods is incorrect - should be String type
 - **Fix applied**:
   - `lookup_function_def_for_call` now uses a per-base overload index instead of scanning `@function_defs` for every call.
   - Result: `Parser#parse_expression` lowering dropped from ~49s → ~3.3s (see `logs/lower_method_time_parser.log`).
+  - Cached `resolve_type_name_in_context` and `.class`/`.metaclass` resolution (clears alongside type cache) to reduce `type_ref_for_name` hot-path overhead (2026-01-xx).
 - **Next**:
   - Profile for hotspots inside lowering (resolve_method_call / infer_type_from_expr / lower_function_if_needed).
   - Consider caching/memoization or an indexed lookup to avoid repeated full-map scans.

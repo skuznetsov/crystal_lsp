@@ -466,6 +466,10 @@ module Crystal::HIR
 
     # Type cache to prevent infinite recursion in type_ref_for_name/create_union_type
     @type_cache : Hash(String, TypeRef)
+    # Cache resolved type names per namespace to avoid repeated context scans.
+    @resolved_type_name_cache : Hash(String, String)
+    # Cache resolved class names for .class/.metaclass type literals.
+    @type_literal_class_cache : Hash(String, String?)
 
     # Temporary arena switching context for cross-file yield inlining:
     # {caller_arena, callee_arena}
@@ -607,6 +611,8 @@ module Crystal::HIR
       @type_aliases = {} of String => String
       @generated_allocators = Set(String).new
       @type_cache = {} of String => TypeRef
+      @resolved_type_name_cache = {} of String => String
+      @type_literal_class_cache = {} of String => String?
       @short_type_index = {} of String => Set(String)
       @current_typeof_local_names = nil
       @top_level_main_defined = false
@@ -10503,12 +10509,20 @@ module Crystal::HIR
 
     private def resolve_type_name_in_context(name : String) : String
       return name if name.empty?
+      cache_key = type_name_resolution_cache_key(name)
+      if cached = @resolved_type_name_cache[cache_key]?
+        return cached
+      end
       if name.starts_with?("::")
-        return name.size > 2 ? name[2..] : ""
+        resolved = name.size > 2 ? name[2..] : ""
+        @resolved_type_name_cache[cache_key] = resolved
+        return resolved
       end
 
       if name == "self"
-        return @current_class || name
+        resolved = @current_class || name
+        @resolved_type_name_cache[cache_key] = resolved
+        return resolved
       end
 
       if info = split_generic_base_and_args(name)
@@ -10516,21 +10530,34 @@ module Crystal::HIR
         resolved_args = split_generic_type_args(info[:args]).map do |arg|
           normalize_tuple_literal_type_name(resolve_type_name_in_context(arg.strip))
         end.join(", ")
-        return resolved_base == info[:base] && resolved_args == info[:args] ? name : "#{resolved_base}(#{resolved_args})"
+        resolved = resolved_base == info[:base] && resolved_args == info[:args] ? name : "#{resolved_base}(#{resolved_args})"
+        @resolved_type_name_cache[cache_key] = resolved
+        return resolved
       end
 
-      return resolve_class_name_in_context(name) unless name.includes?("::")
-      return name if type_name_exists?(name)
+      unless name.includes?("::")
+        resolved = resolve_class_name_in_context(name)
+        @resolved_type_name_cache[cache_key] = resolved
+        return resolved
+      end
+      if type_name_exists?(name)
+        @resolved_type_name_cache[cache_key] = name
+        return name
+      end
 
       if current = @current_class
         parts = current.split("::")
         while parts.size > 0
           qualified_name = (parts + [name]).join("::")
-          return qualified_name if type_name_exists?(qualified_name)
+          if type_name_exists?(qualified_name)
+            @resolved_type_name_cache[cache_key] = qualified_name
+            return qualified_name
+          end
           parts.pop
         end
       end
 
+      @resolved_type_name_cache[cache_key] = name
       name
     end
 
@@ -14369,11 +14396,18 @@ module Crystal::HIR
 
     private def resolve_type_literal_class_name(type_name : String) : String?
       return nil unless type_name.ends_with?(".class") || type_name.ends_with?(".metaclass")
+      cache_key = type_cache_key(type_name)
+      if @type_literal_class_cache.has_key?(cache_key)
+        return @type_literal_class_cache[cache_key]
+      end
 
       base_name = type_name
       base_name = base_name.sub(/\.class$/, "")
       base_name = base_name.sub(/\.metaclass$/, "")
-      return nil if base_name.empty?
+      if base_name.empty?
+        @type_literal_class_cache[cache_key] = nil
+        return nil
+      end
 
       base_name = resolve_type_name_in_context(base_name)
       base_name = substitute_type_params_in_type_name(base_name)
@@ -14388,10 +14422,13 @@ module Crystal::HIR
         if generic_base != "Proc" && !@monomorphized.includes?(class_name)
           monomorphize_generic_class(generic_base, type_args, class_name)
         end
+        @type_literal_class_cache[cache_key] = class_name
         return class_name
       end
 
-      resolve_type_alias_chain(base_name)
+      resolved = resolve_type_alias_chain(base_name)
+      @type_literal_class_cache[cache_key] = resolved
+      resolved
     end
 
     # ═══════════════════════════════════════════════════════════════════════
@@ -24846,8 +24883,19 @@ module Crystal::HIR
       "#{context}::#{name}"
     end
 
+    private def type_name_resolution_cache_key(name : String) : String
+      override = @current_namespace_override
+      current = @current_class
+      return name if override.nil? && current.nil?
+      override_str = override || ""
+      current_str = current || ""
+      "#{override_str}||#{current_str}||#{name}"
+    end
+
     private def invalidate_type_cache_for_namespace(name : String) : Nil
       return if name.empty?
+      @resolved_type_name_cache.clear
+      @type_literal_class_cache.clear
       short = name.split("::").last?
       keys = [] of String
       @type_cache.each_key do |key|
@@ -24871,6 +24919,8 @@ module Crystal::HIR
         invalidate_type_cache_for_namespace(context)
       else
         @type_cache.clear
+        @resolved_type_name_cache.clear
+        @type_literal_class_cache.clear
       end
     end
 
