@@ -20561,8 +20561,11 @@ module Crystal::HIR
       best_param_count = Int32::MAX
       best_score = Int32::MIN
 
-      @function_defs.each do |name, def_node|
+      base_name = func_name.split("$", 2).first
+      function_def_overloads(base_name).each do |name|
         next unless name == func_name || name.starts_with?("#{func_name}$")
+        def_node = @function_defs[name]?
+        next unless def_node
         params = def_node.params
         next unless params && params.any?(&.is_block)
 
