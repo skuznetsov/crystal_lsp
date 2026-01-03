@@ -328,6 +328,46 @@ module Crystal::HIR
       "SSizeT"   => "Int64",             # 64-bit
     }
 
+    BUILTIN_TYPE_NAMES = {
+      "Void", "Nil", "Bool",
+      "Int8", "Int16", "Int32", "Int64", "Int128",
+      "UInt8", "UInt16", "UInt32", "UInt64", "UInt128",
+      "Float32", "Float64",
+      "Char", "String", "Symbol",
+      "Pointer", "Proc", "Tuple", "NamedTuple",
+    }
+
+    BUILTIN_GENERIC_BASES = {
+      "Array", "Hash", "Set", "Slice", "Pointer", "StaticArray",
+      "Tuple", "NamedTuple", "Proc", "Range", "Iterator", "Enumerable",
+    }
+
+    private def builtin_type_ref_for(name : String) : TypeRef?
+      case name
+      when "Void"    then TypeRef::VOID
+      when "Nil"     then TypeRef::NIL
+      when "Bool"    then TypeRef::BOOL
+      when "Int8"    then TypeRef::INT8
+      when "Int16"   then TypeRef::INT16
+      when "Int32"   then TypeRef::INT32
+      when "Int64"   then TypeRef::INT64
+      when "Int128"  then TypeRef::INT128
+      when "UInt8"   then TypeRef::UINT8
+      when "UInt16"  then TypeRef::UINT16
+      when "UInt32"  then TypeRef::UINT32
+      when "UInt64"  then TypeRef::UINT64
+      when "UInt128" then TypeRef::UINT128
+      when "Float32" then TypeRef::FLOAT32
+      when "Float64" then TypeRef::FLOAT64
+      when "Char"    then TypeRef::CHAR
+      when "String"  then TypeRef::STRING
+      when "Symbol"  then TypeRef::SYMBOL
+      when "Pointer" then TypeRef::POINTER
+      else
+        nil
+      end
+    end
+
     # Top-level user-defined `def main` is renamed to avoid clashing with the C entrypoint.
     TOP_LEVEL_MAIN_BASE = "__crystal_user_main"
     # Marker for top-level `fun` definitions (C ABI). Stored in DefNode.receiver.
@@ -24892,6 +24932,11 @@ module Crystal::HIR
       return name if name.empty?
       return name if name.starts_with?("::")
       return name if name.includes?("::")
+      return name if BUILTIN_TYPE_NAMES.includes?(name)
+      if name.includes?("(")
+        base = name.split("(", 2)[0]
+        return name if BUILTIN_GENERIC_BASES.includes?(base)
+      end
       context = type_cache_context
       return name if context.nil? || context.empty?
       "#{context}::#{name}"
@@ -24906,10 +24951,43 @@ module Crystal::HIR
       "#{override_str}||#{current_str}||#{name}"
     end
 
+    private def invalidate_resolved_type_name_cache_for(name : String) : Nil
+      return if @resolved_type_name_cache.empty?
+      short = name.split("::").last?
+      keys = [] of String
+      @resolved_type_name_cache.each_key do |key|
+        raw = key.split("||").last?
+        next unless raw
+        if raw == name || (short && raw == short)
+          keys << key
+        end
+      end
+      keys.each { |key| @resolved_type_name_cache.delete(key) }
+    end
+
+    private def invalidate_type_literal_cache_for(name : String) : Nil
+      return if @type_literal_class_cache.empty?
+      short = name.split("::").last?
+      suffixes = [] of String
+      suffixes << "#{name}.class"
+      suffixes << "#{name}.metaclass"
+      if short && short != name
+        suffixes << "#{short}.class"
+        suffixes << "#{short}.metaclass"
+      end
+      keys = [] of String
+      @type_literal_class_cache.each_key do |key|
+        if suffixes.any? { |suffix| key.ends_with?(suffix) }
+          keys << key
+        end
+      end
+      keys.each { |key| @type_literal_class_cache.delete(key) }
+    end
+
     private def invalidate_type_cache_for_namespace(name : String) : Nil
       return if name.empty?
-      @resolved_type_name_cache.clear
-      @type_literal_class_cache.clear
+      invalidate_resolved_type_name_cache_for(name)
+      invalidate_type_literal_cache_for(name)
       short = name.split("::").last?
       keys = [] of String
       @type_cache.each_key do |key|
@@ -24951,6 +25029,16 @@ module Crystal::HIR
       end
 
       lookup_name = normalized_name
+      if BUILTIN_TYPE_NAMES.includes?(lookup_name)
+        if builtin_ref = builtin_type_ref_for(lookup_name)
+          cache_key = type_cache_key(lookup_name)
+          if cached = @type_cache[cache_key]?
+            return cached
+          end
+          @type_cache[cache_key] = builtin_ref
+          return builtin_ref
+        end
+      end
       if lookup_name.includes?("typeof(")
         lookup_name = resolve_typeof_in_type_string(lookup_name)
       end

@@ -1363,6 +1363,9 @@ The return_type=16 (NIL) for `to_s` methods is incorrect - should be String type
   - Result: `Parser#parse_expression` lowering dropped from ~49s → ~3.3s (see `logs/lower_method_time_parser.log`).
   - Cached `resolve_type_name_in_context` and `.class`/`.metaclass` resolution (clears alongside type cache) to reduce `type_ref_for_name` hot-path overhead (2026-01-xx).
   - Skip duplicate enum registrations; only compute enum base type once per enum name (reduces `register_enum`/`enum_base_type_for_node` overhead in self-host) (2026-01-xx).
+  - Targeted invalidation for resolved type-name and type-literal caches (avoid full cache clear on each enum) (2026-01-xx).
+  - Treat built-in type names and built-in generic bases as global for type-cache keys (avoid per-namespace cache churn) (2026-01-xx).
+  - Fast-path builtin type names in `type_ref_for_name` to skip context/typeof handling (2026-01-xx).
 - **Next**:
   - Profile for hotspots inside lowering (resolve_method_call / infer_type_from_expr / lower_function_if_needed).
   - Consider caching/memoization or an indexed lookup to avoid repeated full-map scans.
