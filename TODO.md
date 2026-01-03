@@ -1133,7 +1133,7 @@ r2 = maybe(false)  # => nil
 - Cache keys in type/function lookup still elide namespace/owner in some paths; collisions remain a regression risk.
 - Yield inlining is guarded but still touches cross-arena defs; a single ownership source + fallback path is needed.
 - Unions of unrelated class types collapse to the first class in HIR (no UnionType), so dynamic dispatch is bypassed and calls become unsound.
-- Self-host compile still stalls in `__crystal_main` at `driver.compile` call; `DEBUG_MAIN=1` + `DEBUG_LOWER_PROGRESS=CompilerDriver#compile` shows slowdown inside `all_arenas.each` block. Follow-up showed `parse_file_recursive` lowering `Parser#parse_program` as the hotspot (~40s) during compiler self-compile; driver now uses AST+require cache (2026-01-xx) — parse-only run is ~5.5s with cache, but `CRYSTAL_V2_STOP_AFTER_HIR=1` still times out (>120s). `DEBUG_HIR_TIMINGS=1` indicates stall inside module lowering; slow modules include `Crystal::Dwarf`, `Crystal::MachO`, `Crystal::EventLoop::Polling`, `ENV`, `Iterator`, `Indexable`, `Float::FastFloat` (2026-01-xx). (2026-01-xx)
+- Self-host compile still stalls in `__crystal_main` at `driver.compile` call; `DEBUG_MAIN=1` + `DEBUG_LOWER_PROGRESS=CompilerDriver#compile` shows slowdown inside `all_arenas.each` block. Follow-up showed `parse_file_recursive` lowering `Parser#parse_program` as the hotspot (~40s) during compiler self-compile; driver now uses AST+require cache (2026-01-xx) — parse-only run is ~5.5s with cache, but `CRYSTAL_V2_STOP_AFTER_HIR=1` still times out (>120s). `DEBUG_HIR_TIMINGS=1` indicates stall inside module lowering; slow modules include `Crystal::Dwarf`, `Crystal::MachO`, `Crystal::EventLoop::Polling`, `ENV`, `Iterator`, `Indexable`, `Float::FastFloat` (2026-01-xx). `DEBUG_MAIN_SLOW_ONLY=1` shows `driver.compile` call is the last main expr; `DEBUG_LOWER_PROGRESS=parse_file_recursive` shows slow lowering at `source = File.read(abs_path)` (likely pulling in heavy IO/std lib code). (2026-01-xx)
 
 ### Bootstrap Stabilization Plan (prioritized, 2026-01-xx)
 
@@ -1290,8 +1290,13 @@ r2 = maybe(false)  # => nil
 - `CRYSTAL_V2_STOP_AFTER_PARSE=1` - stops driver after parse (self-host parse + AST cache ≈ 5.5s on 273 files, 2026-01-xx)
 - `CRYSTAL_V2_STOP_AFTER_HIR=1` - stops driver after HIR lowering (useful to isolate post-HIR stalls)
 - `CRYSTAL_V2_STOP_AFTER_MIR=1` - stops driver after MIR lowering (useful to isolate LLVM/llc stalls)
+- `CRYSTAL_V2_LAZY_HIR=1` - skips eager module/class lowering (relies on lazy lower on call)
 - `DEBUG_HIR_SLOW_MS=NN` - logs per-method HIR lowering slower than NN ms (driver only)
 - `DEBUG_HIR_TIMINGS=1` - logs per-pass HIR timings in driver (collect/register/lower)
+- `DEBUG_MAIN_SLOW_ONLY=1` - only log slow main expressions (no per-expr start spam)
+- `DEBUG_MAIN_SLOW_MS=NN` - threshold for slow main expr logging (default 50ms)
+- `DEBUG_MAIN_PROGRESS_EVERY=N` - progress interval for main lowering (default 500)
+- `DEBUG_LOWER_SLOW_ONLY=1` - only log slow expressions in lower_def when DEBUG_LOWER_PROGRESS matches
 
 ### 8.6 Bootstrap Session Notes (2026-01-01 - Session 2)
 

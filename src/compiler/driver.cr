@@ -316,37 +316,41 @@ module Crystal::V2
       func_count = 0
       pass3_start = Time.monotonic if debug_hir_timings
       slow_ms = ENV["DEBUG_HIR_SLOW_MS"]?.try(&.to_f)
-      module_nodes.each do |module_node, arena|
-        hir_converter.arena = arena
-        if slow_ms
-          start = Time.monotonic
-          hir_converter.lower_module(module_node)
-          elapsed = (Time.monotonic - start).total_milliseconds
-          if elapsed >= slow_ms
-            name = String.new(module_node.name)
-            source_path = paths_by_arena[arena]?
-            STDERR.puts "[HIR_SLOW] module #{name} #{elapsed.round(1)}ms#{source_path ? " file=#{source_path}" : ""}"
+      unless ENV.has_key?("CRYSTAL_V2_LAZY_HIR")
+        module_nodes.each do |module_node, arena|
+          hir_converter.arena = arena
+          if slow_ms
+            start = Time.monotonic
+            hir_converter.lower_module(module_node)
+            elapsed = (Time.monotonic - start).total_milliseconds
+            if elapsed >= slow_ms
+              name = String.new(module_node.name)
+              source_path = paths_by_arena[arena]?
+              STDERR.puts "[HIR_SLOW] module #{name} #{elapsed.round(1)}ms#{source_path ? " file=#{source_path}" : ""}"
+            end
+          else
+            hir_converter.lower_module(module_node)
           end
-        else
-          hir_converter.lower_module(module_node)
+          func_count += 1
         end
-        func_count += 1
-      end
-      class_nodes.each do |class_node, arena|
-        hir_converter.arena = arena
-        if slow_ms
-          start = Time.monotonic
-          hir_converter.lower_class(class_node)
-          elapsed = (Time.monotonic - start).total_milliseconds
-          if elapsed >= slow_ms
-            name = String.new(class_node.name)
-            source_path = paths_by_arena[arena]?
-            STDERR.puts "[HIR_SLOW] class #{name} #{elapsed.round(1)}ms#{source_path ? " file=#{source_path}" : ""}"
+        class_nodes.each do |class_node, arena|
+          hir_converter.arena = arena
+          if slow_ms
+            start = Time.monotonic
+            hir_converter.lower_class(class_node)
+            elapsed = (Time.monotonic - start).total_milliseconds
+            if elapsed >= slow_ms
+              name = String.new(class_node.name)
+              source_path = paths_by_arena[arena]?
+              STDERR.puts "[HIR_SLOW] class #{name} #{elapsed.round(1)}ms#{source_path ? " file=#{source_path}" : ""}"
+            end
+          else
+            hir_converter.lower_class(class_node)
           end
-        else
-          hir_converter.lower_class(class_node)
+          func_count += 1
         end
-        func_count += 1
+      else
+        trace_driver("[DRIVER_TRACE] CRYSTAL_V2_LAZY_HIR=1; skipping eager module/class lowering")
       end
       if debug_hir_timings && pass3_start
         elapsed = (Time.monotonic - pass3_start).total_milliseconds
@@ -354,6 +358,7 @@ module Crystal::V2
       end
 
       # Create synthetic main function from top-level expressions (or user-defined main)
+      STDERR.puts "[HIR_TIMING] start lower_main" if debug_hir_timings
       main_start = Time.monotonic if debug_hir_timings
       if main_exprs.size > 0
         hir_converter.lower_main(main_exprs)
@@ -369,6 +374,7 @@ module Crystal::V2
       end
 
       # Ensure top-level `fun main` is lowered as an entrypoint when present.
+      STDERR.puts "[HIR_TIMING] start lower_fun_main" if debug_hir_timings
       fun_main_start = Time.monotonic if debug_hir_timings
       if fun_main = def_nodes.find { |(n, _)| n.receiver.try { |recv| String.new(recv) == HIR::AstToHir::FUN_DEF_RECEIVER } || false }
         hir_converter.arena = fun_main[1]
@@ -382,6 +388,7 @@ module Crystal::V2
 
       # Lower remaining top-level function bodies after main to allow
       # call-site types to guide inference for used functions.
+      STDERR.puts "[HIR_TIMING] start lower_defs" if debug_hir_timings
       defs_start = Time.monotonic if debug_hir_timings
       def_nodes.each do |node, arena|
         hir_converter.arena = arena

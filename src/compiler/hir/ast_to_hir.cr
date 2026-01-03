@@ -8260,6 +8260,7 @@ module Crystal::HIR
         if progress_filter
           progress_match = progress_filter == "1" || base_name.includes?(progress_filter)
         end
+        slow_only = ENV.has_key?("DEBUG_LOWER_SLOW_ONLY")
         slow_ms = nil
         if progress_match
           slow_ms = ENV["DEBUG_LOWER_SLOW_MS"]?.try(&.to_f) || 50.0
@@ -8277,7 +8278,7 @@ module Crystal::HIR
         end
         body.each_with_index do |expr_id, idx|
           expr_snippet = nil
-          if progress_match
+          if progress_match && !slow_only
             begin
               expr_node = @arena[expr_id]
               if source = @sources_by_arena[@arena]?
@@ -12140,13 +12141,16 @@ module Crystal::HIR
       # Lower each top-level expression in order
       last_value : ValueId? = nil
       debug_main = ENV.has_key?("DEBUG_MAIN")
+      slow_only = ENV.has_key?("DEBUG_MAIN_SLOW_ONLY")
+      progress_every = ENV["DEBUG_MAIN_PROGRESS_EVERY"]?.try(&.to_i?) || 500
+      slow_ms = ENV["DEBUG_MAIN_SLOW_MS"]?.try(&.to_f) || 50.0
       if debug_main
         STDERR.puts "[MAIN] lower_main exprs=#{main_exprs.size}"
       end
       main_exprs.each_with_index do |(expr_id, arena), idx|
         # Switch arena context for this expression
         @arena = arena
-        if debug_main
+        if debug_main && !slow_only
           node = @arena[expr_id]
           snippet = nil
           if source = @sources_by_arena[@arena]?
@@ -12169,10 +12173,25 @@ module Crystal::HIR
         last_value = lower_expr(ctx, expr_id)
         if debug_main && expr_start
           elapsed = (Time.monotonic - expr_start).total_milliseconds
-          if elapsed > 50.0
+          if elapsed > slow_ms
             node = @arena[expr_id]
-            STDERR.puts "[MAIN] expr #{idx + 1}/#{main_exprs.size} #{node.class} #{elapsed.round(1)}ms"
-          elsif (idx % 500 == 0) || (idx + 1 == main_exprs.size)
+            snippet = nil
+            if source = @sources_by_arena[@arena]?
+              span = node.span
+              start = span.start_offset
+              length = span.end_offset - span.start_offset
+              if length > 0 && start >= 0 && start < source.bytesize
+                max_len = 80
+                slice_len = length > max_len ? max_len : length
+                snippet = source.byte_slice(start, slice_len).gsub(/\s+/, " ").strip
+              end
+            end
+            if snippet
+              STDERR.puts "[MAIN] expr #{idx + 1}/#{main_exprs.size} #{node.class} #{elapsed.round(1)}ms \"#{snippet}\""
+            else
+              STDERR.puts "[MAIN] expr #{idx + 1}/#{main_exprs.size} #{node.class} #{elapsed.round(1)}ms"
+            end
+          elsif (idx % progress_every == 0) || (idx + 1 == main_exprs.size)
             STDERR.puts "[MAIN] progress #{idx + 1}/#{main_exprs.size}"
           end
         end
@@ -24981,9 +25000,10 @@ module Crystal::HIR
         method_name = "#{@current_class}##{@current_method}"
         progress_match = progress_filter == "1" || method_name.includes?(progress_filter)
       end
+      slow_only = ENV.has_key?("DEBUG_LOWER_SLOW_ONLY")
       body.each_with_index do |expr_id, idx|
         next if expr_id.invalid?
-        if progress_match
+        if progress_match && !slow_only
           node = @arena[expr_id]
           STDERR.puts "[LOWER_PROGRESS] method=#{@current_class}##{@current_method} idx=#{idx} node=#{node.class.name}"
         end
