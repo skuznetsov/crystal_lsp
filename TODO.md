@@ -1382,6 +1382,7 @@ The return_type=16 (NIL) for `to_s` methods is incorrect - should be String type
   - Index function_type keys by base for operator lookup (avoid scanning all function types on `<<` fallback) (2026-01-xx).
   - Index method base names by method for unknown-receiver fallback in resolve_method_call (avoid class_info scans) (2026-01-xx).
   - Use class_info_by_type_id in lower_call receiver resolution (avoid class_info scans) (2026-01-xx).
+  - Index parent->children for module-typed resolution (avoid class_info scans in module/ivar fallback) (2026-01-xx).
 - **Next**:
   - Profile for hotspots inside lowering (resolve_method_call / infer_type_from_expr / lower_function_if_needed).
   - Consider caching/memoization or an indexed lookup to avoid repeated full-map scans.

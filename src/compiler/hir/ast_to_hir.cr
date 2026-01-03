@@ -419,6 +419,7 @@ module Crystal::HIR
     getter class_info : Hash(String, ClassInfo)
     @class_info_by_type_id : Hash(Int32, ClassInfo)
     @classes_with_subclasses : Set(String)
+    @children_by_parent : Hash(String, Set(String))
     # Module-level class vars (modules don't have ClassInfo entries)
     @module_class_vars : Hash(String, Array(ClassVarInfo))
     # Track lib struct/union types for field access lowering.
@@ -640,6 +641,7 @@ module Crystal::HIR
       @class_info = {} of String => ClassInfo
       @class_info_by_type_id = {} of Int32 => ClassInfo
       @classes_with_subclasses = Set(String).new
+      @children_by_parent = {} of String => Set(String)
       @module_class_vars = {} of String => Array(ClassVarInfo)
       @lib_structs = Set(String).new
       @init_params = {} of String => Array({String, TypeRef})
@@ -994,12 +996,46 @@ module Crystal::HIR
       @classes_with_subclasses.includes?(class_name)
     end
 
-    private def record_class_parent(parent_name : String?) : Nil
+    private def record_class_parent(child_name : String, parent_name : String?) : Nil
       return unless parent_name
       @classes_with_subclasses.add(parent_name)
       if short_name = parent_name.split("::").last?
         @classes_with_subclasses.add(short_name)
       end
+      parent_base = parent_name.split("(", 2).first
+      keys = Set(String).new
+      keys << parent_name
+      keys << parent_base if parent_base != parent_name
+      if short = parent_name.split("::").last?
+        keys << short
+      end
+      if short_base = parent_base.split("::").last?
+        keys << short_base
+      end
+      keys.each do |key|
+        (@children_by_parent[key] ||= Set(String).new) << child_name
+      end
+    end
+
+    private def collect_subclasses(parents : Enumerable(String)) : Array(String)
+      results = [] of String
+      visited = Set(String).new
+      queue = parents.to_a
+      queue.each { |parent| visited.add(parent) }
+      idx = 0
+      while idx < queue.size
+        parent = queue[idx]
+        idx += 1
+        if children = @children_by_parent[parent]?
+          children.each do |child|
+            next if visited.includes?(child)
+            visited.add(child)
+            results << child
+            queue << child
+          end
+        end
+      end
+      results
     end
 
     # Get class info by name
@@ -7068,7 +7104,7 @@ module Crystal::HIR
       final_info = ClassInfo.new(class_name, type_ref, ivars, class_vars, offset, is_struct, parent_name)
       @class_info[class_name] = final_info
       @class_info_by_type_id[type_ref.id] = final_info
-      record_class_parent(parent_name)
+      record_class_parent(class_name, parent_name)
       if ENV.has_key?("DEBUG_CLASS_PARENTS") && (class_name == "Base" || class_name == "Child")
         STDERR.puts "[CLASS_PARENT] class=#{class_name} parent=#{parent_name || "nil"}"
       end
@@ -9452,41 +9488,13 @@ module Crystal::HIR
       end
       # Also add subclasses of includers (for abstract classes like Crystal::EventLoop)
       # The concrete implementation may be in a subclass (e.g., Polling, Kqueue)
-      subclasses = [] of String
-      # Debug disabled
-      # if method_name == "write"
-      #   ev_classes = @class_info.select { |k, _| k.includes?("EventLoop") || k.includes?("Polling") || k.includes?("Kqueue") }
-      #   STDERR.puts "[SUBCLASS_DEBUG] Checking parents: #{ev_classes.map { |k, v| "#{k}->#{v.parent_name}" }}"
-      # end
+      parent_keys = includers.to_a
       includers.each do |inc|
-        # Get short name (e.g., "Crystal::EventLoop" -> "EventLoop")
-        inc_short = inc.split("::").last
-        @class_info.each do |name, ci|
-          parent = ci.parent_name
-          next unless parent
-          # Match if parent equals full name, short name, or ends with short name
-          if parent == inc || parent == inc_short || inc.ends_with?("::#{parent}")
-            subclasses << name
-          end
+        if inc_short = inc.split("::").last?
+          parent_keys << inc_short unless parent_keys.includes?(inc_short)
         end
       end
-      # Recursively find subclasses of subclasses (e.g., Kqueue < Polling < EventLoop)
-      prev_size = 0
-      while subclasses.size > prev_size
-        prev_size = subclasses.size
-        subclasses.dup.each do |sub|
-          sub_short = sub.split("::").last
-          @class_info.each do |name, ci|
-            parent = ci.parent_name
-            next unless parent
-            if parent == sub || parent == sub_short || sub.ends_with?("::#{parent}")
-              unless subclasses.includes?(name)
-                subclasses << name
-              end
-            end
-          end
-        end
-      end
+      subclasses = collect_subclasses(parent_keys)
       candidates.concat(subclasses)
       candidates.uniq!
       if DebugHooks::ENABLED && module_base.includes?("ByteFormat") && method_name == "decode"
@@ -9611,32 +9619,13 @@ module Crystal::HIR
       end
 
       candidates = includers.to_a
-      subclasses = [] of String
+      parent_keys = includers.to_a
       includers.each do |inc|
-        inc_short = inc.split("::").last
-        @class_info.each do |name, ci|
-          parent = ci.parent_name
-          next unless parent
-          if parent == inc || parent == inc_short || inc.ends_with?("::#{parent}")
-            subclasses << name unless subclasses.includes?(name)
-          end
+        if inc_short = inc.split("::").last?
+          parent_keys << inc_short unless parent_keys.includes?(inc_short)
         end
       end
-
-      prev_size = 0
-      while subclasses.size > prev_size
-        prev_size = subclasses.size
-        subclasses.dup.each do |sub|
-          sub_short = sub.split("::").last
-          @class_info.each do |name, ci|
-            parent = ci.parent_name
-            next unless parent
-            if parent == sub || parent == sub_short || sub.ends_with?("::#{parent}")
-              subclasses << name unless subclasses.includes?(name)
-            end
-          end
-        end
-      end
+      subclasses = collect_subclasses(parent_keys)
       subclasses.each { |name| candidates << name unless candidates.includes?(name) }
       if prefer_class && !candidates.includes?(prefer_class)
         candidates << prefer_class
