@@ -16,6 +16,7 @@ module CrystalV2
 
       def initialize(@program : Program, context : Context)
         @arena = @program.arena
+        @string_pool = @program.string_pool
         @virtual_arena = @arena.is_a?(Frontend::VirtualArena) ? @arena.as(Frontend::VirtualArena) : nil
         @table_stack = [context.symbol_table]
         @diagnostics = [] of Diagnostic
@@ -69,6 +70,10 @@ module CrystalV2
           end
         end
 
+        private def intern_name(slice : Slice(UInt8)) : String
+          @string_pool.intern_string(slice)
+        end
+
       private def visit(node_id : Frontend::ExprId)
         return if node_id.invalid?
 
@@ -109,7 +114,7 @@ module CrystalV2
           name_slice = node.name
           return unless name_slice
 
-          name = String.new(name_slice)
+          name = intern_name(name_slice)
           body_id = node.body
           return unless body_id
 
@@ -133,9 +138,9 @@ module CrystalV2
           name_slice = node.name
           return unless name_slice
 
-          name = String.new(name_slice)
+          name = intern_name(name_slice)
           params = node.params || [] of Frontend::Parameter
-          return_annotation = node.return_type.try { |slice| String.new(slice) }
+          return_annotation = node.return_type.try { |slice| intern_name(slice) }
 
           # Week 1 Day 2: Detect generic type parameters from method signature
           type_params = detect_generic_type_parameters(params, return_annotation)
@@ -143,7 +148,7 @@ module CrystalV2
           receiver = node.receiver
           target_table = current_table
           is_class_method = false
-          if receiver && String.new(receiver) == "self"
+          if receiver && intern_name(receiver) == "self"
             if enum_owner = @enum_stack.last?
               target_table = enum_owner.scope
             else
@@ -170,9 +175,9 @@ module CrystalV2
             next unless param_name = param.name
 
             # TIER 2.1: Convert Slice(UInt8) to String for symbol table
-            param_name_str = String.new(param_name)
+            param_name_str = intern_name(param_name)
             param_type_str = if type_ann = param.type_annotation
-              String.new(type_ann)
+              intern_name(type_ann)
             else
               nil
             end
@@ -200,12 +205,12 @@ module CrystalV2
           name_slice = node.name
           return unless name_slice
 
-          name = String.new(name_slice)
-          super_name = node.super_name.try { |slice| String.new(slice) }
+          name = intern_name(name_slice)
+          super_name = node.super_name.try { |slice| intern_name(slice) }
 
           # Week 1: Parse generic type parameters (e.g., class Box(T))
           type_params = node.type_params.try do |params|
-            params.map { |param_slice| String.new(param_slice) }
+            params.map { |param_slice| intern_name(param_slice) }
           end
 
           table = current_table
@@ -268,7 +273,7 @@ module CrystalV2
           name_slice = node.name
           return unless name_slice
 
-          name = String.new(name_slice)
+          name = intern_name(name_slice)
           table = current_table
 
           symbol = table.lookup_local(name)
@@ -309,12 +314,12 @@ module CrystalV2
           name_slice = node.name
           return unless name_slice
 
-          name = String.new(name_slice)
+          name = intern_name(name_slice)
           table = current_table
 
           # Parse base type if specified
           base_type = if bt = node.base_type
-            String.new(bt)
+            intern_name(bt)
           else
             "Int32"
           end
@@ -323,12 +328,12 @@ module CrystalV2
           members = {} of String => Int64
           next_value = 0i64
           node.members.each do |member|
-            member_name = String.new(member.name)
+            member_name = intern_name(member.name)
             if val_id = member.value
               # Member has explicit value - try to evaluate it
               val_node = @program.arena[val_id]
               if val_node.is_a?(Frontend::NumberNode)
-                members[member_name] = String.new(val_node.value).to_i64? || next_value
+                members[member_name] = intern_name(val_node.value).to_i64? || next_value
                 next_value = members[member_name] + 1
               else
                 members[member_name] = next_value
@@ -361,7 +366,7 @@ module CrystalV2
           name_slice = node.name
           return unless name_slice
 
-          name = String.new(name_slice)
+          name = intern_name(name_slice)
           value_id = node.value
 
           const_symbol = ConstantSymbol.new(name, node_id, value_id)
@@ -379,8 +384,8 @@ module CrystalV2
         end
 
         private def handle_global_var_decl(node_id : Frontend::ExprId, node : Frontend::GlobalVarDeclNode)
-          name = String.new(node.name)
-          type_ann = node.type.try { |slice| String.new(slice) }
+          name = intern_name(node.name)
+          type_ann = node.type.try { |slice| intern_name(slice) }
           define_global_var_symbol(name, type_ann, node_id)
         end
 
@@ -389,7 +394,7 @@ module CrystalV2
           target_node = @arena[target_id]
           case target_node
           when Frontend::GlobalNode
-            name = String.new(target_node.name)
+            name = intern_name(target_node.name)
             define_global_var_symbol(name, nil, target_id)
           end
         end
@@ -459,7 +464,7 @@ module CrystalV2
         private def build_getter_def(spec : Frontend::AccessorSpec, base_span : Frontend::Span) : Frontend::DefNode
           # TIER 2.2: spec.name is already Slice(UInt8), spec.type_annotation is Slice(UInt8)?
           # Create instance variable access node: @name
-          spec_name_str = String.new(spec.name)  # Convert for interpolation
+          spec_name_str = intern_name(spec.name)  # Convert for interpolation
           ivar_name = "@#{spec_name_str}"
           ivar_bytes = ivar_name.to_slice
           ivar_node = Frontend::InstanceVarNode.new(
@@ -507,7 +512,7 @@ module CrystalV2
           )
 
           # Create instance variable node: @name
-          spec_name_str = String.new(spec.name)  # Convert for interpolation
+          spec_name_str = intern_name(spec.name)  # Convert for interpolation
           ivar_name = "@#{spec_name_str}"
           ivar_bytes = ivar_name.to_slice
           ivar_node = Frontend::InstanceVarNode.new(
@@ -533,7 +538,7 @@ module CrystalV2
           assign_id = @arena.add_typed(assign_node)
 
           # Create def node with assignment as body
-          spec_name_str2 = String.new(spec.name)  # Convert for interpolation
+          spec_name_str2 = intern_name(spec.name)  # Convert for interpolation
           setter_name = "#{spec_name_str2}="
           setter_name_bytes = setter_name.to_slice
 
@@ -556,7 +561,7 @@ module CrystalV2
           callee_slice = Frontend.node_member(node)
           return unless callee_slice
 
-          callee_name = String.new(callee_slice)
+          callee_name = intern_name(callee_slice)
 
           # Look up in current scope
           table = current_table
@@ -621,7 +626,7 @@ module CrystalV2
         private def attach_ivar_annotations(class_symbol : ClassSymbol, node : Frontend::InstanceVarDeclNode, annotation_ids : Array(Frontend::ExprId))
           return if annotation_ids.empty?
 
-          ivar_name = String.new(node.name)
+          ivar_name = intern_name(node.name)
           ivar_name = ivar_name[1..-1] if ivar_name.starts_with?("@")
 
           annotation_ids.each do |ann_id|
@@ -652,7 +657,7 @@ module CrystalV2
           return if infos.empty?
 
           specs.each do |spec|
-            spec_name = String.new(spec.name)
+            spec_name = intern_name(spec.name)
             infos.each do |info|
               class_symbol.add_ivar_annotation(spec_name, info)
             end
@@ -670,7 +675,7 @@ module CrystalV2
           named_args_hash = {} of String => ExprId
           if named_args = node.named_args
             named_args.each do |named_arg|
-              key = String.new(named_arg.name)
+              key = intern_name(named_arg.name)
               named_args_hash[key] = named_arg.value
             end
           end
@@ -686,7 +691,7 @@ module CrystalV2
 
           case node
           when Frontend::IdentifierNode
-            String.new(node.name)
+            intern_name(node.name)
           when Frontend::PathNode
             parts = [] of String
             current_id = name_expr_id
@@ -706,7 +711,7 @@ module CrystalV2
                   break
                 end
               when Frontend::IdentifierNode
-                parts << String.new(current.name)
+                parts << intern_name(current.name)
                 break
               else
                 literal = Frontend.node_literal_string(current)
@@ -794,9 +799,9 @@ module CrystalV2
           case node
           when Frontend::InstanceVarDeclNode
             # Phase 5C: Handle explicit type annotations (@var : Type = default)
-            var_name = String.new(node.name)
+            var_name = intern_name(node.name)
             var_name = var_name[1..-1] if var_name.starts_with?("@")
-            type_annotation = node.type.try { |slice| String.new(slice) }
+            type_annotation = node.type.try { |slice| intern_name(slice) }
             default_value = node.value
             has_default = !default_value.nil?
             class_symbol.add_instance_var(var_name, type_annotation, default_value, has_default)
@@ -806,14 +811,14 @@ module CrystalV2
             target_id = node.target
             target_node = @arena[target_id]
             if target_node.is_a?(Frontend::InstanceVarNode)
-              var_name = String.new(target_node.name)
+              var_name = intern_name(target_node.name)
               var_name = var_name[1..-1] if var_name.starts_with?("@")
               unless class_symbol.get_instance_var_type(var_name)
                 # Week 1: Try to infer type from RHS if it's a parameter reference
                 type_annotation = infer_ivar_type_from_assignment(node.value, current_method)
                 # Assignment in initialize is a form of default value
                 default_value = node.value
-                has_default = current_method.try { |m| String.new(m.name.not_nil!) == "initialize" } || false
+                has_default = current_method.try { |m| intern_name(m.name.not_nil!) == "initialize" } || false
                 class_symbol.add_instance_var(var_name, type_annotation, default_value, has_default)
               end
               define_instance_var_symbol(class_symbol, var_name, nil, target_id)
@@ -842,15 +847,15 @@ module CrystalV2
 
           case node
           when Frontend::ClassVarDeclNode
-            var_name = String.new(node.name)
+            var_name = intern_name(node.name)
             var_name = var_name[2..-1] if var_name.starts_with?("@@")
-            type_annotation = node.type.try { |slice| String.new(slice) }
+            type_annotation = node.type.try { |slice| intern_name(slice) }
             define_class_var_symbol(class_symbol, var_name, type_annotation, expr_id)
           when Frontend::AssignNode
             target_id = node.target
             target_node = @arena[target_id]
             if target_node.is_a?(Frontend::ClassVarNode)
-              var_name = String.new(target_node.name)
+              var_name = intern_name(target_node.name)
               var_name = var_name[2..-1] if var_name.starts_with?("@@")
               type_annotation = nil
               define_class_var_symbol(class_symbol, var_name, type_annotation, target_id)
@@ -878,14 +883,14 @@ module CrystalV2
           value_node = @arena[value_expr_id]
           # If RHS is an identifier (e.g., parameter name)
           if value_node.is_a?(Frontend::IdentifierNode)
-            param_name = String.new(value_node.name)
+            param_name = intern_name(value_node.name)
             # Look for matching parameter
             current_method.params.try do |params|
               params.each do |param|
                 # Phase BLOCK_CAPTURE: Skip anonymous block parameter
                 next unless p_name = param.name
-                if String.new(p_name) == param_name
-                  return param.type_annotation.try { |slice| String.new(slice) }
+                if intern_name(p_name) == param_name
+                  return param.type_annotation.try { |slice| intern_name(slice) }
                 end
               end
             end
@@ -1033,7 +1038,7 @@ module CrystalV2
         # Extract type parameters from type annotation (zero-copy)
         # Examples: "T" → add "T", "Box(T)" → add "T", "Pair(K,V)" → add "K","V"
         private def extract_type_parameters(type_ann : Slice(UInt8), result : Set(String)) : Nil
-          type_name = String.new(type_ann)
+          type_name = intern_name(type_ann)
 
           # Check for generic syntax: Box(T), Pair(K,V)
           if paren_start = type_ann.index('('.ord.to_u8)
@@ -1050,7 +1055,7 @@ module CrystalV2
                   if byte == ','.ord.to_u8
                     # Extract parameter (zero-copy)
                     param_slice = Slice.new(inner_slice.to_unsafe + current_start, i - current_start)
-                    param_name = String.new(param_slice).strip
+                    param_name = intern_name(param_slice).strip
                     if is_generic_type_parameter?(param_name)
                       result << param_name
                     end
@@ -1061,7 +1066,7 @@ module CrystalV2
                 # Last parameter (or only parameter)
                 if current_start < inner_slice.size
                   param_slice = Slice.new(inner_slice.to_unsafe + current_start, inner_slice.size - current_start)
-                  param_name = String.new(param_slice).strip
+                  param_name = intern_name(param_slice).strip
                   if is_generic_type_parameter?(param_name)
                     result << param_name
                   end
@@ -1102,7 +1107,7 @@ module CrystalV2
           if target_id = node.target
             resolve_symbol_from_expr(target_id)
           elsif name_slice = node.name
-            current_table.lookup(String.new(name_slice))
+            current_table.lookup(intern_name(name_slice))
           else
             nil
           end
@@ -1112,7 +1117,7 @@ module CrystalV2
           if target_id
             resolve_symbol_from_expr(target_id)
           elsif name_slice
-            current_table.lookup(String.new(name_slice))
+            current_table.lookup(intern_name(name_slice))
           else
             nil
           end
@@ -1126,7 +1131,7 @@ module CrystalV2
             collect_path_segments(node, segments)
             resolve_symbol_by_segments(segments)
           when Frontend::IdentifierNode
-            resolve_symbol_by_segments([String.new(node.name)])
+            resolve_symbol_by_segments([intern_name(node.name)])
           else
             nil
           end
@@ -1139,14 +1144,14 @@ module CrystalV2
             when Frontend::PathNode
               collect_path_segments(left_node, segments)
             when Frontend::IdentifierNode
-              segments << String.new(left_node.name)
+              segments << intern_name(left_node.name)
             end
           end
 
           right_node = @arena[node.right]
           case right_node
           when Frontend::IdentifierNode
-            segments << String.new(right_node.name)
+            segments << intern_name(right_node.name)
           when Frontend::PathNode
             collect_path_segments(right_node, segments)
           end

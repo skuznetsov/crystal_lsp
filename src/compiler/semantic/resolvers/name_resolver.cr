@@ -25,6 +25,7 @@ module CrystalV2
 
         def initialize(@program : Program, root_table : SymbolTable)
           @arena = @program.arena
+          @string_pool = @program.string_pool
           @root_table = root_table
           @identifier_symbols = {} of ExprId => Symbol
           @diagnostics = [] of Diagnostic
@@ -117,7 +118,7 @@ module CrystalV2
         private def resolve_identifier(node_id : ExprId, node : Frontend::IdentifierNode)
           slice = node.name
           return unless slice
-          name = String.new(slice)
+          name = intern_name(slice)
 
           debug("[NameResolver] resolve #{name} in table=#{@current_table.object_id}")
           if symbol = @current_table.lookup(name)
@@ -133,7 +134,7 @@ module CrystalV2
         private def resolve_instance_var(node_id : ExprId, node : Frontend::InstanceVarNode)
           slice = node.name
           return unless slice
-          name = String.new(slice)
+          name = intern_name(slice)
           if symbol = @current_table.lookup(name)
             @identifier_symbols[node_id] = symbol
           end
@@ -142,7 +143,7 @@ module CrystalV2
         private def resolve_class_var(node_id : ExprId, node : Frontend::ClassVarNode)
           slice = node.name
           return unless slice
-          name = String.new(slice)
+          name = intern_name(slice)
           if symbol = @current_table.lookup(name)
             @identifier_symbols[node_id] = symbol
           end
@@ -151,7 +152,7 @@ module CrystalV2
         private def resolve_global_var(node_id : ExprId, node : Frontend::GlobalNode)
           slice = node.name
           return unless slice
-          name = String.new(slice)
+          name = intern_name(slice)
           if symbol = @root_table.lookup(name)
             @identifier_symbols[node_id] = symbol
           end
@@ -166,7 +167,7 @@ module CrystalV2
           if target_node.is_a?(Frontend::IdentifierNode)
             slice = target_node.name
             return unless slice
-            name = String.new(slice)
+            name = intern_name(slice)
 
             # Check if variable already exists (reassignment vs first assignment)
             if existing = @current_table.lookup_local(name)
@@ -207,7 +208,7 @@ module CrystalV2
           name_slice = node.name
           return unless name_slice
 
-          name = String.new(name_slice)
+          name = intern_name(name_slice)
           symbol = @current_table.lookup(name)
 
           method_symbol = case symbol
@@ -237,7 +238,7 @@ module CrystalV2
           name_slice = node.name
           return unless name_slice
 
-          name = String.new(name_slice)
+          name = intern_name(name_slice)
           symbol = @current_table.lookup(name)
           unless symbol.is_a?(ClassSymbol)
             return
@@ -258,7 +259,7 @@ module CrystalV2
           name_slice = node.name
           return unless name_slice
 
-          name = String.new(name_slice)
+          name = intern_name(name_slice)
           symbol = @current_table.lookup(name)
           unless symbol.is_a?(ModuleSymbol)
             return
@@ -327,8 +328,8 @@ module CrystalV2
               end
 
               next unless param_name = param.name
-              name = String.new(param_name)
-              declared_type = param.type_annotation.try { |ann| String.new(ann) }
+              name = intern_name(param_name)
+              declared_type = param.type_annotation.try { |ann| intern_name(ann) }
 
               debug("[NameResolver] define block param #{name}")
               unless block_scope.lookup_local(name)
@@ -354,8 +355,8 @@ module CrystalV2
               end
 
               next unless param_name = param.name
-              name = String.new(param_name)
-              declared_type = param.type_annotation.try { |ann| String.new(ann) }
+              name = intern_name(param_name)
+              declared_type = param.type_annotation.try { |ann| intern_name(ann) }
 
               debug("[NameResolver] define proc param #{name}")
               unless proc_scope.lookup_local(name)
@@ -390,7 +391,7 @@ module CrystalV2
               result.concat(collect_path_segments(left))
             when Frontend::IdentifierNode
               if slice = left.name
-                result << String.new(slice)
+                result << intern_name(slice)
               end
             end
           end
@@ -402,7 +403,7 @@ module CrystalV2
           result.concat(collect_path_segments(right))
         when Frontend::IdentifierNode
           if slice = right.name
-            result << String.new(slice)
+            result << intern_name(slice)
           end
         end
 
@@ -443,6 +444,10 @@ module CrystalV2
       private def debug(message : String)
         return unless ENV.has_key?("LSP_DEBUG_BLOCK")
         STDOUT.puts(message)
+      end
+
+      private def intern_name(slice : Slice(UInt8)) : String
+        @string_pool.intern_string(slice)
       end
     end
     end

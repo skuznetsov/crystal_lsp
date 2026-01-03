@@ -59,6 +59,7 @@ module CrystalV2
           @source_provider = source_provider
           @macro_source = macro_source
           @source_sink = source_sink
+          @string_pool = @program.string_pool
         end
 
         # Expansion context for macro evaluation
@@ -188,7 +189,7 @@ module CrystalV2
 
           named_args.try do |list|
             list.each do |named_arg|
-              named_values[String.new(named_arg.name)] = expr_to_macro_value(named_arg.value)
+              named_values[intern_name(named_arg.name)] = expr_to_macro_value(named_arg.value)
             end
           end
 
@@ -273,7 +274,7 @@ module CrystalV2
             MacroIdValue.new(Frontend.node_literal_string(node) || "")
           else
             if node.is_a?(Frontend::TypeDeclarationNode) || node.is_a?(Frontend::AssignNode)
-              MacroNodeValue.new(expr_id, @arena)
+              MacroNodeValue.new(expr_id, @arena, @string_pool)
             elsif node.is_a?(Frontend::PathNode)
               name = path_to_string(node)
               name.empty? ? MacroIdValue.new("") : MacroIdValue.new(name)
@@ -341,7 +342,7 @@ module CrystalV2
             elsif node.is_a?(Frontend::NamedTupleLiteralNode)
               entries = {} of String => MacroValue
               node.entries.each do |entry|
-                key = String.new(entry.key)
+                key = intern_name(entry.key)
                 entries[key] = evaluate_to_macro_value(entry.value, context)
               end
               return MacroNamedTupleValue.new(entries)
@@ -372,13 +373,13 @@ module CrystalV2
               end
               return MACRO_NIL
             elsif node.is_a?(Frontend::TypeDeclarationNode) || node.is_a?(Frontend::AssignNode)
-              return MacroNodeValue.new(expr_id, @arena)
+              return MacroNodeValue.new(expr_id, @arena, @string_pool)
             elsif node.is_a?(Frontend::PathNode)
               name = path_to_string(node)
               return name.empty? ? MACRO_NIL : MacroIdValue.new(name)
             end
 
-            MacroNodeValue.new(expr_id, @arena)
+            MacroNodeValue.new(expr_id, @arena, @string_pool)
           end
         end
 
@@ -456,7 +457,7 @@ module CrystalV2
                 literal = expr ? Frontend.node_literal_string(expr) : nil
                 detail = "expr#{idx}=#{expr.class} literal=#{literal.inspect}"
                 if expr.is_a?(Frontend::MemberAccessNode)
-                  detail += " member=#{String.new(expr.member)}"
+                  detail += " member=#{intern_name(expr.member)}"
                   obj = @arena[expr.object]
                   detail += " obj=#{obj.class}"
                 elsif expr.is_a?(Frontend::CallNode)
@@ -469,12 +470,12 @@ module CrystalV2
                       inner_callee = @arena[arg_node.callee]
                       detail += " inner_callee=#{inner_callee.class}"
                       if inner_callee.is_a?(Frontend::MemberAccessNode)
-                        detail += " inner_member=#{String.new(inner_callee.member)}"
+                        detail += " inner_member=#{intern_name(inner_callee.member)}"
                         inner_obj = @arena[inner_callee.object]
                         detail += " inner_obj=#{inner_obj.class}"
                       end
                     elsif arg_node.is_a?(Frontend::MemberAccessNode)
-                      detail += " arg_member=#{String.new(arg_node.member)}"
+                      detail += " arg_member=#{intern_name(arg_node.member)}"
                     end
                   end
                 end
@@ -501,7 +502,7 @@ module CrystalV2
 
         private def evaluate_member_access_to_macro_value(node : Frontend::MemberAccessNode, context : Context) : MacroValue
           obj = @arena[node.object]
-          member = String.new(node.member)
+          member = intern_name(node.member)
 
           base_value = if obj.is_a?(Frontend::IdentifierNode)
                          name = Frontend.node_literal_string(obj)
@@ -555,7 +556,7 @@ module CrystalV2
             literal = Frontend.node_literal_string(callee) if callee.is_a?(Frontend::IdentifierNode)
             STDERR.puts "[MACRO_CALL] callee=#{callee.class} literal=#{literal.inspect if literal}"
             if callee.is_a?(Frontend::MemberAccessNode)
-              STDERR.puts "[MACRO_CALL] member=#{String.new(callee.member)}"
+              STDERR.puts "[MACRO_CALL] member=#{intern_name(callee.member)}"
             end
           end
 
@@ -570,7 +571,7 @@ module CrystalV2
 
           if callee.is_a?(Frontend::MemberAccessNode)
             obj = callee.object
-            member = String.new(callee.member)
+            member = intern_name(callee.member)
 
             # Handle annotation/annotations returning MacroAnnotationValue
             if member == "annotation" || member == "annotations"
@@ -584,7 +585,7 @@ module CrystalV2
               named_arg_values = node.named_args.try do |named|
                 values = {} of String => MacroValue
                 named.each do |named_arg|
-                  values[String.new(named_arg.name)] = evaluate_to_macro_value(named_arg.value, context)
+                  values[intern_name(named_arg.name)] = evaluate_to_macro_value(named_arg.value, context)
                 end
                 values
               end
@@ -626,12 +627,12 @@ module CrystalV2
           return nil unless inner_obj.is_a?(Frontend::ImplicitObjNode)
 
           receiver = evaluate_to_macro_value(node.callee, context)
-          member = String.new(inner_callee.member)
+          member = intern_name(inner_callee.member)
           args = inner_node.args.map { |arg| evaluate_to_macro_value(arg, context) }
           named_arg_values = inner_node.named_args.try do |named|
             values = {} of String => MacroValue
             named.each do |named_arg|
-              values[String.new(named_arg.name)] = evaluate_to_macro_value(named_arg.value, context)
+              values[intern_name(named_arg.name)] = evaluate_to_macro_value(named_arg.value, context)
             end
             values
           end
@@ -715,7 +716,7 @@ module CrystalV2
             params.each_with_index do |param, idx|
               next unless param_name = param.name
               value = values[idx]? || MACRO_NIL
-              scoped = scoped.with_variable(String.new(param_name), value)
+              scoped = scoped.with_variable(intern_name(param_name), value)
             end
           end
 
@@ -724,7 +725,7 @@ module CrystalV2
               name = param.name
               case name
               when Slice(UInt8)
-                String.new(name)
+                intern_name(name)
               when String
                 name
               else
@@ -743,7 +744,7 @@ module CrystalV2
                 STDERR.puts "[MACRO_BLOCK]   call callee=#{callee.class} literal=#{callee_lit.inspect} args=#{expr.args.size}"
               elsif expr.is_a?(Frontend::MemberAccessNode)
                 obj = @arena[expr.object]
-                STDERR.puts "[MACRO_BLOCK]   member=#{String.new(expr.member)} obj=#{obj.class}"
+                STDERR.puts "[MACRO_BLOCK]   member=#{intern_name(expr.member)} obj=#{obj.class}"
               end
             end
           end
@@ -796,7 +797,7 @@ module CrystalV2
         ) : MacroValue
           # @type.annotation(Foo)
           if obj.is_a?(Frontend::InstanceVarNode)
-            ivar_name = String.new(obj.name)
+            ivar_name = intern_name(obj.name)
             if ivar_name == "@type" && context.owner_type
               class_symbol = context.owner_type.as(ClassSymbol)
 
@@ -1157,7 +1158,7 @@ module CrystalV2
         # Currently only supports @type for type-reflection macros.
         private def evaluate_instance_var_expression(node, context : Context) : String
           name_slice = node.name
-          name = String.new(name_slice)
+          name = intern_name(name_slice)
           if name == "@type"
             if owner = context.owner_type
               return owner.name
@@ -1174,7 +1175,7 @@ module CrystalV2
         #   ivar.has_default_value?
         private def evaluate_member_access_expression(node, context : Context) : String
           obj = @arena[node.object]
-          member = String.new(node.member)
+          member = intern_name(node.member)
 
           # Phase 87B-6: Handle .class_name before evaluating base
           # Need to know the AST node type, not the evaluated value
@@ -1184,7 +1185,7 @@ module CrystalV2
 
           # Handle @type.* type introspection methods directly
           if obj.is_a?(Frontend::InstanceVarNode)
-            ivar_name = String.new(obj.name)
+            ivar_name = intern_name(obj.name)
             if ivar_name == "@type" && context.owner_type
               class_symbol = context.owner_type.not_nil!
               case member
@@ -1360,7 +1361,7 @@ module CrystalV2
           # Handle type-reflection and annotation helpers
           if callee.is_a?(Frontend::MemberAccessNode)
             obj = callee.object
-            member = String.new(callee.member)
+            member = intern_name(callee.member)
 
             # Basic support for annotation queries:
             #   @type.annotation(Foo)
@@ -1374,7 +1375,7 @@ module CrystalV2
             if member == "annotation" || member == "annotations"
               # @type.annotation(Foo)
               if obj.is_a?(Frontend::InstanceVarNode)
-                ivar_name = String.new(obj.name)
+                ivar_name = intern_name(obj.name)
                 if ivar_name == "@type" && context.owner_type
                   class_symbol = context.owner_type.as(ClassSymbol)
 
@@ -1434,7 +1435,7 @@ module CrystalV2
             # semantics enough for macros like @type.overrides?(Reference,
             # "inspect") and @type.overrides?(Struct, "inspect").
             if obj.is_a?(Frontend::InstanceVarNode)
-              name = String.new(obj.name)
+              name = intern_name(obj.name)
               if name == "@type" && context.owner_type && member == "overrides?"
                 class_symbol = context.owner_type.as(ClassSymbol)
 
@@ -1461,7 +1462,7 @@ module CrystalV2
 
             # @type.name(...) / @type.size
             if obj.is_a?(Frontend::InstanceVarNode)
-              name = String.new(obj.name)
+              name = intern_name(obj.name)
               if name == "@type" && context.owner_type
                 class_symbol = context.owner_type.as(ClassSymbol)
 
@@ -1477,7 +1478,7 @@ module CrystalV2
                   include_generic_args = true
                   if named_args = node.named_args
                     named_args.each do |named_arg|
-                      arg_name = String.new(named_arg.name)
+                      arg_name = intern_name(named_arg.name)
                       next unless arg_name == "generic_args"
 
                       value_str = evaluate_expression(named_arg.value, context)
@@ -1543,7 +1544,7 @@ module CrystalV2
               # Check if obj is itself a member access (ivar.type)
               if obj.is_a?(Frontend::MemberAccessNode)
                 inner_obj = @arena[obj.object]
-                inner_member = String.new(obj.member)
+                inner_member = intern_name(obj.member)
                 if inner_member == "type" && inner_obj.is_a?(Frontend::IdentifierNode)
                   var_name = Frontend.node_literal_string(inner_obj) || ""
                   if macro_val = context.variables[var_name]?
@@ -1596,7 +1597,7 @@ module CrystalV2
 
           case node
           when Frontend::IdentifierNode
-            String.new(node.name)
+            intern_name(node.name)
           when Frontend::PathNode
             parts = [] of String
             current_id = expr_id
@@ -1615,7 +1616,7 @@ module CrystalV2
                   break
                 end
               when Frontend::IdentifierNode
-                parts << String.new(current.name)
+                parts << intern_name(current.name)
                 break
               else
                 literal = Frontend.node_literal_string(current)
@@ -1680,7 +1681,7 @@ module CrystalV2
 
           if node.is_a?(Frontend::IsANode)
             receiver = evaluate_to_macro_value(node.expression, context)
-            type_name = String.new(node.target_type)
+            type_name = intern_name(node.target_type)
             result = receiver.call_method("is_a?", [MacroIdValue.new(type_name)], nil)
             if ENV["DEBUG_MACRO_COND"]?
               STDERR.puts "[MACRO_COND] is_a? recv=#{receiver.class_name} expected=#{type_name} -> #{result.truthy?}"
@@ -1734,7 +1735,7 @@ module CrystalV2
                 inner_lit = Frontend.node_literal_string(inner_callee)
                 STDERR.puts "[MACRO_COND]     inner callee=#{inner_callee.class} literal=#{inner_lit.inspect} args=#{arg_node.args.size}"
                 if inner_callee.is_a?(Frontend::MemberAccessNode)
-                  STDERR.puts "[MACRO_COND]     inner member=#{String.new(inner_callee.member)}"
+                  STDERR.puts "[MACRO_COND]     inner member=#{intern_name(inner_callee.member)}"
                   inner_obj = @arena[inner_callee.object]
                   STDERR.puts "[MACRO_COND]     inner object=#{inner_obj.class} literal=#{Frontend.node_literal_string(inner_obj).inspect}"
                 end
@@ -2116,14 +2117,14 @@ module CrystalV2
             return nil
           end
 
-          ivar_name = String.new(obj.name)
+          ivar_name = intern_name(obj.name)
           unless ivar_name == "@type" && context.owner_type
             emit_error("For loop member access requires @type with owner context")
             return nil
           end
 
           class_symbol = context.owner_type.not_nil!
-          member = String.new(node.member)
+          member = intern_name(node.member)
 
           case member
           when "instance_vars"
@@ -2451,6 +2452,10 @@ module CrystalV2
             message,
             span
           )
+        end
+
+        private def intern_name(slice : Slice(UInt8)) : String
+          @string_pool.intern_string(slice)
         end
       end
     end

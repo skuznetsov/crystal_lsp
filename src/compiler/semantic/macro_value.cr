@@ -351,8 +351,13 @@ module CrystalV2
       class MacroNodeValue < MacroValue
         getter node_id : Frontend::ExprId
         getter arena : Frontend::ArenaLike
+        getter string_pool : Frontend::StringPool?
 
-        def initialize(@node_id : Frontend::ExprId, @arena : Frontend::ArenaLike)
+        def initialize(
+          @node_id : Frontend::ExprId,
+          @arena : Frontend::ArenaLike,
+          @string_pool : Frontend::StringPool? = nil
+        )
         end
 
         def to_macro_output : String
@@ -374,31 +379,31 @@ module CrystalV2
             end
           when "target"
             if node.is_a?(Frontend::AssignNode)
-              MacroNodeValue.new(node.target, @arena)
+              MacroNodeValue.new(node.target, @arena, @string_pool)
             else
               MacroNilValue.new
             end
           when "var"
             if node.is_a?(Frontend::TypeDeclarationNode)
-              MacroIdValue.new(String.new(node.name))
+              MacroIdValue.new(intern_name(node.name))
             else
               MacroNilValue.new
             end
           when "type"
             if node.is_a?(Frontend::TypeDeclarationNode)
-              MacroIdValue.new(String.new(node.declared_type))
+              MacroIdValue.new(intern_name(node.declared_type))
             else
               MacroNilValue.new
             end
           when "value"
             if node.is_a?(Frontend::TypeDeclarationNode)
               if value_id = node.value
-                MacroNodeValue.new(value_id, @arena)
+                MacroNodeValue.new(value_id, @arena, @string_pool)
               else
                 MacroNilValue.new
               end
             elsif node.is_a?(Frontend::AssignNode)
-              MacroNodeValue.new(node.value, @arena)
+              MacroNodeValue.new(node.value, @arena, @string_pool)
             else
               MacroNilValue.new
             end
@@ -419,13 +424,13 @@ module CrystalV2
         private def node_identifier_name(node) : String?
           case node
           when Frontend::IdentifierNode
-            String.new(node.name)
+            intern_name(node.name)
           when Frontend::ConstantNode
-            String.new(node.name)
+            intern_name(node.name)
           when Frontend::InstanceVarNode
-            String.new(node.name)
+            intern_name(node.name)
           when Frontend::TypeDeclarationNode
-            String.new(node.name)
+            intern_name(node.name)
           when Frontend::AssignNode
             node_identifier_name(@arena[node.target])
           when Frontend::PathNode
@@ -464,15 +469,15 @@ module CrystalV2
             literal = Frontend.node_literal_string(node) || ""
             literal.starts_with?(":") ? literal : ":#{literal}"
           when Frontend::IdentifierNode
-            String.new(node.name)
+            intern_name(node.name)
           when Frontend::ConstantNode
-            String.new(node.name)
+            intern_name(node.name)
           when Frontend::InstanceVarNode
-            String.new(node.name)
+            intern_name(node.name)
         when Frontend::TypeDeclarationNode
-          type_name = String.new(node.declared_type)
+          type_name = intern_name(node.declared_type)
           type_name = type_name[1..] if type_name.starts_with?(':')
-          "#{String.new(node.name)} : #{type_name}"
+          "#{intern_name(node.name)} : #{type_name}"
           when Frontend::PathNode
             node_identifier_name(node) || ""
           when Frontend::AssignNode
@@ -481,6 +486,14 @@ module CrystalV2
             "#{target} = #{value}"
           else
             Frontend.node_literal_string(node) || ""
+          end
+        end
+
+        private def intern_name(slice : Slice(UInt8)) : String
+          if pool = @string_pool
+            pool.intern_string(slice)
+          else
+            String.new(slice)
           end
         end
       end
