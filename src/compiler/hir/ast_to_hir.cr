@@ -9005,24 +9005,17 @@ module Crystal::HIR
     # Resolve a single overload when argument types are unknown (all VOID).
     # Uses arity + block presence to avoid calling an unmangled base name.
     private def function_def_overloads(base_name : String) : Array(String)
-      if @function_defs_cache_size != @function_defs.size
-        @function_def_overloads.clear
-        @function_defs_cache_size = @function_defs.size
-      end
+      rebuild_function_def_overloads if @function_defs_cache_size != @function_defs.size
+      @function_def_overloads[base_name]? || [] of String
+    end
 
-      if cached = @function_def_overloads[base_name]?
-        return cached
-      end
-
-      prefix = "#{base_name}$"
-      overloads = [] of String
+    private def rebuild_function_def_overloads
+      @function_def_overloads.clear
       @function_defs.each_key do |key|
-        if key == base_name || key.starts_with?(prefix)
-          overloads << key
-        end
+        base = key.split("$", 2).first
+        (@function_def_overloads[base] ||= [] of String) << key
       end
-      @function_def_overloads[base_name] = overloads
-      overloads
+      @function_defs_cache_size = @function_defs.size
     end
 
     private def resolve_untyped_overload(base_method_name : String, arg_count : Int32, has_block_call : Bool) : String?
