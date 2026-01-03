@@ -10471,6 +10471,9 @@ module Crystal::HIR
         true
       when CrystalV2::Compiler::Frontend::AssignNode
         contains_yield_in_expr?(node.target) || contains_yield_in_expr?(node.value)
+      when CrystalV2::Compiler::Frontend::MultipleAssignNode
+        return true if contains_yield_in_expr?(node.value)
+        node.targets.any? { |target| contains_yield_in_expr?(target) }
       when CrystalV2::Compiler::Frontend::ReturnNode
         node.value ? contains_yield_in_expr?(node.value.not_nil!) : false
       when CrystalV2::Compiler::Frontend::MemberAccessNode
