@@ -1133,7 +1133,7 @@ r2 = maybe(false)  # => nil
 - Cache keys in type/function lookup still elide namespace/owner in some paths; collisions remain a regression risk.
 - Yield inlining is guarded but still touches cross-arena defs; a single ownership source + fallback path is needed.
 - Unions of unrelated class types collapse to the first class in HIR (no UnionType), so dynamic dispatch is bypassed and calls become unsound.
-- Self-host compile still stalls in `__crystal_main` at `driver.compile` call; `DEBUG_MAIN=1` + `DEBUG_LOWER_PROGRESS=CompilerDriver#compile` shows slowdown inside `all_arenas.each` block. Follow-up showed `parse_file_recursive` lowering `Parser#parse_program` as the hotspot (~40s) during compiler self-compile; driver now uses AST+require cache (2026-01-xx) — re-measure self-host parse stall and confirm improvement. (2026-01-xx)
+- Self-host compile still stalls in `__crystal_main` at `driver.compile` call; `DEBUG_MAIN=1` + `DEBUG_LOWER_PROGRESS=CompilerDriver#compile` shows slowdown inside `all_arenas.each` block. Follow-up showed `parse_file_recursive` lowering `Parser#parse_program` as the hotspot (~40s) during compiler self-compile; driver now uses AST+require cache (2026-01-xx) — parse-only run is ~5.5s with cache, but `CRYSTAL_V2_STOP_AFTER_HIR=1` still times out (>120s), so HIR lowering is the current stall. (2026-01-xx)
 
 ### Bootstrap Stabilization Plan (prioritized, 2026-01-xx)
 
@@ -1288,6 +1288,8 @@ r2 = maybe(false)  # => nil
 - `DEBUG_TEMPLATE_LOOKUP=1` - traces generic template body searches
 - `DEBUG_LOOKUP=1` - traces function name lookups
 - `CRYSTAL_V2_STOP_AFTER_PARSE=1` - stops driver after parse (self-host parse + AST cache ≈ 5.5s on 273 files, 2026-01-xx)
+- `CRYSTAL_V2_STOP_AFTER_HIR=1` - stops driver after HIR lowering (useful to isolate post-HIR stalls)
+- `CRYSTAL_V2_STOP_AFTER_MIR=1` - stops driver after MIR lowering (useful to isolate LLVM/llc stalls)
 
 ### 8.6 Bootstrap Session Notes (2026-01-01 - Session 2)
 

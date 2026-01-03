@@ -339,6 +339,11 @@ module Crystal::V2
         log "  Wrote: #{hir_file}"
       end
 
+      if ENV.has_key?("CRYSTAL_V2_STOP_AFTER_HIR")
+        trace_driver("[DRIVER_TRACE] stop after HIR (CRYSTAL_V2_STOP_AFTER_HIR)")
+        return
+      end
+
       # Step 3: Escape analysis
       log "\n[3/5] Escape analysis..."
       mm_config = memory_config
@@ -419,6 +424,11 @@ module Crystal::V2
         mir_file = @output_file.gsub(/\.[^.]+$/, ".mir")
         File.write(mir_file, mir_module.to_s)
         log "  Wrote: #{mir_file}"
+      end
+
+      if ENV.has_key?("CRYSTAL_V2_STOP_AFTER_MIR")
+        trace_driver("[DRIVER_TRACE] stop after MIR (CRYSTAL_V2_STOP_AFTER_MIR)")
+        return
       end
 
       # Step 5: Generate LLVM IR
