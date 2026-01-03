@@ -57,6 +57,7 @@ module CrystalV2
 
         # Instance-level cycle guard for expression inference (prevents infinite recursion)
         @expr_in_progress : Set(Int32) = Set(Int32).new
+        @identifier_name_cache : Array(String?)
 
         def initialize(
           @program : Frontend::Program,
@@ -69,6 +70,7 @@ module CrystalV2
           @instance_var_types = {} of String => Type # Phase 5A: Track instance variable types
           @flow_narrowings = {} of String => Type    # Phase 95: Flow typing - narrowed types in conditionals
           @children_cache = Array(Array(ExprId)?).new(@program.arena.size)
+          @identifier_name_cache = Array(String?).new(@program.arena.size)
           @current_class = nil
           @current_module = nil
           @receiver_type_context = nil
@@ -790,7 +792,7 @@ module CrystalV2
         # ============================================================
 
         private def infer_identifier(node : Frontend::IdentifierNode, expr_id : ExprId) : Type
-          identifier_name = String.new(node.name)
+          identifier_name = identifier_name_for(expr_id, node)
 
           debug("infer_identifier: name = '#{identifier_name}' (expr_id=#{expr_id} object_id=#{identifier_name.object_id})")
           debug("  @assignments has #{@assignments.size} entries: #{@assignments.keys.inspect}")
@@ -861,6 +863,21 @@ module CrystalV2
           else
             @context.nil_type
           end
+        end
+
+        private def identifier_name_for(expr_id : ExprId, node : Frontend::IdentifierNode) : String
+          idx = expr_id.index
+          if idx >= 0
+            if idx >= @identifier_name_cache.size
+              @identifier_name_cache.resize(@program.arena.size)
+            elsif cached = @identifier_name_cache[idx]?
+              return cached
+            end
+            name = String.new(node.name)
+            @identifier_name_cache[idx] = name
+            return name
+          end
+          String.new(node.name)
         end
 
         # ============================================================

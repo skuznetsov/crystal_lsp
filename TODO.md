@@ -1119,6 +1119,7 @@ r2 = maybe(false)  # => nil
 - Driver parse_file_recursive now uses AST + require cache when `CRYSTAL_V2_AST_CACHE` is enabled (speeds self-host parsing) (2026-01-xx).
 - TypeInferenceEngine caches `children_of` per ExprId to reduce repeated traversal during inference (2026-01-xx).
 - TypeInferenceEngine uses array-backed `children_of` cache (avoid hash overhead; auto-resize for arena growth) (2026-01-xx).
+- TypeInferenceEngine caches identifier names by ExprId (reduce repeated String allocations during inference) (2026-01-xx).
 
 ### Holistic risk scan (2026-01-xx)
 
