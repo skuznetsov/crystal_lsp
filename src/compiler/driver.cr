@@ -301,6 +301,9 @@ module Crystal::V2
         STDERR.puts "[HIR_TIMING] flush_pending_monomorphizations #{elapsed.round(1)}ms"
       end
 
+      # Refresh union descriptors now that all types are registered
+      hir_converter.refresh_union_descriptors
+
       # Pass 2: Register all top-level function signatures
       pass2_start = Time.monotonic if debug_hir_timings
       def_nodes.each do |node, arena|

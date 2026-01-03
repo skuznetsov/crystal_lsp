@@ -453,6 +453,9 @@ module CrystalV2
         log(options, out_io, "  Flushing pending monomorphizations...")
         hir_converter.flush_pending_monomorphizations
 
+        # Refresh union descriptors now that all types are registered
+        hir_converter.refresh_union_descriptors
+
         # Pass 2: Register function signatures
         log(options, out_io, "  Pass 2: Registering #{def_nodes.size} function signatures...")
         def_nodes.each_with_index do |(n, a), i|

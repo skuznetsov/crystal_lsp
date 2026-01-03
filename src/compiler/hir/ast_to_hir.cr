@@ -7208,6 +7208,46 @@ module Crystal::HIR
       end
     end
 
+    # Refresh union descriptors that were created before all types were registered.
+    # This avoids zero-sized payloads from unresolved variants (e.g., Errno | WinError | WasiError).
+    def refresh_union_descriptors : Nil
+      return if @union_descriptors.empty?
+
+      to_refresh = [] of Tuple(String, MIR::TypeRef)
+      @union_descriptors.each do |mir_ref, descriptor|
+        next unless descriptor.variants.any? do |variant|
+          variant.size == 0 && variant.full_name != "Nil" && variant.full_name != "Void"
+        end
+        to_refresh << {descriptor.name, mir_ref}
+      end
+      return if to_refresh.empty?
+
+      # Clear cached entries for these unions regardless of context keying.
+      cache_keys = [] of String
+      to_refresh.each do |(_, mir_ref)|
+        hir_ref = TypeRef.new(mir_ref.id)
+        @type_cache.each do |key, value|
+          cache_keys << key if value == hir_ref
+        end
+      end
+      cache_keys.uniq.each { |key| @type_cache.delete(key) }
+
+      # Deduplicate names for regeneration.
+      names = to_refresh.map(&.[0]).uniq
+      old_class = @current_class
+      old_override = @current_namespace_override
+      @current_class = nil
+      @current_namespace_override = nil
+      begin
+        names.each do |name|
+          create_union_type(name)
+        end
+      ensure
+        @current_class = old_class
+        @current_namespace_override = old_override
+      end
+    end
+
     private def concrete_type_args?(type_args : Array(String)) : Bool
       # NOTE: unions like `String | Nil` are concrete and must be allowed here.
       unresolved_token_re = /(?:^|[^A-Za-z0-9_:])(K2|V2|K|V|T|U|L|W|self)(?:$|[^A-Za-z0-9_:])/
@@ -11138,6 +11178,7 @@ module Crystal::HIR
       return false if primitive_self_type(name)
       return false if builtin_alias_target?(name)
       return false if @class_info.has_key?(name)
+      return false if @enum_info && @enum_info.not_nil!.has_key?(name)
       return false if @short_type_index.has_key?(name)
       return false if @module_defs.has_key?(name)
       return false if @type_aliases.has_key?(name)
@@ -11149,6 +11190,7 @@ module Crystal::HIR
       return true if name.empty?
       return true if primitive_self_type(name)
       return true if @class_info.has_key?(name)
+      return true if @enum_info && @enum_info.not_nil!.has_key?(name)
       return true if @module_defs.has_key?(name)
       return true if @type_aliases.has_key?(name)
       return true if LIBC_TYPE_ALIASES.has_key?(name)
@@ -25471,6 +25513,7 @@ module Crystal::HIR
       return TypeRef::VOID if normalized_name == "_"
 
       lookup_name = normalized_name
+
       if BUILTIN_TYPE_NAMES.includes?(lookup_name)
         if builtin_ref = builtin_type_ref_for(lookup_name)
           cache_key = type_cache_key(lookup_name)
@@ -25765,6 +25808,13 @@ module Crystal::HIR
 
       # Get TypeRefs for each variant (recursive to handle nested unions)
       variant_refs = resolved_variant_names.map { |vn| type_ref_for_name(vn) }
+      if ENV["DEBUG_UNION_TYPES"]?
+        refs_debug = variant_refs.map { |ref| get_type_name_from_ref(ref) }.join(", ")
+        enum_debug = resolved_variant_names.map do |vn|
+          @enum_info ? @enum_info.not_nil!.has_key?(vn) : false
+        end.join(", ")
+        STDERR.puts "[DEBUG_UNION_TYPES] name=#{normalized_name} variants=#{resolved_variant_names.join(", ")} refs=#{refs_debug} enum_known=#{enum_debug}"
+      end
 
       # Calculate union layout
       variants = [] of MIR::UnionVariantDescriptor
