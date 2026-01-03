@@ -462,7 +462,10 @@ module CrystalV2
             end
           else
             # Arena can grow during macro expansion; keep cache aligned.
-            @children_cache.resize(@program.arena.size)
+            new_size = @program.arena.size
+            if new_size > @children_cache.size
+              @children_cache.concat(Array(Array(ExprId) | Nil).new(new_size - @children_cache.size, nil))
+            end
           end
           children = [] of ExprId
           case node
@@ -871,7 +874,10 @@ module CrystalV2
           idx = expr_id.index
           if idx >= 0
             if idx >= @identifier_name_cache.size
-              @identifier_name_cache.resize(@program.arena.size)
+              new_size = @program.arena.size
+              if new_size > @identifier_name_cache.size
+                @identifier_name_cache.concat(Array(String | Nil).new(new_size - @identifier_name_cache.size, nil))
+              end
             elsif cached = @identifier_name_cache[idx]?
               return cached
             end
@@ -882,11 +888,14 @@ module CrystalV2
           intern_name(node.name)
         end
 
-        private def member_name_for(expr_id : ExprId, node : Frontend::MemberAccessNode) : String
+        private def member_name_for(expr_id : ExprId, node : Frontend::MemberAccessNode | Frontend::SafeNavigationNode) : String
           idx = expr_id.index
           if idx >= 0
             if idx >= @member_name_cache.size
-              @member_name_cache.resize(@program.arena.size)
+              new_size = @program.arena.size
+              if new_size > @member_name_cache.size
+                @member_name_cache.concat(Array(String | Nil).new(new_size - @member_name_cache.size, nil))
+              end
             elsif cached = @member_name_cache[idx]?
               return cached
             end
