@@ -6260,6 +6260,17 @@ module Crystal::MIR
             val_ref = value_ref(val)
             val_llvm_type = val_type ? @type_mapper.llvm_type(val_type) : "ptr"
 
+            if @current_return_type.includes?(".union") && val_ref == "null"
+              c = @cond_counter
+              @cond_counter += 1
+              emit "%ret_nil_union.#{c}.ptr = alloca #{@current_return_type}, align 8"
+              emit "%ret_nil_union.#{c}.type_id_ptr = getelementptr #{@current_return_type}, ptr %ret_nil_union.#{c}.ptr, i32 0, i32 0"
+              emit "store i32 1, ptr %ret_nil_union.#{c}.type_id_ptr"
+              emit "%ret_nil_union.#{c}.val = load #{@current_return_type}, ptr %ret_nil_union.#{c}.ptr"
+              emit "ret #{@current_return_type} %ret_nil_union.#{c}.val"
+              return
+            end
+
           # Check if we need to wrap concrete type in union
           if @current_return_type.includes?(".union") && !val_llvm_type.includes?(".union")
             c = @cond_counter  # Reuse cond_counter for unique naming
