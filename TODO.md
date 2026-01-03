@@ -1287,6 +1287,7 @@ r2 = maybe(false)  # => nil
 - `DEBUG_GENERIC_TEMPLATE=1` - traces generic template registration (shows body_size)
 - `DEBUG_TEMPLATE_LOOKUP=1` - traces generic template body searches
 - `DEBUG_LOOKUP=1` - traces function name lookups
+- `CRYSTAL_V2_STOP_AFTER_PARSE=1` - stops driver after parse (self-host parse + AST cache ≈ 5.5s on 273 files, 2026-01-xx)
 
 ### 8.6 Bootstrap Session Notes (2026-01-01 - Session 2)
 

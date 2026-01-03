@@ -159,6 +159,11 @@ module Crystal::V2
       total_exprs = all_arenas.sum { |t| t[1].size }
       log "  Files: #{all_arenas.size}, Expressions: #{total_exprs}"
 
+      if ENV.has_key?("CRYSTAL_V2_STOP_AFTER_PARSE")
+        trace_driver("[DRIVER_TRACE] stop after parse (CRYSTAL_V2_STOP_AFTER_PARSE)")
+        return
+      end
+
       # Step 2: Lower to HIR
       trace_driver("[DRIVER_TRACE] [2/5] Lowering to HIR...")
       log "\n[2/5] Lowering to HIR..."
