@@ -523,6 +523,7 @@ module Crystal::HIR
     @module_defs : Hash(String, Array({CrystalV2::Compiler::Frontend::ModuleNode, CrystalV2::Compiler::Frontend::ArenaLike}))
     # Track concrete types that include a module for module-typed receiver fallback.
     @module_includers : Hash(String, Set(String))
+    @module_includer_keys_by_suffix : Hash(String, Set(String))
     # Reverse mapping: track which modules each class includes (for method lookup)
     @class_included_modules : Hash(String, Set(String))
     # Modules that have `extend self` applied (treat defs without receiver as class methods).
@@ -691,6 +692,7 @@ module Crystal::HIR
       @class_accessor_entries = {} of String => ClassAccessorEntry
       @module_defs = {} of String => Array({CrystalV2::Compiler::Frontend::ModuleNode, CrystalV2::Compiler::Frontend::ArenaLike})
       @module_includers = {} of String => Set(String)
+      @module_includer_keys_by_suffix = {} of String => Set(String)
       @class_included_modules = {} of String => Set(String)
       @module_extend_self = Set(String).new
       @module_defs_cache_version = 0
@@ -861,6 +863,12 @@ module Crystal::HIR
       end
       set.add(class_name)
       @module.register_module_includer(resolved_module_name, class_name)
+      module_base = resolved_module_name.split("(", 2).first
+      parts = module_base.split("::")
+      parts.each_index do |idx|
+        suffix = parts[idx..].join("::")
+        (@module_includer_keys_by_suffix[suffix] ||= Set(String).new) << resolved_module_name
+      end
       # Also record reverse mapping (class -> modules it includes)
       class_set = @class_included_modules[class_name]? || begin
         new_set = Set(String).new
@@ -9435,9 +9443,12 @@ module Crystal::HIR
                     end
       includers = @module_includers[module_base]?
       if includers.nil? || includers.empty?
-        matches = @module_includers.keys.select { |key| key.ends_with?("::#{module_base}") }
-        module_base = matches.first if matches.size == 1
-        includers = @module_includers[module_base]?
+        if matches = @module_includer_keys_by_suffix[module_base]?
+          if matches.size == 1
+            module_base = matches.first
+            includers = @module_includers[module_base]?
+          end
+        end
       end
       # Fallback: try short name if full name has no includers
       # e.g., "Crystal::EventLoop::FileDescriptor" -> "FileDescriptor"
@@ -9446,10 +9457,11 @@ module Crystal::HIR
         if short_name != module_base
           includers = @module_includers[short_name]?
           if includers.nil? || includers.empty?
-            matches = @module_includers.keys.select { |key| key.ends_with?("::#{short_name}") }
-            if matches.size == 1
-              module_base = matches.first
-              includers = @module_includers[module_base]?
+            if matches = @module_includer_keys_by_suffix[short_name]?
+              if matches.size == 1
+                module_base = matches.first
+                includers = @module_includers[module_base]?
+              end
             end
           end
         end
@@ -9567,14 +9579,12 @@ module Crystal::HIR
     private def module_includers_match?(name : String) : Bool
       return true if @module_includers.has_key?(name)
 
-      if @module_includers.keys.any? { |key| key.ends_with?("::#{name}") }
-        return true
-      end
+      return true if @module_includer_keys_by_suffix.has_key?(name)
 
       short_name = name.split("::").last
       return true if @module_includers.has_key?(short_name)
 
-      @module_includers.keys.any? { |key| key.ends_with?("::#{short_name}") }
+      @module_includer_keys_by_suffix.has_key?(short_name)
     end
 
     private def resolve_module_typed_ivar(
@@ -9592,19 +9602,23 @@ module Crystal::HIR
                     end
       includers = @module_includers[module_base]?
       if includers.nil? || includers.empty?
-        matches = @module_includers.keys.select { |key| key.ends_with?("::#{module_base}") }
-        module_base = matches.first if matches.size == 1
-        includers = @module_includers[module_base]?
+        if matches = @module_includer_keys_by_suffix[module_base]?
+          if matches.size == 1
+            module_base = matches.first
+            includers = @module_includers[module_base]?
+          end
+        end
       end
       if includers.nil? || includers.empty?
         short_name = module_base.split("::").last
         if short_name != module_base
           includers = @module_includers[short_name]?
           if includers.nil? || includers.empty?
-            matches = @module_includers.keys.select { |key| key.ends_with?("::#{short_name}") }
-            if matches.size == 1
-              module_base = matches.first
-              includers = @module_includers[module_base]?
+            if matches = @module_includer_keys_by_suffix[short_name]?
+              if matches.size == 1
+                module_base = matches.first
+                includers = @module_includers[module_base]?
+              end
             end
           end
         end
