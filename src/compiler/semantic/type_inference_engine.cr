@@ -58,6 +58,7 @@ module CrystalV2
         # Instance-level cycle guard for expression inference (prevents infinite recursion)
         @expr_in_progress : Set(Int32) = Set(Int32).new
         @identifier_name_cache : Array(String?)
+        @member_name_cache : Array(String?)
 
         def initialize(
           @program : Frontend::Program,
@@ -71,6 +72,7 @@ module CrystalV2
           @flow_narrowings = {} of String => Type    # Phase 95: Flow typing - narrowed types in conditionals
           @children_cache = Array(Array(ExprId)?).new(@program.arena.size)
           @identifier_name_cache = Array(String?).new(@program.arena.size)
+          @member_name_cache = Array(String?).new(@program.arena.size)
           @current_class = nil
           @current_module = nil
           @receiver_type_context = nil
@@ -878,6 +880,21 @@ module CrystalV2
             return name
           end
           String.new(node.name)
+        end
+
+        private def member_name_for(expr_id : ExprId, node : Frontend::MemberAccessNode) : String
+          idx = expr_id.index
+          if idx >= 0
+            if idx >= @member_name_cache.size
+              @member_name_cache.resize(@program.arena.size)
+            elsif cached = @member_name_cache[idx]?
+              return cached
+            end
+            name = String.new(node.member)
+            @member_name_cache[idx] = name
+            return name
+          end
+          String.new(node.member)
         end
 
         # ============================================================
@@ -2494,7 +2511,7 @@ module CrystalV2
 
           # Phase 103C: Infer receiver and method, return nilable result
           receiver_type = infer_expression(node.object)
-          method_name = String.new(node.member)
+          method_name = member_name_for(expr_id, node)
 
           # Strip Nil from receiver for method lookup (since we're safe-navigating)
           non_nil_type = case receiver_type
@@ -2578,7 +2595,7 @@ module CrystalV2
           when Frontend::PathNode
             collect_path_segments(expr, segments)
           when Frontend::IdentifierNode
-            segments << String.new(expr.name)
+            segments << identifier_name_for(expr_id, expr)
           end
         end
 
@@ -2695,7 +2712,7 @@ module CrystalV2
           when Frontend::IdentifierNode
             table = @global_table
             return nil unless table
-            name = String.new(node.name)
+            name = identifier_name_for(expr_id, node)
             if symbol = table.lookup(name)
               if type = type_from_symbol(symbol)
                 return normalize_literal_type(type)
@@ -2818,7 +2835,7 @@ module CrystalV2
               end
             end
           end
-          method_name = String.new(node.member)
+          method_name = member_name_for(expr_id, node)
 
           debug("infer_member_access: receiver_type = #{receiver_type.class.name}: #{receiver_type}, method = #{method_name}")
 
@@ -2921,12 +2938,12 @@ module CrystalV2
           case callee_node
           when Frontend::MemberAccessNode
             receiver_type = infer_expression(callee_node.object)
-            method_name = String.new(callee_node.member)
+            method_name = member_name_for(node.callee, callee_node)
             debug("  receiver_type = #{receiver_type.class.name}: #{receiver_type}")
             debug("  method_name = #{method_name}")
           when Frontend::IdentifierNode
             # Week 1 Day 2: Top-level function call (e.g., identity(42))
-            method_name = String.new(callee_node.name)
+            method_name = identifier_name_for(node.callee, callee_node)
             debug("  IdentifierNode call: method_name = #{method_name}")
             # Infer argument types
             arg_types = Array(Type).new(node.args.size)
