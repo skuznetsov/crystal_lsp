@@ -1386,6 +1386,7 @@ The return_type=16 (NIL) for `to_s` methods is incorrect - should be String type
   - Use class_info_by_type_id and short index in member-access resolution (avoid class_info scans) (2026-01-xx).
   - Index module includer keys by suffix (avoid scanning module_includers keys) (2026-01-xx).
   - Index instance method names by owner for macro symbol tables (avoid function_defs scans) (2026-01-xx).
+  - Index HIR functions by base name (avoid scanning module.functions for fuzzy matches) (2026-01-xx).
 - **Next**:
   - Profile for hotspots inside lowering (resolve_method_call / infer_type_from_expr / lower_function_if_needed).
   - Consider caching/memoization or an indexed lookup to avoid repeated full-map scans.

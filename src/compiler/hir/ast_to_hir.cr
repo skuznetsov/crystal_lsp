@@ -10565,8 +10565,8 @@ module Crystal::HIR
         return cached
       end
       # Fall back to already-lowered functions
-      @module.functions.each do |func|
-        return func.return_type if func.name == name
+      if func = @module.function_by_name(name)
+        return func.return_type
       end
       TypeRef::VOID
     end
@@ -11982,7 +11982,7 @@ module Crystal::HIR
       end
 
       # Idempotency: avoid lowering the same function twice (can happen with conditional defs).
-      if existing = @module.functions.find { |f| f.name == full_name }
+      if existing = @module.function_by_name(full_name)
         return existing
       end
 
@@ -12134,7 +12134,7 @@ module Crystal::HIR
     # Lower a synthetic __crystal_main that calls a user-defined main.
     # Used when there are no top-level expressions (no implicit main body).
     def lower_main_from_def(node : CrystalV2::Compiler::Frontend::DefNode) : Function
-      if existing = @module.functions.find { |f| f.name == "__crystal_main" }
+      if existing = @module.function_by_name("__crystal_main")
         return existing
       end
 
@@ -19508,7 +19508,7 @@ module Crystal::HIR
       end
 
       # Check if function exists in module by base name (for unqualified functions).
-      base_func_exists = @module.functions.any? { |f| f.name == base_method_name }
+      base_func_exists = @module.has_function?(base_method_name)
 
       if base_func_exists && !base_method_name.includes?("#") && !base_method_name.includes?(".") && !has_typed_args
         # Function exists with base name - use that (no mangling needed for simple functions)
@@ -20442,12 +20442,12 @@ module Crystal::HIR
       method_name : String
     ) : Array(ValueId)
       # Find the target function to get parameter types
-      target_func = @module.functions.find { |f| f.name == method_name }
+      target_func = @module.function_by_name(method_name)
 
       # If not found, try fuzzy match (for mangled names)
       unless target_func
         base_name = method_name.split("$").first
-        target_func = @module.functions.find { |f| f.name.split("$").first == base_name }
+        target_func = @module.functions_by_base_name(base_name).try(&.first?)
       end
 
       # Try another fuzzy match: method name may have different type suffix but same base
@@ -20463,16 +20463,8 @@ module Crystal::HIR
             # Extract just the method name (before $type suffix)
             method_part = method_with_types.split("$").first
             # Match: same class, same method name, possibly different type suffixes
-            target_func = @module.functions.find do |f|
-              if f.name.includes?(separator)
-                f_parts = f.name.split(separator, 2)
-                f_parts.size == 2 &&
-                  f_parts[0] == class_part &&
-                  f_parts[1].split("$").first == method_part
-              else
-                false
-              end
-            end
+            base = "#{class_part}#{separator}#{method_part}"
+            target_func = @module.functions_by_base_name(base).try(&.first?)
           end
         end
       end

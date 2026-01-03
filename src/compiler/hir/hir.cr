@@ -1210,10 +1210,12 @@ module Crystal::HIR
     @next_type_id : TypeId = TypeRef::FIRST_USER_TYPE
     @string_intern : Hash(String, StringId)
     @functions_by_name : Hash(String, Function)
+    @functions_by_base_name : Hash(String, Array(Function))
 
     def initialize(@name : String = "main")
       @functions = [] of Function
       @functions_by_name = {} of String => Function
+      @functions_by_base_name = {} of String => Array(Function)
       @types = [] of TypeDescriptor
       @strings = [] of String
       @string_intern = {} of String => StringId
@@ -1309,11 +1311,21 @@ module Crystal::HIR
       func = Function.new(id, name, return_type)
       @functions << func
       @functions_by_name[name] = func
+      base_name = name.split("$", 2).first
+      (@functions_by_base_name[base_name] ||= [] of Function) << func
       func
     end
 
     def has_function?(name : String) : Bool
       @functions_by_name.has_key?(name)
+    end
+
+    def function_by_name(name : String) : Function?
+      @functions_by_name[name]?
+    end
+
+    def functions_by_base_name(base_name : String) : Array(Function)?
+      @functions_by_base_name[base_name]?
     end
 
     # Compute reachable function names from a set of entry roots by following Call instructions.
