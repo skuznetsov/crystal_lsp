@@ -1662,7 +1662,7 @@ module CrystalV2
           return nil unless expr_node.is_a?(Frontend::IdentifierNode)
 
           var_name = intern_name(expr_node.name)
-          type_name = String.new(condition_node.target_type)
+          type_name = intern_name(condition_node.target_type)
 
           # Resolve target type
           narrowed_type = parse_type_name(type_name)
@@ -1680,7 +1680,7 @@ module CrystalV2
           # Only narrow if condition is a simple variable (identifier)
           var_name = case condition_node
                      when Frontend::IdentifierNode
-                       String.new(condition_node.name)
+                       intern_name(condition_node.name)
                      when Frontend::AssignNode
                        target_node = @program.arena[condition_node.target]
                        return nil unless target_node.is_a?(Frontend::IdentifierNode)
@@ -1775,7 +1775,7 @@ module CrystalV2
               # Check method parameters
               symbol.params.each do |param|
                 if (param_name = param.name) && intern_name(param_name) == var_name && (param_type = param.type_annotation)
-                  return parse_type_name(String.new(param_type))
+                  return parse_type_name(intern_name(param_type))
                 end
               end
             end
@@ -1868,7 +1868,7 @@ module CrystalV2
 
           decl = node.as(Frontend::TypeDeclarationNode)
           var_name = intern_name(decl.name)
-          type_name = String.new(decl.declared_type)
+          type_name = intern_name(decl.declared_type)
 
           # Resolve the declared type
           declared_type = lookup_type_by_name(type_name) || PrimitiveType.new(type_name)
@@ -2288,7 +2288,7 @@ module CrystalV2
 
           # Phase 103C: Resolve target type from type name
           infer_expression(node.expression)
-          target_type_name = String.new(node.target_type)
+          target_type_name = intern_name(node.target_type)
 
           # Try to resolve the target type
           if target_type = lookup_type_by_name(target_type_name)
@@ -2306,7 +2306,7 @@ module CrystalV2
 
           # Phase 103C: Resolve target type and make nilable
           infer_expression(node.expression)
-          target_type_name = String.new(node.target_type)
+          target_type_name = intern_name(node.target_type)
 
           # Try to resolve the target type
           target_type = if resolved = lookup_type_by_name(target_type_name)
@@ -3344,7 +3344,7 @@ module CrystalV2
           arg_types.each_with_index do |arg_type, i|
             param = params[i]
             if type_ann = param.type_annotation
-              type_name = String.new(type_ann)
+              type_name = intern_name(type_ann)
 
               # Case 1: Simple type parameter (e.g., x : T)
               if type_params.includes?(type_name)
@@ -3806,7 +3806,7 @@ module CrystalV2
             type_ann = param.type_annotation
             next unless type_ann  # No annotation means any type matches
 
-            param_type = parse_type_name(String.new(type_ann))
+            param_type = parse_type_name(intern_name(type_ann))
             return false unless type_matches?(arg_type, param_type)
           end
 
@@ -3896,7 +3896,7 @@ module CrystalV2
             type_ann = param.type_annotation
             next unless type_ann
 
-            param_type = parse_type_name(String.new(type_ann))
+            param_type = parse_type_name(intern_name(type_ann))
 
             if arg_type.to_s == param_type.to_s
               # Exact match: highest score
@@ -4437,7 +4437,7 @@ module CrystalV2
             params.each do |param|
               if param_name = param.name
                 param_type = if type_ann = param.type_annotation
-                               parse_type_name(String.new(type_ann))
+                               parse_type_name(intern_name(type_ann))
                              else
                                @context.nil_type
                              end
@@ -4464,7 +4464,7 @@ module CrystalV2
           # 2. Otherwise use inferred body type
           # 3. Default to Nil for empty body
           return_type = if rt = node.return_type
-                          parse_type_name(String.new(rt))
+                          parse_type_name(intern_name(rt))
                         elsif body_type
                           body_type
                         else
@@ -4508,7 +4508,7 @@ module CrystalV2
 
           params.zip(arg_types).each do |param, arg_type|
             if type_ann = param.type_annotation
-              type_name = String.new(type_ann)
+              type_name = intern_name(type_ann)
               # If parameter type is a type parameter (e.g., "T"), bind it
               if type_params.includes?(type_name)
                 binding[type_name] = arg_type
@@ -4697,7 +4697,7 @@ module CrystalV2
             case cond_node
             when Frontend::IdentifierNode
               # when String, when Int32, etc. (type as identifier)
-              type_name = String.new(cond_node.name)
+              type_name = intern_name(cond_node.name)
               if is_type_name?(type_name)
                 return parse_type_name(type_name)
               end
@@ -4708,7 +4708,7 @@ module CrystalV2
               end
             when Frontend::IsANode
               # when .is_a?(Type) - rarely used in case but possible
-              type_name = String.new(cond_node.target_type)
+              type_name = intern_name(cond_node.target_type)
               return parse_type_name(type_name)
             when Frontend::MemberAccessNode
               # when .class (check if it's a .class call on type)
