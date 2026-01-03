@@ -194,8 +194,10 @@ module Crystal::V2
       # Top-level expressions that form the main function
       main_exprs = [] of Tuple(CrystalV2::Compiler::Frontend::ExprId, CrystalV2::Compiler::Frontend::ArenaLike)
       acyclic_types = Set(String).new
+      debug_hir_timings = ENV.has_key?("DEBUG_HIR_TIMINGS")
 
       flags = CrystalV2::Runtime.target_flags
+      collect_start = Time.monotonic if debug_hir_timings
       all_arenas.each do |arena, exprs, file_path, source|
         pending_annotations = [] of Tuple(CrystalV2::Compiler::Frontend::AnnotationNode, CrystalV2::Compiler::Frontend::ArenaLike)
         exprs.each do |expr_id|
@@ -219,9 +221,14 @@ module Crystal::V2
             )
           end
         end
+      if debug_hir_timings && collect_start
+        elapsed = (Time.monotonic - collect_start).total_milliseconds
+        STDERR.puts "[HIR_TIMING] collect_top_level_nodes #{elapsed.round(1)}ms"
+      end
 
       # Three-pass approach:
       # Pass 1: Register all enums, modules, class types and their methods
+      pass1_start = Time.monotonic if debug_hir_timings
       if ENV.has_key?("DEBUG_NESTED_CLASS")
         STDERR.puts "[DEBUG_DRIVER] class_nodes: #{class_nodes.size}, module_nodes: #{module_nodes.size}"
         module_nodes.each do |module_node, arena|
@@ -266,6 +273,10 @@ module Crystal::V2
         hir_converter.arena = arena
         hir_converter.register_class(class_node)
       end
+      if debug_hir_timings && pass1_start
+        elapsed = (Time.monotonic - pass1_start).total_milliseconds
+        STDERR.puts "[HIR_TIMING] register_types #{elapsed.round(1)}ms"
+      end
 
       constant_exprs.each do |expr_id, arena|
         hir_converter.arena = arena
@@ -283,28 +294,67 @@ module Crystal::V2
 
       # Flush pending monomorphizations now that all templates are registered
       puts "  Flushing pending monomorphizations..." if @verbose
+      mono_start = Time.monotonic if debug_hir_timings
       hir_converter.flush_pending_monomorphizations
+      if debug_hir_timings && mono_start
+        elapsed = (Time.monotonic - mono_start).total_milliseconds
+        STDERR.puts "[HIR_TIMING] flush_pending_monomorphizations #{elapsed.round(1)}ms"
+      end
 
       # Pass 2: Register all top-level function signatures
+      pass2_start = Time.monotonic if debug_hir_timings
       def_nodes.each do |node, arena|
         hir_converter.arena = arena
         hir_converter.register_function(node)
       end
+      if debug_hir_timings && pass2_start
+        elapsed = (Time.monotonic - pass2_start).total_milliseconds
+        STDERR.puts "[HIR_TIMING] register_functions #{elapsed.round(1)}ms"
+      end
 
       # Pass 3: Lower all function and method bodies
       func_count = 0
+      pass3_start = Time.monotonic if debug_hir_timings
+      slow_ms = ENV["DEBUG_HIR_SLOW_MS"]?.try(&.to_f)
       module_nodes.each do |module_node, arena|
         hir_converter.arena = arena
-        hir_converter.lower_module(module_node)
+        if slow_ms
+          start = Time.monotonic
+          hir_converter.lower_module(module_node)
+          elapsed = (Time.monotonic - start).total_milliseconds
+          if elapsed >= slow_ms
+            name = String.new(module_node.name)
+            source_path = paths_by_arena[arena]?
+            STDERR.puts "[HIR_SLOW] module #{name} #{elapsed.round(1)}ms#{source_path ? " file=#{source_path}" : ""}"
+          end
+        else
+          hir_converter.lower_module(module_node)
+        end
         func_count += 1
       end
       class_nodes.each do |class_node, arena|
         hir_converter.arena = arena
-        hir_converter.lower_class(class_node)
+        if slow_ms
+          start = Time.monotonic
+          hir_converter.lower_class(class_node)
+          elapsed = (Time.monotonic - start).total_milliseconds
+          if elapsed >= slow_ms
+            name = String.new(class_node.name)
+            source_path = paths_by_arena[arena]?
+            STDERR.puts "[HIR_SLOW] class #{name} #{elapsed.round(1)}ms#{source_path ? " file=#{source_path}" : ""}"
+          end
+        else
+          hir_converter.lower_class(class_node)
+        end
         func_count += 1
+      end
+      if debug_hir_timings && pass3_start
+        elapsed = (Time.monotonic - pass3_start).total_milliseconds
+        STDERR.puts "[HIR_TIMING] lower_modules_classes #{elapsed.round(1)}ms"
       end
 
       # Create synthetic main function from top-level expressions (or user-defined main)
+      main_start = Time.monotonic if debug_hir_timings
       if main_exprs.size > 0
         hir_converter.lower_main(main_exprs)
         func_count += 1
@@ -313,20 +363,45 @@ module Crystal::V2
         hir_converter.lower_main_from_def(main_def[0])
         func_count += 1
       end
+      if debug_hir_timings && main_start
+        elapsed = (Time.monotonic - main_start).total_milliseconds
+        STDERR.puts "[HIR_TIMING] lower_main #{elapsed.round(1)}ms"
+      end
 
       # Ensure top-level `fun main` is lowered as an entrypoint when present.
+      fun_main_start = Time.monotonic if debug_hir_timings
       if fun_main = def_nodes.find { |(n, _)| n.receiver.try { |recv| String.new(recv) == HIR::AstToHir::FUN_DEF_RECEIVER } || false }
         hir_converter.arena = fun_main[1]
         hir_converter.lower_def(fun_main[0])
         func_count += 1
       end
+      if debug_hir_timings && fun_main_start
+        elapsed = (Time.monotonic - fun_main_start).total_milliseconds
+        STDERR.puts "[HIR_TIMING] lower_fun_main #{elapsed.round(1)}ms"
+      end
 
       # Lower remaining top-level function bodies after main to allow
       # call-site types to guide inference for used functions.
+      defs_start = Time.monotonic if debug_hir_timings
       def_nodes.each do |node, arena|
         hir_converter.arena = arena
-        hir_converter.lower_def(node)
+        if slow_ms
+          start = Time.monotonic
+          hir_converter.lower_def(node)
+          elapsed = (Time.monotonic - start).total_milliseconds
+          if elapsed >= slow_ms
+            name = String.new(node.name)
+            source_path = paths_by_arena[arena]?
+            STDERR.puts "[HIR_SLOW] #{name} #{elapsed.round(1)}ms#{source_path ? " file=#{source_path}" : ""}"
+          end
+        else
+          hir_converter.lower_def(node)
+        end
         func_count += 1
+      end
+      if debug_hir_timings && defs_start
+        elapsed = (Time.monotonic - defs_start).total_milliseconds
+        STDERR.puts "[HIR_TIMING] lower_defs #{elapsed.round(1)}ms"
       end
 
       hir_module = hir_converter.module
