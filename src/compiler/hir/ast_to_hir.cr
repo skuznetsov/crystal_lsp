@@ -18719,31 +18719,29 @@ module Crystal::HIR
           ensure_monomorphized_type(receiver_type) unless receiver_type == TypeRef::VOID
           if receiver_type.id > 0
             # Look up class name from type, then resolve method with inheritance
-            @class_info.each do |name, info|
-              if info.type_ref.id == receiver_type.id
-                # Debug: track when short names are matched
-                if ENV.has_key?("DEBUG_CLASS_MATCH") && !name.includes?("::")
-                  STDERR.puts "[CLASS_MATCH] method=#{method_name}, receiver_id=#{receiver_type.id}, name=#{name}"
-                end
-                if receiver_is_type_literal
-                  if method_name == "new"
-                    full_method_name = "#{name}.#{method_name}"
-                    static_class_name = name
-                  else
-                    full_method_name = resolve_class_method_with_inheritance(name, method_name) || "#{name}.#{method_name}"
-                    static_class_name = full_method_name.split(".", 2)[0]? || name
-                  end
-                  receiver_id = nil
-                  if method_name == "new"
-                    generate_allocator(name, info)
-                  end
+            if info = @class_info_by_type_id[receiver_type.id]?
+              name = info.name
+              # Debug: track when short names are matched
+              if ENV.has_key?("DEBUG_CLASS_MATCH") && !name.includes?("::")
+                STDERR.puts "[CLASS_MATCH] method=#{method_name}, receiver_id=#{receiver_type.id}, name=#{name}"
+              end
+              if receiver_is_type_literal
+                if method_name == "new"
+                  full_method_name = "#{name}.#{method_name}"
+                  static_class_name = name
                 else
-                  # Use inheritance-aware method resolution
-                  full_method_name = resolve_method_with_inheritance(name, method_name)
-                  full_method_name ||= "#{name}##{method_name}"
-                  generate_allocator(name, info) if method_name == "new"
+                  full_method_name = resolve_class_method_with_inheritance(name, method_name) || "#{name}.#{method_name}"
+                  static_class_name = full_method_name.split(".", 2)[0]? || name
                 end
-                break
+                receiver_id = nil
+                if method_name == "new"
+                  generate_allocator(name, info)
+                end
+              else
+                # Use inheritance-aware method resolution
+                full_method_name = resolve_method_with_inheritance(name, method_name)
+                full_method_name ||= "#{name}##{method_name}"
+                generate_allocator(name, info) if method_name == "new"
               end
             end
 
