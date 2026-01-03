@@ -8260,6 +8260,7 @@ module Crystal::HIR
         if progress_filter
           progress_match = progress_filter == "1" || base_name.includes?(progress_filter)
         end
+        progress_every = ENV["DEBUG_LOWER_PROGRESS_EVERY"]?.try(&.to_i?)
         slow_only = ENV.has_key?("DEBUG_LOWER_SLOW_ONLY")
         slow_ms = nil
         if progress_match
@@ -8279,6 +8280,11 @@ module Crystal::HIR
         body.each_with_index do |expr_id, idx|
           expr_snippet = nil
           if progress_match && !slow_only
+            if progress_every && progress_every > 0
+              if idx % progress_every == 0
+                STDERR.puts "[LOWER_PROGRESS] method=#{base_name} idx=#{idx}/#{body.size}"
+              end
+            else
             begin
               expr_node = @arena[expr_id]
               if source = @sources_by_arena[@arena]?
@@ -8297,6 +8303,7 @@ module Crystal::HIR
               end
             rescue
               STDERR.puts "[LOWER_PROGRESS] method=#{base_name} idx=#{idx} node=(OOB)"
+            end
             end
           end
           expr_start = slow_ms ? Time.monotonic : nil
