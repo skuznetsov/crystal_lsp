@@ -483,6 +483,12 @@ module Crystal::HIR
     # Method resolution cache (per-lowering scope).
     @method_resolution_cache : Hash(String, String)
     @method_resolution_cache_scope : String?
+    # Method resolution cache for inheritance lookups (class_name + method).
+    @method_inheritance_cache : Hash(String, String?)
+    @class_method_inheritance_cache : Hash(String, String?)
+    @method_inheritance_cache_function_size : Int32
+    @method_inheritance_cache_class_info_size : Int32
+    @method_inheritance_cache_module_version : Int32
 
     # Pending monomorphizations (deferred until after all templates are registered)
     @pending_monomorphizations : Array({String, Array(String), String})
@@ -525,6 +531,7 @@ module Crystal::HIR
     # Track concrete types that include a module for module-typed receiver fallback.
     @module_includers : Hash(String, Set(String))
     @module_includer_keys_by_suffix : Hash(String, Set(String))
+    @module_includers_version : Int32
     # Reverse mapping: track which modules each class includes (for method lookup)
     @class_included_modules : Hash(String, Set(String))
     # Modules that have `extend self` applied (treat defs without receiver as class methods).
@@ -688,6 +695,11 @@ module Crystal::HIR
       @eager_monomorphization = ENV.has_key?("CRYSTAL_V2_EAGER_MONO")
       @method_resolution_cache = {} of String => String
       @method_resolution_cache_scope = nil
+      @method_inheritance_cache = {} of String => String?
+      @class_method_inheritance_cache = {} of String => String?
+      @method_inheritance_cache_function_size = 0
+      @method_inheritance_cache_class_info_size = 0
+      @method_inheritance_cache_module_version = 0
       @type_param_map = {} of String => String
       @macro_defs = {} of String => {CrystalV2::Compiler::Frontend::MacroDefNode, CrystalV2::Compiler::Frontend::ArenaLike}
       @macro_params = {} of String => Array(MacroParamInfo)
@@ -695,6 +707,7 @@ module Crystal::HIR
       @module_defs = {} of String => Array({CrystalV2::Compiler::Frontend::ModuleNode, CrystalV2::Compiler::Frontend::ArenaLike})
       @module_includers = {} of String => Set(String)
       @module_includer_keys_by_suffix = {} of String => Set(String)
+      @module_includers_version = 0
       @class_included_modules = {} of String => Set(String)
       @module_extend_self = Set(String).new
       @module_defs_cache_version = 0
@@ -858,12 +871,16 @@ module Crystal::HIR
       if ENV["DEBUG_MODULE_INCLUDE"]? && (module_name.includes?("FileDescriptor") || class_name.includes?("EventLoop") || module_name.includes?("MatchData"))
         STDERR.puts "[DEBUG_MODULE_INCLUDE] #{class_name} <= #{module_name} (resolved: #{resolved_module_name})"
       end
+      cache_bump = false
       set = @module_includers[resolved_module_name]? || begin
         new_set = Set(String).new
         @module_includers[resolved_module_name] = new_set
         new_set
       end
-      set.add(class_name)
+      unless set.includes?(class_name)
+        set.add(class_name)
+        cache_bump = true
+      end
       @module.register_module_includer(resolved_module_name, class_name)
       module_base = resolved_module_name.split("(", 2).first
       parts = module_base.split("::")
@@ -877,7 +894,11 @@ module Crystal::HIR
         @class_included_modules[class_name] = new_set
         new_set
       end
-      class_set.add(resolved_module_name)
+      unless class_set.includes?(resolved_module_name)
+        class_set.add(resolved_module_name)
+        cache_bump = true
+      end
+      @module_includers_version += 1 if cache_bump
       debug_hook("module.include", "#{class_name} <= #{resolved_module_name}")
     end
 
@@ -9224,6 +9245,18 @@ module Crystal::HIR
       @instance_method_names_cache_version = @function_defs_cache_size
     end
 
+    private def ensure_method_inheritance_cache
+      if @method_inheritance_cache_function_size != @function_types.size ||
+         @method_inheritance_cache_class_info_size != @class_info.size ||
+         @method_inheritance_cache_module_version != @module_includers_version
+        @method_inheritance_cache.clear
+        @class_method_inheritance_cache.clear
+        @method_inheritance_cache_function_size = @function_types.size
+        @method_inheritance_cache_class_info_size = @class_info.size
+        @method_inheritance_cache_module_version = @module_includers_version
+      end
+    end
+
     private def resolve_untyped_overload(base_method_name : String, arg_count : Int32, has_block_call : Bool) : String?
       return nil if base_method_name.empty?
 
@@ -11372,6 +11405,11 @@ module Crystal::HIR
     # Note: Returns the base name without mangling - caller should mangle with actual arg types
     private def resolve_method_with_inheritance(class_name : String, method_name : String) : String?
       class_name = normalize_method_owner_name(class_name)
+      ensure_method_inheritance_cache
+      cache_key = "#{class_name}##{method_name}"
+      if @method_inheritance_cache.has_key?(cache_key)
+        return @method_inheritance_cache[cache_key]
+      end
       current = class_name
       visited = Set(String).new
       while true
@@ -11380,6 +11418,7 @@ module Crystal::HIR
         test_name = "#{current}##{method_name}"
         # O(1) lookup: check exact match first, then check if base name exists
         if @function_types.has_key?(test_name) || has_function_base?(test_name)
+          @method_inheritance_cache[cache_key] = test_name
           return test_name  # Return base name - caller will mangle
         end
         # Also check included modules for this class
@@ -11390,6 +11429,7 @@ module Crystal::HIR
             module_method = "#{base_module}##{method_name}"
             if @function_types.has_key?(module_method) || has_function_base?(module_method)
               # Return with class prefix so it gets lowered for this class
+              @method_inheritance_cache[cache_key] = test_name
               return test_name
             end
           end
@@ -11408,15 +11448,20 @@ module Crystal::HIR
       if template_owner = primitive_template_owner(class_name)
         template_method = "#{template_owner}##{method_name}"
         if @function_types.has_key?(template_method) || has_function_base?(template_method)
-          return "#{class_name}##{method_name}"
+          resolved = "#{class_name}##{method_name}"
+          @method_inheritance_cache[cache_key] = resolved
+          return resolved
         end
       end
       if class_name != "Object"
         object_method = "Object##{method_name}"
         if @function_types.has_key?(object_method) || has_function_base?(object_method)
-          return "#{class_name}##{method_name}"
+          resolved = "#{class_name}##{method_name}"
+          @method_inheritance_cache[cache_key] = resolved
+          return resolved
         end
       end
+      @method_inheritance_cache[cache_key] = nil
       nil
     end
 
@@ -11424,6 +11469,11 @@ module Crystal::HIR
     # Returns base name without mangling or nil if not found.
     private def resolve_class_method_with_inheritance(class_name : String, method_name : String) : String?
       class_name = normalize_method_owner_name(class_name)
+      ensure_method_inheritance_cache
+      cache_key = "#{class_name}.#{method_name}"
+      if @class_method_inheritance_cache.has_key?(cache_key)
+        return @class_method_inheritance_cache[cache_key]
+      end
       current = class_name
       visited = Set(String).new
       while true
@@ -11431,6 +11481,7 @@ module Crystal::HIR
         visited << current
         test_name = "#{current}.#{method_name}"
         if @function_types.has_key?(test_name) || has_function_base?(test_name)
+          @class_method_inheritance_cache[cache_key] = test_name
           return test_name
         end
         if info = @class_info[current]?
@@ -11441,6 +11492,7 @@ module Crystal::HIR
         end
         break
       end
+      @class_method_inheritance_cache[cache_key] = nil
       nil
     end
 
