@@ -18089,11 +18089,19 @@ module Crystal::HIR
             should_log ||= elapsed_ms >= slow_threshold
           end
           if should_log
+            source_path = nil
+            if arena
+              source_path = source_path_for(arena)
+            elsif @arena
+              source_path = source_path_for(@arena)
+            end
             stats = @lower_method_stats_stack.pop?
             if stats
-              STDERR.puts "[LOWER_METHOD_TIME] name=#{target_name} requested=#{name} total=#{elapsed_ms.round(1)}ms self=#{self_ms.round(1)}ms child=#{child_ms.round(1)}ms resolve=#{stats.resolve_ms.round(1)}ms/#{stats.resolve_calls} infer=#{stats.infer_ms.round(1)}ms/#{stats.infer_calls}"
+              suffix = source_path ? " file=#{source_path}" : ""
+              STDERR.puts "[LOWER_METHOD_TIME] name=#{target_name} requested=#{name} total=#{elapsed_ms.round(1)}ms self=#{self_ms.round(1)}ms child=#{child_ms.round(1)}ms resolve=#{stats.resolve_ms.round(1)}ms/#{stats.resolve_calls} infer=#{stats.infer_ms.round(1)}ms/#{stats.infer_calls}#{suffix}"
             else
-              STDERR.puts "[LOWER_METHOD_TIME] name=#{target_name} requested=#{name} total=#{elapsed_ms.round(1)}ms self=#{self_ms.round(1)}ms child=#{child_ms.round(1)}ms"
+              suffix = source_path ? " file=#{source_path}" : ""
+              STDERR.puts "[LOWER_METHOD_TIME] name=#{target_name} requested=#{name} total=#{elapsed_ms.round(1)}ms self=#{self_ms.round(1)}ms child=#{child_ms.round(1)}ms#{suffix}"
             end
           elsif ENV["DEBUG_LOWER_METHOD_STATS"]?
             @lower_method_stats_stack.pop?
