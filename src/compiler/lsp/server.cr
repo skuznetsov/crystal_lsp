@@ -3408,7 +3408,7 @@ module CrystalV2
 
         # Find expression at the given position (LSP 0-indexed -> Span 1-indexed)
         private def find_expr_at_position(doc_state : DocumentState, line : Int32, character : Int32, precomputed_offset : Int32? = nil) : Frontend::ExprId?
-          return nil if comment_position?(doc_state.text_document.text, line, character)
+          return nil if comment_position?(doc_state, line, character)
           offset = precomputed_offset || position_to_offset(doc_state, line, character)
           return nil unless offset
 
@@ -3568,6 +3568,56 @@ module CrystalV2
             (byte >= 'a'.ord && byte <= 'z'.ord) ||
             (byte >= '0'.ord && byte <= '9'.ord) ||
             byte == '_'.ord || byte == ':'.ord
+        end
+
+        private def comment_position?(doc_state : DocumentState, target_line : Int32, character : Int32) : Bool
+          return false if target_line < 0
+          text = doc_state.text_document.text
+          offsets = doc_state.line_offsets
+          return comment_position?(text, target_line, character) if offsets.empty? || target_line >= offsets.size
+
+          line_start = offsets[target_line]
+          line_end = if target_line + 1 < offsets.size
+                       offsets[target_line + 1]
+                     else
+                       text.bytesize
+                     end
+          line_text = text.byte_slice(line_start, line_end - line_start)
+          return false if line_text.empty?
+
+          stripped = line_text.lstrip
+          return false if stripped.empty?
+          leading = line_text.size - stripped.size
+
+          if stripped.starts_with?('#')
+            return character >= leading
+          end
+
+          in_string = false
+          escape_next = false
+          string_char = '\0'
+          line_text.each_char_with_index do |ch, idx|
+            if escape_next
+              escape_next = false
+              next
+            end
+
+            if ch == '\\'
+              escape_next = true
+              next
+            end
+
+            if !in_string && (ch == '"' || ch == '\'')
+              in_string = true
+              string_char = ch
+            elsif in_string && ch == string_char
+              in_string = false
+            elsif !in_string && ch == '#'
+              return character >= idx
+            end
+          end
+
+          false
         end
 
         private def comment_position?(text : String, target_line : Int32, character : Int32) : Bool
@@ -4028,7 +4078,7 @@ module CrystalV2
           end
 
           # Skip hover if cursor is in a comment
-          if comment_position?(doc_state.text_document.text, line, character)
+          if comment_position?(doc_state, line, character)
             debug("Hover skipped: cursor in comment")
             return send_response(id, "null")
           end
