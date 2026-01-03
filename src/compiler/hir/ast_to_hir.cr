@@ -416,6 +416,7 @@ module Crystal::HIR
 
     # Class type information
     getter class_info : Hash(String, ClassInfo)
+    @classes_with_subclasses : Set(String)
     # Module-level class vars (modules don't have ClassInfo entries)
     @module_class_vars : Hash(String, Array(ClassVarInfo))
     # Track lib struct/union types for field access lowering.
@@ -632,6 +633,7 @@ module Crystal::HIR
       @function_enum_return_names = {} of String => String
       @function_return_type_literals = Set(String).new
       @class_info = {} of String => ClassInfo
+      @classes_with_subclasses = Set(String).new
       @module_class_vars = {} of String => Array(ClassVarInfo)
       @lib_structs = Set(String).new
       @init_params = {} of String => Array({String, TypeRef})
@@ -977,10 +979,14 @@ module Crystal::HIR
     end
 
     private def class_has_subclasses?(class_name : String) : Bool
-      @class_info.each_value.any? do |info|
-        parent = info.parent_name
-        next false unless parent
-        parent == class_name || parent.ends_with?("::#{class_name}")
+      @classes_with_subclasses.includes?(class_name)
+    end
+
+    private def record_class_parent(parent_name : String?) : Nil
+      return unless parent_name
+      @classes_with_subclasses.add(parent_name)
+      if short_name = parent_name.split("::").last?
+        @classes_with_subclasses.add(short_name)
       end
     end
 
@@ -7046,6 +7052,7 @@ module Crystal::HIR
       end
 
       @class_info[class_name] = ClassInfo.new(class_name, type_ref, ivars, class_vars, offset, is_struct, parent_name)
+      record_class_parent(parent_name)
       if ENV.has_key?("DEBUG_CLASS_PARENTS") && (class_name == "Base" || class_name == "Child")
         STDERR.puts "[CLASS_PARENT] class=#{class_name} parent=#{parent_name || "nil"}"
       end
