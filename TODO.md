@@ -1176,7 +1176,7 @@ r2 = maybe(false)  # => nil
 **Additional codegen gaps (observed):**
 - Top-level `{% if flag? %}` bodies now use raw source spans to parse defs/modules for simple flag branches; general macro expansion for complex bodies is still missing.
 - Mixed-width primitive calls in untyped methods (e.g., `Math.min` with `Int64` + `Int32`) can emit LLVM phis with mismatched integer widths; needs numeric promotion/common-type coercion (2025-12-26).
-- Pointer null comparisons can emit invalid IR (`icmp ne ptr 0, null`); ensure pointer constants are typed or use `ptrtoint` + integer compare (2026-01-xx).
+- Pointer null comparisons can emit invalid IR (`icmp ne ptr 0, null`); fix applied in LLVM backend (convert `0` to `null` for ptr NOT/branch conditions). Needs rebuild verification (2026-01-xx).
 - [x] Enum method bodies are captured and registered (enum defs now emitted for `Signal#reset` etc.) (2025-01-02)
 - [x] Macro `flag?` branches inside class/struct bodies now register defs (e.g., `Crystal::Scheduler.init`). (2025-01-02)
 - [x] Replace remaining `StructNode` checks with `ClassNode.is_struct` (parser does not emit StructNode). (2025-12-25)

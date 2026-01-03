@@ -3578,7 +3578,8 @@ module Crystal::MIR
             emit "%#{base_name}.bool = add i1 0, 0"  # false
             emit "#{name} = xor i1 %#{base_name}.bool, 1"  # NOT false = true
           elsif operand_llvm_type == "ptr"
-            emit "%#{base_name}.bool = icmp ne ptr #{operand}, null"
+            ptr_operand = operand == "0" ? "null" : operand
+            emit "%#{base_name}.bool = icmp ne ptr #{ptr_operand}, null"
             emit "#{name} = xor i1 %#{base_name}.bool, 1"
           elsif operand_llvm_type.includes?(".union")
             # For unions, check if type_id != 1 (1 = nil)
@@ -6482,7 +6483,8 @@ module Crystal::MIR
           # Pointer type: compare against null
           c = @cond_counter
           @cond_counter += 1
-          emit "%cond#{c}.not_null = icmp ne ptr #{cond}, null"
+          cond_ptr = cond == "0" ? "null" : cond
+          emit "%cond#{c}.not_null = icmp ne ptr #{cond_ptr}, null"
           emit "br i1 %cond#{c}.not_null, label %#{then_block}, label %#{else_block}"
         elsif cond_type
           cond_llvm_type = @type_mapper.llvm_type(cond_type)
