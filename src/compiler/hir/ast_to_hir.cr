@@ -25025,12 +25025,19 @@ module Crystal::HIR
         method_name = "#{@current_class}##{@current_method}"
         progress_match = progress_filter == "1" || method_name.includes?(progress_filter)
       end
+      progress_every = ENV["DEBUG_LOWER_PROGRESS_EVERY"]?.try(&.to_i?)
       slow_only = ENV.has_key?("DEBUG_LOWER_SLOW_ONLY")
       body.each_with_index do |expr_id, idx|
         next if expr_id.invalid?
         if progress_match && !slow_only
-          node = @arena[expr_id]
-          STDERR.puts "[LOWER_PROGRESS] method=#{@current_class}##{@current_method} idx=#{idx} node=#{node.class.name}"
+          if progress_every && progress_every > 0
+            if idx % progress_every == 0
+              STDERR.puts "[LOWER_PROGRESS] method=#{@current_class}##{@current_method} idx=#{idx}/#{body.size}"
+            end
+          else
+            node = @arena[expr_id]
+            STDERR.puts "[LOWER_PROGRESS] method=#{@current_class}##{@current_method} idx=#{idx} node=#{node.class.name}"
+          end
         end
         if progress_match
           start_time = Time.monotonic
