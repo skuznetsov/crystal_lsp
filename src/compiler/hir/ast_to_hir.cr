@@ -274,6 +274,29 @@ module Crystal::HIR
       end
     end
 
+    private struct DefParamStats
+      getter param_count : Int32
+      getter required : Int32
+      getter has_splat : Bool
+      getter has_double_splat : Bool
+      getter has_block : Bool
+      getter typed_param_count : Int32
+      getter type_param_names : Array(String)
+      getter has_non_type_param_annotation : Bool
+
+      def initialize(
+        @param_count : Int32,
+        @required : Int32,
+        @has_splat : Bool,
+        @has_double_splat : Bool,
+        @has_block : Bool,
+        @typed_param_count : Int32,
+        @type_param_names : Array(String),
+        @has_non_type_param_annotation : Bool,
+      )
+      end
+    end
+
     private record CallsiteArgs, types : Array(TypeRef), literals : Array(Bool)?
 
     private class InitParamsCapture
@@ -414,6 +437,7 @@ module Crystal::HIR
     @function_def_arenas : Hash(String, CrystalV2::Compiler::Frontend::ArenaLike)
     @function_def_overloads : Hash(String, Array(String))
     @function_defs_cache_size : Int32
+    @function_param_stats : Hash(String, DefParamStats)
 
     # Functions that contain yield (candidates for inline)
     @yield_functions : Set(String)
@@ -621,6 +645,7 @@ module Crystal::HIR
       @function_def_arenas = {} of String => CrystalV2::Compiler::Frontend::ArenaLike
       @function_def_overloads = {} of String => Array(String)
       @function_defs_cache_size = 0
+      @function_param_stats = {} of String => DefParamStats
       @yield_functions = Set(String).new
       @yield_return_functions = Set(String).new
       @yield_return_checked = Set(String).new
@@ -9011,11 +9036,75 @@ module Crystal::HIR
 
     private def rebuild_function_def_overloads
       @function_def_overloads.clear
-      @function_defs.each_key do |key|
+      @function_param_stats.clear
+      @function_defs.each do |key, def_node|
         base = key.split("$", 2).first
         (@function_def_overloads[base] ||= [] of String) << key
+        @function_param_stats[key] = build_param_stats(def_node)
       end
       @function_defs_cache_size = @function_defs.size
+    end
+
+    private def function_param_stats(name : String, def_node : CrystalV2::Compiler::Frontend::DefNode) : DefParamStats
+      rebuild_function_def_overloads if @function_defs_cache_size != @function_defs.size
+      if stats = @function_param_stats[name]?
+        return stats
+      end
+      stats = build_param_stats(def_node)
+      @function_param_stats[name] = stats
+      stats
+    end
+
+    private def build_param_stats(def_node : CrystalV2::Compiler::Frontend::DefNode) : DefParamStats
+      param_count = 0
+      required = 0
+      has_splat = false
+      has_double_splat = false
+      has_block = false
+      typed_param_count = 0
+      type_param_names = [] of String
+      has_non_type_param_annotation = false
+
+      if params = def_node.params
+        params.each do |param|
+          if param.is_block
+            has_block = true
+            next
+          end
+          next if named_only_separator?(param)
+          has_splat = true if param.is_splat
+          has_double_splat = true if param.is_double_splat
+          param_count += 1
+          if param.default_value.nil? && !param.is_splat && !param.is_double_splat
+            required += 1
+          end
+          if ta = param.type_annotation
+            typed_param_count += 1
+            type_name = String.new(ta)
+            if type_param_like?(type_name)
+              type_param_names << type_name
+            else
+              has_non_type_param_annotation = true
+            end
+          end
+        end
+      end
+
+      DefParamStats.new(
+        param_count,
+        required,
+        has_splat,
+        has_double_splat,
+        has_block,
+        typed_param_count,
+        type_param_names,
+        has_non_type_param_annotation
+      )
+    end
+
+    private def untyped_candidate_for?(stats : DefParamStats) : Bool
+      return false if stats.has_non_type_param_annotation
+      stats.type_param_names.none? { |name| @type_param_map.has_key?(name) }
     end
 
     private def resolve_untyped_overload(base_method_name : String, arg_count : Int32, has_block_call : Bool) : String?
@@ -9038,27 +9127,12 @@ module Crystal::HIR
       function_def_overloads(base_method_name).each do |name|
         def_node = @function_defs[name]?
         next unless def_node
-        params = def_node.params
-        next unless params
-
-        param_count = 0
-        required = 0
-        has_splat = false
-        has_double_splat = false
-        def_has_block = false
-        params.each do |param|
-          next if named_only_separator?(param)
-          if param.is_block
-            def_has_block = true
-            next
-          end
-          param_count += 1
-          has_splat ||= param.is_splat
-          has_double_splat ||= param.is_double_splat
-          if param.default_value.nil? && !param.is_splat && !param.is_double_splat
-            required += 1
-          end
-        end
+        stats = function_param_stats(name, def_node)
+        param_count = stats.param_count
+        required = stats.required
+        has_splat = stats.has_splat
+        has_double_splat = stats.has_double_splat
+        def_has_block = stats.has_block
 
         next if has_block_call && !def_has_block
         next if !has_block_call && def_has_block
@@ -20435,81 +20509,53 @@ module Crystal::HIR
       best_score = Int32::MIN
       prefer_untyped = false
       if arg_types && arg_types.any? { |t| t == TypeRef::VOID }
-        overload_keys.each do |name|
-          def_node = @function_defs[name]?
-          next unless def_node
-          params = def_node.params
-          next unless params
+      overload_keys.each do |name|
+        def_node = @function_defs[name]?
+        next unless def_node
+        stats = function_param_stats(name, def_node)
 
-          if has_block
-            next unless params.any?(&.is_block)
-          else
-            next if params.any?(&.is_block)
-          end
-
-          param_count = params.count { |p| !p.is_block && !named_only_separator?(p) }
-          has_splat = params.any? { |p| p.is_splat && !named_only_separator?(p) }
-          has_double_splat = params.any? { |p| p.is_double_splat }
-          required = params.count do |p|
-            !p.is_block && !named_only_separator?(p) && p.default_value.nil? && !p.is_splat && !p.is_double_splat
-          end
-
-          next if arg_count < required
-          next if arg_count > param_count && !has_splat && !has_double_splat
-
-          untyped_candidate = true
-          params.each do |param|
-            next if param.is_block || named_only_separator?(param)
-            next if param.is_splat || param.is_double_splat
-            if ta = param.type_annotation
-              type_name = String.new(ta)
-              if !type_param_like?(type_name) || @type_param_map.has_key?(type_name)
-                untyped_candidate = false
-                break
-              end
-            end
-          end
-          if untyped_candidate
-            prefer_untyped = true
-            break
-          end
+        if has_block
+          next unless stats.has_block
+        else
+          next if stats.has_block
         end
+
+        param_count = stats.param_count
+        has_splat = stats.has_splat
+        has_double_splat = stats.has_double_splat
+        required = stats.required
+
+        next if arg_count < required
+        next if arg_count > param_count && !has_splat && !has_double_splat
+
+        untyped_candidate = untyped_candidate_for?(stats)
+        if untyped_candidate
+          prefer_untyped = true
+          break
+        end
+      end
       end
 
       overload_keys.each do |name|
         def_node = @function_defs[name]?
         next unless def_node
-        params = def_node.params
-        next unless params
+        stats = function_param_stats(name, def_node)
 
         if has_block
-          next unless params.any?(&.is_block)
+          next unless stats.has_block
         else
-          next if params.any?(&.is_block)
+          next if stats.has_block
         end
 
-        param_count = params.count { |p| !p.is_block && !named_only_separator?(p) }
-        has_splat = params.any? { |p| p.is_splat && !named_only_separator?(p) }
-        has_double_splat = params.any? { |p| p.is_double_splat }
-        required = params.count do |p|
-          !p.is_block && !named_only_separator?(p) && p.default_value.nil? && !p.is_splat && !p.is_double_splat
-        end
+        param_count = stats.param_count
+        has_splat = stats.has_splat
+        has_double_splat = stats.has_double_splat
+        required = stats.required
 
         next if arg_count < required
         next if arg_count > param_count && !has_splat && !has_double_splat
 
-        untyped_candidate = true
-        params.each do |param|
-          next if param.is_block || named_only_separator?(param)
-          next if param.is_splat || param.is_double_splat
-          if ta = param.type_annotation
-            type_name = String.new(ta)
-            if !type_param_like?(type_name) || @type_param_map.has_key?(type_name)
-              untyped_candidate = false
-              break
-            end
-          end
-        end
+        untyped_candidate = untyped_candidate_for?(stats)
         next if prefer_untyped && !untyped_candidate
 
         score = 0
@@ -20519,10 +20565,7 @@ module Crystal::HIR
           score = params_match_score(def_node, arg_types, func_context)
         end
         if arg_types && !unknown_args && arg_types.any? { |t| t == TypeRef::VOID }
-          typed_param_count = params.count do |p|
-            !p.is_block && !named_only_separator?(p) && !p.type_annotation.nil?
-          end
-          score -= typed_param_count
+          score -= stats.typed_param_count
         end
         if has_splat
           score -= 1
@@ -20566,15 +20609,13 @@ module Crystal::HIR
         next unless name == func_name || name.starts_with?("#{func_name}$")
         def_node = @function_defs[name]?
         next unless def_node
-        params = def_node.params
-        next unless params && params.any?(&.is_block)
+        stats = function_param_stats(name, def_node)
+        next unless stats.has_block
 
-        param_count = params.count { |p| !p.is_block && !named_only_separator?(p) }
-        has_splat = params.any? { |p| p.is_splat && !named_only_separator?(p) }
-        has_double_splat = params.any? { |p| p.is_double_splat }
-        required = params.count do |p|
-          !p.is_block && !named_only_separator?(p) && p.default_value.nil? && !p.is_splat && !p.is_double_splat
-        end
+        param_count = stats.param_count
+        has_splat = stats.has_splat
+        has_double_splat = stats.has_double_splat
+        required = stats.required
 
         next if arg_count < required
         next if arg_count > param_count && !has_splat && !has_double_splat
