@@ -68,7 +68,7 @@ module CrystalV2
           @assignments = {} of String => Type        # Track variable assignments: name → type
           @instance_var_types = {} of String => Type # Phase 5A: Track instance variable types
           @flow_narrowings = {} of String => Type    # Phase 95: Flow typing - narrowed types in conditionals
-          @children_cache = {} of Int32 => Array(ExprId)
+          @children_cache = Array(Array(ExprId)?).new(@program.arena.size)
           @current_class = nil
           @current_module = nil
           @receiver_type_context = nil
@@ -450,8 +450,15 @@ module CrystalV2
 
         # Return direct child ExprIds of a node (used by iterative inference)
         private def children_of(expr_id : ExprId, node) : Array(ExprId)
-          if cached = @children_cache[expr_id.index]?
-            return cached
+          idx = expr_id.index
+          return [] of ExprId if idx < 0
+          if idx < @children_cache.size
+            if cached = @children_cache[idx]?
+              return cached
+            end
+          else
+            # Arena can grow during macro expansion; keep cache aligned.
+            @children_cache.resize(@program.arena.size)
           end
           children = [] of ExprId
           case node
@@ -579,7 +586,7 @@ module CrystalV2
               end
             end
           end
-          @children_cache[expr_id.index] = children
+          @children_cache[idx] = children if idx >= 0 && idx < @children_cache.size
           children
         end
 
