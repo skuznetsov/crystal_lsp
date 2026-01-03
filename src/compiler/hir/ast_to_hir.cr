@@ -406,6 +406,7 @@ module Crystal::HIR
     # Maps base name -> true (existence check)
     @function_base_names : Set(String)
     @method_bases_by_name : Hash(String, Set(String))
+    @instance_method_names_by_owner : Hash(String, Set(String))
 
     # Cached return type for a function base name (without $ suffix).
     # This is used for method resolution when only the base name is known.
@@ -636,6 +637,7 @@ module Crystal::HIR
       @function_types = {} of String => TypeRef
       @function_base_names = Set(String).new
       @method_bases_by_name = {} of String => Set(String)
+      @instance_method_names_by_owner = {} of String => Set(String)
       @function_base_return_types = {} of String => TypeRef
       @function_enum_return_names = {} of String => String
       @function_return_type_literals = Set(String).new
@@ -931,8 +933,10 @@ module Crystal::HIR
       base_name = full_name.split("$").first
       @function_base_names.add(base_name)
       if hash_idx = base_name.rindex('#')
+        owner = base_name[0, hash_idx]
         method_name = base_name[(hash_idx + 1)..]
         (@method_bases_by_name[method_name] ||= Set(String).new) << base_name
+        (@instance_method_names_by_owner[owner] ||= Set(String).new) << method_name
       end
       # Cache a representative return type for the base name.
       # Prefer a non-VOID return type when available.
@@ -2011,15 +2015,8 @@ module Crystal::HIR
       if cached = @instance_method_names_cache[class_name]?
         return cached
       end
-      prefix = "#{class_name}#"
-      names = Set(String).new
-      @function_defs.each_key do |key|
-        next unless key.starts_with?(prefix)
-        raw = key[prefix.size..]
-        method_name = raw.split("(").first
-        names.add(method_name)
-      end
-      result = names.to_a
+      names = @instance_method_names_by_owner[class_name]?
+      result = names ? names.to_a : [] of String
       @instance_method_names_cache[class_name] = result
       result
     end
