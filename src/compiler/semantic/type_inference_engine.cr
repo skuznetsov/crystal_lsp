@@ -68,6 +68,7 @@ module CrystalV2
           @assignments = {} of String => Type        # Track variable assignments: name → type
           @instance_var_types = {} of String => Type # Phase 5A: Track instance variable types
           @flow_narrowings = {} of String => Type    # Phase 95: Flow typing - narrowed types in conditionals
+          @children_cache = {} of Int32 => Array(ExprId)
           @current_class = nil
           @current_module = nil
           @receiver_type_context = nil
@@ -119,9 +120,9 @@ module CrystalV2
             id = frame[0]
             next if @context.get_type(id)
             node = @program.arena[id]
-            if !frame[1]
+          if !frame[1]
               stack << {id, true}
-              children_of(node).each do |child|
+              children_of(id, node).each do |child|
                 next if @context.get_type(child)
                 case state[child]?
                 when 2
@@ -448,7 +449,10 @@ module CrystalV2
         end
 
         # Return direct child ExprIds of a node (used by iterative inference)
-        private def children_of(node) : Array(ExprId)
+        private def children_of(expr_id : ExprId, node) : Array(ExprId)
+          if cached = @children_cache[expr_id.index]?
+            return cached
+          end
           children = [] of ExprId
           case node
           when Frontend::GroupingNode
@@ -575,6 +579,7 @@ module CrystalV2
               end
             end
           end
+          @children_cache[expr_id.index] = children
           children
         end
 
