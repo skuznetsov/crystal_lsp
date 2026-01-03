@@ -14994,6 +14994,51 @@ module Crystal::HIR
       end
     end
 
+    # Lower short-circuiting || and && for condition context (branches directly).
+    private def lower_short_circuit_condition(
+      ctx : LoweringContext,
+      node : CrystalV2::Compiler::Frontend::BinaryNode,
+      then_block : BlockId,
+      else_block : BlockId
+    ) : Nil
+      op_str = node.operator_string
+      left_id = lower_expr(ctx, node.left)
+      left_type = ctx.type_of(left_id)
+      left_cond = lower_truthy_check(ctx, left_id, left_type)
+
+      rhs_block = ctx.create_block
+      if op_str == "&&"
+        ctx.terminate(Branch.new(left_cond, rhs_block, else_block))
+        ctx.current_block = rhs_block
+        lower_condition_branch(ctx, node.right, then_block, else_block)
+      else
+        ctx.terminate(Branch.new(left_cond, then_block, rhs_block))
+        ctx.current_block = rhs_block
+        lower_condition_branch(ctx, node.right, then_block, else_block)
+      end
+    end
+
+    private def lower_condition_branch(
+      ctx : LoweringContext,
+      expr_id : ExprId,
+      then_block : BlockId,
+      else_block : BlockId
+    ) : Nil
+      expr_node = @arena[expr_id]
+      if expr_node.is_a?(CrystalV2::Compiler::Frontend::BinaryNode)
+        op_str = expr_node.operator_string
+        if op_str == "&&" || op_str == "||"
+          lower_short_circuit_condition(ctx, expr_node, then_block, else_block)
+          return
+        end
+      end
+
+      cond_id = lower_expr(ctx, expr_id)
+      cond_type = ctx.type_of(cond_id)
+      cond_bool = lower_truthy_check(ctx, cond_id, cond_type)
+      ctx.terminate(Branch.new(cond_bool, then_block, else_block))
+    end
+
     private def is_a_narrowing_targets(condition_id : ExprId) : Array(Tuple(String, TypeRef))
       return [] of Tuple(String, TypeRef) if condition_id.invalid?
 
@@ -15318,8 +15363,16 @@ module Crystal::HIR
                         end
 
       # Lower main condition and branch
-      cond_id = lower_expr(ctx, node.condition)
-      ctx.terminate(Branch.new(cond_id, then_block, next_test_block))
+      cond_node = @arena[node.condition]
+      if cond_node.is_a?(CrystalV2::Compiler::Frontend::BinaryNode) &&
+         (cond_node.operator_string == "&&" || cond_node.operator_string == "||")
+        lower_short_circuit_condition(ctx, cond_node, then_block, next_test_block)
+      else
+        cond_id = lower_expr(ctx, node.condition)
+        cond_type = ctx.type_of(cond_id)
+        cond_bool = lower_truthy_check(ctx, cond_id, cond_type)
+        ctx.terminate(Branch.new(cond_bool, then_block, next_test_block))
+      end
 
       # Process "then" branch
       ctx.current_block = then_block
@@ -22874,7 +22927,6 @@ module Crystal::HIR
                      else
                        [] of ValueId
                      end
-
       # Lower block body
       # For inlined yield-functions, the block body must run in the *caller* lexical scope
       # (caller locals, caller `self`). Otherwise ivar access inside the block can target
@@ -23038,6 +23090,7 @@ module Crystal::HIR
 
     private def lower_index(ctx : LoweringContext, node : CrystalV2::Compiler::Frontend::IndexNode) : ValueId
       object_id = lower_expr(ctx, node.object)
+      obj_node = @arena[node.object]
 
       # Check if any index is a Range - if so, this is a slice operation
       # Need to check BEFORE lowering the indices so we can handle Range specially
@@ -23067,7 +23120,6 @@ module Crystal::HIR
 
       # Check if this is an array by looking at the object node (ArrayLiteral check)
       # This is necessary because arrays are typed as POINTER but should use IndexGet
-      obj_node = @arena[node.object]
       is_array_literal = obj_node.is_a?(CrystalV2::Compiler::Frontend::ArrayLiteralNode)
       # Also check if object is an identifier that was assigned an array
       if !is_array_literal && obj_node.is_a?(CrystalV2::Compiler::Frontend::IdentifierNode)
