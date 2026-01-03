@@ -974,6 +974,13 @@ module Crystal::HIR
     def register_enum(node : CrystalV2::Compiler::Frontend::EnumNode)
       enum_name = String.new(node.name)
       @enum_info ||= {} of String => Hash(String, Int64)
+      if @enum_info.not_nil!.has_key?(enum_name)
+        unless @enum_base_types.try(&.has_key?(enum_name))
+          register_enum_base_type(enum_name, enum_base_type_for_node(node))
+        end
+        register_enum_methods(node, enum_name)
+        return
+      end
 
       members = {} of String => Int64
       current_value = 0_i64
@@ -1001,6 +1008,13 @@ module Crystal::HIR
     def register_enum_with_name(node : CrystalV2::Compiler::Frontend::EnumNode, full_enum_name : String)
       full_enum_name = resolve_class_name_for_definition(full_enum_name)
       @enum_info ||= {} of String => Hash(String, Int64)
+      if @enum_info.not_nil!.has_key?(full_enum_name)
+        unless @enum_base_types.try(&.has_key?(full_enum_name))
+          register_enum_base_type(full_enum_name, enum_base_type_for_node(node))
+        end
+        register_enum_methods(node, full_enum_name)
+        return
+      end
 
       members = {} of String => Int64
       current_value = 0_i64
