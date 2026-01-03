@@ -14158,19 +14158,16 @@ module Crystal::HIR
       # First try exact match
       if func_def = @function_defs[super_method_name]?
         actual_func_def = func_def
+      elsif entry = lookup_function_def_for_call(base_method_name, args.size, false, arg_types)
+        actual_func_name, actual_func_def = entry
+        if actual_func_name != super_method_name
+          super_method_name = actual_func_name
+        end
       elsif func_def = @function_defs[base_method_name]?
         actual_func_def = func_def
         actual_func_name = base_method_name
       else
-        # Search for mangled variant (method with more params than we're passing)
-        mangled_prefix = "#{base_method_name}$"
-        @function_defs.each_key do |key|
-          if key.starts_with?(mangled_prefix)
-            actual_func_def = @function_defs[key]
-            actual_func_name = key
-            break
-          end
-        end
+        # No matching overload found; keep default mangled name.
       end
 
       # If we found a method with more parameters, fill in defaults for missing args
