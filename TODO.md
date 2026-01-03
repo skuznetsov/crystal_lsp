@@ -1366,6 +1366,7 @@ The return_type=16 (NIL) for `to_s` methods is incorrect - should be String type
   - Targeted invalidation for resolved type-name and type-literal caches (avoid full cache clear on each enum) (2026-01-xx).
   - Treat built-in type names and built-in generic bases as global for type-cache keys (avoid per-namespace cache churn) (2026-01-xx).
   - Fast-path builtin type names in `type_ref_for_name` to skip context/typeof handling (2026-01-xx).
+  - Indexed type-cache invalidation by namespace component (avoid O(n) scans on every enum/class/module registration) (2026-01-xx).
 - **Next**:
   - Profile for hotspots inside lowering (resolve_method_call / infer_type_from_expr / lower_function_if_needed).
   - Consider caching/memoization or an indexed lookup to avoid repeated full-map scans.

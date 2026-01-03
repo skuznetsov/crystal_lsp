@@ -506,6 +506,8 @@ module Crystal::HIR
 
     # Type cache to prevent infinite recursion in type_ref_for_name/create_union_type
     @type_cache : Hash(String, TypeRef)
+    @type_cache_keys_by_component : Hash(String, Set(String))
+    @type_cache_keys_by_generic_prefix : Hash(String, Set(String))
     # Cache resolved type names per namespace to avoid repeated context scans.
     @resolved_type_name_cache : Hash(String, String)
     # Cache resolved class names for .class/.metaclass type literals.
@@ -651,6 +653,8 @@ module Crystal::HIR
       @type_aliases = {} of String => String
       @generated_allocators = Set(String).new
       @type_cache = {} of String => TypeRef
+      @type_cache_keys_by_component = {} of String => Set(String)
+      @type_cache_keys_by_generic_prefix = {} of String => Set(String)
       @resolved_type_name_cache = {} of String => String
       @type_literal_class_cache = {} of String => String?
       @short_type_index = {} of String => Set(String)
@@ -24942,6 +24946,52 @@ module Crystal::HIR
       "#{context}::#{name}"
     end
 
+    private def register_type_cache_key(cache_key : String) : Nil
+      return if cache_key.empty?
+      # Track generic prefix keys like "Foo(" at the start.
+      if idx = cache_key.index("::")
+        first_segment = cache_key[0, idx]
+        base = first_segment.split("(", 2)[0]
+        if !base.empty? && cache_key.starts_with?("#{base}(")
+          set = @type_cache_keys_by_generic_prefix[base]? || begin
+            created = Set(String).new
+            @type_cache_keys_by_generic_prefix[base] = created
+            created
+          end
+          set << cache_key
+        end
+      else
+        base = cache_key.split("(", 2)[0]
+        if !base.empty? && cache_key.starts_with?("#{base}(")
+          set = @type_cache_keys_by_generic_prefix[base]? || begin
+            created = Set(String).new
+            @type_cache_keys_by_generic_prefix[base] = created
+            created
+          end
+          set << cache_key
+        end
+      end
+
+      parts = cache_key.split("::")
+      parts.each_with_index do |part, idx|
+        next if idx == 0
+        base = part.split("(", 2)[0]
+        next if base.empty?
+        set = @type_cache_keys_by_component[base]? || begin
+          created = Set(String).new
+          @type_cache_keys_by_component[base] = created
+          created
+        end
+        set << cache_key
+      end
+    end
+
+    private def store_type_cache(cache_key : String, type_ref : TypeRef) : TypeRef
+      @type_cache[cache_key] = type_ref
+      register_type_cache_key(cache_key)
+      type_ref
+    end
+
     private def type_name_resolution_cache_key(name : String) : String
       override = @current_namespace_override
       current = @current_class
@@ -24988,18 +25038,29 @@ module Crystal::HIR
       return if name.empty?
       invalidate_resolved_type_name_cache_for(name)
       invalidate_type_literal_cache_for(name)
-      short = name.split("::").last?
       keys = [] of String
-      @type_cache.each_key do |key|
-        next if key.empty?
-        if key == name || key.includes?("::#{name}") || key.starts_with?("#{name}(")
-          keys << key
-          next
+      if @type_cache.has_key?(name)
+        keys << name
+      end
+      if entries = @type_cache_keys_by_component[name]?
+        keys.concat(entries.to_a)
+      end
+      if entries = @type_cache_keys_by_generic_prefix[name]?
+        keys.concat(entries.to_a)
+      end
+
+      if short = name.split("::").last?
+        if @type_cache.has_key?(short)
+          keys << short
         end
-        if short && (key == short || key.includes?("::#{short}") || key.starts_with?("#{short}("))
-          keys << key
+        if entries = @type_cache_keys_by_component[short]?
+          keys.concat(entries.to_a)
+        end
+        if entries = @type_cache_keys_by_generic_prefix[short]?
+          keys.concat(entries.to_a)
         end
       end
+
       keys.each { |key| @type_cache.delete(key) }
     end
 
@@ -25011,6 +25072,8 @@ module Crystal::HIR
         invalidate_type_cache_for_namespace(context)
       else
         @type_cache.clear
+        @type_cache_keys_by_component.clear
+        @type_cache_keys_by_generic_prefix.clear
         @resolved_type_name_cache.clear
         @type_literal_class_cache.clear
       end
@@ -25035,7 +25098,7 @@ module Crystal::HIR
           if cached = @type_cache[cache_key]?
             return cached
           end
-          @type_cache[cache_key] = builtin_ref
+          store_type_cache(cache_key, builtin_ref)
           return builtin_ref
         end
       end
@@ -25059,7 +25122,7 @@ module Crystal::HIR
       if lookup_name.ends_with?(".class") || lookup_name.ends_with?(".metaclass")
         if base_name = resolve_type_literal_class_name(lookup_name)
           result = type_ref_for_name(base_name)
-          @type_cache[cache_key] = result
+          store_type_cache(cache_key, result)
           return result
         end
       end
@@ -25082,7 +25145,7 @@ module Crystal::HIR
       end
 
       if proc_ref = proc_type_ref_for_name(lookup_name)
-        @type_cache[cache_key] = proc_ref
+        store_type_cache(cache_key, proc_ref)
         return proc_ref
       end
 
@@ -25093,7 +25156,7 @@ module Crystal::HIR
         tuple_args = split_generic_type_args(inner)
         tuple_name = "Tuple(#{tuple_args.join(", ")})"
         result = type_ref_for_name(tuple_name)
-        @type_cache[cache_key] = result
+        store_type_cache(cache_key, result)
         return result
       end
 
@@ -25106,7 +25169,7 @@ module Crystal::HIR
 
       # Mark as being processed with placeholder to break cycles (BEFORE any recursion)
       # Only for non-union types - union types are handled by create_union_type
-      @type_cache[cache_key] = TypeRef::VOID
+      store_type_cache(cache_key, TypeRef::VOID)
 
       # Handle nullable type suffix: "T?" means "T | Nil"
       if lookup_name.ends_with?("?")
@@ -25115,7 +25178,7 @@ module Crystal::HIR
         base_name = @type_param_map[base_name]? || base_name
         union_name = "#{base_name} | Nil"
         result = create_union_type(union_name)
-        @type_cache[cache_key] = result
+        store_type_cache(cache_key, result)
         return result
       end
 
@@ -25123,7 +25186,7 @@ module Crystal::HIR
       if alias_target = @type_aliases[lookup_name]?
         if alias_target != lookup_name
           result = type_ref_for_name(alias_target)
-          @type_cache[cache_key] = result
+          store_type_cache(cache_key, result)
           return result
         end
       end
@@ -25131,7 +25194,7 @@ module Crystal::HIR
       # Check LibC type aliases (platform-specific fallback)
       if libc_target = LIBC_TYPE_ALIASES[lookup_name]?
         result = type_ref_for_name(libc_target)
-        @type_cache[cache_key] = result
+        store_type_cache(cache_key, result)
         return result
       end
 
@@ -25191,7 +25254,7 @@ module Crystal::HIR
                       end
                     end
         result = @module.intern_type(TypeDescriptor.new(type_kind, substituted_name, type_params))
-        @type_cache[cache_key] = result
+        store_type_cache(cache_key, result)
 
         # Trigger monomorphization if this is a generic class/struct template
         # This ensures included module methods get registered for the specialized type
@@ -25224,26 +25287,26 @@ module Crystal::HIR
         end
         base_name = base_name.strip
         if base_name.empty?
-          @type_cache[cache_key] = TypeRef::POINTER
+          store_type_cache(cache_key, TypeRef::POINTER)
           return TypeRef::POINTER
         end
 
         pointer_name = base_name
         star_count.times { pointer_name = "Pointer(#{pointer_name})" }
         result = type_ref_for_name(pointer_name)
-        @type_cache[cache_key] = result
+        store_type_cache(cache_key, result)
         return result
       end
 
       if lookup_name == "Pointer"
         # Pointer(T) or just Pointer -> pointer type
-        @type_cache[cache_key] = TypeRef::POINTER
+        store_type_cache(cache_key, TypeRef::POINTER)
         return TypeRef::POINTER
       end
 
       if event_loop_interface_module_name?(lookup_name)
         result = @module.intern_type(TypeDescriptor.new(TypeKind::Module, lookup_name))
-        @type_cache[cache_key] = result
+        store_type_cache(cache_key, result)
         return result
       end
 
@@ -25269,20 +25332,20 @@ module Crystal::HIR
                else
                  # Check if this is an enum type - enums are stored as Int32
                  if enum_info = @enum_info
-                   if enum_info.has_key?(lookup_name)
-                     @type_cache[cache_key] = TypeRef::INT32
-                     return TypeRef::INT32
-                   end
-                 end
+                  if enum_info.has_key?(lookup_name)
+                    store_type_cache(cache_key, TypeRef::INT32)
+                    return TypeRef::INT32
+                  end
+                end
 
                  # Prefer already-registered concrete types to preserve kind (struct vs class).
                  if info = @class_info[lookup_name]?
-                   @type_cache[cache_key] = info.type_ref
+                   store_type_cache(cache_key, info.type_ref)
                    return info.type_ref
                  end
                  if @module_defs.has_key?(lookup_name)
                    result = @module.intern_type(TypeDescriptor.new(TypeKind::Module, lookup_name))
-                   @type_cache[cache_key] = result
+                   store_type_cache(cache_key, result)
                    return result
                  end
 
@@ -25291,7 +25354,7 @@ module Crystal::HIR
                  @module.intern_type(TypeDescriptor.new(TypeKind::Class, lookup_name))
                end
       # Cache the result to avoid VOID placeholder being returned on subsequent calls
-      @type_cache[cache_key] = result
+      store_type_cache(cache_key, result)
       result
     end
 
@@ -25319,7 +25382,7 @@ module Crystal::HIR
         return cached
       end
       # Mark as being processed with placeholder to break cycles
-      @type_cache[cache_key] = TypeRef::VOID
+      store_type_cache(cache_key, TypeRef::VOID)
 
       # Get TypeRefs for each variant (recursive to handle nested unions)
       variant_refs = resolved_variant_names.map { |vn| type_ref_for_name(vn) }
@@ -25370,7 +25433,7 @@ module Crystal::HIR
       @union_descriptors[mir_union_type_ref] = descriptor
 
       # Update cache with real value (replacing placeholder)
-      @type_cache[cache_key] = type_ref
+      store_type_cache(cache_key, type_ref)
 
       type_ref
     end
