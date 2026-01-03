@@ -59,6 +59,7 @@ module CrystalV2
         @expr_in_progress : Set(Int32) = Set(Int32).new
         @identifier_name_cache : Array(String?)
         @member_name_cache : Array(String?)
+        @name_intern : Hash(Slice(UInt8), String)
 
         def initialize(
           @program : Frontend::Program,
@@ -73,6 +74,7 @@ module CrystalV2
           @children_cache = Array(Array(ExprId)?).new(@program.arena.size)
           @identifier_name_cache = Array(String?).new(@program.arena.size)
           @member_name_cache = Array(String?).new(@program.arena.size)
+          @name_intern = {} of Slice(UInt8) => String
           @current_class = nil
           @current_module = nil
           @receiver_type_context = nil
@@ -875,11 +877,11 @@ module CrystalV2
             elsif cached = @identifier_name_cache[idx]?
               return cached
             end
-            name = String.new(node.name)
+            name = intern_name(node.name)
             @identifier_name_cache[idx] = name
             return name
           end
-          String.new(node.name)
+          intern_name(node.name)
         end
 
         private def member_name_for(expr_id : ExprId, node : Frontend::MemberAccessNode) : String
@@ -890,11 +892,19 @@ module CrystalV2
             elsif cached = @member_name_cache[idx]?
               return cached
             end
-            name = String.new(node.member)
+            name = intern_name(node.member)
             @member_name_cache[idx] = name
             return name
           end
-          String.new(node.member)
+          intern_name(node.member)
+        end
+
+        private def intern_name(slice : Slice(UInt8)) : String
+          @name_intern[slice]? || begin
+            name = String.new(slice)
+            @name_intern[slice] = name
+            name
+          end
         end
 
         # ============================================================
@@ -949,7 +959,7 @@ module CrystalV2
           guard_watchdog!
 
           # Look up the ClassSymbol from the symbol table
-          class_name = String.new(node.name)
+          class_name = intern_name(node.name)
 
           class_symbol = @global_table.try(&.lookup(class_name))
           return @context.nil_type unless class_symbol.is_a?(ClassSymbol)
@@ -980,7 +990,7 @@ module CrystalV2
 
         # Phase 31: Type inference for module definition
         private def infer_module(node : Frontend::ModuleNode, expr_id : ExprId) : Type
-          module_name = String.new(node.name)
+          module_name = intern_name(node.name)
           previous_module = @current_module
 
           # Prefer nested lookup inside current module, otherwise fall back to global table
@@ -1102,7 +1112,7 @@ module CrystalV2
         end
 
         private def infer_instance_var(node : Frontend::InstanceVarNode, expr_id : ExprId) : Type
-          var_name = String.new(node.name)
+          var_name = intern_name(node.name)
 
           # Remove @ prefix
           clean_name = var_name.starts_with?("@") ? var_name[1..-1] : var_name
@@ -1651,7 +1661,7 @@ module CrystalV2
           # Only narrow if checking a simple variable (identifier)
           return nil unless expr_node.is_a?(Frontend::IdentifierNode)
 
-          var_name = String.new(expr_node.name)
+          var_name = intern_name(expr_node.name)
           type_name = String.new(condition_node.target_type)
 
           # Resolve target type
@@ -1674,7 +1684,7 @@ module CrystalV2
                      when Frontend::AssignNode
                        target_node = @program.arena[condition_node.target]
                        return nil unless target_node.is_a?(Frontend::IdentifierNode)
-                       String.new(target_node.name)
+                       intern_name(target_node.name)
                      else
                        return nil
                      end
@@ -1764,7 +1774,7 @@ module CrystalV2
             when MethodSymbol
               # Check method parameters
               symbol.params.each do |param|
-                if (param_name = param.name) && String.new(param_name) == var_name && (param_type = param.type_annotation)
+                if (param_name = param.name) && intern_name(param_name) == var_name && (param_type = param.type_annotation)
                   return parse_type_name(String.new(param_type))
                 end
               end
@@ -1857,7 +1867,7 @@ module CrystalV2
           guard_watchdog!
 
           decl = node.as(Frontend::TypeDeclarationNode)
-          var_name = String.new(decl.name)
+          var_name = intern_name(decl.name)
           type_name = String.new(decl.declared_type)
 
           # Resolve the declared type
@@ -2002,12 +2012,12 @@ module CrystalV2
           # Phase 5A: Check if target is instance variable
           case target_node
           when Frontend::InstanceVarNode
-            target_name = String.new(target_node.name)
+            target_name = intern_name(target_node.name)
             clean_name = target_name.starts_with?("@") ? target_name[1..-1] : target_name
             @instance_var_types[clean_name] = value_type
             @context.set_type(target_id, value_type)
           when Frontend::IdentifierNode
-            @assignments[String.new(target_node.name)] = value_type
+            @assignments[intern_name(target_node.name)] = value_type
             @context.set_type(target_id, value_type)
           end
           # Phase 14B: Index assignment (h["key"] = value) - no tracking needed,
@@ -2044,7 +2054,7 @@ module CrystalV2
                                # Fallback to the whole type if not destructurable
                                value_type
                              end
-              @assignments[String.new(target_node.name)] = element_type
+              @assignments[intern_name(target_node.name)] = element_type
               @context.set_type(target_id, element_type)
             end
           end
@@ -2788,7 +2798,7 @@ module CrystalV2
             key_name = case index_node
             when Frontend::SymbolNode
               # Symbol name may include leading colon, strip it
-              sym_name = String.new(index_node.name)
+              sym_name = intern_name(index_node.name)
               sym_name.lstrip(':')
             when Frontend::StringNode
               String.new(index_node.value)
@@ -3105,7 +3115,7 @@ module CrystalV2
               if block = map_block_node
                 # Set up block parameter with element type
                 if (params = block.params) && (first_param = params.first?) && (name_slice = first_param.name)
-                  param_name = String.new(name_slice)
+                  param_name = intern_name(name_slice)
                   old_assignment = @assignments[param_name]?
                   @assignments[param_name] = elem_type
                   # Clear cached types
@@ -3182,7 +3192,7 @@ module CrystalV2
               if block = block_node
                 # Block receives the non-nil type as implicit parameter
                 if (params = block.params) && (first_param = params.first?) && (name_slice = first_param.name)
-                  param_name = String.new(name_slice)
+                  param_name = intern_name(name_slice)
                   old_assignment = @assignments[param_name]?
                   @assignments[param_name] = non_nil_type
                   # Clear any cached types for the param identifier
@@ -3205,7 +3215,7 @@ module CrystalV2
                   if body_id = block.body.first?
                     body_node = @program.arena[body_id]
                     if body_node.is_a?(Frontend::MemberAccessNode)
-                      member_name = String.new(body_node.member)
+                      member_name = intern_name(body_node.member)
                       if method = lookup_method(non_nil_type, member_name, [] of Type)
                         if ann = method.return_annotation
                           block_result = parse_type_name(ann)
@@ -4388,7 +4398,7 @@ module CrystalV2
           if (params = node.params)
             params.each do |param|
               if (name_slice = param.name)
-                param_name = String.new(name_slice)
+                param_name = intern_name(name_slice)
                 # If param is synthesized (__arg0) and not in assignments, defer to caller
                 if param_name.starts_with?("__arg") && !@assignments.has_key?(param_name)
                   return @context.nil_type
@@ -4431,7 +4441,7 @@ module CrystalV2
                              else
                                @context.nil_type
                              end
-                @assignments[String.new(param_name)] = param_type
+                @assignments[intern_name(param_name)] = param_type
                 param_types << param_type
               end
             end
@@ -4444,7 +4454,7 @@ module CrystalV2
           if params = node.params
             params.each do |param|
               if param_name = param.name
-                @assignments.delete(String.new(param_name))
+                @assignments.delete(intern_name(param_name))
               end
             end
           end
@@ -4627,7 +4637,7 @@ module CrystalV2
             # Check if case value is a simple identifier (for narrowing)
             case_value_node = @program.arena[case_value_id]
             if case_value_node.is_a?(Frontend::IdentifierNode)
-              case_var_name = String.new(case_value_node.name)
+              case_var_name = intern_name(case_value_node.name)
             end
           end
 
@@ -4774,14 +4784,14 @@ module CrystalV2
             when Frontend::PathNode
               collect_path_segments_for_type(left_node, segments)
             when Frontend::IdentifierNode
-              segments << String.new(left_node.name)
+              segments << intern_name(left_node.name)
             end
           end
 
           right_node = @program.arena[node.right]
           case right_node
           when Frontend::IdentifierNode
-            segments << String.new(right_node.name)
+            segments << intern_name(right_node.name)
           when Frontend::PathNode
             collect_path_segments_for_type(right_node, segments)
           end
@@ -4806,7 +4816,7 @@ module CrystalV2
         # Phase 97: Extract member name from MemberAccessNode
         private def extract_member_name(node : Frontend::MemberAccessNode) : String?
           if member_slice = node.member
-            String.new(member_slice)
+            intern_name(member_slice)
           else
             nil
           end
@@ -4954,7 +4964,7 @@ module CrystalV2
           # Infer type of each value and build NamedTupleType
           type_entries = [] of {String, Type}
           entries.each do |entry|
-            key = String.new(entry.key)
+            key = intern_name(entry.key)
             value_type = infer_expression(entry.value)
             type_entries << {key, value_type}
           end

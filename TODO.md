@@ -1121,6 +1121,7 @@ r2 = maybe(false)  # => nil
 - TypeInferenceEngine uses array-backed `children_of` cache (avoid hash overhead; auto-resize for arena growth) (2026-01-xx).
 - TypeInferenceEngine caches identifier names by ExprId (reduce repeated String allocations during inference) (2026-01-xx).
 - TypeInferenceEngine caches member-access names by ExprId (reduce repeated String allocations during call/member inference) (2026-01-xx).
+- TypeInferenceEngine interns name slices to canonical Strings (reduces duplicate String allocations across nodes) (2026-01-xx).
 
 ### Holistic risk scan (2026-01-xx)
 
