@@ -405,6 +405,7 @@ module Crystal::HIR
     # Index of function base names (without $ type suffix) for fast prefix lookups
     # Maps base name -> true (existence check)
     @function_base_names : Set(String)
+    @method_bases_by_name : Hash(String, Set(String))
 
     # Cached return type for a function base name (without $ suffix).
     # This is used for method resolution when only the base name is known.
@@ -632,6 +633,7 @@ module Crystal::HIR
       @module = Module.new(module_name)
       @function_types = {} of String => TypeRef
       @function_base_names = Set(String).new
+      @method_bases_by_name = {} of String => Set(String)
       @function_base_return_types = {} of String => TypeRef
       @function_enum_return_names = {} of String => String
       @function_return_type_literals = Set(String).new
@@ -918,6 +920,10 @@ module Crystal::HIR
       # Extract base name (without $ type suffix) for fast lookups
       base_name = full_name.split("$").first
       @function_base_names.add(base_name)
+      if hash_idx = base_name.rindex('#')
+        method_name = base_name[(hash_idx + 1)..]
+        (@method_bases_by_name[method_name] ||= Set(String).new) << base_name
+      end
       # Cache a representative return type for the base name.
       # Prefer a non-VOID return type when available.
       if return_type != TypeRef::VOID
@@ -9009,15 +9015,16 @@ module Crystal::HIR
       # Search through all class info for matching method (O(n) fallback).
       # Only do this when the receiver type is unknown (no descriptor name).
       if class_name.empty?
-        @class_info.each do |klass_name, info|
-          test_base = "#{klass_name}##{method_name}"
-          test_mangled = mangle_function_name(test_base, arg_types)
-          if @function_types.has_key?(test_mangled)
-            debug_hook("method.resolve", "base=#{base_method_name} resolved=#{test_mangled} reason=fallback_scan")
-            return cache_method_resolution(cache_key, test_mangled)
-          elsif has_function_base?(test_base)
-            debug_hook("method.resolve", "base=#{base_method_name} resolved=#{test_base} reason=fallback_scan_base")
-            return cache_method_resolution(cache_key, test_base)
+        if candidates = @method_bases_by_name[method_name]?
+          candidates.each do |test_base|
+            test_mangled = mangle_function_name(test_base, arg_types)
+            if @function_types.has_key?(test_mangled)
+              debug_hook("method.resolve", "base=#{base_method_name} resolved=#{test_mangled} reason=fallback_scan")
+              return cache_method_resolution(cache_key, test_mangled)
+            elsif has_function_base?(test_base)
+              debug_hook("method.resolve", "base=#{base_method_name} resolved=#{test_base} reason=fallback_scan_base")
+              return cache_method_resolution(cache_key, test_base)
+            end
           end
         end
       end
