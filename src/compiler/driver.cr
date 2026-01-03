@@ -5,6 +5,7 @@
 # Usage:
 #   crystal run src/compiler/driver.cr -- input.cr -o output
 
+require "digest/sha256"
 require "./frontend/lexer"
 require "./frontend/parser"
 require "./hir/hir"
@@ -16,6 +17,7 @@ require "./mir/mir"
 require "./mir/optimizations"
 require "./mir/hir_to_mir"
 require "./mir/llvm_backend"
+require "./lsp/ast_cache"
 require "../runtime"
 
 module Crystal::V2
@@ -687,6 +689,48 @@ module Crystal::V2
       STDERR.flush
     end
 
+    private def ast_cache_enabled? : Bool
+      ENV["CRYSTAL_V2_AST_CACHE"]? != "0"
+    end
+
+    private def digest_string(value : String) : String
+      digest = Digest::SHA256.new
+      digest.update(value.to_slice)
+      digest.hexfinal
+    end
+
+    private def require_cache_path(file_path : String) : String
+      cache_dir = ENV["XDG_CACHE_HOME"]? || File.join(ENV["HOME"]? || "/tmp", ".cache")
+      hash = digest_string("v3:#{file_path}")
+      File.join(cache_dir, "crystal_v2", "requires", "#{hash}.req")
+    end
+
+    private def load_require_cache(file_path : String) : Array(String)?
+      cache_path = require_cache_path(file_path)
+      return nil unless File.exists?(cache_path)
+      return nil unless File.exists?(file_path)
+
+      cache_mtime = File.info(cache_path).modification_time
+      file_mtime = File.info(file_path).modification_time
+      return nil if file_mtime > cache_mtime
+
+      lines = File.read_lines(cache_path)
+      lines.reject { |line| line.empty? || line.starts_with?("#") }
+    rescue ex
+      nil
+    end
+
+    private def save_require_cache(file_path : String, requires : Array(String)) : Nil
+      unique = requires.uniq
+      return if unique.empty?
+
+      cache_path = require_cache_path(file_path)
+      Dir.mkdir_p(File.dirname(cache_path))
+      File.write(cache_path, unique.join("\n") + "\n")
+    rescue ex
+      nil
+    end
+
     # Recursively parse files, handling require statements
     private def parse_file_recursive(
       file_path : String,
@@ -706,8 +750,29 @@ module Crystal::V2
         return
       end
 
-      # Parse the file
       source = File.read(abs_path)
+      if ast_cache_enabled?
+        if cached = CrystalV2::Compiler::LSP::AstCache.load(abs_path)
+          arena = cached.arena
+          exprs = cached.roots
+          base_dir = File.dirname(abs_path)
+          if cached_requires = load_require_cache(abs_path)
+            cached_requires.each do |req_path|
+              parse_file_recursive(req_path, results, loaded)
+            end
+          else
+            requires = [] of String
+            exprs.each do |expr_id|
+              process_require_node(arena, expr_id, base_dir, results, loaded, requires)
+            end
+            save_require_cache(abs_path, requires)
+          end
+          results << {arena, exprs, abs_path, source}
+          trace_driver("[DRIVER_TRACE] AST cache hit: #{abs_path}")
+          return
+        end
+      end
+
       lexer = CrystalV2::Compiler::Frontend::Lexer.new(source)
       parser = CrystalV2::Compiler::Frontend::Parser.new(lexer)
       program = parser.parse_program
@@ -717,13 +782,25 @@ module Crystal::V2
 
       # Extract require paths and process them first (dependencies before dependents)
       base_dir = File.dirname(abs_path)
+      requires = [] of String
       exprs.each do |expr_id|
-        process_require_node(arena, expr_id, base_dir, results, loaded)
+        process_require_node(arena, expr_id, base_dir, results, loaded, requires)
       end
       trace_driver("[DRIVER_TRACE] done requires for #{File.basename(abs_path)}")
 
       # Add this file's results (after dependencies)
       results << {arena, exprs, abs_path, source}
+
+      if ast_cache_enabled? && arena.is_a?(CrystalV2::Compiler::Frontend::AstArena)
+        begin
+          cache = CrystalV2::Compiler::LSP::AstCache.new(arena, exprs, lexer.string_pool)
+          cache.save(abs_path)
+          save_require_cache(abs_path, requires)
+          trace_driver("[DRIVER_TRACE] AST cache saved: #{abs_path}")
+        rescue ex
+          trace_driver("[DRIVER_TRACE] AST cache save failed: #{ex.message}")
+        end
+      end
     end
 
     private def process_require_node(
@@ -731,7 +808,8 @@ module Crystal::V2
       expr_id : CrystalV2::Compiler::Frontend::ExprId,
       base_dir : String,
       results : Array(Tuple(CrystalV2::Compiler::Frontend::ArenaLike, Array(CrystalV2::Compiler::Frontend::ExprId), String, String)),
-      loaded : Set(String)
+      loaded : Set(String),
+      requires_out : Array(String)? = nil
     )
       node = arena[expr_id]
       # Uncomment for debug: STDERR.puts "[DRIVER_TRACE] process_require_node: #{node.class}"
@@ -739,7 +817,7 @@ module Crystal::V2
       when CrystalV2::Compiler::Frontend::ModuleNode
         if body = node.body
           body.each do |child_id|
-            process_require_node(arena, child_id, base_dir, results, loaded)
+            process_require_node(arena, child_id, base_dir, results, loaded, requires_out)
           end
         end
       when CrystalV2::Compiler::Frontend::RequireNode
@@ -750,6 +828,7 @@ module Crystal::V2
           resolved = resolve_require_path(req_path, base_dir)
           trace_driver("[DRIVER_TRACE] resolved to: #{resolved || "nil"}")
           if resolved
+            requires_out << resolved if requires_out
             if loaded.includes?(resolved)
               trace_driver("[DRIVER_TRACE] already loaded, skipping")
             else
@@ -765,15 +844,15 @@ module Crystal::V2
         condition = evaluate_macro_condition(arena, node.condition, CrystalV2::Runtime.target_flags)
         trace_driver("[DRIVER_TRACE] MacroIfNode condition=#{condition.inspect}")
         if condition == true
-          process_require_node(arena, node.then_body, base_dir, results, loaded)
+          process_require_node(arena, node.then_body, base_dir, results, loaded, requires_out)
         elsif condition == false
           if else_body = node.else_body
-            process_require_node(arena, else_body, base_dir, results, loaded)
+            process_require_node(arena, else_body, base_dir, results, loaded, requires_out)
           end
         else
-          process_require_node(arena, node.then_body, base_dir, results, loaded)
+          process_require_node(arena, node.then_body, base_dir, results, loaded, requires_out)
           if else_body = node.else_body
-            process_require_node(arena, else_body, base_dir, results, loaded)
+            process_require_node(arena, else_body, base_dir, results, loaded, requires_out)
           end
         end
         trace_driver("[DRIVER_TRACE] MacroIfNode done")
@@ -784,7 +863,10 @@ module Crystal::V2
           text.scan(/\brequire\s*["']?([^"'\s]+)["']?/) do |match|
             req_path = match[1]
             resolved = resolve_require_path(req_path, base_dir)
-            parse_file_recursive(resolved, results, loaded) if resolved
+            if resolved
+              requires_out << resolved if requires_out
+              parse_file_recursive(resolved, results, loaded)
+            end
           end
         end
       end

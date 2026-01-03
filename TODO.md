@@ -1116,6 +1116,7 @@ r2 = maybe(false)  # => nil
 - Index lowering uses primitive class names for `[]`; unsigned integers treated as bitshift for `<<` (2026-01-xx).
 - Debug callsite context added for `function.lookup.*` hooks (2026-01-xx).
 - Resolve PathNode constants to values before member access (fixes `Char::REPLACEMENT.ord`) (2026-01-xx).
+- Driver parse_file_recursive now uses AST + require cache when `CRYSTAL_V2_AST_CACHE` is enabled (speeds self-host parsing) (2026-01-xx).
 
 ### Holistic risk scan (2026-01-xx)
 
