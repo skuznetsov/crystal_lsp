@@ -1209,9 +1209,11 @@ module Crystal::HIR
     @next_function_id : FunctionId = 0_u32
     @next_type_id : TypeId = TypeRef::FIRST_USER_TYPE
     @string_intern : Hash(String, StringId)
+    @functions_by_name : Hash(String, Function)
 
     def initialize(@name : String = "main")
       @functions = [] of Function
+      @functions_by_name = {} of String => Function
       @types = [] of TypeDescriptor
       @strings = [] of String
       @string_intern = {} of String => StringId
@@ -1289,7 +1291,7 @@ module Crystal::HIR
 
     def create_function(name : String, return_type : TypeRef) : Function
       # Check for duplicates
-      if existing = @functions.find { |f| f.name == name }
+      if existing = @functions_by_name[name]?
         if existing.return_type == TypeRef::VOID && return_type != TypeRef::VOID
           existing.return_type = return_type
         elsif existing.return_type != return_type && return_type != TypeRef::VOID && ENV.has_key?("DEBUG_DUP_FUNCTION")
@@ -1306,18 +1308,19 @@ module Crystal::HIR
       @next_function_id += 1
       func = Function.new(id, name, return_type)
       @functions << func
+      @functions_by_name[name] = func
       func
     end
 
     def has_function?(name : String) : Bool
-      @functions.any? { |f| f.name == name }
+      @functions_by_name.has_key?(name)
     end
 
     # Compute reachable function names from a set of entry roots by following Call instructions.
     def reachable_function_names(roots : Array(String)) : Set(String)
       reachable = Set(String).new
       worklist = [] of String
-      func_by_name = {} of String => Function
+      func_by_name = @functions_by_name
       base_to_funcs = Hash(String, Array(String)).new { |h, k| h[k] = [] of String }
       base_name_for = ->(name : String) do
         base = name
@@ -1332,7 +1335,6 @@ module Crystal::HIR
         base
       end
       @functions.each do |func|
-        func_by_name[func.name] = func
         base_to_funcs[base_name_for.call(func.name)] << func.name
       end
 
