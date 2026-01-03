@@ -277,7 +277,8 @@ module Crystal
       @block_map[hir_func.entry_block] = mir_func.entry_block
 
       # Lower each block (phi incoming resolution is deferred)
-      hir_func.blocks.each do |hir_block|
+      ordered_blocks = order_blocks_for(hir_func)
+      ordered_blocks.each do |hir_block|
         lower_block(hir_block)
       end
 
@@ -298,6 +299,47 @@ module Crystal
           mir_value = get_value(hir_value)
           mir_phi.add_incoming(mir_block, mir_value)
         end
+      end
+    end
+
+    private def order_blocks_for(hir_func : HIR::Function) : Array(HIR::Block)
+      visited = Set(HIR::BlockId).new
+      ordered = [] of HIR::Block
+      stack = [] of HIR::BlockId
+      stack << hir_func.entry_block
+
+      while block_id = stack.pop?
+        next if visited.includes?(block_id)
+        visited.add(block_id)
+        block = hir_func.get_block(block_id)
+        ordered << block
+
+        successors = block_successors(block)
+        # Preserve a stable order by pushing in reverse.
+        successors.reverse_each { |succ| stack << succ }
+      end
+
+      # Append unreachable blocks to keep lowering deterministic.
+      hir_func.blocks.each do |block|
+        next if visited.includes?(block.id)
+        ordered << block
+      end
+
+      ordered
+    end
+
+    private def block_successors(block : HIR::Block) : Array(HIR::BlockId)
+      case term = block.terminator
+      when HIR::Branch
+        [term.then_block, term.else_block]
+      when HIR::Jump
+        [term.target]
+      when HIR::Switch
+        succs = term.cases.map { |(_, bid)| bid }
+        succs << term.default
+        succs
+      else
+        [] of HIR::BlockId
       end
     end
 
@@ -1755,7 +1797,10 @@ module Crystal
     # ─────────────────────────────────────────────────────────────────────────
 
     private def get_value(hir_id : HIR::ValueId) : ValueId
-      @value_map[hir_id]? || 0_u32
+      if mapped = @value_map[hir_id]?
+        return mapped
+      end
+      0_u32
     end
 
     private def record_stack_slot(slot : ValueId, type : TypeRef)
