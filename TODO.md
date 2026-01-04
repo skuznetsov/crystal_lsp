@@ -1044,10 +1044,9 @@ r2 = maybe(false)  # => nil
   - ByteFormat decode/from_io resolved (no `_IO__ByteFormat_decode_UInt32_IO`).
 
 **Regressions (open):**
-- [ ] GH #10 (crystal_lsp): prelude build with `puts` still fails to link on minimal `fib.cr`. After fixing top-level type resolution (IO::File → File), missing symbols changed:
-  - `_File__FileDescriptor_initialize_Int32`, `_File_fd`, `_LibC_pthread_self`, `_Tuple_min_by_block`, `_Void___Pointer_write_File__PReader_Slice_UInt8_`, `_func490` (String.inspect_char)
-  - Repro: `./bin/crystal_v2 build --release --no-llvm-metadata fib.cr` (no-prelude path still links).
-  - Track: verify `File < IO::FileDescriptor` super init, thread/event-loop calls, Tuple min_by block lowering, and String.inspect_char codegen.
+- [x] GH #10 (crystal_lsp): prelude build with `puts` now links on minimal `fib.cr`.
+  - Fix: track block owner for inline-yield inference so `Tuple#compare_or_raise` uses concrete `U` types (no `Nil#<=>`).
+  - DoD: `./bin/crystal_v2 build --release --no-llvm-metadata bin/fib.cr -o /tmp/fib` succeeds (2026-01-xx).
 
 **Recent fixes (prelude bootstrap path):**
 - Normalize `flag?` macro arguments (strip leading `:`) + require cache v3; pthread requires now load.
