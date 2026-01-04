@@ -1385,6 +1385,12 @@ The return_type=16 (NIL) for `to_s` methods is incorrect - should be String type
   - Emit `fcmp one` for float truthiness in LLVM backend to avoid `icmp ne double ... 0` errors when non-bool float conditions slip through.
 - **Verification**: `DEBUG_FROM_CHARS=1 DEBUG_LOWER_PROGRESS=from_chars_advanced ./bin/crystal_v2 --no-llvm-opt --no-llvm-metadata --no-link /tmp/ff_test2.cr -o /tmp/ff_test2` completes, and both overloads are lowered.
 
+#### Issue 8: Namespaced type params causing generic arity errors - FIXED (2026-01-xx)
+- **Symptom**: self-host `CRYSTAL_V2_STOP_AFTER_HIR=1` fails with `Generic Hash expects 2 type args, got 1` on `Hash(Crystal::HIR::V)`.
+- **Root cause**: type parameter names were getting namespace-qualified (e.g., `Crystal::HIR::V`), and `concrete_type_args?` treated them as concrete.
+- **Fix**: treat namespaced type params as unresolved by checking the last path segment; skip monomorphization for path-like args; add DEBUG_MONO arg/arity diagnostics.
+- **Verification**: `rg "Generic Hash expects" /tmp/selfhost_hir_mono.log` returns no matches with `DEBUG_MONO=1` run.
+
 #### Issue 8: Parser lowering time spikes (parse_expression / macro parsing) - IN PROGRESS (2026-01-xx)
 - **Symptom**: self-host compile appears to stall; `DEBUG_LOWER_METHOD_TIME=Parser#` shows large lowering times:
   - `Parser#parse_expression` ~45s
