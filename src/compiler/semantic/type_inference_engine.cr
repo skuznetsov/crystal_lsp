@@ -61,6 +61,7 @@ module CrystalV2
         @member_name_cache : Array(String?)
         @node_kind_cache : Array(Frontend::NodeKind?)
         @method_candidates_cache : Hash(MethodCandidatesKey, Array(MethodSymbol))
+        @parse_type_cache : Hash(String, Type)
 
         private struct MethodCandidatesKey
           getter receiver_id : UInt64
@@ -94,6 +95,7 @@ module CrystalV2
           @member_name_cache = Array(String?).new(@program.arena.size)
           @node_kind_cache = Array(Frontend::NodeKind?).new(@program.arena.size)
           @method_candidates_cache = {} of MethodCandidatesKey => Array(MethodSymbol)
+          @parse_type_cache = {} of String => Type
           @current_class = nil
           @current_module = nil
           @receiver_type_context = nil
@@ -1252,19 +1254,22 @@ module CrystalV2
         # For Phase 1: Only built-in primitive types
         private def parse_type_name(name : String) : Type
           guard_watchdog!
+          if cached = @parse_type_cache[name]?
+            return cached
+          end
 
           # Handle nilable syntax: T? = T | Nil
           if name.ends_with?("?") && name.size > 1
             base_name = name[0...-1]  # Remove trailing ?
             base_type = parse_type_name(base_name)
-            return union_of([base_type, @context.nil_type])
+            return @parse_type_cache[name] = union_of([base_type, @context.nil_type])
           end
 
           # Handle union syntax: T | U | V
           if name.includes?(" | ")
             parts = name.split(" | ").map(&.strip)
             types = parts.map { |p| parse_type_name(p) }
-            return union_of(types)
+            return @parse_type_cache[name] = union_of(types)
           end
 
           # Check for generic type syntax: Array(T)
@@ -1279,53 +1284,53 @@ module CrystalV2
             case base_type
             when "Array"
               element_type = parse_type_name(type_arg)
-              return ArrayType.new(element_type)
+              return @parse_type_cache[name] = ArrayType.new(element_type)
             else
               emit_error("Unknown generic type '#{base_type}'")
-              return @context.nil_type
+              return @parse_type_cache[name] = @context.nil_type
             end
           end
 
           # Handle primitive types
           case name
-          when "Int32"   then @context.int32_type
-          when "Int64"   then @context.int64_type
-          when "Float64" then @context.float64_type
-          when "String"  then @context.string_type
-          when "Bool"    then @context.bool_type
-          when "Nil"     then @context.nil_type
-          when "Char"    then @context.char_type
+          when "Int32"   then return @parse_type_cache[name] = @context.int32_type
+          when "Int64"   then return @parse_type_cache[name] = @context.int64_type
+          when "Float64" then return @parse_type_cache[name] = @context.float64_type
+          when "String"  then return @parse_type_cache[name] = @context.string_type
+          when "Bool"    then return @parse_type_cache[name] = @context.bool_type
+          when "Nil"     then return @parse_type_cache[name] = @context.nil_type
+          when "Char"    then return @parse_type_cache[name] = @context.char_type
           else
             # Try resolving scoped names (Time::Span) by full path
             if symbol = resolve_scoped_symbol(name)
               case symbol
               when ClassSymbol
-                return InstanceType.new(symbol)
+                return @parse_type_cache[name] = InstanceType.new(symbol)
               when ModuleSymbol
-                return PrimitiveType.new(name)
+                return @parse_type_cache[name] = PrimitiveType.new(name)
               end
             end
             # Try finding class by last segment anywhere in global table
             if symbol = find_class_symbol_by_suffix(name)
-              return InstanceType.new(symbol)
+              return @parse_type_cache[name] = InstanceType.new(symbol)
             end
 
             base_name = name.includes?("::") ? name.split("::").last : name
 
             if prim = primitive_type_for(base_name)
-              return prim
+              return @parse_type_cache[name] = prim
             end
 
             if table = @global_table
               if symbol = table.lookup(base_name)
                 if type = type_from_symbol(symbol)
-                  return normalize_literal_type(type)
+                  return @parse_type_cache[name] = normalize_literal_type(type)
                 end
               end
             end
 
             # As a fallback, create a nominal primitive type to avoid Nil/Unknown
-            PrimitiveType.new(name)
+            @parse_type_cache[name] = PrimitiveType.new(name)
           end
         end
 
