@@ -1060,7 +1060,7 @@ r2 = maybe(false)  # => nil
 - Track functions that return type literals; mark call results as type literals and resolve absolute `::` paths in HIR (fixes `EventLoop.backend_class`/nested class lookups) (2026-01-xx).
 - Invalidate type cache on enum registration to prevent enum names from collapsing to Class; IO::Seek predicate now lowers to compare (removes `_IO__Seek_current_`).
 - Resolve superclass name in context when registering classes (fixes `FileDescriptor_initialize_Int32` super call).
-- Seed top-level type names in CLI/driver + avoid namespace prefixing for top-level classes (fixes `IO::File` resolution in `IO::ARGF` and `IO#read` missing symbols) (2026-01-xx).
+- Seed top-level type names + class kinds in CLI/driver; prefer top-level class/struct over module (fixes `IO::File` resolution in `IO::ARGF` and `IO#read` missing symbols) (2026-01-xx).
 - Register MacroIf/MacroLiteral nodes inside nested modules during HIR lowering.
 - Remove `StructNode` handling from macro-parsed class bodies; rely on `ClassNode.is_struct` (2026-01-02).
 - Attach trailing `do` blocks to parenthesized/member-access calls (fixes `Array(T).build(size) do` + `times do` in stdlib) (2026-01-xx).
@@ -1073,6 +1073,7 @@ r2 = maybe(false)  # => nil
 - Lower `unsafe_as(T)` calls as intrinsic casts (no method call) and bitcast same-size float/int in MIR cast lowering (fixes `float_as_int`/`Object#unsafe_as(Int64)` returning ptr; removes `llc` phi type mismatches) (2026-01-01).
 - Convert integer arithmetic results to float payloads when wrapping union math into float variants (fixes `store double %binop.raw` llc error in `LineNumbers#find`) (2026-01-01).
 - Lower inherited class methods via Object fallback in codegen (fixes `String.set_crystal_type_id`) (2026-01-xx).
+- Resolve inherited methods in parent namespace during lazy lowering (fixes `IO::Encoder` class/instance resolution) (2026-01-xx).
 - Fix escaped macro controls in macro bodies to avoid false `{% for %}` nesting errors (restores `Object.set_crystal_type_id`) (2026-01-xx).
 - Resolve lib out-struct types via `short_type_index` guard in `type_param_like?` (fixes `DlInfo` resolution; removes `Pointer(UInt8)#dli_*` missing symbols) (2026-01-xx).
 - Normalize union type names using resolved variant names (avoid namespace cache poisoning across contexts) (2026-01-xx).
@@ -1091,6 +1092,7 @@ r2 = maybe(false)  # => nil
 - Substitute type params in receiver names during method resolution; log unresolved generic receivers via debug hooks (2026-01-05).
 - Log unresolved generic receivers for class method calls and lowering paths (Array(T).build tracing) (2026-01-05).
 - Resolve overloads via full scan when call uses base name (avoid picking block overloads without blocks; removes missing func451 in raise_without_backtrace) (2026-01-06).
+- Prefer static call resolution only when identifier is not a local; emit extern static member calls directly (fixes `LibC.pthread_self`) (2026-01-xx).
 - Prefer module namespace over top-level aliases for mixin instance methods; carry module namespace into lazy lowering (fixes `FileDescriptor.system_info` resolving to `Crystal::System::FileDescriptor`) (2026-01-07).
 - Expand macro calls for static member access (class/module) during call lowering (fixes macro-only class methods like `IO::Error.from_errno`) (2026-01-07).
 - Run `macro included` during include registration/lowering; register macros + `extend` class methods from included modules (fixes `SystemError`-style class methods) (2026-01-07).
