@@ -122,6 +122,10 @@ module Crystal
       end
     end
 
+    def self.class_var_global_name(class_name : String, var_name : String) : String
+      "#{class_name}__classvar__#{var_name}"
+    end
+
     # Register union types from AstToHir
     # Creates union types in MIR TypeRegistry and stores descriptors for debug info
     def register_union_types(union_descriptors : Hash(MIR::TypeRef, UnionDescriptor))
@@ -1494,16 +1498,14 @@ module Crystal
 
     private def lower_classvar_get(cv : HIR::ClassVarGet) : ValueId
       builder = @builder.not_nil!
-      # Generate global name: ClassName_varname
-      global_name = "#{cv.class_name}_#{cv.var_name}"
+      global_name = HIRToMIRLowering.class_var_global_name(cv.class_name, cv.var_name)
       builder.global_load(global_name, convert_type(cv.type))
     end
 
     private def lower_classvar_set(cv : HIR::ClassVarSet) : ValueId
       builder = @builder.not_nil!
       value = get_value(cv.value)
-      # Generate global name: ClassName_varname
-      global_name = "#{cv.class_name}_#{cv.var_name}"
+      global_name = HIRToMIRLowering.class_var_global_name(cv.class_name, cv.var_name)
       builder.global_store(global_name, value, convert_type(cv.type))
       value
     end

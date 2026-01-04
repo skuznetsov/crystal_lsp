@@ -578,7 +578,7 @@ module CrystalV2
         globals = [] of Tuple(String, HIR::TypeRef, Int64?)
         hir_converter.class_info.each do |class_name, info|
           info.class_vars.each do |cvar|
-            global_name = "#{class_name}_#{cvar.name}"
+            global_name = MIR::HIRToMIRLowering.class_var_global_name(class_name, cvar.name)
             globals << {global_name, cvar.type, cvar.initial_value}
           end
         end
