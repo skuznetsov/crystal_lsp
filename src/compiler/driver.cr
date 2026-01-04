@@ -234,6 +234,12 @@ module Crystal::V2
       alias_nodes.each { |node, _| top_level_type_names.add(String.new(node.name)) }
       lib_nodes.each { |node, _, _| top_level_type_names.add(String.new(node.name)) }
       hir_converter.seed_top_level_type_names(top_level_type_names)
+      top_level_class_kinds = {} of String => Bool
+      class_nodes.each do |node, _|
+        name = String.new(node.name)
+        top_level_class_kinds[name] = node.is_struct == true
+      end
+      hir_converter.seed_top_level_class_kinds(top_level_class_kinds)
 
       # Three-pass approach:
       # Pass 1: Register all enums, modules, class types and their methods

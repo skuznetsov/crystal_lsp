@@ -619,6 +619,7 @@ module Crystal::HIR
     # Short name index for class/struct lookups (short -> full names).
     @short_type_index : Hash(String, Set(String))
     @top_level_type_names : Set(String)
+    @top_level_class_kinds : Hash(String, Bool)
     # Track constant definitions and inferred types for constant resolution.
     @constant_defs : Set(String)
     @constant_types : Hash(String, TypeRef)
@@ -730,6 +731,7 @@ module Crystal::HIR
       @type_literal_class_cache = {} of String => String?
       @short_type_index = {} of String => Set(String)
       @top_level_type_names = Set(String).new
+      @top_level_class_kinds = {} of String => Bool
       @current_typeof_local_names = nil
       @top_level_main_defined = false
       @block_captures = {} of BlockId => Array(CapturedVar)
@@ -764,6 +766,10 @@ module Crystal::HIR
 
     def seed_top_level_type_names(names : Enumerable(String)) : Nil
       names.each { |name| @top_level_type_names.add(name) }
+    end
+
+    def seed_top_level_class_kinds(kinds : Enumerable(Tuple(String, Bool))) : Nil
+      kinds.each { |name, is_struct| @top_level_class_kinds[name] = is_struct }
     end
 
     private def effect_annotation_name(node : CrystalV2::Compiler::Frontend::AnnotationNode) : String?
@@ -6578,7 +6584,7 @@ module Crystal::HIR
       existing_info = @class_info[class_name]?
       mono_debug = ENV.has_key?("DEBUG_MONO") && (class_name.starts_with?("Hash(") || class_name.starts_with?("Set("))
       mono_start = Time.monotonic if mono_debug
-      invalidate_type_cache_for_namespace(class_name) if existing_info
+      invalidate_type_cache_for_namespace(class_name) if existing_info || @module_defs.has_key?(class_name)
 
       # Collect instance variables and their types
       ivars = [] of IVarInfo
@@ -26082,6 +26088,13 @@ module Crystal::HIR
                  if info = @class_info[lookup_name]?
                    store_type_cache(cache_key, info.type_ref)
                    return info.type_ref
+                 end
+                 if @top_level_class_kinds.has_key?(lookup_name)
+                   is_struct = @top_level_class_kinds[lookup_name]
+                   type_kind = is_struct ? TypeKind::Struct : TypeKind::Class
+                   result = @module.intern_type(TypeDescriptor.new(type_kind, lookup_name))
+                   store_type_cache(cache_key, result)
+                   return result
                  end
                  if @module_defs.has_key?(lookup_name)
                    result = @module.intern_type(TypeDescriptor.new(TypeKind::Module, lookup_name))
