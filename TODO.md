@@ -1131,6 +1131,7 @@ r2 = maybe(false)  # => nil
 - TypeInferenceEngine caches member-access names by ExprId (reduce repeated String allocations during call/member inference) (2026-01-xx).
 - TypeInferenceEngine interns name slices to canonical Strings (reduces duplicate String allocations across nodes) (2026-01-xx).
 - Frontend::StringPool gains String interning (`intern_string`) and Program carries string_pool (shared canonical Strings per parse) (2026-01-xx).
+- Deduplicate callsite arg-type recording by base+arity to reduce Hash churn during HIR lowering (2026-01-xx).
 
 ### Holistic risk scan (2026-01-xx)
 
