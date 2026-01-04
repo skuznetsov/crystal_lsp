@@ -1044,10 +1044,10 @@ r2 = maybe(false)  # => nil
   - ByteFormat decode/from_io resolved (no `_IO__ByteFormat_decode_UInt32_IO`).
 
 **Regressions (open):**
-- [ ] GH #10 (crystal_lsp): prelude build with `puts` fails to link on minimal `fib.cr` (`__to_s_IO`/`IO_puts*` unresolved); build without `puts` links but segfaults on run. Repro:
-  - `./bin/crystal_v2 build --release --no-llvm-metadata fib.cr`
-  - `./bin/crystal_v2 build --no-prelude --release --no-llvm-metadata fib.cr` works
-  - Track: ensure prelude path emits `IO#puts` + `IO#to_s` and runtime init entrypoint is correct.
+- [ ] GH #10 (crystal_lsp): prelude build with `puts` still fails to link on minimal `fib.cr`. After fixing top-level type resolution (IO::File → File), missing symbols changed:
+  - `_File__FileDescriptor_initialize_Int32`, `_File_fd`, `_LibC_pthread_self`, `_Tuple_min_by_block`, `_Void___Pointer_write_File__PReader_Slice_UInt8_`, `_func490` (String.inspect_char)
+  - Repro: `./bin/crystal_v2 build --release --no-llvm-metadata fib.cr` (no-prelude path still links).
+  - Track: verify `File < IO::FileDescriptor` super init, thread/event-loop calls, Tuple min_by block lowering, and String.inspect_char codegen.
 
 **Recent fixes (prelude bootstrap path):**
 - Normalize `flag?` macro arguments (strip leading `:`) + require cache v3; pthread requires now load.
@@ -1060,6 +1060,7 @@ r2 = maybe(false)  # => nil
 - Track functions that return type literals; mark call results as type literals and resolve absolute `::` paths in HIR (fixes `EventLoop.backend_class`/nested class lookups) (2026-01-xx).
 - Invalidate type cache on enum registration to prevent enum names from collapsing to Class; IO::Seek predicate now lowers to compare (removes `_IO__Seek_current_`).
 - Resolve superclass name in context when registering classes (fixes `FileDescriptor_initialize_Int32` super call).
+- Seed top-level type names in CLI/driver + avoid namespace prefixing for top-level classes (fixes `IO::File` resolution in `IO::ARGF` and `IO#read` missing symbols) (2026-01-xx).
 - Register MacroIf/MacroLiteral nodes inside nested modules during HIR lowering.
 - Remove `StructNode` handling from macro-parsed class bodies; rely on `ClassNode.is_struct` (2026-01-02).
 - Attach trailing `do` blocks to parenthesized/member-access calls (fixes `Array(T).build(size) do` + `times do` in stdlib) (2026-01-xx).
