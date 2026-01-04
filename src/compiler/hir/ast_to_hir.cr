@@ -19364,7 +19364,11 @@ module Crystal::HIR
       if ENV["DEBUG_CALL_TRACE"]? && method_name == "copy_to"
         STDERR.puts "[CALL_TRACE] stage=after_defaults method=#{method_name} args=#{args.size} receiver=#{!!receiver_id} full=#{full_method_name || ""}"
       end
-      args = pack_splat_args_for_call(ctx, args, method_name, full_method_name, has_block_call, receiver_id)
+      prepack_arg_types = args.map { |arg_id| ctx.type_of(arg_id) }
+      prepack_arg_literals = args.map { |arg_id| ctx.type_literal?(arg_id) }
+      pack_result = pack_splat_args_for_call(ctx, args, method_name, full_method_name, has_block_call, receiver_id)
+      args = pack_result[0]
+      splat_packed = pack_result[1]
       if ENV["DEBUG_CALL_TRACE"]? && method_name == "copy_to"
         STDERR.puts "[CALL_TRACE] stage=after_pack method=#{method_name} args=#{args.size} receiver=#{!!receiver_id} full=#{full_method_name || ""}"
       end
@@ -19630,6 +19634,13 @@ module Crystal::HIR
       # Collect argument types for name mangling (overloading support)
       arg_types = args.map { |arg_id| ctx.type_of(arg_id) }
       arg_literals = args.map { |arg_id| ctx.type_literal?(arg_id) }
+      callsite_arg_types = splat_packed ? prepack_arg_types.dup : arg_types
+      callsite_arg_literals = splat_packed ? prepack_arg_literals.dup : arg_literals
+      if splat_packed && args.size > prepack_arg_types.size
+        extra_ids = args[prepack_arg_types.size..-1] || [] of ValueId
+        callsite_arg_types.concat(extra_ids.map { |arg_id| ctx.type_of(arg_id) })
+        callsite_arg_literals.concat(extra_ids.map { |arg_id| ctx.type_literal?(arg_id) })
+      end
       if receiver_id && method_name.ends_with?("=") && args.size == 1 &&
          arg_types.all? { |t| t == TypeRef::VOID }
         if inferred = ivar_type_for_setter(ctx, receiver_id, method_name)
@@ -20618,9 +20629,9 @@ module Crystal::HIR
         STDERR.puts "[CALL_TRACE] stage=before_lower_function method=#{method_name} mangled=#{mangled_method_name} primary=#{primary_mangled_name} return=#{return_type.id}"
       end
       # Lazily lower target function bodies (avoid full stdlib lowering).
-      remember_callsite_arg_types(primary_mangled_name, arg_types, arg_literals, has_block_call)
+      remember_callsite_arg_types(primary_mangled_name, callsite_arg_types, callsite_arg_literals, has_block_call)
       if mangled_method_name != primary_mangled_name
-        remember_callsite_arg_types(mangled_method_name, arg_types, arg_literals, has_block_call)
+        remember_callsite_arg_types(mangled_method_name, callsite_arg_types, callsite_arg_literals, has_block_call)
       end
       if ENV["DEBUG_CALL_TRACE"]? && method_name == "copy_to"
         STDERR.puts "[CALL_TRACE] stage=after_remember method=#{method_name} mangled=#{mangled_method_name} primary=#{primary_mangled_name}"
@@ -20846,7 +20857,7 @@ module Crystal::HIR
       full_method_name : String?,
       has_block_call : Bool,
       receiver_id : ValueId?
-    ) : Array(ValueId)
+    ) : Tuple(Array(ValueId), Bool)
       func_name = if full_method_name
                     full_method_name
                   elsif receiver_id
@@ -20868,10 +20879,10 @@ module Crystal::HIR
                   end
       arg_types = args.map { |arg_id| ctx.type_of(arg_id) }
       entry = lookup_function_def_for_call(func_name, args.size, has_block_call, arg_types)
-      return args unless entry
+      return {args, false} unless entry
 
       func_def = entry[1]
-      return args unless params = func_def.params
+      return {args, false} unless params = func_def.params
       if ENV["DEBUG_PUTS_PACK"]? && method_name == "puts"
         param_debug = params.map do |param|
           name = param.name ? String.new(param.name.not_nil!) : "(anon)"
@@ -20900,21 +20911,21 @@ module Crystal::HIR
         param_index += 1
       end
 
-      return args unless splat_index && splat_is_last
-      return args if args.size <= splat_index
+      return {args, false} unless splat_index && splat_is_last
+      return {args, false} if args.size <= splat_index
 
       fixed = args[0, splat_index]
       splat_args = args[splat_index..-1] || [] of ValueId
-      return args if splat_args.empty?
+      return {args, false} if splat_args.empty?
 
       splat_types = splat_args.map { |arg_id| ctx.type_of(arg_id) }
       tuple_type = tuple_type_from_arg_types(splat_types)
-      return args if tuple_type == TypeRef::VOID
+      return {args, false} if tuple_type == TypeRef::VOID
 
       tuple_alloc = Allocate.new(ctx.next_id, tuple_type, splat_args)
       ctx.emit(tuple_alloc)
 
-      fixed + [tuple_alloc.id]
+      {fixed + [tuple_alloc.id], true}
     end
 
     private def ensure_double_splat_arg(
