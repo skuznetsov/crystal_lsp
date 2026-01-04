@@ -1152,6 +1152,7 @@ r2 = maybe(false)  # => nil
 - `DEBUG_LOWER_METHOD_SLOW_MS=200` during `CRYSTAL_V2_STOP_AFTER_HIR=1` self-host run shows hot spots inside compiler type inference and CLI: `Analyzer#infer_types` (~5.1s), `TypeInferenceEngine#infer_types` (~5.0s), `TypeInferenceEngine#infer_call` (~1.2s), `TypeInferenceEngine#infer_method_body_type` (~1.0s), `CLI#run_check` (~13.1s), and stdlib helpers (`Path#join`, `String#tr`, `File.join`) ~0.58s each. Indicates HIR stall is dominated by lowering the compiler's own inference engine, not just IO. (2026-01-xx)
 - `DEBUG_LOWER_PROGRESS=CLI#run_check` shows slow subcalls inside `CLI#run_check`: `analyzer.collect_symbols` (~3.4s), `analyzer.resolve_names` (~1.2s), `analyzer.infer_types` (~5.7s). `DEBUG_LOWER_PROGRESS=infer_types` shows `TypeInferenceEngine#infer_types` dominated by `infer_expression(root_id)` (~5.8s). `DEBUG_LOWER_PROGRESS=infer_expression` highlights the large `case Frontend.node_kind(node)` and `infer_call` paths as slow in `infer_expression` (2026-01-xx).
 - `DEBUG_LOWER_METHOD_SLOW_MS=500` with file paths shows main hotspots in `src/compiler/semantic/*` (SymbolCollector/NameResolver/TypeInferenceEngine), `src/compiler/frontend/parser.cr`, and stdlib `path.cr`/`file.cr`/`string.cr`. Suggests self-host HIR time is dominated by lowering the compiler/stdlib code itself, not a single stuck method. (2026-01-xx)
+- Self-host HIR pass completes (≈13 min) with `CRYSTAL_V2_STOP_AFTER_HIR=1` + AST cache enabled; no errors in log. (2026-01-xx)
 
 ### Bootstrap Stabilization Plan (prioritized, 2026-01-xx)
 
