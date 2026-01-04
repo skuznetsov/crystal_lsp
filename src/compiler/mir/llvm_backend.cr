@@ -998,6 +998,16 @@ module Crystal::MIR
       # Emit proc type
       emit_raw "%__crystal_proc = type { ptr, ptr }\n"
 
+      # Precompute union payload sizes by name to avoid redefinition conflicts.
+      union_payload_sizes = {} of String => UInt64
+      @module.type_registry.types.each do |type|
+        next unless type.kind.union?
+        type_name = @type_mapper.mangle_name(type.name)
+        max_size = type.variants.try(&.map(&.size).max) || 8_u64
+        existing = union_payload_sizes[type_name]? || 0_u64
+        union_payload_sizes[type_name] = max_size > existing ? max_size : existing
+      end
+
       # Track emitted types to avoid duplicates
       emitted_types = Set(String).new
 
@@ -1010,8 +1020,8 @@ module Crystal::MIR
           emit_struct_type(type)
           emitted_types << type_name
         elsif type.kind.union?
-          emit_union_type(type)
-          emitted_types << "#{type_name}.union"
+          emit_union_type(type, union_payload_sizes[type_name]?)
+          emitted_types << type_name
         end
       end
 
@@ -1048,10 +1058,10 @@ module Crystal::MIR
       end
     end
 
-    private def emit_union_type(type : Type)
+    private def emit_union_type(type : Type, payload_size : UInt64? = nil)
       name = @type_mapper.mangle_name(type.name)
       # Union = { i32 discriminator, [max_size x i8] data }
-      max_size = type.variants.try(&.map(&.size).max) || 8_u64
+      max_size = payload_size || type.variants.try(&.map(&.size).max) || 8_u64
       emit_raw "%#{name}.union = type { i32, [#{max_size} x i8] }\n"
     end
 
