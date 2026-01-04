@@ -60,6 +60,24 @@ module CrystalV2
         @identifier_name_cache : Array(String?)
         @member_name_cache : Array(String?)
         @node_kind_cache : Array(Frontend::NodeKind?)
+        @method_candidates_cache : Hash(MethodCandidatesKey, Array(MethodSymbol))
+
+        private struct MethodCandidatesKey
+          getter receiver_id : UInt64
+          getter name : String
+
+          def initialize(receiver : Type, @name : String)
+            @receiver_id = receiver.object_id
+          end
+
+          def hash : UInt64
+            receiver_id.hash ^ name.hash
+          end
+
+          def ==(other : MethodCandidatesKey) : Bool
+            receiver_id == other.receiver_id && name == other.name
+          end
+        end
 
         def initialize(
           @program : Frontend::Program,
@@ -75,6 +93,7 @@ module CrystalV2
           @identifier_name_cache = Array(String?).new(@program.arena.size)
           @member_name_cache = Array(String?).new(@program.arena.size)
           @node_kind_cache = Array(Frontend::NodeKind?).new(@program.arena.size)
+          @method_candidates_cache = {} of MethodCandidatesKey => Array(MethodSymbol)
           @current_class = nil
           @current_module = nil
           @receiver_type_context = nil
@@ -3429,7 +3448,7 @@ module CrystalV2
         # 4. Return best match
         private def lookup_method(receiver_type : Type, method_name : String, arg_types : Array(Type)) : MethodSymbol?
           debug_hook("infer.lookup.start", "method=#{method_name} receiver=#{receiver_type} args=#{arg_types.size}")
-          candidates = find_all_methods(receiver_type, method_name)
+          candidates = method_candidates_for(receiver_type, method_name)
           if candidates.empty?
             debug_hook("infer.lookup.miss", "method=#{method_name} receiver=#{receiver_type} stage=candidates")
             return nil
@@ -3562,6 +3581,16 @@ module CrystalV2
             methods.concat(get_universal_methods(receiver_type, method_name))
           end
 
+          methods
+        end
+
+        private def method_candidates_for(receiver_type : Type, method_name : String) : Array(MethodSymbol)
+          key = MethodCandidatesKey.new(receiver_type, method_name)
+          if cached = @method_candidates_cache[key]?
+            return cached
+          end
+          methods = find_all_methods(receiver_type, method_name)
+          @method_candidates_cache[key] = methods
           methods
         end
 
