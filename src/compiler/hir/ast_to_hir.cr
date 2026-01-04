@@ -459,6 +459,7 @@ module Crystal::HIR
     # Call-site argument types for lazily lowered functions (mangled name -> arg types).
     @pending_arg_types : Hash(String, Array(TypeRef))
     @pending_arg_types_by_arity : Hash(String, Hash(Int32, Array(CallsiteArgs)))
+    @pending_arg_types_seen_by_arity : Hash(String, Hash(Int32, Set(String)))
     @pending_arg_types_by_signature : Hash(CallSignature, Array(CallsiteArgs))
     # Call-site type-literal flags for lazily lowered functions (mangled name -> arg literal flags).
     @pending_arg_type_literals : Hash(String, Array(Bool))
@@ -689,6 +690,7 @@ module Crystal::HIR
       @lowering_functions = Set(String).new
       @pending_arg_types = {} of String => Array(TypeRef)
       @pending_arg_types_by_arity = {} of String => Hash(Int32, Array(CallsiteArgs))
+      @pending_arg_types_seen_by_arity = {} of String => Hash(Int32, Set(String))
       @pending_arg_types_by_signature = {} of CallSignature => Array(CallsiteArgs)
       @pending_arg_type_literals = {} of String => Array(Bool)
       @pending_type_param_maps = {} of String => Hash(String, String)
@@ -17388,6 +17390,24 @@ module Crystal::HIR
       @pending_arg_type_literals[name] = arg_literals.dup if arg_literals
       base_key = base_callsite_key(name)
       return if base_key.empty?
+      literal_key = if arg_literals
+                      arg_literals.map { |flag| flag ? '1' : '0' }.join
+                    else
+                      "-"
+                    end
+      seen_by_arity = @pending_arg_types_seen_by_arity[base_key]? || begin
+        new_map = {} of Int32 => Set(String)
+        @pending_arg_types_seen_by_arity[base_key] = new_map
+        new_map
+      end
+      seen_bucket = seen_by_arity[arg_types.size]? || begin
+        new_set = Set(String).new
+        seen_by_arity[arg_types.size] = new_set
+        new_set
+      end
+      callsite_key = "#{arg_types.map(&.id).join(",")}|#{literal_key}|#{has_block ? 1 : 0}"
+      return if seen_bucket.includes?(callsite_key)
+      seen_bucket.add(callsite_key)
       by_arity = @pending_arg_types_by_arity[base_key]? || begin
         new_map = {} of Int32 => Array(CallsiteArgs)
         @pending_arg_types_by_arity[base_key] = new_map
