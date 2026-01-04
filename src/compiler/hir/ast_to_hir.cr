@@ -1061,6 +1061,16 @@ module Crystal::HIR
       end
     end
 
+    private def class_inherits_from?(child_name : String, parent_name : String) : Bool
+      return true if child_name == parent_name
+      current = @class_info[child_name]?.try(&.parent_name)
+      while current
+        return true if current == parent_name
+        current = @class_info[current]?.try(&.parent_name)
+      end
+      false
+    end
+
     private def collect_subclasses(parents : Enumerable(String)) : Array(String)
       results = [] of String
       visited = Set(String).new
@@ -9797,6 +9807,7 @@ module Crystal::HIR
         break if arg_idx >= arg_types.size
 
         param_type_name = param.type_annotation ? String.new(param.type_annotation.not_nil!) : ""
+        param_resolved_name = param_type_name
         if !param_type_name.empty? && context
           param_type_name = normalize_declared_type_name(param_type_name, context)
         end
@@ -9811,6 +9822,7 @@ module Crystal::HIR
         if !param_type_name.empty?
           # Resolve type alias chain FIRST, then get type ref
           resolved_name = resolve_type_alias_chain(param_type_name)
+          param_resolved_name = resolved_name
           if module_like_type_name?(resolved_name)
             return false if primitive_type?(arg_type)
             arg_idx += 1
@@ -9841,6 +9853,16 @@ module Crystal::HIR
               # They're the same type after alias resolution, allow
               arg_idx += 1
               next
+            end
+            # Check if arg type is a subclass of the param type (e.g., IO::FileDescriptor -> IO)
+            if arg_desc && !param_resolved_name.empty?
+              arg_class = resolve_type_alias_chain(arg_desc.name)
+              if @class_info.has_key?(arg_class) && @class_info.has_key?(param_resolved_name)
+                if class_inherits_from?(arg_class, param_resolved_name)
+                  arg_idx += 1
+                  next
+                end
+              end
             end
             # Check if arg type includes the param type (for module methods)
             # e.g., IO::FileDescriptor includes Crystal::System::FileDescriptor
