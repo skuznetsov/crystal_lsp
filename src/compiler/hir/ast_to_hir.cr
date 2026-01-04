@@ -19249,7 +19249,7 @@ module Crystal::HIR
             # This handles records, generic structs, and module types
             unless full_method_name
               if type_desc = @module.get_type_descriptor(receiver_type)
-                type_name = type_desc.name
+                type_name = normalize_method_owner_name(type_desc.name)
                 # DEBUG: Detect type name mismatches for any type that doesn't include ::
                 if ENV.has_key?("DEBUG_TYPE_RESOLVE") && !type_name.includes?("::")
                   STDERR.puts "[DEBUG_TYPE] method=#{method_name}, receiver_type_id=#{receiver_type.id}, type_name=#{type_name}"
