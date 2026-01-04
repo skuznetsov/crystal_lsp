@@ -59,6 +59,7 @@ module CrystalV2
         @expr_in_progress : Set(Int32) = Set(Int32).new
         @identifier_name_cache : Array(String?)
         @member_name_cache : Array(String?)
+        @node_kind_cache : Array(Frontend::NodeKind?)
 
         def initialize(
           @program : Frontend::Program,
@@ -73,6 +74,7 @@ module CrystalV2
           @children_cache = Array(Array(ExprId)?).new(@program.arena.size)
           @identifier_name_cache = Array(String?).new(@program.arena.size)
           @member_name_cache = Array(String?).new(@program.arena.size)
+          @node_kind_cache = Array(Frontend::NodeKind?).new(@program.arena.size)
           @current_class = nil
           @current_module = nil
           @receiver_type_context = nil
@@ -203,7 +205,7 @@ module CrystalV2
           result_type = if node.is_a?(Frontend::SplatNode)
                           @context.nil_type
                         else
-                          case Frontend.node_kind(node)
+                          case node_kind_for(expr_id, node)
                         when .number?
                           infer_number(node.as(Frontend::NumberNode))
                         when .string?
@@ -904,6 +906,24 @@ module CrystalV2
             return name
           end
           intern_name(node.member)
+        end
+
+        private def node_kind_for(expr_id : ExprId, node : Frontend::Node) : Frontend::NodeKind
+          idx = expr_id.index
+          if idx >= 0
+            if idx >= @node_kind_cache.size
+              new_size = @program.arena.size
+              if new_size > @node_kind_cache.size
+                @node_kind_cache.concat(Array(Frontend::NodeKind?).new(new_size - @node_kind_cache.size, nil))
+              end
+            elsif cached = @node_kind_cache[idx]?
+              return cached
+            end
+            kind = Frontend.node_kind(node)
+            @node_kind_cache[idx] = kind
+            return kind
+          end
+          Frontend.node_kind(node)
         end
 
         private def intern_name(slice : Slice(UInt8)) : String
