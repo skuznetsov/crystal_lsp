@@ -4123,10 +4123,15 @@ module Crystal::MIR
       # Unknown types might be forward-referenced ptrs, so emit as ptr phi to be safe
       # This is a MIR type mismatch - handle by emitting as ptr phi with null for union values
       if is_union_type
+        union_descriptor = @module.get_union_descriptor(inst.type)
         has_ptr_or_unknown_incoming = incoming_pairs.any? do |(block, val)|
           val_type = @value_types[val]?
           const_val = @constant_values[val]?
           val_llvm_type = val_type ? @type_mapper.llvm_type(val_type) : nil
+          if val_type && union_descriptor
+            # If the incoming type is a known union variant, don't treat ptr as a mismatch.
+            next false if union_descriptor.variants.any? { |variant| variant.type_ref == val_type }
+          end
           # Has ptr type, OR has no known type (forward reference that might be ptr)
           # But exclude constants which have known values
           # Also check if the incoming value is from a block that might have ptr phis

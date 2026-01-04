@@ -118,6 +118,10 @@ module Crystal::HIR
       value
     end
 
+    def value_for(id : ValueId) : Value?
+      @values[id]?
+    end
+
     # Look up the type of a value by ID
     def type_of(id : ValueId) : TypeRef
       @value_types[id]? || TypeRef::VOID
@@ -1004,6 +1008,9 @@ module Crystal::HIR
       end
       if ENV["DEBUG_TO_S_REGISTER"]? && base_name.ends_with?("#to_s")
         STDERR.puts "[TO_S_REGISTER] full=#{full_name} base=#{base_name} ret=#{get_type_name_from_ref(return_type)}"
+      end
+      if ENV["DEBUG_STRING_POOL_RET"]? && full_name.includes?("StringPool#intern")
+        STDERR.puts "[STRING_POOL_RET] full=#{full_name} ret=#{get_type_name_from_ref(return_type)}"
       end
     end
 
@@ -12182,7 +12189,51 @@ module Crystal::HIR
           end
         end
       end
+
+      # Fallback: if a union has a single pointer-like non-nil variant, allow
+      # pointer-like values to wrap into that variant (common for struct/reference
+      # types lowered as pointers in LLVM).
+      if pointer_like_type?(value_type)
+        if fallback = pointer_like_union_variant_id(union_type)
+          return fallback
+        end
+      end
+
       -1
+    end
+
+    private def pointer_like_union_variant_id(union_type : TypeRef) : Int32?
+      mir_union_ref = hir_to_mir_type_ref(union_type)
+      descriptor = @union_descriptors[mir_union_ref]?
+      return nil unless descriptor
+
+      candidates = [] of Int32
+      descriptor.variants.each_with_index do |variant, idx|
+        hir_variant = mir_to_hir_type_ref(variant.type_ref)
+        next if hir_variant == TypeRef::NIL || hir_variant == TypeRef::VOID
+
+        if pointer_like_type?(hir_variant)
+          candidates << idx
+        end
+      end
+
+      if candidates.size == 1
+        if ENV["DEBUG_UNION_WRAP_PTR"]?
+          STDERR.puts "[UNION_WRAP_PTR] union=#{get_type_name_from_ref(union_type)} variant_id=#{candidates.first}"
+        end
+        return candidates.first
+      end
+
+      nil
+    end
+
+    private def pointer_like_type?(type_ref : TypeRef) : Bool
+      return true if type_ref == TypeRef::POINTER || type_ref == TypeRef::STRING
+      if desc = @module.get_type_descriptor(type_ref)
+        return desc.kind == TypeKind::Struct || desc.kind == TypeKind::Class ||
+               desc.kind == TypeKind::Pointer
+      end
+      false
     end
 
     # Find an existing union type in the module that can represent all required types.
@@ -15413,9 +15464,33 @@ module Crystal::HIR
             return nil_lit.id
           end
 
+          incoming = [{then_exit, then_value}, {else_exit, else_value}]
+          coerced_incoming = incoming.map do |(blk, val)|
+            val_type = ctx.type_of(val)
+            if val_type == phi_type
+              {blk, val}
+            elsif is_union_type?(phi_type)
+              variant_id = get_union_variant_id(phi_type, val_type)
+              if variant_id >= 0
+                wrap = UnionWrap.new(ctx.next_id, phi_type, val, variant_id)
+                ctx.emit_to_block(blk, wrap)
+                {blk, wrap.id}
+              else
+                {blk, val}
+              end
+            elsif numeric_primitive?(val_type) && numeric_primitive?(phi_type)
+              cast = Cast.new(ctx.next_id, phi_type, val, phi_type, safe: false)
+              ctx.emit_to_block(blk, cast)
+              {blk, cast.id}
+            else
+              {blk, val}
+            end
+          end
+
           phi = Phi.new(ctx.next_id, phi_type)
-          phi.add_incoming(then_exit, then_value)
-          phi.add_incoming(else_exit, else_value)
+          coerced_incoming.each do |exit_block, value|
+            phi.add_incoming(exit_block, value)
+          end
           ctx.emit(phi)
           ctx.register_type(phi.id, phi_type)
           return phi.id
@@ -15959,9 +16034,18 @@ module Crystal::HIR
         return value
       else
         # Multiple branches flow - create phi
-        # Use first flowing branch's type as phi type (simplified)
-        first_value = flowing_branches.first[1]
-        phi_type = ctx.type_of(first_value)
+        incoming = flowing_branches.map { |exit_block, value, _, _| {exit_block, value} }
+        value_types = incoming.map { |(_, val)| ctx.type_of(val) }.reject { |t| t == TypeRef::VOID }.uniq
+        phi_type = value_types.first? || TypeRef::VOID
+
+        if value_types.size > 1 && !value_types.all? { |t| numeric_primitive?(t) }
+          if union_ref = find_covering_union_type(value_types)
+            phi_type = union_ref
+          else
+            union_name = value_types.map { |t| get_type_name_from_ref(t) }.uniq.join(" | ")
+            phi_type = create_union_type(union_name)
+          end
+        end
 
         # Don't create phi for void/nil types
         if phi_type == TypeRef::VOID || phi_type == TypeRef::NIL
@@ -15970,8 +16054,30 @@ module Crystal::HIR
           return nil_lit.id
         end
 
+        coerced_incoming = incoming.map do |(blk, val)|
+          val_type = ctx.type_of(val)
+          if val_type == phi_type
+            {blk, val}
+          elsif is_union_type?(phi_type)
+            variant_id = get_union_variant_id(phi_type, val_type)
+            if variant_id >= 0
+              wrap = UnionWrap.new(ctx.next_id, phi_type, val, variant_id)
+              ctx.emit_to_block(blk, wrap)
+              {blk, wrap.id}
+            else
+              {blk, val}
+            end
+          elsif numeric_primitive?(val_type) && numeric_primitive?(phi_type)
+            cast = Cast.new(ctx.next_id, phi_type, val, phi_type, safe: false)
+            ctx.emit_to_block(blk, cast)
+            {blk, cast.id}
+          else
+            {blk, val}
+          end
+        end
+
         phi = Phi.new(ctx.next_id, phi_type)
-        flowing_branches.each do |exit_block, value, _, _|
+        coerced_incoming.each do |exit_block, value|
           phi.add_incoming(exit_block, value)
         end
         ctx.emit(phi)
@@ -16971,6 +17077,21 @@ module Crystal::HIR
       value_types = incoming.map { |(_, val)| ctx.type_of(val) }.reject { |t| t == TypeRef::VOID }.uniq
       phi_type = value_types.first? || TypeRef::VOID
 
+      if ENV["DEBUG_UNION_PHI"]?
+        debug_filter = ENV["DEBUG_UNION_PHI"]?
+        should_log = debug_filter == "1" ||
+                     (debug_filter && ctx.function.name.includes?(debug_filter))
+        if should_log
+          incoming.each do |(blk, val)|
+            val_type = ctx.type_of(val)
+            val_info = ctx.value_for(val)
+            val_desc = val_info ? val_info.class.name.split("::").last : "unknown"
+            val_name = val_info.is_a?(Call) ? " call=#{val_info.method_name}" : ""
+            STDERR.puts "[UNION_PHI_IN] func=#{ctx.function.name} blk=#{blk} val=#{get_type_name_from_ref(val_type)} kind=#{val_desc}#{val_name}"
+          end
+        end
+      end
+
       # If branch value types differ, prefer a union type that covers them.
       # This avoids invalid IR when merging mixed types (e.g., Bool/Float64/Int64),
       # and matches Crystal semantics (case expression returns a union).
@@ -16993,6 +17114,17 @@ module Crystal::HIR
           {blk, val}
         elsif is_union_type?(phi_type)
           variant_id = get_union_variant_id(phi_type, val_type)
+          if ENV["DEBUG_UNION_PHI"]?
+            debug_filter = ENV["DEBUG_UNION_PHI"]?
+            should_log = debug_filter == "1" ||
+                         (debug_filter && ctx.function.name.includes?(debug_filter))
+            if should_log
+              val_info = ctx.value_for(val)
+              val_desc = val_info ? val_info.class.name.split("::").last : "unknown"
+              val_name = val_info.is_a?(Call) ? " call=#{val_info.method_name}" : ""
+              STDERR.puts "[UNION_PHI] func=#{ctx.function.name} phi=#{get_type_name_from_ref(phi_type)} val=#{get_type_name_from_ref(val_type)} kind=#{val_desc}#{val_name} variant_id=#{variant_id}"
+            end
+          end
           if variant_id >= 0
             wrap = UnionWrap.new(ctx.next_id, phi_type, val, variant_id)
             ctx.emit_to_block(blk, wrap)
@@ -26546,6 +26678,8 @@ module Crystal::HIR
 
       # Check cache first to prevent infinite recursion
       if cached = @type_cache[cache_key]?
+        return cached if cached == TypeRef::VOID
+        ensure_union_descriptor(cached, normalized_name, resolved_variant_names)
         return cached
       end
       # Mark as being processed with placeholder to break cycles
@@ -26560,6 +26694,37 @@ module Crystal::HIR
         end.join(", ")
         STDERR.puts "[DEBUG_UNION_TYPES] name=#{normalized_name} variants=#{resolved_variant_names.join(", ")} refs=#{refs_debug} enum_known=#{enum_debug}"
       end
+
+      # Create union type and register descriptor
+      type_ref = @module.intern_type(TypeDescriptor.new(TypeKind::Union, normalized_name))
+      register_union_descriptor(type_ref, normalized_name, resolved_variant_names, variant_refs)
+
+      # Update cache with real value (replacing placeholder)
+      store_type_cache(cache_key, type_ref)
+
+      type_ref
+    end
+
+    private def ensure_union_descriptor(
+      type_ref : TypeRef,
+      normalized_name : String,
+      resolved_variant_names : Array(String)
+    ) : Nil
+      mir_union_type_ref = hir_to_mir_type_ref(type_ref)
+      return if @union_descriptors.has_key?(mir_union_type_ref)
+
+      variant_refs = resolved_variant_names.map { |vn| type_ref_for_name(vn) }
+      register_union_descriptor(type_ref, normalized_name, resolved_variant_names, variant_refs)
+    end
+
+    private def register_union_descriptor(
+      type_ref : TypeRef,
+      normalized_name : String,
+      resolved_variant_names : Array(String),
+      variant_refs : Array(TypeRef)
+    ) : Nil
+      mir_union_type_ref = hir_to_mir_type_ref(type_ref)
+      return if @union_descriptors.has_key?(mir_union_type_ref)
 
       # Calculate union layout
       variants = [] of MIR::UnionVariantDescriptor
@@ -26589,12 +26754,6 @@ module Crystal::HIR
       payload_offset = ((4 + max_align - 1) // max_align) * max_align
       total_size = payload_offset + max_size
 
-      # Create union type and register descriptor
-      type_ref = @module.intern_type(TypeDescriptor.new(TypeKind::Union, normalized_name))
-
-      # Convert to MIR::TypeRef for the descriptor key
-      mir_union_type_ref = hir_to_mir_type_ref(type_ref)
-
       # Create union descriptor
       descriptor = MIR::UnionDescriptor.new(
         name: normalized_name,
@@ -26605,11 +26764,6 @@ module Crystal::HIR
 
       # Store descriptor for LLVM backend
       @union_descriptors[mir_union_type_ref] = descriptor
-
-      # Update cache with real value (replacing placeholder)
-      store_type_cache(cache_key, type_ref)
-
-      type_ref
     end
 
     # Create a nullable union type (T | Nil) from a concrete type
