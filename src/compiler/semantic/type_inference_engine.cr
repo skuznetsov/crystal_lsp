@@ -62,6 +62,9 @@ module CrystalV2
         @node_kind_cache : Array(Frontend::NodeKind?)
         @method_candidates_cache : Hash(MethodCandidatesKey, Array(MethodSymbol))
         @parse_type_cache : Hash(String, Type)
+        @expr_state_epoch : Int32
+        @expr_state_version : Array(Int32)
+        @expr_state_value : Array(Int32)
 
         private struct MethodCandidatesKey
           getter receiver_id : UInt64
@@ -96,6 +99,9 @@ module CrystalV2
           @node_kind_cache = Array(Frontend::NodeKind?).new(@program.arena.size)
           @method_candidates_cache = {} of MethodCandidatesKey => Array(MethodSymbol)
           @parse_type_cache = {} of String => Type
+          @expr_state_epoch = 0
+          @expr_state_version = Array(Int32).new(@program.arena.size, 0)
+          @expr_state_value = Array(Int32).new(@program.arena.size, 0)
           @current_class = nil
           @current_module = nil
           @receiver_type_context = nil
@@ -137,9 +143,10 @@ module CrystalV2
           end
           # local frame as tuple {id, visited}, plus state map 0/1/2
           stack = [] of {ExprId, Bool}
-          state = {} of ExprId => Int32
+          state_hash = {} of ExprId => Int32
+          epoch = next_expr_state_epoch
           stack << {expr_id, false}
-          state[expr_id] = 1
+          set_expr_state(expr_id, epoch, 1, state_hash)
           while frame = stack.pop?
             # Check watchdog to prevent infinite loops in type inference
             Frontend::Watchdog.check!
@@ -151,7 +158,7 @@ module CrystalV2
               stack << {id, true}
               children_of(id, node).each do |child|
                 next if @context.get_type(child)
-                case state[child]?
+                case expr_state(child, epoch, state_hash)
                 when 2
                   next
                 when 1
@@ -164,7 +171,7 @@ module CrystalV2
                   end
                   next
                 else
-                  state[child] = 1
+                  set_expr_state(child, epoch, 1, state_hash)
                   stack << {child, false}
                 end
               end
@@ -176,7 +183,7 @@ module CrystalV2
                   debug("ITERATIVE: #{node.class.name.split("::").last} computed type #{t}")
                 end
                 @context.set_type(id, t)
-                state[id] = 2
+                set_expr_state(id, epoch, 2, state_hash)
               else
                 # Complex node - skip in iterative path, leave for recursive fallback
                 if @debug_enabled
@@ -185,7 +192,7 @@ module CrystalV2
                 # IMPORTANT: Clear any type that might have been set by cycle detection (line 97)
                 # Otherwise line 86 will skip this node even though it needs recursive processing
                 @context.expression_types.delete(id)
-                state[id] = 0 # Reset to allow recursive processing
+                set_expr_state(id, epoch, 0, state_hash) # Reset to allow recursive processing
               end
             end
           end
@@ -945,6 +952,49 @@ module CrystalV2
             return kind
           end
           Frontend.node_kind(node)
+        end
+
+        private def next_expr_state_epoch : Int32
+          @expr_state_epoch += 1
+          if @expr_state_epoch == Int32::MAX
+            @expr_state_epoch = 1
+            @expr_state_version.fill(0)
+          end
+          @expr_state_epoch
+        end
+
+        private def ensure_expr_state_capacity(idx : Int32)
+          return if idx < @expr_state_version.size
+          new_size = @program.arena.size
+          return if new_size <= @expr_state_version.size
+          @expr_state_version.concat(Array(Int32).new(new_size - @expr_state_version.size, 0))
+          @expr_state_value.concat(Array(Int32).new(new_size - @expr_state_value.size, 0))
+        end
+
+        private def expr_state(expr_id : ExprId, epoch : Int32, state_hash : Hash(ExprId, Int32)) : Int32
+          idx = expr_id.index
+          if idx < 0
+            return state_hash[expr_id]? || 0
+          end
+          ensure_expr_state_capacity(idx)
+          if @expr_state_version[idx] != epoch
+            @expr_state_version[idx] = epoch
+            @expr_state_value[idx] = 0
+          end
+          @expr_state_value[idx]
+        end
+
+        private def set_expr_state(expr_id : ExprId, epoch : Int32, value : Int32, state_hash : Hash(ExprId, Int32))
+          idx = expr_id.index
+          if idx < 0
+            state_hash[expr_id] = value
+            return
+          end
+          ensure_expr_state_capacity(idx)
+          if @expr_state_version[idx] != epoch
+            @expr_state_version[idx] = epoch
+          end
+          @expr_state_value[idx] = value
         end
 
         private def intern_name(slice : Slice(UInt8)) : String
