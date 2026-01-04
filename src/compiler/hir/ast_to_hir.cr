@@ -11629,7 +11629,7 @@ module Crystal::HIR
         test_name = "#{current}##{method_name}"
         # O(1) lookup: check exact match first, then check if base name exists
         if @function_types.has_key?(test_name) || has_function_base?(test_name)
-          resolved = current == origin ? test_name : "#{origin}##{method_name}"
+          resolved = current == origin ? test_name : test_name
           @method_inheritance_cache[cache_key] = resolved
           return resolved  # Return base name - caller will mangle
         end
@@ -17880,6 +17880,9 @@ module Crystal::HIR
                 parent = @class_info[parent]?.try(&.parent_name)
               end
               if func_def
+                if matched_parent
+                  store_function_namespace_override(name, base_name, matched_parent)
+                end
                 debug_hook("function.lookup.parent_fallback", "name=#{name} parent=#{matched_parent || "Object"}")
               end
             end
@@ -17999,6 +18002,7 @@ module Crystal::HIR
               arena = @function_def_arenas[parent_base]
               target_name = name
               lookup_branch = "parent_class_fallback"
+              store_function_namespace_override(name, base_name, parent)
               break
             elsif name.includes?("$")
               suffix = name.split("$", 2)[1]
@@ -18008,6 +18012,7 @@ module Crystal::HIR
                 arena = @function_def_arenas[parent_mangled]
                 target_name = name
                 lookup_branch = "parent_class_fallback_mangled"
+                store_function_namespace_override(name, base_name, parent)
                 break
               end
             end
@@ -18020,6 +18025,7 @@ module Crystal::HIR
                 arena = @function_def_arenas[key]
                 target_name = name
                 lookup_branch = "parent_class_fallback_prefix"
+                store_function_namespace_override(name, base_name, parent)
                 break
               end
             end
