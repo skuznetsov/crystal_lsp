@@ -68,6 +68,7 @@ module CrystalV2
         @class_type_cache : Hash(ClassSymbol, ClassType)
         @module_type_cache : Hash(ModuleSymbol, ModuleType)
         @instance_type_cache : Hash(ClassSymbol, InstanceType)
+        @method_lookup_cache : Hash(MethodLookupKey, MethodSymbol?)
 
         private struct MethodCandidatesKey
           getter receiver_id : UInt64
@@ -83,6 +84,29 @@ module CrystalV2
 
           def ==(other : MethodCandidatesKey) : Bool
             receiver_id == other.receiver_id && name == other.name
+          end
+        end
+
+        private struct MethodLookupKey
+          getter receiver_id : UInt64
+          getter name : String
+          getter arg_sig : UInt64
+
+          def initialize(receiver : Type, @name : String, arg_types : Array(Type))
+            @receiver_id = receiver.object_id
+            sig = arg_types.size.hash
+            arg_types.each do |arg|
+              sig ^= arg.object_id.hash
+            end
+            @arg_sig = sig
+          end
+
+          def hash : UInt64
+            receiver_id.hash ^ name.hash ^ arg_sig.hash
+          end
+
+          def ==(other : MethodLookupKey) : Bool
+            receiver_id == other.receiver_id && name == other.name && arg_sig == other.arg_sig
           end
         end
 
@@ -108,6 +132,7 @@ module CrystalV2
           @class_type_cache = {} of ClassSymbol => ClassType
           @module_type_cache = {} of ModuleSymbol => ModuleType
           @instance_type_cache = {} of ClassSymbol => InstanceType
+          @method_lookup_cache = {} of MethodLookupKey => MethodSymbol?
           @current_class = nil
           @current_module = nil
           @receiver_type_context = nil
@@ -3523,9 +3548,14 @@ module CrystalV2
         # 4. Return best match
         private def lookup_method(receiver_type : Type, method_name : String, arg_types : Array(Type)) : MethodSymbol?
           debug_hook("infer.lookup.start", "method=#{method_name} receiver=#{receiver_type} args=#{arg_types.size}")
+          lookup_key = MethodLookupKey.new(receiver_type, method_name, arg_types)
+          if @method_lookup_cache.has_key?(lookup_key)
+            return @method_lookup_cache[lookup_key]
+          end
           candidates = method_candidates_for(receiver_type, method_name)
           if candidates.empty?
             debug_hook("infer.lookup.miss", "method=#{method_name} receiver=#{receiver_type} stage=candidates")
+            @method_lookup_cache[lookup_key] = nil
             return nil
           end
 
@@ -3539,6 +3569,7 @@ module CrystalV2
           end
           if matching_count.empty?
             debug_hook("infer.lookup.miss", "method=#{method_name} receiver=#{receiver_type} stage=arity")
+            @method_lookup_cache[lookup_key] = nil
             return nil
           end
 
@@ -3549,10 +3580,12 @@ module CrystalV2
 
           if matches.empty?
             debug_hook("infer.lookup.miss", "method=#{method_name} receiver=#{receiver_type} stage=types")
+            @method_lookup_cache[lookup_key] = nil
             return nil
           end
           if matches.size == 1
             debug_hook("infer.lookup.hit", "method=#{method_name} receiver=#{receiver_type} selected=#{matches.first.name}")
+            @method_lookup_cache[lookup_key] = matches.first
             return matches.first
           end
 
@@ -3562,6 +3595,7 @@ module CrystalV2
           # Ties are resolved by order of definition (first defined wins)
           selected = matches.max_by { |m| specificity_score(m, arg_types) }
           debug_hook("infer.lookup.hit", "method=#{method_name} receiver=#{receiver_type} selected=#{selected.name} overloads=#{matches.size}")
+          @method_lookup_cache[lookup_key] = selected
           selected
         end
 
