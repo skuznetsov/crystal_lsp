@@ -18901,83 +18901,85 @@ module Crystal::HIR
           end
         elsif obj_node.is_a?(CrystalV2::Compiler::Frontend::IdentifierNode)
           name = String.new(obj_node.name)
-          if @module.is_lib?(name)
-            class_name_str = name
-          else
-            if type_name = lookup_typeof_local_name(name)
-              if ENV["DEBUG_TYPE_CLASS"]? && type_name.ends_with?(".class")
-                STDERR.puts "[DEBUG_TYPE_CLASS] method=#{method_name} name=#{name} type_name=#{type_name}"
-              end
-              if class_literal = resolve_type_literal_class_name(type_name)
-                class_name_str = class_literal
-              end
-            end
-            resolved_name = resolve_class_name_in_context(name)
-            resolved_name = resolve_type_alias_chain(resolved_name)
-            if class_name_str.nil? && @generic_templates.has_key?(resolved_name) && method_name == "new"
-              inferred_type = infer_generic_type_arg(resolved_name, call_args, block_expr, ctx)
-              if inferred_type
-                specialized_name = "#{resolved_name}(#{inferred_type})"
-                if !@monomorphized.includes?(specialized_name)
-                  monomorphize_generic_class(resolved_name, [inferred_type], specialized_name)
-                end
-                class_name_str = specialized_name
-              elsif resolved_name == "Array"
-                specialized_name = "Array(String)"
-                if !@monomorphized.includes?(specialized_name)
-                  monomorphize_generic_class(resolved_name, ["String"], specialized_name)
-                end
-                class_name_str = specialized_name
-              end
-            end
-            # Prefer class/module resolution when the identifier maps to a known type.
-            if class_name_str.nil? &&
-               (type_name_exists?(resolved_name) || @enum_info.try(&.has_key?(resolved_name)) ||
-                is_module_method?(resolved_name, method_name) || primitive_self_type(resolved_name))
-              class_name_str = resolved_name
-            elsif resolve_constant_name_in_context(name)
-              constant_receiver = true
+          if ctx.lookup_local(name).nil?
+            if @module.is_lib?(name)
+              class_name_str = name
             else
-              # Check if it's a class name (starts with uppercase and is known class)
-              # OR a module name (check if Module.method exists in function_types)
-              if class_name_str.nil? && resolved_name[0].uppercase?
-                # Prefer nested types in the current namespace over top-level types.
-                resolved_name = resolve_class_name_in_context(resolved_name) unless resolved_name.includes?("::")
-                if @class_info.has_key?(resolved_name) ||
-                   @enum_info.try(&.has_key?(resolved_name))
-                  class_name_str = resolved_name
-                elsif is_module_method?(resolved_name, method_name)
-                  # It's a module method call
-                  class_name_str = resolved_name
-                elsif @generic_templates.has_key?(resolved_name) && method_name == "new"
-                  # Calling .new on a generic template (e.g., Array.new, Hash.new)
-                  # Try to infer type argument from constructor arguments or block
-                  inferred_type = infer_generic_type_arg(resolved_name, call_args, block_expr, ctx)
-                  if inferred_type
-                    specialized_name = "#{resolved_name}(#{inferred_type})"
-                    # Monomorphize if not already done
-                    if !@monomorphized.includes?(specialized_name)
-                      monomorphize_generic_class(resolved_name, [inferred_type], specialized_name)
-                    end
-                    class_name_str = specialized_name
-                  else
-                    # Can't infer type - use fallback or report error
-                    # For now, use String as default for Array (common case)
-                    if resolved_name == "Array"
-                      specialized_name = "Array(String)"
+              if type_name = lookup_typeof_local_name(name)
+                if ENV["DEBUG_TYPE_CLASS"]? && type_name.ends_with?(".class")
+                  STDERR.puts "[DEBUG_TYPE_CLASS] method=#{method_name} name=#{name} type_name=#{type_name}"
+                end
+                if class_literal = resolve_type_literal_class_name(type_name)
+                  class_name_str = class_literal
+                end
+              end
+              resolved_name = resolve_class_name_in_context(name)
+              resolved_name = resolve_type_alias_chain(resolved_name)
+              if class_name_str.nil? && @generic_templates.has_key?(resolved_name) && method_name == "new"
+                inferred_type = infer_generic_type_arg(resolved_name, call_args, block_expr, ctx)
+                if inferred_type
+                  specialized_name = "#{resolved_name}(#{inferred_type})"
+                  if !@monomorphized.includes?(specialized_name)
+                    monomorphize_generic_class(resolved_name, [inferred_type], specialized_name)
+                  end
+                  class_name_str = specialized_name
+                elsif resolved_name == "Array"
+                  specialized_name = "Array(String)"
+                  if !@monomorphized.includes?(specialized_name)
+                    monomorphize_generic_class(resolved_name, ["String"], specialized_name)
+                  end
+                  class_name_str = specialized_name
+                end
+              end
+              # Prefer class/module resolution when the identifier maps to a known type.
+              if class_name_str.nil? &&
+                 (type_name_exists?(resolved_name) || @enum_info.try(&.has_key?(resolved_name)) ||
+                  is_module_method?(resolved_name, method_name) || primitive_self_type(resolved_name))
+                class_name_str = resolved_name
+              elsif resolve_constant_name_in_context(name)
+                constant_receiver = true
+              else
+                # Check if it's a class name (starts with uppercase and is known class)
+                # OR a module name (check if Module.method exists in function_types)
+                if class_name_str.nil? && resolved_name[0].uppercase?
+                  # Prefer nested types in the current namespace over top-level types.
+                  resolved_name = resolve_class_name_in_context(resolved_name) unless resolved_name.includes?("::")
+                  if @class_info.has_key?(resolved_name) ||
+                     @enum_info.try(&.has_key?(resolved_name))
+                    class_name_str = resolved_name
+                  elsif is_module_method?(resolved_name, method_name)
+                    # It's a module method call
+                    class_name_str = resolved_name
+                  elsif @generic_templates.has_key?(resolved_name) && method_name == "new"
+                    # Calling .new on a generic template (e.g., Array.new, Hash.new)
+                    # Try to infer type argument from constructor arguments or block
+                    inferred_type = infer_generic_type_arg(resolved_name, call_args, block_expr, ctx)
+                    if inferred_type
+                      specialized_name = "#{resolved_name}(#{inferred_type})"
+                      # Monomorphize if not already done
                       if !@monomorphized.includes?(specialized_name)
-                        monomorphize_generic_class(resolved_name, ["String"], specialized_name)
+                        monomorphize_generic_class(resolved_name, [inferred_type], specialized_name)
                       end
                       class_name_str = specialized_name
+                    else
+                      # Can't infer type - use fallback or report error
+                      # For now, use String as default for Array (common case)
+                      if resolved_name == "Array"
+                        specialized_name = "Array(String)"
+                        if !@monomorphized.includes?(specialized_name)
+                          monomorphize_generic_class(resolved_name, ["String"], specialized_name)
+                        end
+                        class_name_str = specialized_name
+                      end
                     end
-                  end
-                else
-                  # For primitive types and aliases not in class_info, use the resolved name directly.
-                  # Avoid treating value constants (like STDERR) as type names.
-                  if primitive_self_type(resolved_name)
-                    class_name_str = resolved_name
-                  elsif @type_aliases.has_key?(resolved_name) || LIBC_TYPE_ALIASES.has_key?(resolved_name)
-                    class_name_str = resolved_name
+                  else
+                    # For primitive types and aliases not in class_info, use the resolved name directly.
+                    # Avoid treating value constants (like STDERR) as type names.
+                    if primitive_self_type(resolved_name)
+                      class_name_str = resolved_name
+                    elsif @type_aliases.has_key?(resolved_name) || LIBC_TYPE_ALIASES.has_key?(resolved_name)
+                      class_name_str = resolved_name
+                    end
                   end
                 end
               end
@@ -23724,20 +23726,22 @@ module Crystal::HIR
         end
       elsif obj_node.is_a?(CrystalV2::Compiler::Frontend::IdentifierNode)
         name = String.new(obj_node.name)
-        # Resolve type alias if exists (check both @type_aliases and LIBC_TYPE_ALIASES)
-        resolved_name = @type_aliases[name]? || LIBC_TYPE_ALIASES[name]? || name
-        # Chain resolve if needed - max 10 iterations
-        depth = 0
-        while (next_resolved = @type_aliases[resolved_name]? || LIBC_TYPE_ALIASES[resolved_name]?) && next_resolved != resolved_name && depth < 10
-          resolved_name = next_resolved
-          depth += 1
-        end
-        if resolved_name[0].uppercase?
-          resolved_name = resolve_class_name_in_context(resolved_name)
-          if @class_info.has_key?(resolved_name) ||
-             @enum_info.try(&.has_key?(resolved_name)) ||
-             is_module_method?(resolved_name, member_name)
-            class_name_str = resolved_name
+        if ctx.lookup_local(name).nil?
+          # Resolve type alias if exists (check both @type_aliases and LIBC_TYPE_ALIASES)
+          resolved_name = @type_aliases[name]? || LIBC_TYPE_ALIASES[name]? || name
+          # Chain resolve if needed - max 10 iterations
+          depth = 0
+          while (next_resolved = @type_aliases[resolved_name]? || LIBC_TYPE_ALIASES[resolved_name]?) && next_resolved != resolved_name && depth < 10
+            resolved_name = next_resolved
+            depth += 1
+          end
+          if resolved_name[0].uppercase?
+            resolved_name = resolve_class_name_in_context(resolved_name)
+            if @class_info.has_key?(resolved_name) ||
+               @enum_info.try(&.has_key?(resolved_name)) ||
+               is_module_method?(resolved_name, member_name)
+              class_name_str = resolved_name
+            end
           end
         end
       elsif obj_node.is_a?(CrystalV2::Compiler::Frontend::GenericNode)
@@ -24766,6 +24770,10 @@ module Crystal::HIR
       class_name_str : String,
       member_name : String
     ) : ValueId
+      if extern_func = @module.get_extern_function(class_name_str, member_name)
+        return emit_extern_call(ctx, extern_func, [] of ValueId)
+      end
+
       full_method_name = if member_name == "new"
                            "#{class_name_str}.#{member_name}"
                          else
