@@ -710,6 +710,7 @@ The key insight is: **Don't compete with LLVM, complement it.**
   - Virtual calls now expand reachability by base method name; spec covers HIR reachability for virtual calls.
 - [x] Lazy monomorphization flush by default to avoid prelude stalls; set `CRYSTAL_V2_EAGER_MONO=1` to restore eager behavior (2025-12-27)
 - [x] HIR lowering for `spawn` keyword via synthetic `spawn { ... }` call (2025-12-27)
+- [x] CLI honors `CRYSTAL_V2_STOP_AFTER_{PARSE,HIR,MIR}` for accurate phase profiling (2026-01-xx)
 
 ### GC Minimization (DX / Bootstrap)
 - [x] Wire CLI/driver `--mm=conservative|balanced|aggressive` to HIR MemoryConfig.
