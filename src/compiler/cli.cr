@@ -1165,6 +1165,8 @@ module CrystalV2
           # Skip - already processed
         when Frontend::MacroExpressionNode
           collect_top_level_nodes(arena, node.expression, def_nodes, class_nodes, module_nodes, enum_nodes, macro_nodes, alias_nodes, lib_nodes, constant_exprs, main_exprs, pending_annotations, acyclic_types, flags, sources_by_arena, source, depth, collect_main_exprs)
+        when Frontend::VisibilityModifierNode
+          collect_top_level_nodes(arena, node.expression, def_nodes, class_nodes, module_nodes, enum_nodes, macro_nodes, alias_nodes, lib_nodes, constant_exprs, main_exprs, pending_annotations, acyclic_types, flags, sources_by_arena, source, depth, collect_main_exprs)
         when Frontend::MacroIfNode
           if raw_text = macro_if_raw_text(node, source)
             parsed_any = false

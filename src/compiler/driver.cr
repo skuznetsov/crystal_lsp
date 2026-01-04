@@ -125,6 +125,7 @@ module Crystal::V2
     end
 
     def compile
+      STDERR.puts "[USE_LIBICONV] debug env active" if ENV["DEBUG_USE_LIBICONV"]?
       trace_driver("[DRIVER_TRACE] compile() started")
       log "=== Crystal v2 Compiler ==="
       log "Input: #{@input_file}"
@@ -1022,6 +1023,9 @@ module Crystal::V2
       when CrystalV2::Compiler::Frontend::ConstantNode
         constant_exprs << {expr_id, arena}
         main_exprs << {expr_id, arena} if collect_main_exprs
+        if ENV["DEBUG_USE_LIBICONV"]? && String.new(node.name) == "USE_LIBICONV"
+          STDERR.puts "[USE_LIBICONV] collect_top_level_nodes constant bytes=#{source.bytesize}"
+        end
         pending_annotations.clear
       when CrystalV2::Compiler::Frontend::AnnotationNode
         pending_annotations << {node, arena}
@@ -1029,7 +1033,12 @@ module Crystal::V2
         # Skip require nodes - already processed
       when CrystalV2::Compiler::Frontend::MacroExpressionNode
         collect_top_level_nodes(arena, node.expression, def_nodes, class_nodes, module_nodes, enum_nodes, macro_nodes, alias_nodes, lib_nodes, constant_exprs, main_exprs, pending_annotations, acyclic_types, flags, sources_by_arena, source, depth, collect_main_exprs)
+      when CrystalV2::Compiler::Frontend::VisibilityModifierNode
+        collect_top_level_nodes(arena, node.expression, def_nodes, class_nodes, module_nodes, enum_nodes, macro_nodes, alias_nodes, lib_nodes, constant_exprs, main_exprs, pending_annotations, acyclic_types, flags, sources_by_arena, source, depth, collect_main_exprs)
       when CrystalV2::Compiler::Frontend::MacroIfNode
+        if ENV["DEBUG_USE_LIBICONV"]? && source.includes?("USE_LIBICONV")
+          STDERR.puts "[USE_LIBICONV] collect_top_level_nodes macro_if depth=#{depth}"
+        end
         if raw_text = macro_if_raw_text(node, source)
           parsed_any = false
           combined = macro_literal_texts_from_raw(raw_text, flags).join
@@ -1060,6 +1069,9 @@ module Crystal::V2
         end
       when CrystalV2::Compiler::Frontend::MacroLiteralNode
         if raw_text = macro_literal_raw_text(node, source)
+          if ENV["DEBUG_USE_LIBICONV"]? && raw_text.includes?("USE_LIBICONV")
+            STDERR.puts "[USE_LIBICONV] macro_literal_raw_text hit"
+          end
           combined = macro_literal_texts_from_raw(raw_text, flags).join
           unless combined.strip.empty? || combined.includes?("{%")
             if parsed = parse_macro_literal_program(combined)
@@ -1075,6 +1087,9 @@ module Crystal::V2
         target = arena[node.target]
         if target.is_a?(CrystalV2::Compiler::Frontend::ConstantNode)
           constant_exprs << {expr_id, arena}
+          if ENV["DEBUG_USE_LIBICONV"]? && String.new(target.name) == "USE_LIBICONV"
+            STDERR.puts "[USE_LIBICONV] collect_top_level_nodes assign bytes=#{source.bytesize}"
+          end
         end
         main_exprs << {expr_id, arena} if collect_main_exprs
       else
@@ -1583,6 +1598,8 @@ module Crystal::V2
       when CrystalV2::Compiler::Frontend::NilNode
         false
       when CrystalV2::Compiler::Frontend::MacroExpressionNode
+        evaluate_macro_condition(arena, node.expression, flags)
+      when CrystalV2::Compiler::Frontend::GroupingNode
         evaluate_macro_condition(arena, node.expression, flags)
       when CrystalV2::Compiler::Frontend::UnaryNode
         op = String.new(node.operator)

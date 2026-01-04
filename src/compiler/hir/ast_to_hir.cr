@@ -621,6 +621,7 @@ module Crystal::HIR
     # Track constant definitions and inferred types for constant resolution.
     @constant_defs : Set(String)
     @constant_types : Hash(String, TypeRef)
+    @constant_literal_values : Hash(String, CrystalV2::Compiler::Semantic::MacroValue)
 
     # Track top-level `def main` so we can remap calls and avoid entrypoint collisions.
     @top_level_main_defined : Bool
@@ -738,6 +739,7 @@ module Crystal::HIR
       @type_literal_values = Set(ValueId).new
       @constant_defs = Set(String).new
       @constant_types = {} of String => TypeRef
+      @constant_literal_values = {} of String => CrystalV2::Compiler::Semantic::MacroValue
       @debug_callsite = nil
       @pending_def_annotations = [] of Tuple(CrystalV2::Compiler::Frontend::AnnotationNode, CrystalV2::Compiler::Frontend::ArenaLike)
     end
@@ -8519,7 +8521,7 @@ module Crystal::HIR
     private def primitive_template_type_map(template_owner : String, primitive_owner : String) : Hash(String, String)
       case template_owner
       when "Int"
-        {"Int" => "Int32"}
+        {"Int" => primitive_owner}
       when "Float"
         {"Float" => primitive_owner}
       else
@@ -10800,6 +10802,18 @@ module Crystal::HIR
     private def record_constant_definition(owner_name : String?, name : String, value_id : ExprId, arena : CrystalV2::Compiler::Frontend::ArenaLike)
       full_name = constant_full_name(owner_name, name)
       @constant_defs.add(full_name)
+      if ENV["DEBUG_USE_LIBICONV"]? && name == "USE_LIBICONV"
+        STDERR.puts "[USE_LIBICONV] record_constant_definition owner=#{owner_name || ""}"
+      end
+
+      if @constant_literal_values.has_key?(full_name)
+        return if @constant_types.has_key?(full_name)
+      else
+        if literal = constant_literal_value_from_expr(value_id, arena, owner_name)
+          @constant_literal_values[full_name] = literal
+        end
+      end
+
       return if @constant_types.has_key?(full_name)
 
       old_arena = @arena
@@ -10811,6 +10825,38 @@ module Crystal::HIR
       @arena = old_arena
 
       @constant_types[full_name] = inferred
+
+      if ENV["DEBUG_USE_LIBICONV"]? && name == "USE_LIBICONV"
+        literal = @constant_literal_values[full_name]?
+        literal_str = literal ? literal.to_macro_output : "nil"
+        STDERR.puts "[USE_LIBICONV] owner=#{owner_name || ""} literal=#{literal_str} inferred=#{inferred.id}"
+      end
+    end
+
+    private def constant_literal_value_from_expr(
+      value_id : ExprId,
+      arena : CrystalV2::Compiler::Frontend::ArenaLike,
+      owner_name : String?
+    ) : CrystalV2::Compiler::Semantic::MacroValue?
+      old_arena = @arena
+      old_class = @current_class
+      @arena = arena
+      @current_class = owner_name
+      begin
+        value = macro_value_for_expr(value_id)
+        case value
+        when CrystalV2::Compiler::Semantic::MacroBoolValue,
+             CrystalV2::Compiler::Semantic::MacroNumberValue,
+             CrystalV2::Compiler::Semantic::MacroStringValue,
+             CrystalV2::Compiler::Semantic::MacroSymbolValue
+          value
+        else
+          nil
+        end
+      ensure
+        @current_class = old_class
+        @arena = old_arena
+      end
     end
 
     private def emit_constant_get(ctx : LoweringContext, full_name : String) : ValueId
@@ -10972,6 +11018,15 @@ module Crystal::HIR
         # E.g., inside Span, "Span" should resolve to the same class
         elsif (current = @current_class) && (last_part = current.split("::").last) && last_part == name && type_name_exists?(current)
           result = current
+        end
+      end
+
+      # If unresolved and inside a namespace, prefer a qualified name so forward references
+      # (e.g., IO::EncodingOptions) don't collapse to a type param-like placeholder.
+      if result == name && (current = @current_class) && name[0]?.try(&.uppercase?)
+        unless builtin_alias_target?(name)
+          parent_namespace = current.includes?("::") ? current.rpartition("::")[0] : ""
+          result = parent_namespace.empty? ? "#{current}::#{name}" : "#{parent_namespace}::#{name}"
         end
       end
 
@@ -11486,6 +11541,7 @@ module Crystal::HIR
     # Note: Returns the base name without mangling - caller should mangle with actual arg types
     private def resolve_method_with_inheritance(class_name : String, method_name : String) : String?
       class_name = normalize_method_owner_name(class_name)
+      origin = class_name
       ensure_method_inheritance_cache
       cache_key = "#{class_name}##{method_name}"
       if @method_inheritance_cache.has_key?(cache_key)
@@ -11499,8 +11555,9 @@ module Crystal::HIR
         test_name = "#{current}##{method_name}"
         # O(1) lookup: check exact match first, then check if base name exists
         if @function_types.has_key?(test_name) || has_function_base?(test_name)
-          @method_inheritance_cache[cache_key] = test_name
-          return test_name  # Return base name - caller will mangle
+          resolved = current == origin ? test_name : "#{origin}##{method_name}"
+          @method_inheritance_cache[cache_key] = resolved
+          return resolved  # Return base name - caller will mangle
         end
         # Also check included modules for this class
         if included = @class_included_modules[current]?
@@ -11510,8 +11567,9 @@ module Crystal::HIR
             module_method = "#{base_module}##{method_name}"
             if @function_types.has_key?(module_method) || has_function_base?(module_method)
               # Return with class prefix so it gets lowered for this class
-              @method_inheritance_cache[cache_key] = test_name
-              return test_name
+              resolved = current == origin ? test_name : "#{origin}##{method_name}"
+              @method_inheritance_cache[cache_key] = resolved
+              return resolved
             end
           end
         end
@@ -11550,6 +11608,7 @@ module Crystal::HIR
     # Returns base name without mangling or nil if not found.
     private def resolve_class_method_with_inheritance(class_name : String, method_name : String) : String?
       class_name = normalize_method_owner_name(class_name)
+      origin = class_name
       ensure_method_inheritance_cache
       cache_key = "#{class_name}.#{method_name}"
       if @class_method_inheritance_cache.has_key?(cache_key)
@@ -11562,8 +11621,9 @@ module Crystal::HIR
         visited << current
         test_name = "#{current}.#{method_name}"
         if @function_types.has_key?(test_name) || has_function_base?(test_name)
-          @class_method_inheritance_cache[cache_key] = test_name
-          return test_name
+          resolved = current == origin ? test_name : "#{origin}.#{method_name}"
+          @class_method_inheritance_cache[cache_key] = resolved
+          return resolved
         end
         if info = @class_info[current]?
           if parent = info.parent_name
@@ -13281,6 +13341,8 @@ module Crystal::HIR
         false
       when CrystalV2::Compiler::Frontend::MacroExpressionNode
         try_evaluate_macro_condition(cond_node.expression)
+      when CrystalV2::Compiler::Frontend::GroupingNode
+        try_evaluate_macro_condition(cond_node.expression)
       when CrystalV2::Compiler::Frontend::CallNode
         # Check for flag?(:name) or flag?("name")
         callee = @arena[cond_node.callee]
@@ -13365,24 +13427,91 @@ module Crystal::HIR
       case expr_node
       when CrystalV2::Compiler::Frontend::MacroExpressionNode
         macro_value_for_expr(expr_node.expression)
+      when CrystalV2::Compiler::Frontend::BoolNode
+        CrystalV2::Compiler::Semantic::MacroBoolValue.new(expr_node.value)
       when CrystalV2::Compiler::Frontend::StringNode
         CrystalV2::Compiler::Semantic::MacroStringValue.new(String.new(expr_node.value))
       when CrystalV2::Compiler::Frontend::SymbolNode
         CrystalV2::Compiler::Semantic::MacroSymbolValue.new(String.new(expr_node.name))
       when CrystalV2::Compiler::Frontend::NumberNode
-        num_str = String.new(expr_node.value).gsub("_", "")
-        if num_str.includes?(".") || num_str.includes?("e") || num_str.includes?("E")
-          CrystalV2::Compiler::Semantic::MacroNumberValue.new(num_str.to_f64)
+        num_str = strip_numeric_suffix(String.new(expr_node.value)).gsub("_", "")
+        if expr_node.kind.in?(
+             CrystalV2::Compiler::Frontend::NumberKind::F32,
+             CrystalV2::Compiler::Frontend::NumberKind::F64
+           )
+          if value = num_str.to_f64?
+            CrystalV2::Compiler::Semantic::MacroNumberValue.new(value)
+          else
+            nil
+          end
         else
-          CrystalV2::Compiler::Semantic::MacroNumberValue.new(num_str.to_i64)
+          if value = num_str.to_i64?(prefix: true)
+            CrystalV2::Compiler::Semantic::MacroNumberValue.new(value)
+          else
+            nil
+          end
+        end
+      when CrystalV2::Compiler::Frontend::TernaryNode
+        cond_val = macro_value_for_expr(expr_node.condition)
+        branch = cond_val && cond_val.truthy? ? expr_node.true_branch : expr_node.false_branch
+        macro_value_for_expr(branch)
+      when CrystalV2::Compiler::Frontend::IfNode
+        cond_val = macro_value_for_expr(expr_node.condition)
+        if cond_val && cond_val.truthy?
+          if expr_id = tail_expr_id_for_body(expr_node.then_body)
+            return macro_value_for_expr(expr_id)
+          end
+        else
+          if elsifs = expr_node.elsifs
+            elsifs.each do |elsif_branch|
+              branch_val = macro_value_for_expr(elsif_branch.condition)
+              if branch_val && branch_val.truthy?
+                if expr_id = tail_expr_id_for_body(elsif_branch.body)
+                  return macro_value_for_expr(expr_id)
+                end
+              end
+            end
+          end
+          if else_body = expr_node.else_body
+            if expr_id = tail_expr_id_for_body(else_body)
+              return macro_value_for_expr(expr_id)
+            end
+          end
+        end
+        nil
+      when CrystalV2::Compiler::Frontend::ConstantNode
+        raw_name = String.new(expr_node.name)
+        resolved = resolve_constant_name_in_context(raw_name) || raw_name
+        if literal = @constant_literal_values[resolved]?
+          literal
+        else
+          CrystalV2::Compiler::Semantic::MacroIdValue.new(raw_name)
         end
       when CrystalV2::Compiler::Frontend::IdentifierNode
-        CrystalV2::Compiler::Semantic::MacroIdValue.new(String.new(expr_node.name))
+        name = String.new(expr_node.name)
+        if name[0]?.try(&.uppercase?)
+          if resolved = resolve_constant_name_in_context(name)
+            if literal = @constant_literal_values[resolved]?
+              return literal
+            end
+          end
+        end
+        CrystalV2::Compiler::Semantic::MacroIdValue.new(name)
       when CrystalV2::Compiler::Frontend::PathNode
-        CrystalV2::Compiler::Semantic::MacroIdValue.new(collect_path_string(expr_node))
+        path = collect_path_string(expr_node)
+        if resolved = resolve_constant_name_in_context(path)
+          if literal = @constant_literal_values[resolved]?
+            return literal
+          end
+        end
+        CrystalV2::Compiler::Semantic::MacroIdValue.new(path)
       else
         nil
       end
+    end
+
+    private def strip_numeric_suffix(literal : String) : String
+      literal.sub(/_?(i8|i16|i32|i64|i128|u8|u16|u32|u64|u128|f32|f64)\z/i, "")
     end
 
     private def macro_int_literal_for_expr(expr_id : ExprId) : Int64?
@@ -13396,6 +13525,22 @@ module Crystal::HIR
       else
         nil
       end
+    end
+
+    private def macro_expression_class_name(expr_id : ExprId) : String?
+      value = macro_value_for_expr(expr_id)
+      return nil unless value
+      raw = value.to_macro_output
+      return nil if raw.empty?
+      resolved = resolve_type_name_in_context(raw)
+      resolved = resolve_type_alias_chain(resolved)
+      if @module.is_lib?(resolved) || type_name_exists?(resolved) || @module_defs.has_key?(resolved) || @generic_templates.has_key?(resolved)
+        return resolved
+      end
+      if @module.is_lib?(raw) || type_name_exists?(raw) || @module_defs.has_key?(raw) || @generic_templates.has_key?(raw)
+        return raw
+      end
+      nil
     end
 
     # Lower macro if/elsif/else at compile time
@@ -17313,6 +17458,9 @@ module Crystal::HIR
 
     private def lower_function_if_needed(name : String) : Nil
       return if name.empty?
+      if ENV["DEBUG_VDISPATCH_UNION"]? && name.includes?("next_power_of_two")
+        STDERR.puts "[VDISPATCH_UNION_HIR] lower_function_if_needed name=#{name}"
+      end
       if ENV["DEBUG_FROM_CHARS"]? && name.includes?("from_chars_advanced")
         STDERR.puts "[DEBUG_FROM_CHARS] lower_function_if_needed name=#{name}"
       end
@@ -18556,11 +18704,6 @@ module Crystal::HIR
         # Could be method call: obj.method() or class method: ClassName.new()
         obj_expr = callee_node.object
         obj_node = @arena[obj_expr]
-        while obj_node.is_a?(CrystalV2::Compiler::Frontend::GroupingNode) ||
-              obj_node.is_a?(CrystalV2::Compiler::Frontend::MacroExpressionNode)
-          obj_expr = obj_node.is_a?(CrystalV2::Compiler::Frontend::GroupingNode) ? obj_node.expression : obj_node.expression
-          obj_node = @arena[obj_expr]
-        end
         method_name = String.new(callee_node.member)
         if ENV["DEBUG_ENUM_PREDICATE"]? && method_name == "character_device?"
           STDERR.puts "[DEBUG_ENUM_CALL_PATH] lower_call method=#{method_name} callee=#{callee_node.class.name}"
@@ -18629,9 +18772,19 @@ module Crystal::HIR
         end
 
         # Check if it's a class/module method call (ClassName.new() or Module.method())
-        # Can be ConstantNode, IdentifierNode starting with uppercase, or GenericNode
+        # Can be ConstantNode, IdentifierNode starting with uppercase, GenericNode, or macro expression.
         class_name_str : String? = nil
         constant_receiver = false
+        if obj_node.is_a?(CrystalV2::Compiler::Frontend::MacroExpressionNode)
+          if resolved = macro_expression_class_name(obj_node.expression)
+            class_name_str = resolved
+            constant_receiver = true
+          end
+        end
+        while obj_node.is_a?(CrystalV2::Compiler::Frontend::GroupingNode)
+          obj_expr = obj_node.expression
+          obj_node = @arena[obj_expr]
+        end
         if obj_node.is_a?(CrystalV2::Compiler::Frontend::SelfNode) && @current_method_is_class
           class_name_str = @current_class
         elsif obj_node.is_a?(CrystalV2::Compiler::Frontend::ConstantNode)
@@ -20363,6 +20516,30 @@ module Crystal::HIR
                 candidate = mangle_function_name(base_name, arg_types, has_block_call)
                 lower_function_if_needed(candidate)
                 lower_function_if_needed(base_name) unless candidate == base_name
+              end
+            end
+          elsif type_desc.kind == TypeKind::Union
+            union_name = type_desc.name.includes?("___") ? type_desc.name.gsub("___", "|") : type_desc.name
+            key = "union|#{union_name}|#{method_name}|#{arg_types.map(&.id).join(",")}|#{has_block_call ? 1 : 0}"
+            unless @virtual_targets_lowered.includes?(key)
+              @virtual_targets_lowered.add(key)
+              split_union_type_name(union_name).each do |variant|
+                next if variant == "Nil"
+                resolved_variant = resolve_type_alias_chain(variant)
+                expanded = [] of String
+                [resolved_variant, variant].uniq.each do |owner|
+                  if owner.includes?("|")
+                    expanded.concat(split_union_type_name(owner))
+                  else
+                    expanded << owner
+                  end
+                end
+                expanded.uniq.each do |owner|
+                  base_name = "#{owner}##{method_name}"
+                  candidate = mangle_function_name(base_name, arg_types, has_block_call)
+                  lower_function_if_needed(candidate)
+                  lower_function_if_needed(base_name) unless candidate == base_name
+                end
               end
             end
           end
@@ -23580,8 +23757,19 @@ module Crystal::HIR
           class_name = desc.name unless desc.name.empty?
         end
         if class_name
+          if member_name == "name"
+            lit = Literal.new(ctx.next_id, TypeRef::STRING, class_name)
+            ctx.emit(lit)
+            ctx.register_type(lit.id, TypeRef::STRING)
+            return lit.id
+          end
           return lower_static_member_access_call(ctx, class_name, member_name)
         end
+      end
+
+      if member_name == "class"
+        type_name = get_type_name_from_ref(receiver_type)
+        return lower_type_literal_from_name(ctx, type_name) unless type_name.empty?
       end
 
       if member_name == "value"
@@ -24131,6 +24319,52 @@ module Crystal::HIR
         recv_desc = @module.get_type_descriptor(recv_type)
         recv_name = recv_desc ? "#{recv_desc.name}(#{recv_desc.kind})" : recv_type.id.to_s
         STDERR.puts "[HIR_VIRTUAL_CALL] method=#{member_name} recv=#{recv_name} virtual=#{call_virtual}"
+      end
+
+      # Ensure virtual dispatch targets are lowered so MIR can build vdispatch tables.
+      if call_virtual
+        if type_desc = @module.get_type_descriptor(ctx.type_of(object_id))
+          if type_desc.kind == TypeKind::Class
+            key = "#{type_desc.name}|#{member_name}|#{arg_types.map(&.id).join(",")}|0"
+            unless @virtual_targets_lowered.includes?(key)
+              @virtual_targets_lowered.add(key)
+              owners = [type_desc.name] + collect_subclasses([type_desc.name])
+              owners.each do |owner|
+                base_name = "#{owner}##{member_name}"
+                candidate = mangle_function_name(base_name, arg_types, false)
+                lower_function_if_needed(candidate)
+                lower_function_if_needed(base_name) unless candidate == base_name
+              end
+            end
+          elsif type_desc.kind == TypeKind::Union
+            union_name = type_desc.name.includes?("___") ? type_desc.name.gsub("___", "|") : type_desc.name
+            key = "union|#{union_name}|#{member_name}|#{arg_types.map(&.id).join(",")}|0"
+            unless @virtual_targets_lowered.includes?(key)
+              @virtual_targets_lowered.add(key)
+              split_union_type_name(union_name).each do |variant|
+                next if variant == "Nil"
+                resolved_variant = resolve_type_alias_chain(variant)
+                expanded = [] of String
+                [resolved_variant, variant].uniq.each do |owner|
+                  if owner.includes?("|")
+                    expanded.concat(split_union_type_name(owner))
+                  else
+                    expanded << owner
+                  end
+                end
+                if ENV["DEBUG_VDISPATCH_UNION"]? && member_name == "next_power_of_two"
+                  STDERR.puts "[VDISPATCH_UNION_HIR] variant=#{variant} resolved=#{resolved_variant} expanded=#{expanded.join(",")}"
+                end
+                expanded.uniq.each do |owner|
+                  base_name = "#{owner}##{member_name}"
+                  candidate = mangle_function_name(base_name, arg_types, false)
+                  lower_function_if_needed(candidate)
+                  lower_function_if_needed(base_name) unless candidate == base_name
+                end
+              end
+            end
+          end
+        end
       end
 
       primary_name = if resolved_method_name
@@ -25535,13 +25769,15 @@ module Crystal::HIR
         substituted_name = substitute_type_params_in_type_name(lookup_name)
         lookup_name = substituted_name if substituted_name != lookup_name
       end
-      if type_param_like?(lookup_name) && !@type_param_map.has_key?(lookup_name)
-        return TypeRef::VOID
-      end
       # Resolve type names in the current namespace before cache lookup.
       # This avoids poisoning the cache with names that resolve differently per scope.
       if !lookup_name.includes?("|")
         lookup_name = resolve_type_name_in_context(lookup_name)
+      end
+      if type_param_like?(lookup_name) && !@type_param_map.has_key?(lookup_name)
+        # Treat short uppercase identifiers as type params; longer names are likely
+        # forward-referenced types (e.g., EncodingOptions).
+        return TypeRef::VOID if lookup_name.size <= 2
       end
       cache_key = type_cache_key(lookup_name)
       if lookup_name.ends_with?(".class") || lookup_name.ends_with?(".metaclass")
@@ -25791,7 +26027,18 @@ module Crystal::HIR
         return TypeRef::VOID
       end
 
-      resolved_variant_names = variant_names.map do |variant|
+      expanded_variants = [] of String
+      variant_names.each do |variant|
+        resolved = resolve_type_alias_chain(variant)
+        if resolved.includes?("|")
+          expanded_variants.concat(split_union_type_name(resolved))
+        else
+          expanded_variants << resolved
+        end
+      end
+      expanded_variants.uniq!
+
+      resolved_variant_names = expanded_variants.map do |variant|
         resolved = variant
         if !@type_param_map.empty?
           resolved = substitute_type_params_in_type_name(resolved)

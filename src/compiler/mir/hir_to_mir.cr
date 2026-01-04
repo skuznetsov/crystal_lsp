@@ -1057,11 +1057,18 @@ module Crystal
       if recv_desc.kind == HIR::TypeKind::Union
         mir_union_ref = convert_type(recv_type)
         if union_desc = @mir_module.get_union_descriptor(mir_union_ref)
+          if ENV["DEBUG_VDISPATCH_UNION"]? && method_suffix == "next_power_of_two"
+            variants = union_desc.variants.map(&.full_name).join(",")
+            STDERR.puts "[VDISPATCH_UNION] union=#{union_desc.name} variants=#{variants}"
+          end
           union_desc.variants.each do |variant|
             if variant.full_name == "Nil"
               next
             end
-            if func = @mir_module.get_function("#{variant.full_name}##{method_suffix}")
+            if func = resolve_virtual_method_for_class(variant.full_name, method_suffix)
+              if ENV["DEBUG_VDISPATCH_UNION"]? && method_suffix == "next_power_of_two"
+                STDERR.puts "[VDISPATCH_UNION] candidate=#{variant.full_name} func=#{func.name}"
+              end
               candidates << {
                 type_id: variant.type_id,
                 type_ref: variant.type_ref,
@@ -1105,6 +1112,20 @@ module Crystal
       end
 
       candidates
+    end
+
+    private def resolve_virtual_method_for_class(class_name : String, method_suffix : String) : Function?
+      current = class_name
+      seen = Set(String).new
+      while !current.empty? && !seen.includes?(current)
+        seen.add(current)
+        if func = @mir_module.get_function("#{current}##{method_suffix}")
+          return func
+        end
+        parent = @hir_module.class_parents[current]?
+        current = parent || ""
+      end
+      nil
     end
 
     private def hir_type_name(type_ref : HIR::TypeRef?) : String
