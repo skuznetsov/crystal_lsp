@@ -65,6 +65,9 @@ module CrystalV2
         @expr_state_epoch : Int32
         @expr_state_version : Array(Int32)
         @expr_state_value : Array(Int32)
+        @class_type_cache : Hash(ClassSymbol, ClassType)
+        @module_type_cache : Hash(ModuleSymbol, ModuleType)
+        @instance_type_cache : Hash(ClassSymbol, InstanceType)
 
         private struct MethodCandidatesKey
           getter receiver_id : UInt64
@@ -102,6 +105,9 @@ module CrystalV2
           @expr_state_epoch = 0
           @expr_state_version = Array(Int32).new(@program.arena.size, 0)
           @expr_state_value = Array(Int32).new(@program.arena.size, 0)
+          @class_type_cache = {} of ClassSymbol => ClassType
+          @module_type_cache = {} of ModuleSymbol => ModuleType
+          @instance_type_cache = {} of ClassSymbol => InstanceType
           @current_class = nil
           @current_module = nil
           @receiver_type_context = nil
@@ -881,11 +887,11 @@ module CrystalV2
           when ClassSymbol
             # Reference to class → ClassType
             # Class itself is a value (for calling class methods like Dog.new)
-            ClassType.new(symbol)
+            class_type_for(symbol)
           when ModuleSymbol
             # Reference to module → ModuleType
             # Module itself is a value (for calling module methods like Utils.helper)
-            ModuleType.new(symbol)
+            module_type_for(symbol)
           when EnumSymbol
             # Reference to enum → EnumType
             EnumType.new(symbol)
@@ -995,6 +1001,20 @@ module CrystalV2
             @expr_state_version[idx] = epoch
           end
           @expr_state_value[idx] = value
+        end
+
+        private def class_type_for(symbol : ClassSymbol) : ClassType
+          @class_type_cache[symbol] ||= ClassType.new(symbol)
+        end
+
+        private def module_type_for(symbol : ModuleSymbol) : ModuleType
+          @module_type_cache[symbol] ||= ModuleType.new(symbol)
+        end
+
+        private def instance_type_for(symbol : ClassSymbol, type_args : Array(Type)? = nil) : InstanceType
+          # Avoid caching generic instantiations until we have a stable key for type_args.
+          return InstanceType.new(symbol, type_args) if type_args && !type_args.empty?
+          @instance_type_cache[symbol] ||= InstanceType.new(symbol)
         end
 
         private def intern_name(slice : Slice(UInt8)) : String
@@ -1355,14 +1375,14 @@ module CrystalV2
             if symbol = resolve_scoped_symbol(name)
               case symbol
               when ClassSymbol
-                return @parse_type_cache[name] = InstanceType.new(symbol)
+                return @parse_type_cache[name] = instance_type_for(symbol)
               when ModuleSymbol
                 return @parse_type_cache[name] = PrimitiveType.new(name)
               end
             end
             # Try finding class by last segment anywhere in global table
             if symbol = find_class_symbol_by_suffix(name)
-              return @parse_type_cache[name] = InstanceType.new(symbol)
+              return @parse_type_cache[name] = instance_type_for(symbol)
             end
 
             base_name = name.includes?("::") ? name.split("::").last : name
@@ -2184,7 +2204,7 @@ module CrystalV2
           # self returns InstanceType of the current class
           # (Type will be set by infer_expression)
           if current_class = @current_class
-            instance_type = InstanceType.new(current_class)
+            instance_type = instance_type_for(current_class)
             instance_type
           else
             # self outside class context (shouldn't happen in valid code)
@@ -2709,9 +2729,9 @@ module CrystalV2
         private def type_from_symbol(symbol : Symbol) : Type?
           case symbol
           when ClassSymbol
-            ClassType.new(symbol)
+            class_type_for(symbol)
           when ModuleSymbol
-            ModuleType.new(symbol)
+            module_type_for(symbol)
           else
             nil
           end
@@ -2938,7 +2958,7 @@ module CrystalV2
           if receiver_type.is_a?(PrimitiveType) && receiver_type.name.includes?("::")
             if sym = resolve_scoped_symbol(receiver_type.name)
               if sym.is_a?(ClassSymbol)
-                receiver_type = InstanceType.new(sym)
+                receiver_type = instance_type_for(sym)
               end
             end
           end
@@ -2952,7 +2972,7 @@ module CrystalV2
           if method_name == "new" && receiver_type.is_a?(ClassType)
             # If ClassType has type_args (e.g., Box(Int32)), copy them to InstanceType
             debug("  Constructor call - returning InstanceType")
-            return InstanceType.new(receiver_type.symbol, receiver_type.type_args)
+            return instance_type_for(receiver_type.symbol, receiver_type.type_args)
           end
 
           # Phase 4B: Zero-argument method call
@@ -3176,12 +3196,12 @@ module CrystalV2
 
             # If ClassType already has type_args (explicit Box(Int32)), use them
             if receiver_type.type_args
-              return InstanceType.new(receiver_type.symbol, receiver_type.type_args)
+              return instance_type_for(receiver_type.symbol, receiver_type.type_args)
               # Otherwise try to infer type arguments from constructor arguments
             elsif type_args = infer_type_arguments(receiver_type.symbol, arg_types)
-              return InstanceType.new(receiver_type.symbol, type_args)
+              return instance_type_for(receiver_type.symbol, type_args)
             else
-              return InstanceType.new(receiver_type.symbol)
+              return instance_type_for(receiver_type.symbol)
             end
           end
 
@@ -4824,7 +4844,7 @@ module CrystalV2
                   # This is x.class - the object is the type
                   object_type = infer_expression(cond_node.object)
                   if object_type.is_a?(ClassType)
-                    return InstanceType.new(object_type.symbol)
+                    return instance_type_for(object_type.symbol)
                   end
                 end
               end
@@ -4852,7 +4872,7 @@ module CrystalV2
           if symbol = @global_table.try(&.lookup(full_name))
             case symbol
             when ClassSymbol
-              return InstanceType.new(symbol)
+              return instance_type_for(symbol)
             end
           end
 
@@ -4876,7 +4896,7 @@ module CrystalV2
             end
 
             if current.is_a?(ClassSymbol)
-              return InstanceType.new(current)
+              return instance_type_for(current)
             end
           end
 
