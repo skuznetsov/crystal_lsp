@@ -5648,6 +5648,57 @@ module CrystalV2
           last_token
         end
 
+        # Parse a constant name path and return a normalized slice (no whitespace).
+        # For A::B::C returns "A::B::C", for ::A returns "::A".
+        private def parse_constant_name_slice : Slice(UInt8)?
+          token = current_token
+          leading_colon = false
+
+          if token.kind == Token::Kind::ColonColon
+            leading_colon = true
+            advance
+            skip_trivia
+            token = current_token
+          end
+
+          unless token.kind == Token::Kind::Identifier
+            emit_unexpected(token)
+            return nil
+          end
+
+          segments = [] of Slice(UInt8)
+          segments << token.slice
+          advance
+
+          while current_token.kind == Token::Kind::ColonColon
+            advance
+            skip_trivia
+
+            token = current_token
+            unless token.kind == Token::Kind::Identifier
+              emit_unexpected(token)
+              return nil
+            end
+
+            segments << token.slice
+            advance
+          end
+
+          if segments.size == 1 && !leading_colon
+            return segments[0]
+          end
+
+          normalized = String.build do |io|
+            io << "::" if leading_colon
+            segments.each_with_index do |seg, idx|
+              io << "::" if idx > 0
+              io.write(seg)
+            end
+          end
+          @arena.retain_source(normalized)
+          normalized.to_slice
+        end
+
         # Parse a constant name path (A::B::C) and return all segments as tokens.
         # Returns array of tokens for each segment, or nil on error.
         # Used for creating nested module/class structures.
@@ -5706,19 +5757,17 @@ module CrystalV2
 
           # Parse optional superclass: < SuperClass or < self
           skip_trivia
-          super_name_token = nil
-          superclass_is_self = false
+          super_name_slice = nil
           if current_token.kind == Token::Kind::Less
             advance  # Skip <
             skip_trivia
             # Phase 130: Handle self as superclass (class Foo < self)
             if current_token.kind == Token::Kind::Self
-              superclass_is_self = true
-              super_name_token = current_token
+              super_name_slice = current_token.slice
               advance
             else
-              super_name_token = parse_constant_name_token
-              return PREFIX_ERROR unless super_name_token
+              super_name_slice = parse_constant_name_slice
+              return PREFIX_ERROR unless super_name_slice
             end
             skip_trivia
           end
@@ -5873,7 +5922,7 @@ module CrystalV2
             ClassNode.new(
               class_span,
               innermost_token.slice,
-              super_name_token.try(&.slice),
+              super_name_slice,
               body_ids_b.to_a,
               is_abstract,
               is_struct,
