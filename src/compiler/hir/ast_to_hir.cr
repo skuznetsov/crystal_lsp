@@ -7364,9 +7364,18 @@ module Crystal::HIR
     private def concrete_type_args?(type_args : Array(String)) : Bool
       # NOTE: unions like `String | Nil` are concrete and must be allowed here.
       unresolved_token_re = /(?:^|[^A-Za-z0-9_:])(K2|V2|K|V|T|U|L|W|self)(?:$|[^A-Za-z0-9_:])/
+      unresolved_param_names = {"K2", "V2", "K", "V", "T", "U", "L", "W", "self"}
       # Bare generic names without type params (like Array, Hash) are not concrete
       bare_generic_names = {"Array", "Hash", "Set", "Slice", "Pointer", "StaticArray", "Iterator", "Enumerable"}
       type_args.none? do |arg|
+        arg = arg.strip
+        if short = arg.split("::").last?
+          # Namespaced type params like Crystal::HIR::K should still be treated as unresolved.
+          short = short.gsub(/[^A-Za-z0-9_]/, "")
+          next true if unresolved_param_names.includes?(short)
+        end
+        # Path-like type args are never concrete (guard against require path leakage).
+        next true if arg.includes?("/")
         # typeof(...) in type positions is not fully resolved during bootstrap.
         next true if arg.includes?("typeof(")
         # `self` as a standalone type arg is unresolved
@@ -7407,11 +7416,14 @@ module Crystal::HIR
       mono_start = nil
       if ENV.has_key?("DEBUG_MONO")
         mono_start = Time.monotonic
-        STDERR.puts "[MONO] start #{specialized_name}"
+        STDERR.puts "[MONO] start #{specialized_name} args=#{type_args.join(",")}"
       end
 
       # Check arity matches
       if template.type_params.size != type_args.size
+        if ENV.has_key?("DEBUG_MONO")
+          STDERR.puts "[MONO] arity_mismatch base=#{base_name} name=#{specialized_name} args=#{type_args.join(",")}"
+        end
         raise "Generic #{base_name} expects #{template.type_params.size} type args, got #{type_args.size}"
       end
 
