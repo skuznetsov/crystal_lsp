@@ -618,6 +618,7 @@ module Crystal::HIR
     @current_typeof_local_names : Hash(String, String)?
     # Short name index for class/struct lookups (short -> full names).
     @short_type_index : Hash(String, Set(String))
+    @top_level_type_names : Set(String)
     # Track constant definitions and inferred types for constant resolution.
     @constant_defs : Set(String)
     @constant_types : Hash(String, TypeRef)
@@ -728,6 +729,7 @@ module Crystal::HIR
       @resolved_type_name_cache = {} of String => String
       @type_literal_class_cache = {} of String => String?
       @short_type_index = {} of String => Set(String)
+      @top_level_type_names = Set(String).new
       @current_typeof_local_names = nil
       @top_level_main_defined = false
       @block_captures = {} of BlockId => Array(CapturedVar)
@@ -758,6 +760,10 @@ module Crystal::HIR
 
     private def clear_pending_effect_annotations : Nil
       @pending_def_annotations.clear
+    end
+
+    def seed_top_level_type_names(names : Enumerable(String)) : Nil
+      names.each { |name| @top_level_type_names.add(name) }
     end
 
     private def effect_annotation_name(node : CrystalV2::Compiler::Frontend::AnnotationNode) : String?
@@ -10874,6 +10880,26 @@ module Crystal::HIR
       if cached = @resolved_type_name_cache[cache_key]?
         return cached
       end
+      if name.ends_with?("?")
+        base = name[0, name.size - 1]
+        resolved_base = resolve_type_name_in_context(base)
+        resolved = "#{resolved_base}?"
+        @resolved_type_name_cache[cache_key] = resolved
+        return resolved
+      end
+      if name.ends_with?("*")
+        base = name
+        star_count = 0
+        while base.ends_with?("*")
+          base = base[0...-1]
+          star_count += 1
+        end
+        base = base.strip
+        resolved_base = base.empty? ? base : resolve_type_name_in_context(base)
+        resolved = "#{resolved_base}#{("*" * star_count)}"
+        @resolved_type_name_cache[cache_key] = resolved
+        return resolved
+      end
       if name.starts_with?("::")
         resolved = name.size > 2 ? name[2..] : ""
         @resolved_type_name_cache[cache_key] = resolved
@@ -10961,6 +10987,16 @@ module Crystal::HIR
     # E.g., if @current_class is "CrystalV2::Compiler::Frontend::Span" and name is "Span",
     # returns "CrystalV2::Compiler::Frontend::Span"
     private def resolve_class_name_in_context(name : String) : String
+      if ENV["DEBUG_FILE_RESOLVE"]? && name == "File"
+        STDERR.puts "[DEBUG_FILE_RESOLVE] current=#{@current_class || ""} override=#{@current_namespace_override || ""} top_level=#{@top_level_type_names.includes?(name)}"
+      end
+      if primitive_self_type(name) || LIBC_TYPE_ALIASES.has_key?(name)
+        return name
+      end
+      if name == "Int" || name == "Float" || name == "Number" || name == "Atomic"
+        return name
+      end
+
       # If this is a generic type name, resolve the base in context and
       # reconstruct with the original type args.
       if info = split_generic_base_and_args(name)
@@ -11024,9 +11060,16 @@ module Crystal::HIR
       # If unresolved and inside a namespace, prefer a qualified name so forward references
       # (e.g., IO::EncodingOptions) don't collapse to a type param-like placeholder.
       if result == name && (current = @current_class) && name[0]?.try(&.uppercase?)
-        unless builtin_alias_target?(name)
-          parent_namespace = current.includes?("::") ? current.rpartition("::")[0] : ""
-          result = parent_namespace.empty? ? "#{current}::#{name}" : "#{parent_namespace}::#{name}"
+        unless builtin_alias_target?(name) || LIBC_TYPE_ALIASES.has_key?(name)
+          unless @top_level_type_names.includes?(name)
+            parent_namespace = nil
+            if current.includes?("::")
+              parent_namespace = current.rpartition("::")[0]
+            elsif @module_defs.has_key?(current)
+              parent_namespace = current
+            end
+            result = "#{parent_namespace}::#{name}" if parent_namespace
+          end
         end
       end
 
@@ -11057,6 +11100,9 @@ module Crystal::HIR
       end
 
       debug_hook_type_resolve(name, @current_class || "", result)
+      if ENV["DEBUG_FILE_RESOLVE"]? && name == "File"
+        STDERR.puts "[DEBUG_FILE_RESOLVE] result=#{result}"
+      end
       result
     end
 

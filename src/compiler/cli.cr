@@ -396,6 +396,14 @@ module CrystalV2
           end
         end
 
+        top_level_type_names = Set(String).new
+        class_nodes.each { |node, _| top_level_type_names.add(String.new(node.name)) }
+        module_nodes.each { |node, _| top_level_type_names.add(String.new(node.name)) }
+        enum_nodes.each { |node, _| top_level_type_names.add(String.new(node.name)) }
+        alias_nodes.each { |node, _| top_level_type_names.add(String.new(node.name)) }
+        lib_nodes.each { |node, _, _| top_level_type_names.add(String.new(node.name)) }
+        hir_converter.seed_top_level_type_names(top_level_type_names)
+
         # Pass 1: Register types
         if ENV.has_key?("DEBUG_NESTED_CLASS")
           STDERR.puts "[DEBUG_CLI] class_nodes: #{class_nodes.size}, module_nodes: #{module_nodes.size}"
