@@ -344,6 +344,12 @@ module CrystalV2
 
         link_libs = collect_link_libraries(all_arenas, options, out_io)
 
+        if ENV.has_key?("CRYSTAL_V2_STOP_AFTER_PARSE")
+          log(options, out_io, "  Stop after parse (CRYSTAL_V2_STOP_AFTER_PARSE)")
+          emit_timings(options, out_io, timings, total_start)
+          return 0
+        end
+
         # Step 2: Lower to HIR
         log(options, out_io, "\n[2/6] Lowering to HIR...")
         hir_start = Time.monotonic
@@ -522,6 +528,12 @@ module CrystalV2
           log(options, out_io, "  Wrote: #{hir_file}")
         end
 
+        if ENV.has_key?("CRYSTAL_V2_STOP_AFTER_HIR")
+          log(options, out_io, "  Stop after HIR (CRYSTAL_V2_STOP_AFTER_HIR)")
+          emit_timings(options, out_io, timings, total_start)
+          return 0
+        end
+
         # Step 3: Escape analysis
         log(options, out_io, "\n[3/6] Escape analysis...")
         escape_start = Time.monotonic
@@ -623,6 +635,12 @@ module CrystalV2
           mir_file = options.output + ".mir"
           File.write(mir_file, mir_module.to_s)
           log(options, out_io, "  Wrote: #{mir_file}")
+        end
+
+        if ENV.has_key?("CRYSTAL_V2_STOP_AFTER_MIR")
+          log(options, out_io, "  Stop after MIR (CRYSTAL_V2_STOP_AFTER_MIR)")
+          emit_timings(options, out_io, timings, total_start)
+          return 0
         end
 
         # Step 5: Generate LLVM IR
