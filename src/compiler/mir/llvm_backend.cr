@@ -954,6 +954,11 @@ module Crystal::MIR
           emit_raw "@#{actual_name} = global #{llvm_type} zeroinitializer\n"
         elsif llvm_type == "ptr"
           emit_raw "@#{actual_name} = global #{llvm_type} null\n"
+        elsif llvm_type == "float" || llvm_type == "double"
+          float_value = initial.to_f.to_s
+          float_value = "0.0" if float_value == "0"
+          float_value = "#{float_value}.0" if float_value.matches?(/^-?\d+$/)
+          emit_raw "@#{actual_name} = global #{llvm_type} #{float_value}\n"
         else
           emit_raw "@#{actual_name} = global #{llvm_type} #{initial}\n"
         end
@@ -970,6 +975,8 @@ module Crystal::MIR
           emit_raw "@#{name} = global #{llvm_type} null\n"
         elsif llvm_type.starts_with?("%") || llvm_type.starts_with?("{")
           emit_raw "@#{name} = global #{llvm_type} zeroinitializer\n"
+        elsif llvm_type == "float" || llvm_type == "double"
+          emit_raw "@#{name} = global #{llvm_type} 0.0\n"
         else
           emit_raw "@#{name} = global #{llvm_type} 0\n"
         end
