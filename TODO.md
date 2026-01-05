@@ -1051,6 +1051,10 @@ r2 = maybe(false)  # => nil
   - DoD: prelude build runs without segfault and prints correct result.
   - Update (2026-01-xx): after lowering stdlib `fun main` as C-ABI entrypoint, build now fails at link with 27 missing symbols (see `/tmp/fib_noputs.link.log`).
   - Update (2026-01-xx): resolve forward refs in nested namespaces to current scope; `Crystal__System__Entry_name` removed. Link now fails with 64 missing symbols (see `/tmp/fib_noputs.link.log`).
+- [ ] LLVM opt/llc type mismatch in full-prelude `fib.cr` build.
+  - Repro: `./bin/crystal_v2 build --release --no-llvm-metadata /tmp/fib.cr -o /tmp/fib`
+  - Error: `'%r20.fromslot.6' defined with type '%Pointer_Crystal__EventLoop__Polling__Arena__Entry...union' but expected 'ptr'` in `/tmp/fib.ll`.
+  - DoD: `fib.cr` reaches link stage (or better) without LLVM type mismatch.
 
 **Recent fixes (prelude bootstrap path):**
 - Normalize `flag?` macro arguments (strip leading `:`) + require cache v3; pthread requires now load.
@@ -1103,6 +1107,7 @@ r2 = maybe(false)  # => nil
 - Run `macro included` during include registration/lowering; register macros + `extend` class methods from included modules (fixes `SystemError`-style class methods) (2026-01-07).
 - Capture `initialize` params from included modules for `new` signature inference (2026-01-xx).
 - Prefer mangled def names during method resolution when a definition exists (avoid base fallback) (2026-01-xx).
+- Register generic class-method aliases for base owners and honor block-aware overload resolution (fixes `Deque.half_slices` missing symbols) (2026-01-xx).
 - Store callsite arg types by CallSignature (base+arity+block) to reduce `$arity`/`_splat` collisions (2026-01-xx).
 - Force class-method lowering for module `extend self` methods when called as `Module.method` (fixes `self.*` calls inside class methods) (2026-01-xx).
 - Capture callsite arg types by base+arity to survive `_splat`/`$arity` name shifts (2026-01-xx).
