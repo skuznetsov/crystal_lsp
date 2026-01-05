@@ -228,6 +228,74 @@ describe Crystal::MIR::LLVMIRGenerator do
       output.should contain("call void @__crystal_v2_slab_free(ptr %")
     end
 
+    it "emits ptr phi when a union phi has ptr incoming" do
+      mod = Crystal::MIR::Module.new("phi_union_ptr")
+
+      union_type = mod.type_registry.create_type(Crystal::MIR::TypeKind::Union, "PtrOrNil", 16, 8)
+      union_ref = Crystal::MIR::TypeRef.new(union_type.id)
+      mod.register_union(
+        union_ref,
+        Crystal::MIR::UnionDescriptor.new(
+          "PtrOrNil",
+          [
+            Crystal::MIR::UnionVariantDescriptor.new(
+              type_id: 0,
+              type_ref: Crystal::MIR::TypeRef::POINTER,
+              full_name: "Pointer",
+              size: 8,
+              alignment: 8,
+              field_offsets: nil
+            ),
+            Crystal::MIR::UnionVariantDescriptor.new(
+              type_id: 1,
+              type_ref: Crystal::MIR::TypeRef::NIL,
+              full_name: "Nil",
+              size: 0,
+              alignment: 1,
+              field_offsets: nil
+            ),
+          ],
+          16,
+          8
+        )
+      )
+
+      func = mod.create_function("phi_union_ptr", Crystal::MIR::TypeRef::VOID)
+      builder = Crystal::MIR::Builder.new(func)
+
+      entry = func.entry_block
+      then_block = func.create_block
+      else_block = func.create_block
+      merge_block = func.create_block
+
+      cond = builder.const_bool(true)
+      builder.branch(cond, then_block, else_block)
+
+      builder.current_block = then_block
+      ptr_val = builder.alloc(Crystal::MIR::MemoryStrategy::Stack, Crystal::MIR::TypeRef::INT32, 4_u64, 4_u32)
+      wrapped_ptr = builder.union_wrap(ptr_val, 0, union_ref)
+      builder.jump(merge_block)
+
+      builder.current_block = else_block
+      nil_val = builder.const_nil
+      wrapped_nil = builder.union_wrap(nil_val, 1, union_ref)
+      builder.jump(merge_block)
+
+      builder.current_block = merge_block
+      phi = builder.phi(union_ref)
+      phi.add_incoming(then_block, wrapped_ptr)
+      phi.add_incoming(else_block, wrapped_nil)
+      builder.ret
+
+      gen = Crystal::MIR::LLVMIRGenerator.new(mod)
+      gen.emit_type_metadata = false
+      output = gen.generate
+
+      phi_line = output.lines.find { |line| line.includes?("phi %PtrOrNil.union") }
+      phi_line.should_not be_nil
+      phi_line.not_nil!.should_not contain("zeroinitializer")
+    end
+
     it "generates RC increment and decrement" do
       mod = Crystal::MIR::Module.new("test")
       func = mod.create_function("rc_test", Crystal::MIR::TypeRef::VOID)

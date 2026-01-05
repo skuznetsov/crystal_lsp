@@ -493,6 +493,84 @@ describe Crystal::MIR::HIRToMIRLowering do
       merge_mir = mir_func.blocks.find { |b| b.instructions.any? { |i| i.is_a?(Crystal::MIR::Phi) } }
       merge_mir.should_not be_nil
     end
+
+    it "wraps non-union incoming values for union phi nodes" do
+      hir_mod = Crystal::HIR::Module.new("test")
+      union_desc = Crystal::HIR::TypeDescriptor.new(Crystal::HIR::TypeKind::Union, "PtrOrNil")
+      hir_union_ref = hir_mod.intern_type(union_desc)
+
+      hir_func = hir_mod.create_function("phi_union_ptr", hir_union_ref)
+      entry_block = hir_func.get_block(hir_func.entry_block)
+      then_block_id = hir_func.create_block(0_u32)
+      else_block_id = hir_func.create_block(0_u32)
+      merge_block_id = hir_func.create_block(0_u32)
+
+      cond = Crystal::HIR::Literal.new(hir_func.next_value_id, Crystal::HIR::TypeRef::BOOL, true)
+      entry_block.add(cond)
+      entry_block.terminator = Crystal::HIR::Branch.new(cond.id, then_block_id, else_block_id)
+
+      then_block = hir_func.get_block(then_block_id)
+      ptr_val = Crystal::HIR::Literal.new(hir_func.next_value_id, Crystal::HIR::TypeRef::POINTER, nil)
+      then_block.add(ptr_val)
+      then_block.terminator = Crystal::HIR::Jump.new(merge_block_id)
+
+      else_block = hir_func.get_block(else_block_id)
+      nil_val = Crystal::HIR::Literal.new(hir_func.next_value_id, Crystal::HIR::TypeRef::NIL, nil)
+      else_block.add(nil_val)
+      else_block.terminator = Crystal::HIR::Jump.new(merge_block_id)
+
+      merge_block = hir_func.get_block(merge_block_id)
+      phi = Crystal::HIR::Phi.new(hir_func.next_value_id, hir_union_ref)
+      phi.add_incoming(then_block_id, ptr_val.id)
+      phi.add_incoming(else_block_id, nil_val.id)
+      merge_block.add(phi)
+      merge_block.terminator = Crystal::HIR::Return.new(phi.id)
+
+      mir_union_ref = Crystal::MIR::TypeRef.new(hir_union_ref.id + 20_u32)
+      mir_union_desc = Crystal::MIR::UnionDescriptor.new(
+        "PtrOrNil",
+        [
+          Crystal::MIR::UnionVariantDescriptor.new(
+            type_id: 0,
+            type_ref: Crystal::MIR::TypeRef::POINTER,
+            full_name: "Pointer",
+            size: 8,
+            alignment: 8,
+            field_offsets: nil
+          ),
+          Crystal::MIR::UnionVariantDescriptor.new(
+            type_id: 1,
+            type_ref: Crystal::MIR::TypeRef::NIL,
+            full_name: "Nil",
+            size: 0,
+            alignment: 1,
+            field_offsets: nil
+          ),
+        ],
+        16,
+        8
+      )
+
+      lowering = Crystal::MIR::HIRToMIRLowering.new(hir_mod)
+      lowering.register_union_types({mir_union_ref => mir_union_desc})
+      mir_mod = lowering.lower
+
+      mir_func = mir_mod.functions.find { |f| f.name == "phi_union_ptr" }
+      mir_func.should_not be_nil
+      mir_func = mir_func.not_nil!
+
+      phi_inst = mir_func.blocks.flat_map(&.instructions).find { |i| i.is_a?(Crystal::MIR::Phi) }
+      phi_inst.should_not be_nil
+      phi_inst = phi_inst.not_nil!.as(Crystal::MIR::Phi)
+      phi_inst.type.should eq(mir_union_ref)
+
+      phi_inst.incoming.each do |(block_id, value_id)|
+        block = mir_func.get_block(block_id)
+        wrap = block.instructions.find { |i| i.is_a?(Crystal::MIR::UnionWrap) && i.id == value_id }
+        wrap.should_not be_nil
+        wrap.not_nil!.as(Crystal::MIR::UnionWrap).type.should eq(mir_union_ref)
+      end
+    end
   end
 
   # ═══════════════════════════════════════════════════════════════════════════

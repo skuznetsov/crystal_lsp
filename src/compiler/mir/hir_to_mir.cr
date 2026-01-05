@@ -297,13 +297,36 @@ module Crystal
 
     # Resolve phi incoming values after all blocks are lowered
     private def resolve_pending_phis
+      builder = @builder.not_nil!
+      original_block = builder.current_block
+
       @pending_phis.each do |(mir_phi, hir_phi)|
+        mir_phi_type = mir_phi.type
+        is_phi_union = is_union_type?(mir_phi_type)
+        union_descriptor = is_phi_union ? @mir_module.get_union_descriptor(mir_phi_type) : nil
+
         hir_phi.incoming.each do |(hir_block, hir_value)|
           mir_block = @block_map[hir_block]
           mir_value = get_value(hir_value)
+
+          if is_phi_union && union_descriptor
+            if hir_type = @hir_value_types[hir_value]?
+              incoming_mir_type = convert_type(hir_type)
+              if !is_union_type?(incoming_mir_type)
+                variant = union_descriptor.variants.find { |v| v.type_ref == incoming_mir_type }
+                if variant
+                  builder.current_block = mir_block
+                  mir_value = builder.union_wrap(mir_value, variant.type_id, mir_phi_type)
+                end
+              end
+            end
+          end
+
           mir_phi.add_incoming(mir_block, mir_value)
         end
       end
+
+      builder.current_block = original_block
     end
 
     private def order_blocks_for(hir_func : HIR::Function) : Array(HIR::Block)
@@ -1870,6 +1893,7 @@ module Crystal
       when HIR::TypeRef::STRING  then TypeRef::STRING
       when HIR::TypeRef::NIL     then TypeRef::NIL
       when HIR::TypeRef::SYMBOL  then TypeRef::SYMBOL
+      when HIR::TypeRef::POINTER then TypeRef::POINTER
       else
         # User-defined types: offset by primitive count
         TypeRef.new(hir_type.id + 20_u32)
