@@ -499,7 +499,7 @@ module CrystalV2
         end
 
         # Ensure top-level `fun main` is lowered as a real entrypoint (C ABI).
-        if fun_main = def_nodes.find { |(n, _)| n.receiver.try { |recv| String.new(recv) == HIR::AstToHir::FUN_DEF_RECEIVER } || false }
+        if fun_main = def_nodes.find { |(n, _)| n.receiver.try { |recv| String.new(recv) == HIR::AstToHir::FUN_DEF_RECEIVER } && String.new(n.name) == "main" }
           hir_converter.arena = fun_main[1]
           hir_converter.lower_def(fun_main[0])
         end

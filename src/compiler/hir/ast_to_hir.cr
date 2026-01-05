@@ -10299,8 +10299,12 @@ module Crystal::HIR
                     end
       @current_typeof_locals = old_typeof_locals
 
-      # Register with mangled name.
-      full_name = function_full_name_for_def(base_name, param_types, node.params, has_block)
+      # Register with mangled name, except for stdlib fun main (C-ABI entrypoint).
+      full_name = if fun_def?(node) && base_name == "main" && @current_class.nil?
+                    base_name
+                  else
+                    function_full_name_for_def(base_name, param_types, node.params, has_block)
+                  end
       register_function_type(full_name, return_type)
 
       # Also register with base name for fallback lookup
@@ -12440,6 +12444,10 @@ module Crystal::HIR
       end
 
       # Top-level functions support overloading, so use mangled names consistently.
+      # Exception: stdlib fun main is a C-ABI entrypoint and must stay unmangled.
+      if full_name_override.nil? && fun_def?(node) && base_name == "main" && @current_class.nil?
+        full_name_override = base_name
+      end
       full_name = full_name_override || function_full_name_for_def(base_name, param_types, node.params, has_block)
 
       if registered = @function_types[full_name]?
