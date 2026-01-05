@@ -284,6 +284,7 @@ module Crystal::HIR
       getter has_splat : Bool
       getter has_double_splat : Bool
       getter has_block : Bool
+      getter has_named_only : Bool
       getter typed_param_count : Int32
       getter type_param_names : Array(String)
       getter has_non_type_param_annotation : Bool
@@ -294,6 +295,7 @@ module Crystal::HIR
         @has_splat : Bool,
         @has_double_splat : Bool,
         @has_block : Bool,
+        @has_named_only : Bool,
         @typed_param_count : Int32,
         @type_param_names : Array(String),
         @has_non_type_param_annotation : Bool,
@@ -4981,6 +4983,13 @@ module Crystal::HIR
             if ENV.has_key?("DEBUG_MODULE_THREAD") && module_name.includes?("System::Thread")
               STDERR.puts "[REG_MODULE_METHOD] #{module_name}.#{method_name} -> #{full_name}"
             end
+            if ENV["DEBUG_BYTEFORMAT_REGISTER"]? && module_name.includes?("ByteFormat") && method_name == "decode"
+              file_path = if arena = @arena.as?(CrystalV2::Compiler::Frontend::VirtualArena)
+                            arena.file_for_id(expr_id)
+                          end
+              loc = "#{member.span.start_line}:#{member.span.start_column}"
+              STDERR.puts "[DEBUG_BYTEFORMAT_REGISTER] name=#{full_name} module=#{module_name} file=#{file_path || "unknown"} loc=#{loc}"
+            end
             register_function_type(full_name, return_type)
             @function_defs[full_name] = member
             @function_def_arenas[full_name] = @arena
@@ -9206,23 +9215,36 @@ module Crystal::HIR
       variants = split_union_type_name(desc.name)
       best_idx : Int32? = nil
       best_type : TypeRef? = nil
+      fallback_idx : Int32? = nil
+      fallback_type : TypeRef? = nil
 
       variants.each_with_index do |variant, idx|
         next unless variant.starts_with?("Pointer")
         variant_type = type_ref_for_name(variant)
+        elem_type = pointer_element_type(variant)
         if value_type
-          elem_type = pointer_element_type(variant)
           next if elem_type == TypeRef::VOID
           if elem_type == value_type
             best_idx = idx
             best_type = variant_type
             break
           end
+        else
+          if elem_type != TypeRef::VOID
+            if best_idx.nil?
+              best_idx = idx
+              best_type = variant_type
+            end
+          elsif fallback_idx.nil?
+            fallback_idx = idx
+            fallback_type = variant_type
+          end
         end
-        if best_idx.nil?
-          best_idx = idx
-          best_type = variant_type
-        end
+      end
+
+      if best_idx.nil? && fallback_idx
+        best_idx = fallback_idx
+        best_type = fallback_type
       end
 
       return nil unless best_idx && best_type
@@ -9241,13 +9263,21 @@ module Crystal::HIR
     # - "Int32#downto" + [] + has_block=true -> "Int32#downto$block"
     #
     # Note: Using $ instead of : because LLVM doesn't support : in identifiers.
-    private def mangle_function_name(base_name : String, param_types : Array(TypeRef), has_block : Bool = false) : String
+    private def mangle_function_name(
+      base_name : String,
+      param_types : Array(TypeRef),
+      has_block : Bool = false,
+      has_named_only : Bool = false
+    ) : String
       # Filter out VOID types (untyped parameters don't provide overload info)
       typed_params = param_types.reject { |t| t == TypeRef::VOID }
 
       suffix = typed_params.map { |t| type_name_for_mangling(t) }.join("_")
       if has_block
         suffix = suffix.empty? ? "block" : "#{suffix}_block"
+      end
+      if has_named_only
+        suffix = suffix.empty? ? "named" : "#{suffix}_named"
       end
 
       suffix.empty? ? base_name : "#{base_name}$#{suffix}"
@@ -9259,7 +9289,8 @@ module Crystal::HIR
       params : Array(CrystalV2::Compiler::Frontend::Parameter)?,
       has_block : Bool
     ) : String
-      full_name = mangle_function_name(base_name, param_types, has_block)
+      has_named_only = false
+      full_name = mangle_function_name(base_name, param_types, has_block, has_named_only)
       return full_name unless params
 
       param_count = 0
@@ -9267,12 +9298,17 @@ module Crystal::HIR
       has_double_splat = false
       has_untyped = param_types.any? { |t| t == TypeRef::VOID }
       params.each do |param|
+        if named_only_separator?(param)
+          has_named_only = true
+          next
+        end
         next if param.is_block || named_only_separator?(param)
         param_count += 1
         has_splat = true if param.is_splat
         has_double_splat = true if param.is_double_splat
       end
 
+      full_name = mangle_function_name(base_name, param_types, has_block, has_named_only)
       if has_double_splat
         full_name = full_name.includes?("$") ? "#{full_name}_double_splat" : "#{base_name}$double_splat"
       elsif has_splat
@@ -9589,6 +9625,7 @@ module Crystal::HIR
       has_splat = false
       has_double_splat = false
       has_block = false
+      has_named_only = false
       typed_param_count = 0
       type_param_names = [] of String
       has_non_type_param_annotation = false
@@ -9599,7 +9636,10 @@ module Crystal::HIR
             has_block = true
             next
           end
-          next if named_only_separator?(param)
+          if named_only_separator?(param)
+            has_named_only = true
+            next
+          end
           has_splat = true if param.is_splat
           has_double_splat = true if param.is_double_splat
           param_count += 1
@@ -9624,6 +9664,7 @@ module Crystal::HIR
         has_splat,
         has_double_splat,
         has_block,
+        has_named_only,
         typed_param_count,
         type_param_names,
         has_non_type_param_annotation
@@ -9678,10 +9719,19 @@ module Crystal::HIR
       best_param_count = Int32::MAX
       best_score = Int32::MIN
 
-      function_def_overloads(base_method_name).each do |name|
+      overload_keys = function_def_overloads(base_method_name)
+      prefer_non_named = overload_keys.any? do |name|
+        def_node = @function_defs[name]?
+        next false unless def_node
+        stats = function_param_stats(name, def_node)
+        !stats.has_named_only
+      end
+
+      overload_keys.each do |name|
         def_node = @function_defs[name]?
         next unless def_node
         stats = function_param_stats(name, def_node)
+        next if prefer_non_named && stats.has_named_only
         param_count = stats.param_count
         required = stats.required
         has_splat = stats.has_splat
@@ -18717,6 +18767,11 @@ module Crystal::HIR
       if ENV.has_key?("DEBUG_DEFERRED") && name.includes?("byte_range")
         STDERR.puts "[DEFERRED_FUNC] func_def=#{!func_def.nil?} name=#{name} target=#{target_name} lookup=#{lookup_branch || "none"}"
       end
+      if func_def && ENV["DEBUG_BYTEFORMAT_REGISTER"]? && name.includes?("ByteFormat") && name.includes?("decode")
+        arena_for_log = arena || resolve_arena_for_def(func_def, @arena)
+        loc = "#{func_def.span.start_line}:#{func_def.span.start_column}"
+        STDERR.puts "[DEBUG_BYTEFORMAT_LOWER] name=#{name} target=#{target_name} arena=#{arena_for_log.class} loc=#{loc} branch=#{lookup_branch || "none"}"
+      end
       return unless func_def
       is_lowering_target = @lowering_functions.includes?(target_name)
       if ENV.has_key?("DEBUG_DEFERRED") && name.includes?("byte_range")
@@ -21784,12 +21839,19 @@ module Crystal::HIR
       end
 
       overload_keys = function_def_overloads(func_name)
+      prefer_non_named = overload_keys.any? do |name|
+        def_node = @function_defs[name]?
+        next false unless def_node
+        stats = function_param_stats(name, def_node)
+        !stats.has_named_only
+      end
       prefer_splat = false
       if call_has_splat
         overload_keys.each do |name|
           def_node = @function_defs[name]?
           next unless def_node
           stats = function_param_stats(name, def_node)
+          next if prefer_non_named && stats.has_named_only
           if stats.has_splat
             prefer_splat = true
             break
@@ -21806,6 +21868,7 @@ module Crystal::HIR
         def_node = @function_defs[name]?
         next unless def_node
         stats = function_param_stats(name, def_node)
+        next if prefer_non_named && stats.has_named_only
 
         if has_block
           next unless stats.has_block
@@ -21833,6 +21896,7 @@ module Crystal::HIR
         def_node = @function_defs[name]?
         next unless def_node
         stats = function_param_stats(name, def_node)
+        next if prefer_non_named && stats.has_named_only
 
         if has_block
           next unless stats.has_block
@@ -24287,6 +24351,12 @@ module Crystal::HIR
       # Check if this is pointer indexing (ptr[i])
       object_type = ctx.type_of(object_id)
       type_desc = @module.get_type_descriptor(object_type)
+      if type_desc && type_desc.kind == TypeKind::Union
+        if unwrapped = unwrap_pointer_union(ctx, object_id, object_type)
+          object_id, object_type = unwrapped
+          type_desc = @module.get_type_descriptor(object_type)
+        end
+      end
       is_pointer_type = object_type == TypeRef::POINTER ||
                         (type_desc && type_desc.kind == TypeKind::Pointer) ||
                         (type_desc && type_desc.name.starts_with?("Pointer"))
@@ -24734,6 +24804,14 @@ module Crystal::HIR
 
       # Pointer address conversions for member access (no-arg calls).
       recv_type_desc = @module.get_type_descriptor(receiver_type)
+      if recv_type_desc && recv_type_desc.kind == TypeKind::Union
+        if member_name.in?("address", "to_u64", "to_i", "to_i64", "to_i32", "to_u32", "to_f64", "value")
+          if unwrapped = unwrap_pointer_union(ctx, object_id, receiver_type)
+            object_id, receiver_type = unwrapped
+            recv_type_desc = @module.get_type_descriptor(receiver_type)
+          end
+        end
+      end
       is_pointer_type = receiver_type == TypeRef::POINTER ||
                         (recv_type_desc && recv_type_desc.name.starts_with?("Pointer"))
       if is_pointer_type
@@ -26583,6 +26661,16 @@ module Crystal::HIR
 
       lookup_name = normalized_name
 
+      # Handle type literals early to avoid namespace prefixing on ".class"
+      if lookup_name.ends_with?(".class") || lookup_name.ends_with?(".metaclass")
+        if base_name = resolve_type_literal_class_name(lookup_name)
+          cache_key = type_cache_key(lookup_name)
+          result = type_ref_for_name(base_name)
+          store_type_cache(cache_key, result)
+          return result
+        end
+      end
+
       if BUILTIN_TYPE_NAMES.includes?(lookup_name)
         if builtin_ref = builtin_type_ref_for(lookup_name)
           cache_key = type_cache_key(lookup_name)
@@ -26614,14 +26702,15 @@ module Crystal::HIR
           return TypeRef::VOID if lookup_name.size <= 2
         end
       end
-      cache_key = type_cache_key(lookup_name)
       if lookup_name.ends_with?(".class") || lookup_name.ends_with?(".metaclass")
         if base_name = resolve_type_literal_class_name(lookup_name)
+          cache_key = type_cache_key(lookup_name)
           result = type_ref_for_name(base_name)
           store_type_cache(cache_key, result)
           return result
         end
       end
+      cache_key = type_cache_key(lookup_name)
 
       if cached = @type_cache[cache_key]?
         if info = split_generic_base_and_args(lookup_name)

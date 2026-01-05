@@ -1051,10 +1051,9 @@ r2 = maybe(false)  # => nil
   - DoD: prelude build runs without segfault and prints correct result.
   - Update (2026-01-xx): after lowering stdlib `fun main` as C-ABI entrypoint, build now fails at link with 27 missing symbols (see `/tmp/fib_noputs.link.log`).
   - Update (2026-01-xx): resolve forward refs in nested namespaces to current scope; `Crystal__System__Entry_name` removed. Link now fails with 64 missing symbols (see `/tmp/fib_noputs.link.log`).
-- [ ] LLVM opt/llc type mismatch in full-prelude `fib.cr` build.
-  - Repro: `./bin/crystal_v2 build --release --no-llvm-metadata /tmp/fib.cr -o /tmp/fib`
-  - Error: `'%r20.fromslot.6' defined with type '%Pointer_Crystal__EventLoop__Polling__Arena__Entry...union' but expected 'ptr'` in `/tmp/fib.ll`.
-  - DoD: `fib.cr` reaches link stage (or better) without LLVM type mismatch.
+- [x] LLVM opt/llc type mismatch in full-prelude `fib.cr` build.
+  - Fix: resolve `.class` type literals before context prefixing; ByteFormat `UInt32.class` no longer resolves to `IO::ByteFormat::LittleEndian::UInt32`.
+  - DoD: `./bin/crystal_v2 build --release --no-llvm-metadata /tmp/fib.cr -o /tmp/fib` now reaches link stage (missing symbols only).
 
 **Recent fixes (prelude bootstrap path):**
 - Normalize `flag?` macro arguments (strip leading `:`) + require cache v3; pthread requires now load.
