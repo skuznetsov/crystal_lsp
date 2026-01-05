@@ -573,6 +573,65 @@ describe Crystal::MIR::HIRToMIRLowering do
     end
   end
 
+  describe "union unwrap lowering" do
+    it "uses the descriptor variant type when unwrap type is still union" do
+      hir_mod = Crystal::HIR::Module.new("test")
+      union_desc = Crystal::HIR::TypeDescriptor.new(Crystal::HIR::TypeKind::Union, "PtrOrNil")
+      hir_union_ref = hir_mod.intern_type(union_desc)
+
+      hir_func = hir_mod.create_function("union_unwrap_ptr", hir_union_ref)
+      block = hir_func.get_block(hir_func.entry_block)
+
+      ptr_val = Crystal::HIR::Literal.new(hir_func.next_value_id, Crystal::HIR::TypeRef::POINTER, nil)
+      block.add(ptr_val)
+
+      wrap = Crystal::HIR::UnionWrap.new(hir_func.next_value_id, hir_union_ref, ptr_val.id, 0)
+      block.add(wrap)
+
+      unwrap = Crystal::HIR::UnionUnwrap.new(hir_func.next_value_id, hir_union_ref, wrap.id, 0)
+      block.add(unwrap)
+      block.terminator = Crystal::HIR::Return.new(unwrap.id)
+
+      mir_union_ref = Crystal::MIR::TypeRef.new(hir_union_ref.id + 20_u32)
+      mir_union_desc = Crystal::MIR::UnionDescriptor.new(
+        "PtrOrNil",
+        [
+          Crystal::MIR::UnionVariantDescriptor.new(
+            type_id: 0,
+            type_ref: Crystal::MIR::TypeRef::POINTER,
+            full_name: "Pointer",
+            size: 8,
+            alignment: 8,
+            field_offsets: nil
+          ),
+          Crystal::MIR::UnionVariantDescriptor.new(
+            type_id: 1,
+            type_ref: Crystal::MIR::TypeRef::NIL,
+            full_name: "Nil",
+            size: 0,
+            alignment: 1,
+            field_offsets: nil
+          ),
+        ],
+        16,
+        8
+      )
+
+      lowering = Crystal::MIR::HIRToMIRLowering.new(hir_mod)
+      lowering.register_union_types({mir_union_ref => mir_union_desc})
+      mir_mod = lowering.lower
+
+      mir_func = mir_mod.functions.find { |f| f.name == "union_unwrap_ptr" }
+      mir_func.should_not be_nil
+      mir_func = mir_func.not_nil!
+
+      unwrap_inst = mir_func.blocks.flat_map(&.instructions).find { |i| i.is_a?(Crystal::MIR::UnionUnwrap) }
+      unwrap_inst.should_not be_nil
+      unwrap_inst = unwrap_inst.not_nil!.as(Crystal::MIR::UnionUnwrap)
+      unwrap_inst.type.should eq(Crystal::MIR::TypeRef::POINTER)
+    end
+  end
+
   # ═══════════════════════════════════════════════════════════════════════════
   # LOWERING STATISTICS
   # ═══════════════════════════════════════════════════════════════════════════
