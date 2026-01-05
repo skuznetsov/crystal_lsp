@@ -3213,6 +3213,9 @@ module Crystal::HIR
           next
         end
         if arg_name == param_name && type_param_like?(arg_name)
+          mapped = @type_param_map[arg_name]?
+          next unless mapped
+          extra[param_name] = mapped
           next
         end
         extra[param_name] = arg_name
@@ -10214,6 +10217,14 @@ module Crystal::HIR
               arg_idx += 1
               next
             end
+            # Allow generic base match: Hash matches Hash(Int32, T), Array matches Array(T), etc.
+            if arg_desc && !param_resolved_name.empty?
+              param_base = param_resolved_name.split("(").first
+              if BUILTIN_GENERIC_BASES.includes?(param_base) && arg_desc.name.starts_with?("#{param_base}(")
+                arg_idx += 1
+                next
+              end
+            end
             # Check if arg type is a subclass of the param type (e.g., IO::FileDescriptor -> IO)
             if arg_desc && !param_resolved_name.empty?
               arg_class = resolve_type_alias_chain(arg_desc.name)
@@ -10286,6 +10297,12 @@ module Crystal::HIR
             else
               numeric_target = numeric_param_target_type(param_type_name, arg_type)
               score += 1 if numeric_target
+            end
+            if arg_desc = @module.get_type_descriptor(arg_type)
+              param_base = resolved_name.split("(").first
+              if BUILTIN_GENERIC_BASES.includes?(param_base) && arg_desc.name.starts_with?("#{param_base}(")
+                score += 1
+              end
             end
           end
         end
