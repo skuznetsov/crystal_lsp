@@ -26732,13 +26732,21 @@ module Crystal::HIR
       max_align = 4  # Minimum alignment for type_id
 
       variant_refs.each_with_index do |vref, idx|
+        # Convert HIR::TypeRef to MIR::TypeRef using proper ID mapping
+        mir_type_ref = hir_to_mir_type_ref(vref)
+        if mir_type_ref == mir_union_type_ref
+          # Guard against self-referential union variants (can happen with unresolved type params).
+          if ENV["DEBUG_UNION_TYPES"]?
+            STDERR.puts "[DEBUG_UNION_TYPES] self-variant #{normalized_name} -> Pointer"
+          end
+          vref = TypeRef::POINTER
+          mir_type_ref = MIR::TypeRef::POINTER
+        end
+
         vsize = type_size(vref)
         valign = type_alignment(vref)
         max_size = {max_size, vsize}.max
         max_align = {max_align, valign}.max
-
-        # Convert HIR::TypeRef to MIR::TypeRef using proper ID mapping
-        mir_type_ref = hir_to_mir_type_ref(vref)
 
         variants << MIR::UnionVariantDescriptor.new(
           type_id: idx,
