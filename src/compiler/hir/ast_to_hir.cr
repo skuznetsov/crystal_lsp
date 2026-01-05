@@ -16395,6 +16395,8 @@ module Crystal::HIR
 
       # Save locals state before branching
       pre_branch_locals = ctx.save_locals
+      truthy_targets = truthy_narrowing_targets(node.condition)
+      is_a_targets = is_a_narrowing_targets(node.condition)
 
       # Negate condition
       neg_cond = UnaryOperation.new(ctx.next_id, TypeRef::BOOL, UnaryOp::Not, cond_id)
@@ -16417,7 +16419,7 @@ module Crystal::HIR
 
       # Check if then branch flows to merge (not terminated by return/raise)
       then_block_data = ctx.get_block(ctx.current_block)
-      then_has_noreturn = then_block_data.instructions.any? { |inst| inst.is_a?(Raise) }
+      then_has_noreturn = then_block_data.instructions.any? { |inst| inst.is_a?(Raise) || inst.is_a?(Return) }
       then_flows_to_merge = then_block_data.terminator.is_a?(Unreachable) && !then_has_noreturn
       if then_flows_to_merge
         ctx.terminate(Jump.new(merge_block))
@@ -16426,6 +16428,9 @@ module Crystal::HIR
       # Else branch (if any)
       ctx.current_block = else_block
       ctx.restore_locals(pre_branch_locals)
+      ctx.push_scope(ScopeKind::Block)
+      apply_truthy_narrowing(ctx, truthy_targets)
+      apply_is_a_narrowing(ctx, is_a_targets)
       else_value = if else_branch = node.else_branch
                      lower_body(ctx, else_branch)
                    else
@@ -16435,10 +16440,11 @@ module Crystal::HIR
                    end
       else_exit = ctx.current_block
       else_locals = ctx.save_locals
+      ctx.pop_scope
 
       # Check if else branch flows to merge
       else_block_data = ctx.get_block(ctx.current_block)
-      else_has_noreturn = else_block_data.instructions.any? { |inst| inst.is_a?(Raise) }
+      else_has_noreturn = else_block_data.instructions.any? { |inst| inst.is_a?(Raise) || inst.is_a?(Return) }
       else_flows_to_merge = else_block_data.terminator.is_a?(Unreachable) && !else_has_noreturn
       if else_flows_to_merge
         ctx.terminate(Jump.new(merge_block))

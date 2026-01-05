@@ -1143,6 +1143,7 @@ r2 = maybe(false)  # => nil
 - TypeInferenceEngine interns name slices to canonical Strings (reduces duplicate String allocations across nodes) (2026-01-xx).
 - Frontend::StringPool gains String interning (`intern_string`) and Program carries string_pool (shared canonical Strings per parse) (2026-01-xx).
 - Deduplicate callsite arg-type recording by base+arity to reduce Hash churn during HIR lowering (2026-01-xx).
+- HIR `unless` applies truthy/is_a narrowing to else branch and treats `Return` as no-flow (fixes guard-clause nilable unwraps like `Arena#at?`) (2026-01-xx).
 
 ### Holistic risk scan (2026-01-xx)
 
