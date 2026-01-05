@@ -1379,6 +1379,9 @@ The return_type=16 (NIL) for `to_s` methods is incorrect - should be String type
 - **Result**: `String#to_s` is registered; union `String | Nil#to_s` resolves to `String#to_s`; `Nil#empty?`/`Nil#bytesize`/`Nil#check_no_null_byte` no longer appear in `/tmp/bootstrap_array_full.hir`.
 - **Fix applied**: avoid refining VOID args to Float64 when untyped overloads exist; prefer untyped overloads for VOID arg sets. `Math.min/max` now lower to integer paths and `llc` no longer errors on `Slice_UInt8_____Int32_Int32` (2026-01-02).
 - **Fix applied**: inline `try` for union receivers (nil-check + block inlining) to avoid generating union `try` symbols; `*_try` entries removed from missing list (2026-01-xx).
+- **Fix applied**: preserve enum value tracking across nested lowering (push/pop) so callsite enum hints survive; `Unicode.check_downcase_turkic` now lowers to enum predicate compare (no `Int32#turkic?` in HIR).
+- **Fix applied**: propagate enum types through @param auto-assign + ivar/cvar loads; `Path#windows?` and enum predicates no longer emit `Int32#windows?` in HIR.
+- **Fix applied**: inline `nil?` for member access on non-union receivers; removes `Int32#nil?` / `Nil#nil?` call sites in HIR.
 
 #### Issue 6: ExprId -1 in inline_loop_vars_union (union keyword) - FIXED (2026-01-xx)
 - **Symptom**: self-host compile crashed with `ExprId out of bounds: -1` while lowering `AstToHir#inline_loop_vars_union`.

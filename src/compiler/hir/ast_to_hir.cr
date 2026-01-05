@@ -303,7 +303,7 @@ module Crystal::HIR
       end
     end
 
-    private record CallsiteArgs, types : Array(TypeRef), literals : Array(Bool)?
+    private record CallsiteArgs, types : Array(TypeRef), literals : Array(Bool)?, enum_names : Array(String?)?
 
     private class InitParamsCapture
       property params : Array({String, TypeRef})
@@ -463,12 +463,10 @@ module Crystal::HIR
     @lowered_functions : Set(String)
     @lowering_functions : Set(String)
     # Call-site argument types for lazily lowered functions (mangled name -> arg types).
-    @pending_arg_types : Hash(String, Array(TypeRef))
+    @pending_arg_types : Hash(String, CallsiteArgs)
     @pending_arg_types_by_arity : Hash(String, Hash(Int32, Array(CallsiteArgs)))
     @pending_arg_types_seen_by_arity : Hash(String, Hash(Int32, Set(String)))
     @pending_arg_types_by_signature : Hash(CallSignature, Array(CallsiteArgs))
-    # Call-site type-literal flags for lazily lowered functions (mangled name -> arg literal flags).
-    @pending_arg_type_literals : Hash(String, Array(Bool))
     # Call-site type parameter bindings for lazily lowered functions (mangled name -> map).
     @pending_type_param_maps : Hash(String, Hash(String, String))
     # Captured type parameter bindings for module methods copied into concrete classes.
@@ -694,11 +692,10 @@ module Crystal::HIR
       @yield_return_checked = Set(String).new
       @lowered_functions = Set(String).new
       @lowering_functions = Set(String).new
-      @pending_arg_types = {} of String => Array(TypeRef)
+      @pending_arg_types = {} of String => CallsiteArgs
       @pending_arg_types_by_arity = {} of String => Hash(Int32, Array(CallsiteArgs))
       @pending_arg_types_seen_by_arity = {} of String => Hash(Int32, Set(String))
       @pending_arg_types_by_signature = {} of CallSignature => Array(CallsiteArgs)
-      @pending_arg_type_literals = {} of String => Array(Bool)
       @pending_type_param_maps = {} of String => Hash(String, String)
       @function_type_param_maps = {} of String => Hash(String, String)
       @function_namespace_overrides = {} of String => String
@@ -1123,6 +1120,9 @@ module Crystal::HIR
     @enum_base_types : Hash(String, TypeRef)?
     # Map enum value literals to their enum type names (for method resolution).
     @enum_value_types : Hash(ValueId, String)?
+    # Map enum ivar/class var names to their enum type names.
+    @enum_ivar_types : Hash(String, Hash(String, String))?
+    @enum_cvar_types : Hash(String, Hash(String, String))?
 
     private def enum_base_type_for_node(node : CrystalV2::Compiler::Frontend::EnumNode) : TypeRef
       if base = node.base_type
@@ -3531,7 +3531,8 @@ module Crystal::HIR
     private def capture_initialize_params(
       params : Array(CrystalV2::Compiler::Frontend::Parameter),
       ivars : Array(IVarInfo),
-      offset_ptr : Pointer(Int32)
+      offset_ptr : Pointer(Int32),
+      owner_name : String? = nil
     ) : Array({String, TypeRef})
       init_params = [] of {String, TypeRef}
       params.each do |param|
@@ -3550,6 +3551,19 @@ module Crystal::HIR
           unless ivars.any? { |iv| iv.name == ivar_name }
             ivars << IVarInfo.new(ivar_name, param_type, offset_ptr.value)
             offset_ptr.value += type_size(param_type)
+          end
+          if owner_name && (ta = param.type_annotation)
+            type_name = String.new(ta)
+            resolved = resolve_type_alias_chain(resolve_type_name_in_context(type_name))
+            if enum_name = resolve_enum_name(resolved)
+              enum_map = @enum_ivar_types ||= {} of String => Hash(String, String)
+              class_map = enum_map[owner_name]? || begin
+                new_map = {} of String => String
+                enum_map[owner_name] = new_map
+                new_map
+              end
+              class_map[ivar_name] = enum_name
+            end
           end
           init_params << {param_name, param_type}
         else
@@ -3758,7 +3772,7 @@ module Crystal::HIR
                   if method_name == "initialize"
                     if init_capture && init_capture.source != :class
                       if params = member.params
-                        new_params = capture_initialize_params(params, ivars, pointerof(offset))
+                        new_params = capture_initialize_params(params, ivars, pointerof(offset), class_name)
                         init_capture.params.clear
                         init_capture.params.concat(new_params)
                         init_capture.source = :include
@@ -6444,7 +6458,33 @@ module Crystal::HIR
               next unless is_class_method
               STDERR.puts "      [#{module_name}] Method #{idx}: #{method_name}" if ENV["HIR_DEBUG"]?
               STDERR.flush if ENV["HIR_DEBUG"]?
-              lower_module_method(module_name, member)
+              base_name = "#{module_name}.#{method_name}"
+              param_types = [] of TypeRef
+              has_block = false
+              if params = member.params
+                params.each do |param|
+                  next if named_only_separator?(param)
+                  if param.is_block
+                    has_block = true
+                    next
+                  end
+                  param_type = if ta = param.type_annotation
+                                 type_ref_for_name(String.new(ta))
+                               elsif param.is_double_splat
+                                 type_ref_for_name("NamedTuple")
+                               else
+                                 TypeRef::VOID
+                               end
+                  param_types << param_type
+                end
+              end
+              full_name = function_full_name_for_def(base_name, param_types, member.params, has_block)
+              next if @module.has_function?(full_name)
+              callsite_args = pending_callsite_args_for_def(member, base_name, full_name)
+              call_arg_types = callsite_args ? callsite_args.types : nil
+              call_arg_literals = callsite_args ? callsite_args.literals : nil
+              call_arg_enum_names = callsite_args ? callsite_args.enum_names : nil
+              lower_module_method(module_name, member, call_arg_types, call_arg_literals, call_arg_enum_names)
             when CrystalV2::Compiler::Frontend::GetterNode
               next unless member.is_class?
               member.specs.each do |spec|
@@ -6506,7 +6546,35 @@ module Crystal::HIR
                           else
                             false
                           end
-        lower_module_method(module_name, member) if is_class_method
+        if is_class_method
+          method_name = String.new(member.name)
+          base_name = "#{module_name}.#{method_name}"
+          param_types = [] of TypeRef
+          has_block = false
+          if params = member.params
+            params.each do |param|
+              next if named_only_separator?(param)
+              if param.is_block
+                has_block = true
+                next
+              end
+              param_type = if ta = param.type_annotation
+                             type_ref_for_name(String.new(ta))
+                           elsif param.is_double_splat
+                             type_ref_for_name("NamedTuple")
+                           else
+                             TypeRef::VOID
+                           end
+              param_types << param_type
+            end
+          end
+          full_name = function_full_name_for_def(base_name, param_types, member.params, has_block)
+          callsite_args = pending_callsite_args_for_def(member, base_name, full_name)
+          call_arg_types = callsite_args ? callsite_args.types : nil
+          call_arg_literals = callsite_args ? callsite_args.literals : nil
+          call_arg_enum_names = callsite_args ? callsite_args.enum_names : nil
+          lower_module_method(module_name, member, call_arg_types, call_arg_literals, call_arg_enum_names)
+        end
       when CrystalV2::Compiler::Frontend::GetterNode
         return unless member.is_class?
         member.specs.each do |spec|
@@ -6573,12 +6641,12 @@ module Crystal::HIR
       node : CrystalV2::Compiler::Frontend::DefNode,
       call_arg_types : Array(TypeRef)? = nil,
       call_arg_literals : Array(Bool)? = nil,
+      call_arg_enum_names : Array(String?)? = nil,
       full_name_override : String? = nil
     )
-      # CRITICAL: Clear enum value tracking at start of each function.
-      # ValueIds are local to each function's LoweringContext, so we must not carry over
-      # mappings from previous functions.
-      @enum_value_types.try(&.clear)
+      # Enum value tracking is per-function; preserve outer context.
+      old_enum_value_types = @enum_value_types
+      @enum_value_types = nil
 
       method_name = String.new(node.name)
       base_name = "#{module_name}.#{method_name}"
@@ -6609,13 +6677,13 @@ module Crystal::HIR
       @current_typeof_local_names = {} of String => String
       call_types = call_arg_types || [] of TypeRef
       call_literal_flags = call_arg_literals || [] of Bool
+      call_enum_names = call_arg_enum_names || [] of String?
       if DebugHooks::ENABLED && base_name.ends_with?("#read_bytes")
         debug_hook(
           "method.callsite_literals",
           "name=#{base_name} types=#{call_types.map(&.id).join(",")} literals=#{call_literal_flags.join(",")}"
         )
       end
-      common_numeric = common_numeric_type(call_types)
       call_index = 0
       splat_param_info_index : Int32? = nil
       splat_param_types_index : Int32? = nil
@@ -6636,7 +6704,7 @@ module Crystal::HIR
                        end
           if param_type == TypeRef::VOID && !param.is_block && !param.is_splat && !param.is_double_splat
             if call_index < call_types.size
-              inferred = common_numeric || call_types[call_index]
+              inferred = call_types[call_index]
               param_type = inferred if inferred != TypeRef::VOID
             end
           end
@@ -6645,7 +6713,8 @@ module Crystal::HIR
           end
           param_type_map[param_name] = param_type
           param_infos << {param_name, param_type}
-          param_type_names << type_ann_str
+          enum_name = call_index < call_enum_names.size ? call_enum_names[call_index] : nil
+          param_type_names << (type_ann_str || enum_name)
           if ta = param.type_annotation
             update_typeof_local_name(param_name, String.new(ta))
           end
@@ -6756,6 +6825,8 @@ module Crystal::HIR
       if block.terminator.is_a?(Unreachable) && !block_has_raise
         block.terminator = Return.new(last_value)
       end
+
+      @enum_value_types = old_enum_value_types
     end
 
     # Register a class type and its methods (pass 1)
@@ -7195,7 +7266,7 @@ module Crystal::HIR
             # Note: Only capture from FIRST initialize (for multiple overloads, each gets its own mangled name)
             if method_name == "initialize" && init_params.empty?
               if params = member.params
-                new_params = capture_initialize_params(params, ivars, pointerof(offset))
+                new_params = capture_initialize_params(params, ivars, pointerof(offset), class_name)
                 init_params.clear
                 init_params.concat(new_params)
                 init_capture.source = :class
@@ -7821,7 +7892,8 @@ module Crystal::HIR
               callsite_args = pending_callsite_args_for_def(member, base_name, full_name)
               call_arg_types = callsite_args ? callsite_args.types : nil
               call_arg_literals = callsite_args ? callsite_args.literals : nil
-              lower_method(class_name, class_info, member, call_arg_types, call_arg_literals)
+              call_arg_enum_names = callsite_args ? callsite_args.enum_names : nil
+              lower_method(class_name, class_info, member, call_arg_types, call_arg_literals, call_arg_enum_names)
               add_defined_instance_methods_from_expr(class_name, defined_full_names, expr_id)
             when CrystalV2::Compiler::Frontend::GetterNode
               # Generate synthetic getter methods
@@ -8365,14 +8437,10 @@ module Crystal::HIR
       node : CrystalV2::Compiler::Frontend::DefNode,
       call_arg_types : Array(TypeRef)? = nil,
       call_arg_literals : Array(Bool)? = nil,
+      call_arg_enum_names : Array(String?)? = nil,
       full_name_override : String? = nil,
       force_class_method : Bool = false
     )
-      # CRITICAL: Clear enum value tracking at start of each function.
-      # ValueIds are local to each function's LoweringContext, so we must not carry over
-      # mappings from previous functions.
-      @enum_value_types.try(&.clear)
-
       method_name = String.new(node.name)
       if ENV.has_key?("DEBUG_LOWER_BYTE") && (method_name == "byte_begin" || method_name == "byte_range")
         STDERR.puts "[LOWER_METHOD] START class=#{class_name} method=#{method_name} override=#{full_name_override || "nil"} arena=#{@arena.class}:#{@arena.size} modules=#{@class_included_modules[class_name]?.try(&.to_a.join(",")) || "nil"}"
@@ -8420,6 +8488,10 @@ module Crystal::HIR
         return if node.body.nil?
       end
 
+      # Enum value tracking is per-function; preserve outer context.
+      old_enum_value_types = @enum_value_types
+      @enum_value_types = nil
+
       # Track current method for super calls
       old_class = @current_class
       old_method = @current_method
@@ -8441,13 +8513,13 @@ module Crystal::HIR
       @current_typeof_local_names = {} of String => String
       call_types = call_arg_types || [] of TypeRef
       call_literal_flags = call_arg_literals || [] of Bool
+      call_enum_names = call_arg_enum_names || [] of String?
       if DebugHooks::ENABLED && base_name.ends_with?("#read_bytes")
         debug_hook(
           "method.callsite_literals",
           "name=#{base_name} types=#{call_types.map(&.id).join(",")} literals=#{call_literal_flags.join(",")}"
         )
       end
-      common_numeric = common_numeric_type(call_types)
       call_index = 0
       splat_param_info_index : Int32? = nil
       splat_param_types_index : Int32? = nil
@@ -8468,7 +8540,7 @@ module Crystal::HIR
                        end
           if param_type == TypeRef::VOID && !param.is_block && !param.is_splat && !param.is_double_splat
             if call_index < call_types.size
-              inferred = common_numeric || call_types[call_index]
+              inferred = call_types[call_index]
               param_type = inferred if inferred != TypeRef::VOID
             end
           end
@@ -8489,7 +8561,8 @@ module Crystal::HIR
                           call_index < call_literal_flags.size && call_literal_flags[call_index]
           param_type_map[param_name] = param_type
           param_infos << {param_name, param_type, param.is_instance_var}
-          param_type_names << type_ann_str
+          enum_name = call_index < call_enum_names.size ? call_enum_names[call_index] : nil
+          param_type_names << (type_ann_str || enum_name)
           if ta = param.type_annotation
             update_typeof_local_name(param_name, String.new(ta))
           end
@@ -8636,6 +8709,15 @@ module Crystal::HIR
       auto_assign_params.each do |(ivar_name, param_id, offset)|
         self_id = emit_self(ctx)
         param_type = ctx.type_of(param_id)
+        if enum_name = @enum_value_types.try(&.[param_id]?)
+          enum_map = @enum_ivar_types ||= {} of String => Hash(String, String)
+          class_map = enum_map[class_name]? || begin
+            new_map = {} of String => String
+            enum_map[class_name] = new_map
+            new_map
+          end
+          class_map[ivar_name] = enum_name
+        end
         field_set = FieldSet.new(ctx.next_id, TypeRef::VOID, self_id, ivar_name, param_id, offset)
         ctx.emit(field_set)
       end
@@ -8752,6 +8834,8 @@ module Crystal::HIR
 
       @current_typeof_locals = old_typeof_locals
       @current_typeof_local_names = old_typeof_local_names
+
+      @enum_value_types = old_enum_value_types
 
       # Restore previous method context
       @current_class = old_class
@@ -12575,8 +12659,12 @@ module Crystal::HIR
       node : CrystalV2::Compiler::Frontend::DefNode,
       call_arg_types : Array(TypeRef)? = nil,
       call_arg_literals : Array(Bool)? = nil,
+      call_arg_enum_names : Array(String?)? = nil,
       full_name_override : String? = nil
     ) : Function
+      # Enum value tracking is per-function; preserve outer context.
+      old_enum_value_types = @enum_value_types
+      @enum_value_types = nil
       base_name = String.new(node.name)
       if ENV.has_key?("DEBUG_STRING_METHOD_LOWER") && (base_name == "[]" || base_name == "char_index_to_byte_index")
         STDERR.puts "[DEBUG_LOWER_DEF] name=#{base_name} override=#{full_name_override || "(none)"} current_class=#{@current_class || "(none)"}"
@@ -12599,7 +12687,7 @@ module Crystal::HIR
       @current_typeof_local_names = {} of String => String
       call_types = call_arg_types || [] of TypeRef
       call_literal_flags = call_arg_literals || [] of Bool
-      common_numeric = common_numeric_type(call_types)
+      call_enum_names = call_arg_enum_names || [] of String?
       call_index = 0
       splat_param_info_index : Int32? = nil
       splat_param_types_index : Int32? = nil
@@ -12618,7 +12706,7 @@ module Crystal::HIR
                        end
           if param_type == TypeRef::VOID && !param.is_block && !param.is_splat && !param.is_double_splat
             if call_index < call_types.size
-              inferred = common_numeric || call_types[call_index]
+              inferred = call_types[call_index]
               param_type = inferred if inferred != TypeRef::VOID
             end
           end
@@ -12629,7 +12717,8 @@ module Crystal::HIR
           param_type_map[param_name] = param_type
           param_infos << {param_name, param_type}
           # Track type annotation name for enum detection
-          param_type_names << (param.type_annotation ? String.new(param.type_annotation.not_nil!) : nil)
+          enum_name = call_index < call_enum_names.size ? call_enum_names[call_index] : nil
+          param_type_names << (param.type_annotation ? String.new(param.type_annotation.not_nil!) : enum_name)
           if ta = param.type_annotation
             update_typeof_local_name(param_name, String.new(ta))
           end
@@ -12714,6 +12803,7 @@ module Crystal::HIR
 
       # Idempotency: avoid lowering the same function twice (can happen with conditional defs).
       if existing = @module.function_by_name(full_name)
+        @enum_value_types = old_enum_value_types
         return existing
       end
 
@@ -12790,6 +12880,8 @@ module Crystal::HIR
 
       @current_typeof_locals = old_typeof_locals
       @current_typeof_local_names = old_typeof_local_names
+
+      @enum_value_types = old_enum_value_types
 
       func
     end
@@ -14934,7 +15026,8 @@ module Crystal::HIR
       # Get the type and offset of the instance variable from current class
       ivar_type = TypeRef::VOID
       ivar_offset = 0
-      if class_name = @current_class
+      class_name = @current_class
+      if class_name
         if class_info = @class_info[class_name]?
           class_info.ivars.each do |ivar|
             if ivar.name == name
@@ -14989,6 +15082,11 @@ module Crystal::HIR
       field_get = FieldGet.new(ctx.next_id, ivar_type, self_id, name, ivar_offset)
       ctx.emit(field_get)
       ctx.register_type(field_get.id, ivar_type)  # Register type for is_a?/case checks
+      if class_name
+        if enum_name = @enum_ivar_types.try(&.[class_name]?).try(&.[name]?)
+          (@enum_value_types ||= {} of ValueId => String)[field_get.id] = enum_name
+        end
+      end
       field_get.id
     end
 
@@ -15001,6 +15099,9 @@ module Crystal::HIR
       class_var_get = ClassVarGet.new(ctx.next_id, cvar_type, class_name, name)
       ctx.emit(class_var_get)
       ctx.register_type(class_var_get.id, cvar_type)
+      if enum_name = @enum_cvar_types.try(&.[class_name]?).try(&.[name]?)
+        (@enum_value_types ||= {} of ValueId => String)[class_var_get.id] = enum_name
+      end
       class_var_get.id
     end
 
@@ -17796,11 +17897,16 @@ module Crystal::HIR
       name : String,
       arg_types : Array(TypeRef),
       arg_literals : Array(Bool)? = nil,
+      enum_names : Array(String?)? = nil,
       has_block : Bool = false
     ) : Nil
       return if name.empty?
-      @pending_arg_types[name] = arg_types.dup
-      @pending_arg_type_literals[name] = arg_literals.dup if arg_literals
+      callsite = CallsiteArgs.new(
+        arg_types.dup,
+        arg_literals ? arg_literals.dup : nil,
+        enum_names ? enum_names.dup : nil
+      )
+      @pending_arg_types[name] = callsite
       base_key = base_callsite_key(name)
       return if base_key.empty?
       literal_key = if arg_literals
@@ -17826,7 +17932,6 @@ module Crystal::HIR
         @pending_arg_types_by_arity[base_key] = new_map
         new_map
       end
-      callsite = CallsiteArgs.new(arg_types.dup, arg_literals ? arg_literals.dup : nil)
       bucket = by_arity[arg_types.size]? || [] of CallsiteArgs
       bucket << callsite
       by_arity[arg_types.size] = bucket
@@ -17872,13 +17977,11 @@ module Crystal::HIR
 
       candidates.uniq!
       candidates.each do |key|
-        if types = @pending_arg_types[key]?
-          literals = @pending_arg_type_literals[key]?
+        if callsite = @pending_arg_types[key]?
           @pending_arg_types.delete(key)
-          @pending_arg_type_literals.delete(key)
           base = base_callsite_key(key)
-          remove_callsite_from_pending_maps(base, types, literals)
-          return CallsiteArgs.new(types, literals)
+          remove_callsite_from_pending_maps(base, callsite.types, callsite.literals)
+          return callsite
         end
       end
 
@@ -18439,7 +18542,7 @@ module Crystal::HIR
                                      end
               if expected_param_count == 0
                 if callsite = @pending_arg_types[name]? || @pending_arg_types[target_name]?
-                  expected_param_count = callsite.size
+                  expected_param_count = callsite.types.size
                 end
               end
               included.each do |module_name|
@@ -18819,6 +18922,7 @@ module Crystal::HIR
       end
       call_arg_types = callsite_args ? callsite_args.types : nil
       call_arg_literals = callsite_args ? callsite_args.literals : nil
+      call_arg_enum_names = callsite_args ? callsite_args.enum_names : nil
 
       extra_type_params : Hash(String, String)? = nil
       resolved_owner : String? = nil
@@ -18965,7 +19069,7 @@ module Crystal::HIR
               merged_params = extra_type_params ? extra_params.merge(extra_type_params) : extra_params
               with_type_param_map(merged_params) do
                 with_namespace_override_or_clear(namespace_override) do
-                  lower_method(owner, class_info, func_def, call_arg_types, call_arg_literals, override, force_class_method: force_class_method)
+                  lower_method(owner, class_info, func_def, call_arg_types, call_arg_literals, call_arg_enum_names, override, force_class_method: force_class_method)
                 end
               end
               @current_class = old_class
@@ -18974,7 +19078,7 @@ module Crystal::HIR
                 old_class = @current_class
                 @current_class = owner
                 dummy_info = ClassInfo.new(owner, TypeRef::INT32, [] of IVarInfo, [] of ClassVarInfo, 0, false, nil)
-                lower_method(owner, dummy_info, func_def, call_arg_types, call_arg_literals, name, force_class_method: force_class_method)
+                lower_method(owner, dummy_info, func_def, call_arg_types, call_arg_literals, call_arg_enum_names, name, force_class_method: force_class_method)
                 @current_class = old_class
               elsif target_name.includes?("from_chars")
                 STDERR.puts "[LOWERING] No class_info for #{owner}"
@@ -19011,12 +19115,12 @@ module Crystal::HIR
               if extra_type_params
                 with_type_param_map(extra_type_params) do
                   with_namespace_override_or_clear(namespace_override) do
-                    lower_method(owner, class_info, func_def, call_arg_types, call_arg_literals, target_for_lower, force_class_method: force_class_method)
+                    lower_method(owner, class_info, func_def, call_arg_types, call_arg_literals, call_arg_enum_names, target_for_lower, force_class_method: force_class_method)
                   end
                 end
               else
                 with_namespace_override_or_clear(namespace_override) do
-                  lower_method(owner, class_info, func_def, call_arg_types, call_arg_literals, target_for_lower, force_class_method: force_class_method)
+                  lower_method(owner, class_info, func_def, call_arg_types, call_arg_literals, call_arg_enum_names, target_for_lower, force_class_method: force_class_method)
                 end
               end
               @current_class = old_class
@@ -19025,17 +19129,17 @@ module Crystal::HIR
                 old_class = @current_class
                 @current_class = owner
                 dummy_info = ClassInfo.new(owner, TypeRef::INT32, [] of IVarInfo, [] of ClassVarInfo, 0, false, nil)
-                lower_method(owner, dummy_info, func_def, call_arg_types, call_arg_literals, target_for_lower)
+                lower_method(owner, dummy_info, func_def, call_arg_types, call_arg_literals, call_arg_enum_names, target_for_lower)
                 @current_class = old_class
               else
-                lower_module_method(owner, func_def, call_arg_types, call_arg_literals, target_for_lower)
+                lower_module_method(owner, func_def, call_arg_types, call_arg_literals, call_arg_enum_names, target_for_lower)
               end
             else
-              lower_module_method(owner, func_def, call_arg_types, call_arg_literals, target_for_lower)
+              lower_module_method(owner, func_def, call_arg_types, call_arg_literals, call_arg_enum_names, target_for_lower)
             end
           else
             # Use the call-site mangled name so top-level defs match call signatures.
-            lower_def(func_def, call_arg_types, call_arg_literals, name)
+            lower_def(func_def, call_arg_types, call_arg_literals, call_arg_enum_names, name)
           end
         end
       ensure
@@ -20045,6 +20149,11 @@ module Crystal::HIR
       end
       prepack_arg_types = args.map { |arg_id| ctx.type_of(arg_id) }
       prepack_arg_literals = args.map { |arg_id| ctx.type_literal?(arg_id) }
+      prepack_arg_enum_names = nil
+      if enum_map = @enum_value_types
+        names = args.map { |arg_id| enum_map[arg_id]? }
+        prepack_arg_enum_names = names if names.any?
+      end
       pack_result = pack_splat_args_for_call(ctx, args, method_name, full_method_name, has_block_call, receiver_id, has_splat)
       args = pack_result[0]
       splat_packed = pack_result[1]
@@ -20315,10 +20424,20 @@ module Crystal::HIR
       arg_literals = args.map { |arg_id| ctx.type_literal?(arg_id) }
       callsite_arg_types = splat_packed ? prepack_arg_types.dup : arg_types
       callsite_arg_literals = splat_packed ? prepack_arg_literals.dup : arg_literals
+      callsite_arg_enum_names = nil
+      if splat_packed
+        callsite_arg_enum_names = prepack_arg_enum_names.try(&.dup)
+      elsif enum_map = @enum_value_types
+        names = args.map { |arg_id| enum_map[arg_id]? }
+        callsite_arg_enum_names = names if names.any?
+      end
       if splat_packed && args.size > prepack_arg_types.size
         extra_ids = args[prepack_arg_types.size..-1] || [] of ValueId
         callsite_arg_types.concat(extra_ids.map { |arg_id| ctx.type_of(arg_id) })
         callsite_arg_literals.concat(extra_ids.map { |arg_id| ctx.type_literal?(arg_id) })
+        if callsite_arg_enum_names && (enum_map = @enum_value_types)
+          callsite_arg_enum_names.concat(extra_ids.map { |arg_id| enum_map[arg_id]? })
+        end
       end
       if receiver_id && method_name.ends_with?("=") && args.size == 1 &&
          arg_types.all? { |t| t == TypeRef::VOID }
@@ -21337,9 +21456,9 @@ module Crystal::HIR
         STDERR.puts "[CALL_TRACE] stage=before_lower_function method=#{method_name} mangled=#{mangled_method_name} primary=#{primary_mangled_name} return=#{return_type.id}"
       end
       # Lazily lower target function bodies (avoid full stdlib lowering).
-      remember_callsite_arg_types(primary_mangled_name, callsite_arg_types, callsite_arg_literals, has_block_call)
+      remember_callsite_arg_types(primary_mangled_name, callsite_arg_types, callsite_arg_literals, callsite_arg_enum_names, has_block_call)
       if mangled_method_name != primary_mangled_name
-        remember_callsite_arg_types(mangled_method_name, callsite_arg_types, callsite_arg_literals, has_block_call)
+        remember_callsite_arg_types(mangled_method_name, callsite_arg_types, callsite_arg_literals, callsite_arg_enum_names, has_block_call)
       end
       if ENV["DEBUG_CALL_TRACE"]? && method_name == "copy_to"
         STDERR.puts "[CALL_TRACE] stage=after_remember method=#{method_name} mangled=#{mangled_method_name} primary=#{primary_mangled_name}"
@@ -24684,9 +24803,27 @@ module Crystal::HIR
         end
       end
 
-      # Handle nil? intrinsic for union types (T | Nil)
-      if member_name == "nil?" && is_union_or_nilable_type?(receiver_type)
-        return lower_nil_check_intrinsic(ctx, object_id, receiver_type)
+      # Handle nil? intrinsic (union and non-union).
+      if member_name == "nil?"
+        if is_union_or_nilable_type?(receiver_type)
+          return lower_nil_check_intrinsic(ctx, object_id, receiver_type)
+        end
+        if receiver_type == TypeRef::NIL
+          lit = Literal.new(ctx.next_id, TypeRef::BOOL, true)
+          ctx.emit(lit)
+          return lit.id
+        elsif receiver_type == TypeRef::POINTER
+          nil_val = Literal.new(ctx.next_id, TypeRef::POINTER, 0_i64)
+          ctx.emit(nil_val)
+          eq_check = BinaryOperation.new(ctx.next_id, TypeRef::BOOL, BinaryOp::Eq, object_id, nil_val.id)
+          ctx.emit(eq_check)
+          ctx.register_type(eq_check.id, TypeRef::BOOL)
+          return eq_check.id
+        else
+          lit = Literal.new(ctx.next_id, TypeRef::BOOL, false)
+          ctx.emit(lit)
+          return lit.id
+        end
       end
 
       # Handle not_nil! intrinsic for union types
@@ -25401,6 +25538,15 @@ module Crystal::HIR
           end
         end
         self_id = emit_self(ctx)
+        if class_name && (enum_name = @enum_value_types.try(&.[value_id]?))
+          enum_map = @enum_ivar_types ||= {} of String => Hash(String, String)
+          class_map = enum_map[class_name]? || begin
+            new_map = {} of String => String
+            enum_map[class_name] = new_map
+            new_map
+          end
+          class_map[name] = enum_name
+        end
 
         # Check if ivar is a union type - need to wrap the value
         if ivar_type && is_union_type?(ivar_type)
@@ -25436,6 +25582,15 @@ module Crystal::HIR
           value_type = ctx.type_of(value_id)
           record_class_var_type(class_name, name, value_type)
           cvar_type = value_type unless value_type == TypeRef::VOID
+        end
+        if enum_name = @enum_value_types.try(&.[value_id]?)
+          enum_map = @enum_cvar_types ||= {} of String => Hash(String, String)
+          class_map = enum_map[class_name]? || begin
+            new_map = {} of String => String
+            enum_map[class_name] = new_map
+            new_map
+          end
+          class_map[name] = enum_name
         end
         class_var_set = ClassVarSet.new(ctx.next_id, cvar_type, class_name, name, value_id)
         ctx.emit(class_var_set)
