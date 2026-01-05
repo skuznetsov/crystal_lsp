@@ -228,6 +228,69 @@ describe Crystal::MIR::LLVMIRGenerator do
       output.should contain("call void @__crystal_v2_slab_free(ptr %")
     end
 
+    it "normalizes union stores to zeroinitializer" do
+      mod = Crystal::MIR::Module.new("test")
+      union_type = mod.type_registry.create_type(Crystal::MIR::TypeKind::Union, "IntOrNil", 16, 8)
+      union_ref = Crystal::MIR::TypeRef.new(union_type.id)
+      mod.register_union(
+        union_ref,
+        Crystal::MIR::UnionDescriptor.new(
+          "IntOrNil",
+          [
+            Crystal::MIR::UnionVariantDescriptor.new(
+              type_id: 0,
+              type_ref: Crystal::MIR::TypeRef::INT32,
+              full_name: "Int32",
+              size: 4,
+              alignment: 4,
+              field_offsets: nil
+            ),
+            Crystal::MIR::UnionVariantDescriptor.new(
+              type_id: 1,
+              type_ref: Crystal::MIR::TypeRef::NIL,
+              full_name: "Nil",
+              size: 0,
+              alignment: 1,
+              field_offsets: nil
+            ),
+          ],
+          16,
+          8
+        )
+      )
+
+      func = mod.create_function("union_store", Crystal::MIR::TypeRef::VOID)
+      builder = Crystal::MIR::Builder.new(func)
+      ptr = builder.alloc(Crystal::MIR::MemoryStrategy::Stack, union_ref, 16_u64, 8_u32)
+
+      block = func.get_block(func.entry_block)
+      union_nil = Crystal::MIR::Constant.new(func.next_value_id, union_ref, nil)
+      block.add(union_nil)
+      builder.store(ptr, union_nil.id)
+      builder.ret
+
+      gen = Crystal::MIR::LLVMIRGenerator.new(mod)
+      gen.emit_type_metadata = false
+      output = gen.generate
+
+      output.should contain("store %IntOrNil.union zeroinitializer")
+    end
+
+    it "skips emitting SSA values for void casts" do
+      mod = Crystal::MIR::Module.new("test")
+      func = mod.create_function("void_cast", Crystal::MIR::TypeRef::VOID)
+      builder = Crystal::MIR::Builder.new(func)
+      val = builder.const_int(1_i64, Crystal::MIR::TypeRef::INT32)
+      builder.cast(Crystal::MIR::CastKind::Bitcast, val, Crystal::MIR::TypeRef::VOID)
+      builder.ret
+
+      gen = Crystal::MIR::LLVMIRGenerator.new(mod)
+      gen.emit_type_metadata = false
+      output = gen.generate
+
+      output.should_not contain("alloca void")
+    end
+
     it "emits ptr phi when a union phi has ptr incoming" do
       mod = Crystal::MIR::Module.new("phi_union_ptr")
 
