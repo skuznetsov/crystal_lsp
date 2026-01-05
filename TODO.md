@@ -1045,9 +1045,11 @@ r2 = maybe(false)  # => nil
   - ByteFormat decode/from_io resolved (no `_IO__ByteFormat_decode_UInt32_IO`).
 
 **Regressions (open):**
-- [x] GH #10 (crystal_lsp): prelude build with `puts` now links on minimal `fib.cr`.
-  - Fix: track block owner for inline-yield inference so `Tuple#compare_or_raise` uses concrete `U` types (no `Nil#<=>`).
-  - DoD: `./bin/crystal_v2 build --release --no-llvm-metadata bin/fib.cr -o /tmp/fib` succeeds (2026-01-xx).
+- [ ] GH #10 (crystal_lsp): prelude build links for minimal `fib.cr`, but runtime segfault persists.
+  - Repro (2026-01-xx): `./bin/crystal_v2 build --release --no-llvm-metadata /tmp/fib.cr -o /tmp/fib` succeeds; `/tmp/fib` exits 139.
+  - `--no-prelude` path works: `/tmp/fib_no_prelude` prints `267914296` and exits 0.
+  - DoD: prelude build runs without segfault and prints correct result.
+  - Update (2026-01-xx): after lowering stdlib `fun main` as C-ABI entrypoint, build now fails at link with 27 missing symbols (see `/tmp/fib_noputs.link.log`).
 
 **Recent fixes (prelude bootstrap path):**
 - Normalize `flag?` macro arguments (strip leading `:`) + require cache v3; pthread requires now load.
