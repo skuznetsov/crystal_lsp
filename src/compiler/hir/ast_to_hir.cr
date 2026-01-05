@@ -11223,13 +11223,12 @@ module Crystal::HIR
       if result == name && (current = @current_class) && name[0]?.try(&.uppercase?)
         unless builtin_alias_target?(name) || LIBC_TYPE_ALIASES.has_key?(name)
           unless @top_level_type_names.includes?(name)
-            parent_namespace = nil
-            if current.includes?("::")
-              parent_namespace = current.rpartition("::")[0]
-            elsif @module_defs.has_key?(current)
-              parent_namespace = current
+            namespace = nil
+            if current.includes?("::") || @module_defs.has_key?(current)
+              namespace = current
             end
-            result = "#{parent_namespace}::#{name}" if parent_namespace
+            # Prefer the current namespace for forward references in nested scopes.
+            result = "#{namespace}::#{name}" if namespace
           end
         end
       end
