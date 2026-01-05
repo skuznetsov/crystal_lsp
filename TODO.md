@@ -1050,6 +1050,7 @@ r2 = maybe(false)  # => nil
   - `--no-prelude` path works: `/tmp/fib_no_prelude` prints `267914296` and exits 0.
   - DoD: prelude build runs without segfault and prints correct result.
   - Update (2026-01-xx): after lowering stdlib `fun main` as C-ABI entrypoint, build now fails at link with 27 missing symbols (see `/tmp/fib_noputs.link.log`).
+  - Update (2026-01-xx): resolve forward refs in nested namespaces to current scope; `Crystal__System__Entry_name` removed. Link now fails with 64 missing symbols (see `/tmp/fib_noputs.link.log`).
 
 **Recent fixes (prelude bootstrap path):**
 - Normalize `flag?` macro arguments (strip leading `:`) + require cache v3; pthread requires now load.
