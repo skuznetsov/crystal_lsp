@@ -2903,6 +2903,13 @@ module Crystal::HIR
       end
     end
 
+    private def bare_generic_annotation?(type_name : String) : Bool
+      return false if type_name.includes?("(")
+      resolved = resolve_type_name_in_context(type_name)
+      base = resolved.split("(", 2).first
+      @generic_templates.has_key?(base)
+    end
+
     private def update_typeof_local(name : String, type_ref : TypeRef) : Nil
       return unless locals = @current_typeof_locals
       locals[name] = type_ref
@@ -6702,6 +6709,13 @@ module Crystal::HIR
                        else
                          TypeRef::VOID
                        end
+          if type_ann_str && bare_generic_annotation?(type_ann_str)
+            param_type = TypeRef::VOID
+          end
+          if param_type == TypeRef::VOID && method_name == "hash" && param_name == "hasher"
+            inferred = type_ref_for_name("Crystal::Hasher")
+            param_type = inferred if inferred != TypeRef::VOID
+          end
           if param_type == TypeRef::VOID && !param.is_block && !param.is_splat && !param.is_double_splat
             if call_index < call_types.size
               inferred = call_types[call_index]
@@ -7530,7 +7544,7 @@ module Crystal::HIR
       @class_info_by_type_id[type_ref.id] = final_info
       @class_info_version += 1
       record_class_parent(class_name, parent_name)
-      if ENV.has_key?("DEBUG_CLASS_PARENTS") && (class_name == "Base" || class_name == "Child")
+      if ENV.has_key?("DEBUG_CLASS_PARENTS") && (class_name == "Base" || class_name == "Child" || class_name == "IO::Memory")
         STDERR.puts "[CLASS_PARENT] class=#{class_name} parent=#{parent_name || "nil"}"
       end
       @module.register_class_parent(class_name, parent_name)
@@ -8477,6 +8491,10 @@ module Crystal::HIR
                   else
                     "#{class_name}##{method_name}"
                   end
+      if ENV["DEBUG_HASH_PARAMS"]? && method_name == "hash"
+        params_list = node.params.try(&.map { |param| param.name || "_" }.join(",")) || ""
+        STDERR.puts "[HASH_PARAM_DEF] class=#{class_name} params=#{params_list}"
+      end
 
       # Skip abstract methods - they have no implementation
       if node.is_abstract
@@ -8538,6 +8556,13 @@ module Crystal::HIR
                        else
                          TypeRef::VOID
                        end
+          if type_ann_str && bare_generic_annotation?(type_ann_str)
+            param_type = TypeRef::VOID
+          end
+          if param_type == TypeRef::VOID && method_name == "hash" && param_name == "hasher"
+            inferred = type_ref_for_name("Crystal::Hasher")
+            param_type = inferred if inferred != TypeRef::VOID
+          end
           if param_type == TypeRef::VOID && !param.is_block && !param.is_splat && !param.is_double_splat
             if call_index < call_types.size
               inferred = call_types[call_index]
@@ -8546,6 +8571,10 @@ module Crystal::HIR
           end
           if !param.is_block && !param.is_splat && !param.is_double_splat && call_index < call_types.size
             param_type = refine_param_type_from_call(param_type, call_types[call_index])
+          end
+          if ENV["DEBUG_HASH_PARAMS"]? && method_name == "hash" && param_name == "hasher"
+            hasher_ref = type_ref_for_name("Crystal::Hasher")
+            STDERR.puts "[HASH_PARAM] class=#{class_name} param_type=#{get_type_name_from_ref(param_type)} hasher=#{get_type_name_from_ref(hasher_ref)}"
           end
           if module_type_ref?(param_type) && (default_value = param.default_value)
             call_type = call_index < call_types.size ? call_types[call_index] : TypeRef::VOID
@@ -12697,13 +12726,22 @@ module Crystal::HIR
         params.each do |param|
           next if named_only_separator?(param)
           param_name = param.name.nil? ? "_" : String.new(param.name.not_nil!)
+          type_ann_str : String? = nil
           param_type = if ta = param.type_annotation
-                         type_ref_for_name(String.new(ta))
+                         type_ann_str = String.new(ta)
+                         type_ref_for_name(type_ann_str)
                        elsif param.is_double_splat
                          type_ref_for_name("NamedTuple")
                        else
                          TypeRef::VOID  # Unknown type
                        end
+          if type_ann_str && bare_generic_annotation?(type_ann_str)
+            param_type = TypeRef::VOID
+          end
+          if param_type == TypeRef::VOID && base_name == "hash" && param_name == "hasher"
+            inferred = type_ref_for_name("Crystal::Hasher")
+            param_type = inferred if inferred != TypeRef::VOID
+          end
           if param_type == TypeRef::VOID && !param.is_block && !param.is_splat && !param.is_double_splat
             if call_index < call_types.size
               inferred = call_types[call_index]
@@ -15027,31 +15065,45 @@ module Crystal::HIR
       ivar_type = TypeRef::VOID
       ivar_offset = 0
       class_name = @current_class
-      if class_name
-        if class_info = @class_info[class_name]?
+      ivar_owner = class_name
+      ivar_found = false
+      debug_filter = ENV["DEBUG_IVAR"]?
+      debug_trace = debug_filter ? [] of String : nil
+      search_name = class_name
+      while search_name
+        if class_info = @class_info[search_name]?
+          if debug_trace
+            debug_trace << "#{search_name}(ivars=#{class_info.ivars.size})"
+          end
           class_info.ivars.each do |ivar|
             if ivar.name == name
+              ivar_found = true
               ivar_type = ivar.type
               ivar_offset = ivar.offset
+              ivar_owner = search_name
               break
             end
           end
-          # Debug: log ivar lookup results (commented out for performance)
-          # if ENV.has_key?("DEBUG_IVAR") && ivar_type == TypeRef::VOID
-          #   ivar_names = class_info.ivars.map { |iv| "#{iv.name}:#{iv.type.id}" }.join(", ")
-          #   found_ivar = class_info.ivars.find { |iv| iv.name == name }
-          #   if found_ivar
-          #     STDERR.puts "[IVAR] #{class_name}##{name} FOUND but type is VOID (id=#{found_ivar.type.id})"
-          #   else
-          #     STDERR.puts "[IVAR] #{class_name}##{name} NOT FOUND in ivars: [#{ivar_names}]"
-          #   end
-          # end
+          break if ivar_found
+          parent_name = class_info.parent_name
+          parent_name ||= @module.class_parents[search_name]?
+          search_name = parent_name
+        else
+          break
+        end
+      end
+      if debug_trace && class_name
+        filter = debug_filter.not_nil!
+        if filter.empty? || class_name.includes?(filter) || name == filter
+          type_name = get_type_name_from_ref(ivar_type)
+          owner_name = ivar_owner || "nil"
+          STDERR.puts "[IVAR] class=#{class_name} name=#{name} owner=#{owner_name} found=#{ivar_found} type=#{type_name} trace=#{debug_trace.join("->")}"
         end
       end
 
       # If ivar type is still VOID, try to find a getter method as fallback
       # This handles cases where ivars are defined implicitly (e.g., @ivar = value in initialize)
-      if ivar_type == TypeRef::VOID && (class_name = @current_class)
+      if !ivar_found && ivar_type == TypeRef::VOID && (class_name = @current_class)
         # Try to find getter method: @bytesize -> bytesize()
         accessor_name = name.lchop('@')
         # IMPORTANT: Don't call getter if we're inside that getter method!
@@ -15082,8 +15134,8 @@ module Crystal::HIR
       field_get = FieldGet.new(ctx.next_id, ivar_type, self_id, name, ivar_offset)
       ctx.emit(field_get)
       ctx.register_type(field_get.id, ivar_type)  # Register type for is_a?/case checks
-      if class_name
-        if enum_name = @enum_ivar_types.try(&.[class_name]?).try(&.[name]?)
+      if ivar_owner
+        if enum_name = @enum_ivar_types.try(&.[ivar_owner]?).try(&.[name]?)
           (@enum_value_types ||= {} of ValueId => String)[field_get.id] = enum_name
         end
       end
@@ -18055,7 +18107,6 @@ module Crystal::HIR
       base_key = base_callsite_key(target_name.empty? ? name : target_name)
       return nil if base_key.empty?
       by_arity = @pending_arg_types_by_arity[base_key]?
-      return nil unless by_arity
 
       params = func_def.params
       return nil unless params
@@ -18074,33 +18125,100 @@ module Crystal::HIR
       end
 
       func_context = function_context_from_name(target_name.empty? ? name : target_name)
-      if bucket = by_arity[param_count]?
-        if match = select_best_callsite_args(func_def, bucket, func_context) || bucket.first?
-          consume_callsite_args(base_key, match)
-          return match
+      if by_arity
+        if bucket = by_arity[param_count]?
+          if match = select_best_callsite_args(func_def, bucket, func_context) || bucket.first?
+            consume_callsite_args(base_key, match)
+            return match
+          end
         end
-      end
 
-      if signature = call_signature_for_def(func_def, name, target_name)
-        if sig_bucket = @pending_arg_types_by_signature[signature]?
-          if match = select_best_callsite_args(func_def, sig_bucket, func_context) || sig_bucket.first?
+        if signature = call_signature_for_def(func_def, name, target_name)
+          if sig_bucket = @pending_arg_types_by_signature[signature]?
+            if match = select_best_callsite_args(func_def, sig_bucket, func_context) || sig_bucket.first?
+              consume_callsite_args(base_key, match)
+              return match
+            end
+          end
+        end
+
+        fallback_key = if has_splat
+                         by_arity.keys.select { |key| key >= required_count }.max?
+                       else
+                         by_arity.keys.select { |key| key >= required_count && key <= param_count }.max?
+                       end
+        if fallback_key
+          bucket = by_arity[fallback_key]
+          match = select_best_callsite_args(func_def, bucket, func_context) || bucket.first?
+          if match
             consume_callsite_args(base_key, match)
             return match
           end
         end
       end
 
-      fallback_key = if has_splat
-                       by_arity.keys.select { |key| key >= required_count }.max?
-                     else
-                       by_arity.keys.select { |key| key >= required_count && key <= param_count }.max?
-                     end
-      return nil unless fallback_key
-      bucket = by_arity[fallback_key]
-      match = select_best_callsite_args(func_def, bucket, func_context) || bucket.first?
-      return nil unless match
-      consume_callsite_args(base_key, match)
-      match
+      owner = function_context_from_name(base_key)
+      sep = base_key.includes?("#") ? "#" : "."
+      method = base_key.split(sep, 2)[1]?
+
+      if owner && method
+        current = owner
+        visited = Set(String).new
+        while true
+          break if visited.includes?(current)
+          visited << current
+          parent_name = @class_info[current]?.try(&.parent_name)
+          parent_name ||= @module.class_parents[current]?
+          break unless parent_name
+          current = parent_name
+          ancestor_key = "#{current}#{sep}#{method}"
+          if ancestor_by_arity = @pending_arg_types_by_arity[ancestor_key]?
+            if bucket = ancestor_by_arity[param_count]?
+              if match = select_best_callsite_args(func_def, bucket, func_context) || bucket.first?
+                return match
+              end
+            end
+
+            fallback_key = if has_splat
+                             ancestor_by_arity.keys.select { |key| key >= required_count }.max?
+                           else
+                             ancestor_by_arity.keys.select { |key| key >= required_count && key <= param_count }.max?
+                           end
+            if fallback_key
+              bucket = ancestor_by_arity[fallback_key]
+              match = select_best_callsite_args(func_def, bucket, func_context) || bucket.first?
+              return match if match
+            end
+          end
+        end
+      end
+
+      if method
+        unique : CallsiteArgs? = nil
+        ambiguous = false
+        @pending_arg_types_by_arity.each do |key, bucket_map|
+          next unless key.ends_with?("##{method}") || key.ends_with?(".#{method}")
+          bucket = bucket_map[param_count]?
+          next unless bucket
+          bucket.each do |candidate|
+            next unless params_compatible_with_args?(func_def, candidate.types, func_context)
+            if unique
+              same_types = candidate.types == unique.types
+              same_literals = unique.literals.nil? || candidate.literals.nil? || candidate.literals == unique.literals
+              unless same_types && same_literals
+                ambiguous = true
+                break
+              end
+            else
+              unique = candidate
+            end
+          end
+          break if ambiguous
+        end
+        return unique if unique && !ambiguous
+      end
+
+      nil
     end
 
     # Search a generic template's body for a method definition by name.
@@ -18898,6 +19016,10 @@ module Crystal::HIR
         STDERR.puts "[DEFERRED_CHECK] is_lowering=#{is_lowering_target}"
       end
       return if is_lowering_target
+      if func_def.is_abstract
+        @lowering_functions.add(target_name)
+        return
+      end
 
       if arena.nil?
         arena = resolve_arena_for_def(func_def, @arena)
@@ -20443,6 +20565,20 @@ module Crystal::HIR
          arg_types.all? { |t| t == TypeRef::VOID }
         if inferred = ivar_type_for_setter(ctx, receiver_id, method_name)
           arg_types = [inferred]
+        end
+      end
+      if receiver_id.nil? && method_name == "new" && full_method_name == "Range.new" && arg_types.size >= 2
+        begin_name = get_type_name_from_ref(arg_types[0])
+        end_name = get_type_name_from_ref(arg_types[1])
+        if begin_name != "Void" && end_name != "Void" &&
+           !begin_name.includes?("|") && !end_name.includes?("|")
+          range_name = "Range(#{begin_name}, #{end_name})"
+          monomorphize_generic_class("Range", [begin_name, end_name], range_name)
+          full_method_name = "#{range_name}.new"
+          static_class_name = range_name
+          if class_info = @class_info[range_name]?
+            generate_allocator(range_name, class_info)
+          end
         end
       end
       if ENV["DEBUG_CALL_TRACE"]? && method_name == "copy_to"
@@ -24520,7 +24656,35 @@ module Crystal::HIR
         # Array element access: arr[i] -> IndexGet
         # Prefer the array's element type from the interned TypeDescriptor params.
         # Arrays are represented as POINTER at runtime, so we must carry element type explicitly.
-        element_type = type_desc.not_nil!.type_params.first? || TypeRef::INT32
+        element_type = TypeRef::INT32
+        td = type_desc.not_nil!
+        if td.kind == TypeKind::Union
+          # For union types like Array(T) | Nil, find the Array variant and get its element type.
+          # Union variants are stored in @union_descriptors, not in type_params.
+          mir_union_ref = hir_to_mir_type_ref(object_type)
+          if union_desc = @union_descriptors[mir_union_ref]?
+            union_desc.variants.each do |variant|
+              variant_hir_ref = mir_to_hir_type_ref(variant.type_ref)
+              if variant_desc = @module.get_type_descriptor(variant_hir_ref)
+                if variant_desc.kind == TypeKind::Array || variant_desc.name.starts_with?("Array") || variant_desc.name.starts_with?("StaticArray")
+                  element_type = variant_desc.type_params.first? || TypeRef::INT32
+                  break
+                end
+              end
+            end
+          else
+            # Fallback: parse the type name to extract array element type
+            # e.g., "Array(Tuple(Int32, Int32, Property)) | Nil" -> extract element from "Array(...)"
+            if match = td.name.match(/^Array\((.+)\)\s*\|/)
+              element_name = match[1]
+              if elem_ref = type_ref_for_name(element_name)
+                element_type = elem_ref
+              end
+            end
+          end
+        else
+          element_type = td.type_params.first? || TypeRef::INT32
+        end
         element_type = TypeRef::INT32 if element_type == TypeRef::VOID
 
         index_get = IndexGet.new(ctx.next_id, element_type, object_id, index_ids.first)
