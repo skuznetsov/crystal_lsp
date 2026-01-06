@@ -23409,7 +23409,7 @@ module Crystal::HIR
                    end
 
       # Get element type from source array
-      source_element_type = TypeRef::INT32  # Default to Int32
+      source_element_type = array_element_type_for_value(ctx, array_id, TypeRef::INT32)
 
       # Collect transformed values
       transformed_values = [] of ValueId
@@ -23473,7 +23473,8 @@ module Crystal::HIR
                      "__map_elem"
                    end
 
-      element_type = TypeRef::INT32
+      # Get element type from array - not hardcoded!
+      element_type = array_element_type_for_value(ctx, array_id, TypeRef::INT32)
 
       # Get size dynamically
       size_val = ArraySize.new(ctx.next_id, TypeRef::INT32, array_id)
@@ -24651,7 +24652,6 @@ module Crystal::HIR
       is_array_type = type_desc && (type_desc.kind == TypeKind::Array ||
                                      type_desc.name.starts_with?("Array") ||
                                      type_desc.name.starts_with?("StaticArray"))
-
       if is_array_type && index_ids.size == 1
         # Array element access: arr[i] -> IndexGet
         # Prefer the array's element type from the interned TypeDescriptor params.
