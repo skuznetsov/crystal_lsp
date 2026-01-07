@@ -6806,11 +6806,26 @@ module Crystal::HIR
       end
 
       # Lower body
+      # IMPORTANT: Save and clear inline yield stacks to prevent cross-context contamination.
+      # When lowering a standalone function, yield should emit a Yield instruction,
+      # NOT substitute an inline block from an unrelated call context.
+      saved_yield_block_stack = @inline_yield_block_stack
+      saved_yield_arena_stack = @inline_yield_block_arena_stack
+      saved_yield_name_stack = @inline_yield_name_stack
+      @inline_yield_block_stack = [] of CrystalV2::Compiler::Frontend::BlockNode
+      @inline_yield_block_arena_stack = [] of CrystalV2::Compiler::Frontend::ArenaLike
+      @inline_yield_name_stack = [] of String
       last_value : ValueId? = nil
-      if body = node.body
-        body.each do |expr_id|
-          last_value = lower_expr(ctx, expr_id)
+      begin
+        if body = node.body
+          body.each do |expr_id|
+            last_value = lower_expr(ctx, expr_id)
+          end
         end
+      ensure
+        @inline_yield_block_stack = saved_yield_block_stack
+        @inline_yield_block_arena_stack = saved_yield_arena_stack
+        @inline_yield_name_stack = saved_yield_name_stack
       end
 
       # Infer return type from the last expression for unannotated module methods.
@@ -8752,7 +8767,17 @@ module Crystal::HIR
       end
 
       # Lower body
+      # IMPORTANT: Save and clear inline yield stacks to prevent cross-context contamination.
+      # When lowering a standalone function, yield should emit a Yield instruction,
+      # NOT substitute an inline block from an unrelated call context.
+      saved_yield_block_stack = @inline_yield_block_stack
+      saved_yield_arena_stack = @inline_yield_block_arena_stack
+      saved_yield_name_stack = @inline_yield_name_stack
+      @inline_yield_block_stack = [] of CrystalV2::Compiler::Frontend::BlockNode
+      @inline_yield_block_arena_stack = [] of CrystalV2::Compiler::Frontend::ArenaLike
+      @inline_yield_name_stack = [] of String
       last_value : ValueId? = nil
+      begin
       if body = node.body
         progress_filter = ENV["DEBUG_LOWER_PROGRESS"]?
         progress_match = false
@@ -8837,6 +8862,11 @@ module Crystal::HIR
             end
           end
         end
+      end
+      ensure
+        @inline_yield_block_stack = saved_yield_block_stack
+        @inline_yield_block_arena_stack = saved_yield_arena_stack
+        @inline_yield_name_stack = saved_yield_name_stack
       end
 
       # Infer return type from the last expression for unannotated methods.
@@ -12926,11 +12956,26 @@ module Crystal::HIR
       end
 
       # Lower body
+      # IMPORTANT: Save and clear inline yield stacks to prevent cross-context contamination.
+      # When lowering a standalone function, yield should emit a Yield instruction,
+      # NOT substitute an inline block from an unrelated call context.
+      saved_yield_block_stack = @inline_yield_block_stack
+      saved_yield_arena_stack = @inline_yield_block_arena_stack
+      saved_yield_name_stack = @inline_yield_name_stack
+      @inline_yield_block_stack = [] of CrystalV2::Compiler::Frontend::BlockNode
+      @inline_yield_block_arena_stack = [] of CrystalV2::Compiler::Frontend::ArenaLike
+      @inline_yield_name_stack = [] of String
       last_value : ValueId? = nil
-      if body = node.body
-        body.each do |expr_id|
-          last_value = lower_expr(ctx, expr_id)
+      begin
+        if body = node.body
+          body.each do |expr_id|
+            last_value = lower_expr(ctx, expr_id)
+          end
         end
+      ensure
+        @inline_yield_block_stack = saved_yield_block_stack
+        @inline_yield_block_arena_stack = saved_yield_arena_stack
+        @inline_yield_name_stack = saved_yield_name_stack
       end
 
       # Add implicit return if not already terminated
@@ -18444,6 +18489,9 @@ module Crystal::HIR
       target_name = name
       primitive_template_map : Hash(String, String)? = nil
       debug_hook("function.lookup.start", name)
+      if ENV["DEBUG_TRACE_FUNC"]? && name.includes?("trace")
+        STDERR.puts "[TRACE_FUNC] lookup name=#{name}"
+      end
       func_def = @function_defs[target_name]?
       arena = @function_def_arenas[target_name]?
       lookup_branch : String? = func_def ? "direct" : nil
