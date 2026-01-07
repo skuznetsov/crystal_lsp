@@ -11231,6 +11231,14 @@ module Crystal::HIR
         if name.includes?("$")
           return type
         end
+        # Special case: X#to_s with no args should return String, not Nil
+        # In Crystal, to_s() without args returns String by convention:
+        # - Enums: to_s : String returns member_name || value.to_s
+        # - Other types: to_s : String returns String.build { |io| to_s(io) }
+        # The NIL return type comes from to_s(io : IO) : Nil being the only registered variant
+        if type == TypeRef::NIL && name.ends_with?("#to_s")
+          return TypeRef::STRING
+        end
         return type unless type == TypeRef::VOID || type == TypeRef::NIL
       end
       # If this is a base name (no $ suffix), use cached return type if available.
