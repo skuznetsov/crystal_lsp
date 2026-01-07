@@ -11578,17 +11578,58 @@ module Crystal::HIR
         end
       end
 
-      # If unresolved and inside a namespace, prefer a qualified name so forward references
-      # (e.g., IO::EncodingOptions) don't collapse to a type param-like placeholder.
+      # If unresolved and inside a namespace, first check if a sibling type exists
+      # in the parent namespace using short_type_index. This handles cases like:
+      # - Inside PollDescriptor, "Waiters" should resolve to Polling::Waiters (sibling)
+      # - NOT to PollDescriptor::Waiters (nested forward reference)
       if result == name && (current = @current_class) && name[0]?.try(&.uppercase?)
         unless builtin_alias_target?(name) || LIBC_TYPE_ALIASES.has_key?(name)
           unless @top_level_type_names.includes?(name)
-            namespace = nil
-            if current.includes?("::") || @module_defs.has_key?(current)
-              namespace = current
+            # First, check short_type_index for sibling matches in parent namespace
+            if ENV["DEBUG_SIBLING"]? && name == "Waiters"
+              candidates_debug = @short_type_index[name]?
+              STDERR.puts "[SIBLING] name=#{name} current=#{current} candidates=#{candidates_debug.try(&.to_a) || "nil"}"
             end
-            # Prefer the current namespace for forward references in nested scopes.
-            result = "#{namespace}::#{name}" if namespace
+            if (candidates = @short_type_index[name]?) && candidates.size >= 1
+              # Find candidates that are siblings (in parent namespace, not nested)
+              parent_namespace = current.includes?("::") ? current.rpartition("::")[0] : nil
+              if parent_namespace
+                sibling_matches = candidates.select { |c| c.starts_with?("#{parent_namespace}::") && !c.starts_with?("#{current}::") }
+                if sibling_matches.size == 1
+                  result = sibling_matches.first
+                elsif sibling_matches.size > 1
+                  # Multiple siblings, prefer the shortest (most direct sibling)
+                  result = sibling_matches.min_by(&.size)
+                elsif candidates.size == 1
+                  # No sibling matches but only one candidate - use it
+                  result = candidates.first
+                end
+              elsif candidates.size == 1
+                result = candidates.first
+              end
+            end
+
+            # Only create forward reference as nested type if no sibling found
+            if result == name
+              # Check if parent namespace is a module (not a class) - if so, prefer
+              # the parent namespace because the type is likely a sibling in the module.
+              # This avoids creating incorrect nested types like PollDescriptor::Waiters
+              # when the type should be Polling::Waiters (a sibling struct in the module).
+              parent_namespace = current.includes?("::") ? current.rpartition("::")[0] : nil
+              parent_is_module = parent_namespace && @module_defs.has_key?(parent_namespace)
+
+              if parent_is_module
+                # Prefer sibling in module namespace over nested type
+                result = "#{parent_namespace}::#{name}"
+              else
+                namespace = nil
+                if current.includes?("::") || @module_defs.has_key?(current)
+                  namespace = current
+                end
+                # Prefer the current namespace for forward references in nested scopes.
+                result = "#{namespace}::#{name}" if namespace
+              end
+            end
           end
         end
       end
