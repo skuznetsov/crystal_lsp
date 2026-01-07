@@ -20937,13 +20937,17 @@ module Crystal::HIR
             call_args = args
 
             skip_inline = false
-            if type_param_name = block_return_type_param_name(mangled_method_name, base_method_name)
-              receiver_map = type_param_map_for_receiver_name(base_method_name)
-              unless @type_param_map.has_key?(type_param_name) || receiver_map.has_key?(type_param_name)
-                debug_hook("call.inline.skip", "callee=#{mangled_method_name} missing=#{type_param_name}")
-                skip_inline = true
-              end
-            end
+            # NOTE: We used to skip when block return type param wasn't in type_param_map.
+            # However, this prevented valid inlining of methods like min_by { |x| x } where
+            # the block's return type can be inferred from the actual block body.
+            # The inline expansion can handle type inference from the concrete block.
+            # Removed check:
+            # if type_param_name = block_return_type_param_name(mangled_method_name, base_method_name)
+            #   receiver_map = type_param_map_for_receiver_name(base_method_name)
+            #   unless @type_param_map.has_key?(type_param_name) || receiver_map.has_key?(type_param_name)
+            #     skip_inline = true
+            #   end
+            # end
             if !skip_inline && method_name == "try" && receiver_id
               recv_type = ctx.type_of(receiver_id)
               if ENV["DEBUG_TRY_INLINE"]?
