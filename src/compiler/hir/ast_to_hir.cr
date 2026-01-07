@@ -11586,10 +11586,6 @@ module Crystal::HIR
         unless builtin_alias_target?(name) || LIBC_TYPE_ALIASES.has_key?(name)
           unless @top_level_type_names.includes?(name)
             # First, check short_type_index for sibling matches in parent namespace
-            if ENV["DEBUG_SIBLING"]? && name == "Waiters"
-              candidates_debug = @short_type_index[name]?
-              STDERR.puts "[SIBLING] name=#{name} current=#{current} candidates=#{candidates_debug.try(&.to_a) || "nil"}"
-            end
             if (candidates = @short_type_index[name]?) && candidates.size >= 1
               # Find candidates that are siblings (in parent namespace, not nested)
               parent_namespace = current.includes?("::") ? current.rpartition("::")[0] : nil
