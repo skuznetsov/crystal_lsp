@@ -20998,7 +20998,12 @@ module Crystal::HIR
             if !skip_inline && (entry = lookup_block_function_def_for_call(base_method_name, call_args.size, arg_types))
               yield_name, yield_def = entry
               callee_arena = @function_def_arenas[yield_name]? || @arena
-              if def_contains_yield?(yield_def, callee_arena)
+              has_yield = def_contains_yield?(yield_def, callee_arena)
+              # If the function name ends with $block, it likely contains yield
+              # even if AST check fails (could be macro-generated yield).
+              # Since we have a block to pass, it's safe to attempt inlining.
+              has_block_suffix = yield_name.ends_with?("$block")
+              if has_yield || has_block_suffix
                 @yield_functions.add(yield_name)
                 debug_hook("call.inline.yield", "callee=#{yield_name} current=#{@current_class || ""}")
                 return inline_yield_function(ctx, yield_def, yield_name, receiver_id, call_args, block_cast, callee_arena)
