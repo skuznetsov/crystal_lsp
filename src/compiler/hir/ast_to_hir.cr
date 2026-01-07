@@ -25168,7 +25168,12 @@ module Crystal::HIR
       # Handle pointer.value -> PointerLoad for typed pointers (Pointer(T))
       type_desc = @module.get_type_descriptor(receiver_type)
       is_pointer_type = receiver_type == TypeRef::POINTER ||
-                        (type_desc && type_desc.name.starts_with?("Pointer"))
+                        (type_desc && type_desc.name.starts_with?("Pointer")) ||
+                        (type_desc && type_desc.kind == TypeKind::Pointer)
+      if ENV["DEBUG_POINTER_VALUE"]? && member_name == "value"
+        type_name = type_desc ? type_desc.name : "nil"
+        STDERR.puts "[PTR_VALUE] receiver_type=#{receiver_type} type_desc=#{type_name} is_pointer=#{is_pointer_type}"
+      end
       if is_pointer_type && member_name == "value"
         # Return the dereferenced type from Pointer(T) -> T
         deref_type = if type_desc && type_desc.name.starts_with?("Pointer(") && type_desc.name.ends_with?(")")
@@ -27263,6 +27268,15 @@ module Crystal::HIR
                  if info = @class_info[lookup_name]?
                    store_type_cache(cache_key, info.type_ref)
                    return info.type_ref
+                 end
+                 # Fallback: try with Crystal:: prefix for stdlib types like EventLoop::Polling::Arena::Index
+                 # which should resolve to Crystal::EventLoop::Polling::Arena::Index
+                 if !lookup_name.starts_with?("Crystal::") && lookup_name.includes?("::")
+                   crystal_prefixed = "Crystal::#{lookup_name}"
+                   if info = @class_info[crystal_prefixed]?
+                     store_type_cache(cache_key, info.type_ref)
+                     return info.type_ref
+                   end
                  end
                  if @top_level_class_kinds.has_key?(lookup_name)
                    is_struct = @top_level_class_kinds[lookup_name]
