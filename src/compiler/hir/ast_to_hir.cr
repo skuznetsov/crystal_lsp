@@ -10388,6 +10388,13 @@ module Crystal::HIR
                 next
               end
             end
+            # Symbol → Enum autocast compatibility:
+            # Crystal allows symbol literals like :sched to autocast to enum values.
+            # The enum backing type is usually Int32, but arg_type will be Symbol.
+            if arg_type == TypeRef::SYMBOL && @enum_info.try(&.has_key?(param_resolved_name))
+              arg_idx += 1
+              next
+            end
             return false
           end
         end
@@ -20941,6 +20948,12 @@ module Crystal::HIR
             end
 
             # Check if this is a call to a yield-function using mangled name
+            if ENV.has_key?("DEBUG_YIELD_INLINE") && (method_name == "trace" || mangled_method_name.includes?("trace"))
+              STDERR.puts "[YIELD_INLINE] method=#{method_name} mangled=#{mangled_method_name} base=#{base_method_name}"
+              STDERR.puts "[YIELD_INLINE]   skip_inline=#{skip_inline}"
+              STDERR.puts "[YIELD_INLINE]   in_yield_functions=#{@yield_functions.includes?(mangled_method_name)}"
+              STDERR.puts "[YIELD_INLINE]   in_function_defs=#{@function_defs.has_key?(mangled_method_name)}"
+            end
             if !skip_inline && @yield_functions.includes?(mangled_method_name)
               if func_def = @function_defs[mangled_method_name]?
                 debug_hook("call.inline.yield", "callee=#{mangled_method_name} current=#{@current_class || ""}")
@@ -20949,6 +20962,10 @@ module Crystal::HIR
               end
             end
             # Also try base method name (for functions without overloading)
+            if ENV.has_key?("DEBUG_YIELD_INLINE") && (method_name == "trace" || mangled_method_name.includes?("trace"))
+              STDERR.puts "[YIELD_INLINE]   base_in_yield_functions=#{@yield_functions.includes?(base_method_name)}"
+              STDERR.puts "[YIELD_INLINE]   base_in_function_defs=#{@function_defs.has_key?(base_method_name)}"
+            end
             if !skip_inline && @yield_functions.includes?(base_method_name)
               if func_def = @function_defs[base_method_name]?
                 debug_hook("call.inline.yield", "callee=#{base_method_name} current=#{@current_class || ""}")
@@ -20959,6 +20976,13 @@ module Crystal::HIR
 
             # Fallback: resolve the def node by arity/signature and inline if it yields,
             # even if @yield_functions didn't capture the mangled name.
+            if ENV.has_key?("DEBUG_YIELD_INLINE") && (method_name == "trace" || mangled_method_name.includes?("trace"))
+              overloads = function_def_overloads(base_method_name)
+              STDERR.puts "[YIELD_INLINE]   overloads=#{overloads.size} base=#{base_method_name}"
+              overloads.each { |o| STDERR.puts "[YIELD_INLINE]     - #{o}" }
+              fb_entry = lookup_block_function_def_for_call(base_method_name, call_args.size, arg_types)
+              STDERR.puts "[YIELD_INLINE]   lookup_block_entry=#{fb_entry ? fb_entry[0] : "nil"}"
+            end
             if !skip_inline && (entry = lookup_block_function_def_for_call(base_method_name, call_args.size, arg_types))
               yield_name, yield_def = entry
               callee_arena = @function_def_arenas[yield_name]? || @arena
@@ -22326,11 +22350,18 @@ module Crystal::HIR
       best_score = Int32::MIN
 
       base_name = func_name.split("$", 2).first
+      debug_lookup = ENV.has_key?("DEBUG_YIELD_INLINE") && func_name.includes?("trace")
       function_def_overloads(base_name).each do |name|
+        if debug_lookup
+          STDERR.puts "[LOOKUP_BLOCK] checking name=#{name} func_name=#{func_name}"
+        end
         next unless name == func_name || name.starts_with?("#{func_name}$")
         def_node = @function_defs[name]?
         next unless def_node
         stats = function_param_stats(name, def_node)
+        if debug_lookup
+          STDERR.puts "[LOOKUP_BLOCK]   has_block=#{stats.has_block} param_count=#{stats.param_count} required=#{stats.required} arg_count=#{arg_count}"
+        end
         next unless stats.has_block
 
         param_count = stats.param_count
@@ -22338,13 +22369,23 @@ module Crystal::HIR
         has_double_splat = stats.has_double_splat
         required = stats.required
 
+        if debug_lookup && arg_count < required
+          STDERR.puts "[LOOKUP_BLOCK]   SKIP: arg_count < required"
+        end
         next if arg_count < required
+        if debug_lookup && (arg_count > param_count && !has_splat && !has_double_splat)
+          STDERR.puts "[LOOKUP_BLOCK]   SKIP: arg_count > param_count"
+        end
         next if arg_count > param_count && !has_splat && !has_double_splat
 
         score = 0
         if arg_types
           func_context = function_context_from_name(name)
-          next unless params_compatible_with_args?(def_node, arg_types, func_context)
+          compatible = params_compatible_with_args?(def_node, arg_types, func_context)
+          if debug_lookup && !compatible
+            STDERR.puts "[LOOKUP_BLOCK]   SKIP: params_compatible=false arg_types=#{arg_types.map(&.id).join(",")}"
+          end
+          next unless compatible
           score = params_match_score(def_node, arg_types, func_context)
         end
         if has_splat
