@@ -857,9 +857,29 @@ module Crystal
           func = @mir_module.functions.find do |f|
             f.name.split("$").first == base_name
           end
+        else
+          # For unqualified method names with a receiver, try to qualify based on receiver type
+          if call.receiver
+            recv_type = @hir_value_types[call.receiver.not_nil!]?
+            if recv_type
+              recv_desc = @hir_module.get_type_descriptor(recv_type)
+              type_name = recv_desc.try(&.name) || hir_type_name(recv_type)
+              if type_name && !type_name.empty?
+                # Try qualified name with type prefix
+                qualified_name = "#{type_name}##{call.method_name}"
+                func = @mir_module.get_function(qualified_name)
+
+                # If not found, try fuzzy matching (handle type suffixes)
+                unless func
+                  base_name = qualified_name.split("$").first
+                  func = @mir_module.functions.find do |f|
+                    f.name.split("$").first == base_name
+                  end
+                end
+              end
+            end
+          end
         end
-        # NOTE: Unqualified method names are left as extern calls
-        # The proper fix is to qualify names at HIR generation time
       end
 
       if func
@@ -1160,7 +1180,29 @@ module Crystal
       if desc = @hir_module.get_type_descriptor(type_ref)
         return desc.name
       end
-      type_ref.id.to_s
+      # Map primitive type IDs to their names
+      case type_ref
+      when HIR::TypeRef::VOID    then "Void"
+      when HIR::TypeRef::BOOL    then "Bool"
+      when HIR::TypeRef::INT8    then "Int8"
+      when HIR::TypeRef::INT16   then "Int16"
+      when HIR::TypeRef::INT32   then "Int32"
+      when HIR::TypeRef::INT64   then "Int64"
+      when HIR::TypeRef::INT128  then "Int128"
+      when HIR::TypeRef::UINT8   then "UInt8"
+      when HIR::TypeRef::UINT16  then "UInt16"
+      when HIR::TypeRef::UINT32  then "UInt32"
+      when HIR::TypeRef::UINT64  then "UInt64"
+      when HIR::TypeRef::UINT128 then "UInt128"
+      when HIR::TypeRef::FLOAT32 then "Float32"
+      when HIR::TypeRef::FLOAT64 then "Float64"
+      when HIR::TypeRef::CHAR    then "Char"
+      when HIR::TypeRef::STRING  then "String"
+      when HIR::TypeRef::NIL     then "Nil"
+      when HIR::TypeRef::SYMBOL  then "Symbol"
+      when HIR::TypeRef::POINTER then "Pointer"
+      else                            type_ref.id.to_s
+      end
     end
 
     # Helper to get the MIR type of a HIR value by finding it in the function

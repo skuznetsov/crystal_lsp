@@ -5245,6 +5245,33 @@ module Crystal::MIR
         return
       end
 
+      # Handle ascii_alphanumeric? on Char - check if A-Z, a-z, or 0-9
+      # ASCII ranges: A-Z = 65-90, a-z = 97-122, 0-9 = 48-57
+      if mangled_extern_name == "ascii_alphanumeric_" && inst.args.size == 1
+        arg_id = inst.args[0]
+        arg_val = value_ref(arg_id)
+        id = inst.id
+        # Check if char is in any of the alphanumeric ranges using unique temp names
+        # Check uppercase (65 <= c <= 90)
+        emit "%aa_up_ge.#{id} = icmp uge i32 #{arg_val}, 65"
+        emit "%aa_up_le.#{id} = icmp ule i32 #{arg_val}, 90"
+        emit "%aa_upper.#{id} = and i1 %aa_up_ge.#{id}, %aa_up_le.#{id}"
+        # Check lowercase (97 <= c <= 122)
+        emit "%aa_lo_ge.#{id} = icmp uge i32 #{arg_val}, 97"
+        emit "%aa_lo_le.#{id} = icmp ule i32 #{arg_val}, 122"
+        emit "%aa_lower.#{id} = and i1 %aa_lo_ge.#{id}, %aa_lo_le.#{id}"
+        # Check digit (48 <= c <= 57)
+        emit "%aa_dg_ge.#{id} = icmp uge i32 #{arg_val}, 48"
+        emit "%aa_dg_le.#{id} = icmp ule i32 #{arg_val}, 57"
+        emit "%aa_digit.#{id} = and i1 %aa_dg_ge.#{id}, %aa_dg_le.#{id}"
+        # Combine all three checks with OR
+        emit "%aa_letter.#{id} = or i1 %aa_upper.#{id}, %aa_lower.#{id}"
+        emit "#{name} = or i1 %aa_letter.#{id}, %aa_digit.#{id}"
+        @value_types[inst.id] = TypeRef::BOOL
+        @value_names[inst.id] = "r#{inst.id}"
+        return
+      end
+
       # Handle none?/zero? on numeric types - compare with 0
       # This handles flags enums like Unicode::CaseOptions#none?
       if mangled_extern_name.ends_with?("_none_") && inst.args.size == 1
