@@ -19753,16 +19753,33 @@ module Crystal::HIR
               STDERR.puts "[INCLUDED] class=#{current} method=#{method_name} no_modules"
             end
             unless included_method_found
-              # Also check for module-style method (Module.method)
-              module_method_name = "#{current}.#{method_name}"
-              # O(1) lookup: check exact match or mangled version exists
-              has_module_method = @function_types.has_key?(module_method_name) || has_function_base?(module_method_name)
-              if has_module_method
-                # This is a module method call (no receiver)
-                receiver_id = nil
-                full_method_name = module_method_name
-              else
-                receiver_id = nil
+              # Check if method exists in parent classes (inheritance chain)
+              parent_method_found = false
+              parent_class = @class_info[current]?.try(&.parent_name) || @module.class_parents[current]?
+              while parent_class && !parent_method_found
+                parent_method_name = "#{parent_class}##{method_name}"
+                if @function_types.has_key?(parent_method_name) || has_function_base?(parent_method_name)
+                  receiver_id = emit_self(ctx)
+                  full_method_name = parent_method_name
+                  parent_method_found = true
+                  break
+                end
+                # Move to next parent
+                parent_class = @class_info[parent_class]?.try(&.parent_name) || @module.class_parents[parent_class]?
+              end
+
+              unless parent_method_found
+                # Also check for module-style method (Module.method)
+                module_method_name = "#{current}.#{method_name}"
+                # O(1) lookup: check exact match or mangled version exists
+                has_module_method = @function_types.has_key?(module_method_name) || has_function_base?(module_method_name)
+                if has_module_method
+                  # This is a module method call (no receiver)
+                  receiver_id = nil
+                  full_method_name = module_method_name
+                else
+                  receiver_id = nil
+                end
               end
             end
           end
