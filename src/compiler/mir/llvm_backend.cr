@@ -5177,6 +5177,73 @@ module Crystal::MIR
         return
       end
 
+      # Handle to_u64!/to_i64!/to_i32! on numeric union types (e.g., Int8 | Int16 | Int32#to_u64!)
+      # These are sign/zero extensions of primitive values and should be inlined
+      if (mangled_extern_name.includes?("to_u64_") || mangled_extern_name.includes?("to_i64_")) && inst.args.size == 1
+        arg_id = inst.args[0]
+        arg_type = @value_types[arg_id]? || TypeRef::POINTER
+        arg_llvm_type = @type_mapper.llvm_type(arg_type)
+        arg_val = value_ref(arg_id)
+
+        c = @cond_counter
+        @cond_counter += 1
+
+        if arg_llvm_type.includes?(".union")
+          # Union of numeric types - extract payload and sign-extend to i64
+          # Union is { i32 type_id, [N x i8] payload }
+          # For numeric unions like Int8|Int16|Int32, just load the payload as i64
+          emit "%to_i64_alloca.#{c} = alloca #{arg_llvm_type}, align 8"
+          emit "store #{arg_llvm_type} #{normalize_union_value(arg_val, arg_llvm_type)}, ptr %to_i64_alloca.#{c}"
+          emit "%to_i64_payload_ptr.#{c} = getelementptr #{arg_llvm_type}, ptr %to_i64_alloca.#{c}, i32 0, i32 1"
+          emit "%to_i64_val.#{c} = load i32, ptr %to_i64_payload_ptr.#{c}"  # Load as i32 (covers Int8/16/32)
+          emit "#{name} = sext i32 %to_i64_val.#{c} to i64"
+          @value_types[inst.id] = TypeRef::INT64
+        elsif arg_llvm_type.starts_with?("i")
+          # Primitive int type - just sign extend
+          emit "#{name} = sext #{arg_llvm_type} #{arg_val} to i64"
+          @value_types[inst.id] = TypeRef::INT64
+        else
+          # Fallback - treat as i32 and extend
+          emit "#{name} = sext i32 #{arg_val} to i64"
+          @value_types[inst.id] = TypeRef::INT64
+        end
+        @value_names[inst.id] = "r#{inst.id}"
+        return
+      end
+
+      if (mangled_extern_name.includes?("to_u32_") || mangled_extern_name.includes?("to_i32_") || mangled_extern_name.includes?("to_i_")) && inst.args.size == 1
+        arg_id = inst.args[0]
+        arg_type = @value_types[arg_id]? || TypeRef::POINTER
+        arg_llvm_type = @type_mapper.llvm_type(arg_type)
+        arg_val = value_ref(arg_id)
+
+        c = @cond_counter
+        @cond_counter += 1
+
+        if arg_llvm_type.includes?(".union")
+          # Union of numeric types - extract payload as i32
+          emit "%to_i32_alloca.#{c} = alloca #{arg_llvm_type}, align 8"
+          emit "store #{arg_llvm_type} #{normalize_union_value(arg_val, arg_llvm_type)}, ptr %to_i32_alloca.#{c}"
+          emit "%to_i32_payload_ptr.#{c} = getelementptr #{arg_llvm_type}, ptr %to_i32_alloca.#{c}, i32 0, i32 1"
+          emit "#{name} = load i32, ptr %to_i32_payload_ptr.#{c}"
+          @value_types[inst.id] = TypeRef::INT32
+        elsif arg_llvm_type == "i64"
+          emit "#{name} = trunc i64 #{arg_val} to i32"
+          @value_types[inst.id] = TypeRef::INT32
+        elsif arg_llvm_type.starts_with?("i")
+          emit "#{name} = sext #{arg_llvm_type} #{arg_val} to i32"
+          @value_types[inst.id] = TypeRef::INT32
+        elsif arg_llvm_type == "ptr"
+          emit "#{name} = ptrtoint ptr #{arg_val} to i32"
+          @value_types[inst.id] = TypeRef::INT32
+        else
+          emit "#{name} = add i32 0, 0"  # Fallback to 0
+          @value_types[inst.id] = TypeRef::INT32
+        end
+        @value_names[inst.id] = "r#{inst.id}"
+        return
+      end
+
       # If the mangled name doesn't match any defined function, try to find a match with namespace prefix
       # Search in MIR module's functions - but only exact matches or proper namespace matches
       # Note: Suffix matching is disabled as it causes false positives (e.g., matching initialize to unrelated methods)
