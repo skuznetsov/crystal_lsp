@@ -21319,7 +21319,8 @@ module Crystal::HIR
       # Primitive numeric predicates and shifts.
       if receiver_id && numeric_primitive?(ctx.type_of(receiver_id))
         receiver_type = ctx.type_of(receiver_id)
-        if method_name == "zero?" && args.empty?
+        # Handle zero? and none? (flags enums use none? which is equivalent to zero?)
+        if (method_name == "zero?" || method_name == "none?") && args.empty?
           zero = Literal.new(ctx.next_id, receiver_type, 0_i64)
           ctx.emit(zero)
           ctx.register_type(zero.id, receiver_type)

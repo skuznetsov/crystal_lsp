@@ -5244,6 +5244,22 @@ module Crystal::MIR
         return
       end
 
+      # Handle none?/zero? on numeric types - compare with 0
+      # This handles flags enums like Unicode::CaseOptions#none?
+      if mangled_extern_name.ends_with?("_none_") && inst.args.size == 1
+        arg_id = inst.args[0]
+        arg_type = @value_types[arg_id]? || TypeRef::INT32
+        arg_llvm_type = @type_mapper.llvm_type(arg_type)
+        arg_val = value_ref(arg_id)
+
+        if arg_llvm_type.starts_with?("i")
+          emit "#{name} = icmp eq #{arg_llvm_type} #{arg_val}, 0"
+          @value_types[inst.id] = TypeRef::BOOL
+          @value_names[inst.id] = "r#{inst.id}"
+          return
+        end
+      end
+
       # If the mangled name doesn't match any defined function, try to find a match with namespace prefix
       # Search in MIR module's functions - but only exact matches or proper namespace matches
       # Note: Suffix matching is disabled as it causes false positives (e.g., matching initialize to unrelated methods)
