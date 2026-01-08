@@ -16415,8 +16415,6 @@ module Crystal::HIR
     private def lower_if(ctx : LoweringContext, node : CrystalV2::Compiler::Frontend::IfNode) : ValueId
       merge_block = ctx.create_block
 
-      # Save locals state before branching
-      pre_branch_locals = ctx.save_locals
       truthy_targets = truthy_narrowing_targets(node.condition)
       is_a_targets = is_a_narrowing_targets(node.condition)
 
@@ -16437,6 +16435,9 @@ module Crystal::HIR
                         end
 
       # Lower main condition and branch
+      # NOTE: Condition must be evaluated BEFORE saving locals, because
+      # 'out' parameters in the condition create new locals that must be
+      # visible in both branches (e.g., `if func(out x) == -1 ... else ... x ...`)
       cond_node = @arena[node.condition]
       if cond_node.is_a?(CrystalV2::Compiler::Frontend::BinaryNode) &&
          (cond_node.operator_string == "&&" || cond_node.operator_string == "||")
@@ -16447,6 +16448,9 @@ module Crystal::HIR
         cond_bool = lower_truthy_check(ctx, cond_id, cond_type)
         ctx.terminate(Branch.new(cond_bool, then_block, next_test_block))
       end
+
+      # Save locals state AFTER condition evaluation to preserve 'out' parameters
+      pre_branch_locals = ctx.save_locals
 
       # Process "then" branch
       ctx.current_block = then_block
