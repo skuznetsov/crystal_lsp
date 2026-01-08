@@ -5009,7 +5009,8 @@ module Crystal::MIR
       # Mangle the extern name to be a valid LLVM identifier
       mangled_extern_name = @type_mapper.mangle_name(inst.extern_name)
 
-      if mangled_extern_name.starts_with?("Pointer_") && mangled_extern_name.ends_with?("__new") && inst.args.size == 1
+      # Handle Pointer.new / Pointer.new! - convert integer to pointer
+      if mangled_extern_name.starts_with?("Pointer_") && (mangled_extern_name.includes?("__new") || mangled_extern_name.includes?("_new_")) && inst.args.size == 1
         arg_id = inst.args[0]
         arg = value_ref(arg_id)
         arg_type = lookup_value_llvm_type(arg_id)
