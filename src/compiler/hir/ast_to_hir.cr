@@ -20031,7 +20031,27 @@ module Crystal::HIR
         if ENV.has_key?("DEBUG_CALL_PATH") && method_name == "byte_range"
           STDERR.puts "[CALL_PATH] IdentifierNode method=#{method_name} @current_class=#{@current_class || "nil"}"
         end
-        if current = @current_class
+        if self_id = ctx.lookup_local("self")
+          self_type = ctx.type_of(self_id)
+          if self_type != TypeRef::VOID
+            self_name = if info = @class_info_by_type_id[self_type.id]?
+                          info.name
+                        elsif desc = @module.get_type_descriptor(self_type)
+                          normalize_method_owner_name(desc.name)
+                        else
+                          ""
+                        end
+            if !self_name.empty?
+              self_method_name = "#{self_name}##{method_name}"
+              if @function_types.has_key?(self_method_name) || has_function_base?(self_method_name)
+                receiver_id = self_id
+                full_method_name = resolve_method_with_inheritance(self_name, method_name) || self_method_name
+              end
+            end
+          end
+        end
+
+        if receiver_id.nil? && (current = @current_class)
           # Debug: track when @current_class is a short name
           if ENV.has_key?("DEBUG_SHORT_NAMES") && !current.includes?("::") &&
              (current == "Seek" || current == "Section" || current == "LoadCommand" || current == "Sequence")
