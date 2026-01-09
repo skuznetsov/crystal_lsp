@@ -3229,15 +3229,16 @@ module Crystal::HIR
         break if idx >= arg_strings.size
         param_name = String.new(tp)
         arg_name = arg_strings[idx]
+        if arg_name == param_name && type_param_like?(arg_name)
+          mapped = @type_param_map[arg_name]?
+          if mapped
+            extra[param_name] = mapped
+          end
+          next
+        end
         # Skip mappings that still reference the same type param (e.g., Union(*T), Array(T)).
         # Treat these as unresolved so module methods defer until concrete types are known.
         if type_name_includes_param?(arg_name, param_name)
-          next
-        end
-        if arg_name == param_name && type_param_like?(arg_name)
-          mapped = @type_param_map[arg_name]?
-          next unless mapped
-          extra[param_name] = mapped
           next
         end
         extra[param_name] = arg_name
