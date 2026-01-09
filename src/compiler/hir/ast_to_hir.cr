@@ -1826,7 +1826,12 @@ module Crystal::HIR
     private def process_macro_literal_in_lib(node : CrystalV2::Compiler::Frontend::MacroLiteralNode, lib_name : String, pass : Symbol)
       if raw_text = macro_literal_raw_text(node)
         expanded = expand_flag_macro_text(raw_text) || raw_text
-        if parsed = parse_macro_literal_lib_body(expanded)
+        sanitized = strip_macro_lines(expanded)
+        parsed = parse_macro_literal_lib_body(expanded)
+        if parsed.nil? && sanitized != expanded
+          parsed = parse_macro_literal_lib_body(sanitized)
+        end
+        if parsed
           program, body = parsed
           with_arena(program.arena) do
             body.each do |expr_id|
@@ -1839,7 +1844,12 @@ module Crystal::HIR
 
       texts = macro_literal_active_texts(node)
       combined = texts.join("\n")
-      if parsed = parse_macro_literal_lib_body(combined)
+      sanitized = strip_macro_lines(combined)
+      parsed = parse_macro_literal_lib_body(combined)
+      if parsed.nil? && sanitized != combined
+        parsed = parse_macro_literal_lib_body(sanitized)
+      end
+      if parsed
         program, body = parsed
         with_arena(program.arena) do
           body.each do |expr_id|
@@ -1851,7 +1861,12 @@ module Crystal::HIR
 
       texts.each do |text|
         next if text.strip.empty?
-        if parsed = parse_macro_literal_lib_body(text)
+        sanitized = strip_macro_lines(text)
+        parsed = parse_macro_literal_lib_body(text)
+        if parsed.nil? && sanitized != text
+          parsed = parse_macro_literal_lib_body(sanitized)
+        end
+        if parsed
           program, body = parsed
           with_arena(program.arena) do
             body.each do |expr_id|
@@ -3801,6 +3816,9 @@ module Crystal::HIR
                   store_function_type_param_map(full_name, base_name, extra_map)
                   store_function_namespace_override(full_name, base_name, module_full_name)
                   debug_hook("module.instance_method.register", "class=#{class_name} module=#{module_full_name} method=#{method_name} full=#{full_name}")
+                  if ENV["DEBUG_EACH_REGISTER"]? && method_name == "each" && class_name.includes?("Slice(")
+                    STDERR.puts "[EACH_REGISTER] class=#{class_name} full=#{full_name}"
+                  end
                   if type_literal_name
                     literal_ref = type_ref_for_name(type_literal_name)
                     if literal_ref != TypeRef::VOID
@@ -3818,6 +3836,9 @@ module Crystal::HIR
                       debug_hook("yield.unregister", full_name)
                     elsif contains_yield
                       @yield_functions.add(full_name)
+                      if ENV["DEBUG_EACH_REGISTER"]? && method_name == "each" && class_name.includes?("Slice(")
+                        STDERR.puts "[EACH_REGISTER] yield=#{full_name}"
+                      end
                       debug_hook("yield.register", full_name)
                       unless @function_defs.has_key?(base_name)
                         @function_defs[base_name] = member
@@ -4241,6 +4262,10 @@ module Crystal::HIR
 
     NILABLE_QUERY_METHODS = ["[]?", "at?", "first?", "last?", "pop?", "shift?"] of String
 
+    private def fallback_query_return_type(method_name : String) : TypeRef
+      NILABLE_QUERY_METHODS.includes?(method_name) ? TypeRef::VOID : TypeRef::BOOL
+    end
+
     # Some stdlib methods end in `?` but return a value (typically `T?` / `V?`) rather than `Bool`.
     # We need correct return types early (during signature registration) so callers lowered before the
     # callee body still get a stable type (avoids emitting `i1` where `i32`/union is expected).
@@ -4266,9 +4291,21 @@ module Crystal::HIR
         if paren = base.index('(')
           base = base[0, paren]
         end
-        case base
+        short_base = base.split("::").last
+        case short_base
         when "Deque", "Slice", "StaticArray", "Set"
           create_union_type_for_nullable(elem)
+        when "PointerLinkedList"
+          elem_name = get_type_name_from_ref(elem)
+          if elem_name.empty? || elem_name == "Void" || elem_name == "Unknown"
+            if info = split_generic_base_and_args(desc.name)
+              elem_name = info[:args].strip
+            end
+          end
+          return nil if elem_name.empty? || elem_name == "Void" || elem_name == "Unknown"
+          ptr_ref = type_ref_for_name("Pointer(#{elem_name})")
+          return nil if ptr_ref == TypeRef::VOID
+          create_union_type_for_nullable(ptr_ref)
         else
           nil
         end
@@ -5271,7 +5308,12 @@ module Crystal::HIR
     private def process_macro_literal_in_module(node : CrystalV2::Compiler::Frontend::MacroLiteralNode, module_name : String)
       if raw_text = macro_literal_raw_text(node)
         expanded = expand_flag_macro_text(raw_text) || raw_text
-        if program = parse_macro_literal_program(expanded)
+        sanitized = strip_macro_lines(expanded)
+        program = parse_macro_literal_program(expanded)
+        if program.nil? && sanitized != expanded
+          program = parse_macro_literal_program(sanitized)
+        end
+        if program
           with_arena(program.arena) do
             scan_module_extend_self_in_program(program, module_name)
             program.roots.each do |expr_id|
@@ -5305,7 +5347,12 @@ module Crystal::HIR
       # Fallback: evaluate active text pieces (handles nested macro controls).
       texts = macro_literal_active_texts(node)
       combined = texts.join("\n")
-      if program = parse_macro_literal_program(combined)
+      sanitized = strip_macro_lines(combined)
+      program = parse_macro_literal_program(combined)
+      if program.nil? && sanitized != combined
+        program = parse_macro_literal_program(sanitized)
+      end
+      if program
         with_arena(program.arena) do
           scan_module_extend_self_in_program(program, module_name)
           program.roots.each do |expr_id|
@@ -5336,7 +5383,12 @@ module Crystal::HIR
       parsed_any = false
       texts.each do |text|
         next if text.strip.empty?
-        if program = parse_macro_literal_program(text)
+        sanitized = strip_macro_lines(text)
+        program = parse_macro_literal_program(text)
+        if program.nil? && sanitized != text
+          program = parse_macro_literal_program(sanitized)
+        end
+        if program
           parsed_any = true
           with_arena(program.arena) do
             program.roots.each do |expr_id|
@@ -5965,7 +6017,12 @@ module Crystal::HIR
     )
       if raw_text = macro_literal_raw_text(node)
         expanded = expand_flag_macro_text(raw_text) || raw_text
-        if program = parse_macro_literal_program(expanded)
+        sanitized = strip_macro_lines(expanded)
+        program = parse_macro_literal_program(expanded)
+        if program.nil? && sanitized != expanded
+          program = parse_macro_literal_program(sanitized)
+        end
+        if program
           with_arena(program.arena) do
             program.roots.each do |expr_id|
               expr_node = @arena[expr_id]
@@ -5993,7 +6050,12 @@ module Crystal::HIR
 
       texts = macro_literal_active_texts(node)
       combined = texts.join("\n")
-      if parsed = parse_macro_literal_class_body(combined)
+      sanitized = strip_macro_lines(combined)
+      parsed = parse_macro_literal_class_body(combined)
+      if parsed.nil? && sanitized != combined
+        parsed = parse_macro_literal_class_body(sanitized)
+      end
+      if parsed
         program, body_ids = parsed
         with_arena(program.arena) do
           body_ids.each do |expr_id|
@@ -6034,7 +6096,12 @@ module Crystal::HIR
       parsed_any = false
       texts.each do |text|
         next if text.strip.empty?
-        if parsed = parse_macro_literal_class_body(text)
+        sanitized = strip_macro_lines(text)
+        parsed = parse_macro_literal_class_body(text)
+        if parsed.nil? && sanitized != text
+          parsed = parse_macro_literal_class_body(sanitized)
+        end
+        if parsed
           parsed_any = true
           program, body_ids = parsed
           with_arena(program.arena) do
@@ -7194,7 +7261,7 @@ module Crystal::HIR
                             self_type = type_ref_for_name(class_name)
                             inferred = infer_unannotated_query_return_type(method_name, self_type)
                             inferred ||= infer_concrete_return_type_from_body(member, class_name)
-                            inferred || TypeRef::BOOL
+                            inferred || fallback_query_return_type(method_name)
                           else
             # Try to infer return type from getter-style methods (single ivar access).
             inferred = infer_getter_return_type(member, ivars)
@@ -8674,7 +8741,9 @@ module Crystal::HIR
                         type_ref_for_name(rt_name)
                       end
                     elsif method_name.ends_with?("?")
-                      infer_unannotated_query_return_type(method_name, class_info.type_ref) || TypeRef::BOOL
+                      inferred = infer_unannotated_query_return_type(method_name, class_info.type_ref)
+                      inferred ||= infer_concrete_return_type_from_body(node, class_name)
+                      inferred || fallback_query_return_type(method_name)
                     else
                       # Try to infer return type from getter-style methods (single ivar access)
                       inferred = infer_getter_return_type(node, class_info.ivars)
@@ -9108,13 +9177,13 @@ module Crystal::HIR
         if elem = tuple_element_type(receiver_type, 0)
           create_union_type_for_nullable(elem)
         else
-          TypeRef::NIL
+          nil
         end
       when "last?"
         if elem = tuple_element_type(receiver_type, -1)
           create_union_type_for_nullable(elem)
         else
-          TypeRef::NIL
+          nil
         end
       else
         nil
@@ -11237,6 +11306,25 @@ module Crystal::HIR
         if name.includes?("$")
           return type
         end
+        if type == TypeRef::BOOL && name.ends_with?("?")
+          receiver_name = nil.as(String?)
+          method_name = nil.as(String?)
+          if idx = name.rindex('#')
+            receiver_name = name[0, idx]
+            method_name = name[(idx + 1)..]
+          elsif idx = name.rindex('.')
+            receiver_name = name[0, idx]
+            method_name = name[(idx + 1)..]
+          end
+          if receiver_name && method_name && NILABLE_QUERY_METHODS.includes?(method_name)
+            receiver_ref = type_ref_for_name(receiver_name)
+            if receiver_ref != TypeRef::VOID
+              if inferred = infer_unannotated_query_return_type(method_name, receiver_ref)
+                return inferred
+              end
+            end
+          end
+        end
         # Special case: X#to_s with no args should return String, not Nil
         # In Crystal, to_s() without args returns String by convention:
         # - Enums: to_s : String returns member_name || value.to_s
@@ -11250,6 +11338,25 @@ module Crystal::HIR
       # If this is a base name (no $ suffix), use cached return type if available.
       if cached = @function_base_return_types[name]?
         return cached
+      end
+      if name.ends_with?("?")
+        receiver_name = nil.as(String?)
+        method_name = nil.as(String?)
+        if idx = name.rindex('#')
+          receiver_name = name[0, idx]
+          method_name = name[(idx + 1)..]
+        elsif idx = name.rindex('.')
+          receiver_name = name[0, idx]
+          method_name = name[(idx + 1)..]
+        end
+        if receiver_name && method_name && NILABLE_QUERY_METHODS.includes?(method_name)
+          receiver_ref = type_ref_for_name(receiver_name)
+          if receiver_ref != TypeRef::VOID
+            if inferred = infer_unannotated_query_return_type(method_name, receiver_ref)
+              return inferred
+            end
+          end
+        end
       end
       # Fall back to already-lowered functions
       if func = @module.function_by_name(name)
@@ -12081,6 +12188,71 @@ module Crystal::HIR
       type_param_name
     end
 
+    private def resolve_return_type_from_def(
+      mangled_method_name : String,
+      base_method_name : String,
+      receiver_type : TypeRef?
+    ) : TypeRef?
+      func_def = @function_defs[mangled_method_name]? || @function_defs[base_method_name]?
+      return nil unless func_def
+
+      return_type_slice = func_def.return_type
+      return nil unless return_type_slice
+
+      return_type_name = String.new(return_type_slice)
+      return nil if return_type_name.empty?
+
+      if return_type_name == "self"
+        if receiver_type && receiver_type != TypeRef::VOID
+          return receiver_type
+        end
+      end
+
+      param_map = function_type_param_map_for(mangled_method_name, base_method_name)
+      receiver_map = type_param_map_for_receiver_name(base_method_name)
+      if receiver_map.empty?
+        receiver_map = type_param_map_for_receiver_name(mangled_method_name)
+      end
+      if receiver_map.empty? && receiver_type && receiver_type != TypeRef::VOID
+        if desc = @module.get_type_descriptor(receiver_type)
+          if info = split_generic_base_and_args(desc.name)
+            if template = @generic_templates[info[:base]]?
+              if desc.type_params.size == template.type_params.size
+                template.type_params.each_with_index do |param, idx|
+                  receiver_map[param] = get_type_name_from_ref(desc.type_params[idx])
+                end
+              end
+            end
+          end
+        end
+      end
+
+      merged = {} of String => String
+      if param_map && !param_map.empty?
+        merged.merge!(param_map)
+      end
+      if !receiver_map.empty?
+        merged.merge!(receiver_map)
+      end
+
+      if merged.empty?
+        resolved = type_ref_for_name(return_type_name)
+        if ENV["DEBUG_RETURN_DEF"]? && (mangled_method_name.includes?("PointerPairingHeap") || base_method_name.includes?("PointerPairingHeap"))
+          STDERR.puts "[RETURN_DEF] name=#{mangled_method_name} base=#{base_method_name} rt=#{return_type_name} map=none resolved=#{get_type_name_from_ref(resolved)}"
+        end
+        return resolved
+      end
+
+      with_type_param_map(merged) do
+        resolved = type_ref_for_name(return_type_name)
+        if ENV["DEBUG_RETURN_DEF"]? && (mangled_method_name.includes?("PointerPairingHeap") || base_method_name.includes?("PointerPairingHeap"))
+          params_str = merged.map { |k, v| "#{k}=#{v}" }.join(",")
+          STDERR.puts "[RETURN_DEF] name=#{mangled_method_name} base=#{base_method_name} rt=#{return_type_name} map=#{params_str} resolved=#{get_type_name_from_ref(resolved)}"
+        end
+        resolved
+      end
+    end
+
     private def block_param_types_for_call(
       mangled_method_name : String,
       base_method_name : String,
@@ -12355,6 +12527,18 @@ module Crystal::HIR
 
       # For Slice.new(pointer, size, ...), infer from first arg's pointed-to type
       if class_name == "Slice" && args && args.size >= 1
+        if current = @current_class
+          if info = split_generic_base_and_args(current)
+            base = normalize_method_owner_name(info[:base])
+            if base == "Slice"
+              type_args = split_generic_type_args(info[:args])
+              if elem_name = type_args.first?
+                elem_name = elem_name.strip
+                return elem_name unless elem_name.empty?
+              end
+            end
+          end
+        end
         pointer_arg_id = args[0]
         pointer_arg = @arena[pointer_arg_id]
         # Try to get the pointer's element type
@@ -20373,6 +20557,12 @@ module Crystal::HIR
           end
           receiver_is_type_literal = ctx.type_literal?(receiver_id)
           ensure_monomorphized_type(receiver_type) unless receiver_type == TypeRef::VOID
+          if ENV["DEBUG_EACH_RESOLVE"]? && method_name == "each"
+            desc_name = @module.get_type_descriptor(receiver_type).try(&.name) || "nil"
+            info_name = @class_info_by_type_id[receiver_type.id]?.try(&.name) || "nil"
+            scope = "#{@current_class || ""}##{@current_method || ""}"
+            STDERR.puts "[EACH_RESOLVE] recv_id=#{receiver_type.id} desc=#{desc_name} info=#{info_name} scope=#{scope}"
+          end
           if receiver_type.id > 0
             # Look up class name from type, then resolve method with inheritance
             if info = @class_info_by_type_id[receiver_type.id]?
@@ -20948,6 +21138,12 @@ module Crystal::HIR
           mangled_method_name = entry_name
         end
       end
+      if ENV["DEBUG_EACH_RESOLVE"]? && method_name == "each" && receiver_id
+        recv_name = get_type_name_from_ref(ctx.type_of(receiver_id))
+        if recv_name.includes?("Slice(Pointer(Crystal::EventLoop::Polling::Event))")
+          STDERR.puts "[EACH_RESOLVE_CALL] recv=#{recv_name} lookup=#{lookup_name} base=#{base_method_name} mangled=#{mangled_method_name}"
+        end
+      end
       if receiver_id
         # Preserve a callsite-mangled overload (typed args) to avoid collapsing
         # into base names like `IO#puts` that hide typed overloads.
@@ -21034,6 +21230,16 @@ module Crystal::HIR
         STDERR.puts "[CALL_TRACE] stage=after_resolve method=#{method_name} base=#{base_method_name} mangled=#{mangled_method_name}"
       end
       debug_hook("call.resolve", "method=#{method_name} base=#{base_method_name} mangled=#{mangled_method_name} receiver=#{receiver_name} args=#{arg_names} current=#{@current_class || ""}")
+      if ENV["DEBUG_EACH_RESOLVE"]? && method_name == "each"
+        recv = receiver_id ? get_type_name_from_ref(ctx.type_of(receiver_id)) : "nil"
+        scope = "#{@current_class || ""}##{@current_method || ""}"
+        STDERR.puts "[EACH_RESOLVE_FINAL] recv=#{recv} base=#{base_method_name} mangled=#{mangled_method_name} scope=#{scope} func=#{ctx.function.name}"
+      end
+      if ENV["DEBUG_UNSAFE_FETCH"]? && method_name == "unsafe_fetch"
+        recv = receiver_id ? get_type_name_from_ref(ctx.type_of(receiver_id)) : "nil"
+        current_scope = "#{@current_class || ""}##{@current_method || ""}"
+        STDERR.puts "[UNSAFE_FETCH] recv=#{recv} base=#{base_method_name} mangled=#{mangled_method_name} current=#{current_scope} func=#{ctx.function.name}"
+      end
       if ENV["DEBUG_PUTS_CALLS"]? && method_name == "puts"
         STDERR.puts "[DEBUG_PUTS_CALL] base=#{base_method_name} mangled=#{mangled_method_name} args=#{arg_names.join(",")}"
       end
@@ -21134,10 +21340,30 @@ module Crystal::HIR
               STDERR.puts "[YIELD_INLINE]   in_function_defs=#{@function_defs.has_key?(mangled_method_name)}"
             end
             if !skip_inline && @yield_functions.includes?(mangled_method_name)
-              if func_def = @function_defs[mangled_method_name]?
-                debug_hook("call.inline.yield", "callee=#{mangled_method_name} current=#{@current_class || ""}")
-                callee_arena = @function_def_arenas[mangled_method_name]? || @arena
-                return inline_yield_function(ctx, func_def, mangled_method_name, receiver_id, call_args, block_cast, callee_arena)
+              if receiver_id
+                recv_name = get_type_name_from_ref(ctx.type_of(receiver_id))
+                owner_part = mangled_method_name.split("$", 2).first
+                owner_name = if owner_part.includes?("#")
+                               owner_part.split("#", 2).first
+                             elsif owner_part.includes?(".")
+                               owner_part.split(".", 2).first
+                             else
+                               nil
+                             end
+                if owner_name && owner_name.includes?("(") && recv_name.includes?("(")
+                  owner_base = split_generic_base_and_args(owner_name).try(&.[](:base)) || owner_name
+                  recv_base = split_generic_base_and_args(recv_name).try(&.[](:base)) || recv_name
+                  if owner_base == recv_base && owner_name != recv_name
+                    skip_inline = true
+                  end
+                end
+              end
+              if !skip_inline
+                if func_def = @function_defs[mangled_method_name]?
+                  debug_hook("call.inline.yield", "callee=#{mangled_method_name} current=#{@current_class || ""}")
+                  callee_arena = @function_def_arenas[mangled_method_name]? || @arena
+                  return inline_yield_function(ctx, func_def, mangled_method_name, receiver_id, call_args, block_cast, callee_arena)
+                end
               end
             end
             # Also try base method name (for functions without overloading)
@@ -21181,11 +21407,15 @@ module Crystal::HIR
             # This handles inherited methods like Object#tap called on any class.
             # Example: `fd.tap { |x| x.something }` where tap is defined in Object.
             if !skip_inline && receiver_id
-              if yield_key = find_yield_method_fallback(method_name, call_args.size)
-                if func_def = @function_defs[yield_key]?
-                  debug_hook("call.inline.yield", "callee=#{yield_key} current=#{@current_class || ""}")
-                  callee_arena = @function_def_arenas[yield_key]? || @arena
-                  return inline_yield_function(ctx, func_def, yield_key, receiver_id, call_args, block_cast, callee_arena)
+              receiver_desc = @module.get_type_descriptor(ctx.type_of(receiver_id))
+              generic_receiver = receiver_desc && receiver_desc.name.includes?("(")
+              unless generic_receiver
+                if yield_key = find_yield_method_fallback(method_name, call_args.size)
+                  if func_def = @function_defs[yield_key]?
+                    debug_hook("call.inline.yield", "callee=#{yield_key} current=#{@current_class || ""}")
+                    callee_arena = @function_def_arenas[yield_key]? || @arena
+                    return inline_yield_function(ctx, func_def, yield_key, receiver_id, call_args, block_cast, callee_arena)
+                  end
                 end
               end
             end
@@ -21326,6 +21556,28 @@ module Crystal::HIR
         if tuple_return = tuple_return_type_for_method(ctx.type_of(receiver_id), method_name)
           return_type = tuple_return
         end
+      end
+
+      if receiver_id &&
+         method_name.ends_with?("?") &&
+         (return_type == TypeRef::BOOL || return_type == TypeRef::VOID || return_type == TypeRef::NIL)
+        if inferred = infer_unannotated_query_return_type(method_name, ctx.type_of(receiver_id))
+          return_type = inferred
+        end
+      end
+
+      if ENV["DEBUG_CALL_RETURN"]? && (mangled_method_name.includes?("PointerPairingHeap") || base_method_name.includes?("PointerPairingHeap"))
+        STDERR.puts "[CALL_RETURN] before name=#{mangled_method_name} base=#{base_method_name} return=#{get_type_name_from_ref(return_type)}"
+      end
+
+      if return_type == TypeRef::VOID || return_type == TypeRef::NIL
+        if inferred = resolve_return_type_from_def(mangled_method_name, base_method_name, receiver_id ? ctx.type_of(receiver_id) : nil)
+          return_type = inferred unless inferred == TypeRef::VOID || inferred == TypeRef::NIL
+        end
+      end
+
+      if ENV["DEBUG_CALL_RETURN"]? && (mangled_method_name.includes?("PointerPairingHeap") || base_method_name.includes?("PointerPairingHeap"))
+        STDERR.puts "[CALL_RETURN] after name=#{mangled_method_name} base=#{base_method_name} return=#{get_type_name_from_ref(return_type)}"
       end
 
       # If still not found and receiver_id is set, try to find method in any class.
@@ -21892,6 +22144,9 @@ module Crystal::HIR
       end
       if ENV["DEBUG_CALL_TRACE"]? && method_name == "copy_to"
         STDERR.puts "[CALL_TRACE] stage=after_remember method=#{method_name} mangled=#{mangled_method_name} primary=#{primary_mangled_name}"
+      end
+      if ENV["DEBUG_EACH_RESOLVE"]? && method_name == "each"
+        STDERR.puts "[EACH_LOWER] primary=#{primary_mangled_name} mangled=#{mangled_method_name} func=#{ctx.function.name}"
       end
       callsite_label = nil
       if DebugHooks::ENABLED
@@ -25725,6 +25980,17 @@ module Crystal::HIR
           actual_name = base_method_name
         end
       end
+      if ENV["DEBUG_MEMBER_RETURN"]? && (member_name == "first?" || actual_name.includes?("PointerPairingHeap"))
+        STDERR.puts "[MEMBER_RETURN] member=#{member_name} actual=#{actual_name} base=#{base_method_name} return=#{get_type_name_from_ref(return_type)}"
+      end
+      if return_type == TypeRef::VOID || return_type == TypeRef::NIL
+        if inferred = resolve_return_type_from_def(actual_name, base_method_name, receiver_type)
+          return_type = inferred unless inferred == TypeRef::VOID || inferred == TypeRef::NIL
+        end
+      end
+      if ENV["DEBUG_MEMBER_RETURN"]? && (member_name == "first?" || actual_name.includes?("PointerPairingHeap"))
+        STDERR.puts "[MEMBER_RETURN] after member=#{member_name} actual=#{actual_name} base=#{base_method_name} return=#{get_type_name_from_ref(return_type)}"
+      end
       if DebugHooks::ENABLED && (member_name == "first" || member_name == "last" || member_name == "address")
         recv_name = receiver_type == TypeRef::VOID ? "Void" : get_type_name_from_ref(receiver_type)
         ret_name = return_type == TypeRef::VOID ? "Void" : get_type_name_from_ref(return_type)
@@ -25733,7 +25999,8 @@ module Crystal::HIR
       if tuple_return = tuple_return_type_for_method(receiver_type, member_name)
         return_type = tuple_return
       end
-      if return_type == TypeRef::BOOL && member_name.ends_with?("?")
+      if member_name.ends_with?("?") &&
+         (return_type == TypeRef::BOOL || return_type == TypeRef::VOID || return_type == TypeRef::NIL)
         if inferred = infer_unannotated_query_return_type(member_name, ctx.type_of(object_id))
           return_type = inferred
         end
@@ -25908,6 +26175,9 @@ module Crystal::HIR
       args = coerce_args_to_param_types(ctx, args, actual_name)
       if ENV["DEBUG_CALL_TRACE"]? && member_name == "copy_to"
         STDERR.puts "[CALL_TRACE] stage=before_emit method=#{member_name} actual=#{actual_name} args=#{args.size}"
+      end
+      if ENV["DEBUG_MEMBER_CALL"]? && member_name == "first?"
+        STDERR.puts "[MEMBER_CALL] name=#{actual_name} return_id=#{return_type.id} return=#{get_type_name_from_ref(return_type)}"
       end
       call = Call.new(ctx.next_id, return_type, object_id, actual_name, args, nil, call_virtual)
       ctx.emit(call)
