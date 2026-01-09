@@ -584,6 +584,8 @@ module Crystal::HIR
     # Use a stack to support nested inlining (a block body may itself contain `yield`).
     @inline_yield_block_stack : Array(CrystalV2::Compiler::Frontend::BlockNode) = [] of CrystalV2::Compiler::Frontend::BlockNode
     @inline_yield_block_arena_stack : Array(CrystalV2::Compiler::Frontend::ArenaLike) = [] of CrystalV2::Compiler::Frontend::ArenaLike
+    # Block parameter types for the current inline-yield context (aligned with @inline_yield_block_stack).
+    @inline_yield_block_param_types_stack : Array(Array(TypeRef)?) = [] of Array(TypeRef)?
 
     # Track currently inlined yield-functions to avoid infinite inline recursion on stdlib code.
     @inline_yield_name_stack : Array(String) = [] of String
@@ -6888,9 +6890,11 @@ module Crystal::HIR
       # NOT substitute an inline block from an unrelated call context.
       saved_yield_block_stack = @inline_yield_block_stack
       saved_yield_arena_stack = @inline_yield_block_arena_stack
+      saved_yield_param_stack = @inline_yield_block_param_types_stack
       saved_yield_name_stack = @inline_yield_name_stack
       @inline_yield_block_stack = [] of CrystalV2::Compiler::Frontend::BlockNode
       @inline_yield_block_arena_stack = [] of CrystalV2::Compiler::Frontend::ArenaLike
+      @inline_yield_block_param_types_stack = [] of Array(TypeRef)?
       @inline_yield_name_stack = [] of String
       last_value : ValueId? = nil
       begin
@@ -6902,6 +6906,7 @@ module Crystal::HIR
       ensure
         @inline_yield_block_stack = saved_yield_block_stack
         @inline_yield_block_arena_stack = saved_yield_arena_stack
+        @inline_yield_block_param_types_stack = saved_yield_param_stack
         @inline_yield_name_stack = saved_yield_name_stack
       end
 
@@ -8856,9 +8861,11 @@ module Crystal::HIR
       # NOT substitute an inline block from an unrelated call context.
       saved_yield_block_stack = @inline_yield_block_stack
       saved_yield_arena_stack = @inline_yield_block_arena_stack
+      saved_yield_param_stack = @inline_yield_block_param_types_stack
       saved_yield_name_stack = @inline_yield_name_stack
       @inline_yield_block_stack = [] of CrystalV2::Compiler::Frontend::BlockNode
       @inline_yield_block_arena_stack = [] of CrystalV2::Compiler::Frontend::ArenaLike
+      @inline_yield_block_param_types_stack = [] of Array(TypeRef)?
       @inline_yield_name_stack = [] of String
       last_value : ValueId? = nil
       begin
@@ -8950,6 +8957,7 @@ module Crystal::HIR
       ensure
         @inline_yield_block_stack = saved_yield_block_stack
         @inline_yield_block_arena_stack = saved_yield_arena_stack
+        @inline_yield_block_param_types_stack = saved_yield_param_stack
         @inline_yield_name_stack = saved_yield_name_stack
       end
 
@@ -12283,19 +12291,21 @@ module Crystal::HIR
       if debug_block_params
         STDERR.puts "[BLOCK_PARAMS] lookup base=#{base_method_name} mangled=#{mangled_method_name} func_def=#{!func_def.nil?}"
       end
-      return nil unless func_def
+      return fallback_block_param_types(base_method_name, receiver_type) unless func_def
 
       block_param = func_def.params.try(&.find(&.is_block))
       if debug_block_params
         STDERR.puts "[BLOCK_PARAMS] block_param=#{!block_param.nil?}"
       end
-      return nil unless block_param
+      return fallback_block_param_types(base_method_name, receiver_type) unless block_param
 
       type_slice = block_param.type_annotation
       if debug_block_params
         STDERR.puts "[BLOCK_PARAMS] type_slice=#{type_slice ? String.new(type_slice) : "nil"}"
       end
-      return nil unless type_slice
+      if type_slice.nil?
+        return fallback_block_param_types(base_method_name, receiver_type)
+      end
 
       input_names = proc_input_type_names(String.new(type_slice))
       if debug_block_params
@@ -12359,6 +12369,44 @@ module Crystal::HIR
       end
 
       resolved_names.map { |name| type_ref_for_name(name) }
+    end
+
+    private def fallback_block_param_types(
+      base_method_name : String,
+      receiver_type : TypeRef?
+    ) : Array(TypeRef)?
+      return nil unless receiver_type && receiver_type != TypeRef::VOID
+      recv_desc = @module.get_type_descriptor(receiver_type)
+      return nil unless recv_desc
+      recv_name = recv_desc.name
+      method = if hash = base_method_name.rindex('#')
+                 base_method_name[(hash + 1)..]
+               elsif dot = base_method_name.rindex('.')
+                 base_method_name[(dot + 1)..]
+               else
+                 base_method_name
+               end
+      elem_ref = nil
+      if recv_name == "String"
+        case method
+        when "each_byte", "each_byte_with_index"
+          elem_ref = TypeRef::UINT8
+        when "each_char", "each_char_with_index"
+          elem_ref = TypeRef::CHAR
+        when "each_codepoint", "each_codepoint_with_index"
+          elem_ref = TypeRef::INT32
+        end
+      end
+      if elem_ref.nil?
+        if elem_name = element_type_for_type_name(recv_name)
+          elem_ref = type_ref_for_name(elem_name)
+        end
+      end
+      return nil unless elem_ref
+      if method.ends_with?("_with_index")
+        return [elem_ref, TypeRef::INT32]
+      end
+      [elem_ref]
     end
 
     private def intern_proc_type(type_names : Array(String)) : TypeRef
@@ -13184,9 +13232,11 @@ module Crystal::HIR
       # NOT substitute an inline block from an unrelated call context.
       saved_yield_block_stack = @inline_yield_block_stack
       saved_yield_arena_stack = @inline_yield_block_arena_stack
+      saved_yield_param_stack = @inline_yield_block_param_types_stack
       saved_yield_name_stack = @inline_yield_name_stack
       @inline_yield_block_stack = [] of CrystalV2::Compiler::Frontend::BlockNode
       @inline_yield_block_arena_stack = [] of CrystalV2::Compiler::Frontend::ArenaLike
+      @inline_yield_block_param_types_stack = [] of Array(TypeRef)?
       @inline_yield_name_stack = [] of String
       last_value : ValueId? = nil
       begin
@@ -13198,6 +13248,7 @@ module Crystal::HIR
       ensure
         @inline_yield_block_stack = saved_yield_block_stack
         @inline_yield_block_arena_stack = saved_yield_arena_stack
+        @inline_yield_block_param_types_stack = saved_yield_param_stack
         @inline_yield_name_stack = saved_yield_name_stack
       end
 
@@ -20201,7 +20252,7 @@ module Crystal::HIR
                     if yield_key = find_yield_method_fallback(inner_method, inner_args.size)
                       if func_def = @function_defs[yield_key]?
                         callee_arena = @function_def_arenas[yield_key]? || @arena
-                        return inline_yield_function(ctx, func_def, yield_key, inner_receiver_id, inner_args, blk_node, callee_arena)
+                        return inline_yield_function(ctx, func_def, yield_key, inner_receiver_id, inner_args, blk_node, nil, callee_arena)
                       end
                     end
                   end
@@ -21294,23 +21345,32 @@ module Crystal::HIR
       # Must check with mangled name since that's how yield functions are registered.
       block_for_inline : CrystalV2::Compiler::Frontend::BlockNode? = nil
       proc_for_inline : CrystalV2::Compiler::Frontend::ProcLiteralNode? = nil
+      block_param_types_inline : Array(TypeRef)? = nil
       if block_expr
         blk_node = @arena[block_expr]
         if blk_node.is_a?(CrystalV2::Compiler::Frontend::BlockNode)
+          block_param_types_inline = block_param_types_for_call(mangled_method_name, base_method_name, receiver_id ? ctx.type_of(receiver_id) : nil)
+          if method_name == "try" && receiver_id
+            if non_nil = non_nil_type_for_union(ctx.type_of(receiver_id))
+              block_param_types_inline = [non_nil]
+            elsif block_param_types_inline.nil?
+              block_param_types_inline = [ctx.type_of(receiver_id)]
+            end
+          end
           block_for_inline = blk_node
         elsif blk_node.is_a?(CrystalV2::Compiler::Frontend::ProcLiteralNode)
           proc_for_inline = blk_node
         end
       elsif block_pass_expr
-        block_param_types = block_param_types_for_call(mangled_method_name, base_method_name, receiver_id ? ctx.type_of(receiver_id) : nil)
+        block_param_types_inline = block_param_types_for_call(mangled_method_name, base_method_name, receiver_id ? ctx.type_of(receiver_id) : nil)
         if method_name == "try" && receiver_id
           if non_nil = non_nil_type_for_union(ctx.type_of(receiver_id))
-            block_param_types = [non_nil]
-          elsif block_param_types.nil?
-            block_param_types = [ctx.type_of(receiver_id)]
+            block_param_types_inline = [non_nil]
+          elsif block_param_types_inline.nil?
+            block_param_types_inline = [ctx.type_of(receiver_id)]
           end
         end
-        block_for_inline = build_block_from_block_pass(block_pass_expr, block_param_types, node.span)
+        block_for_inline = build_block_from_block_pass(block_pass_expr, block_param_types_inline, node.span)
       end
 
       if block_for_inline || proc_for_inline
@@ -21400,7 +21460,7 @@ module Crystal::HIR
                 if func_def = @function_defs[mangled_method_name]?
                   debug_hook("call.inline.yield", "callee=#{mangled_method_name} current=#{@current_class || ""}")
                   callee_arena = @function_def_arenas[mangled_method_name]? || @arena
-                  return inline_yield_function(ctx, func_def, mangled_method_name, receiver_id, call_args, block_cast, callee_arena)
+                  return inline_yield_function(ctx, func_def, mangled_method_name, receiver_id, call_args, block_cast, block_param_types_inline, callee_arena)
                 end
               end
             end
@@ -21413,7 +21473,7 @@ module Crystal::HIR
               if func_def = @function_defs[base_method_name]?
                 debug_hook("call.inline.yield", "callee=#{base_method_name} current=#{@current_class || ""}")
                 callee_arena = @function_def_arenas[base_method_name]? || @arena
-                return inline_yield_function(ctx, func_def, base_method_name, receiver_id, call_args, block_cast, callee_arena)
+                return inline_yield_function(ctx, func_def, base_method_name, receiver_id, call_args, block_cast, block_param_types_inline, callee_arena)
               end
             end
 
@@ -21433,7 +21493,7 @@ module Crystal::HIR
               if has_yield
                 @yield_functions.add(yield_name)
                 debug_hook("call.inline.yield", "callee=#{yield_name} current=#{@current_class || ""}")
-                return inline_yield_function(ctx, yield_def, yield_name, receiver_id, call_args, block_cast, callee_arena)
+                return inline_yield_function(ctx, yield_def, yield_name, receiver_id, call_args, block_cast, block_param_types_inline, callee_arena)
               end
             end
 
@@ -21448,7 +21508,7 @@ module Crystal::HIR
                   if func_def = @function_defs[yield_key]?
                     debug_hook("call.inline.yield", "callee=#{yield_key} current=#{@current_class || ""}")
                     callee_arena = @function_def_arenas[yield_key]? || @arena
-                    return inline_yield_function(ctx, func_def, yield_key, receiver_id, call_args, block_cast, callee_arena)
+                    return inline_yield_function(ctx, func_def, yield_key, receiver_id, call_args, block_cast, block_param_types_inline, callee_arena)
                   end
                 end
               end
@@ -22626,6 +22686,37 @@ module Crystal::HIR
       end
 
       result
+    end
+
+    private def coerce_value_to_type(
+      ctx : LoweringContext,
+      value_id : ValueId,
+      target_type : TypeRef
+    ) : ValueId
+      return value_id if target_type == TypeRef::VOID
+      value_type = ctx.type_of(value_id)
+      return value_id if value_type == target_type || value_type == TypeRef::VOID
+
+      if needs_union_coercion?(value_type, target_type)
+        variant_id = get_union_variant_id(target_type, value_type)
+        if variant_id >= 0
+          wrap = UnionWrap.new(ctx.next_id, target_type, value_id, variant_id)
+          ctx.emit(wrap)
+          ctx.register_type(wrap.id, target_type)
+          return wrap.id
+        end
+      end
+
+      if numeric_primitive?(target_type)
+        if numeric_primitive?(value_type) || value_type == TypeRef::POINTER
+          cast = Cast.new(ctx.next_id, target_type, value_id, target_type)
+          ctx.emit(cast)
+          ctx.register_type(cast.id, target_type)
+          return cast.id
+        end
+      end
+
+      value_id
     end
 
     # Check if arg_type needs to be wrapped into param_type union
@@ -24676,11 +24767,12 @@ module Crystal::HIR
       inline_key : String,
       receiver_id : ValueId?,
       call_args : Array(ValueId),
-      block : CrystalV2::Compiler::Frontend::BlockNode
+      block : CrystalV2::Compiler::Frontend::BlockNode,
+      block_param_types : Array(TypeRef)? = nil
     ) : ValueId
       lower_function_if_needed(inline_key)
       return_type = get_function_return_type(inline_key)
-      block_id = lower_block_to_block_id(ctx, block)
+      block_id = lower_block_to_block_id(ctx, block, block_param_types)
       call = Call.new(ctx.next_id, return_type, receiver_id, inline_key, call_args, block_id)
       ctx.emit(call)
       ctx.register_type(call.id, return_type)
@@ -24710,6 +24802,7 @@ module Crystal::HIR
       receiver_id : ValueId?,
       call_args : Array(ValueId),
       block : CrystalV2::Compiler::Frontend::BlockNode,
+      block_param_types : Array(TypeRef)?,
       callee_arena : CrystalV2::Compiler::Frontend::ArenaLike
     ) : ValueId
       ctx.push_scope(ScopeKind::Block)
@@ -24725,14 +24818,14 @@ module Crystal::HIR
         if ENV.has_key?("DEBUG_YIELD_INLINE")
           STDERR.puts "[INLINE_YIELD] skipping inline: #{inline_key} (depth=#{@inline_yield_name_stack.size}, max=#{max_depth}, repeat=#{repeat_count}, max_repeat=#{max_repeat})"
         end
-        return inline_yield_fallback_call(ctx, inline_key, receiver_id, call_args, block)
+        return inline_yield_fallback_call(ctx, inline_key, receiver_id, call_args, block, block_param_types)
       end
       base_inline_name = inline_key.split("$", 2)[0]
       namespace_override = function_namespace_override_for(inline_key, base_inline_name)
       if receiver = receiver_name_from_method_name(base_inline_name)
         if unresolved_generic_receiver?(receiver)
           debug_hook("inline.yield.skip", "callee=#{inline_key} receiver=#{receiver} reason=unresolved_generic")
-          return inline_yield_fallback_call(ctx, inline_key, receiver_id, call_args, block)
+          return inline_yield_fallback_call(ctx, inline_key, receiver_id, call_args, block, block_param_types)
         end
       end
       if ENV["DEBUG_YIELD_INLINE_ALL"]?
@@ -24749,7 +24842,7 @@ module Crystal::HIR
       block_arena = resolve_arena_for_block(block, caller_arena)
       unless block_arena
         debug_hook("inline.yield.block_arena_missing", "callee=#{inline_key} caller=#{ctx.function.name}")
-        return inline_yield_fallback_call(ctx, inline_key, receiver_id, call_args, block)
+        return inline_yield_fallback_call(ctx, inline_key, receiver_id, call_args, block, block_param_types)
       end
       unless block.body.empty?
         max_index = block.body.max_of(&.index)
@@ -24758,7 +24851,7 @@ module Crystal::HIR
             "inline.yield.block_arena_mismatch",
             "callee=#{inline_key} max=#{max_index} arena=#{block_arena.size}"
           )
-          return inline_yield_fallback_call(ctx, inline_key, receiver_id, call_args, block)
+          return inline_yield_fallback_call(ctx, inline_key, receiver_id, call_args, block, block_param_types)
         end
       end
 
@@ -24770,7 +24863,7 @@ module Crystal::HIR
           end
           if max_index < 0 || max_index >= callee_arena.size
             debug_hook("inline.yield.arena_mismatch", "callee=#{inline_key} max=#{max_index} arena=#{callee_arena.size}")
-            return inline_yield_fallback_call(ctx, inline_key, receiver_id, call_args, block)
+            return inline_yield_fallback_call(ctx, inline_key, receiver_id, call_args, block, block_param_types)
           end
         end
       end
@@ -24805,6 +24898,7 @@ module Crystal::HIR
         end
         @inline_yield_block_stack << block
         @inline_yield_block_arena_stack << block_arena
+        @inline_yield_block_param_types_stack << block_param_types
         pushed_block = true
         inline_return = InlineReturnContext.new(ctx.create_block, [] of {BlockId, ValueId}, ctx.function.id)
         @inline_yield_return_stack << inline_return
@@ -24961,6 +25055,7 @@ module Crystal::HIR
         @inline_caller_type_param_map_stack.pop?
         @inline_yield_block_stack.pop? if pushed_block
         @inline_yield_block_arena_stack.pop? if pushed_block
+        @inline_yield_block_param_types_stack.pop? if pushed_block
         @inline_yield_name_stack.pop? if pushed_name
         @inline_yield_return_stack.pop?
         @inline_yield_return_override_stack.pop? if pushed_override
@@ -24998,6 +25093,14 @@ module Crystal::HIR
                      else
                        [] of ValueId
                      end
+        param_types = @inline_yield_block_param_types_stack.last?
+        if param_types
+          param_types.each_with_index do |param_type, idx|
+            next if param_type == TypeRef::VOID
+            next unless idx < yield_args.size
+            yield_args[idx] = coerce_value_to_type(ctx, yield_args[idx], param_type)
+          end
+        end
       # Lower block body
       # For inlined yield-functions, the block body must run in the *caller* lexical scope
       # (caller locals, caller `self`). Otherwise ivar access inside the block can target
@@ -25038,9 +25141,16 @@ module Crystal::HIR
           # Bind block parameters to yield arguments (in caller scope).
           param_names.each_with_index do |param_name, idx|
             next unless idx < yield_args.size
-            ctx.register_local(param_name, yield_args[idx])
             arg_id = yield_args[idx]
-            ctx.register_type(arg_id, ctx.type_of(arg_id))
+            if param_types && (param_type = param_types[idx]?) && param_type != TypeRef::VOID
+              ctx.register_local(param_name, arg_id)
+              ctx.register_type(arg_id, param_type)
+              update_typeof_local(param_name, param_type)
+              update_typeof_local_name(param_name, get_type_name_from_ref(param_type))
+            else
+              ctx.register_local(param_name, arg_id)
+              ctx.register_type(arg_id, ctx.type_of(arg_id))
+            end
           end
 
           # Ensure block body is lowered in the caller arena, even when the callee comes from another file.
@@ -25050,12 +25160,15 @@ module Crystal::HIR
             # in the block body can bind to an outer inlining context (if any).
             popped_block = @inline_yield_block_stack.pop?
             popped_arena = @inline_yield_block_arena_stack.pop?
+            popped_param_types = @inline_yield_block_param_types_stack.pop?
             if popped_block && popped_block.object_id != block.object_id
               # Unexpected mismatch; restore stacks and continue without popping.
               @inline_yield_block_stack << popped_block
               @inline_yield_block_arena_stack << popped_arena if popped_arena
+              @inline_yield_block_param_types_stack << popped_param_types
               popped_block = nil
               popped_arena = nil
+              popped_param_types = nil
             end
 
             old_arena = @arena
@@ -25069,11 +25182,12 @@ module Crystal::HIR
                 @arena = old_arena
               end
             ensure
-              if popped_block
-                @inline_yield_block_stack << popped_block
-                if restored_arena = popped_arena
-                  @inline_yield_block_arena_stack << restored_arena
-                else
+            if popped_block
+              @inline_yield_block_stack << popped_block
+              @inline_yield_block_param_types_stack << popped_param_types
+              if restored_arena = popped_arena
+                @inline_yield_block_arena_stack << restored_arena
+              else
                   @inline_yield_block_arena_stack << old_arena
                 end
               end
