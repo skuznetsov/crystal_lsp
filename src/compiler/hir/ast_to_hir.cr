@@ -27724,7 +27724,9 @@ module Crystal::HIR
         if builtin_ref = builtin_type_ref_for(lookup_name)
           cache_key = type_cache_key(lookup_name)
           if cached = @type_cache[cache_key]?
-            return cached
+            return cached if cached == builtin_ref
+            store_type_cache(cache_key, builtin_ref)
+            return builtin_ref
           end
           store_type_cache(cache_key, builtin_ref)
           return builtin_ref
@@ -27762,6 +27764,26 @@ module Crystal::HIR
       cache_key = type_cache_key(lookup_name)
 
       if cached = @type_cache[cache_key]?
+        if !lookup_name.empty? && !lookup_name.includes?("(")
+          module_name = lookup_name
+          if !@module_defs.has_key?(module_name) && !module_name.starts_with?("Crystal::") && module_name.includes?("::")
+            crystal_prefixed = "Crystal::#{module_name}"
+            module_name = crystal_prefixed if @module_defs.has_key?(crystal_prefixed)
+          end
+          if @module_defs.has_key?(module_name)
+            if desc = @module.get_type_descriptor(cached)
+              if desc.kind != TypeKind::Module
+                result = @module.intern_type(TypeDescriptor.new(TypeKind::Module, module_name))
+                store_type_cache(cache_key, result)
+                return result
+              end
+            else
+              result = @module.intern_type(TypeDescriptor.new(TypeKind::Module, module_name))
+              store_type_cache(cache_key, result)
+              return result
+            end
+          end
+        end
         if info = split_generic_base_and_args(lookup_name)
           if template = @generic_templates[info[:base]]?
             if desc = @module.get_type_descriptor(cached)
@@ -27998,6 +28020,14 @@ module Crystal::HIR
                    store_type_cache(cache_key, result)
                    return result
                  end
+                 if !lookup_name.starts_with?("Crystal::") && lookup_name.includes?("::")
+                   crystal_prefixed = "Crystal::#{lookup_name}"
+                   if @module_defs.has_key?(crystal_prefixed)
+                     result = @module.intern_type(TypeDescriptor.new(TypeKind::Module, crystal_prefixed))
+                     store_type_cache(cache_key, result)
+                     return result
+                   end
+                 end
 
                  # For unknown types, keep the unqualified name to avoid poisoning
                  # the cache with a context-specific namespace.
@@ -28042,6 +28072,9 @@ module Crystal::HIR
         resolved
       end
       normalized_name = resolved_variant_names.join(" | ")
+      if resolved_variant_names.size == 1
+        return type_ref_for_name(resolved_variant_names.first)
+      end
       cache_key = type_cache_key(normalized_name)
 
       # Check cache first to prevent infinite recursion
