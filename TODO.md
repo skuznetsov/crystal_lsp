@@ -1485,9 +1485,10 @@ The return_type=16 (NIL) for `to_s` methods is incorrect - should be String type
 | Primitive type names in `hir_type_name` | e241c3a | ~5 |
 | Parent class method lookup for implicit self calls | f025e32 | ~20 |
 | `has_constant?` macro method support | (local) | ~5 |
-| Brace-literal postfix now attaches `do`/`{}` blocks + AST cache v24 invalidation | (pending) | (kqueue types) |
+| Brace-literal postfix now attaches `do`/`{}` blocks + AST cache v24 invalidation | (local) | (kqueue types) |
+| Avoid type-like fallback on non-type receivers (tuple literal `.each_with_index`) | (local) | ~1 |
 
-**Progress**: 150 → 52 symbols remaining.
+**Progress**: 150 → 64 symbols remaining.
 
 **Remaining symbol categories** (52 symbols):
 
