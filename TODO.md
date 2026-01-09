@@ -1465,4 +1465,65 @@ The return_type=16 (NIL) for `to_s` methods is incorrect - should be String type
   - `lower_call()` around lines 18400-18600 - where return types are determined
   - `register_function_type()` - where function types are registered
 
-**Current missing symbol count**: 0 (`/private/tmp/missing_symbols_latest.txt`, built from `/private/tmp/bootstrap_array_full.link.log` on 2026-01-02).
+**Current missing symbol count**: 52 (after fib.cr with prelude, 2026-01-08).
+
+### 8.7 Bootstrap Session Notes (2026-01-08) - Linker Symbol Fixes
+
+**Starting point**: ~150 undefined symbols when compiling `fib.cr` with prelude.
+
+**Completed fixes**:
+
+| Fix | Commit | Symbols Fixed |
+|-----|--------|---------------|
+| `to_s()` return type should be String, not receiver type | f025e32 (parent class) | ~10 |
+| Yield inlining for `min_by`, `max_by`, etc. | e241c3a | ~15 |
+| Yield functions with `$block` suffix detection | e241c3a | ~10 |
+| Numeric union type conversions (`Int32 \| Int64` → common type) | 2ff6523 | ~8 |
+| Flags enum `none?` intrinsic inlining | e31b8af | ~5 |
+| `Pointer.new!` with type suffix intrinsic | 279757b | ~5 |
+| `ascii_alphanumeric?` intrinsic inlining | e241c3a | ~3 |
+| Primitive type names in `hir_type_name` | e241c3a | ~5 |
+| Parent class method lookup for implicit self calls | f025e32 | ~20 |
+| `has_constant?` macro method support | (local) | ~5 |
+| Brace-literal postfix now attaches `do`/`{}` blocks + AST cache v24 invalidation | (pending) | (kqueue types) |
+
+**Progress**: 150 → 52 symbols remaining.
+
+**Remaining symbol categories** (52 symbols):
+
+1. **Event loop / kqueue types** (~25 symbols):
+   - `Int32_filter`, `Int32_index`, `Int32_fflags_block`, `Int32_generation`
+   - `Pointer_UInt8__fiber`, `Pointer_UInt8__index`, `Pointer_UInt8__type`
+   - `UInt8_value`, `Nil_value`, `Bool_value`
+   - **Root cause**: Stale AST cache after brace-literal block parsing; tuple literal `.each_with_index do` lost block → `kevent`/`filter` typed as VOID.
+   - **Status**: parser fix + AST cache VERSION v24 invalidation; recheck missing symbol count.
+
+2. **DWARF / exception handling** (~10 symbols):
+   - `Crystal__DWARF__Attribute_at`, `Crystal__DWARF__Attribute_form`, `Crystal__DWARF__Attribute_value`
+   - `Bool_read_attribute_value_Crystal__DWARF__Attribute`
+   - **Root cause**: Similar macro conditional type inference issue.
+
+3. **System / Thread** (~8 symbols):
+   - `Thread_threads`, `push_Thread`
+   - `Crystal__System__Process_executable_path`
+   - `GC_set_stackbottom_Pointer_Void_`
+
+4. **Misc type dispatch** (~9 symbols):
+   - `Number_floor`, `Enumerable_reduce_Path`
+   - `String__CHAR_TO_DIGIT_to_unsafe`, `LibC__PATH_MAX_to_u32`
+   - `realpath_DARWIN_EXTSN`
+
+**Current investigation**:
+- `has_constant?` macro method added to `try_evaluate_macro_condition`
+- Platform-specific constant detection via `evaluate_macro_flag("darwin")` etc.
+- Issue: Types inside macro branches still inferring wrong (Int32 instead of struct pointer)
+
+**Next steps**:
+1. Debug why `kevent` variable type is Int32 inside `{% if LibC.has_constant?(:EVFILT_USER) %}` branch
+2. Check if macro branch body parsing preserves outer scope types
+3. Verify `process_interrupt?` function body is being parsed with correct types
+
+**Files modified**:
+- `src/compiler/hir/ast_to_hir.cr`:
+  - Added `evaluate_has_constant()` at lines 14078-14118
+  - Added `has_constant?` handling in `try_evaluate_macro_condition` at lines 14163-14196
