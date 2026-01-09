@@ -1492,6 +1492,7 @@ The return_type=16 (NIL) for `to_s` methods is incorrect - should be String type
 **Recent unverified fixes (2026-01-xx):**
 - Include type param mapping now uses current bindings when arg name matches a type param (unblocks generic include resolution).
 - Module-typed resolution: prefer `System::FileDescriptor` → `IO::FileDescriptor`, `System::Socket` → `Socket`; allow lazy accessor generation when DefNode is missing.
+- Module-typed ivar access: avoid marking module-typed params as type literals and prefer `IO::FileDescriptor` when multiple includer matches; removes `Crystal__System__FileDescriptor__read_timeout`/`write_timeout` from `/tmp/fib_link.log`.
 - Bare call resolution prefers `self` type before `@current_class` (fixes `Slice(Pointer(T))#unsafe_fetch` mis-resolving to `Slice(UInt8)`).
 - Type cache hardening: builtin refs override stale cached types; module-kind correction for cached entries; `Crystal::` prefix resolution for modules; single-variant unions collapse to concrete type.
 - Inline yield propagation: carry block param types (including fallback element inference for `String`/`Enumerable`), coerce yield args, and preserve param types across nested inlining.

@@ -6875,9 +6875,6 @@ module Crystal::HIR
         if param_literal_flags[idx]?
           ctx.mark_type_literal(hir_param.id)
         end
-        if module_type_ref?(param_type)
-          ctx.mark_type_literal(hir_param.id)
-        end
         # Track enum types for predicate method resolution
         if type_name = param_type_names[idx]?
           track_enum_value(hir_param.id, type_name)
@@ -8823,9 +8820,6 @@ module Crystal::HIR
         if param_literal_flags[idx]?
           ctx.mark_type_literal(hir_param.id)
         end
-        if module_type_ref?(param_type)
-          ctx.mark_type_literal(hir_param.id)
-        end
         if type_name = param_type_names[idx]?
           track_enum_value(hir_param.id, type_name)
         end
@@ -10384,11 +10378,23 @@ module Crystal::HIR
         candidates.sort!
       end
 
+      if ENV["DEBUG_IVAR_ACCESS"]? && (module_type_name.includes?("FileDescriptor") || module_type_name.includes?("Socket"))
+        includer_list = includers.to_a.sort!.join(",")
+        candidate_list = candidates.join(",")
+        STDERR.puts "[IVAR_ACCESS] module=#{module_type_name} base=#{module_base} ivar=#{ivar_name} prefer=#{prefer_class} includers=#{includer_list} candidates=#{candidate_list}"
+      end
+
       matches = [] of {ClassInfo, IVarInfo}
       candidates.each do |name|
         next unless info = @class_info[name]?
         if ivar_info = info.ivars.find { |iv| iv.name == ivar_name }
           matches << {info, ivar_info}
+        end
+      end
+
+      if matches.size > 1 && prefer_class
+        if preferred = matches.find { |(info, _)| info.name == prefer_class }
+          return preferred
         end
       end
 
@@ -13217,9 +13223,6 @@ module Crystal::HIR
         if param_literal_flags[idx]?
           ctx.mark_type_literal(hir_param.id)
         end
-        if module_type_ref?(param_type)
-          ctx.mark_type_literal(hir_param.id)
-        end
         # Track enum type for predicate method inlining
         if type_name = param_type_names[idx]?
           track_enum_value(hir_param.id, type_name)
@@ -13611,6 +13614,9 @@ module Crystal::HIR
         lower_index(ctx, node)
 
       when CrystalV2::Compiler::Frontend::MemberAccessNode
+        if ENV["DEBUG_IVAR_ACCESS"]?
+          STDERR.puts "[IVAR_ACCESS_NODE] member=#{String.new(node.member)}"
+        end
         lower_member_access(ctx, node)
 
       # ═══════════════════════════════════════════════════════════════════
@@ -25517,6 +25523,9 @@ module Crystal::HIR
       elsif obj_node.is_a?(CrystalV2::Compiler::Frontend::IdentifierNode)
         name = String.new(obj_node.name)
         if ctx.lookup_local(name).nil?
+          if ENV["DEBUG_IVAR_ACCESS"]?
+            STDERR.puts "[IVAR_ACCESS] local_missing name=#{name} member=#{member_name}"
+          end
           # Resolve type alias if exists (check both @type_aliases and LIBC_TYPE_ALIASES)
           resolved_name = @type_aliases[name]? || LIBC_TYPE_ALIASES[name]? || name
           # Chain resolve if needed - max 10 iterations
@@ -25620,6 +25629,9 @@ module Crystal::HIR
 
       # If it's a static class call (like Counter.new), emit as static call
       if class_name_str
+        if ENV["DEBUG_IVAR_ACCESS"]?
+          STDERR.puts "[IVAR_ACCESS] static_call member=#{member_name} class=#{class_name_str}"
+        end
         return lower_static_member_access_call(ctx, class_name_str, member_name)
       end
 
@@ -25670,8 +25682,18 @@ module Crystal::HIR
         end
       end
 
+      if ENV["DEBUG_IVAR_ACCESS"]?
+        STDERR.puts "[IVAR_ACCESS] member_check=#{member_name.inspect} starts_with_at=#{member_name.starts_with?("@")}"
+      end
+
       # Direct ivar access on another object (obj.@ivar) - use field get.
       if member_name.starts_with?("@")
+        if ENV["DEBUG_IVAR_ACCESS"]?
+          local_name = obj_node.is_a?(CrystalV2::Compiler::Frontend::IdentifierNode) ? String.new(obj_node.name) : ""
+          local_id = local_name.empty? ? "n/a" : (ctx.lookup_local(local_name).try(&.to_s) || "nil")
+          recv_name = get_type_name_from_ref(receiver_type)
+          STDERR.puts "[IVAR_ACCESS] member=#{member_name} obj=#{obj_node.class.name} local=#{local_name} local_id=#{local_id} recv=#{recv_name}"
+        end
         if info = class_info_for_type(receiver_type)
           if ivar_info = info.ivars.find { |iv| iv.name == member_name }
             field_get = FieldGet.new(ctx.next_id, ivar_info.type, object_id, member_name, ivar_info.offset)
