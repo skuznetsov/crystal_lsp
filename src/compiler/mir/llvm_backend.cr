@@ -4754,6 +4754,17 @@ module Crystal::MIR
                    @cond_counter += 1
                    emit "%itofp.#{c} = sitofp #{actual_llvm_type} #{val} to #{expected_llvm_type}"
                    "#{expected_llvm_type} %itofp.#{c}"
+                 elsif expected_llvm_type.starts_with?("i") && (actual_llvm_type == "float" || actual_llvm_type == "double")
+                   # Float to int conversion: fptosi/fptoui based on signedness
+                   val = value_ref(a)
+                   c = @cond_counter
+                   @cond_counter += 1
+                   unsigned = param_type == TypeRef::UINT8 || param_type == TypeRef::UINT16 ||
+                              param_type == TypeRef::UINT32 || param_type == TypeRef::UINT64 ||
+                              param_type == TypeRef::UINT128
+                   op = unsigned ? "fptoui" : "fptosi"
+                   emit "%fpto_int.#{c} = #{op} #{actual_llvm_type} #{val} to #{expected_llvm_type}"
+                   "#{expected_llvm_type} %fpto_int.#{c}"
                  elsif expected_llvm_type == "i1" && actual_llvm_type.starts_with?("i") && actual_llvm_type != "i1"
                    # Larger int to i1 (bool) - truncate
                    val = value_ref(a)
