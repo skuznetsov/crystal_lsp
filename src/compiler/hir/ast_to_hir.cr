@@ -20221,7 +20221,12 @@ module Crystal::HIR
         end
 
         if class_name_str.nil? && !constant_receiver
-          if type_name = stringify_type_expr(obj_expr)
+          if type_like_expr_id?(obj_expr)
+            type_name = stringify_type_expr(obj_expr)
+          else
+            type_name = nil
+          end
+          if type_name
             type_name = substitute_type_params_in_type_name(type_name)
             if type_name[0]?.try(&.uppercase?) || type_name.includes?("::")
               if info = split_generic_base_and_args(type_name)
