@@ -1465,7 +1465,7 @@ The return_type=16 (NIL) for `to_s` methods is incorrect - should be String type
   - `lower_call()` around lines 18400-18600 - where return types are determined
   - `register_function_type()` - where function types are registered
 
-**Current missing symbol count**: 71 (after `bin/fib.cr` with prelude, log `/tmp/fib_link.log`, 2026-01-xx).
+**Current missing symbol count**: 70 (after `bin/fib.cr` with prelude, log `/tmp/fib_link.log`, 2026-01-xx).
   - Remaining categories: EventLoop (`system_*`, arena helpers, `PollDescriptor_owned_by_`), DWARF (`Attribute_*`, `LineNumbers_decode_sequences`), MachO `Nlist64::Type_*`, IO/Path/File (`IO_read/write`, `Process.executable_path`, `PATH_MAX`, `realpath_DARWIN_EXTSN`, `File::Error.from_errno`, `Path.separators`), string/regex helpers (`String_*`, `Regex__MatchData_*`), pointer/tuple/slice helpers, `Thread_threads`, `_func*` stubs, and `__context`.
 
 ### 8.7 Bootstrap Session Notes (2026-01-08) - Linker Symbol Fixes
@@ -1493,6 +1493,7 @@ The return_type=16 (NIL) for `to_s` methods is incorrect - should be String type
 - Include type param mapping now uses current bindings when arg name matches a type param (unblocks generic include resolution).
 - Module-typed resolution: prefer `System::FileDescriptor` → `IO::FileDescriptor`, `System::Socket` → `Socket`; allow lazy accessor generation when DefNode is missing.
 - Module-typed ivar access: avoid marking module-typed params as type literals and prefer `IO::FileDescriptor` when multiple includer matches; removes `Crystal__System__FileDescriptor__read_timeout`/`write_timeout` from `/tmp/fib_link.log`.
+- Module accessor setters on `obj.field = ...` now generate synthetic setters when missing (fixes `IO::FileDescriptor#__evloop_data=` missing symbol).
 - Bare call resolution prefers `self` type before `@current_class` (fixes `Slice(Pointer(T))#unsafe_fetch` mis-resolving to `Slice(UInt8)`).
 - Type cache hardening: builtin refs override stale cached types; module-kind correction for cached entries; `Crystal::` prefix resolution for modules; single-variant unions collapse to concrete type.
 - Inline yield propagation: carry block param types (including fallback element inference for `String`/`Enumerable`), coerce yield args, and preserve param types across nested inlining.
