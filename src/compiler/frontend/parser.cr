@@ -486,6 +486,15 @@ module CrystalV2
           skip_whitespace_and_optional_newlines
           token = current_token
 
+          # If a trailing do-block follows a call-like expression, attach it here.
+          # This covers cases where parse_expression stopped before the block
+          # (e.g., tuple literal member access: `{a, b}.each_with_index do ...`).
+          if token.kind == Token::Kind::Do && can_attach_block_to?(left)
+            left = attach_block_to_call(left)
+            skip_whitespace_and_optional_newlines
+            token = current_token
+          end
+
           # Special case: extend call arguments without parentheses
           if token.kind == Token::Kind::Comma && Frontend.node_kind(@arena[left]) == Frontend::NodeKind::Call
             call_node = @arena[left].as(CallNode)
@@ -10784,6 +10793,15 @@ module CrystalV2
             when Token::Kind::LParen
               # Method call with args: {hash}.method(args) - convert MemberAccess to Call
               node = parse_parenthesized_call(node)
+            when Token::Kind::Do
+              break unless can_attach_block_to?(node)
+              node = attach_block_to_call(node)
+            when Token::Kind::LBrace
+              if can_attach_block_to?(node)
+                node = attach_block_to_call(node)
+              else
+                break
+              end
             when Token::Kind::Operator
               # Check for '.' (member access)
               if slice_eq?(current_token.slice, ".")
