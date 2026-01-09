@@ -1465,8 +1465,8 @@ The return_type=16 (NIL) for `to_s` methods is incorrect - should be String type
   - `lower_call()` around lines 18400-18600 - where return types are determined
   - `register_function_type()` - where function types are registered
 
-**Current missing symbol count**: 32 (after `bin/fib.cr` with prelude, log `/tmp/fib.link.log`, 2026-01-xx).
-  - Remaining categories: DWARF (`Attribute_value`, `CallStack_skip`, Hash(Int64, Array(DWARF::Abbrev)) helpers), EventLoop/FileDescriptor (`system_del`, `Unknown#hash`, `read_timeout`, `write_timeout`, `evloop_data`), MachO `Nlist64::Type_*`, Path/File (`Process.executable_path`, `PATH_MAX`, `realpath_DARWIN_EXTSN`, `File::Error.from_errno`, `Path.separators`), sort/reduce blocks (`_Union__UInt64__bsearch_block`, `_Slice_sort__block`, `Enumerable_reduce_Path`, `Enumerable_Fiber__each_block`), misc `_func*` stubs and `__context`.
+**Current missing symbol count**: 71 (after `bin/fib.cr` with prelude, log `/tmp/fib_link.log`, 2026-01-xx).
+  - Remaining categories: EventLoop (`system_*`, arena helpers, `PollDescriptor_owned_by_`), DWARF (`Attribute_*`, `LineNumbers_decode_sequences`), MachO `Nlist64::Type_*`, IO/Path/File (`IO_read/write`, `Process.executable_path`, `PATH_MAX`, `realpath_DARWIN_EXTSN`, `File::Error.from_errno`, `Path.separators`), string/regex helpers (`String_*`, `Regex__MatchData_*`), pointer/tuple/slice helpers, `Thread_threads`, `_func*` stubs, and `__context`.
 
 ### 8.7 Bootstrap Session Notes (2026-01-08) - Linker Symbol Fixes
 
