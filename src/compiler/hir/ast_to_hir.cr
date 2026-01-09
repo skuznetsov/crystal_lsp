@@ -9698,11 +9698,22 @@ module Crystal::HIR
       end
 
       if !class_name.empty? && method_name.ends_with?("=")
-        if info = @class_info[class_name]?
+        info = @class_info[class_name]?
+        accessor_owner = class_name
+        if info.nil? && module_like_receiver
+          if preferred = preferred_module_typed_class_for(class_name)
+            if preferred_info = @class_info[preferred]?
+              info = preferred_info
+              accessor_owner = preferred
+            end
+          end
+        end
+        if info
           accessor = method_name[0, method_name.size - 1]
           ivar_name = "@#{accessor}"
           if ivar_info = info.ivars.find { |iv| iv.name == ivar_name }
-            expected_name = mangle_function_name(base_method_name, [ivar_info.type])
+            expected_base = "#{accessor_owner}##{method_name}"
+            expected_name = mangle_function_name(expected_base, [ivar_info.type])
             if @function_types.has_key?(expected_name)
               debug_hook("method.resolve", "base=#{base_method_name} resolved=#{expected_name} reason=setter_accessor")
               return cache_method_resolution(cache_key, expected_name)
