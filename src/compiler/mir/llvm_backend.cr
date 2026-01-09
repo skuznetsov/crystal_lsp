@@ -313,6 +313,10 @@ module Crystal::MIR
     # Phi predecessor loads: for cross-block values in phi incomings, we emit loads
     # in predecessor blocks before terminators. Maps (pred_block, value_id) -> loaded_name
     @phi_predecessor_loads : Hash({BlockId, ValueId}, String) = {} of {BlockId, ValueId} => String
+
+    # Phi predecessor conversions: for fixed-type values (params, ExternCalls) that need
+    # type conversion for phi compatibility. Maps (pred_block, value_id) -> (converted_name, from_bits, to_bits)
+    @phi_predecessor_conversions : Hash({BlockId, ValueId}, {String, Int32, Int32}) = {} of {BlockId, ValueId} => {String, Int32, Int32}
     @current_func_blocks : Hash(BlockId, BasicBlock) = {} of BlockId => BasicBlock
     @current_block_id : BlockId? = nil
 
@@ -1583,6 +1587,9 @@ module Crystal::MIR
       # This MUST happen before emitting blocks because block order may differ from CFG order
       prepass_collect_phi_predecessor_loads(func)
 
+      # Prepass: identify which fixed-type values need conversion in predecessor blocks for phi nodes
+      prepass_collect_phi_predecessor_conversions(func)
+
       func.blocks.each do |block|
         emit_block(block, func)
       end
@@ -1654,6 +1661,40 @@ module Crystal::MIR
             # Record that this predecessor block needs to emit a load for this value
             load_name = "r#{val_id}.phi_load.#{pred_block_id}"
             @phi_predecessor_loads[{pred_block_id, val_id}] = load_name
+          end
+        end
+      end
+    end
+
+    # Prepass: identify phi predecessor conversions needed for fixed-type values (params, ExternCalls)
+    # These values have fixed LLVM types and need explicit sext/zext in predecessor blocks
+    private def prepass_collect_phi_predecessor_conversions(func : Function)
+      @phi_predecessor_conversions.clear
+
+      func.blocks.each do |block|
+        block.instructions.each do |inst|
+          next unless inst.is_a?(Phi)
+          phi = inst
+
+          phi_llvm_type = @type_mapper.llvm_type(phi.type)
+          next if phi_llvm_type == "void"
+          next unless phi_llvm_type.starts_with?("i") && !phi_llvm_type.includes?(".")
+          next if phi_llvm_type == "i1"
+          phi_bits = phi_llvm_type[1..-1].to_i? || 32
+
+          phi.incoming.each do |(pred_block_id, val_id)|
+            # Check if this value needs conversion
+            conversion = @phi_zext_conversions[val_id]?
+            next unless conversion
+
+            from_bits, to_bits = conversion
+
+            # Don't add duplicate entries
+            next if @phi_predecessor_conversions.has_key?({pred_block_id, val_id})
+
+            # Record that this predecessor block needs to emit a conversion for this value
+            conv_name = "r#{val_id}.phi_conv.#{pred_block_id}"
+            @phi_predecessor_conversions[{pred_block_id, val_id}] = {conv_name, from_bits, to_bits}
           end
         end
       end
@@ -1879,13 +1920,18 @@ module Crystal::MIR
 
       # Fourth pass: Propagate phi types to incoming values (regardless of current type)
       # This handles cases like UInt8___ (returns i8) used in phi expecting i32
-      # BUT: For ExternCall instructions, record zext conversion needed instead of changing type
-      # (Their return types are fixed by the actual external function signature)
-      extern_call_ids = Set(ValueId).new
+      # BUT: For ExternCall instructions AND parameters, record zext/sext conversion needed
+      # instead of changing type (their return/LLVM types are fixed)
+      fixed_type_ids = Set(ValueId).new
+      # Parameters have fixed LLVM types in function signature
+      func.params.each do |param|
+        fixed_type_ids << param.index
+      end
+      # ExternCall return types are fixed by the external function
       func.blocks.each do |block|
         block.instructions.each do |inst|
           if inst.is_a?(ExternCall)
-            extern_call_ids << inst.id
+            fixed_type_ids << inst.id
           end
         end
       end
@@ -1909,14 +1955,17 @@ module Crystal::MIR
                current_llvm_type.starts_with?("i") && !current_llvm_type.includes?(".")
               val_bits = current_llvm_type[1..-1].to_i? || 32
 
-              if extern_call_ids.includes?(val)
-                # ExternCall - don't change type, but record zext conversion needed
+              if fixed_type_ids.includes?(val)
+                # Fixed-type value (param or ExternCall) - record conversion needed
                 if val_bits < phi_bits
+                  @phi_zext_conversions[val] = {val_bits, phi_bits}
+                elsif val_bits > phi_bits
+                  # Need truncation (larger to smaller) - also record it
                   @phi_zext_conversions[val] = {val_bits, phi_bits}
                 end
                 # Keep the original type - don't overwrite
               else
-                # Non-ExternCall - change type as before
+                # Non-fixed-type - change type as before
                 @value_types[val] = phi_type
               end
             end
@@ -2371,6 +2420,7 @@ module Crystal::MIR
       @phi_zext_conversions.clear
       @zext_value_names.clear
       @phi_nil_incoming_blocks.clear
+      @phi_predecessor_conversions.clear
       @cond_counter = 0  # Reset for each function
 
       func.params.each do |param|
@@ -2433,6 +2483,9 @@ module Crystal::MIR
       # This must happen BEFORE the terminator (branch) to successor blocks
       emit_phi_predecessor_loads(block)
 
+      # Emit type conversions for fixed-type values (params, ExternCalls) used in successor phi nodes
+      emit_phi_predecessor_conversions(block)
+
       emit_terminator(block.terminator)
       @indent = 0
       @current_block_id = nil
@@ -2456,6 +2509,39 @@ module Crystal::MIR
         # but the slot was allocated with the prepass type
         llvm_type = @cross_block_slot_types[val_id]? || "i64"
         emit "%#{load_name} = load #{llvm_type}, ptr %#{slot_name}"
+      end
+    end
+
+    # Emit type conversions for fixed-type values (params, ExternCalls) used in phi nodes
+    # The prepass identified which (pred_block, val) pairs need conversions
+    # Emit sext/zext instructions before the block terminator
+    private def emit_phi_predecessor_conversions(block : BasicBlock)
+      @phi_predecessor_conversions.each do |(key, conv_info)|
+        pred_block_id, val_id = key
+        # Only emit conversions for THIS block
+        next unless pred_block_id == block.id
+
+        conv_name, from_bits, to_bits = conv_info
+
+        # Get the original value reference
+        val_ref = value_ref(val_id)
+
+        # Emit the appropriate conversion instruction
+        if from_bits < to_bits
+          # Widening: use sext for signed, zext for unsigned
+          # Check if the type is signed based on @value_types
+          val_type = @value_types[val_id]?
+          is_signed = val_type && (val_type == TypeRef::INT8 || val_type == TypeRef::INT16 ||
+                                   val_type == TypeRef::INT32 || val_type == TypeRef::INT64)
+          if is_signed
+            emit "%#{conv_name} = sext i#{from_bits} #{val_ref} to i#{to_bits}"
+          else
+            emit "%#{conv_name} = zext i#{from_bits} #{val_ref} to i#{to_bits}"
+          end
+        else
+          # Narrowing: use trunc
+          emit "%#{conv_name} = trunc i#{from_bits} #{val_ref} to i#{to_bits}"
+        end
       end
     end
 
@@ -4058,14 +4144,17 @@ module Crystal::MIR
             elsif val_type_str && val_type_str.starts_with?("i") && !val_type_str.includes?(".union")
               val_bits = val_type_str[1..-1].to_i? || 32
               if val_bits != phi_bits
-                # Type size mismatch - check if prepass recorded a zext conversion for this value
-                # We use @phi_zext_conversions (set at prepass) because the zext may not be emitted yet
-                if @phi_zext_conversions.has_key?(val)
+                # Type size mismatch - check if prepass recorded a conversion for this value
+                # First check for predecessor conversion (for params and fixed-type values)
+                if pred_conv = @phi_predecessor_conversions[{block, val}]?
+                  conv_name, _, _ = pred_conv
+                  "[%#{conv_name}, %#{@block_names[block]}]"
+                elsif @phi_zext_conversions.has_key?(val)
                   # Construct the expected zext name (will be emitted by emit_extern_call)
                   zext_name = "%r#{val}.zext"
                   "[#{zext_name}, %#{@block_names[block]}]"
                 else
-                  # No zext planned - use 0 as fallback
+                  # No conversion planned - use 0 as fallback
                   "[0, %#{@block_names[block]}]"
                 end
               else
