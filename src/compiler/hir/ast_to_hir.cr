@@ -20137,7 +20137,9 @@ module Crystal::HIR
           # Check if method exists in current class (instance method: Class#method)
           class_method_name = "#{current}##{method_name}"
           # O(1) lookup: check exact match or mangled version exists
-          has_class_method = @function_types.has_key?(class_method_name) || has_function_base?(class_method_name)
+          has_class_method = @function_types.has_key?(class_method_name) ||
+            has_function_base?(class_method_name) ||
+            !function_def_overloads(class_method_name).empty?
           if has_class_method
             # This is a method call on self - set receiver to self
             receiver_id = emit_self(ctx)
@@ -20188,7 +20190,9 @@ module Crystal::HIR
               parent_class = @class_info[current]?.try(&.parent_name) || @module.class_parents[current]?
               while parent_class && !parent_method_found
                 parent_method_name = "#{parent_class}##{method_name}"
-                if @function_types.has_key?(parent_method_name) || has_function_base?(parent_method_name)
+                if @function_types.has_key?(parent_method_name) ||
+                   has_function_base?(parent_method_name) ||
+                   !function_def_overloads(parent_method_name).empty?
                   receiver_id = emit_self(ctx)
                   full_method_name = parent_method_name
                   parent_method_found = true
@@ -21183,6 +21187,9 @@ module Crystal::HIR
       base_method_name = rewrite_event_loop_method_name(base_method_name)
       if receiver_id.nil? && full_method_name.nil? && method_name == "main" && @top_level_main_defined
         base_method_name = TOP_LEVEL_MAIN_BASE
+      end
+      if receiver_id.nil? && base_method_name.includes?("#") && !@current_method_is_class
+        receiver_id = emit_self(ctx)
       end
 
       # Refine VOID arg types by looking at overload parameter annotations
