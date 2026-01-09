@@ -120,7 +120,7 @@ module CrystalV2
         MAGIC   = "CV2A"
         # Bump this version whenever the parser or AST format changes
         # to invalidate all cached ASTs
-        VERSION = 24_u32
+        VERSION = 26_u32
 
         getter arena : Frontend::AstArena
         getter roots : Array(Frontend::ExprId)
@@ -311,6 +311,10 @@ module CrystalV2
             call_node.named_args.try &.each do |arg|
               yield String.new(arg.name)
             end
+          when Frontend::NodeKind::HashLiteral
+            hash_node = node.as(Frontend::HashLiteralNode)
+            hash_node.of_key_type.try { |s| yield String.new(s) }
+            hash_node.of_value_type.try { |s| yield String.new(s) }
           when Frontend::NodeKind::Def
             def_node = node.as(Frontend::DefNode)
             yield String.new(def_node.name)

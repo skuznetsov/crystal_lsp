@@ -4890,6 +4890,10 @@ module Crystal::HIR
 
     private def register_module_with_name(node : CrystalV2::Compiler::Frontend::ModuleNode, module_name : String)
       module_name = resolve_class_name_for_definition(module_name)
+      if ENV["DEBUG_TYPE_PATH"]? && module_name.includes?("/")
+        current_path = @paths_by_arena[@arena]? || "(unknown)"
+        STDERR.puts "[TYPE_PATH_MODULE] name=#{module_name} file=#{File.basename(current_path)} span=#{node.span.start_line}:#{node.span.start_column}"
+      end
       if ENV.has_key?("DEBUG_NESTED_CLASS") && (module_name == "IO" || module_name.includes?("FileDescriptor"))
         STDERR.puts "[DEBUG_MODULE] Processing module: #{module_name}, body_size=#{node.body.try(&.size) || 0}"
       end
@@ -6942,6 +6946,10 @@ module Crystal::HIR
     # Register a class with a specific name (for nested classes like Foo::Bar)
     def register_class_with_name(node : CrystalV2::Compiler::Frontend::ClassNode, class_name : String)
       class_name = resolve_class_name_for_definition(class_name)
+      if ENV["DEBUG_TYPE_PATH"]? && class_name.includes?("/")
+        current_path = @paths_by_arena[@arena]? || "(unknown)"
+        STDERR.puts "[TYPE_PATH_CLASS] name=#{class_name} file=#{File.basename(current_path)} span=#{node.span.start_line}:#{node.span.start_column}"
+      end
       if ENV["DEBUG_STRING_CLASS"]? && class_name == "String"
         STDERR.puts "[STRING_CLASS_REG] class=#{class_name} span=#{node.span.start_line}-#{node.span.end_line}"
       end
@@ -27055,6 +27063,12 @@ module Crystal::HIR
     end
 
     private def lower_hash_literal(ctx : LoweringContext, node : CrystalV2::Compiler::Frontend::HashLiteralNode) : ValueId
+      if ENV["DEBUG_HASH_OF_TYPE"]?
+        current_path = @paths_by_arena[@arena]? || "(unknown)"
+        key_str = node.of_key_type ? String.new(node.of_key_type.not_nil!) : "(nil)"
+        val_str = node.of_value_type ? String.new(node.of_value_type.not_nil!) : "(nil)"
+        STDERR.puts "[HASH_OF] file=#{File.basename(current_path)} key=#{key_str} val=#{val_str} entries=#{node.entries.size}"
+      end
       # Lower key-value pairs
       args = [] of ValueId
       node.entries.each do |entry|
@@ -27662,6 +27676,9 @@ module Crystal::HIR
       return TypeRef::VOID if normalized_name == "_"
 
       lookup_name = normalized_name
+      if ENV["DEBUG_TYPE_PATH"]? && lookup_name.includes?("/")
+        STDERR.puts "[TYPE_PATH] name=#{lookup_name} current=#{@current_class || ""} method=#{@current_method || ""} ns=#{@current_namespace_override || ""}"
+      end
 
       # Handle type literals early to avoid namespace prefixing on ".class"
       if lookup_name.ends_with?(".class") || lookup_name.ends_with?(".metaclass")
