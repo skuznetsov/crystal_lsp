@@ -10048,6 +10048,10 @@ module Crystal::HIR
       when "Crystal::EventLoop::FileDescriptor", "EventLoop::FileDescriptor",
            "Crystal::EventLoop::Socket", "EventLoop::Socket"
         preferred_event_loop_interface_class
+      when "Crystal::System::FileDescriptor", "System::FileDescriptor"
+        "IO::FileDescriptor"
+      when "Crystal::System::Socket", "System::Socket"
+        "Socket"
       else
         nil
       end
@@ -10254,6 +10258,11 @@ module Crystal::HIR
           if @function_types.has_key?(mangled) || @module.has_function?(mangled)
             matches << mangled
           elsif has_function_base?(base)
+            matches << base
+          end
+        elsif has_function_base?(base)
+          # Accessors (property/getter/setter) often have no DefNode; generate lazily.
+          if maybe_generate_accessor_for_name(base)
             matches << base
           end
         end
