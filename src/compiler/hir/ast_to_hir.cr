@@ -19893,6 +19893,15 @@ module Crystal::HIR
       receiver_type = ctx.type_of(receiver_id)
       class_name = get_type_name_from_ref(receiver_type)
       class_info = @class_info[class_name]?
+      if class_info.nil? && module_like_type_name?(class_name)
+        if preferred = preferred_module_typed_class_for(class_name)
+          class_name = preferred
+          class_info = @class_info[class_name]?
+        end
+      end
+      if ENV["DEBUG_ACCESSOR"]?
+        STDERR.puts "[ACCESSOR] method=#{method_name} recv=#{get_type_name_from_ref(receiver_type)} resolved=#{class_name} class_info=#{class_info ? "yes" : "no"}"
+      end
       return nil unless class_info
 
       if method_name.ends_with?("=")
@@ -21705,10 +21714,13 @@ module Crystal::HIR
       end
 
       # Ensure synthetic accessors exist for direct ivar access.
-      if return_type == TypeRef::VOID && receiver_id
-        if accessor = ensure_accessor_method(ctx, receiver_id, method_name)
-          return_type = accessor[0]
-          mangled_method_name = accessor[1]
+      if receiver_id
+        missing_impl = mangled_method_name && !@module.has_function?(mangled_method_name)
+        if return_type == TypeRef::VOID || missing_impl
+          if accessor = ensure_accessor_method(ctx, receiver_id, method_name)
+            return_type = accessor[0]
+            mangled_method_name = accessor[1]
+          end
         end
       end
 
@@ -26641,6 +26653,12 @@ module Crystal::HIR
         arg_types = [ctx.type_of(value_id)]
         method_name = resolve_method_call(ctx, object_id, setter_name, arg_types, false)
         return_type = get_function_return_type(method_name)
+        if !@module.has_function?(method_name)
+          if accessor = ensure_accessor_method(ctx, object_id, setter_name)
+            return_type = accessor[0]
+            method_name = accessor[1]
+          end
+        end
         # Ensure the setter method is lowered
         remember_callsite_arg_types(method_name, arg_types)
         lower_function_if_needed(method_name)
