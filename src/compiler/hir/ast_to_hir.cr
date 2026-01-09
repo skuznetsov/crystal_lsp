@@ -3555,6 +3555,11 @@ module Crystal::HIR
 
         if param.is_instance_var
           ivar_name = "@#{param_name}"
+          if param_type == TypeRef::VOID
+            if existing = ivars.find { |iv| iv.name == ivar_name }
+              param_type = existing.type unless existing.type == TypeRef::VOID
+            end
+          end
           unless ivars.any? { |iv| iv.name == ivar_name }
             ivars << IVarInfo.new(ivar_name, param_type, offset_ptr.value)
             offset_ptr.value += type_size(param_type)
@@ -8194,6 +8199,7 @@ module Crystal::HIR
         # Mangle the initialize call with parameter types
         init_param_types = init_params.map { |_, t| t }
         init_name = mangle_function_name(init_base_name, init_param_types)
+        remember_callsite_arg_types(init_name, init_param_types) unless init_param_types.empty?
         lower_function_if_needed(init_name)
         init_call = Call.new(ctx.next_id, TypeRef::VOID, alloc.id, init_name, param_ids)
         ctx.emit(init_call)
@@ -19245,7 +19251,9 @@ module Crystal::HIR
       call_arg_literals = callsite_args ? callsite_args.literals : nil
       call_arg_enum_names = callsite_args ? callsite_args.enum_names : nil
 
-      if !name.includes?("$") && def_params_untyped?(func_def)
+      base_guard_name = name.split("$", 2)[0]
+      allow_untyped_base = base_guard_name.ends_with?("#initialize") || base_guard_name.ends_with?(".initialize")
+      if !name.includes?("$") && def_params_untyped?(func_def) && !allow_untyped_base
         callsite_void = call_arg_types.nil? || call_arg_types.all? { |t| t == TypeRef::VOID }
         if callsite_void
           params = func_def.params
