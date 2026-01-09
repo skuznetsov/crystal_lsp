@@ -21392,11 +21392,7 @@ module Crystal::HIR
               yield_name, yield_def = entry
               callee_arena = @function_def_arenas[yield_name]? || @arena
               has_yield = def_contains_yield?(yield_def, callee_arena)
-              # If the function name ends with $block, it likely contains yield
-              # even if AST check fails (could be macro-generated yield).
-              # Since we have a block to pass, it's safe to attempt inlining.
-              has_block_suffix = yield_name.ends_with?("$block")
-              if has_yield || has_block_suffix
+              if has_yield
                 @yield_functions.add(yield_name)
                 debug_hook("call.inline.yield", "callee=#{yield_name} current=#{@current_class || ""}")
                 return inline_yield_function(ctx, yield_def, yield_name, receiver_id, call_args, block_cast, callee_arena)
@@ -24694,6 +24690,7 @@ module Crystal::HIR
         return inline_yield_fallback_call(ctx, inline_key, receiver_id, call_args, block)
       end
       base_inline_name = inline_key.split("$", 2)[0]
+      namespace_override = function_namespace_override_for(inline_key, base_inline_name)
       if receiver = receiver_name_from_method_name(base_inline_name)
         if unresolved_generic_receiver?(receiver)
           debug_hook("inline.yield.skip", "callee=#{inline_key} receiver=#{receiver} reason=unresolved_generic")
@@ -24828,10 +24825,18 @@ module Crystal::HIR
           end
         end
         if inline_param_map.empty?
-          apply_inline.call
+          if namespace_override
+            with_namespace_override(namespace_override) { apply_inline.call }
+          else
+            apply_inline.call
+          end
         else
           with_type_param_map(inline_param_map) do
-            apply_inline.call
+            if namespace_override
+              with_namespace_override(namespace_override) { apply_inline.call }
+            else
+              apply_inline.call
+            end
           end
         end
 
