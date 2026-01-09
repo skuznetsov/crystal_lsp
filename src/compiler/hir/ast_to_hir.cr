@@ -14075,6 +14075,48 @@ module Crystal::HIR
       end
     end
 
+    # Evaluate LibC.has_constant?(:NAME) or similar
+    private def evaluate_has_constant(lib_name : String, const_name : String) : Bool
+      # Remove leading colon if present
+      clean_name = const_name.lstrip(':')
+
+      # First check if it's defined in @constant_defs (parsed from lib declarations)
+      full_name = "#{lib_name}::#{clean_name}"
+      return true if @constant_defs.includes?(full_name)
+
+      # Platform-specific constants for LibC
+      if lib_name == "LibC"
+        is_darwin = evaluate_macro_flag("darwin")
+        is_linux = evaluate_macro_flag("linux")
+        is_bsd = evaluate_macro_flag("freebsd") || evaluate_macro_flag("openbsd") || evaluate_macro_flag("netbsd") || evaluate_macro_flag("dragonfly")
+
+        case clean_name
+        # kqueue constants (Darwin, BSD)
+        when "EVFILT_USER", "NOTE_TRIGGER", "EV_UDATA_SPECIFIC"
+          is_darwin || is_bsd
+        when "EVFILT_READ", "EVFILT_WRITE", "EVFILT_TIMER", "EV_ADD", "EV_DELETE", "EV_CLEAR", "EV_EOF", "EV_ERROR"
+          is_darwin || is_bsd
+
+        # epoll constants (Linux)
+        when "EPOLL_CTL_ADD", "EPOLL_CTL_DEL", "EPOLL_CTL_MOD", "EPOLLIN", "EPOLLOUT", "EPOLLERR", "EPOLLHUP"
+          is_linux
+
+        # io_uring constants (Linux 5.1+)
+        when "IOURING_SETUP_SQPOLL", "IORING_ENTER_GETEVENTS"
+          is_linux
+
+        # Common POSIX constants
+        when "CLOCK_MONOTONIC", "TIOCGWINSZ", "TIOCSCTTY", "O_CLOEXEC", "O_DIRECTORY", "O_NONBLOCK"
+          is_darwin || is_linux || is_bsd
+
+        else
+          false
+        end
+      else
+        false
+      end
+    end
+
     private def merge_macro_or(left : Bool?, right : Bool?) : Bool?
       return true if left == true || right == true
       return false if left == false && right == false
@@ -14118,6 +14160,36 @@ module Crystal::HIR
                           end
               if flag_name
                 return evaluate_macro_flag(flag_name)
+              end
+            end
+          end
+        elsif callee.is_a?(CrystalV2::Compiler::Frontend::MemberAccessNode)
+          # Check for LibC.has_constant?(:name) or Type.has_constant?(:name)
+          member_name = String.new(callee.member)
+          if member_name == "has_constant?"
+            obj_node = @arena[callee.object]
+            lib_name = case obj_node
+                       when CrystalV2::Compiler::Frontend::ConstantNode
+                         String.new(obj_node.name)
+                       when CrystalV2::Compiler::Frontend::IdentifierNode
+                         String.new(obj_node.name)
+                       when CrystalV2::Compiler::Frontend::PathNode
+                         collect_path_string(obj_node)
+                       else
+                         nil
+                       end
+            if lib_name && cond_node.args.size >= 1
+              arg_node = @arena[cond_node.args[0]]
+              const_name = case arg_node
+                           when CrystalV2::Compiler::Frontend::SymbolNode
+                             String.new(arg_node.name)
+                           when CrystalV2::Compiler::Frontend::StringNode
+                             String.new(arg_node.value)
+                           else
+                             nil
+                           end
+              if const_name
+                return evaluate_has_constant(lib_name, const_name)
               end
             end
           end
@@ -15047,6 +15119,21 @@ module Crystal::HIR
           enum_map[copy.id] = enum_name
         end
         return copy.id
+      elsif @inline_yield_block_body_depth > 0
+        # Inline-yield block bodies should be able to see caller locals. When a
+        # block references an outer local (e.g. kevent inside get? { ... }),
+        # fall back to the inline caller locals instead of creating a new void local.
+        if value_id = inline_caller_local_id(name)
+          ctx.register_local(name, value_id)
+          copy = Copy.new(ctx.next_id, ctx.type_of(value_id), value_id)
+          ctx.emit(copy)
+          ctx.mark_type_literal(copy.id) if ctx.type_literal?(value_id)
+          if enum_name = @enum_value_types.try(&.[value_id]?)
+            enum_map = @enum_value_types ||= {} of ValueId => String
+            enum_map[copy.id] = enum_name
+          end
+          return copy.id
+        end
       elsif ENV["DEBUG_BLOCK_PARAMS"]? && name.starts_with?("__arg")
         STDERR.puts "[BLOCK_PARAMS] missing_local name=#{name} scope=#{ctx.current_scope}"
       end
@@ -19147,8 +19234,36 @@ module Crystal::HIR
         callsite_args = pending_callsite_args_for_def(func_def, name, target_name)
       end
       call_arg_types = callsite_args ? callsite_args.types : nil
+      # Fallback: parse types from mangled name suffix when callsite_args is nil
+      if call_arg_types.nil? && name.includes?("$")
+        suffix = name.split("$", 2)[1]
+        if suffix && !suffix.empty?
+          parsed_types = parse_types_from_suffix(suffix)
+          call_arg_types = parsed_types unless parsed_types.empty?
+        end
+      end
       call_arg_literals = callsite_args ? callsite_args.literals : nil
       call_arg_enum_names = callsite_args ? callsite_args.enum_names : nil
+
+      if !name.includes?("$") && def_params_untyped?(func_def)
+        callsite_void = call_arg_types.nil? || call_arg_types.all? { |t| t == TypeRef::VOID }
+        if callsite_void
+          params = func_def.params
+          requires_args = false
+          if params
+            params.each do |param|
+              next if named_only_separator?(param) || param.is_block || param.is_double_splat
+              next unless param.default_value.nil?
+              requires_args = true
+              break
+            end
+          end
+          if requires_args
+            debug_hook("function.lower.skip_untyped_base", "name=#{name}") if DebugHooks::ENABLED
+            return
+          end
+        end
+      end
 
       extra_type_params : Hash(String, String)? = nil
       resolved_owner : String? = nil
@@ -19219,7 +19334,11 @@ module Crystal::HIR
       end
 
       if !@type_param_map.empty? && @current_class
-        if base_target_name.starts_with?("#{@current_class}#") || base_target_name.starts_with?("#{@current_class}.")
+        current = @current_class.not_nil!
+        current_base = current.split("(", 2)[0]
+        if base_target_name.starts_with?("#{current}#") ||
+           base_target_name.starts_with?("#{current}.") ||
+           base_target_name.starts_with?("#{current_base}::")
           extra_type_params = extra_type_params ? @type_param_map.merge(extra_type_params) : @type_param_map.dup
         end
       end
@@ -20805,7 +20924,13 @@ module Crystal::HIR
               end
             end
           end
-          mangled_method_name = untyped_params ? entry_name : mangle_function_name(entry_name, arg_types, has_block_call)
+          # Even for untyped params, use mangled name if we have concrete arg types
+          # This ensures the correct overload is called at call site
+          if untyped_params && arg_types.any? { |t| t != TypeRef::VOID }
+            mangled_method_name = mangle_function_name(entry_name, arg_types, has_block_call)
+          else
+            mangled_method_name = untyped_params ? entry_name : mangle_function_name(entry_name, arg_types, has_block_call)
+          end
         else
           mangled_method_name = entry_name
         end
@@ -20819,13 +20944,21 @@ module Crystal::HIR
                         !mangled_method_name.includes?("$")
         if needs_resolve
           resolved_name = resolve_method_call(ctx, receiver_id, method_name, arg_types, has_block_call)
-          if resolved_name != mangled_method_name &&
-             (resolved_name.includes?("$") ||
-              @function_types.has_key?(resolved_name) ||
-              @function_defs.has_key?(resolved_name) ||
-              @module.has_function?(resolved_name))
-            mangled_method_name = resolved_name
-            base_method_name = resolved_name.split("$").first
+          # Don't override a mangled name with suffix with a base name without suffix
+          # when we have concrete argument types
+          if resolved_name != mangled_method_name
+            should_override = resolved_name.includes?("$") ||
+                             @function_types.has_key?(resolved_name) ||
+                             @function_defs.has_key?(resolved_name) ||
+                             @module.has_function?(resolved_name)
+            # Keep mangled name if it has suffix and resolved doesn't
+            if mangled_method_name.includes?("$") && !resolved_name.includes?("$")
+              should_override = false
+            end
+            if should_override
+              mangled_method_name = resolved_name
+              base_method_name = resolved_name.split("$").first
+            end
           end
         end
 
@@ -24253,6 +24386,18 @@ module Crystal::HIR
       call.id
     end
 
+    private def inline_caller_local_id(name : String) : ValueId?
+      return nil if @inline_caller_locals_stack.empty?
+
+      @inline_caller_locals_stack.reverse_each do |locals|
+        if value_id = locals[name]?
+          return value_id
+        end
+      end
+
+      nil
+    end
+
     # Inline a yield-function call with block
     # Transforms: func(args) { |params| block_body }
     # Into: inline func body, replacing yield with block_body
@@ -27147,6 +27292,69 @@ module Crystal::HIR
         @resolved_type_name_cache.clear
         @type_literal_class_cache.clear
       end
+    end
+
+    # Parse types from mangled name suffix (e.g., "Pointer(LibC::Kevent)_Int32" -> [Pointer(LibC::Kevent), Int32])
+    private def parse_types_from_suffix(suffix : String) : Array(TypeRef)
+      result = [] of TypeRef
+      return result if suffix.empty?
+
+      # Split on underscores, but handle parentheses for generic types
+      parts = [] of String
+      current = String::Builder.new
+      paren_depth = 0
+
+      suffix.each_char do |ch|
+        case ch
+        when '('
+          paren_depth += 1
+          current << ch
+        when ')'
+          paren_depth -= 1
+          current << ch
+        when '_'
+          if paren_depth > 0
+            current << ch
+          else
+            part = current.to_s
+            parts << part unless part.empty?
+            current = String::Builder.new
+          end
+        else
+          current << ch
+        end
+      end
+      final_part = current.to_s
+      parts << final_part unless final_part.empty?
+
+      parts.each do |part|
+        # Convert mangled type name back to Crystal type name
+        # e.g., "Pointer(LibC::Kevent)" stays as is
+        # e.g., "LibC__Kevent" -> "LibC::Kevent"
+        type_name = part.gsub("__", "::")
+        type_ref = type_ref_for_name(type_name)
+        result << type_ref if type_ref != TypeRef::VOID
+      end
+
+      result
+    end
+
+    private def def_params_untyped?(func_def : CrystalV2::Compiler::Frontend::DefNode) : Bool
+      params = func_def.params
+      return false unless params
+
+      has_regular = false
+      params.each do |param|
+        next if named_only_separator?(param) || param.is_block || param.is_double_splat
+        has_regular = true
+        if ta = param.type_annotation
+          type_name = String.new(ta)
+          next if type_param_like?(type_name) && !@type_param_map.has_key?(type_name)
+          return false
+        end
+      end
+
+      has_regular
     end
 
     private def type_ref_for_name(name : String) : TypeRef
