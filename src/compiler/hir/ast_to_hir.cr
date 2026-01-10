@@ -9449,9 +9449,46 @@ module Crystal::HIR
         else
           nil
         end
+      when "reverse"
+        desc = @module.get_type_descriptor(receiver_type)
+        return nil unless desc
+        return nil unless desc.kind == TypeKind::Tuple || desc.name.starts_with?("Tuple(")
+        types = desc.type_params.reject { |t| t == TypeRef::VOID }
+        return nil if types.empty?
+        names = types.reverse.map { |t| get_type_name_from_ref(t) }
+        type_ref_for_name("Tuple(#{names.join(", ")})")
       else
         nil
       end
+    end
+
+    private def tuple_map_return_type(
+      receiver_type : TypeRef,
+      element_type_name : String
+    ) : TypeRef?
+      return nil if element_type_name.empty?
+      desc = @module.get_type_descriptor(receiver_type)
+      return nil unless desc
+
+      variants = [] of String
+      if desc.kind == TypeKind::Union
+        split_union_type_name(desc.name).each do |variant|
+          info = split_generic_base_and_args(variant)
+          next unless info && info[:base] == "Tuple"
+          args = split_generic_type_args(info[:args])
+          next if args.empty?
+          mapped = Array.new(args.size, element_type_name).join(", ")
+          variants << "Tuple(#{mapped})"
+        end
+      elsif desc.kind == TypeKind::Tuple || desc.name.starts_with?("Tuple(")
+        args = desc.type_params.reject { |t| t == TypeRef::VOID }
+        return nil if args.empty?
+        mapped = Array.new(args.size, element_type_name).join(", ")
+        variants << "Tuple(#{mapped})"
+      end
+
+      return nil if variants.empty?
+      type_ref_for_name(variants.uniq.join(" | "))
     end
 
     private def tuple_size_from_type_name(type_name : String) : Int32?
@@ -12837,6 +12874,19 @@ module Crystal::HIR
                        else
                          input_names.map { |name| substitute_type_params(name, param_map.not_nil!) }
                        end
+      if receiver_type && receiver_type != TypeRef::VOID
+        if recv_desc = @module.get_type_descriptor(receiver_type)
+          if elem_name = element_type_for_type_name(recv_desc.name)
+            resolved_names = resolved_names.map do |name|
+              if name.starts_with?("Union(*") && name.ends_with?(")")
+                elem_name
+              else
+                name
+              end
+            end
+          end
+        end
+      end
 
       if debug_block_params
         map_str = param_map ? param_map.not_nil!.map { |k, v| "#{k}=#{v}" }.join(",") : ""
@@ -22199,6 +22249,11 @@ module Crystal::HIR
         if inferred = resolve_block_dependent_return_type(mangled_method_name, base_method_name, block_return_name)
           return_type = inferred
         end
+        if receiver_id && (method_name == "map" || method_name == "map_with_index")
+          if tuple_return = tuple_map_return_type(ctx.type_of(receiver_id), block_return_name)
+            return_type = tuple_return
+          end
+        end
       end
       if ENV["DEBUG_BLOCK_RETURN"]? && (mangled_method_name.includes?("sort_by") || base_method_name.includes?("sort_by"))
         STDERR.puts "[BLOCK_RETURN] method=#{mangled_method_name} base=#{base_method_name} return=#{block_return_name || "nil"}"
@@ -26368,6 +26423,22 @@ module Crystal::HIR
       if member_name == "value"
         if @enum_value_types.try(&.[object_id]?)
           return object_id
+        end
+      end
+
+      if member_name == "key" || member_name == "value"
+        if desc = @module.get_type_descriptor(receiver_type)
+          if desc.kind == TypeKind::Tuple || desc.name.starts_with?("Tuple(")
+            index = member_name == "key" ? 0 : 1
+            if elem = tuple_element_type(receiver_type, index)
+              index_lit = Literal.new(ctx.next_id, TypeRef::INT32, index.to_i64)
+              ctx.emit(index_lit)
+              index_get = IndexGet.new(ctx.next_id, elem, object_id, index_lit.id)
+              ctx.emit(index_get)
+              ctx.register_type(index_get.id, elem)
+              return index_get.id
+            end
+          end
         end
       end
 
