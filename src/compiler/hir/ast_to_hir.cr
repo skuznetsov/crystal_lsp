@@ -10054,6 +10054,14 @@ module Crystal::HIR
         end
       end
 
+      if !class_name.empty?
+        if resolved_base = resolve_method_with_inheritance(class_name, method_name)
+          resolved_mangled = mangle_function_name(resolved_base, arg_types, has_block_call)
+          debug_hook("method.resolve", "base=#{base_method_name} resolved=#{resolved_mangled} reason=inheritance_prefer_owner")
+          return cache_method_resolution(cache_key, resolved_mangled)
+        end
+      end
+
       # If any overload exists for the base name, return the base name and let
       # the MIR lowering do fuzzy matching to pick a concrete overload.
       if !class_name.empty? && has_function_base?(base_method_name)
@@ -13009,7 +13017,13 @@ module Crystal::HIR
         test_name = "#{current}##{method_name}"
         # O(1) lookup: check exact match first, then check if base name exists
         if @function_types.has_key?(test_name) || has_function_base?(test_name)
-          resolved = current == origin ? test_name : test_name
+          resolved = if current == origin
+                       test_name
+                     elsif numeric_primitive_class_name?(origin)
+                       "#{origin}##{method_name}"
+                     else
+                       test_name
+                     end
           @method_inheritance_cache[cache_key] = resolved
           return resolved  # Return base name - caller will mangle
         end
