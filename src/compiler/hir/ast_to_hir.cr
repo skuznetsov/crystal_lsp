@@ -16178,14 +16178,11 @@ module Crystal::HIR
 
       # Find parent class
       class_info = @class_info[class_name]?
-      parent_name = class_info.try(&.parent_name)
-
-      unless parent_name
-        # No parent - return void
-        void_lit = Literal.new(ctx.next_id, TypeRef::VOID, 0_i64)
-        ctx.emit(void_lit)
-        return void_lit.id
+      if class_info.nil?
+        class_base = class_name.split("(", 2)[0]
+        class_info = @class_info[class_base]?
       end
+      parent_name = class_info.try(&.parent_name)
 
       # Lower arguments first to get their types
       args = if node_args = node.args
@@ -16198,6 +16195,102 @@ module Crystal::HIR
 
       # Get argument types for mangling
       arg_types = args.map { |arg| ctx.type_of(arg) }
+
+      previous_base = "#{class_name}##{method_name}_previous"
+      if entry = lookup_function_def_for_call(previous_base, args.size, false, arg_types)
+        actual_prev_name, actual_prev_def = entry
+        if params = actual_prev_def.params
+          param_count = params.count { |p| !p.is_block && !named_only_separator?(p) }
+          if param_count > args.size
+            param_idx = 0
+            params.each do |param|
+              next if param.is_block || named_only_separator?(param)
+              if param_idx >= args.size
+                if default_val = param.default_value
+                  default_id = lower_expr(ctx, default_val)
+                  args << default_id
+                else
+                  nil_lit = Literal.new(ctx.next_id, TypeRef::NIL, nil)
+                  ctx.emit(nil_lit)
+                  ctx.register_type(nil_lit.id, TypeRef::NIL)
+                  args << nil_lit.id
+                end
+              end
+              param_idx += 1
+            end
+          end
+        end
+        arg_types = args.map { |arg| ctx.type_of(arg) }
+        remember_callsite_arg_types(actual_prev_name, arg_types, nil, nil, false)
+        lower_function_if_needed(actual_prev_name)
+        return_type = @function_types[actual_prev_name]? || TypeRef::VOID
+        self_id = emit_self(ctx)
+        call = Call.new(ctx.next_id, return_type, self_id, actual_prev_name, args)
+        ctx.emit(call)
+        ctx.register_type(call.id, return_type)
+        return call.id
+      end
+
+      if class_info
+        class_lookup = class_name
+        class_base = class_name.split("(", 2)[0]
+        included = @class_included_modules[class_lookup]? || @class_included_modules[class_base]?
+        if included
+          included.to_a.sort.each do |module_name|
+            module_base = resolve_module_alias_for_include(module_name).split('(').first
+            visited = Set(String).new
+            if found = find_module_def_recursive(module_base, method_name, args.size, visited)
+              actual_func_def = found[0]
+              def_arena = found[1]
+              if params = actual_func_def.params
+                param_count = params.count { |p| !p.is_block && !named_only_separator?(p) }
+                if param_count > args.size
+                  param_idx = 0
+                  params.each do |param|
+                    next if param.is_block || named_only_separator?(param)
+                    if param_idx >= args.size
+                      if default_val = param.default_value
+                        default_id = lower_expr(ctx, default_val)
+                        args << default_id
+                      else
+                        nil_lit = Literal.new(ctx.next_id, TypeRef::NIL, nil)
+                        ctx.emit(nil_lit)
+                        ctx.register_type(nil_lit.id, TypeRef::NIL)
+                        args << nil_lit.id
+                      end
+                    end
+                    param_idx += 1
+                  end
+                end
+              end
+              arg_types = args.map { |arg| ctx.type_of(arg) }
+              super_base = "#{class_name}##{method_name}_super"
+              super_name = mangle_function_name(super_base, arg_types)
+              unless @module.has_function?(super_name)
+                receiver_map = type_param_map_for_receiver_name("#{class_name}##{method_name}")
+                with_arena(def_arena) do
+                  with_type_param_map(receiver_map) do
+                    lower_method(class_name, class_info, actual_func_def, arg_types, nil, nil, super_name, force_class_method: @current_method_is_class)
+                  end
+                end
+              end
+              return_type = @function_types[super_name]? || TypeRef::VOID
+              self_id = emit_self(ctx)
+              call = Call.new(ctx.next_id, return_type, self_id, super_name, args)
+              ctx.emit(call)
+              ctx.register_type(call.id, return_type)
+              return call.id
+            end
+          end
+        end
+      end
+
+      unless parent_name
+        # No parent - return void
+        void_lit = Literal.new(ctx.next_id, TypeRef::VOID, 0_i64)
+        ctx.emit(void_lit)
+        return void_lit.id
+      end
 
       # Find the method in parent class with proper mangling
       base_method_name = "#{parent_name}##{method_name}"
