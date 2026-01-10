@@ -586,6 +586,8 @@ module Crystal::HIR
     @inline_yield_block_arena_stack : Array(CrystalV2::Compiler::Frontend::ArenaLike) = [] of CrystalV2::Compiler::Frontend::ArenaLike
     # Block parameter types for the current inline-yield context (aligned with @inline_yield_block_stack).
     @inline_yield_block_param_types_stack : Array(Array(TypeRef)?) = [] of Array(TypeRef)?
+    # Cached return type names for inline-yield blocks (aligned with @inline_yield_block_stack).
+    @inline_yield_block_return_stack : Array(String?) = [] of String?
 
     # Track currently inlined yield-functions to avoid infinite inline recursion on stdlib code.
     @inline_yield_name_stack : Array(String) = [] of String
@@ -4634,6 +4636,39 @@ module Crystal::HIR
         return TypeRef::CHAR
       when CrystalV2::Compiler::Frontend::SymbolNode
         return TypeRef::SYMBOL
+      when CrystalV2::Compiler::Frontend::TupleLiteralNode
+        element_names = [] of String
+        expr_node.elements.each do |elem|
+          elem_type = infer_type_from_expr(elem, self_type_name)
+          return nil unless elem_type
+          elem_name = get_type_name_from_ref(elem_type)
+          return nil if elem_name == "Void" || elem_name == "Unknown"
+          element_names << elem_name
+        end
+        return type_ref_for_name("Tuple(#{element_names.join(", ")})")
+      when CrystalV2::Compiler::Frontend::NamedTupleLiteralNode
+        entries = [] of String
+        expr_node.entries.each do |entry|
+          value_type = infer_type_from_expr(entry.value, self_type_name)
+          return nil unless value_type
+          value_name = get_type_name_from_ref(value_type)
+          return nil if value_name == "Void" || value_name == "Unknown"
+          entries << "#{String.new(entry.key)}: #{value_name}"
+        end
+        return type_ref_for_name("NamedTuple(#{entries.join(", ")})")
+      when CrystalV2::Compiler::Frontend::YieldNode
+        if @inline_yield_block_return_stack.size >= 2
+          if inferred = @inline_yield_block_return_stack[-2]?
+            return type_ref_for_name(inferred) if inferred && !inferred.empty?
+          end
+        end
+        if @inline_yield_block_stack.size >= 2
+          outer_block = @inline_yield_block_stack[-2]
+          outer_param_types = @inline_yield_block_param_types_stack[-2]?
+          if inferred = inline_block_return_type_name(outer_block, outer_param_types, self_type_name)
+            return type_ref_for_name(inferred)
+          end
+        end
       when CrystalV2::Compiler::Frontend::PathNode
         full_name = resolve_path_string_in_context(collect_path_string(expr_node))
         parts = full_name.split("::")
@@ -4668,6 +4703,34 @@ module Crystal::HIR
                object_name == "K" || object_name == "E" || object_name == "B" ||
                object_name == "L" || object_name == "W"
               return TypeRef::INT32
+            end
+          end
+        end
+        if obj_type = infer_type_from_expr(expr_node.object, self_type_name)
+          if obj_type != TypeRef::VOID
+            class_name = get_type_name_from_ref(obj_type)
+            owner_name = split_generic_base_and_args(class_name).try(&.[](:base)) || class_name
+            base_name = resolve_method_with_inheritance(owner_name, member_name) || "#{owner_name}##{member_name}"
+            ret_type = resolve_return_type_from_def(base_name, base_name, obj_type)
+            if ret_type && ret_type != TypeRef::VOID
+              return ret_type
+            end
+            ret_type = get_function_return_type(base_name)
+            if ret_type != TypeRef::VOID
+              return ret_type
+            end
+            if member_name == "first" || member_name == "last" || member_name == "first?" || member_name == "last?"
+              if desc = @module.get_type_descriptor(obj_type)
+                if elem_name = element_type_for_type_name(desc.name)
+                  elem_ref = type_ref_for_name(elem_name)
+                  if elem_ref != TypeRef::VOID
+                    return member_name.ends_with?("?") ? create_union_type_for_nullable(elem_ref) : elem_ref
+                  end
+                end
+              end
+            end
+            if ENV["DEBUG_INFER_MEMBER"]? && (member_name == "first" || member_name == "address")
+              STDERR.puts "[INFER_MEMBER] member=#{member_name} owner=#{owner_name} type=#{class_name} base=#{base_name} ret=Void"
             end
           end
         end
@@ -6888,10 +6951,12 @@ module Crystal::HIR
       saved_yield_block_stack = @inline_yield_block_stack
       saved_yield_arena_stack = @inline_yield_block_arena_stack
       saved_yield_param_stack = @inline_yield_block_param_types_stack
+      saved_yield_return_stack = @inline_yield_block_return_stack
       saved_yield_name_stack = @inline_yield_name_stack
       @inline_yield_block_stack = [] of CrystalV2::Compiler::Frontend::BlockNode
       @inline_yield_block_arena_stack = [] of CrystalV2::Compiler::Frontend::ArenaLike
       @inline_yield_block_param_types_stack = [] of Array(TypeRef)?
+      @inline_yield_block_return_stack = [] of String?
       @inline_yield_name_stack = [] of String
       last_value : ValueId? = nil
       begin
@@ -6904,6 +6969,7 @@ module Crystal::HIR
         @inline_yield_block_stack = saved_yield_block_stack
         @inline_yield_block_arena_stack = saved_yield_arena_stack
         @inline_yield_block_param_types_stack = saved_yield_param_stack
+        @inline_yield_block_return_stack = saved_yield_return_stack
         @inline_yield_name_stack = saved_yield_name_stack
       end
 
@@ -8856,10 +8922,12 @@ module Crystal::HIR
       saved_yield_block_stack = @inline_yield_block_stack
       saved_yield_arena_stack = @inline_yield_block_arena_stack
       saved_yield_param_stack = @inline_yield_block_param_types_stack
+      saved_yield_return_stack = @inline_yield_block_return_stack
       saved_yield_name_stack = @inline_yield_name_stack
       @inline_yield_block_stack = [] of CrystalV2::Compiler::Frontend::BlockNode
       @inline_yield_block_arena_stack = [] of CrystalV2::Compiler::Frontend::ArenaLike
       @inline_yield_block_param_types_stack = [] of Array(TypeRef)?
+      @inline_yield_block_return_stack = [] of String?
       @inline_yield_name_stack = [] of String
       last_value : ValueId? = nil
       begin
@@ -8952,6 +9020,7 @@ module Crystal::HIR
         @inline_yield_block_stack = saved_yield_block_stack
         @inline_yield_block_arena_stack = saved_yield_arena_stack
         @inline_yield_block_param_types_stack = saved_yield_param_stack
+        @inline_yield_block_return_stack = saved_yield_return_stack
         @inline_yield_name_stack = saved_yield_name_stack
       end
 
@@ -11628,11 +11697,24 @@ module Crystal::HIR
         @resolved_type_name_cache[cache_key] = resolved
         return resolved
       end
+      # Preserve short unbound type params (T/U/V) to avoid creating forward
+      # references like Namespace::U for method generic params.
+      if type_param_like?(name) && name.size <= 2 && !@type_param_map.has_key?(name)
+        @resolved_type_name_cache[cache_key] = name
+        return name
+      end
 
       if info = split_generic_base_and_args(name)
         resolved_base = resolve_type_name_in_context(info[:base])
         resolved_args = split_generic_type_args(info[:args]).map do |arg|
-          normalize_tuple_literal_type_name(resolve_type_name_in_context(arg.strip))
+          arg = arg.strip
+          # Preserve short unbound type params in generic args (T/U/V) so they
+          # don't get namespace-qualified into fake nested classes.
+          if type_param_like?(arg) && arg.size <= 2 && !@type_param_map.has_key?(arg)
+            normalize_tuple_literal_type_name(arg)
+          else
+            normalize_tuple_literal_type_name(resolve_type_name_in_context(arg))
+          end
         end.join(", ")
         resolved = resolved_base == info[:base] && resolved_args == info[:args] ? name : "#{resolved_base}(#{resolved_args})"
         @resolved_type_name_cache[cache_key] = resolved
@@ -11672,6 +11754,9 @@ module Crystal::HIR
 
     private def resolve_path_string_in_context(path : String) : String
       return path if path.empty?
+      if type_param_like?(path) && path.size <= 2 && !@type_param_map.has_key?(path)
+        return path
+      end
       if path.starts_with?("::")
         return path.size > 2 ? path[2..] : ""
       end
@@ -11716,6 +11801,9 @@ module Crystal::HIR
         return name
       end
       if name == "Int" || name == "Float" || name == "Number" || name == "Atomic"
+        return name
+      end
+      if type_param_like?(name) && name.size <= 2 && !@type_param_map.has_key?(name)
         return name
       end
 
@@ -12181,6 +12269,57 @@ module Crystal::HIR
       type_name
     end
 
+    private def inline_block_return_type_name(
+      block : CrystalV2::Compiler::Frontend::BlockNode,
+      param_types : Array(TypeRef)?,
+      self_type_name : String?
+    ) : String?
+      old_arena = @arena
+      if block_arena = @block_node_arenas[block.object_id]?
+        @arena = block_arena
+      end
+
+      body = block.body
+      old_locals = @current_typeof_locals
+      old_names = @current_typeof_local_names
+      local_map = old_locals ? old_locals.dup : {} of String => TypeRef
+      name_map = old_names ? old_names.dup : {} of String => String
+
+      if params = block.params
+        params.each_with_index do |param, idx|
+          next unless pname = param.name
+          name = String.new(pname)
+          param_type = if param_types && (override = param_types[idx]?)
+                         override
+                       elsif ta = param.type_annotation
+                         type_ref_for_name(String.new(ta))
+                       else
+                         TypeRef::VOID
+                       end
+          local_map[name] = param_type if param_type != TypeRef::VOID
+        end
+      end
+
+      @current_typeof_locals = local_map
+      @current_typeof_local_names = name_map
+      begin
+        return nil if body.empty?
+        last_expr = body.last?
+        return nil unless last_expr
+        if inferred = infer_type_from_expr(last_expr, self_type_name)
+          type_name = get_type_name_from_ref(inferred)
+          return nil if type_name == "Void" || type_name == "Unknown"
+          return type_name
+        end
+      ensure
+        @current_typeof_locals = old_locals
+        @current_typeof_local_names = old_names
+        @arena = old_arena
+      end
+
+      nil
+    end
+
     private def resolve_block_dependent_return_type(
       mangled_method_name : String,
       base_method_name : String,
@@ -12226,7 +12365,9 @@ module Crystal::HIR
       return nil unless block_type
 
       type_param_name = extract_proc_return_type_name(String.new(block_type))
-      return nil unless type_param_name && type_param_like?(type_param_name)
+      return nil unless type_param_name && !type_param_name.empty?
+      return "_" if type_param_name == "_"
+      return nil unless type_param_like?(type_param_name)
 
       type_param_name
     end
@@ -13247,10 +13388,12 @@ module Crystal::HIR
       saved_yield_block_stack = @inline_yield_block_stack
       saved_yield_arena_stack = @inline_yield_block_arena_stack
       saved_yield_param_stack = @inline_yield_block_param_types_stack
+      saved_yield_return_stack = @inline_yield_block_return_stack
       saved_yield_name_stack = @inline_yield_name_stack
       @inline_yield_block_stack = [] of CrystalV2::Compiler::Frontend::BlockNode
       @inline_yield_block_arena_stack = [] of CrystalV2::Compiler::Frontend::ArenaLike
       @inline_yield_block_param_types_stack = [] of Array(TypeRef)?
+      @inline_yield_block_return_stack = [] of String?
       @inline_yield_name_stack = [] of String
       last_value : ValueId? = nil
       begin
@@ -13263,6 +13406,7 @@ module Crystal::HIR
         @inline_yield_block_stack = saved_yield_block_stack
         @inline_yield_block_arena_stack = saved_yield_arena_stack
         @inline_yield_block_param_types_stack = saved_yield_param_stack
+        @inline_yield_block_return_stack = saved_yield_return_stack
         @inline_yield_name_stack = saved_yield_name_stack
       end
 
@@ -21452,6 +21596,14 @@ module Crystal::HIR
             #     skip_inline = true
             #   end
             # end
+            if block_pass_expr
+              if type_param_name = block_return_type_param_name(mangled_method_name, base_method_name)
+                receiver_map = type_param_map_for_receiver_name(base_method_name)
+                unless @type_param_map.has_key?(type_param_name) || receiver_map.has_key?(type_param_name)
+                  skip_inline = true
+                end
+              end
+            end
             if !skip_inline && method_name == "try" && receiver_id
               recv_type = ctx.type_of(receiver_id)
               if ENV["DEBUG_TRY_INLINE"]?
@@ -21648,17 +21800,22 @@ module Crystal::HIR
       block_return_name = nil
       if block_id
         block_return_name = block_return_type_name(ctx, block_id)
-        if block_return_name
-          if type_param_name = block_return_type_param_name(mangled_method_name, base_method_name)
-            record_pending_type_param_map(mangled_method_name, {type_param_name => block_return_name})
-          end
-          if inferred = resolve_block_dependent_return_type(mangled_method_name, base_method_name, block_return_name)
-            return_type = inferred
-          end
+      elsif block_for_inline
+        block_return_name = inline_block_return_type_name(block_for_inline, block_param_types_inline, @current_class)
+      end
+      if block_return_name
+        if type_param_name = block_return_type_param_name(mangled_method_name, base_method_name)
+          record_pending_type_param_map(mangled_method_name, {type_param_name => block_return_name})
+        end
+        if inferred = resolve_block_dependent_return_type(mangled_method_name, base_method_name, block_return_name)
+          return_type = inferred
         end
       end
+      if ENV["DEBUG_BLOCK_RETURN"]? && (mangled_method_name.includes?("sort_by") || base_method_name.includes?("sort_by"))
+        STDERR.puts "[BLOCK_RETURN] method=#{mangled_method_name} base=#{base_method_name} return=#{block_return_name || "nil"}"
+      end
 
-      if block_id && method_name == "try" && block_return_name
+      if block_return_name && method_name == "try"
         inferred = type_ref_for_name(block_return_name)
         if receiver_id && is_union_or_nilable_type?(ctx.type_of(receiver_id))
           inferred = create_union_type_for_nullable(inferred)
@@ -21666,7 +21823,7 @@ module Crystal::HIR
         return_type = inferred if inferred != TypeRef::VOID
       end
 
-      if block_id && block_return_name
+      if block_return_name
         if yield_return_function_for_call(mangled_method_name, base_method_name)
           inferred = type_ref_for_name(block_return_name)
           return_type = inferred if inferred != TypeRef::VOID
@@ -24935,6 +25092,7 @@ module Crystal::HIR
         @inline_yield_block_stack << block
         @inline_yield_block_arena_stack << block_arena
         @inline_yield_block_param_types_stack << block_param_types
+        @inline_yield_block_return_stack << nil
         pushed_block = true
         inline_return = InlineReturnContext.new(ctx.create_block, [] of {BlockId, ValueId}, ctx.function.id)
         @inline_yield_return_stack << inline_return
@@ -24951,6 +25109,31 @@ module Crystal::HIR
           method_name: old_current_method,
           is_class: old_current_method_is_class || false,
         }
+        inferred_block_return = inline_block_return_type_name(block, block_param_types, old_current_class)
+        if inferred_block_return
+          @inline_yield_block_return_stack[-1] = inferred_block_return
+        end
+        if ENV["DEBUG_BLOCK_RETURN"]? && (inline_key.includes?("sort_by") || inline_key.includes?("map"))
+          param_str = block_param_types ? block_param_types.map { |t| get_type_name_from_ref(t) }.join(",") : "nil"
+          STDERR.puts "[INLINE_BLOCK_RETURN] callee=#{inline_key} params=#{param_str} return=#{inferred_block_return || "nil"}"
+          if inferred_block_return.nil?
+            if last_expr = block.body.last?
+              node = @arena[last_expr]
+              detail = case node
+                       when CrystalV2::Compiler::Frontend::IdentifierNode
+                         "Identifier(#{String.new(node.name)})"
+                       when CrystalV2::Compiler::Frontend::MemberAccessNode
+                         "MemberAccess(#{String.new(node.member)})"
+                       when CrystalV2::Compiler::Frontend::CallNode
+                         callee = @arena[node.callee]
+                         "Call(#{callee.class.name})"
+                       else
+                         node.class.name
+                       end
+              STDERR.puts "[INLINE_BLOCK_RETURN_EXPR] callee=#{inline_key} node=#{detail}"
+            end
+          end
+        end
         if base_inline_name.includes?("#")
           owner, method = base_inline_name.split("#", 2)
           unless owner.empty?
@@ -24967,6 +25150,25 @@ module Crystal::HIR
           end
         end
         inline_param_map = type_param_map_for_receiver_name(base_inline_name)
+        if registered = function_type_param_map_for(inline_key, base_inline_name)
+          inline_param_map = inline_param_map.merge(registered)
+        end
+        if pending = consume_pending_type_param_map(inline_key)
+          inline_param_map = inline_param_map.merge(pending)
+          store_function_type_param_map(inline_key, base_inline_name, pending)
+        elsif pending = consume_pending_type_param_map(base_inline_name)
+          inline_param_map = inline_param_map.merge(pending)
+          store_function_type_param_map(inline_key, base_inline_name, pending)
+        end
+        if type_param_name = block_return_type_param_name(inline_key, base_inline_name)
+          unless inline_param_map.has_key?(type_param_name)
+            if inferred = inline_block_return_type_name(block, block_param_types, old_current_class)
+              inline_param_map[type_param_name] = inferred
+              record_pending_type_param_map(inline_key, {type_param_name => inferred})
+              record_pending_type_param_map(base_inline_name, {type_param_name => inferred})
+            end
+          end
+        end
         result_value = nil_value(ctx)
         apply_inline = -> do
           # If inlining an instance method, bind the receiver as `self`.
@@ -25092,6 +25294,7 @@ module Crystal::HIR
         @inline_yield_block_stack.pop? if pushed_block
         @inline_yield_block_arena_stack.pop? if pushed_block
         @inline_yield_block_param_types_stack.pop? if pushed_block
+        @inline_yield_block_return_stack.pop? if pushed_block
         @inline_yield_name_stack.pop? if pushed_name
         @inline_yield_return_stack.pop?
         @inline_yield_return_override_stack.pop? if pushed_override
@@ -27911,6 +28114,11 @@ module Crystal::HIR
       if !@type_param_map.empty?
         substituted_name = substitute_type_params_in_type_name(lookup_name)
         lookup_name = substituted_name if substituted_name != lookup_name
+      end
+      # Treat short uppercase identifiers (T, U, V) as method type params before
+      # namespace resolution to avoid creating fake nested classes like Foo::U.
+      if type_param_like?(lookup_name) && !@type_param_map.has_key?(lookup_name)
+        return TypeRef::VOID if lookup_name.size <= 2
       end
       # Resolve type names in the current namespace before cache lookup.
       # This avoids poisoning the cache with names that resolve differently per scope.
