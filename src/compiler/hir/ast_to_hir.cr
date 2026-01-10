@@ -635,6 +635,7 @@ module Crystal::HIR
     @constant_defs : Set(String)
     @constant_types : Hash(String, TypeRef)
     @constant_literal_values : Hash(String, CrystalV2::Compiler::Semantic::MacroValue)
+    @nested_type_names : Hash(String, Set(String))
 
     # Track top-level `def main` so we can remap calls and avoid entrypoint collisions.
     @top_level_main_defined : Bool
@@ -756,6 +757,7 @@ module Crystal::HIR
       @constant_defs = Set(String).new
       @constant_types = {} of String => TypeRef
       @constant_literal_values = {} of String => CrystalV2::Compiler::Semantic::MacroValue
+      @nested_type_names = {} of String => Set(String)
       @debug_callsite = nil
       @pending_def_annotations = [] of Tuple(CrystalV2::Compiler::Frontend::AnnotationNode, CrystalV2::Compiler::Frontend::ArenaLike)
     end
@@ -1507,6 +1509,35 @@ module Crystal::HIR
             end
           end
         end
+      end
+    end
+
+    private def record_nested_type_names(class_name : String, body : Array(ExprId)?) : Nil
+      return unless body
+      set = @nested_type_names[class_name]? || Set(String).new
+      body.each do |expr_id|
+        collect_nested_type_names(expr_id, set)
+      end
+      @nested_type_names[class_name] = set unless set.empty?
+    end
+
+    private def collect_nested_type_names(expr_id : ExprId, set : Set(String)) : Nil
+      return if expr_id.invalid?
+      node = unwrap_visibility_member(@arena[expr_id])
+      case node
+      when CrystalV2::Compiler::Frontend::BlockNode
+        node.body.each { |child_id| collect_nested_type_names(child_id, set) }
+      when CrystalV2::Compiler::Frontend::MacroIfNode
+        collect_nested_type_names(node.then_body, set)
+        if else_body = node.else_body
+          collect_nested_type_names(else_body, set)
+        end
+      when CrystalV2::Compiler::Frontend::MacroForNode
+        collect_nested_type_names(node.body, set)
+      when CrystalV2::Compiler::Frontend::ClassNode,
+           CrystalV2::Compiler::Frontend::ModuleNode,
+           CrystalV2::Compiler::Frontend::EnumNode
+        set << String.new(node.name)
       end
     end
 
@@ -3709,9 +3740,11 @@ module Crystal::HIR
               end
             end
             if body = mod_node.body
-              body.each do |member_id|
-                member = unwrap_visibility_member(@arena[member_id])
-                case member
+              body_ids = body.not_nil!
+              with_namespace_override(module_full_name) do
+                body_ids.each do |member_id|
+                  member = unwrap_visibility_member(@arena[member_id])
+                  case member
                 when CrystalV2::Compiler::Frontend::IncludeNode
                   offset = register_module_instance_methods_for(
                     class_name,
@@ -3820,7 +3853,16 @@ module Crystal::HIR
 
                   store_function_type_param_map(full_name, base_name, extra_map)
                   store_function_namespace_override(full_name, base_name, module_full_name)
-                  debug_hook("module.instance_method.register", "class=#{class_name} module=#{module_full_name} method=#{method_name} full=#{full_name}")
+                  if DebugHooks::ENABLED
+                    debug_hook(
+                      "module.instance_method.register",
+                      "class=#{class_name} module=#{module_full_name} method=#{method_name} full=#{full_name}"
+                    )
+                    if module_full_name.includes?("SelectAction")
+                      param_ids = param_types.map(&.id).join(",")
+                      debug_hook("module.instance_method.register.body", "method=#{method_name} params=#{param_ids}")
+                    end
+                  end
                   if ENV["DEBUG_EACH_REGISTER"]? && method_name == "each" && class_name.includes?("Slice(")
                     STDERR.puts "[EACH_REGISTER] class=#{class_name} full=#{full_name}"
                   end
@@ -3893,6 +3935,7 @@ module Crystal::HIR
                     )
                   end
                 end
+                end
               end
             end
           end
@@ -3929,8 +3972,9 @@ module Crystal::HIR
           extra_map = include_type_param_map(mod_node, extend_target, include_arena)
           with_type_param_map(extra_map) do
             if body = mod_node.body
+              body_ids = body.not_nil!
               with_namespace_override(module_full_name) do
-                body.each do |member_id|
+                body_ids.each do |member_id|
                   member = unwrap_visibility_member(@arena[member_id])
                   case member
                   when CrystalV2::Compiler::Frontend::IncludeNode
@@ -7029,6 +7073,7 @@ module Crystal::HIR
         STDERR.puts "[DEBUG_RECORD_CLASS] class_name=#{class_name} current=#{@current_class || "(none)"}"
       end
       is_struct = node.is_struct == true
+      record_nested_type_names(class_name, node.body)
 
       # Check if this is a generic class (has type parameters)
       if type_params = node.type_params
@@ -11797,7 +11842,7 @@ module Crystal::HIR
       if ENV["DEBUG_FILE_RESOLVE"]? && name == "File"
         STDERR.puts "[DEBUG_FILE_RESOLVE] current=#{@current_class || ""} override=#{@current_namespace_override || ""} top_level=#{@top_level_type_names.includes?(name)}"
       end
-      if primitive_self_type(name) || LIBC_TYPE_ALIASES.has_key?(name)
+      if primitive_self_type(name) || LIBC_TYPE_ALIASES.has_key?(name) || builtin_alias_target?(name)
         return name
       end
       if name == "Int" || name == "Float" || name == "Number" || name == "Atomic"
@@ -11874,6 +11919,13 @@ module Crystal::HIR
       if result == name && (current = @current_class) && name[0]?.try(&.uppercase?)
         unless builtin_alias_target?(name) || LIBC_TYPE_ALIASES.has_key?(name)
           unless @top_level_type_names.includes?(name)
+            if result == name
+              if nested = @nested_type_names[current]?
+                if nested.includes?(name)
+                  result = "#{current}::#{name}"
+                end
+              end
+            end
             # First, check short_type_index for sibling matches in parent namespace
             if (candidates = @short_type_index[name]?) && candidates.size >= 1
               # Find candidates that are siblings (in parent namespace, not nested)
@@ -11896,25 +11948,41 @@ module Crystal::HIR
 
             # Only create forward reference as nested type if no sibling found
             if result == name
-              # Check if parent namespace is a module (not a class) - if so, prefer
-              # the parent namespace because the type is likely a sibling in the module.
-              # This avoids creating incorrect nested types like PollDescriptor::Waiters
-              # when the type should be Polling::Waiters (a sibling struct in the module).
-              parent_namespace = current.includes?("::") ? current.rpartition("::")[0] : nil
-              parent_is_module = parent_namespace && @module_defs.has_key?(parent_namespace)
-
-              if parent_is_module
-                # Prefer sibling in module namespace over nested type
-                result = "#{parent_namespace}::#{name}"
-              else
-                namespace = nil
-                if current.includes?("::") || @module_defs.has_key?(current)
-                  namespace = current
+              if override = @current_namespace_override
+                parent_namespace = override.includes?("::") ? override.rpartition("::")[0] : nil
+                if parent_namespace
+                  # Prefer siblings in the override's parent namespace (module mixins).
+                  result = "#{parent_namespace}::#{name}"
+                elsif @module_defs.has_key?(override)
+                  result = "#{override}::#{name}"
                 end
-                # Prefer the current namespace for forward references in nested scopes.
-                result = "#{namespace}::#{name}" if namespace
               end
             end
+          end
+        end
+      end
+
+      if result == name
+        # Check if parent namespace is a module (not a class) - if so, prefer
+        # the parent namespace because the type is likely a sibling in the module.
+        # This avoids creating incorrect nested types like PollDescriptor::Waiters
+        # when the type should be Polling::Waiters (a sibling struct in the module).
+        if current = @current_class
+          parent_namespace = current.includes?("::") ? current.rpartition("::")[0] : nil
+          parent_is_module = parent_namespace && @module_defs.has_key?(parent_namespace)
+
+          nested = @nested_type_names[current]?
+          if nested && nested.includes?(name)
+            result = "#{current}::#{name}"
+          elsif parent_namespace
+            result = "#{parent_namespace}::#{name}"
+          else
+            namespace = nil
+            if current.includes?("::") || @module_defs.has_key?(current)
+              namespace = current
+            end
+            # Prefer the current namespace for forward references in nested scopes.
+            result = "#{namespace}::#{name}" if namespace
           end
         end
       end
@@ -28120,6 +28188,8 @@ module Crystal::HIR
       if type_param_like?(lookup_name) && !@type_param_map.has_key?(lookup_name)
         return TypeRef::VOID if lookup_name.size <= 2
       end
+      orig_name = lookup_name
+
       # Resolve type names in the current namespace before cache lookup.
       # This avoids poisoning the cache with names that resolve differently per scope.
       if !lookup_name.includes?("|")
@@ -28142,6 +28212,7 @@ module Crystal::HIR
         end
       end
       cache_key = type_cache_key(lookup_name)
+      debug_hook_type_cache(orig_name, type_cache_context || "", cache_key, lookup_name)
 
       if cached = @type_cache[cache_key]?
         if !lookup_name.empty? && !lookup_name.includes?("(")

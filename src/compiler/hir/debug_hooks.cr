@@ -101,3 +101,12 @@ macro debug_hook(event, data)
     DebugHooks.debug({{event}}, {{data}})
   {% end %}
 end
+
+macro debug_hook_type_cache(name, context, cache_key, resolved_name)
+  {% if flag?(:debug_hooks) %}
+    DebugHooks.debug(
+      "type_cache",
+      "name=#{ {{name}} } context=#{ {{context}} } key=#{ {{cache_key}} } resolved=#{ {{resolved_name}} }"
+    )
+  {% end %}
+end
