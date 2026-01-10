@@ -1042,7 +1042,8 @@ r2 = maybe(false)  # => nil
 - Reaches LLVM IR emission and `opt -O1` successfully; link still fails due to missing runtime/stdlib symbols (expected at this stage).
 - Timing snapshot (release + `--stats --no-llvm-opt --no-llvm-metadata`): parse prelude ~167ms, HIR ~2.0s, MIR ~0.3ms, LLVM ~1.8ms, total ~2.2s; link failure is the current blocker.
 - Linker missing symbols (bootstrap_array full-prelude run 2025-12-31; 132 entries; full list in `/tmp/missing_symbols_latest.txt`).
-  - Update (2026-01-xx): full-prelude `bootstrap_array` now links with 51 missing symbols (see `/private/tmp/bootstrap_array_full.link.log` and `/private/tmp/missing_symbols_latest.txt`); removed `_Pointer_UInt8__includes__UInt8`, `_Tuple_key`, `_Tuple_value`.
+- Update (2026-01-xx): full-prelude `bootstrap_array` now links with 51 missing symbols (see `/private/tmp/bootstrap_array_full.link.log` and `/private/tmp/missing_symbols_latest.txt`); removed `_Pointer_UInt8__includes__UInt8`, `_Tuple_key`, `_Tuple_value`.
+- Update (2026-01-xx): missing symbols now 48 after super resolution via include-chain + pointer hash inline; removed `_Value_index_UInt8_Int32`, `_Value_reverse_`, `_Pointer_Void__hash_Crystal__Hasher`.
   - ByteFormat decode/from_io resolved (no `_IO__ByteFormat_decode_UInt32_IO`).
 
 **Regressions (open):**
