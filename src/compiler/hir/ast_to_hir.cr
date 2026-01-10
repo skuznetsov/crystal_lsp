@@ -10056,9 +10056,14 @@ module Crystal::HIR
 
       if !class_name.empty?
         if resolved_base = resolve_method_with_inheritance(class_name, method_name)
-          resolved_mangled = mangle_function_name(resolved_base, arg_types, has_block_call)
-          debug_hook("method.resolve", "base=#{base_method_name} resolved=#{resolved_mangled} reason=inheritance_prefer_owner")
-          return cache_method_resolution(cache_key, resolved_mangled)
+          if numeric_primitive_class_name?(class_name)
+            resolved_mangled = mangle_function_name(resolved_base, arg_types, has_block_call)
+            debug_hook("method.resolve", "base=#{base_method_name} resolved=#{resolved_mangled} reason=inheritance_prefer_owner")
+            return cache_method_resolution(cache_key, resolved_mangled)
+          elsif resolved_untyped = resolve_untyped_overload(resolved_base, arg_types.size, has_block_call)
+            debug_hook("method.resolve", "base=#{base_method_name} resolved=#{resolved_untyped} reason=inheritance_overload_arity")
+            return cache_method_resolution(cache_key, resolved_untyped)
+          end
         end
       end
 
