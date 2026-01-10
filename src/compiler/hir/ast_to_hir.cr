@@ -4872,6 +4872,49 @@ module Crystal::HIR
         callee_node = node_for_expr(expr_node.callee)
         if callee_node.is_a?(CrystalV2::Compiler::Frontend::MemberAccessNode)
           member_name = String.new(callee_node.member)
+          if member_name == "try"
+            receiver_type = infer_type_from_expr(callee_node.object, self_type_name)
+            if receiver_type && receiver_type != TypeRef::VOID
+              block_id = expr_node.block
+              if block_id.nil? && !expr_node.args.empty?
+                last_id = expr_node.args.last
+                last_node = node_for_expr(last_id)
+                case last_node
+                when CrystalV2::Compiler::Frontend::BlockNode
+                  block_id = last_id
+                when CrystalV2::Compiler::Frontend::UnaryNode
+                  if String.new(last_node.operator) == "&"
+                    operand = last_node.operand
+                    operand_node = node_for_expr(operand)
+                    if operand_node.is_a?(CrystalV2::Compiler::Frontend::BlockNode)
+                      block_id = operand
+                    end
+                  end
+                end
+              end
+              if ENV["DEBUG_INFER_TRY"]?
+                recv_name = get_type_name_from_ref(receiver_type)
+                block_kind = block_id ? (node_for_expr(block_id).class.to_s) : "nil"
+                STDERR.puts "[INFER_TRY] recv=#{recv_name} block=#{block_kind}"
+              end
+              if block_id && !block_id.invalid?
+                non_nil_type = non_nil_type_for_union(receiver_type) || receiver_type
+                if ENV["DEBUG_INFER_TRY"]?
+                  non_nil_name = get_type_name_from_ref(non_nil_type)
+                  STDERR.puts "[INFER_TRY] non_nil=#{non_nil_name}"
+                end
+                if block_return = infer_try_block_return_type(block_id, [non_nil_type], self_type_name)
+                  if ENV["DEBUG_INFER_TRY"]?
+                    ret_name = get_type_name_from_ref(block_return)
+                    STDERR.puts "[INFER_TRY] return=#{ret_name}"
+                  end
+                  return TypeRef::NIL if block_return == TypeRef::VOID || block_return == TypeRef::NIL
+                  return block_return if is_union_or_nilable_type?(block_return)
+                  return create_union_type_for_nullable(block_return)
+                end
+              end
+            end
+          end
           if member_name == "unsafe_as"
             if arg = expr_node.args.first?
               if type_str = stringify_type_expr(arg)
@@ -12689,6 +12732,81 @@ module Crystal::HIR
       ensure
         @current_typeof_locals = old_locals
         @current_typeof_local_names = old_names
+        @arena = old_arena
+      end
+
+      nil
+    end
+
+    private def inline_proc_return_type_name(
+      proc_node : CrystalV2::Compiler::Frontend::ProcLiteralNode,
+      param_types : Array(TypeRef)?,
+      self_type_name : String?
+    ) : String?
+      body = proc_node.body
+      return nil unless body && !body.empty?
+
+      old_locals = @current_typeof_locals
+      old_names = @current_typeof_local_names
+      local_map = old_locals ? old_locals.dup : {} of String => TypeRef
+      name_map = old_names ? old_names.dup : {} of String => String
+
+      if params = proc_node.params
+        params.each_with_index do |param, idx|
+          next unless pname = param.name
+          name = String.new(pname)
+          param_type = if param_types && (override = param_types[idx]?)
+                         override
+                       elsif ta = param.type_annotation
+                         type_ref_for_name(String.new(ta))
+                       else
+                         TypeRef::VOID
+                       end
+          local_map[name] = param_type if param_type != TypeRef::VOID
+        end
+      end
+
+      @current_typeof_locals = local_map
+      @current_typeof_local_names = name_map
+      begin
+        last_expr = body.last?
+        return nil unless last_expr
+        if inferred = infer_type_from_expr(last_expr, self_type_name)
+          type_name = get_type_name_from_ref(inferred)
+          return nil if type_name == "Void" || type_name == "Unknown"
+          return type_name
+        end
+      ensure
+        @current_typeof_locals = old_locals
+        @current_typeof_local_names = old_names
+      end
+
+      nil
+    end
+
+    private def infer_try_block_return_type(
+      block_id : ExprId,
+      param_types : Array(TypeRef),
+      self_type_name : String?
+    ) : TypeRef?
+      arena = arena_for_expr?(block_id)
+      return nil unless arena
+      return nil if block_id.index >= arena.size
+
+      old_arena = @arena
+      @arena = arena
+      begin
+        node = @arena[block_id]
+        if node.is_a?(CrystalV2::Compiler::Frontend::BlockNode)
+          if name = inline_block_return_type_name(node, param_types, self_type_name)
+            return type_ref_for_name(name)
+          end
+        elsif node.is_a?(CrystalV2::Compiler::Frontend::ProcLiteralNode)
+          if name = inline_proc_return_type_name(node, param_types, self_type_name)
+            return type_ref_for_name(name)
+          end
+        end
+      ensure
         @arena = old_arena
       end
 
