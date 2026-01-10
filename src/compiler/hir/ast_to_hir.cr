@@ -1534,6 +1534,16 @@ module Crystal::HIR
         end
       when CrystalV2::Compiler::Frontend::MacroForNode
         collect_nested_type_names(node.body, set)
+      when CrystalV2::Compiler::Frontend::CallNode
+        callee_name = resolve_path_like_name(node.callee)
+        if callee_name == "record"
+          if first_arg = node.args.first?
+            if nested_name = resolve_path_like_name(first_arg)
+              short = nested_name.split("::").last?
+              set << short if short && !short.empty?
+            end
+          end
+        end
       when CrystalV2::Compiler::Frontend::ClassNode,
            CrystalV2::Compiler::Frontend::ModuleNode,
            CrystalV2::Compiler::Frontend::EnumNode
