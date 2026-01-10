@@ -1042,6 +1042,7 @@ r2 = maybe(false)  # => nil
 - Reaches LLVM IR emission and `opt -O1` successfully; link still fails due to missing runtime/stdlib symbols (expected at this stage).
 - Timing snapshot (release + `--stats --no-llvm-opt --no-llvm-metadata`): parse prelude ~167ms, HIR ~2.0s, MIR ~0.3ms, LLVM ~1.8ms, total ~2.2s; link failure is the current blocker.
 - Linker missing symbols (bootstrap_array full-prelude run 2025-12-31; 132 entries; full list in `/tmp/missing_symbols_latest.txt`).
+  - Update (2026-01-xx): full-prelude `bootstrap_array` now links with 52 missing symbols (see `/private/tmp/bootstrap_array_full.link.log` and `/private/tmp/missing_symbols_latest.txt`).
   - ByteFormat decode/from_io resolved (no `_IO__ByteFormat_decode_UInt32_IO`).
 
 **Regressions (open):**
@@ -1122,7 +1123,7 @@ r2 = maybe(false)  # => nil
 - Union-to-scalar casts now extract union payload instead of bitcast (fixes `Char::Reader#previous_char` union→i8 llc error) (2026-01-xx).
 - Remove `StructNode` from AST + LSP AST cache; structs are `ClassNode.is_struct` (cache version bump) (2025-12-25).
 - Case/when enum predicate matching now ignores underscores (e.g., `.character_device?`), lowering to enum == literal and removing `_character_device_` missing symbol (2026-01-02).
-- Full-prelude bootstrap_array now links cleanly (no missing symbols in `/private/tmp/bootstrap_array_full.link.log`) (2026-01-02).
+- Full-prelude bootstrap_array link status now fluctuates; latest run shows 52 missing symbols (see `/private/tmp/bootstrap_array_full.link.log`) (2026-01-xx).
 - Macro body parsing: skip block depth for `abstract def` inside macro bodies to avoid false `{% end %}` errors (2026-01-02).
 - Macro `flag?` expansion handles nested if/elsif/else/unless branches and strips leading comments in macro bodies (2026-01-xx).
 - Bump AST cache version to 20 for macro-parse + enum predicate matching fixes (2026-01-02).
