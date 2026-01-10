@@ -7474,6 +7474,11 @@ module Crystal::HIR
                 alias_full_name = function_full_name_for_def(alias_base, method_param_types, member.params, has_block)
               end
             end
+            if filter = ENV["DEBUG_METHOD_REGISTER_FILTER"]?
+              if filter == "1" || class_name.includes?(filter) || method_name.includes?(filter)
+                STDERR.puts "[DEBUG_METHOD_REGISTER] class=#{class_name} method=#{method_name} full=#{full_name}"
+              end
+            end
             if type_literal_name
               literal_ref = type_ref_for_name(type_literal_name)
               if literal_ref != TypeRef::VOID
@@ -19313,6 +19318,10 @@ module Crystal::HIR
 
     private def lower_function_if_needed(name : String) : Nil
       return if name.empty?
+      debug_lookup_name = ENV["DEBUG_LOOKUP_NAME"]?
+      if debug_lookup_name && name.includes?(debug_lookup_name)
+        STDERR.puts "[DEBUG_LOOKUP_NAME] start name=#{name}"
+      end
       if ENV["DEBUG_VDISPATCH_UNION"]? && name.includes?("next_power_of_two")
         STDERR.puts "[VDISPATCH_UNION_HIR] lower_function_if_needed name=#{name}"
       end
@@ -19340,6 +19349,9 @@ module Crystal::HIR
       func_def = @function_defs[target_name]?
       arena = @function_def_arenas[target_name]?
       lookup_branch : String? = func_def ? "direct" : nil
+      if debug_lookup_name && name.includes?(debug_lookup_name) && func_def
+        STDERR.puts "[DEBUG_LOOKUP_NAME] hit name=#{name} branch=#{lookup_branch} target=#{target_name}"
+      end
       unless func_def
         if maybe_generate_class_accessor_for_name(name)
           debug_hook("function.lookup.generated", "name=#{name} kind=class_accessor")
