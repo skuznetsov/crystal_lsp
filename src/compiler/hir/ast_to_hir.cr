@@ -779,7 +779,13 @@ module Crystal::HIR
     end
 
     def seed_top_level_type_names(names : Enumerable(String)) : Nil
-      names.each { |name| @top_level_type_names.add(name) }
+      names.each do |name|
+        @top_level_type_names.add(name)
+        if idx = name.index("(")
+          base = name[0, idx]
+          @top_level_type_names.add(base) unless base.empty?
+        end
+      end
     end
 
     def seed_top_level_class_kinds(kinds : Enumerable(Tuple(String, Bool))) : Nil
@@ -7063,7 +7069,16 @@ module Crystal::HIR
       if ENV.has_key?("DEBUG_NESTED_CLASS") && (class_name == "IO" || class_name.includes?("FileDescriptor"))
         STDERR.puts "[DEBUG_CLASS_REG] register_class called: #{class_name}"
       end
-      register_class_with_name(node, class_name)
+      old_class = @current_class
+      old_override = @current_namespace_override
+      @current_class = nil
+      @current_namespace_override = nil
+      begin
+        register_class_with_name(node, class_name)
+      ensure
+        @current_class = old_class
+        @current_namespace_override = old_override
+      end
     end
 
     # Register a class with a specific name (for nested classes like Foo::Bar)
@@ -9140,7 +9155,7 @@ module Crystal::HIR
       case name
       when "Nil", "Void", "NoReturn", "String", "Symbol", "Pointer", "Slice", "Array",
            "Hash", "Tuple", "NamedTuple", "Proc", "Range", "Regex", "IO", "Bytes",
-           "Object", "Reference", "Class", "Struct", "Enum", "Module"
+           "Object", "Reference", "Class", "Struct", "Enum", "Module", "StaticArray", "Path"
         true
       else
         false
@@ -9679,7 +9694,29 @@ module Crystal::HIR
     end
 
     private def split_union_type_name(type_name : String) : Array(String)
-      type_name.split("|").map(&.strip).reject(&.empty?)
+      parts = [] of String
+      depth = 0
+      start = 0
+      i = 0
+      while i < type_name.bytesize
+        ch = type_name.byte_at(i).unsafe_chr
+        case ch
+        when '(', '{', '['
+          depth += 1
+        when ')', '}', ']'
+          depth -= 1 if depth > 0
+        when '|'
+          if depth == 0
+            part = type_name[start, i - start].strip
+            parts << part unless part.empty?
+            start = i + 1
+          end
+        end
+        i += 1
+      end
+      tail = type_name[start, type_name.size - start].strip
+      parts << tail unless tail.empty?
+      parts
     end
 
     private def resolve_union_method_call(type_name : String, method_name : String, arg_types : Array(TypeRef), has_block_call : Bool) : String?
@@ -11721,6 +11758,14 @@ module Crystal::HIR
       if cached = @resolved_type_name_cache[cache_key]?
         return cached
       end
+      if name.includes?("|")
+        parts = split_union_type_name(name)
+        if parts.size > 1
+          resolved = parts.map { |part| resolve_type_name_in_context(part) }.join(" | ")
+          @resolved_type_name_cache[cache_key] = resolved
+          return resolved
+        end
+      end
       if name.ends_with?("?")
         base = name[0, name.size - 1]
         resolved_base = resolve_type_name_in_context(base)
@@ -11852,6 +11897,12 @@ module Crystal::HIR
       if ENV["DEBUG_FILE_RESOLVE"]? && name == "File"
         STDERR.puts "[DEBUG_FILE_RESOLVE] current=#{@current_class || ""} override=#{@current_namespace_override || ""} top_level=#{@top_level_type_names.includes?(name)}"
       end
+      if filter = ENV["DEBUG_TOP_LEVEL_NAMES"]?
+        filters = filter.split(",").map(&.strip)
+        if filter == "*" || filters.includes?(name)
+          STDERR.puts "[DEBUG_TOP_LEVEL] name=#{name} current=#{@current_class || ""} top_level=#{@top_level_type_names.includes?(name)}"
+        end
+      end
       if primitive_self_type(name) || LIBC_TYPE_ALIASES.has_key?(name) || builtin_alias_target?(name)
         return name
       end
@@ -11929,19 +11980,24 @@ module Crystal::HIR
       if result == name && (current = @current_class) && name[0]?.try(&.uppercase?)
         unless builtin_alias_target?(name) || LIBC_TYPE_ALIASES.has_key?(name)
           unless @top_level_type_names.includes?(name)
+            current_base = if info = split_generic_base_and_args(current)
+                             info[:base]
+                           else
+                             current
+                           end
             if result == name
-              if nested = @nested_type_names[current]?
+              if nested = @nested_type_names[current_base]? || @nested_type_names[current]?
                 if nested.includes?(name)
-                  result = "#{current}::#{name}"
+                  result = "#{current_base}::#{name}"
                 end
               end
             end
             # First, check short_type_index for sibling matches in parent namespace
             if (candidates = @short_type_index[name]?) && candidates.size >= 1
               # Find candidates that are siblings (in parent namespace, not nested)
-              parent_namespace = current.includes?("::") ? current.rpartition("::")[0] : nil
+              parent_namespace = current_base.includes?("::") ? current_base.rpartition("::")[0] : nil
               if parent_namespace
-                sibling_matches = candidates.select { |c| c.starts_with?("#{parent_namespace}::") && !c.starts_with?("#{current}::") }
+                sibling_matches = candidates.select { |c| c.starts_with?("#{parent_namespace}::") && !c.starts_with?("#{current_base}::") }
                 if sibling_matches.size == 1
                   result = sibling_matches.first
                 elsif sibling_matches.size > 1
@@ -11978,21 +12034,30 @@ module Crystal::HIR
         # This avoids creating incorrect nested types like PollDescriptor::Waiters
         # when the type should be Polling::Waiters (a sibling struct in the module).
         if current = @current_class
-          parent_namespace = current.includes?("::") ? current.rpartition("::")[0] : nil
-          parent_is_module = parent_namespace && @module_defs.has_key?(parent_namespace)
+          current_base = if info = split_generic_base_and_args(current)
+                           info[:base]
+                         else
+                           current
+                         end
+          nested = @nested_type_names[current_base]? || @nested_type_names[current]?
+          skip_namespace = @top_level_type_names.includes?(name) || builtin_alias_target?(name) || LIBC_TYPE_ALIASES.has_key?(name)
+          skip_namespace = false if nested && nested.includes?(name)
+          unless skip_namespace
+            parent_namespace = current_base.includes?("::") ? current_base.rpartition("::")[0] : nil
+            parent_is_module = parent_namespace && @module_defs.has_key?(parent_namespace)
 
-          nested = @nested_type_names[current]?
-          if nested && nested.includes?(name)
-            result = "#{current}::#{name}"
-          elsif parent_namespace
-            result = "#{parent_namespace}::#{name}"
-          else
-            namespace = nil
-            if current.includes?("::") || @module_defs.has_key?(current)
-              namespace = current
+            if nested && nested.includes?(name)
+              result = "#{current_base}::#{name}"
+            elsif parent_namespace
+              result = "#{parent_namespace}::#{name}"
+            else
+              namespace = nil
+              if current_base.includes?("::") || @module_defs.has_key?(current_base)
+                namespace = current_base
+              end
+              # Prefer the current namespace for forward references in nested scopes.
+              result = "#{namespace}::#{name}" if namespace
             end
-            # Prefer the current namespace for forward references in nested scopes.
-            result = "#{namespace}::#{name}" if namespace
           end
         end
       end
@@ -27936,6 +28001,8 @@ module Crystal::HIR
       return name if name.empty?
       return name if name.starts_with?("::")
       return name if name.includes?("::")
+      return name if @top_level_type_names.includes?(name)
+      return name if builtin_alias_target?(name) || LIBC_TYPE_ALIASES.has_key?(name)
       return name if BUILTIN_TYPE_NAMES.includes?(name)
       if name.includes?("(")
         base = name.split("(", 2)[0]

@@ -120,7 +120,7 @@ module CrystalV2
         MAGIC   = "CV2A"
         # Bump this version whenever the parser or AST format changes
         # to invalidate all cached ASTs
-        VERSION = 27_u32
+        VERSION = 28_u32
 
         getter arena : Frontend::AstArena
         getter roots : Array(Frontend::ExprId)
