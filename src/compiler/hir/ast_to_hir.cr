@@ -22754,6 +22754,13 @@ module Crystal::HIR
         end
       end
 
+      if receiver_id && method_name == "hash" && !arg_types.empty?
+        first_arg = arg_types.first
+        if first_arg != TypeRef::VOID && (return_type == TypeRef::VOID || return_type == TypeRef::POINTER || return_type == TypeRef::NIL)
+          return_type = first_arg
+        end
+      end
+
       # For unqualified method calls (no class prefix in the call name),
       # if return type is still void, use pointer as fallback
       # This handles stdlib methods that aren't defined in the bootstrap sources
@@ -27715,12 +27722,23 @@ module Crystal::HIR
       # Add block parameters (params can be nil)
       # Default to POINTER type since block parameters are typically objects (IO, etc.)
       if params = node.params
+        effective_param_types = param_types
+        if effective_param_types && effective_param_types.size == 1 && params.size > 1
+          if tuple_desc = @module.get_type_descriptor(effective_param_types[0])
+            if tuple_desc.kind == TypeKind::Tuple || tuple_desc.name.starts_with?("Tuple(")
+              tuple_params = tuple_desc.type_params.reject { |t| t == TypeRef::VOID }
+              if tuple_params.size >= params.size
+                effective_param_types = tuple_params
+              end
+            end
+          end
+        end
         params.each_with_index do |param, idx|
           if param_name = param.name
             name = String.new(param_name)
             param_type = if ta = param.type_annotation
                            type_ref_for_name(String.new(ta))
-                         elsif param_types && (resolved = param_types[idx]?)
+                         elsif effective_param_types && (resolved = effective_param_types[idx]?)
                            resolved
                          else
                            TypeRef::POINTER  # Default to pointer for block params
