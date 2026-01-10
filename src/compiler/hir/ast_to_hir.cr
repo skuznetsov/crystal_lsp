@@ -4889,6 +4889,20 @@ module Crystal::HIR
                   return type_ref_for_name(range_name)
                 end
               end
+              # Infer Slice(T) from Slice.new(pointer, size) when generic args are omitted.
+              if type_str == "Slice" && expr_node.args.size >= 1
+                if arg_type = infer_type_from_expr(expr_node.args[0], self_type_name)
+                  if desc = @module.get_type_descriptor(arg_type)
+                    if desc.kind == TypeKind::Pointer
+                      elem_type = desc.type_params.first? || pointer_element_type(desc.name)
+                      if elem_type && elem_type != TypeRef::VOID
+                        elem_name = get_type_name_from_ref(elem_type)
+                        return type_ref_for_name("Slice(#{elem_name})")
+                      end
+                    end
+                  end
+                end
+              end
               return type_ref_for_name(type_str)
             end
           elsif member_name.ends_with?("?")
@@ -13654,14 +13668,18 @@ module Crystal::HIR
 
       # Ensure function type is registered even when caller skipped register_function (e.g. conditional defs).
       if existing = @function_types[full_name]?
-        if existing == TypeRef::VOID || (existing == TypeRef::NIL && return_type != TypeRef::NIL)
+        if existing == TypeRef::VOID ||
+           (existing == TypeRef::NIL && return_type != TypeRef::NIL) ||
+           (existing == TypeRef::POINTER && return_type != TypeRef::POINTER)
           register_function_type(full_name, return_type)
         end
       else
         register_function_type(full_name, return_type)
       end
       if existing = @function_types[base_name]?
-        if existing == TypeRef::VOID || (existing == TypeRef::NIL && return_type != TypeRef::NIL)
+        if existing == TypeRef::VOID ||
+           (existing == TypeRef::NIL && return_type != TypeRef::NIL) ||
+           (existing == TypeRef::POINTER && return_type != TypeRef::POINTER)
           register_function_type(base_name, return_type)
         end
       else
@@ -27457,6 +27475,7 @@ module Crystal::HIR
       # MultipleAssignNode has a single value (destructured)
       # e.g., a, b, c = expr  where expr is a tuple/array
       rhs_id = lower_expr(ctx, node.value)
+      rhs_type = ctx.type_of(rhs_id)
 
       # For each target, emit index operation to destructure
       node.targets.each_with_index do |target_expr, idx|
@@ -27465,8 +27484,10 @@ module Crystal::HIR
         # Index into the RHS to get this element
         index_lit = Literal.new(ctx.next_id, TypeRef::INT32, idx.to_i64)
         ctx.emit(index_lit)
-        element_id = IndexGet.new(ctx.next_id, TypeRef::VOID, rhs_id, index_lit.id)
+        element_type = tuple_element_type(rhs_type, idx) || TypeRef::VOID
+        element_id = IndexGet.new(ctx.next_id, element_type, rhs_id, index_lit.id)
         ctx.emit(element_id)
+        ctx.register_type(element_id.id, element_type)
 
         case target_node
         when CrystalV2::Compiler::Frontend::IdentifierNode
