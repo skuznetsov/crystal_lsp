@@ -20020,8 +20020,12 @@ module Crystal::HIR
             end
           end
           if requires_args
-            debug_hook("function.lower.skip_untyped_base", "name=#{name}") if DebugHooks::ENABLED
-            return
+            overloads = function_def_overloads(base_guard_name)
+            has_typed_overload = overloads.any? { |key| key != base_guard_name }
+            if has_typed_overload
+              debug_hook("function.lower.skip_untyped_base", "name=#{name}") if DebugHooks::ENABLED
+              return
+            end
           end
         end
       end
