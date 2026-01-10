@@ -1045,6 +1045,7 @@ r2 = maybe(false)  # => nil
 - Update (2026-01-xx): full-prelude `bootstrap_array` now links with 51 missing symbols (see `/private/tmp/bootstrap_array_full.link.log` and `/private/tmp/missing_symbols_latest.txt`); removed `_Pointer_UInt8__includes__UInt8`, `_Tuple_key`, `_Tuple_value`.
 - Update (2026-01-xx): missing symbols now 48 after super resolution via include-chain + pointer hash inline; removed `_Value_index_UInt8_Int32`, `_Value_reverse_`, `_Pointer_Void__hash_Crystal__Hasher`.
   - ByteFormat decode/from_io resolved (no `_IO__ByteFormat_decode_UInt32_IO`).
+- Update (2026-01-10): numeric inherited methods now specialize on primitive owners (Int32#divmod), removing `Number_*` callsites. Current full-prelude `bootstrap_array` link shows 70 missing symbols (see `/private/tmp/bootstrap_array_full.link.log` and `/private/tmp/missing_symbols_latest.txt`).
 
 **Regressions (open):**
 - [ ] GH #10 (crystal_lsp): prelude build links for minimal `fib.cr`, but runtime segfault persists.
