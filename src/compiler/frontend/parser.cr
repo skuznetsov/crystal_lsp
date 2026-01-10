@@ -10749,8 +10749,8 @@ module CrystalV2
           end
 
           # Parse optional block after parenthesized call: foo(args) do ... end
-          # Allow newlines before the block to match Crystal's call syntax.
-          consume_newlines
+          # Keep newline as a statement boundary (match Crystal parser behavior).
+          skip_trivia
           if current_token.kind == Token::Kind::Do || current_token.kind == Token::Kind::LBrace
             # Temporarily release the call-args guard to allow nested DSL calls inside the block.
             @parsing_call_args -= 1
