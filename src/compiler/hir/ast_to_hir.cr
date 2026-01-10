@@ -22547,6 +22547,30 @@ module Crystal::HIR
         end
       end
 
+      if receiver_id && method_name == "hash" && args.size == 1
+        receiver_type = ctx.type_of(receiver_id)
+        recv_type_desc = @module.get_type_descriptor(receiver_type)
+        is_pointer_type = receiver_type == TypeRef::POINTER ||
+                          (recv_type_desc && recv_type_desc.name.starts_with?("Pointer"))
+        if is_pointer_type
+          cast = Cast.new(ctx.next_id, TypeRef::UINT64, receiver_id, TypeRef::UINT64)
+          ctx.emit(cast)
+          ctx.register_type(cast.id, TypeRef::UINT64)
+          hasher_type = ctx.type_of(args[0])
+          if hasher_type == TypeRef::VOID
+            inferred = type_ref_for_name("Crystal::Hasher")
+            hasher_type = inferred unless inferred == TypeRef::VOID
+          end
+          hasher_type = TypeRef::POINTER if hasher_type == TypeRef::VOID
+          hash_name = mangle_function_name("UInt64#hash", [hasher_type])
+          lower_function_if_needed(hash_name)
+          call = Call.new(ctx.next_id, hasher_type, cast.id, hash_name, args)
+          ctx.emit(call)
+          ctx.register_type(call.id, hasher_type)
+          return call.id
+        end
+      end
+
       # Check for pointer primitive operations
       # Pointer(T).malloc(count) -> PointerMalloc
       if full_method_name && full_method_name.starts_with?("Pointer(") && method_name == "malloc" && args.size == 1
