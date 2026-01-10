@@ -642,6 +642,8 @@ module Crystal::HIR
 
     # Source text per arena (used to reconstruct macro literal text from spans).
     @sources_by_arena : Hash(CrystalV2::Compiler::Frontend::ArenaLike, String)
+    # Cached line counts per arena source (used for span validation).
+    @line_counts_by_arena : Hash(CrystalV2::Compiler::Frontend::ArenaLike, Int32)
     # Source path per arena (used for diagnostics).
     @paths_by_arena : Hash(CrystalV2::Compiler::Frontend::ArenaLike, String)
     # Extra source snippets (macro expansion/reparse) to keep slices alive.
@@ -750,6 +752,7 @@ module Crystal::HIR
       @block_node_arenas = {} of UInt64 => CrystalV2::Compiler::Frontend::ArenaLike
       @block_owner = {} of UInt64 => {class_name: String?, method_name: String?, is_class: Bool}
       @sources_by_arena = sources_by_arena || {} of CrystalV2::Compiler::Frontend::ArenaLike => String
+      @line_counts_by_arena = {} of CrystalV2::Compiler::Frontend::ArenaLike => Int32
       @paths_by_arena = paths_by_arena || {} of CrystalV2::Compiler::Frontend::ArenaLike => String
       @extra_sources_by_arena = {} of CrystalV2::Compiler::Frontend::ArenaLike => Array(String)
       @last_splat_context = nil
@@ -3075,7 +3078,16 @@ module Crystal::HIR
 
     private def span_fits_source?(arena : CrystalV2::Compiler::Frontend::ArenaLike, span : CrystalV2::Compiler::Frontend::Span) : Bool
       if source = @sources_by_arena[arena]?
-        span.end_offset <= source.bytesize
+        return false if span.end_offset > source.bytesize
+        if span.end_line > 0
+          line_count = @line_counts_by_arena[arena]?
+          unless line_count
+            line_count = source.count('\n') + 1
+            @line_counts_by_arena[arena] = line_count
+          end
+          return false if span.end_line > line_count
+        end
+        true
       else
         true
       end
@@ -6824,6 +6836,7 @@ module Crystal::HIR
       node : CrystalV2::Compiler::Frontend::CallNode
     )
       callee_node = @arena[node.callee]
+      # (debug hook intentionally not used here)
       return unless callee_node.is_a?(CrystalV2::Compiler::Frontend::IdentifierNode)
 
       method_name = String.new(callee_node.name)
@@ -7013,16 +7026,21 @@ module Crystal::HIR
       saved_yield_param_stack = @inline_yield_block_param_types_stack
       saved_yield_return_stack = @inline_yield_block_return_stack
       saved_yield_name_stack = @inline_yield_name_stack
+      saved_inline_arenas = @inline_arenas
       @inline_yield_block_stack = [] of CrystalV2::Compiler::Frontend::BlockNode
       @inline_yield_block_arena_stack = [] of CrystalV2::Compiler::Frontend::ArenaLike
       @inline_yield_block_param_types_stack = [] of Array(TypeRef)?
       @inline_yield_block_return_stack = [] of String?
       @inline_yield_name_stack = [] of String
+      @inline_arenas = nil
       last_value : ValueId? = nil
       begin
         if body = node.body
+          method_arena = @arena
           body.each do |expr_id|
-            last_value = lower_expr(ctx, expr_id)
+            with_arena(method_arena) do
+              last_value = lower_expr(ctx, expr_id)
+            end
           end
         end
       ensure
@@ -7031,6 +7049,7 @@ module Crystal::HIR
         @inline_yield_block_param_types_stack = saved_yield_param_stack
         @inline_yield_block_return_stack = saved_yield_return_stack
         @inline_yield_name_stack = saved_yield_name_stack
+        @inline_arenas = saved_inline_arenas
       end
 
       # Infer return type from the last expression for unannotated module methods.
@@ -8040,6 +8059,13 @@ module Crystal::HIR
         return
       end
 
+      if filter = ENV["DEBUG_CLASS_ARENA"]?
+        if filter == "1" || class_name.includes?(filter)
+          path = source_path_for(@arena) || "(unknown)"
+          STDERR.puts "[DEBUG_CLASS_ARENA] class=#{class_name} arena=#{@arena.class}:#{@arena.size} file=#{path}"
+        end
+      end
+
       class_info = @class_info[class_name]? || return
       old_class = @current_class
       old_pending = @pending_def_annotations
@@ -8713,11 +8739,72 @@ module Crystal::HIR
         sep = is_class_method ? "." : "#"
         STDERR.puts "[DEBUG_LOWER_METHOD] #{class_name}#{sep}#{method_name} override=#{full_name_override || "(none)"}"
       end
+      if filter = ENV["DEBUG_METHOD_ARENA"]?
+        full_label = "#{class_name}#{is_class_method ? "." : "#"}#{method_name}"
+        if filter == "1" || full_label.includes?(filter)
+          path = source_path_for(@arena) || "(unknown)"
+          STDERR.puts "[DEBUG_METHOD_ARENA] method=#{full_label} arena=#{@arena.class}:#{@arena.size} file=#{path}"
+        end
+      end
       if DebugHooks::ENABLED && class_name.starts_with?("Array(") && method_name == "new" && is_class_method
         debug_hook("method.lower.array_new", "class=#{class_name} map=#{type_param_map_debug_string} override=#{full_name_override || ""}")
       end
       if DebugHooks::ENABLED && method_name == "map" && !is_class_method
         debug_hook("method.lower.map", "class=#{class_name} map=#{type_param_map_debug_string} override=#{full_name_override || ""}")
+      end
+      if ENV["DEBUG_STRING_COMPARE_BODY"]? && class_name == "String" && method_name == "compare"
+        if body = node.body
+          preview = body.first(10).map do |expr_id|
+            @arena[expr_id].class.to_s.split("::").last
+          end
+          STDERR.puts "[DEBUG_STRING_COMPARE_BODY] body_classes=#{preview.join(",")}"
+        else
+          STDERR.puts "[DEBUG_STRING_COMPARE_BODY] body_classes=(none)"
+        end
+      end
+      if ENV["DEBUG_STRING_COMPARE_SCAN"]? && class_name == "String" && method_name == "compare"
+        found = false
+        if body = node.body
+          body.each do |expr_id|
+            node_at = @arena[expr_id]
+            if node_at.is_a?(CrystalV2::Compiler::Frontend::CallNode)
+              callee = @arena[node_at.callee]
+              if callee.is_a?(CrystalV2::Compiler::Frontend::MemberAccessNode)
+                member_name = String.new(callee.member)
+                if member_name == "read_attribute_value"
+                  found = true
+                  break
+                end
+              end
+            end
+          end
+        end
+        STDERR.puts "[DEBUG_STRING_COMPARE_SCAN] contains_read_attribute_value=#{found}"
+      end
+      if ENV["DEBUG_STRING_COMPARE_DUMP"]? && class_name == "String" && method_name == "compare"
+        if body = node.body
+          source = @sources_by_arena[@arena]?
+          body.each_with_index do |expr_id, idx|
+            break if idx >= 50
+            begin
+              node_at = @arena[expr_id]
+              snippet = nil
+              if source
+                span = node_at.span
+                start = span.start_offset
+                length = span.end_offset - span.start_offset
+                if length > 0 && start >= 0 && start < source.bytesize
+                  slice_len = length > 80 ? 80 : length
+                  snippet = source.byte_slice(start, slice_len).gsub(/\s+/, " ").strip
+                end
+              end
+              snippet_label = snippet ? " \"#{snippet}\"" : ""
+              STDERR.puts "[DEBUG_STRING_COMPARE_DUMP] idx=#{idx} expr=#{expr_id.index} node=#{node_at.class.name}#{snippet_label}"
+            rescue ex
+              STDERR.puts "[DEBUG_STRING_COMPARE_DUMP] idx=#{idx} expr=#{expr_id.index} error=#{ex.message}"
+            end
+          end
+        end
       end
 
       # Class methods use "." separator, instance methods use "#"
@@ -8994,11 +9081,13 @@ module Crystal::HIR
       saved_yield_param_stack = @inline_yield_block_param_types_stack
       saved_yield_return_stack = @inline_yield_block_return_stack
       saved_yield_name_stack = @inline_yield_name_stack
+      saved_inline_arenas = @inline_arenas
       @inline_yield_block_stack = [] of CrystalV2::Compiler::Frontend::BlockNode
       @inline_yield_block_arena_stack = [] of CrystalV2::Compiler::Frontend::ArenaLike
       @inline_yield_block_param_types_stack = [] of Array(TypeRef)?
       @inline_yield_block_return_stack = [] of String?
       @inline_yield_name_stack = [] of String
+      @inline_arenas = nil
       last_value : ValueId? = nil
       begin
       if body = node.body
@@ -9024,64 +9113,67 @@ module Crystal::HIR
             end
           end
         end
+        method_arena = @arena
         body.each_with_index do |expr_id, idx|
-          expr_snippet = nil
-          if progress_match && !slow_only
-            if progress_every && progress_every > 0
-              if idx % progress_every == 0
-                STDERR.puts "[LOWER_PROGRESS] method=#{base_name} idx=#{idx}/#{body.size}"
-              end
-            else
-            begin
-              expr_node = @arena[expr_id]
-              if source = @sources_by_arena[@arena]?
-                span = expr_node.span
-                start = span.start_offset
-                length = span.end_offset - span.start_offset
-                if length > 0 && start >= 0 && start < source.bytesize
-                  slice_len = length > 120 ? 120 : length
-                  expr_snippet = source.byte_slice(start, slice_len).gsub(/\s+/, " ").strip
+          with_arena(method_arena) do
+            expr_snippet = nil
+            if progress_match && !slow_only
+              if progress_every && progress_every > 0
+                if idx % progress_every == 0
+                  STDERR.puts "[LOWER_PROGRESS] method=#{base_name} idx=#{idx}/#{body.size}"
+                end
+              else
+                begin
+                  expr_node = @arena[expr_id]
+                  if source = @sources_by_arena[@arena]?
+                    span = expr_node.span
+                    start = span.start_offset
+                    length = span.end_offset - span.start_offset
+                    if length > 0 && start >= 0 && start < source.bytesize
+                      slice_len = length > 120 ? 120 : length
+                      expr_snippet = source.byte_slice(start, slice_len).gsub(/\s+/, " ").strip
+                    end
+                  end
+                  if expr_snippet
+                    STDERR.puts "[LOWER_PROGRESS] method=#{base_name} idx=#{idx} node=#{expr_node.class.name} offs=#{expr_node.span.start_offset} \"#{expr_snippet}\""
+                  else
+                    STDERR.puts "[LOWER_PROGRESS] method=#{base_name} idx=#{idx} node=#{expr_node.class.name}"
+                  end
+                rescue
+                  STDERR.puts "[LOWER_PROGRESS] method=#{base_name} idx=#{idx} node=(OOB)"
                 end
               end
-              if expr_snippet
-                STDERR.puts "[LOWER_PROGRESS] method=#{base_name} idx=#{idx} node=#{expr_node.class.name} offs=#{expr_node.span.start_offset} \"#{expr_snippet}\""
-              else
-                STDERR.puts "[LOWER_PROGRESS] method=#{base_name} idx=#{idx} node=#{expr_node.class.name}"
-              end
-            rescue
-              STDERR.puts "[LOWER_PROGRESS] method=#{base_name} idx=#{idx} node=(OOB)"
             end
-            end
-          end
-          expr_start = slow_ms ? Time.monotonic : nil
-          if ENV["DEBUG_CALL_TRACE"]? && method_name == "copy_to"
-            STDERR.puts "[LOWER_METHOD] expr=#{expr_id.index} idx=#{idx} arena=#{@arena.size}"
-            begin
-              expr_node = @arena[expr_id]
-              if source = @sources_by_arena[@arena]?
-                span = expr_node.span
-                start = span.start_offset
-                length = span.end_offset - span.start_offset
-                if length > 0 && start >= 0 && start < source.bytesize
-                  slice_len = length > 120 ? 120 : length
-                  snippet = source.byte_slice(start, slice_len).gsub(/\s+/, " ").strip
-                  STDERR.puts "[LOWER_METHOD] node=#{expr_node.class} span=#{start}..#{span.end_offset} \"#{snippet}\""
+            expr_start = slow_ms ? Time.monotonic : nil
+            if ENV["DEBUG_CALL_TRACE"]? && method_name == "copy_to"
+              STDERR.puts "[LOWER_METHOD] expr=#{expr_id.index} idx=#{idx} arena=#{@arena.size}"
+              begin
+                expr_node = @arena[expr_id]
+                if source = @sources_by_arena[@arena]?
+                  span = expr_node.span
+                  start = span.start_offset
+                  length = span.end_offset - span.start_offset
+                  if length > 0 && start >= 0 && start < source.bytesize
+                    slice_len = length > 120 ? 120 : length
+                    snippet = source.byte_slice(start, slice_len).gsub(/\s+/, " ").strip
+                    STDERR.puts "[LOWER_METHOD] node=#{expr_node.class} span=#{start}..#{span.end_offset} \"#{snippet}\""
+                  else
+                    STDERR.puts "[LOWER_METHOD] node=#{expr_node.class} span=#{start}..#{span.end_offset}"
+                  end
                 else
-                  STDERR.puts "[LOWER_METHOD] node=#{expr_node.class} span=#{start}..#{span.end_offset}"
+                  STDERR.puts "[LOWER_METHOD] node=#{expr_node.class} span=#{expr_node.span.start_offset}..#{expr_node.span.end_offset}"
                 end
-              else
-                STDERR.puts "[LOWER_METHOD] node=#{expr_node.class} span=#{expr_node.span.start_offset}..#{expr_node.span.end_offset}"
+              rescue ex
+                STDERR.puts "[LOWER_METHOD] inspect_failed expr=#{expr_id.index} error=#{ex.message}"
               end
-            rescue ex
-              STDERR.puts "[LOWER_METHOD] inspect_failed expr=#{expr_id.index} error=#{ex.message}"
             end
-          end
-          last_value = lower_expr(ctx, expr_id)
-          if slow_ms && expr_start
-            elapsed = (Time.monotonic - expr_start).total_milliseconds
-            if elapsed >= slow_ms
-              snippet_label = expr_snippet ? " \"#{expr_snippet}\"" : ""
-              STDERR.puts "[LOWER_SLOW] method=#{base_name} idx=#{idx} #{elapsed.round(1)}ms#{snippet_label}"
+            last_value = lower_expr(ctx, expr_id)
+            if slow_ms && expr_start
+              elapsed = (Time.monotonic - expr_start).total_milliseconds
+              if elapsed >= slow_ms
+                snippet_label = expr_snippet ? " \"#{expr_snippet}\"" : ""
+                STDERR.puts "[LOWER_SLOW] method=#{base_name} idx=#{idx} #{elapsed.round(1)}ms#{snippet_label}"
+              end
             end
           end
         end
@@ -9092,6 +9184,7 @@ module Crystal::HIR
         @inline_yield_block_param_types_stack = saved_yield_param_stack
         @inline_yield_block_return_stack = saved_yield_return_stack
         @inline_yield_name_stack = saved_yield_name_stack
+        @inline_arenas = saved_inline_arenas
       end
 
       # Infer return type from the last expression for unannotated methods.
@@ -9922,15 +10015,20 @@ module Crystal::HIR
       # Only do this when the receiver type is unknown (no descriptor name).
       if class_name.empty?
         if candidates = @method_bases_by_name[method_name]?
+          matches = [] of String
           candidates.each do |test_base|
             test_mangled = mangle_function_name(test_base, arg_types, has_block_call)
             if @function_types.has_key?(test_mangled)
-              debug_hook("method.resolve", "base=#{base_method_name} resolved=#{test_mangled} reason=fallback_scan")
-              return cache_method_resolution(cache_key, test_mangled)
+              matches << test_mangled
             elsif has_function_base?(test_base)
-              debug_hook("method.resolve", "base=#{base_method_name} resolved=#{test_base} reason=fallback_scan_base")
-              return cache_method_resolution(cache_key, test_base)
+              matches << test_base
             end
+          end
+          if matches.size == 1
+            resolved = matches.first
+            reason = resolved.includes?("$") ? "fallback_unique_mangled" : "fallback_unique_base"
+            debug_hook("method.resolve", "base=#{base_method_name} resolved=#{resolved} reason=#{reason}")
+            return cache_method_resolution(cache_key, resolved)
           end
         end
       end
@@ -10835,9 +10933,56 @@ module Crystal::HIR
       nil
     end
 
+    private def yield_receiver_base_name(receiver_type : TypeRef) : String?
+      name = if desc = @module.get_type_descriptor(receiver_type)
+               desc.name
+             else
+               get_type_name_from_ref(receiver_type)
+             end
+      name = normalize_method_owner_name(name)
+      return nil if name.empty?
+      return nil if name.includes?("|") || name.includes?("___")
+      if split = split_generic_base_and_args(name)
+        name = split[:base]
+      end
+      name
+    end
+
+    private def receiver_allows_yield_owner?(receiver_base : String, owner_base : String) : Bool
+      return true if receiver_base == owner_base
+      owner_short = owner_base.split("::").last?
+      if owner_short && !receiver_base.includes?("::")
+        return true if owner_short == receiver_base
+      end
+      current = receiver_base
+      while current
+        info = @class_info[current]?
+        break unless info
+        parent = info.parent_name
+        if parent
+          return true if parent == owner_base
+          if owner_short
+            parent_short = parent.split("::").last?
+            return true if parent_short && parent_short == owner_short
+          end
+        end
+        current = parent
+      end
+      if modules = @class_included_modules[receiver_base]?
+        modules.each do |mod|
+          return true if mod == owner_base
+          if owner_short
+            mod_short = mod.split("::").last?
+            return true if mod_short && mod_short == owner_short
+          end
+        end
+      end
+      false
+    end
+
     # Fallback for yield-function inlining when receiver type is unknown (often due to untyped params).
     # Tries to find a unique yield method by name + arity.
-    private def find_yield_method_fallback(method_name : String, arg_count : Int32) : String?
+    private def find_yield_method_fallback(method_name : String, arg_count : Int32, receiver_base : String? = nil) : String?
       instance_suffix = "##{method_name}"
       class_suffix = ".#{method_name}"
 
@@ -10846,6 +10991,21 @@ module Crystal::HIR
       @yield_functions.each do |name|
         base = name.split("$").first
         next unless base.ends_with?(instance_suffix) || base.ends_with?(class_suffix)
+        if receiver_base
+          owner = if idx = base.rindex('#')
+                    base[0, idx]
+                  elsif idx = base.rindex('.')
+                    base[0, idx]
+                  else
+                    ""
+                  end
+          owner_base = if split = split_generic_base_and_args(owner)
+                         split[:base]
+                       else
+                         owner
+                       end
+          next unless receiver_allows_yield_owner?(receiver_base, owner_base)
+        end
         func_def = @function_defs[name]?
         func_def ||= @function_defs[base]?
         next unless func_def
@@ -10866,6 +11026,7 @@ module Crystal::HIR
       # Multiple candidates - prefer Object methods (base class) over more specialized ones
       # This handles cases like Object#tap vs Iterator#tap
       if candidates.size > 1
+        return nil if receiver_base
         object_candidate = candidates.find { |c| c.starts_with?("Object#") }
         return object_candidate if object_candidate
         # Fallback: return first candidate anyway (better than nothing)
@@ -13533,16 +13694,21 @@ module Crystal::HIR
       saved_yield_param_stack = @inline_yield_block_param_types_stack
       saved_yield_return_stack = @inline_yield_block_return_stack
       saved_yield_name_stack = @inline_yield_name_stack
+      saved_inline_arenas = @inline_arenas
       @inline_yield_block_stack = [] of CrystalV2::Compiler::Frontend::BlockNode
       @inline_yield_block_arena_stack = [] of CrystalV2::Compiler::Frontend::ArenaLike
       @inline_yield_block_param_types_stack = [] of Array(TypeRef)?
       @inline_yield_block_return_stack = [] of String?
       @inline_yield_name_stack = [] of String
+      @inline_arenas = nil
       last_value : ValueId? = nil
       begin
         if body = node.body
+          def_arena = @arena
           body.each do |expr_id|
-            last_value = lower_expr(ctx, expr_id)
+            with_arena(def_arena) do
+              last_value = lower_expr(ctx, expr_id)
+            end
           end
         end
       ensure
@@ -13551,6 +13717,7 @@ module Crystal::HIR
         @inline_yield_block_param_types_stack = saved_yield_param_stack
         @inline_yield_block_return_stack = saved_yield_return_stack
         @inline_yield_name_stack = saved_yield_name_stack
+        @inline_arenas = saved_inline_arenas
       end
 
       # Add implicit return if not already terminated
@@ -13753,6 +13920,15 @@ module Crystal::HIR
         end
       end
       arena = arena_for_expr?(expr_id) || @arena
+      if filter = ENV["DEBUG_EXPR_ARENA"]?
+        if filter == "1" || ctx.function.name.includes?(filter)
+          if arena != @arena
+            current_path = source_path_for(@arena) || "(unknown)"
+            chosen_path = source_path_for(arena) || "(unknown)"
+            STDERR.puts "[DEBUG_EXPR_ARENA] func=#{ctx.function.name} expr=#{expr_id.index} current=#{@arena.class}:#{@arena.size} chosen=#{arena.class}:#{arena.size} current_file=#{current_path} chosen_file=#{chosen_path}"
+          end
+        end
+      end
       if expr_id.index < 0 || expr_id.index >= arena.size
         if ENV["DEBUG_EXPR_OOB"]?
           stack = @inline_yield_name_stack.join(" -> ")
@@ -19783,12 +19959,20 @@ module Crystal::HIR
       elsif body = func_def.body
         unless body.empty?
           max_index = body.max_of(&.index)
-          if max_index >= arena.size
+          if max_index >= arena.size || !span_fits_source?(arena, func_def.span)
             arena = resolve_arena_for_def(func_def, arena)
             if ENV["DEBUG_CALL_TRACE"]? && name.includes?("copy_to")
               STDERR.puts "[LOWER_TRACE] arena_repair name=#{name} max=#{max_index} arena=#{arena.class}:#{arena.size}"
             end
           end
+        end
+      end
+      if filter = ENV["DEBUG_FUNC_DEF"]?
+        if filter == "*" || target_name.includes?(filter) || name.includes?(filter)
+          arena_for_log = arena || @arena
+          path = source_path_for(arena_for_log) || "(unknown)"
+          span = func_def.span
+          STDERR.puts "[DEBUG_FUNC_DEF] name=#{target_name} def_span=#{span.start_line}-#{span.end_line} file=#{path}"
         end
       end
 
@@ -20316,6 +20500,30 @@ module Crystal::HIR
       # - Other: chained/complex calls
 
       callee_node = @arena[node.callee]
+      if ENV["DEBUG_READ_ATTR_CALL"]?
+        callee_name = case callee_node
+                      when CrystalV2::Compiler::Frontend::IdentifierNode
+                        String.new(callee_node.name)
+                      when CrystalV2::Compiler::Frontend::MemberAccessNode
+                        String.new(callee_node.member)
+                      else
+                        nil
+                      end
+        if callee_name == "read_attribute_value"
+          snippet = nil
+          if source = @sources_by_arena[@arena]?
+            span = node.span
+            start = span.start_offset
+            length = span.end_offset - span.start_offset
+            if length > 0 && start >= 0 && start < source.bytesize
+              slice_len = length > 120 ? 120 : length
+              snippet = source.byte_slice(start, slice_len).gsub(/\s+/, " ").strip
+            end
+          end
+          snippet_label = snippet ? " \"#{snippet}\"" : ""
+          STDERR.puts "[DEBUG_READ_ATTR_CALL] func=#{ctx.function.name} class=#{@current_class || "nil"} arena=#{@arena.class}:#{@arena.size}#{snippet_label}"
+        end
+      end
 
       # Intrinsic: obj.is_a?(Type) should lower to IsA/UnionIs without a runtime method call.
       if node.named_args.nil?
@@ -20566,7 +20774,8 @@ module Crystal::HIR
                                  else
                                    expand_splat_args(ctx, inner_call.args, call_arena)
                                  end
-                    if yield_key = find_yield_method_fallback(inner_method, inner_args.size)
+                    receiver_base = yield_receiver_base_name(ctx.type_of(inner_receiver_id))
+                    if yield_key = find_yield_method_fallback(inner_method, inner_args.size, receiver_base)
                       if func_def = @function_defs[yield_key]?
                         callee_arena = @function_def_arenas[yield_key]? || @arena
                         return inline_yield_function(ctx, func_def, yield_key, inner_receiver_id, inner_args, blk_node, nil, callee_arena)
@@ -21832,7 +22041,8 @@ module Crystal::HIR
               receiver_desc = @module.get_type_descriptor(ctx.type_of(receiver_id))
               generic_receiver = receiver_desc && receiver_desc.name.includes?("(")
               unless generic_receiver
-                if yield_key = find_yield_method_fallback(method_name, call_args.size)
+                receiver_base = yield_receiver_base_name(ctx.type_of(receiver_id))
+                if yield_key = find_yield_method_fallback(method_name, call_args.size, receiver_base)
                   if func_def = @function_defs[yield_key]?
                     debug_hook("call.inline.yield", "callee=#{yield_key} current=#{@current_class || ""}")
                     callee_arena = @function_def_arenas[yield_key]? || @arena
@@ -22015,17 +22225,19 @@ module Crystal::HIR
         type_desc = @module.get_type_descriptor(receiver_type)
         if receiver_type == TypeRef::VOID || type_desc.nil?
           if candidates = @method_bases_by_name[method_name]?
+            matches = [] of String
             candidates.each do |test_base|
               test_mangled = mangle_function_name(test_base, arg_types)
-              if type = @function_types[test_mangled]?
-                return_type = type
-                mangled_method_name = test_mangled
-                break
-              elsif type = @function_types[test_base]?
-                return_type = type
-                mangled_method_name = test_base
-                break
+              if @function_types.has_key?(test_mangled)
+                matches << test_mangled
+              elsif @function_types.has_key?(test_base)
+                matches << test_base
               end
+            end
+            if matches.size == 1
+              resolved = matches.first
+              return_type = @function_types[resolved]
+              mangled_method_name = resolved
             end
           end
         end

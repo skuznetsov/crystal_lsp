@@ -1499,6 +1499,7 @@ The return_type=16 (NIL) for `to_s` methods is incorrect - should be String type
 - Bare call resolution prefers `self` type before `@current_class` (fixes `Slice(Pointer(T))#unsafe_fetch` mis-resolving to `Slice(UInt8)`).
 - Type cache hardening: builtin refs override stale cached types; module-kind correction for cached entries; `Crystal::` prefix resolution for modules; single-variant unions collapse to concrete type.
 - Inline yield propagation: carry block param types (including fallback element inference for `String`/`Enumerable`), coerce yield args, and preserve param types across nested inlining.
+- Inline yield fallback now filters by receiver ancestry; prevents `Crystal::DWARF::Info#each` from inlining into unrelated methods (removed `Nil#read_attribute_value` from `String#compare` HIR; verified via `rg` on `/tmp/bootstrap_array_full_nocache.hir`).
 - Parenthesized calls no longer attach `{}`/`do` blocks across newlines (prevents `if foo() { ... }` from stealing the then-body tuple literal; `Path#separators` now parsed inside the `Path` class).
 
 **Progress**: 150 → 64 symbols remaining.
