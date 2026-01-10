@@ -3634,12 +3634,14 @@ module Crystal::HIR
 
         if param.is_instance_var
           ivar_name = "@#{param_name}"
-          if param_type == TypeRef::VOID
-            if existing = ivars.find { |iv| iv.name == ivar_name }
-              param_type = existing.type unless existing.type == TypeRef::VOID
+          if idx = ivars.index { |iv| iv.name == ivar_name }
+            existing = ivars[idx]
+            if existing.type == TypeRef::VOID && param_type != TypeRef::VOID
+              ivars[idx] = IVarInfo.new(ivar_name, param_type, existing.offset)
+            elsif param_type == TypeRef::VOID && existing.type != TypeRef::VOID
+              param_type = existing.type
             end
-          end
-          unless ivars.any? { |iv| iv.name == ivar_name }
+          else
             ivars << IVarInfo.new(ivar_name, param_type, offset_ptr.value)
             offset_ptr.value += type_size(param_type)
           end
@@ -25926,15 +25928,65 @@ module Crystal::HIR
           start_id = lower_expr(ctx, idx_node.begin_expr)
           end_id = lower_expr(ctx, idx_node.end_expr)
 
-          # Emit a call to an intrinsic that creates a slice
-          # For now, create a new array and copy elements
-          # Qualify method name with receiver's class
+          # Emit a call to [] for range slicing with proper return type inference.
           start_type = ctx.type_of(start_id)
           end_type = ctx.type_of(end_id)
-          method_name = resolve_method_call(ctx, object_id, "[]", [start_type, end_type], false)
-          call = Call.new(ctx.next_id, TypeRef::POINTER, object_id, method_name, [start_id, end_id])
+          arg_types = [start_type, end_type]
+          method_name = resolve_method_call(ctx, object_id, "[]", arg_types, false)
+          # Ensure the target function is lowered (IndexNode bypasses lower_call).
+          object_type = ctx.type_of(object_id)
+          type_desc = @module.get_type_descriptor(object_type)
+          class_name = type_desc.try(&.name) || primitive_class_name(object_type) || ""
+          class_name = normalize_method_owner_name(class_name)
+          base_method_name = class_name.empty? ? "[]" : "#{class_name}#[]"
+          primary_mangled_name = mangle_function_name(base_method_name, arg_types)
+          remember_callsite_arg_types(primary_mangled_name, arg_types)
+          if method_name != primary_mangled_name
+            remember_callsite_arg_types(method_name, arg_types)
+          end
+          callsite_label = nil
+          if DebugHooks::ENABLED
+            span = node.span
+            receiver_name = type_name_for_mangling(ctx.type_of(object_id))
+            callsite_label = "func=#{ctx.function.name} method=[] full=#{method_name} class=#{@current_class || ""} recv=#{receiver_name} span=#{span.start_line}:#{span.start_column}-#{span.end_line}:#{span.end_column}"
+          end
+          with_debug_callsite(callsite_label) do
+            lower_function_if_needed(primary_mangled_name)
+            if method_name != primary_mangled_name
+              lower_function_if_needed(method_name)
+            end
+          end
+          return_type = get_function_return_type(method_name)
+          owner_type_for_return = object_type
+          owner_part = method_name.split("$", 2).first
+          owner_name = if owner_part.includes?("#")
+                         owner_part.split("#", 2).first
+                       elsif owner_part.includes?(".")
+                         owner_part.split(".", 2).first
+                       else
+                         nil
+                       end
+          if owner_name && !owner_name.empty?
+            if owner_ref = type_ref_for_name(owner_name)
+              owner_type_for_return = owner_ref unless owner_ref == TypeRef::VOID
+            end
+          end
+          inferred_return = resolve_return_type_from_def(primary_mangled_name, base_method_name, owner_type_for_return)
+          if inferred_return.nil? && method_name != primary_mangled_name
+            inferred_return = resolve_return_type_from_def(method_name, base_method_name, owner_type_for_return)
+          end
+          if inferred_return && inferred_return != TypeRef::VOID
+            if return_type == TypeRef::VOID || return_type == TypeRef::POINTER
+              return_type = inferred_return
+            end
+          end
+          # Fallback: [] typically returns a value (element or subslice)
+          if return_type == TypeRef::VOID
+            return_type = TypeRef::POINTER
+          end
+          call = Call.new(ctx.next_id, return_type, object_id, method_name, [start_id, end_id])
           ctx.emit(call)
-          ctx.register_type(call.id, TypeRef::POINTER)
+          ctx.register_type(call.id, return_type)
           return call.id
         end
       end
@@ -26065,6 +26117,29 @@ module Crystal::HIR
           end
         end
         return_type = get_function_return_type(method_name)
+        owner_type_for_return = object_type
+        owner_part = method_name.split("$", 2).first
+        owner_name = if owner_part.includes?("#")
+                       owner_part.split("#", 2).first
+                     elsif owner_part.includes?(".")
+                       owner_part.split(".", 2).first
+                     else
+                       nil
+                     end
+        if owner_name && !owner_name.empty?
+          if owner_ref = type_ref_for_name(owner_name)
+            owner_type_for_return = owner_ref unless owner_ref == TypeRef::VOID
+          end
+        end
+        inferred_return = resolve_return_type_from_def(primary_mangled_name, base_method_name, owner_type_for_return)
+        if inferred_return.nil? && method_name != primary_mangled_name
+          inferred_return = resolve_return_type_from_def(method_name, base_method_name, owner_type_for_return)
+        end
+        if inferred_return && inferred_return != TypeRef::VOID
+          if return_type == TypeRef::VOID || return_type == TypeRef::POINTER
+            return_type = inferred_return
+          end
+        end
         # Fallback: [] typically returns a value (element or subslice)
         if return_type == TypeRef::VOID
           return_type = TypeRef::POINTER
@@ -28454,6 +28529,9 @@ module Crystal::HIR
       return TypeRef::VOID if normalized_name == "_"
 
       lookup_name = normalized_name
+      if lookup_name == "Bytes"
+        lookup_name = "Slice(UInt8)"
+      end
       if ENV["DEBUG_TYPE_PATH"]? && lookup_name.includes?("/")
         STDERR.puts "[TYPE_PATH] name=#{lookup_name} current=#{@current_class || ""} method=#{@current_method || ""} ns=#{@current_namespace_override || ""}"
       end
