@@ -20342,7 +20342,7 @@ module Crystal::HIR
         if base_name != name
           func_def = @function_defs[base_name]?
           arena = @function_def_arenas[base_name]? if func_def
-          target_name = base_name if func_def
+          target_name = name.includes?("$") ? name : base_name if func_def
           lookup_branch = "base_name" if func_def
         end
         # If still not found, try monomorphizing a generic owner and retry.
@@ -20541,7 +20541,7 @@ module Crystal::HIR
                   func_def = mod_func_def
                   arena = @function_def_arenas[module_method]
                   # Keep target_name as class method name - will generate with class prefix
-                  target_name = base_name
+                  target_name = name.includes?("$") ? name : base_name
                   lookup_branch = "included_module"
                   break
                 end
@@ -20550,7 +20550,7 @@ module Crystal::HIR
                   next if key == module_method
                   func_def = @function_defs[key]
                   arena = @function_def_arenas[key]
-                  target_name = base_name
+                  target_name = name.includes?("$") ? name : base_name
                   lookup_branch = "included_module_mangled"
                   break
                 end
@@ -20622,7 +20622,7 @@ module Crystal::HIR
                 if candidate = @function_defs[parent_base]?
                   func_def = candidate
                   arena = @function_def_arenas[parent_base]
-                  target_name = base_name
+                  target_name = name.includes?("$") ? name : base_name
                   lookup_branch = "parent_fallback"
                   matched_parent = parent
                 elsif name.includes?("$")
@@ -20631,7 +20631,7 @@ module Crystal::HIR
                   if candidate = @function_defs[parent_mangled]?
                     func_def = candidate
                     arena = @function_def_arenas[parent_mangled]
-                    target_name = base_name
+                    target_name = name.includes?("$") ? name : base_name
                     lookup_branch = "parent_fallback_mangled"
                     matched_parent = parent
                   end
@@ -20643,7 +20643,7 @@ module Crystal::HIR
                     next unless key.starts_with?(mangled_prefix)
                     func_def = @function_defs[key]
                     arena = @function_def_arenas[key]
-                    target_name = base_name
+                    target_name = name.includes?("$") ? name : base_name
                     lookup_branch = "parent_fallback_prefix"
                     matched_parent = parent
                     break
@@ -20693,7 +20693,7 @@ module Crystal::HIR
               if candidate = @function_defs[template_base]?
                 func_def = candidate
                 arena = @function_def_arenas[template_base]
-                target_name = base_name
+                target_name = name.includes?("$") ? name : base_name
                 primitive_template_map = primitive_template_type_map(template_owner, owner)
                 lookup_branch = "primitive_template"
               elsif name.includes?("$")
@@ -20702,7 +20702,7 @@ module Crystal::HIR
                 if candidate = @function_defs[template_mangled]?
                   func_def = candidate
                   arena = @function_def_arenas[template_mangled]
-                  target_name = base_name
+                  target_name = name.includes?("$") ? name : base_name
                   primitive_template_map = primitive_template_type_map(template_owner, owner)
                   lookup_branch = "primitive_template_mangled"
                 end
@@ -20714,7 +20714,7 @@ module Crystal::HIR
                   next unless key.starts_with?(mangled_prefix)
                   func_def = @function_defs[key]
                   arena = @function_def_arenas[key]
-                  target_name = base_name
+                  target_name = name.includes?("$") ? name : base_name
                   primitive_template_map = primitive_template_type_map(template_owner, owner)
                   lookup_branch = "primitive_template_prefix"
                   break
@@ -20733,7 +20733,7 @@ module Crystal::HIR
               if candidate = @function_defs[object_base]?
                 func_def = candidate
                 arena = @function_def_arenas[object_base]
-                target_name = base_name
+                target_name = name.includes?("$") ? name : base_name
                 lookup_branch = "object_fallback"
               elsif name.includes?("$")
                 suffix = name.split("$", 2)[1]
@@ -20741,7 +20741,7 @@ module Crystal::HIR
                 if candidate = @function_defs[object_mangled]?
                   func_def = candidate
                   arena = @function_def_arenas[object_mangled]
-                  target_name = base_name
+                  target_name = name.includes?("$") ? name : base_name
                   lookup_branch = "object_fallback_mangled"
                 end
               end
@@ -20752,7 +20752,7 @@ module Crystal::HIR
                   next unless key.starts_with?(mangled_prefix)
                   func_def = @function_defs[key]
                   arena = @function_def_arenas[key]
-                  target_name = base_name
+                  target_name = name.includes?("$") ? name : base_name
                   lookup_branch = "object_fallback_prefix"
                   break
                 end
