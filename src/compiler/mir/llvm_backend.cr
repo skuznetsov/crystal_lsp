@@ -3119,9 +3119,21 @@ module Crystal::MIR
         emit "#{ext_name} = fptosi #{index_type_str} #{index} to i64"
         emit "#{name} = getelementptr #{element_type}, ptr #{base}, i64 #{ext_name}"
       else
-        # Convert integer type to i64 with sign extension
+        # Convert integer index to i64 (extend or truncate based on width).
         ext_name = "#{name}.idx64"
-        emit "#{ext_name} = sext #{index_type_str} #{index} to i64"
+        bits = nil.as(Int32?)
+        if index_type_str.starts_with?("i")
+          bits = index_type_str[1..].to_i?
+        end
+        if bits && bits > 64
+          emit "#{ext_name} = trunc #{index_type_str} #{index} to i64"
+        else
+          is_unsigned = index_type == TypeRef::UINT8 || index_type == TypeRef::UINT16 ||
+                        index_type == TypeRef::UINT32 || index_type == TypeRef::UINT64 ||
+                        index_type == TypeRef::UINT128
+          op = is_unsigned ? "zext" : "sext"
+          emit "#{ext_name} = #{op} #{index_type_str} #{index} to i64"
+        end
         emit "#{name} = getelementptr #{element_type}, ptr #{base}, i64 #{ext_name}"
       end
       @value_types[inst.id] = TypeRef::POINTER  # GEP always returns pointer
