@@ -1078,6 +1078,7 @@ r2 = maybe(false)  # => nil
 - Register MacroIf/MacroLiteral nodes inside nested modules during HIR lowering.
 - Remove `StructNode` handling from macro-parsed class bodies; rely on `ClassNode.is_struct` (2026-01-02).
 - Attach trailing `do` blocks to parenthesized/member-access calls (fixes `Array(T).build(size) do` + `times do` in stdlib) (2026-01-xx).
+- Infer identifier call types for implicit class/module methods during type inference; block param fallback now overrides stale type-param maps using receiver element types (fixes `Unicode.in_any_category?` lowering to `in_category?$Int32_Array(Tuple(...))`, removes `Unicode.in_category?$Int32_UInt64` from HIR) (2026-02-xx).
 - Handle inline returns during yield inlining (guard proc/block bodies + safe block bounds) to preserve Enumerable semantics.
 - Coerce short-circuit phi incomings into union variants (fixes `String::Grapheme.codepoints` classvar `||=` union phi) (2026-01-xx).
 - Deduplicate union type emissions by name and use max payload size (fixes `opt` redefinition of `%_T__T_.union`) (2026-01-xx).

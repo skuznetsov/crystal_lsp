@@ -4971,6 +4971,26 @@ module Crystal::HIR
         if type_name = lookup_typeof_local_name(String.new(expr_node.name))
           return type_ref_for_name(type_name)
         end
+        if owner_name = (self_type_name || @current_class)
+          if class_method_base = resolve_method_with_inheritance(owner_name, name)
+            receiver_ref = type_ref_for_name(owner_name)
+            if receiver_ref != TypeRef::VOID
+              if ret_type = resolve_return_type_from_def(class_method_base, class_method_base, receiver_ref)
+                return ret_type if ret_type != TypeRef::VOID
+              end
+            end
+            ret_type = get_function_return_type(class_method_base)
+            return ret_type if ret_type != TypeRef::VOID
+          end
+          module_method_base = "#{owner_name}.#{name}"
+          if @function_types.has_key?(module_method_base) ||
+             has_function_base?(module_method_base) ||
+             @class_accessor_entries.has_key?(module_method_base)
+            ret_type = get_function_return_type(module_method_base)
+            ret_type = @function_types[module_method_base]? if ret_type == TypeRef::VOID
+            return ret_type if ret_type && ret_type != TypeRef::VOID
+          end
+        end
       when CrystalV2::Compiler::Frontend::AssignNode
         value_id = expr_node.value
         value_node = node_for_expr(value_id)
@@ -7357,6 +7377,13 @@ module Crystal::HIR
           if idx = splat_param_types_index
             param_types[idx] = splat_type
           end
+        end
+        if ENV["DEBUG_IN_ANY_CATEGORY"]? && base_name == "Unicode.in_any_category?"
+          splat_name = splat_param_name.not_nil!
+          splat_type_name = get_type_name_from_ref(splat_type)
+          call_names = call_types.map { |t| get_type_name_from_ref(t) }
+          param_names = param_types.map { |t| get_type_name_from_ref(t) }
+          STDERR.puts "[IN_ANY_CATEGORY] base=#{base_name} splat=#{splat_name} splat_type=#{splat_type_name} call_types=#{call_names.join(",")} param_types=#{param_names.join(",")}"
         end
       end
 
@@ -10503,6 +10530,10 @@ module Crystal::HIR
             debug_hook("method.resolve", "base=#{base_method_name} resolved=#{resolved_mangled} reason=inheritance_prefer_owner")
             return cache_method_resolution(cache_key, resolved_mangled)
           elsif resolved_untyped = resolve_untyped_overload(resolved_base, arg_types.size, has_block_call)
+            if callsite = prefer_callsite_specialization(resolved_base, resolved_untyped, arg_types, has_block_call)
+              debug_hook("method.resolve", "base=#{base_method_name} resolved=#{callsite} reason=inheritance_callsite")
+              return cache_method_resolution(cache_key, callsite)
+            end
             debug_hook("method.resolve", "base=#{base_method_name} resolved=#{resolved_untyped} reason=inheritance_overload_arity")
             return cache_method_resolution(cache_key, resolved_untyped)
           end
@@ -10513,6 +10544,10 @@ module Crystal::HIR
       # the MIR lowering do fuzzy matching to pick a concrete overload.
       if !class_name.empty? && has_function_base?(base_method_name)
         if resolved = resolve_untyped_overload(base_method_name, arg_types.size, has_block_call)
+          if callsite = prefer_callsite_specialization(base_method_name, resolved, arg_types, has_block_call)
+            debug_hook("method.resolve", "base=#{base_method_name} resolved=#{callsite} reason=base_callsite")
+            return cache_method_resolution(cache_key, callsite)
+          end
           debug_hook("method.resolve", "base=#{base_method_name} resolved=#{resolved} reason=base_overload_arity")
           return cache_method_resolution(cache_key, resolved)
         end
@@ -10772,6 +10807,26 @@ module Crystal::HIR
       end
 
       best_name
+    end
+
+    private def prefer_callsite_specialization(
+      base_method_name : String,
+      resolved_name : String,
+      arg_types : Array(TypeRef),
+      has_block_call : Bool
+    ) : String?
+      return nil if base_method_name.empty?
+      return nil if arg_types.empty?
+      return nil if arg_types.all? { |t| t == TypeRef::VOID }
+
+      def_node = @function_defs[base_method_name]?
+      return nil unless def_node
+      return nil unless def_params_untyped?(def_node)
+
+      callsite = mangle_function_name(base_method_name, arg_types, has_block_call)
+      return nil if callsite == resolved_name
+
+      callsite
     end
 
     private def resolve_nilable_function_type_overload(
@@ -13715,11 +13770,12 @@ module Crystal::HIR
         param_map = receiver_map
       end
 
+      receiver_type_map = {} of String => String
       if receiver_type && receiver_type != TypeRef::VOID
         receiver_type_map = type_param_map_for_receiver_type(receiver_type)
         if !receiver_type_map.empty?
           if param_map && !param_map.empty?
-            param_map = receiver_type_map.merge(param_map)
+            param_map = param_map.merge(receiver_type_map)
           else
             param_map = receiver_type_map
           end
@@ -13770,14 +13826,18 @@ module Crystal::HIR
 
       if receiver_type && receiver_type != TypeRef::VOID
         needs_fallback = param_map.nil? || param_map.empty? ||
-                         input_names.any? { |name| type_param_like?(name) && !param_map.try(&.has_key?(name)) }
+                         input_names.any? do |name|
+                           type_param_like?(name) && (receiver_type_map.empty? || !receiver_type_map.has_key?(name))
+                         end
         if needs_fallback
           if type_desc = @module.get_type_descriptor(receiver_type)
             if element_name = element_type_for_type_name(type_desc.name)
               param_map = param_map ? param_map.not_nil!.dup : {} of String => String
               input_names.each do |name|
                 next unless type_param_like?(name)
-                param_map[name] ||= element_name
+                if receiver_type_map.empty? || !receiver_type_map.has_key?(name)
+                  param_map[name] = element_name
+                end
               end
             end
           end
@@ -25257,7 +25317,51 @@ module Crystal::HIR
       call_arena : CrystalV2::Compiler::Frontend::ArenaLike
     ) : Array(ValueId)
       func_name = full_method_name || method_name
-      arg_types = infer_arg_types_for_call(positional_args, @current_class)
+      arg_types = positional_args.map do |arg_expr|
+        arg_node = if arg_expr.index >= 0 && arg_expr.index < call_arena.size
+                     call_arena[arg_expr]
+                   else
+                     nil
+                   end
+        if arg_node.is_a?(CrystalV2::Compiler::Frontend::IdentifierNode)
+          name = String.new(arg_node.name)
+          if local_id = ctx.lookup_local(name)
+            ctx.type_of(local_id)
+          else
+            infer_type_from_expr(arg_expr, @current_class) || TypeRef::VOID
+          end
+        else
+          infer_type_from_expr(arg_expr, @current_class) || TypeRef::VOID
+        end
+      end
+      if ENV["DEBUG_CALL_TYPES"]? &&
+         (func_name.includes?("Unicode.in_category?") || func_name.includes?("Unicode.in_any_category?"))
+        arg_type_names = arg_types.map { |t| get_type_name_from_ref(t) }
+        STDERR.puts "[CALL_TYPES] name=#{func_name} arg_types=#{arg_type_names.join(",")}"
+        positional_args.each_with_index do |arg_expr, idx|
+          arg_node = if arg_expr.index >= 0 && arg_expr.index < call_arena.size
+                       call_arena[arg_expr]
+                     else
+                       nil
+                     end
+          if arg_node.is_a?(CrystalV2::Compiler::Frontend::IdentifierNode)
+            name = String.new(arg_node.name)
+            if local_id = ctx.lookup_local(name)
+              local_type = get_type_name_from_ref(ctx.type_of(local_id))
+              STDERR.puts "[CALL_TYPES] arg#{idx} ident=#{name} local_type=#{local_type}"
+            else
+              STDERR.puts "[CALL_TYPES] arg#{idx} ident=#{name} local_type=(missing)"
+            end
+          else
+            STDERR.puts "[CALL_TYPES] arg#{idx} node=#{arg_node.class}"
+          end
+        end
+      end
+      # If any argument type is unknown, avoid pinning to a specific overload.
+      # This prevents premature coercions that can lock in the wrong overload.
+      if arg_types.any? { |t| t == TypeRef::VOID }
+        return positional_args.map { |arg| lower_expr(ctx, arg) }
+      end
       func_entry = lookup_function_def_for_call(func_name, positional_args.size, has_block_call, arg_types)
       func_def = func_entry ? func_entry[1] : nil
       func_context = func_entry ? function_context_from_name(func_entry[0]) : nil
