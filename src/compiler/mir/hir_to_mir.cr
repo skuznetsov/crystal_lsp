@@ -714,6 +714,9 @@ module Crystal
 
       # Get element type from context (default to INT32 for now)
       element_type = convert_type(idx.type)
+      if element_type == MIR::TypeRef::NIL
+        return builder.const_nil_typed(element_type)
+      end
       if element_type.id == MIR::TypeRef::VOID.id
         element_type = MIR::TypeRef::INT32
       end
@@ -736,6 +739,9 @@ module Crystal
 
       # Get element type - use type from HIR IndexSet.type or default to INT32
       element_type = convert_type(idx.type)
+      if element_type == MIR::TypeRef::NIL
+        return builder.const_nil_typed(element_type)
+      end
       if element_type.id == MIR::TypeRef::VOID.id
         element_type = MIR::TypeRef::INT32
       end

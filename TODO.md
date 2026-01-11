@@ -1502,10 +1502,11 @@ The return_type=16 (NIL) for `to_s` methods is incorrect - should be String type
   - `lower_call()` around lines 18400-18600 - where return types are determined
   - `register_function_type()` - where function types are registered
 
-**Current missing symbol count**: 73 (after `bin/fib.cr` with prelude, log `/tmp/fib_link.log`, 2026-01-xx).
+**Current missing symbol count**: 72 (after `bin/fib.cr` with prelude, log `/tmp/fib_link.log`, list `/tmp/missing_symbols_latest.txt`, 2026-02-xx).
 - Update (2026-01-xx): `./bin/crystal_v2 --no-llvm-opt --no-llvm-metadata bin/fib.cr -o /tmp/fib` yields 104 missing symbols (`/tmp/missing_symbols_latest.txt`), only 3 are `Nil_*` (`Nil_index`, `Nil_to_u64`, `Nil_when`).
 - Update (2026-01-xx): IO namespace wrappers no longer force `IO` to Module; `/tmp/fib.hir` shows `Class IO` and no `Nil#to_u64`. New blocker: llc error `expected 'i32' but got 'double'` for GEP index at `/tmp/fib.ll:45707`.
 - Update (2026-01-xx): array GEP indices now cast from float to i32; llc error resolved. Current missing symbols: 100 (`/tmp/missing_symbols_latest.txt`, log `/tmp/fib_link.log`).
+- Update (2026-02-xx): Nil element index lowering returns typed nil (skips ArrayGet/Set), and array index casts extend i1/i8/i16 to i32; llc void/idx mismatch resolved. Missing symbols now 72 (`/tmp/fib_link.log`, `/tmp/missing_symbols_latest.txt`).
 - Update (2026-01-xx): fixed `lower_if` static is_a? guard to handle `false` (not just `true`), pruning Float32/Float64 branches in `Range#bsearch`; `Range(Int32, Int32)#unsafe_fetch$Float64` removed from `/tmp/fib.hir`. Missing symbols still 100 (`/tmp/fib_link.log`).
 - Update (2026-01-xx): `restore_locals` now restores `self` from saved locals (no override by callee `self`), fixing inline-yield block receiver leakage. `Range(Int32, Int32)#unsafe_fetch$Pointer | Pointer` and `Nil#unsafe_fetch$Nil` removed from `/tmp/fib.hir`; missing symbols down to 80 (`/tmp/fib_link.log`).
 - Update (2026-01-xx): `new` callsites now feed initializer callsite types and trigger lowering; `ArgumentError#initialize` is emitted in `/private/tmp/arg_error.hir` (no more missing `_ArgumentError_initialize`), missing symbols now 77 (`/tmp/fib_link.log`).
