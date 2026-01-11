@@ -11943,6 +11943,115 @@ module Crystal::HIR
       end
     end
 
+    private def collect_yield_arg_lists(body : Array(ExprId), lists : Array(Array(ExprId))) : Nil
+      body.each { |expr_id| collect_yield_arg_lists(expr_id, lists) }
+    end
+
+    private def collect_yield_arg_lists(expr_id : ExprId, lists : Array(Array(ExprId))) : Nil
+      return if expr_id.invalid?
+      node = node_for_expr(expr_id)
+      return unless node
+
+      case node
+      when CrystalV2::Compiler::Frontend::YieldNode
+        if args = node.args
+          lists << args
+        else
+          lists << [] of ExprId
+        end
+      when CrystalV2::Compiler::Frontend::AssignNode
+        collect_yield_arg_lists(node.target, lists)
+        collect_yield_arg_lists(node.value, lists)
+      when CrystalV2::Compiler::Frontend::MultipleAssignNode
+        node.targets.each { |target| collect_yield_arg_lists(target, lists) }
+        collect_yield_arg_lists(node.value, lists)
+      when CrystalV2::Compiler::Frontend::ReturnNode
+        collect_yield_arg_lists(node.value.not_nil!, lists) if node.value
+      when CrystalV2::Compiler::Frontend::MemberAccessNode
+        collect_yield_arg_lists(node.object, lists)
+      when CrystalV2::Compiler::Frontend::CallNode
+        if callee_id = node.callee
+          callee_node = node_for_expr(callee_id)
+          if callee_node.is_a?(CrystalV2::Compiler::Frontend::IdentifierNode)
+            lists << node.args if String.new(callee_node.name) == "yield"
+          end
+          collect_yield_arg_lists(callee_id, lists)
+        end
+        node.args.each { |arg| collect_yield_arg_lists(arg, lists) }
+        if block_id = node.block
+          collect_yield_arg_lists(block_id, lists)
+        end
+        if named = node.named_args
+          named.each { |na| collect_yield_arg_lists(na.value, lists) }
+        end
+      when CrystalV2::Compiler::Frontend::UnaryNode
+        collect_yield_arg_lists(node.operand, lists)
+      when CrystalV2::Compiler::Frontend::BinaryNode
+        collect_yield_arg_lists(node.left, lists)
+        collect_yield_arg_lists(node.right, lists)
+      when CrystalV2::Compiler::Frontend::GroupingNode
+        collect_yield_arg_lists(node.expression, lists)
+      when CrystalV2::Compiler::Frontend::MacroExpressionNode
+        collect_yield_arg_lists(node.expression, lists)
+      when CrystalV2::Compiler::Frontend::ConstantNode
+        collect_yield_arg_lists(node.value, lists)
+      when CrystalV2::Compiler::Frontend::IfNode
+        collect_yield_arg_lists(node.condition, lists)
+        collect_yield_arg_lists(node.then_body, lists)
+        collect_yield_arg_lists(node.else_body.not_nil!, lists) if node.else_body
+      when CrystalV2::Compiler::Frontend::UnlessNode
+        collect_yield_arg_lists(node.condition, lists)
+        collect_yield_arg_lists(node.then_branch, lists)
+        collect_yield_arg_lists(node.else_branch.not_nil!, lists) if node.else_branch
+      when CrystalV2::Compiler::Frontend::WhileNode
+        collect_yield_arg_lists(node.condition, lists)
+        collect_yield_arg_lists(node.body, lists)
+      when CrystalV2::Compiler::Frontend::UntilNode
+        collect_yield_arg_lists(node.condition, lists)
+        collect_yield_arg_lists(node.body, lists)
+      when CrystalV2::Compiler::Frontend::LoopNode
+        collect_yield_arg_lists(node.body, lists)
+      when CrystalV2::Compiler::Frontend::BlockNode
+        collect_yield_arg_lists(node.body, lists)
+      when CrystalV2::Compiler::Frontend::ProcLiteralNode
+        collect_yield_arg_lists(node.body, lists)
+      when CrystalV2::Compiler::Frontend::CaseNode
+        node.when_branches.each { |w| collect_yield_arg_lists(w.body, lists) }
+        collect_yield_arg_lists(node.else_branch.not_nil!, lists) if node.else_branch
+      when CrystalV2::Compiler::Frontend::ArrayLiteralNode
+        node.elements.each { |el| collect_yield_arg_lists(el, lists) }
+        collect_yield_arg_lists(node.of_type.not_nil!, lists) if node.of_type
+      when CrystalV2::Compiler::Frontend::TupleLiteralNode
+        node.elements.each { |el| collect_yield_arg_lists(el, lists) }
+      when CrystalV2::Compiler::Frontend::HashLiteralNode
+        node.entries.each do |entry|
+          collect_yield_arg_lists(entry.key, lists)
+          collect_yield_arg_lists(entry.value, lists)
+        end
+      when CrystalV2::Compiler::Frontend::NamedTupleLiteralNode
+        node.entries.each { |entry| collect_yield_arg_lists(entry.value, lists) }
+      when CrystalV2::Compiler::Frontend::StringInterpolationNode
+        node.pieces.each do |piece|
+          if piece.kind == CrystalV2::Compiler::Frontend::StringPiece::Kind::Expression && piece.expr
+            collect_yield_arg_lists(piece.expr.not_nil!, lists)
+          end
+        end
+      when CrystalV2::Compiler::Frontend::IndexNode
+        collect_yield_arg_lists(node.object, lists)
+        node.indexes.each { |idx| collect_yield_arg_lists(idx, lists) }
+      when CrystalV2::Compiler::Frontend::RangeNode
+        collect_yield_arg_lists(node.begin_expr, lists)
+        collect_yield_arg_lists(node.end_expr, lists)
+      when CrystalV2::Compiler::Frontend::BeginNode
+        collect_yield_arg_lists(node.body, lists)
+        if clauses = node.rescue_clauses
+          clauses.each { |cl| collect_yield_arg_lists(cl.body, lists) }
+        end
+        collect_yield_arg_lists(node.else_body.not_nil!, lists) if node.else_body
+        collect_yield_arg_lists(node.ensure_body.not_nil!, lists) if node.ensure_body
+      end
+    end
+
     private def contains_yield_in_expr?(expr_id : ExprId) : Bool
       return false if expr_id.invalid?
       node = node_for_expr(expr_id)
@@ -13125,6 +13234,28 @@ module Crystal::HIR
       mapping
     end
 
+    private def type_param_map_for_receiver_type(receiver_type : TypeRef) : Hash(String, String)
+      desc = @module.get_type_descriptor(receiver_type)
+      return {} of String => String unless desc
+
+      info = split_generic_base_and_args(desc.name)
+      return {} of String => String unless info
+
+      template = @generic_templates[info[:base]]?
+      return {} of String => String unless template
+
+      args = split_generic_type_args(info[:args]).map do |arg|
+        normalize_tuple_literal_type_name(arg.strip)
+      end
+      return {} of String => String unless template.type_params.size == args.size
+
+      mapping = {} of String => String
+      template.type_params.each_with_index do |param, i|
+        mapping[param] = args[i].strip
+      end
+      mapping
+    end
+
     private def block_return_type_name(ctx : LoweringContext, block_id : BlockId) : String?
       block = ctx.get_block(block_id)
       term = block.terminator
@@ -13401,20 +13532,6 @@ module Crystal::HIR
       end
       return fallback_block_param_types(base_method_name, receiver_type) unless block_param
 
-      type_slice = block_param.type_annotation
-      if debug_block_params
-        STDERR.puts "[BLOCK_PARAMS] type_slice=#{type_slice ? String.new(type_slice) : "nil"}"
-      end
-      if type_slice.nil?
-        return fallback_block_param_types(base_method_name, receiver_type)
-      end
-
-      input_names = proc_input_type_names(String.new(type_slice))
-      if debug_block_params
-        STDERR.puts "[BLOCK_PARAMS] inputs=#{input_names ? input_names.join(",") : "nil"}"
-      end
-      return nil unless input_names && !input_names.empty?
-
       param_map = function_type_param_map_for(mangled_method_name, base_method_name)
       if param_map && !param_map.empty?
         param_map = param_map.dup
@@ -13427,12 +13544,57 @@ module Crystal::HIR
         param_map = receiver_map
       end
 
+      if receiver_type && receiver_type != TypeRef::VOID
+        receiver_type_map = type_param_map_for_receiver_type(receiver_type)
+        if !receiver_type_map.empty?
+          if param_map && !param_map.empty?
+            param_map = receiver_type_map.merge(param_map)
+          else
+            param_map = receiver_type_map
+          end
+        end
+      end
+
       if !@type_param_map.empty?
         if param_map && !param_map.empty?
           param_map = @type_param_map.merge(param_map)
         else
           param_map = @type_param_map.dup
         end
+      end
+
+      type_slice = block_param.type_annotation
+      if debug_block_params
+        STDERR.puts "[BLOCK_PARAMS] type_slice=#{type_slice ? String.new(type_slice) : "nil"}"
+      end
+      if type_slice.nil?
+        if inferred = infer_yield_param_types_from_body(
+             func_def,
+             mangled_method_name,
+             base_method_name,
+             receiver_type,
+             param_map
+           )
+          return inferred
+        end
+        return fallback_block_param_types(base_method_name, receiver_type)
+      end
+
+      input_names = proc_input_type_names(String.new(type_slice))
+      if debug_block_params
+        STDERR.puts "[BLOCK_PARAMS] inputs=#{input_names ? input_names.join(",") : "nil"}"
+      end
+      unless input_names && !input_names.empty?
+        if inferred = infer_yield_param_types_from_body(
+             func_def,
+             mangled_method_name,
+             base_method_name,
+             receiver_type,
+             param_map
+           )
+          return inferred
+        end
+        return fallback_block_param_types(base_method_name, receiver_type)
       end
 
       if receiver_type && receiver_type != TypeRef::VOID
@@ -13484,6 +13646,94 @@ module Crystal::HIR
       end
 
       resolved_names.map { |name| type_ref_for_name(name) }
+    end
+
+    private def infer_yield_param_types_from_body(
+      func_def : CrystalV2::Compiler::Frontend::DefNode,
+      func_name : String,
+      base_method_name : String,
+      receiver_type : TypeRef?,
+      param_map : Hash(String, String)?
+    ) : Array(TypeRef)?
+      body = func_def.body
+      return nil unless body && !body.empty?
+
+      def_arena = @function_def_arenas[func_name]? || @function_def_arenas[base_method_name]? || @arena
+      old_arena = @arena
+      old_locals = @current_typeof_locals
+      old_names = @current_typeof_local_names
+      local_map = old_locals ? old_locals.dup : {} of String => TypeRef
+      name_map = old_names ? old_names.dup : {} of String => String
+
+      if params = func_def.params
+        params.each do |param|
+          next unless pname = param.name
+          name = String.new(pname)
+          param_type = TypeRef::VOID
+          if ta = param.type_annotation
+            type_name = String.new(ta)
+            if param_map && !param_map.empty?
+              if template = @generic_templates[type_name]?
+                mapped_args = template.type_params.map { |param| param_map[param]? }
+                if mapped_args.all?(&.itself)
+                  type_name = "#{type_name}(#{mapped_args.join(", ")})"
+                end
+              end
+              type_name = substitute_type_params(type_name, param_map)
+            end
+            param_type = type_ref_for_name(type_name)
+          end
+          local_map[name] = param_type if param_type != TypeRef::VOID
+        end
+      end
+      if receiver_type && receiver_type != TypeRef::VOID
+        local_map["self"] = receiver_type
+      end
+
+      @arena = def_arena
+      @current_typeof_locals = local_map
+      @current_typeof_local_names = name_map
+      begin
+        lists = [] of Array(ExprId)
+        collect_yield_arg_lists(body, lists)
+        return nil if lists.empty?
+
+        if lists.all?(&.empty?)
+          return [] of TypeRef
+        end
+
+        self_type_name = if receiver_type && receiver_type != TypeRef::VOID
+                           get_type_name_from_ref(receiver_type)
+                         else
+                           @current_class
+                         end
+
+        compute = -> do
+          merged_types = nil
+          lists.each do |args|
+            next if args.empty?
+            inferred = args.map do |arg|
+              infer_type_from_expr(arg, self_type_name) || TypeRef::VOID
+            end
+            next if inferred.any? { |t| t == TypeRef::VOID }
+            if merged_types.nil?
+              merged_types = inferred
+            elsif merged_types.size == inferred.size
+              merged_types = merged_types.zip(inferred).map { |left, right| union_type_for_values(left, right) }
+            end
+          end
+          merged_types
+        end
+
+        if param_map && !param_map.empty?
+          return with_type_param_map(param_map) { compute.call }
+        end
+        compute.call
+      ensure
+        @current_typeof_locals = old_locals
+        @current_typeof_local_names = old_names
+        @arena = old_arena
+      end
     end
 
     private def fallback_block_param_types(
