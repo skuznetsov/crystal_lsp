@@ -35,6 +35,7 @@ module Crystal::HIR
 
     # Variable name → ValueId mapping per scope
     @locals : Hash(String, ValueId)
+    @self_id : ValueId?
 
     # Scope stack for nested scopes
     @scope_stack : Array(ScopeId)
@@ -50,6 +51,7 @@ module Crystal::HIR
     def initialize(@function : Function, @module : Module, @arena)
       @current_block = @function.entry_block
       @locals = {} of String => ValueId
+      @self_id = nil
       @scope_stack = [@function.scopes[0].id]  # Function scope
       @type_cache = {} of String => TypeRef
       @value_types = {} of ValueId => TypeRef
@@ -158,10 +160,16 @@ module Crystal::HIR
     def register_local(name : String, value_id : ValueId)
       @locals[name] = value_id
       @function.get_scope(current_scope).add_local(value_id)
+      @self_id = value_id if name == "self"
     end
 
     # Lookup local variable
     def lookup_local(name : String) : ValueId?
+      if name == "self"
+        if self_id = @self_id
+          return self_id
+        end
+      end
       @locals[name]?
     end
 
@@ -173,6 +181,9 @@ module Crystal::HIR
     # Restore locals state (for else branch)
     def restore_locals(saved : Hash(String, ValueId))
       @locals = saved.dup
+      if self_id = @self_id
+        @locals["self"] = self_id
+      end
     end
 
     # Get all current locals
