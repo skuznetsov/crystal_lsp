@@ -12730,6 +12730,12 @@ module Crystal::HIR
         @resolved_type_name_cache[cache_key] = resolved
         return resolved
       end
+      if (tuple_index = name.index("::{")) && name.ends_with?("}")
+        tuple_literal = name[(tuple_index + 2)..]
+        resolved = resolve_type_name_in_context(tuple_literal)
+        @resolved_type_name_cache[cache_key] = resolved
+        return resolved
+      end
 
       if name == "self"
         resolved = @current_class || name
