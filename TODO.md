@@ -1496,11 +1496,12 @@ The return_type=16 (NIL) for `to_s` methods is incorrect - should be String type
   - `lower_call()` around lines 18400-18600 - where return types are determined
   - `register_function_type()` - where function types are registered
 
-**Current missing symbol count**: 100 (after `bin/fib.cr` with prelude, log `/tmp/fib_link.log`, 2026-01-xx).
+**Current missing symbol count**: 80 (after `bin/fib.cr` with prelude, log `/tmp/fib_link.log`, 2026-01-xx).
 - Update (2026-01-xx): `./bin/crystal_v2 --no-llvm-opt --no-llvm-metadata bin/fib.cr -o /tmp/fib` yields 104 missing symbols (`/tmp/missing_symbols_latest.txt`), only 3 are `Nil_*` (`Nil_index`, `Nil_to_u64`, `Nil_when`).
 - Update (2026-01-xx): IO namespace wrappers no longer force `IO` to Module; `/tmp/fib.hir` shows `Class IO` and no `Nil#to_u64`. New blocker: llc error `expected 'i32' but got 'double'` for GEP index at `/tmp/fib.ll:45707`.
 - Update (2026-01-xx): array GEP indices now cast from float to i32; llc error resolved. Current missing symbols: 100 (`/tmp/missing_symbols_latest.txt`, log `/tmp/fib_link.log`).
 - Update (2026-01-xx): fixed `lower_if` static is_a? guard to handle `false` (not just `true`), pruning Float32/Float64 branches in `Range#bsearch`; `Range(Int32, Int32)#unsafe_fetch$Float64` removed from `/tmp/fib.hir`. Missing symbols still 100 (`/tmp/fib_link.log`).
+- Update (2026-01-xx): `restore_locals` now restores `self` from saved locals (no override by callee `self`), fixing inline-yield block receiver leakage. `Range(Int32, Int32)#unsafe_fetch$Pointer | Pointer` and `Nil#unsafe_fetch$Nil` removed from `/tmp/fib.hir`; missing symbols down to 80 (`/tmp/fib_link.log`).
 - **Missing trace snapshot (2026-01-xx)**: `CRYSTAL_V2_DEBUG_HOOKS=1 CRYSTAL_V2_MISSING_TRACE=1` on `bin/fib.cr` shows 98 unique `abstract=false` missing symbols. Top offenders: `Pointer(UInt8)#each$block` (21), `Range(Int32,...)` (9), `Int32#get_entry$Int32` (8), `Crystal::SpinLock#add_timer$Pointer` (8), `Int32#fit_in_indices$Crystal::Hasher` (4).
   - Remaining categories: EventLoop (`system_*`, arena helpers, `PollDescriptor_owned_by_`), DWARF (`Attribute_*`, `LineNumbers_decode_sequences`), MachO `Nlist64::Type_*`, IO/Path/File (`IO_read/write`, `Process.executable_path`, `PATH_MAX`, `realpath_DARWIN_EXTSN`, `File::Error.from_errno`, `Path.separators`), string/regex helpers (`String_*`, `Regex__MatchData_*`), pointer/tuple/slice helpers, `Thread_threads`, `_func*` stubs, and `__context`.
 

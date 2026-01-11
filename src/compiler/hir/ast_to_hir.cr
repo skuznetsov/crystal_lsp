@@ -181,8 +181,10 @@ module Crystal::HIR
     # Restore locals state (for else branch)
     def restore_locals(saved : Hash(String, ValueId))
       @locals = saved.dup
-      if self_id = @self_id
-        @locals["self"] = self_id
+      if self_id = @locals["self"]?
+        @self_id = self_id
+      else
+        @self_id = nil
       end
     end
 
