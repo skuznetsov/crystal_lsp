@@ -1573,3 +1573,4 @@ The return_type=16 (NIL) for `to_s` methods is incorrect - should be String type
 - `src/compiler/hir/ast_to_hir.cr`:
   - Added `evaluate_has_constant()` at lines 14078-14118
   - Added `has_constant?` handling in `try_evaluate_macro_condition` at lines 14163-14196
+- **Fix applied**: infer ivar types from initialize default values for instance-var params; removed `Nil#[]`/`Nil#when` in `Time::Location` transitions (2026-01-xx).

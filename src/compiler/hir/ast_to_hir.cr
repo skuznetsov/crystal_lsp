@@ -30099,3 +30099,9 @@ module Crystal::HIR
     end
   end
 end
+          if param_type == TypeRef::VOID
+            if default_value = param.default_value
+              inferred = infer_type_from_expr(default_value, owner_name)
+              param_type = inferred if inferred && inferred != TypeRef::VOID
+            end
+          end
