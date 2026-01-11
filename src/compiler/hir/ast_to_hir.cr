@@ -12392,7 +12392,7 @@ module Crystal::HIR
     end
 
     # Split a generic type argument list like "String, Array(Int32), Hash(K, V)"
-    # into top-level arguments, respecting nested parentheses.
+    # into top-level arguments, respecting nested parentheses and proc type arrows.
     private def split_generic_type_args(params_str : String) : Array(String)
       args = [] of String
       depth = 0
@@ -12407,6 +12407,12 @@ module Crystal::HIR
           depth -= 1 if depth > 0
         when ','
           if depth == 0
+            # If a top-level proc arrow appears before the next top-level comma,
+            # this comma belongs to a proc type like "A, B -> C".
+            if proc_arrow_ahead?(params_str, i + 1)
+              i += 1
+              next
+            end
             part = params_str[start, i - start].strip
             args << part unless part.empty?
             start = i + 1
@@ -12417,6 +12423,28 @@ module Crystal::HIR
       tail = params_str[start, params_str.size - start].strip
       args << tail unless tail.empty?
       args
+    end
+
+    private def proc_arrow_ahead?(source : String, start_idx : Int32) : Bool
+      depth = 0
+      i = start_idx
+      while i + 1 < source.bytesize
+        ch = source.byte_at(i).unsafe_chr
+        case ch
+        when '(', '{', '['
+          depth += 1
+        when ')', '}', ']'
+          depth -= 1 if depth > 0
+        when ','
+          return false if depth == 0
+        when '-'
+          if depth == 0 && source.byte_at(i + 1).unsafe_chr == '>'
+            return true
+          end
+        end
+        i += 1
+      end
+      false
     end
 
     # Split a full generic type name into base and args, handling nested parens in the base.

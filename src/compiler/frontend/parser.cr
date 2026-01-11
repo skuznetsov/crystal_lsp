@@ -9017,40 +9017,14 @@ module CrystalV2
               advance
               skip_trivia
 
-              # Parse type expression as AST nodes (supports unions, generics, proc types)
-              # Phase 103O: Handle bare proc type `->` in of-context (parse_expression treats -> as proc literal)
-              if current_token.kind == Token::Kind::ThinArrow
-                of_type_expr = parse_proc_type_as_expr
-              else
-                of_type_expr = parse_expression(0)
-                return PREFIX_ERROR if of_type_expr.invalid?
+              # Parse bare proc types as a single slice so `A, B -> C` stays intact.
+              type_start = current_token
+              type_slice = parse_bare_proc_type
+              return PREFIX_ERROR if type_slice.nil?
 
-                # Phase 103Q: Handle proc type with input types: `A ->` or `A::B -> ReturnType`
-                skip_trivia
-                if current_token.kind == Token::Kind::ThinArrow
-                  arrow_token = current_token
-                  advance
-                  skip_trivia
-
-                  # Check for optional return type
-                  if current_token.kind.in?(Token::Kind::Identifier, Token::Kind::Self,
-                                            Token::Kind::Typeof, Token::Kind::LParen,
-                                            Token::Kind::LBrace, Token::Kind::ColonColon)
-                    return_type_expr = parse_expression(0)
-                    return PREFIX_ERROR if return_type_expr.invalid?
-                    end_span = @arena[return_type_expr].span
-                    proc_span = @arena[of_type_expr].span.cover(end_span)
-                    # Create GenericNode with input type, ->, and return type
-                    arrow_id = @arena.add_typed(IdentifierNode.new(arrow_token.span, arrow_token.slice))
-                    of_type_expr = @arena.add_typed(GenericNode.new(proc_span, arrow_id, [of_type_expr, return_type_expr]))
-                  else
-                    # No return type: `A ->`
-                    proc_span = @arena[of_type_expr].span.cover(arrow_token.span)
-                    arrow_id = @arena.add_typed(IdentifierNode.new(arrow_token.span, arrow_token.slice))
-                    of_type_expr = @arena.add_typed(GenericNode.new(proc_span, arrow_id, [of_type_expr]))
-                  end
-                end
-              end
+              type_end = previous_token || type_start
+              type_span = type_start.span.cover(type_end.span)
+              of_type_expr = @arena.add_typed(IdentifierNode.new(type_span, type_slice.not_nil!))
             end
 
             closing_span = previous_token.try(&.span) || lbracket.span
@@ -9148,9 +9122,13 @@ module CrystalV2
             advance
             skip_trivia
 
-            # Parse type expression as AST nodes (supports unions, generics, proc types)
-            of_type_expr = parse_expression(0)
-            return PREFIX_ERROR if of_type_expr.invalid?
+            type_start = current_token
+            type_slice = parse_bare_proc_type
+            return PREFIX_ERROR if type_slice.nil?
+
+            type_end = previous_token || type_start
+            type_span = type_start.span.cover(type_end.span)
+            of_type_expr = @arena.add_typed(IdentifierNode.new(type_span, type_slice.not_nil!))
           end
 
           array_span = lbracket.span.cover(closing_bracket.span)
@@ -14613,10 +14591,19 @@ module CrystalV2
 
             # Try to skip over a type
             case current_token.kind
-            when Token::Kind::Identifier, Token::Kind::Self, Token::Kind::ColonColon
-              # Identifier or ::Qualified
-              advance
-              skip_trivia
+            when Token::Kind::ColonColon, Token::Kind::Identifier, Token::Kind::Self
+              if current_token.kind == Token::Kind::ColonColon
+                # Global path: ::Foo::Bar
+                advance
+                skip_trivia
+                return false unless current_token.kind == Token::Kind::Identifier
+                advance
+                skip_trivia
+              else
+                # Identifier or self
+                advance
+                skip_trivia
+              end
 
               # Allow chained ::Foo::Bar in lookahead
               while current_token.kind == Token::Kind::ColonColon
