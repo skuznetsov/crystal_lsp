@@ -3026,7 +3026,10 @@ module Crystal::HIR
       return primitive_name if primitive_name
 
       if desc = @module.get_type_descriptor(type_ref)
-        return nil if desc.kind.in?(TypeKind::Module, TypeKind::Union)
+        return nil if desc.kind == TypeKind::Module
+        if desc.kind == TypeKind::Union
+          return desc.name.includes?("___") ? desc.name.gsub("___", " | ") : desc.name
+        end
         return desc.name
       end
 
