@@ -10489,6 +10489,13 @@ module Crystal::HIR
         end
       end
 
+      if arg_types.any? { |t| t == TypeRef::NIL }
+        if resolved = resolve_nilable_function_type_overload(base_method_name, arg_types, has_block_call)
+          debug_hook("method.resolve", "base=#{base_method_name} resolved=#{resolved} reason=nilable_overload")
+          return cache_method_resolution(cache_key, resolved)
+        end
+      end
+
       if !class_name.empty?
         if resolved_base = resolve_method_with_inheritance(class_name, method_name)
           if numeric_primitive_class_name?(class_name)
@@ -10760,6 +10767,64 @@ module Crystal::HIR
         if param_count < best_param_count || (param_count == best_param_count && score > best_score)
           best_name = name
           best_param_count = param_count
+          best_score = score
+        end
+      end
+
+      best_name
+    end
+
+    private def resolve_nilable_function_type_overload(
+      base_method_name : String,
+      arg_types : Array(TypeRef),
+      has_block_call : Bool
+    ) : String?
+      return nil if base_method_name.empty?
+      return nil unless arg_types.any? { |t| t == TypeRef::NIL }
+
+      best_name : String? = nil
+      best_score = Int32::MIN
+
+      function_type_keys_for_base(base_method_name).each do |name|
+        next if name == base_method_name
+        suffix = name.split("$", 2)[1]? || ""
+        next if suffix.empty?
+        has_block_suffix = suffix.ends_with?("_block")
+        next if has_block_call != has_block_suffix
+        clean_suffix = strip_mangled_suffix_flags(suffix)
+        next if clean_suffix.empty?
+        next if clean_suffix.starts_with?("arity")
+
+        param_types = parse_types_from_suffix(clean_suffix)
+        next unless param_types.size == arg_types.size
+
+        score = 0
+        compatible = true
+        arg_types.each_with_index do |arg_type, idx|
+          param_type = param_types[idx]
+          if param_type == arg_type
+            score += 2
+            next
+          end
+          if arg_type == TypeRef::NIL
+            if is_union_type?(param_type) && get_union_variant_id(param_type, TypeRef::NIL) >= 0
+              score += 1
+              next
+            end
+            compatible = false
+            break
+          end
+          if is_union_type?(param_type) && get_union_variant_id(param_type, arg_type) >= 0
+            score += 1
+            next
+          end
+          compatible = false
+          break
+        end
+        next unless compatible
+
+        if score > best_score
+          best_name = name
           best_score = score
         end
       end
@@ -18265,6 +18330,28 @@ module Crystal::HIR
       left_cond = lower_truthy_check(ctx, left_id, left_type)
 
       rhs_block = ctx.create_block
+      static_left = static_truthy_value(ctx, left_cond)
+      static_left = static_truthy_value(ctx, left_id) if static_left.nil?
+      unless static_left.nil?
+        if op_str == "&&"
+          if static_left
+            ctx.terminate(Jump.new(rhs_block))
+            ctx.current_block = rhs_block
+            lower_condition_branch(ctx, node.right, then_block, else_block)
+          else
+            ctx.terminate(Jump.new(else_block))
+          end
+        else
+          if static_left
+            ctx.terminate(Jump.new(then_block))
+          else
+            ctx.terminate(Jump.new(rhs_block))
+            ctx.current_block = rhs_block
+            lower_condition_branch(ctx, node.right, then_block, else_block)
+          end
+        end
+        return
+      end
       if op_str == "&&"
         ctx.terminate(Branch.new(left_cond, rhs_block, else_block))
         ctx.current_block = rhs_block
@@ -18274,6 +18361,21 @@ module Crystal::HIR
         ctx.current_block = rhs_block
         lower_condition_branch(ctx, node.right, then_block, else_block)
       end
+    end
+
+    private def static_truthy_value(ctx : LoweringContext, value_id : ValueId) : Bool?
+      if value = ctx.value_for(value_id)
+        if value.is_a?(Literal)
+          return false if value.type == TypeRef::NIL
+          if value.type == TypeRef::BOOL
+            return value.value.as(Bool)
+          end
+        end
+      end
+
+      value_type = ctx.type_of(value_id)
+      return false if value_type == TypeRef::NIL
+      nil
     end
 
     private def lower_condition_branch(
@@ -30122,6 +30224,23 @@ module Crystal::HIR
       end
 
       result
+    end
+
+    private def strip_mangled_suffix_flags(suffix : String) : String
+      stripped = suffix
+      flags = ["_block", "_named", "_splat", "_double_splat"]
+      loop do
+        removed = false
+        flags.each do |flag|
+          if stripped.ends_with?(flag)
+            stripped = stripped[0, stripped.size - flag.size]
+            removed = true
+            break
+          end
+        end
+        break unless removed
+      end
+      stripped
     end
 
     private def def_params_untyped?(func_def : CrystalV2::Compiler::Frontend::DefNode) : Bool

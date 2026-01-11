@@ -1398,6 +1398,7 @@ The return_type=16 (NIL) for `to_s` methods is incorrect - should be String type
 - **Fix applied**: infer ivar types from initialize default values for instance-var params; removed `Nil#[]`/`Nil#when` in `Time::Location` transitions (2026-01-xx).
 - **Fix applied**: GEP index cast now truncates i128 → i64 (previously emitted `sext i128 to i64`, which LLVM rejects). This unblocks llc on `bin/fib.cr` with full prelude (2026-01-xx).
 - **Fix applied**: pre-register implicit `self` for instance methods and block capture, so inline-yield and implicit calls use the receiver instead of VOID. `Object#to_s$IO` now logs with `recv=Object` and no `recv=Void` in `/tmp/fib_missing_trace_latest.log` (2026-01-xx).
+- **Fix applied**: treat constant truthy/falsey short-circuit conditions as static; skip RHS lowering for `&&`/`||` when `left_cond` is a literal Bool. Removes `Nil#[]?` in `peek_or_read_utf8$Nil_Int32` (default nil `peek`) and drops those entries from `/tmp/fib_unresolved.log` (2026-02-xx).
 - **Instrumentation**: added `CRYSTAL_V2_UNRESOLVED_CALL_TRACE=1` to log MIR-level unresolved calls (fallback to extern). Top offenders from `/tmp/unresolved_calls.log`: `Pointer(UInt8)#each$block`, `Pointer::Appender#<<$UInt8`, `Time::Location::ZoneTransition#when`, `Nil#offset`, `Time::Location::ZoneTransition#index` (2026-01-xx).
 
 #### Issue 6: ExprId -1 in inline_loop_vars_union (union keyword) - FIXED (2026-01-xx)
