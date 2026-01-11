@@ -6110,6 +6110,12 @@ module Crystal::MIR
         elsif index_llvm == "i64"
           emit "%#{base_name}.idx_int = trunc i64 #{index} to i32"
           index = "%#{base_name}.idx_int"
+        elsif index_llvm == "double"
+          emit "%#{base_name}.idx_int = fptosi double #{index} to i32"
+          index = "%#{base_name}.idx_int"
+        elsif index_llvm == "float"
+          emit "%#{base_name}.idx_int = fptosi float #{index} to i32"
+          index = "%#{base_name}.idx_int"
         end
       end
       # Guard against null index (MIR type mismatch) - default to 0
@@ -6179,6 +6185,12 @@ module Crystal::MIR
           index = "%#{base_name}.idx_int"
         elsif index_llvm == "i64"
           emit "%#{base_name}.idx_int = trunc i64 #{index} to i32"
+          index = "%#{base_name}.idx_int"
+        elsif index_llvm == "double"
+          emit "%#{base_name}.idx_int = fptosi double #{index} to i32"
+          index = "%#{base_name}.idx_int"
+        elsif index_llvm == "float"
+          emit "%#{base_name}.idx_int = fptosi float #{index} to i32"
           index = "%#{base_name}.idx_int"
         end
       end
