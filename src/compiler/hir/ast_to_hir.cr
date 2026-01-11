@@ -673,6 +673,7 @@ module Crystal::HIR
       @classes_with_subclasses = Set(String).new
       @children_by_parent = {} of String => Set(String)
       @module_class_vars = {} of String => Array(ClassVarInfo)
+      @class_var_infer_stack = Set(String).new
       @lib_structs = Set(String).new
       @init_params = {} of String => Array({String, TypeRef})
       @current_class = nil
@@ -1138,6 +1139,8 @@ module Crystal::HIR
     # Map enum ivar/class var names to their enum type names.
     @enum_ivar_types : Hash(String, Hash(String, String))?
     @enum_cvar_types : Hash(String, Hash(String, String))?
+    # Track active class-var inference to avoid recursion.
+    @class_var_infer_stack : Set(String)
 
     private def enum_base_type_for_node(node : CrystalV2::Compiler::Frontend::EnumNode) : TypeRef
       if base = node.base_type
@@ -4730,6 +4733,20 @@ module Crystal::HIR
           entries << "#{String.new(entry.key)}: #{value_name}"
         end
         return type_ref_for_name("NamedTuple(#{entries.join(", ")})")
+      when CrystalV2::Compiler::Frontend::ArrayLiteralNode
+        if of_type = expr_node.of_type
+          if type_str = stringify_type_expr(of_type)
+            element_name = normalize_declared_type_name(type_str)
+            return type_ref_for_name("Array(#{element_name})")
+          end
+        end
+        if first_id = expr_node.elements.first?
+          if elem_type = infer_type_from_expr(first_id, self_type_name)
+            elem_name = get_type_name_from_ref(elem_type)
+            return type_ref_for_name("Array(#{elem_name})") if elem_name != "Void" && elem_name != "Unknown"
+          end
+        end
+        return type_ref_for_name("Array(String)")
       when CrystalV2::Compiler::Frontend::YieldNode
         if @inline_yield_block_return_stack.size >= 2
           if inferred = @inline_yield_block_return_stack[-2]?
@@ -4868,6 +4885,17 @@ module Crystal::HIR
             end
           end
         end
+      when CrystalV2::Compiler::Frontend::ClassVarNode
+        raw_name = String.new(expr_node.name)
+        name = raw_name.lstrip('@')
+        cvar_type = get_class_var_type(name)
+        if cvar_type == TypeRef::VOID
+          owner_name = self_type_name || @current_class
+          if inferred = infer_class_var_type_from_owner(owner_name, name)
+            cvar_type = inferred
+          end
+        end
+        return cvar_type if cvar_type != TypeRef::VOID
       when CrystalV2::Compiler::Frontend::CallNode
         callee_node = node_for_expr(expr_node.callee)
         if callee_node.is_a?(CrystalV2::Compiler::Frontend::MemberAccessNode)
@@ -5109,6 +5137,34 @@ module Crystal::HIR
           body.each do |expr_id|
             member = @arena[expr_id]
             STDERR.puts "[REG_MODULE_MEMBER] type=#{member.class}"
+          end
+        end
+      end
+      if ENV["DEBUG_CLASSVAR_INFER"]? && module_name == "Crystal::AtExitHandlers"
+        if body = node.body
+          body.each do |expr_id|
+            member = unwrap_visibility_member(@arena[expr_id])
+            next unless member.is_a?(CrystalV2::Compiler::Frontend::DefNode)
+            next unless String.new(member.name) == "add"
+            if def_body = member.body
+              def_body.each do |child|
+                child_node = @arena[child]
+                next unless child_node.is_a?(CrystalV2::Compiler::Frontend::CallNode)
+                if block_id = child_node.block
+                  block_node = @arena[block_id]
+                  block_size = block_node.is_a?(CrystalV2::Compiler::Frontend::BlockNode) ? block_node.body.try(&.size) || 0 : 0
+                  STDERR.puts "[REG_MODULE_TOP] AtExitHandlers.add block_body=#{block_size}"
+                  if block_node.is_a?(CrystalV2::Compiler::Frontend::BlockNode)
+                    if block_body = block_node.body
+                      block_body.each do |bid|
+                        expr = @arena[bid]
+                        STDERR.puts "[REG_MODULE_TOP] AtExitHandlers.add block_expr=#{expr.class.name.split("::").last} span=#{expr.span.start_line}"
+                      end
+                    end
+                  end
+                end
+              end
+            end
           end
         end
       end
@@ -6998,6 +7054,15 @@ module Crystal::HIR
           end
           if !param.is_block && !param.is_splat && !param.is_double_splat && call_index < call_types.size
             param_type = refine_param_type_from_call(param_type, call_types[call_index])
+          end
+          if param_type == TypeRef::VOID && !param.is_block && !param.is_splat && !param.is_double_splat
+            if default_value = param.default_value
+              default_node = @arena[default_value]
+              if default_node.is_a?(CrystalV2::Compiler::Frontend::NilNode)
+                object_ref = type_ref_for_name("Object")
+                param_type = create_union_type_for_nullable(object_ref) if object_ref != TypeRef::VOID
+              end
+            end
           end
           param_type_map[param_name] = param_type
           param_infos << {param_name, param_type}
@@ -8961,6 +9026,19 @@ module Crystal::HIR
           if ENV["DEBUG_HASH_PARAMS"]? && method_name == "hash" && param_name == "hasher"
             hasher_ref = type_ref_for_name("Crystal::Hasher")
             STDERR.puts "[HASH_PARAM] class=#{class_name} param_type=#{get_type_name_from_ref(param_type)} hasher=#{get_type_name_from_ref(hasher_ref)}"
+          end
+          if param_type == TypeRef::VOID && !param.is_block && !param.is_splat && !param.is_double_splat
+            if default_value = param.default_value
+              default_node = @arena[default_value]
+              if default_node.is_a?(CrystalV2::Compiler::Frontend::NilNode)
+                object_ref = type_ref_for_name("Object")
+                param_type = create_union_type_for_nullable(object_ref) if object_ref != TypeRef::VOID
+              end
+            end
+          end
+          if ENV["DEBUG_PARAM_TYPES"]? && class_name == "IO::Error" && method_name == "initialize" && param_name == "target"
+            default_kind = param.default_value ? @arena[param.default_value.not_nil!].class.name.split("::").last : "none"
+            STDERR.puts "[PARAM_TYPE] class=#{class_name} param=#{param_name} type=#{get_type_name_from_ref(param_type)} default=#{default_kind}"
           end
           if module_type_ref?(param_type) && (default_value = param.default_value)
             call_type = call_index < call_types.size ? call_types[call_index] : TypeRef::VOID
@@ -13689,6 +13767,212 @@ module Crystal::HIR
       TypeRef::VOID
     end
 
+    private def infer_class_var_type_from_owner(owner_name : String?, cvar_name : String) : TypeRef?
+      return nil unless owner_name
+      key = "#{owner_name}::#{cvar_name}"
+      return nil if @class_var_infer_stack.includes?(key)
+      @class_var_infer_stack.add(key)
+      if ENV["DEBUG_CLASSVAR_INFER"]?
+        STDERR.puts "[CVAR_INFER] owner=#{owner_name} var=#{cvar_name}"
+      end
+
+      types = [] of TypeRef
+      if defs = @module_defs[owner_name]?
+        if ENV["DEBUG_CLASSVAR_INFER"]?
+          STDERR.puts "[CVAR_INFER] owner=#{owner_name} defs=#{defs.size}"
+        end
+        defs.each do |(mod_node, mod_arena)|
+          if ENV["DEBUG_CLASSVAR_INFER"]? && owner_name == "Crystal::AtExitHandlers"
+            current_path = @paths_by_arena[mod_arena]? || "(unknown)"
+            STDERR.puts "[CVAR_INFER] owner=#{owner_name} file=#{current_path} arena=#{mod_arena.class.name.split("::").last}"
+          end
+          body = mod_node.body
+          next unless body
+          with_arena(mod_arena) do
+            old_class = @current_class
+            @current_class = owner_name
+            begin
+              body.each do |expr_id|
+                member = unwrap_visibility_member(@arena[expr_id])
+                case member
+                when CrystalV2::Compiler::Frontend::DefNode
+                  if ENV["DEBUG_CLASSVAR_INFER"]? && owner_name == "Crystal::AtExitHandlers"
+                    def_name = String.new(member.name)
+                    STDERR.puts "[CVAR_INFER] scan def=#{def_name} body=#{member.body.try(&.size) || 0}"
+                    if def_name == "add"
+                      if def_body = member.body
+                        def_body.each do |child|
+                          child_node = @arena[child]
+                          if child_node.is_a?(CrystalV2::Compiler::Frontend::CallNode)
+                            if block_id = child_node.block
+                              block_node = @arena[block_id]
+                              block_size = block_node.is_a?(CrystalV2::Compiler::Frontend::BlockNode) ? block_node.body.try(&.size) || 0 : 0
+                              STDERR.puts "[CVAR_INFER] add block body=#{block_size}"
+                            end
+                          end
+                        end
+                      end
+                    end
+                  end
+                  if def_body = member.body
+                    def_body.each do |child|
+                      collect_class_var_assignment_types(child, cvar_name, owner_name, types)
+                    end
+                  end
+                when CrystalV2::Compiler::Frontend::AssignNode,
+                     CrystalV2::Compiler::Frontend::ClassVarDeclNode
+                  collect_class_var_assignment_types(expr_id, cvar_name, owner_name, types)
+                end
+              end
+            ensure
+              @current_class = old_class
+            end
+          end
+        end
+      end
+
+      begin
+        return nil if types.empty?
+        merged = types.first
+        types[1..].each { |t| merged = union_type_for_values(merged, t) }
+        record_class_var_type(owner_name, cvar_name, merged)
+        if ENV["DEBUG_CLASSVAR_INFER"]?
+          STDERR.puts "[CVAR_INFER] owner=#{owner_name} var=#{cvar_name} type=#{get_type_name_from_ref(merged)}"
+        end
+        merged
+      ensure
+        @class_var_infer_stack.delete(key)
+      end
+    end
+
+    private def infer_class_var_assignment_type(
+      value_id : ExprId,
+      cvar_name : String,
+      self_type_name : String?
+    ) : TypeRef?
+      value_node = @arena[value_id]
+      if value_node.is_a?(CrystalV2::Compiler::Frontend::BinaryNode) &&
+         value_node.operator_string == "||"
+        left = @arena[value_node.left]
+        if left.is_a?(CrystalV2::Compiler::Frontend::ClassVarNode)
+          left_name = String.new(left.name).lstrip('@')
+          if left_name == cvar_name
+            return infer_type_from_expr(value_node.right, self_type_name)
+          end
+        end
+      end
+      infer_type_from_expr(value_id, self_type_name)
+    end
+
+    private def collect_class_var_assignment_types(
+      expr_id : ExprId,
+      cvar_name : String,
+      self_type_name : String?,
+      output : Array(TypeRef)
+    ) : Nil
+      expr_node = @arena[expr_id]
+      case expr_node
+      when CrystalV2::Compiler::Frontend::AssignNode
+        target = @arena[expr_node.target]
+        if ENV["DEBUG_CLASSVAR_INFER"]? && cvar_name == "handlers" && @current_class == "Crystal::AtExitHandlers"
+          target_name = target.is_a?(CrystalV2::Compiler::Frontend::ClassVarNode) ? String.new(target.name) : target.class.name.split("::").last
+          span = expr_node.span
+          STDERR.puts "[CVAR_INFER] assign_node target=#{target_name} span=#{span.start_line}:#{span.start_column}-#{span.end_line}:#{span.end_column}"
+        end
+        if target.is_a?(CrystalV2::Compiler::Frontend::ClassVarNode)
+          name = String.new(target.name).lstrip('@')
+          if name == cvar_name
+            if inferred = infer_class_var_assignment_type(expr_node.value, cvar_name, self_type_name)
+              output << inferred if inferred != TypeRef::VOID
+              if ENV["DEBUG_CLASSVAR_INFER"]?
+                STDERR.puts "[CVAR_INFER] assign=#{cvar_name} type=#{get_type_name_from_ref(inferred)}"
+              end
+            elsif ENV["DEBUG_CLASSVAR_INFER"]?
+              STDERR.puts "[CVAR_INFER] assign=#{cvar_name} type=nil"
+            end
+          end
+        end
+        collect_class_var_assignment_types(expr_node.value, cvar_name, self_type_name, output)
+      when CrystalV2::Compiler::Frontend::ClassVarDeclNode
+        name = String.new(expr_node.name).lstrip('@')
+        if name == cvar_name
+          cvar_type = type_ref_for_name(String.new(expr_node.type))
+          output << cvar_type if cvar_type != TypeRef::VOID
+        end
+        if value_id = expr_node.value
+          collect_class_var_assignment_types(value_id, cvar_name, self_type_name, output)
+        end
+      when CrystalV2::Compiler::Frontend::DefNode
+        if body = expr_node.body
+          body.each { |child| collect_class_var_assignment_types(child, cvar_name, self_type_name, output) }
+        end
+      when CrystalV2::Compiler::Frontend::BlockNode
+        if body = expr_node.body
+          if ENV["DEBUG_CLASSVAR_INFER"]? && cvar_name == "handlers" && @current_class == "Crystal::AtExitHandlers"
+            spans = body.map { |child| @arena[child].span.start_line }
+            STDERR.puts "[CVAR_INFER] block spans=#{spans.join(",")}"
+          end
+          body.each { |child| collect_class_var_assignment_types(child, cvar_name, self_type_name, output) }
+        end
+      when CrystalV2::Compiler::Frontend::IfNode
+        expr_node.then_body.each { |child| collect_class_var_assignment_types(child, cvar_name, self_type_name, output) }
+        if elsifs = expr_node.elsifs
+          elsifs.each { |branch| branch.body.each { |child| collect_class_var_assignment_types(child, cvar_name, self_type_name, output) } }
+        end
+        if else_body = expr_node.else_body
+          else_body.each { |child| collect_class_var_assignment_types(child, cvar_name, self_type_name, output) }
+        end
+      when CrystalV2::Compiler::Frontend::CaseNode
+        expr_node.when_branches.each { |branch| branch.body.each { |child| collect_class_var_assignment_types(child, cvar_name, self_type_name, output) } }
+        if else_branch = expr_node.else_branch
+          else_branch.each { |child| collect_class_var_assignment_types(child, cvar_name, self_type_name, output) }
+        end
+        if in_branches = expr_node.in_branches
+          in_branches.each { |branch| branch.body.each { |child| collect_class_var_assignment_types(child, cvar_name, self_type_name, output) } }
+        end
+      when CrystalV2::Compiler::Frontend::BeginNode
+        expr_node.body.each { |child| collect_class_var_assignment_types(child, cvar_name, self_type_name, output) }
+        if clauses = expr_node.rescue_clauses
+          clauses.each { |clause| clause.body.each { |child| collect_class_var_assignment_types(child, cvar_name, self_type_name, output) } }
+        end
+        if else_body = expr_node.else_body
+          else_body.each { |child| collect_class_var_assignment_types(child, cvar_name, self_type_name, output) }
+        end
+        if ensure_body = expr_node.ensure_body
+          ensure_body.each { |child| collect_class_var_assignment_types(child, cvar_name, self_type_name, output) }
+        end
+      when CrystalV2::Compiler::Frontend::WhileNode
+        expr_node.body.each { |child| collect_class_var_assignment_types(child, cvar_name, self_type_name, output) }
+      when CrystalV2::Compiler::Frontend::UntilNode
+        expr_node.body.each { |child| collect_class_var_assignment_types(child, cvar_name, self_type_name, output) }
+      when CrystalV2::Compiler::Frontend::LoopNode
+        expr_node.body.each { |child| collect_class_var_assignment_types(child, cvar_name, self_type_name, output) }
+      when CrystalV2::Compiler::Frontend::ForNode
+        expr_node.body.each { |child| collect_class_var_assignment_types(child, cvar_name, self_type_name, output) }
+      when CrystalV2::Compiler::Frontend::CallNode
+        if ENV["DEBUG_CLASSVAR_INFER"]? && cvar_name == "handlers" && @current_class == "Crystal::AtExitHandlers"
+          if block_id = expr_node.block
+            block_node = @arena[block_id]
+            block_size = block_node.is_a?(CrystalV2::Compiler::Frontend::BlockNode) ? block_node.body.try(&.size) || 0 : 0
+            STDERR.puts "[CVAR_INFER] call block=yes block_type=#{block_node.class.name.split("::").last} body=#{block_size}"
+          else
+            STDERR.puts "[CVAR_INFER] call block=no"
+          end
+        end
+        if block = expr_node.block
+          collect_class_var_assignment_types(block, cvar_name, self_type_name, output)
+        end
+      when CrystalV2::Compiler::Frontend::ReturnNode
+        if value = expr_node.value
+          collect_class_var_assignment_types(value, cvar_name, self_type_name, output)
+        end
+      when CrystalV2::Compiler::Frontend::GroupingNode
+        collect_class_var_assignment_types(expr_node.expression, cvar_name, self_type_name, output)
+      when CrystalV2::Compiler::Frontend::MacroExpressionNode
+        collect_class_var_assignment_types(expr_node.expression, cvar_name, self_type_name, output)
+      end
+    end
+
     private def record_class_var_type(owner_name : String, cvar_name : String, cvar_type : TypeRef, initial_value : Int64? = nil) : Nil
       return if owner_name.empty?
       return if cvar_type == TypeRef::VOID
@@ -16311,6 +16595,11 @@ module Crystal::HIR
       name = raw_name.lstrip('@')
       cvar_type = get_class_var_type(name)
       class_name = @current_class || ""
+      if cvar_type == TypeRef::VOID
+        if inferred = infer_class_var_type_from_owner(@current_class, name)
+          cvar_type = inferred
+        end
+      end
       class_var_get = ClassVarGet.new(ctx.next_id, cvar_type, class_name, name)
       ctx.emit(class_var_get)
       ctx.register_type(class_var_get.id, cvar_type)
@@ -21801,10 +22090,34 @@ module Crystal::HIR
         end
       end
 
+      # Ensure try receivers have a concrete type when possible (block shorthand often
+      # loses the receiver type and falls back to VOID).
+      if method_name == "try" && receiver_id && ctx.type_of(receiver_id) == TypeRef::VOID
+        if callee_node.is_a?(CrystalV2::Compiler::Frontend::MemberAccessNode)
+          if inferred = infer_type_from_expr(callee_node.object, @current_class)
+            ctx.register_type(receiver_id, inferred) if inferred != TypeRef::VOID
+          end
+        end
+      end
+
       if ENV["DEBUG_TRY_CALL"]? && method_name == "try"
         recv_type = receiver_id ? ctx.type_of(receiver_id) : TypeRef::VOID
         recv_name = receiver_id ? get_type_name_from_ref(recv_type) : "nil"
         STDERR.puts "[TRY_CALL] receiver=#{recv_name} block=#{!block_expr.nil?} block_pass=#{!block_pass_expr.nil?}"
+        if recv_type == TypeRef::VOID && callee_node.is_a?(CrystalV2::Compiler::Frontend::MemberAccessNode)
+          if source = @sources_by_arena[@arena]?
+            receiver_snippet = slice_source_for_expr_in_arena(callee_node.object, @arena, source)
+            STDERR.puts "[TRY_CALL] receiver_expr=#{receiver_snippet}" if receiver_snippet
+            span = node.span
+            start = span.start_offset
+            length = span.end_offset - span.start_offset
+            if length > 0 && start >= 0 && start < source.bytesize
+              slice_len = length > 160 ? 160 : length
+              call_snippet = source.byte_slice(start, slice_len).gsub(/\s+/, " ").strip
+              STDERR.puts "[TRY_CALL] call=#{call_snippet}"
+            end
+          end
+        end
       end
 
       # Handle Range#each { |i| body } and Array#each { |x| body } intrinsics

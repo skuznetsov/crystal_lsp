@@ -1072,6 +1072,8 @@ r2 = maybe(false)  # => nil
 - Resolve superclass name in context when registering classes (fixes `FileDescriptor_initialize_Int32` super call).
 - Seed top-level type names + class kinds in CLI/driver; prefer top-level class/struct over module (fixes `IO::File` resolution in `IO::ARGF` and `IO#read` missing symbols) (2026-01-xx).
 - Resolve top-level type names before namespace prefixing in HIR (generic base seeding + union split) and bump AST cache VERSION to 28 to avoid stale namespace leaks (`File::Path`, `Path::Random`) (2026-01-xx).
+- Treat proc-typed generic args as a single type in `split_generic_type_args` (fixes `Array(Int32, Exception? ->)`), and bump AST cache VERSION to 29 to invalidate stale parsed ASTs (AtExitHandlers block now parses with both statements) (2026-01-xx).
+- Infer class var types from assignment sites inside module/class defs (e.g., `Crystal::AtExitHandlers@@handlers` from `||=` with `[] of ...`) (2026-01-xx).
 - Register MacroIf/MacroLiteral nodes inside nested modules during HIR lowering.
 - Remove `StructNode` handling from macro-parsed class bodies; rely on `ClassNode.is_struct` (2026-01-02).
 - Attach trailing `do` blocks to parenthesized/member-access calls (fixes `Array(T).build(size) do` + `times do` in stdlib) (2026-01-xx).
