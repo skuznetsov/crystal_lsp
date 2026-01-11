@@ -29704,6 +29704,7 @@ module Crystal::HIR
         has_regular = true
         if ta = param.type_annotation
           type_name = String.new(ta)
+          next if type_name == "_"
           next if type_param_like?(type_name) && !@type_param_map.has_key?(type_name)
           return false
         end
