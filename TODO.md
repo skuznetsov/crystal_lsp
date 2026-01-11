@@ -1514,6 +1514,7 @@ The return_type=16 (NIL) for `to_s` methods is incorrect - should be String type
 - Update (2026-02-xx): allow lowering untyped defs with all-default params by inferring call types from defaults (fixes base `IO#read_char_with_bytesize` no-arg calls; no `method.lower.defer` on `read_char_with_bytesize` in debug hooks).
 - Update (2026-02-xx): `CRYSTAL_V2_UNRESOLVED_CALL_TRACE=1` on `bin/fib.cr` shows 283 unresolved calls; `read_char_with_bytesize` no longer appears in `/tmp/fib_unresolved.log`.
 - Update (2026-02-xx): macro arg reparse fallback wraps `record` calls to handle keyword identifiers (`when : Int64`), restoring `ZoneTransition#when`/`#index` getters; unresolved call trace now 256 (from 283).
+- Update (2026-02-xx): `|| raise` now unwraps nilable unions in `lower_short_circuit` and inference (adds `union_unwrap` for `peek_or_read_utf8_masked`); `UInt8 | Nil#to_u32` no longer appears in `/tmp/peek_utf8.hir`.
 
 ### 8.7 Bootstrap Session Notes (2026-01-08) - Linker Symbol Fixes
 

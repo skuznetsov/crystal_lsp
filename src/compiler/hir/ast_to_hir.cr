@@ -4739,6 +4739,20 @@ module Crystal::HIR
       merged
     end
 
+    private def noreturn_expr?(expr_id : ExprId) : Bool
+      node = node_for_expr(expr_id)
+      return false unless node
+      case node
+      when CrystalV2::Compiler::Frontend::RaiseNode,
+           CrystalV2::Compiler::Frontend::ReturnNode,
+           CrystalV2::Compiler::Frontend::BreakNode,
+           CrystalV2::Compiler::Frontend::NextNode
+        true
+      else
+        false
+      end
+    end
+
     private def infer_type_from_expr(expr_id : ExprId, self_type_name : String?) : TypeRef?
       stats = ENV["DEBUG_LOWER_METHOD_STATS"]? ? @lower_method_stats_stack.last? : nil
       stats_start = stats ? Time.monotonic : nil
@@ -4965,12 +4979,19 @@ module Crystal::HIR
           op = value_node.operator_string
           if op == "&&" || op == "||"
             left_type = infer_type_from_expr(value_node.left, self_type_name)
-            right_type = infer_type_from_expr(value_node.right, self_type_name)
-            if left_type && right_type
-              value_type = union_type_for_values(left_type, right_type)
+            right_noreturn = (op == "||") && noreturn_expr?(value_node.right)
+            if right_noreturn
+              if left_type && left_type != TypeRef::VOID
+                value_type = non_nil_type_for_union(left_type) || left_type
+              end
+            else
+              right_type = infer_type_from_expr(value_node.right, self_type_name)
+              if left_type && right_type
+                value_type = union_type_for_values(left_type, right_type)
+              end
+              value_type ||= left_type if left_type && left_type != TypeRef::VOID
+              value_type ||= right_type if right_type && right_type != TypeRef::VOID
             end
-            value_type ||= left_type if left_type && left_type != TypeRef::VOID
-            value_type ||= right_type if right_type && right_type != TypeRef::VOID
           end
         end
         value_type ||= infer_type_from_expr(value_id, self_type_name)
@@ -5138,6 +5159,10 @@ module Crystal::HIR
         op = expr_node.operator_string
         if op == "&&" || op == "||"
           left_type = infer_type_from_expr(expr_node.left, self_type_name)
+          right_noreturn = (op == "||") && noreturn_expr?(expr_node.right)
+          if right_noreturn
+            return non_nil_type_for_union(left_type) || left_type if left_type && left_type != TypeRef::VOID
+          end
           right_type = infer_type_from_expr(expr_node.right, self_type_name)
           if left_type && right_type
             return union_type_for_values(left_type, right_type)
@@ -18131,6 +18156,11 @@ module Crystal::HIR
         ctx.terminate(Jump.new(merge_block))
       end
 
+      if op_str == "||" && else_has_noreturn
+        then_type = ctx.type_of(then_value)
+        then_value = unwrap_non_nil_to_block(ctx, then_exit, then_value, then_type)
+      end
+
       ctx.current_block = merge_block
 
       if then_flows_to_merge || else_flows_to_merge
@@ -30809,6 +30839,39 @@ module Crystal::HIR
 
       # Fallback: return the original value to avoid incorrect narrowing.
       value_id
+    end
+
+    private def unwrap_non_nil_to_block(
+      ctx : LoweringContext,
+      block_id : BlockId,
+      value_id : ValueId,
+      value_type : TypeRef
+    ) : ValueId
+      return value_id unless is_union_or_nilable_type?(value_type)
+
+      non_nil_type = TypeRef::POINTER
+      non_nil_variant = -1
+      extra_non_nil = false
+
+      mir_union_ref = hir_to_mir_type_ref(value_type)
+      if descriptor = @union_descriptors[mir_union_ref]?
+        descriptor.variants.each_with_index do |variant, idx|
+          next if variant.type_ref == MIR::TypeRef::NIL
+          if non_nil_variant >= 0
+            extra_non_nil = true
+            break
+          end
+          non_nil_variant = idx
+          non_nil_type = mir_to_hir_type_ref(variant.type_ref)
+        end
+      end
+
+      return value_id if non_nil_variant < 0 || extra_non_nil
+
+      unwrap = UnionUnwrap.new(ctx.next_id, non_nil_type, value_id, non_nil_variant, false)
+      ctx.emit_to_block(block_id, unwrap)
+      ctx.register_type(unwrap.id, non_nil_type)
+      unwrap.id
     end
   end
 end
