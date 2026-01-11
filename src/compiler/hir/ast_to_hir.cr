@@ -4837,6 +4837,11 @@ module Crystal::HIR
         end
       when CrystalV2::Compiler::Frontend::PathNode
         full_name = resolve_path_string_in_context(collect_path_string(expr_node))
+        if mapped = @type_param_map[full_name]?
+          if literal = literal_for_type_param_value(mapped)
+            return literal[0]
+          end
+        end
         parts = full_name.split("::")
         if parts.size >= 2
           member = parts.last
@@ -4907,11 +4912,16 @@ module Crystal::HIR
       when CrystalV2::Compiler::Frontend::SelfNode
         return type_ref_for_name(self_type_name) if self_type_name
       when CrystalV2::Compiler::Frontend::IdentifierNode
+        name = String.new(expr_node.name)
+        if mapped = @type_param_map[name]?
+          if literal = literal_for_type_param_value(mapped)
+            return literal[0]
+          end
+        end
         if self_type_name && String.new(expr_node.name) == "self"
           return type_ref_for_name(self_type_name)
         end
         if locals = @current_typeof_locals
-          name = String.new(expr_node.name)
           if type_ref = locals[name]?
             return type_ref if type_ref != TypeRef::VOID
           end
@@ -5151,6 +5161,73 @@ module Crystal::HIR
       else
         TypeRef::INT32
       end
+    end
+
+    private def literal_for_type_param_value(value : String) : {TypeRef, LiteralValue}?
+      raw = value.strip
+      return {TypeRef::BOOL, true} if raw == "true"
+      return {TypeRef::BOOL, false} if raw == "false"
+
+      suffix = raw.match(/_(i|u)(8|16|32|64|128)\z/)
+      signed = true
+      bits = 0
+      if suffix
+        signed = suffix[1] == "i"
+        bits = suffix[2].to_i
+        raw = raw[0, raw.size - suffix[0].size]
+      end
+
+      negative = raw.starts_with?("-")
+      raw = raw[1..] if negative
+
+      base = 10
+      if raw.starts_with?("0x")
+        base = 16
+        raw = raw[2..]
+      elsif raw.starts_with?("0b")
+        base = 2
+        raw = raw[2..]
+      elsif raw.starts_with?("0o")
+        base = 8
+        raw = raw[2..]
+      end
+
+      raw = raw.gsub('_', "")
+      return nil if raw.empty?
+
+      if signed
+        int_value = raw.to_i64(base)
+        int_value = -int_value if negative
+        type = case bits
+               when 8  then TypeRef::INT8
+               when 16 then TypeRef::INT16
+               when 32 then TypeRef::INT32
+               when 64 then TypeRef::INT64
+               when 128 then TypeRef::INT128
+               else
+                 if int_value >= Int32::MIN && int_value <= Int32::MAX
+                   TypeRef::INT32
+                 else
+                   TypeRef::INT64
+                 end
+               end
+        return {type, int_value}
+      end
+
+      return nil if negative
+      uint_value = raw.to_u64(base)
+      type = case bits
+             when 8  then TypeRef::UINT8
+             when 16 then TypeRef::UINT16
+             when 32 then TypeRef::UINT32
+             when 64 then TypeRef::UINT64
+             when 128 then TypeRef::UINT128
+             else
+               TypeRef::UINT64
+             end
+      {type, uint_value}
+    rescue
+      nil
     end
 
     private def infer_arg_types_for_call(args : Array(ExprId), self_type_name : String?) : Array(TypeRef)
@@ -12361,6 +12438,10 @@ module Crystal::HIR
       if cached = @resolved_type_name_cache[cache_key]?
         return cached
       end
+      if value_literal_name?(name)
+        @resolved_type_name_cache[cache_key] = name
+        return name
+      end
       if name.includes?("|")
         parts = split_union_type_name(name)
         if parts.size > 1
@@ -12457,6 +12538,7 @@ module Crystal::HIR
 
     private def resolve_path_string_in_context(path : String) : String
       return path if path.empty?
+      return path if value_literal_name?(path)
       if type_param_like?(path) && path.size <= 2 && !@type_param_map.has_key?(path)
         return path
       end
@@ -12902,6 +12984,11 @@ module Crystal::HIR
     private def type_param_map_debug_string : String
       return "" if @type_param_map.empty?
       @type_param_map.map { |param, actual| "#{param}=#{actual}" }.join(",")
+    end
+
+    private def value_literal_name?(name : String) : Bool
+      return true if name == "true" || name == "false"
+      name.matches?(/\A-?(0x[0-9A-Fa-f_]+|0b[01_]+|0o[0-7_]+|[0-9_]+)(_[iu](8|16|32|64|128))?\z/)
     end
 
     private def type_param_like?(name : String) : Bool
@@ -16681,6 +16768,14 @@ module Crystal::HIR
         STDERR.puts "[BLOCK_PARAMS] missing_local name=#{name} scope=#{ctx.current_scope}"
       end
 
+      if mapped = @type_param_map[name]?
+        if literal = literal_for_type_param_value(mapped)
+          lit = Literal.new(ctx.next_id, literal[0], literal[1])
+          ctx.emit(lit)
+          return lit.id
+        end
+      end
+
       if name[0].uppercase?
         resolved = resolve_type_name_in_context(name)
         resolved = resolve_type_alias_chain(resolved)
@@ -17288,6 +17383,13 @@ module Crystal::HIR
       end
 
       full_path = resolve_path_string_in_context(collect_path_string(node))
+      if mapped = @type_param_map[full_path]?
+        if literal = literal_for_type_param_value(mapped)
+          lit = Literal.new(ctx.next_id, literal[0], literal[1])
+          ctx.emit(lit)
+          return lit.id
+        end
+      end
       if type_name_exists?(full_path) || @type_aliases.has_key?(full_path) || @generic_templates.has_key?(full_path)
         return lower_type_literal_from_name(ctx, full_path)
       end
