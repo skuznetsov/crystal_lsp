@@ -1460,13 +1460,21 @@ The return_type=16 (NIL) for `to_s` methods is incorrect - should be String type
   - Index HIR functions by base name (avoid scanning module.functions for fuzzy matches) (2026-01-xx).
 - **Profile check** (2026-01-xx):
   - `tmp/profile_parser.cr` with `DEBUG_LOWER_METHOD_TIME=1` shows ~2.1–2.3s self-time per Parser parse_* method (parse_program/parse_macro_*), resolve/infer time ≈ 0. Cost is raw lowering, not lookup/inference.
-  - `DEBUG_LOWER_PROGRESS=Parser#parse_program DEBUG_LOWER_SLOW_MS=50` shows slowest node is the `parse_macro_definition` call (dominant cost inside parse_program).
-  - Chain from `parse_program` slow node: `parse_macro_definition` → `parse_macro_body` → `parse_macro_control_piece` → `parse_macro_for_header` → `parse_expression(0)` (all ~2.1s self-time). Root cost is `parse_expression` lowering itself.
-  - `parse_expression` slow node is `parse_prefix`; `parse_prefix` slow node is its large `case token.kind` dispatch. Cost scales with method body size; suggests HIR caching/pre-lowered blobs for compiler frontend would be higher leverage than more lookup caching.
+- `DEBUG_LOWER_PROGRESS=Parser#parse_program DEBUG_LOWER_SLOW_MS=50` shows slowest node is the `parse_macro_definition` call (dominant cost inside parse_program).
+- Chain from `parse_program` slow node: `parse_macro_definition` → `parse_macro_body` → `parse_macro_control_piece` → `parse_macro_for_header` → `parse_expression(0)` (all ~2.1s self-time). Root cost is `parse_expression` lowering itself.
+- `parse_expression` slow node is `parse_prefix`; `parse_prefix` slow node is its large `case token.kind` dispatch. Cost scales with method body size; suggests HIR caching/pre-lowered blobs for compiler frontend would be higher leverage than more lookup caching.
 - **Next**:
   - Profile for hotspots inside lowering (resolve_method_call / infer_type_from_expr / lower_function_if_needed).
   - Consider caching/memoization or an indexed lookup to avoid repeated full-map scans.
   - `DEBUG_LOWER_METHOD_STATS=1 DEBUG_LOWER_METHOD_TIME=register_enum` shows resolve/infer time = 0; register_enum time is dominated by raw lowering cost, not inference (2026-01-xx).
+
+#### Issue 9: Untyped base methods generate unqualified calls (index$UInt8) - FIXED (2026-01-xx)
+- **Symptom**: missing-trace reports `index$UInt8` with `recv=Void` from `peek.index(delimiter_byte)` in `IO#gets`.
+- **HIR evidence**: both `IO#gets_peek$Char_Int32_Bool_Slice(UInt8)` (typed) and an untyped `IO#gets_peek(%1: 0, %2: 0, %3: 0, %4: 0)` are lowered. The untyped base emits `call %19.index$UInt8(%20)` (no owner), producing missing symbols.
+- **Hypothesis**: eager lowering of defs happens before callsite arg types are recorded, so untyped methods are lowered with VOID params even though specialized callsites exist.
+- **Fix applied**:
+  - Defer lowering methods with all-VOID params unless a callsite signature is present (guard in `lower_method`).
+  - Verification: `/tmp/gets_peek.hir` has `IO#gets_peek$Char_Int32_Bool_Slice(UInt8)` and no untyped `IO#gets_peek` or `index$UInt8` entries.
 
 **Next steps for GPT-5.2**:
 1. **Flow typing for variable reassignment**: DONE (see Issue 3).

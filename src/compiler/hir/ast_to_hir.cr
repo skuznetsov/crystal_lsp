@@ -9016,6 +9016,24 @@ module Crystal::HIR
         return if node.body.nil?
       end
 
+      # Defer lowering for untyped params until call-site types are available.
+      if def_params_untyped?(node)
+        call_types = call_arg_types || [] of TypeRef
+        if (call_types.empty? || call_types.all? { |t| t == TypeRef::VOID }) &&
+           full_name_override && full_name_override.includes?("$")
+          suffix = full_name_override.split("$", 2)[1]
+          parsed_types = parse_types_from_suffix(suffix)
+          unless parsed_types.empty?
+            call_types = parsed_types
+            call_arg_types = parsed_types
+          end
+        end
+        if call_types.empty? || call_types.all? { |t| t == TypeRef::VOID }
+          debug_hook("method.lower.defer", "class=#{class_name} method=#{method_name} reason=untyped_params") if DebugHooks::ENABLED
+          return
+        end
+      end
+
       # Enum value tracking is per-function; preserve outer context.
       old_enum_value_types = @enum_value_types
       @enum_value_types = nil
