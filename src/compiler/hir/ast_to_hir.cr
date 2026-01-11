@@ -29859,6 +29859,24 @@ module Crystal::HIR
           return TypeRef::VOID if lookup_name.size <= 2
         end
       end
+      if !@type_param_map.empty? && !lookup_name.includes?("(") && lookup_name.includes?("::")
+        if current = @current_class
+          current_base = if info = split_generic_base_and_args(current)
+                           info[:base]
+                         else
+                           current
+                         end
+          if lookup_name.starts_with?("#{current_base}::")
+            if template = @generic_templates[lookup_name]?
+              mapped_args = template.type_params.map { |param| @type_param_map[param]? }
+              if mapped_args.all?(&.itself)
+                specialized_name = "#{lookup_name}(#{mapped_args.join(", ")})"
+                return type_ref_for_name(specialized_name)
+              end
+            end
+          end
+        end
+      end
       if lookup_name.ends_with?(".class") || lookup_name.ends_with?(".metaclass")
         if base_name = resolve_type_literal_class_name(lookup_name)
           cache_key = type_cache_key(lookup_name)
