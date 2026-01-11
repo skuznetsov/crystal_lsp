@@ -637,6 +637,7 @@ module Crystal::HIR
     @block_node_arenas : Hash(UInt64, CrystalV2::Compiler::Frontend::ArenaLike) = {} of UInt64 => CrystalV2::Compiler::Frontend::ArenaLike
     # Map block node object ids to their defining scope (class/method).
     @block_owner : Hash(UInt64, {class_name: String?, method_name: String?, is_class: Bool}) = {} of UInt64 => {class_name: String?, method_name: String?, is_class: Bool}
+    @block_owner_self_ids : Hash(UInt64, ValueId) = {} of UInt64 => ValueId
 
     # Track declared type names for locals (used to resolve module-typed receivers).
     @current_typeof_local_names : Hash(String, String)?
@@ -765,6 +766,7 @@ module Crystal::HIR
       @block_captures = {} of BlockId => Array(CapturedVar)
       @block_node_arenas = {} of UInt64 => CrystalV2::Compiler::Frontend::ArenaLike
       @block_owner = {} of UInt64 => {class_name: String?, method_name: String?, is_class: Bool}
+      @block_owner_self_ids = {} of UInt64 => ValueId
       @sources_by_arena = sources_by_arena || {} of CrystalV2::Compiler::Frontend::ArenaLike => String
       @line_counts_by_arena = {} of CrystalV2::Compiler::Frontend::ArenaLike => Int32
       @paths_by_arena = paths_by_arena || {} of CrystalV2::Compiler::Frontend::ArenaLike => String
@@ -7314,6 +7316,12 @@ module Crystal::HIR
 
       func = @module.create_function(full_name, return_type)
       ctx = LoweringContext.new(func, @module, @arena)
+      if ctx.lookup_local("self").nil? && func.name.includes?("#")
+        if receiver_param = func.params.first?
+          ctx.register_local("self", receiver_param.id)
+          ctx.register_type(receiver_param.id, receiver_param.type)
+        end
+      end
 
       # Lower parameters (no self for module methods)
       param_infos.each_with_index do |(param_name, param_type), idx|
@@ -17433,6 +17441,15 @@ module Crystal::HIR
       if self_id = ctx.lookup_local("self")
         return self_id
       end
+      param = ctx.function.params.find { |p| p.name == "self" }
+      if param.nil? && ctx.function.name.includes?("#")
+        param = ctx.function.params.first?
+      end
+      if param
+        ctx.register_local("self", param.id)
+        ctx.register_type(param.id, param.type)
+        return param.id
+      end
 
       # Create implicit self parameter
       local = Local.new(ctx.next_id, TypeRef::VOID, "self", ctx.current_scope, mutable: false)
@@ -21698,6 +21715,12 @@ module Crystal::HIR
         if ENV.has_key?("DEBUG_CALL_PATH") && method_name == "byte_range"
           STDERR.puts "[CALL_PATH] IdentifierNode method=#{method_name} @current_class=#{@current_class || "nil"}"
         end
+        if ctx.lookup_local("self").nil? && @inline_yield_block_body_depth > 0
+          if value_id = inline_caller_local_id("self")
+            ctx.register_local("self", value_id)
+            ctx.register_type(value_id, ctx.type_of(value_id))
+          end
+        end
         if self_id = ctx.lookup_local("self")
           self_type = ctx.type_of(self_id)
           if self_type != TypeRef::VOID
@@ -21710,7 +21733,9 @@ module Crystal::HIR
                         end
             if !self_name.empty?
               self_method_name = "#{self_name}##{method_name}"
-              if @function_types.has_key?(self_method_name) || has_function_base?(self_method_name)
+              if @function_types.has_key?(self_method_name) ||
+                 has_function_base?(self_method_name) ||
+                 @function_defs.has_key?(self_method_name)
                 receiver_id = self_id
                 full_method_name = resolve_method_with_inheritance(self_name, method_name) || self_method_name
               end
@@ -26605,7 +26630,11 @@ module Crystal::HIR
       # Isolate callee locals from caller locals, but keep caller locals available for block bodies.
       caller_locals = ctx.save_locals
       @inline_caller_locals_stack << caller_locals
-      ctx.restore_locals({} of String => ValueId)
+      preserved_locals = {} of String => ValueId
+      if self_id = caller_locals["self"]?
+        preserved_locals["self"] = self_id
+      end
+      ctx.restore_locals(preserved_locals)
 
       begin
         pushed_name = false
@@ -26638,6 +26667,9 @@ module Crystal::HIR
           method_name: old_current_method,
           is_class: old_current_method_is_class || false,
         }
+        if self_id = caller_locals["self"]?
+          @block_owner_self_ids[block.object_id] ||= self_id
+        end
         inferred_block_return = inline_block_return_type_name(block, block_param_types, old_current_class)
         if inferred_block_return
           @inline_yield_block_return_stack[-1] = inferred_block_return
@@ -26873,8 +26905,35 @@ module Crystal::HIR
       # For inlined yield-functions, the block body must run in the *caller* lexical scope
       # (caller locals, caller `self`). Otherwise ivar access inside the block can target
       # the callee receiver (e.g. `tap` receiver) and generate invalid IR.
-      result = if caller_locals = @inline_caller_locals_stack.last?
-        owner = @block_owner[block.object_id]?
+      owner = @block_owner[block.object_id]?
+      caller_locals_index = @inline_caller_locals_stack.size - 1
+      if owner
+        matched = false
+        (@inline_caller_class_stack.size - 1).downto(0) do |idx|
+          next unless @inline_caller_class_stack[idx]? == owner[:class_name]
+          owner_method = owner[:method_name]
+          stack_method = @inline_caller_method_stack[idx]?
+          if owner_method.nil? || owner_method.empty? || stack_method == owner_method
+            caller_locals_index = idx
+            matched = true
+            break
+          end
+        end
+        if !matched
+          (@inline_caller_class_stack.size - 1).downto(0) do |idx|
+            next unless @inline_caller_class_stack[idx]? == owner[:class_name]
+            caller_locals_index = idx
+            break
+          end
+        end
+      end
+      result = if caller_locals = @inline_caller_locals_stack[caller_locals_index]?
+        if owner_self_id = @block_owner_self_ids[block.object_id]?
+          unless caller_locals.has_key?("self")
+            caller_locals = caller_locals.dup
+            caller_locals["self"] = owner_self_id
+          end
+        end
         caller_class = owner ? owner[:class_name] : @inline_caller_class_stack.last?
         caller_method = owner ? owner[:method_name] : @inline_caller_method_stack.last?
         caller_is_class = owner ? owner[:is_class] : (@inline_caller_method_is_class_stack.last? || false)
@@ -26990,7 +27049,7 @@ module Crystal::HIR
               end
             end
           end
-          @inline_caller_locals_stack[-1] = caller_locals_after
+          @inline_caller_locals_stack[caller_locals_index] = caller_locals_after
 
           ctx.restore_locals(saved_callee_locals)
           body_result
@@ -28790,8 +28849,21 @@ module Crystal::HIR
         method_name: @current_method,
         is_class: @current_method_is_class,
       }
+      if ctx.lookup_local("self").nil?
+        param = ctx.function.params.find { |p| p.name == "self" }
+        if param.nil? && ctx.function.name.includes?("#")
+          param = ctx.function.params.first?
+        end
+        if param
+          ctx.register_local("self", param.id)
+          ctx.register_type(param.id, param.type)
+        end
+      end
       # Save locals before lowering block body - block-local vars shouldn't leak
       saved_locals = ctx.save_locals
+      if self_id = saved_locals["self"]?
+        @block_owner_self_ids[node.object_id] = self_id
+      end
       assigned_vars = collect_assigned_vars(node.body).to_set
       if params = node.params
         params.each do |param|
