@@ -3138,7 +3138,9 @@ module Crystal::HIR
       method_name : String,
       receiver_id : ValueId?,
       arg_types : Array(TypeRef),
-      reason : String
+      reason : String,
+      call_virtual : Bool,
+      abstract_target : Bool
     ) : Nil
       return unless DebugHooks::ENABLED && ENV["CRYSTAL_V2_MISSING_TRACE"]?
 
@@ -3147,7 +3149,7 @@ module Crystal::HIR
       recv_name = receiver_id ? type_name_for_mangling(ctx.type_of(receiver_id)) : "nil"
       arg_names = arg_types.map { |t| type_name_for_mangling(t) }.join(",")
       snippet = callsite_snippet_for(@arena, span)
-      data = "symbol=#{mangled_name} base=#{base_name} method=#{method_name} recv=#{recv_name} args=#{arg_names} path=#{path} span=#{span.start_line}:#{span.start_column}-#{span.end_line}:#{span.end_column} reason=#{reason}"
+      data = "symbol=#{mangled_name} base=#{base_name} method=#{method_name} recv=#{recv_name} args=#{arg_names} path=#{path} span=#{span.start_line}:#{span.start_column}-#{span.end_line}:#{span.end_column} reason=#{reason} virtual=#{call_virtual} abstract=#{abstract_target}"
       if snippet && !snippet.empty?
         data += " snippet=\"#{snippet}\""
       end
@@ -23623,7 +23625,10 @@ module Crystal::HIR
       end
       if DebugHooks::ENABLED && ENV["CRYSTAL_V2_MISSING_TRACE"]?
         unless @module.has_function?(mangled_method_name) || @module.has_function?(primary_mangled_name)
-          trace_missing_symbol(ctx, node, mangled_method_name, base_method_name, method_name, receiver_id, arg_types, "unlowered")
+          abstract_target = abstract_def?(mangled_method_name) ||
+            abstract_def?(primary_mangled_name) ||
+            (base_method_name != mangled_method_name && abstract_def?(base_method_name))
+          trace_missing_symbol(ctx, node, mangled_method_name, base_method_name, method_name, receiver_id, arg_types, "unlowered", call_virtual, abstract_target)
         end
       end
       call = Call.new(ctx.next_id, return_type, receiver_id, mangled_method_name, args, block_id, call_virtual)
