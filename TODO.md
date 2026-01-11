@@ -1544,6 +1544,7 @@ The return_type=16 (NIL) for `to_s` methods is incorrect - should be String type
 - Inline yield propagation: carry block param types (including fallback element inference for `String`/`Enumerable`), coerce yield args, and preserve param types across nested inlining.
 - Inline yield fallback now filters by receiver ancestry; prevents `Crystal::DWARF::Info#each` from inlining into unrelated methods (removed `Nil#read_attribute_value` from `String#compare` HIR; verified via `rg` on `/tmp/bootstrap_array_full_nocache.hir`).
 - Yield block param inference now scans callee bodies when block type annotations are missing (e.g., `Deque.half_slices`), using yield argument types to set block param types. This removes `Pointer(UInt8)#each$block` unresolved calls; verified with `CRYSTAL_V2_UNRESOLVED_CALL_TRACE=1 ... --no-link bin/fib.cr` (2026-01-xx).
+- `TernaryNode` now participates in yield detection and yield-arg collection, so yield-functions like `Hash#put` are correctly marked and inlined. This removes unresolved `Hash(... )#put$..._block` calls; `CRYSTAL_V2_STOP_AFTER_MIR=1 CRYSTAL_V2_UNRESOLVED_CALL_TRACE=1 ... bin/fib.cr` shows 313→286 unresolved (2026-01-xx).
 - Allow lowering untyped base defs when no typed overloads exist (fixes `Crystal::DWARF::LineNumbers#decode_sequences` missing symbol in `/tmp/fib_link.log`).
 - Parenthesized calls no longer attach `{}`/`do` blocks across newlines (prevents `if foo() { ... }` from stealing the then-body tuple literal; `Path#separators` now parsed inside the `Path` class).
 

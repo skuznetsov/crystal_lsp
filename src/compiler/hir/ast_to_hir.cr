@@ -11839,6 +11839,22 @@ module Crystal::HIR
       result
     end
 
+    private def yield_function_name_for(method_name : String) : String?
+      return method_name if @yield_functions.includes?(method_name)
+
+      stripped = strip_generic_receiver_from_method_name(method_name)
+      return stripped if @yield_functions.includes?(stripped)
+
+      return nil if stripped == method_name
+
+      @yield_functions.each do |name|
+        next unless strip_generic_receiver_from_method_name(name) == stripped
+        return name
+      end
+
+      nil
+    end
+
     private def infer_ivars_from_body(body : Array(ExprId), ivars : Array(IVarInfo), offset_ref : Pointer(Int32)) : Nil
       body.each { |expr_id| infer_ivars_from_expr(expr_id, ivars, offset_ref) }
     end
@@ -11989,6 +12005,10 @@ module Crystal::HIR
       when CrystalV2::Compiler::Frontend::BinaryNode
         collect_yield_arg_lists(node.left, lists)
         collect_yield_arg_lists(node.right, lists)
+      when CrystalV2::Compiler::Frontend::TernaryNode
+        collect_yield_arg_lists(node.condition, lists)
+        collect_yield_arg_lists(node.true_branch, lists)
+        collect_yield_arg_lists(node.false_branch, lists)
       when CrystalV2::Compiler::Frontend::GroupingNode
         collect_yield_arg_lists(node.expression, lists)
       when CrystalV2::Compiler::Frontend::MacroExpressionNode
@@ -12092,6 +12112,10 @@ module Crystal::HIR
         contains_yield_in_expr?(node.operand)
       when CrystalV2::Compiler::Frontend::BinaryNode
         contains_yield_in_expr?(node.left) || contains_yield_in_expr?(node.right)
+      when CrystalV2::Compiler::Frontend::TernaryNode
+        contains_yield_in_expr?(node.condition) ||
+          contains_yield_in_expr?(node.true_branch) ||
+          contains_yield_in_expr?(node.false_branch)
       when CrystalV2::Compiler::Frontend::GroupingNode
         contains_yield_in_expr?(node.expression)
       when CrystalV2::Compiler::Frontend::MacroExpressionNode
@@ -13254,6 +13278,20 @@ module Crystal::HIR
         mapping[param] = args[i].strip
       end
       mapping
+    end
+
+    private def strip_generic_receiver_from_method_name(method_name : String) : String
+      sep = method_name.index('#') || method_name.index('.')
+      return method_name unless sep
+
+      receiver = method_name[0, sep]
+      return method_name unless receiver.includes?("(")
+
+      if info = split_generic_base_and_args(receiver)
+        return "#{info[:base]}#{method_name[sep..-1]}"
+      end
+
+      method_name
     end
 
     private def block_return_type_name(ctx : LoweringContext, block_id : BlockId) : String?
@@ -23411,11 +23449,13 @@ module Crystal::HIR
               STDERR.puts "[YIELD_INLINE]   base_in_yield_functions=#{@yield_functions.includes?(base_method_name)}"
               STDERR.puts "[YIELD_INLINE]   base_in_function_defs=#{@function_defs.has_key?(base_method_name)}"
             end
-            if !skip_inline && @yield_functions.includes?(base_method_name)
-              if func_def = @function_defs[base_method_name]?
-                debug_hook("call.inline.yield", "callee=#{base_method_name} current=#{@current_class || ""}")
-                callee_arena = @function_def_arenas[base_method_name]? || @arena
-                return inline_yield_function(ctx, func_def, base_method_name, receiver_id, call_args, block_cast, block_param_types_inline, callee_arena)
+            if !skip_inline
+              if yield_name = yield_function_name_for(base_method_name)
+                if func_def = @function_defs[yield_name]?
+                  debug_hook("call.inline.yield", "callee=#{yield_name} current=#{@current_class || ""}")
+                  callee_arena = @function_def_arenas[yield_name]? || @arena
+                  return inline_yield_function(ctx, func_def, yield_name, receiver_id, call_args, block_cast, block_param_types_inline, callee_arena)
+                end
               end
             end
 
@@ -26821,8 +26861,16 @@ module Crystal::HIR
       namespace_override = function_namespace_override_for(inline_key, base_inline_name)
       if receiver = receiver_name_from_method_name(base_inline_name)
         if unresolved_generic_receiver?(receiver)
-          debug_hook("inline.yield.skip", "callee=#{inline_key} receiver=#{receiver} reason=unresolved_generic")
-          return inline_yield_fallback_call(ctx, inline_key, receiver_id, call_args, block, block_param_types)
+          if receiver_id
+            receiver_type_map = type_param_map_for_receiver_type(ctx.type_of(receiver_id))
+            if receiver_type_map.empty?
+              debug_hook("inline.yield.skip", "callee=#{inline_key} receiver=#{receiver} reason=unresolved_generic")
+              return inline_yield_fallback_call(ctx, inline_key, receiver_id, call_args, block, block_param_types)
+            end
+          else
+            debug_hook("inline.yield.skip", "callee=#{inline_key} receiver=#{receiver} reason=unresolved_generic")
+            return inline_yield_fallback_call(ctx, inline_key, receiver_id, call_args, block, block_param_types)
+          end
         end
       end
       if ENV["DEBUG_YIELD_INLINE_ALL"]?
@@ -26961,6 +27009,12 @@ module Crystal::HIR
           end
         end
         inline_param_map = type_param_map_for_receiver_name(base_inline_name)
+        if receiver_id
+          receiver_type_map = type_param_map_for_receiver_type(ctx.type_of(receiver_id))
+          if !receiver_type_map.empty?
+            inline_param_map = inline_param_map.merge(receiver_type_map)
+          end
+        end
         if registered = function_type_param_map_for(inline_key, base_inline_name)
           inline_param_map = inline_param_map.merge(registered)
         end
