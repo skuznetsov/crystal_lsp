@@ -9191,28 +9191,26 @@ module Crystal::HIR
           end
         end
         if call_types.empty? || call_types.all? { |t| t == TypeRef::VOID }
-          if method_name == "initialize"
-            if params = node.params
-              inferred = [] of TypeRef
-              all_defaulted = true
-              params.each do |param|
-                next if param.is_block || named_only_separator?(param)
-                if ta = param.type_annotation
-                  inferred << type_ref_for_name(String.new(ta))
-                elsif param.is_double_splat
-                  inferred << type_ref_for_name("NamedTuple")
-                elsif default_value = param.default_value
-                  inferred_type = infer_type_from_expr(default_value, class_name)
-                  inferred << (inferred_type || TypeRef::VOID)
-                else
-                  all_defaulted = false
-                  break
-                end
+          if params = node.params
+            inferred = [] of TypeRef
+            all_defaulted = true
+            params.each do |param|
+              next if param.is_block || named_only_separator?(param)
+              if ta = param.type_annotation
+                inferred << type_ref_for_name(String.new(ta))
+              elsif param.is_double_splat
+                inferred << type_ref_for_name("NamedTuple")
+              elsif default_value = param.default_value
+                inferred_type = infer_type_from_expr(default_value, class_name)
+                inferred << (inferred_type || TypeRef::VOID)
+              else
+                all_defaulted = false
+                break
               end
-              if all_defaulted && inferred.any? { |t| t != TypeRef::VOID }
-                call_types = inferred
-                call_arg_types = inferred
-              end
+            end
+            if all_defaulted && inferred.any? { |t| t != TypeRef::VOID }
+              call_types = inferred
+              call_arg_types = inferred
             end
           end
         end
