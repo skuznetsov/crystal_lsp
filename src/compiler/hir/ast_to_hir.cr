@@ -15679,11 +15679,11 @@ module Crystal::HIR
       case body_node
       when CrystalV2::Compiler::Frontend::MacroLiteralNode
         if raw_text = macro_literal_raw_text(body_node)
-          if parsed = parse_macro_literal_method_body(raw_text)
+          if parsed = parse_macro_literal_for_context(raw_text)
             return lower_parsed_macro_body(ctx, parsed)
           elsif raw_text.includes?("{%")
             if expanded = expand_flag_macro_text(raw_text)
-              if parsed = parse_macro_literal_method_body(expanded)
+              if parsed = parse_macro_literal_for_context(expanded)
                 return lower_parsed_macro_body(ctx, parsed)
               end
             end
@@ -15718,6 +15718,31 @@ module Crystal::HIR
         # Direct expression
         lower_expr(ctx, body_id)
       end
+    end
+
+    private def parse_macro_literal_for_context(code : String) : Tuple(CrystalV2::Compiler::Frontend::Program, Array(ExprId))?
+      if @current_method
+        if parsed = parse_macro_literal_method_body(code)
+          return parsed
+        end
+      end
+
+      if current = @current_class
+        if @module.is_lib?(current)
+          if parsed = parse_macro_literal_lib_body(code)
+            return parsed
+          end
+        end
+        if parsed = parse_macro_literal_class_body(code)
+          return parsed
+        end
+      end
+
+      if program = parse_macro_literal_program(code)
+        return {program, program.roots}
+      end
+
+      nil
     end
 
     private def lower_parsed_macro_body(
