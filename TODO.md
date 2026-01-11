@@ -1340,6 +1340,7 @@ r2 = maybe(false)  # => nil
 - `DEBUG_LOWER_SLOW_ONLY=1` - only log slow expressions in lower_def when DEBUG_LOWER_PROGRESS matches
 - `DEBUG_LOWER_PROGRESS_EVERY=N` - log every Nth expr index during lower_def progress (reduces snippet spam)
 - `DEBUG_LOWER_METHOD_SLOW_MS=NN` - log method lowering times only when >= NN ms
+- Missing trace entries now include `virtual=` and `abstract=` flags to separate abstract virtual calls from real missing defs (2026-01-xx).
 
 ### 8.6 Bootstrap Session Notes (2026-01-01 - Session 2)
 
