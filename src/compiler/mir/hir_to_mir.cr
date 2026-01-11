@@ -948,8 +948,12 @@ module Crystal
       end
 
       # Unknown function - emit as extern call
-      if ENV.has_key?("DEBUG_CALLS")
-        STDERR.puts "[UNRESOLVED CALL] #{call.method_name} in #{@current_lowering_func_name}"
+      if ENV.has_key?("CRYSTAL_V2_UNRESOLVED_CALL_TRACE")
+        recv_type = call.receiver ? @hir_value_types[call.receiver.not_nil!]? : nil
+        recv_name = hir_type_name(recv_type)
+        STDERR.puts "[UNRESOLVED_CALL] func=#{@current_lowering_func_name} method=#{call.method_name} base=#{base_method_name} recv=#{recv_name} virtual=#{call.virtual} args=#{call.args.size}"
+      elsif ENV.has_key?("DEBUG_CALLS")
+        STDERR.puts "[UNRESOLVED_CALL] #{call.method_name} in #{@current_lowering_func_name}"
       end
       builder.extern_call(call.method_name, args, convert_type(call.type))
     end
