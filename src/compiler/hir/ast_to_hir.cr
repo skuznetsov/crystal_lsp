@@ -3100,6 +3100,49 @@ module Crystal::HIR
       @paths_by_arena[arena]?
     end
 
+    private def callsite_snippet_for(
+      arena : CrystalV2::Compiler::Frontend::ArenaLike,
+      span : CrystalV2::Compiler::Frontend::Span,
+      max_bytes : Int32 = 160
+    ) : String?
+      source = @sources_by_arena[arena]?
+      return nil unless source
+      start = span.start_offset
+      finish = span.end_offset
+      return nil if start < 0 || finish <= start || start >= source.bytesize
+      length = finish - start
+      length = max_bytes if length > max_bytes
+      slice = source.byte_slice(start, length)
+      slice.gsub(/\s+/, " ").strip
+    end
+
+    private def trace_missing_symbol(
+      ctx : LoweringContext,
+      node : CrystalV2::Compiler::Frontend::CallNode,
+      mangled_name : String,
+      base_name : String,
+      method_name : String,
+      receiver_id : ValueId?,
+      arg_types : Array(TypeRef),
+      reason : String
+    ) : Nil
+      return unless DebugHooks::ENABLED && ENV["CRYSTAL_V2_MISSING_TRACE"]?
+
+      span = node.span
+      path = source_path_for(@arena) || "(unknown)"
+      recv_name = receiver_id ? type_name_for_mangling(ctx.type_of(receiver_id)) : "nil"
+      arg_names = arg_types.map { |t| type_name_for_mangling(t) }.join(",")
+      snippet = callsite_snippet_for(@arena, span)
+      data = "symbol=#{mangled_name} base=#{base_name} method=#{method_name} recv=#{recv_name} args=#{arg_names} path=#{path} span=#{span.start_line}:#{span.start_column}-#{span.end_line}:#{span.end_column} reason=#{reason}"
+      if snippet && !snippet.empty?
+        data += " snippet=\"#{snippet}\""
+      end
+      if debug_callsite = @debug_callsite
+        data += " callsite=#{debug_callsite}"
+      end
+      debug_hook("missing.symbol", data)
+    end
+
     private def record_allocation_location(
       ctx : LoweringContext,
       value_id : ValueId,
@@ -23563,6 +23606,11 @@ module Crystal::HIR
       if ENV["DEBUG_FROM_CHARS"]? && method_name == "from_chars_advanced"
         arg_names = args.map { |arg_id| get_type_name_from_ref(ctx.type_of(arg_id)) }
         STDERR.puts "[DEBUG_FROM_CHARS] base=#{base_method_name} mangled=#{mangled_method_name} args=#{arg_names.join(",")}"
+      end
+      if DebugHooks::ENABLED && ENV["CRYSTAL_V2_MISSING_TRACE"]?
+        unless @module.has_function?(mangled_method_name) || @module.has_function?(primary_mangled_name)
+          trace_missing_symbol(ctx, node, mangled_method_name, base_method_name, method_name, receiver_id, arg_types, "unlowered")
+        end
       end
       call = Call.new(ctx.next_id, return_type, receiver_id, mangled_method_name, args, block_id, call_virtual)
       ctx.emit(call)
