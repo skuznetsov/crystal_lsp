@@ -17790,6 +17790,58 @@ module Crystal::HIR
       ctx.terminate(Branch.new(cond_bool, then_block, else_block))
     end
 
+    private def static_is_a_condition_value(ctx : LoweringContext, condition_id : ExprId) : Bool?
+      return nil if condition_id.invalid?
+
+      node = @arena[condition_id]
+      case node
+      when CrystalV2::Compiler::Frontend::GroupingNode
+        static_is_a_condition_value(ctx, node.expression)
+      when CrystalV2::Compiler::Frontend::BinaryNode
+        op = node.operator_string
+        if op == "&&" || op == "||"
+          left = static_is_a_condition_value(ctx, node.left)
+          right = static_is_a_condition_value(ctx, node.right)
+          return nil if left.nil? || right.nil?
+          return op == "&&" ? (left && right) : (left || right)
+        end
+        nil
+      when CrystalV2::Compiler::Frontend::UnaryNode
+        op = String.new(node.operator)
+        return nil unless op == "!"
+        inner = static_is_a_condition_value(ctx, node.operand)
+        inner.nil? ? nil : !inner
+      when CrystalV2::Compiler::Frontend::IsANode
+        expr_node = @arena[node.expression]
+        return nil unless expr_node.is_a?(CrystalV2::Compiler::Frontend::IdentifierNode)
+        local_id = ctx.lookup_local(String.new(expr_node.name))
+        return nil unless local_id
+        value_type = ctx.type_of(local_id)
+        target_name = resolve_typeof_in_type_string(String.new(node.target_type))
+        target_type = type_ref_for_name(target_name)
+        statically_is_a_type?(value_type, target_type)
+      when CrystalV2::Compiler::Frontend::CallNode
+        callee_node = @arena[node.callee]
+        if callee_node.is_a?(CrystalV2::Compiler::Frontend::MemberAccessNode) &&
+           String.new(callee_node.member) == "is_a?" &&
+           node.args.size == 1
+          obj_node = @arena[callee_node.object]
+          return nil unless obj_node.is_a?(CrystalV2::Compiler::Frontend::IdentifierNode)
+          local_id = ctx.lookup_local(String.new(obj_node.name))
+          return nil unless local_id
+          value_type = ctx.type_of(local_id)
+          if type_str = stringify_type_expr(node.args.first)
+            type_str = resolve_typeof_in_type_string(type_str)
+            target_type = type_ref_for_name(type_str)
+            return statically_is_a_type?(value_type, target_type)
+          end
+        end
+        nil
+      else
+        nil
+      end
+    end
+
     private def is_a_narrowing_targets(condition_id : ExprId) : Array(Tuple(String, TypeRef))
       return [] of Tuple(String, TypeRef) if condition_id.invalid?
 
@@ -18095,10 +18147,38 @@ module Crystal::HIR
     # ═══════════════════════════════════════════════════════════════════════
 
     private def lower_if(ctx : LoweringContext, node : CrystalV2::Compiler::Frontend::IfNode) : ValueId
-      merge_block = ctx.create_block
-
       truthy_targets = truthy_narrowing_targets(node.condition)
       is_a_targets = is_a_narrowing_targets(node.condition)
+      static_cond = static_is_a_condition_value(ctx, node.condition)
+      if !static_cond.nil? && (node.elsifs.nil? || node.elsifs.try(&.empty?))
+        if static_cond
+          ctx.push_scope(ScopeKind::Block)
+          apply_truthy_narrowing(ctx, truthy_targets)
+          apply_is_a_narrowing(ctx, is_a_targets)
+          then_value = lower_body(ctx, node.then_body)
+          ctx.pop_scope
+          return then_value
+        end
+
+        ctx.push_scope(ScopeKind::Block)
+        else_value = if else_body = node.else_body
+                       if else_body.empty?
+                         nil_lit = Literal.new(ctx.next_id, TypeRef::NIL, nil)
+                         ctx.emit(nil_lit)
+                         nil_lit.id
+                       else
+                         lower_body(ctx, else_body)
+                       end
+                     else
+                       nil_lit = Literal.new(ctx.next_id, TypeRef::NIL, nil)
+                       ctx.emit(nil_lit)
+                       nil_lit.id
+                     end
+        ctx.pop_scope
+        return else_value
+      end
+
+      merge_block = ctx.create_block
 
       # Collect all branches: (exit_block, value, locals, flows_to_merge)
       branches = [] of {BlockId, ValueId, Hash(String, ValueId), Bool}
