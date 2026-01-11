@@ -1394,6 +1394,7 @@ The return_type=16 (NIL) for `to_s` methods is incorrect - should be String type
 - **Fix applied**: propagate enum types through @param auto-assign + ivar/cvar loads; `Path#windows?` and enum predicates no longer emit `Int32#windows?` in HIR.
 - **Fix applied**: inline `nil?` for member access on non-union receivers; removes `Int32#nil?` / `Nil#nil?` call sites in HIR.
 - **Fix applied**: infer `try` return types when block shorthand is parsed as an argument (BlockNode in CallNode args). This avoids `Bool#each$block` from `Exception#backtrace?` by returning the block's type (nilable union). Verification: `DEBUG_INFER_TRY=1 CRYSTAL_V2_STOP_AFTER_HIR=1 ./bin/crystal_v2 --no-prelude --no-link /tmp/try_test.cr -o /tmp/try_test` logs `[INFER_TRY] return=Int32`; `rg "Bool#each" /tmp/bootstrap_array_full.hir` returns no matches (2026-01-xx).
+- **Fix applied**: infer ivar types from initialize default values for instance-var params; removed `Nil#[]`/`Nil#when` in `Time::Location` transitions (2026-01-xx).
 - **Fix applied**: GEP index cast now truncates i128 → i64 (previously emitted `sext i128 to i64`, which LLVM rejects). This unblocks llc on `bin/fib.cr` with full prelude (2026-01-xx).
 
 #### Issue 6: ExprId -1 in inline_loop_vars_union (union keyword) - FIXED (2026-01-xx)
@@ -1496,6 +1497,8 @@ The return_type=16 (NIL) for `to_s` methods is incorrect - should be String type
   - `register_function_type()` - where function types are registered
 
 **Current missing symbol count**: 50 (after `bin/fib.cr` with prelude, log `/tmp/fib_link.log`, 2026-01-xx).
+- Update (2026-01-xx): `./bin/crystal_v2 --no-llvm-opt --no-llvm-metadata bin/fib.cr -o /tmp/fib` yields 104 missing symbols (`/tmp/missing_symbols_latest.txt`), only 3 are `Nil_*` (`Nil_index`, `Nil_to_u64`, `Nil_when`).
+- Update (2026-01-xx): IO namespace wrappers no longer force `IO` to Module; `/tmp/fib.hir` shows `Class IO` and no `Nil#to_u64`. New blocker: llc error `expected 'i32' but got 'double'` for GEP index at `/tmp/fib.ll:45707`.
 - **Missing trace snapshot (2026-01-xx)**: `CRYSTAL_V2_DEBUG_HOOKS=1 CRYSTAL_V2_MISSING_TRACE=1` on `bin/fib.cr` shows 98 unique `abstract=false` missing symbols. Top offenders: `Pointer(UInt8)#each$block` (21), `Range(Int32,...)` (9), `Int32#get_entry$Int32` (8), `Crystal::SpinLock#add_timer$Pointer` (8), `Int32#fit_in_indices$Crystal::Hasher` (4).
   - Remaining categories: EventLoop (`system_*`, arena helpers, `PollDescriptor_owned_by_`), DWARF (`Attribute_*`, `LineNumbers_decode_sequences`), MachO `Nlist64::Type_*`, IO/Path/File (`IO_read/write`, `Process.executable_path`, `PATH_MAX`, `realpath_DARWIN_EXTSN`, `File::Error.from_errno`, `Path.separators`), string/regex helpers (`String_*`, `Regex__MatchData_*`), pointer/tuple/slice helpers, `Thread_threads`, `_func*` stubs, and `__context`.
 
@@ -1573,4 +1576,3 @@ The return_type=16 (NIL) for `to_s` methods is incorrect - should be String type
 - `src/compiler/hir/ast_to_hir.cr`:
   - Added `evaluate_has_constant()` at lines 14078-14118
   - Added `has_constant?` handling in `try_evaluate_macro_condition` at lines 14163-14196
-- **Fix applied**: infer ivar types from initialize default values for instance-var params; removed `Nil#[]`/`Nil#when` in `Time::Location` transitions (2026-01-xx).

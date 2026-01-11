@@ -3696,6 +3696,12 @@ module Crystal::HIR
 
         if param.is_instance_var
           ivar_name = "@#{param_name}"
+          if param_type == TypeRef::VOID
+            if default_value = param.default_value
+              inferred = infer_type_from_expr(default_value, owner_name)
+              param_type = inferred if inferred && inferred != TypeRef::VOID
+            end
+          end
           if idx = ivars.index { |iv| iv.name == ivar_name }
             existing = ivars[idx]
             if existing.type == TypeRef::VOID && param_type != TypeRef::VOID
@@ -4384,12 +4390,20 @@ module Crystal::HIR
       end
     end
 
+    private def class_like_namespace?(name : String) : Bool
+      return true if @class_info.has_key?(name)
+      return true if @generic_templates.has_key?(name)
+      return true if @top_level_class_kinds.has_key?(name)
+      false
+    end
+
     private def module_like_type_name?(name : String) : Bool
       base = if paren = name.index('(')
                name[0, paren]
              else
                name
              end
+      return false if class_like_namespace?(base)
       @module_defs.has_key?(base)
     end
 
@@ -5180,6 +5194,42 @@ module Crystal::HIR
       end
       if ENV.has_key?("DEBUG_NESTED_CLASS") && (module_name == "IO" || module_name.includes?("FileDescriptor"))
         STDERR.puts "[DEBUG_MODULE] Processing module: #{module_name}, body_size=#{node.body.try(&.size) || 0}"
+      end
+
+      if class_like_namespace?(module_name)
+        if @module_defs.delete(module_name)
+          @module_defs_cache_version += 1
+          invalidate_type_cache_for_namespace(module_name)
+        end
+        if body = node.body
+          body.each do |expr_id|
+            member = unwrap_visibility_member(@arena[expr_id])
+            case member
+            when CrystalV2::Compiler::Frontend::ModuleNode
+              nested_name = String.new(member.name)
+              full_nested_name = "#{module_name}::#{nested_name}"
+              register_nested_module(member, full_nested_name)
+            when CrystalV2::Compiler::Frontend::ClassNode
+              nested_name = String.new(member.name)
+              full_nested_name = "#{module_name}::#{nested_name}"
+              register_class_with_name(member, full_nested_name)
+            when CrystalV2::Compiler::Frontend::EnumNode
+              nested_name = String.new(member.name)
+              full_nested_name = "#{module_name}::#{nested_name}"
+              register_enum_with_name(member, full_nested_name)
+            when CrystalV2::Compiler::Frontend::AliasNode
+              alias_name = String.new(member.name)
+              old_class = @current_class
+              @current_class = module_name
+              target_name = resolve_alias_target(String.new(member.value))
+              @current_class = old_class
+              full_alias_name = "#{module_name}::#{alias_name}"
+              register_type_alias(full_alias_name, target_name)
+              register_type_alias(alias_name, target_name)
+            end
+          end
+        end
+        return
       end
 
       # Keep module AST around for mixin expansion (`include Foo` in classes/structs).
@@ -7366,7 +7416,12 @@ module Crystal::HIR
       existing_info = @class_info[class_name]?
       mono_debug = ENV.has_key?("DEBUG_MONO") && (class_name.starts_with?("Hash(") || class_name.starts_with?("Set("))
       mono_start = Time.monotonic if mono_debug
-      invalidate_type_cache_for_namespace(class_name) if existing_info || @module_defs.has_key?(class_name)
+      had_module_defs = @module_defs.has_key?(class_name)
+      if had_module_defs
+        @module_defs.delete(class_name)
+        @module_defs_cache_version += 1
+      end
+      invalidate_type_cache_for_namespace(class_name) if existing_info || had_module_defs
 
       # Collect instance variables and their types
       ivars = [] of IVarInfo
@@ -29510,7 +29565,7 @@ module Crystal::HIR
             crystal_prefixed = "Crystal::#{module_name}"
             module_name = crystal_prefixed if @module_defs.has_key?(crystal_prefixed)
           end
-          if @module_defs.has_key?(module_name)
+          if @module_defs.has_key?(module_name) && !class_like_namespace?(module_name)
             if desc = @module.get_type_descriptor(cached)
               if desc.kind != TypeKind::Module
                 result = @module.intern_type(TypeDescriptor.new(TypeKind::Module, module_name))
@@ -29755,14 +29810,14 @@ module Crystal::HIR
                    store_type_cache(cache_key, result)
                    return result
                  end
-                 if @module_defs.has_key?(lookup_name)
+                 if @module_defs.has_key?(lookup_name) && !class_like_namespace?(lookup_name)
                    result = @module.intern_type(TypeDescriptor.new(TypeKind::Module, lookup_name))
                    store_type_cache(cache_key, result)
                    return result
                  end
                  if !lookup_name.starts_with?("Crystal::") && lookup_name.includes?("::")
                    crystal_prefixed = "Crystal::#{lookup_name}"
-                   if @module_defs.has_key?(crystal_prefixed)
+                   if @module_defs.has_key?(crystal_prefixed) && !class_like_namespace?(crystal_prefixed)
                      result = @module.intern_type(TypeDescriptor.new(TypeKind::Module, crystal_prefixed))
                      store_type_cache(cache_key, result)
                      return result
@@ -30099,9 +30154,3 @@ module Crystal::HIR
     end
   end
 end
-          if param_type == TypeRef::VOID
-            if default_value = param.default_value
-              inferred = infer_type_from_expr(default_value, owner_name)
-              param_type = inferred if inferred && inferred != TypeRef::VOID
-            end
-          end
