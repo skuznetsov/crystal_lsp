@@ -12742,6 +12742,19 @@ module Crystal::HIR
         @resolved_type_name_cache[cache_key] = name
         return name
       end
+      if name.starts_with?("{") && name.ends_with?("}")
+        inner = name[1, name.size - 2].strip
+        if inner.empty?
+          tuple_name = "Tuple()"
+        else
+          tuple_args = split_generic_type_args(inner).map do |arg|
+            resolve_type_name_in_context(arg.strip)
+          end
+          tuple_name = "Tuple(#{tuple_args.join(", ")})"
+        end
+        @resolved_type_name_cache[cache_key] = tuple_name
+        return tuple_name
+      end
 
       if info = split_generic_base_and_args(name)
         resolved_base = resolve_type_name_in_context(info[:base])
