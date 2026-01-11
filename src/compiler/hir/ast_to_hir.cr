@@ -22564,7 +22564,7 @@ module Crystal::HIR
           if method_name == "try" && receiver_id
             if non_nil = non_nil_type_for_union(ctx.type_of(receiver_id))
               block_param_types_inline = [non_nil]
-            elsif block_param_types_inline.nil?
+            else
               block_param_types_inline = [ctx.type_of(receiver_id)]
             end
           end
@@ -22577,7 +22577,7 @@ module Crystal::HIR
         if method_name == "try" && receiver_id
           if non_nil = non_nil_type_for_union(ctx.type_of(receiver_id))
             block_param_types_inline = [non_nil]
-          elsif block_param_types_inline.nil?
+          else
             block_param_types_inline = [ctx.type_of(receiver_id)]
           end
         end
