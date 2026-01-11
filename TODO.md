@@ -1068,6 +1068,7 @@ r2 = maybe(false)  # => nil
 - Track enum value types for `.new`/`.value` and propagate via assignments/identifiers in HIR lowering.
 - Propagate enum return types from method calls into enum predicate lowering (e.g., `File::Info#type` predicates) (2026-01-xx).
 - Track functions that return type literals; mark call results as type literals and resolve absolute `::` paths in HIR (fixes `EventLoop.backend_class`/nested class lookups) (2026-01-xx).
+- Preserve `self` binding across block lowering so implicit self calls inside blocks use the correct receiver (fixes `Object#to_s` calling abstract `Object#to_s(io)` without virtual dispatch) (2026-01-xx).
 - Invalidate type cache on enum registration to prevent enum names from collapsing to Class; IO::Seek predicate now lowers to compare (removes `_IO__Seek_current_`).
 - Resolve superclass name in context when registering classes (fixes `FileDescriptor_initialize_Int32` super call).
 - Seed top-level type names + class kinds in CLI/driver; prefer top-level class/struct over module (fixes `IO::File` resolution in `IO::ARGF` and `IO#read` missing symbols) (2026-01-xx).
