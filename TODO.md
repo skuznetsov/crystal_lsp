@@ -1414,13 +1414,14 @@ The return_type=16 (NIL) for `to_s` methods is incorrect - should be String type
   - Emit `fcmp one` for float truthiness in LLVM backend to avoid `icmp ne double ... 0` errors when non-bool float conditions slip through.
 - **Verification**: `DEBUG_FROM_CHARS=1 DEBUG_LOWER_PROGRESS=from_chars_advanced ./bin/crystal_v2 --no-llvm-opt --no-llvm-metadata --no-link /tmp/ff_test2.cr -o /tmp/ff_test2` completes, and both overloads are lowered.
 
-#### Issue 8: Getter return type stays VOID in member access - IN PROGRESS (2026-01-11)
-- **Symptom**: `/tmp/ivar_getter.cr` compiles to HIR with `call Box#buffer() : 0` while `func @Box#buffer -> 15` (String).
-- **Evidence**: `DEBUG_IVAR_INFER=1` shows `class=Box ivar=@buffer inferred=String`, but member access return type is still VOID.
-- **Repro**:
+#### Issue 8: Getter return type stays VOID in member access - FIXED (2026-01-11)
+- **Symptom**: `/tmp/ivar_getter.cr` compiled to HIR with `call Box#buffer() : 0` while `func @Box#buffer -> 15` (String).
+- **Fix applied**:
+  - `get_function_return_type` now falls back to base-name/ivar return types even when the callsite name is mangled.
+  - `ivar_return_type_for_method` strips `$...` mangling before looking up ivars.
+- **Verification**:
   - `CRYSTAL_V2_STOP_AFTER_HIR=1 ./bin/crystal_v2 --emit hir --no-link --no-llvm-opt --no-llvm-metadata /tmp/ivar_getter.cr -o /tmp/ivar_getter`
-  - `rg "Box#buffer" /tmp/ivar_getter.hir`
-- **Hypothesis**: `get_function_return_type` is still returning VOID at member-access lowering time (even after accessor generation). Need to verify actual_name/base_name path and whether `@function_types`/`@module.function_by_name` are visible during `lower_member_access`.
+  - `rg "Box#buffer" /tmp/ivar_getter.hir` shows `call ... : 15`.
 
 #### Issue 8: Namespaced type params causing generic arity errors - FIXED (2026-01-xx)
 - **Symptom**: self-host `CRYSTAL_V2_STOP_AFTER_HIR=1` fails with `Generic Hash expects 2 type args, got 1` on `Hash(Crystal::HIR::V)`.

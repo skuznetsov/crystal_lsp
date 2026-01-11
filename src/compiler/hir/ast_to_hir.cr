@@ -11958,11 +11958,32 @@ module Crystal::HIR
 
     # Look up return type of a function by name
     private def get_function_return_type(name : String) : TypeRef
+      base_name = name.split("$", 2).first
+      if debug_name = ENV["DEBUG_GET_RETURN"]?
+        if name.includes?(debug_name) || base_name.includes?(debug_name)
+          func_type = @function_types[name]?
+          base_type = @function_types[base_name]?
+          func_rt = @module.function_by_name(name).try(&.return_type)
+          STDERR.puts "[GET_RETURN] name=#{name} base=#{base_name} func_type=#{func_type ? get_type_name_from_ref(func_type) : "(nil)"} base_type=#{base_type ? get_type_name_from_ref(base_type) : "(nil)"} module_rt=#{func_rt ? get_type_name_from_ref(func_rt) : "(nil)"}"
+        end
+      end
       # First check pre-registered signatures (for forward references)
       if type = @function_types[name]?
         # For base names (no $ suffix), treat VOID/NIL as unknown and fall back
         # to cached base return types from other overloads.
         if name.includes?("$")
+          if type != TypeRef::VOID && type != TypeRef::NIL
+            return type
+          end
+          if ivar_type = ivar_return_type_for_method(base_name)
+            return ivar_type
+          end
+          if base_type = @function_types[base_name]?
+            return base_type unless base_type == TypeRef::VOID || base_type == TypeRef::NIL
+          end
+          if cached = @function_base_return_types[base_name]?
+            return cached
+          end
           return type
         end
         if type == TypeRef::BOOL && name.ends_with?("?")
@@ -11999,11 +12020,11 @@ module Crystal::HIR
         end
         return type unless type == TypeRef::VOID || type == TypeRef::NIL
       end
-      if ivar_type = ivar_return_type_for_method(name)
+      if ivar_type = ivar_return_type_for_method(base_name)
         return ivar_type
       end
       # If this is a base name (no $ suffix), use cached return type if available.
-      if cached = @function_base_return_types[name]?
+      if cached = @function_base_return_types[base_name]?
         return cached
       end
       if name.ends_with?("?")
@@ -12036,6 +12057,9 @@ module Crystal::HIR
       return nil unless hash_idx = name.rindex('#')
       receiver_name = name[0, hash_idx]
       method_name = name[(hash_idx + 1)..]
+      if method_name.includes?("$")
+        method_name = method_name.split("$", 2).first
+      end
       return nil if method_name.empty?
       return nil unless class_info = @class_info[receiver_name]?
 
