@@ -1513,6 +1513,7 @@ The return_type=16 (NIL) for `to_s` methods is incorrect - should be String type
   - Remaining categories: EventLoop (`system_*`, arena helpers, `PollDescriptor_owned_by_`), DWARF (`Attribute_*`, `LineNumbers_decode_sequences`), MachO `Nlist64::Type_*`, IO/Path/File (`IO_read/write`, `Process.executable_path`, `PATH_MAX`, `realpath_DARWIN_EXTSN`, `File::Error.from_errno`, `Path.separators`), string/regex helpers (`String_*`, `Regex__MatchData_*`), pointer/tuple/slice helpers, `Thread_threads`, `_func*` stubs, and `__context`.
 - Update (2026-02-xx): allow lowering untyped defs with all-default params by inferring call types from defaults (fixes base `IO#read_char_with_bytesize` no-arg calls; no `method.lower.defer` on `read_char_with_bytesize` in debug hooks).
 - Update (2026-02-xx): `CRYSTAL_V2_UNRESOLVED_CALL_TRACE=1` on `bin/fib.cr` shows 283 unresolved calls; `read_char_with_bytesize` no longer appears in `/tmp/fib_unresolved.log`.
+- Update (2026-02-xx): macro arg reparse fallback wraps `record` calls to handle keyword identifiers (`when : Int64`), restoring `ZoneTransition#when`/`#index` getters; unresolved call trace now 256 (from 283).
 
 ### 8.7 Bootstrap Session Notes (2026-01-08) - Linker Symbol Fixes
 

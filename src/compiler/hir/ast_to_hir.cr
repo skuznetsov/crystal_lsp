@@ -2156,7 +2156,33 @@ module Crystal::HIR
       lexer = CrystalV2::Compiler::Frontend::Lexer.new(text)
       parser = CrystalV2::Compiler::Frontend::Parser.new(lexer, target_arena, recovery_mode: true)
       program = parser.parse_program
-      program.roots.first? || ExprId.new(-1)
+      root = program.roots.first?
+      if root
+        node = target_arena[root]
+        return root unless node.is_a?(CrystalV2::Compiler::Frontend::NilNode)
+      end
+
+      # Fallback for typed macro args using keyword identifiers (e.g., `when : Int64` in `record`).
+      # Reparse through a wrapper call to reuse the typed macro arg parsing path.
+      if text.includes?(':')
+        wrapper = "record __macro_tmp__, #{text}"
+        store_extra_source(target_arena, wrapper)
+        wrapper_lexer = CrystalV2::Compiler::Frontend::Lexer.new(wrapper)
+        wrapper_parser = CrystalV2::Compiler::Frontend::Parser.new(wrapper_lexer, target_arena, recovery_mode: true)
+        wrapper_program = wrapper_parser.parse_program
+        if call_root = wrapper_program.roots.first?
+          call_node = target_arena[call_root]
+          if call_node.is_a?(CrystalV2::Compiler::Frontend::CallNode)
+            if arg = call_node.args[1]?
+              return arg
+            elsif arg0 = call_node.args.first?
+              return arg0
+            end
+          end
+        end
+      end
+
+      ExprId.new(-1)
     end
 
     private def reparse_named_arg_for_macro(
