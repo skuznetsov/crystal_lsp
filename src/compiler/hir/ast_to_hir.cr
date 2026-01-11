@@ -8587,7 +8587,11 @@ module Crystal::HIR
     end
 
     # Generate allocator: ClassName.new(...) -> allocates and returns instance
-    private def generate_allocator(class_name : String, class_info : ClassInfo)
+    private def generate_allocator(
+      class_name : String,
+      class_info : ClassInfo,
+      call_arg_types : Array(TypeRef)? = nil
+    )
       func_name = "#{class_name}.new"
 
       # Debug disabled for performance
@@ -8613,8 +8617,17 @@ module Crystal::HIR
         return
       end
 
-      # Skip if allocator already generated (for reopened classes)
-      return if @generated_allocators.includes?(class_name)
+      # Skip if allocator already generated (for reopened classes), but
+      # still feed callsite arg types to initialize lowering when available.
+      if @generated_allocators.includes?(class_name)
+        if call_arg_types && call_arg_types.any? { |t| t != TypeRef::VOID }
+          if init_base_name = resolve_method_with_inheritance(class_name, "initialize")
+            remember_callsite_arg_types(init_base_name, call_arg_types)
+            lower_function_if_needed(init_base_name)
+          end
+        end
+        return
+      end
       @generated_allocators.add(class_name)
 
       # Also check if function already exists in HIR module (belt and suspenders)
@@ -8684,7 +8697,12 @@ module Crystal::HIR
         # Mangle the initialize call with parameter types
         init_param_types = init_params.map { |_, t| t }
         init_name = mangle_function_name(init_base_name, init_param_types)
-        remember_callsite_arg_types(init_name, init_param_types) unless init_param_types.empty?
+        callsite_init_types = if call_arg_types && call_arg_types.any? { |t| t != TypeRef::VOID }
+                                call_arg_types
+                              else
+                                init_param_types
+                              end
+        remember_callsite_arg_types(init_name, callsite_init_types) unless callsite_init_types.empty?
         lower_function_if_needed(init_name)
         init_call = Call.new(ctx.next_id, TypeRef::VOID, alloc.id, init_name, param_ids)
         ctx.emit(init_call)
@@ -21146,7 +21164,7 @@ module Crystal::HIR
                   explicit_new = function_def_overloads(base_new).any? { |key| key != base_new }
                 end
                 if allocator_supported?(owner) && !explicit_new
-                  generate_allocator(owner, class_info)
+                  generate_allocator(owner, class_info, call_arg_types)
                   # The function was just generated (or already existed), return
                   return
                 end
@@ -22608,7 +22626,7 @@ module Crystal::HIR
           full_method_name = "#{range_name}.new"
           static_class_name = range_name
           if class_info = @class_info[range_name]?
-            generate_allocator(range_name, class_info)
+            generate_allocator(range_name, class_info, arg_types)
           end
         end
       end
@@ -22663,6 +22681,17 @@ module Crystal::HIR
 
       # Refine VOID arg types by looking at overload parameter annotations
       arg_types = refine_void_args_from_overloads(base_method_name, arg_types)
+
+      if receiver_id.nil? && method_name == "new"
+        if class_name = static_class_name || full_method_name.try(&.split(".", 2).first?)
+          if arg_types.any? { |t| t != TypeRef::VOID }
+            if init_base = resolve_method_with_inheritance(class_name, "initialize")
+              remember_callsite_arg_types(init_base, arg_types)
+              lower_function_if_needed(init_base)
+            end
+          end
+        end
+      end
 
       if receiver_id.nil? && method_name == "new"
         target_name = full_method_name || base_method_name
@@ -22777,7 +22806,7 @@ module Crystal::HIR
       if method_name == "new" && full_method_name
         if class_name = full_method_name.split(".", 2).first?
           if class_info = @class_info[class_name]?
-            generate_allocator(class_name, class_info)
+            generate_allocator(class_name, class_info, arg_types)
           end
         end
         explicit_new = !!lookup_function_def_for_call(full_method_name, args.size, has_block_call, arg_types)
