@@ -2938,7 +2938,7 @@ module Crystal::HIR
               next
             end
             inner = type_name.byte_slice(start, j - start - 1)
-            io << resolve_typeof_inner(inner)
+            io << resolve_typeof_string_expr(inner)
             i = j
           else
             io << type_name[i]
@@ -8699,6 +8699,7 @@ module Crystal::HIR
 
       base_name = "#{class_name}##{accessor_name}"
       func_name = mangle_function_name(base_name, [] of TypeRef)
+      register_function_type(func_name, ivar_type)
       return if @module.has_function?(func_name)
 
       func = @module.create_function(func_name, ivar_type)
@@ -8721,6 +8722,7 @@ module Crystal::HIR
 
       base_name = "#{class_name}##{accessor_name}="
       func_name = mangle_function_name(base_name, [ivar_type])
+      register_function_type(func_name, ivar_type)
       return if @module.has_function?(func_name)
 
       func = @module.create_function(func_name, ivar_type)
@@ -11655,6 +11657,23 @@ module Crystal::HIR
       body.each { |expr_id| infer_ivars_from_expr(expr_id, ivars, offset_ref) }
     end
 
+    private def update_getter_return_types_for_ivar(class_name : String, ivar_name : String, inferred : TypeRef) : Nil
+      return if inferred == TypeRef::VOID
+
+      accessor_name = ivar_name.lstrip('@')
+      ["#{class_name}##{accessor_name}", "#{class_name}##{accessor_name}?"].each do |base_name|
+        full_name = mangle_function_name(base_name, [] of TypeRef)
+        if existing = @function_types[full_name]?
+          if existing == TypeRef::VOID || existing == TypeRef::NIL
+            if ENV["DEBUG_IVAR_GETTER_UPDATE"]?
+              STDERR.puts "[IVAR_GETTER_UPDATE] class=#{class_name} ivar=#{ivar_name} getter=#{full_name} from=#{get_type_name_from_ref(existing)} to=#{get_type_name_from_ref(inferred)}"
+            end
+            register_function_type(full_name, inferred)
+          end
+        end
+      end
+    end
+
     private def infer_ivars_from_expr(expr_id : ExprId, ivars : Array(IVarInfo), offset_ref : Pointer(Int32)) : Nil
       return if expr_id.invalid?
       node = @arena[expr_id]
@@ -11673,10 +11692,16 @@ module Crystal::HIR
             if idx = ivars.index { |iv| iv.name == ivar_name }
               if ivars[idx].type == TypeRef::VOID
                 ivars[idx] = IVarInfo.new(ivar_name, inferred, ivars[idx].offset)
+                if class_name = @current_class
+                  update_getter_return_types_for_ivar(class_name, ivar_name, inferred)
+                end
               end
             else
               ivars << IVarInfo.new(ivar_name, inferred, offset_ref.value)
               offset_ref.value += type_size(inferred)
+              if class_name = @current_class
+                update_getter_return_types_for_ivar(class_name, ivar_name, inferred)
+              end
             end
           end
         end
@@ -11967,7 +11992,15 @@ module Crystal::HIR
         if type == TypeRef::NIL && name.ends_with?("#to_s")
           return TypeRef::STRING
         end
+        if type == TypeRef::VOID || type == TypeRef::NIL
+          if ivar_type = ivar_return_type_for_method(name)
+            return ivar_type
+          end
+        end
         return type unless type == TypeRef::VOID || type == TypeRef::NIL
+      end
+      if ivar_type = ivar_return_type_for_method(name)
+        return ivar_type
       end
       # If this is a base name (no $ suffix), use cached return type if available.
       if cached = @function_base_return_types[name]?
@@ -11997,6 +12030,21 @@ module Crystal::HIR
         return func.return_type
       end
       TypeRef::VOID
+    end
+
+    private def ivar_return_type_for_method(name : String) : TypeRef?
+      return nil unless hash_idx = name.rindex('#')
+      receiver_name = name[0, hash_idx]
+      method_name = name[(hash_idx + 1)..]
+      return nil if method_name.empty?
+      return nil unless class_info = @class_info[receiver_name]?
+
+      ivar_method = method_name.ends_with?("?") ? method_name[0, method_name.size - 1] : method_name
+      ivar_name = "@#{ivar_method}"
+      if ivar = class_info.ivars.find { |iv| iv.name == ivar_name }
+        return ivar.type unless ivar.type == TypeRef::VOID
+      end
+      nil
     end
 
     # Get instance variable offset from current class
@@ -13581,6 +13629,11 @@ module Crystal::HIR
     # Infer type from class-level ivar assignment: @vec = SomeType.new
     # Used during class registration (pass 2) to handle implicit ivars
     private def infer_type_from_class_ivar_assign(value_node) : TypeRef
+      if inferred_name = infer_type_from_expr(value_node)
+        inferred_ref = type_ref_for_name(inferred_name)
+        return inferred_ref unless inferred_ref == TypeRef::VOID
+      end
+
       case value_node
       when CrystalV2::Compiler::Frontend::MemberAccessNode
         # Direct member access: SomeType.new (without call parens)
@@ -27826,6 +27879,20 @@ module Crystal::HIR
       lower_function_if_needed(primary_name)
       if actual_name != primary_name
         lower_function_if_needed(actual_name)
+      end
+
+      if return_type == TypeRef::VOID
+        return_type = get_function_return_type(actual_name)
+        if return_type == TypeRef::VOID && actual_name != primary_name
+          return_type = get_function_return_type(primary_name)
+        end
+      end
+      resolved_return_type = get_function_return_type(actual_name)
+      if resolved_return_type == TypeRef::VOID && actual_name != primary_name
+        resolved_return_type = get_function_return_type(primary_name)
+      end
+      if resolved_return_type != TypeRef::VOID && resolved_return_type != TypeRef::NIL && resolved_return_type != return_type
+        return_type = resolved_return_type
       end
 
       if ENV["DEBUG_CALL_TRACE"]? && member_name == "copy_to"
