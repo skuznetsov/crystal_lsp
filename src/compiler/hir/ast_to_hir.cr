@@ -12164,13 +12164,15 @@ module Crystal::HIR
     private def yield_function_name_for(method_name : String) : String?
       return method_name if @yield_functions.includes?(method_name)
 
-      stripped = strip_generic_receiver_from_method_name(method_name)
+      base_name = method_name.split("$", 2)[0]
+      return base_name if @yield_functions.includes?(base_name)
+
+      stripped = strip_generic_receiver_from_method_name(base_name)
       return stripped if @yield_functions.includes?(stripped)
 
-      return nil if stripped == method_name
-
       @yield_functions.each do |name|
-        next unless strip_generic_receiver_from_method_name(name) == stripped
+        yield_base = name.split("$", 2)[0]
+        next unless strip_generic_receiver_from_method_name(yield_base) == stripped
         return name
       end
 
