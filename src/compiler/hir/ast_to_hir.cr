@@ -5762,7 +5762,6 @@ module Crystal::HIR
     private def process_macro_for_in_module(node : CrystalV2::Compiler::Frontend::MacroForNode, module_name : String)
       iter_vars = node.iter_vars.map { |name| String.new(name) }
       return if iter_vars.empty?
-
       values = macro_for_iterable_values(node.iterable)
       return unless values
 
@@ -5790,7 +5789,6 @@ module Crystal::HIR
           end
         end
       end
-
       sanitized = strip_macro_lines(expanded)
       if program = parse_macro_literal_program(sanitized)
         with_arena(program.arena) do
@@ -6898,11 +6896,8 @@ module Crystal::HIR
             case member
           when CrystalV2::Compiler::Frontend::DefNode
             method_name = String.new(member.name)
-            is_class_method = if recv = member.receiver
-                                String.new(recv) == "self"
-                              else
-                                false
-                              end
+            recv = member.receiver
+            is_class_method = recv ? String.new(recv) == "self" : false
             next unless is_class_method
             if ENV.has_key?("DEBUG_MODULE_LOOKUP") && full_name == "Crystal::System::Signal"
               STDERR.puts "[DEBUG_MODULE_LOOKUP] register #{full_name}.#{method_name}"
@@ -6966,6 +6961,8 @@ module Crystal::HIR
             register_macro(member, full_name)
           when CrystalV2::Compiler::Frontend::MacroIfNode
             process_macro_if_in_module(member, full_name)
+          when CrystalV2::Compiler::Frontend::MacroForNode
+            process_macro_for_in_module(member, full_name)
           when CrystalV2::Compiler::Frontend::MacroLiteralNode
             process_macro_literal_in_module(member, full_name)
             end
