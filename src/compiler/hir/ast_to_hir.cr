@@ -7316,6 +7316,12 @@ module Crystal::HIR
           if !param.is_block && !param.is_splat && !param.is_double_splat && call_index < call_types.size
             param_type = refine_param_type_from_call(param_type, call_types[call_index])
           end
+          if type_ann_str && (type_ann_str == "IO::ByteFormat" || type_ann_str == "ByteFormat")
+            if call_index < call_types.size
+              inferred = call_types[call_index]
+              param_type = inferred if inferred != TypeRef::VOID
+            end
+          end
           if param_type == TypeRef::VOID && !param.is_block && !param.is_splat && !param.is_double_splat
             if default_value = param.default_value
               default_node = @arena[default_value]
@@ -9256,6 +9262,31 @@ module Crystal::HIR
         return if node.body.nil?
       end
 
+      if full_name_override && full_name_override.includes?("$")
+        suffix = full_name_override.split("$", 2)[1]
+        if ENV["DEBUG_FROM_IO_LOWER"]? && method_name == "from_io"
+          STDERR.puts "[FROM_IO_LOWER] class=#{class_name} override=#{full_name_override} suffix=#{suffix || ""}"
+        end
+        if suffix && !suffix.empty?
+          parsed_types = parse_types_from_suffix(suffix)
+          if ENV["DEBUG_FROM_IO_LOWER"]? && method_name == "from_io"
+            parsed_ids = parsed_types.map(&.id).join(",")
+            STDERR.puts "[FROM_IO_LOWER] class=#{class_name} parsed=#{parsed_ids}"
+          end
+          unless parsed_types.empty?
+            if call_arg_types.nil?
+              call_arg_types = parsed_types
+            else
+              call_arg_types = merge_call_arg_types_from_suffix(call_arg_types, parsed_types)
+            end
+            if ENV["DEBUG_FROM_IO_LOWER"]? && method_name == "from_io"
+              merged_ids = call_arg_types.map(&.id).join(",")
+              STDERR.puts "[FROM_IO_LOWER] class=#{class_name} merged=#{merged_ids}"
+            end
+          end
+        end
+      end
+
       # Defer lowering for untyped params until call-site types are available.
       if def_params_untyped?(node)
         call_types = call_arg_types || [] of TypeRef
@@ -9984,6 +10015,9 @@ module Crystal::HIR
         param_name = resolve_type_alias_chain(param_desc.name)
         call_name = resolve_type_alias_chain(call_desc.name)
         return call_type if param_name == call_name
+        if (param_name == "IO::ByteFormat" || param_name == "ByteFormat") && call_name.starts_with?("IO::ByteFormat::")
+          return call_type
+        end
         includers = @module_includers[param_name]?
         if includers.nil? || includers.empty?
           short_name = param_name.split("::").last
@@ -10417,6 +10451,19 @@ module Crystal::HIR
         end
       end
       class_name = normalize_method_owner_name(class_name)
+      if type_desc && type_desc.kind == TypeKind::Module
+        case class_name
+        when "IO::ByteFormat", "ByteFormat", "IO::ByteFormat::SystemEndian"
+          class_name = "IO::ByteFormat::LittleEndian"
+        when "IO::ByteFormat::NetworkEndian"
+          class_name = "IO::ByteFormat::BigEndian"
+        end
+        if class_name.starts_with?("IO::ByteFormat::")
+          if preferred_desc = @module.get_type_descriptor(type_ref_for_name(class_name))
+            type_desc = preferred_desc
+          end
+        end
+      end
       if ENV["DEBUG_TUPLE_CALLS"]? && class_name == "Tuple"
         params = type_desc.try(&.type_params)
         param_names = params ? params.map { |ref| get_type_name_from_ref(ref) }.join(",") : ""
@@ -10946,6 +10993,10 @@ module Crystal::HIR
       when "Crystal::EventLoop::FileDescriptor", "EventLoop::FileDescriptor",
            "Crystal::EventLoop::Socket", "EventLoop::Socket"
         preferred_event_loop_interface_class
+      when "IO::ByteFormat", "ByteFormat", "IO::ByteFormat::SystemEndian"
+        "IO::ByteFormat::LittleEndian"
+      when "IO::ByteFormat::NetworkEndian"
+        "IO::ByteFormat::BigEndian"
       when "Crystal::System::FileDescriptor", "System::FileDescriptor"
         "IO::FileDescriptor"
       when "Crystal::System::Socket", "System::Socket"
@@ -11094,22 +11145,27 @@ module Crystal::HIR
 
       arg_count = arg_types.size
       module_method_base = "#{module_base}.#{method_name}"
-      if entry = lookup_function_def_for_call(module_method_base, arg_count, has_block, arg_types)
-        def_node = entry[1]
-        func_context = function_context_from_name(entry[0])
-        if params_compatible_with_args?(def_node, arg_types, func_context)
-          mangled = mangle_function_name(module_method_base, arg_types, has_block)
-          if @function_types.has_key?(mangled) || @module.has_function?(mangled)
-            return mangled unless abstract_def?(mangled)
-          elsif has_function_base?(module_method_base)
-            return module_method_base unless abstract_def?(module_method_base)
+      skip_module_base = module_base == "IO::ByteFormat" || module_base == "ByteFormat"
+      unless skip_module_base
+        if entry = lookup_function_def_for_call(module_method_base, arg_count, has_block, arg_types)
+          def_node = entry[1]
+          func_context = function_context_from_name(entry[0])
+          if params_compatible_with_args?(def_node, arg_types, func_context)
+            mangled = mangle_function_name(module_method_base, arg_types, has_block)
+            if @function_types.has_key?(mangled) || @module.has_function?(mangled)
+              return mangled unless abstract_def?(mangled)
+            elsif has_function_base?(module_method_base)
+              return module_method_base unless abstract_def?(module_method_base)
+            end
           end
         end
       end
 
       candidates = includers.to_a
       if module_like_type_name?(module_base) && !candidates.includes?(module_base)
-        candidates << module_base
+        unless module_base == "IO::ByteFormat" || module_base == "ByteFormat"
+          candidates << module_base
+        end
       end
       if prefer_class && !candidates.includes?(prefer_class)
         candidates << prefer_class
@@ -20544,6 +20600,9 @@ module Crystal::HIR
           "callsite.args",
           "name=#{name} types=#{arg_types.map(&.id).join(",")} literals=#{literal_payload}"
         )
+      end
+      if ENV["DEBUG_FROM_IO_CALLSITE"]? && name.includes?("from_io")
+        STDERR.puts "[FROM_IO_CALLSITE] name=#{name} types=#{arg_types.map(&.id).join(",")}"
       end
       if signature = call_signature_for_call(name, arg_types.size, has_block)
         sig_bucket = @pending_arg_types_by_signature[signature]? || [] of CallsiteArgs
@@ -30347,6 +30406,35 @@ module Crystal::HIR
       end
 
       result
+    end
+
+    private def merge_call_arg_types_from_suffix(
+      call_types : Array(TypeRef),
+      parsed_types : Array(TypeRef)
+    ) : Array(TypeRef)
+      return call_types if parsed_types.empty? || call_types.empty?
+      return call_types if parsed_types.size != call_types.size
+
+      merged = call_types.dup
+      parsed_types.each_with_index do |parsed, idx|
+        next if parsed == TypeRef::VOID
+        if merged[idx] == TypeRef::VOID
+          merged[idx] = parsed
+          next
+        end
+        call_desc = @module.get_type_descriptor(merged[idx])
+        parsed_desc = @module.get_type_descriptor(parsed)
+        next unless call_desc && parsed_desc
+        next unless call_desc.kind == TypeKind::Module && parsed_desc.kind == TypeKind::Module
+
+        call_name = resolve_type_alias_chain(call_desc.name)
+        parsed_name = resolve_type_alias_chain(parsed_desc.name)
+        if parsed_name.starts_with?("#{call_name}::")
+          merged[idx] = parsed
+        end
+      end
+
+      merged
     end
 
     private def strip_mangled_suffix_flags(suffix : String) : String
