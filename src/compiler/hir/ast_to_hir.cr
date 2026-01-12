@@ -4510,6 +4510,30 @@ module Crystal::HIR
       false
     end
 
+    private def resolve_included_type_name(name : String) : String?
+      return nil if name.empty?
+      return nil if name.includes?("::")
+
+      namespaces = [] of String
+      if override = @current_namespace_override
+        if included = @class_included_modules[override]?
+          namespaces.concat(included.to_a)
+        end
+      end
+      if current = @current_class
+        if included = @class_included_modules[current]?
+          namespaces.concat(included.to_a)
+        end
+      end
+
+      namespaces.each do |namespace|
+        candidate = "#{namespace}::#{name}"
+        return candidate if type_name_exists?(candidate)
+      end
+
+      nil
+    end
+
     NILABLE_QUERY_METHODS = ["[]?", "at?", "first?", "last?", "pop?", "shift?"] of String
 
     private def fallback_query_return_type(method_name : String) : TypeRef
@@ -5622,9 +5646,8 @@ module Crystal::HIR
             @current_class = old_class
             full_alias_name = "#{module_name}::#{alias_name}"
             register_type_alias(full_alias_name, target_name)
-            register_type_alias(alias_name, target_name)
             if ENV.has_key?("DEBUG_ALIAS")
-              STDERR.puts "[ALIAS] Registered (module): #{full_alias_name} => #{target_name}, also: #{alias_name} => #{target_name}"
+              STDERR.puts "[ALIAS] Registered (module): #{full_alias_name} => #{target_name}"
             end
           elsif member.is_a?(CrystalV2::Compiler::Frontend::ModuleNode)
             # Nested module: Foo::Bar (as module)
@@ -7877,6 +7900,20 @@ module Crystal::HIR
         # so type lookups resolve in the correct namespace
         old_class = @current_class
         @current_class = class_name
+        include_nodes = [] of CrystalV2::Compiler::Frontend::IncludeNode
+        extend_nodes = [] of CrystalV2::Compiler::Frontend::ExtendNode
+        body.each do |expr_id|
+          member = unwrap_visibility_member(@arena[expr_id])
+          case member
+          when CrystalV2::Compiler::Frontend::IncludeNode
+            include_nodes << member
+            if module_name = resolve_path_like_name(member.target)
+              record_module_inclusion(module_name, class_name)
+            end
+          when CrystalV2::Compiler::Frontend::ExtendNode
+            extend_nodes << member
+          end
+        end
         record_constants_in_body(class_name, body)
         # Seed provisional class info so return-type inference can see ivars
         # collected during registration (initialize assignments, ivar decls, etc.).
@@ -7904,8 +7941,6 @@ module Crystal::HIR
           elapsed = (Time.monotonic - defined_start).total_milliseconds
           STDERR.puts "[MONO] #{class_name} collect_defined_instance_methods #{elapsed.round(1)}ms"
         end
-        include_nodes = [] of CrystalV2::Compiler::Frontend::IncludeNode
-        extend_nodes = [] of CrystalV2::Compiler::Frontend::ExtendNode
 
         begin
         body_start = Time.monotonic if mono_debug
@@ -7917,9 +7952,9 @@ module Crystal::HIR
           yield_elapsed = nil
           case member
           when CrystalV2::Compiler::Frontend::IncludeNode
-            include_nodes << member
+            next
           when CrystalV2::Compiler::Frontend::ExtendNode
-            extend_nodes << member
+            next
           when CrystalV2::Compiler::Frontend::InstanceVarDeclNode
             # Instance variable declaration: @value : Int32
             ivar_name = String.new(member.name)
@@ -13092,6 +13127,10 @@ module Crystal::HIR
       end
 
       unless name.includes?("::")
+        if resolved_included = resolve_included_type_name(name)
+          @resolved_type_name_cache[cache_key] = resolved_included
+          return resolved_included
+        end
         resolved = resolve_class_name_in_context(name)
         @resolved_type_name_cache[cache_key] = resolved
         return resolved
