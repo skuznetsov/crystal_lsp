@@ -632,6 +632,10 @@ module Crystal::HIR
     @inline_yield_return_stack : Array(InlineReturnContext) = [] of InlineReturnContext
     @inline_yield_return_override_stack : Array(InlineReturnOverride) = [] of InlineReturnOverride
     @virtual_targets_lowered : Set(String) = Set(String).new
+    # Track virtual targets so newly-registered subclasses can be lowered later.
+    record VirtualTarget, method_name : String, arg_types : Array(TypeRef), has_block : Bool, has_splat : Bool
+    @virtual_targets_by_parent : Hash(String, Array(VirtualTarget)) = {} of String => Array(VirtualTarget)
+    @virtual_targets_recorded : Set(String) = Set(String).new
 
     # Captures computed for block literals (body_block -> captures).
     @block_captures : Hash(BlockId, Array(CapturedVar)) = {} of BlockId => Array(CapturedVar)
@@ -1109,6 +1113,54 @@ module Crystal::HIR
       end
       keys.each do |key|
         (@children_by_parent[key] ||= Set(String).new) << child_name
+      end
+
+      # If this parent already has recorded virtual targets, lower them for the new child.
+      current_parent = parent_name
+      while current_parent
+        lower_virtual_targets_for_child(child_name, current_parent)
+        current_parent = @class_info[current_parent]?.try(&.parent_name)
+      end
+    end
+
+    private def record_virtual_target(
+      parent_name : String,
+      method_name : String,
+      arg_types : Array(TypeRef),
+      has_block : Bool,
+      has_splat : Bool
+    ) : Nil
+      key = "#{parent_name}|#{method_name}|#{arg_types.map(&.id).join(",")}|#{has_block ? 1 : 0}|#{has_splat ? 1 : 0}"
+      return if @virtual_targets_recorded.includes?(key)
+      @virtual_targets_recorded.add(key)
+
+      entry = VirtualTarget.new(method_name, arg_types.dup, has_block, has_splat)
+      (@virtual_targets_by_parent[parent_name] ||= [] of VirtualTarget) << entry
+      if ENV["DEBUG_VIRTUAL_TARGETS"]?
+        type_ids = arg_types.map(&.id).join(",")
+        STDERR.puts "[VIRTUAL_TARGET] record parent=#{parent_name} method=#{method_name} args=[#{type_ids}] block=#{has_block ? 1 : 0} splat=#{has_splat ? 1 : 0}"
+      end
+    end
+
+    private def lower_virtual_targets_for_child(child_name : String, parent_name : String) : Nil
+      targets = @virtual_targets_by_parent[parent_name]?
+      return unless targets
+      if ENV["DEBUG_VIRTUAL_TARGETS"]?
+        STDERR.puts "[VIRTUAL_TARGET] lower child=#{child_name} parent=#{parent_name} targets=#{targets.size}"
+      end
+
+      targets.each do |target|
+        base_name = "#{child_name}##{target.method_name}"
+        if resolved = lookup_function_def_for_call(base_name, target.arg_types.size, target.has_block, target.arg_types, target.has_splat)
+          resolved_name = resolved[0]
+          lower_function_if_needed(resolved_name)
+          resolved_base = resolved_name.split("$", 2).first
+          lower_function_if_needed(resolved_base) unless resolved_name == resolved_base
+        else
+          candidate = mangle_function_name(base_name, target.arg_types, target.has_block)
+          lower_function_if_needed(candidate)
+          lower_function_if_needed(base_name) unless candidate == base_name
+        end
       end
     end
 
@@ -4428,6 +4480,16 @@ module Crystal::HIR
       return true if @generic_templates.has_key?(name)
       return true if @top_level_class_kinds.has_key?(name)
       false
+    end
+
+    private def upgrade_module_type_for_class(name : String, kind : TypeKind) : TypeRef?
+      @module.types.each_with_index do |desc, idx|
+        next unless desc.name == name
+        next unless desc.kind == TypeKind::Module
+        @module.types[idx] = TypeDescriptor.new(kind, name, desc.type_params)
+        return TypeRef.new(TypeRef::FIRST_USER_TYPE + idx.to_u32)
+      end
+      nil
     end
 
     private def module_like_type_name?(name : String) : Bool
@@ -7758,7 +7820,12 @@ module Crystal::HIR
                      if class_name.includes?("(")
                        type_ref_for_name(class_name)
                      else
-                       @module.intern_type(TypeDescriptor.new(type_kind, class_name))
+                       if upgraded = upgrade_module_type_for_class(class_name, type_kind)
+                         store_type_cache(type_cache_key(class_name), upgraded)
+                         upgraded
+                       else
+                         @module.intern_type(TypeDescriptor.new(type_kind, class_name))
+                       end
                      end
                    end
                  end
@@ -24824,12 +24891,20 @@ module Crystal::HIR
             key = "#{type_desc.name}|#{method_name}|#{arg_types.map(&.id).join(",")}|#{has_block_call ? 1 : 0}"
             unless @virtual_targets_lowered.includes?(key)
               @virtual_targets_lowered.add(key)
+              record_virtual_target(type_desc.name, method_name, arg_types, has_block_call, has_splat)
               owners = [type_desc.name] + collect_subclasses([type_desc.name])
               owners.each do |owner|
                 base_name = "#{owner}##{method_name}"
-                candidate = mangle_function_name(base_name, arg_types, has_block_call)
-                lower_function_if_needed(candidate)
-                lower_function_if_needed(base_name) unless candidate == base_name
+                if resolved = lookup_function_def_for_call(base_name, arg_types.size, has_block_call, arg_types, has_splat)
+                  resolved_name = resolved[0]
+                  lower_function_if_needed(resolved_name)
+                  resolved_base = resolved_name.split("$", 2).first
+                  lower_function_if_needed(resolved_base) unless resolved_name == resolved_base
+                else
+                  candidate = mangle_function_name(base_name, arg_types, has_block_call)
+                  lower_function_if_needed(candidate)
+                  lower_function_if_needed(base_name) unless candidate == base_name
+                end
               end
             end
           elsif type_desc.kind == TypeKind::Union
@@ -24849,10 +24924,24 @@ module Crystal::HIR
                   end
                 end
                 expanded.uniq.each do |owner|
-                  base_name = "#{owner}##{method_name}"
-                  candidate = mangle_function_name(base_name, arg_types, has_block_call)
-                  lower_function_if_needed(candidate)
-                  lower_function_if_needed(base_name) unless candidate == base_name
+                  owners = [owner]
+                  if class_has_subclasses?(owner)
+                    owners.concat(collect_subclasses([owner]))
+                  end
+                  record_virtual_target(owner, method_name, arg_types, has_block_call, has_splat)
+                  owners.uniq.each do |resolved_owner|
+                    base_name = "#{resolved_owner}##{method_name}"
+                    if resolved = lookup_function_def_for_call(base_name, arg_types.size, has_block_call, arg_types, has_splat)
+                      resolved_name = resolved[0]
+                      lower_function_if_needed(resolved_name)
+                      resolved_base = resolved_name.split("$", 2).first
+                      lower_function_if_needed(resolved_base) unless resolved_name == resolved_base
+                    else
+                      candidate = mangle_function_name(base_name, arg_types, has_block_call)
+                      lower_function_if_needed(candidate)
+                      lower_function_if_needed(base_name) unless candidate == base_name
+                    end
+                  end
                 end
               end
             end

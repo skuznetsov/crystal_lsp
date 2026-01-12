@@ -1048,6 +1048,7 @@ r2 = maybe(false)  # => nil
 - Update (2026-01-10): numeric inherited methods now specialize on primitive owners (Int32#divmod), removing `Number_*` callsites. Current full-prelude `bootstrap_array` link shows 70 missing symbols (see `/private/tmp/bootstrap_array_full.link.log` and `/private/tmp/missing_symbols_latest.txt`).
 - Update (2026-01-10): inherited overload resolution now respects arity for non-numeric receivers (Tuple#to_s no longer resolves to IO overload); Nil callsites removed. Missing symbols now 49 (see `/private/tmp/bootstrap_array_full.link.log` and `/private/tmp/missing_symbols_latest.txt`).
 - Update (2026-01-12): union virtual dispatch now falls back to class vdispatch for abstract union variants (e.g., `IO | Nil | Pointer`), removing `_IO_read_Slice_UInt8_`/`_IO_write_Slice_UInt8_` callsites; current full-prelude `bootstrap_array` link shows 98 missing symbols (see `/private/tmp/bootstrap_array_full.link.log`).
+- Update (2026-01-12): Polling class/module dedup + union virtual subclass lowering; `system_del` lowered and missing symbols now 43 (see `/private/tmp/bootstrap_array_full.link.log` and `/private/tmp/missing_symbols_latest.txt`).
 
 **Regressions (open):**
 - [ ] GH #10 (crystal_lsp): prelude build links for minimal `fib.cr`, but runtime segfault persists.
@@ -1068,6 +1069,7 @@ r2 = maybe(false)  # => nil
 - Register `MacroForNode` inside nested modules so reopened macro modules (IO::ByteFormat::{Little,Big}Endian) contribute defs; `IO::ByteFormat::LittleEndian.decode` functions now appear in HIR (2026-02-xx).
 - LLVM backend treats pointer constants `"0"` as `null` for ptr→int casts, removing `ptrtoint ptr 0` llc errors (2026-02-xx).
 - EventLoop interface dispatch: force EventLoop::FileDescriptor/Socket to module kind and map instance calls to Polling/IOCP/Wasi (removes EventLoop__FileDescriptor_* missing symbols) (2026-01-xx).
+- Upgrade module-typed forward declarations to class/struct on registration (removes duplicate `Module`/`Class` types like Polling and restores virtual lowering); union virtual calls now expand class subclasses for variants (2026-01-12).
 - Fix module class-method deferred lookup to use the module arena (prevents `Index out of bounds` in `find_module_class_def`) (2026-01-xx).
 - Track enum value types for `.new`/`.value` and propagate via assignments/identifiers in HIR lowering.
 - Propagate enum return types from method calls into enum predicate lowering (e.g., `File::Info#type` predicates) (2026-01-xx).
