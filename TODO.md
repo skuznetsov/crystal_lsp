@@ -1047,6 +1047,7 @@ r2 = maybe(false)  # => nil
   - ByteFormat decode/from_io resolved (no `_IO__ByteFormat_decode_UInt32_IO`).
 - Update (2026-01-10): numeric inherited methods now specialize on primitive owners (Int32#divmod), removing `Number_*` callsites. Current full-prelude `bootstrap_array` link shows 70 missing symbols (see `/private/tmp/bootstrap_array_full.link.log` and `/private/tmp/missing_symbols_latest.txt`).
 - Update (2026-01-10): inherited overload resolution now respects arity for non-numeric receivers (Tuple#to_s no longer resolves to IO overload); Nil callsites removed. Missing symbols now 49 (see `/private/tmp/bootstrap_array_full.link.log` and `/private/tmp/missing_symbols_latest.txt`).
+- Update (2026-01-12): union virtual dispatch now falls back to class vdispatch for abstract union variants (e.g., `IO | Nil | Pointer`), removing `_IO_read_Slice_UInt8_`/`_IO_write_Slice_UInt8_` callsites; current full-prelude `bootstrap_array` link shows 98 missing symbols (see `/private/tmp/bootstrap_array_full.link.log`).
 
 **Regressions (open):**
 - [ ] GH #10 (crystal_lsp): prelude build links for minimal `fib.cr`, but runtime segfault persists.

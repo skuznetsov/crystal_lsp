@@ -1043,13 +1043,20 @@ module Crystal
         end
 
         hir_args_with_receiver = [recv_id] + call.args
-        callee_args = coerce_call_args(dispatch_builder, cand_args, hir_args_with_receiver, candidate[:func])
-        call_val = dispatch_builder.call(candidate[:func].id, callee_args, dispatch_func.return_type)
-
-        if phi
-          phi.add_incoming(case_block, call_val)
+        call_func = candidate[:func]
+        if call_func.nil? && candidate[:dispatch_class]
+          call_func = ensure_class_dispatch_for_union(candidate[:dispatch_class].not_nil!, method_suffix, candidate[:type_ref], call)
         end
-        dispatch_func.get_block(case_block).terminator = Jump.new(end_block)
+        if call_func
+          callee_args = coerce_call_args(dispatch_builder, cand_args, hir_args_with_receiver, call_func)
+          call_val = dispatch_builder.call(call_func.id, callee_args, dispatch_func.return_type)
+          if phi
+            phi.add_incoming(case_block, call_val)
+          end
+          dispatch_func.get_block(case_block).terminator = Jump.new(end_block)
+        else
+          dispatch_func.get_block(case_block).terminator = Jump.new(default_block)
+        end
       end
 
       if phi
@@ -1108,8 +1115,8 @@ module Crystal
       recv_desc : HIR::TypeDescriptor,
       recv_type : HIR::TypeRef,
       method_suffix : String
-    ) : Array(NamedTuple(type_id: Int32, type_ref: TypeRef, variant_id: Int32, func: Function))
-      candidates = [] of NamedTuple(type_id: Int32, type_ref: TypeRef, variant_id: Int32, func: Function)
+    ) : Array(NamedTuple(type_id: Int32, type_ref: TypeRef, variant_id: Int32, func: Function?, dispatch_class: String?))
+      candidates = [] of NamedTuple(type_id: Int32, type_ref: TypeRef, variant_id: Int32, func: Function?, dispatch_class: String?)
 
       if recv_desc.kind == HIR::TypeKind::Union
         mir_union_ref = convert_type(recv_type)
@@ -1130,7 +1137,18 @@ module Crystal
                 type_id: variant.type_id,
                 type_ref: variant.type_ref,
                 variant_id: variant.type_id,
-                func: func
+                func: func,
+                dispatch_class: nil
+              }
+            elsif (mir_type = @mir_module.type_registry.get_by_name(variant.full_name)) &&
+                  !mir_type.is_value_type? &&
+                  !subclasses_for(variant.full_name).empty?
+              candidates << {
+                type_id: variant.type_id,
+                type_ref: variant.type_ref,
+                variant_id: variant.type_id,
+                func: nil,
+                dispatch_class: variant.full_name
               }
             end
           end
@@ -1145,7 +1163,8 @@ module Crystal
             type_id: mir_type.id.to_i32,
             type_ref: TypeRef.new(mir_type.id),
             variant_id: mir_type.id.to_i32,
-            func: func
+            func: func,
+            dispatch_class: nil
           }
         end
       elsif recv_desc.kind == HIR::TypeKind::Module
@@ -1162,13 +1181,82 @@ module Crystal
               type_id: mir_type.id.to_i32,
               type_ref: TypeRef.new(mir_type.id),
               variant_id: mir_type.id.to_i32,
-              func: func
+              func: func,
+              dispatch_class: nil
             }
           end
         end
       end
 
       candidates
+    end
+
+    private def ensure_class_dispatch_for_union(
+      class_name : String,
+      method_suffix : String,
+      receiver_type : TypeRef,
+      call : HIR::Call
+    ) : Function?
+      dispatch_name = "__vdispatch__#{class_name}##{method_suffix}"
+      if existing = @mir_module.get_function(dispatch_name)
+        return existing
+      end
+
+      candidates = [] of NamedTuple(type_id: Int32, func: Function)
+      ([class_name] + subclasses_for(class_name)).each do |name|
+        if func = resolve_virtual_method_for_class(name, method_suffix)
+          next unless mir_type = @mir_module.type_registry.get_by_name(name)
+          next if mir_type.is_value_type?
+          candidates << {type_id: mir_type.id.to_i32, func: func}
+        end
+      end
+      return nil if candidates.empty?
+
+      dispatch_func = @mir_module.create_function(dispatch_name, convert_type(call.type))
+      param_values = [] of ValueId
+      dispatch_func.add_param("recv", receiver_type)
+      param_values << 0_u32
+      call.args.each_with_index do |arg_id, idx|
+        arg_type = @hir_value_types[arg_id]? || HIR::TypeRef::POINTER
+        dispatch_func.add_param("arg#{idx}", convert_type(arg_type))
+        param_values << (idx + 1).to_u32
+      end
+
+      dispatch_builder = Builder.new(dispatch_func)
+      header_ptr = dispatch_builder.gep(param_values[0], [0_u32], TypeRef::POINTER)
+      type_id_val = dispatch_builder.load(header_ptr, TypeRef::INT32)
+
+      end_block = dispatch_func.create_block
+      phi = nil
+      if dispatch_func.return_type != TypeRef::VOID
+        dispatch_builder.current_block = end_block
+        phi = dispatch_builder.phi(dispatch_func.return_type)
+      end
+
+      default_block = dispatch_func.create_block
+      cases = [] of Tuple(Int64, BlockId)
+      candidates.each do |candidate|
+        case_block = dispatch_func.create_block
+        cases << {candidate[:type_id].to_i64, case_block}
+      end
+
+      dispatch_builder.current_block = dispatch_func.entry_block
+      dispatch_func.get_block(dispatch_func.entry_block).terminator = Switch.new(type_id_val, cases, default_block)
+
+      candidates.each_with_index do |candidate, idx|
+        case_block = cases[idx][1]
+        dispatch_builder.current_block = case_block
+
+        cand_args = param_values.dup
+        call_id = dispatch_builder.call(candidate[:func].id, cand_args, dispatch_func.return_type)
+        if phi && call_id != 0_u32
+          phi.add_incoming(call_id, case_block)
+        end
+        dispatch_func.get_block(case_block).terminator = Jump.new(end_block)
+      end
+
+      dispatch_func.get_block(default_block).terminator = Unreachable.new
+      dispatch_func
     end
 
     private def resolve_virtual_method_for_class(class_name : String, method_suffix : String) : Function?
