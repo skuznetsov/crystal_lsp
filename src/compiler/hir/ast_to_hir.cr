@@ -527,6 +527,8 @@ module Crystal::HIR
 
     # Locals available for resolving typeof(...) in type positions (per def)
     @current_typeof_locals : Hash(String, TypeRef)?
+    # Optional body context for local-type inference when resolving identifiers.
+    @infer_body_context : Array(ExprId)?
     # Guard against recursive inference loops (arena object_id + expr index).
     @infer_expr_stack : Set(UInt64)
     @infer_type_cache : Hash(UInt64, {Int32, TypeRef})
@@ -695,6 +697,7 @@ module Crystal::HIR
       @current_method = nil
       @current_method_is_class = false
       @current_typeof_locals = nil
+      @infer_body_context = nil
       @infer_expr_stack = Set(UInt64).new
       @infer_type_cache = {} of UInt64 => {Int32, TypeRef}
       @infer_type_cache_version = 0
@@ -4586,15 +4589,40 @@ module Crystal::HIR
     ) : TypeRef?
       body = node.body
       return nil unless body && !body.empty?
+      old_body_context = @infer_body_context
+      @infer_body_context = body
+      begin
+        return_types = [] of TypeRef
+        body.each do |expr_id|
+          collect_return_types(expr_id, self_type_name, return_types)
+        end
+        if return_types.any?
+          inferred = merge_return_types(return_types)
+          # If we have explicit returns, still consider the final expression
+          # as a possible implicit return type.
+          expr_id = body.last
+          loop do
+            expr_node = @arena[expr_id]
+            case expr_node
+            when CrystalV2::Compiler::Frontend::GroupingNode
+              expr_id = expr_node.expression
+            when CrystalV2::Compiler::Frontend::MacroExpressionNode
+              expr_id = expr_node.expression
+            when CrystalV2::Compiler::Frontend::ReturnNode
+              value = expr_node.value
+              break unless value
+              expr_id = value
+            else
+              break
+            end
+          end
+          if inferred && (tail_type = infer_type_from_expr(expr_id, self_type_name))
+            inferred = union_type_for_values(inferred, tail_type) if tail_type != inferred
+          end
+          return inferred
+        end
 
-      return_types = [] of TypeRef
-      body.each do |expr_id|
-        collect_return_types(expr_id, self_type_name, return_types)
-      end
-      if return_types.any?
-        inferred = merge_return_types(return_types)
-        # If we have explicit returns, still consider the final expression
-        # as a possible implicit return type.
+        # Use the last expression as a heuristic return (handles simple multi-line bodies).
         expr_id = body.last
         loop do
           expr_node = @arena[expr_id]
@@ -4605,54 +4633,34 @@ module Crystal::HIR
             expr_id = expr_node.expression
           when CrystalV2::Compiler::Frontend::ReturnNode
             value = expr_node.value
-            break unless value
+            return nil unless value
             expr_id = value
           else
             break
           end
         end
-        if inferred && (tail_type = infer_type_from_expr(expr_id, self_type_name))
-          inferred = union_type_for_values(inferred, tail_type) if tail_type != inferred
-        end
-        return inferred
-      end
 
-      # Use the last expression as a heuristic return (handles simple multi-line bodies).
-      expr_id = body.last
-      loop do
-        expr_node = @arena[expr_id]
-        case expr_node
-        when CrystalV2::Compiler::Frontend::GroupingNode
-          expr_id = expr_node.expression
-        when CrystalV2::Compiler::Frontend::MacroExpressionNode
-          expr_id = expr_node.expression
-        when CrystalV2::Compiler::Frontend::ReturnNode
-          value = expr_node.value
-          return nil unless value
-          expr_id = value
-        else
-          break
-        end
-      end
-
-      if inferred = infer_type_from_expr(expr_id, self_type_name)
-        return inferred
-      end
-
-      expr_node = @arena[expr_id]
-      case expr_node
-      when CrystalV2::Compiler::Frontend::IdentifierNode
-        name = String.new(expr_node.name)
-        if inferred = infer_local_type_from_body(body, name, self_type_name)
+        if inferred = infer_type_from_expr(expr_id, self_type_name)
           return inferred
         end
-      when CrystalV2::Compiler::Frontend::AssignNode
-        return infer_type_from_expr(expr_node.value, self_type_name)
-      when CrystalV2::Compiler::Frontend::TypeDeclarationNode
-        return type_ref_for_name(String.new(expr_node.declared_type))
-      end
 
-      nil
+        expr_node = @arena[expr_id]
+        case expr_node
+        when CrystalV2::Compiler::Frontend::IdentifierNode
+          name = String.new(expr_node.name)
+          if inferred = infer_local_type_from_body(body, name, self_type_name)
+            return inferred
+          end
+        when CrystalV2::Compiler::Frontend::AssignNode
+          return infer_type_from_expr(expr_node.value, self_type_name)
+        when CrystalV2::Compiler::Frontend::TypeDeclarationNode
+          return type_ref_for_name(String.new(expr_node.declared_type))
+        end
+
+        nil
+      ensure
+        @infer_body_context = old_body_context
+      end
     end
 
     private def record_type_literal_return(full_name : String, base_name : String) : Nil
@@ -4970,6 +4978,11 @@ module Crystal::HIR
         end
         if type_name = lookup_typeof_local_name(String.new(expr_node.name))
           return type_ref_for_name(type_name)
+        end
+        if body = @infer_body_context
+          if inferred = infer_local_type_from_body(body, name, self_type_name)
+            return inferred
+          end
         end
         if owner_name = (self_type_name || @current_class)
           if class_method_base = resolve_method_with_inheritance(owner_name, name)
@@ -5310,25 +5323,112 @@ module Crystal::HIR
     private def infer_local_type_from_body(
       body : Array(ExprId),
       name : String,
-      self_type_name : String?
+      self_type_name : String?,
+      visited : Set(String)? = nil
     ) : TypeRef?
-      body.reverse_each do |expr_id|
-        expr_node = @arena[expr_id]
-        case expr_node
-        when CrystalV2::Compiler::Frontend::AssignNode
-          target = @arena[expr_node.target]
-          if target.is_a?(CrystalV2::Compiler::Frontend::IdentifierNode) &&
-             String.new(target.name) == name
-            return infer_type_from_expr(expr_node.value, self_type_name)
-          end
-        when CrystalV2::Compiler::Frontend::TypeDeclarationNode
-          if String.new(expr_node.name) == name
-            return type_ref_for_name(String.new(expr_node.declared_type))
+      visited ||= Set(String).new
+      return nil if visited.includes?(name)
+      visited.add(name)
+      types = [] of TypeRef
+      body.each do |expr_id|
+        collect_local_assignment_types(expr_id, name, self_type_name, types, body, visited)
+      end
+      visited.delete(name)
+      merge_return_types(types)
+    end
+
+    private def collect_local_assignment_types(
+      expr_id : ExprId,
+      name : String,
+      self_type_name : String?,
+      output : Array(TypeRef),
+      body : Array(ExprId),
+      visited : Set(String)
+    ) : Nil
+      expr_node = @arena[expr_id]
+      case expr_node
+      when CrystalV2::Compiler::Frontend::AssignNode
+        target = @arena[expr_node.target]
+        if target.is_a?(CrystalV2::Compiler::Frontend::IdentifierNode) &&
+           String.new(target.name) == name
+          if inferred = infer_type_from_expr(expr_node.value, self_type_name)
+            output << inferred if inferred != TypeRef::VOID
+          elsif value_node = node_for_expr(expr_node.value)
+            if value_node.is_a?(CrystalV2::Compiler::Frontend::IdentifierNode)
+              value_name = String.new(value_node.name)
+              if inferred = infer_local_type_from_body(body, value_name, self_type_name, visited)
+                output << inferred if inferred != TypeRef::VOID
+              end
+            end
           end
         end
+        collect_local_assignment_types(expr_node.value, name, self_type_name, output, body, visited)
+      when CrystalV2::Compiler::Frontend::TypeDeclarationNode
+        if String.new(expr_node.name) == name
+          type_ref = type_ref_for_name(String.new(expr_node.declared_type))
+          output << type_ref if type_ref != TypeRef::VOID
+        end
+        if value_id = expr_node.value
+          collect_local_assignment_types(value_id, name, self_type_name, output, body, visited)
+        end
+      when CrystalV2::Compiler::Frontend::MultipleAssignNode
+        collect_local_assignment_types(expr_node.value, name, self_type_name, output, body, visited)
+      when CrystalV2::Compiler::Frontend::DefNode
+        if body = expr_node.body
+          body.each { |child| collect_local_assignment_types(child, name, self_type_name, output, body, visited) }
+        end
+      when CrystalV2::Compiler::Frontend::BlockNode
+        if body = expr_node.body
+          body.each { |child| collect_local_assignment_types(child, name, self_type_name, output, body, visited) }
+        end
+      when CrystalV2::Compiler::Frontend::IfNode
+        expr_node.then_body.each { |child| collect_local_assignment_types(child, name, self_type_name, output, body, visited) }
+        if elsifs = expr_node.elsifs
+          elsifs.each { |branch| branch.body.each { |child| collect_local_assignment_types(child, name, self_type_name, output, body, visited) } }
+        end
+        if else_body = expr_node.else_body
+          else_body.each { |child| collect_local_assignment_types(child, name, self_type_name, output, body, visited) }
+        end
+      when CrystalV2::Compiler::Frontend::CaseNode
+        expr_node.when_branches.each { |branch| branch.body.each { |child| collect_local_assignment_types(child, name, self_type_name, output, body, visited) } }
+        if else_branch = expr_node.else_branch
+          else_branch.each { |child| collect_local_assignment_types(child, name, self_type_name, output, body, visited) }
+        end
+        if in_branches = expr_node.in_branches
+          in_branches.each { |branch| branch.body.each { |child| collect_local_assignment_types(child, name, self_type_name, output, body, visited) } }
+        end
+      when CrystalV2::Compiler::Frontend::BeginNode
+        expr_node.body.each { |child| collect_local_assignment_types(child, name, self_type_name, output, body, visited) }
+        if clauses = expr_node.rescue_clauses
+          clauses.each { |clause| clause.body.each { |child| collect_local_assignment_types(child, name, self_type_name, output, body, visited) } }
+        end
+        if else_body = expr_node.else_body
+          else_body.each { |child| collect_local_assignment_types(child, name, self_type_name, output, body, visited) }
+        end
+        if ensure_body = expr_node.ensure_body
+          ensure_body.each { |child| collect_local_assignment_types(child, name, self_type_name, output, body, visited) }
+        end
+      when CrystalV2::Compiler::Frontend::WhileNode
+        expr_node.body.each { |child| collect_local_assignment_types(child, name, self_type_name, output, body, visited) }
+      when CrystalV2::Compiler::Frontend::UntilNode
+        expr_node.body.each { |child| collect_local_assignment_types(child, name, self_type_name, output, body, visited) }
+      when CrystalV2::Compiler::Frontend::LoopNode
+        expr_node.body.each { |child| collect_local_assignment_types(child, name, self_type_name, output, body, visited) }
+      when CrystalV2::Compiler::Frontend::ForNode
+        expr_node.body.each { |child| collect_local_assignment_types(child, name, self_type_name, output, body, visited) }
+      when CrystalV2::Compiler::Frontend::CallNode
+        if block = expr_node.block
+          collect_local_assignment_types(block, name, self_type_name, output, body, visited)
+        end
+      when CrystalV2::Compiler::Frontend::ReturnNode
+        if value = expr_node.value
+          collect_local_assignment_types(value, name, self_type_name, output, body, visited)
+        end
+      when CrystalV2::Compiler::Frontend::GroupingNode
+        collect_local_assignment_types(expr_node.expression, name, self_type_name, output, body, visited)
+      when CrystalV2::Compiler::Frontend::MacroExpressionNode
+        collect_local_assignment_types(expr_node.expression, name, self_type_name, output, body, visited)
       end
-
-      nil
     end
 
     # Register a module and its methods (pass 1)
@@ -19160,10 +19260,42 @@ module Crystal::HIR
         end
 
         # Create phi to merge the values
-        var_type = ctx.type_of(then_val)
+        then_type = ctx.type_of(then_val)
+        else_type = ctx.type_of(else_val)
+        var_type = then_type
+        if then_type != else_type
+          var_type = union_type_for_values(then_type, else_type)
+        end
+
+        if var_type == TypeRef::VOID || var_type == TypeRef::NIL
+          ctx.register_local(var_name, then_val)
+          next
+        end
+
+        coerced_incoming = [{then_block, then_val}, {else_block, else_val}].map do |(blk, val)|
+          val_type = ctx.type_of(val)
+          if val_type == var_type
+            {blk, val}
+          elsif is_union_type?(var_type)
+            variant_id = get_union_variant_id(var_type, val_type)
+            if variant_id >= 0
+              wrap = UnionWrap.new(ctx.next_id, var_type, val, variant_id)
+              ctx.emit_to_block(blk, wrap)
+              {blk, wrap.id}
+            else
+              {blk, val}
+            end
+          elsif numeric_primitive?(val_type) && numeric_primitive?(var_type)
+            cast = Cast.new(ctx.next_id, var_type, val, var_type, safe: false)
+            ctx.emit_to_block(blk, cast)
+            {blk, cast.id}
+          else
+            {blk, val}
+          end
+        end
+
         merge_phi = Phi.new(ctx.next_id, var_type)
-        merge_phi.add_incoming(then_block, then_val)
-        merge_phi.add_incoming(else_block, else_val)
+        coerced_incoming.each { |blk, val| merge_phi.add_incoming(blk, val) }
         ctx.emit(merge_phi)
         ctx.register_local(var_name, merge_phi.id)
       end
@@ -19330,6 +19462,19 @@ module Crystal::HIR
         end
       end
 
+      assigned_var_types = {} of String => TypeRef
+      old_body_context = @infer_body_context
+      @infer_body_context = node.body
+      begin
+        assigned_vars.each do |var_name|
+          if inferred = infer_local_type_from_body(node.body, var_name, @current_class)
+            assigned_var_types[var_name] = inferred
+          end
+        end
+      ensure
+        @infer_body_context = old_body_context
+      end
+
       cond_block = ctx.create_block
       body_block = ctx.create_block
       exit_block = ctx.create_block
@@ -19343,9 +19488,27 @@ module Crystal::HIR
       assigned_vars.each do |var_name|
         if initial_val = initial_values[var_name]?
           var_type = ctx.type_of(initial_val)
+          if inferred = assigned_var_types[var_name]?
+            var_type = union_type_for_values(var_type, inferred)
+          end
           phi = Phi.new(ctx.next_id, var_type)
           # Add incoming from pre-loop block
-          phi.add_incoming(pre_loop_block, initial_val)
+          incoming = {pre_loop_block, initial_val}
+          if var_type != ctx.type_of(initial_val)
+            val_type = ctx.type_of(initial_val)
+            if is_union_type?(var_type)
+              if variant_id = get_union_variant_id(var_type, val_type); variant_id >= 0
+                wrap = UnionWrap.new(ctx.next_id, var_type, initial_val, variant_id)
+                ctx.emit_to_block(pre_loop_block, wrap)
+                incoming = {pre_loop_block, wrap.id}
+              end
+            elsif numeric_primitive?(val_type) && numeric_primitive?(var_type)
+              cast = Cast.new(ctx.next_id, var_type, initial_val, var_type, safe: false)
+              ctx.emit_to_block(pre_loop_block, cast)
+              incoming = {pre_loop_block, cast.id}
+            end
+          end
+          phi.add_incoming(incoming[0], incoming[1])
           ctx.emit(phi)
           phi_nodes[var_name] = phi
           # Update local to point to phi
@@ -19380,7 +19543,23 @@ module Crystal::HIR
         if phi = phi_nodes[var_name]?
           if updated_val = ctx.lookup_local(var_name)
             # Add incoming from body block (the updated value)
-            phi.add_incoming(body_exit_block, updated_val)
+            incoming_val = updated_val
+            phi_type = ctx.type_of(phi.id)
+            if phi_type != ctx.type_of(updated_val)
+              val_type = ctx.type_of(updated_val)
+              if is_union_type?(phi_type)
+                if variant_id = get_union_variant_id(phi_type, val_type); variant_id >= 0
+                  wrap = UnionWrap.new(ctx.next_id, phi_type, updated_val, variant_id)
+                  ctx.emit_to_block(body_exit_block, wrap)
+                  incoming_val = wrap.id
+                end
+              elsif numeric_primitive?(val_type) && numeric_primitive?(phi_type)
+                cast = Cast.new(ctx.next_id, phi_type, updated_val, phi_type, safe: false)
+                ctx.emit_to_block(body_exit_block, cast)
+                incoming_val = cast.id
+              end
+            end
+            phi.add_incoming(body_exit_block, incoming_val)
             # Reset local to point back to phi for next iteration
             ctx.register_local(var_name, phi.id)
           end
@@ -19421,6 +19600,19 @@ module Crystal::HIR
         end
       end
 
+      assigned_var_types = {} of String => TypeRef
+      old_body_context = @infer_body_context
+      @infer_body_context = node.body
+      begin
+        assigned_vars.each do |var_name|
+          if inferred = infer_local_type_from_body(node.body, var_name, @current_class)
+            assigned_var_types[var_name] = inferred
+          end
+        end
+      ensure
+        @infer_body_context = old_body_context
+      end
+
       # For infinite loop, we just need body and exit blocks
       body_block = ctx.create_block
       exit_block = ctx.create_block
@@ -19434,8 +19626,26 @@ module Crystal::HIR
       assigned_vars.each do |var_name|
         if initial_val = initial_values[var_name]?
           var_type = ctx.type_of(initial_val)
+          if inferred = assigned_var_types[var_name]?
+            var_type = union_type_for_values(var_type, inferred)
+          end
           phi = Phi.new(ctx.next_id, var_type)
-          phi.add_incoming(pre_loop_block, initial_val)
+          incoming = {pre_loop_block, initial_val}
+          if var_type != ctx.type_of(initial_val)
+            val_type = ctx.type_of(initial_val)
+            if is_union_type?(var_type)
+              if variant_id = get_union_variant_id(var_type, val_type); variant_id >= 0
+                wrap = UnionWrap.new(ctx.next_id, var_type, initial_val, variant_id)
+                ctx.emit_to_block(pre_loop_block, wrap)
+                incoming = {pre_loop_block, wrap.id}
+              end
+            elsif numeric_primitive?(val_type) && numeric_primitive?(var_type)
+              cast = Cast.new(ctx.next_id, var_type, initial_val, var_type, safe: false)
+              ctx.emit_to_block(pre_loop_block, cast)
+              incoming = {pre_loop_block, cast.id}
+            end
+          end
+          phi.add_incoming(incoming[0], incoming[1])
           ctx.emit(phi)
           phi_nodes[var_name] = phi
           ctx.register_local(var_name, phi.id)
@@ -19463,7 +19673,23 @@ module Crystal::HIR
       assigned_vars.each do |var_name|
         if phi = phi_nodes[var_name]?
           if updated_val = ctx.lookup_local(var_name)
-            phi.add_incoming(body_exit_block, updated_val)
+            incoming_val = updated_val
+            phi_type = ctx.type_of(phi.id)
+            if phi_type != ctx.type_of(updated_val)
+              val_type = ctx.type_of(updated_val)
+              if is_union_type?(phi_type)
+                if variant_id = get_union_variant_id(phi_type, val_type); variant_id >= 0
+                  wrap = UnionWrap.new(ctx.next_id, phi_type, updated_val, variant_id)
+                  ctx.emit_to_block(body_exit_block, wrap)
+                  incoming_val = wrap.id
+                end
+              elsif numeric_primitive?(val_type) && numeric_primitive?(phi_type)
+                cast = Cast.new(ctx.next_id, phi_type, updated_val, phi_type, safe: false)
+                ctx.emit_to_block(body_exit_block, cast)
+                incoming_val = cast.id
+              end
+            end
+            phi.add_incoming(body_exit_block, incoming_val)
             ctx.register_local(var_name, phi.id)
           end
         end
@@ -28950,6 +29176,12 @@ module Crystal::HIR
       when CrystalV2::Compiler::Frontend::IdentifierNode
         name = String.new(target_node.name)
         value_type = ctx.type_of(value_id)
+        if debug_name = ENV["DEBUG_ASSIGN_VAR"]?
+          if debug_name == name
+            type_name = value_type == TypeRef::VOID ? "Void" : get_type_name_from_ref(value_type)
+            STDERR.puts "[ASSIGN_VAR] scope=#{@current_class || ""}##{@current_method || ""} name=#{name} type=#{type_name}"
+          end
+        end
         if ENV["DEBUG_VALUE_ASSIGN"]? && name == "value"
           type_name = value_type == TypeRef::VOID ? "Void" : get_type_name_from_ref(value_type)
           STDERR.puts "[ASSIGN] scope=#{@current_class || ""}##{@current_method || ""} name=value type=#{type_name}"
