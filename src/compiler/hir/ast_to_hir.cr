@@ -6301,6 +6301,7 @@ module Crystal::HIR
 
     private def register_type_method_from_def(member : CrystalV2::Compiler::Frontend::DefNode, type_name : String)
       method_name = String.new(member.name)
+      def_arena = resolve_arena_for_def(member, @arena)
       is_class_method = if recv = member.receiver
                           String.new(recv) == "self"
                         else
@@ -6379,7 +6380,7 @@ module Crystal::HIR
         if prev_arena = @function_def_arenas[full_name]?
           @function_def_arenas[previous_full] = prev_arena
         else
-          @function_def_arenas[previous_full] = @arena
+          @function_def_arenas[previous_full] = def_arena
         end
         if prev_enum = @function_enum_return_names[full_name]? || @function_enum_return_names[base_name]?
           @function_enum_return_names[previous_full] = prev_enum
@@ -6388,23 +6389,23 @@ module Crystal::HIR
       end
       register_function_type(full_name, return_type)
       @function_defs[full_name] = member
-      @function_def_arenas[full_name] = @arena
+      @function_def_arenas[full_name] = def_arena
       if alias_full_name
         register_function_type(alias_full_name, return_type) unless @function_types.has_key?(alias_full_name)
         @function_defs[alias_full_name] = member
-        @function_def_arenas[alias_full_name] = @arena
+        @function_def_arenas[alias_full_name] = def_arena
       end
 
       if body = member.body
-        if contains_yield?(body)
+        if def_contains_yield?(member, def_arena)
           @yield_functions.add(full_name)
           debug_hook("yield.register", full_name)
           unless @function_defs.has_key?(base_name)
             @function_defs[base_name] = member
-            @function_def_arenas[base_name] = @arena
+            @function_def_arenas[base_name] = def_arena
           end
           @function_defs[full_name] = member
-          @function_def_arenas[full_name] = @arena
+          @function_def_arenas[full_name] = def_arena
         end
       end
     end
@@ -12342,6 +12343,12 @@ module Crystal::HIR
       when CrystalV2::Compiler::Frontend::IfNode
         collect_yield_arg_lists(node.condition, lists)
         collect_yield_arg_lists(node.then_body, lists)
+        if elsifs = node.elsifs
+          elsifs.each do |branch|
+            collect_yield_arg_lists(branch.condition, lists)
+            collect_yield_arg_lists(branch.body, lists)
+          end
+        end
         collect_yield_arg_lists(node.else_body.not_nil!, lists) if node.else_body
       when CrystalV2::Compiler::Frontend::UnlessNode
         collect_yield_arg_lists(node.condition, lists)
@@ -12449,6 +12456,9 @@ module Crystal::HIR
       when CrystalV2::Compiler::Frontend::IfNode
         contains_yield_in_expr?(node.condition) ||
           contains_yield?(node.then_body) ||
+          (node.elsifs && node.elsifs.not_nil!.any? do |branch|
+            contains_yield_in_expr?(branch.condition) || contains_yield?(branch.body)
+          end) ||
           (node.else_body ? contains_yield?(node.else_body.not_nil!) : false)
       when CrystalV2::Compiler::Frontend::UnlessNode
         contains_yield_in_expr?(node.condition) ||
@@ -12540,6 +12550,9 @@ module Crystal::HIR
       when CrystalV2::Compiler::Frontend::IfNode
         contains_return_in_expr?(node.condition) ||
           contains_return?(node.then_body) ||
+          (node.elsifs && node.elsifs.not_nil!.any? do |branch|
+            contains_return_in_expr?(branch.condition) || contains_return?(branch.body)
+          end) ||
           (node.else_body ? contains_return?(node.else_body.not_nil!) : false)
       when CrystalV2::Compiler::Frontend::UnlessNode
         contains_return_in_expr?(node.condition) ||
