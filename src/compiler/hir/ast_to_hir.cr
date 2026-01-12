@@ -11849,7 +11849,7 @@ module Crystal::HIR
         0  # Nil/Void has no storage size
       else
         # Check if it's a union type we've registered
-        mir_type_ref = MIR::TypeRef.new(type.id)
+        mir_type_ref = hir_to_mir_type_ref(type)
         if descriptor = @union_descriptors[mir_type_ref]?
           descriptor.total_size
         else
@@ -12934,9 +12934,31 @@ module Crystal::HIR
         return resolved
       end
       if name.starts_with?("::")
-        resolved = name.size > 2 ? name[2..] : ""
-        @resolved_type_name_cache[cache_key] = resolved
-        return resolved
+        stripped = name.size > 2 ? name[2..] : ""
+        if stripped.empty?
+          @resolved_type_name_cache[cache_key] = ""
+          return ""
+        end
+        if info = split_generic_base_and_args(stripped)
+          resolved_args = split_generic_type_args(info[:args]).map do |arg|
+            arg = arg.strip
+            if arg == "self"
+              @current_class || arg
+            else
+              resolve_type_name_in_context(arg)
+            end
+          end.join(", ")
+          resolved = "#{info[:base]}(#{resolved_args})"
+          @resolved_type_name_cache[cache_key] = resolved
+          return resolved
+        end
+        if stripped == "self"
+          resolved = @current_class || stripped
+          @resolved_type_name_cache[cache_key] = resolved
+          return resolved
+        end
+        @resolved_type_name_cache[cache_key] = stripped
+        return stripped
       end
       if (tuple_index = name.index("::{")) && name.ends_with?("}")
         tuple_literal = name[(tuple_index + 2)..]
