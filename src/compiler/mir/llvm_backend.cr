@@ -6866,6 +6866,12 @@ module Crystal::MIR
     private def value_ref(id : ValueId) : String
       # Check if it's a constant (inline the value)
       if const_val = @constant_values[id]?
+        if const_val == "0"
+          if val_type = @value_types[id]?
+            llvm_type = @type_mapper.llvm_type(val_type)
+            return "null" if llvm_type == "ptr"
+          end
+        end
         return const_val
       end
       # Check if this was a void call - return safe default literal
