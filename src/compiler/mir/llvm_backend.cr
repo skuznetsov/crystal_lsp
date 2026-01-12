@@ -3857,6 +3857,15 @@ module Crystal::MIR
         end
       end
 
+      # Guard: zext/sext on narrowing casts is invalid; use trunc instead.
+      if (op == "sext" || op == "zext") && is_src_int && is_dst_int && src_type != dst_type
+        src_bits = src_type[1..].to_i?
+        dst_bits = dst_type[1..].to_i?
+        if src_bits && dst_bits && dst_bits < src_bits
+          op = "trunc"
+        end
+      end
+
       # Guard: sext/zext/trunc can't be used with ptr - use ptrtoint instead
       if (op == "sext" || op == "zext" || op == "trunc") && src_type == "ptr"
         # ptr to int - use ptrtoint
