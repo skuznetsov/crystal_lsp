@@ -146,6 +146,13 @@ module CrystalV2
             # Evaluate macro body
             output = evaluate_macro_body(macro_symbol.body, context)
             @last_output = output
+            if (match = ENV["DEBUG_MACRO_OUTPUT_MATCH"]?) && output.includes?(match)
+              STDERR.puts "[MACRO_OUTPUT_MATCH] name=#{macro_symbol.name} match=#{match.inspect} bytes=#{output.bytesize}"
+              output.each_line do |line|
+                next unless line.includes?(match)
+                STDERR.puts "[MACRO_OUTPUT_LINE] #{line.rstrip}"
+              end
+            end
 
             # Parse result back to AST
             reparse(output, macro_symbol.node_id)
@@ -170,6 +177,13 @@ module CrystalV2
             context = Context.new(variables, {} of String => String, owner_type, @depth, @flags, nil)
             output = evaluate_macro_body(body_id, context)
             @last_output = output
+            if (match = ENV["DEBUG_MACRO_OUTPUT_MATCH"]?) && output.includes?(match)
+              STDERR.puts "[MACRO_OUTPUT_MATCH] literal match=#{match.inspect} bytes=#{output.bytesize}"
+              output.each_line do |line|
+                next unless line.includes?(match)
+                STDERR.puts "[MACRO_OUTPUT_LINE] #{line.rstrip}"
+              end
+            end
             output
           ensure
             @depth -= 1

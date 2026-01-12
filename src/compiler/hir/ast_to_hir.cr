@@ -6151,7 +6151,7 @@ module Crystal::HIR
 
     private def strip_macro_lines(code : String) : String
       String.build do |io|
-        code.each_line do |line|
+        code.each_line(chomp: false) do |line|
           next if line.includes?("{{") || line.includes?("{%")
           io << line
         end
@@ -16506,6 +16506,13 @@ module Crystal::HIR
         return macro_for_iterable_values(node.expression)
       end
 
+      if words = macro_word_list_from_source(node, 'w')
+        return words.map { |word| CrystalV2::Compiler::Semantic::MacroStringValue.new(word).as(CrystalV2::Compiler::Semantic::MacroValue) }
+      end
+      if words = macro_word_list_from_source(node, 'i')
+        return words.map { |word| CrystalV2::Compiler::Semantic::MacroSymbolValue.new(word).as(CrystalV2::Compiler::Semantic::MacroValue) }
+      end
+
       case node
       when CrystalV2::Compiler::Frontend::ArrayLiteralNode
         values = [] of CrystalV2::Compiler::Semantic::MacroValue
@@ -16530,6 +16537,43 @@ module Crystal::HIR
           current += 1
         end
         values
+      else
+        nil
+      end
+    end
+
+    private def macro_word_list_from_source(
+      node : CrystalV2::Compiler::Frontend::Node,
+      kind : Char
+    ) : Array(String)?
+      source = @sources_by_arena[@arena]?
+      return nil unless source
+      span = node.span
+      length = span.end_offset - span.start_offset
+      return nil if length <= 0 || span.start_offset < 0 || span.start_offset >= source.bytesize
+      if span.start_offset + length > source.bytesize
+        length = source.bytesize - span.start_offset
+      end
+      text = source.byte_slice(span.start_offset, length).strip
+      if ENV["DEBUG_MACRO_WORD_LIST"]? && (text.includes?("%w") || text.includes?("%i"))
+        STDERR.puts "[MACRO_WORD_LIST] text=#{text.inspect} span=#{span.start_line}:#{span.start_column}-#{span.end_line}:#{span.end_column}"
+      end
+      return nil unless text.starts_with?("%#{kind}") && text.size >= 4
+      open_delim = text[2]
+      close_delim = macro_word_list_closer(open_delim)
+      return nil unless close_delim
+      return nil unless text.ends_with?(close_delim.to_s)
+      inner = text[3, text.size - 4]
+      inner.split(/\s+/).reject(&.empty?)
+    end
+
+    private def macro_word_list_closer(open_delim : Char) : Char?
+      case open_delim
+      when '(' then ')'
+      when '[' then ']'
+      when '{' then '}'
+      when '<' then '>'
+      when '|' then '|'
       else
         nil
       end
@@ -17033,6 +17077,11 @@ module Crystal::HIR
       lexer = CrystalV2::Compiler::Frontend::Lexer.new(wrapped)
       parser = CrystalV2::Compiler::Frontend::Parser.new(lexer, recovery_mode: true)
       program = parser.parse_program
+      if ENV["DEBUG_MACRO_CLASS_PARSE"]? && parser.diagnostics.any?
+        details = parser.diagnostics.map(&.message).join("; ")
+        STDERR.puts "[MACRO_CLASS_PARSE] diagnostics=#{details}"
+        STDERR.puts "[MACRO_CLASS_PARSE] code=#{wrapped.inspect}"
+      end
       return nil if program.roots.empty?
       @sources_by_arena[program.arena] = wrapped
 
