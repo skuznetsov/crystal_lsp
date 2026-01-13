@@ -1049,6 +1049,7 @@ r2 = maybe(false)  # => nil
 - Update (2026-01-10): inherited overload resolution now respects arity for non-numeric receivers (Tuple#to_s no longer resolves to IO overload); Nil callsites removed. Missing symbols now 49 (see `/private/tmp/bootstrap_array_full.link.log` and `/private/tmp/missing_symbols_latest.txt`).
 - Update (2026-01-12): union virtual dispatch now falls back to class vdispatch for abstract union variants (e.g., `IO | Nil | Pointer`), removing `_IO_read_Slice_UInt8_`/`_IO_write_Slice_UInt8_` callsites; current full-prelude `bootstrap_array` link shows 98 missing symbols (see `/private/tmp/bootstrap_array_full.link.log`).
 - Update (2026-01-12): Polling class/module dedup + union virtual subclass lowering; `system_del` lowered and missing symbols now 43 (see `/private/tmp/bootstrap_array_full.link.log` and `/private/tmp/missing_symbols_latest.txt`).
+- Update (2026-01-12): resolve included module aliases before lowering; module-level aliases no longer leak globally. `IO::Handle` no longer mis-registered as a class; missing symbols remain 43 (see `/private/tmp/bootstrap_array_full.link.log`).
 
 **Regressions (open):**
 - [ ] GH #10 (crystal_lsp): prelude build links for minimal `fib.cr`, but runtime segfault persists.

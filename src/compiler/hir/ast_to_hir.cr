@@ -475,6 +475,13 @@ module Crystal::HIR
     # Track functions lowered lazily to avoid re-entrancy/duplication.
     @lowered_functions : Set(String)
     @lowering_functions : Set(String)
+
+    # Work queue approach to prevent stack overflow in recursive lowering.
+    # When @inside_lowering is true, new lower_function_if_needed calls are queued
+    # instead of processed immediately, breaking the recursive cycle.
+    @inside_lowering : Bool = false
+    @pending_lower_functions : Set(String) = Set(String).new
+
     # Call-site argument types for lazily lowered functions (mangled name -> arg types).
     @pending_arg_types : Hash(String, CallsiteArgs)
     @pending_arg_types_by_arity : Hash(String, Hash(Int32, Array(CallsiteArgs)))
@@ -1276,6 +1283,8 @@ module Crystal::HIR
           register_enum_base_type(enum_name, enum_base_type_for_node(node))
         end
         register_enum_methods(node, enum_name)
+        # Register Enum as included module so enum instances can dispatch Enum methods
+        (@class_included_modules[enum_name] ||= Set(String).new) << "Enum"
         return
       end
 
@@ -1295,10 +1304,15 @@ module Crystal::HIR
         current_value += 1
       end
 
+      # Extract members from macro conditionals in body (e.g., {% if flag?(:unix) %})
+      extract_enum_members_from_body(node, members)
+
       @enum_info.not_nil![enum_name] = members
       invalidate_type_cache_for_namespace(enum_name)
       register_enum_base_type(enum_name, enum_base_type_for_node(node))
       register_enum_methods(node, enum_name)
+      # Register Enum as included module so enum instances can dispatch Enum methods
+      (@class_included_modules[enum_name] ||= Set(String).new) << "Enum"
     end
 
     # Register an enum type with explicit name (for nested enums)
@@ -1310,6 +1324,8 @@ module Crystal::HIR
           register_enum_base_type(full_enum_name, enum_base_type_for_node(node))
         end
         register_enum_methods(node, full_enum_name)
+        # Register Enum as included module so enum instances can dispatch Enum methods
+        (@class_included_modules[full_enum_name] ||= Set(String).new) << "Enum"
         return
       end
 
@@ -1329,12 +1345,17 @@ module Crystal::HIR
         current_value += 1
       end
 
+      # Extract members from macro conditionals in body (e.g., {% if flag?(:unix) %})
+      extract_enum_members_from_body(node, members)
+
       @enum_info.not_nil![full_enum_name] = members
       invalidate_type_cache_for_namespace(full_enum_name)
       base_type = enum_base_type_for_node(node)
       register_enum_base_type(full_enum_name, base_type)
       debug_hook_enum_register(full_enum_name, @module.get_type_descriptor(base_type).try(&.name) || "?")
       register_enum_methods(node, full_enum_name)
+      # Register Enum as included module so enum instances can dispatch Enum methods
+      (@class_included_modules[full_enum_name] ||= Set(String).new) << "Enum"
     end
 
     def register_constant(node : CrystalV2::Compiler::Frontend::ConstantNode, owner_name : String? = nil)
@@ -6384,6 +6405,138 @@ module Crystal::HIR
       end
     end
 
+    # Extract enum members from macro conditionals in enum body
+    private def extract_enum_members_from_body(node : CrystalV2::Compiler::Frontend::EnumNode, members : Hash(String, Int64))
+      return unless body = node.body
+      body.each do |expr_id|
+        body_node = @arena[expr_id]
+        case body_node
+        when CrystalV2::Compiler::Frontend::MacroIfNode
+          extract_enum_members_from_macro_if(body_node, members)
+        when CrystalV2::Compiler::Frontend::MacroLiteralNode
+          extract_enum_members_from_macro_literal(body_node, members)
+        end
+      end
+    end
+
+    private def extract_enum_members_from_macro_if(node : CrystalV2::Compiler::Frontend::MacroIfNode, members : Hash(String, Int64))
+      # Try to parse raw text first for simple flag conditionals
+      if raw_text = macro_if_raw_text(node)
+        nested_macro_end = raw_text.scan(/\{%\s*end\s*%\}/).size > 1
+        unless nested_macro_end
+          if expanded = expand_flag_macro_text(raw_text)
+            if program = parse_macro_literal_program(expanded)
+              with_arena(program.arena) do
+                program.roots.each do |expr_id|
+                  expr_node = @arena[expr_id]
+                  case expr_node
+                  when CrystalV2::Compiler::Frontend::ConstantNode
+                    extract_member_from_constant(expr_node, members)
+                  when CrystalV2::Compiler::Frontend::MacroIfNode
+                    extract_enum_members_from_macro_if(expr_node, members)
+                  when CrystalV2::Compiler::Frontend::MacroLiteralNode
+                    extract_enum_members_from_macro_literal(expr_node, members)
+                  end
+                end
+              end
+              return
+            end
+          end
+        end
+      end
+
+      # Evaluate condition and process appropriate branch
+      result = try_evaluate_macro_condition(node.condition)
+      if result == true
+        extract_enum_members_from_body_id(node.then_body, members)
+      elsif result == false
+        if else_node = node.else_body
+          else_ast = @arena[else_node]
+          case else_ast
+          when CrystalV2::Compiler::Frontend::MacroIfNode
+            extract_enum_members_from_macro_if(else_ast, members)
+          else
+            extract_enum_members_from_body_id(else_node, members)
+          end
+        end
+      else
+        # Unknown - process both branches
+        extract_enum_members_from_body_id(node.then_body, members)
+        if else_node = node.else_body
+          extract_enum_members_from_body_id(else_node, members)
+        end
+      end
+    end
+
+    private def extract_enum_members_from_body_id(body_id : ExprId, members : Hash(String, Int64))
+      body_node = @arena[body_id]
+      case body_node
+      when CrystalV2::Compiler::Frontend::MacroLiteralNode
+        extract_enum_members_from_macro_literal(body_node, members)
+      when CrystalV2::Compiler::Frontend::MacroIfNode
+        extract_enum_members_from_macro_if(body_node, members)
+      when CrystalV2::Compiler::Frontend::ConstantNode
+        extract_member_from_constant(body_node, members)
+      end
+    end
+
+    private def extract_enum_members_from_macro_literal(node : CrystalV2::Compiler::Frontend::MacroLiteralNode, members : Hash(String, Int64))
+      if raw_text = macro_literal_raw_text(node)
+        expanded = expand_flag_macro_text(raw_text) || raw_text
+        if program = parse_macro_literal_program(expanded)
+          with_arena(program.arena) do
+            program.roots.each do |expr_id|
+              expr_node = @arena[expr_id]
+              case expr_node
+              when CrystalV2::Compiler::Frontend::ConstantNode
+                extract_member_from_constant(expr_node, members)
+              when CrystalV2::Compiler::Frontend::MacroIfNode
+                extract_enum_members_from_macro_if(expr_node, members)
+              when CrystalV2::Compiler::Frontend::MacroLiteralNode
+                extract_enum_members_from_macro_literal(expr_node, members)
+              end
+            end
+          end
+          return
+        end
+      end
+
+      texts = macro_literal_active_texts(node)
+      combined = texts.join("\n")
+      if program = parse_macro_literal_program(combined)
+        with_arena(program.arena) do
+          program.roots.each do |expr_id|
+            expr_node = @arena[expr_id]
+            case expr_node
+            when CrystalV2::Compiler::Frontend::ConstantNode
+              extract_member_from_constant(expr_node, members)
+            when CrystalV2::Compiler::Frontend::MacroIfNode
+              extract_enum_members_from_macro_if(expr_node, members)
+            when CrystalV2::Compiler::Frontend::MacroLiteralNode
+              extract_enum_members_from_macro_literal(expr_node, members)
+            end
+          end
+        end
+      end
+    end
+
+    private def extract_member_from_constant(node : CrystalV2::Compiler::Frontend::ConstantNode, members : Hash(String, Int64))
+      member_name = String.new(node.name)
+      # Try to extract value if it's a number
+      value = members.values.max? || -1_i64
+      value += 1
+      begin
+        val_node = @arena[node.value]
+        case val_node
+        when CrystalV2::Compiler::Frontend::NumberNode
+          value = String.new(val_node.value).to_i64? || value
+        end
+      rescue
+        # Value not accessible, use default
+      end
+      members[member_name] = value unless members.has_key?(member_name)
+    end
+
     private def register_type_method_from_def(member : CrystalV2::Compiler::Frontend::DefNode, type_name : String)
       method_name = String.new(member.name)
       def_arena = resolve_arena_for_def(member, @arena)
@@ -9740,6 +9893,8 @@ module Crystal::HIR
         self_param = func.add_param("self", self_type)
         ctx.register_local("self", self_param.id)
         ctx.register_type(self_param.id, self_type)
+        # Track enum type for self parameter (enables predicate method inlining)
+        track_enum_value(self_param.id, class_name)
       end
 
       # Lower explicit parameters
@@ -10567,6 +10722,9 @@ module Crystal::HIR
     end
 
     private def resolve_union_method_call(type_name : String, method_name : String, arg_types : Array(TypeRef), has_block_call : Bool) : String?
+      if ENV["DEBUG_ENUM_UNION_PREDICATE"]? && method_name.ends_with?("?")
+        STDERR.puts "[RESOLVE_UNION] type_name=#{type_name} method=#{method_name} args=#{arg_types.size} block=#{has_block_call}"
+      end
       variants = split_union_type_name(type_name)
       return nil if variants.empty?
 
@@ -10587,6 +10745,32 @@ module Crystal::HIR
           elsif has_function_base?(base_name)
             if resolved = resolve_untyped_overload(base_name, arg_types.size, has_block_call)
               return resolved
+            end
+          end
+
+          # Handle enum predicates on union types (e.g., Signal | Nil with .kill?)
+          # Enum predicates are typically inlined, so they won't be in @function_types,
+          # but we still need to return the properly-prefixed method name for the Call node.
+          if method_name.ends_with?("?") && arg_types.empty? && !has_block_call
+            if ENV["DEBUG_ENUM_UNION_PREDICATE"]?
+              STDERR.puts "[ENUM_UNION_PRED] candidate=#{candidate} method=#{method_name}"
+            end
+            if enum_info = @enum_info
+              if members = enum_info[candidate]?
+                # Check if the predicate matches an enum member
+                predicate_base = method_name[0...-1]
+                target = underscore_lower(predicate_base)
+                if ENV["DEBUG_ENUM_UNION_PREDICATE"]?
+                  STDERR.puts "[ENUM_UNION_PRED] predicate_base=#{predicate_base} target=#{target} members=#{members.keys.first(5).join(",")}"
+                end
+                if members.keys.any? { |m| underscore_lower(m) == target }
+                  # Return the enum-prefixed predicate method name
+                  if ENV["DEBUG_ENUM_UNION_PREDICATE"]?
+                    STDERR.puts "[ENUM_UNION_PRED] MATCHED! returning #{candidate}##{method_name}"
+                  end
+                  return "#{candidate}##{method_name}"
+                end
+              end
             end
           end
         end
@@ -10743,6 +10927,9 @@ module Crystal::HIR
         end
       end
 
+      if ENV["DEBUG_ENUM_UNION_PREDICATE"]? && method_name.ends_with?("?") && (method_name == "kill?" || method_name == "hup?" || method_name == "quit?")
+        STDERR.puts "[RESOLVE_METHOD] class_name=#{class_name} method=#{method_name} has_pipe=#{class_name.includes?("|")}"
+      end
       if !class_name.empty? && (class_name.includes?("|") || class_name.includes?("___"))
         union_name = class_name.includes?("___") ? class_name.gsub("___", "|") : class_name
         if resolved = resolve_union_method_call(union_name, method_name, arg_types, has_block_call)
@@ -15482,6 +15669,10 @@ module Crystal::HIR
         block.terminator = Return.new(nil)
       end
 
+      # WORK QUEUE: Process all pending functions that were deferred during lowering.
+      # This breaks the recursive cycle by processing functions iteratively.
+      process_pending_lower_functions
+
       func
     end
 
@@ -15535,7 +15726,43 @@ module Crystal::HIR
       ctx.emit(call)
 
       ctx.terminate(Return.new(nil))
+
+      # WORK QUEUE: Process all pending functions that were deferred during lowering.
+      process_pending_lower_functions
+
       func
+    end
+
+    # WORK QUEUE: Process functions that were deferred during lowering.
+    # This breaks the recursive stack overflow by processing functions iteratively.
+    # Each iteration may add more functions to the queue, so we loop until empty.
+    private def process_pending_lower_functions
+      max_iterations = 10000  # Safety limit to prevent infinite loops
+      iteration = 0
+
+      while !@pending_lower_functions.empty? && iteration < max_iterations
+        # Take a snapshot of currently pending functions
+        pending = @pending_lower_functions.dup
+        @pending_lower_functions.clear
+
+        # Reset inside_lowering to allow these functions to be processed
+        @inside_lowering = false
+
+        pending.each do |name|
+          # Skip if already lowered or currently being lowered
+          next if @module.has_function?(name)
+          next if @lowered_functions.includes?(name)
+          next if @lowering_functions.includes?(name)
+
+          lower_function_if_needed(name)
+        end
+
+        iteration += 1
+      end
+
+      if iteration >= max_iterations && !@pending_lower_functions.empty?
+        STDERR.puts "[WARNING] process_pending_lower_functions hit iteration limit, #{@pending_lower_functions.size} functions remaining"
+      end
     end
 
     # Lower a single expression, returns ValueId of result
@@ -17671,6 +17898,10 @@ module Crystal::HIR
           if function_returns_type_literal?(full_name, class_method_base)
             ctx.mark_type_literal(call.id)
           end
+          # Track enum return type for predicate method inlining
+          if enum_name = enum_return_name_for(full_name)
+            (@enum_value_types ||= {} of ValueId => String)[call.id] = enum_name
+          end
           return call.id
         end
 
@@ -17691,6 +17922,10 @@ module Crystal::HIR
           ctx.register_type(call.id, return_type)
           if function_returns_type_literal?(full_name, module_method_base)
             ctx.mark_type_literal(call.id)
+          end
+          # Track enum return type for predicate method inlining
+          if enum_name = enum_return_name_for(full_name)
+            (@enum_value_types ||= {} of ValueId => String)[call.id] = enum_name
           end
           return call.id
         end
@@ -20142,6 +20377,25 @@ module Crystal::HIR
     # Returns ValueId of boolean result
     private def emit_case_comparison(ctx : LoweringContext, subject_id : ValueId, cond_expr : ExprId) : ValueId
       cond_node = @arena[cond_expr]
+      if ENV["DEBUG_ENUM_UNION_PREDICATE"]?
+        node_type = cond_node.class.name.split("::").last
+        member = case cond_node
+                 when CrystalV2::Compiler::Frontend::MemberAccessNode
+                   String.new(cond_node.member)
+                 when CrystalV2::Compiler::Frontend::CallNode
+                   callee = @arena[cond_node.callee]
+                   if callee.is_a?(CrystalV2::Compiler::Frontend::MemberAccessNode)
+                     String.new(callee.member)
+                   else
+                     "?"
+                   end
+                 else
+                   "?"
+                 end
+        if member == "kill?" || member == "hup?" || member == "quit?"
+          STDERR.puts "[CASE_CMP] node_type=#{node_type} member=#{member} func=#{ctx.function.name}"
+        end
+      end
 
       case cond_node
       when CrystalV2::Compiler::Frontend::NumberNode,
@@ -20252,6 +20506,21 @@ module Crystal::HIR
                 if @enum_info.try(&.has_key?(type_name))
                   enum_name = type_name
                 end
+                # For union types like "Signal | Nil", check if any variant is an enum
+                if enum_name.nil? && type_desc.kind == TypeKind::Union
+                  if ENV["DEBUG_ENUM_UNION_PREDICATE"]? && (member_name == "kill?" || member_name == "hup?" || member_name == "quit?")
+                    STDERR.puts "[CASE_UNION] type_name=#{type_name} variants=#{split_union_type_name(type_name).join(",")}"
+                  end
+                  split_union_type_name(type_name).each do |variant_name|
+                    if @enum_info.try(&.has_key?(variant_name))
+                      if ENV["DEBUG_ENUM_UNION_PREDICATE"]? && (member_name == "kill?" || member_name == "hup?" || member_name == "quit?")
+                        STDERR.puts "[CASE_UNION] found enum variant=#{variant_name}"
+                      end
+                      enum_name = variant_name
+                      break
+                    end
+                  end
+                end
               end
               # Also try direct lookup by type_ref id in enum_base_types
               # For primitive types that map to enums (e.g., UInt8 for Color : UInt8)
@@ -20289,7 +20558,13 @@ module Crystal::HIR
                 # Try to match the predicate to an enum member
                 # e.g., "data1?" -> "Data1", "block?" -> "Block"
                 base_name = member_name[0...-1]  # Remove trailing ?
+                if ENV["DEBUG_ENUM_UNION_PREDICATE"]? && (member_name == "kill?" || member_name == "hup?" || member_name == "quit?")
+                  STDERR.puts "[CASE_ENUM_PRED] member_name=#{member_name} base_name=#{base_name} enum_name=#{enum_name} members=#{members.keys.first(5).join(",")}"
+                end
                 member_match = members.keys.find { |m| underscore_lower(m) == underscore_lower(base_name) }
+                if ENV["DEBUG_ENUM_UNION_PREDICATE"]? && (member_name == "kill?" || member_name == "hup?" || member_name == "quit?")
+                  STDERR.puts "[CASE_ENUM_PRED] member_match=#{member_match || "nil"}"
+                end
                 if member_match
                   member_value = members[member_match]
                   # Emit: subject_id == member_value
@@ -20346,8 +20621,20 @@ module Crystal::HIR
 
             if enum_info = @enum_info
               # Search all enums for one that has this member
+              if ENV["DEBUG_ENUM_UNION_PREDICATE"]? && (member_name == "kill?" || member_name == "hup?" || member_name == "quit?")
+                STDERR.puts "[CALL_ENUM_SEARCH] base_name=#{base_name} enum_count=#{enum_info.size}"
+                # Check what Signal enum has
+                if signal_members = enum_info["Signal"]?
+                  STDERR.puts "[CALL_ENUM_SEARCH] Signal members: #{signal_members.keys.first(10).join(",")}"
+                else
+                  STDERR.puts "[CALL_ENUM_SEARCH] Signal enum not found in enum_info!"
+                end
+              end
               enum_info.each do |name, members|
                 if members.keys.any? { |m| underscore_lower(m) == underscore_lower(base_name) }
+                  if ENV["DEBUG_ENUM_UNION_PREDICATE"]? && (member_name == "kill?" || member_name == "hup?" || member_name == "quit?")
+                    STDERR.puts "[CALL_ENUM_SEARCH] found enum=#{name} for base_name=#{base_name}"
+                  end
                   enum_name = name
                   break
                 end
@@ -21432,6 +21719,14 @@ module Crystal::HIR
         return
       end
       return if @module.has_function?(name)
+      return if @lowered_functions.includes?(name)
+
+      # WORK QUEUE: If we're already inside lowering, defer this function
+      # to prevent stack overflow from deep recursive lowering chains.
+      if @inside_lowering
+        @pending_lower_functions.add(name)
+        return
+      end
 
       target_name = name
       primitive_template_map : Hash(String, String)? = nil
@@ -22220,6 +22515,11 @@ module Crystal::HIR
 
       target_name = resolved_target_name
       @lowering_functions.add(target_name)
+
+      # WORK QUEUE: Track that we're inside lowering to defer nested calls
+      was_inside_lowering = @inside_lowering
+      @inside_lowering = true
+
       debug_hook("function.lower.start", "name=#{target_name} requested=#{name}")
       if ENV.has_key?("DEBUG_CLASS_MODULES") && (target_name.includes?("byte_begin") || target_name.includes?("MatchData"))
         owner = target_name.split("#", 2)[0]
@@ -22346,6 +22646,8 @@ module Crystal::HIR
           end
         end
       ensure
+        # WORK QUEUE: Restore previous inside_lowering state
+        @inside_lowering = was_inside_lowering
         @lowering_functions.delete(target_name)
         @lowered_functions.add(target_name)
         debug_hook("function.lower.done", "name=#{target_name}")
@@ -22556,6 +22858,18 @@ module Crystal::HIR
     end
 
     private def lower_call(ctx : LoweringContext, node : CrystalV2::Compiler::Frontend::CallNode) : ValueId
+      if ENV["DEBUG_ENUM_UNION_PREDICATE"]?
+        callee_node = @arena[node.callee]
+        callee_name = case callee_node
+                      when CrystalV2::Compiler::Frontend::MemberAccessNode
+                        String.new(callee_node.member)
+                      else
+                        nil
+                      end
+        if callee_name && (callee_name == "kill?" || callee_name == "hup?" || callee_name == "quit?")
+          STDERR.puts "[LOWER_CALL_SIGNAL] method=#{callee_name} func=#{ctx.function.name}"
+        end
+      end
       if ENV["DEBUG_ALL_CALLS"]? || ENV["DEBUG_LOWER_CALL"]?
         callee_node = @arena[node.callee]
         callee_name = case callee_node
@@ -25074,11 +25388,6 @@ module Crystal::HIR
       end
       if enum_name = enum_return_name_for(mangled_method_name)
         (@enum_value_types ||= {} of ValueId => String)[call.id] = enum_name
-        if ENV["DEBUG_ENUM_CALL"]? && mangled_method_name == "File::Info#type"
-          STDERR.puts "[DEBUG_ENUM_CALL] name=#{mangled_method_name} enum=#{enum_name}"
-        end
-      elsif ENV["DEBUG_ENUM_CALL"]? && mangled_method_name == "File::Info#type"
-        STDERR.puts "[DEBUG_ENUM_CALL] name=#{mangled_method_name} enum=(nil)"
       end
       if ENV["DEBUG_CALL_TRACE"]? && method_name == "copy_to"
         STDERR.puts "[CALL_TRACE] stage=after_emit method=#{method_name} mangled=#{mangled_method_name}"
@@ -27622,7 +27931,7 @@ module Crystal::HIR
       # Prevent infinite recursion / runaway stack usage in aggressive yield inlining.
       # This can happen in stdlib where yield is used deeply (or recursively).
       # Keep inline expansion bounded to avoid runaway lowering on deep stdlib chains.
-      max_depth = (ENV["INLINE_YIELD_MAX_DEPTH"]? || "16").to_i
+      max_depth = (ENV["INLINE_YIELD_MAX_DEPTH"]? || "8").to_i
       max_repeat = (ENV["INLINE_YIELD_MAX_REPEAT"]? || "2").to_i
       caller_arena = @arena
       repeat_count = @inline_yield_name_stack.count(inline_key)
@@ -28447,10 +28756,6 @@ module Crystal::HIR
 
     private def lower_enum_predicate(ctx : LoweringContext, object_id : ValueId, member_name : String) : ValueId?
       return nil unless member_name.ends_with?("?")
-      if ENV["DEBUG_ENUM_PREDICATE"]? && member_name == "character_device?"
-        enum_hit = @enum_value_types.try(&.[object_id]?)
-        STDERR.puts "[DEBUG_ENUM_PREDICATE] member=#{member_name} object_id=#{object_id} enum=#{enum_hit || "(nil)"}"
-      end
       enum_name = @enum_value_types.try(&.[object_id]?)
       return nil unless enum_name
       members = enum_members_for_type_name(enum_name)
@@ -29366,11 +29671,6 @@ module Crystal::HIR
       ctx.register_type(call.id, return_type)
       if enum_name = enum_return_name_for(actual_name)
         (@enum_value_types ||= {} of ValueId => String)[call.id] = enum_name
-        if ENV["DEBUG_ENUM_CALL"]? && actual_name == "File::Info#type"
-          STDERR.puts "[DEBUG_ENUM_CALL] member_access name=#{actual_name} enum=#{enum_name}"
-        end
-      elsif ENV["DEBUG_ENUM_CALL"]? && actual_name == "File::Info#type"
-        STDERR.puts "[DEBUG_ENUM_CALL] member_access name=#{actual_name} enum=(nil)"
       end
       if ENV["DEBUG_CALL_TRACE"]? && member_name == "copy_to"
         STDERR.puts "[CALL_TRACE] stage=after_emit method=#{member_name} actual=#{actual_name}"
@@ -31242,13 +31542,16 @@ module Crystal::HIR
                when "String"  then TypeRef::STRING
                when "Symbol"  then TypeRef::SYMBOL
                else
-                 # Check if this is an enum type - enums are stored as Int32
+                 # Check if this is an enum type - create TypeDescriptor to preserve name for mangling
+                 # (enums use Int32 storage but need their semantic name for method dispatch)
                  if enum_info = @enum_info
-                  if enum_info.has_key?(lookup_name)
-                    store_type_cache(cache_key, TypeRef::INT32)
-                    return TypeRef::INT32
-                  end
-                end
+                   if enum_info.has_key?(lookup_name)
+                     # Use Struct kind since enums are value types
+                     enum_ref = @module.intern_type(TypeDescriptor.new(TypeKind::Struct, lookup_name))
+                     store_type_cache(cache_key, enum_ref)
+                     return enum_ref
+                   end
+                 end
 
                  # Prefer already-registered concrete types to preserve kind (struct vs class).
                  if info = @class_info[lookup_name]?
@@ -31588,6 +31891,7 @@ module Crystal::HIR
       non_nil_type = TypeRef::POINTER
       non_nil_variant = -1
       extra_non_nil = false
+      non_nil_type_name : String? = nil
 
       mir_union_ref = hir_to_mir_type_ref(value_type)
       if descriptor = @union_descriptors[mir_union_ref]?
@@ -31598,7 +31902,9 @@ module Crystal::HIR
             break
           end
           non_nil_variant = idx
-          non_nil_type = mir_to_hir_type_ref(variant.type_ref)
+          non_nil_type_name = variant.full_name
+          # Use full_name for semantic type (preserves enum type like Signal instead of storage Int32)
+          non_nil_type = type_ref_for_name(variant.full_name)
         end
       end
 
@@ -31607,6 +31913,10 @@ module Crystal::HIR
         unwrap = UnionUnwrap.new(ctx.next_id, non_nil_type, value_id, non_nil_variant, false)
         ctx.emit(unwrap)
         ctx.register_type(unwrap.id, non_nil_type)
+        # Register enum type for the unwrapped value so predicates work correctly
+        if non_nil_type_name && @enum_info.try(&.has_key?(non_nil_type_name))
+          (@enum_value_types ||= {} of ValueId => String)[unwrap.id] = non_nil_type_name
+        end
         return unwrap.id
       end
 
@@ -31625,6 +31935,7 @@ module Crystal::HIR
       non_nil_type = TypeRef::POINTER
       non_nil_variant = -1
       extra_non_nil = false
+      non_nil_type_name : String? = nil
 
       mir_union_ref = hir_to_mir_type_ref(value_type)
       if descriptor = @union_descriptors[mir_union_ref]?
@@ -31635,7 +31946,9 @@ module Crystal::HIR
             break
           end
           non_nil_variant = idx
-          non_nil_type = mir_to_hir_type_ref(variant.type_ref)
+          non_nil_type_name = variant.full_name
+          # Use full_name for semantic type (preserves enum type like Signal instead of storage Int32)
+          non_nil_type = type_ref_for_name(variant.full_name)
         end
       end
 
@@ -31644,6 +31957,10 @@ module Crystal::HIR
       unwrap = UnionUnwrap.new(ctx.next_id, non_nil_type, value_id, non_nil_variant, false)
       ctx.emit_to_block(block_id, unwrap)
       ctx.register_type(unwrap.id, non_nil_type)
+      # Register enum type for the unwrapped value so predicates work correctly
+      if non_nil_type_name && @enum_info.try(&.has_key?(non_nil_type_name))
+        (@enum_value_types ||= {} of ValueId => String)[unwrap.id] = non_nil_type_name
+      end
       unwrap.id
     end
   end
