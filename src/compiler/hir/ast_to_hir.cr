@@ -5891,7 +5891,13 @@ module Crystal::HIR
             if program = parse_macro_literal_program(expanded)
               with_arena(program.arena) do
                 scan_module_extend_self_in_program(program, module_name)
-                program.roots.each do |expr_id|
+                roots = program.roots
+                skip_next = false
+                roots.each_with_index do |expr_id, idx|
+                  if skip_next
+                    skip_next = false
+                    next
+                  end
                   expr_node = @arena[expr_id]
                   case expr_node
                   when CrystalV2::Compiler::Frontend::DefNode
@@ -5912,6 +5918,37 @@ module Crystal::HIR
                     process_macro_for_in_module(expr_node, module_name)
                   when CrystalV2::Compiler::Frontend::MacroLiteralNode
                     process_macro_literal_in_module(expr_node, module_name)
+                  when CrystalV2::Compiler::Frontend::ClassVarDeclNode
+                    # Handle class variable declarations from macro-expanded content
+                    raw_name = String.new(expr_node.name)
+                    cvar_name = raw_name.lstrip('@')
+                    cvar_type = type_ref_for_name(String.new(expr_node.type))
+                    initial_value : Int64? = nil
+                    if val_id = expr_node.value
+                      val_node = @arena[val_id]
+                      if val_node.is_a?(CrystalV2::Compiler::Frontend::NumberNode)
+                        num_str = String.new(val_node.value)
+                        initial_value = num_str.to_i64?
+                      end
+                    end
+                    STDERR.puts "[DEBUG_CVAR_MACRO_IF] Registering #{module_name}::@@#{cvar_name} : #{String.new(expr_node.type)}" if ENV["DEBUG_CVAR"]?
+                    record_class_var_type(module_name, cvar_name, cvar_type, initial_value)
+                  when CrystalV2::Compiler::Frontend::ClassVarNode
+                    # Handle class var node followed by PathNode (type) - parser quirk for @@var : Type at top level
+                    raw_name = String.new(expr_node.name)
+                    cvar_name = raw_name.lstrip('@')
+                    # Check if next root is a PathNode (the type)
+                    if idx + 1 < roots.size
+                      next_id = roots[idx + 1]
+                      next_node = @arena[next_id]
+                      if next_node.is_a?(CrystalV2::Compiler::Frontend::PathNode)
+                        type_name = collect_path_string(next_node)
+                        cvar_type = type_ref_for_name(type_name)
+                        STDERR.puts "[DEBUG_CVAR_MACRO_IF] Registering (ClassVarNode+PathNode) #{module_name}::@@#{cvar_name} : #{type_name}" if ENV["DEBUG_CVAR"]?
+                        record_class_var_type(module_name, cvar_name, cvar_type, nil)
+                        skip_next = true
+                      end
+                    end
                   end
                 end
               end
@@ -5961,6 +5998,20 @@ module Crystal::HIR
         process_macro_if_in_module(body_node, module_name)
       when CrystalV2::Compiler::Frontend::MacroForNode
         process_macro_for_in_module(body_node, module_name)
+      when CrystalV2::Compiler::Frontend::ClassVarDeclNode
+        # Handle class variable declarations from macro-expanded content
+        raw_name = String.new(body_node.name)
+        cvar_name = raw_name.lstrip('@')
+        cvar_type = type_ref_for_name(String.new(body_node.type))
+        initial_value : Int64? = nil
+        if val_id = body_node.value
+          val_node = @arena[val_id]
+          if val_node.is_a?(CrystalV2::Compiler::Frontend::NumberNode)
+            num_str = String.new(val_node.value)
+            initial_value = num_str.to_i64?
+          end
+        end
+        record_class_var_type(module_name, cvar_name, cvar_type, initial_value)
       end
     end
 
@@ -6058,6 +6109,20 @@ module Crystal::HIR
                 process_macro_for_in_module(expr_node, module_name)
               when CrystalV2::Compiler::Frontend::MacroLiteralNode
                 process_macro_literal_in_module(expr_node, module_name)
+              when CrystalV2::Compiler::Frontend::ClassVarDeclNode
+                # Handle class variable declarations from macro-expanded content
+                raw_name = String.new(expr_node.name)
+                cvar_name = raw_name.lstrip('@')
+                cvar_type = type_ref_for_name(String.new(expr_node.type))
+                initial_value : Int64? = nil
+                if val_id = expr_node.value
+                  val_node = @arena[val_id]
+                  if val_node.is_a?(CrystalV2::Compiler::Frontend::NumberNode)
+                    num_str = String.new(val_node.value)
+                    initial_value = num_str.to_i64?
+                  end
+                end
+                record_class_var_type(module_name, cvar_name, cvar_type, initial_value)
               end
             end
           end
@@ -6095,6 +6160,20 @@ module Crystal::HIR
               process_macro_if_in_module(expr_node, module_name)
             when CrystalV2::Compiler::Frontend::MacroLiteralNode
               process_macro_literal_in_module(expr_node, module_name)
+            when CrystalV2::Compiler::Frontend::ClassVarDeclNode
+              # Handle class variable declarations from macro-expanded content
+              raw_name = String.new(expr_node.name)
+              cvar_name = raw_name.lstrip('@')
+              cvar_type = type_ref_for_name(String.new(expr_node.type))
+              initial_value : Int64? = nil
+              if val_id = expr_node.value
+                val_node = @arena[val_id]
+                if val_node.is_a?(CrystalV2::Compiler::Frontend::NumberNode)
+                  num_str = String.new(val_node.value)
+                  initial_value = num_str.to_i64?
+                end
+              end
+              record_class_var_type(module_name, cvar_name, cvar_type, initial_value)
             end
           end
         end
@@ -6133,6 +6212,20 @@ module Crystal::HIR
                 process_macro_for_in_module(expr_node, module_name)
               when CrystalV2::Compiler::Frontend::MacroLiteralNode
                 process_macro_literal_in_module(expr_node, module_name)
+              when CrystalV2::Compiler::Frontend::ClassVarDeclNode
+                # Handle class variable declarations from macro-expanded content
+                raw_name = String.new(expr_node.name)
+                cvar_name = raw_name.lstrip('@')
+                cvar_type = type_ref_for_name(String.new(expr_node.type))
+                initial_value : Int64? = nil
+                if val_id = expr_node.value
+                  val_node = @arena[val_id]
+                  if val_node.is_a?(CrystalV2::Compiler::Frontend::NumberNode)
+                    num_str = String.new(val_node.value)
+                    initial_value = num_str.to_i64?
+                  end
+                end
+                record_class_var_type(module_name, cvar_name, cvar_type, initial_value)
               end
             end
           end
@@ -6158,6 +6251,20 @@ module Crystal::HIR
               process_macro_for_in_module(expr_node, module_name)
             when CrystalV2::Compiler::Frontend::MacroLiteralNode
               process_macro_literal_in_module(expr_node, module_name)
+            when CrystalV2::Compiler::Frontend::ClassVarDeclNode
+              # Handle class variable declarations from macro-expanded content
+              raw_name = String.new(expr_node.name)
+              cvar_name = raw_name.lstrip('@')
+              cvar_type = type_ref_for_name(String.new(expr_node.type))
+              initial_value : Int64? = nil
+              if val_id = expr_node.value
+                val_node = @arena[val_id]
+                if val_node.is_a?(CrystalV2::Compiler::Frontend::NumberNode)
+                  num_str = String.new(val_node.value)
+                  initial_value = num_str.to_i64?
+                end
+              end
+              record_class_var_type(module_name, cvar_name, cvar_type, initial_value)
             end
           end
         end
