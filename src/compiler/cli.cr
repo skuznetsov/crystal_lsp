@@ -1425,6 +1425,7 @@ module CrystalV2
         libraries = [] of String
         working = text.dup
 
+        # Match named args with quoted values: key: "value" or key: 'value'
         working.scan(/(\w+)\s*:\s*["']([^"']*)["']/) do |match|
           key = match[1]
           value = match[2]
@@ -1437,7 +1438,21 @@ module CrystalV2
           libraries << "#{prefix}#{value}"
         end
 
+        # Match named args with backtick values: key: `command`
+        working.scan(/(\w+)\s*:\s*`([^`]*)`/) do |match|
+          key = match[1]
+          value = "`#{match[2]}`"  # Re-add backticks for execution
+          prefix = case key
+                   when "pkg_config" then "pkg_config:"
+                   when "framework"  then "framework:"
+                   when "dll"        then "dll:"
+                   else "#{key}:"
+                   end
+          libraries << "#{prefix}#{value}"
+        end
+
         working = working.gsub(/(\w+)\s*:\s*["'][^"']*["']/, "")
+        working = working.gsub(/(\w+)\s*:\s*`[^`]*`/, "")
         working.scan(/["']([^"']*)["']/) do |match|
           libraries << match[1]
         end

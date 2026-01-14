@@ -1105,19 +1105,18 @@ module Crystal::HIR
     private def record_class_parent(child_name : String, parent_name : String?) : Nil
       return unless parent_name
       @classes_with_subclasses.add(parent_name)
-      if short_name = parent_name.split("::").last?
+      short_name = last_namespace_component(parent_name)
+      if short_name != parent_name
         @classes_with_subclasses.add(short_name)
       end
       parent_base = parent_name.split("(", 2).first
       keys = Set(String).new
       keys << parent_name
       keys << parent_base if parent_base != parent_name
-      if short = parent_name.split("::").last?
-        keys << short
-      end
-      if short_base = parent_base.split("::").last?
-        keys << short_base
-      end
+      short = last_namespace_component(parent_name)
+      keys << short if short != parent_name
+      short_base = last_namespace_component(parent_base)
+      keys << short_base if short_base != parent_base
       keys.each do |key|
         (@children_by_parent[key] ||= Set(String).new) << child_name
       end
@@ -1239,9 +1238,9 @@ module Crystal::HIR
     private def resolve_enum_name(name : String) : String?
       return nil unless enum_info = @enum_info
       return name if enum_info.has_key?(name)
-      short_name = name.split("::").last?
-      return short_name if short_name && enum_info.has_key?(short_name)
-      if short_name
+      short_name = last_namespace_component(name)
+      return short_name if short_name != name && enum_info.has_key?(short_name)
+      if short_name != name
         matches = enum_info.keys.select { |key| key.ends_with?("::#{short_name}") }
         return matches.first if matches.size == 1
       end
@@ -1642,8 +1641,8 @@ module Crystal::HIR
         if callee_name == "record"
           if first_arg = node.args.first?
             if nested_name = resolve_path_like_name(first_arg)
-              short = nested_name.split("::").last?
-              set << short if short && !short.empty?
+              short = last_namespace_component(nested_name)
+              set << short unless short.empty?
             end
           end
         end
@@ -4586,7 +4585,7 @@ module Crystal::HIR
         if paren = base.index('(')
           base = base[0, paren]
         end
-        short_base = base.split("::").last
+        short_base = last_namespace_component(base)
         case short_base
         when "Deque", "Slice", "StaticArray", "Set"
           create_union_type_for_nullable(elem)
@@ -8573,7 +8572,8 @@ module Crystal::HIR
         ivar_dump = ivars.map { |iv| "#{iv.name}:#{get_type_name_from_ref(iv.type)}@#{iv.offset}" }.join(", ")
         STDERR.puts "[CLASS_INFO] #{class_name} ivars=[#{ivar_dump}] size=#{offset}"
       end
-      if short_name = class_name.split("::").last?
+      short_name = last_namespace_component(class_name)
+      if short_name != class_name
         (@short_type_index[short_name] ||= Set(String).new) << class_name
       end
       # DEBUG: track type_ref.id for problematic types
@@ -8674,11 +8674,10 @@ module Crystal::HIR
       bare_generic_names = {"Array", "Hash", "Set", "Slice", "Pointer", "StaticArray", "Iterator", "Enumerable"}
       type_args.none? do |arg|
         arg = arg.strip
-        if short = arg.split("::").last?
-          # Namespaced type params like Crystal::HIR::K should still be treated as unresolved.
-          short = short.gsub(/[^A-Za-z0-9_]/, "")
-          next true if unresolved_param_names.includes?(short)
-        end
+        short = last_namespace_component(arg)
+        # Namespaced type params like Crystal::HIR::K should still be treated as unresolved.
+        short = short.gsub(/[^A-Za-z0-9_]/, "")
+        next true if unresolved_param_names.includes?(short)
         # Path-like type args are never concrete (guard against require path leakage).
         next true if arg.includes?("/")
         # typeof(...) in type positions is not fully resolved during bootstrap.
@@ -10375,7 +10374,7 @@ module Crystal::HIR
         end
         includers = @module_includers[param_name]?
         if includers.nil? || includers.empty?
-          short_name = param_name.split("::").last
+          short_name = last_namespace_component(param_name)
           includers = @module_includers[short_name]?
         end
         if includers
@@ -11507,7 +11506,7 @@ module Crystal::HIR
       # Fallback: try short name if full name has no includers
       # e.g., "Crystal::EventLoop::FileDescriptor" -> "FileDescriptor"
       if includers.nil? || includers.empty?
-        short_name = module_base.split("::").last
+        short_name = last_namespace_component(module_base)
         if short_name != module_base
           includers = @module_includers[short_name]?
           if includers.nil? || includers.empty?
@@ -11561,7 +11560,8 @@ module Crystal::HIR
       # The concrete implementation may be in a subclass (e.g., Polling, Kqueue)
       parent_keys = includers.to_a
       includers.each do |inc|
-        if inc_short = inc.split("::").last?
+        inc_short = last_namespace_component(inc)
+        if inc_short != inc
           parent_keys << inc_short unless parent_keys.includes?(inc_short)
         end
       end
@@ -11645,7 +11645,7 @@ module Crystal::HIR
 
       return true if @module_includer_keys_by_suffix.has_key?(name)
 
-      short_name = name.split("::").last
+      short_name = last_namespace_component(name)
       return true if @module_includers.has_key?(short_name)
 
       @module_includer_keys_by_suffix.has_key?(short_name)
@@ -11674,7 +11674,7 @@ module Crystal::HIR
         end
       end
       if includers.nil? || includers.empty?
-        short_name = module_base.split("::").last
+        short_name = last_namespace_component(module_base)
         if short_name != module_base
           includers = @module_includers[short_name]?
           if includers.nil? || includers.empty?
@@ -11699,7 +11699,8 @@ module Crystal::HIR
       candidates = includers.to_a
       parent_keys = includers.to_a
       includers.each do |inc|
-        if inc_short = inc.split("::").last?
+        inc_short = last_namespace_component(inc)
+        if inc_short != inc
           parent_keys << inc_short unless parent_keys.includes?(inc_short)
         end
       end
@@ -11829,7 +11830,7 @@ module Crystal::HIR
             if arg_desc
               arg_class = arg_desc.name
               param_base = param_type_name.split("(").first
-              if @class_included_modules[arg_class]?.try(&.any? { |m| m.includes?(param_base) || param_base.includes?(m.split("::").last) })
+              if @class_included_modules[arg_class]?.try(&.any? { |m| m.includes?(param_base) || param_base.includes?(last_namespace_component(m)) })
                 arg_idx += 1
                 next
               end
@@ -11988,7 +11989,7 @@ module Crystal::HIR
         return unsigned_integer_type_for_width(bits) if bits
       end
 
-      short_name = param_type_name.split("::").last
+      short_name = last_namespace_component(param_type_name)
       case short_name
       when "Int"
         return signed_integer_type_for_width(bits) if bits
@@ -12019,7 +12020,7 @@ module Crystal::HIR
 
     private def receiver_allows_yield_owner?(receiver_base : String, owner_base : String) : Bool
       return true if receiver_base == owner_base
-      owner_short = owner_base.split("::").last?
+      owner_short = last_namespace_component_if_nested(owner_base)
       if owner_short && !receiver_base.includes?("::")
         return true if owner_short == receiver_base
       end
@@ -12031,7 +12032,7 @@ module Crystal::HIR
         if parent
           return true if parent == owner_base
           if owner_short
-            parent_short = parent.split("::").last?
+            parent_short = last_namespace_component_if_nested(parent)
             return true if parent_short && parent_short == owner_short
           end
         end
@@ -12041,7 +12042,7 @@ module Crystal::HIR
         modules.each do |mod|
           return true if mod == owner_base
           if owner_short
-            mod_short = mod.split("::").last?
+            mod_short = last_namespace_component_if_nested(mod)
             return true if mod_short && mod_short == owner_short
           end
         end
@@ -13461,11 +13462,11 @@ module Crystal::HIR
         if type_name_exists?(name)
           result = name
         # Resolve to the override namespace if it matches the short name.
-        elsif (override = @current_namespace_override) && (last_part = override.split("::").last) && last_part == name && type_name_exists?(override)
+        elsif (override = @current_namespace_override) && last_namespace_component(override) == name && type_name_exists?(override)
           result = override
         # Also try the exact class name if current class matches
         # E.g., inside Span, "Span" should resolve to the same class
-        elsif (current = @current_class) && (last_part = current.split("::").last) && last_part == name && type_name_exists?(current)
+        elsif (current = @current_class) && last_namespace_component(current) == name && type_name_exists?(current)
           result = current
         end
       end
@@ -23506,14 +23507,13 @@ module Crystal::HIR
           if !@class_info.has_key?(class_name_str) && @module_defs.has_key?(class_name_str)
             module_method_name = "#{class_name_str}.#{method_name}"
             unless @function_types.has_key?(module_method_name) || has_function_base?(module_method_name)
-              if short_name = class_name_str.split("::").last?
-                if candidates = @short_type_index[short_name]?
-                  if candidates.size == 1
-                    candidate = candidates.first
-                    candidate_method = "#{candidate}.#{method_name}"
-                    if @function_types.has_key?(candidate_method) || has_function_base?(candidate_method)
-                      class_name_str = candidate
-                    end
+              short_name = last_namespace_component(class_name_str)
+              if candidates = @short_type_index[short_name]?
+                if candidates.size == 1
+                  candidate = candidates.first
+                  candidate_method = "#{candidate}.#{method_name}"
+                  if @function_types.has_key?(candidate_method) || has_function_base?(candidate_method)
+                    class_name_str = candidate
                   end
                 end
               end
@@ -26069,8 +26069,8 @@ module Crystal::HIR
       candidates.uniq.each do |candidate|
         lookup = resolve_type_alias_chain(candidate)
         return enum_info[lookup]? if enum_info.has_key?(lookup)
-        short_name = lookup.split("::").last?
-        return enum_info[short_name]? if short_name && enum_info.has_key?(short_name)
+        short_name = last_namespace_component(lookup)
+        return enum_info[short_name]? if short_name != lookup && enum_info.has_key?(short_name)
       end
       nil
     end
@@ -31019,6 +31019,27 @@ module Crystal::HIR
       type_ref
     end
 
+    # Fast helper to get last component of a namespace path (e.g., "Foo::Bar::Baz" -> "Baz")
+    # Avoids allocating an array like split("::").last would
+    @[AlwaysInline]
+    private def last_namespace_component(name : String) : String
+      if idx = name.rindex("::")
+        name[(idx + 2)..]
+      else
+        name
+      end
+    end
+
+    # Returns last component only if name contains "::", otherwise nil
+    @[AlwaysInline]
+    private def last_namespace_component_if_nested(name : String) : String?
+      if idx = name.rindex("::")
+        name[(idx + 2)..]
+      else
+        nil
+      end
+    end
+
     private def type_name_resolution_cache_key(name : String) : String
       override = @current_namespace_override
       current = @current_class
@@ -31030,12 +31051,13 @@ module Crystal::HIR
 
     private def invalidate_resolved_type_name_cache_for(name : String) : Nil
       return if @resolved_type_name_cache.empty?
-      short = name.split("::").last?
+      # Optimization: use ends_with? instead of split - cache key format is "override||current||name"
+      suffix_full = "||#{name}"
+      short = last_namespace_component_if_nested(name)
+      suffix_short = short ? "||#{short}" : nil
       keys = [] of String
       @resolved_type_name_cache.each_key do |key|
-        raw = key.split("||").last?
-        next unless raw
-        if raw == name || (short && raw == short)
+        if key.ends_with?(suffix_full) || (suffix_short && key.ends_with?(suffix_short))
           keys << key
         end
       end
@@ -31044,17 +31066,16 @@ module Crystal::HIR
 
     private def invalidate_type_literal_cache_for(name : String) : Nil
       return if @type_literal_class_cache.empty?
-      short = name.split("::").last?
-      suffixes = [] of String
-      suffixes << "#{name}.class"
-      suffixes << "#{name}.metaclass"
-      if short && short != name
-        suffixes << "#{short}.class"
-        suffixes << "#{short}.metaclass"
-      end
+      short = last_namespace_component_if_nested(name)
+      suffix_class = "#{name}.class"
+      suffix_meta = "#{name}.metaclass"
+      suffix_short_class = short ? "#{short}.class" : nil
+      suffix_short_meta = short ? "#{short}.metaclass" : nil
       keys = [] of String
       @type_literal_class_cache.each_key do |key|
-        if suffixes.any? { |suffix| key.ends_with?(suffix) }
+        if key.ends_with?(suffix_class) || key.ends_with?(suffix_meta) ||
+           (suffix_short_class && key.ends_with?(suffix_short_class)) ||
+           (suffix_short_meta && key.ends_with?(suffix_short_meta))
           keys << key
         end
       end
@@ -31076,7 +31097,8 @@ module Crystal::HIR
         keys.concat(entries.to_a)
       end
 
-      if short = name.split("::").last?
+      # Only compute short name if the name contains "::"
+      if short = last_namespace_component_if_nested(name)
         if @type_cache.has_key?(short)
           keys << short
         end

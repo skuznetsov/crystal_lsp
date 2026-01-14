@@ -675,14 +675,18 @@ module Crystal::V2
           seen << flag
         when "ldflags"
           next if value.empty?
+          STDERR.puts "[DEBUG_LDFLAGS] value=#{value.inspect}" if ENV["DEBUG_LINK"]?
           # Execute backtick commands if present
           expanded = if value.starts_with?("`") && value.ends_with?("`")
                        cmd = value[1..-2]
-                       `sh -c #{cmd.inspect}`.strip
+                       result = `sh -c #{cmd.inspect}`.strip
+                       STDERR.puts "[DEBUG_LDFLAGS] backtick cmd=#{cmd.inspect} result=#{result.inspect}" if ENV["DEBUG_LINK"]?
+                       result
                      else
                        value
                      end
           next if expanded.empty?
+          STDERR.puts "[DEBUG_LDFLAGS] expanded=#{expanded.inspect}" if ENV["DEBUG_LINK"]?
           # Add each flag separately
           expanded.split.each do |flag|
             next if seen.includes?(flag)
