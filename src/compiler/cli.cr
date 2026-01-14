@@ -867,6 +867,22 @@ module CrystalV2
             next if seen.includes?(flag)
             flags << flag
             seen << flag
+          when "ldflags"
+            next if value.empty?
+            # Execute backtick commands if present
+            expanded = if value.starts_with?("`") && value.ends_with?("`")
+                         cmd = value[1..-2]
+                         `sh -c #{cmd.inspect}`.strip
+                       else
+                         value
+                       end
+            next if expanded.empty?
+            # Add each flag separately
+            expanded.split.each do |flag|
+              next if seen.includes?(flag)
+              flags << flag
+              seen << flag
+            end
           else
             lib_name = value.empty? ? entry : value
             next if lib_name.empty?

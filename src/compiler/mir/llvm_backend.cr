@@ -1753,15 +1753,19 @@ module Crystal::MIR
             # For ExternCall, look up the actual function return type from module
             # This handles cases like String#index returning Int32|Nil
             mangled_extern_name = @type_mapper.mangle_name(inst.extern_name)
-            # Skip suffix matching for arithmetic operators (___* = *, __* = +)
-            # These can match unrelated array methods like Array____Int32
+            # Skip suffix matching for:
+            # 1. Arithmetic operators (___* = *, __* = +) - can match unrelated methods
+            # 2. C library functions (simple names without namespace) - avoid matching Crystal methods
             is_arithmetic_op = mangled_extern_name.starts_with?("___") ||
                                (mangled_extern_name.starts_with?("__") && !mangled_extern_name.starts_with?("___"))
-            # Search for exact match OR suffix match (for non-arithmetic operators)
+            # C library functions are typically simple names like "write", "read", "malloc"
+            # Crystal methods would have namespace prefixes like "IO_write" or "String_size"
+            is_c_lib_function = !mangled_extern_name.includes?("_") || mangled_extern_name.starts_with?("__")
+            # Search for exact match OR suffix match (for non-arithmetic, non-C-lib operators)
             matching_func = @module.functions.find do |f|
               mangled = @type_mapper.mangle_name(f.name)
-              if is_arithmetic_op
-                # Only exact match for arithmetic operators
+              if is_arithmetic_op || is_c_lib_function
+                # Only exact match for arithmetic operators and C lib functions
                 mangled == mangled_extern_name
               else
                 # Exact match OR suffix match (e.g., index_UInt8 matches String_index_UInt8)

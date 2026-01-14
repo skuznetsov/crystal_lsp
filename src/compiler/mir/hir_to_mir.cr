@@ -2041,8 +2041,8 @@ module Crystal
 
     private def convert_type(hir_type : HIR::TypeRef) : TypeRef
       # Map HIR type IDs to MIR type IDs
-      # Primitives have same IDs in both
-      case hir_type
+      # Note: HIR and MIR have DIFFERENT layouts! HIR: BOOL=1, MIR: NIL=1, BOOL=2
+      result = case hir_type
       when HIR::TypeRef::VOID    then TypeRef::VOID
       when HIR::TypeRef::BOOL    then TypeRef::BOOL
       when HIR::TypeRef::INT8    then TypeRef::INT8

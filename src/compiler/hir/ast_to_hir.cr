@@ -16626,7 +16626,7 @@ module Crystal::HIR
         TypeRef::INT32
       when "UInt32", "UInt"
         TypeRef::UINT32
-      when "Int64", "Long", "LongLong"
+      when "Int64", "Long", "LongLong", "SSizeT", "OffT", "PtrDiffT"
         TypeRef::INT64
       when "UInt64", "ULong", "ULongLong", "SizeT"
         TypeRef::UINT64
