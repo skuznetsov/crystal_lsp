@@ -5035,7 +5035,31 @@ module Crystal::MIR
     private def emit_indirect_call(inst : IndirectCall, name : String)
       return_type = @type_mapper.llvm_type(inst.type)
       callee = value_ref(inst.callee_ptr)
-      args = inst.args.map { |a| "ptr #{value_ref(a)}" }.join(", ")
+      # Handle args: union types need special handling - pass ptr to slot/alloca, not loaded value
+      arg_strs = inst.args.map do |a|
+        arg_type = @value_types[a]?
+        if arg_type
+          arg_llvm_type = @type_mapper.llvm_type(arg_type)
+          if arg_llvm_type.includes?(".union")
+            # For union types, check if we have a cross-block slot to use
+            if slot_name = @cross_block_slots[a]?
+              "ptr %#{slot_name}"
+            else
+              # No slot - need to alloca and store the union value
+              temp_slot = "%indirect_union_arg.#{@cond_counter}"
+              @cond_counter += 1
+              emit "#{temp_slot} = alloca #{arg_llvm_type}, align 8"
+              emit "store #{arg_llvm_type} #{value_ref(a)}, ptr #{temp_slot}"
+              "ptr #{temp_slot}"
+            end
+          else
+            "ptr #{value_ref(a)}"
+          end
+        else
+          "ptr #{value_ref(a)}"
+        end
+      end
+      args = arg_strs.join(", ")
       if return_type == "void"
         emit "call void #{callee}(#{args})"
         # Mark as void so value_ref returns a safe default for downstream uses
