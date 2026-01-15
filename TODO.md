@@ -1568,31 +1568,39 @@ The return_type=16 (NIL) for `to_s` methods is incorrect - should be String type
 - Allow lowering untyped base defs when no typed overloads exist (fixes `Crystal::DWARF::LineNumbers#decode_sequences` missing symbol in `/tmp/fib_link.log`).
 - Parenthesized calls no longer attach `{}`/`do` blocks across newlines (prevents `if foo() { ... }` from stealing the then-body tuple literal; `Path#separators` now parsed inside the `Path` class).
 
-**Progress**: 150 → 64 symbols remaining.
+**Progress**: 150 → 64 → 30 symbols remaining.
 
-**Remaining symbol categories** (52 symbols):
+**Session 2026-01-15 fixes**:
+- Added modules to `@short_type_index` so short module names resolve correctly (e.g., `Printer` → `Float::Printer`)
+- Fixed `register_nested_module` to scan for `extend self` and register module methods with `@module_extend_self`
+- Emit loop stuck sigs reduced: 20 → 12 → 9
+- `Float::Printer.shortest` now resolves and emits correctly
 
-1. **Event loop / kqueue types** (~25 symbols):
-   - `Int32_filter`, `Int32_index`, `Int32_fflags_block`, `Int32_generation`
-   - `Pointer_UInt8__fiber`, `Pointer_UInt8__index`, `Pointer_UInt8__type`
-   - `UInt8_value`, `Nil_value`, `Bool_value`
-   - **Root cause**: Stale AST cache after brace-literal block parsing; tuple literal `.each_with_index do` lost block → `kevent`/`filter` typed as VOID.
-   - **Status**: parser fix + AST cache VERSION v24 invalidation; recheck missing symbol count.
+**Remaining symbol categories** (30 symbols):
 
-2. **DWARF / exception handling** (~10 symbols):
-   - `Crystal__DWARF__Attribute_at`, `Crystal__DWARF__Attribute_form`, `Crystal__DWARF__Attribute_value`
-   - `Bool_read_attribute_value_Crystal__DWARF__Attribute`
-   - **Root cause**: Similar macro conditional type inference issue.
+1. **Malformed names** (~5 symbols):
+   - `____Int32` - empty method name with Int32 receiver
+   - `_func946` - anonymous function reference
+   - `_inspect_IO`, `_to_s_IO_Int32` - incomplete mangling
+   - `_self_to_u8_` - self receiver issue
+   - **Root cause**: Method name empty or receiver not correctly resolved during mangling
 
-3. **System / Thread** (~8 symbols):
-   - `Thread_threads`, `push_Thread`
-   - `Crystal__System__Process_executable_path`
-   - `GC_set_stackbottom_Pointer_Void_`
+2. **System module methods** (~7 symbols):
+   - `Crystal__System__Fiber_current`, `_init`, `_suspend` - methods don't exist in unix/fiber.cr
+   - `Crystal__System__Thread_current`
+   - `Crystal__System__Time_day`, `_hour`, `_to_unix`
+   - **Root cause**: Platform-specific methods not being included or called incorrectly
 
-4. **Misc type dispatch** (~9 symbols):
-   - `Number_floor`, `Enumerable_reduce_Path`
-   - `String__CHAR_TO_DIGIT_to_unsafe`, `LibC__PATH_MAX_to_u32`
-   - `realpath_DARWIN_EXTSN`
+3. **Union types in mangled names** (~3 symbols):
+   - `Float__Printer__Dragonbox_to_decimal_Float32___Float64` - union `|` in arg type
+   - **Root cause**: Union types being stringified with `|` in method signatures
+
+4. **Misc missing methods** (~15 symbols):
+   - `String__Builder_initialize_Int32`, `File__Error_from_errno_String_String`
+   - `Exception__CallStack_decode_function_name`, `_decode_line_number`, `_skip`
+   - `Tuple_count`, `Pointer_UInt8__size`, `_to_unsafe`
+   - `LibC__PATH_MAX_to_u32`, `realpath_DARWIN_EXTSN`
+   - `RuntimeError_from_os_error_...` (complex overload)
 
 **Current investigation**:
 - `has_constant?` macro method added to `try_evaluate_macro_condition`
@@ -1608,3 +1616,56 @@ The return_type=16 (NIL) for `to_s` methods is incorrect - should be String type
 - `src/compiler/hir/ast_to_hir.cr`:
   - Added `evaluate_has_constant()` at lines 14078-14118
   - Added `has_constant?` handling in `try_evaluate_macro_condition` at lines 14163-14196
+
+### 8.8 Bootstrap Session (2026-01-15) - Return Type Inference Root Cause
+
+**Key discovery**: The `____Int32` and other EMPTY_CLASS errors share a common root cause - **method return types are not being inferred/registered correctly**.
+
+**Debug findings**:
+
+1. **Pattern observed**: When `DEBUG_EMPTY_CLASS=1`, many methods have VOID receiver:
+   ```
+   [EMPTY_CLASS] method=put receiver_id=14 receiver_type.id=0 ... func=Array(String)#to_s
+   [EMPTY_CLASS] method=delete receiver_id=72 receiver_type.id=0 ... func=Array(String)#to_s
+   ```
+
+2. **Receiver value trace** shows receivers are `Copy` of local variables:
+   ```
+   recv_value=Copy(src=8)  # hash variable in exec_recursive
+   ```
+
+3. **Return type lookup** reveals the actual problem:
+   ```
+   [GET_RETURN] name=Fiber#exec_recursive_hash func_type=Void base_type=Void module_rt=(nil)
+   [GET_RETURN] name=Crystal::System::Fiber.current func_type=(nil) base_type=(nil) module_rt=(nil)
+   ```
+
+**Root cause chain**:
+1. `Fiber#exec_recursive_hash` returns `Hash({UInt64, Symbol}, Nil)` but is registered with VOID
+2. When lowering `hash = Fiber.current.exec_recursive_hash`, the local `hash` gets VOID type
+3. Subsequent `hash.put(...)` call has VOID receiver → empty class name → malformed symbol `_put`
+
+**Methods affected** (return VOID instead of actual type):
+- `Fiber#exec_recursive_hash` → should return `Hash({UInt64, Symbol}, Nil)`
+- `Fiber#exec_recursive_clone_hash` → should return `Hash(UInt64, UInt64)`
+- Many instance methods with inferred return types from `||=` expressions
+
+**Specific code pattern not handled**:
+```crystal
+def exec_recursive_hash
+  @exec_recursive_hash ||= Hash({UInt64, Symbol}, Nil).new  # ||= not inferring type
+end
+```
+
+**Files with fixes made this session**:
+- `src/compiler/hir/ast_to_hir.cr`:
+  - Added `Pointer#value` handling in `infer_type_from_expr` (~line 5051)
+  - Added generic template check in `resolve_method_with_inheritance` (~line 14811)
+  - Enhanced EMPTY_CLASS debug to show `recv_value` info
+
+**Next steps**:
+1. **Fix return type inference for `||=` expressions** - the right-hand side of `||=` should determine return type
+2. **Audit ivar accessor return types** - methods like `@foo ||= X.new` need to return type of X
+3. **Check if `Crystal::System::Fiber.current` is being called incorrectly** - this method doesn't exist
+
+**Symbol count**: 30 remaining (unchanged - investigation phase)
