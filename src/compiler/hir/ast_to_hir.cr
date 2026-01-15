@@ -15841,6 +15841,11 @@ module Crystal::HIR
       func
     end
 
+    # Public method to flush pending functions from external callers (e.g., CLI after lower_def)
+    def flush_pending_functions
+      process_pending_lower_functions
+    end
+
     # WORK QUEUE: Process functions that were deferred during lowering.
     # This breaks the recursive stack overflow by processing functions iteratively.
     # Each iteration may add more functions to the queue, so we loop until empty.

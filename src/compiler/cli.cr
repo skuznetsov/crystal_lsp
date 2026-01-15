@@ -502,6 +502,8 @@ module CrystalV2
         if fun_main = def_nodes.find { |(n, _)| n.receiver.try { |recv| String.new(recv) == HIR::AstToHir::FUN_DEF_RECEIVER } && String.new(n.name) == "main" }
           hir_converter.arena = fun_main[1]
           hir_converter.lower_def(fun_main[0])
+          # Process any pending functions from fun main lowering (e.g., Crystal.init_runtime)
+          hir_converter.flush_pending_functions
         end
         STDERR.puts "  Main function created" if options.progress
 
