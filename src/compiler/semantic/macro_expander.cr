@@ -190,6 +190,28 @@ module CrystalV2
           end
         end
 
+        # Expand a standalone macro expression with a provided variable context.
+        # Returns the expanded text (no AST reparse).
+        def expand_expression(expr_id : ExprId, *, variables : Hash(String, MacroValue), owner_type : ClassSymbol? = nil) : String
+          @diagnostics.clear
+          @last_output = nil
+
+          if @depth >= MAX_DEPTH
+            emit_error("Macro recursion depth exceeded (#{MAX_DEPTH})")
+            return ""
+          end
+
+          @depth += 1
+          begin
+            context = Context.new(variables, {} of String => String, owner_type, @depth, @flags, nil)
+            output = evaluate_expression(expr_id, context)
+            @last_output = output
+            output
+          ensure
+            @depth -= 1
+          end
+        end
+
         private def build_context(
           macro_symbol : MacroSymbol,
           args : Array(ExprId),
@@ -1335,6 +1357,23 @@ module CrystalV2
           value
         end
 
+        # Count tuple type arguments in a name like "Tuple(Int32, String)".
+        private def macro_tuple_size_from_type_name(type_name : String) : Int32?
+          return nil unless type_name.starts_with?("Tuple(") && type_name.ends_with?(")")
+          inner = type_name[6...-1]
+          return 0 if inner.empty?
+          depth = 0
+          size = 1
+          inner.each_char do |c|
+            case c
+            when '(' then depth += 1
+            when ')' then depth -= 1
+            when ',' then size += 1 if depth == 0
+            end
+          end
+          size
+        end
+
         # Phase 87B-6: .class_name - return AST node type name
         private def macro_class_name(node, context : Context) : String
           # For macro variables, resolve first
@@ -1511,8 +1550,12 @@ module CrystalV2
                     return base_name
                   end
                 when "size"
-                  # Approximate @type.size as the number of generic type
-                  # parameters declared on the owning class.
+                  # Approximate @type.size for tuples/named tuples by counting
+                  # concrete type args in the type name; otherwise fall back
+                  # to the number of generic type parameters.
+                  if (tuple_size = macro_tuple_size_from_type_name(class_symbol.name))
+                    return tuple_size.to_s
+                  end
                   type_params = class_symbol.type_parameters
                   return (type_params ? type_params.size : 0).to_s
                 when "methods"

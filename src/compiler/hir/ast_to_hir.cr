@@ -16705,14 +16705,17 @@ module Crystal::HIR
         # Handle macro literals with text pieces that may contain {% if flag?() %}
         lower_macro_literal(ctx, node)
 
-      when CrystalV2::Compiler::Frontend::MacroVarNode,
-           CrystalV2::Compiler::Frontend::MacroForNode,
-           CrystalV2::Compiler::Frontend::MacroExpressionNode
-        # Macro nodes are not lowered directly - they are expanded first
-        # Return nil for any macro content encountered
+      when CrystalV2::Compiler::Frontend::MacroVarNode
+        # Macro vars are compile-time only; return nil at runtime.
         nil_lit = Literal.new(ctx.next_id, TypeRef::NIL, nil)
         ctx.emit(nil_lit)
         nil_lit.id
+
+      when CrystalV2::Compiler::Frontend::MacroForNode
+        lower_macro_for(ctx, node)
+
+      when CrystalV2::Compiler::Frontend::MacroExpressionNode
+        lower_macro_expression(ctx, node)
 
       when CrystalV2::Compiler::Frontend::PointerofNode
         lower_pointerof(ctx, node)
@@ -17672,6 +17675,161 @@ module Crystal::HIR
       end
     end
 
+    private def macro_value_for_type_name(type_name : String) : CrystalV2::Compiler::Semantic::MacroValue
+      resolved = resolve_type_alias_chain(resolve_type_name_in_context(type_name))
+      type_vars = nil
+      if info = split_generic_base_and_args(resolved)
+        type_vars = split_generic_type_args(info[:args]).map(&.strip)
+      end
+      type_ref = type_ref_for_name(resolved)
+      desc = type_ref == TypeRef::VOID ? nil : @module.get_type_descriptor(type_ref)
+      is_struct = desc ? desc.kind == TypeKind::Struct : false
+      is_module = desc ? desc.kind == TypeKind::Module : false
+      CrystalV2::Compiler::Semantic::MacroTypeValue.new(
+        resolved,
+        nil,
+        is_struct,
+        is_module,
+        false,
+        nil,
+        type_vars
+      )
+    end
+
+    private def macro_vars_for_current_context(ctx : LoweringContext) : Hash(String, CrystalV2::Compiler::Semantic::MacroValue)
+      vars = {} of String => CrystalV2::Compiler::Semantic::MacroValue
+      @type_param_map.each do |param, actual|
+        next if actual.empty?
+        vars[param] = macro_value_for_type_name(actual)
+      end
+
+      if tuple_list = @type_param_map["T__tuple"]?
+        args = split_generic_type_args(tuple_list).map(&.strip)
+        unless args.empty?
+          elems = [] of CrystalV2::Compiler::Semantic::MacroValue
+          args.each do |arg|
+            elems << macro_value_for_type_name(arg)
+          end
+          vars["T"] = CrystalV2::Compiler::Semantic::MacroTupleValue.new(elems)
+        end
+      end
+
+      if self_id = ctx.lookup_local("self")
+        if desc = @module.get_type_descriptor(ctx.type_of(self_id))
+          if desc.kind == TypeKind::Tuple || desc.name.starts_with?("Tuple(")
+            args = desc.type_params.reject { |t| t == TypeRef::VOID }.map { |ref| get_type_name_from_ref(ref) }
+            if args.empty?
+              if info = split_generic_base_and_args(desc.name)
+                args = split_generic_type_args(info[:args]).map(&.strip)
+              end
+            end
+            unless args.empty?
+              elems = [] of CrystalV2::Compiler::Semantic::MacroValue
+              args.each do |arg|
+                elems << macro_value_for_type_name(arg)
+              end
+              vars["T"] = CrystalV2::Compiler::Semantic::MacroTupleValue.new(elems)
+            end
+          end
+        end
+      end
+
+      if current = @current_class
+        if info = split_generic_base_and_args(current)
+          base = info[:base]
+          args = split_generic_type_args(info[:args]).map(&.strip)
+          if base == "Tuple" && !args.empty? && !vars.has_key?("T")
+            elems = [] of CrystalV2::Compiler::Semantic::MacroValue
+            args.each do |arg|
+              elems << macro_value_for_type_name(arg)
+            end
+            vars["T"] = CrystalV2::Compiler::Semantic::MacroTupleValue.new(elems)
+          elsif template = @generic_templates[base]?
+            template.type_params.each_with_index do |param, idx|
+              next if vars.has_key?(param)
+              if arg = args[idx]?
+                vars[param] = macro_value_for_type_name(arg)
+              end
+            end
+          end
+        end
+      end
+
+      vars
+    end
+
+    private def macro_int_literal_for_expr_with_context(
+      expr_id : ExprId,
+      vars : Hash(String, CrystalV2::Compiler::Semantic::MacroValue),
+      owner_type : CrystalV2::Compiler::Semantic::ClassSymbol?,
+      expander : CrystalV2::Compiler::Semantic::MacroExpander
+    ) : Int64?
+      expr_node = @arena[expr_id]
+      case expr_node
+      when CrystalV2::Compiler::Frontend::MacroExpressionNode
+        macro_int_literal_for_expr_with_context(expr_node.expression, vars, owner_type, expander)
+      when CrystalV2::Compiler::Frontend::NumberNode
+        num_str = strip_numeric_suffix(String.new(expr_node.value)).gsub("_", "")
+        num_str.to_i64?
+      else
+        output = expander.expand_expression(expr_id, variables: vars, owner_type: owner_type).strip
+        return nil if output.empty?
+        num_str = strip_numeric_suffix(output).gsub("_", "")
+        num_str.to_i64?
+      end
+    end
+
+    private def macro_for_iterable_values_with_context(
+      iterable_id : ExprId,
+      vars : Hash(String, CrystalV2::Compiler::Semantic::MacroValue),
+      owner_type : CrystalV2::Compiler::Semantic::ClassSymbol?,
+      expander : CrystalV2::Compiler::Semantic::MacroExpander
+    ) : Array(CrystalV2::Compiler::Semantic::MacroValue)?
+      node = @arena[iterable_id]
+      if node.is_a?(CrystalV2::Compiler::Frontend::MacroExpressionNode)
+        return macro_for_iterable_values_with_context(node.expression, vars, owner_type, expander)
+      end
+
+      case node
+      when CrystalV2::Compiler::Frontend::IdentifierNode
+        name = CrystalV2::Compiler::Frontend.node_literal_string(node)
+        if name && (val = vars[name]?)
+          if val.is_a?(CrystalV2::Compiler::Semantic::MacroArrayValue)
+            return val.elements
+          elsif val.is_a?(CrystalV2::Compiler::Semantic::MacroTupleValue)
+            return val.elements
+          end
+        end
+      when CrystalV2::Compiler::Frontend::RangeNode
+        start_val = macro_int_literal_for_expr_with_context(node.begin_expr, vars, owner_type, expander)
+        end_val = macro_int_literal_for_expr_with_context(node.end_expr, vars, owner_type, expander)
+        return nil unless start_val && end_val
+        limit = CrystalV2::Compiler::Semantic::MacroExpander::MAX_RANGE_SIZE
+        last_val = node.exclusive ? end_val - 1 : end_val
+        count = last_val - start_val + 1
+        return nil if count < 0 || count > limit
+        values = [] of CrystalV2::Compiler::Semantic::MacroValue
+        current = start_val
+        while current <= last_val
+          values << CrystalV2::Compiler::Semantic::MacroNumberValue.new(current)
+          current += 1
+        end
+        return values
+      when CrystalV2::Compiler::Frontend::ArrayLiteralNode
+        values = [] of CrystalV2::Compiler::Semantic::MacroValue
+        node.elements.each do |elem_id|
+          if value = macro_value_for_expr(elem_id)
+            values << value
+          else
+            return nil
+          end
+        end
+        return values
+      end
+
+      nil
+    end
+
     private def strip_numeric_suffix(literal : String) : String
       literal.sub(/_?(i8|i16|i32|i64|i128|u8|u16|u32|u64|u128|f32|f64)\z/i, "")
     end
@@ -17741,6 +17899,96 @@ module Crystal::HIR
         ctx.emit(nil_lit)
         nil_lit.id
       end
+    end
+
+    private def macro_expander_for_current_context : CrystalV2::Compiler::Semantic::MacroExpander
+      source = @sources_by_arena[@arena]?
+      program = CrystalV2::Compiler::Frontend::Program.new(@arena, [] of ExprId)
+      CrystalV2::Compiler::Semantic::MacroExpander.new(
+        program,
+        @arena,
+        CrystalV2::Runtime.target_flags,
+        recovery_mode: true,
+        macro_source: source
+      )
+    end
+
+    private def lower_macro_expression(
+      ctx : LoweringContext,
+      node : CrystalV2::Compiler::Frontend::MacroExpressionNode
+    ) : ValueId
+      vars = macro_vars_for_current_context(ctx)
+      owner_type = @current_class ? macro_owner_type_for(@current_class.not_nil!) : nil
+      expander = macro_expander_for_current_context
+      output = expander.expand_expression(node.expression, variables: vars, owner_type: owner_type)
+      if !output.empty?
+        if parsed = parse_macro_literal_for_context(output)
+          return lower_parsed_macro_body(ctx, parsed)
+        end
+        if value = lower_expanded_macro_code(ctx, output)
+          return value
+        end
+      end
+      nil_lit = Literal.new(ctx.next_id, TypeRef::NIL, nil)
+      ctx.emit(nil_lit)
+      nil_lit.id
+    end
+
+    private def lower_macro_for(
+      ctx : LoweringContext,
+      node : CrystalV2::Compiler::Frontend::MacroForNode
+    ) : ValueId
+      iter_vars = node.iter_vars.map { |name| String.new(name) }
+      if iter_vars.empty?
+        nil_lit = Literal.new(ctx.next_id, TypeRef::NIL, nil)
+        ctx.emit(nil_lit)
+        return nil_lit.id
+      end
+
+      vars = macro_vars_for_current_context(ctx)
+      owner_type = @current_class ? macro_owner_type_for(@current_class.not_nil!) : nil
+      expander = macro_expander_for_current_context
+
+      values = macro_for_iterable_values(node.iterable)
+      if values.nil?
+        values = macro_for_iterable_values_with_context(node.iterable, vars, owner_type, expander)
+      end
+      unless values
+        nil_lit = Literal.new(ctx.next_id, TypeRef::NIL, nil)
+        ctx.emit(nil_lit)
+        return nil_lit.id
+      end
+
+      expanded = String.build do |io|
+        values.each_with_index do |value, idx|
+          loop_vars = vars.dup
+          loop_vars[iter_vars[0]] = value
+          if idx_name = iter_vars[1]?
+            loop_vars[idx_name] = CrystalV2::Compiler::Semantic::MacroNumberValue.new(idx.to_i64)
+          end
+          if body_output = expander.expand_literal(node.body, variables: loop_vars, owner_type: owner_type)
+            io << body_output
+            io << "\n"
+          end
+        end
+      end
+
+      if expanded.strip.empty?
+        nil_lit = Literal.new(ctx.next_id, TypeRef::NIL, nil)
+        ctx.emit(nil_lit)
+        return nil_lit.id
+      end
+
+      if parsed = parse_macro_literal_for_context(expanded)
+        return lower_parsed_macro_body(ctx, parsed)
+      end
+      if value = lower_expanded_macro_code(ctx, expanded)
+        return value
+      end
+
+      nil_lit = Literal.new(ctx.next_id, TypeRef::NIL, nil)
+      ctx.emit(nil_lit)
+      nil_lit.id
     end
 
     # Lower the body of a macro branch (MacroLiteralNode or expression)
