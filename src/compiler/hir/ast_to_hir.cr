@@ -21466,7 +21466,16 @@ module Crystal::HIR
         rescue_result : ValueId = ctx.next_id
         rescue_clauses.each_with_index do |clause, idx|
           # If clause has variable name, create local for exception
-          if var_name = clause.variable_name
+          var_name = clause.variable_name
+          if var_name.nil?
+            if exc_type = clause.exception_type
+              exc_name = String.new(exc_type)
+              if !exc_name.empty? && exc_name[0].lowercase?
+                var_name = exc_type
+              end
+            end
+          end
+          if var_name
             exc_var = Local.new(ctx.next_id, TypeRef::POINTER, String.new(var_name), ctx.current_scope, true)
             ctx.emit(exc_var)
             ctx.register_local(String.new(var_name), exc_var.id)
