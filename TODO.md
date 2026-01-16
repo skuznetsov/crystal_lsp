@@ -1676,3 +1676,9 @@ end
 3. **Check if `Crystal::System::Fiber.current` is being called incorrectly** - this method doesn't exist
 
 **Symbol count**: 30 remaining (unchanged - investigation phase)
+
+**Update (2026-01-16)**:
+- `Fiber.current` now resolves to the top-level class (no `Crystal::System::Fiber.current` in HIR) when `--emit hir` is used.
+- `exec_recursive_hash` return type infers `Hash(Tuple(UInt64, Symbol), Nil)` by recognizing `Hash(...).new` in member-access inference and `||=`.
+- Verification: `/tmp/exec_hash.hir` shows `call Fiber.current() : <non-VOID>` and `call %...Fiber#exec_recursive_hash() : Hash(...)`.
+- `bin/fib.cr` link now reports **30** missing symbols (`/tmp/fib_link.log`).

@@ -4699,6 +4699,8 @@ module Crystal::HIR
     ) : TypeRef?
       body = node.body
       method_name = String.new(node.name)
+      debug_name = ENV["DEBUG_INFER_BODY_NAME"]?
+      debug_infer = debug_name && method_name.includes?(debug_name)
       if ENV["DEBUG_INFER_BODY"]? && method_name.includes?("internal_representation")
         STDERR.puts "[INFER_BODY] method=#{method_name} body_size=#{body.try(&.size) || 0} self=#{self_type_name || "nil"}"
       end
@@ -4755,7 +4757,17 @@ module Crystal::HIR
         end
 
         if inferred = infer_type_from_expr(expr_id, self_type_name)
+          if debug_infer
+            inferred_name = get_type_name_from_ref(inferred)
+            expr_node = @arena[expr_id]
+            expr_kind = expr_node.class.name.split("::").last
+            STDERR.puts "[INFER_BODY] method=#{method_name} expr=#{expr_kind} inferred=#{inferred_name}"
+          end
           return inferred
+        elsif debug_infer
+          expr_node = @arena[expr_id]
+          expr_kind = expr_node.class.name.split("::").last
+          STDERR.puts "[INFER_BODY] method=#{method_name} expr=#{expr_kind} inferred=nil"
         end
 
         expr_node = @arena[expr_id]
@@ -5044,6 +5056,11 @@ module Crystal::HIR
         if ENV["DEBUG_INFER_MEMBER_ACCESS"]? && member_name == "value"
           STDERR.puts "[INFER_MEMBER_ACCESS] member=#{member_name} self_type=#{self_type_name || "nil"}"
         end
+        if member_name == "new"
+          if type_str = stringify_type_expr(expr_node.object)
+            return type_ref_for_name(type_str)
+          end
+        end
         if member_name == "size"
           object_node = node_for_expr(expr_node.object)
           if object_node.is_a?(CrystalV2::Compiler::Frontend::IdentifierNode)
@@ -5186,6 +5203,16 @@ module Crystal::HIR
               value_type ||= left_type if left_type && left_type != TypeRef::VOID
               value_type ||= right_type if right_type && right_type != TypeRef::VOID
             end
+            if ENV["DEBUG_INFER_ASSIGN"]? && value_type.nil?
+              left_name = left_type ? get_type_name_from_ref(left_type) : "nil"
+              right_name = right_type ? get_type_name_from_ref(right_type) : "nil"
+              STDERR.puts "[INFER_ASSIGN] op=#{op} left=#{left_name} right=#{right_name} self=#{self_type_name || "nil"}"
+              if self_type_name == "Fiber"
+                left_node = node_for_expr(value_node.left)
+                right_node = node_for_expr(value_node.right)
+                STDERR.puts "[INFER_ASSIGN_NODE] left=#{left_node.class.name.split("::").last} right=#{right_node.class.name.split("::").last}"
+              end
+            end
           end
         end
         value_type ||= infer_type_from_expr(value_id, self_type_name)
@@ -5291,6 +5318,9 @@ module Crystal::HIR
           end
           if member_name == "new"
             if type_str = stringify_type_expr(callee_node.object)
+              if ENV["DEBUG_INFER_NEW"]? && self_type_name == "Fiber"
+                STDERR.puts "[INFER_NEW] type_str=#{type_str}"
+              end
               if type_str == "Range" && expr_node.args.size >= 2
                 begin_type = infer_type_from_expr(expr_node.args[0], self_type_name)
                 end_type = infer_type_from_expr(expr_node.args[1], self_type_name)
@@ -5314,6 +5344,22 @@ module Crystal::HIR
                 end
               end
               return type_ref_for_name(type_str)
+            elsif ENV["DEBUG_INFER_NEW"]? && self_type_name == "Fiber"
+              obj_node = node_for_expr(callee_node.object)
+              obj_kind = obj_node.class.name.split("::").last
+              detail = nil
+              if obj_node.is_a?(CrystalV2::Compiler::Frontend::MemberAccessNode)
+                member = String.new(obj_node.member)
+                inner = node_for_expr(obj_node.object)
+                detail = "#{inner.class.name.split("::").last}.#{member}"
+              end
+              snippet = nil
+              if source = @sources_by_arena[@arena]?
+                snippet = slice_source_for_expr_in_arena(callee_node.object, @arena, source)
+              end
+              snippet_label = snippet ? " snippet=#{snippet}" : ""
+              detail_label = detail ? " detail=#{detail}" : ""
+              STDERR.puts "[INFER_NEW] type_str=nil obj=#{obj_kind}#{detail_label}#{snippet_label}"
             end
           elsif member_name.ends_with?("?")
             if obj_type = infer_type_from_expr(callee_node.object, self_type_name)
@@ -13723,6 +13769,9 @@ module Crystal::HIR
       end
 
       @resolved_type_name_cache[cache_key] = name
+      if ENV["DEBUG_FIBER_RESOLVE"]? && name == "Fiber"
+        STDERR.puts "[DEBUG_FIBER_RESOLVE] name=#{name} current=#{@current_class || "nil"} override=#{@current_namespace_override || "nil"} resolved=#{name} top_level=#{@top_level_type_names.includes?(name)}"
+      end
       name
     end
 
@@ -13825,6 +13874,12 @@ module Crystal::HIR
         while parts.size > 0
           qualified_name = (parts + [name]).join("::")
           if type_name_exists?(qualified_name)
+            # Prefer a top-level class/struct over a namespaced module when the
+            # short name is known to be a class (e.g., Fiber vs Crystal::System::Fiber).
+            if @module_defs.has_key?(qualified_name) && @top_level_class_kinds.has_key?(name)
+              parts.pop
+              next
+            end
             result = qualified_name
             found = true
             break
@@ -13836,7 +13891,7 @@ module Crystal::HIR
 
       unless found
         # Fall back to a top-level type
-        if type_name_exists?(name)
+        if type_name_exists?(name) || @top_level_class_kinds.has_key?(name)
           result = name
         # Resolve to the override namespace if it matches the short name.
         elsif (override = @current_namespace_override) && last_namespace_component(override) == name && type_name_exists?(override)
@@ -13957,15 +14012,22 @@ module Crystal::HIR
       end
 
       # Final fallback: resolve unique short-name matches (avoids short-name leakage)
-      if result == name && (candidates = @short_type_index[name]?)
-        if candidates.size == 1
-          result = candidates.first
+      # If the name is known to be top-level, keep it as-is to avoid
+      # accidentally binding to a namespaced sibling (e.g., Fiber -> Crystal::System::Fiber).
+      if result == name && !@top_level_type_names.includes?(name)
+        if candidates = @short_type_index[name]?
+          if candidates.size == 1
+            result = candidates.first
+          end
         end
       end
 
       debug_hook_type_resolve(name, @current_class || "", result)
       if ENV["DEBUG_FILE_RESOLVE"]? && name == "File"
         STDERR.puts "[DEBUG_FILE_RESOLVE] result=#{result}"
+      end
+      if ENV["DEBUG_FIBER_RESOLVE"]? && name == "Fiber"
+        STDERR.puts "[DEBUG_FIBER_RESOLVE] name=#{name} current=#{@current_class || "nil"} override=#{@current_namespace_override || "nil"} result=#{result} top_level=#{@top_level_type_names.includes?(name)}"
       end
       result
     end
@@ -23818,12 +23880,15 @@ module Crystal::HIR
                 class_name_str = specialized_name
               end
             end
-            if class_name_str.nil? &&
-               (type_name_exists?(resolved) || primitive_self_type(resolved) ||
-                @enum_info.try(&.has_key?(resolved)) || is_module_method?(resolved, method_name))
-              class_name_str = resolved
-            elsif class_name_str.nil? && resolve_constant_name_in_context(name)
-              constant_receiver = true
+            if class_name_str.nil?
+              if class_like_namespace?(resolved) || primitive_self_type(resolved) ||
+                 @enum_info.try(&.has_key?(resolved))
+                class_name_str = resolved
+              elsif is_module_method?(resolved, method_name)
+                class_name_str = resolved
+              elsif resolve_constant_name_in_context(name)
+                constant_receiver = true
+              end
             end
           end
         elsif obj_node.is_a?(CrystalV2::Compiler::Frontend::IdentifierNode)
@@ -23859,13 +23924,17 @@ module Crystal::HIR
                 end
               end
               # Prefer class/module resolution when the identifier maps to a known type.
-              if class_name_str.nil? &&
-                 (type_name_exists?(resolved_name) || @enum_info.try(&.has_key?(resolved_name)) ||
-                  is_module_method?(resolved_name, method_name) || primitive_self_type(resolved_name))
-                class_name_str = resolved_name
-              elsif resolve_constant_name_in_context(name)
-                constant_receiver = true
-              else
+              if class_name_str.nil?
+                if class_like_namespace?(resolved_name) || @enum_info.try(&.has_key?(resolved_name)) ||
+                   primitive_self_type(resolved_name)
+                  class_name_str = resolved_name
+                elsif is_module_method?(resolved_name, method_name)
+                  class_name_str = resolved_name
+                elsif resolve_constant_name_in_context(name)
+                  constant_receiver = true
+                end
+              end
+              if class_name_str.nil? && !constant_receiver
                 # Check if it's a class name (starts with uppercase and is known class)
                 # OR a module name (check if Module.method exists in function_types)
                 if class_name_str.nil? && resolved_name[0].uppercase?
@@ -24061,7 +24130,14 @@ module Crystal::HIR
           end
         end
 
+        if ENV["DEBUG_FIBER_CURRENT"]? && method_name == "current"
+          obj_kind = obj_node.class.name.split("::").last
+          STDERR.puts "[DEBUG_FIBER_CURRENT] obj=#{obj_kind} owner=#{class_name_str || "nil"} current_class=#{@current_class || "nil"}"
+        end
         if class_name_str
+          if ENV["DEBUG_FIBER_CURRENT"]? && method_name == "current"
+            STDERR.puts "[DEBUG_FIBER_CURRENT] owner=#{class_name_str} current_class=#{@current_class || "nil"}"
+          end
           if !@class_info.has_key?(class_name_str) && @module_defs.has_key?(class_name_str)
             module_method_name = "#{class_name_str}.#{method_name}"
             unless @function_types.has_key?(module_method_name) || has_function_base?(module_method_name)
@@ -29378,7 +29454,7 @@ module Crystal::HIR
         name = String.new(obj_node.name)
         resolved_name = resolve_class_name_in_context(name)
         resolved_name = resolve_type_alias_chain(resolved_name)
-        if type_name_exists?(resolved_name) || primitive_self_type(resolved_name)
+        if class_like_namespace?(resolved_name) || primitive_self_type(resolved_name)
           class_name_str = resolved_name
         elsif is_module_method?(resolved_name, member_name)
           class_name_str = resolved_name
@@ -29399,9 +29475,10 @@ module Crystal::HIR
           end
           if resolved_name[0].uppercase?
             resolved_name = resolve_class_name_in_context(resolved_name)
-            if @class_info.has_key?(resolved_name) ||
+            if class_like_namespace?(resolved_name) ||
                @enum_info.try(&.has_key?(resolved_name)) ||
-               is_module_method?(resolved_name, member_name)
+               is_module_method?(resolved_name, member_name) ||
+               primitive_self_type(resolved_name)
               class_name_str = resolved_name
             end
           end
@@ -29491,6 +29568,10 @@ module Crystal::HIR
       end
 
       # If it's a static class call (like Counter.new), emit as static call
+      if ENV["DEBUG_FIBER_CURRENT"]? && member_name == "current"
+        obj_kind = obj_node.class.name.split("::").last
+        STDERR.puts "[DEBUG_FIBER_MEMBER] obj=#{obj_kind} class=#{class_name_str || "nil"} current=#{@current_class || "nil"}"
+      end
       if class_name_str
         if ENV["DEBUG_IVAR_ACCESS"]?
           STDERR.puts "[IVAR_ACCESS] static_call member=#{member_name} class=#{class_name_str}"
