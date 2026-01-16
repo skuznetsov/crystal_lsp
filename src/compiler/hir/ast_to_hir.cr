@@ -4998,6 +4998,15 @@ module Crystal::HIR
           element_names << elem_name
         end
         return type_ref_for_name("Tuple(#{element_names.join(", ")})")
+      when CrystalV2::Compiler::Frontend::RangeNode
+        begin_type = infer_type_from_expr(expr_node.begin_expr, self_type_name)
+        end_type = infer_type_from_expr(expr_node.end_expr, self_type_name)
+        return nil unless begin_type && end_type
+        begin_name = get_type_name_from_ref(begin_type)
+        end_name = get_type_name_from_ref(end_type)
+        return nil if begin_name == "Void" || begin_name == "Unknown"
+        return nil if end_name == "Void" || end_name == "Unknown"
+        return type_ref_for_name("Range(#{begin_name}, #{end_name})")
       when CrystalV2::Compiler::Frontend::NamedTupleLiteralNode
         entries = [] of String
         expr_node.entries.each do |entry|
@@ -8131,6 +8140,12 @@ module Crystal::HIR
                 object_ref = type_ref_for_name("Object")
                 param_type = create_union_type_for_nullable(object_ref) if object_ref != TypeRef::VOID
               end
+            end
+          end
+          if param_type == TypeRef::VOID && !param.is_block && !param.is_splat && !param.is_double_splat
+            if default_value = param.default_value
+              inferred = infer_type_from_expr(default_value, module_name)
+              param_type = inferred if inferred && inferred != TypeRef::VOID
             end
           end
           param_type_map[param_name] = param_type
