@@ -1684,3 +1684,45 @@ end
 - `bin/fib.cr` link now reports **30** missing symbols (`/tmp/fib_link.log`).
 - **Update (2026-01-xx)**: If/branch inference now uses branch-local context + unions across then/elsif/else. `Crystal::System.to_string_slice` now infers `Slice(UInt8)` (DEBUG_INFER_BODY_NAME). `bin/fib.cr` missing symbols down to **28** (`/tmp/fib_link.log`, list in `/tmp/missing_symbols_latest.txt`).
 - **Update (2026-01-xx)**: lib extern globals now emit `external global` and lib globals resolve via member access; `LibGC_stackbottom` removed. `bin/fib.cr` missing symbols now **27** (`/tmp/fib_link.log`).
+- **Update (2026-01-16)**: `bin/fib.cr` link now reports **26** missing symbols (authoritative list in `/tmp/fib_link.log`; `/tmp/missing_symbols_latest.txt` is stale).
+  - **Runtime helpers (declared, no defs)**: `Crystal__ex_message`, `Crystal__ex_backtrace_`, `Crystal__handler_ex_message`, `Crystal_trace_Int32_String_UInt64___Nil_NamedTuple`
+  - **Block funcs missing**: `each_block`, `func965`, `func1649` (no emitted block defs)
+  - **Stdlib defs not lowered**: `String__Builder_initialize_Int32`, `Thread_threads`, `Crystal__System__Signal_inspect`, `Location__Zone_inspect_IO`, `Exception__CallStack_decode_function_name`, `Exception__CallStack_decode_line_number`, `RuntimeError_from_os_error_String___Nil_Errno___WinError___WasiError___Nil_NamedTuple_double_splat`
+  - **LibC / OS externs**: `realpath_DARWIN_EXTSN`, `File_fstat_Int32_Pointer`, `LibC__PATH_MAX_to_u32`
+  - **Receiver/loss / mangling**: `set_crystal_type_id_Pointer_UInt8_`, `self_to_u8_`
+  - **EventLoop Unknown methods**: `Crystal__EventLoop__Unknown_to_s_IO`, `Crystal__EventLoop__Unknown_inspect_IO`
+  - **Remaining misc**: `Crystal__EventLoop__Polling__Arena_Crystal__EventLoop__Polling__PollDescriptor__65536__unsafe_grow`, `File__Error_from_errno_String_String`, `Dragonbox_to_decimal_Float32___Float64`, `Tuple_count`, `TupleCrystal__TupleVoid___Crystal__String__String____Int32`
+- **Update (2026-01-16)**: relaxed generic inline-yield skip (when receiver type params are known). `bin/fib.cr` missing symbols now **23** (`/tmp/missing_current.txt`, `/tmp/fib_link.log`).
+  - Removed: `Crystal__ex_message`, `Crystal__ex_backtrace_`, `Crystal__handler_ex_message`, `func965`, `func1649`.
+- Remaining block funcs: `each_block`, `func1031`, `func1708` (still no block func emission for some cases).
+
+### 8.9 Grok Review Notes (2026-02-xx)
+
+**Summary (actionable):**
+- Implicit generic inference still collapses to `VOID/Any` in some flows (Array/Hash).
+- Lazy monomorphization + conditional callsites leave signatures recorded but not lowered.
+- Several HIR lowering heuristics are string-based (array detection) and can misfire.
+
+**Proposed fixes (bootstrapping blockers first):**
+1) **Force lower all tracked callsite signatures** (even when calls are in conditional paths).
+   - Source: `@callsite_args` / recorded signatures.
+   - DoD: missing symbols for callsite-only functions drop in `/tmp/fib_link.log`.
+2) **Generic instantiation for implicit params**:
+   - Avoid `Array(VOID)`/`Hash(VOID, ...)` fallback in `get_function_return_type`.
+   - Ensure `type_params` are substituted for implicit locals inferred from body.
+   - DoD: `Array(U)` with implicit U resolves to concrete in HIR (no `VOID`).
+3) **Yield/block lowering completeness**:
+   - Either inline all yield-bearing defs or implement MIR lowering for yield.
+   - DoD: no `each_block` or `func####` missing in `/tmp/fib_link.log`.
+4) **HIR lowering robustness**:
+   - Replace string-based type checks (e.g., `"Array"` prefix) with TypeKind.
+   - Ensure phi creation includes loop-carried locals.
+
+**Medium-term (post-bootstrap):**
+- Add annotation-driven escape/taint metadata (`@[NoEscape]`, `@[Transfer]`, `@[Arena]`).
+- Improve `--no-gc` diagnostics: point to variable + source span for GC-requiring allocation.
+
+**Update (2026-02-xx)**:
+- Bare identifier fallback now resolves to top-level functions when no local exists (e.g., `caller`).
+  - Evidence: `/tmp/caller_test.hir` contains `call caller()` and no `local "caller"`, and the loop lowers via `array_size` (no `each$block`).
+  - Evidence (prelude): `/private/tmp/fib.hir` now contains `call caller()` inside `Crystal::Scheduler#fatal_resume_error`; no `each$block` for `caller.each`.

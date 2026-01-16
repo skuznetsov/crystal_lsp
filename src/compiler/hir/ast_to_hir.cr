@@ -639,6 +639,9 @@ module Crystal::HIR
     @inline_yield_return_stack : Array(InlineReturnContext) = [] of InlineReturnContext
     @inline_yield_return_override_stack : Array(InlineReturnOverride) = [] of InlineReturnOverride
     @virtual_targets_lowered : Set(String) = Set(String).new
+    # Track assigned local names for the current def (used to disambiguate
+    # bare identifier receivers vs top-level function calls).
+    @assigned_vars_stack : Array(Set(String)) = [] of Set(String)
     # Track virtual targets so newly-registered subclasses can be lowered later.
     record VirtualTarget, method_name : String, arg_types : Array(TypeRef), has_block : Bool, has_splat : Bool
     @virtual_targets_by_parent : Hash(String, Array(VirtualTarget)) = {} of String => Array(VirtualTarget)
@@ -8245,15 +8248,19 @@ module Crystal::HIR
       @inline_arenas = nil
       last_value : ValueId? = nil
       begin
-        if body = node.body
+        body_exprs = node.body
+        if body_exprs
+          assigned_vars = collect_assigned_vars(body_exprs).to_set
+          @assigned_vars_stack << assigned_vars
           method_arena = @arena
-          body.each do |expr_id|
+          body_exprs.each do |expr_id|
             with_arena(method_arena) do
               last_value = lower_expr(ctx, expr_id)
             end
           end
         end
       ensure
+        @assigned_vars_stack.pop? if body_exprs
         @inline_yield_block_stack = saved_yield_block_stack
         @inline_yield_block_arena_stack = saved_yield_arena_stack
         @inline_yield_block_param_types_stack = saved_yield_param_stack
@@ -18886,6 +18893,30 @@ module Crystal::HIR
         return call.id
       end
 
+      # Top-level function fallback: if no local/constant resolved, treat bare
+      # identifier as a zero-arg call when a top-level function exists.
+      if @function_defs.has_key?(name) || @function_types.has_key?(name) || has_function_base?(name)
+        full_name = mangle_function_name(name, [] of TypeRef)
+        return_type = @function_types[full_name]? || @function_types[name]? || TypeRef::VOID
+        lower_function_if_needed(full_name)
+        if return_type == TypeRef::VOID
+          return_type = get_function_return_type(full_name)
+          if return_type == TypeRef::VOID && full_name != name
+            return_type = get_function_return_type(name)
+          end
+        end
+        call = Call.new(ctx.next_id, return_type, nil, full_name, [] of ValueId)
+        ctx.emit(call)
+        ctx.register_type(call.id, return_type)
+        if function_returns_type_literal?(full_name, name)
+          ctx.mark_type_literal(call.id)
+        end
+        if enum_name = enum_return_name_for(full_name)
+          (@enum_value_types ||= {} of ValueId => String)[call.id] = enum_name
+        end
+        return call.id
+      end
+
       # Otherwise create a new local (first use)
       local = Local.new(ctx.next_id, TypeRef::VOID, name, ctx.current_scope)
       ctx.emit(local)
@@ -22091,20 +22122,37 @@ module Crystal::HIR
             end
           end
           if var_name
-            exc_var = Local.new(ctx.next_id, TypeRef::POINTER, String.new(var_name), ctx.current_scope, true)
+            exc_type_name = clause.exception_type ? String.new(clause.exception_type.not_nil!) : ""
+            if !exc_type_name.empty? && exc_type_name[0].lowercase?
+              exc_type_name = ""
+            end
+            exc_type_ref = TypeRef::VOID
+            if !exc_type_name.empty?
+              exc_type_ref = type_ref_for_name(exc_type_name)
+            end
+            if exc_type_ref == TypeRef::VOID
+              exc_type_ref = type_ref_for_name("Exception")
+              exc_type_ref = TypeRef::POINTER if exc_type_ref == TypeRef::VOID
+            end
+            if ENV["DEBUG_RESCUE_TYPE"]?
+              exc_name = exc_type_name.empty? ? "Exception" : exc_type_name
+              STDERR.puts "[RESCUE_TYPE] var=#{String.new(var_name)} type_name=#{exc_name} resolved=#{get_type_name_from_ref(exc_type_ref)}"
+            end
+
+            exc_var = Local.new(ctx.next_id, exc_type_ref, String.new(var_name), ctx.current_scope, true)
             ctx.emit(exc_var)
             ctx.register_local(String.new(var_name), exc_var.id)
-            ctx.register_type(exc_var.id, TypeRef::POINTER)
+            ctx.register_type(exc_var.id, exc_type_ref)
 
             # Get exception value
-            get_exc = GetException.new(ctx.next_id, TypeRef::POINTER)
+            get_exc = GetException.new(ctx.next_id, exc_type_ref)
             ctx.emit(get_exc)
-            ctx.register_type(get_exc.id, TypeRef::POINTER)
+            ctx.register_type(get_exc.id, exc_type_ref)
 
             # Copy to variable
-            copy = Copy.new(ctx.next_id, TypeRef::POINTER, get_exc.id)
+            copy = Copy.new(ctx.next_id, exc_type_ref, get_exc.id)
             ctx.emit(copy)
-            ctx.register_type(copy.id, TypeRef::POINTER)
+            ctx.register_type(copy.id, exc_type_ref)
           end
 
           # Lower rescue body
@@ -24496,6 +24544,54 @@ module Crystal::HIR
         end
 
         if class_name_str.nil?
+          if receiver_id.nil? && obj_node.is_a?(CrystalV2::Compiler::Frontend::IdentifierNode) && ctx.lookup_local(String.new(obj_node.name)).nil?
+            obj_name = String.new(obj_node.name)
+            assigned_locals = @assigned_vars_stack.last?
+            is_type_param = type_param_like?(obj_name) || @type_param_map.has_key?(obj_name)
+            func_exists = @function_defs.has_key?(obj_name) ||
+              @function_types.has_key?(obj_name) ||
+              has_function_base?(obj_name)
+            if obj_name == "caller" && ENV["DEBUG_CALLER_FALLBACK"]?
+              assigned = assigned_locals ? assigned_locals.includes?(obj_name) : false
+              STDERR.puts "[CALLER_FALLBACK] name=#{obj_name} func_exists=#{func_exists} assigned=#{assigned} func=#{ctx.function.name} method=#{method_name}"
+            end
+            if !is_type_param &&
+               (assigned_locals.nil? || !assigned_locals.includes?(obj_name)) &&
+               func_exists
+              full_name = mangle_function_name(obj_name, [] of TypeRef)
+              return_type = @function_types[full_name]? || @function_types[obj_name]? || TypeRef::VOID
+              lower_function_if_needed(full_name)
+              if return_type == TypeRef::VOID
+                return_type = get_function_return_type(full_name)
+                if return_type == TypeRef::VOID && full_name != obj_name
+                  return_type = get_function_return_type(obj_name)
+                end
+              end
+              call = Call.new(ctx.next_id, return_type, nil, full_name, [] of ValueId)
+              ctx.emit(call)
+              ctx.register_type(call.id, return_type)
+              receiver_id = call.id
+              receiver_type = return_type
+            elsif obj_name == "caller" && !func_exists
+              if current = @current_class
+                if base = resolve_method_with_inheritance(current, obj_name) ||
+                          resolve_method_with_inheritance("Object", obj_name)
+                  self_id = emit_self(ctx)
+                  full_name = mangle_function_name(base, [] of TypeRef)
+                  return_type = @function_types[full_name]? || TypeRef::VOID
+                  lower_function_if_needed(full_name)
+                  call = Call.new(ctx.next_id, return_type, self_id, full_name, [] of ValueId)
+                  ctx.emit(call)
+                  ctx.register_type(call.id, return_type)
+                  receiver_id = call.id
+                  receiver_type = return_type
+                end
+              end
+            end
+          end
+        end
+
+        if class_name_str.nil? && receiver_id.nil?
           receiver_id = lower_expr(ctx, callee_node.object)
           receiver_type = ctx.type_of(receiver_id)
           if receiver_type.id >= TypeRef::FIRST_USER_TYPE
@@ -25475,7 +25571,9 @@ module Crystal::HIR
                   owner_base = split_generic_base_and_args(owner_name).try(&.[](:base)) || owner_name
                   recv_base = split_generic_base_and_args(recv_name).try(&.[](:base)) || recv_name
                   if owner_base == recv_base && owner_name != recv_name
-                    skip_inline = true
+                    # Only skip when we can't map generic params from the receiver type.
+                    receiver_map = type_param_map_for_receiver_type(ctx.type_of(receiver_id))
+                    skip_inline = true if receiver_map.empty?
                   end
                 end
               end
@@ -29302,6 +29400,40 @@ module Crystal::HIR
                        [] of ValueId
                      end
         param_types = @inline_yield_block_param_types_stack.last?
+        if block_params = block.params
+          if block_params.size > 1 && yield_args.size == 1
+            expanded_param_types = param_types
+            tuple_source_type = if expanded_param_types && expanded_param_types.size == 1
+                                  expanded_param_types.first
+                                elsif expanded_param_types.nil?
+                                  ctx.type_of(yield_args.first)
+                                end
+            if tuple_source_type
+              if tuple_desc = @module.get_type_descriptor(tuple_source_type)
+                if tuple_desc.kind == TypeKind::Tuple || tuple_desc.name.starts_with?("Tuple(")
+                  tuple_params = tuple_desc.type_params.reject { |t| t == TypeRef::VOID }
+                  if tuple_params.size >= block_params.size
+                    expanded_param_types = tuple_params
+                    tuple_val = yield_args.first
+                    expanded_args = [] of ValueId
+                    block_params.each_with_index do |_, idx|
+                      idx_lit = Literal.new(ctx.next_id, TypeRef::INT32, idx.to_i64)
+                      ctx.emit(idx_lit)
+                      ctx.register_type(idx_lit.id, TypeRef::INT32)
+                      elem_type = tuple_params[idx]? || TypeRef::VOID
+                      idx_get = IndexGet.new(ctx.next_id, elem_type, tuple_val, idx_lit.id)
+                      ctx.emit(idx_get)
+                      ctx.register_type(idx_get.id, elem_type)
+                      expanded_args << idx_get.id
+                    end
+                    yield_args = expanded_args
+                    param_types = expanded_param_types
+                  end
+                end
+              end
+            end
+          end
+        end
         if param_types
           param_types.each_with_index do |param_type, idx|
             next if param_type == TypeRef::VOID
@@ -29965,6 +30097,56 @@ module Crystal::HIR
 
       # Otherwise it's an instance method call - evaluate object first
       object_id = lower_expr(ctx, node.object)
+
+      # If the receiver is an unresolved bare identifier (VOID local), but a
+      # top-level function with that name exists, treat it as a zero-arg call.
+      if obj_node.is_a?(CrystalV2::Compiler::Frontend::IdentifierNode)
+        obj_name = String.new(obj_node.name)
+        if ctx.type_of(object_id) == TypeRef::VOID
+          if ctx.value_for(object_id).is_a?(Local)
+            assigned_locals = @assigned_vars_stack.last?
+            is_type_param = type_param_like?(obj_name) || @type_param_map.has_key?(obj_name)
+            func_exists = @function_defs.has_key?(obj_name) ||
+              @function_types.has_key?(obj_name) ||
+              has_function_base?(obj_name)
+            if obj_name == "caller" && ENV["DEBUG_CALLER_FALLBACK"]?
+              assigned = assigned_locals ? assigned_locals.includes?(obj_name) : false
+              STDERR.puts "[CALLER_FALLBACK] access name=#{obj_name} func_exists=#{func_exists} assigned=#{assigned} func=#{ctx.function.name} member=#{member_name}"
+            end
+            if !is_type_param &&
+               (assigned_locals.nil? || !assigned_locals.includes?(obj_name)) &&
+               func_exists
+              full_name = mangle_function_name(obj_name, [] of TypeRef)
+              return_type = @function_types[full_name]? || @function_types[obj_name]? || TypeRef::VOID
+              lower_function_if_needed(full_name)
+              if return_type == TypeRef::VOID
+                return_type = get_function_return_type(full_name)
+                if return_type == TypeRef::VOID && full_name != obj_name
+                  return_type = get_function_return_type(obj_name)
+                end
+              end
+              call = Call.new(ctx.next_id, return_type, nil, full_name, [] of ValueId)
+              ctx.emit(call)
+              ctx.register_type(call.id, return_type)
+              object_id = call.id
+            elsif obj_name == "caller" && !func_exists
+              if current = @current_class
+                if base = resolve_method_with_inheritance(current, obj_name) ||
+                          resolve_method_with_inheritance("Object", obj_name)
+                  self_id = emit_self(ctx)
+                  full_name = mangle_function_name(base, [] of TypeRef)
+                  return_type = @function_types[full_name]? || TypeRef::VOID
+                  lower_function_if_needed(full_name)
+                  call = Call.new(ctx.next_id, return_type, self_id, full_name, [] of ValueId)
+                  ctx.emit(call)
+                  ctx.register_type(call.id, return_type)
+                  object_id = call.id
+                end
+              end
+            end
+          end
+        end
+      end
 
       # Check for pointer.value -> PointerLoad
       receiver_type = ctx.type_of(object_id)
@@ -30676,7 +30858,8 @@ module Crystal::HIR
           union_parts = desc.type_params.map { |ref| get_type_name_from_ref(ref) }.reject(&.empty?)
           if !union_parts.empty?
             tuple_union = union_parts.join(" | ")
-            map = {"T" => tuple_union}
+            tuple_list = union_parts.join(", ")
+            map = {"T" => tuple_union, "T__tuple" => tuple_list}
             record_pending_type_param_map(primary_name, map)
             record_pending_type_param_map(actual_name, map)
             record_pending_type_param_map(base_method_name, map) if base_method_name
