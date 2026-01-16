@@ -1737,3 +1737,20 @@ end
 - Bare identifier fallback now resolves to top-level functions when no local exists (e.g., `caller`).
   - Evidence: `/tmp/caller_test.hir` contains `call caller()` and no `local "caller"`, and the loop lowers via `array_size` (no `each$block`).
   - Evidence (prelude): `/private/tmp/fib.hir` now contains `call caller()` inside `Crystal::Scheduler#fatal_resume_error`; no `each$block` for `caller.each`.
+
+### 8.10 Bootstrap Blockers: Budgeted Callsite Lowering (PROPOSED)
+
+**Problem**: Naive “lower all tracked callsite signatures” risks compile-time blowups.  
+**Goal**: Keep missing symbols dropping without exploding compile time or memory.
+
+**Plan (fast, low-risk):**
+1) **Baseline metrics**: record number of pending callsite signatures and time spent in `emit_all_tracked_signatures` on `bin/fib.cr`.
+   - DoD: `DEBUG_EMIT_SIGS=1 ./bin/crystal_v2 --no-llvm-opt --no-link bin/fib.cr -o /tmp/fib` logs counts.
+   - **Update (2026-02-xx)**: baseline shows `emit_all_tracked_signatures` loops 100 iterations with 16 sigs each time (no progress). Log: `/tmp/fib_emit_sigs.log`.
+2) **Budgeted lowering**: cap the number of signatures lowered per iteration (global cap + per-base cap).
+   - Prefer non-VOID callsite args.
+   - Skip bare generics and VOID-only signatures unless explicitly requested.
+3) **Feedback loop**: use missing-symbol lists to re-run lowering for the exact missing signatures (manual two-pass workflow).
+   - DoD: missing symbols drop between pass 1 and pass 2 without large time regression.
+
+**Rationale**: Keeps monomorphization lazy but prevents “recorded-only” symbols from being dropped.
