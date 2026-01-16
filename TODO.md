@@ -1695,6 +1695,17 @@ end
 - **Update (2026-01-16)**: relaxed generic inline-yield skip (when receiver type params are known). `bin/fib.cr` missing symbols now **23** (`/tmp/missing_current.txt`, `/tmp/fib_link.log`).
   - Removed: `Crystal__ex_message`, `Crystal__ex_backtrace_`, `Crystal__handler_ex_message`, `func965`, `func1649`.
 - Remaining block funcs: `each_block`, `func1031`, `func1708` (still no block func emission for some cases).
+- **Update (2026-01-16)**: `bin/fib.cr` link now reports **18** missing symbols (see `/tmp/fib_link.log`).
+  - Missing: `Crystal__EventLoop__Polling__Arena_Crystal__EventLoop__Polling__PollDescriptor__65536__unsafe_grow`,
+    `Crystal__EventLoop__Unknown_to_s_IO`, `Crystal__EventLoop__Unknown_inspect_IO`,
+    `Crystal__System__Signal_inspect`, `Crystal_trace_Int32_String_UInt64___Nil_NamedTuple`,
+    `Dragonbox_to_decimal_Float32___Float64`,
+    `Exception__CallStack_decode_function_name`, `Exception__CallStack_decode_line_number`,
+    `File__Error_from_errno_String_String`, `File_fstat_Int32_Pointer`, `LibC__PATH_MAX_to_u32`,
+    `Location__Zone_inspect_IO`, `RuntimeError_from_os_error_String___Nil_Errno___WinError___WasiError___Nil_NamedTuple_double_splat`,
+    `String__Builder_initialize_Int32`, `Thread_threads`,
+    `TupleCrystal__TupleString___Crystal__Nil__String____Int32`, `Tuple_count`, `func1030`, `func1708`,
+    `realpath_DARWIN_EXTSN`, `self_to_u8_`, `set_crystal_type_id_Pointer_UInt8_`.
 
 ### 8.9 Grok Review Notes (2026-02-xx)
 
