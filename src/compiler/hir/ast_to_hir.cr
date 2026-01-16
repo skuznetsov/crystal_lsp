@@ -18095,6 +18095,30 @@ module Crystal::HIR
     private def lower_identifier(ctx : LoweringContext, node : CrystalV2::Compiler::Frontend::IdentifierNode) : ValueId
       name = String.new(node.name)
 
+      case name
+      when "__FILE__"
+        path = source_path_for(@arena) || ""
+        lit = Literal.new(ctx.next_id, TypeRef::STRING, path)
+        ctx.emit(lit)
+        return lit.id
+      when "__DIR__"
+        path = source_path_for(@arena) || ""
+        dir = path.empty? ? "" : File.dirname(path)
+        lit = Literal.new(ctx.next_id, TypeRef::STRING, dir)
+        ctx.emit(lit)
+        return lit.id
+      when "__LINE__"
+        line = node.span.start_line
+        lit = Literal.new(ctx.next_id, TypeRef::INT32, line.to_i64)
+        ctx.emit(lit)
+        return lit.id
+      when "__END_LINE__"
+        line = node.span.end_line
+        lit = Literal.new(ctx.next_id, TypeRef::INT32, line.to_i64)
+        ctx.emit(lit)
+        return lit.id
+      end
+
       # Check if it's a local variable first
       if local_id = ctx.lookup_local(name)
         # Return a copy/reference to the local
