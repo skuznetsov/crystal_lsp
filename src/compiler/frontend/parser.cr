@@ -3726,32 +3726,34 @@ module CrystalV2
 
             token = current_token
             if token.kind == Token::Kind::Identifier
-              identifier_token = token
-              advance
-              skip_trivia
-
-              if current_token.kind == Token::Kind::Colon
-                variable_name = identifier_token.slice
-                advance  # consume ':'
-                skip_trivia
-
-                type_slice = parse_type_annotation
-                if type_slice.empty?
-                  emit_unexpected(current_token)
-                else
-                  exception_type = type_slice
-                end
+              if is_constant_name?(token.slice)
+                exception_type = parse_type_annotation
                 skip_trivia
                 token = current_token
               else
-                # rescue ex -> bind variable, rescue all
-                variable_name = identifier_token.slice
-                token = current_token
+                identifier_token = token
+                advance
+                skip_trivia
+
+                if current_token.kind == Token::Kind::Colon
+                  variable_name = identifier_token.slice
+                  advance  # consume ':'
+                  skip_trivia
+
+                  type_slice = parse_type_annotation
+                  if type_slice.empty?
+                    emit_unexpected(current_token)
+                  else
+                    exception_type = type_slice
+                  end
+                  skip_trivia
+                  token = current_token
+                else
+                  # rescue ex -> bind variable, rescue all
+                  variable_name = identifier_token.slice
+                  token = current_token
+                end
               end
-            elsif token.kind == Token::Kind::Constant
-              exception_type = parse_type_annotation
-              skip_trivia
-              token = current_token
             end
 
             if token.kind == Token::Kind::Arrow
