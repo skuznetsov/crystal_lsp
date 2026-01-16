@@ -15289,7 +15289,10 @@ module Crystal::HIR
         break if visited.includes?(current)
         visited << current
         test_name = "#{current}.#{method_name}"
-        if @function_types.has_key?(test_name) || has_function_base?(test_name)
+        if @function_types.has_key?(test_name) ||
+           has_function_base?(test_name) ||
+           @function_defs.has_key?(test_name) ||
+           !function_def_overloads(test_name).empty?
           resolved = current == origin ? test_name : "#{origin}.#{method_name}"
           @class_method_inheritance_cache[cache_key] = resolved
           return resolved
@@ -15301,6 +15304,17 @@ module Crystal::HIR
           end
         end
         break
+      end
+      if class_name != "Object"
+        object_method = "Object.#{method_name}"
+        if @function_types.has_key?(object_method) ||
+           has_function_base?(object_method) ||
+           @function_defs.has_key?(object_method) ||
+           !function_def_overloads(object_method).empty?
+          resolved = "#{origin}.#{method_name}"
+          @class_method_inheritance_cache[cache_key] = resolved
+          return resolved
+        end
       end
       @class_method_inheritance_cache[cache_key] = nil
       nil
@@ -18960,8 +18974,13 @@ module Crystal::HIR
         end
 
         # Module/class method call without parens (e.g., class_getter inside module)
-        module_method_base = "#{current_class}.#{name}"
-        if @function_types.has_key?(module_method_base) || has_function_base?(module_method_base) || @class_accessor_entries.has_key?(module_method_base)
+        module_method_base = resolve_class_method_with_inheritance(current_class, name)
+        if module_method_base.nil?
+          if find_module_class_def(current_class, name, 0)
+            module_method_base = "#{current_class}.#{name}"
+          end
+        end
+        if module_method_base && (@function_types.has_key?(module_method_base) || has_function_base?(module_method_base) || @class_accessor_entries.has_key?(module_method_base))
           full_name = mangle_function_name(module_method_base, [] of TypeRef)
           return_type = @function_types[full_name]? || @function_types[module_method_base]? || TypeRef::VOID
           lower_function_if_needed(full_name)
@@ -24161,6 +24180,9 @@ module Crystal::HIR
       when CrystalV2::Compiler::Frontend::IdentifierNode
         # Simple function call: foo()
         method_name = String.new(callee_node.name)
+        if ENV["DEBUG_SET_CRYSTAL_TYPE_ID"]? && method_name == "set_crystal_type_id"
+          STDERR.puts "[SET_CRYSTAL_TYPE_ID] current_class=#{@current_class || "nil"} current_method=#{@current_method || "nil"} class_method=#{@current_method_is_class} func=#{ctx.function.name}"
+        end
 
         # Check if this is a macro call - expand inline instead of generating Call.
         # Skip spawn macro when lowering SpawnNode-generated calls (block + no args).
@@ -24279,19 +24301,33 @@ module Crystal::HIR
               end
 
               unless parent_method_found
-                # Also check for module-style method (Module.method)
-                module_method_name = "#{current}.#{method_name}"
-                # O(1) lookup: check exact match or mangled version exists
-                has_module_method = @function_types.has_key?(module_method_name) || has_function_base?(module_method_name)
-                if has_module_method
-                  # This is a module method call (no receiver)
+                # Also check for module-style method (Module.method), including inherited class methods.
+                if class_method_base = resolve_class_method_with_inheritance(current, method_name)
+                  # This is a module/class method call (no receiver)
                   receiver_id = nil
-                  full_method_name = module_method_name
+                  full_method_name = class_method_base
+                elsif find_module_class_def(current, method_name, call_args.size)
+                  # Class method exists in AST but wasn't registered yet.
+                  receiver_id = nil
+                  full_method_name = "#{current}.#{method_name}"
                 else
                   receiver_id = nil
                 end
               end
             end
+          end
+          if receiver_id.nil? && full_method_name.nil? && @current_method_is_class
+            top_level_exists = @function_defs.has_key?(method_name) ||
+              @function_types.has_key?(method_name) ||
+              has_function_base?(method_name)
+            unless top_level_exists
+              receiver_id = nil
+              full_method_name = "#{current}.#{method_name}"
+            end
+          end
+          if receiver_id.nil? && full_method_name.nil? && method_name == "set_crystal_type_id"
+            receiver_id = nil
+            full_method_name = "#{current}.#{method_name}"
           end
         else
           receiver_id = nil
@@ -25329,28 +25365,40 @@ module Crystal::HIR
                          elsif receiver_id.nil? && (current = @current_class)
                            # Bare calls inside a class/module resolve to self.<method> only
                            # when that method exists; otherwise fall back to top-level.
-                           sep = @current_method_is_class ? "." : "#"
-                           candidate = "#{current}#{sep}#{method_name}"
-                           if @function_types.has_key?(candidate) || has_function_base?(candidate)
-                             candidate
+                           resolved = if @current_method_is_class
+                                        resolve_class_method_with_inheritance(current, method_name)
+                                      else
+                                        resolve_method_with_inheritance(current, method_name)
+                                      end
+                           if resolved
+                             resolved
                            else
-                             # Check if method exists in included modules
-                             included_candidate : String? = nil
-                             if modules = @class_included_modules[current]?
-                               if ENV.has_key?("DEBUG_INCLUDED_BASE") && method_name == "byte_range"
-                                 STDERR.puts "[INCLUDED_BASE] class=#{current} modules=#{modules.to_a.join(",")}"
-                               end
-                               modules.each do |mod_name|
-                                 mod_candidate = "#{mod_name}##{method_name}"
-                                 if @function_types.has_key?(mod_candidate) || has_function_base?(mod_candidate)
-                                   included_candidate = mod_candidate
-                                   break
-                                 end
-                               end
-                             elsif ENV.has_key?("DEBUG_INCLUDED_BASE") && method_name == "byte_range"
-                               STDERR.puts "[INCLUDED_BASE] class=#{current} NO_MODULES"
+                             class_method_fallback : String? = nil
+                             if @current_method_is_class
+                               top_level_exists = @function_defs.has_key?(method_name) ||
+                                 @function_types.has_key?(method_name) ||
+                                 has_function_base?(method_name)
+                               class_method_fallback = "#{current}.#{method_name}" unless top_level_exists
                              end
-                             included_candidate || method_name
+                             # Check if method exists in included modules (instance methods only).
+                             included_candidate : String? = nil
+                             if !@current_method_is_class
+                               if modules = @class_included_modules[current]?
+                                 if ENV.has_key?("DEBUG_INCLUDED_BASE") && method_name == "byte_range"
+                                   STDERR.puts "[INCLUDED_BASE] class=#{current} modules=#{modules.to_a.join(",")}"
+                                 end
+                                 modules.each do |mod_name|
+                                   mod_candidate = "#{mod_name}##{method_name}"
+                                   if @function_types.has_key?(mod_candidate) || has_function_base?(mod_candidate)
+                                     included_candidate = mod_candidate
+                                     break
+                                   end
+                                 end
+                               elsif ENV.has_key?("DEBUG_INCLUDED_BASE") && method_name == "byte_range"
+                                 STDERR.puts "[INCLUDED_BASE] class=#{current} NO_MODULES"
+                               end
+                             end
+                             class_method_fallback || included_candidate || method_name
                            end
                          else
                            method_name
