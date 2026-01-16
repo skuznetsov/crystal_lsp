@@ -1816,17 +1816,21 @@ end
 - Several HIR lowering heuristics are string-based (array detection) and can misfire.
 
 **Proposed fixes (bootstrapping blockers first):**
-1) **Force lower all tracked callsite signatures** (even when calls are in conditional paths).
+1) **Deterministic signature pipeline** (normalize → record → emit once).
+   - Normalize callsite arg types (VOID/implicit) before mangling; avoid base-name fallback.
    - Source: `@callsite_args` / recorded signatures.
    - DoD: missing symbols for callsite-only functions drop in `/tmp/fib_link.log`.
 2) **Generic instantiation for implicit params**:
    - Avoid `Array(VOID)`/`Hash(VOID, ...)` fallback in `get_function_return_type`.
    - Ensure `type_params` are substituted for implicit locals inferred from body.
    - DoD: `Array(U)` with implicit U resolves to concrete in HIR (no `VOID`).
-3) **Yield/block lowering completeness**:
+3) **Class-method resolution hardening**:
+   - Ensure `TypeLiteral/Path.method` always resolves to `Class.method` (dot) and never `#`.
+   - DoD: `Thread.threads` lowers as `Thread.threads` (no `_Thread_threads` missing).
+4) **Yield/block lowering completeness**:
    - Either inline all yield-bearing defs or implement MIR lowering for yield.
    - DoD: no `each_block` or `func####` missing in `/tmp/fib_link.log`.
-4) **HIR lowering robustness**:
+5) **HIR lowering robustness**:
    - Replace string-based type checks (e.g., `"Array"` prefix) with TypeKind.
    - Ensure phi creation includes loop-carried locals.
 
