@@ -30,6 +30,7 @@ test_*.cr
 logs/__pycache__/
 
 # Local build artifacts (outputs from driver/examples)
+cv2*
 *.hir
 *.ll
 *.mir
