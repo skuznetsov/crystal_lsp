@@ -15829,14 +15829,19 @@ module Crystal::HIR
 
       # Add parameters to match lib declaration
       argc_param = func.add_param("argc", TypeRef::INT32)
-      # UInt8** = pointer to pointer to UInt8, use generic POINTER type
-      argv_param = func.add_param("argv", TypeRef::POINTER)
+      argv_type = type_ref_for_name("Pointer(Pointer(UInt8))")
+      argv_type = TypeRef::POINTER if argv_type == TypeRef::VOID
+      argv_param = func.add_param("argv", argv_type)
 
       ctx = LoweringContext.new(func, @module, @arena)
 
       # Register parameters in context for potential use
       ctx.register_local("argc", argc_param.id)
       ctx.register_local("argv", argv_param.id)
+      ctx.register_type(argc_param.id, TypeRef::INT32)
+      ctx.register_type(argv_param.id, argv_type)
+      ctx.register_local("ARGC_UNSAFE", argc_param.id)
+      ctx.register_local("ARGV_UNSAFE", argv_param.id)
 
       # Lower each top-level expression in order
       last_value : ValueId? = nil
@@ -15923,13 +15928,17 @@ module Crystal::HIR
       # Create __crystal_main(argc, argv)
       func = @module.create_function("__crystal_main", TypeRef::VOID)
       argc_param = func.add_param("argc", TypeRef::INT32)
-      argv_param = func.add_param("argv", TypeRef::POINTER)
+      argv_type = type_ref_for_name("Pointer(Pointer(UInt8))")
+      argv_type = TypeRef::POINTER if argv_type == TypeRef::VOID
+      argv_param = func.add_param("argv", argv_type)
 
       ctx = LoweringContext.new(func, @module, @arena)
       ctx.register_local("argc", argc_param.id)
       ctx.register_local("argv", argv_param.id)
       ctx.register_type(argc_param.id, TypeRef::INT32)
-      ctx.register_type(argv_param.id, TypeRef::POINTER)
+      ctx.register_type(argv_param.id, argv_type)
+      ctx.register_local("ARGC_UNSAFE", argc_param.id)
+      ctx.register_local("ARGV_UNSAFE", argv_param.id)
 
       # Build the call to main with argc/argv if requested by the signature.
       param_types = [] of TypeRef
