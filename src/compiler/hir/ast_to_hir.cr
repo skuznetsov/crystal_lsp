@@ -1404,6 +1404,35 @@ module Crystal::HIR
       nil
     end
 
+    private def lookup_macro_entry_with_inheritance(method_name : String, scope_name : String)
+      if entry = lookup_macro_entry(method_name, scope_name)
+        return entry
+      end
+
+      visited = Set(String).new
+      current = scope_name
+      while current && !visited.includes?(current)
+        visited << current
+        if modules = @class_included_modules[current]?
+          modules.each do |mod_name|
+            if entry = lookup_macro_entry(method_name, mod_name)
+              return entry
+            end
+          end
+        end
+
+        parent = @class_info[current]?.try(&.parent_name) || @module.class_parents[current]?
+        break unless parent
+
+        if entry = lookup_macro_entry(method_name, parent)
+          return entry
+        end
+        current = parent
+      end
+
+      nil
+    end
+
     private def macro_def_maybe_defines_type?(
       macro_def : CrystalV2::Compiler::Frontend::MacroDefNode,
       macro_arena : CrystalV2::Compiler::Frontend::ArenaLike
@@ -24802,7 +24831,7 @@ module Crystal::HIR
               class_name_str = "LibIntrinsics"
             end
           end
-          if macro_lookup = lookup_macro_entry(method_name, class_name_str)
+          if macro_lookup = lookup_macro_entry_with_inheritance(method_name, class_name_str)
             macro_entry, macro_key = macro_lookup
             macro_def, macro_arena = macro_entry
             return expand_macro(ctx, macro_def, macro_arena, call_args, node.named_args, block_expr, macro_key)
