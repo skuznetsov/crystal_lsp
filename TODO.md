@@ -1778,6 +1778,20 @@ end
     - `func1781`
     - `realpath_DARWIN_EXTSN`
     - `self_to_u8_`
+  - **Update (2026-02-xx)**: allow lowering when bare generic is `NamedTuple` for `_double_splat` callsites. `RuntimeError.from_os_error` now lowers; missing list updates to **15** (see `/tmp/fib_link.log`):
+    - `Crystal__EventLoop__Polling__Arena_Crystal__EventLoop__Polling__PollDescriptor__65536__unsafe_grow`
+    - `Crystal__EventLoop__Unknown_to_s_IO`, `Crystal__EventLoop__Unknown_inspect_IO`
+    - `Crystal__System__Signal_inspect`
+    - `Crystal__TupleCrystal__TupleString___Crystal__Nil__String____Int32`
+    - `Crystal_trace_Int32_String_UInt64___Nil_NamedTuple`
+    - `Dragonbox_to_decimal_Float32___Float64`
+    - `Exception__CallStack_decode_function_name`, `Exception__CallStack_decode_line_number`
+    - `RuntimeError_os_error_message_Errno___WinError___WasiError___Nil_NamedTuple`
+    - `Thread_threads`
+    - `func1784`
+    - `os_error__Errno___WinError___WasiError___Nil`
+    - `realpath_DARWIN_EXTSN`
+    - `self_to_u8_`
   - **Update (2026-02-xx)**: `Crystal__System__Time_instant` resolved by adding `Crystal::System::Time.instant`.
   - **Update (2026-02-xx)**: `includes__Int32` resolved by inferring default types for untyped params (Range literal in `Float::Printer.decimal`).
 
