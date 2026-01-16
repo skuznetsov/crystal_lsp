@@ -14086,9 +14086,13 @@ module Crystal::HIR
           if type_name_exists?(qualified_name)
             # Prefer a top-level class/struct over a namespaced module when the
             # short name is known to be a class (e.g., Fiber vs Crystal::System::Fiber).
+            # But inside module namespaces, prefer sibling modules to avoid
+            # resolving to unrelated top-level classes (e.g., File vs Crystal::System::File).
             if @module_defs.has_key?(qualified_name) && @top_level_class_kinds.has_key?(name)
-              parts.pop
-              next
+              unless @module_defs.has_key?(namespace)
+                parts.pop
+                next
+              end
             end
             result = qualified_name
             found = true
