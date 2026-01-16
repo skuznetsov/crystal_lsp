@@ -499,12 +499,15 @@ module CrystalV2
         end
 
         # Ensure top-level `fun main` is lowered as a real entrypoint (C ABI).
+        did_flush = false
         if fun_main = def_nodes.find { |(n, _)| n.receiver.try { |recv| String.new(recv) == HIR::AstToHir::FUN_DEF_RECEIVER } && String.new(n.name) == "main" }
           hir_converter.arena = fun_main[1]
           hir_converter.lower_def(fun_main[0])
           # Process any pending functions from fun main lowering (e.g., Crystal.init_runtime)
           hir_converter.flush_pending_functions
+          did_flush = true
         end
+        hir_converter.flush_pending_functions unless did_flush
         STDERR.puts "  Main function created" if options.progress
 
         STDERR.puts "  Getting HIR module..." if options.progress

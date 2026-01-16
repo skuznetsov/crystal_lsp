@@ -9721,6 +9721,21 @@ module Crystal::HIR
                               end
         remember_callsite_arg_types(init_name, callsite_init_types) unless callsite_init_types.empty?
         lower_function_if_needed(init_name)
+        # If the init def wasn't lowered (e.g., pending callsite got consumed),
+        # force a direct lower so the allocator call has a matching body.
+        if !@module.has_function?(init_name) &&
+           !@lowering_functions.includes?(init_name) &&
+           !@lowered_functions.includes?(init_name)
+          init_def = @function_defs[init_name]? || @function_defs[init_base_name]?
+          if init_def
+            init_arena = @function_def_arenas[init_name]? || @function_def_arenas[init_base_name]?
+            init_arena ||= resolve_arena_for_def(init_def, @arena)
+            callsite_types = callsite_init_types.empty? ? nil : callsite_init_types
+            with_arena(init_arena) do
+              lower_method(class_name, class_info, init_def, callsite_types, nil, nil, init_name)
+            end
+          end
+        end
         init_call = Call.new(ctx.next_id, TypeRef::VOID, alloc.id, init_name, param_ids)
         ctx.emit(init_call)
       end

@@ -428,6 +428,8 @@ module Crystal::V2
         elapsed = (Time.instant - defs_start).total_milliseconds
         STDERR.puts "[HIR_TIMING] lower_defs #{elapsed.round(1)}ms"
       end
+      # Ensure deferred callsite signatures are lowered in non-fun-main flows.
+      hir_converter.flush_pending_functions
 
       hir_module = hir_converter.module
       @link_libraries = hir_module.link_libraries.dup
