@@ -913,6 +913,11 @@ module Crystal::MIR
         defined_globals << mangled_name
       end
 
+      extern_globals = @module.extern_globals
+      extern_globals.each_key do |name|
+        defined_globals << @type_mapper.mangle_name(name)
+      end
+
       # Collect all referenced globals from GlobalLoad/GlobalStore instructions
       referenced_globals = Hash(String, TypeRef).new
       @module.functions.each do |func|
@@ -939,6 +944,14 @@ module Crystal::MIR
       function_names = Set(String).new
       @module.functions.each do |func|
         function_names << mangle_function_name(func.name)
+      end
+
+      # Emit extern globals first
+      extern_globals.each do |name, type_ref|
+        llvm_type = @type_mapper.llvm_type(type_ref)
+        llvm_type = "ptr" if llvm_type == "void"
+        mangled_name = @type_mapper.mangle_name(name)
+        emit_raw "@#{mangled_name} = external global #{llvm_type}\n"
       end
 
       # Emit defined globals

@@ -122,6 +122,13 @@ module Crystal
       end
     end
 
+    def register_extern_globals(globals : Array(HIR::ExternGlobal))
+      globals.each do |glob|
+        mir_type = convert_type(glob.type)
+        @mir_module.add_extern_global(glob.real_name, mir_type)
+      end
+    end
+
     def self.class_var_global_name(class_name : String, var_name : String) : String
       "#{class_name}__classvar__#{var_name}"
     end
@@ -1661,15 +1668,19 @@ module Crystal
 
     private def lower_classvar_get(cv : HIR::ClassVarGet) : ValueId
       builder = @builder.not_nil!
-      global_name = HIRToMIRLowering.class_var_global_name(cv.class_name, cv.var_name)
-      builder.global_load(global_name, convert_type(cv.type))
+      extern = @hir_module.get_extern_global(cv.class_name, cv.var_name)
+      global_name = extern ? extern.real_name : HIRToMIRLowering.class_var_global_name(cv.class_name, cv.var_name)
+      hir_type = (extern && cv.type == HIR::TypeRef::VOID) ? extern.type : cv.type
+      builder.global_load(global_name, convert_type(hir_type))
     end
 
     private def lower_classvar_set(cv : HIR::ClassVarSet) : ValueId
       builder = @builder.not_nil!
       value = get_value(cv.value)
-      global_name = HIRToMIRLowering.class_var_global_name(cv.class_name, cv.var_name)
-      builder.global_store(global_name, value, convert_type(cv.type))
+      extern = @hir_module.get_extern_global(cv.class_name, cv.var_name)
+      global_name = extern ? extern.real_name : HIRToMIRLowering.class_var_global_name(cv.class_name, cv.var_name)
+      hir_type = (extern && cv.type == HIR::TypeRef::VOID) ? extern.type : cv.type
+      builder.global_store(global_name, value, convert_type(hir_type))
       value
     end
 

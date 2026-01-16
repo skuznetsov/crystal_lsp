@@ -1752,6 +1752,7 @@ module Crystal::MIR
     getter functions : Array(Function)
     getter type_registry : TypeRegistry
     getter globals : Array(GlobalVar)
+    getter extern_globals : Hash(String, TypeRef)
     getter union_descriptors : Hash(TypeRef, UnionDescriptor)
     property source_file : String?
 
@@ -1763,6 +1764,7 @@ module Crystal::MIR
       @function_map = {} of String => Function
       @type_registry = TypeRegistry.new
       @globals = [] of GlobalVar
+      @extern_globals = {} of String => TypeRef
       @union_descriptors = {} of TypeRef => UnionDescriptor
     end
 
@@ -1778,6 +1780,10 @@ module Crystal::MIR
 
     def add_global(name : String, type : TypeRef, initial_value : Int64? = nil)
       @globals << GlobalVar.new(name, type, initial_value)
+    end
+
+    def add_extern_global(name : String, type : TypeRef)
+      @extern_globals[name] = type
     end
 
     def types : Array(Type)

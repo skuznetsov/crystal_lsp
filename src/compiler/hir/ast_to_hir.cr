@@ -1865,6 +1865,24 @@ module Crystal::HIR
       when CrystalV2::Compiler::Frontend::FunNode
         return unless pass == :externs
         register_extern_fun(lib_name, node)
+      when CrystalV2::Compiler::Frontend::GlobalVarDeclNode
+        return unless pass == :externs
+        raw_name = String.new(node.name)
+        var_name = raw_name.lstrip('$')
+        type_name = String.new(node.type)
+        register_extern_global(lib_name, var_name, type_name)
+      when CrystalV2::Compiler::Frontend::AssignNode
+        return unless pass == :externs
+        target_node = @arena[node.target]
+        value_node = @arena[node.value]
+        if target_node.is_a?(CrystalV2::Compiler::Frontend::GlobalNode) &&
+           value_node.is_a?(CrystalV2::Compiler::Frontend::TypeDeclarationNode)
+          raw_name = String.new(target_node.name)
+          var_name = raw_name.lstrip('$')
+          real_name = String.new(value_node.name)
+          type_name = String.new(value_node.declared_type)
+          register_extern_global(lib_name, var_name, type_name, real_name)
+        end
       when CrystalV2::Compiler::Frontend::MacroIfNode
         process_macro_if_in_lib(node, lib_name, pass)
       when CrystalV2::Compiler::Frontend::MacroForNode
@@ -5059,13 +5077,37 @@ module Crystal::HIR
         if ENV["DEBUG_INFER_MEMBER_ACCESS"]? && member_name == "value"
           STDERR.puts "[INFER_MEMBER_ACCESS] member=#{member_name} self_type=#{self_type_name || "nil"}"
         end
+        object_node = node_for_expr(expr_node.object)
+        lib_name = case object_node
+                   when CrystalV2::Compiler::Frontend::ConstantNode
+                     resolved = resolve_class_name_in_context(String.new(object_node.name))
+                     resolved = resolve_type_alias_chain(resolved)
+                     @module.is_lib?(resolved) ? resolved : nil
+                   when CrystalV2::Compiler::Frontend::IdentifierNode
+                     name = String.new(object_node.name)
+                     if name[0]?.try(&.uppercase?)
+                       resolved = resolve_class_name_in_context(name)
+                       resolved = resolve_type_alias_chain(resolved)
+                       @module.is_lib?(resolved) ? resolved : nil
+                     end
+                   when CrystalV2::Compiler::Frontend::PathNode
+                     raw_path = collect_path_string(object_node)
+                     full_path = path_is_absolute?(object_node) ? raw_path.sub(/^::/, "") : resolve_path_string_in_context(raw_path)
+                     @module.is_lib?(full_path) ? full_path : nil
+                   else
+                     nil
+                   end
+        if lib_name
+          if extern = @module.get_extern_global(lib_name, member_name)
+            return extern.type
+          end
+        end
         if member_name == "new"
           if type_str = stringify_type_expr(expr_node.object)
             return type_ref_for_name(type_str)
           end
         end
         if member_name == "size"
-          object_node = node_for_expr(expr_node.object)
           if object_node.is_a?(CrystalV2::Compiler::Frontend::IdentifierNode)
             object_name = String.new(object_node.name)
             # Macro patterns like {{T.size}} use type params; treat as Int32 for signature inference.
@@ -17100,6 +17142,24 @@ module Crystal::HIR
           when CrystalV2::Compiler::Frontend::FunNode
             # Register external function
             register_extern_fun(lib_name, body_node)
+          when CrystalV2::Compiler::Frontend::GlobalVarDeclNode
+            raw_name = String.new(body_node.name)
+            var_name = raw_name.lstrip('$')
+            type_name = String.new(body_node.type)
+            register_extern_global(lib_name, var_name, type_name)
+          when CrystalV2::Compiler::Frontend::AssignNode
+            target_node = @arena[body_node.target]
+            value_node = @arena[body_node.value]
+            if target_node.is_a?(CrystalV2::Compiler::Frontend::GlobalNode) &&
+               value_node.is_a?(CrystalV2::Compiler::Frontend::TypeDeclarationNode)
+              raw_name = String.new(target_node.name)
+              var_name = raw_name.lstrip('$')
+              real_name = String.new(value_node.name)
+              type_name = String.new(value_node.declared_type)
+              register_extern_global(lib_name, var_name, type_name, real_name)
+            else
+              lower_node(ctx, body_node)
+            end
           when CrystalV2::Compiler::Frontend::AnnotationNode,
                CrystalV2::Compiler::Frontend::AliasNode,
                CrystalV2::Compiler::Frontend::EnumNode,
@@ -17185,6 +17245,20 @@ module Crystal::HIR
       if ENV["DEBUG_LIB_REG"]? && lib_name == "LibUnwind" && fun_name == "raise_exception"
         STDERR.puts "[LIB_REG] extern lib=#{lib_name} fun=#{fun_name} real=#{real_name}"
       end
+    end
+
+    private def register_extern_global(lib_name : String, var_name : String, type_name : String, real_name : String? = nil)
+      real_name ||= var_name
+      old_class = @current_class
+      @current_class = lib_name
+      type_ref = type_ref_for_c_type(type_name)
+      @current_class = old_class
+      @module.add_extern_global(ExternGlobal.new(
+        name: var_name,
+        real_name: real_name,
+        lib_name: lib_name,
+        type: type_ref
+      ))
     end
 
     # Convert Crystal type notation to C-compatible TypeRef
@@ -29510,7 +29584,9 @@ module Crystal::HIR
         name = String.new(obj_node.name)
         resolved_name = resolve_class_name_in_context(name)
         resolved_name = resolve_type_alias_chain(resolved_name)
-        if class_like_namespace?(resolved_name) || primitive_self_type(resolved_name)
+        if @module.is_lib?(resolved_name)
+          class_name_str = resolved_name
+        elsif class_like_namespace?(resolved_name) || primitive_self_type(resolved_name)
           class_name_str = resolved_name
         elsif is_module_method?(resolved_name, member_name)
           class_name_str = resolved_name
@@ -29531,7 +29607,8 @@ module Crystal::HIR
           end
           if resolved_name[0].uppercase?
             resolved_name = resolve_class_name_in_context(resolved_name)
-            if class_like_namespace?(resolved_name) ||
+            if @module.is_lib?(resolved_name) ||
+               class_like_namespace?(resolved_name) ||
                @enum_info.try(&.has_key?(resolved_name)) ||
                is_module_method?(resolved_name, member_name) ||
                primitive_self_type(resolved_name)
@@ -29619,6 +29696,9 @@ module Crystal::HIR
             class_name_str = full_path
           end
         elsif !is_constant_path
+          class_name_str = full_path
+        end
+        if class_name_str && @module.is_lib?(class_name_str)
           class_name_str = full_path
         end
       end
@@ -30623,8 +30703,36 @@ module Crystal::HIR
 
       when CrystalV2::Compiler::Frontend::MemberAccessNode
         # obj.field = value -> call setter method or direct field set
-        object_id = lower_expr(ctx, target_node.object)
         field_name = String.new(target_node.member)
+        lib_name = case obj_node = @arena[target_node.object]
+                   when CrystalV2::Compiler::Frontend::ConstantNode
+                     resolved = resolve_class_name_in_context(String.new(obj_node.name))
+                     resolved = resolve_type_alias_chain(resolved)
+                     @module.is_lib?(resolved) ? resolved : nil
+                   when CrystalV2::Compiler::Frontend::IdentifierNode
+                     name = String.new(obj_node.name)
+                     if ctx.lookup_local(name).nil? && name[0]?.try(&.uppercase?)
+                       resolved = resolve_class_name_in_context(name)
+                       resolved = resolve_type_alias_chain(resolved)
+                       @module.is_lib?(resolved) ? resolved : nil
+                     end
+                   when CrystalV2::Compiler::Frontend::PathNode
+                     raw_path = collect_path_string(obj_node)
+                     full_path = path_is_absolute?(obj_node) ? raw_path.sub(/^::/, "") : resolve_path_string_in_context(raw_path)
+                     @module.is_lib?(full_path) ? full_path : nil
+                   else
+                     nil
+                   end
+        if lib_name
+          if extern_global = @module.get_extern_global(lib_name, field_name)
+            value_type = extern_global.type
+            class_var_set = ClassVarSet.new(ctx.next_id, value_type, lib_name, field_name, value_id)
+            ctx.emit(class_var_set)
+            return class_var_set.id
+          end
+        end
+
+        object_id = lower_expr(ctx, target_node.object)
 
         # Get the object's type to resolve the setter method
         object_type = ctx.type_of(object_id)
@@ -30704,6 +30812,12 @@ module Crystal::HIR
       class_name_str : String,
       member_name : String
     ) : ValueId
+      if extern_global = @module.get_extern_global(class_name_str, member_name)
+        class_var_get = ClassVarGet.new(ctx.next_id, extern_global.type, class_name_str, member_name)
+        ctx.emit(class_var_get)
+        ctx.register_type(class_var_get.id, extern_global.type)
+        return class_var_get.id
+      end
       if extern_func = @module.get_extern_function(class_name_str, member_name)
         return emit_extern_call(ctx, extern_func, [] of ValueId)
       end

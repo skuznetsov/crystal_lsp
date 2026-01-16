@@ -603,6 +603,7 @@ module CrystalV2
           end
         end
         mir_lowering.register_globals(globals)
+        mir_lowering.register_extern_globals(hir_module.extern_globals)
         mir_lowering.register_union_types(hir_converter.union_descriptors)
         mir_lowering.register_class_types(hir_converter.class_info)
 

@@ -1195,6 +1195,17 @@ module Crystal::HIR
     end
   end
 
+  # External C global variable from lib bindings
+  struct ExternGlobal
+    getter name : String         # Crystal-side name (without $)
+    getter real_name : String    # Actual C symbol name
+    getter lib_name : String?    # Library containing the global
+    getter type : TypeRef
+
+    def initialize(@name, @real_name, @lib_name, @type)
+    end
+  end
+
   class Module
     getter name : String
     getter functions : Array(Function)
@@ -1202,6 +1213,7 @@ module Crystal::HIR
     getter strings : Array(String)
     getter link_libraries : Array(String)
     getter extern_functions : Array(ExternFunction)
+    getter extern_globals : Array(ExternGlobal)
     getter method_effects : Hash(String, MethodEffectSummary)
     getter class_parents : Hash(String, String?)
     getter module_includers : Hash(String, Array(String))
@@ -1221,6 +1233,7 @@ module Crystal::HIR
       @string_intern = {} of String => StringId
       @link_libraries = [] of String
       @extern_functions = [] of ExternFunction
+      @extern_globals = [] of ExternGlobal
       @method_effects = {} of String => MethodEffectSummary
       @class_parents = {} of String => String?
       @module_includers = {} of String => Array(String)
@@ -1277,6 +1290,13 @@ module Crystal::HIR
       end
     end
 
+    def add_extern_global(glob : ExternGlobal)
+      # Don't add duplicates
+      unless @extern_globals.any? { |g| g.real_name == glob.real_name }
+        @extern_globals << glob
+      end
+    end
+
     def get_extern_function(name : String) : ExternFunction?
       @extern_functions.find { |f| f.name == name || f.real_name == name }
     end
@@ -1286,9 +1306,18 @@ module Crystal::HIR
       @extern_functions.find { |f| f.lib_name == lib_name && f.name == fun_name }
     end
 
+    # Look up extern global by lib name and global name (e.g., "LibGC", "stackbottom")
+    def get_extern_global(lib_name : String, var_name : String) : ExternGlobal?
+      @extern_globals.find { |g| g.lib_name == lib_name && g.name == var_name }
+    end
+
+    def get_extern_global(name : String) : ExternGlobal?
+      @extern_globals.find { |g| g.name == name || g.real_name == name }
+    end
+
     # Check if a name is a known lib (has any extern functions registered under it)
     def is_lib?(name : String) : Bool
-      @extern_functions.any? { |f| f.lib_name == name }
+      @extern_functions.any? { |f| f.lib_name == name } || @extern_globals.any? { |g| g.lib_name == name }
     end
 
     def create_function(name : String, return_type : TypeRef) : Function
