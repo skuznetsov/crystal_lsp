@@ -216,7 +216,7 @@ class Crystal::EventLoop::Kqueue < Crystal::EventLoop::Polling
     if time
       flags = LibC::EV_ADD | LibC::EV_ONESHOT | LibC::EV_CLEAR
 
-      seconds, nanoseconds = System::Time.monotonic
+      seconds, nanoseconds = System::Time.instant
       now = Time::Span.new(seconds: seconds, nanoseconds: nanoseconds)
       t = time - now
 

@@ -22,11 +22,11 @@ end
 times = [] of Float64
 program = nil
 10.times do
-  start = Time.monotonic
+  start = Time.instant
   lexer = Lexer.new(content)
   parser = Parser.new(lexer)
   program = parser.parse_program
-  time = (Time.monotonic - start).total_milliseconds
+  time = (Time.instant - start).total_milliseconds
   times << time
 end
 

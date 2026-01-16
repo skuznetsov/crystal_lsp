@@ -25,29 +25,29 @@ end
 def benchmark_v2_single_file(path : String) : {Time::Span, Int32, Int32}
   source = File.read(path)
 
-  start = Time.monotonic
+  start = Time.instant
   lexer = CrystalV2::Compiler::Frontend::Lexer.new(source)
   parser = CrystalV2::Compiler::Frontend::Parser.new(lexer)
   program = parser.parse_program
-  duration = Time.monotonic - start
+  duration = Time.instant - start
 
   {duration, program.roots.size, parser.diagnostics.size}
 end
 
 def benchmark_v2_multi_file(entry_path : String) : {Time::Span, Int32, Int32}
-  start = Time.monotonic
+  start = Time.instant
   loader = CrystalV2::Compiler::FileLoader.new
   program = loader.load_with_requires(entry_path)
-  duration = Time.monotonic - start
+  duration = Time.instant - start
 
   stats = loader.stats
   {duration, stats[:files_loaded], stats[:total_nodes]}
 end
 
 def benchmark_original_crystal(path : String) : {Time::Span, String}
-  start = Time.monotonic
+  start = Time.instant
   output = `crystal build --no-codegen "#{path}" 2>&1`
-  duration = Time.monotonic - start
+  duration = Time.instant - start
 
   {duration, output}
 end

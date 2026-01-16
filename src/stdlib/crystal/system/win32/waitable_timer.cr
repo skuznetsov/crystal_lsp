@@ -15,7 +15,7 @@ class Crystal::System::WaitableTimer
   def set(time : ::Time::Span) : Nil
     # convert absolute time to relative time, expressed in 100ns interval,
     # rounded up
-    seconds, nanoseconds = System::Time.monotonic
+    seconds, nanoseconds = System::Time.instant
     relative = time - ::Time::Span.new(seconds: seconds, nanoseconds: nanoseconds)
     ticks = (relative.to_i * 10_000_000 + (relative.nanoseconds + 99) // 100).clamp(0_i64..)
 

@@ -697,16 +697,16 @@ module CrystalV2
           version : Int32 = 0,
         ) : Array(Diagnostic)
           # Phase 1: Parse the file
-          parse_start = Time.monotonic
+          parse_start = Time.instant
           lexer = Frontend::Lexer.new(source)
           file_arena = Frontend::AstArena.new
           parser = Frontend::Parser.new(lexer, file_arena)
           program = parser.parse_program
 
-          parse_time = Time.monotonic - parse_start
+          parse_time = Time.instant - parse_start
 
           # Phase 2: Update arena
-          arena_start = Time.monotonic
+          arena_start = Time.instant
           if @files.has_key?(path)
             # Replace existing file's arena
             @arena.replace_file_arena(path, file_arena)
@@ -716,22 +716,22 @@ module CrystalV2
             @arena.add_file_arena(path, file_arena)
             @file_order << path
           end
-          arena_time = Time.monotonic - arena_start
+          arena_time = Time.instant - arena_start
 
           # Phase 3: Collect symbols from this file
-          symbol_start = Time.monotonic
+          symbol_start = Time.instant
           file_symbols = collect_file_symbols(program, path)
-          symbol_time = Time.monotonic - symbol_start
+          symbol_time = Time.instant - symbol_start
 
           # Phase 4: Run semantic analysis on this file (updates type_context)
-          semantic_start = Time.monotonic
+          semantic_start = Time.instant
           diagnostics = analyze_file_semantics(program, path, file_symbols)
-          semantic_time = Time.monotonic - semantic_start
+          semantic_time = Time.instant - semantic_start
 
           # Phase 5: Build symbol summaries with inferred types (after inference)
-          summaries_start = Time.monotonic
+          summaries_start = Time.instant
           symbol_summaries = build_symbol_summaries(file_symbols, program, @type_context)
-          summaries_time = Time.monotonic - summaries_start
+          summaries_time = Time.instant - summaries_start
 
           # Phase 6: Update file state
           requires = collect_requires(program, path)

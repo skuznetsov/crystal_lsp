@@ -9,12 +9,12 @@ module CrystalV2
 
         class TimeoutError < Exception; end
 
-        @@deadline : Time::Span? = nil
+        @@deadline : Time::Instant? = nil
         @@message = "watchdog abort"
 
         def self.enable!(message = "watchdog abort", timeout : Time::Span = 30.seconds)
           @@message = message
-          @@deadline = Time.monotonic + timeout
+          @@deadline = Time.instant + timeout
         end
 
         def self.disable!
@@ -23,7 +23,7 @@ module CrystalV2
 
         def self.abort!(message = @@message)
           @@message = message
-          @@deadline = Time.monotonic  # force immediate timeout
+          @@deadline = Time.instant  # force immediate timeout
         end
 
         def self.enabled?
@@ -34,7 +34,7 @@ module CrystalV2
           # Fast path: if no deadline, skip entirely
           return unless (dl = @@deadline)
           # Raise when current time exceeds deadline
-          raise TimeoutError.new(@@message) if Time.monotonic >= dl
+          raise TimeoutError.new(@@message) if Time.instant >= dl
         end
       end
     end

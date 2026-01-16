@@ -1,7 +1,7 @@
 require "../src/compiler/lsp/server"
 
 puts "Full prelude load (with name resolution)..."
-start = Time.monotonic
+start = Time.instant
 
 server = CrystalV2::Compiler::LSP::Server.new(
   STDIN,
@@ -12,5 +12,5 @@ server = CrystalV2::Compiler::LSP::Server.new(
   )
 )
 
-elapsed = Time.monotonic - start
+elapsed = Time.instant - start
 puts "Prelude load time (symbol_only=false): #{elapsed.total_milliseconds.round(2)}ms"

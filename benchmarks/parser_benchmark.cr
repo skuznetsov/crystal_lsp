@@ -16,7 +16,7 @@ total_files = 0
 total_lines = 0
 total_nodes = 0
 failed_files = 0
-start_time = Time.monotonic
+start_time = Time.instant
 
 files.each do |file_path|
   next unless File.exists?(file_path)
@@ -41,7 +41,7 @@ files.each do |file_path|
   end
 end
 
-end_time = Time.monotonic
+end_time = Time.instant
 elapsed = (end_time - start_time).total_seconds
 
 puts

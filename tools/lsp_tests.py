@@ -4,7 +4,7 @@ Lightweight LSP regression checks for the v2 server.
 Covers:
   - diagnostics: valid file => none; invalid file => at least one
   - hover: contains expected signature
-  - definition: resolves to stdlib symbol (Time.monotonic -> time.cr)
+  - definition: resolves to stdlib symbol (Time.instant -> time.cr)
 """
 import json
 import os
@@ -64,7 +64,7 @@ def run_tests() -> int:
         'require "time"\n'
         'require "json"\n'
         'require "option_parser"\n'
-        'start = Time.monotonic\n'
+        'start = Time.instant\n'
         'val = JSON.parse("{}")\n'
         'parser = OptionParser.new\n'
     )
@@ -153,7 +153,7 @@ def run_tests() -> int:
         proc.kill()
         return 1
 
-    # Hover test on Time.monotonic (line 4th line zero-based index 3, char ~14)
+    # Hover test on Time.instant (line 4th line zero-based index 3, char ~14)
     send(
         proc,
         {
