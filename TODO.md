@@ -1419,6 +1419,7 @@ The return_type=16 (NIL) for `to_s` methods is incorrect - should be String type
 - **Fix applied**: rescue variable binding for lowercase identifiers (`rescue ex`) via parser + HIR fallback; `Crystal.init_runtime`, `Crystal.main_user_code`, `Crystal.exit`, and `Crystal::System.print_exception` are now lowered in HIR (2026-01-xx).
 - **Update**: full-prelude `bootstrap_array` link now fails on EventLoop/Thread/Fiber/CallStack decode + vararg tuple extraction; see `/private/tmp/bootstrap_array_full.link.log` (2026-01-xx).
 - **Fix applied**: allow tuple types for splat params even when some callsite args are `Void`, and fall back to `Tuple` when callsite types are missing. `Crystal::System.print_error$splat` now has a non-VOID args param (see `/private/tmp/bootstrap_array_full.hir`). Remaining `___Int32` now comes from `String::CHAR_TO_DIGIT.to_unsafe` in `Char#to_i` (bare `[]$Int32` receiver) (2026-01-xx).
+- **Fix applied**: constant inference for `begin` blocks + uppercase identifiers; `String::CHAR_TO_DIGIT`/`CHAR_TO_DIGIT62` now infer as `StaticArray(Int8, 256)`, so `to_unsafe` resolves to `StaticArray#to_unsafe` and the `Nlist64::Type#to_unsafe`/`___Int32` fallback disappears from HIR (2026-02-xx).
 
 #### Issue 6: ExprId -1 in inline_loop_vars_union (union keyword) - FIXED (2026-01-xx)
 - **Symptom**: self-host compile crashed with `ExprId out of bounds: -1` while lowering `AstToHir#inline_loop_vars_union`.

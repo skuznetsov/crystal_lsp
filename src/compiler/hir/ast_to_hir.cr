@@ -5006,6 +5006,11 @@ module Crystal::HIR
             return literal[0]
           end
         end
+        if resolved = resolve_constant_name_in_context(full_name)
+          if const_type = @constant_types[resolved]?
+            return const_type if const_type != TypeRef::VOID
+          end
+        end
         parts = full_name.split("::")
         if parts.size >= 2
           member = parts.last
@@ -5020,6 +5025,13 @@ module Crystal::HIR
         end
         if type_name_exists?(full_name)
           return type_ref_for_name(full_name)
+        end
+      when CrystalV2::Compiler::Frontend::ConstantNode
+        name = String.new(expr_node.name)
+        if resolved = resolve_constant_name_in_context(name)
+          if const_type = @constant_types[resolved]?
+            return const_type if const_type != TypeRef::VOID
+          end
         end
       when CrystalV2::Compiler::Frontend::GroupingNode
         return infer_type_from_expr(expr_node.expression, self_type_name)
@@ -5082,6 +5094,9 @@ module Crystal::HIR
                 end
               end
             end
+            if member_name == "clone" || member_name == "dup"
+              return obj_type
+            end
             if ENV["DEBUG_INFER_MEMBER"]? && (member_name == "first" || member_name == "address")
               STDERR.puts "[INFER_MEMBER] member=#{member_name} owner=#{owner_name} type=#{class_name} base=#{base_name} ret=Void"
             end
@@ -5102,6 +5117,13 @@ module Crystal::HIR
         end
         if self_type_name && String.new(expr_node.name) == "self"
           return type_ref_for_name(self_type_name)
+        end
+        if name[0]?.try(&.uppercase?)
+          if resolved = resolve_constant_name_in_context(name)
+            if const_type = @constant_types[resolved]?
+              return const_type if const_type != TypeRef::VOID
+            end
+          end
         end
         if locals = @current_typeof_locals
           if type_ref = locals[name]?
@@ -5256,6 +5278,17 @@ module Crystal::HIR
               end
             end
           end
+          if member_name == "literal"
+            if type_str = stringify_type_expr(callee_node.object)
+              type_str = resolve_type_name_in_context(type_str)
+              return type_ref_for_name(type_str)
+            end
+          end
+          if member_name == "clone" || member_name == "dup"
+            if receiver_type = infer_type_from_expr(callee_node.object, self_type_name)
+              return receiver_type if receiver_type != TypeRef::VOID
+            end
+          end
           if member_name == "new"
             if type_str = stringify_type_expr(callee_node.object)
               if type_str == "Range" && expr_node.args.size >= 2
@@ -5354,6 +5387,35 @@ module Crystal::HIR
         else_type = expr_node.else_body ? infer_type_from_branch(expr_node.else_body.not_nil!, self_type_name) : TypeRef::NIL
         if then_type && else_type
           return union_type_for_values(then_type, else_type)
+        end
+      when CrystalV2::Compiler::Frontend::BeginNode
+        types = [] of TypeRef
+        old_body_context = @infer_body_context
+        begin
+          if else_body = expr_node.else_body
+            @infer_body_context = else_body
+            if inferred = infer_type_from_branch(else_body, self_type_name)
+              types << inferred
+            end
+          elsif body = expr_node.body
+            @infer_body_context = body
+            if inferred = infer_type_from_branch(body, self_type_name)
+              types << inferred
+            end
+          end
+          if clauses = expr_node.rescue_clauses
+            clauses.each do |clause|
+              @infer_body_context = clause.body
+              if inferred = infer_type_from_branch(clause.body, self_type_name)
+                types << inferred
+              end
+            end
+          end
+        ensure
+          @infer_body_context = old_body_context
+        end
+        if types.any?
+          return merge_return_types(types)
         end
       end
 
@@ -5956,6 +6018,13 @@ module Crystal::HIR
                     process_macro_for_in_module(expr_node, module_name)
                   when CrystalV2::Compiler::Frontend::MacroLiteralNode
                     process_macro_literal_in_module(expr_node, module_name)
+                  when CrystalV2::Compiler::Frontend::ConstantNode
+                    record_constant_definition(module_name, String.new(expr_node.name), expr_node.value, @arena)
+                  when CrystalV2::Compiler::Frontend::AssignNode
+                    target = @arena[expr_node.target]
+                    if target.is_a?(CrystalV2::Compiler::Frontend::ConstantNode)
+                      record_constant_definition(module_name, String.new(target.name), expr_node.value, @arena)
+                    end
                   when CrystalV2::Compiler::Frontend::ClassVarDeclNode
                     # Handle class variable declarations from macro-expanded content
                     raw_name = String.new(expr_node.name)
@@ -6050,6 +6119,13 @@ module Crystal::HIR
           end
         end
         record_class_var_type(module_name, cvar_name, cvar_type, initial_value)
+      when CrystalV2::Compiler::Frontend::ConstantNode
+        record_constant_definition(module_name, String.new(body_node.name), body_node.value, @arena)
+      when CrystalV2::Compiler::Frontend::AssignNode
+        target = @arena[body_node.target]
+        if target.is_a?(CrystalV2::Compiler::Frontend::ConstantNode)
+          record_constant_definition(module_name, String.new(target.name), body_node.value, @arena)
+        end
       end
     end
 
@@ -6147,6 +6223,13 @@ module Crystal::HIR
                 process_macro_for_in_module(expr_node, module_name)
               when CrystalV2::Compiler::Frontend::MacroLiteralNode
                 process_macro_literal_in_module(expr_node, module_name)
+              when CrystalV2::Compiler::Frontend::ConstantNode
+                record_constant_definition(module_name, String.new(expr_node.name), expr_node.value, @arena)
+              when CrystalV2::Compiler::Frontend::AssignNode
+                target = @arena[expr_node.target]
+                if target.is_a?(CrystalV2::Compiler::Frontend::ConstantNode)
+                  record_constant_definition(module_name, String.new(target.name), expr_node.value, @arena)
+                end
               when CrystalV2::Compiler::Frontend::ClassVarDeclNode
                 # Handle class variable declarations from macro-expanded content
                 raw_name = String.new(expr_node.name)
@@ -6198,6 +6281,13 @@ module Crystal::HIR
               process_macro_if_in_module(expr_node, module_name)
             when CrystalV2::Compiler::Frontend::MacroLiteralNode
               process_macro_literal_in_module(expr_node, module_name)
+            when CrystalV2::Compiler::Frontend::ConstantNode
+              record_constant_definition(module_name, String.new(expr_node.name), expr_node.value, @arena)
+            when CrystalV2::Compiler::Frontend::AssignNode
+              target = @arena[expr_node.target]
+              if target.is_a?(CrystalV2::Compiler::Frontend::ConstantNode)
+                record_constant_definition(module_name, String.new(target.name), expr_node.value, @arena)
+              end
             when CrystalV2::Compiler::Frontend::ClassVarDeclNode
               # Handle class variable declarations from macro-expanded content
               raw_name = String.new(expr_node.name)
@@ -6250,6 +6340,13 @@ module Crystal::HIR
                 process_macro_for_in_module(expr_node, module_name)
               when CrystalV2::Compiler::Frontend::MacroLiteralNode
                 process_macro_literal_in_module(expr_node, module_name)
+              when CrystalV2::Compiler::Frontend::ConstantNode
+                record_constant_definition(module_name, String.new(expr_node.name), expr_node.value, @arena)
+              when CrystalV2::Compiler::Frontend::AssignNode
+                target = @arena[expr_node.target]
+                if target.is_a?(CrystalV2::Compiler::Frontend::ConstantNode)
+                  record_constant_definition(module_name, String.new(target.name), expr_node.value, @arena)
+                end
               when CrystalV2::Compiler::Frontend::ClassVarDeclNode
                 # Handle class variable declarations from macro-expanded content
                 raw_name = String.new(expr_node.name)
@@ -6953,6 +7050,13 @@ module Crystal::HIR
                     register_accessors_in_class(expr_node, class_name, ivars, offset_ref)
                   when CrystalV2::Compiler::Frontend::PropertyNode
                     register_accessors_in_class(expr_node, class_name, ivars, offset_ref)
+                  when CrystalV2::Compiler::Frontend::ConstantNode
+                    record_constant_definition(class_name, String.new(expr_node.name), expr_node.value, @arena)
+                  when CrystalV2::Compiler::Frontend::AssignNode
+                    target = @arena[expr_node.target]
+                    if target.is_a?(CrystalV2::Compiler::Frontend::ConstantNode)
+                      record_constant_definition(class_name, String.new(target.name), expr_node.value, @arena)
+                    end
                   end
                 end
               end
@@ -7005,6 +7109,13 @@ module Crystal::HIR
         register_accessors_in_class(body_node, class_name, ivars, offset_ref)
       when CrystalV2::Compiler::Frontend::PropertyNode
         register_accessors_in_class(body_node, class_name, ivars, offset_ref)
+      when CrystalV2::Compiler::Frontend::ConstantNode
+        record_constant_definition(class_name, String.new(body_node.name), body_node.value, @arena)
+      when CrystalV2::Compiler::Frontend::AssignNode
+        target = @arena[body_node.target]
+        if target.is_a?(CrystalV2::Compiler::Frontend::ConstantNode)
+          record_constant_definition(class_name, String.new(target.name), body_node.value, @arena)
+        end
       end
     end
 
@@ -7040,6 +7151,13 @@ module Crystal::HIR
                 register_accessors_in_class(expr_node, class_name, ivars, offset_ref)
               when CrystalV2::Compiler::Frontend::PropertyNode
                 register_accessors_in_class(expr_node, class_name, ivars, offset_ref)
+              when CrystalV2::Compiler::Frontend::ConstantNode
+                record_constant_definition(class_name, String.new(expr_node.name), expr_node.value, @arena)
+              when CrystalV2::Compiler::Frontend::AssignNode
+                target = @arena[expr_node.target]
+                if target.is_a?(CrystalV2::Compiler::Frontend::ConstantNode)
+                  record_constant_definition(class_name, String.new(target.name), expr_node.value, @arena)
+                end
               end
             end
           end
@@ -7086,6 +7204,13 @@ module Crystal::HIR
               register_accessors_in_class(expr_node, class_name, ivars, offset_ref)
             when CrystalV2::Compiler::Frontend::PropertyNode
               register_accessors_in_class(expr_node, class_name, ivars, offset_ref)
+            when CrystalV2::Compiler::Frontend::ConstantNode
+              record_constant_definition(class_name, String.new(expr_node.name), expr_node.value, @arena)
+            when CrystalV2::Compiler::Frontend::AssignNode
+              target = @arena[expr_node.target]
+              if target.is_a?(CrystalV2::Compiler::Frontend::ConstantNode)
+                record_constant_definition(class_name, String.new(target.name), expr_node.value, @arena)
+              end
             end
           end
         end
@@ -7512,6 +7637,24 @@ module Crystal::HIR
         case member
         when CrystalV2::Compiler::Frontend::BlockNode
           record_constants_in_body(owner_name, member.body)
+        when CrystalV2::Compiler::Frontend::MacroIfNode
+          if class_like_namespace?(owner_name)
+            process_macro_if_in_class(member, owner_name)
+          else
+            process_macro_if_in_module(member, owner_name)
+          end
+        when CrystalV2::Compiler::Frontend::MacroForNode
+          if class_like_namespace?(owner_name)
+            process_macro_for_in_class(member, owner_name)
+          else
+            process_macro_for_in_module(member, owner_name)
+          end
+        when CrystalV2::Compiler::Frontend::MacroLiteralNode
+          if class_like_namespace?(owner_name)
+            process_macro_literal_in_class(member, owner_name)
+          else
+            process_macro_literal_in_module(member, owner_name)
+          end
         when CrystalV2::Compiler::Frontend::ConstantNode
           record_constant_definition(owner_name, String.new(member.name), member.value, @arena)
         when CrystalV2::Compiler::Frontend::AssignNode
@@ -13356,20 +13499,37 @@ module Crystal::HIR
       end
 
       if @constant_literal_values.has_key?(full_name)
-        return if @constant_types.has_key?(full_name)
       else
         if literal = constant_literal_value_from_expr(value_id, arena, owner_name)
           @constant_literal_values[full_name] = literal
         end
       end
 
-      return if @constant_types.has_key?(full_name)
+      if existing = @constant_types[full_name]?
+        return if existing != TypeRef::VOID
+      end
 
       old_arena = @arena
       old_class = @current_class
       @arena = arena
       @current_class = owner_name
       inferred = infer_type_from_expr(value_id, owner_name) || TypeRef::VOID
+      if inferred == TypeRef::VOID
+        value_node = @arena[value_id]
+        if value_node.is_a?(CrystalV2::Compiler::Frontend::CallNode)
+          callee_node = @arena[value_node.callee]
+          if callee_node.is_a?(CrystalV2::Compiler::Frontend::MemberAccessNode)
+            member_name = String.new(callee_node.member)
+            if member_name == "literal"
+              if type_str = stringify_type_expr(callee_node.object)
+                type_str = resolve_type_name_in_context(type_str)
+                fallback = type_ref_for_name(type_str)
+                inferred = fallback if fallback != TypeRef::VOID
+              end
+            end
+          end
+        end
+      end
       @current_class = old_class
       @arena = old_arena
 
