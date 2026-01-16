@@ -11,12 +11,12 @@ class HTTP::LogHandler
   end
 
   def call(context : HTTP::Server::Context) : Nil
-    start = Time.monotonic
+    start = Time.instant
 
     begin
       call_next(context)
     ensure
-      elapsed = Time.monotonic - start
+      elapsed = Time.instant - start
       elapsed_text = elapsed_text(elapsed)
 
       req = context.request

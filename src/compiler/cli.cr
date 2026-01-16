@@ -291,7 +291,7 @@ module CrystalV2
       # Full compilation (driver.cr functionality)
       private def compile(input_file : String, options : Options, out_io : IO, err_io : IO) : Int32
         timings = {} of String => Float64
-        total_start = Time.monotonic
+        total_start = Time.instant
         @ast_cache_hits = 0
         @ast_cache_misses = 0
         @llvm_cache_hits = 0
@@ -303,7 +303,7 @@ module CrystalV2
 
         # Step 1: Parse source (with require support)
         log(options, out_io, "\n[1/6] Parsing...")
-        parse_start = Time.monotonic
+        parse_start = Time.instant
 
         loaded_files = Set(String).new
         all_arenas = [] of Tuple(Frontend::ArenaLike, Array(Frontend::ExprId), String, String)
@@ -317,20 +317,20 @@ module CrystalV2
                          end
           if File.exists?(prelude_path)
             log(options, out_io, "  Loading prelude: #{prelude_path}")
-            prelude_start = Time.monotonic
+            prelude_start = Time.instant
             parse_file_recursive(prelude_path, all_arenas, loaded_files, input_file, options, out_io)
             if options.stats
-              timings["parse_prelude"] = (Time.monotonic - prelude_start).total_milliseconds
+              timings["parse_prelude"] = (Time.instant - prelude_start).total_milliseconds
             end
           end
         end
 
         # Parse user's input file
-        user_parse_start = Time.monotonic
+        user_parse_start = Time.instant
         parse_file_recursive(input_file, all_arenas, loaded_files, input_file, options, out_io)
         if options.stats
-          timings["parse_user"] = (Time.monotonic - user_parse_start).total_milliseconds
-          timings["parse_total"] = (Time.monotonic - parse_start).total_milliseconds
+          timings["parse_user"] = (Time.instant - user_parse_start).total_milliseconds
+          timings["parse_total"] = (Time.instant - parse_start).total_milliseconds
         end
 
         if all_arenas.empty?
@@ -352,7 +352,7 @@ module CrystalV2
 
         # Step 2: Lower to HIR
         log(options, out_io, "\n[2/6] Lowering to HIR...")
-        hir_start = Time.monotonic
+        hir_start = Time.instant
 
         first_arena = all_arenas[0][0]
         sources_by_arena = {} of Frontend::ArenaLike => String
@@ -512,7 +512,7 @@ module CrystalV2
         STDERR.puts "  Got HIR module with #{hir_module.functions.size} functions" if options.progress
         options.link_libraries = hir_module.link_libraries.dup
         log(options, out_io, "  Functions: #{hir_module.functions.size}")
-        timings["hir"] = (Time.monotonic - hir_start).total_milliseconds if options.stats
+        timings["hir"] = (Time.instant - hir_start).total_milliseconds if options.stats
         timings["hir_funcs"] = hir_module.functions.size.to_f if options.stats
 
         # Reduce later phases by keeping only functions reachable from entrypoints.
@@ -538,7 +538,7 @@ module CrystalV2
 
         # Step 3: Escape analysis
         log(options, out_io, "\n[3/6] Escape analysis...")
-        escape_start = Time.monotonic
+        escape_start = Time.instant
         total_funcs = hir_module.functions.size
         memory_config = memory_config_for(options)
         type_provider = HIR::ClassInfoTypeProvider.new(hir_module, hir_converter.class_info, acyclic_types)
@@ -566,7 +566,7 @@ module CrystalV2
             gc_details.concat(gc_allocation_details(func, result, hir_module, memory_config))
           end
         end
-        timings["escape"] = (Time.monotonic - escape_start).total_milliseconds if options.stats
+        timings["escape"] = (Time.instant - escape_start).total_milliseconds if options.stats
         if options.stats
           timings["mm_stack"] = total_ms_stats.stack_count.to_f
           timings["mm_slab"] = total_ms_stats.slab_count.to_f
@@ -591,7 +591,7 @@ module CrystalV2
 
         # Step 4: Lower to MIR
         log(options, out_io, "\n[4/6] Lowering to MIR...")
-        mir_start = Time.monotonic
+        mir_start = Time.instant
         mir_lowering = MIR::HIRToMIRLowering.new(hir_module, slab_frame: options.slab_frame)
 
         # Register globals from class variables
@@ -610,12 +610,12 @@ module CrystalV2
         STDERR.puts "  Lowering #{hir_module.functions.size} functions to MIR..." if options.progress
         mir_module = mir_lowering.lower(options.progress)
         log(options, out_io, "  Functions: #{mir_module.functions.size}")
-        timings["mir"] = (Time.monotonic - mir_start).total_milliseconds if options.stats
+        timings["mir"] = (Time.instant - mir_start).total_milliseconds if options.stats
         timings["mir_funcs"] = mir_module.functions.size.to_f if options.stats
 
         # Optimize MIR
         log(options, out_io, "  Optimizing MIR...")
-        mir_opt_start = Time.monotonic
+        mir_opt_start = Time.instant
         mir_module.functions.each_with_index do |func, idx|
           begin
             STDERR.puts "  Optimizing #{idx + 1}/#{mir_module.functions.size}: #{func.name}..." if options.progress
@@ -632,7 +632,7 @@ module CrystalV2
             raise "Index error in optimize for: #{func.name}\n#{ex.message}\n#{ex.backtrace.join("\n")}"
           end
         end
-        timings["mir_opt"] = (Time.monotonic - mir_opt_start).total_milliseconds if options.stats
+        timings["mir_opt"] = (Time.instant - mir_opt_start).total_milliseconds if options.stats
 
         if options.emit_mir
           mir_file = options.output + ".mir"
@@ -648,14 +648,14 @@ module CrystalV2
 
         # Step 5: Generate LLVM IR
         log(options, out_io, "\n[5/6] Generating LLVM IR...")
-        llvm_start = Time.monotonic
+        llvm_start = Time.instant
         llvm_gen = MIR::LLVMIRGenerator.new(mir_module)
         llvm_gen.emit_type_metadata = options.emit_type_metadata
         llvm_gen.progress = options.progress
         llvm_gen.reachability = true  # Only emit reachable functions from main
         llvm_ir = llvm_gen.generate
         log(options, out_io, "  LLVM IR size: #{llvm_ir.size} bytes")
-        timings["llvm"] = (Time.monotonic - llvm_start).total_milliseconds if options.stats
+        timings["llvm"] = (Time.instant - llvm_start).total_milliseconds if options.stats
 
         ll_file = options.output + ".ll"
         File.write(ll_file, llvm_ir)
@@ -669,9 +669,9 @@ module CrystalV2
 
         # Step 6: Compile to binary
         log(options, out_io, "\n[6/6] Compiling to binary...")
-        compile_start = Time.monotonic
+        compile_start = Time.instant
         result = compile_llvm_ir(ll_file, options, out_io, err_io, timings)
-        timings["compile"] = (Time.monotonic - compile_start).total_milliseconds if options.stats
+        timings["compile"] = (Time.instant - compile_start).total_milliseconds if options.stats
         if result != 0
           emit_timings(options, out_io, timings, total_start)
           return result
@@ -724,7 +724,7 @@ module CrystalV2
         opt_ll_file = ll_file
         if options.llvm_opt
           opt_ll_file = "#{ll_file}.opt.ll"
-          opt_start = Time.monotonic
+          opt_start = Time.instant
           if options.llvm_cache && File.exists?(opt_cache_file)
             FileUtils.cp(opt_cache_file, opt_ll_file)
             @llvm_cache_hits += 1
@@ -742,7 +742,7 @@ module CrystalV2
               @llvm_cache_misses += 1
             end
           end
-          timings["opt"] = (Time.monotonic - opt_start).total_milliseconds if options.stats
+          timings["opt"] = (Time.instant - opt_start).total_milliseconds if options.stats
         end
 
         use_clang_link = options.lto || options.pgo_generate || !options.pgo_profile.empty?
@@ -751,7 +751,7 @@ module CrystalV2
           return 1
         end
 
-        llc_start = Time.monotonic
+        llc_start = Time.instant
         unless use_clang_link
           if options.llvm_cache && File.exists?(obj_cache_file)
             FileUtils.cp(obj_cache_file, obj_file)
@@ -770,7 +770,7 @@ module CrystalV2
               @llvm_cache_misses += 1
             end
           end
-          timings["llc"] = (Time.monotonic - llc_start).total_milliseconds if options.stats
+          timings["llc"] = (Time.instant - llc_start).total_milliseconds if options.stats
         end
 
         # Find runtime stub
@@ -788,7 +788,7 @@ module CrystalV2
         link_objs << runtime_stub if File.exists?(runtime_stub)
 
         if options.link
-          link_start = Time.monotonic
+          link_start = Time.instant
           link_flags = build_link_flags(options, out_io)
           link_flags_str = link_flags.join(" ")
           if use_clang_link
@@ -824,7 +824,7 @@ module CrystalV2
               return 1
             end
           end
-          timings["link"] = (Time.monotonic - link_start).total_milliseconds if options.stats
+          timings["link"] = (Time.instant - link_start).total_milliseconds if options.stats
         else
           log(options, out_io, "  Skipping link (--no-link)")
           return 0
@@ -2293,12 +2293,12 @@ module CrystalV2
         out_io.puts msg if options.verbose
       end
 
-      private def emit_timings(options : Options, out_io : IO, timings : Hash(String, Float64)?, total_start : Time::Span?)
+      private def emit_timings(options : Options, out_io : IO, timings : Hash(String, Float64)?, total_start : Time::Instant?)
         return unless options.stats
         return unless timings
         return unless total_start
 
-        total_ms = (Time.monotonic - total_start).total_milliseconds
+        total_ms = (Time.instant - total_start).total_milliseconds
         parts = [] of String
         if (parse = timings["parse_total"]?)
           parts << "parse=#{parse.round(1)}"

@@ -480,9 +480,9 @@ module CrystalV2
           end
 
           send_payload(payload)
-          started = Time.monotonic
+          started = Time.instant
           response = await_response(id)
-          elapsed = Time.monotonic - started
+          elapsed = Time.instant - started
           {response, elapsed.total_milliseconds}
         end
 

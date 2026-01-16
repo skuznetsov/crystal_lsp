@@ -26,10 +26,10 @@ struct Crystal::EventLoop::Timers(T)
   end
 
   # Dequeues and yields each ready timer (their `#wake_at` is lower than
-  # `System::Time.monotonic`) from the oldest to the most recent (i.e. time
+  # `System::Time.instant`) from the oldest to the most recent (i.e. time
   # ascending).
   def dequeue_ready(& : Pointer(T) -> Nil) : Nil
-    seconds, nanoseconds = System::Time.monotonic
+    seconds, nanoseconds = System::Time.instant
     now = Time::Span.new(seconds: seconds, nanoseconds: nanoseconds)
 
     while event = @heap.first?

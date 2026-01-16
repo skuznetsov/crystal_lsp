@@ -197,9 +197,9 @@ require "crystal/system/time"
 # A reading from this clock can be taken using `.monotonic`:
 #
 # ```
-# t1 = Time.monotonic
+# t1 = Time.instant
 # # operation that takes 1 minute
-# t2 = Time.monotonic
+# t2 = Time.instant
 # t2 - t1 # => 1.minute (approximately)
 # ```
 #
@@ -331,16 +331,16 @@ struct Time
   # both readings:
   #
   # ```
-  # start = Time.monotonic
+  # start = Time.instant
   # # operation that takes 20 milliseconds
-  # elapsed = Time.monotonic - start # => 20.milliseconds (approximately)
+  # elapsed = Time.instant - start # => 20.milliseconds (approximately)
   # # operation that takes 50 milliseconds
-  # elapsed_total = Time.monotonic - start # => 70.milliseconds (approximately)
+  # elapsed_total = Time.instant - start # => 70.milliseconds (approximately)
   # ```
   #
   # The execution time of a block can be measured using `.measure`.
   def self.monotonic : Time::Span
-    seconds, nanoseconds = Crystal::System::Time.monotonic
+    seconds, nanoseconds = Crystal::System::Time.instant
     Time::Span.new(seconds: seconds, nanoseconds: nanoseconds)
   end
 

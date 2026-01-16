@@ -13,9 +13,9 @@ puts ""
 puts "=== Original Crystal Formatter ==="
 times = [] of Float64
 10.times do |i|
-  start = Time.monotonic
+  start = Time.instant
   formatted = Crystal.format(source)
-  elapsed = Time.monotonic - start
+  elapsed = Time.instant - start
   times << elapsed.total_milliseconds
   print "." if i % 2 == 0
 end

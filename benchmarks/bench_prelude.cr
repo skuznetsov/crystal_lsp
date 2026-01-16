@@ -15,9 +15,9 @@ puts ""
 # Sequential
 puts "Sequential loading..."
 loader_seq = FileLoader.new(search_paths, parallel: false)
-start = Time.monotonic
+start = Time.instant
 program_seq = loader_seq.load_with_requires(PRELUDE_ENTRY)
-time_seq = (Time.monotonic - start).total_milliseconds
+time_seq = (Time.instant - start).total_milliseconds
 stats_seq = loader_seq.stats
 
 puts "  Time:  #{time_seq.round(2)} ms"
@@ -28,9 +28,9 @@ puts ""
 # Parallel
 puts "Parallel loading..."
 loader_par = FileLoader.new(search_paths, parallel: true)
-start = Time.monotonic
+start = Time.instant
 program_par = loader_par.load_with_requires(PRELUDE_ENTRY)
-time_par = (Time.monotonic - start).total_milliseconds
+time_par = (Time.instant - start).total_milliseconds
 stats_par = loader_par.stats
 
 puts "  Time:  #{time_par.round(2)} ms"

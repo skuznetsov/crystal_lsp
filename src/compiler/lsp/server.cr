@@ -545,7 +545,7 @@ module CrystalV2
           @method_file_cache = Hash(String, Location?).new
           @indexing_active = false
           @indexing_message = nil
-          @indexing_last_sent = Time.monotonic
+          @indexing_last_sent = Time.instant
           @semantic_token_cache = {} of String => {Int32, SemanticTokens}
           if @config.background_indexing
             load_prelude_background
@@ -1374,11 +1374,11 @@ module CrystalV2
         REQUEST_WATCHDOG_MS = ENV["LSP_WATCHDOG_TIMEOUT_MS"]?.try(&.to_i) || 5000
 
         private def with_guard(label : String, &block)
-          start = Time.monotonic
+          start = Time.instant
           begin
             yield
           ensure
-            elapsed = Time.monotonic - start
+            elapsed = Time.instant - start
             ms = (elapsed.total_seconds * 1000).round(1)
             if ms > GUARD_ALERT_MS
               log_error("[guard] #{label} took #{ms} ms")
@@ -1500,30 +1500,30 @@ module CrystalV2
 
         # Handle initialize request
         private def handle_initialize(id : JSON::Any, params : JSON::Any?)
-          t0 = Time.monotonic
+          t0 = Time.instant
           capabilities = ServerCapabilities.new # Use default capabilities with all features enabled
           result = InitializeResult.new(capabilities: capabilities)
-          t1 = Time.monotonic
+          t1 = Time.instant
 
           # Extract project root from initialize params
           if params
             if root_uri = params["rootUri"]?.try(&.as_s?)
               @project_root = uri_to_path(root_uri)
               debug("Project root: #{@project_root}")
-              t2 = Time.monotonic
+              t2 = Time.instant
               try_load_project_cache
-              t3 = Time.monotonic
+              t3 = Time.instant
               start_background_project_index
-              t4 = Time.monotonic
+              t4 = Time.instant
               STDERR.puts "[INIT] caps=#{(t1-t0).total_milliseconds.round(1)}ms cache=#{(t3-t2).total_milliseconds.round(1)}ms bg_index=#{(t4-t3).total_milliseconds.round(1)}ms" if ENV["LSP_DEBUG"]?
             elsif root_path = params["rootPath"]?.try(&.as_s?)
               @project_root = root_path
               debug("Project root (from rootPath): #{@project_root}")
-              t2 = Time.monotonic
+              t2 = Time.instant
               try_load_project_cache
-              t3 = Time.monotonic
+              t3 = Time.instant
               start_background_project_index
-              t4 = Time.monotonic
+              t4 = Time.instant
               STDERR.puts "[INIT] caps=#{(t1-t0).total_milliseconds.round(1)}ms cache=#{(t3-t2).total_milliseconds.round(1)}ms bg_index=#{(t4-t3).total_milliseconds.round(1)}ms" if ENV["LSP_DEBUG"]?
             end
           end
@@ -1561,11 +1561,11 @@ module CrystalV2
           # Update unified project state (new architecture) - async with watchdog
           if doc_path
             spawn do
-              project_start = Time.monotonic
+              project_start = Time.instant
               begin
                 Frontend::Watchdog.enable!("UnifiedProject update_file timeout", 5.seconds)
                 project_diagnostics = @project.update_file(doc_path, text, version)
-                project_time = (Time.monotonic - project_start).total_milliseconds
+                project_time = (Time.instant - project_start).total_milliseconds
                 debug("UnifiedProject update_file: #{project_time.round(2)}ms, #{project_diagnostics.size} diagnostics")
                 @project_cache_dirty = true
                 schedule_project_cache_save
@@ -1714,16 +1714,16 @@ module CrystalV2
           requires = [] of String
 
           # Parse
-          total_start = Time.monotonic
+          total_start = Time.instant
           parse_start = total_start
           lexer = Frontend::Lexer.new(source)
           parser = Frontend::Parser.new(lexer, recovery_mode: @config.parser_recovery_mode)
           program = parser.parse_program
-          parse_ms = (Time.monotonic - parse_start).total_seconds * 1000
+          parse_ms = (Time.instant - parse_start).total_seconds * 1000
           debug("[guard] parse took #{parse_ms.round(1)} ms") if parse_ms > GUARD_WARN_MS
           uses_compiler_module = includes_compiler_module?(program)
           dependency_states = [] of DocumentState
-          requires_start = Time.monotonic
+          requires_start = Time.instant
           if load_requires && !use_project_symbols
             raw_requires = base_dir ? collect_require_paths(program, base_dir) : [] of String
             requires = filter_required_files(requirements: raw_requires, includes_compiler: uses_compiler_module)
@@ -1734,7 +1734,7 @@ module CrystalV2
               end
             end
           end
-          requires_ms = (Time.monotonic - requires_start).total_seconds * 1000
+          requires_ms = (Time.instant - requires_start).total_seconds * 1000
           analysis_program = program
           analysis_program = wrap_program_with_file(program, path) if path
           # Convert parser diagnostics
@@ -1752,18 +1752,18 @@ module CrystalV2
             end
 
             analyzer = Semantic::Analyzer.new(analysis_program, context)
-            collect_start = Time.monotonic
+            collect_start = Time.instant
             analyzer.collect_symbols
-            symbols_ms = (Time.monotonic - collect_start).total_seconds * 1000
+            symbols_ms = (Time.instant - collect_start).total_seconds * 1000
             debug("Symbol collection complete")
 
             symbol_table = analyzer.global_context.symbol_table
             inject_compiler_alias_bindings(symbol_table) if uses_compiler_module
 
             # Run name resolution even if parser reported diagnostics; useful for navigation
-            resolve_start = Time.monotonic
+            resolve_start = Time.instant
             result = analyzer.resolve_names
-            resolve_ms = (Time.monotonic - resolve_start).total_seconds * 1000
+            resolve_ms = (Time.instant - resolve_start).total_seconds * 1000
             identifier_symbols = result.identifier_symbols
             debug("Name resolution complete: #{result.diagnostics.size} diagnostics, #{identifier_symbols.size} identifiers resolved")
 
@@ -1817,10 +1817,10 @@ module CrystalV2
               debug("Loaded #{type_context.try(&.expression_types.size) || 0} cached expression types")
             elsif should_infer
               debug("Starting type inference")
-              infer_start = Time.monotonic
+              infer_start = Time.instant
               engine = analyzer.infer_types(result.identifier_symbols)
               type_context = engine.context
-              infer_ms = (Time.monotonic - infer_start).total_seconds * 1000
+              infer_ms = (Time.instant - infer_start).total_seconds * 1000
               debug("Type inference complete: #{analyzer.type_inference_diagnostics.size} diagnostics")
               if ENV["LSP_DEBUG"]?
                 debug("Type context entries: #{type_context.expression_types.size}")
@@ -1861,7 +1861,7 @@ module CrystalV2
             )
           end
 
-          total_ms = (Time.monotonic - total_start).total_seconds * 1000
+          total_ms = (Time.instant - total_start).total_seconds * 1000
           debug("Analysis complete: #{diagnostics.size} total diagnostics (requires=#{requires.size}, use_cache=#{!!use_project_symbols})")
           if total_ms > GUARD_WARN_MS
             debug("Timing: parse=#{parse_ms.round(1)}ms requires=#{requires_ms.round(1)}ms symbols=#{(symbols_ms || 0).round(1)}ms resolve=#{(resolve_ms || 0).round(1)}ms infer=#{(infer_ms || 0).round(1)}ms total=#{total_ms.round(1)}ms")
@@ -1884,7 +1884,7 @@ module CrystalV2
 
         private def load_prelude
 
-          @prelude_guard_deadline = Time.monotonic + 20.seconds
+          @prelude_guard_deadline = Time.instant + 20.seconds
           # Phase 1: Try loading from binary cache (fastest path)
           if try_load_prelude_from_cache
             debug("Prelude loaded from cache")
@@ -1908,7 +1908,7 @@ module CrystalV2
           @prelude_loading = true
           channel = Channel(PreludeState?).new
           @prelude_load_channel = channel
-          @prelude_guard_deadline = Time.monotonic + 20.seconds
+          @prelude_guard_deadline = Time.instant + 20.seconds
 
           spawn do
             begin
@@ -1927,7 +1927,7 @@ module CrystalV2
 
         # Load prelude in background fiber (doesn't modify server state directly)
         private def load_prelude_in_background : PreludeState?
-          start_time = Time.monotonic
+          start_time = Time.instant
 
           # Try cache first
           if File.exists?(PRELUDE_PATH)
@@ -1935,7 +1935,7 @@ module CrystalV2
             cache = PreludeCache.load(stdlib_path)
 
             if cache
-              cache_ms = (Time.monotonic - start_time).total_milliseconds.round(2)
+              cache_ms = (Time.instant - start_time).total_milliseconds.round(2)
               debug("Background: prelude cache loaded in #{cache_ms}ms (#{cache.symbols.size} symbols, #{cache.files.size} files)")
 
               # Use files with full summaries if available, otherwise fall back to legacy symbols
@@ -1946,7 +1946,7 @@ module CrystalV2
                       else
                         Semantic::SymbolTable.new
                       end
-              rebuild_ms = (Time.monotonic - start_time).total_milliseconds.round(2)
+              rebuild_ms = (Time.instant - start_time).total_milliseconds.round(2)
               debug("Background: SymbolTable rebuilt in #{rebuild_ms}ms")
 
               # Restore expression types from TypeIndex (for hover fallback)
@@ -1987,7 +1987,7 @@ module CrystalV2
           state = build_real_prelude_state(PRELUDE_PATH, program, source, diagnostics, symbol_only: @config.prelude_symbol_only, deadline: @prelude_guard_deadline)
           return nil unless state
 
-          total_ms = (Time.monotonic - start_time).total_milliseconds.round(2)
+          total_ms = (Time.instant - start_time).total_milliseconds.round(2)
           debug("Background: prelude parsed in #{total_ms}ms")
 
           state
@@ -2044,7 +2044,7 @@ module CrystalV2
           return false unless File.exists?(PRELUDE_PATH)
 
           stdlib_path = File.dirname(PRELUDE_PATH)
-          cache_start = Time.monotonic
+          cache_start = Time.instant
           cache = PreludeCache.load(stdlib_path)
 
           unless cache
@@ -2052,11 +2052,11 @@ module CrystalV2
             return false
           end
 
-          cache_ms = (Time.monotonic - cache_start).total_milliseconds.round(2)
+          cache_ms = (Time.instant - cache_start).total_milliseconds.round(2)
           debug("Prelude cache loaded in #{cache_ms}ms (#{cache.symbols.size} symbols, #{cache.files.size} files)")
 
           # Reconstruct SymbolTable from cache
-          rebuild_start = Time.monotonic
+          rebuild_start = Time.instant
           table = if cache.files.any?
                     rebuild_prelude_table_from_cache(cache)
                   elsif cache.symbols.any?
@@ -2064,7 +2064,7 @@ module CrystalV2
                   else
                     Semantic::SymbolTable.new
                   end
-          rebuild_ms = (Time.monotonic - rebuild_start).total_milliseconds.round(2)
+          rebuild_ms = (Time.instant - rebuild_start).total_milliseconds.round(2)
           debug("SymbolTable rebuilt in #{rebuild_ms}ms")
 
           # Create a minimal PreludeState without full program
@@ -2144,7 +2144,7 @@ module CrystalV2
           return if prelude.from_cache # Already loaded from cache, no need to re-save
 
           stdlib_path = File.dirname(PRELUDE_PATH)
-          save_start = Time.monotonic
+          save_start = Time.instant
 
           # Extract symbols from all registered prelude symbols
           symbols = [] of CachedSymbolInfo
@@ -2185,7 +2185,7 @@ module CrystalV2
           cache = PreludeCache.new(unique_symbols, stdlib_hash, cached_files, type_index)
           cache.save
 
-          save_ms = (Time.monotonic - save_start).total_milliseconds.round(2)
+          save_ms = (Time.instant - save_start).total_milliseconds.round(2)
           debug("Prelude cache saved in #{save_ms}ms (#{unique_symbols.size} symbols)")
         rescue ex
           debug("Failed to save prelude cache: #{ex.message}")
@@ -2360,11 +2360,11 @@ module CrystalV2
           return unless @config.project_cache
           return if @project_cache_loaded
 
-          load_start = Time.monotonic
+          load_start = Time.instant
           result = ProjectCacheLoader.load_from_cache(@project, root)
 
           if result[:valid_count] > 0
-            load_ms = (Time.monotonic - load_start).total_milliseconds.round(2)
+            load_ms = (Time.instant - load_start).total_milliseconds.round(2)
             debug("Project cache loaded: #{result[:valid_count]} valid files in #{load_ms}ms")
 
             if result[:invalid_paths].size > 0
@@ -2389,10 +2389,10 @@ module CrystalV2
           return if @project.files.empty?
           return unless @project_cache_dirty
 
-          save_start = Time.monotonic
+          save_start = Time.instant
           ProjectCacheLoader.save_to_cache(@project, root)
 
-          save_ms = (Time.monotonic - save_start).total_milliseconds.round(2)
+          save_ms = (Time.instant - save_start).total_milliseconds.round(2)
           debug("Project cache saved: #{@project.files.size} files in #{save_ms}ms")
           @project_cache_dirty = false
           @project_cache_save_scheduled = false
@@ -2502,11 +2502,11 @@ module CrystalV2
 
           STDERR.puts("[LSP] Loading #{label} from #{path}") if ENV["LSP_DEBUG"]?
           source = File.read(path)
-          parse_started = Time.monotonic
+          parse_started = Time.instant
           lexer = Frontend::Lexer.new(source)
           parser = Frontend::Parser.new(lexer, recovery_mode: @config.parser_recovery_mode)
           program = parser.parse_program
-          parse_ms = (Time.monotonic - parse_started).total_milliseconds.round(2)
+          parse_ms = (Time.instant - parse_started).total_milliseconds.round(2)
 
           diagnostics = [] of Diagnostic
           parser.diagnostics.each { |diag| diagnostics << Diagnostic.from_parser(diag) }
@@ -2623,7 +2623,7 @@ module CrystalV2
           symbol_only : Bool,
           deadline : Time::Span? = nil,
         ) : Bool
-          if deadline && Time.monotonic > deadline
+          if deadline && Time.instant > deadline
             debug("Prelude guard deadline hit at #{path}; skipping further inference")
             return true
           end
@@ -2674,7 +2674,7 @@ module CrystalV2
           analyzer.collect_symbols
           inference_ran = false
 
-          guard_remaining = deadline ? deadline - Time.monotonic : nil
+          guard_remaining = deadline ? deadline - Time.instant : nil
           skip_infer = path.ends_with?("/io/byte_format.cr") ||
                        path.ends_with?("/io/stapled.cr") ||
                        path.ends_with?("/io/delimited.cr") ||
@@ -2712,23 +2712,23 @@ module CrystalV2
             )
           else
             timeout = guard_remaining || 10.seconds
-            phase_start = Time.monotonic
+            phase_start = Time.instant
             Frontend::Watchdog.enable!("Prelude inference #{path}", timeout)
             begin
               debug("Prelude #{path}: resolve_names/type_inference start (timeout=#{timeout.total_milliseconds.round(1)}ms)")
               analyzer.semantic_diagnostics.each { |diag| diagnostics << Diagnostic.from_semantic(diag, source) }
               result = analyzer.resolve_names
-              resolve_ms = (Time.monotonic - phase_start).total_milliseconds
+              resolve_ms = (Time.instant - phase_start).total_milliseconds
               debug("Prelude #{path}: resolve_names done in #{resolve_ms.round(1)}ms")
               result.diagnostics.each { |diag| diagnostics << Diagnostic.from_parser(diag) }
 
-              inference_start = Time.monotonic
+              inference_start = Time.instant
               engine = Semantic::TypeInferenceEngine.new(program, result.identifier_symbols, context.symbol_table)
               engine.infer_types
               engine.context.expression_types.each do |expr_id, type|
                 (@cached_expr_types[path] ||= Hash(Int32, String).new)[expr_id.index] = type.to_s
               end
-              infer_ms = (Time.monotonic - inference_start).total_milliseconds
+              infer_ms = (Time.instant - inference_start).total_milliseconds
               debug("Prelude #{path}: type_inference done in #{infer_ms.round(1)}ms")
               inference_ran = true
             rescue ex : Frontend::Watchdog::TimeoutError
@@ -3367,11 +3367,11 @@ module CrystalV2
           # Update unified project state (incremental) - async with watchdog
           if doc_path
             spawn do
-              project_start = Time.monotonic
+              project_start = Time.instant
               begin
                 Frontend::Watchdog.enable!("UnifiedProject update_file (change) timeout", 3.seconds)
                 project_diagnostics = @project.update_file(doc_path, new_text, version)
-                project_time = (Time.monotonic - project_start).total_milliseconds
+                project_time = (Time.instant - project_start).total_milliseconds
                 debug("UnifiedProject update_file (change): #{project_time.round(2)}ms")
               rescue ex : Frontend::Watchdog::TimeoutError
                 debug("UnifiedProject update_file (change) TIMEOUT: #{ex.message}")
@@ -4055,7 +4055,7 @@ module CrystalV2
 
         # Handle textDocument/hover request
         private def handle_hover(id : JSON::Any, params : JSON::Any?)
-          started_at = Time.monotonic
+          started_at = Time.instant
           return send_error(id, -32602, "Missing params") unless params
 
           uri = params["textDocument"]["uri"].as_s
@@ -4243,7 +4243,7 @@ module CrystalV2
 
         # Handle textDocument/definition request
         private def handle_definition(id : JSON::Any, params : JSON::Any?)
-          started_at = Time.monotonic
+          started_at = Time.instant
           return send_error(id, -32602, "Missing params") unless params
 
           uri = params["textDocument"]["uri"].as_s
@@ -4412,7 +4412,7 @@ module CrystalV2
         # Navigates to the type definition of the symbol under cursor
         # e.g., if `x : Foo = ...`, typeDefinition on `x` goes to `class Foo`
         private def handle_type_definition(id : JSON::Any, params : JSON::Any?)
-          started_at = Time.monotonic
+          started_at = Time.instant
           return send_error(id, -32602, "Missing params") unless params
 
           uri = params["textDocument"]["uri"].as_s
@@ -4585,7 +4585,7 @@ module CrystalV2
 
         private def elapsed_ms_since(start : Time::Span?) : Float64
           return 0.0 unless start
-          (Time.monotonic - start).total_milliseconds.round(2)
+          (Time.instant - start).total_milliseconds.round(2)
         end
 
         private def current_prelude_label : String
@@ -5283,7 +5283,7 @@ module CrystalV2
             end
           end
 
-          start_time = Time.monotonic
+          start_time = Time.instant
 
           # Collect semantic tokens from AST
           tokens = collect_semantic_tokens(
@@ -5295,15 +5295,15 @@ module CrystalV2
             doc_state.path
           )
 
-          collect_ms = (Time.monotonic - start_time).total_milliseconds
+          collect_ms = (Time.instant - start_time).total_milliseconds
 
           # Cache the result
           @semantic_token_cache[uri] = {version, tokens}
 
           # Serialize to JSON
-          json_start = Time.monotonic
+          json_start = Time.instant
           json = tokens.to_json
-          json_ms = (Time.monotonic - json_start).total_milliseconds
+          json_ms = (Time.instant - json_start).total_milliseconds
 
           if ENV["LSP_DEBUG"]? || @config.debug_log_path || ENV["LSP_PROFILE_TOKENS"]?
             sample = semantic_token_sample(tokens)
@@ -5860,7 +5860,7 @@ module CrystalV2
         end
 
         private def notify_indexing(message : String = "Indexing…")
-          now = Time.monotonic
+          now = Time.instant
           # Throttle to avoid client flood
           if @indexing_active && @indexing_message == message
             return if (now - @indexing_last_sent) < 300.milliseconds
@@ -7521,7 +7521,7 @@ module CrystalV2
             end
           end
 
-          # If still unresolved, try prelude symbol table directly (e.g., Time.monotonic)
+          # If still unresolved, try prelude symbol table directly (e.g., Time.instant)
           if method_symbol.nil? && prelude_table
             if receiver_symbol.is_a?(Semantic::ClassSymbol)
               method_symbol = find_class_method_in_hierarchy(receiver_symbol.as(Semantic::ClassSymbol), method_name, prelude_table) ||
@@ -8249,12 +8249,12 @@ module CrystalV2
           pattern = /^\s*(module|class|struct|abstract class|abstract struct|annotation)\s+#{Regex.escape(search_name)}\b/
           full_pattern = constant_name.includes?("::") ? /^\s*(module|class|struct|abstract class|abstract struct|annotation)\s+#{Regex.escape(constant_name)}\b/ : nil
 
-          deadline = Time.monotonic + 100.milliseconds
+          deadline = Time.instant + 100.milliseconds
           break_search = false
 
           paths.each do |path|
             Watchdog.check!
-            break if Time.monotonic > deadline
+            break if Time.instant > deadline
             next unless File.file?(path)
             line_index = 0
             File.each_line(path) do |line|
@@ -8657,14 +8657,14 @@ module CrystalV2
           if cached = @method_file_cache[cache_key]?
             return cached
           end
-          deadline = Time.monotonic + 100.milliseconds
+          deadline = Time.instant + 100.milliseconds
           text = File.read(path)
           pattern = /def\s+(?:self\.|[A-Za-z0-9_:]+\.)?#{Regex.escape(method_name)}/
           getter_pattern = /^\s*(getter|property)\s+#{Regex.escape(method_name)}\b/
           line_index = 0
           text.each_line do |line|
             Watchdog.check!
-            break if Time.monotonic > deadline
+            break if Time.instant > deadline
             stripped = line.lstrip
             if stripped.starts_with?('#')
               line_index += 1
@@ -9211,7 +9211,7 @@ module CrystalV2
           target_path : String? = nil,
         ) : SemanticTokens
           profile = ENV["LSP_PROFILE_TOKENS"]?
-          t0 = Time.monotonic
+          t0 = Time.instant
 
           raw_tokens = [] of RawToken
           context = SemanticTokenContext.new(
@@ -9224,7 +9224,7 @@ module CrystalV2
             target_path
           )
 
-          t1 = Time.monotonic
+          t1 = Time.instant
 
           # Collect tokens from all root nodes (AST-driven semantics)
           roots_processed = 0
@@ -9238,23 +9238,23 @@ module CrystalV2
             collect_tokens_recursive(context, root_id, raw_tokens)
           end
 
-          t2 = Time.monotonic
+          t2 = Time.instant
 
           # Single-pass lexical scan for keywords and string-like tokens
           collect_lexical_tokens_single_pass(source, raw_tokens)
 
-          t3 = Time.monotonic
+          t3 = Time.instant
 
           # Sort tokens by position and prefer higher-priority classifications on ties
           raw_tokens.sort_by! { |t| {t.line, t.start_char, -token_type_priority(t.token_type), -t.length} }
           raw_tokens = deduplicate_tokens(raw_tokens)
 
-          t4 = Time.monotonic
+          t4 = Time.instant
 
           # Delta-encode tokens
           data = delta_encode_tokens(raw_tokens)
 
-          t5 = Time.monotonic
+          t5 = Time.instant
 
           if profile
             STDERR.puts "[PROFILE] semantic tokens: setup=#{(t1-t0).total_milliseconds.round(1)}ms " \

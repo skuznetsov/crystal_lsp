@@ -13,7 +13,7 @@ module CrystalV2
         getter version : Int32
         getter timestamp : Time
 
-        def initialize(@uri, @text, @version, @timestamp = Time.monotonic)
+        def initialize(@uri, @text, @version, @timestamp = Time.instant)
         end
       end
 
@@ -65,7 +65,7 @@ module CrystalV2
         # Process a specific URI immediately (bypassing debounce)
         def process_now(uri : String, text : String, version : Int32)
           @pending.delete(uri)
-          @last_process_time[uri] = Time.monotonic
+          @last_process_time[uri] = Time.instant
           @process_callback.try &.call(uri, text, version)
         end
 
@@ -100,7 +100,7 @@ module CrystalV2
         end
 
         private def process_ready_changes
-          now = Time.monotonic
+          now = Time.instant
           ready_uris = [] of String
 
           @pending.each do |uri, change|
@@ -120,7 +120,7 @@ module CrystalV2
 
         private def process_all_pending
           @pending.each do |uri, change|
-            @last_process_time[uri] = Time.monotonic
+            @last_process_time[uri] = Time.instant
             @process_callback.try &.call(change.uri, change.text, change.version)
           end
           @pending.clear
@@ -141,13 +141,13 @@ module CrystalV2
           last = @last_run[key]?
           return true unless last
 
-          elapsed = (Time.monotonic - last).total_milliseconds
+          elapsed = (Time.instant - last).total_milliseconds
           elapsed >= @interval_ms
         end
 
         # Mark operation as run
         def mark_run(key : String)
-          @last_run[key] = Time.monotonic
+          @last_run[key] = Time.instant
         end
 
         # Run operation if throttle allows

@@ -27,12 +27,12 @@ end
 files = Dir.glob("#{__DIR__}/../src/**/*.cr").sort
 max_files = ENV["SCAN_MAX_FILES"]?.try(&.to_i)
 max_duration = ENV["SCAN_MAX_DURATION"]?.try(&.to_f)
-start_time = Time.monotonic
+start_time = Time.instant
 processed = 0
 
 files.each_with_index do |file, idx|
   break if max_files && processed >= max_files
-  break if max_duration && (Time.monotonic - start_time) > max_duration.seconds
+  break if max_duration && (Time.instant - start_time) > max_duration.seconds
   puts "[#{idx}] start #{file}"
   STDOUT.flush
   begin

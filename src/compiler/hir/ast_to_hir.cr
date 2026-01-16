@@ -241,10 +241,10 @@ module Crystal::HIR
   private struct LowerMethodTiming
     getter name : String
     getter requested : String
-    getter start : Time::Span
+    getter start : Time::Instant
     property child_ms : Float64
 
-    def initialize(@name : String, @requested : String, @start : Time::Span, @child_ms : Float64)
+    def initialize(@name : String, @requested : String, @start : Time::Instant, @child_ms : Float64)
     end
   end
 
@@ -4910,7 +4910,7 @@ module Crystal::HIR
 
     private def infer_type_from_expr(expr_id : ExprId, self_type_name : String?) : TypeRef?
       stats = ENV["DEBUG_LOWER_METHOD_STATS"]? ? @lower_method_stats_stack.last? : nil
-      stats_start = stats ? Time.monotonic : nil
+      stats_start = stats ? Time.instant : nil
       if ENV["DEBUG_INFER_CRASH"]?
         STDERR.puts "[INFER_CALL] expr=#{expr_id.index} current=#{@arena.class}:#{@arena.size}"
       end
@@ -4938,7 +4938,7 @@ module Crystal::HIR
         cached_version, cached_type = cached
         if cached_version == @infer_type_cache_version
           if stats && stats_start
-            stats.infer_ms += (Time.monotonic - stats_start).total_milliseconds
+            stats.infer_ms += (Time.instant - stats_start).total_milliseconds
             stats.infer_calls += 1
           end
           @arena = old_arena
@@ -4947,7 +4947,7 @@ module Crystal::HIR
       end
       if @infer_expr_stack.includes?(key)
         if stats && stats_start
-          stats.infer_ms += (Time.monotonic - stats_start).total_milliseconds
+          stats.infer_ms += (Time.instant - stats_start).total_milliseconds
           stats.infer_calls += 1
         end
         @arena = old_arena
@@ -4960,7 +4960,7 @@ module Crystal::HIR
           @infer_type_cache[key] = {@infer_type_cache_version, result}
         end
         if stats && stats_start
-          stats.infer_ms += (Time.monotonic - stats_start).total_milliseconds
+          stats.infer_ms += (Time.instant - stats_start).total_milliseconds
           stats.infer_calls += 1
         end
         result
@@ -8392,7 +8392,7 @@ module Crystal::HIR
       # Check if class already exists (class reopening)
       existing_info = @class_info[class_name]?
       mono_debug = ENV.has_key?("DEBUG_MONO") && (class_name.starts_with?("Hash(") || class_name.starts_with?("Set("))
-      mono_start = Time.monotonic if mono_debug
+      mono_start = Time.instant if mono_debug
       had_module_defs = @module_defs.has_key?(class_name)
       if had_module_defs
         @module_defs.delete(class_name)
@@ -8489,7 +8489,7 @@ module Crystal::HIR
         @suppress_monomorphization = @suppress_monomorphization || specialized_class
         # PASS 0: Register nested types first so method signatures and bodies can resolve them
         # (e.g., Dir::EntryIterator used as `EntryIterator` inside Dir).
-        pass0_start = Time.monotonic if mono_debug
+        pass0_start = Time.instant if mono_debug
         nested_prefix = if info = split_generic_base_and_args(class_name)
                           info[:base]
                         else
@@ -8515,7 +8515,7 @@ module Crystal::HIR
           end
         end
         if mono_debug && pass0_start
-          elapsed = (Time.monotonic - pass0_start).total_milliseconds
+          elapsed = (Time.instant - pass0_start).total_milliseconds
           STDERR.puts "[MONO] #{class_name} pass0 nested types #{elapsed.round(1)}ms"
         end
 
@@ -8553,7 +8553,7 @@ module Crystal::HIR
       @class_info_by_type_id[type_ref.id] = provisional_info
       @class_info_version += 1
 
-        defined_start = Time.monotonic if mono_debug
+        defined_start = Time.instant if mono_debug
         if ENV.has_key?("DEBUG_TYPE_RESOLVE") && class_name == "IO"
           STDERR.puts "[DEBUG_IO] About to collect_defined_instance_method_full_names for IO"
           STDERR.puts "[DEBUG_IO]   enum_info Seek keys: #{@enum_info.try(&.keys.select { |k| k.includes?("Seek") }) || "nil"}"
@@ -8561,15 +8561,15 @@ module Crystal::HIR
         defined_instance_method_full_names = collect_defined_instance_method_full_names(class_name, body)
         defined_class_method_full_names = collect_defined_class_method_full_names(class_name, body)
         if mono_debug && defined_start
-          elapsed = (Time.monotonic - defined_start).total_milliseconds
+          elapsed = (Time.instant - defined_start).total_milliseconds
           STDERR.puts "[MONO] #{class_name} collect_defined_instance_methods #{elapsed.round(1)}ms"
         end
 
         begin
-        body_start = Time.monotonic if mono_debug
+        body_start = Time.instant if mono_debug
         body.each do |expr_id|
           member = unwrap_visibility_member(@arena[expr_id])
-          member_start = mono_debug ? Time.monotonic : nil
+          member_start = mono_debug ? Time.instant : nil
           return_elapsed = nil
           param_elapsed = nil
           yield_elapsed = nil
@@ -8637,7 +8637,7 @@ module Crystal::HIR
                         else
                           "#{class_name}##{method_name}"
                         end
-            return_start = mono_debug ? Time.monotonic : nil
+            return_start = mono_debug ? Time.instant : nil
             type_literal_name = infer_type_literal_return_name_from_body(member, class_name)
             if method_name == "backend_class" &&
                (class_name == "Crystal::EventLoop" || class_name == "EventLoop")
@@ -8676,11 +8676,11 @@ module Crystal::HIR
                 return_type = literal_ref if literal_ref != TypeRef::VOID
               end
             end
-            return_elapsed = return_start ? (Time.monotonic - return_start).total_milliseconds : nil
+            return_elapsed = return_start ? (Time.instant - return_start).total_milliseconds : nil
             # Collect parameter types for mangling
             method_param_types = [] of TypeRef
             has_block = false
-            param_start = mono_debug ? Time.monotonic : nil
+            param_start = mono_debug ? Time.instant : nil
             if params = member.params
               params.each do |param|
                 next if named_only_separator?(param)
@@ -8698,7 +8698,7 @@ module Crystal::HIR
                 method_param_types << param_type
               end
             end
-            param_elapsed = param_start ? (Time.monotonic - param_start).total_milliseconds : nil
+            param_elapsed = param_start ? (Time.instant - param_start).total_milliseconds : nil
             full_name = function_full_name_for_def(base_name, method_param_types, member.params, has_block)
             alias_full_name = nil
             alias_base = nil
@@ -8743,7 +8743,7 @@ module Crystal::HIR
             # Track yield-functions for inline expansion.
             # Note: MIR lowering removes yield-containing functions (inline-only), so we must inline
             # them at call sites. We key by both base and mangled names so resolution can find them.
-            yield_start = mono_debug ? Time.monotonic : nil
+            yield_start = mono_debug ? Time.instant : nil
             if body = member.body
               if contains_yield?(body)
                 @yield_functions.add(full_name)
@@ -8766,7 +8766,7 @@ module Crystal::HIR
                 end
               end
             end
-            yield_elapsed = yield_start ? (Time.monotonic - yield_start).total_milliseconds : nil
+            yield_elapsed = yield_start ? (Time.instant - yield_start).total_milliseconds : nil
 
             # Capture initialize parameters for new()
             # Also extract ivars from shorthand: def initialize(@value : T)
@@ -8966,7 +8966,7 @@ module Crystal::HIR
             register_type_alias(alias_name, target_name)
           end
           if mono_debug && member_start
-            elapsed = (Time.monotonic - member_start).total_milliseconds
+            elapsed = (Time.instant - member_start).total_milliseconds
             if elapsed > 50.0
               detail = case member
                        when CrystalV2::Compiler::Frontend::DefNode
@@ -8988,12 +8988,12 @@ module Crystal::HIR
           end
         end
         if mono_debug && body_start
-          elapsed = (Time.monotonic - body_start).total_milliseconds
+          elapsed = (Time.instant - body_start).total_milliseconds
           STDERR.puts "[MONO] #{class_name} body scan #{elapsed.round(1)}ms"
         end
 
         # Expand module mixins: register included module instance method signatures.
-        include_start = Time.monotonic if mono_debug
+        include_start = Time.instant if mono_debug
         visited_modules = Set(String).new
         visited_extends = Set(String).new
         include_nodes.each do |inc|
@@ -9019,7 +9019,7 @@ module Crystal::HIR
           )
         end
         if mono_debug && include_start
-          elapsed = (Time.monotonic - include_start).total_milliseconds
+          elapsed = (Time.instant - include_start).total_milliseconds
           STDERR.puts "[MONO] #{class_name} include expansion #{elapsed.round(1)}ms"
         end
         ensure
@@ -9027,7 +9027,7 @@ module Crystal::HIR
           @suppress_monomorphization = old_suppress
         end
         if mono_debug && mono_start
-          elapsed = (Time.monotonic - mono_start).total_milliseconds
+          elapsed = (Time.instant - mono_start).total_milliseconds
           STDERR.puts "[MONO] register_concrete_class #{class_name} total #{elapsed.round(1)}ms"
         end
       end
@@ -9193,7 +9193,7 @@ module Crystal::HIR
       debug_hook("mono.start", "base=#{base_name} name=#{specialized_name} args=#{type_args}")
       mono_start = nil
       if ENV.has_key?("DEBUG_MONO")
-        mono_start = Time.monotonic
+        mono_start = Time.instant
         STDERR.puts "[MONO] start #{specialized_name} args=#{type_args.join(",")}"
       end
 
@@ -9227,7 +9227,7 @@ module Crystal::HIR
       end
 
       if mono_start && ENV.has_key?("DEBUG_MONO")
-        elapsed_ms = (Time.monotonic - mono_start).total_milliseconds
+        elapsed_ms = (Time.instant - mono_start).total_milliseconds
         STDERR.puts "[MONO] done #{specialized_name} in #{elapsed_ms.round(1)}ms"
       end
 
@@ -10502,7 +10502,7 @@ module Crystal::HIR
                 end
               end
             end
-            expr_start = slow_ms ? Time.monotonic : nil
+            expr_start = slow_ms ? Time.instant : nil
             if ENV["DEBUG_CALL_TRACE"]? && method_name == "copy_to"
               STDERR.puts "[LOWER_METHOD] expr=#{expr_id.index} idx=#{idx} arena=#{@arena.size}"
               begin
@@ -10527,7 +10527,7 @@ module Crystal::HIR
             end
             last_value = lower_expr(ctx, expr_id)
             if slow_ms && expr_start
-              elapsed = (Time.monotonic - expr_start).total_milliseconds
+              elapsed = (Time.instant - expr_start).total_milliseconds
               if elapsed >= slow_ms
                 snippet_label = expr_snippet ? " \"#{expr_snippet}\"" : ""
                 STDERR.puts "[LOWER_SLOW] method=#{base_name} idx=#{idx} #{elapsed.round(1)}ms#{snippet_label}"
@@ -11304,7 +11304,7 @@ module Crystal::HIR
 
     private def resolve_method_call(ctx : LoweringContext, receiver_id : ValueId, method_name : String, arg_types : Array(TypeRef), has_block_call : Bool) : String
       stats = ENV["DEBUG_LOWER_METHOD_STATS"]? ? @lower_method_stats_stack.last? : nil
-      stats_start = stats ? Time.monotonic : nil
+      stats_start = stats ? Time.instant : nil
       receiver_type = ctx.type_of(receiver_id)
       type_desc = @module.get_type_descriptor(receiver_type)
       cache_key : String? = nil
@@ -11553,7 +11553,7 @@ module Crystal::HIR
       debug_hook("method.resolve", "base=#{base_method_name} resolved=#{mangled_name} reason=fallback")
       resolved = cache_method_resolution(cache_key, mangled_name)
       if stats && stats_start
-        stats.resolve_ms += (Time.monotonic - stats_start).total_milliseconds
+        stats.resolve_ms += (Time.instant - stats_start).total_milliseconds
         stats.resolve_calls += 1
       end
       resolved
@@ -16209,10 +16209,10 @@ module Crystal::HIR
             STDERR.puts "[MAIN] start #{idx + 1}/#{main_exprs.size} #{node.class}"
           end
         end
-        expr_start = debug_main ? Time.monotonic : nil
+        expr_start = debug_main ? Time.instant : nil
         last_value = lower_expr(ctx, expr_id)
         if debug_main && expr_start
-          elapsed = (Time.monotonic - expr_start).total_milliseconds
+          elapsed = (Time.instant - expr_start).total_milliseconds
           if elapsed > slow_ms
             node = @arena[expr_id]
             snippet = nil
@@ -23274,7 +23274,7 @@ module Crystal::HIR
       time_match = time_filter && (time_filter == "1" || target_name.includes?(time_filter) || name.includes?(time_filter))
       start_time = nil
       if time_match || slow_enabled
-        start_time = Time.monotonic
+        start_time = Time.instant
         @lower_method_time_stack << LowerMethodTiming.new(target_name, name, start_time, 0.0)
         if ENV["DEBUG_LOWER_METHOD_STATS"]?
           @lower_method_stats_stack << LowerMethodStats.new
@@ -23391,7 +23391,7 @@ module Crystal::HIR
         @lowered_functions.add(target_name)
         debug_hook("function.lower.done", "name=#{target_name}")
         if start_time
-          elapsed_ms = (Time.monotonic - start_time).total_milliseconds
+          elapsed_ms = (Time.instant - start_time).total_milliseconds
           entry = @lower_method_time_stack.pop?
           child_ms = entry ? entry.child_ms : 0.0
           self_ms = elapsed_ms - child_ms
@@ -31624,9 +31624,9 @@ module Crystal::HIR
           end
         end
         if progress_match
-          start_time = Time.monotonic
+          start_time = Time.instant
           last_value = lower_expr(ctx, expr_id)
-          elapsed_ms = (Time.monotonic - start_time).total_milliseconds
+          elapsed_ms = (Time.instant - start_time).total_milliseconds
           slow_threshold = 200.0
           if threshold_str = ENV["DEBUG_LOWER_SLOW_MS"]?
             slow_threshold = threshold_str.to_f? || 200.0

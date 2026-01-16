@@ -46,14 +46,14 @@ class LSPTimingProbe
 
     return nil if content_length == 0
 
-    t0 = Time.monotonic
+    t0 = Time.instant
     body = Bytes.new(content_length)
     @output.read_fully(body)
-    t1 = Time.monotonic
+    t1 = Time.instant
     str = String.new(body)
-    t2 = Time.monotonic
+    t2 = Time.instant
     result = JSON.parse(str)
-    t3 = Time.monotonic
+    t3 = Time.instant
 
     if content_length > 100_000
       STDERR.puts "  [PROBE] large response: #{content_length} bytes, read=#{(t1-t0).total_milliseconds.round(1)}ms, string=#{(t2-t1).total_milliseconds.round(1)}ms, parse=#{(t3-t2).total_milliseconds.round(1)}ms"
@@ -65,9 +65,9 @@ class LSPTimingProbe
   def wait_for_response(id : Int32, debug = false) : JSON::Any?
     msg_count = 0
     loop do
-      t0 = Time.monotonic
+      t0 = Time.instant
       msg = read_message
-      t1 = Time.monotonic
+      t1 = Time.instant
       return nil unless msg
       msg_count += 1
 
@@ -95,9 +95,9 @@ class LSPTimingProbe
   end
 
   def timed(label : String, &)
-    start = Time.monotonic
+    start = Time.instant
     result = yield
-    elapsed = Time.monotonic - start
+    elapsed = Time.instant - start
     @timings << {label, elapsed}
     puts "  #{label}: #{format_time(elapsed)}"
     result
