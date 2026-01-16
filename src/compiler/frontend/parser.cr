@@ -3744,9 +3744,14 @@ module CrystalV2
                 skip_trivia
                 token = current_token
               else
-                exception_type = identifier_token.slice
+                # rescue ex -> bind variable, rescue all
+                variable_name = identifier_token.slice
                 token = current_token
               end
+            elsif token.kind == Token::Kind::Constant
+              exception_type = parse_type_annotation
+              skip_trivia
+              token = current_token
             end
 
             if token.kind == Token::Kind::Arrow
