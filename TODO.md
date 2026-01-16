@@ -1706,6 +1706,17 @@ end
     `String__Builder_initialize_Int32`, `Thread_threads`,
     `TupleCrystal__TupleString___Crystal__Nil__String____Int32`, `Tuple_count`, `func1030`, `func1708`,
     `realpath_DARWIN_EXTSN`, `self_to_u8_`, `set_crystal_type_id_Pointer_UInt8_`.
+- **Update (2026-02-xx)**: `./bin/crystal_v2 --no-llvm-opt bin/fib.cr -o /tmp/fib` link now reports **18** missing symbols (see `/tmp/fib_link.log`).
+  - Missing: `Crystal__EventLoop__Polling__Arena_Crystal__EventLoop__Polling__PollDescriptor__65536__unsafe_grow`,
+    `Crystal__EventLoop__Unknown_to_s_IO`, `Crystal__EventLoop__Unknown_inspect_IO`,
+    `Crystal__System__Signal_inspect`, `Crystal__System__Time_instant`,
+    `Crystal_trace_Int32_String_UInt64___Nil_NamedTuple`, `Dragonbox_to_decimal_Float32___Float64`,
+    `Exception__CallStack_decode_function_name`, `Exception__CallStack_decode_line_number`,
+    `File__Error_from_errno_String_String`, `File_fstat_Int32_Pointer`, `LibC__PATH_MAX_to_u32`,
+    `Location__Zone_inspect_IO`, `RuntimeError_from_os_error_String___Nil_Errno___WinError___WasiError___Nil_NamedTuple_double_splat`,
+    `String__Builder_initialize_Int32`, `Thread_threads`,
+    `TupleCrystal__TupleString___Crystal__Nil__String____Int32`, `func1701`,
+    `includes__Int32`, `realpath_DARWIN_EXTSN`, `self_to_u8_`, `set_crystal_type_id_Pointer_UInt8_`.
 
 ### 8.9 Grok Review Notes (2026-02-xx)
 
