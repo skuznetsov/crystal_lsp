@@ -7878,14 +7878,18 @@ module Crystal::HIR
         splat_type = TypeRef::VOID
         if !call_types.empty?
           remaining = call_types[call_index..-1]? || [] of TypeRef
-          splat_type = tuple_type_from_arg_types(remaining)
+          splat_type = tuple_type_from_arg_types(remaining, allow_void: true)
         end
         if splat_type == TypeRef::VOID
           if elem_type = param_type_map[splat_param_name.not_nil!]?
             if elem_type != TypeRef::VOID
-              splat_type = tuple_type_from_arg_types([elem_type])
+              splat_type = tuple_type_from_arg_types([elem_type], allow_void: true)
             end
           end
+        end
+        if splat_type == TypeRef::VOID
+          fallback = type_ref_for_name("Tuple")
+          splat_type = fallback if fallback != TypeRef::VOID
         end
         if splat_type != TypeRef::VOID
           param_type_map[splat_param_name.not_nil!] = splat_type
@@ -10004,14 +10008,18 @@ module Crystal::HIR
         splat_type = TypeRef::VOID
         if !call_types.empty?
           remaining = call_types[call_index..-1]? || [] of TypeRef
-          splat_type = tuple_type_from_arg_types(remaining)
+          splat_type = tuple_type_from_arg_types(remaining, allow_void: true)
         end
         if splat_type == TypeRef::VOID
           if elem_type = param_type_map[splat_param_name.not_nil!]?
             if elem_type != TypeRef::VOID
-              splat_type = tuple_type_from_arg_types([elem_type])
+              splat_type = tuple_type_from_arg_types([elem_type], allow_void: true)
             end
           end
+        end
+        if splat_type == TypeRef::VOID
+          fallback = type_ref_for_name("Tuple")
+          splat_type = fallback if fallback != TypeRef::VOID
         end
         if splat_type != TypeRef::VOID
           param_type_map[splat_param_name.not_nil!] = splat_type
@@ -10443,9 +10451,12 @@ module Crystal::HIR
       end
     end
 
-    private def tuple_type_from_arg_types(arg_types : Array(TypeRef)) : TypeRef
+    private def tuple_type_from_arg_types(
+      arg_types : Array(TypeRef),
+      allow_void : Bool = false
+    ) : TypeRef
       return TypeRef::VOID if arg_types.empty?
-      return TypeRef::VOID if arg_types.any? { |t| t == TypeRef::VOID }
+      return TypeRef::VOID if !allow_void && arg_types.any? { |t| t == TypeRef::VOID }
 
       parts = arg_types.map { |t| type_name_for_mangling(t) }
       type_ref_for_name("Tuple(#{parts.join(", ")})")
@@ -15650,14 +15661,18 @@ module Crystal::HIR
         splat_type = TypeRef::VOID
         if !call_types.empty?
           remaining = call_types[call_index..-1]? || [] of TypeRef
-          splat_type = tuple_type_from_arg_types(remaining)
+          splat_type = tuple_type_from_arg_types(remaining, allow_void: true)
         end
         if splat_type == TypeRef::VOID
           if elem_type = param_type_map[splat_param_name.not_nil!]?
             if elem_type != TypeRef::VOID
-              splat_type = tuple_type_from_arg_types([elem_type])
+              splat_type = tuple_type_from_arg_types([elem_type], allow_void: true)
             end
           end
+        end
+        if splat_type == TypeRef::VOID
+          fallback = type_ref_for_name("Tuple")
+          splat_type = fallback if fallback != TypeRef::VOID
         end
         if splat_type != TypeRef::VOID
           param_type_map[splat_param_name.not_nil!] = splat_type
@@ -26001,7 +26016,7 @@ module Crystal::HIR
       return {args, false} if splat_args.empty?
 
       splat_types = splat_args.map { |arg_id| ctx.type_of(arg_id) }
-      tuple_type = tuple_type_from_arg_types(splat_types)
+      tuple_type = tuple_type_from_arg_types(splat_types, allow_void: true)
       return {args, false} if tuple_type == TypeRef::VOID
 
       tuple_alloc = Allocate.new(ctx.next_id, tuple_type, splat_args)
