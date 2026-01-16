@@ -1854,6 +1854,9 @@ module Crystal::HIR
         @current_class = old_class
         full_alias_name = "#{lib_name}::#{alias_name}"
         register_type_alias(full_alias_name, target_name)
+      when CrystalV2::Compiler::Frontend::ConstantNode
+        return unless pass == :types
+        record_constant_definition(lib_name, String.new(node.name), node.value, @arena)
       when CrystalV2::Compiler::Frontend::EnumNode
         return unless pass == :types
         enum_name = String.new(node.name)
@@ -1875,16 +1878,21 @@ module Crystal::HIR
         type_name = String.new(node.type)
         register_extern_global(lib_name, var_name, type_name)
       when CrystalV2::Compiler::Frontend::AssignNode
-        return unless pass == :externs
         target_node = @arena[node.target]
         value_node = @arena[node.value]
-        if target_node.is_a?(CrystalV2::Compiler::Frontend::GlobalNode) &&
-           value_node.is_a?(CrystalV2::Compiler::Frontend::TypeDeclarationNode)
-          raw_name = String.new(target_node.name)
-          var_name = raw_name.lstrip('$')
-          real_name = String.new(value_node.name)
-          type_name = String.new(value_node.declared_type)
-          register_extern_global(lib_name, var_name, type_name, real_name)
+        if target_node.is_a?(CrystalV2::Compiler::Frontend::ConstantNode)
+          return unless pass == :types
+          record_constant_definition(lib_name, String.new(target_node.name), node.value, @arena)
+        else
+          return unless pass == :externs
+          if target_node.is_a?(CrystalV2::Compiler::Frontend::GlobalNode) &&
+             value_node.is_a?(CrystalV2::Compiler::Frontend::TypeDeclarationNode)
+            raw_name = String.new(target_node.name)
+            var_name = raw_name.lstrip('$')
+            real_name = String.new(value_node.name)
+            type_name = String.new(value_node.declared_type)
+            register_extern_global(lib_name, var_name, type_name, real_name)
+          end
         end
       when CrystalV2::Compiler::Frontend::MacroIfNode
         process_macro_if_in_lib(node, lib_name, pass)
@@ -13941,6 +13949,12 @@ module Crystal::HIR
         resolved = resolve_class_name_in_context(name)
         @resolved_type_name_cache[cache_key] = resolved
         return resolved
+      end
+      # Resolve relative path heads in type contexts (e.g., Location::Zone inside Time::Location).
+      resolved_path = resolve_path_string_in_context(name)
+      if resolved_path != name
+        @resolved_type_name_cache[cache_key] = resolved_path
+        return resolved_path
       end
       head = name.split("::", 2).first
       if @top_level_type_names.includes?(head)
