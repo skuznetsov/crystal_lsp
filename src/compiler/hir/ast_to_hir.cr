@@ -5412,6 +5412,9 @@ module Crystal::HIR
           end
           if member_name == "new"
             if type_str = stringify_type_expr(callee_node.object)
+              if type_str == "self" && self_type_name
+                return type_ref_for_name(self_type_name)
+              end
               if ENV["DEBUG_INFER_NEW"]? && self_type_name == "Fiber"
                 STDERR.puts "[INFER_NEW] type_str=#{type_str}"
               end
@@ -5442,7 +5445,15 @@ module Crystal::HIR
                 end
               end
               return type_ref_for_name(type_str)
-            elsif ENV["DEBUG_INFER_NEW"]? && self_type_name == "Fiber"
+            else
+              if self_type_name
+                obj_node = node_for_expr(callee_node.object)
+                if obj_node.is_a?(CrystalV2::Compiler::Frontend::SelfNode) ||
+                   (obj_node.is_a?(CrystalV2::Compiler::Frontend::IdentifierNode) && String.new(obj_node.name) == "self")
+                  return type_ref_for_name(self_type_name)
+                end
+              end
+              if ENV["DEBUG_INFER_NEW"]? && self_type_name == "Fiber"
               obj_node = node_for_expr(callee_node.object)
               obj_kind = obj_node.class.name.split("::").last
               detail = nil
@@ -5458,6 +5469,7 @@ module Crystal::HIR
               snippet_label = snippet ? " snippet=#{snippet}" : ""
               detail_label = detail ? " detail=#{detail}" : ""
               STDERR.puts "[INFER_NEW] type_str=nil obj=#{obj_kind}#{detail_label}#{snippet_label}"
+              end
             end
           elsif member_name.ends_with?("?")
             if obj_type = infer_type_from_expr(callee_node.object, self_type_name)
@@ -16499,10 +16511,12 @@ module Crystal::HIR
           base_name = name.split("$", 2).first
           next unless base_name.includes?("#") || base_name.includes?(".")
           # Skip functions with bare generic types (they need concrete instantiation)
+          base_name = name.split("$", 2).first
+          has_double_splat_def = function_def_overloads(base_name).any? { |key| key.includes?("_double_splat") }
           has_bare_generic = args.types.any? do |t|
             if desc = @module.get_type_descriptor(t)
               is_bare = !desc.name.includes?("(") && KNOWN_GENERIC_TYPES.includes?(desc.name)
-              if is_bare && desc.name == "NamedTuple" && name.includes?("_double_splat")
+              if is_bare && desc.name == "NamedTuple" && has_double_splat_def
                 false
               else
                 is_bare
@@ -23582,11 +23596,15 @@ module Crystal::HIR
       # Skip lowering functions with bare generic types when no concrete type info is available
       # This prevents emitting functions like Indexable.range_to_index_and_count$Range_Int32 which call Range#begin on bare Range
       if call_arg_types
+        has_double_splat_param = false
+        if params = func_def.params
+          has_double_splat_param = params.any?(&.is_double_splat)
+        end
         has_bare_generic = call_arg_types.any? do |t|
           if desc = @module.get_type_descriptor(t)
             # Bare generic: name without '(' but is a known generic type
             is_bare = !desc.name.includes?("(") && KNOWN_GENERIC_TYPES.includes?(desc.name)
-            if is_bare && desc.name == "NamedTuple" && name.includes?("_double_splat")
+            if is_bare && desc.name == "NamedTuple" && has_double_splat_param
               false
             else
               if ENV.has_key?("DEBUG_RANGE_SKIP") && is_bare
