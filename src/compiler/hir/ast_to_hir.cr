@@ -16501,7 +16501,12 @@ module Crystal::HIR
           # Skip functions with bare generic types (they need concrete instantiation)
           has_bare_generic = args.types.any? do |t|
             if desc = @module.get_type_descriptor(t)
-              !desc.name.includes?("(") && KNOWN_GENERIC_TYPES.includes?(desc.name)
+              is_bare = !desc.name.includes?("(") && KNOWN_GENERIC_TYPES.includes?(desc.name)
+              if is_bare && desc.name == "NamedTuple" && name.includes?("_double_splat")
+                false
+              else
+                is_bare
+              end
             else
               false
             end
@@ -23581,10 +23586,14 @@ module Crystal::HIR
           if desc = @module.get_type_descriptor(t)
             # Bare generic: name without '(' but is a known generic type
             is_bare = !desc.name.includes?("(") && KNOWN_GENERIC_TYPES.includes?(desc.name)
-            if ENV.has_key?("DEBUG_RANGE_SKIP") && is_bare
-              STDERR.puts "[RANGE_SKIP] name=#{name} bare_type=#{desc.name} skipping"
+            if is_bare && desc.name == "NamedTuple" && name.includes?("_double_splat")
+              false
+            else
+              if ENV.has_key?("DEBUG_RANGE_SKIP") && is_bare
+                STDERR.puts "[RANGE_SKIP] name=#{name} bare_type=#{desc.name} skipping"
+              end
+              is_bare
             end
-            is_bare
           else
             false
           end
