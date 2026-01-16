@@ -16391,15 +16391,19 @@ module Crystal::HIR
     # This ensures functions referenced in conditional code paths are included.
     private def emit_all_tracked_signatures
       max_iterations = 100
+      attempted = Set(String).new
+      sig_budget = ENV["CRYSTAL_V2_SIG_BUDGET"]?.try(&.to_i?) || 0
       iteration = 0
 
       while iteration < max_iterations
         # Collect all unique function names from pending arg types
-        sigs_to_lower = Set(String).new
+        sigs_to_lower = [] of String
+        sigs_seen = Set(String).new
         @pending_arg_types.each do |name, args|
           next if @module.has_function?(name)
           next if @lowered_functions.includes?(name)
           next if @lowering_functions.includes?(name)
+          next if attempted.includes?(name)
           # Skip incomplete names (must have class prefix with # or .)
           base_name = name.split("$", 2).first
           next unless base_name.includes?("#") || base_name.includes?(".")
@@ -16412,13 +16416,20 @@ module Crystal::HIR
             end
           end
           next if has_bare_generic
-          sigs_to_lower.add(name)
+          next if sigs_seen.includes?(name)
+          sigs_seen.add(name)
+          sigs_to_lower << name
         end
 
         break if sigs_to_lower.empty?
 
+        if sig_budget > 0 && sigs_to_lower.size > sig_budget
+          sigs_to_lower = sigs_to_lower.first(sig_budget)
+        end
+
         if ENV.has_key?("DEBUG_EMIT_SIGS")
-          STDERR.puts "[EMIT_SIGS] iteration=#{iteration} sigs=#{sigs_to_lower.size}"
+          budget_note = sig_budget > 0 ? " budget=#{sig_budget}" : ""
+          STDERR.puts "[EMIT_SIGS] iteration=#{iteration} sigs=#{sigs_to_lower.size}#{budget_note}"
           if iteration == 0 && sigs_to_lower.size > 0
             sigs_to_lower.first(10).each do |name|
               STDERR.puts "[EMIT_SIGS] sample: #{name}"
@@ -16427,6 +16438,7 @@ module Crystal::HIR
         end
 
         sigs_to_lower.each do |name|
+          attempted.add(name)
           lower_function_if_needed(name)
         end
 
