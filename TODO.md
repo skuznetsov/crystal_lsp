@@ -1682,3 +1682,4 @@ end
 - `exec_recursive_hash` return type infers `Hash(Tuple(UInt64, Symbol), Nil)` by recognizing `Hash(...).new` in member-access inference and `||=`.
 - Verification: `/tmp/exec_hash.hir` shows `call Fiber.current() : <non-VOID>` and `call %...Fiber#exec_recursive_hash() : Hash(...)`.
 - `bin/fib.cr` link now reports **30** missing symbols (`/tmp/fib_link.log`).
+- **Update (2026-01-xx)**: If/branch inference now uses branch-local context + unions across then/elsif/else. `Crystal::System.to_string_slice` now infers `Slice(UInt8)` (DEBUG_INFER_BODY_NAME). `bin/fib.cr` missing symbols down to **28** (`/tmp/fib_link.log`, list in `/tmp/missing_symbols_latest.txt`).

@@ -4706,7 +4706,9 @@ module Crystal::HIR
       end
       return nil unless body && !body.empty?
       old_body_context = @infer_body_context
+      old_method = @current_method
       @infer_body_context = body
+      @current_method = method_name
       begin
         return_types = [] of TypeRef
         body.each do |expr_id|
@@ -4786,6 +4788,7 @@ module Crystal::HIR
         nil
       ensure
         @infer_body_context = old_body_context
+        @current_method = old_method
       end
     end
 
@@ -5339,8 +5342,12 @@ module Crystal::HIR
                         elem_name = get_type_name_from_ref(elem_type)
                         return type_ref_for_name("Slice(#{elem_name})")
                       end
+                    elsif arg_type == TypeRef::POINTER && expr_node.args.size >= 2
+                      return type_ref_for_name("Slice(UInt8)")
                     end
                   end
+                elsif expr_node.args.size >= 2
+                  return type_ref_for_name("Slice(UInt8)")
                 end
               end
               return type_ref_for_name(type_str)
@@ -5429,10 +5436,26 @@ module Crystal::HIR
         return left_type if left_type && left_type != TypeRef::VOID
         return right_type if right_type && right_type != TypeRef::VOID
       when CrystalV2::Compiler::Frontend::IfNode
-        then_type = infer_type_from_branch(expr_node.then_body, self_type_name)
-        else_type = expr_node.else_body ? infer_type_from_branch(expr_node.else_body.not_nil!, self_type_name) : TypeRef::NIL
-        if then_type && else_type
-          return union_type_for_values(then_type, else_type)
+        types = [] of TypeRef
+        if inferred = infer_type_from_branch(expr_node.then_body, self_type_name)
+          types << inferred
+        end
+        if elsifs = expr_node.elsifs
+          elsifs.each do |branch|
+            if inferred = infer_type_from_branch(branch.body, self_type_name)
+              types << inferred
+            end
+          end
+        end
+        if else_body = expr_node.else_body
+          if inferred = infer_type_from_branch(else_body, self_type_name)
+            types << inferred
+          end
+        else
+          types << TypeRef::NIL
+        end
+        if types.any?
+          return merge_return_types(types)
         end
       when CrystalV2::Compiler::Frontend::BeginNode
         types = [] of TypeRef
@@ -5473,8 +5496,41 @@ module Crystal::HIR
       self_type_name : String?
     ) : TypeRef?
       return nil if body.empty?
-      expr_id = body.last
-      infer_type_from_expr(expr_id, self_type_name)
+      old_body_context = @infer_body_context
+      debug_name = ENV["DEBUG_INFER_BRANCH"]?
+      method_name = @current_method
+      debug_infer = debug_name && method_name && method_name.includes?(debug_name)
+      @infer_body_context = body
+      begin
+        expr_id = body.last
+        loop do
+          expr_node = @arena[expr_id]
+          case expr_node
+          when CrystalV2::Compiler::Frontend::GroupingNode
+            expr_id = expr_node.expression
+          when CrystalV2::Compiler::Frontend::MacroExpressionNode
+            expr_id = expr_node.expression
+          when CrystalV2::Compiler::Frontend::ReturnNode
+            if debug_infer
+              expr_kind = expr_node.class.name.split("::").last
+              STDERR.puts "[INFER_BRANCH] method=#{@current_method || ""} expr=#{expr_kind} inferred=nil (return)"
+            end
+            return nil
+          else
+            break
+          end
+        end
+        inferred = infer_type_from_expr(expr_id, self_type_name)
+        if debug_infer
+          expr_node = @arena[expr_id]
+          expr_kind = expr_node.class.name.split("::").last
+          inferred_name = inferred ? get_type_name_from_ref(inferred) : "nil"
+          STDERR.puts "[INFER_BRANCH] method=#{@current_method || ""} expr=#{expr_kind} inferred=#{inferred_name}"
+        end
+        inferred
+      ensure
+        @infer_body_context = old_body_context
+      end
     end
 
     private def type_ref_for_number_kind(kind : CrystalV2::Compiler::Frontend::NumberKind) : TypeRef
