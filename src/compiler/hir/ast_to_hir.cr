@@ -30399,18 +30399,32 @@ module Crystal::HIR
                        nil
                      end
 
-        if !is_constant_path && left_name && right_name
-          if enum_info = @enum_info
-            if enum_info.has_key?(left_name) && right_name[0]?.try(&.uppercase?)
-              class_name_str = nil
+        resolved_path = resolve_type_alias_chain(full_path)
+        if is_constant_path
+          if @module.is_lib?(resolved_path) ||
+             class_like_namespace?(resolved_path) ||
+             @module_defs.has_key?(resolved_path) ||
+             @enum_info.try(&.has_key?(resolved_path)) ||
+             is_module_method?(resolved_path, member_name) ||
+             primitive_self_type(resolved_path)
+            class_name_str = resolved_path
+          elsif fallback = class_method_fallback_from_module(resolved_path, member_name)
+            class_name_str = fallback
+          end
+        else
+          if left_name && right_name
+            if enum_info = @enum_info
+              if enum_info.has_key?(left_name) && right_name[0]?.try(&.uppercase?)
+                class_name_str = nil
+              else
+                class_name_str = full_path
+              end
             else
               class_name_str = full_path
             end
           else
             class_name_str = full_path
           end
-        elsif !is_constant_path
-          class_name_str = full_path
         end
         if class_name_str && @module.is_lib?(class_name_str)
           class_name_str = full_path
@@ -32113,6 +32127,7 @@ module Crystal::HIR
       end
 
       ctx.current_block = saved_block
+      ctx.restore_locals(saved_locals)
       @current_typeof_locals = old_typeof_locals
       @current_typeof_local_names = old_typeof_local_names
 
