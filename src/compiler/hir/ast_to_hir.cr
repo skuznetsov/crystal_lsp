@@ -4560,6 +4560,17 @@ module Crystal::HIR
       false
     end
 
+    private def class_method_fallback_from_module(resolved_name : String, method_name : String) : String?
+      return nil unless @module_defs.has_key?(resolved_name)
+      return nil if is_module_method?(resolved_name, method_name)
+      short_name = last_namespace_component(resolved_name)
+      return nil if short_name.empty?
+      return nil unless @class_info.has_key?(short_name) || @top_level_class_kinds.has_key?(short_name)
+      return short_name if resolve_class_method_with_inheritance(short_name, method_name)
+      return short_name if @function_types.has_key?("#{short_name}.#{method_name}") || has_function_base?("#{short_name}.#{method_name}")
+      nil
+    end
+
     private def upgrade_module_type_for_class(name : String, kind : TypeKind) : TypeRef?
       @module.types.each_with_index do |desc, idx|
         next unless desc.name == name
@@ -14095,6 +14106,12 @@ module Crystal::HIR
         result = resolved_base == info[:base] ? name : "#{resolved_base}(#{info[:args]})"
         debug_hook_type_resolve(name, @current_class || "", result)
         return result
+      end
+
+      if current = @current_class
+        if last_namespace_component(current) == name && type_name_exists?(current)
+          return current
+        end
       end
 
       result = name  # Default fallback
@@ -24415,6 +24432,9 @@ module Crystal::HIR
         if ENV["DEBUG_ENUM_PREDICATE"]? && method_name == "character_device?"
           STDERR.puts "[DEBUG_ENUM_CALL_PATH] lower_call method=#{method_name} callee=#{callee_node.class.name}"
         end
+        if ENV["DEBUG_THREAD_RESOLVE"]? && method_name == "threads"
+          STDERR.puts "[THREAD_RESOLVE_CALL] obj_node=#{obj_node.class.name} current=#{@current_class || "nil"} override=#{@current_namespace_override || "nil"}"
+        end
         if ENV["DEBUG_POINTER_LIST"]? && method_name == "new"
           if obj_name = stringify_type_expr(obj_expr)
             if obj_name.includes?("PointerLinkedList")
@@ -24520,6 +24540,11 @@ module Crystal::HIR
               end
             end
             if class_name_str.nil?
+              if fallback = class_method_fallback_from_module(resolved, method_name)
+                class_name_str = fallback
+              end
+            end
+            if class_name_str.nil?
               if class_like_namespace?(resolved) || primitive_self_type(resolved) ||
                  @enum_info.try(&.has_key?(resolved))
                 class_name_str = resolved
@@ -24532,7 +24557,7 @@ module Crystal::HIR
           end
         elsif obj_node.is_a?(CrystalV2::Compiler::Frontend::IdentifierNode)
           name = String.new(obj_node.name)
-          if ctx.lookup_local(name).nil?
+          if ctx.lookup_local(name).nil? || name[0]?.try(&.uppercase?)
             if @module.is_lib?(name)
               class_name_str = name
             else
@@ -24546,6 +24571,9 @@ module Crystal::HIR
               end
               resolved_name = resolve_class_name_in_context(name)
               resolved_name = resolve_type_alias_chain(resolved_name)
+              if ENV["DEBUG_THREAD_RESOLVE"]? && method_name == "threads"
+                STDERR.puts "[THREAD_RESOLVE] name=#{name} resolved=#{resolved_name} current=#{@current_class || "nil"} override=#{@current_namespace_override || "nil"}"
+              end
               if class_name_str.nil? && @generic_templates.has_key?(resolved_name) && method_name == "new"
                 inferred_type = infer_generic_type_arg(resolved_name, call_args, block_expr, ctx)
                 if inferred_type
@@ -24571,6 +24599,11 @@ module Crystal::HIR
                   class_name_str = resolved_name
                 elsif resolve_constant_name_in_context(name)
                   constant_receiver = true
+                end
+              end
+              if class_name_str.nil?
+                if fallback = class_method_fallback_from_module(resolved_name, method_name)
+                  class_name_str = fallback
                 end
               end
               if class_name_str.nil? && !constant_receiver
@@ -24757,6 +24790,39 @@ module Crystal::HIR
         end
 
         if class_name_str.nil?
+          raw_name = case obj_node
+                     when CrystalV2::Compiler::Frontend::IdentifierNode
+                       String.new(obj_node.name)
+                     when CrystalV2::Compiler::Frontend::ConstantNode
+                       String.new(obj_node.name)
+                     when CrystalV2::Compiler::Frontend::PathNode
+                       collect_path_string(obj_node)
+                     else
+                       nil
+                     end
+          if raw_name && raw_name[0]?.try(&.uppercase?)
+            resolved = resolve_class_name_in_context(raw_name)
+            resolved = resolve_type_alias_chain(resolved)
+            candidates = [] of String
+            candidates << resolved
+            candidates << raw_name if raw_name != resolved
+            short_name = last_namespace_component(resolved)
+            candidates << short_name unless short_name.empty? || candidates.includes?(short_name)
+            candidates.each do |candidate|
+              base = resolve_class_method_with_inheritance(candidate, method_name)
+              if base
+                class_name_str = base.split(".", 2)[0]? || candidate
+                break
+              end
+              if @function_types.has_key?("#{candidate}.#{method_name}") || has_function_base?("#{candidate}.#{method_name}")
+                class_name_str = candidate
+                break
+              end
+            end
+          end
+        end
+
+        if class_name_str.nil?
           if receiver_id.nil? && obj_node.is_a?(CrystalV2::Compiler::Frontend::IdentifierNode) && ctx.lookup_local(String.new(obj_node.name)).nil?
             obj_name = String.new(obj_node.name)
             assigned_locals = @assigned_vars_stack.last?
@@ -24923,6 +24989,29 @@ module Crystal::HIR
             ctx.mark_type_literal(receiver_id)
           end
           receiver_is_type_literal = ctx.type_literal?(receiver_id)
+          if !receiver_is_type_literal
+            raw_name = case obj_node
+                       when CrystalV2::Compiler::Frontend::IdentifierNode
+                         String.new(obj_node.name)
+                       when CrystalV2::Compiler::Frontend::ConstantNode
+                         String.new(obj_node.name)
+                       when CrystalV2::Compiler::Frontend::PathNode
+                         collect_path_string(obj_node)
+                       else
+                         nil
+                       end
+            if raw_name && raw_name[0]?.try(&.uppercase?)
+              candidate = resolve_class_name_in_context(raw_name)
+              candidate = resolve_type_alias_chain(candidate)
+              if ENV["DEBUG_THREAD_RESOLVE"]? && method_name == "threads"
+                STDERR.puts "[THREAD_RESOLVE_LIT] raw=#{raw_name} candidate=#{candidate} type_exists=#{type_name_exists?(candidate)}"
+              end
+              if type_name_exists?(candidate)
+                ctx.mark_type_literal(receiver_id)
+                receiver_is_type_literal = true
+              end
+            end
+          end
           ensure_monomorphized_type(receiver_type) unless receiver_type == TypeRef::VOID
           if ENV["DEBUG_EACH_RESOLVE"]? && method_name == "each"
             desc_name = @module.get_type_descriptor(receiver_type).try(&.name) || "nil"
