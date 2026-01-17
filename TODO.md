@@ -1840,6 +1840,7 @@ end
     - `self_to_u8_`
   - **Update (2026-02-xx)**: `Crystal__System__Time_instant` resolved by adding `Crystal::System::Time.instant`.
   - **Update (2026-02-xx)**: `includes__Int32` resolved by inferring default types for untyped params (Range literal in `Float::Printer.decimal`).
+  - **Update (2026-02-xx)**: Enum predicates and enum bracket literals lower directly to comparisons/bitwise OR; `Regex::Options#[]` no longer emitted in HIR and `_Regex__Options___` is absent from `/tmp/fib_link.log`.
 
 ### 8.9 Grok Review Notes (2026-02-xx)
 
