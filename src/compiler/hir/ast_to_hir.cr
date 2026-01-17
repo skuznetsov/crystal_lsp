@@ -10308,12 +10308,18 @@ module Crystal::HIR
       if ENV.has_key?("DEBUG_LOWER_BYTE") && (method_name == "byte_begin" || method_name == "byte_range")
         STDERR.puts "[LOWER_METHOD] START class=#{class_name} method=#{method_name} override=#{full_name_override || "nil"} arena=#{@arena.class}:#{@arena.size} modules=#{@class_included_modules[class_name]?.try(&.to_a.join(",")) || "nil"}"
       end
-
       # Check if this is a class method (def self.method_name)
       is_class_method = force_class_method || if recv = node.receiver
         String.new(recv) == "self"
       else
         false
+      end
+
+      if filter = ENV["DEBUG_METHOD_NS"]?
+        full_label = "#{class_name}#{is_class_method ? "." : "#"}#{method_name}"
+        if filter == "1" || full_label.includes?(filter)
+          STDERR.puts "[DEBUG_METHOD_NS] method=#{full_label} override=#{@current_namespace_override || "nil"}"
+        end
       end
 
       if ENV.has_key?("DEBUG_NESTED_CLASS") && (class_name.includes?("FileDescriptor") && method_name.includes?("from_stdio"))
@@ -14421,6 +14427,11 @@ module Crystal::HIR
         return result
       end
 
+      if override = @current_namespace_override
+        if last_namespace_component(override) == name && type_name_exists?(override)
+          return override
+        end
+      end
       if current = @current_class
         if last_namespace_component(current) == name && type_name_exists?(current)
           return current
