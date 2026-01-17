@@ -17182,23 +17182,49 @@ module Crystal::HIR
 
     private def lower_uninitialized(ctx : LoweringContext, node : CrystalV2::Compiler::Frontend::UninitializedNode) : ValueId
       # uninitialized Type - returns undefined value of given type
-      # Extract type name from the type expression
       type_node = @arena[node.type]
-      type_name = case type_node
-                  when CrystalV2::Compiler::Frontend::IdentifierNode
-                    String.new(type_node.name)
-                  when CrystalV2::Compiler::Frontend::ConstantNode
-                    String.new(type_node.name)
-                  when CrystalV2::Compiler::Frontend::PathNode
-                    resolve_path_string_in_context(collect_path_string(type_node))
-                  when CrystalV2::Compiler::Frontend::GenericNode
-                    # Generic type - extract base and type args
-                    base = @arena[type_node.base_type]
+      type_name = stringify_type_expr(node.type)
+      if type_name && type_name.includes?("Unknown")
+        if type_node.is_a?(CrystalV2::Compiler::Frontend::IndexNode)
+          base_node = @arena[type_node.object]
+          base_name = case base_node
+                      when CrystalV2::Compiler::Frontend::IdentifierNode
+                        String.new(base_node.name)
+                      when CrystalV2::Compiler::Frontend::ConstantNode
+                        String.new(base_node.name)
+                      when CrystalV2::Compiler::Frontend::PathNode
+                        collect_path_string(base_node)
+                      else
+                        nil
+                      end
+          if base_name
+            size_str = "0"
+            if type_node.indexes.size > 0
+              size_node = @arena[type_node.indexes[0]]
+              size_str = String.new(size_node.value) if size_node.is_a?(CrystalV2::Compiler::Frontend::NumberNode)
+            end
+            type_name = "StaticArray(#{base_name}, #{size_str})"
+          end
+        end
+      end
+      debug_hook("uninitialized.type", "type=#{type_name} node=#{type_node.class.name}")
+      type_name ||= case type_node
+                    when CrystalV2::Compiler::Frontend::IdentifierNode
+                      String.new(type_node.name)
+                    when CrystalV2::Compiler::Frontend::ConstantNode
+                      String.new(type_node.name)
+                    when CrystalV2::Compiler::Frontend::PathNode
+                      resolve_path_string_in_context(collect_path_string(type_node))
+                    when CrystalV2::Compiler::Frontend::GenericNode
+                      # Generic type - extract base and type args
+                      base = @arena[type_node.base_type]
                     base_name = case base
                                 when CrystalV2::Compiler::Frontend::IdentifierNode
                                   String.new(base.name)
                                 when CrystalV2::Compiler::Frontend::ConstantNode
                                   String.new(base.name)
+                                when CrystalV2::Compiler::Frontend::PathNode
+                                  resolve_path_string_in_context(collect_path_string(base))
                                 else
                                   "Unknown"
                                 end
@@ -17209,38 +17235,42 @@ module Crystal::HIR
                         String.new(arg.name)
                       when CrystalV2::Compiler::Frontend::ConstantNode
                         String.new(arg.name)
+                      when CrystalV2::Compiler::Frontend::PathNode
+                        resolve_path_string_in_context(collect_path_string(arg))
                       else
                         "Unknown"
                       end
                     end
                     "#{base_name}(#{type_args.join(", ")})"
-                  when CrystalV2::Compiler::Frontend::IndexNode
-                    # Static array type: UInt8[256] -> StaticArray(UInt8, 256)
-                    base = @arena[type_node.object]
+                    when CrystalV2::Compiler::Frontend::IndexNode
+                      # Static array type: UInt8[256] -> StaticArray(UInt8, 256)
+                      base = @arena[type_node.object]
                     base_name = case base
                                 when CrystalV2::Compiler::Frontend::IdentifierNode
                                   String.new(base.name)
                                 when CrystalV2::Compiler::Frontend::ConstantNode
                                   String.new(base.name)
+                                when CrystalV2::Compiler::Frontend::PathNode
+                                  resolve_path_string_in_context(collect_path_string(base))
                                 else
                                   "Unknown"
                                 end
-                    # Get size from first index
-                    if type_node.indexes.size > 0
-                      size_node = @arena[type_node.indexes[0]]
-                      size_str = case size_node
-                                 when CrystalV2::Compiler::Frontend::NumberNode
-                                   String.new(size_node.value)
-                                 else
-                                   "0"
-                                 end
-                      "StaticArray(#{base_name}, #{size_str})"
+                      # Get size from first index
+                      if type_node.indexes.size > 0
+                        size_node = @arena[type_node.indexes[0]]
+                        size_str = case size_node
+                                   when CrystalV2::Compiler::Frontend::NumberNode
+                                     String.new(size_node.value)
+                                   else
+                                     "0"
+                                   end
+                        "StaticArray(#{base_name}, #{size_str})"
+                      else
+                        "StaticArray(#{base_name}, 0)"
+                      end
                     else
-                      "StaticArray(#{base_name}, 0)"
+                      "Unknown"
                     end
-                  else
-                    "Unknown"
-                  end
 
       type_ref = type_ref_for_name(type_name)
 
@@ -33063,6 +33093,9 @@ module Crystal::HIR
 
         # Reconstruct with substituted params
         substituted_name = "#{base_name}(#{substituted_params.join(", ")})"
+        if base_name == "StaticArray"
+          debug_hook("type.static_array", "name=#{lookup_name} substituted=#{substituted_name} params=#{substituted_params.join(", ")}")
+        end
         if substituted_name != lookup_name
           # Types changed - recurse with new name
           return type_ref_for_name(substituted_name)
@@ -33104,6 +33137,10 @@ module Crystal::HIR
                       end
                     end
         result = @module.intern_type(TypeDescriptor.new(type_kind, substituted_name, type_params))
+        if base_name == "StaticArray"
+          desc = @module.get_type_descriptor(result)
+          debug_hook("type.static_array.result", "name=#{desc ? desc.name : "?"} params=#{type_params.map { |t| get_type_name_from_ref(t) }.join(", ")}")
+        end
         store_type_cache(cache_key, result)
 
         # Trigger monomorphization if this is a generic class/struct template
