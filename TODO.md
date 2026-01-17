@@ -1773,6 +1773,7 @@ end
     - `Crystal_trace_Int32_String_UInt64___Nil_NamedTuple`
     - `Dragonbox_to_decimal_Float32___Float64`
     - `Exception__CallStack_decode_function_name`, `Exception__CallStack_decode_line_number`
+  - **Update (2026-02-xx)**: `Thread.threads` now resolves as a class method with AST cache enabled (cache version bumped to 30). `Thread_threads` is absent from `/private/tmp/fib.hir`.
     - `RuntimeError_from_os_error_String___Nil_Errno___WinError___WasiError___Nil_NamedTuple_double_splat`
     - `Thread_threads`
     - `func1781`
