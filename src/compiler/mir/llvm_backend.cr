@@ -5168,8 +5168,15 @@ module Crystal::MIR
         end
       end
 
-      # Mangle the extern name to be a valid LLVM identifier
+      # Mangle the extern name to be a valid LLVM identifier.
+      # Preserve '$' for platform-specific C symbols like realpath$DARWIN_EXTSN.
       mangled_extern_name = @type_mapper.mangle_name(inst.extern_name)
+      if inst.extern_name.includes?("$") &&
+         !inst.extern_name.includes?("::") &&
+         !inst.extern_name.includes?("#") &&
+         !inst.extern_name.includes?(".")
+        mangled_extern_name = inst.extern_name
+      end
 
       # Handle Pointer.new / Pointer.new! - convert integer to pointer
       if mangled_extern_name.starts_with?("Pointer_") && (mangled_extern_name.includes?("__new") || mangled_extern_name.includes?("_new_")) && inst.args.size == 1
