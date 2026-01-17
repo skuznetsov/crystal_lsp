@@ -34,6 +34,7 @@ module CrystalV2
         @allow_in_operator : Bool  # Disable `in` operator when parsing case value
         # Streaming tokenization support
         @streaming : Bool
+        @lib_depth : Int32
         @lexer : Lexer?
         @source : String
         @keep_trivia : Bool
@@ -73,6 +74,7 @@ module CrystalV2
           @in_macro_expression = false  # Not in macro expression initially
           @allow_pointer_suffix = 0
           @allow_in_operator = true
+          @lib_depth = 0
           @streaming = ENV["CRYSTAL_V2_PARSER_STREAM"]? != nil
           @expect_context = nil
           @parsing_method_params = false
@@ -188,6 +190,7 @@ module CrystalV2
           @macro_expr_synth_index = nil
           @macro_expr_brace_cache = Hash(Int32, Bool).new
           @allow_inline_rescue = true
+          @lib_depth = 0
           if @streaming
             @lexer = lexer
             @keep_trivia = ENV["CRYSTAL_V2_PARSER_KEEP_TRIVIA"]? != nil
@@ -1699,6 +1702,7 @@ module CrystalV2
 
         private def union_definition_start?(token : Token) : Bool
           return false unless token.kind == Token::Kind::Union
+          return false if @lib_depth <= 0
           next_tok = peek_next_non_trivia
           next_tok.kind == Token::Kind::Identifier
         end
@@ -6171,94 +6175,98 @@ module CrystalV2
           advance
 
           consume_newlines
-
-          body_ids_b = SmallVec(ExprId, 4).new
-          loop do
-            skip_trivia
-            # Consume semicolons as statement separators at start of lib body loop
-            while current_token.kind == Token::Kind::Semicolon
-              advance
+          @lib_depth += 1
+          begin
+            body_ids_b = SmallVec(ExprId, 4).new
+            loop do
               skip_trivia
-            end
-            token = current_token
-            break if token.kind == Token::Kind::End
-            break if token.kind == Token::Kind::EOF
+              # Consume semicolons as statement separators at start of lib body loop
+              while current_token.kind == Token::Kind::Semicolon
+                advance
+                skip_trivia
+              end
+              token = current_token
+              break if token.kind == Token::Kind::End
+              break if token.kind == Token::Kind::EOF
 
-            if token.kind == Token::Kind::InstanceVar
-              next_token = peek_next_non_trivia
-              if next_token.kind == Token::Kind::Colon
-                expr = parse_instance_var_decl
-              else
-                expr = parse_statement
-              end
-            elsif token.kind == Token::Kind::ClassVar
-              next_token = peek_next_non_trivia
-              if next_token.kind == Token::Kind::Colon
-                expr = parse_class_var_decl
-              else
-                expr = parse_statement
-              end
-            elsif token.kind == Token::Kind::Identifier && slice_eq?(token.slice, "type")
-              expr = parse_lib_type_alias
-            elsif definition_start?
-              expr = case current_token.kind
-                when Token::Kind::Def
-                  parse_def
-                when Token::Kind::Fun
-                  parse_fun
-                when Token::Kind::Class
-                  parse_class
-                when Token::Kind::Module
-                  parse_module
-                when Token::Kind::Struct
-                  parse_struct
-                when Token::Kind::Union
-                  parse_union
-                when Token::Kind::Enum
-                  parse_enum
-                when Token::Kind::Alias
-                  parse_alias
-                when Token::Kind::Annotation
-                  # Phase 92: annotation definition
-                  parse_annotation_def
-                when Token::Kind::Abstract
-                  parse_abstract
-                when Token::Kind::Private
-                  parse_private
-                when Token::Kind::Protected
-                  parse_protected
+              if token.kind == Token::Kind::InstanceVar
+                next_token = peek_next_non_trivia
+                if next_token.kind == Token::Kind::Colon
+                  expr = parse_instance_var_decl
                 else
-                  parse_statement
+                  expr = parse_statement
                 end
-            else
-              expr = parse_statement
-            end
-            body_ids_b << expr unless expr.invalid?
-            consume_newlines
-            # Also consume semicolons as statement terminators in lib context
-            while current_token.kind == Token::Kind::Semicolon
-              advance
+              elsif token.kind == Token::Kind::ClassVar
+                next_token = peek_next_non_trivia
+                if next_token.kind == Token::Kind::Colon
+                  expr = parse_class_var_decl
+                else
+                  expr = parse_statement
+                end
+              elsif token.kind == Token::Kind::Identifier && slice_eq?(token.slice, "type")
+                expr = parse_lib_type_alias
+              elsif definition_start?
+                expr = case current_token.kind
+                  when Token::Kind::Def
+                    parse_def
+                  when Token::Kind::Fun
+                    parse_fun
+                  when Token::Kind::Class
+                    parse_class
+                  when Token::Kind::Module
+                    parse_module
+                  when Token::Kind::Struct
+                    parse_struct
+                  when Token::Kind::Union
+                    parse_union
+                  when Token::Kind::Enum
+                    parse_enum
+                  when Token::Kind::Alias
+                    parse_alias
+                  when Token::Kind::Annotation
+                    # Phase 92: annotation definition
+                    parse_annotation_def
+                  when Token::Kind::Abstract
+                    parse_abstract
+                  when Token::Kind::Private
+                    parse_private
+                  when Token::Kind::Protected
+                    parse_protected
+                  else
+                    parse_statement
+                  end
+              else
+                expr = parse_statement
+              end
+              body_ids_b << expr unless expr.invalid?
               consume_newlines
+              # Also consume semicolons as statement terminators in lib context
+              while current_token.kind == Token::Kind::Semicolon
+                advance
+                consume_newlines
+              end
             end
-          end
 
-          expect_identifier("end")
-          end_token = previous_token
-          consume_newlines
+            expect_identifier("end")
+            end_token = previous_token
+            consume_newlines
 
-          lib_span = if end_token
-            lib_token.span.cover(end_token.span)
-          else
-            lib_token.span
-          end
+            lib_span = if end_token
+              lib_token.span.cover(end_token.span)
+            else
+              lib_token.span
+            end
 
-          @arena.add_typed(
-            LibNode.new(
-              lib_span,
-              name_token.slice,
-              body_ids_b.to_a
+            return @arena.add_typed(
+              LibNode.new(
+                lib_span,
+                name_token.slice,
+                body_ids_b.to_a
+              )
             )
-          )
+          ensure
+            @lib_depth -= 1
+          end
         end
 
         private def parse_lib_type_alias : ExprId
@@ -7592,8 +7600,8 @@ module CrystalV2
                 skip_trivia
 
                 # Parse type as expression (following original parser pattern)
-                # This handles: Int32, String, Foo::Bar, Array(Int32), etc.
-                type_expr = parse_expression(0)
+                # This handles: Int32, String, Foo::Bar, Array(Int32), Void*, etc.
+                type_expr = with_pointer_suffix { parse_expression(0) }
                 return PREFIX_ERROR if type_expr.invalid?
 
                 # Create UninitializedNode
@@ -8285,7 +8293,7 @@ module CrystalV2
 
             # Treat trailing '*' as a pointer suffix in type-ish contexts (Void*, Foo**)
             if @allow_pointer_suffix > 0 && token.kind == Token::Kind::Star
-              next_tok = peek_next_non_trivia
+              next_tok = peek_next_non_space_or_comment
               if pointer_suffix_delimiter?(next_tok)
                 star_token = token
                 advance
@@ -12277,6 +12285,18 @@ module CrystalV2
             token = peek_token(offset)
             return token unless token.kind == Token::Kind::Whitespace ||
                                token.kind == Token::Kind::Newline ||
+                               token.kind == Token::Kind::Comment
+            offset += 1
+          end
+        end
+
+        # Peek ahead, skipping whitespace/comments but preserving newlines.
+        # Useful for pointer suffix parsing where line breaks terminate a type.
+        private def peek_next_non_space_or_comment
+          offset = 1
+          loop do
+            token = peek_token(offset)
+            return token unless token.kind == Token::Kind::Whitespace ||
                                token.kind == Token::Kind::Comment
             offset += 1
           end
