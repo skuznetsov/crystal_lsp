@@ -27,10 +27,10 @@ module Float::Printer
       decimal_exponent = 0
       case pos_v
       when Float32
-        sig32, decimal_exponent = Dragonbox.to_decimal(pos_v.unsafe_as(Float32))
+        sig32, decimal_exponent = Float::Printer::Dragonbox.to_decimal(pos_v.unsafe_as(Float32))
         significand = sig32.to_u64
       when Float64
-        significand, decimal_exponent = Dragonbox.to_decimal(pos_v.unsafe_as(Float64))
+        significand, decimal_exponent = Float::Printer::Dragonbox.to_decimal(pos_v.unsafe_as(Float64))
       end
 
       # remove trailing zeros
