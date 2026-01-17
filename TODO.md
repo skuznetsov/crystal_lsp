@@ -1863,6 +1863,7 @@ end
     - Evidence: `/private/tmp/fib.hir` shows `func @Crystal.trace$Int32_String(...)` and `func @Crystal.trace$Int32_String_UInt64 | Nil_NamedTuple(...)` bodies with `return` only (no `yield`).
     - `Crystal.trace` callsites no longer bind to yield-only defs (no `yield` in trace bodies).
   - Update (2026-02-xx): anonymous block params now set `Parameter#is_block` by construction; AST cache bumped to v32 to invalidate old param flags.
+  - Update (2026-02-xx): pre-scan constants in nested module/class bodies so reopened types expose outer constants before nested class inference. `Time::Format::DAY_NAMES` now resolves in `Time::Format::Formatter`; `get_day_name`/`get_short_day_name` infer `String` (DEBUG_PRE_SCAN_CONST/DEBUG_INFER_INDEX). Current llc failure moved to `Symbol_needs_quotes_for_named_argument__Nil` (`/tmp/fib.ll:59523`).
   - Update (2026-02-xx): `./bin/crystal_v2 --no-llvm-opt --no-llvm-metadata bin/fib.cr -o /tmp/fib` now fails at llc with `@**$Float` argument type mismatch (`/tmp/fib.ll:34817`) instead of missing `Crystal_trace`.
   - Update (2026-02-xx): sanitized unsafe extern names; llc now fails with type mismatch `%r20` is `ptr` but used as `i32` in `icmp` (see `/tmp/fib.ll:59546`, `Time::Format::Formatter#get_short_day_name`).
 
