@@ -3028,6 +3028,17 @@ module Crystal::HIR
       nil
     end
 
+    private def hash_value_type_for_type_name(type_name : String) : String?
+      name = type_name.strip
+      return nil unless name.starts_with?("Hash(") && name.ends_with?(")")
+      paren = name.index('(')
+      return nil unless paren
+      params_str = name[paren + 1, name.size - paren - 2]
+      args = split_generic_type_args(params_str)
+      return nil unless args.size >= 2
+      args[1]
+    end
+
     private def array_element_type_for_value(
       ctx : LoweringContext,
       array_id : ValueId,
@@ -4789,8 +4800,10 @@ module Crystal::HIR
       return nil unless body && !body.empty?
       old_body_context = @infer_body_context
       old_method = @current_method
+      old_class = @current_class
       @infer_body_context = body
       @current_method = method_name
+      @current_class = self_type_name if self_type_name
       begin
         return_types = [] of TypeRef
         body.each do |expr_id|
@@ -4871,6 +4884,7 @@ module Crystal::HIR
       ensure
         @infer_body_context = old_body_context
         @current_method = old_method
+        @current_class = old_class
       end
     end
 
@@ -5134,7 +5148,14 @@ module Crystal::HIR
         end
       when CrystalV2::Compiler::Frontend::ConstantNode
         name = String.new(expr_node.name)
-        if resolved = resolve_constant_name_in_context(name)
+        resolved = resolve_constant_name_in_context(name)
+        if debug_filter = ENV["DEBUG_INFER_CONST"]?
+          if debug_filter == "1" || name.includes?(debug_filter) || (resolved && resolved.includes?(debug_filter))
+            type_name = resolved ? @constant_types[resolved]?.try { |t| get_type_name_from_ref(t) } : nil
+            STDERR.puts "[INFER_CONST] name=#{name} resolved=#{resolved || "nil"} type=#{type_name || "nil"}"
+          end
+        end
+        if resolved
           if const_type = @constant_types[resolved]?
             return const_type if const_type != TypeRef::VOID
           end
@@ -5254,7 +5275,14 @@ module Crystal::HIR
           return type_ref_for_name(self_type_name)
         end
         if name[0]?.try(&.uppercase?)
-          if resolved = resolve_constant_name_in_context(name)
+          resolved = resolve_constant_name_in_context(name)
+          if debug_filter = ENV["DEBUG_INFER_CONST"]?
+            if debug_filter == "1" || name.includes?(debug_filter) || (resolved && resolved.includes?(debug_filter))
+              type_name = resolved ? @constant_types[resolved]?.try { |t| get_type_name_from_ref(t) } : nil
+              STDERR.puts "[INFER_CONST] ident=#{name} resolved=#{resolved || "nil"} type=#{type_name || "nil"}"
+            end
+          end
+          if resolved
             if const_type = @constant_types[resolved]?
               return const_type if const_type != TypeRef::VOID
             end
@@ -5366,6 +5394,16 @@ module Crystal::HIR
           owner_name = self_type_name || @current_class
           if inferred = infer_class_var_type_from_owner(owner_name, name)
             cvar_type = inferred
+          end
+          if cvar_type == TypeRef::VOID && owner_name && owner_name.includes?("::")
+            parts = owner_name.split("::")
+            (parts.size - 1).downto(1) do |i|
+              parent_name = parts[0, i].join("::")
+              if inferred = infer_class_var_type_from_owner(parent_name, name)
+                cvar_type = inferred
+                break
+              end
+            end
           end
         end
         return cvar_type if cvar_type != TypeRef::VOID
@@ -5529,6 +5567,48 @@ module Crystal::HIR
           if cached = @function_base_return_types[method_name]?
             return cached if cached != TypeRef::VOID
           end
+        end
+      when CrystalV2::Compiler::Frontend::IndexNode
+        debug_filter = ENV["DEBUG_INFER_INDEX"]?
+        debug_enabled = debug_filter && (debug_filter == "1" || (@current_method && @current_method.not_nil!.includes?(debug_filter)))
+        obj_type = infer_type_from_expr(expr_node.object, self_type_name)
+        if obj_type
+          if obj_type == TypeRef::VOID
+            if debug_enabled
+              STDERR.puts "[INFER_INDEX] method=#{@current_method || ""} self=#{self_type_name || "nil"} obj=Void idxs=#{expr_node.indexes.size}"
+            end
+            return nil
+          end
+          desc = @module.get_type_descriptor(obj_type)
+          type_name = desc ? desc.name : get_type_name_from_ref(obj_type)
+          if debug_enabled
+            STDERR.puts "[INFER_INDEX] method=#{@current_method || ""} self=#{self_type_name || "nil"} obj=#{type_name} idxs=#{expr_node.indexes.size}"
+          end
+          if type_name == "String"
+            if expr_node.indexes.size >= 2 ||
+               expr_node.indexes.any? { |idx| node_for_expr(idx).is_a?(CrystalV2::Compiler::Frontend::RangeNode) }
+              return TypeRef::STRING
+            end
+            return TypeRef::CHAR
+          end
+          if type_name.starts_with?("Hash(")
+            if desc && desc.type_params.size >= 2
+              value_ref = desc.type_params[1]
+              return value_ref if value_ref != TypeRef::VOID
+            end
+            if value_name = hash_value_type_for_type_name(type_name)
+              value_ref = type_ref_for_name(value_name)
+              return value_ref if value_ref != TypeRef::VOID
+            end
+          end
+          if elem_name = element_type_for_type_name(type_name)
+            elem_ref = type_ref_for_name(elem_name)
+            return elem_ref if elem_ref != TypeRef::VOID
+          end
+        elsif debug_enabled
+          obj_node = node_for_expr(expr_node.object)
+          obj_kind = obj_node ? obj_node.class.name.split("::").last : "nil"
+          STDERR.puts "[INFER_INDEX] method=#{@current_method || ""} self=#{self_type_name || "nil"} obj=nil obj_kind=#{obj_kind} idxs=#{expr_node.indexes.size}"
         end
       when CrystalV2::Compiler::Frontend::UnaryNode
         op = String.new(expr_node.operator)
@@ -13800,6 +13880,11 @@ module Crystal::HIR
 
     private def resolve_constant_name_in_context(name : String) : String?
       return nil if name.empty?
+      if debug_filter = ENV["DEBUG_CONST_LOOKUP"]?
+        if debug_filter == "1" || name.includes?(debug_filter)
+          STDERR.puts "[CONST_LOOKUP] name=#{name} current=#{@current_class || "nil"} override=#{@current_namespace_override || "nil"}"
+        end
+      end
       return name if constant_name_exists?(name)
 
       if name.includes?("::")
@@ -13827,6 +13912,11 @@ module Crystal::HIR
         parts = namespace.split("::")
         while parts.size > 0
           qualified_name = (parts + [name]).join("::")
+          if debug_filter = ENV["DEBUG_CONST_LOOKUP"]?
+            if debug_filter == "1" || name.includes?(debug_filter)
+              STDERR.puts "[CONST_LOOKUP] try=#{qualified_name} exists=#{constant_name_exists?(qualified_name)}"
+            end
+          end
           return qualified_name if constant_name_exists?(qualified_name)
           parts.pop
         end

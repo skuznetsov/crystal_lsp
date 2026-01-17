@@ -241,6 +241,90 @@ module Crystal::V2
       end
       hir_converter.seed_top_level_class_kinds(top_level_class_kinds)
 
+      # Pre-scan constant definitions so nested classes can resolve outer constants
+      # across reopened types (require order interleaves files).
+      debug_filter = ENV["DEBUG_PRE_SCAN_CONST"]?
+      scan_constants_in_body = ->(
+        owner : String,
+        arena : CrystalV2::Compiler::Frontend::ArenaLike,
+        body : Array(CrystalV2::Compiler::Frontend::ExprId)
+      ) do
+        stack = [body]
+        while current = stack.pop?
+          current.each do |expr_id|
+            expr_node = arena[expr_id]
+            while expr_node.is_a?(CrystalV2::Compiler::Frontend::VisibilityModifierNode)
+              expr_node = arena[expr_node.expression]
+            end
+            case expr_node
+            when CrystalV2::Compiler::Frontend::BlockNode
+              stack << expr_node.body
+            when CrystalV2::Compiler::Frontend::ConstantNode
+              if debug_filter && (debug_filter == "1" || String.new(expr_node.name) == debug_filter)
+                path = paths_by_arena[arena]? || "(unknown)"
+                STDERR.puts "[PRE_SCAN_CONST] owner=#{owner} name=#{String.new(expr_node.name)} file=#{path}"
+              end
+              hir_converter.register_constant(expr_node, owner)
+            when CrystalV2::Compiler::Frontend::AssignNode
+              target = arena[expr_node.target]
+              if target.is_a?(CrystalV2::Compiler::Frontend::ConstantNode)
+                if debug_filter && (debug_filter == "1" || String.new(target.name) == debug_filter)
+                  path = paths_by_arena[arena]? || "(unknown)"
+                  STDERR.puts "[PRE_SCAN_CONST] owner=#{owner} name=#{String.new(target.name)} file=#{path}"
+                end
+                hir_converter.register_constant_value(String.new(target.name), expr_node.value, arena, owner)
+              end
+            end
+          end
+        end
+      end
+
+      scan_module_body = ->(
+        prefix : String,
+        arena : CrystalV2::Compiler::Frontend::ArenaLike,
+        body : Array(CrystalV2::Compiler::Frontend::ExprId)
+      ) do
+        stack = [{prefix: prefix, body: body}]
+        while current = stack.pop?
+          current[:body].each do |expr_id|
+            expr_node = arena[expr_id]
+            while expr_node.is_a?(CrystalV2::Compiler::Frontend::VisibilityModifierNode)
+              expr_node = arena[expr_node.expression]
+            end
+            case expr_node
+            when CrystalV2::Compiler::Frontend::ModuleNode
+              next unless mod_body = expr_node.body
+              name = String.new(expr_node.name)
+              full_name = current[:prefix].empty? ? name : "#{current[:prefix]}::#{name}"
+              stack << {prefix: full_name, body: mod_body}
+            when CrystalV2::Compiler::Frontend::ClassNode
+              next unless class_body = expr_node.body
+              name = String.new(expr_node.name)
+              full_name = if current[:prefix].empty? || name.includes?("::")
+                            name
+                          else
+                            "#{current[:prefix]}::#{name}"
+                          end
+              scan_constants_in_body.call(full_name, arena, class_body)
+            end
+          end
+        end
+      end
+
+      class_nodes.each do |class_node, arena|
+        next unless body = class_node.body
+        hir_converter.arena = arena
+        class_name = String.new(class_node.name)
+        scan_constants_in_body.call(class_name, arena, body)
+      end
+
+      module_nodes.each do |module_node, arena|
+        next unless body = module_node.body
+        hir_converter.arena = arena
+        module_name = String.new(module_node.name)
+        scan_module_body.call(module_name, arena, body)
+      end
+
       # Three-pass approach:
       # Pass 1: Register all enums, modules, class types and their methods
       pass1_start = Time.instant if debug_hir_timings
