@@ -8129,6 +8129,14 @@ module CrystalV2
               skip_trivia
             end
             token = current_token
+            if token.kind == Token::Kind::Newline && !inside_delimiters?
+              next_token = peek_next_non_space_or_comment
+              if (next_token.kind == Token::Kind::Operator && slice_eq?(next_token.slice, ".")) ||
+                 next_token.kind == Token::Kind::AmpDot
+                advance
+                next
+              end
+            end
             debug("parse_expression(#{precedence}): postfix loop, token=#{token.kind}")
             # Treat do..end blocks as a statement boundary during expression parsing,
             # unless the current expression can accept a trailing block.
