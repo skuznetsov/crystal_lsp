@@ -25409,6 +25409,17 @@ module Crystal::HIR
               class_name_str = "LibIntrinsics"
             end
           end
+          if method_name == "[]"
+            enum_name = resolve_enum_name(class_name_str)
+            if enum_name.nil? && @enum_info.try(&.has_key?(class_name_str))
+              enum_name = class_name_str
+            end
+            if enum_name
+              if value_id = lower_enum_bracket_call(ctx, enum_name, call_args, call_arena)
+                return value_id
+              end
+            end
+          end
           if macro_lookup = lookup_macro_entry_with_inheritance(method_name, class_name_str)
             macro_entry, macro_key = macro_lookup
             macro_def, macro_arena = macro_entry
@@ -30514,6 +30525,35 @@ module Crystal::HIR
     private def lower_index(ctx : LoweringContext, node : CrystalV2::Compiler::Frontend::IndexNode) : ValueId
       object_id = lower_expr(ctx, node.object)
       obj_node = @arena[node.object]
+      enum_name = nil
+      case obj_node
+      when CrystalV2::Compiler::Frontend::ConstantNode
+        name = String.new(obj_node.name)
+        resolved = resolve_class_name_in_context(name)
+        resolved = resolve_type_alias_chain(resolved)
+        enum_name = resolve_enum_name(resolved) || (@enum_info.try(&.has_key?(resolved)) ? resolved : nil)
+      when CrystalV2::Compiler::Frontend::IdentifierNode
+        name = String.new(obj_node.name)
+        if ctx.lookup_local(name).nil?
+          resolved = resolve_class_name_in_context(name)
+          resolved = resolve_type_alias_chain(resolved)
+          enum_name = resolve_enum_name(resolved) || (@enum_info.try(&.has_key?(resolved)) ? resolved : nil)
+        end
+      when CrystalV2::Compiler::Frontend::PathNode
+        raw_path = collect_path_string(obj_node)
+        full_path = if path_is_absolute?(obj_node)
+                      raw_path.starts_with?("::") ? raw_path[2..] : raw_path
+                    else
+                      resolve_path_string_in_context(raw_path)
+                    end
+        resolved = resolve_type_alias_chain(full_path)
+        enum_name = resolve_enum_name(resolved) || (@enum_info.try(&.has_key?(resolved)) ? resolved : nil)
+      end
+      if enum_name
+        if value_id = lower_enum_bracket_call(ctx, enum_name, node.indexes, @arena)
+          return value_id
+        end
+      end
 
       # Check if any index is a Range - if so, this is a slice operation
       # Need to check BEFORE lowering the indices so we can handle Range specially
@@ -30770,14 +30810,47 @@ module Crystal::HIR
     private def lower_enum_predicate(ctx : LoweringContext, object_id : ValueId, member_name : String) : ValueId?
       return nil unless member_name.ends_with?("?")
       enum_name = @enum_value_types.try(&.[object_id]?)
-      return nil unless enum_name
-      members = enum_members_for_type_name(enum_name)
+      type_name = get_type_name_from_ref(ctx.type_of(object_id))
+      if enum_name.nil? && !type_name.empty?
+        enum_name = resolve_enum_name(type_name)
+        if enum_name.nil?
+          candidates = [] of String
+          if type_name.ends_with?("?")
+            candidates << type_name[0...-1]
+          elsif type_name.includes?("|")
+            candidates.concat(type_name.split("|").map(&.strip))
+          end
+          candidates.each do |candidate|
+            if resolved = resolve_enum_name(candidate)
+              enum_name = resolved
+              break
+            end
+          end
+        end
+        if enum_name
+          (@enum_value_types ||= {} of ValueId => String)[object_id] = enum_name
+        end
+      end
+      enum_key = enum_name || type_name
+      return nil if enum_key.empty?
+      members = enum_members_for_type_name(enum_key)
       return nil unless members
+      enum_name ||= resolve_enum_name(type_name) || enum_key
 
       # Try to match the predicate to an enum member (e.g., "data1?" -> "Data1").
       base_name = member_name[0...-1]
       target = underscore_lower(base_name)
       member_match = members.keys.find { |m| underscore_lower(m) == target }
+      if member_match.nil? && target == "none"
+        enum_type = enum_base_type(enum_name)
+        lit = Literal.new(ctx.next_id, enum_type, 0_i64)
+        ctx.emit(lit)
+        ctx.register_type(lit.id, enum_type)
+        cmp = BinaryOperation.new(ctx.next_id, TypeRef::BOOL, BinaryOp::Eq, object_id, lit.id)
+        ctx.emit(cmp)
+        ctx.register_type(cmp.id, TypeRef::BOOL)
+        return cmp.id
+      end
       return nil unless member_match
 
       member_value = members[member_match]
@@ -30789,6 +30862,93 @@ module Crystal::HIR
       ctx.emit(cmp)
       ctx.register_type(cmp.id, TypeRef::BOOL)
       cmp.id
+    end
+
+    private def lower_enum_bracket_call(
+      ctx : LoweringContext,
+      enum_name : String,
+      call_args : Array(ExprId),
+      call_arena : CrystalV2::Compiler::Frontend::ArenaLike
+    ) : ValueId?
+      members = enum_members_for_type_name(enum_name)
+      return nil unless members
+
+      enum_type = enum_base_type(enum_name)
+      value_ids = [] of ValueId
+
+      if call_args.empty?
+        lit = Literal.new(ctx.next_id, enum_type, 0_i64)
+        ctx.emit(lit)
+        ctx.register_type(lit.id, enum_type)
+        (@enum_value_types ||= {} of ValueId => String)[lit.id] = enum_name
+        return lit.id
+      end
+
+      call_args.each do |arg_expr|
+        arg_node = call_arena[arg_expr]
+        value_id : ValueId? = nil
+
+        case arg_node
+        when CrystalV2::Compiler::Frontend::SymbolNode
+          if value = enum_member_value(enum_name, String.new(arg_node.name))
+            lit = Literal.new(ctx.next_id, enum_type, value)
+            ctx.emit(lit)
+            ctx.register_type(lit.id, enum_type)
+            value_id = lit.id
+          end
+        when CrystalV2::Compiler::Frontend::IdentifierNode
+          name = String.new(arg_node.name)
+          if ctx.lookup_local(name).nil?
+            if value = members[name]?
+              lit = Literal.new(ctx.next_id, enum_type, value)
+              ctx.emit(lit)
+              ctx.register_type(lit.id, enum_type)
+              value_id = lit.id
+            end
+          end
+        when CrystalV2::Compiler::Frontend::ConstantNode
+          name = String.new(arg_node.name)
+          if value = members[name]?
+            lit = Literal.new(ctx.next_id, enum_type, value)
+            ctx.emit(lit)
+            ctx.register_type(lit.id, enum_type)
+            value_id = lit.id
+          end
+        when CrystalV2::Compiler::Frontend::PathNode
+          path = with_arena(call_arena) { collect_path_string(arg_node) }
+          member = last_namespace_component(path)
+          if value = members[member]?
+            lit = Literal.new(ctx.next_id, enum_type, value)
+            ctx.emit(lit)
+            ctx.register_type(lit.id, enum_type)
+            value_id = lit.id
+          end
+        end
+
+        unless value_id
+          value_id = lower_expr(ctx, arg_expr)
+          value_type = ctx.type_of(value_id)
+          if value_type != enum_type
+            cast = Cast.new(ctx.next_id, enum_type, value_id, enum_type, safe: false)
+            ctx.emit(cast)
+            ctx.register_type(cast.id, enum_type)
+            value_id = cast.id
+          end
+        end
+
+        value_ids << value_id
+      end
+
+      result_id = value_ids.first
+      value_ids[1..].each do |next_id|
+        binop = BinaryOperation.new(ctx.next_id, enum_type, BinaryOp::BitOr, result_id, next_id)
+        ctx.emit(binop)
+        ctx.register_type(binop.id, enum_type)
+        result_id = binop.id
+      end
+
+      (@enum_value_types ||= {} of ValueId => String)[result_id] = enum_name
+      result_id
     end
 
     private def lower_member_access(ctx : LoweringContext, node : CrystalV2::Compiler::Frontend::MemberAccessNode) : ValueId
