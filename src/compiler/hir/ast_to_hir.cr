@@ -10024,6 +10024,29 @@ module Crystal::HIR
         init_name = mangle_function_name(init_base_name, init_param_types)
         remember_callsite_arg_types(init_name, call_arg_types) unless call_arg_types.empty?
         lower_function_if_needed(init_name)
+        if !@module.has_function?(init_name) &&
+           !@lowering_functions.includes?(init_name) &&
+           !@lowered_functions.includes?(init_name)
+          init_def = @function_defs[init_name]?
+          init_def_name = init_def ? init_name : nil
+          unless init_def
+            init_def = @function_defs[init_base_name]?
+            init_def_name = init_def ? init_base_name : nil
+          end
+          unless init_def
+            if match = lookup_function_def_for_call(init_base_name, call_arg_types.size, false, call_arg_types)
+              init_def_name, init_def = match
+            end
+          end
+          if init_def
+            init_arena = @function_def_arenas[init_def_name]? || @function_def_arenas[init_base_name]?
+            init_arena ||= resolve_arena_for_def(init_def, @arena)
+            callsite_types = call_arg_types.empty? ? nil : call_arg_types
+            with_arena(init_arena) do
+              lower_method(class_name, class_info, init_def, callsite_types, nil, nil, init_name)
+            end
+          end
+        end
         init_call = Call.new(ctx.next_id, TypeRef::VOID, alloc.id, init_name, param_ids)
         ctx.emit(init_call)
       end
