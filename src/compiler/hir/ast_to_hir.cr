@@ -3355,19 +3355,25 @@ module Crystal::HIR
                     -1
                   end
       candidates = [] of CrystalV2::Compiler::Frontend::ArenaLike
-      candidates << fallback
+      @function_def_arenas.each_value { |arena| candidates << arena }
       if arenas = @inline_arenas
         arenas.each { |arena| candidates << arena }
       end
-      @function_def_arenas.each_value { |arena| candidates << arena }
+      candidates << fallback
 
+      best = nil
+      best_size = Int32::MAX
       candidates.each do |arena|
         next if max_index >= 0 && max_index >= arena.size
         next unless span_fits_source?(arena, func_def.span)
-        return arena
+        size = arena.size
+        if size < best_size
+          best = arena
+          best_size = size
+        end
       end
 
-      fallback
+      best || fallback
     end
 
     private def resolve_arena_for_block(
@@ -4094,6 +4100,9 @@ module Crystal::HIR
                       param_types << param_type
                     end
                   end
+                  if !has_block
+                    has_block = def_contains_yield?(member, @arena)
+                  end
 
                   if method_name == "initialize"
                     if init_capture && init_capture.source != :class
@@ -4136,9 +4145,13 @@ module Crystal::HIR
                   register_function_type(full_name, return_type)
                   @function_defs[full_name] = member
                   @function_def_arenas[full_name] = @arena
+                  if !has_block
+                    @function_defs[base_name] = member
+                    @function_def_arenas[base_name] = @arena
+                  end
 
                   if body = member.body
-                    contains_yield = contains_yield?(body)
+                    contains_yield = def_contains_yield?(member, @arena)
                     if !contains_yield && @yield_functions.includes?(full_name)
                       @yield_functions.delete(full_name)
                       debug_hook("yield.unregister", full_name)
@@ -6064,7 +6077,7 @@ module Crystal::HIR
                             TypeRef::BOOL
                           else
                             infer_concrete_return_type_from_body(member) || TypeRef::VOID
-                          end
+            end
             param_types = [] of TypeRef
             has_block = false
             if params = member.params
@@ -6084,6 +6097,9 @@ module Crystal::HIR
                 param_types << param_type
               end
             end
+            if !has_block
+              has_block = def_contains_yield?(member, @arena)
+            end
             full_name = function_full_name_for_def(base_name, param_types, member.params, has_block)
             if ENV.has_key?("DEBUG_MODULE_THREAD") && module_name.includes?("System::Thread")
               STDERR.puts "[REG_MODULE_METHOD] #{module_name}.#{method_name} -> #{full_name}"
@@ -6098,19 +6114,21 @@ module Crystal::HIR
             register_function_type(full_name, return_type)
             @function_defs[full_name] = member
             @function_def_arenas[full_name] = @arena
+            if !has_block
+              @function_defs[base_name] = member
+              @function_def_arenas[base_name] = @arena
+            end
 
             # Track yield-functions for inline expansion (module methods).
-            if body = member.body
-              if contains_yield?(body)
-                @yield_functions.add(full_name)
-                debug_hook("yield.register", full_name)
-                unless @function_defs.has_key?(base_name)
-                  @function_defs[base_name] = member
-                  @function_def_arenas[base_name] = @arena
-                end
-                @function_defs[full_name] = member
-                @function_def_arenas[full_name] = @arena
+            if def_contains_yield?(member, @arena)
+              @yield_functions.add(full_name)
+              debug_hook("yield.register", full_name)
+              unless @function_defs.has_key?(base_name)
+                @function_defs[base_name] = member
+                @function_def_arenas[base_name] = @arena
               end
+              @function_defs[full_name] = member
+              @function_def_arenas[full_name] = @arena
             end
           when CrystalV2::Compiler::Frontend::GetterNode
             next unless member.is_class?
@@ -6759,16 +6777,17 @@ module Crystal::HIR
           param_types << param_type
         end
       end
+      if !has_block
+        has_block = def_contains_yield?(member, @arena)
+      end
       full_name = function_full_name_for_def(base_name, param_types, member.params, has_block)
       if ENV.has_key?("DEBUG_MODULE_THREAD") && module_name.includes?("System::Thread")
         STDERR.puts "[REG_MODULE_METHOD_MACRO] #{module_name}.#{method_name} -> #{full_name}"
       end
       if @function_defs.has_key?(full_name)
-        if body = member.body
-          if contains_yield?(body)
-            @yield_functions.add(full_name)
-            debug_hook("yield.register", full_name)
-          end
+        if def_contains_yield?(member, @arena)
+          @yield_functions.add(full_name)
+          debug_hook("yield.register", full_name)
         end
         if ENV.has_key?("DEBUG_DUP_FUNCTION")
           STDERR.puts "[DEBUG_DUP_FUNCTION] Skipping duplicate module method: #{full_name}"
@@ -6778,19 +6797,21 @@ module Crystal::HIR
       register_function_type(full_name, return_type)
       @function_defs[full_name] = member
       @function_def_arenas[full_name] = @arena
+      if !has_block
+        @function_defs[base_name] = member
+        @function_def_arenas[base_name] = @arena
+      end
 
       # Track yield-functions for inline expansion
-      if body = member.body
-        if contains_yield?(body)
-          @yield_functions.add(full_name)
-          debug_hook("yield.register", full_name)
-          unless @function_defs.has_key?(base_name)
-            @function_defs[base_name] = member
-            @function_def_arenas[base_name] = @arena
-          end
-          @function_defs[full_name] = member
-          @function_def_arenas[full_name] = @arena
+      if def_contains_yield?(member, @arena)
+        @yield_functions.add(full_name)
+        debug_hook("yield.register", full_name)
+        unless @function_defs.has_key?(base_name)
+          @function_defs[base_name] = member
+          @function_def_arenas[base_name] = @arena
         end
+        @function_defs[full_name] = member
+        @function_def_arenas[full_name] = @arena
       end
     end
 
@@ -6996,7 +7017,6 @@ module Crystal::HIR
 
     private def register_type_method_from_def(member : CrystalV2::Compiler::Frontend::DefNode, type_name : String)
       method_name = String.new(member.name)
-      def_arena = resolve_arena_for_def(member, @arena)
       is_class_method = if recv = member.receiver
                           String.new(recv) == "self"
                         else
@@ -7047,6 +7067,9 @@ module Crystal::HIR
           param_types << param_type
         end
       end
+      if !has_block
+        has_block = def_contains_yield?(member, @arena)
+      end
       full_name = function_full_name_for_def(base_name, param_types, member.params, has_block)
       alias_full_name = nil
       if is_class_method
@@ -7075,7 +7098,7 @@ module Crystal::HIR
         if prev_arena = @function_def_arenas[full_name]?
           @function_def_arenas[previous_full] = prev_arena
         else
-          @function_def_arenas[previous_full] = def_arena
+          @function_def_arenas[previous_full] = @arena
         end
         if prev_enum = @function_enum_return_names[full_name]? || @function_enum_return_names[base_name]?
           @function_enum_return_names[previous_full] = prev_enum
@@ -7084,23 +7107,27 @@ module Crystal::HIR
       end
       register_function_type(full_name, return_type)
       @function_defs[full_name] = member
-      @function_def_arenas[full_name] = def_arena
+      @function_def_arenas[full_name] = @arena
       if alias_full_name
         register_function_type(alias_full_name, return_type) unless @function_types.has_key?(alias_full_name)
         @function_defs[alias_full_name] = member
-        @function_def_arenas[alias_full_name] = def_arena
+        @function_def_arenas[alias_full_name] = @arena
+      end
+      if !has_block
+        @function_defs[base_name] = member
+        @function_def_arenas[base_name] = @arena
       end
 
       if body = member.body
-        if def_contains_yield?(member, def_arena)
+        if def_contains_yield?(member, @arena)
           @yield_functions.add(full_name)
           debug_hook("yield.register", full_name)
           unless @function_defs.has_key?(base_name)
             @function_defs[base_name] = member
-            @function_def_arenas[base_name] = def_arena
+            @function_def_arenas[base_name] = @arena
           end
           @function_defs[full_name] = member
-          @function_def_arenas[full_name] = def_arena
+          @function_def_arenas[full_name] = @arena
         end
       end
     end
@@ -7783,24 +7810,29 @@ module Crystal::HIR
                 param_types << param_type
               end
             end
+            if !has_block
+              has_block = def_contains_yield?(member, @arena)
+            end
             full_method_name = function_full_name_for_def(base_name, param_types, member.params, has_block)
             register_function_type(full_method_name, return_type)
             @function_defs[full_method_name] = member
             @function_def_arenas[full_method_name] = @arena
+            if !has_block
+              @function_defs[base_name] = member
+              @function_def_arenas[base_name] = @arena
+            end
 
             # Track yield-functions for inline expansion (nested module methods).
-            if body = member.body
-                if contains_yield?(body)
-                  @yield_functions.add(full_method_name)
-                  debug_hook("yield.register", full_method_name)
-                  unless @function_defs.has_key?(base_name)
-                    @function_defs[base_name] = member
-                    @function_def_arenas[base_name] = @arena
-                  end
-                  @function_defs[full_method_name] = member
-                  @function_def_arenas[full_method_name] = @arena
-                end
+            if def_contains_yield?(member, @arena)
+              @yield_functions.add(full_method_name)
+              debug_hook("yield.register", full_method_name)
+              unless @function_defs.has_key?(base_name)
+                @function_defs[base_name] = member
+                @function_def_arenas[base_name] = @arena
               end
+              @function_defs[full_method_name] = member
+              @function_def_arenas[full_method_name] = @arena
+            end
           when CrystalV2::Compiler::Frontend::ClassNode
             class_name = String.new(member.name)
             full_class_name = "#{full_name}::#{class_name}"
@@ -8781,6 +8813,9 @@ module Crystal::HIR
               end
             end
             param_elapsed = param_start ? (Time.instant - param_start).total_milliseconds : nil
+            if !has_block
+              has_block = def_contains_yield?(member, @arena)
+            end
             full_name = function_full_name_for_def(base_name, method_param_types, member.params, has_block)
             alias_full_name = nil
             alias_base = nil
@@ -8821,31 +8856,33 @@ module Crystal::HIR
               @function_defs[alias_full_name] = member
               @function_def_arenas[alias_full_name] = @arena
             end
+            if !has_block
+              @function_defs[base_name] = member
+              @function_def_arenas[base_name] = @arena
+            end
 
             # Track yield-functions for inline expansion.
             # Note: MIR lowering removes yield-containing functions (inline-only), so we must inline
             # them at call sites. We key by both base and mangled names so resolution can find them.
             yield_start = mono_debug ? Time.instant : nil
-            if body = member.body
-              if contains_yield?(body)
-                @yield_functions.add(full_name)
-                debug_hook("yield.register", full_name)
-                unless @function_defs.has_key?(base_name)
-                  @function_defs[base_name] = member
-                  @function_def_arenas[base_name] = @arena
+            if def_contains_yield?(member, @arena)
+              @yield_functions.add(full_name)
+              debug_hook("yield.register", full_name)
+              unless @function_defs.has_key?(base_name)
+                @function_defs[base_name] = member
+                @function_def_arenas[base_name] = @arena
+              end
+              @function_defs[full_name] = member
+              @function_def_arenas[full_name] = @arena
+              if alias_full_name
+                @yield_functions.add(alias_full_name)
+                debug_hook("yield.register", alias_full_name)
+                if alias_base && !@function_defs.has_key?(alias_base)
+                  @function_defs[alias_base] = member
+                  @function_def_arenas[alias_base] = @arena
                 end
-                @function_defs[full_name] = member
-                @function_def_arenas[full_name] = @arena
-                if alias_full_name
-                  @yield_functions.add(alias_full_name)
-                  debug_hook("yield.register", alias_full_name)
-                  if alias_base && !@function_defs.has_key?(alias_base)
-                    @function_defs[alias_base] = member
-                    @function_def_arenas[alias_base] = @arena
-                  end
-                  @function_defs[alias_full_name] = member
-                  @function_def_arenas[alias_full_name] = @arena
-                end
+                @function_defs[alias_full_name] = member
+                @function_def_arenas[alias_full_name] = @arena
               end
             end
             yield_elapsed = yield_start ? (Time.instant - yield_start).total_milliseconds : nil
@@ -10414,6 +10451,10 @@ module Crystal::HIR
             param_types[idx] = splat_type
           end
         end
+      end
+      if !has_block
+        def_arena = @function_def_arenas[base_name]? || resolve_arena_for_def(node, @arena)
+        has_block = def_contains_yield?(node, def_arena)
       end
 
       return_type = if rt = node.return_type
@@ -12803,6 +12844,9 @@ module Crystal::HIR
           param_types << param_type
         end
       end
+      if !has_block
+        has_block = def_contains_yield?(node, @arena)
+      end
 
       return_type = if rt = node.return_type
                       type_ref_for_name(String.new(rt))
@@ -12832,11 +12876,9 @@ module Crystal::HIR
       end
 
       # Check if function contains yield
-      if body = node.body
-        if contains_yield?(body)
-          @yield_functions.add(full_name)
-          debug_hook("yield.register", full_name)
-        end
+      if def_contains_yield?(node, @arena)
+        @yield_functions.add(full_name)
+        debug_hook("yield.register", full_name)
       end
     end
 
@@ -16191,6 +16233,10 @@ module Crystal::HIR
             param_types[idx] = splat_type
           end
         end
+      end
+      if !has_block
+        def_arena = @function_def_arenas[base_name]? || resolve_arena_for_def(node, @arena)
+        has_block = def_contains_yield?(node, def_arena)
       end
 
       # Determine return type (default to Void if not specified)

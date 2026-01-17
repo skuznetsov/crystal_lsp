@@ -1859,6 +1859,11 @@ end
     - `func1784`
     - `self_to_u8_`
   - Update (2026-02-xx): preserve `$` in C extern names, removing `realpath$DARWIN_EXTSN` from `/tmp/fib_link.log`.
+  - Update (2026-02-xx): non-block defs now register base-name fallbacks, so `Crystal.trace` resolves to the non-yield overload.
+    - Evidence: `/private/tmp/fib.hir` shows `func @Crystal.trace$Int32_String(...)` and `func @Crystal.trace$Int32_String_UInt64 | Nil_NamedTuple(...)` bodies with `return` only (no `yield`).
+    - `Crystal.trace` callsites no longer bind to yield-only defs (no `yield` in trace bodies).
+  - Update (2026-02-xx): anonymous block params now set `Parameter#is_block` by construction; AST cache bumped to v32 to invalidate old param flags.
+  - Update (2026-02-xx): `./bin/crystal_v2 --no-llvm-opt --no-llvm-metadata bin/fib.cr -o /tmp/fib` now fails at llc with `@**$Float` argument type mismatch (`/tmp/fib.ll:34817`) instead of missing `Crystal_trace`.
 
 ### 8.10 Bootstrap Blockers: Budgeted Callsite Lowering (PROPOSED)
 
