@@ -11417,6 +11417,7 @@ module Crystal::HIR
     ) : Bool
       return false if has_block
       return true if full_name == base_name
+      return false if @function_defs.has_key?(base_name)
       def_params_untyped?(member)
     end
 
