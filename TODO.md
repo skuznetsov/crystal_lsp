@@ -1844,6 +1844,20 @@ end
 - Bare identifier fallback now resolves to top-level functions when no local exists (e.g., `caller`).
   - Evidence: `/tmp/caller_test.hir` contains `call caller()` and no `local "caller"`, and the loop lowers via `array_size` (no `each$block`).
   - Evidence (prelude): `/private/tmp/fib.hir` now contains `call caller()` inside `Crystal::Scheduler#fatal_resume_error`; no `each$block` for `caller.each`.
+- Uninitialized static arrays now resolve path types correctly (e.g., `LibC::Kevent[2]` → `StaticArray(LibC::Kevent, 2)`), removing `Unknown` types from `fib.hir`.
+  - Evidence: `/private/tmp/fib.hir` contains `StaticArray(LibC::Kevent, 2)` and no `StaticArray(Unknown, 2)`; link now reports **12** missing symbols in `/tmp/fib_link.log`:
+    - `Crystal__EventLoop__Polling__Arena_Crystal__EventLoop__Polling__PollDescriptor__65536__unsafe_grow`
+    - `Crystal__System__Signal_inspect`
+    - `Crystal__TupleCrystal__TupleString___Crystal__Nil__String____Int32`
+    - `Crystal_trace_Int32_String_UInt64___Nil_NamedTuple`
+    - `Dragonbox_to_decimal_Float32___Float64`
+    - `Exception__CallStack_decode_function_name`
+    - `Exception__CallStack_decode_line_number`
+    - `IO__FileDescriptor_system_info_Int32`
+    - `func1764`
+    - `func1784`
+    - `realpath_DARWIN_EXTSN`
+    - `self_to_u8_`
 
 ### 8.10 Bootstrap Blockers: Budgeted Callsite Lowering (PROPOSED)
 
