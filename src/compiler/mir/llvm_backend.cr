@@ -5174,7 +5174,8 @@ module Crystal::MIR
       if inst.extern_name.includes?("$") &&
          !inst.extern_name.includes?("::") &&
          !inst.extern_name.includes?("#") &&
-         !inst.extern_name.includes?(".")
+         !inst.extern_name.includes?(".") &&
+         inst.extern_name.matches?(/\A[a-zA-Z0-9_$]+\z/)
         mangled_extern_name = inst.extern_name
       end
 
