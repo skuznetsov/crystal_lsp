@@ -17548,6 +17548,9 @@ module Crystal::HIR
       var_name = String.new(node.name)
       type_name = String.new(node.declared_type)
       type_ref = type_ref_for_name(type_name)
+      if DebugHooks::ENABLED && ENV["CRYSTAL_V2_DEBUG_UNINITIALIZED_REF"]?
+        debug_hook("uninitialized.type_ref", "type=#{type_name} id=#{type_ref.id} resolved=#{get_type_name_from_ref(type_ref)}")
+      end
 
       if value_id = node.value
         # Has initial value: x : Type = value
