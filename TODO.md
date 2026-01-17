@@ -1866,6 +1866,24 @@ end
   - Update (2026-02-xx): pre-scan constants in nested module/class bodies so reopened types expose outer constants before nested class inference. `Time::Format::DAY_NAMES` now resolves in `Time::Format::Formatter`; `get_day_name`/`get_short_day_name` infer `String` (DEBUG_PRE_SCAN_CONST/DEBUG_INFER_INDEX). Current llc failure moved to `Symbol_needs_quotes_for_named_argument__Nil` (`/tmp/fib.ll:59523`).
   - Update (2026-02-xx): `./bin/crystal_v2 --no-llvm-opt --no-llvm-metadata bin/fib.cr -o /tmp/fib` now fails at llc with `@**$Float` argument type mismatch (`/tmp/fib.ll:34817`) instead of missing `Crystal_trace`.
   - Update (2026-02-xx): sanitized unsafe extern names; llc now fails with type mismatch `%r20` is `ptr` but used as `i32` in `icmp` (see `/tmp/fib.ll:59546`, `Time::Format::Formatter#get_short_day_name`).
+  - Update (2026-02-xx): base-name registration no longer overrides zero-arg defs for untyped overloads; `Array(String)#calculate_new_capacity` and other specialized zero-arg methods now lower. `./bin/crystal_v2 --no-llvm-opt --no-llvm-metadata bin/fib.cr -o /tmp/fib` now reports **17** missing symbols (see `/tmp/fib_link.log`):
+    - `Char_ascii_number__Int32`
+    - `Crystal__EventLoop__Polling__Arena_Crystal__EventLoop__Polling__PollDescriptor__65536__unsafe_grow`
+    - `Crystal__TupleCrystal__TupleString___Crystal__Nil__String____Int32`
+    - `Crystal_trace_Int32_String_UInt64___Nil_NamedTuple`
+    - `Dragonbox_to_decimal_Float32___Float64`
+    - `Exception__CallStack_decode_function_name`
+    - `Exception__CallStack_decode_line_number`
+    - `IO__FileDescriptor_system_info_Int32`
+    - `NotImplementedError_initialize`
+    - `Object____`
+    - `Regex_name_table`
+    - `Time__Format__Formatter_time_zone_offset_NamedTuple_Bool_Bool_Bool`
+    - `Time__Span_tdiv_Int32`
+    - `fetch$Int32_Int32`
+    - `func2613`
+    - `func2643`
+    - `self_to_u8_`
 
 ### 8.10 Bootstrap Blockers: Budgeted Callsite Lowering (PROPOSED)
 
