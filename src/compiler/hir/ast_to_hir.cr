@@ -9819,6 +9819,7 @@ module Crystal::HIR
             remember_callsite_arg_types(init_base_name, call_arg_types)
             lower_function_if_needed(init_base_name)
           end
+          generate_allocator_overload(class_name, class_info, call_arg_types)
         end
         return
       end
@@ -9829,6 +9830,17 @@ module Crystal::HIR
 
       # Get initialize parameters for this class
       init_params = @init_params[class_name]? || [] of {String, TypeRef}
+      allocator_params = init_params.map { |param| {param[0], param[1]} }
+      if call_arg_types && call_arg_types.any? { |t| t != TypeRef::VOID }
+        allocator_params.each_with_index do |(param_name, param_type), idx|
+          next if idx >= call_arg_types.size
+          call_type = call_arg_types[idx]
+          next if call_type == TypeRef::VOID
+          if param_type == TypeRef::VOID
+            allocator_params[idx] = {param_name, call_type}
+          end
+        end
+      end
       if DebugHooks::ENABLED
         debug_hook("allocator.generate", "class=#{class_name} init_params=#{init_params.size}")
       end
@@ -9846,7 +9858,7 @@ module Crystal::HIR
       #     STDERR.puts "  [#{idx}] #{name}: #{type_ref.id}"
       #   end
       # end
-      init_params.each do |param_name, param_type|
+      allocator_params.each do |param_name, param_type|
         hir_param = func.add_param(param_name, param_type)
         ctx.register_local(param_name, hir_param.id)
         ctx.register_type(hir_param.id, param_type)
@@ -9889,7 +9901,7 @@ module Crystal::HIR
       init_base_name = resolve_method_with_inheritance(class_name, "initialize")
       if init_base_name
         # Mangle the initialize call with parameter types
-        init_param_types = init_params.map { |_, t| t }
+        init_param_types = allocator_params.map { |_, t| t }
         init_name = mangle_function_name(init_base_name, init_param_types)
         callsite_init_types = if call_arg_types && call_arg_types.any? { |t| t != TypeRef::VOID }
                                 call_arg_types
@@ -9931,7 +9943,7 @@ module Crystal::HIR
         instance_ctx.register_type(self_param.id, class_info.type_ref)
 
         wrapper_param_ids = [] of ValueId
-        init_params.each do |param_name, param_type|
+        allocator_params.each do |param_name, param_type|
           hir_param = instance_func.add_param(param_name, param_type)
           instance_ctx.register_local(param_name, hir_param.id)
           instance_ctx.register_type(hir_param.id, param_type)
@@ -9943,6 +9955,80 @@ module Crystal::HIR
         instance_ctx.register_type(new_call.id, class_info.type_ref)
         instance_ctx.terminate(Return.new(new_call.id))
       end
+
+      generate_allocator_overload(class_name, class_info, call_arg_types)
+    end
+
+    private def generate_allocator_overload(
+      class_name : String,
+      class_info : ClassInfo,
+      call_arg_types : Array(TypeRef)?
+    ) : Nil
+      return unless call_arg_types
+      return if call_arg_types.empty?
+      return if call_arg_types.all? { |t| t == TypeRef::VOID }
+
+      base_name = "#{class_name}.new"
+      overload_name = mangle_function_name(base_name, call_arg_types)
+      return if overload_name == base_name
+      return if @module.has_function?(overload_name)
+
+      init_params = @init_params[class_name]? || [] of {String, TypeRef}
+      allocator_params = init_params.map { |param| {param[0], param[1]} }
+      if allocator_params.empty?
+        allocator_params = call_arg_types.map_with_index { |type_ref, idx| {"arg#{idx}", type_ref} }
+      else
+        allocator_params.each_with_index do |(param_name, param_type), idx|
+          next if idx >= call_arg_types.size
+          call_type = call_arg_types[idx]
+          next if call_type == TypeRef::VOID
+          if param_type == TypeRef::VOID
+            allocator_params[idx] = {param_name, call_type}
+          end
+        end
+      end
+
+      func = @module.create_function(overload_name, class_info.type_ref)
+      ctx = LoweringContext.new(func, @module, @arena)
+
+      param_ids = [] of ValueId
+      allocator_params.each do |param_name, param_type|
+        hir_param = func.add_param(param_name, param_type)
+        ctx.register_local(param_name, hir_param.id)
+        ctx.register_type(hir_param.id, param_type)
+        param_ids << hir_param.id
+      end
+
+      alloc = Allocate.new(ctx.next_id, class_info.type_ref, [] of ValueId, class_info.is_struct)
+      ctx.emit(alloc)
+      ctx.register_type(alloc.id, class_info.type_ref)
+
+      class_info.ivars.each do |ivar|
+        type_desc = @module.get_type_descriptor(ivar.type)
+        if type_desc && type_desc.kind == TypeKind::Union
+          next
+        end
+        is_pointer = ivar.type == TypeRef::POINTER ||
+                     (type_desc && type_desc.kind == TypeKind::Pointer) ||
+                     (type_desc && type_desc.name.starts_with?("Pointer"))
+        default_value : (Int64 | Nil) = is_pointer ? nil : 0_i64
+        default_val = Literal.new(ctx.next_id, ivar.type, default_value)
+        ctx.emit(default_val)
+        ivar_store = FieldSet.new(ctx.next_id, TypeRef::VOID, alloc.id, ivar.name, default_val.id, ivar.offset)
+        ctx.emit(ivar_store)
+      end
+
+      init_base_name = resolve_method_with_inheritance(class_name, "initialize")
+      if init_base_name
+        init_param_types = allocator_params.map { |_, t| t }
+        init_name = mangle_function_name(init_base_name, init_param_types)
+        remember_callsite_arg_types(init_name, call_arg_types) unless call_arg_types.empty?
+        lower_function_if_needed(init_name)
+        init_call = Call.new(ctx.next_id, TypeRef::VOID, alloc.id, init_name, param_ids)
+        ctx.emit(init_call)
+      end
+
+      ctx.terminate(Return.new(alloc.id))
     end
 
     private def allocator_supported?(class_name : String) : Bool
@@ -26067,7 +26153,8 @@ module Crystal::HIR
           end
         end
         explicit_new = !!lookup_function_def_for_call(full_method_name, args.size, has_block_call, arg_types, false, has_named_args)
-        if !explicit_new && @module.has_function?(full_method_name) && !@module.has_function?(mangled_method_name)
+        if !explicit_new && @module.has_function?(full_method_name) && !@module.has_function?(mangled_method_name) &&
+           arg_types.all? { |t| t == TypeRef::VOID }
           mangled_method_name = full_method_name
           base_method_name = full_method_name
         end
