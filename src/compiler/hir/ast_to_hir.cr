@@ -16720,6 +16720,8 @@ module Crystal::HIR
       # Fix #2: Emit all tracked signatures to ensure functions called from
       # conditional branches or with specific type instantiations are lowered.
       emit_all_tracked_signatures
+      # Final pass: lower any remaining call targets that already appear in HIR.
+      lower_missing_call_targets
     end
 
     # Emit all tracked callsite signatures that haven't been lowered yet.
@@ -16824,6 +16826,45 @@ module Crystal::HIR
 
       if ENV.has_key?("DEBUG_EMIT_SIGS")
         STDERR.puts "[EMIT_SIGS] done after #{iteration} iterations"
+      end
+    end
+
+    # Lower any missing call targets that already appear in the HIR module.
+    # This is a safety net for late-resolved overloads (defaults, implicit generics).
+    private def lower_missing_call_targets
+      max_iterations = 20
+      budget = ENV["CRYSTAL_V2_MISSING_BUDGET"]?.try(&.to_i?) || 0
+      iteration = 0
+
+      while iteration < max_iterations
+        missing = [] of String
+        @module.functions.each do |func|
+          func.blocks.each do |block|
+            block.instructions.each do |inst|
+              next unless inst.is_a?(Call)
+              name = inst.method_name
+              next if name.empty?
+              next if @module.has_function?(name)
+              next if @lowered_functions.includes?(name)
+              next if @lowering_functions.includes?(name)
+              missing << name
+            end
+          end
+        end
+        missing.uniq!
+        break if missing.empty?
+
+        if budget > 0 && missing.size > budget
+          missing = missing.first(budget)
+        end
+
+        before = @module.functions.size
+        missing.each do |name|
+          lower_function_if_needed(name)
+        end
+        process_pending_lower_functions
+        iteration += 1
+        break if @module.functions.size == before
       end
     end
 
