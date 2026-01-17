@@ -1821,6 +1821,7 @@ end
 1) **Deterministic signature pipeline** (normalize → record → emit once).
    - Normalize callsite arg types (VOID/implicit) before mangling; avoid base-name fallback.
    - Source: `@callsite_args` / recorded signatures.
+   - Emit all recorded callsite signatures even if not reached in the main worklist.
    - DoD: missing symbols for callsite-only functions drop in `/tmp/fib_link.log`.
 2) **Generic instantiation for implicit params**:
    - Avoid `Array(VOID)`/`Hash(VOID, ...)` fallback in `get_function_return_type`.
@@ -1845,7 +1846,7 @@ end
   - Evidence: `/tmp/caller_test.hir` contains `call caller()` and no `local "caller"`, and the loop lowers via `array_size` (no `each$block`).
   - Evidence (prelude): `/private/tmp/fib.hir` now contains `call caller()` inside `Crystal::Scheduler#fatal_resume_error`; no `each$block` for `caller.each`.
 - Uninitialized static arrays now resolve path types correctly (e.g., `LibC::Kevent[2]` → `StaticArray(LibC::Kevent, 2)`), removing `Unknown` types from `fib.hir`.
-  - Evidence: `/private/tmp/fib.hir` contains `StaticArray(LibC::Kevent, 2)` and no `StaticArray(Unknown, 2)`; link now reports **12** missing symbols in `/tmp/fib_link.log`:
+  - Evidence: `/private/tmp/fib.hir` contains `StaticArray(LibC::Kevent, 2)` and no `StaticArray(Unknown, 2)`; link now reports **11** missing symbols in `/tmp/fib_link.log`:
     - `Crystal__EventLoop__Polling__Arena_Crystal__EventLoop__Polling__PollDescriptor__65536__unsafe_grow`
     - `Crystal__System__Signal_inspect`
     - `Crystal__TupleCrystal__TupleString___Crystal__Nil__String____Int32`
@@ -1856,8 +1857,8 @@ end
     - `IO__FileDescriptor_system_info_Int32`
     - `func1764`
     - `func1784`
-    - `realpath_DARWIN_EXTSN`
     - `self_to_u8_`
+  - Update (2026-02-xx): preserve `$` in C extern names, removing `realpath$DARWIN_EXTSN` from `/tmp/fib_link.log`.
 
 ### 8.10 Bootstrap Blockers: Budgeted Callsite Lowering (PROPOSED)
 
