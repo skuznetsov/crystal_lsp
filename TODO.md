@@ -1864,6 +1864,7 @@ end
     - `Crystal.trace` callsites no longer bind to yield-only defs (no `yield` in trace bodies).
   - Update (2026-02-xx): anonymous block params now set `Parameter#is_block` by construction; AST cache bumped to v32 to invalidate old param flags.
   - Update (2026-02-xx): `./bin/crystal_v2 --no-llvm-opt --no-llvm-metadata bin/fib.cr -o /tmp/fib` now fails at llc with `@**$Float` argument type mismatch (`/tmp/fib.ll:34817`) instead of missing `Crystal_trace`.
+  - Update (2026-02-xx): sanitized unsafe extern names; llc now fails with type mismatch `%r20` is `ptr` but used as `i32` in `icmp` (see `/tmp/fib.ll:59546`, `Time::Format::Formatter#get_short_day_name`).
 
 ### 8.10 Bootstrap Blockers: Budgeted Callsite Lowering (PROPOSED)
 
