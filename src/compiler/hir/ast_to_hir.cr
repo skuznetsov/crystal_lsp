@@ -11356,6 +11356,9 @@ module Crystal::HIR
       has_block : Bool = false,
       has_named_only : Bool = false
     ) : String
+      if dollar = base_name.index('$')
+        base_name = base_name[0, dollar]
+      end
       # Filter out VOID types (untyped parameters don't provide overload info)
       typed_params = param_types.reject { |t| t == TypeRef::VOID }
 
