@@ -23315,15 +23315,16 @@ module Crystal::HIR
               matched_parent : String? = nil
               while parent
                 parent_base = "#{parent}##{method_part}"
-                if candidate = @function_defs[parent_base]?
-                  func_def = candidate
-                  arena = @function_def_arenas[parent_base]
-                  target_name = name.includes?("$") ? name : base_name
-                  lookup_branch = "parent_fallback"
-                  matched_parent = parent
-                elsif name.includes?("$")
+                if ENV["DEBUG_PARENT_FALLBACK"]? && name.includes?("Int32#**")
+                  STDERR.puts "[PARENT_FALLBACK] name=#{name} parent=#{parent} base=#{parent_base}"
+                end
+                if name.includes?("$")
                   suffix = name.split("$", 2)[1]
                   parent_mangled = "#{parent_base}$#{suffix}"
+                  if ENV["DEBUG_PARENT_FALLBACK"]? && name.includes?("Int32#**")
+                    has_mangled = @function_defs.has_key?(parent_mangled)
+                    STDERR.puts "[PARENT_FALLBACK] suffix=#{suffix} mangled=#{parent_mangled} found=#{has_mangled}"
+                  end
                   if candidate = @function_defs[parent_mangled]?
                     func_def = candidate
                     arena = @function_def_arenas[parent_mangled]
@@ -23331,6 +23332,21 @@ module Crystal::HIR
                     lookup_branch = "parent_fallback_mangled"
                     matched_parent = parent
                   end
+                end
+                if !func_def && (candidate = @function_defs[parent_base]?)
+                  if ENV["DEBUG_PARENT_FALLBACK"]? && name.includes?("Int32#**")
+                    STDERR.puts "[PARENT_FALLBACK] base_found parent_base=#{parent_base}"
+                  end
+                  func_def = candidate
+                  arena = @function_def_arenas[parent_base]
+                  target_name = name.includes?("$") ? name : base_name
+                  lookup_branch = "parent_fallback"
+                  matched_parent = parent
+                end
+                if func_def && ENV["DEBUG_PARENT_FALLBACK"]? && name.includes?("Int32#**")
+                  def_name = String.new(func_def.name)
+                  param_names = func_def.params.try(&.map { |p| p.type_annotation ? String.new(p.type_annotation.not_nil!) : "_" }.join(","))
+                  STDERR.puts "[PARENT_FALLBACK] picked=#{def_name} params=#{param_names || "(none)"}"
                 end
                 unless func_def
                   mangled_prefix = "#{parent_base}$"
@@ -23386,21 +23402,46 @@ module Crystal::HIR
             owner, method_part = base_name.split("#", 2)
             if template_owner = primitive_template_owner(owner)
               template_base = "#{template_owner}##{method_part}"
-              if candidate = @function_defs[template_base]?
-                func_def = candidate
-                arena = @function_def_arenas[template_base]
-                target_name = name.includes?("$") ? name : base_name
-                primitive_template_map = primitive_template_type_map(template_owner, owner)
-                lookup_branch = "primitive_template"
-              elsif name.includes?("$")
+              if ENV["DEBUG_PRIMITIVE_TEMPLATE_LOOKUP"]? && name.includes?("Int32#**")
+                STDERR.puts "[PRIM_TEMPLATE] name=#{name} template=#{template_base}"
+              end
+              if name.includes?("$")
                 suffix = name.split("$", 2)[1]
                 template_mangled = "#{template_base}$#{suffix}"
+                if ENV["DEBUG_PRIMITIVE_TEMPLATE_LOOKUP"]? && name.includes?("Int32#**")
+                  has_mangled = @function_defs.has_key?(template_mangled)
+                  STDERR.puts "[PRIM_TEMPLATE] suffix=#{suffix} mangled=#{template_mangled} found=#{has_mangled}"
+                end
                 if candidate = @function_defs[template_mangled]?
                   func_def = candidate
                   arena = @function_def_arenas[template_mangled]
                   target_name = name.includes?("$") ? name : base_name
                   primitive_template_map = primitive_template_type_map(template_owner, owner)
                   lookup_branch = "primitive_template_mangled"
+                else
+                  if mapped_suffix = map_suffix_for_primitive_template(suffix, template_owner)
+                    mapped_mangled = "#{template_base}$#{mapped_suffix}"
+                    if ENV["DEBUG_PRIMITIVE_TEMPLATE_LOOKUP"]? && name.includes?("Int32#**")
+                      has_mapped = @function_defs.has_key?(mapped_mangled)
+                      STDERR.puts "[PRIM_TEMPLATE] mapped=#{mapped_mangled} found=#{has_mapped}"
+                    end
+                    if candidate = @function_defs[mapped_mangled]?
+                      func_def = candidate
+                      arena = @function_def_arenas[mapped_mangled]
+                      target_name = name.includes?("$") ? name : base_name
+                      primitive_template_map = primitive_template_type_map(template_owner, owner)
+                      lookup_branch = "primitive_template_mapped"
+                    end
+                  end
+                end
+              end
+              if !func_def
+                if candidate = @function_defs[template_base]?
+                  func_def = candidate
+                  arena = @function_def_arenas[template_base]
+                  target_name = name.includes?("$") ? name : base_name
+                  primitive_template_map = primitive_template_type_map(template_owner, owner)
+                  lookup_branch = "primitive_template"
                 end
               end
               unless func_def
@@ -32909,6 +32950,27 @@ module Crystal::HIR
         break unless removed
       end
       stripped
+    end
+
+    private def map_suffix_for_primitive_template(suffix : String, template_owner : String) : String?
+      stripped = strip_mangled_suffix_flags(suffix)
+      flags = suffix[stripped.size, suffix.size - stripped.size]
+      parsed = parse_types_from_suffix(stripped)
+      return nil if parsed.empty?
+
+      mapped = parsed.map do |type_ref|
+        type_name = get_type_name_from_ref(type_ref)
+        if type_name != "Unknown" && primitive_template_owner(type_name) == template_owner
+          type_ref_for_name(template_owner)
+        else
+          type_ref
+        end
+      end
+
+      return nil if mapped == parsed
+
+      mapped_suffix = mapped.map { |type_ref| type_name_for_mangling(type_ref) }.join("_")
+      mapped_suffix + flags
     end
 
     private def def_params_untyped?(func_def : CrystalV2::Compiler::Frontend::DefNode) : Bool
