@@ -1823,6 +1823,21 @@ end
     - `func2645`
     - `func2676`
     - `self_to_u8_`
+  - **Update (2026-01-17)**: class-name resolution now prefers namespace override (fixes `IO::FileDescriptor.system_info` → `Crystal::System::FileDescriptor.system_info`); missing list updates to **14** (see `/tmp/fib_link3.log`):
+    - `Crystal__EventLoop__Polling__Arena_Crystal__EventLoop__Polling__PollDescriptor__65536__unsafe_grow`
+    - `Crystal__TupleCrystal__TupleString___Crystal__Nil__String____Int32`
+    - `Crystal_trace_Int32_String_UInt64___Nil_NamedTuple`
+    - `Dragonbox_to_decimal_Float32___Float64`
+    - `Exception__CallStack_decode_function_name`
+    - `Exception__CallStack_decode_line_number`
+    - `Object____`
+    - `Regex_name_table`
+    - `Time__Format__Formatter_time_zone_offset_NamedTuple_Bool_Bool_Bool`
+    - `Time__Span_tdiv_Int32`
+    - `fetch$Int32_Int32`
+    - `func2648`
+    - `func2679`
+    - `self_to_u8_`
   - **Update (2026-02-xx)**: `Crystal__System__Time_instant` resolved by adding `Crystal::System::Time.instant`.
   - **Update (2026-02-xx)**: `includes__Int32` resolved by inferring default types for untyped params (Range literal in `Float::Printer.decimal`).
 
