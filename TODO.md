@@ -1917,6 +1917,7 @@ end
     - `func2613`
     - `func2643`
     - `self_to_u8_`
+  - Update (2026-02-xx): `Float::Printer.shortest` now casts `pos_v` to concrete Float32/Float64 before `Dragonbox.to_decimal`, removing `Dragonbox_to_decimal_Float32___Float64` and `Float__Printer_to_u8_` from `/tmp/fib.ll`.
 
 ### 8.10 Bootstrap Blockers: Budgeted Callsite Lowering (PROPOSED)
 
