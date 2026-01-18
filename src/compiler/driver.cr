@@ -923,7 +923,7 @@ module Crystal::V2
 
     private def require_cache_path(file_path : String) : String
       cache_dir = ENV["XDG_CACHE_HOME"]? || File.join(ENV["HOME"]? || "/tmp", ".cache")
-      hash = digest_string("v3:#{file_path}")
+      hash = digest_string("v4:#{file_path}")
       File.join(cache_dir, "crystal_v2", "requires", "#{hash}.req")
     end
 
@@ -965,6 +965,11 @@ module Crystal::V2
       # Skip if already loaded
       return if loaded.includes?(abs_path)
       loaded << abs_path
+      if filter = ENV["DEBUG_PARSE_FILES_FILTER"]?
+        if filter == "*" || abs_path.includes?(filter)
+          STDERR.puts "[PARSE_FILE] #{abs_path}"
+        end
+      end
       trace_driver("[DRIVER_TRACE] parse_file: #{abs_path}")
 
       unless File.exists?(abs_path)
@@ -1047,18 +1052,20 @@ module Crystal::V2
         if path_node.is_a?(CrystalV2::Compiler::Frontend::StringNode)
           req_path = String.new(path_node.value)
           trace_driver("[DRIVER_TRACE] require '#{req_path}' from #{base_dir}")
-          resolved = resolve_require_path(req_path, base_dir)
-          trace_driver("[DRIVER_TRACE] resolved to: #{resolved || "nil"}")
-          if resolved
-            requires_out << resolved if requires_out
-            if loaded.includes?(resolved)
-              trace_driver("[DRIVER_TRACE] already loaded, skipping")
-            else
-              trace_driver("[DRIVER_TRACE] will parse: #{resolved}")
-            end
-            parse_file_recursive(resolved, results, loaded)
-          else
+          resolved_paths = resolve_require_paths(req_path, base_dir)
+          if resolved_paths.empty?
             trace_driver("[DRIVER_TRACE] WARN: Could not resolve require '#{req_path}'")
+          else
+            resolved_paths.each do |resolved|
+              trace_driver("[DRIVER_TRACE] resolved to: #{resolved}")
+              requires_out << resolved if requires_out
+              if loaded.includes?(resolved)
+                trace_driver("[DRIVER_TRACE] already loaded, skipping")
+              else
+                trace_driver("[DRIVER_TRACE] will parse: #{resolved}")
+              end
+              parse_file_recursive(resolved, results, loaded)
+            end
           end
         end
       when CrystalV2::Compiler::Frontend::MacroIfNode
@@ -1084,8 +1091,7 @@ module Crystal::V2
           next unless text.includes?("require")
           text.scan(/\brequire\s*["']?([^"'\s]+)["']?/) do |match|
             req_path = match[1]
-            resolved = resolve_require_path(req_path, base_dir)
-            if resolved
+            resolve_require_paths(req_path, base_dir).each do |resolved|
               requires_out << resolved if requires_out
               parse_file_recursive(resolved, results, loaded)
             end
@@ -1776,6 +1782,44 @@ module Crystal::V2
       return nil unless flag_name
       flag_name = flag_name.strip.gsub(/^[:"']|["']$/, "")
       flags.includes?(flag_name)
+    end
+
+    private def resolve_require_paths(req_path : String, base_dir : String) : Array(String)
+      if req_path.includes?('*') || req_path.includes?('?') || req_path.includes?('[')
+        return resolve_require_glob(req_path, base_dir)
+      end
+      if resolved = resolve_require_path(req_path, base_dir)
+        return [resolved]
+      end
+      [] of String
+    end
+
+    private def resolve_require_glob(req_path : String, base_dir : String) : Array(String)
+      patterns = [] of String
+      if req_path.starts_with?("./") || req_path.starts_with?("../")
+        patterns << File.expand_path(req_path, base_dir)
+      else
+        patterns << File.expand_path(req_path, base_dir)
+        input_dir = File.dirname(File.expand_path(@input_file))
+        input_pattern = File.expand_path(req_path, input_dir)
+        patterns << input_pattern unless patterns.includes?(input_pattern)
+        stdlib_pattern = File.expand_path(req_path, STDLIB_PATH)
+        patterns << stdlib_pattern unless patterns.includes?(stdlib_pattern)
+      end
+
+      matches = [] of String
+      patterns.each do |pattern|
+        Dir.glob(pattern).sort.each do |path|
+          next unless File.file?(path)
+          if path.ends_with?(".cr")
+            matches << path
+          elsif File.file?(path + ".cr")
+            matches << path + ".cr"
+          end
+        end
+      end
+
+      matches.uniq
     end
 
     # Resolve require path to absolute file path
