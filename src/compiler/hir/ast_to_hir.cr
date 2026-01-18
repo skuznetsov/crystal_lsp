@@ -2006,10 +2006,7 @@ module Crystal::HIR
       expanded = String.build do |io|
         values.each_with_index do |value, idx|
           vars = {} of String => CrystalV2::Compiler::Semantic::MacroValue
-          vars[iter_vars[0]] = value
-          if idx_name = iter_vars[1]?
-            vars[idx_name] = CrystalV2::Compiler::Semantic::MacroNumberValue.new(idx.to_i64)
-          end
+          assign_macro_iter_vars(vars, iter_vars, value, idx)
           if body_output = expander.expand_literal(node.body, variables: vars, owner_type: owner_type)
             io << body_output
             io << "\n"
@@ -6463,10 +6460,7 @@ module Crystal::HIR
       expanded = String.build do |io|
         values.each_with_index do |value, idx|
           vars = {} of String => CrystalV2::Compiler::Semantic::MacroValue
-          vars[iter_vars[0]] = value
-          if idx_name = iter_vars[1]?
-            vars[idx_name] = CrystalV2::Compiler::Semantic::MacroNumberValue.new(idx.to_i64)
-          end
+          assign_macro_iter_vars(vars, iter_vars, value, idx)
           if body_output = expander.expand_literal(node.body, variables: vars, owner_type: owner_type)
             io << body_output
             io << "\n"
@@ -6822,6 +6816,10 @@ module Crystal::HIR
     # Register a class method from a DefNode inside a module
     private def register_module_method_from_def(member : CrystalV2::Compiler::Frontend::DefNode, module_name : String)
       method_name = String.new(member.name)
+      if ENV["DEBUG_DRAGONBOX_REGISTER"]? && module_name.includes?("Dragonbox")
+        recv_name = member.receiver ? String.new(member.receiver.not_nil!) : "(none)"
+        STDERR.puts "[DRAGONBOX_MACRO_DEF] owner=#{module_name} method=#{method_name} receiver=#{recv_name}"
+      end
       is_class_method = if recv = member.receiver
                           String.new(recv) == "self"
                         else
@@ -7615,10 +7613,7 @@ module Crystal::HIR
       expanded = String.build do |io|
         values.each_with_index do |value, idx|
           vars = {} of String => CrystalV2::Compiler::Semantic::MacroValue
-          vars[iter_vars[0]] = value
-          if idx_name = iter_vars[1]?
-            vars[idx_name] = CrystalV2::Compiler::Semantic::MacroNumberValue.new(idx.to_i64)
-          end
+          assign_macro_iter_vars(vars, iter_vars, value, idx)
           if body_output = expander.expand_literal(node.body, variables: vars, owner_type: owner_type)
             io << body_output
             io << "\n"
@@ -7851,6 +7846,10 @@ module Crystal::HIR
           when CrystalV2::Compiler::Frontend::DefNode
             method_name = String.new(member.name)
             recv = member.receiver
+            if ENV["DEBUG_DRAGONBOX_REGISTER"]? && full_name.includes?("Dragonbox")
+              recv_name = recv ? String.new(recv) : "(none)"
+              STDERR.puts "[DRAGONBOX_DEF] owner=#{full_name} method=#{method_name} receiver=#{recv_name}"
+            end
             # Check extend self for nested modules - methods without receiver are class methods if extend self
             is_class_method = if recv
                                 String.new(recv) == "self"
@@ -18181,6 +18180,15 @@ module Crystal::HIR
           values << value
         end
         values
+      when CrystalV2::Compiler::Frontend::HashLiteralNode
+        values = [] of CrystalV2::Compiler::Semantic::MacroValue
+        node.entries.each do |entry|
+          key_val = macro_value_for_expr(entry.key)
+          value_val = macro_value_for_expr(entry.value)
+          return nil unless key_val && value_val
+          values << CrystalV2::Compiler::Semantic::MacroTupleValue.new([key_val, value_val])
+        end
+        values
       when CrystalV2::Compiler::Frontend::RangeNode
         start_val = macro_int_literal_for_expr(node.begin_expr)
         end_val = macro_int_literal_for_expr(node.end_expr)
@@ -18198,6 +18206,31 @@ module Crystal::HIR
         values
       else
         nil
+      end
+    end
+
+    private def assign_macro_iter_vars(
+      vars : Hash(String, CrystalV2::Compiler::Semantic::MacroValue),
+      iter_vars : Array(String),
+      value : CrystalV2::Compiler::Semantic::MacroValue,
+      idx : Int32
+    ) : Nil
+      if iter_vars.size >= 2
+        case value
+        when CrystalV2::Compiler::Semantic::MacroTupleValue,
+             CrystalV2::Compiler::Semantic::MacroArrayValue
+          elements = value.elements
+          iter_vars.each_with_index do |name, index|
+            break if index >= elements.size
+            vars[name] = elements[index]
+          end
+          return
+        end
+      end
+
+      vars[iter_vars[0]] = value
+      if idx_name = iter_vars[1]?
+        vars[idx_name] = CrystalV2::Compiler::Semantic::MacroNumberValue.new(idx.to_i64)
       end
     end
 
@@ -18451,6 +18484,15 @@ module Crystal::HIR
             return val.elements
           end
         end
+      when CrystalV2::Compiler::Frontend::HashLiteralNode
+        values = [] of CrystalV2::Compiler::Semantic::MacroValue
+        node.entries.each do |entry|
+          key_val = macro_value_for_expr(entry.key)
+          value_val = macro_value_for_expr(entry.value)
+          return nil unless key_val && value_val
+          values << CrystalV2::Compiler::Semantic::MacroTupleValue.new([key_val, value_val])
+        end
+        return values
       when CrystalV2::Compiler::Frontend::RangeNode
         start_val = macro_int_literal_for_expr_with_context(node.begin_expr, vars, owner_type, expander)
         end_val = macro_int_literal_for_expr_with_context(node.end_expr, vars, owner_type, expander)
@@ -18613,10 +18655,7 @@ module Crystal::HIR
       expanded = String.build do |io|
         values.each_with_index do |value, idx|
           loop_vars = vars.dup
-          loop_vars[iter_vars[0]] = value
-          if idx_name = iter_vars[1]?
-            loop_vars[idx_name] = CrystalV2::Compiler::Semantic::MacroNumberValue.new(idx.to_i64)
-          end
+          assign_macro_iter_vars(loop_vars, iter_vars, value, idx)
           if body_output = expander.expand_literal(node.body, variables: loop_vars, owner_type: owner_type)
             io << body_output
             io << "\n"
