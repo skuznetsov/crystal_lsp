@@ -3949,6 +3949,14 @@ module Crystal::MIR
         end
       end
 
+      # Guard: ptr to float/double - can't bitcast directly, must load from ptr
+      # This happens when value is a pointer to float/double and we need the value itself
+      if src_type == "ptr" && (dst_type == "float" || dst_type == "double")
+        emit "#{name} = load #{dst_type}, ptr #{value}"
+        @value_types[inst.id] = inst.type
+        return
+      end
+
       emit "#{name} = #{op} #{src_type} #{value} to #{dst_type}"
       # Track actual destination type for downstream use
       @value_types[inst.id] = inst.type
