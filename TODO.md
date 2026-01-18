@@ -1918,6 +1918,22 @@ end
     - `func2643`
     - `self_to_u8_`
   - Update (2026-02-xx): `Float::Printer.shortest` now casts `pos_v` to concrete Float32/Float64 before `Dragonbox.to_decimal`, removing `Dragonbox_to_decimal_Float32___Float64` and `Float__Printer_to_u8_` from `/tmp/fib.ll`.
+  - Update (2026-02-xx): macro-for hash iter vars now lower (Dragonbox macro expands), but `bin/fib.cr` still misses **15** symbols (see `/tmp/fib_link.log`):
+    - `Crystal__EventLoop__Polling__Arena_Crystal__EventLoop__Polling__PollDescriptor__65536__unsafe_grow`
+    - `Crystal__TupleCrystal__TupleString___Crystal__Nil__String____Int32`
+    - `Crystal_trace_Int32_String_UInt64___Nil_NamedTuple`
+    - `Exception__CallStack_decode_function_name`
+    - `Exception__CallStack_decode_line_number`
+    - `Float__Printer__Dragonbox__Impl_Float32__Float__Printer__Dragonbox__ImplInfo_Float32__to_decimal_Pointer`
+    - `Float__Printer__Dragonbox__Impl_Float64__Float__Printer__Dragonbox__ImplInfo_Float64__to_decimal_Pointer`
+    - `ImplInfo_Float32_extract_exponent_bits_UInt32`
+    - `ImplInfo_Float32_remove_exponent_bits_UInt32_Pointer`
+    - `ImplInfo_Float64_extract_exponent_bits_UInt64`
+    - `ImplInfo_Float64_remove_exponent_bits_UInt64_Pointer`
+    - `Object____`
+    - `Time__Format__Formatter_time_zone_offset_NamedTuple_Bool_Bool_Bool`
+    - `func2663`
+    - `func2694`
 
 ### 8.10 Bootstrap Blockers: Budgeted Callsite Lowering (PROPOSED)
 
