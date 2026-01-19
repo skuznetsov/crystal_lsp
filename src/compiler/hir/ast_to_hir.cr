@@ -465,6 +465,7 @@ module Crystal::HIR
     @function_param_stats : Hash(String, DefParamStats)
     @function_type_keys_by_base : Hash(String, Array(String))
     @function_type_keys_by_base_size : Int32
+    @function_type_keys_processed : Set(String)
 
     # Functions that contain yield (candidates for inline)
     @yield_functions : Set(String)
@@ -726,6 +727,7 @@ module Crystal::HIR
       @function_param_stats = {} of String => DefParamStats
       @function_type_keys_by_base = {} of String => Array(String)
       @function_type_keys_by_base_size = 0
+      @function_type_keys_processed = Set(String).new
       @yield_functions = Set(String).new
       @yield_return_functions = Set(String).new
       @yield_return_checked = Set(String).new
@@ -2577,6 +2579,9 @@ module Crystal::HIR
         right = stringify_type_expr(node.right)
         return nil unless left && right
         "#{left} | #{right}"
+      when CrystalV2::Compiler::Frontend::SelfNode
+        # For extend SomeModule(self), return the current class/module name
+        @current_class || @current_namespace_override
       else
         nil
       end
@@ -3496,7 +3501,8 @@ module Crystal::HIR
     private def include_type_param_map(
       module_node : CrystalV2::Compiler::Frontend::ModuleNode,
       include_target : ExprId,
-      include_arena : CrystalV2::Compiler::Frontend::ArenaLike = @arena
+      include_arena : CrystalV2::Compiler::Frontend::ArenaLike = @arena,
+      self_type : String? = nil
     ) : Hash(String, String)
       extra = {} of String => String
       type_params = module_node.type_params
@@ -3513,7 +3519,13 @@ module Crystal::HIR
       end
       with_arena(include_arena) do
         target_node.type_args.each do |arg|
-          if str = stringify_type_expr(arg)
+          arg_node = include_arena[arg]
+          # Handle self specially - resolve to the including class/module
+          if arg_node.is_a?(CrystalV2::Compiler::Frontend::SelfNode)
+            if self_name = self_type || @current_class || @current_namespace_override
+              arg_strings << substitute_type_params_in_type_name(self_name)
+            end
+          elsif str = stringify_type_expr(arg)
             arg_strings << substitute_type_params_in_type_name(str)
           end
         end
@@ -3967,7 +3979,7 @@ module Crystal::HIR
       include_arena = @arena
       defs.each do |mod_node, mod_arena|
         with_arena(mod_arena) do
-          extra_map = include_type_param_map(mod_node, include_node.target, include_arena)
+          extra_map = include_type_param_map(mod_node, include_node.target, include_arena, class_name)
           with_type_param_map(extra_map) do
             if macro_lookup = lookup_macro_entry("included", module_full_name)
               macro_entry, macro_key = macro_lookup
@@ -4251,7 +4263,7 @@ module Crystal::HIR
       include_arena = @arena
       defs.each do |mod_node, mod_arena|
         with_arena(mod_arena) do
-          extra_map = include_type_param_map(mod_node, extend_target, include_arena)
+          extra_map = include_type_param_map(mod_node, extend_target, include_arena, class_name)
           with_type_param_map(extra_map) do
             if body = mod_node.body
               body_ids = body.not_nil!
@@ -4360,7 +4372,7 @@ module Crystal::HIR
       include_arena = @arena
       defs.each do |mod_node, mod_arena|
         with_arena(mod_arena) do
-          extra_map = include_type_param_map(mod_node, include_node.target, include_arena)
+          extra_map = include_type_param_map(mod_node, include_node.target, include_arena, class_name)
           with_type_param_map(extra_map) do
             if macro_lookup = lookup_macro_entry("included", module_full_name)
               macro_entry, macro_key = macro_lookup
@@ -4546,7 +4558,7 @@ module Crystal::HIR
       include_arena = @arena
       defs.each do |mod_node, mod_arena|
         with_arena(mod_arena) do
-          extra_map = include_type_param_map(mod_node, extend_target, include_arena)
+          extra_map = include_type_param_map(mod_node, extend_target, include_arena, class_name)
           with_type_param_map(extra_map) do
             if body = mod_node.body
               with_namespace_override(module_full_name) do
@@ -9484,6 +9496,108 @@ module Crystal::HIR
       @monomorphized.add(specialized_name)
     end
 
+    # Monomorphize a generic module (e.g., Impl(Float32, ImplInfo_Float32))
+    private def monomorphize_generic_module(base_name : String, type_args : Array(String), specialized_name : String)
+      defs = @module_defs[base_name]?
+      return unless defs
+
+      # Find a module definition with type parameters
+      template_def : CrystalV2::Compiler::Frontend::ModuleNode? = nil
+      template_arena : CrystalV2::Compiler::Frontend::ArenaLike? = nil
+
+      defs.each do |mod_node, mod_arena|
+        if type_params = mod_node.type_params
+          if type_params.size == type_args.size
+            template_def = mod_node
+            template_arena = mod_arena
+            break
+          end
+        end
+      end
+
+      return unless template_def && template_arena
+
+      # Mark as monomorphized to prevent infinite recursion
+      @monomorphized.add(specialized_name)
+
+      # Set up type parameter substitutions
+      old_map = @type_param_map.dup
+      if type_params = template_def.type_params
+        type_params.each_with_index do |param, i|
+          @type_param_map[String.new(param)] = type_args[i]
+        end
+      end
+
+      old_arena = @arena
+      @arena = template_arena
+
+      # Register module methods for the specialized module
+      # Module class methods (def self.foo) become <specialized_name>.foo
+      if body = template_def.body
+        body.each do |expr_id|
+          member = unwrap_visibility_member(@arena[expr_id])
+          case member
+          when CrystalV2::Compiler::Frontend::DefNode
+            recv = member.receiver
+            next unless recv && String.new(recv) == "self"
+            next if member.is_abstract
+
+            method_name = String.new(member.name)
+            base_method = "#{specialized_name}.#{method_name}"
+
+            # Get return type
+            return_type = if rt = member.return_type
+                            type_ref_for_name(substitute_type_params_in_type_name(String.new(rt)))
+                          else
+                            inferred = infer_concrete_return_type_from_body(member, specialized_name)
+                            inferred || TypeRef::VOID
+                          end
+
+            # Get parameter types
+            param_types = [] of TypeRef
+            has_block = false
+            if params = member.params
+              params.each do |param|
+                next if named_only_separator?(param)
+                if param.is_block
+                  has_block = true
+                  next
+                end
+                param_type = if ta = param.type_annotation
+                               type_ref_for_name(substitute_type_params_in_type_name(String.new(ta)))
+                             elsif param.is_double_splat
+                               type_ref_for_name("NamedTuple")
+                             else
+                               TypeRef::VOID
+                             end
+                param_types << param_type
+              end
+            end
+
+            full_name = function_full_name_for_def(base_method, param_types, member.params, has_block)
+
+            # Skip if already registered
+            next if @function_types.has_key?(full_name)
+
+            register_function_type(full_name, return_type)
+            @function_defs[full_name] = member
+            @function_def_arenas[full_name] = @arena
+
+            # CRITICAL: Store type param map so lowering can resolve type param calls
+            # e.g., ImplInfo.get_cache() -> ImplInfo_Float32.get_cache()
+            store_function_type_param_map(full_name, base_method, @type_param_map)
+
+            if ENV["DEBUG_MONO_MODULE"]?
+              STDERR.puts "[MONO_MODULE] #{full_name} -> #{return_type} params=#{@type_param_map}"
+            end
+          end
+        end
+      end
+
+      @arena = old_arena
+      @type_param_map = old_map
+    end
+
     # Lower a class and all its methods (pass 3)
     def lower_class(node : CrystalV2::Compiler::Frontend::ClassNode)
       class_name = String.new(node.name)
@@ -11950,12 +12064,20 @@ module Crystal::HIR
       @function_param_stats.clear
       @function_type_keys_by_base.clear
       @function_defs.each do |key, def_node|
-        base = key.split("$", 2).first
+        base = if idx = key.index('$')
+                 key[0, idx]
+               else
+                 key
+               end
         (@function_def_overloads[base] ||= [] of String) << key
         @function_param_stats[key] = build_param_stats(def_node)
       end
       @function_types.each_key do |key|
-        base = key.split("$", 2).first
+        base = if idx = key.index('$')
+                 key[0, idx]
+               else
+                 key
+               end
         (@function_type_keys_by_base[base] ||= [] of String) << key
       end
       @function_type_keys_by_base_size = @function_types.size
@@ -11967,7 +12089,11 @@ module Crystal::HIR
       if @function_type_keys_by_base_size != @function_types.size
         @function_type_keys_by_base.clear
         @function_types.each_key do |key|
-          base = key.split("$", 2).first
+          base = if idx = key.index('$')
+                   key[0, idx]
+                 else
+                   key
+                 end
           (@function_type_keys_by_base[base] ||= [] of String) << key
         end
         @function_type_keys_by_base_size = @function_types.size
@@ -14736,6 +14862,16 @@ module Crystal::HIR
       end
 
       if name.includes?("::")
+        # Check if the prefix before :: is a type param (e.g., ImplInfo::CarrierUInt)
+        if idx = name.index("::")
+          prefix = name[0, idx]
+          suffix = name[(idx + 2)..]
+          if substitution = @type_param_map[prefix]?
+            # Recursively substitute the suffix in case it also contains type params
+            return "#{substitution}::#{substitute_type_params_in_type_name(suffix)}"
+          end
+        end
+        # Also check if the suffix after the last :: is a type param
         if idx = name.rindex("::")
           suffix = name[(idx + 2)..]
           if substitution = @type_param_map[suffix]?
@@ -24407,10 +24543,24 @@ module Crystal::HIR
                 lower_method(owner, dummy_info, func_def, call_arg_types, call_arg_literals, call_arg_enum_names, target_for_lower)
                 @current_class = old_class
               else
-                lower_module_method(owner, func_def, call_arg_types, call_arg_literals, call_arg_enum_names, target_for_lower)
+                # Apply type param map for generic module methods
+                if extra_type_params && !extra_type_params.empty?
+                  with_type_param_map(extra_type_params) do
+                    lower_module_method(owner, func_def, call_arg_types, call_arg_literals, call_arg_enum_names, target_for_lower)
+                  end
+                else
+                  lower_module_method(owner, func_def, call_arg_types, call_arg_literals, call_arg_enum_names, target_for_lower)
+                end
               end
             else
-              lower_module_method(owner, func_def, call_arg_types, call_arg_literals, call_arg_enum_names, target_for_lower)
+              # Apply type param map for generic module methods
+              if extra_type_params && !extra_type_params.empty?
+                with_type_param_map(extra_type_params) do
+                  lower_module_method(owner, func_def, call_arg_types, call_arg_literals, call_arg_enum_names, target_for_lower)
+                end
+              else
+                lower_module_method(owner, func_def, call_arg_types, call_arg_literals, call_arg_enum_names, target_for_lower)
+              end
             end
           else
             # Use the call-site mangled name so top-level defs match call signatures.
@@ -25093,7 +25243,18 @@ module Crystal::HIR
                   class_name_str = class_literal
                 end
               end
-              resolved_name = resolve_class_name_in_context(name)
+              # CRITICAL: Substitute type params FIRST, before namespace resolution
+              # e.g., ImplInfo -> ImplInfo_Float32 (or Float::Printer::Dragonbox::ImplInfo_Float32)
+              # This must happen before resolve_class_name_in_context because the type param
+              # substitution gives us the concrete type name to resolve.
+              substituted_name = substitute_type_params_in_type_name(name)
+              # If the substitution result already has a namespace (::), use it directly
+              # to avoid double namespace like Float::Printer::Dragonbox::Float::Printer::Dragonbox::ImplInfo_Float32
+              resolved_name = if substituted_name != name && substituted_name.includes?("::")
+                                substituted_name
+                              else
+                                resolve_class_name_in_context(substituted_name)
+                              end
               resolved_name = resolve_type_alias_chain(resolved_name)
               if ENV["DEBUG_THREAD_RESOLVE"]? && method_name == "threads"
                 STDERR.puts "[THREAD_RESOLVE] name=#{name} resolved=#{resolved_name} current=#{@current_class || "nil"} override=#{@current_namespace_override || "nil"}"
@@ -25219,6 +25380,10 @@ module Crystal::HIR
               if !@monomorphized.includes?(class_name_str)
                 monomorphize_generic_class(base_name, type_args, class_name_str)
               end
+              # If not a class, try as a generic module
+              if !@monomorphized.includes?(class_name_str) && @module_defs.has_key?(base_name)
+                monomorphize_generic_module(base_name, type_args, class_name_str)
+              end
             end
           end
         elsif obj_node.is_a?(CrystalV2::Compiler::Frontend::CallNode)
@@ -25254,6 +25419,8 @@ module Crystal::HIR
                       else
                         resolve_path_string_in_context(raw_path)
                       end
+          # Substitute type params in path (e.g., ImplInfo::CarrierUInt -> ImplInfo_Float32::CarrierUInt)
+          full_path = substitute_type_params_in_type_name(full_path)
           if constant_name_exists?(full_path)
             if @module.is_lib?(full_path)
               class_name_str = full_path
@@ -25273,7 +25440,7 @@ module Crystal::HIR
                 resolved = next_resolved
                 depth += 1
               end
-              class_name_str = resolved
+              class_name_str = substitute_type_params_in_type_name(resolved)
             else
               # Even if not in class_info, treat path as class name for class method calls
               # This handles nested classes/modules that may not be fully registered
