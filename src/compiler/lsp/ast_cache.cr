@@ -1376,7 +1376,7 @@ module CrystalV2
           when .number_node?
             span = read_span(io)
             value = pool.intern(strings[read_string_idx(io)].to_slice)
-            kind = Frontend::NumberKind.new(io.read_byte.not_nil!)
+            kind = Frontend::NumberKind.new(io.read_byte.not_nil!.to_i32)
             Frontend::NumberNode.new(span, value, kind)
 
           when .identifier_node?
@@ -1794,7 +1794,7 @@ module CrystalV2
 
           when .visibility_modifier_node?
             span = read_span(io)
-            visibility = Frontend::Visibility.new(io.read_byte.not_nil!)
+            visibility = Frontend::Visibility.new(io.read_byte.not_nil!.to_i32)
             expr = read_expr_id(io)
             Frontend::VisibilityModifierNode.new(span, visibility, expr)
 
@@ -1978,7 +1978,7 @@ module CrystalV2
 
         private def self.read_optional_visibility(io : IO) : Frontend::Visibility?
           return nil unless io.read_byte.not_nil! == 1_u8
-          Frontend::Visibility.new(io.read_byte.not_nil!)
+          Frontend::Visibility.new(io.read_byte.not_nil!.to_i32)
         end
 
         private def self.read_optional_string_array(io : IO, strings : Array(String), pool : Frontend::StringPool) : Array(Slice(UInt8))?
@@ -2131,7 +2131,7 @@ module CrystalV2
         private def self.read_string_pieces(io : IO, strings : Array(String), pool : Frontend::StringPool) : Array(Frontend::StringPiece)
           count = io.read_bytes(UInt32, IO::ByteFormat::LittleEndian).to_i
           Array.new(count) do
-            kind = Frontend::StringPiece::Kind.new(io.read_byte.not_nil!)
+            kind = Frontend::StringPiece::Kind.new(io.read_byte.not_nil!.to_i32)
             if kind.text?
               Frontend::StringPiece.text(strings[read_string_idx(io)])
             else
@@ -2143,7 +2143,7 @@ module CrystalV2
         private def self.read_macro_pieces(io : IO, strings : Array(String), pool : Frontend::StringPool) : Array(Frontend::MacroPiece)
           count = io.read_bytes(UInt32, IO::ByteFormat::LittleEndian).to_i
           Array.new(count) do
-            kind = Frontend::MacroPiece::Kind.new(io.read_byte.not_nil!)
+            kind = Frontend::MacroPiece::Kind.new(io.read_byte.not_nil!.to_i32)
             text_flag = io.read_byte.not_nil!
             text = text_flag == 1_u8 ? strings[read_string_idx(io)] : nil
             expr = read_optional_expr_id(io)
