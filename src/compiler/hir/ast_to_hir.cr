@@ -2510,7 +2510,10 @@ module Crystal::HIR
         name = String.new(node.name)
         @type_param_map[name]? || name
       when CrystalV2::Compiler::Frontend::PathNode
-        resolve_path_string_in_context(collect_path_string(node))
+        raw_path = collect_path_string(node)
+        # Substitute type params in path prefix (e.g., D::CACHE -> ImplInfo_Float32::CACHE)
+        substituted = substitute_type_params_in_type_name(raw_path)
+        resolve_path_string_in_context(substituted)
       when CrystalV2::Compiler::Frontend::CallNode
         base = resolve_path_like_name(node.callee) || stringify_type_expr(node.callee)
         return nil unless base
@@ -4279,6 +4282,9 @@ module Crystal::HIR
 
                     method_name = String.new(member.name)
                     base_name = "#{class_name}.#{method_name}"
+                    if ENV["DEBUG_EXTEND_REGISTER"]? && class_name.includes?("ImplInfo")
+                      STDERR.puts "[EXTEND_REGISTER] class=#{class_name} method=#{method_name} base=#{base_name}"
+                    end
 
                     type_literal_name = infer_type_literal_return_name_from_body(member, class_name)
                     return_type = if rt = member.return_type
@@ -6058,8 +6064,14 @@ module Crystal::HIR
       if body = node.body
         extend_self = false
         extend_nodes = [] of CrystalV2::Compiler::Frontend::ExtendNode
+        if ENV["DEBUG_EXTEND_REGISTER"]? && module_name.includes?("ImplInfo")
+          STDERR.puts "[EXTEND_SCAN] module=#{module_name} body_size=#{body.size}"
+        end
         body.each do |expr_id|
           member = unwrap_visibility_member(@arena[expr_id])
+          if ENV["DEBUG_EXTEND_REGISTER"]? && module_name.includes?("ImplInfo")
+            STDERR.puts "[EXTEND_SCAN_MEMBER] module=#{module_name} member=#{member.class.name}"
+          end
           next unless member.is_a?(CrystalV2::Compiler::Frontend::ExtendNode)
           extend_nodes << member
           target_node = @arena[member.target]
@@ -6292,6 +6304,10 @@ module Crystal::HIR
         end
           visited_extends = Set(String).new
           extend_nodes.each do |ext|
+            if ENV["DEBUG_EXTEND_REGISTER"]? && module_name.includes?("ImplInfo")
+              target_str = resolve_path_like_name(ext.target) || "?"
+              STDERR.puts "[EXTEND_REGISTER_CALL] module=#{module_name} target=#{target_str}"
+            end
             register_module_class_methods_for(
               module_name,
               ext.target,
@@ -7846,6 +7862,55 @@ module Crystal::HIR
             if is_self
               @module_extend_self.add(full_name)
             end
+          end
+        end
+        # Process extend SomeModule(...) patterns (not extend self)
+        extend_nodes = body.compact_map do |expr_id|
+          member = unwrap_visibility_member(@arena[expr_id])
+          next unless member.is_a?(CrystalV2::Compiler::Frontend::ExtendNode)
+          target_node = @arena[member.target]
+          is_self = case target_node
+                    when CrystalV2::Compiler::Frontend::SelfNode
+                      true
+                    when CrystalV2::Compiler::Frontend::IdentifierNode
+                      String.new(target_node.name) == "self"
+                    else
+                      false
+                    end
+          next if is_self
+          member
+        end
+        unless extend_nodes.empty?
+          visited_extends = Set(String).new
+          defined_class_method_full_names = Set(String).new
+          # Pre-populate with already defined methods
+          body.each do |expr_id|
+            member = unwrap_visibility_member(@arena[expr_id])
+            if member.is_a?(CrystalV2::Compiler::Frontend::DefNode)
+              recv = member.receiver
+              if recv && String.new(recv) == "self"
+                method_name = String.new(member.name)
+                defined_class_method_full_names << "#{full_name}.#{method_name}"
+              end
+            end
+          end
+          old_class = @current_class
+          @current_class = full_name
+          begin
+            extend_nodes.each do |ext|
+              if ENV["DEBUG_EXTEND_REGISTER"]? && full_name.includes?("ImplInfo")
+                target_str = resolve_path_like_name(ext.target) || "?"
+                STDERR.puts "[EXTEND_REGISTER_NESTED] module=#{full_name} target=#{target_str}"
+              end
+              register_module_class_methods_for(
+                full_name,
+                ext.target,
+                defined_class_method_full_names,
+                visited_extends
+              )
+            end
+          ensure
+            @current_class = old_class
           end
         end
         # PASS 2: Register functions and other members (now that aliases are available)
@@ -20250,7 +20315,10 @@ module Crystal::HIR
         end
       end
 
-      full_path = resolve_path_string_in_context(collect_path_string(node))
+      raw_path = collect_path_string(node)
+      # Substitute type params in path prefix (e.g., D::CACHE -> ImplInfo_Float32::CACHE)
+      substituted_path = substitute_type_params_in_type_name(raw_path)
+      full_path = resolve_path_string_in_context(substituted_path)
       if mapped = @type_param_map[full_path]?
         if literal = literal_for_type_param_value(mapped)
           lit = Literal.new(ctx.next_id, literal[0], literal[1])
@@ -25414,13 +25482,19 @@ module Crystal::HIR
           # Path like Foo::Bar for nested classes/modules
           raw_path = collect_path_string(obj_node)
           absolute_path = path_is_absolute?(obj_node)
+          # Substitute type params FIRST, before resolving context (e.g., D::CACHE -> ImplInfo_Float32::CACHE)
+          substituted_path = substitute_type_params_in_type_name(raw_path)
+          # Check if the first component was a type param (e.g., D::CACHE where D is mapped)
+          first_component = raw_path.split("::").first
+          first_was_type_param = @type_param_map.has_key?(first_component)
           full_path = if absolute_path
-                        raw_path.starts_with?("::") ? raw_path[2..] : raw_path
+                        substituted_path.starts_with?("::") ? substituted_path[2..] : substituted_path
+                      elsif first_was_type_param && substituted_path.includes?("::")
+                        # First component was a type param that got substituted - use as-is
+                        substituted_path
                       else
-                        resolve_path_string_in_context(raw_path)
+                        resolve_path_string_in_context(substituted_path)
                       end
-          # Substitute type params in path (e.g., ImplInfo::CarrierUInt -> ImplInfo_Float32::CarrierUInt)
-          full_path = substitute_type_params_in_type_name(full_path)
           if constant_name_exists?(full_path)
             if @module.is_lib?(full_path)
               class_name_str = full_path
@@ -25487,7 +25561,8 @@ module Crystal::HIR
                      when CrystalV2::Compiler::Frontend::ConstantNode
                        String.new(obj_node.name)
                      when CrystalV2::Compiler::Frontend::PathNode
-                       collect_path_string(obj_node)
+                       # Substitute type params in path (e.g., D::CACHE -> ImplInfo_Float32::CACHE)
+                       substitute_type_params_in_type_name(collect_path_string(obj_node))
                      else
                        nil
                      end
