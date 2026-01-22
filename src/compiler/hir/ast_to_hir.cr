@@ -473,15 +473,54 @@ module Crystal::HIR
     @yield_return_functions : Set(String)
     @yield_return_checked : Set(String)
 
-    # Track functions lowered lazily to avoid re-entrancy/duplication.
-    @lowered_functions : Set(String)
-    @lowering_functions : Set(String)
+    # ═══════════════════════════════════════════════════════════════════════════
+    # FUNCTION LOWERING STATE MACHINE
+    # ═══════════════════════════════════════════════════════════════════════════
+    #
+    # Unified state tracking for lazy function lowering. Replaces the previous
+    # 4-collection approach (@lowered_functions, @lowering_functions,
+    # @pending_lower_functions, @inside_lowering) with a single source of truth.
+    #
+    # State transitions:
+    #   NotStarted → Pending (queued when inside another lowering)
+    #   NotStarted → InProgress (direct lowering when not nested)
+    #   Pending → InProgress (picked up from work queue)
+    #   InProgress → Completed (lowering finished)
+    #
+    enum FunctionLoweringState
+      NotStarted   # Never seen or not yet queued
+      Pending      # Queued for lowering (deferred due to nesting)
+      InProgress   # Currently being lowered
+      Completed    # Successfully lowered
+    end
 
-    # Work queue approach to prevent stack overflow in recursive lowering.
-    # When @inside_lowering is true, new lower_function_if_needed calls are queued
-    # instead of processed immediately, breaking the recursive cycle.
-    @inside_lowering : Bool = false
-    @pending_lower_functions : Set(String) = Set(String).new
+    # Per-function lowering state
+    @function_lowering_states : Hash(String, FunctionLoweringState) = {} of String => FunctionLoweringState
+
+    # Tracks nesting depth of lowering operations.
+    # When > 0, new lower requests are queued instead of executed immediately.
+    @lowering_depth : Int32 = 0
+
+    # Helper: get function state (defaults to NotStarted)
+    private def function_state(name : String) : FunctionLoweringState
+      @function_lowering_states[name]? || FunctionLoweringState::NotStarted
+    end
+
+    # Helper: check if function can be lowered (not already in progress or completed)
+    private def can_start_lowering?(name : String) : Bool
+      state = function_state(name)
+      state.not_started? || state.pending?
+    end
+
+    # Helper: check if we're inside a lowering operation
+    private def inside_lowering? : Bool
+      @lowering_depth > 0
+    end
+
+    # Helper: get all pending functions
+    private def pending_functions : Array(String)
+      @function_lowering_states.select { |_, v| v.pending? }.keys
+    end
 
     # Call-site argument types for lazily lowered functions (mangled name -> arg types).
     @pending_arg_types : Hash(String, CallsiteArgs)
@@ -731,8 +770,8 @@ module Crystal::HIR
       @yield_functions = Set(String).new
       @yield_return_functions = Set(String).new
       @yield_return_checked = Set(String).new
-      @lowered_functions = Set(String).new
-      @lowering_functions = Set(String).new
+      # Note: @lowered_functions and @lowering_functions removed.
+      # Use @function_lowering_states with FunctionLoweringState enum instead.
       @pending_arg_types = {} of String => CallsiteArgs
       @pending_arg_types_by_arity = {} of String => Hash(Int32, Array(CallsiteArgs))
       @pending_arg_types_seen_by_arity = {} of String => Hash(Int32, Set(String))
@@ -10189,8 +10228,8 @@ module Crystal::HIR
         # If the init def wasn't lowered (e.g., pending callsite got consumed),
         # force a direct lower so the allocator call has a matching body.
         if !@module.has_function?(init_name) &&
-           !@lowering_functions.includes?(init_name) &&
-           !@lowered_functions.includes?(init_name)
+           !function_state(init_name).in_progress? &&
+           !function_state(init_name).completed?
           init_def = @function_defs[init_name]? || @function_defs[init_base_name]?
           if init_def
             init_arena = @function_def_arenas[init_name]? || @function_def_arenas[init_base_name]?
@@ -10301,8 +10340,8 @@ module Crystal::HIR
         remember_callsite_arg_types(init_name, call_arg_types) unless call_arg_types.empty?
         lower_function_if_needed(init_name)
         if !@module.has_function?(init_name) &&
-           !@lowering_functions.includes?(init_name) &&
-           !@lowered_functions.includes?(init_name)
+           !function_state(init_name).in_progress? &&
+           !function_state(init_name).completed?
           init_def = @function_defs[init_name]?
           init_def_name = init_def ? init_name : nil
           unless init_def
@@ -17239,8 +17278,8 @@ module Crystal::HIR
         sigs_seen = Set(String).new
         @pending_arg_types.each do |name, args|
           next if @module.has_function?(name)
-          next if @lowered_functions.includes?(name)
-          next if @lowering_functions.includes?(name)
+          next if function_state(name).completed?
+          next if function_state(name).in_progress?
           next if attempted.includes?(name)
           next if args.types.all? { |t| t == TypeRef::VOID }
           # Skip incomplete names (must have class prefix with # or .)
@@ -17276,8 +17315,8 @@ module Crystal::HIR
             next if args.types.all? { |t| t == TypeRef::VOID }
             name = mangle_function_name(base_name, args.types, signature.has_block)
             next if @module.has_function?(name)
-            next if @lowered_functions.includes?(name)
-            next if @lowering_functions.includes?(name)
+            next if function_state(name).completed?
+            next if function_state(name).in_progress?
             next if attempted.includes?(name)
             has_bare_generic = args.types.any? do |t|
               if desc = @module.get_type_descriptor(t)
@@ -17346,8 +17385,8 @@ module Crystal::HIR
               name = inst.method_name
               next if name.empty?
               next if @module.has_function?(name)
-              next if @lowered_functions.includes?(name)
-              next if @lowering_functions.includes?(name)
+              next if function_state(name).completed?
+              next if function_state(name).in_progress?
               missing << name
             end
           end
@@ -17376,28 +17415,33 @@ module Crystal::HIR
       max_iterations = 10000  # Safety limit to prevent infinite loops
       iteration = 0
 
-      while !@pending_lower_functions.empty? && iteration < max_iterations
+      while pending_functions.size > 0 && iteration < max_iterations
         # Take a snapshot of currently pending functions
-        pending = @pending_lower_functions.dup
-        @pending_lower_functions.clear
+        pending = pending_functions
 
-        # Reset inside_lowering to allow these functions to be processed
-        @inside_lowering = false
+        # Clear pending state (transition to NotStarted so they can be lowered)
+        pending.each { |name| @function_lowering_states.delete(name) }
+
+        # Reset lowering depth to allow these functions to be processed
+        saved_depth = @lowering_depth
+        @lowering_depth = 0
 
         pending.each do |name|
           # Skip if already lowered or currently being lowered
           next if @module.has_function?(name)
-          next if @lowered_functions.includes?(name)
-          next if @lowering_functions.includes?(name)
+          next if function_state(name).completed?
+          next if function_state(name).in_progress?
 
           lower_function_if_needed(name)
         end
 
+        @lowering_depth = saved_depth
         iteration += 1
       end
 
-      if iteration >= max_iterations && !@pending_lower_functions.empty?
-        STDERR.puts "[WARNING] process_pending_lower_functions hit iteration limit, #{@pending_lower_functions.size} functions remaining"
+      pending_remaining = pending_functions
+      if iteration >= max_iterations && pending_remaining.size > 0
+        STDERR.puts "[WARNING] process_pending_lower_functions hit iteration limit, #{pending_remaining.size} functions remaining"
       end
     end
 
@@ -23884,16 +23928,18 @@ module Crystal::HIR
     # Returns true if the function was lowered, false if it couldn't be.
     private def force_lower_function_for_return_type(name : String) : Bool
       # Don't force if it would cause infinite recursion
-      return false if @lowering_functions.includes?(name)
+      return false if function_state(name).in_progress?
       return false if @module.has_function?(name)
-      return false if @lowered_functions.includes?(name)
+      return false if function_state(name).completed?
 
-      # Remove from pending queue (we'll handle it now)
-      @pending_lower_functions.delete(name)
+      # Clear pending state if set (we'll handle it now)
+      if function_state(name).pending?
+        @function_lowering_states.delete(name)
+      end
 
       # Temporarily disable inside_lowering to allow immediate processing
-      saved_inside_lowering = @inside_lowering
-      @inside_lowering = false
+      saved_depth = @lowering_depth
+      @lowering_depth = 0
       begin
         lower_function_if_needed_impl(name)
         true
@@ -23901,7 +23947,7 @@ module Crystal::HIR
         STDERR.puts "[FORCE_LOWER_ERROR] name=#{name} error=#{ex.message}"
         false
       ensure
-        @inside_lowering = saved_inside_lowering
+        @lowering_depth = saved_depth
       end
     end
 
@@ -23921,19 +23967,19 @@ module Crystal::HIR
         is_yield = @yield_functions.includes?(name)
         STDERR.puts "[YIELD_SKIP] name=#{name} is_yield=#{is_yield}"
       end
-      if @lowering_functions.includes?(name)
+      if function_state(name).in_progress?
         if ENV["DEBUG_FROM_CHARS"]? && name.includes?("from_chars_advanced")
           STDERR.puts "[DEBUG_FROM_CHARS] skip already lowering name=#{name}"
         end
         return
       end
       return if @module.has_function?(name)
-      return if @lowered_functions.includes?(name)
+      return if function_state(name).completed?
 
       # WORK QUEUE: If we're already inside lowering, defer this function
       # to prevent stack overflow from deep recursive lowering chains.
-      if @inside_lowering
-        @pending_lower_functions.add(name)
+      if inside_lowering?
+        @function_lowering_states[name] = FunctionLoweringState::Pending
         return
       end
 
@@ -24591,13 +24637,13 @@ module Crystal::HIR
         STDERR.puts "[DEBUG_BYTEFORMAT_LOWER] name=#{name} target=#{target_name} arena=#{arena_for_log.class} loc=#{loc} branch=#{lookup_branch || "none"}"
       end
       return unless func_def
-      is_lowering_target = @lowering_functions.includes?(target_name)
+      is_lowering_target = function_state(target_name).in_progress?
       if ENV.has_key?("DEBUG_DEFERRED") && name.includes?("byte_range")
         STDERR.puts "[DEFERRED_CHECK] is_lowering=#{is_lowering_target}"
       end
       return if is_lowering_target
       if func_def.is_abstract
-        @lowering_functions.add(target_name)
+        @function_lowering_states[target_name] = FunctionLoweringState::InProgress
         return
       end
 
@@ -24795,7 +24841,7 @@ module Crystal::HIR
       end
 
       has_in_module = @module.has_function?(resolved_target_name)
-      is_lowering_resolved = @lowering_functions.includes?(resolved_target_name)
+      is_lowering_resolved = function_state(resolved_target_name).in_progress?
       if ENV.has_key?("DEBUG_DEFERRED") && name.includes?("byte_range")
         STDERR.puts "[DEFERRED_FINAL] resolved=#{resolved_target_name} has_in_module=#{has_in_module} is_lowering=#{is_lowering_resolved}"
       end
@@ -24803,11 +24849,10 @@ module Crystal::HIR
       return if is_lowering_resolved
 
       target_name = resolved_target_name
-      @lowering_functions.add(target_name)
+      @function_lowering_states[target_name] = FunctionLoweringState::InProgress
 
       # WORK QUEUE: Track that we're inside lowering to defer nested calls
-      was_inside_lowering = @inside_lowering
-      @inside_lowering = true
+      @lowering_depth += 1
 
       debug_hook("function.lower.start", "name=#{target_name} requested=#{name}")
       if ENV.has_key?("DEBUG_CLASS_MODULES") && (target_name.includes?("byte_begin") || target_name.includes?("MatchData"))
@@ -24956,9 +25001,8 @@ module Crystal::HIR
         end
       ensure
         # WORK QUEUE: Restore previous inside_lowering state
-        @inside_lowering = was_inside_lowering
-        @lowering_functions.delete(target_name)
-        @lowered_functions.add(target_name)
+        @lowering_depth -= 1
+        @function_lowering_states[target_name] = FunctionLoweringState::Completed
         debug_hook("function.lower.done", "name=#{target_name}")
         if start_time
           elapsed_ms = (Time.instant - start_time).total_milliseconds
@@ -27960,17 +28004,17 @@ module Crystal::HIR
         STDERR.puts "[GET_CACHE_TRACE] after_re-check return_type=#{rt_name}"
       end
 
-      # If return type is still VOID, the function may have been deferred due to @inside_lowering.
+      # If return type is still VOID, the function may have been deferred due to inside_lowering?.
       # Force-lower it now to get the correct return type.
       if return_type == TypeRef::VOID
         force_lowered = false
         debug_force = ENV["DEBUG_FORCE_LOWER"]? && method_name == "get_cache"
         if debug_force
           STDERR.puts "[FORCE_LOWER] check method=#{method_name} mangled=#{mangled_method_name} primary=#{primary_mangled_name} base=#{base_method_name}"
-          STDERR.puts "[FORCE_LOWER] pending=#{@pending_lower_functions.select { |n| n.includes?("get_cache") }.join(",")}"
+          STDERR.puts "[FORCE_LOWER] pending=#{pending_functions.select { |n| n.includes?("get_cache") }.join(",")}"
         end
         # Try primary name first
-        if @pending_lower_functions.includes?(primary_mangled_name)
+        if function_state(primary_mangled_name).pending?
           if debug_force
             STDERR.puts "[FORCE_LOWER] trying primary_mangled=#{primary_mangled_name}"
           end
@@ -27985,7 +28029,7 @@ module Crystal::HIR
         end
         # Try mangled name if different
         if return_type == TypeRef::VOID && mangled_method_name != primary_mangled_name
-          if @pending_lower_functions.includes?(mangled_method_name)
+          if function_state(mangled_method_name).pending?
             if debug_force
               STDERR.puts "[FORCE_LOWER] trying mangled=#{mangled_method_name}"
             end
@@ -28001,7 +28045,7 @@ module Crystal::HIR
         end
         # Try base name if still no result
         if return_type == TypeRef::VOID && base_method_name != mangled_method_name
-          if @pending_lower_functions.includes?(base_method_name)
+          if function_state(base_method_name).pending?
             if debug_force
               STDERR.puts "[FORCE_LOWER] trying base=#{base_method_name}"
             end
