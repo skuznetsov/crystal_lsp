@@ -1055,7 +1055,11 @@ module Crystal::MIR
       @incoming = [] of Tuple(BlockId, ValueId)
     end
 
-    def add_incoming(block : BlockId, value : ValueId)
+    # Add an incoming value from a predecessor block.
+    # Named parameters are REQUIRED to prevent argument order bugs.
+    # Correct:   phi.add_incoming(from: block_id, value: val_id)
+    # Wrong:     phi.add_incoming(block_id, val_id)  # compile error
+    def add_incoming(*, from block : BlockId, value : ValueId)
       @incoming << {block, value}
     end
 

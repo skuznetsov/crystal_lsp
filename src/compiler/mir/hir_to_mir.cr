@@ -329,7 +329,7 @@ module Crystal
             end
           end
 
-          mir_phi.add_incoming(mir_block, mir_value)
+          mir_phi.add_incoming(from: mir_block, value: mir_value)
         end
       end
 
@@ -971,6 +971,127 @@ module Crystal
       builder.extern_call(call.method_name, args, convert_type(call.type))
     end
 
+    # Dispatch kind for unified vdispatch generator
+    private enum VDispatchKind
+      Union  # receiver is a union type - use UnionTypeIdGet + UnionUnwrap
+      Class  # receiver is a class pointer - use gep header + load type_id
+    end
+
+    # Unified candidate structure for vdispatch
+    private alias VDispatchCandidate = NamedTuple(
+      type_id: Int32,
+      func: Function?,
+      type_ref: TypeRef?,       # for Union unwrap
+      variant_id: Int32?,       # for Union unwrap
+      dispatch_class: String?   # for nested class dispatch
+    )
+
+    # Unified vdispatch body generator - handles both Union and Class dispatch
+    # Returns the phi node if return type is non-void, nil otherwise
+    private def generate_vdispatch_body(
+      dispatch_func : Function,
+      dispatch_builder : Builder,
+      param_values : Array(ValueId),
+      candidates : Array(VDispatchCandidate),
+      kind : VDispatchKind,
+      method_suffix : String?,
+      hir_call : HIR::Call?
+    ) : Phi?
+      # 1. Get type ID based on dispatch kind
+      type_id_val = case kind
+        in .union?
+          dispatch_builder.emit(MIR::UnionTypeIdGet.new(dispatch_builder.next_id, param_values[0]))
+        in .class?
+          header_ptr = dispatch_builder.gep(param_values[0], [0_u32], TypeRef::POINTER)
+          dispatch_builder.load(header_ptr, TypeRef::INT32)
+      end
+
+      # 2. Create end block and phi (if non-void return)
+      end_block = dispatch_func.create_block
+      phi : Phi? = nil
+      if dispatch_func.return_type != TypeRef::VOID
+        dispatch_builder.current_block = end_block
+        phi = dispatch_builder.phi(dispatch_func.return_type)
+      end
+
+      # 3. Create default block and case blocks
+      default_block = dispatch_func.create_block
+      cases = [] of Tuple(Int64, BlockId)
+      candidates.each do |candidate|
+        case_block = dispatch_func.create_block
+        cases << {candidate[:type_id].to_i64, case_block}
+      end
+
+      # 4. Set up switch in entry block
+      dispatch_builder.current_block = dispatch_func.entry_block
+      dispatch_func.get_block(dispatch_func.entry_block).terminator = Switch.new(type_id_val, cases, default_block)
+
+      # 5. Generate each case
+      candidates.each_with_index do |candidate, idx|
+        case_block = cases[idx][1]
+        dispatch_builder.current_block = case_block
+
+        cand_args = param_values.dup
+
+        # Union: unwrap receiver to concrete type
+        if kind.union? && candidate[:type_ref] && candidate[:variant_id]
+          unwrap = MIR::UnionUnwrap.new(
+            dispatch_builder.next_id,
+            candidate[:type_ref].not_nil!,
+            param_values[0],
+            candidate[:variant_id].not_nil!,
+            false
+          )
+          dispatch_builder.emit(unwrap)
+          cand_args[0] = unwrap.id
+        end
+
+        # Get the function to call (may need nested dispatch for union containing class hierarchy)
+        call_func = candidate[:func]
+        if call_func.nil? && candidate[:dispatch_class] && method_suffix && hir_call
+          call_func = ensure_class_dispatch_for_union(
+            candidate[:dispatch_class].not_nil!,
+            method_suffix,
+            candidate[:type_ref] || TypeRef::POINTER,
+            hir_call
+          )
+        end
+
+        if call_func
+          # Coerce args if we have HIR info
+          final_args = if hir_call
+            recv_id = hir_call.receiver
+            hir_args_with_receiver = recv_id ? [recv_id] + hir_call.args : hir_call.args
+            coerce_call_args(dispatch_builder, cand_args, hir_args_with_receiver, call_func)
+          else
+            cand_args
+          end
+
+          call_val = dispatch_builder.call(call_func.id, final_args, dispatch_func.return_type)
+          if phi && call_val != 0_u32
+            phi.add_incoming(from: case_block, value: call_val)
+          end
+          dispatch_func.get_block(case_block).terminator = Jump.new(end_block)
+        else
+          # No implementation found - jump to default (unreachable)
+          dispatch_func.get_block(case_block).terminator = Jump.new(default_block)
+        end
+      end
+
+      # 6. Set up end block return
+      if phi
+        dispatch_builder.current_block = end_block
+        dispatch_func.get_block(end_block).terminator = Return.new(phi.id)
+      else
+        dispatch_func.get_block(end_block).terminator = Return.new(nil)
+      end
+
+      # 7. Default block is unreachable
+      dispatch_func.get_block(default_block).terminator = Unreachable.new
+
+      phi
+    end
+
     private def lower_virtual_dispatch(call : HIR::Call, args : Array(ValueId)) : ValueId?
       recv_id = call.receiver
       return nil unless recv_id
@@ -982,14 +1103,15 @@ module Crystal
       method_suffix = extract_method_suffix(call.method_name)
       return nil unless method_suffix
 
-      candidates = virtual_dispatch_candidates(recv_desc, recv_type, method_suffix)
-      return nil if candidates.empty?
+      old_candidates = virtual_dispatch_candidates(recv_desc, recv_type, method_suffix)
+      return nil if old_candidates.empty?
 
       dispatch_name = "__vdispatch__#{call.method_name}"
       if existing = @mir_module.get_function(dispatch_name)
         return @builder.not_nil!.call(existing.id, args, convert_type(call.type))
       end
 
+      # Create dispatch function
       dispatch_func = @mir_module.create_function(dispatch_name, convert_type(call.type))
       param_values = [] of ValueId
 
@@ -1007,73 +1129,30 @@ module Crystal
 
       dispatch_builder = Builder.new(dispatch_func)
 
-      type_id_val = if recv_desc.kind == HIR::TypeKind::Union
-                      dispatch_builder.emit(MIR::UnionTypeIdGet.new(dispatch_builder.next_id, param_values[0]))
-                    else
-                      header_ptr = dispatch_builder.gep(param_values[0], [0_u32], TypeRef::POINTER)
-                      dispatch_builder.load(header_ptr, TypeRef::INT32)
-                    end
-
-      end_block = dispatch_func.create_block
-      phi = nil
-      if dispatch_func.return_type != TypeRef::VOID
-        dispatch_builder.current_block = end_block
-        phi = dispatch_builder.phi(dispatch_func.return_type)
+      # Convert to unified candidate format
+      candidates = old_candidates.map do |c|
+        VDispatchCandidate.new(
+          type_id: c[:type_id],
+          func: c[:func],
+          type_ref: c[:type_ref],
+          variant_id: c[:variant_id],
+          dispatch_class: c[:dispatch_class]
+        )
       end
 
-      default_block = dispatch_func.create_block
+      # Determine dispatch kind
+      kind = recv_desc.kind == HIR::TypeKind::Union ? VDispatchKind::Union : VDispatchKind::Class
 
-      cases = [] of Tuple(Int64, BlockId)
-      candidates.each do |candidate|
-        case_block = dispatch_func.create_block
-        cases << {candidate[:type_id].to_i64, case_block}
-      end
-
-      dispatch_builder.current_block = dispatch_func.entry_block
-      dispatch_func.get_block(dispatch_func.entry_block).terminator = Switch.new(type_id_val, cases, default_block)
-
-      candidates.each_with_index do |candidate, idx|
-        case_block = cases[idx][1]
-        dispatch_builder.current_block = case_block
-
-        cand_args = param_values.dup
-        if recv_desc.kind == HIR::TypeKind::Union
-          unwrap = MIR::UnionUnwrap.new(
-            dispatch_builder.next_id,
-            candidate[:type_ref],
-            param_values[0],
-            candidate[:variant_id].to_i32,
-            false
-          )
-          dispatch_builder.emit(unwrap)
-          cand_args[0] = unwrap.id
-        end
-
-        hir_args_with_receiver = [recv_id] + call.args
-        call_func = candidate[:func]
-        if call_func.nil? && candidate[:dispatch_class]
-          call_func = ensure_class_dispatch_for_union(candidate[:dispatch_class].not_nil!, method_suffix, candidate[:type_ref], call)
-        end
-        if call_func
-          callee_args = coerce_call_args(dispatch_builder, cand_args, hir_args_with_receiver, call_func)
-          call_val = dispatch_builder.call(call_func.id, callee_args, dispatch_func.return_type)
-          if phi
-            phi.add_incoming(case_block, call_val)
-          end
-          dispatch_func.get_block(case_block).terminator = Jump.new(end_block)
-        else
-          dispatch_func.get_block(case_block).terminator = Jump.new(default_block)
-        end
-      end
-
-      if phi
-        dispatch_builder.current_block = end_block
-        dispatch_func.get_block(end_block).terminator = Return.new(phi.id)
-      else
-        dispatch_func.get_block(end_block).terminator = Return.new(nil)
-      end
-
-      dispatch_func.get_block(default_block).terminator = Unreachable.new
+      # Use unified generator
+      generate_vdispatch_body(
+        dispatch_func,
+        dispatch_builder,
+        param_values,
+        candidates,
+        kind,
+        method_suffix,
+        call
+      )
 
       @builder.not_nil!.call(dispatch_func.id, args, convert_type(call.type))
     end
@@ -1209,16 +1288,18 @@ module Crystal
         return existing
       end
 
-      candidates = [] of NamedTuple(type_id: Int32, func: Function)
+      # Gather candidates from class hierarchy
+      old_candidates = [] of NamedTuple(type_id: Int32, func: Function)
       ([class_name] + subclasses_for(class_name)).each do |name|
         if func = resolve_virtual_method_for_class(name, method_suffix)
           next unless mir_type = @mir_module.type_registry.get_by_name(name)
           next if mir_type.is_value_type?
-          candidates << {type_id: mir_type.id.to_i32, func: func}
+          old_candidates << {type_id: mir_type.id.to_i32, func: func}
         end
       end
-      return nil if candidates.empty?
+      return nil if old_candidates.empty?
 
+      # Create dispatch function
       dispatch_func = @mir_module.create_function(dispatch_name, convert_type(call.type))
       param_values = [] of ValueId
       dispatch_func.add_param("recv", receiver_type)
@@ -1230,39 +1311,29 @@ module Crystal
       end
 
       dispatch_builder = Builder.new(dispatch_func)
-      header_ptr = dispatch_builder.gep(param_values[0], [0_u32], TypeRef::POINTER)
-      type_id_val = dispatch_builder.load(header_ptr, TypeRef::INT32)
 
-      end_block = dispatch_func.create_block
-      phi = nil
-      if dispatch_func.return_type != TypeRef::VOID
-        dispatch_builder.current_block = end_block
-        phi = dispatch_builder.phi(dispatch_func.return_type)
+      # Convert to unified candidate format (class dispatch = no unwrap needed)
+      candidates = old_candidates.map do |c|
+        VDispatchCandidate.new(
+          type_id: c[:type_id],
+          func: c[:func],
+          type_ref: nil,        # No unwrap for class dispatch
+          variant_id: nil,      # No unwrap for class dispatch
+          dispatch_class: nil   # No nested dispatch
+        )
       end
 
-      default_block = dispatch_func.create_block
-      cases = [] of Tuple(Int64, BlockId)
-      candidates.each do |candidate|
-        case_block = dispatch_func.create_block
-        cases << {candidate[:type_id].to_i64, case_block}
-      end
+      # Use unified generator with Class kind
+      generate_vdispatch_body(
+        dispatch_func,
+        dispatch_builder,
+        param_values,
+        candidates,
+        VDispatchKind::Class,
+        nil,   # No method_suffix needed (direct func calls)
+        nil    # No HIR call needed (simple args)
+      )
 
-      dispatch_builder.current_block = dispatch_func.entry_block
-      dispatch_func.get_block(dispatch_func.entry_block).terminator = Switch.new(type_id_val, cases, default_block)
-
-      candidates.each_with_index do |candidate, idx|
-        case_block = cases[idx][1]
-        dispatch_builder.current_block = case_block
-
-        cand_args = param_values.dup
-        call_id = dispatch_builder.call(candidate[:func].id, cand_args, dispatch_func.return_type)
-        if phi && call_id != 0_u32
-          phi.add_incoming(case_block, call_id)  # Fixed: was (call_id, case_block)
-        end
-        dispatch_func.get_block(case_block).terminator = Jump.new(end_block)
-      end
-
-      dispatch_func.get_block(default_block).terminator = Unreachable.new
       dispatch_func
     end
 

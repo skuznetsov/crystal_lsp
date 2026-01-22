@@ -185,8 +185,8 @@ module Crystal::MIR
       # Merge block: phi node for result
       if call.type != TypeRef::VOID
         phi = Phi.new(@function.next_value_id, call.type)
-        phi.add_incoming(fast_path_id, fast_result.id)
-        phi.add_incoming(slow_path_id, slow_result.id)
+        phi.add_incoming(from: fast_path_id, value: fast_result.id)
+        phi.add_incoming(from: slow_path_id, value: slow_result.id)
         merge_block.add_phi(phi)
 
         # Rewrite uses of original call result to phi result

@@ -1246,7 +1246,7 @@ module Crystal::MIR
           use_index = block_sizes[block_id]? || 0
           new_val = resolve(val, replacements, block_id, use_index, def_blocks, def_index, dominators)
           changed ||= new_val != val
-          phi.add_incoming(block_id, new_val)
+          phi.add_incoming(from: block_id, value: new_val)
         end
         return inst unless changed
         phi
