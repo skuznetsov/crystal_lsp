@@ -8,7 +8,7 @@ about syntax or types and should match what the original compiler would report.
 
 ---
 
-## Current Status (2025-12-31)
+## Current Status (2026-01-22)
 
 ### Test Coverage
 - **3400+ tests**, 0 failures, minimal pending
@@ -894,8 +894,8 @@ The key insight is: **Don't compete with LLVM, complement it.**
 | Performance | Complete | Incremental inference, lazy method bodies, cache warming |
 | HIR | Complete | 155 tests (data structures, lowering, escape, taint, memory strategy) |
 | MIR | Complete | 128 tests (SSA form, memory ops, optimizations, PGO passes) |
-| Codegen | 75% | M1-M4.2 done, basic codegen working |
-| Bootstrap | ~65% | Basic codegen works, stdlib needs typeof/blocks/mixins |
+| Codegen | 80% | M1-M4.2 done, basic codegen working, phi/vdispatch refactored |
+| Bootstrap | ~70% | 17 linker errors remain; state machine simplified |
 
 ---
 
@@ -1934,6 +1934,33 @@ end
     - `Time__Format__Formatter_time_zone_offset_NamedTuple_Bool_Bool_Bool`
     - `func2663`
     - `func2694`
+  - **Update (2026-01-22)**: `./bin/crystal_v2 compile examples/bench_fibonacci.cr -o /tmp/fib_test` reports **17** missing symbols (see `/tmp/fib_test` link errors):
+    - `Crystal__DWARF__LineNumbers_initialize_IO__FileDescriptor_...` - DWARF debug info
+    - `Crystal__MachO__CpuType_value_previous` - missing enum method
+    - `Crystal__System__Process_executable_path` - system call
+    - `Crystal_trace_Int32_String_UInt64___Nil_NamedTuple` - trace function
+    - `File_open_String` - File.open with String arg
+    - `Float__Printer__Dragonbox__WUInt__UInt128_unsafe_add__UInt64` - Dragonbox high-precision math
+    - `Nil_includes__UInt8`, `Nil_to_i` - calling methods on Nil
+    - `Object____` - comparison operator
+    - `Pointer_UInt8__column/line/path` - DWARF row accessors
+    - `Time__Format__Formatter_time_zone_offset_NamedTuple_Bool_Bool_Bool` - time formatting
+    - `UInt8_downcase_IO_Unicode__CaseOptions` - downcase with options
+    - `func2727`, `func2753`, `try$block` - anonymous blocks/lambdas
+
+### 8.11 Architectural Improvements (2026-01-22)
+
+**Completed refactorings to improve code robustness:**
+
+| Refactoring | File | Benefit |
+|-------------|------|---------|
+| Type-safe phi API | `mir/mir.cr` | Named params `phi.add_incoming(from: block, value: val)` prevent argument order bugs |
+| Unified vdispatch generator | `mir/hir_to_mir.cr` | Single `generate_vdispatch_body()` for Union and Class dispatch; eliminates copy-paste divergence |
+| State machine simplification | `hir/ast_to_hir.cr` | 4 collections → 1 enum (`FunctionLoweringState`); single source of truth for function lowering state |
+
+**Commits:**
+- `acb89d4` - refactor: type-safe phi API and unified vdispatch generator
+- `2aa5960` - refactor: simplify lowering state machine (4 collections → 1 enum)
 
 ### 8.10 Bootstrap Blockers: Budgeted Callsite Lowering (PROPOSED)
 
