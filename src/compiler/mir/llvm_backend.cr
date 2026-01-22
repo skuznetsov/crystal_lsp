@@ -4000,6 +4000,11 @@ module Crystal::MIR
       phi_type = @type_mapper.llvm_type(inst.type)
       prepass_type_ref = @value_types[inst.id]?
 
+      # Helper lambda for safe block name lookup
+      block_name = ->(block_id : BlockId) {
+        @block_names[block_id]? || "bb#{block_id}"
+      }
+
       incoming_pairs = inst.incoming
       missing_preds = [] of BlockId
       if current_block_id = @current_block_id
@@ -4034,7 +4039,7 @@ module Crystal::MIR
 
       append_missing = ->(entries : Array(String), llvm_type : String) do
         missing_preds.each do |pred|
-          entries << "[#{default_phi_value.call(llvm_type)}, %#{@block_names[pred]}]"
+          entries << "[#{default_phi_value.call(llvm_type)}, %#{block_name.call(pred)}]"
         end
       end
 
@@ -4049,26 +4054,26 @@ module Crystal::MIR
         incoming = incoming_pairs.map do |(block, val)|
           # Check for predecessor load first (cross-block SSA fix)
           if pred_ref = phi_incoming_ref(block, val, "ptr")
-            next "[#{pred_ref}, %#{@block_names[block]}]"
+            next "[#{pred_ref}, %#{block_name.call(block)}]"
           end
           val_type = @value_types[val]?
           val_type_str = val_type ? @type_mapper.llvm_type(val_type) : nil
           if val_type_str && val_type_str.includes?(".union")
             # Union value can't be used in ptr phi - use null
-            "[null, %#{@block_names[block]}]"
+            "[null, %#{block_name.call(block)}]"
           elsif val_type_str && val_type_str.starts_with?("i") && !val_type_str.includes?(".union")
             # Int value can't be used in ptr phi - use null
-            "[null, %#{@block_names[block]}]"
+            "[null, %#{block_name.call(block)}]"
           else
             # Check if value was emitted before using value_ref
             val_emitted = @value_names.has_key?(val)
             val_is_const = @constant_values.has_key?(val)
             if !val_emitted && !val_is_const
               # Undefined value in prepass ptr phi - use null
-              "[null, %#{@block_names[block]}]"
+              "[null, %#{block_name.call(block)}]"
             else
               ref = value_ref(val)
-              "[#{ref}, %#{@block_names[block]}]"
+              "[#{ref}, %#{block_name.call(block)}]"
             end
           end
         end
@@ -4083,7 +4088,7 @@ module Crystal::MIR
       if phi_type == "void"
         # Emit as ptr phi with null values so the register exists for downstream use
         incoming = incoming_pairs.map do |(block, val)|
-          "[null, %#{@block_names[block]}]"
+          "[null, %#{block_name.call(block)}]"
         end
         append_missing.call(incoming, "ptr")
         emit "#{name} = phi ptr #{incoming.join(", ")}"
@@ -4110,35 +4115,35 @@ module Crystal::MIR
             # Check for predecessor load first (cross-block SSA fix) - but only if types match
             pred_ref = phi_incoming_ref(block, val, "i1")
             if pred_ref
-              next "[#{pred_ref}, %#{@block_names[block]}]"
+              next "[#{pred_ref}, %#{block_name.call(block)}]"
             end
             val_type = @value_types[val]?
             val_type_str = val_type ? @type_mapper.llvm_type(val_type) : nil
             if val_type_str && val_type_str.includes?(".union")
               # Union value - use 0 (false) as default
-              "[0, %#{@block_names[block]}]"
+              "[0, %#{block_name.call(block)}]"
             elsif val_type_str == "ptr" || val_type_str == "void"
               # Ptr/void value flowing into i1 phi - use 0 (type mismatch)
-              "[0, %#{@block_names[block]}]"
+              "[0, %#{block_name.call(block)}]"
             elsif val_type_str && val_type_str.starts_with?("i") && val_type_str != "i1"
               # Larger int (i8, i16, i32, i64) flowing into i1 phi - use 0 (type mismatch)
               # Can't truncate in phi node, so use 0 as safe default
-              "[0, %#{@block_names[block]}]"
+              "[0, %#{block_name.call(block)}]"
             elsif val_type_str == "float" || val_type_str == "double"
               # Float/double value flowing into i1 phi - use 0 (type mismatch)
-              "[0, %#{@block_names[block]}]"
+              "[0, %#{block_name.call(block)}]"
             else
               # Check if value was emitted before using value_ref
               val_emitted = @value_names.has_key?(val)
               val_is_const = @constant_values.has_key?(val)
               if !val_emitted && !val_is_const
                 # Undefined value in bool phi - use 0
-                "[0, %#{@block_names[block]}]"
+                "[0, %#{block_name.call(block)}]"
               else
                 ref = value_ref(val)
                 # Guard against null and float literals for non-ptr phi
                 ref = "0" if ref == "null" || ref.includes?(".")
-                "[#{ref}, %#{@block_names[block]}]"
+                "[#{ref}, %#{block_name.call(block)}]"
               end
             end
           end
@@ -4179,14 +4184,14 @@ module Crystal::MIR
           incoming = incoming_pairs.map do |(block, val)|
             # Check for predecessor load first (cross-block SSA fix)
             if pred_ref = phi_incoming_ref(block, val, phi_type)
-              next "[#{pred_ref}, %#{@block_names[block]}]"
+              next "[#{pred_ref}, %#{block_name.call(block)}]"
             end
             val_type = @value_types[val]?
             val_type_str = val_type ? @type_mapper.llvm_type(val_type) : nil
             if val_type_str && val_type_str.includes?(".union")
               # Union value flowing into int phi - use 0 as default
               # This happens with e.g. String#index returning Int32|Nil
-              "[0, %#{@block_names[block]}]"
+              "[0, %#{block_name.call(block)}]"
             elsif val_type_str && val_type_str.starts_with?("i") && !val_type_str.includes?(".union")
               val_bits = val_type_str[1..-1].to_i? || 32
               if val_bits != phi_bits
@@ -4194,33 +4199,33 @@ module Crystal::MIR
                 # First check for predecessor conversion (for params and fixed-type values)
                 if pred_conv = @phi_predecessor_conversions[{block, val}]?
                   conv_name, _, _ = pred_conv
-                  "[%#{conv_name}, %#{@block_names[block]}]"
+                  "[%#{conv_name}, %#{block_name.call(block)}]"
                 elsif @phi_zext_conversions.has_key?(val)
                   # Construct the expected zext name (will be emitted by emit_extern_call)
                   zext_name = "%r#{val}.zext"
-                  "[#{zext_name}, %#{@block_names[block]}]"
+                  "[#{zext_name}, %#{block_name.call(block)}]"
                 else
                   # No conversion planned - use 0 as fallback
-                  "[0, %#{@block_names[block]}]"
+                  "[0, %#{block_name.call(block)}]"
                 end
               else
                 ref = value_ref(val)
                 ref = "0" if ref == "null"
-                "[#{ref}, %#{@block_names[block]}]"
+                "[#{ref}, %#{block_name.call(block)}]"
               end
             elsif val_type_str.nil? || val_type_str == "void" || val_type_str == "ptr"
               # No type, void, or ptr value flowing into int phi - use 0
-              "[0, %#{@block_names[block]}]"
+              "[0, %#{block_name.call(block)}]"
             else
               # Check if value was emitted
               val_emitted = @value_names.has_key?(val)
               val_is_const = @constant_values.has_key?(val)
               if !val_emitted && !val_is_const
-                "[0, %#{@block_names[block]}]"
+                "[0, %#{block_name.call(block)}]"
               else
                 ref = value_ref(val)
                 ref = "0" if ref == "null"
-                "[#{ref}, %#{@block_names[block]}]"
+                "[#{ref}, %#{block_name.call(block)}]"
               end
             end
           end
@@ -4250,32 +4255,32 @@ module Crystal::MIR
           incoming = incoming_pairs.map do |(block, val)|
             # Check for predecessor load first (cross-block SSA fix)
             if pred_ref = phi_incoming_ref(block, val, "ptr")
-              next "[#{pred_ref}, %#{@block_names[block]}]"
+              next "[#{pred_ref}, %#{block_name.call(block)}]"
             end
             val_type = @value_types[val]?
             val_type_str = val_type ? @type_mapper.llvm_type(val_type) : nil
             if val_type_str && val_type_str.includes?(".union")
               # Union value can't be directly used in ptr phi - use null
-              "[null, %#{@block_names[block]}]"
+              "[null, %#{block_name.call(block)}]"
             elsif val_type_str && val_type_str.starts_with?("i") && !val_type_str.includes?(".union")
               # Int value in ptr phi - use null
-              "[null, %#{@block_names[block]}]"
+              "[null, %#{block_name.call(block)}]"
             elsif val_type_str == "float" || val_type_str == "double"
               # Float/double value in ptr phi - use null
-              "[null, %#{@block_names[block]}]"
+              "[null, %#{block_name.call(block)}]"
             elsif val_type_str == "void"
               # Void value (from void call) can't be used in ptr phi - use null
-              "[null, %#{@block_names[block]}]"
+              "[null, %#{block_name.call(block)}]"
             else
               # Check if value was emitted before using value_ref
               val_emitted = @value_names.has_key?(val)
               val_is_const = @constant_values.has_key?(val)
               if !val_emitted && !val_is_const
                 # Undefined value in ptr phi - use null
-                "[null, %#{@block_names[block]}]"
+                "[null, %#{block_name.call(block)}]"
               else
                 ref = value_ref(val)
-                "[#{ref}, %#{@block_names[block]}]"
+                "[#{ref}, %#{block_name.call(block)}]"
               end
             end
           end
@@ -4320,7 +4325,7 @@ module Crystal::MIR
           incoming = incoming_pairs.map do |(block, val)|
             # Check for predecessor load first (cross-block SSA fix)
             if pred_ref = phi_incoming_ref(block, val, "ptr")
-              next "[#{pred_ref}, %#{@block_names[block]}]"
+              next "[#{pred_ref}, %#{block_name.call(block)}]"
             end
             val_type = @value_types[val]?
             val_type_str = val_type ? @type_mapper.llvm_type(val_type) : nil
@@ -4328,26 +4333,26 @@ module Crystal::MIR
               def_inst = find_def_inst(val)
               if def_inst && def_inst.is_a?(UnionUnwrap) && @type_mapper.llvm_type(def_inst.type) == "ptr"
                 # UnionUnwrap produced a ptr value; keep it.
-                "[#{value_ref(val)}, %#{@block_names[block]}]"
+                "[#{value_ref(val)}, %#{block_name.call(block)}]"
               else
                 # Union value can't be used in ptr phi - use null
                 # This is lossy but allows compilation to proceed
-                "[null, %#{@block_names[block]}]"
+                "[null, %#{block_name.call(block)}]"
               end
             elsif val_type_str && val_type_str.starts_with?("i") && !val_type_str.includes?(".union")
               # Int value can't be used in ptr phi - use null
-              "[null, %#{@block_names[block]}]"
+              "[null, %#{block_name.call(block)}]"
             else
               # Check if value was emitted before using value_ref
               val_emitted = @value_names.has_key?(val)
               val_is_const = @constant_values.has_key?(val)
               if !val_emitted && !val_is_const
                 # Undefined value in ptr phi - use null
-                "[null, %#{@block_names[block]}]"
+                "[null, %#{block_name.call(block)}]"
               else
                 ref = value_ref(val)
                 # For unknown types, assume they're ptr-compatible
-                "[#{ref}, %#{@block_names[block]}]"
+                "[#{ref}, %#{block_name.call(block)}]"
               end
             end
           end
@@ -4380,7 +4385,7 @@ module Crystal::MIR
           incoming = incoming_pairs.map do |(block, val)|
             # Check for predecessor load first (cross-block SSA fix)
             if pred_ref = phi_incoming_ref(block, val, phi_type)
-              next "[#{pred_ref}, %#{@block_names[block]}]"
+              next "[#{pred_ref}, %#{block_name.call(block)}]"
             end
             val_type = @value_types[val]?
             val_type_str = val_type ? @type_mapper.llvm_type(val_type) : nil
@@ -4389,10 +4394,10 @@ module Crystal::MIR
               ref = value_ref(val)
               # If value_ref returned "null", convert to zeroinitializer for union
               ref = "zeroinitializer" if ref == "null"
-              "[#{ref}, %#{@block_names[block]}]"
+              "[#{ref}, %#{block_name.call(block)}]"
             else
               # Type mismatch (non-union or different union) - use zeroinitializer (nil)
-              "[zeroinitializer, %#{@block_names[block]}]"
+              "[zeroinitializer, %#{block_name.call(block)}]"
             end
           end
           append_missing.call(incoming, phi_type)
@@ -4408,7 +4413,7 @@ module Crystal::MIR
         # This handles cases where phi says [%val, %predBlock] but %val is defined
         # in a different block (pass-through situation causing SSA dominance errors)
         if pred_ref = phi_incoming_ref(block, val, phi_type)
-          next "[#{pred_ref}, %#{@block_names[block]}]"
+          next "[#{pred_ref}, %#{block_name.call(block)}]"
         end
 
         # Check if this is a null constant - use literal "0" for int types
@@ -4432,29 +4437,29 @@ module Crystal::MIR
         if (!val_emitted || is_void_value) && !val_is_const && !is_forward_ref
           # Truly undefined value - use safe default based on phi type
           if is_union_type
-            "[zeroinitializer, %#{@block_names[block]}]"
+            "[zeroinitializer, %#{block_name.call(block)}]"
           elsif is_ptr_type
-            "[null, %#{@block_names[block]}]"
+            "[null, %#{block_name.call(block)}]"
           elsif is_int_type || is_bool_type
-            "[0, %#{@block_names[block]}]"
+            "[0, %#{block_name.call(block)}]"
           elsif is_float_type
-            "[0.0, %#{@block_names[block]}]"
+            "[0.0, %#{block_name.call(block)}]"
           else
-            "[null, %#{@block_names[block]}]"
+            "[null, %#{block_name.call(block)}]"
           end
         elsif is_forward_ref
           # Forward reference from loop back-edge - use %r#{val} which will be defined later
-          "[%r#{val}, %#{@block_names[block]}]"
+          "[%r#{val}, %#{block_name.call(block)}]"
         elsif const_val == "null" && is_union_type
           # null constant in union phi - use zeroinitializer
-          "[zeroinitializer, %#{@block_names[block]}]"
+          "[zeroinitializer, %#{block_name.call(block)}]"
         elsif const_val == "null" && (is_int_type || is_bool_type)
-          "[0, %#{@block_names[block]}]"
+          "[0, %#{block_name.call(block)}]"
         elsif const_val == "null" && is_float_type
           # null flowing into float phi - use 0.0
-          "[0.0, %#{@block_names[block]}]"
+          "[0.0, %#{block_name.call(block)}]"
         elsif const_val == "0" && is_ptr_type
-          "[null, %#{@block_names[block]}]"
+          "[null, %#{block_name.call(block)}]"
         else
           # Check for type mismatch
           val_type = @value_types[val]?
@@ -4462,41 +4467,41 @@ module Crystal::MIR
 
           if (is_int_type || is_bool_type) && val_type_str && val_type_str.includes?(".union")
             # Union flowing into int/bool phi - use 0 (nil case)
-            "[0, %#{@block_names[block]}]"
+            "[0, %#{block_name.call(block)}]"
           elsif (is_int_type || is_bool_type) && (val_type_str == "ptr" || val_type_str == "void")
             # Ptr/void flowing into int/bool phi - use 0 (type mismatch from MIR)
-            "[0, %#{@block_names[block]}]"
+            "[0, %#{block_name.call(block)}]"
           elsif is_int_type && (val_type_str == "double" || val_type_str == "float")
             # Float/double flowing into int phi - use 0 as safe default
             # We can't bitcast here because it would be in wrong block
-            "[0, %#{@block_names[block]}]"
+            "[0, %#{block_name.call(block)}]"
           elsif is_int_type && val_type_str && val_type_str.starts_with?("i") && val_type_str != phi_type
             # Integer width mismatch (e.g., i64 into i32 phi) - use 0 as safe default
             # We can't emit trunc/ext in phi, would need to be in source block
-            "[0, %#{@block_names[block]}]"
+            "[0, %#{block_name.call(block)}]"
           elsif (is_int_type || is_bool_type) && val_type_str.nil?
             # Unknown type flowing into int/bool phi
             ref = value_ref(val)
             if ref == "null"
               # Null value can't flow into int/bool phi
-              "[0, %#{@block_names[block]}]"
+              "[0, %#{block_name.call(block)}]"
             else
               # Allow %r* forward references - these are valid in phi nodes for loop back-edges
-              "[#{ref}, %#{@block_names[block]}]"
+              "[#{ref}, %#{block_name.call(block)}]"
             end
           elsif is_ptr_type && val_type_str && val_type_str.starts_with?("i") && !val_type_str.includes?(".union")
             # Int flowing into ptr phi - use null (type mismatch from MIR)
-            "[null, %#{@block_names[block]}]"
+            "[null, %#{block_name.call(block)}]"
           elsif is_float_type && (val_type_str == "ptr" || val_type_str == "void")
             # Ptr/void flowing into float phi - use 0.0 (type mismatch from MIR)
-            "[0.0, %#{@block_names[block]}]"
+            "[0.0, %#{block_name.call(block)}]"
           elsif is_float_type && val_type_str && (val_type_str == "float" || val_type_str == "double") && val_type_str != phi_type
             # float↔double mismatch in phi - use 0.0 as safe default
             # Can't emit fpext/fptrunc in phi, would need to be in source block
-            "[0.0, %#{@block_names[block]}]"
+            "[0.0, %#{block_name.call(block)}]"
           elsif is_float_type && val_type_str && val_type_str.starts_with?("i")
             # Int flowing into float phi - use 0.0 (type mismatch from MIR)
-            "[0.0, %#{@block_names[block]}]"
+            "[0.0, %#{block_name.call(block)}]"
           else
             ref = value_ref(val)
             # Check if value_ref returned "null"
@@ -4512,7 +4517,7 @@ module Crystal::MIR
               # Int value flowing into ptr phi
               ref = "null"
             end
-            "[#{ref}, %#{@block_names[block]}]"
+            "[#{ref}, %#{block_name.call(block)}]"
           end
         end
       end

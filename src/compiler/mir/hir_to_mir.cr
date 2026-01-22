@@ -1257,7 +1257,7 @@ module Crystal
         cand_args = param_values.dup
         call_id = dispatch_builder.call(candidate[:func].id, cand_args, dispatch_func.return_type)
         if phi && call_id != 0_u32
-          phi.add_incoming(call_id, case_block)
+          phi.add_incoming(case_block, call_id)  # Fixed: was (call_id, case_block)
         end
         dispatch_func.get_block(case_block).terminator = Jump.new(end_block)
       end

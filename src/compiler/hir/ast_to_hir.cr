@@ -2999,6 +2999,34 @@ module Crystal::HIR
       nil
     end
 
+    # Return type for stdlib numeric conversion methods
+    # These are defined in Crystal's primitive types with well-known signatures:
+    #   def to_u8! : UInt8  (etc.)
+    # This enables type inference without requiring full method body lowering.
+    private def conversion_method_return_type(method_name : String) : TypeRef?
+      case method_name
+      when "to_u8", "to_u8!", "to_u8?"   then TypeRef::UINT8
+      when "to_i8", "to_i8!", "to_i8?"   then TypeRef::INT8
+      when "to_u16", "to_u16!", "to_u16?" then TypeRef::UINT16
+      when "to_i16", "to_i16!", "to_i16?" then TypeRef::INT16
+      when "to_u32", "to_u32!", "to_u32?" then TypeRef::UINT32
+      when "to_i32", "to_i32!", "to_i32?" then TypeRef::INT32
+      when "to_u64", "to_u64!", "to_u64?" then TypeRef::UINT64
+      when "to_i64", "to_i64!", "to_i64?" then TypeRef::INT64
+      when "to_u128", "to_u128!", "to_u128?" then type_ref_for_name("UInt128")
+      when "to_i128", "to_i128!", "to_i128?" then type_ref_for_name("Int128")
+      when "to_u", "to_u!"               then TypeRef::UINT64  # alias for to_u64
+      when "to_i", "to_i!"               then TypeRef::INT32   # alias for to_i32
+      when "to_f32", "to_f32!", "to_f32?" then TypeRef::FLOAT32
+      when "to_f64", "to_f64!", "to_f64?" then TypeRef::FLOAT64
+      when "to_f", "to_f!"               then TypeRef::FLOAT64 # alias for to_f64
+      when "ord"                         then TypeRef::INT32   # Char#ord
+      when "chr"                         then type_ref_for_name("Char") # Int#chr
+      when "unsafe_chr"                  then type_ref_for_name("Char")
+      else nil
+      end
+    end
+
     private def element_type_for_type_name(type_name : String) : String?
       name = type_name.strip
       if name.includes?("|")
@@ -5216,6 +5244,11 @@ module Crystal::HIR
             return type_ref_for_name(type_str)
           end
         end
+        # Numeric conversion methods have well-defined return types based on method name
+        # These are stdlib primitives, not arbitrary user methods
+        if conv_type = conversion_method_return_type(member_name)
+          return conv_type
+        end
         if member_name == "size"
           if object_node.is_a?(CrystalV2::Compiler::Frontend::IdentifierNode)
             object_name = String.new(object_node.name)
@@ -5563,6 +5596,38 @@ module Crystal::HIR
             end
             if ret_type = @function_types[base_method]?
               return ret_type if ret_type != TypeRef::VOID
+            end
+          end
+          # Fallback: infer receiver type and look up instance method
+          if recv_type = infer_type_from_expr(callee_node.object, self_type_name)
+            if recv_type != TypeRef::VOID
+              recv_name = get_type_name_from_ref(recv_type)
+              # Strip generic args for base lookup: Array(UInt64) -> Array
+              base_recv = recv_name.split('(').first
+              # Try exact type first, then base type
+              [recv_name, base_recv].each do |owner|
+                next if owner.empty?
+                instance_method = "#{owner}##{member_name}"
+                if ret_type = @function_base_return_types[instance_method]?
+                  return ret_type if ret_type != TypeRef::VOID
+                end
+                if ret_type = @function_types[instance_method]?
+                  return ret_type if ret_type != TypeRef::VOID
+                end
+              end
+              # For collection methods, infer element type
+              if member_name == "unsafe_fetch" || member_name == "[]" || member_name == "first" || member_name == "last"
+                if ENV["DEBUG_UNSAFE_FETCH"]?
+                  STDERR.puts "[UNSAFE_FETCH_INFER] method=#{@current_method} recv_name=#{recv_name} self_type=#{self_type_name}"
+                end
+                if elem_name = element_type_for_type_name(recv_name)
+                  elem_ref = type_ref_for_name(elem_name)
+                  if ENV["DEBUG_UNSAFE_FETCH"]?
+                    STDERR.puts "[UNSAFE_FETCH_INFER] elem_name=#{elem_name} elem_ref=#{elem_ref.id}"
+                  end
+                  return elem_ref if elem_ref != TypeRef::VOID
+                end
+              end
             end
           end
         elsif callee_node.is_a?(CrystalV2::Compiler::Frontend::IdentifierNode)
@@ -7917,6 +7982,8 @@ module Crystal::HIR
         old_class = @current_class
         @current_class = full_name
         begin
+          # Register constants before functions (e.g., CACHE constant in ImplInfo_Float32)
+          record_constants_in_body(full_name, body)
           body.each do |expr_id|
             member = unwrap_visibility_member(@arena[expr_id])
             case member
@@ -8005,6 +8072,26 @@ module Crystal::HIR
             process_macro_for_in_module(member, full_name)
           when CrystalV2::Compiler::Frontend::MacroLiteralNode
             process_macro_literal_in_module(member, full_name)
+          when CrystalV2::Compiler::Frontend::CallNode
+            # Handle macro calls like `record UInt128, ...` inside nested modules
+            callee = @arena[member.callee]
+            if callee.is_a?(CrystalV2::Compiler::Frontend::IdentifierNode)
+              method_name = String.new(callee.name)
+              if macro_lookup = lookup_macro_entry(method_name, full_name)
+                macro_entry, macro_key = macro_lookup
+                macro_def, macro_arena = macro_entry
+                expanded_id = expand_macro_expr(macro_def, macro_arena, member.args, member.named_args, member.block, macro_key)
+                unless expanded_id.invalid?
+                  old_arena = @arena
+                  @arena = macro_arena
+                  begin
+                    register_module_members_from_macro_expansion(full_name, expanded_id)
+                  ensure
+                    @arena = old_arena
+                  end
+                end
+              end
+            end
             end
           end
         ensure
@@ -8535,6 +8622,11 @@ module Crystal::HIR
       # Infer return type from the last expression for unannotated module methods.
       if node.return_type.nil? && last_value
         inferred = ctx.type_of(last_value)
+        if ENV["DEBUG_INFER_RETURN"]? && base_name.includes?("get_cache")
+          inferred_name = get_type_name_from_ref(inferred)
+          return_name = get_type_name_from_ref(return_type)
+          STDERR.puts "[INFER_RETURN_MOD] base=#{base_name} full=#{full_name} inferred=#{inferred_name} return=#{return_name}"
+        end
         if inferred != TypeRef::VOID && inferred != return_type
           return_type = inferred
           func.return_type = inferred
@@ -8586,6 +8678,12 @@ module Crystal::HIR
       if ENV["DEBUG_TYPE_PATH"]? && class_name.includes?("/")
         current_path = @paths_by_arena[@arena]? || "(unknown)"
         STDERR.puts "[TYPE_PATH_CLASS] name=#{class_name} file=#{File.basename(current_path)} span=#{node.span.start_line}:#{node.span.start_column}"
+      end
+      if ENV["DEBUG_WUINT128"]? && class_name.includes?("UInt128")
+        STDERR.puts "[DEBUG_WUINT128] register_class_with_name class_name=#{class_name} is_struct=#{node.is_struct}"
+      end
+      if ENV["DEBUG_WUINT128"]? && class_name.includes?("WUInt::UInt128")
+        STDERR.puts "[DEBUG_WUINT128] --> Adding to @class_info: #{class_name}"
       end
       if ENV["DEBUG_STRING_CLASS"]? && class_name == "String"
         STDERR.puts "[STRING_CLASS_REG] class=#{class_name} span=#{node.span.start_line}-#{node.span.end_line}"
@@ -10867,12 +10965,19 @@ module Crystal::HIR
 
       if base_name.includes?("from_chars")
         STDERR.puts "[LOWER_METHOD] base_name=#{base_name}, full_name=#{full_name}, param_types=#{param_types.map(&.to_s)}, override=#{full_name_override}"
+        STDERR.flush
+        STDERR.puts "[LOWER_METHOD] 1. Before create_function"
+        STDERR.flush
       end
       if ENV["DEBUG_CALL_TRACE"]? && method_name == "copy_to"
         STDERR.puts "[LOWER_METHOD] enter class=#{class_name} full=#{full_name}"
       end
 
       func = @module.create_function(full_name, return_type)
+      if base_name.includes?("from_chars")
+        STDERR.puts "[LOWER_METHOD] 2. After create_function"
+        STDERR.flush
+      end
       ctx = LoweringContext.new(func, @module, @arena)
 
       # Add implicit 'self' binding.
@@ -11036,7 +11141,13 @@ module Crystal::HIR
                 STDERR.puts "[LOWER_METHOD] inspect_failed expr=#{expr_id.index} error=#{ex.message}"
               end
             end
-            last_value = lower_expr(ctx, expr_id)
+            begin
+              last_value = lower_expr(ctx, expr_id)
+            rescue ex : KeyError
+              STDERR.puts "[KEY_ERROR] method=#{base_name} idx=#{idx} expr=#{expr_id.index} error=#{ex.message}"
+              STDERR.puts ex.backtrace.first(20).join("\n")
+              raise ex
+            end
             if slow_ms && expr_start
               elapsed = (Time.instant - expr_start).total_milliseconds
               if elapsed >= slow_ms
@@ -11061,6 +11172,11 @@ module Crystal::HIR
       # that often omit return annotations (e.g., `Hash#[]?`, `Array#first?`).
       if node.return_type.nil? && last_value
         inferred = ctx.type_of(last_value)
+        if ENV["DEBUG_INFER_RETURN"]? && base_name.includes?("get_cache")
+          inferred_name = get_type_name_from_ref(inferred)
+          return_name = get_type_name_from_ref(return_type)
+          STDERR.puts "[INFER_RETURN] base=#{base_name} full=#{full_name} inferred=#{inferred_name} return=#{return_name}"
+        end
         if inferred != TypeRef::VOID && inferred != return_type
           return_type = inferred
           func.return_type = inferred
@@ -11398,6 +11514,52 @@ module Crystal::HIR
       return call_type if call_base == param_name && call_desc.name.includes?("(")
 
       param_type
+    end
+
+    # Refine VOID arg types by tracing back to source Call instructions.
+    # When an arg has VOID type but came from a Call, try to get the return type
+    # of the called function (which may not have been lowered yet).
+    private def refine_void_args_from_source_calls(
+      ctx : LoweringContext,
+      args : Array(ValueId),
+      arg_types : Array(TypeRef)
+    ) : Array(TypeRef)
+      return arg_types unless arg_types.any? { |t| t == TypeRef::VOID }
+
+      refined = arg_types.dup
+      debug = ENV["DEBUG_VOID_REFINE"]?
+      args.each_with_index do |arg_id, idx|
+        next unless arg_types[idx] == TypeRef::VOID
+
+        # Try to find the source value for this argument
+        # Check if it came from a Copy instruction (common for local variables)
+        value = ctx.value_for(arg_id)
+        if debug
+          STDERR.puts "[VOID_REFINE] arg_id=#{arg_id} value_type=#{value.try(&.class.name) || "nil"}"
+        end
+        source_value = value
+        while source_value.is_a?(Copy)
+          source_value = ctx.value_for(source_value.source)
+          break unless source_value
+        end
+        if debug
+          STDERR.puts "[VOID_REFINE] source_value_type=#{source_value.try(&.class.name) || "nil"}"
+        end
+
+        if source_value.is_a?(Call)
+          # Get the method name and try to infer return type
+          method_name = source_value.method_name
+          inferred_type = get_function_return_type(method_name)
+          if debug
+            STDERR.puts "[VOID_REFINE] source_call=#{method_name} inferred_type=#{get_type_name_from_ref(inferred_type)}"
+          end
+          if inferred_type != TypeRef::VOID
+            refined[idx] = inferred_type
+          end
+        end
+      end
+
+      refined
     end
 
     # Refine VOID arg types by looking at overload parameter annotations.
@@ -14091,6 +14253,13 @@ module Crystal::HIR
           if cached = @function_base_return_types[base_name]?
             return cached
           end
+          # Before returning VOID, check if the function was already lowered
+          # with a concrete return type (e.g., extension module methods)
+          if type == TypeRef::VOID
+            if func = @module.function_by_name(name)
+              return func.return_type unless func.return_type == TypeRef::VOID
+            end
+          end
           return type
         end
         if type == TypeRef::BOOL && name.ends_with?("?")
@@ -14305,6 +14474,9 @@ module Crystal::HIR
     private def record_constant_definition(owner_name : String?, name : String, value_id : ExprId, arena : CrystalV2::Compiler::Frontend::ArenaLike)
       full_name = constant_full_name(owner_name, name)
       @constant_defs.add(full_name)
+      if ENV["DEBUG_CONST_REG"]? && name == "CACHE"
+        STDERR.puts "[CONST_REG] full_name=#{full_name} owner=#{owner_name || ""} name=#{name}"
+      end
       if ENV["DEBUG_USE_LIBICONV"]? && name == "USE_LIBICONV"
         STDERR.puts "[USE_LIBICONV] record_constant_definition owner=#{owner_name || ""}"
       end
@@ -14645,6 +14817,9 @@ module Crystal::HIR
       end
 
       found = false
+      if ENV["DEBUG_WUINT128"]? && name == "UInt128"
+        STDERR.puts "[DEBUG_WUINT128] resolve_class_name_in_context name=#{name} namespaces=#{namespaces} current_class=#{@current_class || "(nil)"}"
+      end
       # Prefer the override namespace (module mixins), then the current class namespace.
       namespaces.each do |namespace|
         # Extract namespace: "Foo::Bar::Baz" -> "Foo::Bar"
@@ -14655,6 +14830,9 @@ module Crystal::HIR
         # which should resolve to Foo::Bar::Name before trying Foo::Name
         while parts.size > 0
           qualified_name = (parts + [name]).join("::")
+          if ENV["DEBUG_WUINT128"]? && name == "UInt128"
+            STDERR.puts "[DEBUG_WUINT128] trying qualified_name=#{qualified_name} namespace=#{namespace} type_name_exists=#{type_name_exists?(qualified_name)}"
+          end
           if type_name_exists?(qualified_name)
             # Prefer a top-level class/struct over a namespaced module when the
             # short name is known to be a class (e.g., Fiber vs Crystal::System::Fiber).
@@ -18354,9 +18532,50 @@ module Crystal::HIR
           return merge_macro_or(left, right)
         when "&&"
           return merge_macro_and(left, right)
+        when "==", "!="
+          # Handle type parameter comparison: {% if F == Float32 %}
+          left_type = macro_condition_type_name(cond_node.left)
+          right_type = macro_condition_type_name(cond_node.right)
+          if left_type && right_type
+            are_equal = left_type == right_type
+            return op_str == "==" ? are_equal : !are_equal
+          end
         end
       end
       nil  # Can't evaluate
+    end
+
+    # Extract type name from macro condition expression, with type param substitution.
+    # Used for evaluating {% if F == Float32 %} where F is a type parameter.
+    private def macro_condition_type_name(expr_id : ExprId) : String?
+      node = @arena[expr_id]
+      case node
+      when CrystalV2::Compiler::Frontend::MacroExpressionNode
+        macro_condition_type_name(node.expression)
+      when CrystalV2::Compiler::Frontend::ConstantNode
+        name = String.new(node.name)
+        # Substitute type parameter if present
+        @type_param_map[name]? || name
+      when CrystalV2::Compiler::Frontend::IdentifierNode
+        name = String.new(node.name)
+        @type_param_map[name]? || name
+      when CrystalV2::Compiler::Frontend::PathNode
+        name = collect_path_string(node)
+        # Check if any part is a type param
+        @type_param_map[name]? || substitute_type_params_in_type_name(name)
+      when CrystalV2::Compiler::Frontend::GenericNode
+        base_name = macro_condition_type_name(node.base_type)
+        return nil unless base_name
+        type_arg_names = [] of String
+        node.type_args.each do |arg_id|
+          arg_name = macro_condition_type_name(arg_id)
+          return nil unless arg_name
+          type_arg_names << arg_name
+        end
+        "#{base_name}(#{type_arg_names.join(", ")})"
+      else
+        nil
+      end
     end
 
     private def macro_for_iterable_values(iterable_id : ExprId) : Array(CrystalV2::Compiler::Semantic::MacroValue)?
@@ -23353,11 +23572,12 @@ module Crystal::HIR
                          by_arity.keys.select { |key| key >= required_count && key <= param_count }.max?
                        end
         if fallback_key
-          bucket = by_arity[fallback_key]
-          match = select_best_callsite_args(func_def, bucket, func_context) || bucket.first?
-          if match
-            consume_callsite_args(base_key, match)
-            return match
+          if bucket = by_arity[fallback_key]?
+            match = select_best_callsite_args(func_def, bucket, func_context) || bucket.first?
+            if match
+              consume_callsite_args(base_key, match)
+              return match
+            end
           end
         end
       end
@@ -23390,9 +23610,10 @@ module Crystal::HIR
                              ancestor_by_arity.keys.select { |key| key >= required_count && key <= param_count }.max?
                            end
             if fallback_key
-              bucket = ancestor_by_arity[fallback_key]
-              match = select_best_callsite_args(func_def, bucket, func_context) || bucket.first?
-              return match if match
+              if bucket = ancestor_by_arity[fallback_key]?
+                match = select_best_callsite_args(func_def, bucket, func_context) || bucket.first?
+                return match if match
+              end
             end
           end
         end
@@ -23592,7 +23813,99 @@ module Crystal::HIR
       nil
     end
 
+    # Eagerly infer return type for a function without fully lowering it.
+    # This is used when a function is deferred during nested lowering,
+    # but we need to know its return type for the caller.
+    private def eager_infer_return_type(name : String) : Nil
+      return if name.empty?
+      dollar_idx = name.index('$')
+      base_name = dollar_idx ? name[0, dollar_idx] : name
+
+      # Skip if we already have a non-VOID return type cached
+      if cached = @function_base_return_types[base_name]?
+        return unless cached == TypeRef::VOID
+      end
+
+      # Try to find the function definition
+      func_def = @function_defs[name]? || @function_defs[base_name]?
+      return unless func_def
+
+      # Get the arena for this function
+      arena = @function_def_arenas[name]? || @function_def_arenas[base_name]?
+      return unless arena
+
+      # Switch to the function's arena temporarily
+      old_arena = @arena
+      @arena = arena
+
+      begin
+        # Extract self_type from name for context
+        self_type = nil
+        if hash_idx = base_name.rindex('#')
+          self_type = base_name[0, hash_idx]
+        elsif dot_idx = base_name.rindex('.')
+          self_type = base_name[0, dot_idx]
+        end
+
+        # Try to infer return type from body
+        # Wrap in rescue to handle arena mismatches gracefully
+        begin
+          if inferred = infer_concrete_return_type_from_body(func_def, self_type)
+            # Cache the inferred return type
+            if inferred != TypeRef::VOID
+              @function_base_return_types[base_name] = inferred
+            end
+          end
+        rescue ex
+          # Arena mismatch or other error - just skip eager inference
+          # The type will be inferred later when the function is fully lowered
+        end
+      ensure
+        @arena = old_arena
+      end
+    end
+
     private def lower_function_if_needed(name : String) : Nil
+      begin
+        lower_function_if_needed_impl(name)
+      rescue ex : KeyError
+        STDERR.puts "[KEY_ERROR_TOP] name=#{name} error=#{ex.message}"
+        STDERR.flush
+        ex.backtrace.first(30).each do |line|
+          STDERR.puts line
+        end
+        STDERR.flush
+        raise ex
+      end
+    end
+
+    # Force-lower a function immediately even if we're inside lowering.
+    # Used when we need the return type of a callee that was deferred.
+    # Returns true if the function was lowered, false if it couldn't be.
+    private def force_lower_function_for_return_type(name : String) : Bool
+      # Don't force if it would cause infinite recursion
+      return false if @lowering_functions.includes?(name)
+      return false if @module.has_function?(name)
+      return false if @lowered_functions.includes?(name)
+
+      # Remove from pending queue (we'll handle it now)
+      @pending_lower_functions.delete(name)
+
+      # Temporarily disable inside_lowering to allow immediate processing
+      saved_inside_lowering = @inside_lowering
+      @inside_lowering = false
+      begin
+        lower_function_if_needed_impl(name)
+        true
+      rescue ex
+        STDERR.puts "[FORCE_LOWER_ERROR] name=#{name} error=#{ex.message}"
+        false
+      ensure
+        @inside_lowering = saved_inside_lowering
+      end
+    end
+
+    private def lower_function_if_needed_impl(name : String) : Nil
       return if name.empty?
       debug_lookup_name = ENV["DEBUG_LOOKUP_NAME"]?
       if debug_lookup_name && name.includes?(debug_lookup_name)
@@ -24548,7 +24861,13 @@ module Crystal::HIR
               merged_params = extra_type_params ? extra_params.merge(extra_type_params) : extra_params
               with_type_param_map(merged_params) do
                 with_namespace_override_or_clear(namespace_override) do
-                  lower_method(owner, class_info, func_def, call_arg_types, call_arg_literals, call_arg_enum_names, override, force_class_method: force_class_method)
+                  begin
+                    lower_method(owner, class_info, func_def, call_arg_types, call_arg_literals, call_arg_enum_names, override, force_class_method: force_class_method)
+                  rescue ex : KeyError
+                    STDERR.puts "[KEY_ERROR_DEFERRED] target=#{target_name} owner=#{owner} override=#{override} call_arg_types=#{call_arg_types.try(&.map(&.id).join(",")) || "nil"}"
+                    STDERR.puts ex.backtrace.first(20).join("\n")
+                    raise ex
+                  end
                 end
               end
               @current_class = old_class
@@ -25245,6 +25564,9 @@ module Crystal::HIR
         # Can be ConstantNode, IdentifierNode starting with uppercase, GenericNode, or macro expression.
         class_name_str : String? = nil
         constant_receiver = false
+        if ENV["DEBUG_CONST_RECV"]? && method_name == "unsafe_fetch"
+          STDERR.puts "[CONST_RECV_EARLY] obj_node=#{obj_node.class.name.split("::").last} method=#{method_name} current=#{@current_class || ""}"
+        end
         if obj_node.is_a?(CrystalV2::Compiler::Frontend::MacroExpressionNode)
           if resolved = macro_expression_class_name(obj_node.expression)
             class_name_str = resolved
@@ -25481,6 +25803,9 @@ module Crystal::HIR
         elsif obj_node.is_a?(CrystalV2::Compiler::Frontend::PathNode)
           # Path like Foo::Bar for nested classes/modules
           raw_path = collect_path_string(obj_node)
+          if ENV["DEBUG_CONST_RECV"]? && method_name == "unsafe_fetch"
+            STDERR.puts "[CONST_RECV_PATH] raw_path=#{raw_path} method=#{method_name}"
+          end
           absolute_path = path_is_absolute?(obj_node)
           # Substitute type params FIRST, before resolving context (e.g., D::CACHE -> ImplInfo_Float32::CACHE)
           substituted_path = substitute_type_params_in_type_name(raw_path)
@@ -25495,7 +25820,11 @@ module Crystal::HIR
                       else
                         resolve_path_string_in_context(substituted_path)
                       end
-          if constant_name_exists?(full_path)
+          const_exists = constant_name_exists?(full_path)
+          if ENV["DEBUG_CONST_RECV"]? && method_name == "unsafe_fetch"
+            STDERR.puts "[CONST_RECV] full_path=#{full_path} const_exists=#{const_exists} method=#{method_name}"
+          end
+          if const_exists
             if @module.is_lib?(full_path)
               class_name_str = full_path
             else
@@ -26244,6 +26573,9 @@ module Crystal::HIR
 
       # Collect argument types for name mangling (overloading support)
       arg_types = args.map { |arg_id| ctx.type_of(arg_id) }
+      # Refine VOID arg types by tracing back to their source Call instructions
+      # This handles cases where a call result is used before the called function is lowered
+      arg_types = refine_void_args_from_source_calls(ctx, args, arg_types)
       if ENV.has_key?("DEBUG_RANGE_CALLSITE") && (method_name == "range_to_index_and_count" || (full_method_name && full_method_name.includes?("range_to_index")))
         arg_type_names = arg_types.map { |t| desc = @module.get_type_descriptor(t); desc ? "#{desc.name}(id=#{t.id})" : "T#{t.id}" }
         STDERR.puts "[RANGE_CALLSITE] func=#{ctx.function.name} class=#{@current_class || "nil"} method=#{method_name} full=#{full_method_name} arg_types=#{arg_type_names.join(", ")}"
@@ -26536,6 +26868,11 @@ module Crystal::HIR
       if ENV["DEBUG_PUTS_CALLS"]? && method_name == "puts"
         STDERR.puts "[DEBUG_PUTS_CALL] base=#{base_method_name} mangled=#{mangled_method_name} args=#{arg_names.join(",")}"
       end
+      if ENV["DEBUG_HIGH_CALL"]? && method_name == "high"
+        recv = receiver_id ? get_type_name_from_ref(ctx.type_of(receiver_id)) : "nil"
+        current_scope = "#{@current_class || ""}##{@current_method || ""}"
+        STDERR.puts "[HIGH_CALL] recv=#{recv} base=#{base_method_name} mangled=#{mangled_method_name} current=#{current_scope} func=#{ctx.function.name}"
+      end
 
       if receiver_id.nil? && method_name == "new" && args.size == 1
         if mangled_method_name.starts_with?("Pointer_") && mangled_method_name.ends_with?("__new")
@@ -26805,6 +27142,12 @@ module Crystal::HIR
       # Try to infer return type using mangled name first, fallback to base name
       # For non-overloaded functions, prefer base name since that's how they're registered in HIR module
       return_type = get_function_return_type(mangled_method_name)
+      debug_get_cache = ENV["DEBUG_GET_CACHE_TYPE"]? && method_name == "get_cache"
+      if debug_get_cache
+        rt_name = get_type_name_from_ref(return_type)
+        recv_type_name = receiver_id ? get_type_name_from_ref(ctx.type_of(receiver_id)) : "(nil)"
+        STDERR.puts "[GET_CACHE_RT] 1. initial mangled=#{mangled_method_name} base=#{base_method_name} return=#{rt_name} recv_id=#{receiver_id || "nil"} recv_type=#{recv_type_name} current_class=#{@current_class || "nil"}"
+      end
 
       has_typed_args = arg_types.any? { |t| t != TypeRef::VOID }
       base_signature_exists = @function_types.has_key?(base_method_name)
@@ -26898,6 +27241,10 @@ module Crystal::HIR
       if return_type == TypeRef::VOID || return_type == TypeRef::NIL
         if inferred = resolve_return_type_from_def(mangled_method_name, base_method_name, receiver_id ? ctx.type_of(receiver_id) : nil)
           return_type = inferred unless inferred == TypeRef::VOID || inferred == TypeRef::NIL
+          if debug_get_cache
+            rt_name = get_type_name_from_ref(return_type)
+            STDERR.puts "[GET_CACHE_RT] 2. after resolve_return_type_from_def return_type=#{rt_name}"
+          end
         end
       end
 
@@ -26938,6 +27285,10 @@ module Crystal::HIR
           if accessor = ensure_accessor_method(ctx, receiver_id, method_name)
             return_type = accessor[0]
             mangled_method_name = accessor[1]
+            if debug_get_cache
+              rt_name = get_type_name_from_ref(return_type)
+              STDERR.puts "[GET_CACHE_RT] 2d. ensure_accessor_method => return=#{rt_name} mangled=#{mangled_method_name}"
+            end
           end
         end
       end
@@ -27355,6 +27706,9 @@ module Crystal::HIR
                                            "to_slice", "to_unsafe", "to_h", "to_set", "copy_from"]
         if methods_returning_self_or_value.includes?(method_name)
           return_type = TypeRef::POINTER
+          if debug_get_cache
+            STDERR.puts "[GET_CACHE_RT] 2a. methods_returning_self_or_value => Pointer"
+          end
         end
       end
 
@@ -27387,6 +27741,9 @@ module Crystal::HIR
       # This handles stdlib methods that aren't defined in the bootstrap sources
       if return_type == TypeRef::VOID && receiver_id && !mangled_method_name.includes?("#") && !mangled_method_name.includes?(".")
         return_type = TypeRef::POINTER
+        if debug_get_cache
+          STDERR.puts "[GET_CACHE_RT] 2b. unqualified_method => Pointer"
+        end
       end
 
       # For class method calls (no receiver), handle common builder patterns
@@ -27395,11 +27752,14 @@ module Crystal::HIR
         class_methods_returning_value = ["build", "new", "create", "from", "parse", "load", "open"]
         if class_methods_returning_value.includes?(method_name)
           return_type = TypeRef::POINTER
+          if debug_get_cache
+            STDERR.puts "[GET_CACHE_RT] 2c. class_methods_returning_value => Pointer"
+          end
         end
       end
 
       # For module method calls (within the same module), if return type is still void,
-      # try to find the method's declared return type or use POINTER fallback
+      # try to force-lower the function to get its return type, or use POINTER fallback
       # Module methods returning String/Array/etc. should not be void
       if return_type == TypeRef::VOID && receiver_id.nil? && @current_class
         # Check if it's a method that typically returns a value (not a side-effect only method)
@@ -27412,7 +27772,20 @@ module Crystal::HIR
            method_name.ends_with?("_lines") || method_name.ends_with?("_string") ||
            method_name.ends_with?("_snippet") || method_name.ends_with?("_range") ||
            method_name.ends_with?("_gutter") || method_name.ends_with?("_segment")
-          return_type = TypeRef::POINTER
+          # Try force-lowering to get actual return type before falling back to POINTER
+          force_lowered = false
+          [primary_mangled_name, mangled_method_name, base_method_name].uniq.each do |name|
+            next if force_lowered
+            # Always try force-lowering, regardless of pending status
+            if force_lower_function_for_return_type(name)
+              force_lowered = true
+              return_type = get_function_return_type(name)
+            end
+          end
+          # Fall back to POINTER if force-lower didn't help
+          if return_type == TypeRef::VOID
+            return_type = TypeRef::POINTER
+          end
         end
       end
 
@@ -27572,12 +27945,82 @@ module Crystal::HIR
 
       # After lowering, re-check return type if it was VOID
       # The lowered function may have registered its return type
+      if debug_get_cache
+        rt_name = get_type_name_from_ref(return_type)
+        STDERR.puts "[GET_CACHE_RT] 3. before_re-check return_type=#{rt_name} mangled=#{mangled_method_name}"
+      end
       if return_type == TypeRef::VOID
         return_type = get_function_return_type(mangled_method_name)
         if return_type == TypeRef::VOID && mangled_method_name != base_method_name
           return_type = get_function_return_type(base_method_name)
         end
       end
+      if ENV["DEBUG_FORCE_LOWER"]? && method_name == "get_cache"
+        rt_name = get_type_name_from_ref(return_type)
+        STDERR.puts "[GET_CACHE_TRACE] after_re-check return_type=#{rt_name}"
+      end
+
+      # If return type is still VOID, the function may have been deferred due to @inside_lowering.
+      # Force-lower it now to get the correct return type.
+      if return_type == TypeRef::VOID
+        force_lowered = false
+        debug_force = ENV["DEBUG_FORCE_LOWER"]? && method_name == "get_cache"
+        if debug_force
+          STDERR.puts "[FORCE_LOWER] check method=#{method_name} mangled=#{mangled_method_name} primary=#{primary_mangled_name} base=#{base_method_name}"
+          STDERR.puts "[FORCE_LOWER] pending=#{@pending_lower_functions.select { |n| n.includes?("get_cache") }.join(",")}"
+        end
+        # Try primary name first
+        if @pending_lower_functions.includes?(primary_mangled_name)
+          if debug_force
+            STDERR.puts "[FORCE_LOWER] trying primary_mangled=#{primary_mangled_name}"
+          end
+          if force_lower_function_for_return_type(primary_mangled_name)
+            force_lowered = true
+            return_type = get_function_return_type(primary_mangled_name)
+            if debug_force
+              rt_name = get_type_name_from_ref(return_type)
+              STDERR.puts "[FORCE_LOWER] got return_type=#{rt_name} from primary"
+            end
+          end
+        end
+        # Try mangled name if different
+        if return_type == TypeRef::VOID && mangled_method_name != primary_mangled_name
+          if @pending_lower_functions.includes?(mangled_method_name)
+            if debug_force
+              STDERR.puts "[FORCE_LOWER] trying mangled=#{mangled_method_name}"
+            end
+            if force_lower_function_for_return_type(mangled_method_name)
+              force_lowered = true
+              return_type = get_function_return_type(mangled_method_name)
+              if debug_force
+                rt_name = get_type_name_from_ref(return_type)
+                STDERR.puts "[FORCE_LOWER] got return_type=#{rt_name} from mangled"
+              end
+            end
+          end
+        end
+        # Try base name if still no result
+        if return_type == TypeRef::VOID && base_method_name != mangled_method_name
+          if @pending_lower_functions.includes?(base_method_name)
+            if debug_force
+              STDERR.puts "[FORCE_LOWER] trying base=#{base_method_name}"
+            end
+            if force_lower_function_for_return_type(base_method_name)
+              force_lowered = true
+              return_type = get_function_return_type(base_method_name)
+              if debug_force
+                rt_name = get_type_name_from_ref(return_type)
+                STDERR.puts "[FORCE_LOWER] got return_type=#{rt_name} from base"
+              end
+            end
+          end
+        end
+        if debug_force
+          rt_name = get_type_name_from_ref(return_type)
+          STDERR.puts "[FORCE_LOWER] final return_type=#{rt_name} force_lowered=#{force_lowered}"
+        end
+      end
+
       # If we still have a fallback type, prefer a registered function type when available.
       # But don't override a concrete receiver-derived type with NIL.
       resolved_return_type = get_function_return_type(mangled_method_name)
@@ -31238,6 +31681,14 @@ module Crystal::HIR
       if ENV["DEBUG_ENUM_PREDICATE"]? && member_name == "character_device?"
         STDERR.puts "[DEBUG_ENUM_CALL_PATH] lower_member_access method=#{member_name} object=#{obj_node.class.name}"
       end
+      if ENV["DEBUG_HIGH_CALL"]? && member_name == "high"
+        var_name = if obj_node.is_a?(CrystalV2::Compiler::Frontend::IdentifierNode)
+                     String.new(obj_node.name)
+                   else
+                     "(non-ident)"
+                   end
+        STDERR.puts "[HIGH_CALL_MEMBER] obj_node=#{obj_node.class.name.split("::").last} var=#{var_name} current=#{@current_class || ""} method=#{@current_method || ""}"
+      end
 
       # Check if this is a class/module static call like Counter.new (without parens)
       # Similar logic to lower_call for MemberAccessNode
@@ -31447,6 +31898,10 @@ module Crystal::HIR
 
       # Check for pointer.value -> PointerLoad
       receiver_type = ctx.type_of(object_id)
+      if ENV["DEBUG_HIGH_CALL"]? && member_name == "high"
+        recv_name = get_type_name_from_ref(receiver_type)
+        STDERR.puts "[HIGH_CALL_RECV] recv_type=#{recv_name} recv_id=#{receiver_type.id} current=#{@current_class || ""} method=#{@current_method || ""}"
+      end
       ensure_monomorphized_type(receiver_type) unless receiver_type == TypeRef::VOID
       receiver_is_type_literal = ctx.type_literal?(object_id)
       if member_name == "unsafe_chr" && ENV["DEBUG_UNSAFE_CHR"]?
@@ -33883,6 +34338,23 @@ module Crystal::HIR
       end
 
       if BUILTIN_TYPE_NAMES.includes?(lookup_name)
+        # Before returning builtin type, check if there's a nested type
+        # that shadows this name in the current context (e.g., WUInt::UInt128
+        # should resolve to the record, not the global primitive UInt128).
+        if current = @current_class
+          nested_name = "#{current}::#{lookup_name}"
+          if @class_info.has_key?(nested_name)
+            if ENV["DEBUG_WUINT128"]? && lookup_name == "UInt128"
+              STDERR.puts "[DEBUG_WUINT128] Found nested shadow: #{nested_name}, returning nested type directly"
+            end
+            # Invalidate stale cache and return the nested type
+            cache_key = type_cache_key(lookup_name)
+            @resolved_type_name_cache.delete(cache_key) if @resolved_type_name_cache.has_key?(cache_key)
+            # Recursively call with the fully qualified name
+            return type_ref_for_name(nested_name)
+          end
+        end
+        # No nested shadow found, return builtin type
         if builtin_ref = builtin_type_ref_for(lookup_name)
           cache_key = type_cache_key(lookup_name)
           if cached = @type_cache[cache_key]?
@@ -33912,7 +34384,11 @@ module Crystal::HIR
       # Resolve type names in the current namespace before cache lookup.
       # This avoids poisoning the cache with names that resolve differently per scope.
       if !lookup_name.includes?("|")
+        old_lookup = lookup_name
         lookup_name = resolve_type_name_in_context(lookup_name)
+        if ENV["DEBUG_WUINT128"]? && old_lookup == "UInt128"
+          STDERR.puts "[DEBUG_WUINT128] type_ref_for_name: UInt128 resolved to #{lookup_name}, current=#{@current_class || "(nil)"}"
+        end
       end
       if type_param_like?(lookup_name)
         mapped = @type_param_map[lookup_name]?
