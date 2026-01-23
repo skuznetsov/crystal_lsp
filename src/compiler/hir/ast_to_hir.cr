@@ -31996,6 +31996,14 @@ module Crystal::HIR
           object_type = ctx.type_of(object_id)
           type_desc = @module.get_type_descriptor(object_type)
           class_name = type_desc.try(&.name) || primitive_class_name(object_type) || ""
+          if class_name.empty?
+            if obj_node.is_a?(CrystalV2::Compiler::Frontend::SelfNode) ||
+               (obj_node.is_a?(CrystalV2::Compiler::Frontend::IdentifierNode) && String.new(obj_node.name) == "self")
+              if current = @current_class
+                class_name = resolve_type_alias_chain(substitute_type_params_in_type_name(current))
+              end
+            end
+          end
           class_name = normalize_method_owner_name(class_name)
           base_method_name = class_name.empty? ? "[]" : "#{class_name}#[]"
           primary_mangled_name = mangle_function_name(base_method_name, arg_types)
@@ -32171,6 +32179,14 @@ module Crystal::HIR
         object_type = ctx.type_of(object_id)
         type_desc = @module.get_type_descriptor(object_type)
         class_name = type_desc.try(&.name) || primitive_class_name(object_type) || ""
+        if class_name.empty?
+          if obj_node.is_a?(CrystalV2::Compiler::Frontend::SelfNode) ||
+             (obj_node.is_a?(CrystalV2::Compiler::Frontend::IdentifierNode) && String.new(obj_node.name) == "self")
+            if current = @current_class
+              class_name = resolve_type_alias_chain(substitute_type_params_in_type_name(current))
+            end
+          end
+        end
         class_name = normalize_method_owner_name(class_name)
         base_method_name = class_name.empty? ? "[]" : "#{class_name}#[]"
         primary_mangled_name = mangle_function_name(base_method_name, arg_types)
