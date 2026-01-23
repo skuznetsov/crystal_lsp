@@ -31078,32 +31078,52 @@ module Crystal::HIR
       receiver_type : TypeRef,
       block_node : CrystalV2::Compiler::Frontend::BlockNode
     ) : ValueId
-      inline_try_core(ctx, receiver_id, receiver_type) do |non_nil_id|
-        ctx.push_scope(ScopeKind::Block)
-
-        if params = block_node.params
-          params.each_with_index do |param, i|
-            param_name = if param.name
-                           String.new(param.name.not_nil!)
-                         else
-                           "_block_param_#{i}"
-                         end
-            ctx.register_local(param_name, non_nil_id)
-            ctx.register_type(non_nil_id, ctx.type_of(non_nil_id))
-          end
-        end
-
-        value_id = if body = block_node.body
-                     lower_body(ctx, body)
-                   else
-                     nil_lit = Literal.new(ctx.next_id, TypeRef::NIL, nil)
-                     ctx.emit(nil_lit)
-                     nil_lit.id
-                   end
-
-        ctx.pop_scope
-        value_id
+      if receiver_type == TypeRef::NIL || receiver_type == TypeRef::VOID
+        nil_lit = Literal.new(ctx.next_id, TypeRef::NIL, nil)
+        ctx.emit(nil_lit)
+        return nil_lit.id
       end
+
+      unless is_union_or_nilable_type?(receiver_type)
+        return inline_try_without_nil(ctx, receiver_id) do |non_nil_id|
+          inline_try_block_body(ctx, block_node, non_nil_id)
+        end
+      end
+
+      inline_try_core(ctx, receiver_id, receiver_type) do |non_nil_id|
+        inline_try_block_body(ctx, block_node, non_nil_id)
+      end
+    end
+
+    private def inline_try_block_body(
+      ctx : LoweringContext,
+      block_node : CrystalV2::Compiler::Frontend::BlockNode,
+      param_value : ValueId
+    ) : ValueId
+      ctx.push_scope(ScopeKind::Block)
+
+      if params = block_node.params
+        params.each_with_index do |param, i|
+          param_name = if param.name
+                         String.new(param.name.not_nil!)
+                       else
+                         "_block_param_#{i}"
+                       end
+          ctx.register_local(param_name, param_value)
+          ctx.register_type(param_value, ctx.type_of(param_value))
+        end
+      end
+
+      value_id = if body = block_node.body
+                   lower_body(ctx, body)
+                 else
+                   nil_lit = Literal.new(ctx.next_id, TypeRef::NIL, nil)
+                   ctx.emit(nil_lit)
+                   nil_lit.id
+                 end
+
+      ctx.pop_scope
+      value_id
     end
 
     private def inline_try_with_proc(
@@ -31112,32 +31132,60 @@ module Crystal::HIR
       receiver_type : TypeRef,
       proc_node : CrystalV2::Compiler::Frontend::ProcLiteralNode
     ) : ValueId
-      inline_try_core(ctx, receiver_id, receiver_type) do |non_nil_id|
-        ctx.push_scope(ScopeKind::Block)
-
-        if params = proc_node.params
-          params.each_with_index do |param, i|
-            param_name = if param.name
-                           String.new(param.name.not_nil!)
-                         else
-                           "_block_param_#{i}"
-                         end
-            ctx.register_local(param_name, non_nil_id)
-            ctx.register_type(non_nil_id, ctx.type_of(non_nil_id))
-          end
-        end
-
-        value_id = if body = proc_node.body
-                     lower_body(ctx, body)
-                   else
-                     nil_lit = Literal.new(ctx.next_id, TypeRef::NIL, nil)
-                     ctx.emit(nil_lit)
-                     nil_lit.id
-                   end
-
-        ctx.pop_scope
-        value_id
+      if receiver_type == TypeRef::NIL || receiver_type == TypeRef::VOID
+        nil_lit = Literal.new(ctx.next_id, TypeRef::NIL, nil)
+        ctx.emit(nil_lit)
+        return nil_lit.id
       end
+
+      unless is_union_or_nilable_type?(receiver_type)
+        return inline_try_without_nil(ctx, receiver_id) do |non_nil_id|
+          inline_try_proc_body(ctx, proc_node, non_nil_id)
+        end
+      end
+
+      inline_try_core(ctx, receiver_id, receiver_type) do |non_nil_id|
+        inline_try_proc_body(ctx, proc_node, non_nil_id)
+      end
+    end
+
+    private def inline_try_proc_body(
+      ctx : LoweringContext,
+      proc_node : CrystalV2::Compiler::Frontend::ProcLiteralNode,
+      param_value : ValueId
+    ) : ValueId
+      ctx.push_scope(ScopeKind::Block)
+
+      if params = proc_node.params
+        params.each_with_index do |param, i|
+          param_name = if param.name
+                         String.new(param.name.not_nil!)
+                       else
+                         "_block_param_#{i}"
+                       end
+          ctx.register_local(param_name, param_value)
+          ctx.register_type(param_value, ctx.type_of(param_value))
+        end
+      end
+
+      value_id = if body = proc_node.body
+                   lower_body(ctx, body)
+                 else
+                   nil_lit = Literal.new(ctx.next_id, TypeRef::NIL, nil)
+                   ctx.emit(nil_lit)
+                   nil_lit.id
+                 end
+
+      ctx.pop_scope
+      value_id
+    end
+
+    private def inline_try_without_nil(
+      ctx : LoweringContext,
+      receiver_id : ValueId,
+      &block : ValueId -> ValueId
+    ) : ValueId
+      block.call(receiver_id)
     end
 
     private def inline_try_core(
