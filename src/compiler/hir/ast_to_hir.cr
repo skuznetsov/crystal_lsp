@@ -27449,12 +27449,10 @@ module Crystal::HIR
           end
           if receiver_id && method_name == "try"
             recv_type = ctx.type_of(receiver_id)
-            if is_union_or_nilable_type?(recv_type)
-              if block_for_inline
-                return inline_try_with_block(ctx, receiver_id, recv_type, block_for_inline)
-              elsif proc_for_inline
-                return inline_try_with_proc(ctx, receiver_id, recv_type, proc_for_inline)
-              end
+            if block_for_inline
+              return inline_try_with_block(ctx, receiver_id, recv_type, block_for_inline)
+            elsif proc_for_inline
+              return inline_try_with_proc(ctx, receiver_id, recv_type, proc_for_inline)
             end
           end
 
@@ -27492,13 +27490,9 @@ module Crystal::HIR
               end
             end
             if !skip_inline && method_name == "try" && receiver_id
-              recv_type = ctx.type_of(receiver_id)
               if ENV["DEBUG_TRY_INLINE"]?
+                recv_type = ctx.type_of(receiver_id)
                 STDERR.puts "[TRY_INLINE] recv_type=#{get_type_name_from_ref(recv_type)} union=#{is_union_or_nilable_type?(recv_type)}"
-              end
-              # Avoid inlining try on unions so nil variants can short-circuit in dispatch.
-              if is_union_or_nilable_type?(recv_type)
-                skip_inline = true
               end
             end
 
