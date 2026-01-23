@@ -26584,6 +26584,19 @@ module Crystal::HIR
           # Instance method call like c.increment()
           receiver_id ||= lower_expr(ctx, callee_node.object)
           receiver_type = ctx.type_of(receiver_id)
+          if receiver_type == TypeRef::VOID
+            if obj_node.is_a?(CrystalV2::Compiler::Frontend::SelfNode) ||
+               (obj_node.is_a?(CrystalV2::Compiler::Frontend::IdentifierNode) && String.new(obj_node.name) == "self")
+              if current = @current_class
+                resolved_current = resolve_type_alias_chain(substitute_type_params_in_type_name(current))
+                inferred_self = type_ref_for_name(resolved_current)
+                if inferred_self != TypeRef::VOID
+                  receiver_type = inferred_self
+                  ctx.register_type(receiver_id, receiver_type)
+                end
+              end
+            end
+          end
           if call_args.empty? && block_expr.nil? && block_pass_expr.nil?
             if predicate_id = lower_enum_predicate(ctx, receiver_id, method_name)
               return predicate_id
