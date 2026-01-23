@@ -31931,6 +31931,18 @@ module Crystal::HIR
     private def lower_index(ctx : LoweringContext, node : CrystalV2::Compiler::Frontend::IndexNode) : ValueId
       object_id = lower_expr(ctx, node.object)
       obj_node = @arena[node.object]
+      if ctx.type_of(object_id) == TypeRef::VOID
+        if obj_node.is_a?(CrystalV2::Compiler::Frontend::SelfNode) ||
+           (obj_node.is_a?(CrystalV2::Compiler::Frontend::IdentifierNode) && String.new(obj_node.name) == "self")
+          if current = @current_class
+            resolved_current = resolve_type_alias_chain(substitute_type_params_in_type_name(current))
+            inferred = type_ref_for_name(resolved_current)
+            if inferred != TypeRef::VOID
+              ctx.register_type(object_id, inferred)
+            end
+          end
+        end
+      end
       enum_name = nil
       case obj_node
       when CrystalV2::Compiler::Frontend::ConstantNode
