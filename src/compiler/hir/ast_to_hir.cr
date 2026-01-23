@@ -12209,6 +12209,10 @@ module Crystal::HIR
     end
 
     private def split_union_type_name(type_name : String) : Array(String)
+      if !type_name.includes?("|") && type_name.includes?("___")
+        parts = type_name.split("___").map(&.strip).reject(&.empty?)
+        return parts unless parts.empty?
+      end
       parts = [] of String
       depth = 0
       start = 0
