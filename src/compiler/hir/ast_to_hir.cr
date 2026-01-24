@@ -10601,6 +10601,9 @@ module Crystal::HIR
 
       method_name = String.new(callee_node.name)
       macro_lookup = lookup_macro_entry_with_inheritance(method_name, class_name)
+      if macro_lookup.nil? && class_name != "Object"
+        macro_lookup = lookup_macro_entry(method_name, "Object")
+      end
       return unless macro_lookup
 
       macro_entry, macro_key = macro_lookup
