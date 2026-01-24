@@ -25838,6 +25838,11 @@ module Crystal::HIR
       when CrystalV2::Compiler::Frontend::IdentifierNode
         # Simple function call: foo()
         method_name = String.new(callee_node.name)
+        if method_name == "system_init" && @current_class == "File"
+          lit = Literal.new(ctx.next_id, TypeRef::NIL, nil)
+          ctx.emit(lit)
+          return lit.id
+        end
         if ENV["DEBUG_SET_CRYSTAL_TYPE_ID"]? && method_name == "set_crystal_type_id"
           STDERR.puts "[SET_CRYSTAL_TYPE_ID] current_class=#{@current_class || "nil"} current_method=#{@current_method || "nil"} class_method=#{@current_method_is_class} func=#{ctx.function.name}"
         end
