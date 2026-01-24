@@ -194,6 +194,18 @@ struct Time::Format
       time.zone.format(io, with_colon: force_colon, with_seconds: format_seconds)
     end
 
+    # :nodoc:
+    # Shim for bootstrap: accepts forwarded named tuples as a positional arg.
+    def time_zone_offset(options : NamedTuple, force_colon = false, allow_colon = true, format_seconds = false, parse_seconds = true)
+      time_zone_offset(force_colon: force_colon, allow_colon: allow_colon, format_seconds: format_seconds, parse_seconds: parse_seconds, **options)
+    end
+
+    # :nodoc:
+    # Overload matching forwarded named tuples without parse_seconds.
+    def time_zone_offset(options : NamedTuple, force_colon = false, allow_colon = true, format_seconds = false)
+      time_zone_offset(force_colon: force_colon, allow_colon: allow_colon, format_seconds: format_seconds, **options)
+    end
+
     def time_zone_colon(with_seconds = false) : Nil
       time_zone_offset(force_colon: true, format_seconds: with_seconds)
     end
