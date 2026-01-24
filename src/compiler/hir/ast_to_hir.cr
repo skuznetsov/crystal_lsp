@@ -32750,6 +32750,9 @@ module Crystal::HIR
       if member_name == "not_nil!" && is_union_or_nilable_type?(receiver_type)
         return lower_not_nil_intrinsic(ctx, object_id, receiver_type)
       end
+      if member_name == "not_nil!" && receiver_type != TypeRef::VOID
+        return object_id
+      end
       if member_name == "not_nil!" && receiver_type == TypeRef::VOID
         ctx.register_type(object_id, TypeRef::POINTER)
         return object_id
