@@ -10546,6 +10546,37 @@ module Crystal::HIR
         register_enum_with_name(member, full_name)
       when CrystalV2::Compiler::Frontend::MacroDefNode
         register_macro(member, class_name)
+      when CrystalV2::Compiler::Frontend::MacroLiteralNode
+        # Macro literals in class bodies can contain getters/properties/defs.
+        # Parse and lower them so accessors are actually emitted.
+        if raw_text = macro_literal_raw_text(member)
+          expanded = expand_flag_macro_text(raw_text) || raw_text
+          sanitized = strip_macro_lines(expanded)
+          program = parse_macro_literal_program(expanded)
+          if program.nil? && sanitized != expanded
+            program = parse_macro_literal_program(sanitized)
+          end
+          if program
+            with_arena(program.arena) do
+              program.roots.each do |child_id|
+                lower_class_body_expr(class_name, class_info, child_id, defined_full_names, visited_modules)
+              end
+            end
+            return
+          end
+        end
+
+        texts = macro_literal_active_texts(member)
+        combined = texts.join("\n")
+        sanitized = strip_macro_lines(combined)
+        if parsed = parse_macro_literal_class_body(combined) || (sanitized != combined ? parse_macro_literal_class_body(sanitized) : nil)
+          program, body_ids = parsed
+          with_arena(program.arena) do
+            body_ids.each do |child_id|
+              lower_class_body_expr(class_name, class_info, child_id, defined_full_names, visited_modules)
+            end
+          end
+        end
       when CrystalV2::Compiler::Frontend::CallNode
         if ENV["DEBUG_RECORD_LOWER"]?
           callee = @arena[member.callee]
@@ -10569,7 +10600,7 @@ module Crystal::HIR
       return unless callee_node.is_a?(CrystalV2::Compiler::Frontend::IdentifierNode)
 
       method_name = String.new(callee_node.name)
-      macro_lookup = lookup_macro_entry(method_name, class_name)
+      macro_lookup = lookup_macro_entry_with_inheritance(method_name, class_name)
       return unless macro_lookup
 
       macro_entry, macro_key = macro_lookup
