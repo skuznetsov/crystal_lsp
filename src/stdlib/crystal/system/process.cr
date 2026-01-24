@@ -39,6 +39,12 @@ struct Crystal::System::Process
   # Returns the process identifier of the parent process of the current process.
   # def self.ppid : Int
 
+  # :nodoc:
+  # Shim for bootstrap: some call sites currently resolve to Crystal::System::Process.
+  def self.executable_path : String?
+    ::Process.executable_path
+  end
+
   # Sends a *signal* to the processes identified by the given *pids*.
   # def self.signal(pid : Int, signal : Int)
 
