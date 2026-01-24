@@ -20,9 +20,15 @@ module CrystalV2
         @virtual_arena = @arena.is_a?(Frontend::VirtualArena) ? @arena.as(Frontend::VirtualArena) : nil
         @table_stack = [context.symbol_table]
         @diagnostics = [] of Diagnostic
-          @macro_expander = MacroExpander.new(@program, @arena, context.flags)
-          @class_stack = [] of ClassSymbol
-          @enum_stack = [] of EnumSymbol
+        @source_cache = {} of String => String
+        @macro_expander = MacroExpander.new(
+          @program,
+          @arena,
+          context.flags,
+          source_provider: ->(block_id : Frontend::ExprId) { macro_block_source(block_id) }
+        )
+        @class_stack = [] of ClassSymbol
+        @enum_stack = [] of EnumSymbol
           # Pending root-level annotations (for example,
           # @[JSON::Serializable::Options] immediately before a class
           # definition). These annotations are attached to the next class we
@@ -72,6 +78,56 @@ module CrystalV2
 
         private def intern_name(slice : Slice(UInt8)) : String
           @string_pool.intern_string(slice)
+        end
+
+        private def sources_for_arena(arena : Frontend::ArenaLike) : Array(String)
+          case arena
+          when Frontend::AstArena
+            arena.extra_sources
+          when Frontend::VirtualArena
+            arena.extra_sources
+          when Frontend::PageArena
+            arena.extra_sources
+          else
+            [] of String
+          end
+        end
+
+        private def source_for_span(arena : Frontend::ArenaLike, span : Frontend::Span) : String?
+          sources = sources_for_arena(arena)
+          return nil if sources.empty?
+          sources.find { |source| span.end_offset <= source.bytesize } || sources.first?
+        end
+
+        private def macro_block_source(block_id : Frontend::ExprId) : String?
+          block_node = @arena[block_id]
+          return nil unless block_node.is_a?(Frontend::BlockNode)
+          body = block_node.body
+          return nil if body.empty?
+
+          spans = body.map { |expr_id| @arena[expr_id].span }
+          span = Frontend::Span.cover_all(spans)
+          source = nil
+          if path = file_path_for(block_id)
+            source = @source_cache[path]?
+            unless source
+              begin
+                source = File.read(path)
+                @source_cache[path] = source
+              rescue
+                source = nil
+              end
+            end
+          end
+          source ||= source_for_span(@arena, span)
+          return nil unless source
+
+          start = span.start_offset
+          finish = span.end_offset
+          return nil if start < 0 || finish <= start || start >= source.bytesize
+          length = finish - start
+          length = source.bytesize - start if start + length > source.bytesize
+          source.byte_slice(start, length)
         end
 
       private def visit(node_id : Frontend::ExprId)

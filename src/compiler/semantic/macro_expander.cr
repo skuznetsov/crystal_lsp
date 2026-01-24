@@ -309,7 +309,7 @@ module CrystalV2
           when .identifier?
             MacroIdValue.new(Frontend.node_literal_string(node) || "")
           else
-            if node.is_a?(Frontend::TypeDeclarationNode) || node.is_a?(Frontend::AssignNode)
+            if node.is_a?(Frontend::TypeDeclarationNode) || node.is_a?(Frontend::AssignNode) || node.is_a?(Frontend::GenericNode)
               MacroNodeValue.new(expr_id, @arena, @string_pool)
             elsif node.is_a?(Frontend::PathNode)
               name = path_to_string(node)
@@ -390,6 +390,10 @@ module CrystalV2
               return evaluate_call_to_macro_value(node, context)
             elsif node.is_a?(Frontend::YieldNode)
               text = macro_block_text(context)
+              if ENV["DEBUG_MACRO_YIELD"]?
+                block_idx = context.block_id.try(&.index) || -1
+                STDERR.puts "[MACRO_YIELD] block_id=#{block_idx} len=#{text.bytesize}"
+              end
               return text.empty? ? MACRO_NIL : MacroIdValue.new(text)
             elsif node.is_a?(Frontend::IfNode)
               cond_result, cond_ctx = evaluate_condition(node.condition, context)
@@ -408,7 +412,7 @@ module CrystalV2
                 return evaluate_body_expressions(else_body, context)
               end
               return MACRO_NIL
-            elsif node.is_a?(Frontend::TypeDeclarationNode) || node.is_a?(Frontend::AssignNode)
+            elsif node.is_a?(Frontend::TypeDeclarationNode) || node.is_a?(Frontend::AssignNode) || node.is_a?(Frontend::GenericNode)
               return MacroNodeValue.new(expr_id, @arena, @string_pool)
             elsif node.is_a?(Frontend::PathNode)
               name = path_to_string(node)
@@ -1068,7 +1072,8 @@ module CrystalV2
           # Complex nodes that benefit from MacroValue evaluation
           if node.is_a?(Frontend::StringInterpolationNode) ||
              node.is_a?(Frontend::BinaryNode) ||
-             node.is_a?(Frontend::CallNode)
+             node.is_a?(Frontend::CallNode) ||
+             node.is_a?(Frontend::YieldNode)
             return evaluate_to_macro_value(expr_id, context).to_macro_output
           end
 

@@ -338,6 +338,13 @@ module CrystalV2
 
         def call_method(name : String, args : Array(MacroValue), named_args : Hash(String, MacroValue)?) : MacroValue
           case name
+          when "==", "!="
+            if arg = args[0]?
+              result = @value == arg.to_id
+              result = !result if name == "!="
+              return MacroBoolValue.new(result)
+            end
+            MacroBoolValue.new(false)
           when "symbolize"
             MacroSymbolValue.new(@value)
           else
@@ -431,6 +438,16 @@ module CrystalV2
             intern_name(node.name)
           when Frontend::TypeDeclarationNode
             intern_name(node.name)
+          when Frontend::GenericNode
+            base_name = node_identifier_name(@arena[node.base_type]) || stringify_node(@arena[node.base_type])
+            args = node.type_args.map do |arg_id|
+              node_identifier_name(@arena[arg_id]) || stringify_node(@arena[arg_id])
+            end
+            if base_name
+              "#{base_name}(#{args.join(", ")})"
+            else
+              nil
+            end
           when Frontend::AssignNode
             node_identifier_name(@arena[node.target])
           when Frontend::PathNode
@@ -484,6 +501,10 @@ module CrystalV2
             target = stringify_node(@arena[node.target])
             value = stringify_node(@arena[node.value])
             "#{target} = #{value}"
+          when Frontend::GenericNode
+            base_name = stringify_node(@arena[node.base_type])
+            args = node.type_args.map { |arg_id| stringify_node(@arena[arg_id]) }
+            "#{base_name}(#{args.join(", ")})"
           else
             Frontend.node_literal_string(node) || ""
           end

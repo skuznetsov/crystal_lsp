@@ -1066,6 +1066,7 @@ r2 = maybe(false)  # => nil
 - Normalize `flag?` macro arguments (strip leading `:`) + require cache v3; pthread requires now load.
 - Coerce integer args to `i128` in LLVM backend for mismatch widths.
 - Treat module names as `TypeKind::Module`; module-typed params refine to concrete defaults (IO::ByteFormat → SystemEndian), removing `_IO__ByteFormat_decode_UInt32_IO` (2026-01-xx).
+- Fix runtime IndexNode classification: `self[i]` no longer treated as type literal, so `Tuple#hash` uses instance `[]` and `UInt64#hash` calls; removed `_StaticArray_Tuple__0__hash_Crystal__Hasher` from `bootstrap_array` undefined list (2026-01-24).
 - Refine module-typed params from mangled callsite suffix; `UInt32.from_io$IO_IO::ByteFormat::LittleEndian` now binds `format` to LittleEndian and emits `IO::ByteFormat::LittleEndian.decode` (2026-02-xx).
 - Register `MacroForNode` inside nested modules so reopened macro modules (IO::ByteFormat::{Little,Big}Endian) contribute defs; `IO::ByteFormat::LittleEndian.decode` functions now appear in HIR (2026-02-xx).
 - LLVM backend treats pointer constants `"0"` as `null` for ptr→int casts, removing `ptrtoint ptr 0` llc errors (2026-02-xx).
@@ -1421,6 +1422,7 @@ The return_type=16 (NIL) for `to_s` methods is incorrect - should be String type
 - **Fix applied**: allow tuple types for splat params even when some callsite args are `Void`, and fall back to `Tuple` when callsite types are missing. `Crystal::System.print_error$splat` now has a non-VOID args param (see `/private/tmp/bootstrap_array_full.hir`). Remaining `___Int32` now comes from `String::CHAR_TO_DIGIT.to_unsafe` in `Char#to_i` (bare `[]$Int32` receiver) (2026-01-xx).
 - **Fix applied**: constant inference for `begin` blocks + uppercase identifiers; `String::CHAR_TO_DIGIT`/`CHAR_TO_DIGIT62` now infer as `StaticArray(Int8, 256)`, so `to_unsafe` resolves to `StaticArray#to_unsafe` and the `Nlist64::Type#to_unsafe`/`___Int32` fallback disappears from HIR (2026-02-xx).
 - **Update (2026-02-xx)**: full-prelude `bootstrap_array` link now reports **31 missing symbols** (see `/private/tmp/bootstrap_array_full.link.log` and `/private/tmp/missing_symbols_latest.txt`).
+- **Update (2026-02-xx)**: canonical full-prelude `bootstrap_array` run now reports **4 missing symbols** (see `/tmp/bootstrap_array_full.trace.log` and `/tmp/missing_symbols_bootstrap_array.txt`): `_Float__Printer__Dragonbox__WUInt__UInt128_unsafe_add__UInt64`, `_Object____`, `_block_each_block`, `_property__Pointer__self_`.
 
 #### Issue 6: ExprId -1 in inline_loop_vars_union (union keyword) - FIXED (2026-01-xx)
 - **Symptom**: self-host compile crashed with `ExprId out of bounds: -1` while lowering `AstToHir#inline_loop_vars_union`.

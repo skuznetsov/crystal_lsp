@@ -47,6 +47,7 @@ module Crystal
     @current_lowering_func_name : String = ""
     @slab_frame_enabled : Bool
     @current_slab_frame : Bool = false
+    @current_block_param_id : HIR::ValueId?
     @class_children : Hash(String, Array(String))
 
     # Memory strategy (note: we use inline selection, not global assigner)
@@ -63,6 +64,7 @@ module Crystal
       @stack_slot_values = Set(ValueId).new
       @stack_slot_types = {} of ValueId => TypeRef
       @slab_frame_enabled = slab_frame
+      @current_block_param_id = nil
       @class_children = {} of String => Array(String)
       @hir_module.class_parents.each do |name, parent|
         next unless parent
@@ -234,14 +236,6 @@ module Crystal
     # ─────────────────────────────────────────────────────────────────────────
 
     private def lower_function_body(hir_func : HIR::Function)
-      # Skip functions that contain yield - they are always inlined
-      # and should not be generated as standalone functions
-      if function_contains_yield?(hir_func)
-        # Remove the stub from module since this function is inline-only
-        @mir_module.remove_function(hir_func.name)
-        return
-      end
-
       # Get the pre-created function stub
       mir_func = @mir_module.get_function(hir_func.name)
       if mir_func.nil?
@@ -252,6 +246,7 @@ module Crystal
 
       @current_hir_func = hir_func
       @current_mir_func = mir_func
+      @current_block_param_id = function_contains_yield?(hir_func) ? infer_block_param_id(hir_func) : nil
       @current_slab_frame = should_use_slab_frame?(hir_func)
       mir_func.slab_frame = @current_slab_frame
       @value_map.clear
@@ -300,6 +295,7 @@ module Crystal
       mir_func.compute_predecessors
 
       @stats.functions_lowered += 1
+      @current_block_param_id = nil
     end
 
     # Resolve phi incoming values after all blocks are lowered
@@ -801,6 +797,20 @@ module Crystal
         STDERR.puts "[VIRTUAL_CALL] method=#{call.method_name} receiver=#{recv_type_name} args=#{call.args.size} func=#{@current_lowering_func_name}"
       end
 
+      recv_type = call.receiver ? @hir_value_types[call.receiver.not_nil!]? : nil
+      recv_desc = recv_type ? @hir_module.get_type_descriptor(recv_type) : nil
+
+      # Union numeric conversions (to_i*, to_u*): inline by extracting payload bytes.
+      if recv_desc && recv_desc.kind == HIR::TypeKind::Union && call.args.empty?
+        if method_suffix = extract_method_suffix_loose(call.method_name)
+          if target_type = union_conversion_target_type(method_suffix)
+            if converted = lower_union_numeric_conversion(args[0], recv_type.not_nil!, target_type)
+              return converted
+            end
+          end
+        end
+      end
+
       # Check if this is an external/runtime call
       if call.method_name.starts_with?("__crystal_v2_")
         return builder.extern_call(call.method_name, args, convert_type(call.type))
@@ -844,6 +854,9 @@ module Crystal
       # We use $ as separator (: is not valid in LLVM identifiers)
       # Avoid regex by extracting up to first : or $
       method_name_str = call.method_name
+      if method_name_str == "Crystal::System::Process.executable_path"
+        method_name_str = "Process.executable_path"
+      end
       colon_pos = method_name_str.index(':')
       dollar_pos = method_name_str.index('$')
       base_method_name = if colon_pos || dollar_pos
@@ -854,17 +867,17 @@ module Crystal
                          end
 
       # Look up function by name - try exact match first, then fuzzy match
-      func = @mir_module.get_function(call.method_name)
+      func = @mir_module.get_function(method_name_str)
 
       # If not found, try fuzzy matching to handle type variations (e.g., String vs String | Nil)
       unless func
         if debug_virtual && call.virtual
-          STDERR.puts "[VIRTUAL_CALL] unresolved method=#{call.method_name} base=#{base_method_name} func=#{@current_lowering_func_name}"
+          STDERR.puts "[VIRTUAL_CALL] unresolved method=#{method_name_str} base=#{base_method_name} func=#{@current_lowering_func_name}"
         end
         # Only apply fuzzy matching for qualified method names (containing . or #)
-        if call.method_name.includes?(".") || call.method_name.includes?("#")
+        if method_name_str.includes?(".") || method_name_str.includes?("#")
           # Extract base name (before $ type suffix)
-          base_name = call.method_name.split("$").first
+          base_name = method_name_str.split("$").first
 
           # Search for any function that starts with the base name
           func = @mir_module.functions.find do |f|
@@ -879,7 +892,7 @@ module Crystal
               type_name = recv_desc.try(&.name) || hir_type_name(recv_type)
               if type_name && !type_name.empty?
                 # Try qualified name with type prefix
-                qualified_name = "#{type_name}##{call.method_name}"
+                qualified_name = "#{type_name}##{method_name_str}"
                 func = @mir_module.get_function(qualified_name)
 
                 # If not found, try fuzzy matching (handle type suffixes)
@@ -969,6 +982,150 @@ module Crystal
         STDERR.puts "[UNRESOLVED_CALL] #{call.method_name} in #{@current_lowering_func_name}"
       end
       builder.extern_call(call.method_name, args, convert_type(call.type))
+    end
+
+    private def extract_method_suffix_loose(full_name : String) : String?
+      if suffix = extract_method_suffix(full_name)
+        return suffix
+      end
+      conversions = ["to_i", "to_i8", "to_i16", "to_i32", "to_i64", "to_i128",
+                     "to_u", "to_u8", "to_u16", "to_u32", "to_u64", "to_u128"]
+      conversions.each do |suffix|
+        return suffix if full_name.ends_with?("_#{suffix}") || full_name == suffix
+      end
+      nil
+    end
+
+    private def union_conversion_target_type(method_suffix : String) : TypeRef?
+      case method_suffix
+      when "to_i", "to_i32"
+        TypeRef::INT32
+      when "to_i8"
+        TypeRef::INT8
+      when "to_i16"
+        TypeRef::INT16
+      when "to_i64"
+        TypeRef::INT64
+      when "to_i128"
+        TypeRef::INT128
+      when "to_u", "to_u32"
+        TypeRef::UINT32
+      when "to_u8"
+        TypeRef::UINT8
+      when "to_u16"
+        TypeRef::UINT16
+      when "to_u64"
+        TypeRef::UINT64
+      when "to_u128"
+        TypeRef::UINT128
+      else
+        nil
+      end
+    end
+
+    private def union_numeric_bit_width(type_ref : TypeRef) : Int32?
+      case type_ref
+      when TypeRef::INT8, TypeRef::UINT8
+        8
+      when TypeRef::INT16, TypeRef::UINT16
+        16
+      when TypeRef::INT32, TypeRef::UINT32, TypeRef::CHAR
+        32
+      when TypeRef::INT64, TypeRef::UINT64
+        64
+      when TypeRef::INT128, TypeRef::UINT128
+        128
+      else
+        nil
+      end
+    end
+
+    private def union_unsigned_type_for_bits(bits : Int32) : TypeRef
+      case bits
+      when 8
+        TypeRef::UINT8
+      when 16
+        TypeRef::UINT16
+      when 32
+        TypeRef::UINT32
+      when 64
+        TypeRef::UINT64
+      when 128
+        TypeRef::UINT128
+      else
+        TypeRef::UINT64
+      end
+    end
+
+    private def union_signed_type_for_bits(bits : Int32) : TypeRef
+      case bits
+      when 8
+        TypeRef::INT8
+      when 16
+        TypeRef::INT16
+      when 32
+        TypeRef::INT32
+      when 64
+        TypeRef::INT64
+      when 128
+        TypeRef::INT128
+      else
+        TypeRef::INT64
+      end
+    end
+
+    private def union_numeric_conversion_cast_kind(src_bits : Int32, dst_bits : Int32, dst_signed : Bool) : CastKind
+      if dst_bits < src_bits
+        CastKind::Trunc
+      elsif dst_bits > src_bits
+        dst_signed ? CastKind::SExt : CastKind::ZExt
+      else
+        CastKind::Bitcast
+      end
+    end
+
+    private def union_numeric_conversion_signed?(type_ref : TypeRef) : Bool
+      case type_ref
+      when TypeRef::INT8, TypeRef::INT16, TypeRef::INT32, TypeRef::INT64, TypeRef::INT128
+        true
+      else
+        false
+      end
+    end
+
+    private def lower_union_numeric_conversion(
+      union_value : ValueId,
+      recv_type : HIR::TypeRef,
+      target_type : TypeRef
+    ) : ValueId?
+      mir_union_ref = convert_type(recv_type)
+      union_desc = @mir_module.get_union_descriptor(mir_union_ref)
+      return nil unless union_desc
+
+      # Reject unions with Nil (unsafe to ignore tag).
+      union_desc.variants.each do |variant|
+        return nil if variant.type_ref == TypeRef::NIL
+      end
+
+      # Collect numeric variants and determine payload width.
+      max_bits = nil.as(Int32?)
+      union_desc.variants.each do |variant|
+        bits = union_numeric_bit_width(variant.type_ref)
+        return nil unless bits
+        max_bits = max_bits ? (bits > max_bits ? bits : max_bits) : bits
+      end
+      return nil unless max_bits
+
+      payload_type = union_unsigned_type_for_bits(max_bits)
+      payload = @builder.not_nil!.cast(CastKind::Bitcast, union_value, payload_type)
+
+      # If target is same width unsigned payload, reuse directly.
+      return payload if payload_type == target_type
+
+      dst_bits = union_numeric_bit_width(target_type)
+      return nil unless dst_bits
+      kind = union_numeric_conversion_cast_kind(max_bits, dst_bits, union_numeric_conversion_signed?(target_type))
+      @builder.not_nil!.cast(kind, payload, target_type)
     end
 
     # Dispatch kind for unified vdispatch generator
@@ -1717,10 +1874,24 @@ module Crystal
 
     private def lower_yield(yld : HIR::Yield) : ValueId
       builder = @builder.not_nil!
-      # Yield becomes indirect call through block parameter
+      block_param_id = @current_block_param_id
+      unless block_param_id
+        return builder.const_nil
+      end
+      # Yield becomes indirect call through block parameter.
+      # We treat the block param as a Proc value and emit an indirect call.
       args = yld.args.map { |arg| get_value(arg) }
-      # Block pointer would be passed as hidden parameter
-      builder.const_nil  # Placeholder
+      block_val = get_value(block_param_id)
+      block_type = @hir_value_types[block_param_id]? || HIR::TypeRef::POINTER
+      block_desc = @hir_module.get_type_descriptor(block_type)
+      is_ptr = block_type == HIR::TypeRef::POINTER || (block_desc && block_desc.kind == HIR::TypeKind::Proc)
+      unless is_ptr
+        if block_type == HIR::TypeRef::VOID
+          return builder.const_nil
+        end
+        block_val = builder.cast(CastKind::IntToPtr, block_val, TypeRef::POINTER)
+      end
+      builder.call_indirect(block_val, args, convert_type(yld.type))
     end
 
     # Check if a function contains yield instructions (inline-only function)
@@ -1731,6 +1902,17 @@ module Crystal
         end
       end
       false
+    end
+
+    private def infer_block_param_id(hir_func : HIR::Function) : HIR::ValueId?
+      # Prefer explicit Proc-typed param if present.
+      hir_func.params.reverse_each do |param|
+        if desc = @hir_module.get_type_descriptor(param.type)
+          return param.id if desc.kind == HIR::TypeKind::Proc
+        end
+      end
+      # Fallback: use the last parameter as the block param.
+      hir_func.params.last?.try(&.id)
     end
 
     # ─────────────────────────────────────────────────────────────────────────

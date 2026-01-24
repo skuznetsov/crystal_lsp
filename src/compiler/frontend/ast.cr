@@ -3810,6 +3810,7 @@ end
         @pages : Array(StaticArray(TypedNode, PAGE))
         @count : Int32
         @extra_sources : Array(String)
+        getter extra_sources : Array(String)
 
         def initialize
           @pages = [] of StaticArray(TypedNode, PAGE)

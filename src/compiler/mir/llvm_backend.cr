@@ -270,6 +270,7 @@ module Crystal::MIR
     @alloc_element_types : Hash(ValueId, TypeRef)  # For GEP element type lookup
     @array_info : Hash(ValueId, {String, Int32})  # Array element_type and size
     @string_constants : Hash(String, String)  # String value -> global name
+    @emitted_value_types : Hash(String, String)  # SSA name -> LLVM type (per function)
     @emitted_allocas : Set(ValueId) = Set(ValueId).new  # Track pre-emitted allocas
     @pending_allocas : Array({String, String, Int32}) = [] of {String, String, Int32}  # name, type, align
     @string_counter : Int32 = 0
@@ -361,6 +362,7 @@ module Crystal::MIR
       @alloc_element_types = {} of ValueId => TypeRef
       @array_info = {} of ValueId => {String, Int32}
       @string_constants = {} of String => String
+      @emitted_value_types = {} of String => String
 
       # Type metadata
       @type_info_entries = [] of TypeInfoEntry
@@ -1013,6 +1015,12 @@ module Crystal::MIR
       @output << s
     end
 
+    private def record_emitted_type(name : String, llvm_type : String)
+      return unless name.starts_with?("%")
+      @emitted_value_types[name] = llvm_type
+      @emitted_value_types[name[1..]] = llvm_type
+    end
+
     private def emit_header
       source = @module.source_file || "unknown.cr"
       emit_raw "; ModuleID = '#{@module.name}'\n"
@@ -1528,6 +1536,7 @@ module Crystal::MIR
       @cross_block_slot_types.clear
       @phi_predecessor_loads.clear
       @current_func_blocks.clear
+      @emitted_value_types.clear
 
       # Populate block lookup for phi predecessor load emission
       func.blocks.each { |block| @current_func_blocks[block.id] = block }
@@ -3309,6 +3318,14 @@ module Crystal::MIR
         end
       end
 
+      # If value_ref emitted a casted SSA name, prefer its known LLVM type.
+      if emitted_left = @emitted_value_types[left]?
+        operand_type_str = emitted_left
+      end
+      if emitted_right = @emitted_value_types[right]?
+        right_type_str = emitted_right
+      end
+
       # Determine operation type
       is_arithmetic = inst.op.add? || inst.op.sub? || inst.op.mul? ||
                       inst.op.div? || inst.op.rem? || inst.op.shl? ||
@@ -3898,8 +3915,30 @@ module Crystal::MIR
       dst_type = @type_mapper.llvm_type(inst.type)
       value = value_ref(inst.value)
 
+      # If the value was emitted earlier with a known LLVM type, prefer it.
+      emitted_type = @emitted_value_types[value]?
+      if emitted_type
+        src_type = emitted_type
+        src_type_ref = case emitted_type
+                       when "double" then TypeRef::FLOAT64
+                       when "float"  then TypeRef::FLOAT32
+                       when "i64"    then TypeRef::INT64
+                       when "i32"    then TypeRef::INT32
+                       when "i16"    then TypeRef::INT16
+                       when "i8"     then TypeRef::INT8
+                       when "i1"     then TypeRef::BOOL
+                       when "ptr"    then TypeRef::POINTER
+                       else src_type_ref
+                       end
+      end
+      if ENV["DEBUG_CAST_SLOT"]? && value.includes?(".fromslot.cast")
+        emitted_dbg = @emitted_value_types[value]?
+        STDERR.puts "[CAST_SLOT] func=#{@current_func_name} name=#{name} value=#{value} src=#{src_type} dst=#{dst_type} emitted=#{emitted_dbg}"
+      end
+
       # If this value is stored in a cross-block slot, prefer the slot's LLVM type.
-      if slot_type = @cross_block_slot_types[inst.value]?
+      # Skip if we already have an emitted cast type for the value.
+      if !emitted_type && (slot_type = @cross_block_slot_types[inst.value]?)
         if slot_type != src_type && slot_type != "void"
           src_type = slot_type
           src_type_ref = case slot_type
@@ -3915,7 +3954,7 @@ module Crystal::MIR
       end
 
       # Fallback: if the value was loaded from a cross-block slot, recover slot type from the name.
-      if src_type == "ptr" && (match = value.match(/^%r(\d+)\.fromslot/))
+      if !emitted_type && src_type == "ptr" && (match = value.match(/^%r(\d+)\.fromslot/))
         slot_id = ValueId.new(match[1].to_i)
         if slot_type = @cross_block_slot_types[slot_id]?
           if slot_type != "void"
@@ -3956,6 +3995,7 @@ module Crystal::MIR
           emit "store #{dst_type} #{value}, ptr %#{base_name}.tmp"
           emit "#{name} = load #{dst_type}, ptr %#{base_name}.tmp"
         end
+        record_emitted_type(name, dst_type)
         @value_types[inst.id] = inst.type
         return
       end
@@ -3978,6 +4018,7 @@ module Crystal::MIR
           emit "store #{src_type} #{value}, ptr %#{base_name}.payload_ptr"
         end
         emit "#{name} = load #{dst_type}, ptr %#{base_name}.ptr"
+        record_emitted_type(name, dst_type)
         @value_types[inst.id] = inst.type
         return
       end
@@ -3986,6 +4027,7 @@ module Crystal::MIR
       if src_type == "void"
         if dst_type == "ptr" || dst_type.includes?(".union")
           emit "#{name} = inttoptr i64 0 to ptr"
+          record_emitted_type(name, "ptr")
           @value_types[inst.id] = TypeRef::POINTER
           return
         else
@@ -3995,6 +4037,7 @@ module Crystal::MIR
           else
             emit "#{name} = add #{dst_type} 0, 0"
           end
+          record_emitted_type(name, dst_type)
           @value_types[inst.id] = inst.type
           return
         end
@@ -4070,6 +4113,7 @@ module Crystal::MIR
         emit "store #{src_type} #{normalize_union_value(value, src_type)}, ptr %#{base_name}.union_ptr"
         emit "%#{base_name}.payload_ptr = getelementptr #{src_type}, ptr %#{base_name}.union_ptr, i32 0, i32 1"
         emit "#{name} = load ptr, ptr %#{base_name}.payload_ptr"
+        record_emitted_type(name, "ptr")
         @value_types[inst.id] = TypeRef::POINTER
         return
       end
@@ -4085,6 +4129,7 @@ module Crystal::MIR
           emit "store #{src_type} #{normalize_union_value(value, src_type)}, ptr %#{base_name}.union_ptr"
           emit "%#{base_name}.payload_ptr = getelementptr #{src_type}, ptr %#{base_name}.union_ptr, i32 0, i32 1"
           emit "#{name} = load #{dst_type}, ptr %#{base_name}.payload_ptr"
+          record_emitted_type(name, dst_type)
           @value_types[inst.id] = inst.type
           return
         end
@@ -4123,6 +4168,7 @@ module Crystal::MIR
       end
 
       emit "#{name} = #{op} #{src_type} #{value} to #{dst_type}"
+      record_emitted_type(name, dst_type)
       # Track actual destination type for downstream use
       @value_types[inst.id] = inst.type
     end
@@ -7193,25 +7239,32 @@ module Crystal::MIR
               else
                 emit "#{cast_name} = add #{expected_type} #{temp_name}, 0"
               end
+              record_emitted_type(cast_name, expected_type)
               return cast_name
             end
           elsif llvm_type.starts_with?("i") && (expected_type == "float" || expected_type == "double")
             emit "#{cast_name} = sitofp #{llvm_type} #{temp_name} to #{expected_type}"
+            record_emitted_type(cast_name, expected_type)
             return cast_name
           elsif (llvm_type == "float" || llvm_type == "double") && expected_type.starts_with?("i")
             emit "#{cast_name} = fptosi #{llvm_type} #{temp_name} to #{expected_type}"
+            record_emitted_type(cast_name, expected_type)
             return cast_name
           elsif llvm_type == "float" && expected_type == "double"
             emit "#{cast_name} = fpext float #{temp_name} to double"
+            record_emitted_type(cast_name, expected_type)
             return cast_name
           elsif llvm_type == "double" && expected_type == "float"
             emit "#{cast_name} = fptrunc double #{temp_name} to float"
+            record_emitted_type(cast_name, expected_type)
             return cast_name
           elsif expected_type == "ptr" && llvm_type.starts_with?("i")
             emit "#{cast_name} = inttoptr #{llvm_type} #{temp_name} to ptr"
+            record_emitted_type(cast_name, "ptr")
             return cast_name
           elsif llvm_type == "ptr" && expected_type.starts_with?("i")
             emit "#{cast_name} = ptrtoint ptr #{temp_name} to #{expected_type}"
+            record_emitted_type(cast_name, expected_type)
             return cast_name
           elsif expected_type == "ptr" && llvm_type.includes?(".union")
             # Extract pointer payload from union value.
@@ -7221,6 +7274,7 @@ module Crystal::MIR
             emit "store #{llvm_type} #{temp_name}, ptr #{union_ptr}"
             emit "#{cast_name}.payload_ptr = getelementptr #{llvm_type}, ptr #{union_ptr}, i32 0, i32 1"
             emit "#{cast_name} = load ptr, ptr #{cast_name}.payload_ptr"
+            record_emitted_type(cast_name, "ptr")
             return cast_name
           end
         end

@@ -4075,6 +4075,10 @@ module CrystalV2
 
           # Non-parenthesized arguments: yield arg1, arg2, ...
           token = current_token
+          if @macro_terminator && macro_terminator_reached?(token)
+            # Macro expression terminator: yield with no args
+            return @arena.add_typed(YieldNode.new(yield_token.span, nil))
+          end
           if token.kind.in?(Token::Kind::Newline, Token::Kind::EOF, Token::Kind::End, Token::Kind::Else, Token::Kind::Elsif, Token::Kind::If, Token::Kind::Unless, Token::Kind::While, Token::Kind::Until, Token::Kind::Do, Token::Kind::RBrace, Token::Kind::RParen, Token::Kind::Semicolon)
             # Yield without args
             @arena.add_typed(YieldNode.new(yield_token.span, nil))
