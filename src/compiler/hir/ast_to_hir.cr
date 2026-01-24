@@ -21544,6 +21544,8 @@ module Crystal::HIR
                      nil
                    end
 
+      raw_path = collect_path_string(node)
+
       # Check if this is an enum value access
       if left_name && right_name
         resolved_left = resolve_path_string_in_context(left_name)
@@ -21561,8 +21563,27 @@ module Crystal::HIR
           end
         end
       end
+      # Fallback: resolve enum value by full path prefix (handles nested paths).
+      if right_name && raw_path.includes?("::")
+        if idx = raw_path.rindex("::")
+          prefix = raw_path[0, idx]
+          prefix = prefix.starts_with?("::") ? (prefix.size > 2 ? prefix[2..] : "") : prefix
+          resolved_prefix = resolve_path_string_in_context(prefix)
+          if enum_info = @enum_info
+            if members = enum_info[resolved_prefix]?
+              if right_name[0]?.try(&.uppercase?)
+                value = members[right_name]? || 0_i64
+                enum_type = enum_base_type(resolved_prefix)
+                lit = Literal.new(ctx.next_id, enum_type, value)
+                ctx.emit(lit)
+                (@enum_value_types ||= {} of ValueId => String)[lit.id] = resolved_prefix
+                return lit.id
+              end
+            end
+          end
+        end
+      end
 
-      raw_path = collect_path_string(node)
       # Substitute type params in path prefix (e.g., D::CACHE -> ImplInfo_Float32::CACHE)
       substituted_path = substitute_type_params_in_type_name(raw_path)
       full_path = resolve_path_string_in_context(substituted_path)
