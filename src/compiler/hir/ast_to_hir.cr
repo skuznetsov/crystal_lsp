@@ -2649,9 +2649,11 @@ module Crystal::HIR
            CrystalV2::Compiler::Frontend::PathNode,
            CrystalV2::Compiler::Frontend::GenericNode,
            CrystalV2::Compiler::Frontend::TypeofNode,
-           CrystalV2::Compiler::Frontend::NumberNode,
-           CrystalV2::Compiler::Frontend::IndexNode
+           CrystalV2::Compiler::Frontend::NumberNode
         true
+      when CrystalV2::Compiler::Frontend::IndexNode
+        return false unless type_like_expr_id?(node.object)
+        node.indexes.all? { |idx| type_like_expr_id?(idx) }
       when CrystalV2::Compiler::Frontend::CallNode
         type_like_call_expr?(node)
       else
