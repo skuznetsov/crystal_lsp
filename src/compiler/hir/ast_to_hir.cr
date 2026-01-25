@@ -4083,7 +4083,8 @@ module Crystal::HIR
       params.each do |param|
         next if named_only_separator?(param)
         param_name = param.name.nil? ? "_" : String.new(param.name.not_nil!)
-        if param.is_instance_var
+        is_ivar_param = param.is_instance_var || param_name.starts_with?("@")
+        if is_ivar_param
           param_name = param_name.lstrip('@')
         end
         param_type = if ta = param.type_annotation
@@ -4094,7 +4095,7 @@ module Crystal::HIR
                        TypeRef::VOID
                      end
 
-        if param.is_instance_var
+        if is_ivar_param
           ivar_name = "@#{param_name}"
           if param_type == TypeRef::VOID
             if default_value = param.default_value
@@ -8935,7 +8936,8 @@ module Crystal::HIR
         params.each do |param|
           next if named_only_separator?(param)
           param_name = param.name.nil? ? "_" : String.new(param.name.not_nil!)
-          if param.is_instance_var
+          is_ivar_param = param.is_instance_var || param_name.starts_with?("@")
+          if is_ivar_param
             param_name = param_name.lstrip('@')
           end
           type_ann_str : String? = nil
@@ -11439,7 +11441,7 @@ module Crystal::HIR
           param_literal = !param.is_block && !param.is_splat && !param.is_double_splat &&
                           call_index < call_literal_flags.size && call_literal_flags[call_index]
           param_type_map[param_name] = param_type
-          param_infos << {param_name, param_type, param.is_instance_var}
+          param_infos << {param_name, param_type, is_ivar_param}
           enum_name = call_index < call_enum_names.size ? call_enum_names[call_index] : nil
           param_type_names << (type_ann_str || enum_name)
           if ta = param.type_annotation
