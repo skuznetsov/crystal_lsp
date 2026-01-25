@@ -1050,6 +1050,18 @@ r2 = maybe(false)  # => nil
 - Update (2026-01-12): union virtual dispatch now falls back to class vdispatch for abstract union variants (e.g., `IO | Nil | Pointer`), removing `_IO_read_Slice_UInt8_`/`_IO_write_Slice_UInt8_` callsites; current full-prelude `bootstrap_array` link shows 98 missing symbols (see `/private/tmp/bootstrap_array_full.link.log`).
 - Update (2026-01-12): Polling class/module dedup + union virtual subclass lowering; `system_del` lowered and missing symbols now 43 (see `/private/tmp/bootstrap_array_full.link.log` and `/private/tmp/missing_symbols_latest.txt`).
 - Update (2026-01-12): resolve included module aliases before lowering; module-level aliases no longer leak globally. `IO::Handle` no longer mis-registered as a class; missing symbols remain 43 (see `/private/tmp/bootstrap_array_full.link.log`).
+- Update (2026-01-25): full-prelude `bootstrap_array` now links with **4** missing symbols (see `/private/tmp/bootstrap_array_full.link.log`):
+  - `_Crystal__MachO_read_section__block`
+  - `_Int_upto_arity1`
+  - `_Object____`
+  - `_property__Pointer_Slice_Pointer_Tuple_Array_Crystal__DWARF__LineNumbers__Row___UInt64____`
+  - Generated detailed missing trace log with `CRYSTAL_V2_MISSING_TRACE=1`:
+    - `/private/tmp/bootstrap_array_full.missing_trace.log` (shows unlowered callsites like `Slice(Fiber)#unsafe_fetch$Int32`, `Hash(Int32, String)#get_entry$Int32`, `Time::Format::Formatter#time_zone_z_or_offset$NamedTuple_double_splat`, `Object#to_s$IO` in several receivers). Use this to map callsites → def lowering gaps.
+  - Action items:
+    - `MachO#read_section?` still mangles to `$block` (no typed suffix) in HIR; fix callsite arg typing or remangling for block calls.
+    - `Int#upto` arity mangling still produces `_Int_upto_arity1`; ensure lowering emits the correct arity-1 overload or normalize arity suffixes.
+    - `_Object____` comes from `Tuple#compare_or_raise$Object` (HIR call to `Object#<=>`); avoid Object fallback or emit concrete comparator.
+    - Missing property accessor for `Pointer(Slice(Pointer(Tuple(Array(Crystal::DWARF::LineNumbers::Row), UInt64))))` likely from property macro expansion; confirm getter def exists in HIR.
 
 **Regressions (open):**
 - [ ] GH #10 (crystal_lsp): prelude build links for minimal `fib.cr`, but runtime segfault persists.
