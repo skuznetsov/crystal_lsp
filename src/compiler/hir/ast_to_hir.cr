@@ -8935,6 +8935,9 @@ module Crystal::HIR
         params.each do |param|
           next if named_only_separator?(param)
           param_name = param.name.nil? ? "_" : String.new(param.name.not_nil!)
+          if param.is_instance_var
+            param_name = param_name.lstrip('@')
+          end
           type_ann_str : String? = nil
           param_type = if ta = param.type_annotation
                          type_ann_str = String.new(ta)
