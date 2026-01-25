@@ -11379,6 +11379,10 @@ module Crystal::HIR
         params.each do |param|
           next if named_only_separator?(param)
           param_name = param.name.nil? ? "_" : String.new(param.name.not_nil!)
+          is_ivar_param = param.is_instance_var || param_name.starts_with?("@")
+          if is_ivar_param
+            param_name = param_name.lstrip('@')
+          end
           type_ann_str : String? = nil
           param_type = if ta = param.type_annotation
                          type_ann_str = String.new(ta)
@@ -28138,7 +28142,7 @@ module Crystal::HIR
 
           if block_for_inline
             block_cast = block_for_inline
-            call_args = args
+            call_arg_values = args
 
             skip_inline = false
             # NOTE: We used to skip when block return type param wasn't in type_param_map.
@@ -28208,7 +28212,7 @@ module Crystal::HIR
                 if func_def = @function_defs[mangled_method_name]?
                   debug_hook("call.inline.yield", "callee=#{mangled_method_name} current=#{@current_class || ""}")
                   callee_arena = @function_def_arenas[mangled_method_name]? || @arena
-                  return inline_yield_function(ctx, func_def, mangled_method_name, receiver_id, call_args, block_cast, block_param_types_inline, callee_arena)
+                  return inline_yield_function(ctx, func_def, mangled_method_name, receiver_id, call_arg_values, block_cast, block_param_types_inline, callee_arena)
                 end
               end
             end
@@ -28222,7 +28226,7 @@ module Crystal::HIR
                 if func_def = @function_defs[yield_name]?
                   debug_hook("call.inline.yield", "callee=#{yield_name} current=#{@current_class || ""}")
                   callee_arena = @function_def_arenas[yield_name]? || @arena
-                  return inline_yield_function(ctx, func_def, yield_name, receiver_id, call_args, block_cast, block_param_types_inline, callee_arena)
+                  return inline_yield_function(ctx, func_def, yield_name, receiver_id, call_arg_values, block_cast, block_param_types_inline, callee_arena)
                 end
               end
             end
@@ -28249,7 +28253,7 @@ module Crystal::HIR
               if has_yield || def_accepts_block_param?(yield_def)
                 @yield_functions.add(yield_name) if has_yield
                 debug_hook("call.inline.yield", "callee=#{yield_name} current=#{@current_class || ""}")
-                return inline_yield_function(ctx, yield_def, yield_name, receiver_id, call_args, block_cast, block_param_types_inline, callee_arena)
+                return inline_yield_function(ctx, yield_def, yield_name, receiver_id, call_arg_values, block_cast, block_param_types_inline, callee_arena)
               end
             end
 
@@ -28261,7 +28265,7 @@ module Crystal::HIR
                 if func_def = @function_defs[yield_key]?
                   debug_hook("call.inline.yield", "callee=#{yield_key} current=#{@current_class || ""}")
                   callee_arena = @function_def_arenas[yield_key]? || @arena
-                  return inline_yield_function(ctx, func_def, yield_key, receiver_id, call_args, block_cast, block_param_types_inline, callee_arena)
+                  return inline_yield_function(ctx, func_def, yield_key, receiver_id, call_arg_values, block_cast, block_param_types_inline, callee_arena)
                 end
               end
             end
