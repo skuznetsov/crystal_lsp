@@ -368,8 +368,8 @@ module Crystal::HIR
 
     BUILTIN_TYPE_NAMES = {
       "Void", "Nil", "Bool",
-      "Int8", "Int16", "Int32", "Int64", "Int128",
-      "UInt8", "UInt16", "UInt32", "UInt64", "UInt128",
+      "Int", "Int8", "Int16", "Int32", "Int64", "Int128",
+      "UInt", "UInt8", "UInt16", "UInt32", "UInt64", "UInt128",
       "Float32", "Float64",
       "Char", "String", "Symbol",
       "Pointer", "Proc", "Tuple", "NamedTuple",
@@ -385,11 +385,13 @@ module Crystal::HIR
       when "Void"    then TypeRef::VOID
       when "Nil"     then TypeRef::NIL
       when "Bool"    then TypeRef::BOOL
+      when "Int"     then TypeRef::INT32  # Abstract Int defaults to Int32
       when "Int8"    then TypeRef::INT8
       when "Int16"   then TypeRef::INT16
       when "Int32"   then TypeRef::INT32
       when "Int64"   then TypeRef::INT64
       when "Int128"  then TypeRef::INT128
+      when "UInt"    then TypeRef::UINT32 # Abstract UInt defaults to UInt32
       when "UInt8"   then TypeRef::UINT8
       when "UInt16"  then TypeRef::UINT16
       when "UInt32"  then TypeRef::UINT32
@@ -3678,8 +3680,14 @@ module Crystal::HIR
       names.each do |name|
         next if name.empty?
         if map = @function_type_param_maps[name]?
+          if ENV["DEBUG_TYPE_PARAM_RETRIEVE"]? && (name.includes?("Slice") && name.includes?("hash"))
+            STDERR.puts "[TYPE_PARAM_RETRIEVE] found name=#{name} map=#{map}"
+          end
           return map
         end
+      end
+      if ENV["DEBUG_TYPE_PARAM_RETRIEVE"]? && names.any? { |n| n.includes?("Slice") && n.includes?("hash") }
+        STDERR.puts "[TYPE_PARAM_RETRIEVE] NOT_FOUND names=#{names.to_a.join(", ")}"
       end
       nil
     end
@@ -4298,8 +4306,10 @@ module Crystal::HIR
 
                   method_name = String.new(member.name)
                   base_name = "#{class_name}##{method_name}"
-        # Record the arena early so return-type inference uses the correct AST source.
-        @function_def_arenas[base_name] = @arena
+                  # NOTE: We intentionally do NOT write @function_def_arenas[base_name] here.
+                  # The early arena write was causing bugs when included module methods should
+                  # be skipped (e.g., Slice#hash overrides Indexable#hash). The arena is only
+                  # written when the method is actually registered at line 4409.
 
                   type_literal_name = infer_type_literal_return_name_from_body(member, class_name)
                   return_type = if rt = member.return_type
@@ -4395,6 +4405,10 @@ module Crystal::HIR
                   register_function_type(full_name, return_type)
                   @function_defs[full_name] = member
                   @function_def_arenas[full_name] = @arena
+                  if ENV["DEBUG_ARENA_WRITE"]? && (class_name.includes?("Slice") && method_name == "hash")
+                    arena_path = source_path_for(@arena) || "(unknown)"
+                    STDERR.puts "[ARENA_WRITE_MOD_INST] full=#{full_name} arena=#{arena_path}:#{@arena.size} module=#{module_full_name}"
+                  end
                   if should_register_base_name?(full_name, base_name, member, has_block)
                     @function_defs[base_name] = member
                     @function_def_arenas[base_name] = @arena
@@ -7481,6 +7495,10 @@ module Crystal::HIR
       register_function_type(full_name, return_type)
       @function_defs[full_name] = member
       @function_def_arenas[full_name] = @arena
+      if ENV["DEBUG_ARENA_WRITE"]? && (module_name.includes?("Slice") || full_name.includes?("Slice")) && method_name == "hash"
+        arena_path = source_path_for(@arena) || "(unknown)"
+        STDERR.puts "[ARENA_WRITE_MOD_METHOD] full=#{full_name} base=#{base_name} module=#{module_name} arena=#{arena_path}:#{@arena.size}"
+      end
       if should_register_base_name?(full_name, base_name, member, has_block)
         @function_defs[base_name] = member
         @function_def_arenas[base_name] = @arena
@@ -7799,10 +7817,26 @@ module Crystal::HIR
       register_function_type(full_name, return_type)
       @function_defs[full_name] = member
       @function_def_arenas[full_name] = @arena
+      if ENV["DEBUG_ARENA_WRITE_TYPE"]? && (type_name.includes?("Slice") || full_name.includes?("Slice")) && method_name == "hash"
+        arena_path = source_path_for(@arena) || "(unknown)"
+        STDERR.puts "[ARENA_WRITE_TYPE] full=#{full_name} base=#{base_name} type=#{type_name} arena=#{arena_path}:#{@arena.size}"
+      end
+      # Store type param map for lazy lowering of generic class methods.
+      # When a monomorphized class registers its methods, the @type_param_map
+      # contains substitutions (e.g., T => UInt8) needed for macro evaluation.
+      unless @type_param_map.empty?
+        if ENV["DEBUG_TYPE_PARAM_STORE"]? && (type_name.includes?("Slice") || method_name == "hash")
+          STDERR.puts "[TYPE_PARAM_STORE] full=#{full_name} base=#{base_name} map=#{@type_param_map}"
+        end
+        store_function_type_param_map(full_name, base_name, @type_param_map)
+      end
       if alias_full_name
         register_function_type(alias_full_name, return_type) unless @function_types.has_key?(alias_full_name)
         @function_defs[alias_full_name] = member
         @function_def_arenas[alias_full_name] = @arena
+        unless @type_param_map.empty?
+          store_function_type_param_map(alias_full_name, alias_full_name.split("$", 2).first, @type_param_map)
+        end
       end
       if should_register_base_name?(full_name, base_name, member, has_block)
         @function_defs[base_name] = member
@@ -9697,39 +9731,61 @@ module Crystal::HIR
             end
             register_function_type(full_name, return_type)
             @function_defs[full_name] = member
-            @function_def_arenas[full_name] = @arena
+            # Resolve correct arena for the def node to avoid cross-file contamination.
+            # When registering methods from a monomorphized generic class, @arena may point
+            # to a different file than where the method was actually defined.
+            member_arena = resolve_arena_for_def(member, @arena)
+            if ENV["DEBUG_ARENA_RESOLVE"]? && (class_name.includes?("Slice") && method_name == "hash")
+              current_path = source_path_for(@arena) || "(unknown)"
+              resolved_path = source_path_for(member_arena) || "(unknown)"
+              STDERR.puts "[ARENA_RESOLVE] full=#{full_name} current=#{current_path}:#{@arena.size} resolved=#{resolved_path}:#{member_arena.size} member.span=#{member.span.start_offset}..#{member.span.end_offset}"
+            end
+            @function_def_arenas[full_name] = member_arena
+            # Store type param map for lazy lowering of generic class methods.
+            # When a monomorphized class registers its methods, the @type_param_map
+            # contains substitutions (e.g., T => UInt8) needed for macro evaluation.
+            unless @type_param_map.empty?
+              if ENV["DEBUG_TYPE_PARAM_STORE"]? && (class_name.includes?("Slice") || method_name == "hash")
+                STDERR.puts "[TYPE_PARAM_STORE_CONCRETE] full=#{full_name} base=#{base_name} map=#{@type_param_map}"
+              end
+              store_function_type_param_map(full_name, base_name, @type_param_map)
+            end
             if alias_full_name
               register_function_type(alias_full_name, return_type) unless @function_types.has_key?(alias_full_name)
               @function_defs[alias_full_name] = member
-              @function_def_arenas[alias_full_name] = @arena
+              @function_def_arenas[alias_full_name] = member_arena
+              unless @type_param_map.empty?
+                alias_base_name = alias_full_name.split("$", 2).first
+                store_function_type_param_map(alias_full_name, alias_base_name, @type_param_map)
+              end
             end
             if should_register_base_name?(full_name, base_name, member, has_block)
               @function_defs[base_name] = member
-              @function_def_arenas[base_name] = @arena
+              @function_def_arenas[base_name] = member_arena
             end
 
             # Track yield-functions for inline expansion.
             # Note: MIR lowering removes yield-containing functions (inline-only), so we must inline
             # them at call sites. We key by both base and mangled names so resolution can find them.
             yield_start = mono_debug ? Time.instant : nil
-            if def_contains_yield?(member, @arena)
+            if def_contains_yield?(member, member_arena)
               @yield_functions.add(full_name)
               debug_hook("yield.register", full_name)
               unless @function_defs.has_key?(base_name)
                 @function_defs[base_name] = member
-                @function_def_arenas[base_name] = @arena
+                @function_def_arenas[base_name] = member_arena
               end
               @function_defs[full_name] = member
-              @function_def_arenas[full_name] = @arena
+              @function_def_arenas[full_name] = member_arena
               if alias_full_name
                 @yield_functions.add(alias_full_name)
                 debug_hook("yield.register", alias_full_name)
                 if alias_base && !@function_defs.has_key?(alias_base)
                   @function_defs[alias_base] = member
-                  @function_def_arenas[alias_base] = @arena
+                  @function_def_arenas[alias_base] = member_arena
                 end
                 @function_defs[alias_full_name] = member
-                @function_def_arenas[alias_full_name] = @arena
+                @function_def_arenas[alias_full_name] = member_arena
               end
             end
             yield_elapsed = yield_start ? (Time.instant - yield_start).total_milliseconds : nil
@@ -11698,6 +11754,16 @@ module Crystal::HIR
       # Mangle function name with parameter types for overloading
       full_name = full_name_override || function_full_name_for_def(base_name, param_types, node.params, has_block)
 
+      # Retrieve stored type param map for lazy lowering of generic class methods.
+      # When a monomorphized class's method is lowered, we need the type parameter
+      # substitutions (e.g., T => UInt8) that were stored during method registration.
+      if registered_params = function_type_param_map_for(full_name, base_name)
+        extra_type_params.merge!(registered_params)
+        if ENV.has_key?("DEBUG_LOWER_METHOD_TPM") && (full_name.includes?("Slice") && full_name.includes?("hash"))
+          STDERR.puts "[LOWER_METHOD_TPM] full=#{full_name} base=#{base_name} merged=#{registered_params}"
+        end
+      end
+
       register_pending_method_effects(full_name, param_types.size)
       register_function_type(full_name, return_type)
 
@@ -11803,6 +11869,10 @@ module Crystal::HIR
       last_value : ValueId? = nil
       begin
         if body = node.body
+          if ENV["DEBUG_BODY_EXPRS"]? && (class_name.includes?("Slice") && method_name == "hash")
+            body_indices = body.map(&.index).join(",")
+            STDERR.puts "[BODY_EXPRS] class=#{class_name} method=#{method_name} body_size=#{body.size} indices=[#{body_indices}] node.span=#{node.span.start_offset}..#{node.span.end_offset}"
+          end
           body_proc = ->{
             progress_filter = ENV["DEBUG_LOWER_PROGRESS"]?
             progress_match = false
@@ -11826,7 +11896,17 @@ module Crystal::HIR
                 end
               end
             end
-            method_arena = @arena
+            # Use the stored arena for this function to avoid cross-file contamination.
+            # When lowering methods from monomorphized generic classes, @arena may be
+            # from a different file than where the method is actually defined.
+            method_arena = @function_def_arenas[full_name]? || @function_def_arenas[base_name]? || @arena
+            if ENV["DEBUG_METHOD_ARENA_USE"]? && (class_name.includes?("Slice") && method_name == "hash")
+              stored_full = @function_def_arenas[full_name]?
+              stored_base = @function_def_arenas[base_name]?
+              current_path = source_path_for(@arena) || "(unknown)"
+              method_path = source_path_for(method_arena) || "(unknown)"
+              STDERR.puts "[METHOD_ARENA_USE] full=#{full_name} stored_full=#{!stored_full.nil?} stored_base=#{!stored_base.nil?} current=#{current_path} method=#{method_path}:#{method_arena.size}"
+            end
             body.each_with_index do |expr_id, idx|
               with_arena(method_arena) do
                 expr_snippet = nil
@@ -18147,6 +18227,16 @@ module Crystal::HIR
       end
       full_name = full_name_override || function_full_name_for_def(base_name, param_types, node.params, has_block)
 
+      # Retrieve stored type param map for lazy lowering of generic class methods.
+      # When a monomorphized class's method is lowered, we need the type parameter
+      # substitutions (e.g., T => UInt8) that were stored during method registration.
+      if registered_params = function_type_param_map_for(full_name, base_name)
+        extra_type_params.merge!(registered_params)
+        if ENV.has_key?("DEBUG_LOWER_DEF_TPM") && (full_name.includes?("Slice") && full_name.includes?("hash"))
+          STDERR.puts "[LOWER_DEF_TPM] full=#{full_name} base=#{base_name} merged=#{registered_params}"
+        end
+      end
+
       if registered = @function_types[full_name]?
         if (return_type == TypeRef::VOID || return_type == TypeRef::NIL) &&
            registered != TypeRef::VOID && registered != TypeRef::NIL
@@ -19808,6 +19898,13 @@ module Crystal::HIR
           # Handle type parameter comparison: {% if F == Float32 %}
           left_type = macro_condition_type_name(cond_node.left)
           right_type = macro_condition_type_name(cond_node.right)
+          if ENV.has_key?("DEBUG_MACRO_TYPE_CMP")
+            method_name = @current_method || "(unknown)"
+            if @current_class.try(&.includes?("Slice")) && method_name.includes?("hash")
+              STDERR.puts "[MACRO_TYPE_CMP_SLICE] class=#{@current_class} method=#{method_name} left=#{left_type.inspect}, right=#{right_type.inspect}, op=#{op_str}, type_param_map=#{@type_param_map}"
+            end
+            STDERR.puts "[MACRO_TYPE_CMP] class=#{@current_class} method=#{@current_method} left=#{left_type.inspect}, right=#{right_type.inspect}, op=#{op_str}, type_param_map=#{@type_param_map}"
+          end
           if left_type && right_type
             are_equal = left_type == right_type
             return op_str == "==" ? are_equal : !are_equal
@@ -20307,6 +20404,9 @@ module Crystal::HIR
       result = try_evaluate_macro_condition(node.condition)
       if ENV.has_key?("DEBUG_MACRO_IF")
         STDERR.puts "[MACRO_IF] condition_id=#{node.condition}, result=#{result.inspect}"
+      end
+      if ENV.has_key?("DEBUG_MACRO_IF_SLICE") && (@current_class.try(&.includes?("Slice")) || ctx.function.name.includes?("Slice"))
+        STDERR.puts "[MACRO_IF_SLICE] func=#{ctx.function.name} class=#{@current_class} method=#{@current_method} result=#{result.inspect} type_param_map=#{@type_param_map}"
       end
 
       if result == true
@@ -32633,7 +32733,10 @@ module Crystal::HIR
               if pname = param.name
                 param_name = String.new(pname)
                 if idx < call_args.size
-                  ctx.register_local(param_name, call_args[idx])
+                  arg_id = call_args[idx]
+                  ctx.register_local(param_name, arg_id)
+                  # Also register the type so it's available when the parameter is accessed
+                  ctx.register_type(arg_id, ctx.type_of(arg_id))
                 end
               end
             end
