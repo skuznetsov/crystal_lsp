@@ -1065,6 +1065,27 @@ module Crystal::HIR
 
     # Register a function type and maintain the base name index
     private def register_function_type(full_name : String, return_type : TypeRef)
+      # Fix: Don't overwrite a concrete, nilable return type with an unrelated type.
+      # This prevents pollution from inline context leaking into Hash/Array method types.
+      # The bug: when Unicode.upcase is inlined into Char#upcase(io, options), the Hash#[]?
+      # return type gets incorrectly inferred as IO from the outer context's local variable.
+      if old_type = @function_types[full_name]?
+        old_name = get_type_name_from_ref(old_type)
+        new_name = get_type_name_from_ref(return_type)
+        # If existing type is a union/nilable (contains "|") and new type is a plain type
+        # that doesn't match the container type, keep the existing type.
+        if old_name.includes?(" | ") && !new_name.includes?(" | ")
+          # Extract owner from full_name (e.g., "Hash(...)" from "Hash(...)#method$args")
+          owner = full_name.split("#").first.split(".").first
+          # If the new type is unrelated to the owner (e.g., IO for Hash method), skip update
+          if !new_name.includes?(owner.split("(").first) &&
+             !old_name.includes?(new_name) &&
+             new_name != "Void" && new_name != "Nil"
+            # Don't overwrite a good nilable type with a suspicious singleton type
+            return
+          end
+        end
+      end
       @function_types[full_name] = return_type
       # Extract base name (without $ type suffix) for fast lookups
       base_name = full_name.split("$").first
