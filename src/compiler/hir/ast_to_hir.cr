@@ -28934,6 +28934,18 @@ module Crystal::HIR
       # Try to infer return type using mangled name first, fallback to base name
       # For non-overloaded functions, prefer base name since that's how they're registered in HIR module
       return_type = get_function_return_type(mangled_method_name)
+
+      # For Proc#call, extract return type from Proc type_params (last element is return type)
+      if return_type == TypeRef::VOID && method_name == "call" && receiver_id
+        recv_type = ctx.type_of(receiver_id)
+        if recv_desc = @module.get_type_descriptor(recv_type)
+          if recv_desc.kind == TypeKind::Proc && recv_desc.type_params.size > 0
+            proc_return = recv_desc.type_params.last
+            return_type = proc_return unless proc_return == TypeRef::VOID
+          end
+        end
+      end
+
       if filter = ENV["DEBUG_CALL_RETURN"]?
         if mangled_method_name.includes?(filter) || base_method_name.includes?(filter)
           rt_name = get_type_name_from_ref(return_type)
