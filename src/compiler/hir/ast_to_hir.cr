@@ -22925,6 +22925,17 @@ module Crystal::HIR
         right_name = right_type == TypeRef::VOID ? "Void" : get_type_name_from_ref(right_type)
         STDERR.puts "[COMPARE_OR_RAISE] op=#{op} left=#{left_name} right=#{right_name} current=#{@current_class || ""}##{@current_method || ""}"
       end
+      # Special case: Object#<=> always returns nil (Object is not Comparable).
+      # This matches the optimization in emit_call_expr.
+      if op == "<=>"
+        left_name = get_type_name_from_ref(left_type)
+        if left_name == "Object" || left_name == "Unknown"
+          nil_lit = Literal.new(ctx.next_id, TypeRef::NIL, nil)
+          ctx.emit(nil_lit)
+          ctx.register_type(nil_lit.id, TypeRef::NIL)
+          return nil_lit.id
+        end
+      end
       ensure_monomorphized_type(left_type) unless left_type == TypeRef::VOID
       type_desc = @module.get_type_descriptor(left_type)
       class_name = type_desc.try(&.name) || ""
