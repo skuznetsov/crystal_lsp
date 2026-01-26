@@ -10307,6 +10307,13 @@ module Crystal::HIR
       old_arena = @arena
       @arena = template.arena
 
+      # CRITICAL: Set @current_class so that 'self' in type annotations resolves
+      # to the specialized class name (e.g., Hash(String, Int32)) instead of
+      # whatever class was being processed before. This fixes type params like
+      # @block : (self, K -> V)? in Hash where 'self' must become the monomorphized type.
+      old_class = @current_class
+      @current_class = specialized_name
+
       # Register the specialized class using the template's AST node
       # The type_ref_for_name calls will now substitute T => Int32
       register_concrete_class(template.node, specialized_name, template.is_struct)
@@ -10372,9 +10379,10 @@ module Crystal::HIR
 
       debug_hook("mono.done", "base=#{base_name} name=#{specialized_name}")
 
-      # Restore arena and type param map
+      # Restore arena, type param map, and current class
       @arena = old_arena
       @type_param_map = old_map
+      @current_class = old_class
       @monomorphized.add(specialized_name)
     end
 
@@ -16213,6 +16221,11 @@ module Crystal::HIR
     end
 
     private def substitute_type_params_in_type_name(name : String) : String
+      # Replace 'self' with @current_class in type annotations
+      # e.g., "(self, K -> V)?" becomes "(Hash(String, Int32), String -> Int32)?"
+      if name == "self" && (current = @current_class)
+        return current
+      end
       if substitution = @type_param_map[name]?
         return substitution
       end
@@ -16249,6 +16262,21 @@ module Crystal::HIR
         return "#{substitute_type_params_in_type_name(base)}?"
       end
 
+      # Handle Proc shorthand syntax: (A, B -> C) or (A -> B)
+      # This must be checked before split_generic_base_and_args
+      if name.starts_with?("(") && name.ends_with?(")")
+        inner = name[1, name.size - 2]
+        if arrow_idx = find_top_level_arrow(inner)
+          inputs_str = inner[0, arrow_idx].strip
+          output_str = inner[arrow_idx + 2, inner.size - arrow_idx - 2].strip
+          # Parse inputs (comma-separated at depth 0)
+          inputs = split_proc_type_inputs(inputs_str)
+          new_inputs = inputs.map { |inp| substitute_type_params_in_type_name(inp.strip) }
+          new_output = substitute_type_params_in_type_name(output_str)
+          return "(#{new_inputs.join(", ")} -> #{new_output})"
+        end
+      end
+
       if info = split_generic_base_and_args(name)
         args = split_generic_type_args(info[:args])
         new_args = args.map do |arg|
@@ -16278,6 +16306,35 @@ module Crystal::HIR
         i += 1
       end
       nil
+    end
+
+    # Split Proc input types by comma, respecting nested parens.
+    # Unlike split_generic_type_args, this doesn't skip commas before arrows
+    # since we've already extracted the inputs portion.
+    private def split_proc_type_inputs(inputs_str : String) : Array(String)
+      args = [] of String
+      depth = 0
+      start = 0
+      i = 0
+      while i < inputs_str.bytesize
+        ch = inputs_str.byte_at(i).unsafe_chr
+        case ch
+        when '(', '{', '['
+          depth += 1
+        when ')', '}', ']'
+          depth -= 1 if depth > 0
+        when ','
+          if depth == 0
+            part = inputs_str[start, i - start].strip
+            args << part unless part.empty?
+            start = i + 1
+          end
+        end
+        i += 1
+      end
+      tail = inputs_str[start, inputs_str.size - start].strip
+      args << tail unless tail.empty?
+      args
     end
 
     private def extract_proc_return_type_name(type_name : String) : String?
@@ -17164,12 +17221,28 @@ module Crystal::HIR
         return intern_proc_type(split_generic_type_args(inner))
       end
 
+      # Handle top-level arrow syntax: A, B -> C
       if arrow_index = find_top_level_arrow(stripped)
         left = stripped[0, arrow_index].strip
         right = stripped[arrow_index + 2, stripped.size - arrow_index - 2].strip
         args = left.empty? ? [] of String : split_generic_type_args(left)
         ret_name = right.empty? ? "Nil" : right
         return intern_proc_type(args + [ret_name])
+      end
+
+      # Handle parenthesized Proc shorthand: (A, B -> C)
+      # The arrow is NOT at top level (depth > 0 due to outer parens), so unwrap and retry
+      if stripped.starts_with?("(") && stripped.ends_with?(")")
+        inner = stripped[1, stripped.size - 2]
+        if inner.includes?("->")
+          if arrow_index = find_top_level_arrow(inner)
+            left = inner[0, arrow_index].strip
+            right = inner[arrow_index + 2, inner.size - arrow_index - 2].strip
+            args = left.empty? ? [] of String : split_proc_type_inputs(left)
+            ret_name = right.empty? ? "Nil" : right
+            return intern_proc_type(args + [ret_name])
+          end
+        end
       end
 
       nil

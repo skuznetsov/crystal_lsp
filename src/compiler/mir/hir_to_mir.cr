@@ -819,12 +819,15 @@ module Crystal
       # Special handling for Proc#call - emit indirect call through function pointer
       # Proc calls have format "call$Type" or just "call" and receiver is a Proc type
       # Also match "call(...)" patterns from typed proc calls
+      # Also handle Proc-shorthand types like "(A, B -> C)#call" from monomorphized generics
       is_proc_call = call.method_name == "call" ||
                      call.method_name.starts_with?("call$") ||
                      call.method_name.starts_with?("call(") ||
                      call.method_name == "Proc#call" ||
                      call.method_name.starts_with?("Proc#call$") ||
-                     call.method_name.starts_with?("Proc#call(")
+                     call.method_name.starts_with?("Proc#call(") ||
+                     call.method_name.includes?("#call") ||  # e.g., "(A, B -> C)#call"
+                     call.method_name.includes?("->") && call.method_name.ends_with?("#call")
       if ENV.has_key?("DEBUG_PROC_CALL") && call.method_name.includes?("call")
         recv_type = call.receiver ? @hir_value_types[call.receiver.not_nil!]? : nil
         recv_desc = recv_type ? @hir_module.get_type_descriptor(recv_type) : nil
