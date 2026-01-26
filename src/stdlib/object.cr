@@ -213,6 +213,13 @@ class Object
     !(self == other)
   end
 
+  # Comparison operator. Returns `nil` by default since Object
+  # doesn't implement Comparable. Subclasses that include Comparable
+  # will override this with a proper implementation.
+  def <=>(other) : Int32?
+    nil
+  end
+
   # Shortcut to `!(self =~ other)`.
   def !~(other)
     !(self =~ other)
