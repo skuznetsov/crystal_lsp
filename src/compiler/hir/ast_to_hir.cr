@@ -1168,11 +1168,33 @@ module Crystal::HIR
       end
 
       # If this parent already has recorded virtual targets, lower them for the new child.
-      current_parent = parent_name
-      while current_parent
-        lower_virtual_targets_for_child(child_name, current_parent)
-        current_parent = @class_info[current_parent]?.try(&.parent_name)
+      # Use cached ancestor chain to avoid repeated hash lookups.
+      ancestor_chain = get_ancestor_chain(parent_name)
+      ancestor_chain.each do |ancestor|
+        lower_virtual_targets_for_child(child_name, ancestor)
       end
+    end
+
+    # Cache of ancestor chains to avoid repeated hash lookups during class registration.
+    @ancestor_chain_cache : Hash(String, Array(String))?
+
+    private def get_ancestor_chain(class_name : String) : Array(String)
+      @ancestor_chain_cache ||= {} of String => Array(String)
+      cache = @ancestor_chain_cache.not_nil!
+
+      if cached = cache[class_name]?
+        return cached
+      end
+
+      chain = [class_name]
+      current = @class_info[class_name]?.try(&.parent_name)
+      while current
+        chain << current
+        current = @class_info[current]?.try(&.parent_name)
+      end
+
+      cache[class_name] = chain
+      chain
     end
 
     private def record_virtual_target(
@@ -1218,12 +1240,9 @@ module Crystal::HIR
 
     private def class_inherits_from?(child_name : String, parent_name : String) : Bool
       return true if child_name == parent_name
-      current = @class_info[child_name]?.try(&.parent_name)
-      while current
-        return true if current == parent_name
-        current = @class_info[current]?.try(&.parent_name)
-      end
-      false
+      # Use cached ancestor chain to avoid repeated hash lookups
+      chain = get_ancestor_chain(child_name)
+      chain.includes?(parent_name)
     end
 
     private def collect_subclasses(parents : Enumerable(String)) : Array(String)
@@ -13494,18 +13513,17 @@ module Crystal::HIR
     end
 
     private def resolve_ancestor_overload(owner : String, method_name : String, arg_count : Int32, has_block_call : Bool, call_has_named_args : Bool = false) : String?
-      visited = Set(String).new
-      current = @class_info[owner]?.try(&.parent_name)
-      while current
-        break if visited.includes?(current)
-        visited.add(current)
-        base = "#{current}##{method_name}"
+      # Use cached ancestor chain to avoid repeated hash lookups
+      chain = get_ancestor_chain(owner)
+      # Skip first element (owner itself) and iterate ancestors
+      chain.each_with_index do |ancestor, idx|
+        next if idx == 0 # Skip owner
+        base = "#{ancestor}##{method_name}"
         if has_function_base?(base)
           if resolved = resolve_untyped_overload(base, arg_count, has_block_call, call_has_named_args)
             return resolved
           end
         end
-        current = @class_info[current]?.try(&.parent_name)
       end
       if info = @class_info[owner]?
         if info.is_struct && owner != "Object"
