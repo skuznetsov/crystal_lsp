@@ -831,8 +831,7 @@ module Crystal
       if ENV.has_key?("DEBUG_PROC_CALL") && call.method_name.includes?("call")
         recv_type = call.receiver ? @hir_value_types[call.receiver.not_nil!]? : nil
         recv_desc = recv_type ? @hir_module.get_type_descriptor(recv_type) : nil
-        call_type_desc = @hir_module.get_type_descriptor(call.type)
-        STDERR.puts "[PROC_CALL] func=#{@current_lowering_func_name} method=#{call.method_name} receiver=#{call.receiver} recv_type=#{recv_type.try(&.id)} recv_desc=#{recv_desc.try(&.name)} kind=#{recv_desc.try(&.kind)} call.type=#{call.type.id} call_type_name=#{call_type_desc.try(&.name)}"
+        STDERR.puts "[PROC_CALL] func=#{@current_lowering_func_name} method=#{call.method_name} receiver=#{call.receiver} recv_type=#{recv_type.try(&.id)} recv_desc=#{recv_desc.try(&.name)} kind=#{recv_desc.try(&.kind)}"
       end
       if call.receiver && is_proc_call
         recv_type = @hir_value_types[call.receiver.not_nil!]?

@@ -23983,6 +23983,10 @@ module Crystal::HIR
     end
 
     private def lower_ternary(ctx : LoweringContext, node : CrystalV2::Compiler::Frontend::TernaryNode) : ValueId
+      # Collect narrowing targets BEFORE lowering condition
+      truthy_targets = truthy_narrowing_targets(node.condition)
+      is_a_targets = is_a_narrowing_targets(node.condition)
+
       cond_id = lower_expr(ctx, node.condition)
 
       # Save locals before branching
@@ -23996,6 +24000,9 @@ module Crystal::HIR
 
       ctx.current_block = then_block
       ctx.restore_locals(pre_branch_locals)
+      # Apply truthy narrowing in the then branch (e.g., entry ? entry.value : nil)
+      apply_truthy_narrowing(ctx, truthy_targets)
+      apply_is_a_narrowing(ctx, is_a_targets)
       then_value = lower_expr(ctx, node.true_branch)
       then_exit = ctx.current_block
       then_locals = ctx.save_locals
