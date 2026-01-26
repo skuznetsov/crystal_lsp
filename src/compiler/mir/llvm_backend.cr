@@ -241,7 +241,82 @@ module Crystal::MIR
       # LLVM intrinsics must keep their dots (e.g., "llvm.bswap.i32")
       # These are special built-in functions that LLVM recognizes by exact name
       return name if name.starts_with?("llvm.")
-      name.gsub(/[^a-zA-Z0-9_]/, "_")
+
+      # Escape-encoding for readable, collision-free, portable symbol names.
+      # Multi-character tokens must be checked first (longest match).
+      result = String::Builder.new(name.bytesize)
+      i = 0
+      while i < name.bytesize
+        # Check multi-char operators first (order matters: longest first)
+        remaining = name.bytesize - i
+        if remaining >= 3
+          three = name[i, 3]
+          case three
+          when "<=>" then result << "$CMP"; i += 3; next
+          when "[]=", "[]?" then result << (three == "[]=" ? "$IDXS" : "$IDXQ"); i += 3; next
+          end
+        end
+        if remaining >= 2
+          two = name[i, 2]
+          case two
+          when "<=" then result << "$LE"; i += 2; next
+          when ">=" then result << "$GE"; i += 2; next
+          when "==" then result << "$EQ"; i += 2; next
+          when "!=" then result << "$NE"; i += 2; next
+          when "=~" then result << "$MATCH"; i += 2; next
+          when "!~" then result << "$NMATCH"; i += 2; next
+          when "<<" then result << "$SHL"; i += 2; next
+          when ">>" then result << "$SHR"; i += 2; next
+          when "**" then result << "$POW"; i += 2; next
+          when "[]" then result << "$IDX"; i += 2; next
+          when "->" then result << "$AR"; i += 2; next
+          when "::" then result << "$CC"; i += 2; next  # Colon Colon (namespace)
+          end
+        end
+        # Single character
+        ch = name.byte_at(i).unsafe_chr
+        case ch
+        when 'a'..'z', 'A'..'Z', '0'..'9', '_'
+          result << ch
+        when '<'  then result << "$LT"
+        when '>'  then result << "$GT"
+        when '+'  then result << "$ADD"
+        when '-'  then result << "$SUB"
+        when '*'  then result << "$MUL"
+        when '/'  then result << "$DIV"
+        when '%'  then result << "$MOD"
+        when '&'  then result << "$AND"
+        when '|'  then result << "$OR"
+        when '^'  then result << "$XOR"
+        when '~'  then result << "$NOT"
+        when '='  then result << "$SET"
+        when '!'  then result << "$BANG"
+        when '?'  then result << "$Q"
+        when '('  then result << "$L"
+        when ')'  then result << "$R"
+        when ','  then result << "$C"
+        when '#'  then result << "$H"
+        when '.'  then result << "$D"
+        when ' '  then result << "$_"
+        when '@'  then result << "$AT"
+        when '['  then result << "$BL"  # Bracket Left
+        when ']'  then result << "$BR"  # Bracket Right
+        when '{'  then result << "$YL"  # brace Left
+        when '}'  then result << "$YR"  # brace Right
+        when ':'  then result << "$CO"  # COlon
+        when ';'  then result << "$SC"  # SemiColon
+        when '\'' then result << "$SQ"  # Single Quote
+        when '"'  then result << "$DQ"  # Double Quote
+        when '\\' then result << "$BS"  # BackSlash
+        when '$'  then result << "$$"   # Escape $ itself
+        else
+          # Fallback: hex encode unknown characters
+          result << "$x"
+          result << ch.ord.to_s(16).rjust(2, '0')
+        end
+        i += 1
+      end
+      result.to_s
     end
   end
 
