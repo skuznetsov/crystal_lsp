@@ -11899,7 +11899,15 @@ module Crystal::HIR
             # Use the stored arena for this function to avoid cross-file contamination.
             # When lowering methods from monomorphized generic classes, @arena may be
             # from a different file than where the method is actually defined.
-            method_arena = @function_def_arenas[full_name]? || @function_def_arenas[base_name]? || @arena
+            # IMPORTANT: For super calls (when full_name_override is provided), don't use
+            # base_name fallback because base_name is derived from node.name (e.g., "reverse!")
+            # but we want the arena for the super method. The base_name might incorrectly
+            # point to the child class's method arena instead of the parent's.
+            method_arena = if full_name_override.nil?
+                            @function_def_arenas[full_name]? || @function_def_arenas[base_name]? || @arena
+                          else
+                            @function_def_arenas[full_name]? || @arena
+                          end
             if ENV["DEBUG_METHOD_ARENA_USE"]? && (class_name.includes?("Slice") && method_name == "hash")
               stored_full = @function_def_arenas[full_name]?
               stored_base = @function_def_arenas[base_name]?
