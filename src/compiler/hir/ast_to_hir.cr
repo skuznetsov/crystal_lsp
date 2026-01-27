@@ -599,9 +599,11 @@ module Crystal::HIR
     @function_def_arenas : Hash(String, CrystalV2::Compiler::Frontend::ArenaLike)
     @function_def_overloads : Hash(String, Array(String))
     @function_defs_cache_size : Int32
+    @function_defs_processed_for_overloads : Int32 = 0
     @function_param_stats : Hash(String, DefParamStats)
     @function_type_keys_by_base : Hash(String, Array(String))
     @function_type_keys_by_base_size : Int32
+    @function_types_processed_for_keys : Int32 = 0
     @function_type_keys_processed : Set(String)
 
     # ═══════════════════════════════════════════════════════════════════════════
@@ -622,17 +624,40 @@ module Crystal::HIR
     #
     # This gives O(1) lookup after first access, with zero allocations in hot path.
     #
-    alias MethodIndexKey = {String, String}  # {base_owner, method}
     alias ParentLookupResult = {CrystalV2::Compiler::Frontend::DefNode, CrystalV2::Compiler::Frontend::ArenaLike, String}
 
-    @method_index : Hash(MethodIndexKey, Array(String)) = {} of MethodIndexKey => Array(String)
+    # Nested hash: base_owner → (method_name → [full_function_names])
+    # Avoids Tuple(String,String) key hashing; two single-String lookups instead.
+    @method_index : Hash(String, Hash(String, Array(String))) = {} of String => Hash(String, Array(String))
+    @method_index_built : Bool = false
+    @method_index_size_at_build : Int32 = 0
+    @method_index_processed_count : Int32 = 0
     @parent_lookup_cache : Hash(String, ParentLookupResult?) = {} of String => ParentLookupResult?
+    # Second-tier cache: maps base name ("Owner#method") → parent class that defines it.
+    # All overloads of the same method share this, avoiding repeated parent chain walks.
+    @parent_class_for_method : Hash(String, String?) = {} of String => String?
+    # Pre-computed parent chains: owner → [parent1, parent2, ..., Object]
+    # Eliminates repeated @class_info hash lookups during parent walks.
+    @parent_chains : Hash(String, Array(String)) = {} of String => Array(String)
 
     # Functions that contain yield (candidates for inline)
     @yield_functions : Set(String)
     # Functions whose explicit returns are all `return yield` (block-return-dependent).
     @yield_return_functions : Set(String)
     @yield_return_checked : Set(String)
+
+    # Cache for def_contains_yield? keyed by DefNode object_id → Bool.
+    # Same DefNode always yields the same result regardless of fallback arena.
+    @yield_check_cache : Hash(UInt64, Bool) = {} of UInt64 => Bool
+    # Cache for resolve_arena_for_def keyed by DefNode object_id → resolved arena.
+    @arena_for_def_cache : Hash(UInt64, CrystalV2::Compiler::Frontend::ArenaLike) = {} of UInt64 => CrystalV2::Compiler::Frontend::ArenaLike
+    # Deduplicated set of unique arenas (by object_id) for resolve_arena_for_def candidates.
+    @unique_def_arenas : Hash(UInt64, CrystalV2::Compiler::Frontend::ArenaLike) = {} of UInt64 => CrystalV2::Compiler::Frontend::ArenaLike
+
+    # Cache for yield_function_name_for: method_name → yield function name (or nil)
+    @yield_name_cache : Hash(String, String?) = {} of String => String?
+    # Cache for strip_generic_receiver_from_method_name: method_name → stripped
+    @strip_generic_receiver_cache : Hash(String, String) = {} of String => String
 
     # ═══════════════════════════════════════════════════════════════════════════
     # FUNCTION LOWERING STATE MACHINE
@@ -697,19 +722,80 @@ module Crystal::HIR
       @function_defs[full_name] = def_node
       @function_def_arenas[full_name] = arena
 
-      # Update method index: {base_owner, method} → [full_names]
+      # Update method index: base_owner → method_name → [full_names]
       parts = parse_method_name(full_name)
       if parts.separator && parts.method
-        # Strip generics from owner for index key: "Array(Int32)" → "Array"
         base_owner = strip_generic_args(parts.owner)
-        key = {base_owner, parts.method}
-        list = @method_index[key]?
+        method_name = parts.method.not_nil!
+        owner_methods = @method_index[base_owner]?
+        unless owner_methods
+          owner_methods = Hash(String, Array(String)).new
+          @method_index[base_owner] = owner_methods
+        end
+        list = owner_methods[method_name]?
         if list
           list << full_name unless list.includes?(full_name)
         else
-          @method_index[key] = [full_name]
+          owner_methods[method_name] = [full_name]
         end
       end
+    end
+
+    # Lazily build the method index from all registered function defs.
+    # Called before parent lookups to ensure the index is populated.
+    # Incremental: only processes new entries since last build (tracked by counter).
+    private def ensure_method_index_built
+      current_size = @function_defs.size
+      return if @method_index_built && current_size == @method_index_size_at_build
+      count = 0
+      @function_defs.each_key do |full_name|
+        count += 1
+        next if count <= @method_index_processed_count
+        parts = parse_method_name(full_name)
+        next unless parts.separator && parts.method
+        base_owner = strip_generic_args(parts.owner)
+        method_name = parts.method.not_nil!
+        owner_methods = @method_index[base_owner]?
+        unless owner_methods
+          owner_methods = Hash(String, Array(String)).new
+          @method_index[base_owner] = owner_methods
+        end
+        list = owner_methods[method_name]?
+        if list
+          list << full_name unless list.includes?(full_name)
+        else
+          owner_methods[method_name] = [full_name]
+        end
+      end
+      @method_index_processed_count = count
+      @method_index_built = true
+      @method_index_size_at_build = current_size
+      # NOTE: We intentionally do NOT invalidate nil cache entries here.
+      # New function_defs added during lowering are typically for the CURRENT class
+      # being lowered, not for PARENT classes. Parent methods are registered during
+      # class registration (before lowering starts). Clearing nil entries on every
+      # index rebuild caused O(N*D*H) repeated lookups during the lowering phase.
+    end
+
+    # Get pre-computed parent chain for a class owner.
+    private def get_parent_chain(owner : String) : Array(String)
+      if chain = @parent_chains[owner]?
+        return chain
+      end
+      chain = [] of String
+      seen = Set(String).new
+      seen << owner
+      if ci = @class_info[owner]?
+        p = ci.parent_name
+        while p
+          break if seen.includes?(p)  # cycle detection
+          seen << p
+          chain << p
+          p = @class_info[p]?.try(&.parent_name)
+        end
+      end
+      @parent_chains[owner] = chain
+      chain
     end
 
     # Lookup a method through parent class chain using cached index.
@@ -717,17 +803,69 @@ module Crystal::HIR
     # Results are cached for O(1) subsequent lookups.
     #
     # Strategy:
-    # 1. Check cache first (O(1) for repeated lookups)
-    # 2. Try index-based lookup if index is populated
-    # 3. Fall back to direct hash lookup with string building (for compatibility)
+    # Find a method overload in a specific parent class using the method index.
+    # Returns ParentLookupResult or nil if the parent doesn't have the method.
+    private def find_method_in_parent_via_index(
+      parent : String,
+      method : String,
+      suffix : String?
+    ) : ParentLookupResult?
+      base_parent = strip_generic_args(parent)
+      owner_methods = @method_index[base_parent]?
+      return nil unless owner_methods
+      candidates = owner_methods[method]?
+      return nil unless candidates
+
+      # Try exact suffix match first
+      candidates.each do |candidate_name|
+        candidate_parts = parse_method_name(candidate_name)
+        next unless candidate_parts.owner == parent || strip_generic_args(candidate_parts.owner) == base_parent
+
+        if suffix
+          if candidate_parts.suffix == suffix
+            if def_node = @function_defs[candidate_name]?
+              arena = @function_def_arenas[candidate_name]
+              return {def_node, arena, candidate_name}
+            end
+          end
+        else
+          if candidate_parts.suffix.nil?
+            if def_node = @function_defs[candidate_name]?
+              arena = @function_def_arenas[candidate_name]
+              return {def_node, arena, candidate_name}
+            end
+          end
+        end
+      end
+
+      # Fallback: any candidate from this parent (regardless of suffix)
+      candidates.each do |candidate_name|
+        candidate_parts = parse_method_name(candidate_name)
+        next unless candidate_parts.owner == parent || strip_generic_args(candidate_parts.owner) == base_parent
+        if def_node = @function_defs[candidate_name]?
+          arena = @function_def_arenas[candidate_name]
+          return {def_node, arena, candidate_name}
+        end
+      end
+
+      nil
+    end
+
+    # Two-tier caching strategy for parent method lookup:
+    # Tier 1: @parent_lookup_cache keyed by full name → exact result (per-overload)
+    # Tier 2: @parent_class_for_method keyed by base name → parent class (shared across overloads)
+    # Tier 2 eliminates redundant parent chain walks for different overloads of the same method.
     private def lookup_parent_method(
       name : String,
       name_parts : MethodNameParts
     ) : ParentLookupResult?
-      # Check cache first
+      # Tier 1: check full-name cache
       if @parent_lookup_cache.has_key?(name)
         return @parent_lookup_cache[name]
       end
+
+      # Ensure method index is built from all function_defs
+      ensure_method_index_built
 
       result : ParentLookupResult? = nil
 
@@ -735,55 +873,37 @@ module Crystal::HIR
         owner = name_parts.owner
         method = name_parts.method.not_nil!
         suffix = name_parts.suffix
+        base_key = name_parts.base
 
-        # Walk parent chain
-        if class_info = @class_info[owner]?
-          parent = class_info.parent_name
-          while parent && result.nil?
-            base_parent = strip_generic_args(parent)
+        # Tier 2: check parent class cache (shared across all overloads of same method)
+        if @parent_class_for_method.has_key?(base_key)
+          if found_parent = @parent_class_for_method[base_key]
+            # Direct lookup in the known parent class — skip chain walk entirely
+            result = find_method_in_parent_via_index(found_parent, method, suffix)
+          end
+          # If cached as nil: no parent has this method, result stays nil
+        else
+          # Full parent chain walk (first time for this base method)
+          found_parent_name : String? = nil
 
-            # Try index-based lookup first (fast path when index is populated)
-            if candidates = @method_index[{base_parent, method}]?
-              candidates.each do |candidate_name|
-                candidate_parts = parse_method_name(candidate_name)
-                next unless candidate_parts.owner == parent || strip_generic_args(candidate_parts.owner) == base_parent
-
-                if suffix
-                  if candidate_parts.suffix == suffix
-                    if def_node = @function_defs[candidate_name]?
-                      arena = @function_def_arenas[candidate_name]
-                      result = {def_node, arena, candidate_name}
-                      break
-                    end
-                  end
-                else
-                  if candidate_parts.suffix.nil?
-                    if def_node = @function_defs[candidate_name]?
-                      arena = @function_def_arenas[candidate_name]
-                      result = {def_node, arena, candidate_name}
-                      break
-                    end
-                  end
-                end
-              end
-
-              # If no exact suffix match, try any candidate from this parent
-              if result.nil?
-                candidates.each do |candidate_name|
-                  candidate_parts = parse_method_name(candidate_name)
-                  next unless candidate_parts.owner == parent || strip_generic_args(candidate_parts.owner) == base_parent
-                  if def_node = @function_defs[candidate_name]?
-                    arena = @function_def_arenas[candidate_name]
-                    result = {def_node, arena, candidate_name}
-                    break
-                  end
-                end
-              end
+          # Use pre-computed parent chain to avoid repeated @class_info lookups
+          chain = get_parent_chain(owner)
+          chain.each do |parent|
+            # Try index-based lookup
+            if found = find_method_in_parent_via_index(parent, method, suffix)
+              result = found
+              found_parent_name = parent
+              break
             end
+            # Check if index had candidates at all (even if no match)
+            base_parent = strip_generic_args(parent)
+            owner_methods = @method_index[base_parent]?
+            index_had_candidates = owner_methods ? owner_methods.has_key?(method) : false
 
-            # Fallback: direct hash lookup with string building
-            # This path is taken when index isn't populated yet
-            if result.nil?
+            # Fallback: direct hash lookup with string building.
+            # Skip when index is built (all function_defs are indexed, making
+            # fallback redundant) or when index had candidates for this parent.
+            if !index_had_candidates && !@method_index_built
               # Build parent method name: "Parent#method"
               parent_base = "#{parent}##{method}"
 
@@ -793,6 +913,7 @@ module Crystal::HIR
                 if def_node = @function_defs[parent_mangled]?
                   arena = @function_def_arenas[parent_mangled]
                   result = {def_node, arena, parent_mangled}
+                  found_parent_name = parent
                 end
               end
 
@@ -801,6 +922,7 @@ module Crystal::HIR
                 if def_node = @function_defs[parent_base]?
                   arena = @function_def_arenas[parent_base]
                   result = {def_node, arena, parent_base}
+                  found_parent_name = parent
                 end
               end
 
@@ -813,6 +935,7 @@ module Crystal::HIR
                   if def_node = @function_defs[key]?
                     arena = @function_def_arenas[key]
                     result = {def_node, arena, key}
+                    found_parent_name = parent
                     break
                   end
                 end
@@ -820,12 +943,14 @@ module Crystal::HIR
             end
 
             break if result
-            parent = @class_info[parent]?.try(&.parent_name)
           end
+
+          # Store parent class for all future overloads of this method
+          @parent_class_for_method[base_key] = found_parent_name
         end
       end
 
-      # Cache result (even if nil to avoid repeated lookups)
+      # Cache full result (even if nil to avoid repeated lookups)
       @parent_lookup_cache[name] = result
       result
     end
@@ -833,6 +958,8 @@ module Crystal::HIR
     # Clear parent lookup cache (call when class hierarchy changes)
     private def invalidate_parent_lookup_cache
       @parent_lookup_cache.clear
+      @parent_class_for_method.clear
+      @parent_chains.clear
     end
 
     # Call-site argument types for lazily lowered functions (mangled name -> arg types).
@@ -3907,17 +4034,38 @@ module Crystal::HIR
       func_def : CrystalV2::Compiler::Frontend::DefNode,
       fallback : CrystalV2::Compiler::Frontend::ArenaLike
     ) : CrystalV2::Compiler::Frontend::ArenaLike
+      cache_key = func_def.object_id
+      if cached = @arena_for_def_cache[cache_key]?
+        return cached
+      end
+      result = resolve_arena_for_def_uncached(func_def, fallback)
+      @arena_for_def_cache[cache_key] = result
+      result
+    end
+
+    private def resolve_arena_for_def_uncached(
+      func_def : CrystalV2::Compiler::Frontend::DefNode,
+      fallback : CrystalV2::Compiler::Frontend::ArenaLike
+    ) : CrystalV2::Compiler::Frontend::ArenaLike
       max_index = if body = func_def.body
                     body.empty? ? -1 : body.max_of(&.index)
                   else
                     -1
                   end
+      # Build deduplicated arena set lazily from @function_def_arenas
+      if @unique_def_arenas.size < @function_def_arenas.size
+        @function_def_arenas.each_value do |arena|
+          oid = arena.object_id
+          @unique_def_arenas[oid] = arena unless @unique_def_arenas.has_key?(oid)
+        end
+      end
+      # Use deduplicated arena set instead of iterating all function_def_arenas
       candidates = [] of CrystalV2::Compiler::Frontend::ArenaLike
-      @function_def_arenas.each_value { |arena| candidates << arena }
+      @unique_def_arenas.each_value { |arena| candidates << arena }
       if arenas = @inline_arenas
         arenas.each { |arena| candidates << arena }
       end
-      candidates << fallback
+      candidates << fallback unless @unique_def_arenas.has_key?(fallback.object_id)
 
       fallback_path = source_path_for(fallback)
       if fallback_path
@@ -13579,26 +13727,45 @@ module Crystal::HIR
     end
 
     private def rebuild_function_def_overloads
-      @function_def_overloads.clear
-      @function_param_stats.clear
-      @function_type_keys_by_base.clear
+      # Incremental: only process new entries since last rebuild
+      count = 0
       @function_defs.each do |key, def_node|
+        count += 1
+        next if count <= @function_defs_processed_for_overloads
         base = if idx = key.index('$')
                  key[0, idx]
                else
                  key
                end
-        (@function_def_overloads[base] ||= [] of String) << key
-        @function_param_stats[key] = build_param_stats(def_node)
+        list = @function_def_overloads[base]?
+        if list
+          list << key unless list.includes?(key)
+        else
+          @function_def_overloads[base] = [key]
+        end
+        @function_param_stats[key] = build_param_stats(def_node) unless @function_param_stats.has_key?(key)
       end
+      @function_defs_processed_for_overloads = count
+
+      # Incremental for function_type_keys_by_base
+      type_count = 0
       @function_types.each_key do |key|
+        type_count += 1
+        next if type_count <= @function_types_processed_for_keys
         base = if idx = key.index('$')
                  key[0, idx]
                else
                  key
                end
-        (@function_type_keys_by_base[base] ||= [] of String) << key
+        list = @function_type_keys_by_base[base]?
+        if list
+          list << key unless list.includes?(key)
+        else
+          @function_type_keys_by_base[base] = [key]
+        end
       end
+      @function_types_processed_for_keys = type_count
+
       @function_type_keys_by_base_size = @function_types.size
       @function_defs_cache_size = @function_defs.size
     end
@@ -14858,6 +15025,16 @@ module Crystal::HIR
     end
 
     private def def_contains_yield?(node : CrystalV2::Compiler::Frontend::DefNode, arena : CrystalV2::Compiler::Frontend::ArenaLike) : Bool
+      cache_key = node.object_id
+      if cached = @yield_check_cache[cache_key]?
+        return cached
+      end
+      result = def_contains_yield_uncached?(node, arena)
+      @yield_check_cache[cache_key] = result
+      result
+    end
+
+    private def def_contains_yield_uncached?(node : CrystalV2::Compiler::Frontend::DefNode, arena : CrystalV2::Compiler::Frontend::ArenaLike) : Bool
       return false unless body = node.body
       resolved_arena = resolve_arena_for_def(node, arena)
       return true if with_arena(resolved_arena) { contains_yield?(body) }
@@ -15086,16 +15263,27 @@ module Crystal::HIR
     end
 
     private def yield_function_name_for(method_name : String) : String?
+      if @yield_name_cache.has_key?(method_name)
+        return @yield_name_cache[method_name]
+      end
+      result = yield_function_name_for_uncached(method_name)
+      @yield_name_cache[method_name] = result
+      result
+    end
+
+    private def yield_function_name_for_uncached(method_name : String) : String?
       return method_name if @yield_functions.includes?(method_name)
 
-      base_name = method_name.split("$", 2)[0]
+      parts = parse_method_name(method_name)
+      base_name = parts.base
       return base_name if @yield_functions.includes?(base_name)
 
       stripped = strip_generic_receiver_from_method_name(base_name)
       return stripped if @yield_functions.includes?(stripped)
 
       @yield_functions.each do |name|
-        yield_base = name.split("$", 2)[0]
+        name_parts = parse_method_name(name)
+        yield_base = name_parts.base
         next unless strip_generic_receiver_from_method_name(yield_base) == stripped
         return name
       end
@@ -16883,6 +17071,15 @@ module Crystal::HIR
     end
 
     private def strip_generic_receiver_from_method_name(method_name : String) : String
+      if cached = @strip_generic_receiver_cache[method_name]?
+        return cached
+      end
+      result = strip_generic_receiver_uncached(method_name)
+      @strip_generic_receiver_cache[method_name] = result
+      result
+    end
+
+    private def strip_generic_receiver_uncached(method_name : String) : String
       sep = method_name.index('#') || method_name.index('.')
       return method_name unless sep
 
@@ -30907,13 +31104,15 @@ module Crystal::HIR
       best_param_count = Int32::MAX
       best_score = Int32::MIN
 
-      base_name = func_name.split("$", 2).first
+      func_parts = parse_method_name(func_name)
+      base_name = func_parts.base
+      func_name_dollar = "#{func_name}$"
       debug_lookup = ENV.has_key?("DEBUG_YIELD_INLINE") && func_name.includes?("trace")
       function_def_overloads(base_name).each do |name|
         if debug_lookup
           STDERR.puts "[LOOKUP_BLOCK] checking name=#{name} func_name=#{func_name}"
         end
-        next unless name == func_name || name.starts_with?("#{func_name}$")
+        next unless name == func_name || name.starts_with?(func_name_dollar)
         def_node = @function_defs[name]?
         next unless def_node
         stats = function_param_stats(name, def_node)
@@ -30966,29 +31165,17 @@ module Crystal::HIR
 
       # Fallback: match by method short name across owners (for inherited yield methods).
       # Example: Int32#try should inline Object#try when receiver_base allows it.
-      method_short = nil
-      if idx = func_name.rindex('#')
-        method_short = func_name[idx + 1..]
-      elsif idx = func_name.rindex('.')
-        method_short = func_name[idx + 1..]
-      end
+      method_short = func_parts.method
       if method_short
+        instance_suffix = "##{method_short}"
+        class_suffix = ".#{method_short}"
         @function_defs.each do |name, def_node|
-          base = name.split("$", 2).first
-          next unless base.ends_with?("##{method_short}") || base.ends_with?(".#{method_short}")
+          name_parts = parse_method_name(name)
+          candidate_base = name_parts.base
+          next unless candidate_base.ends_with?(instance_suffix) || candidate_base.ends_with?(class_suffix)
           if receiver_base
-            owner = if idx2 = base.rindex('#')
-                      base[0, idx2]
-                    elsif idx2 = base.rindex('.')
-                      base[0, idx2]
-                    else
-                      ""
-                    end
-            owner_base = if split = split_generic_base_and_args(owner)
-                           split[:base]
-                         else
-                           owner
-                         end
+            owner = name_parts.owner
+            owner_base = strip_generic_args(owner)
             next unless receiver_allows_yield_owner?(receiver_base, owner_base)
           end
 

@@ -117,6 +117,7 @@ module Crystal::MIR
 
     def initialize(@type_registry : TypeRegistry)
       @type_ref_cache = {} of TypeRef => String
+      @mangle_cache = {} of String => String
     end
 
     def llvm_type(type_ref : TypeRef) : String
@@ -238,6 +239,15 @@ module Crystal::MIR
     end
 
     def mangle_name(name : String) : String
+      if cached = @mangle_cache[name]?
+        return cached
+      end
+      result = mangle_name_uncached(name)
+      @mangle_cache[name] = result
+      result
+    end
+
+    private def mangle_name_uncached(name : String) : String
       # LLVM intrinsics must keep their dots (e.g., "llvm.bswap.i32")
       # These are special built-in functions that LLVM recognizes by exact name
       return name if name.starts_with?("llvm.")

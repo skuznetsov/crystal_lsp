@@ -50,6 +50,10 @@ module Crystal
     @current_block_param_id : HIR::ValueId?
     @class_children : Hash(String, Array(String))
 
+    # Index: base_name (before "$") → first matching MIR function.
+    # Eliminates O(N) linear scans during fuzzy call resolution.
+    @function_by_base_name : Hash(String, Function) = {} of String => Function
+
     # Memory strategy (note: we use inline selection, not global assigner)
 
     # Statistics
@@ -91,6 +95,14 @@ module Crystal
         next if seen_names.includes?(hir_func.name)
         seen_names.add(hir_func.name)
         create_function_stub(hir_func)
+      end
+
+      # Build base-name index for fuzzy call resolution (avoids O(N) scans with split)
+      @mir_module.functions.each do |func|
+        name = func.name
+        dollar_idx = name.index('$')
+        base = dollar_idx ? name[0, dollar_idx] : name
+        @function_by_base_name[base] = func unless @function_by_base_name.has_key?(base)
       end
 
       # Pass 2: Lower function bodies
@@ -879,13 +891,12 @@ module Crystal
         end
         # Only apply fuzzy matching for qualified method names (containing . or #)
         if method_name_str.includes?(".") || method_name_str.includes?("#")
-          # Extract base name (before $ type suffix)
-          base_name = method_name_str.split("$").first
+          # Extract base name (before $ type suffix) without allocating
+          dollar_idx = method_name_str.index('$')
+          base_name = dollar_idx ? method_name_str[0, dollar_idx] : method_name_str
 
-          # Search for any function that starts with the base name
-          func = @mir_module.functions.find do |f|
-            f.name.split("$").first == base_name
-          end
+          # O(1) lookup via pre-computed index
+          func = @function_by_base_name[base_name]?
         else
           # For unqualified method names with a receiver, try to qualify based on receiver type
           if call.receiver
@@ -898,12 +909,11 @@ module Crystal
                 qualified_name = "#{type_name}##{method_name_str}"
                 func = @mir_module.get_function(qualified_name)
 
-                # If not found, try fuzzy matching (handle type suffixes)
+                # If not found, try fuzzy matching via index
                 unless func
-                  base_name = qualified_name.split("$").first
-                  func = @mir_module.functions.find do |f|
-                    f.name.split("$").first == base_name
-                  end
+                  q_dollar = qualified_name.index('$')
+                  q_base = q_dollar ? qualified_name[0, q_dollar] : qualified_name
+                  func = @function_by_base_name[q_base]?
                 end
               end
             end
