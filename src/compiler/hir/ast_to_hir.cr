@@ -324,6 +324,145 @@ module Crystal::HIR
       end
     end
 
+    # Zero-copy method name parsing - single pass extracts all parts.
+    # Parses: "Owner#method$TypeSuffix" or "Owner.method$TypeSuffix"
+    # Returns struct with owner, method, suffix, separator - all as byte slices sharing original buffer.
+    private struct MethodNameParts
+      getter owner : String        # "Owner" or "Owner(T)" - always present
+      getter method : String?      # "method" part after # or . (nil if no separator)
+      getter suffix : String?      # type suffix after $ (nil if no $)
+      getter separator : Char?     # '#' or '.' or nil
+      getter base : String         # "Owner#method" or "Owner.method" without suffix
+      getter is_instance : Bool    # true if separator is #
+      getter is_class : Bool       # true if separator is .
+
+      def initialize(@owner, @method, @suffix, @separator, @base, @is_instance, @is_class)
+      end
+    end
+
+    # Parse method name in single pass - O(n) instead of O(3n) for three separate splits
+    @[AlwaysInline]
+    private def parse_method_name(name : String) : MethodNameParts
+      sep_idx : Int32? = nil
+      sep_char : Char? = nil
+      dollar_idx : Int32? = nil
+
+      # Single pass to find both separators
+      i = 0
+      while i < name.bytesize
+        byte = name.to_unsafe[i]
+        case byte
+        when '#'.ord
+          sep_idx = i
+          sep_char = '#'
+        when '.'.ord
+          # Only use . as separator if we haven't seen # yet
+          if sep_idx.nil?
+            sep_idx = i
+            sep_char = '.'
+          end
+        when '$'.ord
+          dollar_idx = i
+          break  # $ is always last, no need to continue
+        end
+        i += 1
+      end
+
+      # Extract parts using byte_slice (zero-copy)
+      if sep_idx
+        owner = name.byte_slice(0, sep_idx)
+        if dollar_idx
+          method = name.byte_slice(sep_idx + 1, dollar_idx - sep_idx - 1)
+          suffix = name.byte_slice(dollar_idx + 1)
+          base = name.byte_slice(0, dollar_idx)
+        else
+          method = name.byte_slice(sep_idx + 1)
+          suffix = nil
+          base = name
+        end
+      else
+        owner = dollar_idx ? name.byte_slice(0, dollar_idx) : name
+        method = nil
+        suffix = dollar_idx ? name.byte_slice(dollar_idx + 1) : nil
+        base = dollar_idx ? name.byte_slice(0, dollar_idx) : name
+      end
+
+      MethodNameParts.new(
+        owner: owner,
+        method: method,
+        suffix: suffix,
+        separator: sep_char,
+        base: base,
+        is_instance: sep_char == '#',
+        is_class: sep_char == '.'
+      )
+    end
+
+    # Quick check helpers that don't allocate
+    @[AlwaysInline]
+    private def has_method_separator?(name : String) : Bool
+      i = 0
+      while i < name.bytesize
+        byte = name.to_unsafe[i]
+        return true if byte == '#'.ord || byte == '.'.ord
+        i += 1
+      end
+      false
+    end
+
+    @[AlwaysInline]
+    private def instance_method?(name : String) : Bool
+      i = 0
+      while i < name.bytesize
+        return true if name.to_unsafe[i] == '#'.ord
+        i += 1
+      end
+      false
+    end
+
+    @[AlwaysInline]
+    private def class_method?(name : String) : Bool
+      i = 0
+      while i < name.bytesize
+        return true if name.to_unsafe[i] == '.'.ord
+        i += 1
+      end
+      false
+    end
+
+    # Legacy helpers for compatibility - use parse_method_name for hot paths
+    @[AlwaysInline]
+    private def strip_type_suffix(name : String) : String
+      parse_method_name(name).base
+    end
+
+    @[AlwaysInline]
+    private def method_owner(name : String) : String
+      parse_method_name(name).owner
+    end
+
+    @[AlwaysInline]
+    private def method_part(name : String) : String?
+      parse_method_name(name).method
+    end
+
+    @[AlwaysInline]
+    private def method_separator(name : String) : Char?
+      parse_method_name(name).separator
+    end
+
+    @[AlwaysInline]
+    private def strip_generic_args(name : String) : String
+      i = 0
+      while i < name.bytesize
+        if name.to_unsafe[i] == '('.ord
+          return name.byte_slice(0, i)
+        end
+        i += 1
+      end
+      name
+    end
+
     # Platform-specific LibC type aliases (fallback for unevaluated macro conditionals)
     # On 64-bit systems (aarch64-darwin, x86_64-*):
     # Includes both LibC:: prefixed and bare names for direct use
@@ -465,6 +604,30 @@ module Crystal::HIR
     @function_type_keys_by_base_size : Int32
     @function_type_keys_processed : Set(String)
 
+    # ═══════════════════════════════════════════════════════════════════════════
+    # HYBRID METHOD INDEX + CACHE (Option D optimization)
+    # ═══════════════════════════════════════════════════════════════════════════
+    #
+    # Instead of building strings in hot loops for parent class method lookup,
+    # we maintain a reverse index and cache lookup results.
+    #
+    # @method_index: Maps {base_class, method_name} → [full_function_names]
+    #   - base_class is stripped of generics: "Array(Int32)" → "Array"
+    #   - method_name is the method part without type suffix
+    #   - Populated at def registration time
+    #
+    # @parent_lookup_cache: Caches results of parent chain lookups
+    #   - Key: original lookup name (e.g., "Child#method$Int32")
+    #   - Value: {DefNode, Arena, resolved_name} or nil if not found
+    #
+    # This gives O(1) lookup after first access, with zero allocations in hot path.
+    #
+    alias MethodIndexKey = {String, String}  # {base_owner, method}
+    alias ParentLookupResult = {CrystalV2::Compiler::Frontend::DefNode, CrystalV2::Compiler::Frontend::ArenaLike, String}
+
+    @method_index : Hash(MethodIndexKey, Array(String)) = {} of MethodIndexKey => Array(String)
+    @parent_lookup_cache : Hash(String, ParentLookupResult?) = {} of String => ParentLookupResult?
+
     # Functions that contain yield (candidates for inline)
     @yield_functions : Set(String)
     # Functions whose explicit returns are all `return yield` (block-return-dependent).
@@ -518,6 +681,158 @@ module Crystal::HIR
     # Helper: get all pending functions
     private def pending_functions : Array(String)
       @function_lowering_states.select { |_, v| v.pending? }.keys
+    end
+
+    # ═══════════════════════════════════════════════════════════════════════════
+    # METHOD INDEX HELPERS (Option D optimization)
+    # ═══════════════════════════════════════════════════════════════════════════
+
+    # Register a function def and update the method index for fast parent lookups.
+    # Call this instead of directly assigning to @function_defs.
+    private def register_function_def(
+      full_name : String,
+      def_node : CrystalV2::Compiler::Frontend::DefNode,
+      arena : CrystalV2::Compiler::Frontend::ArenaLike
+    )
+      @function_defs[full_name] = def_node
+      @function_def_arenas[full_name] = arena
+
+      # Update method index: {base_owner, method} → [full_names]
+      parts = parse_method_name(full_name)
+      if parts.separator && parts.method
+        # Strip generics from owner for index key: "Array(Int32)" → "Array"
+        base_owner = strip_generic_args(parts.owner)
+        key = {base_owner, parts.method}
+        list = @method_index[key]?
+        if list
+          list << full_name unless list.includes?(full_name)
+        else
+          @method_index[key] = [full_name]
+        end
+      end
+    end
+
+    # Lookup a method through parent class chain using cached index.
+    # Returns {DefNode, Arena, resolved_name} or nil if not found.
+    # Results are cached for O(1) subsequent lookups.
+    #
+    # Strategy:
+    # 1. Check cache first (O(1) for repeated lookups)
+    # 2. Try index-based lookup if index is populated
+    # 3. Fall back to direct hash lookup with string building (for compatibility)
+    private def lookup_parent_method(
+      name : String,
+      name_parts : MethodNameParts
+    ) : ParentLookupResult?
+      # Check cache first
+      if @parent_lookup_cache.has_key?(name)
+        return @parent_lookup_cache[name]
+      end
+
+      result : ParentLookupResult? = nil
+
+      if name_parts.is_instance && name_parts.method
+        owner = name_parts.owner
+        method = name_parts.method.not_nil!
+        suffix = name_parts.suffix
+
+        # Walk parent chain
+        if class_info = @class_info[owner]?
+          parent = class_info.parent_name
+          while parent && result.nil?
+            base_parent = strip_generic_args(parent)
+
+            # Try index-based lookup first (fast path when index is populated)
+            if candidates = @method_index[{base_parent, method}]?
+              candidates.each do |candidate_name|
+                candidate_parts = parse_method_name(candidate_name)
+                next unless candidate_parts.owner == parent || strip_generic_args(candidate_parts.owner) == base_parent
+
+                if suffix
+                  if candidate_parts.suffix == suffix
+                    if def_node = @function_defs[candidate_name]?
+                      arena = @function_def_arenas[candidate_name]
+                      result = {def_node, arena, candidate_name}
+                      break
+                    end
+                  end
+                else
+                  if candidate_parts.suffix.nil?
+                    if def_node = @function_defs[candidate_name]?
+                      arena = @function_def_arenas[candidate_name]
+                      result = {def_node, arena, candidate_name}
+                      break
+                    end
+                  end
+                end
+              end
+
+              # If no exact suffix match, try any candidate from this parent
+              if result.nil?
+                candidates.each do |candidate_name|
+                  candidate_parts = parse_method_name(candidate_name)
+                  next unless candidate_parts.owner == parent || strip_generic_args(candidate_parts.owner) == base_parent
+                  if def_node = @function_defs[candidate_name]?
+                    arena = @function_def_arenas[candidate_name]
+                    result = {def_node, arena, candidate_name}
+                    break
+                  end
+                end
+              end
+            end
+
+            # Fallback: direct hash lookup with string building
+            # This path is taken when index isn't populated yet
+            if result.nil?
+              # Build parent method name: "Parent#method"
+              parent_base = "#{parent}##{method}"
+
+              # Try with suffix first
+              if suffix
+                parent_mangled = "#{parent_base}$#{suffix}"
+                if def_node = @function_defs[parent_mangled]?
+                  arena = @function_def_arenas[parent_mangled]
+                  result = {def_node, arena, parent_mangled}
+                end
+              end
+
+              # Try base name
+              if result.nil?
+                if def_node = @function_defs[parent_base]?
+                  arena = @function_def_arenas[parent_base]
+                  result = {def_node, arena, parent_base}
+                end
+              end
+
+              # Try any overload with matching prefix
+              if result.nil?
+                mangled_prefix = "#{parent_base}$"
+                function_def_overloads(parent_base).each do |key|
+                  next if key == parent_base
+                  next unless key.starts_with?(mangled_prefix)
+                  if def_node = @function_defs[key]?
+                    arena = @function_def_arenas[key]
+                    result = {def_node, arena, key}
+                    break
+                  end
+                end
+              end
+            end
+
+            break if result
+            parent = @class_info[parent]?.try(&.parent_name)
+          end
+        end
+      end
+
+      # Cache result (even if nil to avoid repeated lookups)
+      @parent_lookup_cache[name] = result
+      result
+    end
+
+    # Clear parent lookup cache (call when class hierarchy changes)
+    private def invalidate_parent_lookup_cache
+      @parent_lookup_cache.clear
     end
 
     # Call-site argument types for lazily lowered functions (mangled name -> arg types).
@@ -1208,9 +1523,17 @@ module Crystal::HIR
       end
 
       chain = [class_name]
+      visited = Set(String).new
+      visited.add(class_name)
       current = @class_info[class_name]?.try(&.parent_name)
       while current
+        break if visited.includes?(current)  # Cycle detection
+        if chain.size > 100
+          STDERR.puts "[ANCESTOR_CHAIN] chain too long for #{class_name}: #{chain.first(10).join(" -> ")} ... (#{chain.size} entries)"
+          break
+        end
         chain << current
+        visited.add(current)
         current = @class_info[current]?.try(&.parent_name)
       end
 
@@ -25572,7 +25895,9 @@ module Crystal::HIR
       end
 
       target_name = name
-      base_name = name.split("$").first
+      # Parse name once at the start - reuse for all lookups
+      name_parts = parse_method_name(name)
+      base_name = name_parts.base
       primitive_template_map : Hash(String, String)? = nil
       debug_hook("function.lookup.start", name)
       if ENV["DEBUG_TRACE_FUNC"]? && name.includes?("trace")
@@ -25585,10 +25910,10 @@ module Crystal::HIR
         STDERR.puts "[DEBUG_LOOKUP_NAME] hit name=#{name} branch=#{lookup_branch} target=#{target_name}"
       end
       if func_def
-        if base_name.includes?("#") || base_name.includes?(".")
-          sep = base_name.includes?("#") ? "#" : "."
-          owner, method_part = base_name.split(sep, 2)
-          if !owner.includes?("(") && (template = @generic_templates[owner]?)
+        if sep = name_parts.separator
+          owner = name_parts.owner
+          method_part = name_parts.method
+          if method_part && !owner.includes?("(") && (template = @generic_templates[owner]?)
             if found = find_method_in_generic_template(template, method_part)
               func_def = found[0]
               arena = found[1]
@@ -25904,70 +26229,21 @@ module Crystal::HIR
 
         # PARENT CLASS FALLBACK: use parent method bodies for subclasses.
         # This keeps method resolution working when a subclass doesn't redefine a method.
+        # Uses cached index lookup (Option D) for O(1) amortized performance.
         unless func_def
-          if base_name.includes?("#")
-            owner, method_part = base_name.split("#", 2)
-            if info = @class_info[owner]?
-              parent = info.parent_name
-              matched_parent : String? = nil
-              while parent
-                parent_base = "#{parent}##{method_part}"
-                if ENV["DEBUG_PARENT_FALLBACK"]? && name.includes?("Int32#**")
-                  STDERR.puts "[PARENT_FALLBACK] name=#{name} parent=#{parent} base=#{parent_base}"
-                end
-                if name.includes?("$")
-                  suffix = name.split("$", 2)[1]
-                  parent_mangled = "#{parent_base}$#{suffix}"
-                  if ENV["DEBUG_PARENT_FALLBACK"]? && name.includes?("Int32#**")
-                    has_mangled = @function_defs.has_key?(parent_mangled)
-                    STDERR.puts "[PARENT_FALLBACK] suffix=#{suffix} mangled=#{parent_mangled} found=#{has_mangled}"
-                  end
-                  if candidate = @function_defs[parent_mangled]?
-                    func_def = candidate
-                    arena = @function_def_arenas[parent_mangled]
-                    target_name = name.includes?("$") ? name : base_name
-                    lookup_branch = "parent_fallback_mangled"
-                    matched_parent = parent
-                  end
-                end
-                if !func_def && (candidate = @function_defs[parent_base]?)
-                  if ENV["DEBUG_PARENT_FALLBACK"]? && name.includes?("Int32#**")
-                    STDERR.puts "[PARENT_FALLBACK] base_found parent_base=#{parent_base}"
-                  end
-                  func_def = candidate
-                  arena = @function_def_arenas[parent_base]
-                  target_name = name.includes?("$") ? name : base_name
-                  lookup_branch = "parent_fallback"
-                  matched_parent = parent
-                end
-                if func_def && ENV["DEBUG_PARENT_FALLBACK"]? && name.includes?("Int32#**")
-                  def_name = String.new(func_def.name)
-                  param_names = func_def.params.try(&.map { |p| p.type_annotation ? String.new(p.type_annotation.not_nil!) : "_" }.join(","))
-                  STDERR.puts "[PARENT_FALLBACK] picked=#{def_name} params=#{param_names || "(none)"}"
-                end
-                unless func_def
-                  mangled_prefix = "#{parent_base}$"
-                  function_def_overloads(parent_base).each do |key|
-                    next if key == parent_base
-                    next unless key.starts_with?(mangled_prefix)
-                    func_def = @function_defs[key]
-                    arena = @function_def_arenas[key]
-                    target_name = name.includes?("$") ? name : base_name
-                    lookup_branch = "parent_fallback_prefix"
-                    matched_parent = parent
-                    break
-                  end
-                end
-                break if func_def
-                parent = @class_info[parent]?.try(&.parent_name)
-              end
-              if func_def
-                if matched_parent
-                  store_function_namespace_override(name, base_name, matched_parent)
-                end
-                debug_hook("function.lookup.parent_fallback", "name=#{name} parent=#{matched_parent || "Object"}")
-              end
+          if result = lookup_parent_method(name, name_parts)
+            func_def = result[0]
+            arena = result[1]
+            resolved_name = result[2]
+            target_name = name_parts.suffix ? name : base_name
+            lookup_branch = "parent_fallback_cached"
+            # Extract matched parent from resolved name for namespace override
+            resolved_parts = parse_method_name(resolved_name)
+            matched_parent = resolved_parts.owner
+            if matched_parent != name_parts.owner
+              store_function_namespace_override(name, base_name, matched_parent)
             end
+            debug_hook("function.lookup.parent_fallback", "name=#{name} parent=#{matched_parent}")
           end
         end
 
@@ -26384,18 +26660,19 @@ module Crystal::HIR
       extra_type_params : Hash(String, String)? = nil
       resolved_owner : String? = nil
       resolved_target_name = target_name
-      base_target_name = target_name.split("$", 2)[0]
-      force_class_method = base_target_name.includes?(".")
-      if base_target_name.includes?("#") || base_target_name.includes?(".")
-        sep = base_target_name.includes?("#") ? "#" : "."
-        owner, method = base_target_name.split(sep, 2)
+      # Parse target_name once - get all parts in single pass
+      target_parts = parse_method_name(target_name)
+      base_target_name = target_parts.base
+      force_class_method = target_parts.is_class
+      if sep = target_parts.separator
+        owner = target_parts.owner
+        method = target_parts.method
         if info = generic_owner_info(owner)
           resolved_owner = info[:owner]
           extra_type_params = info[:map]
           if resolved_owner != owner
             resolved_base = "#{resolved_owner}#{sep}#{method}"
-            if target_name.includes?("$")
-              suffix = target_name.split("$", 2)[1]
+            if suffix = target_parts.suffix
               resolved_target_name = "#{resolved_base}$#{suffix}"
             else
               resolved_target_name = resolved_base
@@ -26451,7 +26728,7 @@ module Crystal::HIR
 
       if !@type_param_map.empty? && @current_class
         current = @current_class.not_nil!
-        current_base = current.split("(", 2)[0]
+        current_base = strip_generic_args(current)
         if base_target_name.starts_with?("#{current}#") ||
            base_target_name.starts_with?("#{current}.") ||
            base_target_name.starts_with?("#{current_base}::")
@@ -26461,11 +26738,9 @@ module Crystal::HIR
 
       # For Tuple specializations, derive T/T__tuple directly from the owner name
       # so macro loops like 0...T.size can expand without relying on callsite maps.
-      if base_target_name.includes?("#") || base_target_name.includes?(".")
-        sep = base_target_name.includes?("#") ? "#" : "."
-        owner_name, _method = base_target_name.split(sep, 2)
-        if owner_name.starts_with?("Tuple(")
-          if info = split_generic_base_and_args(owner_name)
+      if target_parts.separator
+        if target_parts.owner.starts_with?("Tuple(")
+          if info = split_generic_base_and_args(target_parts.owner)
             args = split_generic_type_args(info[:args]).map(&.strip).reject(&.empty?)
             unless args.empty?
               extra_type_params = (extra_type_params || {} of String => String)
@@ -26494,6 +26769,8 @@ module Crystal::HIR
       return if is_lowering_resolved
 
       target_name = resolved_target_name
+      # Re-parse resolved target name once for use in the rest of this function
+      resolved_parts = parse_method_name(target_name)
       @function_lowering_states[target_name] = FunctionLoweringState::InProgress
 
       # WORK QUEUE: Track that we're inside lowering to defer nested calls
@@ -26501,9 +26778,8 @@ module Crystal::HIR
 
       debug_hook("function.lower.start", "name=#{target_name} requested=#{name}")
       if ENV.has_key?("DEBUG_CLASS_MODULES") && (target_name.includes?("byte_begin") || target_name.includes?("MatchData"))
-        owner = target_name.split("#", 2)[0]
-        modules = @class_included_modules[owner]?
-        STDERR.puts "[CLASS_MODULES] target=#{target_name} owner=#{owner} modules=#{modules ? modules.to_a.join(",") : "nil"}"
+        modules = @class_included_modules[resolved_parts.owner]?
+        STDERR.puts "[CLASS_MODULES] target=#{target_name} owner=#{resolved_parts.owner} modules=#{modules ? modules.to_a.join(",") : "nil"}"
       end
       if target_name.includes?("from_chars")
         STDERR.puts "[LOWERING] Starting lower for #{target_name}, arena=#{arena.class}"
@@ -26522,8 +26798,8 @@ module Crystal::HIR
       end
       begin
         with_arena(arena || @arena) do
-          if target_name.includes?("#")
-            owner = resolved_owner || target_name.split("#", 2)[0]
+          if resolved_parts.is_instance
+            owner = resolved_owner || resolved_parts.owner
             if class_info = @class_info[owner]?
               if DebugHooks::ENABLED && unresolved_generic_receiver?(owner)
                 debug_hook(
@@ -26574,16 +26850,16 @@ module Crystal::HIR
             elsif target_name.includes?("from_chars")
               STDERR.puts "[LOWERING] No class_info for #{owner}"
             end
-          elsif target_name.includes?(".")
-            parts = target_name.split(".", 2)
-            owner = resolved_owner || parts[0]
-            method = parts[1]?
+          elsif resolved_parts.is_class
+            owner = resolved_owner || resolved_parts.owner
+            method = resolved_parts.method
             namespace_override = function_namespace_override_for(target_name, base_target_name, name)
             full_override = name != target_name ? name : nil
             target_for_lower = full_override || target_name
             # For .new on classes/structs, use generate_allocator (not lower_method)
             # This ensures correct init_params from the initialize method are used
-            if method && method.split("$", 2)[0] == "new"
+            # Note: resolved_parts.method already has type suffix stripped
+            if method == "new"
               if class_info = @class_info[owner]?
                 base_new = "#{owner}.new"
                 explicit_new = @function_defs.has_key?(base_new)
@@ -32642,6 +32918,12 @@ module Crystal::HIR
       block : CrystalV2::Compiler::Frontend::BlockNode,
       block_param_types : Array(TypeRef)? = nil
     ) : ValueId
+      # Register call-site argument types so that when the function is deferred
+      # to the work queue, lower_method has type info for untyped parameters.
+      # Without this, functions like read_section?(name, &) whose params lack
+      # type annotations are silently skipped during deferred lowering.
+      callsite_arg_types = call_args.map { |arg| ctx.type_of(arg) }
+      remember_callsite_arg_types(inline_key, callsite_arg_types, nil, nil, true)
       lower_function_if_needed(inline_key)
       return_type = get_function_return_type(inline_key)
       block_id = lower_block_to_block_id(ctx, block, block_param_types)
