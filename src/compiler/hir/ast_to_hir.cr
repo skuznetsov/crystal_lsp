@@ -14576,6 +14576,13 @@ module Crystal::HIR
               arg_idx += 1
               next
             end
+            # Union of integers → Int parameter compatibility:
+            # When arg is a union like UInt32|Int32 and param is an Int type,
+            # allow it since at runtime only one branch is taken.
+            if arg_desc && union_of_integers?(arg_desc.name) && integer_param_type?(param_resolved_name)
+              arg_idx += 1
+              next
+            end
             return false
           end
         end
@@ -14713,6 +14720,31 @@ module Crystal::HIR
       return false unless arg_bits && param_bits
       arg_bits == param_bits
     end
+
+    # Check if a type name represents a union of integer types
+    # e.g., "UInt32 | Int32", "Int32 | Int64", etc.
+    private def union_of_integers?(type_name : String) : Bool
+      return false unless type_name.includes?(" | ")
+      parts = type_name.split(" | ")
+      parts.all? do |part|
+        stripped = part.strip
+        INTEGER_TYPE_NAMES.includes?(stripped)
+      end
+    end
+
+    # Check if a parameter type name accepts integers
+    # e.g., "Int32", "Int64", "Int", etc.
+    private def integer_param_type?(param_name : String) : Bool
+      return false if param_name.empty?
+      stripped = param_name.strip
+      INTEGER_TYPE_NAMES.includes?(stripped) ||
+        stripped == "Int" || stripped == "UInt" ||
+        stripped == "Int::Primitive" || stripped == "Int::Signed" || stripped == "Int::Unsigned" ||
+        stripped == "Number"
+    end
+
+    INTEGER_TYPE_NAMES = {"Int8", "Int16", "Int32", "Int64", "Int128",
+                          "UInt8", "UInt16", "UInt32", "UInt64", "UInt128"}
 
     private def numeric_param_target_type(param_type_name : String, arg_type : TypeRef) : TypeRef?
       bits = integer_bit_width(arg_type)
@@ -26778,14 +26810,6 @@ module Crystal::HIR
         callsite_args = pending_callsite_args_for_def(func_def, name, target_name)
       end
       call_arg_types = callsite_args ? callsite_args.types : nil
-      if ENV.has_key?("DEBUG_RANGE_LOWER") && (name.includes?("Array") && name.includes?("[]"))
-        types_str = call_arg_types ? call_arg_types.map { |t| desc = @module.get_type_descriptor(t); desc ? "#{desc.name}(id=#{t.id})" : "T#{t.id}" }.join(", ") : "nil"
-        STDERR.puts "[RANGE_LOWER] name=#{name} target=#{target_name} call_arg_types=#{types_str}"
-      end
-      if ENV.has_key?("DEBUG_RANGE_LOWER") && name.includes?("Slice") && name.includes?("[]?") && name.includes?("Range")
-        types_str = call_arg_types ? call_arg_types.map { |t| desc = @module.get_type_descriptor(t); desc ? "#{desc.name}(id=#{t.id})" : "T#{t.id}" }.join(", ") : "nil"
-        STDERR.puts "[RANGE_LOWER_SLICE] name=#{name} target=#{target_name} call_arg_types=#{types_str} callsite_args_nil=#{callsite_args.nil?}"
-      end
       if ENV.has_key?("DEBUG_RANGE_LOWER") && name.includes?("range_to_index_and_count")
         types_str = call_arg_types ? call_arg_types.map { |t| desc = @module.get_type_descriptor(t); desc ? "#{desc.name}(id=#{t.id})" : "T#{t.id}" }.join(", ") : "nil"
         STDERR.puts "[RANGE_LOWER_INDEX] name=#{name} target=#{target_name} call_arg_types=#{types_str} callsite_args_nil=#{callsite_args.nil?}"
@@ -28812,14 +28836,6 @@ module Crystal::HIR
       # Refine VOID arg types by tracing back to their source Call instructions
       # This handles cases where a call result is used before the called function is lowered
       arg_types = refine_void_args_from_source_calls(ctx, args, arg_types)
-      if ENV.has_key?("DEBUG_RANGE_CALLSITE") && (method_name == "range_to_index_and_count" || (full_method_name && full_method_name.includes?("range_to_index")))
-        arg_type_names = arg_types.map { |t| desc = @module.get_type_descriptor(t); desc ? "#{desc.name}(id=#{t.id})" : "T#{t.id}" }
-        STDERR.puts "[RANGE_CALLSITE] func=#{ctx.function.name} class=#{@current_class || "nil"} method=#{method_name} full=#{full_method_name} arg_types=#{arg_type_names.join(", ")}"
-        # Print stack trace for bare Range calls
-        if arg_types.first?.try { |t| desc = @module.get_type_descriptor(t); desc && desc.name == "Range" }
-          STDERR.puts "[RANGE_CALLSITE] BARE RANGE - investigate this call"
-        end
-      end
       arg_literals = args.map { |arg_id| ctx.type_literal?(arg_id) }
       callsite_arg_types = splat_packed ? prepack_arg_types.dup : arg_types
       callsite_arg_literals = splat_packed ? prepack_arg_literals.dup : arg_literals
@@ -31051,10 +31067,14 @@ module Crystal::HIR
         next if prefer_untyped && !untyped_candidate
 
         score = 0
+        compatible = true
         if arg_types && !unknown_args
           func_context = function_context_from_name(name)
-          next unless params_compatible_with_args?(def_node, arg_types, func_context)
-          score = params_match_score(def_node, arg_types, func_context)
+          compatible = params_compatible_with_args?(def_node, arg_types, func_context)
+          if compatible
+            score = params_match_score(def_node, arg_types, func_context)
+          end
+          next unless compatible
         end
         if arg_types && !unknown_args && arg_types.any? { |t| t == TypeRef::VOID }
           score -= stats.typed_param_count
