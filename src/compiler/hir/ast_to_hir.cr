@@ -26172,10 +26172,15 @@ module Crystal::HIR
           return
         end
         if base_name != name
-          func_def = @function_defs[base_name]?
-          arena = @function_def_arenas[base_name]? if func_def
-          target_name = name.includes?("$") ? name : base_name if func_def
-          lookup_branch = "base_name" if func_def
+          # When name has a $ suffix (e.g., clamp$Nil_Int32), don't blindly use base_name lookup
+          # as it may return the wrong overload. Let the more sophisticated overload matching handle it.
+          # Only use base_name fallback for names without mangled suffixes.
+          unless name.includes?("$")
+            func_def = @function_defs[base_name]?
+            arena = @function_def_arenas[base_name]? if func_def
+            target_name = base_name if func_def
+            lookup_branch = "base_name" if func_def
+          end
         end
         # If still not found, try monomorphizing a generic owner and retry.
         unless func_def
@@ -26376,7 +26381,10 @@ module Crystal::HIR
 
         # If still not found, try looking in included modules
         # e.g., IO::FileDescriptor#sync= -> IO::Buffered#sync=
-        unless func_def
+        # NOTE: When name has a $ suffix (e.g., clamp$Nil_Int32), skip this simple lookup
+        # and let the deferred module lookup handle it - that code properly considers
+        # parameter count to select the right overload.
+        unless func_def || name.includes?("$")
           if base_name.includes?("#")
             owner, method = base_name.split("#", 2)
             if included = @class_included_modules[owner]?
@@ -26388,7 +26396,7 @@ module Crystal::HIR
                   func_def = mod_func_def
                   arena = @function_def_arenas[module_method]
                   # Keep target_name as class method name - will generate with class prefix
-                  target_name = name.includes?("$") ? name : base_name
+                  target_name = base_name
                   lookup_branch = "included_module"
                   break
                 end
@@ -26397,7 +26405,7 @@ module Crystal::HIR
                   next if key == module_method
                   func_def = @function_defs[key]
                   arena = @function_def_arenas[key]
-                  target_name = name.includes?("$") ? name : base_name
+                  target_name = base_name
                   lookup_branch = "included_module_mangled"
                   break
                 end
@@ -26416,7 +26424,23 @@ module Crystal::HIR
             owner, method_part = base_name.split("#", 2)
             # Extract param signature from original name (includes $params)
             original_method_part = name.includes?("#") ? name.split("#", 2).last : method_part
-            if included = @class_included_modules[owner]?
+            # Collect all included modules from owner and its parent classes
+            # This handles cases like UInt64 which inherits Comparable from Number
+            all_included = Set(String).new
+            visited_classes = Set(String).new
+            current_class = owner
+            while current_class && !visited_classes.includes?(current_class)
+              visited_classes << current_class
+              if modules = @class_included_modules[current_class]?
+                modules.each { |m| all_included << m }
+              end
+              # Get parent class
+              parent = @class_info[current_class]?.try(&.parent_name) || @module.class_parents[current_class]?
+              break unless parent
+              current_class = parent
+            end
+            if !all_included.empty?
+              included = all_included
               method_base = method_part.split("$").first
               expected_param_count = if original_method_part.includes?("$")
                                        suffix = original_method_part.split("$", 2).last
