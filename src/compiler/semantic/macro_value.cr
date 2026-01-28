@@ -566,6 +566,20 @@ module CrystalV2
           when "select", "reject"
             # Would need block support
             self
+          when "includes?"
+            if arg = args[0]?
+              target = arg.to_macro_output
+              found = @elements.any? { |e| e.to_macro_output == target }
+              return MacroBoolValue.new(found)
+            end
+            MacroBoolValue.new(false)
+          when "+"
+            if arg = args[0]?
+              if arg.is_a?(MacroArrayValue)
+                return MacroArrayValue.new(@elements + arg.elements)
+              end
+            end
+            self
           when "join"
             sep = args[0]?.try { |a| a.is_a?(MacroStringValue) ? a.value : ", " } || ""
             MacroStringValue.new(@elements.map(&.to_id).join(sep))

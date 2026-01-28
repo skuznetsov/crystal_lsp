@@ -379,6 +379,9 @@ module CrystalV2
               entries = {} of String => MacroValue
               node.entries.each do |entry|
                 key = intern_name(entry.key)
+                if ENV["DEBUG_MACRO_TYPE"]?
+                  STDERR.puts "[MACRO_NAMED_TUPLE_ENTRY] raw_key=#{String.new(entry.key).inspect} interned=#{key.inspect}"
+                end
                 entries[key] = evaluate_to_macro_value(entry.value, context)
               end
               return MacroNamedTupleValue.new(entries)
@@ -1061,8 +1064,8 @@ module CrystalV2
             if target.is_a?(Frontend::IdentifierNode)
               if name = Frontend.node_literal_string(target)
                 context.variables[name] = evaluate_to_macro_value(node.value, context)
-                if ENV["DEBUG_MACRO_ASSIGN"]? && name == "bytesize"
-                  STDERR.puts "[MACRO_ASSIGN] bytesize=#{context.variables[name].to_macro_output}"
+                if ENV["DEBUG_MACRO_ASSIGN"]?
+                  STDERR.puts "[MACRO_ASSIGN] #{name}=#{context.variables[name].class_name}: #{context.variables[name].to_macro_output[0, 80].inspect}"
                 end
               end
             end
@@ -1107,6 +1110,13 @@ module CrystalV2
           when .identifier?
             # Variable reference: look up in context
             if name = Frontend.node_literal_string(node)
+              if ENV["DEBUG_MACRO_TYPE"]? && name == "type"
+                if macro_val = context.variables[name]?
+                  STDERR.puts "[MACRO_VAR] type class=#{macro_val.class_name} value=#{macro_val.to_macro_output.inspect}"
+                else
+                  STDERR.puts "[MACRO_VAR] type missing from context, available=#{context.variables.keys.join(", ")}"
+                end
+              end
               if ENV["DEBUG_MACRO_VAR"]? && name == "property"
                 if macro_val = context.variables[name]?
                   STDERR.puts "[MACRO_VAR] property type=#{macro_val.class_name} value=#{macro_val.to_macro_output.inspect}"
@@ -2128,9 +2138,19 @@ module CrystalV2
           end
           output = String.build do |str|
             elem_values.each_with_index do |elem_value, idx|
-              loop_context = context.with_variable(value_var, elem_value)
-              if index_var
+              if index_var && elem_value.is_a?(MacroTupleValue) && elem_value.elements.size >= 2
+                # Hash/named-tuple iteration: destructure into key + value variables
+                if ENV["DEBUG_MACRO_TYPE"]?
+                  STDERR.puts "[MACRO_FOR_TUPLE] #{value_var}=#{elem_value.elements[0].to_macro_output.inspect} #{index_var}=#{elem_value.elements[1].to_macro_output.inspect}"
+                end
+                loop_context = context.with_variable(value_var, elem_value.elements[0])
+                loop_context = loop_context.with_variable(index_var, elem_value.elements[1])
+              elsif index_var
+                # Array iteration with index variable
+                loop_context = context.with_variable(value_var, elem_value)
                 loop_context = loop_context.with_variable(index_var, MacroNumberValue.new(idx.to_i64))
+              else
+                loop_context = context.with_variable(value_var, elem_value)
               end
               body_output = evaluate_pieces_range(pieces, body_start, body_end, loop_context)
               str << body_output
@@ -2154,6 +2174,16 @@ module CrystalV2
             if name && (macro_val = context.variables[name]?)
               if macro_val.is_a?(MacroArrayValue)
                 macro_val.elements
+              elsif macro_val.is_a?(MacroNamedTupleValue)
+                # Convert NamedTuple entries to array of tuples for iteration
+                if ENV["DEBUG_MACRO_TYPE"]?
+                  STDERR.puts "[MACRO_NAMED_TUPLE_ITER] entries=#{macro_val.entries.keys.inspect}"
+                end
+                macro_val.entries.map do |k, v|
+                  MacroTupleValue.new([MacroSymbolValue.new(k).as(MacroValue), v]).as(MacroValue)
+                end
+              elsif macro_val.is_a?(MacroTupleValue)
+                macro_val.elements
               else
                 emit_error("For loop iterable #{name} is not an ArrayLiteral")
                 nil
@@ -2161,6 +2191,21 @@ module CrystalV2
             else
               emit_error("For loop requires ArrayLiteral, Range, or @type.instance_vars/@type.methods")
               nil
+            end
+          when Frontend::HashLiteralNode
+            # Hash literal: {"+" => "adding", "-" => "subtracting"}
+            iterable_node.entries.map do |entry|
+              key = evaluate_to_macro_value(entry.key, context)
+              value = evaluate_to_macro_value(entry.value, context)
+              MacroTupleValue.new([key, value]).as(MacroValue)
+            end
+          when Frontend::NamedTupleLiteralNode
+            # Named tuple: {to_i: Int32, to_u: UInt32}
+            iterable_node.entries.map do |entry|
+              key_name = String.new(entry.key)
+              key = MacroSymbolValue.new(key_name)
+              value = evaluate_to_macro_value(entry.value, context)
+              MacroTupleValue.new([key.as(MacroValue), value]).as(MacroValue)
             end
           when Frontend::MemberAccessNode
             # Support for @type.instance_vars and @type.methods

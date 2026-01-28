@@ -1300,23 +1300,47 @@ module CrystalV2
         when Frontend::VisibilityModifierNode
           collect_top_level_nodes(arena, node.expression, def_nodes, class_nodes, module_nodes, enum_nodes, macro_nodes, alias_nodes, lib_nodes, constant_exprs, main_exprs, pending_annotations, acyclic_types, flags, sources_by_arena, source, depth, collect_main_exprs)
         when Frontend::MacroIfNode
+          if ENV["DEBUG_MACRO_EXPAND"]?
+            STDERR.puts "[DEBUG_MACRO_EXPAND] MacroIfNode condition=#{evaluate_macro_condition(arena, node.condition, flags).inspect}"
+          end
           if raw_text = macro_if_raw_text(node, source)
-            parsed_any = false
-            combined = macro_literal_texts_from_raw(raw_text, flags).join
-            unless combined.strip.empty? || combined.includes?("{%")
-              if parsed = parse_macro_literal_program(combined)
-                program, sanitized = parsed
-                parsed_any = true
-                sources_by_arena[program.arena] = sanitized
-                program.roots.each do |inner_id|
-                  collect_top_level_nodes(program.arena, inner_id, def_nodes, class_nodes, module_nodes, enum_nodes, macro_nodes, alias_nodes, lib_nodes, constant_exprs, main_exprs, pending_annotations, acyclic_types, flags, sources_by_arena, sanitized, depth + 1, false)
+            # If the raw text contains {% for %} loops, don't use macro_literal_texts_from_raw
+            # which doesn't handle for-loops. Instead fall through to MacroLiteralNode processing.
+            has_for_loop = raw_text.includes?("{% for") || raw_text.includes?("{%- for") || raw_text.includes?("{%~ for")
+            unless has_for_loop
+              parsed_any = false
+              combined = macro_literal_texts_from_raw(raw_text, flags).join
+              if ENV["DEBUG_MACRO_EXPAND"]?
+                STDERR.puts "[DEBUG_MACRO_EXPAND] MacroIfNode combined empty=#{combined.strip.empty?} has_percent=#{combined.includes?("{%")} size=#{combined.size}"
+                if combined.size < 200
+                  STDERR.puts "[DEBUG_MACRO_EXPAND] MacroIfNode combined content=#{combined.inspect}"
                 end
               end
+              unless combined.strip.empty? || combined.includes?("{%")
+                if parsed = parse_macro_literal_program(combined)
+                  program, sanitized = parsed
+                  parsed_any = true
+                  sources_by_arena[program.arena] = sanitized
+                  program.roots.each do |inner_id|
+                    collect_top_level_nodes(program.arena, inner_id, def_nodes, class_nodes, module_nodes, enum_nodes, macro_nodes, alias_nodes, lib_nodes, constant_exprs, main_exprs, pending_annotations, acyclic_types, flags, sources_by_arena, sanitized, depth + 1, false)
+                  end
+                end
+              end
+              if ENV["DEBUG_MACRO_EXPAND"]? && parsed_any
+                STDERR.puts "[DEBUG_MACRO_EXPAND] MacroIfNode early return (parsed_any)"
+              end
+              return if parsed_any
             end
-            return if parsed_any
+          end
+          if ENV["DEBUG_MACRO_EXPAND"]?
+            STDERR.puts "[DEBUG_MACRO_EXPAND] MacroIfNode continuing to condition check (raw_text exists=#{!raw_text.nil?})"
           end
           condition = evaluate_macro_condition(arena, node.condition, flags)
           if condition == true
+            if ENV["DEBUG_MACRO_EXPAND"]?
+              then_node = arena[node.then_body]
+              STDERR.puts "[DEBUG_MACRO_EXPAND] MacroIfNode then_body type=#{then_node.class}"
+            end
             collect_top_level_nodes(arena, node.then_body, def_nodes, class_nodes, module_nodes, enum_nodes, macro_nodes, alias_nodes, lib_nodes, constant_exprs, main_exprs, pending_annotations, acyclic_types, flags, sources_by_arena, source, depth, collect_main_exprs)
           elsif condition == false
             if else_body = node.else_body
@@ -1329,10 +1353,31 @@ module CrystalV2
             end
           end
         when Frontend::MacroLiteralNode
-          if raw_text = macro_literal_raw_text(node, source)
-            if ENV["DEBUG_MACRO_FOR"]? && (raw_text.includes?("for") || raw_text.includes?("nums") || raw_text.includes?("ints"))
-              STDERR.puts "[DEBUG_MACRO_FOR_LIT] depth=#{depth} raw=#{raw_text[0, [raw_text.size, 120].min].inspect}"
+          # Check if this literal has macro control flow ({% for %}, {% begin %}, etc.)
+          has_control_flow = node.pieces.any? { |p| p.kind.control_start? }
+          if ENV["DEBUG_MACRO_EXPAND"]?
+            STDERR.puts "[DEBUG_MACRO_EXPAND] MacroLiteralNode has_control_flow=#{has_control_flow} pieces=#{node.pieces.size}"
+            node.pieces.each_with_index do |p, i|
+              STDERR.puts "[DEBUG_MACRO_EXPAND]   piece[#{i}] kind=#{p.kind} keyword=#{p.control_keyword.inspect}"
             end
+          end
+          if has_control_flow
+            # Use MacroExpander for full expansion of {% for %} loops, variable assignments, etc.
+            if expanded = expand_macro_literal_via_expander(expr_id, arena, source, flags)
+              if ENV["DEBUG_MACRO_EXPAND"]?
+                STDERR.puts "[DEBUG_MACRO_EXPAND] expanded=#{expanded[0, [expanded.size, 200].min].inspect}"
+              end
+              unless expanded.strip.empty?
+                if parsed = parse_top_level_macro_expansion(expanded)
+                  program, exp_source = parsed
+                  sources_by_arena[program.arena] = exp_source
+                  program.roots.each do |inner_id|
+                    collect_top_level_nodes(program.arena, inner_id, def_nodes, class_nodes, module_nodes, enum_nodes, macro_nodes, alias_nodes, lib_nodes, constant_exprs, main_exprs, pending_annotations, acyclic_types, flags, sources_by_arena, exp_source, depth + 1, false)
+                  end
+                end
+              end
+            end
+          elsif raw_text = macro_literal_raw_text(node, source)
             # Track macro variable assignments (e.g., {% nums = %w(Int8 ...) %})
             track_macro_var_assignment(raw_text)
             combined = macro_literal_texts_from_raw(raw_text, flags).join
@@ -1355,20 +1400,6 @@ module CrystalV2
           end
           main_exprs << {expr_id, arena} if collect_main_exprs
         else
-          if ENV["DEBUG_MACRO_FOR"]?
-            src = sources_by_arena[arena]?
-            snippet = ""
-            if src
-              span = node.span
-              s = span.start_offset
-              l = span.end_offset - s
-              if l > 0 && s >= 0 && s < src.bytesize
-                l = 60 if l > 60
-                snippet = src.byte_slice(s, l).gsub(/\s+/, " ").strip
-              end
-            end
-            STDERR.puts "[DEBUG_MACRO_FOR_ELSE] #{node.class} depth=#{depth} \"#{snippet}\""
-          end
           main_exprs << {expr_id, arena} if collect_main_exprs
         end
       end
@@ -1529,6 +1560,39 @@ module CrystalV2
           end
         end
         nil
+      end
+
+      # Use the MacroExpander to fully expand a MacroLiteralNode that contains
+      # {% for %}, {% if %}, {{ expr }}, and variable assignments.
+      private def expand_macro_literal_via_expander(
+        body_id : Frontend::ExprId,
+        arena : Frontend::ArenaLike,
+        source : String,
+        flags : Set(String)
+      ) : String?
+        dummy_program = Frontend::Program.new(arena, [] of Frontend::ExprId)
+        expander = Semantic::MacroExpander.new(
+          dummy_program, arena, flags,
+          recovery_mode: true,
+          macro_source: source
+        )
+        expanded = expander.expand_literal(
+          body_id,
+          variables: {} of String => Semantic::MacroValue
+        )
+        if ENV["DEBUG_MACRO_EXPAND"]?
+          STDERR.puts "[DEBUG_MACRO_EXPAND] expand_literal returned #{expanded.bytesize} bytes, empty=#{expanded.strip.empty?}"
+          if expanded.bytesize > 0 && expanded.bytesize < 500
+            STDERR.puts "[DEBUG_MACRO_EXPAND] content=#{expanded.inspect}"
+          end
+          if expander.diagnostics.any?
+            expander.diagnostics.each do |d|
+              STDERR.puts "[DEBUG_MACRO_EXPAND] diagnostic: #{d.message}"
+            end
+          end
+        end
+        return nil if expanded.strip.empty?
+        expanded
       end
 
       # Parse expanded macro text allowing {% %} and {{ }} inside struct/class bodies
