@@ -1010,7 +1010,9 @@ module Crystal
     end
 
     private def union_conversion_target_type(method_suffix : String) : TypeRef?
-      case method_suffix
+      # Strip trailing ! (unsafe conversion variant) before matching
+      suffix = method_suffix.rstrip('!')
+      case suffix
       when "to_i", "to_i32"
         TypeRef::INT32
       when "to_i8"
