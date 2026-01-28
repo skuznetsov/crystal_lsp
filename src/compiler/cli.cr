@@ -34,6 +34,8 @@ module CrystalV2
       @ast_cache_misses : Int32 = 0
       @llvm_cache_hits : Int32 = 0
       @llvm_cache_misses : Int32 = 0
+      # Top-level macro variable assignments (e.g., {% nums = %w(Int8 ...) %})
+      @macro_text_vars = {} of String => String
 
       def initialize(@args : Array(String))
       end
@@ -1328,6 +1330,11 @@ module CrystalV2
           end
         when Frontend::MacroLiteralNode
           if raw_text = macro_literal_raw_text(node, source)
+            if ENV["DEBUG_MACRO_FOR"]? && (raw_text.includes?("for") || raw_text.includes?("nums") || raw_text.includes?("ints"))
+              STDERR.puts "[DEBUG_MACRO_FOR_LIT] depth=#{depth} raw=#{raw_text[0, [raw_text.size, 120].min].inspect}"
+            end
+            # Track macro variable assignments (e.g., {% nums = %w(Int8 ...) %})
+            track_macro_var_assignment(raw_text)
             combined = macro_literal_texts_from_raw(raw_text, flags).join
             unless combined.strip.empty? || combined.includes?("{%")
               if parsed = parse_macro_literal_program(combined)
@@ -1339,6 +1346,8 @@ module CrystalV2
               end
             end
           end
+        when Frontend::MacroForNode
+          expand_top_level_macro_for(node, arena, source, def_nodes, class_nodes, module_nodes, enum_nodes, macro_nodes, alias_nodes, lib_nodes, constant_exprs, main_exprs, pending_annotations, acyclic_types, flags, sources_by_arena, depth)
         when Frontend::AssignNode
           target = arena[node.target]
           if target.is_a?(Frontend::ConstantNode)
@@ -1346,8 +1355,191 @@ module CrystalV2
           end
           main_exprs << {expr_id, arena} if collect_main_exprs
         else
+          if ENV["DEBUG_MACRO_FOR"]?
+            src = sources_by_arena[arena]?
+            snippet = ""
+            if src
+              span = node.span
+              s = span.start_offset
+              l = span.end_offset - s
+              if l > 0 && s >= 0 && s < src.bytesize
+                l = 60 if l > 60
+                snippet = src.byte_slice(s, l).gsub(/\s+/, " ").strip
+              end
+            end
+            STDERR.puts "[DEBUG_MACRO_FOR_ELSE] #{node.class} depth=#{depth} \"#{snippet}\""
+          end
           main_exprs << {expr_id, arena} if collect_main_exprs
         end
+      end
+
+      # Track macro variable assignments from raw text like {% nums = %w(Int8 Int16 ...) %}
+      private def track_macro_var_assignment(raw_text : String) : Nil
+        text = raw_text.strip
+        return unless text.starts_with?("{%") && text.ends_with?("%}")
+        inner = text[2, text.size - 4].strip
+        inner = inner.lstrip('-').lstrip('~').rstrip('-').rstrip('~').strip
+        if eq_idx = inner.index('=')
+          name = inner[0, eq_idx].strip
+          value = inner[eq_idx + 1, inner.size - eq_idx - 1].strip
+          # Only track simple identifiers
+          if name.matches?(/\A[a-z_][a-z0-9_]*\z/)
+            @macro_text_vars[name] = value
+          end
+        end
+      end
+
+      # Expand a top-level {% for %} macro loop (e.g., in primitives.cr)
+      private def expand_top_level_macro_for(
+        node : Frontend::MacroForNode,
+        arena : Frontend::ArenaLike,
+        source : String,
+        def_nodes : Array(Tuple(Frontend::DefNode, Frontend::ArenaLike)),
+        class_nodes : Array(Tuple(Frontend::ClassNode, Frontend::ArenaLike)),
+        module_nodes : Array(Tuple(Frontend::ModuleNode, Frontend::ArenaLike)),
+        enum_nodes : Array(Tuple(Frontend::EnumNode, Frontend::ArenaLike)),
+        macro_nodes : Array(Tuple(Frontend::MacroDefNode, Frontend::ArenaLike)),
+        alias_nodes : Array(Tuple(Frontend::AliasNode, Frontend::ArenaLike)),
+        lib_nodes : Array(Tuple(Frontend::LibNode, Frontend::ArenaLike, Array(Tuple(Frontend::AnnotationNode, Frontend::ArenaLike)))),
+        constant_exprs : Array(Tuple(Frontend::ExprId, Frontend::ArenaLike)),
+        main_exprs : Array(Tuple(Frontend::ExprId, Frontend::ArenaLike)),
+        pending_annotations : Array(Tuple(Frontend::AnnotationNode, Frontend::ArenaLike)),
+        acyclic_types : Set(String),
+        flags : Set(String),
+        sources_by_arena : Hash(Frontend::ArenaLike, String),
+        depth : Int32
+      ) : Nil
+        return if depth > 3
+
+        iter_vars = node.iter_vars.map { |name| String.new(name) }
+        return if iter_vars.empty?
+
+        # Get body raw text from source
+        body_node = arena[node.body]
+        body_text = extract_span_text(body_node.span, source)
+        return unless body_text
+
+        # Resolve iterable to list of string values
+        values = resolve_top_level_macro_iterable(arena, node.iterable, source)
+        return unless values
+
+        if ENV["DEBUG_MACRO_FOR"]?
+          STDERR.puts "[DEBUG_MACRO_FOR] expand_top_level_macro_for: var=#{iter_vars.first} values=#{values.size} body_size=#{body_text.size}"
+        end
+
+        # Expand body for each value
+        expanded = String.build do |io|
+          values.each do |value|
+            text = body_text
+            if iter_vars.size == 1
+              var_name = iter_vars[0]
+              text = text.gsub("{{#{var_name}.id}}", value)
+              text = text.gsub("{{ #{var_name}.id }}", value)
+              text = text.gsub("{{#{var_name}}}", value)
+              text = text.gsub("{{ #{var_name} }}", value)
+            end
+            io << text
+            io << "\n"
+          end
+        end
+
+        return if expanded.strip.empty?
+
+        # Parse the expanded text (which may contain {% %} / {{ }} inside struct bodies)
+        if parsed = parse_top_level_macro_expansion(expanded)
+          program, exp_source = parsed
+          sources_by_arena[program.arena] = exp_source
+          program.roots.each do |inner_id|
+            collect_top_level_nodes(program.arena, inner_id, def_nodes, class_nodes, module_nodes, enum_nodes, macro_nodes, alias_nodes, lib_nodes, constant_exprs, main_exprs, pending_annotations, acyclic_types, flags, sources_by_arena, exp_source, depth + 1, false)
+          end
+        end
+      end
+
+      # Extract raw text from a span in the source
+      private def extract_span_text(span : Frontend::Span, source : String) : String?
+        start = span.start_offset
+        length = span.end_offset - span.start_offset
+        return nil if length <= 0 || start < 0 || start >= source.bytesize
+        length = source.bytesize - start if start + length > source.bytesize
+        source.byte_slice(start, length)
+      end
+
+      # Resolve a macro for-loop iterable to a list of string values
+      private def resolve_top_level_macro_iterable(
+        arena : Frontend::ArenaLike,
+        iterable_id : Frontend::ExprId,
+        source : String
+      ) : Array(String)?
+        node = arena[iterable_id]
+
+        # Unwrap MacroExpressionNode
+        if node.is_a?(Frontend::MacroExpressionNode)
+          return resolve_top_level_macro_iterable(arena, node.expression, source)
+        end
+
+        # Try to get raw text of the iterable expression
+        if iterable_text = extract_span_text(node.span, source)
+          iterable_text = iterable_text.strip
+
+          # Direct %w() word list
+          if iterable_text.starts_with?("%w(") && iterable_text.ends_with?(")")
+            inner = iterable_text[3, iterable_text.size - 4]
+            return inner.split(/\s+/).reject(&.empty?)
+          end
+          if iterable_text.starts_with?("%w[") && iterable_text.ends_with?("]")
+            inner = iterable_text[3, iterable_text.size - 4]
+            return inner.split(/\s+/).reject(&.empty?)
+          end
+          if iterable_text.starts_with?("%w{") && iterable_text.ends_with?("}")
+            inner = iterable_text[3, iterable_text.size - 4]
+            return inner.split(/\s+/).reject(&.empty?)
+          end
+
+          # Variable reference - look up in tracked macro vars
+          if iterable_text.matches?(/\A[a-z_][a-z0-9_]*\z/)
+            if var_value = @macro_text_vars[iterable_text]?
+              return resolve_macro_text_value(var_value)
+            end
+          end
+        end
+
+        nil
+      end
+
+      # Parse a macro variable value text into a list of strings
+      private def resolve_macro_text_value(text : String) : Array(String)?
+        text = text.strip
+        # %w() word list
+        if text.starts_with?("%w(") && text.ends_with?(")")
+          inner = text[3, text.size - 4]
+          return inner.split(/\s+/).reject(&.empty?)
+        end
+        if text.starts_with?("%w[") && text.ends_with?("]")
+          inner = text[3, text.size - 4]
+          return inner.split(/\s+/).reject(&.empty?)
+        end
+        if text.starts_with?("%w{") && text.ends_with?("}")
+          inner = text[3, text.size - 4]
+          return inner.split(/\s+/).reject(&.empty?)
+        end
+        # Variable reference to another macro var
+        if text.matches?(/\A[a-z_][a-z0-9_]*\z/)
+          if var_value = @macro_text_vars[text]?
+            return resolve_macro_text_value(var_value)
+          end
+        end
+        nil
+      end
+
+      # Parse expanded macro text allowing {% %} and {{ }} inside struct/class bodies
+      private def parse_top_level_macro_expansion(text : String) : {Frontend::Program, String}?
+        trimmed = text.strip
+        return nil if trimmed.empty?
+        lexer = Frontend::Lexer.new(text)
+        parser = Frontend::Parser.new(lexer, recovery_mode: true)
+        program = parser.parse_program
+        return nil if program.roots.empty?
+        {program, text}
       end
 
       private def skip_file_directive?(source : String, flags : Set(String)) : Bool

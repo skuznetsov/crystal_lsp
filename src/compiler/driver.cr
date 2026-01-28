@@ -42,6 +42,8 @@ module Crystal::V2
     property no_gc : Bool = false
     property link_libraries : Array(String) = [] of String
     @trace_driver : Bool = false
+    # Top-level macro variable assignments (e.g., {% nums = %w(Int8 ...) %})
+    @macro_text_vars = {} of String => String
 
     def initialize
       @trace_driver = ENV.has_key?("CRYSTAL_V2_DRIVER_TRACE")
@@ -126,6 +128,7 @@ module Crystal::V2
 
     def compile
       STDERR.puts "[USE_LIBICONV] debug env active" if ENV["DEBUG_USE_LIBICONV"]?
+      STDERR.puts "[DEBUG_MACRO_FOR] compile() entered" if ENV["DEBUG_MACRO_FOR"]?
       trace_driver("[DRIVER_TRACE] compile() started")
       log "=== Crystal v2 Compiler ==="
       log "Input: #{@input_file}"
@@ -199,7 +202,15 @@ module Crystal::V2
 
       flags = CrystalV2::Runtime.target_flags
       collect_start = Time.instant if debug_hir_timings
+      debug_macro_for = !!ENV["DEBUG_MACRO_FOR"]?
       all_arenas.each do |arena, exprs, file_path, source|
+        if debug_macro_for && file_path.includes?("primitiv")
+          STDERR.puts "[DEBUG_MACRO_FOR] FOUND file: #{file_path}, exprs: #{exprs.size}"
+          exprs.each_with_index do |expr_id, idx|
+            node = arena[expr_id]
+            STDERR.puts "[DEBUG_MACRO_FOR]   expr[#{idx}] = #{node.class}"
+          end
+        end
         pending_annotations = [] of Tuple(CrystalV2::Compiler::Frontend::AnnotationNode, CrystalV2::Compiler::Frontend::ArenaLike)
         exprs.each do |expr_id|
             collect_top_level_nodes(
@@ -1199,6 +1210,8 @@ module Crystal::V2
           if ENV["DEBUG_USE_LIBICONV"]? && raw_text.includes?("USE_LIBICONV")
             STDERR.puts "[USE_LIBICONV] macro_literal_raw_text hit"
           end
+          # Track macro variable assignments (e.g., {% nums = %w(Int8 ...) %})
+          track_macro_var_assignment(raw_text)
           combined = macro_literal_texts_from_raw(raw_text, flags).join
           unless combined.strip.empty? || combined.includes?("{%")
             if parsed = parse_macro_literal_program(combined)
@@ -1210,6 +1223,9 @@ module Crystal::V2
             end
           end
         end
+      when CrystalV2::Compiler::Frontend::MacroForNode
+        STDERR.puts "[DEBUG_MACRO_FOR] top-level MacroForNode encountered, depth=#{depth}"
+        expand_top_level_macro_for(node, arena, source, def_nodes, class_nodes, module_nodes, enum_nodes, macro_nodes, alias_nodes, lib_nodes, constant_exprs, main_exprs, pending_annotations, acyclic_types, flags, sources_by_arena, depth)
       when CrystalV2::Compiler::Frontend::AssignNode
         target = arena[node.target]
         if target.is_a?(CrystalV2::Compiler::Frontend::ConstantNode)
@@ -1231,6 +1247,173 @@ module Crystal::V2
       pending_annotations.any? do |ann_node, ann_arena|
         annotation_name_from_expr(ann_arena, ann_node.name) == name
       end
+    end
+
+    # Track macro variable assignments from raw text like {% nums = %w(Int8 Int16 ...) %}
+    private def track_macro_var_assignment(raw_text : String) : Nil
+      text = raw_text.strip
+      return unless text.starts_with?("{%") && text.ends_with?("%}")
+      inner = text[2, text.size - 4].strip
+      inner = inner.lstrip('-').lstrip('~').rstrip('-').rstrip('~').strip
+      if eq_idx = inner.index('=')
+        name = inner[0, eq_idx].strip
+        value = inner[eq_idx + 1, inner.size - eq_idx - 1].strip
+        # Only track if name looks like a simple identifier
+        if name.matches?(/\A[a-z_][a-z0-9_]*\z/)
+          @macro_text_vars[name] = value
+        end
+      end
+    end
+
+    # Expand a top-level {% for %} macro loop (e.g., in primitives.cr)
+    private def expand_top_level_macro_for(
+      node : CrystalV2::Compiler::Frontend::MacroForNode,
+      arena : CrystalV2::Compiler::Frontend::ArenaLike,
+      source : String,
+      def_nodes : Array(Tuple(CrystalV2::Compiler::Frontend::DefNode, CrystalV2::Compiler::Frontend::ArenaLike)),
+      class_nodes : Array(Tuple(CrystalV2::Compiler::Frontend::ClassNode, CrystalV2::Compiler::Frontend::ArenaLike)),
+      module_nodes : Array(Tuple(CrystalV2::Compiler::Frontend::ModuleNode, CrystalV2::Compiler::Frontend::ArenaLike)),
+      enum_nodes : Array(Tuple(CrystalV2::Compiler::Frontend::EnumNode, CrystalV2::Compiler::Frontend::ArenaLike)),
+      macro_nodes : Array(Tuple(CrystalV2::Compiler::Frontend::MacroDefNode, CrystalV2::Compiler::Frontend::ArenaLike)),
+      alias_nodes : Array(Tuple(CrystalV2::Compiler::Frontend::AliasNode, CrystalV2::Compiler::Frontend::ArenaLike)),
+      lib_nodes : Array(Tuple(CrystalV2::Compiler::Frontend::LibNode, CrystalV2::Compiler::Frontend::ArenaLike, Array(Tuple(CrystalV2::Compiler::Frontend::AnnotationNode, CrystalV2::Compiler::Frontend::ArenaLike)))),
+      constant_exprs : Array(Tuple(CrystalV2::Compiler::Frontend::ExprId, CrystalV2::Compiler::Frontend::ArenaLike)),
+      main_exprs : Array(Tuple(CrystalV2::Compiler::Frontend::ExprId, CrystalV2::Compiler::Frontend::ArenaLike)),
+      pending_annotations : Array(Tuple(CrystalV2::Compiler::Frontend::AnnotationNode, CrystalV2::Compiler::Frontend::ArenaLike)),
+      acyclic_types : Set(String),
+      flags : Set(String),
+      sources_by_arena : Hash(CrystalV2::Compiler::Frontend::ArenaLike, String),
+      depth : Int32
+    ) : Nil
+      return if depth > 3
+
+      iter_vars = node.iter_vars.map { |name| String.new(name) }
+      return if iter_vars.empty?
+
+      # Get the body raw text from source
+      body_node = arena[node.body]
+      body_text = extract_span_text(body_node.span, source)
+      return unless body_text
+
+      # Resolve iterable to a list of string values
+      values = resolve_top_level_macro_iterable(arena, node.iterable, source)
+      return unless values
+
+      trace_driver("[DRIVER_TRACE] expand_top_level_macro_for: var=#{iter_vars.first} values=#{values.size} body_size=#{body_text.size}")
+
+      # Expand body for each value
+      expanded = String.build do |io|
+        values.each do |value|
+          text = body_text
+          if iter_vars.size == 1
+            var_name = iter_vars[0]
+            text = text.gsub("{{#{var_name}.id}}", value)
+            text = text.gsub("{{ #{var_name}.id }}", value)
+            text = text.gsub("{{#{var_name}}}", value)
+            text = text.gsub("{{ #{var_name} }}", value)
+          end
+          io << text
+          io << "\n"
+        end
+      end
+
+      return if expanded.strip.empty?
+
+      # Parse the expanded text (which may contain {% %} / {{ }} inside struct bodies)
+      if parsed = parse_top_level_macro_expansion(expanded)
+        program, exp_source = parsed
+        sources_by_arena[program.arena] = exp_source
+        program.roots.each do |inner_id|
+          collect_top_level_nodes(program.arena, inner_id, def_nodes, class_nodes, module_nodes, enum_nodes, macro_nodes, alias_nodes, lib_nodes, constant_exprs, main_exprs, pending_annotations, acyclic_types, flags, sources_by_arena, exp_source, depth + 1, false)
+        end
+      end
+    end
+
+    # Extract raw text from a span in the source
+    private def extract_span_text(span : CrystalV2::Compiler::Frontend::Span, source : String) : String?
+      start = span.start_offset
+      length = span.end_offset - span.start_offset
+      return nil if length <= 0 || start < 0 || start >= source.bytesize
+      length = source.bytesize - start if start + length > source.bytesize
+      source.byte_slice(start, length)
+    end
+
+    # Resolve a macro for-loop iterable to a list of string values
+    private def resolve_top_level_macro_iterable(
+      arena : CrystalV2::Compiler::Frontend::ArenaLike,
+      iterable_id : CrystalV2::Compiler::Frontend::ExprId,
+      source : String
+    ) : Array(String)?
+      node = arena[iterable_id]
+
+      # Unwrap MacroExpressionNode
+      if node.is_a?(CrystalV2::Compiler::Frontend::MacroExpressionNode)
+        return resolve_top_level_macro_iterable(arena, node.expression, source)
+      end
+
+      # Try to get raw text of the iterable expression
+      if iterable_text = extract_span_text(node.span, source)
+        iterable_text = iterable_text.strip
+
+        # Direct %w() word list
+        if iterable_text.starts_with?("%w(") && iterable_text.ends_with?(")")
+          inner = iterable_text[3, iterable_text.size - 4]
+          return inner.split(/\s+/).reject(&.empty?)
+        end
+        if iterable_text.starts_with?("%w[") && iterable_text.ends_with?("]")
+          inner = iterable_text[3, iterable_text.size - 4]
+          return inner.split(/\s+/).reject(&.empty?)
+        end
+        if iterable_text.starts_with?("%w{") && iterable_text.ends_with?("}")
+          inner = iterable_text[3, iterable_text.size - 4]
+          return inner.split(/\s+/).reject(&.empty?)
+        end
+
+        # Variable reference - look up in tracked macro vars
+        if iterable_text.matches?(/\A[a-z_][a-z0-9_]*\z/)
+          if var_value = @macro_text_vars[iterable_text]?
+            return resolve_macro_text_value(var_value)
+          end
+        end
+      end
+
+      nil
+    end
+
+    # Parse a macro variable value text into a list of strings
+    private def resolve_macro_text_value(text : String) : Array(String)?
+      text = text.strip
+      # %w() word list
+      if text.starts_with?("%w(") && text.ends_with?(")")
+        inner = text[3, text.size - 4]
+        return inner.split(/\s+/).reject(&.empty?)
+      end
+      if text.starts_with?("%w[") && text.ends_with?("]")
+        inner = text[3, text.size - 4]
+        return inner.split(/\s+/).reject(&.empty?)
+      end
+      if text.starts_with?("%w{") && text.ends_with?("}")
+        inner = text[3, text.size - 4]
+        return inner.split(/\s+/).reject(&.empty?)
+      end
+      # Variable reference to another macro var
+      if text.matches?(/\A[a-z_][a-z0-9_]*\z/)
+        if var_value = @macro_text_vars[text]?
+          return resolve_macro_text_value(var_value)
+        end
+      end
+      nil
+    end
+
+    # Parse expanded macro text allowing {% %} and {{ }} inside struct/class bodies
+    private def parse_top_level_macro_expansion(text : String) : {CrystalV2::Compiler::Frontend::Program, String}?
+      trimmed = text.strip
+      return nil if trimmed.empty?
+      lexer = CrystalV2::Compiler::Frontend::Lexer.new(text)
+      parser = CrystalV2::Compiler::Frontend::Parser.new(lexer, recovery_mode: true)
+      program = parser.parse_program
+      return nil if program.roots.empty?
+      {program, text}
     end
 
     private def collect_macro_literal_exprs(
