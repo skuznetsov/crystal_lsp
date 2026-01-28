@@ -2007,6 +2007,8 @@ module Crystal::MIR
                 # Result will be integer, not union - use i64 as default
                 effective_type = TypeRef::INT64
               end
+              # NOTE: If inst.type is union but operands are scalars, keep the union type.
+              # emit_binary_op will wrap the scalar result back into the union.
             end
             end
           end
@@ -2897,7 +2899,106 @@ module Crystal::MIR
         val_type = @value_types[inst.id]? || inst.type
         llvm_type = @type_mapper.llvm_type(val_type)
         llvm_type = "ptr" if llvm_type == "void"
-        store_stmt = "store #{llvm_type} #{name}, ptr %#{slot_name}"
+        slot_llvm_type = @cross_block_slot_types[inst.id]?
+        # Guard: if MIR reuses value IDs, skip store when types are completely incompatible
+        # (e.g., double result into Slice|Nil slot)
+        if slot_llvm_type && slot_llvm_type != llvm_type &&
+           slot_llvm_type.includes?(".union") && !llvm_type.includes?(".union")
+          # Check if the scalar type could reasonably be a payload of the union
+          # Union payload occupies field 1 with size [N x i8]
+          # A double (8 bytes) fits in [8 x i8], i32 fits in [4 x i8], ptr fits in [8 x i8]
+          # Skip store if the union name doesn't relate to the scalar type
+          scalar_compatible = llvm_type == "ptr" || llvm_type.starts_with?("i") ||
+                              llvm_type == "double" || llvm_type == "float"
+          # Check if the union name contains a type related to the scalar
+          union_has_float = slot_llvm_type.includes?("Float") || slot_llvm_type.includes?("float")
+          union_has_int = slot_llvm_type.includes?("Int") || slot_llvm_type.includes?("UInt")
+          value_is_float = llvm_type == "double" || llvm_type == "float"
+          value_is_int = llvm_type.starts_with?("i") && !llvm_type.includes?(".")
+          if scalar_compatible && !((value_is_float && union_has_float) || (value_is_int && union_has_int) || llvm_type == "ptr")
+            # Incompatible types — MIR likely reused this value ID. Skip store.
+            slot_llvm_type = nil  # Signal to skip
+          end
+        end
+        store_val = name
+        store_type = llvm_type
+        # If the slot type differs from the value type, convert value to match slot type.
+        # The slot type is fixed from prepass; loads always use the slot type.
+        if slot_llvm_type && slot_llvm_type != llvm_type
+          base = name.lstrip('%')
+          if slot_llvm_type.includes?(".union") && !llvm_type.includes?(".union")
+            # Scalar → union: wrap value in union struct
+            emit "%#{base}.slot_wrap_ptr = alloca #{slot_llvm_type}, align 8"
+            emit "store #{slot_llvm_type} zeroinitializer, ptr %#{base}.slot_wrap_ptr"
+            emit "%#{base}.slot_wrap_tid = getelementptr #{slot_llvm_type}, ptr %#{base}.slot_wrap_ptr, i32 0, i32 0"
+            emit "store i32 0, ptr %#{base}.slot_wrap_tid"
+            emit "%#{base}.slot_wrap_pay = getelementptr #{slot_llvm_type}, ptr %#{base}.slot_wrap_ptr, i32 0, i32 1"
+            emit "store #{llvm_type} #{name}, ptr %#{base}.slot_wrap_pay"
+            emit "%#{base}.slot_wrap_val = load #{slot_llvm_type}, ptr %#{base}.slot_wrap_ptr"
+            store_val = "%#{base}.slot_wrap_val"
+            store_type = slot_llvm_type
+          elsif !slot_llvm_type.includes?(".union") && llvm_type.includes?(".union")
+            # Union → scalar: extract payload
+            emit "%#{base}.slot_unwrap_ptr = alloca #{llvm_type}, align 8"
+            emit "store #{llvm_type} #{name}, ptr %#{base}.slot_unwrap_ptr"
+            emit "%#{base}.slot_unwrap_pay = getelementptr #{llvm_type}, ptr %#{base}.slot_unwrap_ptr, i32 0, i32 1"
+            emit "%#{base}.slot_unwrap_val = load #{slot_llvm_type}, ptr %#{base}.slot_unwrap_pay"
+            store_val = "%#{base}.slot_unwrap_val"
+            store_type = slot_llvm_type
+          elsif llvm_type.starts_with?("i") && slot_llvm_type.starts_with?("i") && !llvm_type.includes?(".") && !slot_llvm_type.includes?(".")
+            # Integer width mismatch: sext/trunc
+            val_bits = llvm_type[1..].to_i? || 64
+            slot_bits = slot_llvm_type[1..].to_i? || 64
+            if val_bits < slot_bits
+              emit "%#{base}.slot_ext = sext #{llvm_type} #{name} to #{slot_llvm_type}"
+              store_val = "%#{base}.slot_ext"
+            elsif val_bits > slot_bits
+              emit "%#{base}.slot_trunc = trunc #{llvm_type} #{name} to #{slot_llvm_type}"
+              store_val = "%#{base}.slot_trunc"
+            end
+            store_type = slot_llvm_type
+          elsif llvm_type == "ptr" && slot_llvm_type.starts_with?("i")
+            emit "%#{base}.slot_ptrtoint = ptrtoint ptr #{name} to #{slot_llvm_type}"
+            store_val = "%#{base}.slot_ptrtoint"
+            store_type = slot_llvm_type
+          elsif llvm_type.starts_with?("i") && slot_llvm_type == "ptr"
+            emit "%#{base}.slot_inttoptr = inttoptr #{llvm_type} #{name} to ptr"
+            store_val = "%#{base}.slot_inttoptr"
+            store_type = slot_llvm_type
+          elsif (llvm_type == "double" || llvm_type == "float") && slot_llvm_type.starts_with?("i") && !slot_llvm_type.includes?(".")
+            # Float → int: fptosi
+            emit "%#{base}.slot_ftoi = fptosi #{llvm_type} #{name} to #{slot_llvm_type}"
+            store_val = "%#{base}.slot_ftoi"
+            store_type = slot_llvm_type
+          elsif llvm_type.starts_with?("i") && !llvm_type.includes?(".") && (slot_llvm_type == "double" || slot_llvm_type == "float")
+            # Int → float: sitofp
+            emit "%#{base}.slot_itof = sitofp #{llvm_type} #{name} to #{slot_llvm_type}"
+            store_val = "%#{base}.slot_itof"
+            store_type = slot_llvm_type
+          elsif llvm_type == "float" && slot_llvm_type == "double"
+            emit "%#{base}.slot_fpext = fpext float #{name} to double"
+            store_val = "%#{base}.slot_fpext"
+            store_type = "double"
+          elsif llvm_type == "double" && slot_llvm_type == "float"
+            emit "%#{base}.slot_fptrunc = fptrunc double #{name} to float"
+            store_val = "%#{base}.slot_fptrunc"
+            store_type = "float"
+          elsif (llvm_type == "double" || llvm_type == "float") && slot_llvm_type == "ptr"
+            emit "%#{base}.slot_fptoint = fptosi #{llvm_type} #{name} to i64"
+            emit "%#{base}.slot_inttoptr = inttoptr i64 %#{base}.slot_fptoint to ptr"
+            store_val = "%#{base}.slot_inttoptr"
+            store_type = slot_llvm_type
+          elsif llvm_type == "ptr" && (slot_llvm_type == "double" || slot_llvm_type == "float")
+            emit "%#{base}.slot_ptrtoint = ptrtoint ptr #{name} to i64"
+            emit "%#{base}.slot_sitofp = sitofp i64 %#{base}.slot_ptrtoint to #{slot_llvm_type}"
+            store_val = "%#{base}.slot_sitofp"
+            store_type = slot_llvm_type
+          else
+            # Fallback: store as the slot type (may cause issues but avoids crash)
+            store_type = slot_llvm_type
+          end
+        end
+        store_stmt = "store #{store_type} #{store_val}, ptr %#{slot_name}"
         if @in_phi_block
           # Defer store until after all phi nodes (LLVM requires phis to be grouped at top)
           @deferred_phi_stores << store_stmt
@@ -3570,6 +3671,11 @@ module Crystal::MIR
         result_type = float_type
       end
 
+      # Float ops with union result type also need wrapping (parallel to integer wrap logic)
+      if union_result_type && is_float_op && is_arithmetic && !wrap_union_result
+        wrap_union_result = true
+      end
+
       needs_int_operands = (is_arithmetic || is_comparison) && !is_float_op
       if needs_int_operands
         # Helper to check if type is valid for int conversion
@@ -3758,13 +3864,23 @@ module Crystal::MIR
 
           emit "#{raw_name} = #{op} #{result_type} #{left}, #{right}"
 
-          # Pick a non-nil union variant as the result payload type (common for T|Nil arithmetic).
+          # Pick the union variant matching the actual result type.
+          # For float results, pick a float variant; for int results, pick an int variant.
           variant_type_id = 0
           variant_type_ref = TypeRef::INT32
           if descriptor = @module.get_union_descriptor(inst.type)
-            if variant = descriptor.variants.find { |v| v.type_ref != TypeRef::NIL && v.type_ref != TypeRef::VOID }
-              variant_type_id = variant.type_id
-              variant_type_ref = variant.type_ref
+            is_float_result = result_type == "float" || result_type == "double"
+            # Try to find a variant matching the result kind (float or int)
+            best_variant = descriptor.variants.find do |v|
+              next if v.type_ref == TypeRef::NIL || v.type_ref == TypeRef::VOID
+              vt = @type_mapper.llvm_type(v.type_ref)
+              is_float_result ? (vt == "float" || vt == "double") : vt.starts_with?("i")
+            end
+            # Fallback to any non-nil variant
+            best_variant ||= descriptor.variants.find { |v| v.type_ref != TypeRef::NIL && v.type_ref != TypeRef::VOID }
+            if best_variant
+              variant_type_id = best_variant.type_id
+              variant_type_ref = best_variant.type_ref
             end
           end
 
@@ -3805,10 +3921,26 @@ module Crystal::MIR
             elsif payload_type.starts_with?("i") && result_type == "ptr"
               emit "%binop#{inst.id}.raw_ptrtoint = ptrtoint ptr #{raw_name} to #{payload_type}"
               payload_val = "%binop#{inst.id}.raw_ptrtoint"
+            elsif payload_type.starts_with?("i") && (result_type == "float" || result_type == "double")
+              emit "%binop#{inst.id}.raw_ftoi = fptosi #{result_type} #{raw_name} to #{payload_type}"
+              payload_val = "%binop#{inst.id}.raw_ftoi"
+            elsif payload_type == "double" && result_type == "float"
+              emit "%binop#{inst.id}.raw_fpext = fpext float #{raw_name} to double"
+              payload_val = "%binop#{inst.id}.raw_fpext"
+            elsif payload_type == "float" && result_type == "double"
+              emit "%binop#{inst.id}.raw_fptrunc = fptrunc double #{raw_name} to float"
+              payload_val = "%binop#{inst.id}.raw_fptrunc"
             end
           end
 
-          emit "store #{payload_type} #{payload_val}, ptr #{payload_ptr}"
+          # If no conversion happened and types still mismatch, store using result_type directly.
+          # This handles cases where MIR assigns a wrong union type (e.g., Slice|Nil for an fadd)
+          # — the payload memory is large enough for any scalar value.
+          store_type = payload_type
+          if payload_val == raw_name && payload_type != result_type
+            store_type = result_type
+          end
+          emit "store #{store_type} #{payload_val}, ptr #{payload_ptr}"
           emit "#{name} = load #{union_type}, ptr %#{base_name}.ptr"
           @value_types[inst.id] = inst.type
           return
@@ -3986,6 +4118,23 @@ module Crystal::MIR
           # Void operand - use 0 as default value, ~0 = -1
           emit "#{name} = xor i64 0, -1"
           @value_types[inst.id] = TypeRef::INT64
+        elsif actual_type.includes?(".union")
+          # Union type - extract payload as integer, xor, wrap back
+          base_name = name.lstrip('%')
+          emit "%#{base_name}.bitnot_union_ptr = alloca #{actual_type}, align 8"
+          emit "store #{actual_type} #{operand}, ptr %#{base_name}.bitnot_union_ptr"
+          emit "%#{base_name}.bitnot_payload_ptr = getelementptr #{actual_type}, ptr %#{base_name}.bitnot_union_ptr, i32 0, i32 1"
+          emit "%#{base_name}.bitnot_val = load i64, ptr %#{base_name}.bitnot_payload_ptr"
+          emit "%#{base_name}.bitnot_result = xor i64 %#{base_name}.bitnot_val, -1"
+          # Store result back into union
+          emit "%#{base_name}.bitnot_res_ptr = alloca #{actual_type}, align 8"
+          emit "%#{base_name}.bitnot_tid_ptr = getelementptr #{actual_type}, ptr %#{base_name}.bitnot_res_ptr, i32 0, i32 0"
+          emit "%#{base_name}.bitnot_orig_tid = load i32, ptr %#{base_name}.bitnot_union_ptr"
+          emit "store i32 %#{base_name}.bitnot_orig_tid, ptr %#{base_name}.bitnot_tid_ptr"
+          emit "%#{base_name}.bitnot_res_payload_ptr = getelementptr #{actual_type}, ptr %#{base_name}.bitnot_res_ptr, i32 0, i32 1"
+          emit "store i64 %#{base_name}.bitnot_result, ptr %#{base_name}.bitnot_res_payload_ptr"
+          emit "#{name} = load #{actual_type}, ptr %#{base_name}.bitnot_res_ptr"
+          @value_types[inst.id] = operand_type
         else
           emit "#{name} = xor #{actual_type} #{operand}, -1"
           @value_types[inst.id] = operand_type  # bit_not preserves operand type
@@ -6179,6 +6328,13 @@ module Crystal::MIR
       result_type = @type_mapper.llvm_type(inst.type)
       base_name = name.lstrip('%')
 
+      # Void result type cannot be loaded - just emit a null ptr placeholder
+      if result_type == "void"
+        emit "#{name} = bitcast ptr null to ptr"
+        @value_types[inst.id] = TypeRef::POINTER
+        return
+      end
+
       # Check if LLVM type is actually a union struct (not just ptr)
       if union_type.includes?(".union")
         # Store union value to stack to get pointer for GEP
@@ -6395,6 +6551,13 @@ module Crystal::MIR
               # ptr → int: use ptrtoint
               emit "%#{base_name}.elem#{idx}_conv = ptrtoint ptr #{elem_val} to #{element_type}"
               elem_val = "%#{base_name}.elem#{idx}_conv"
+            elsif element_type == "ptr" && actual_elem_type_str.includes?(".union")
+              # union → ptr: extract pointer from union payload
+              emit "%#{base_name}.elem#{idx}_union_ptr = alloca #{actual_elem_type_str}, align 8"
+              emit "store #{actual_elem_type_str} #{normalize_union_value(elem_val, actual_elem_type_str)}, ptr %#{base_name}.elem#{idx}_union_ptr"
+              emit "%#{base_name}.elem#{idx}_payload_ptr = getelementptr #{actual_elem_type_str}, ptr %#{base_name}.elem#{idx}_union_ptr, i32 0, i32 1"
+              emit "%#{base_name}.elem#{idx}_val_ptr = load ptr, ptr %#{base_name}.elem#{idx}_payload_ptr"
+              elem_val = "%#{base_name}.elem#{idx}_val_ptr"
             elsif element_type == "ptr" && actual_elem_type_str.starts_with?("i") && !actual_elem_type_str.includes?(".union")
               # int → ptr: use inttoptr, but convert 0 to null directly
               if elem_val == "0"
@@ -6615,14 +6778,41 @@ module Crystal::MIR
         # Convert ptr to i32
         emit "%#{base_name}.val_int = ptrtoint ptr #{value} to i32"
         value = "%#{base_name}.val_int"
-      elsif actual_value_type == "ptr" && element_type != "ptr"
-        # Convert ptr to target type
+      elsif actual_value_type == "ptr" && element_type != "ptr" && !element_type.includes?(".union")
+        # Convert ptr to target integer type
         emit "%#{base_name}.val_cast = ptrtoint ptr #{value} to #{element_type}"
         value = "%#{base_name}.val_cast"
       elsif actual_value_type == "i1" && element_type.starts_with?("i") && element_type != "i1"
         # Convert bool (i1) to larger integer type (zext)
         emit "%#{base_name}.val_ext = zext i1 #{value} to #{element_type}"
         value = "%#{base_name}.val_ext"
+      elsif actual_value_type.starts_with?("i") && !actual_value_type.includes?(".union") && element_type == "ptr"
+        # Convert integer to ptr (inttoptr)
+        emit "%#{base_name}.val_ptr = inttoptr #{actual_value_type} #{value} to ptr"
+        value = "%#{base_name}.val_ptr"
+      elsif actual_value_type.includes?(".union") && element_type == "ptr"
+        # Union → ptr: extract pointer from union payload
+        emit "%#{base_name}.val_union_ptr = alloca #{actual_value_type}, align 8"
+        emit "store #{actual_value_type} #{normalize_union_value(value, actual_value_type)}, ptr %#{base_name}.val_union_ptr"
+        emit "%#{base_name}.val_payload_ptr = getelementptr #{actual_value_type}, ptr %#{base_name}.val_union_ptr, i32 0, i32 1"
+        emit "%#{base_name}.val_ptr = load ptr, ptr %#{base_name}.val_payload_ptr"
+        value = "%#{base_name}.val_ptr"
+      elsif actual_value_type.includes?(".union") && element_type != actual_value_type
+        # Union → different type: extract payload and convert
+        emit "%#{base_name}.val_union_ptr = alloca #{actual_value_type}, align 8"
+        emit "store #{actual_value_type} #{normalize_union_value(value, actual_value_type)}, ptr %#{base_name}.val_union_ptr"
+        emit "%#{base_name}.val_payload_ptr = getelementptr #{actual_value_type}, ptr %#{base_name}.val_union_ptr, i32 0, i32 1"
+        emit "%#{base_name}.val_conv = load #{element_type}, ptr %#{base_name}.val_payload_ptr"
+        value = "%#{base_name}.val_conv"
+      elsif actual_value_type == "ptr" && element_type.includes?(".union")
+        # ptr → union: wrap pointer in union with type_id=0
+        emit "%#{base_name}.val_union_ptr = alloca #{element_type}, align 8"
+        emit "%#{base_name}.val_tid_ptr = getelementptr #{element_type}, ptr %#{base_name}.val_union_ptr, i32 0, i32 0"
+        emit "store i32 0, ptr %#{base_name}.val_tid_ptr"
+        emit "%#{base_name}.val_pay_ptr = getelementptr #{element_type}, ptr %#{base_name}.val_union_ptr, i32 0, i32 1"
+        emit "store ptr #{value}, ptr %#{base_name}.val_pay_ptr"
+        emit "%#{base_name}.val_union = load #{element_type}, ptr %#{base_name}.val_union_ptr"
+        value = "%#{base_name}.val_union"
       elsif actual_value_type.starts_with?("i") && element_type.starts_with?("i") && actual_value_type != element_type
         # Integer width mismatch - use sext or trunc
         actual_bits = actual_value_type[1..].to_i? || 32
@@ -7360,6 +7550,21 @@ module Crystal::MIR
             emit "#{cast_name}.payload_ptr = getelementptr #{llvm_type}, ptr #{union_ptr}, i32 0, i32 1"
             emit "#{cast_name} = load ptr, ptr #{cast_name}.payload_ptr"
             record_emitted_type(cast_name, "ptr")
+            return cast_name
+          elsif (expected_type == "double" || expected_type == "float" || (expected_type.starts_with?("i") && !expected_type.includes?("."))) && llvm_type.includes?(".union")
+            # Extract scalar payload from union value.
+            union_ptr = "%r#{id}.fromslot.union_ptr.#{@cond_counter}"
+            @cond_counter += 1
+            emit "#{union_ptr} = alloca #{llvm_type}, align 8"
+            emit "store #{llvm_type} #{temp_name}, ptr #{union_ptr}"
+            emit "#{cast_name}.payload_ptr = getelementptr #{llvm_type}, ptr #{union_ptr}, i32 0, i32 1"
+            emit "#{cast_name} = load #{expected_type}, ptr #{cast_name}.payload_ptr"
+            record_emitted_type(cast_name, expected_type)
+            return cast_name
+          elsif llvm_type.includes?(".union") && expected_type.includes?(".union") && llvm_type != expected_type
+            # Different union types - bitcast through ptr (they have same layout)
+            emit "#{cast_name} = bitcast #{llvm_type} #{temp_name} to #{expected_type}"
+            record_emitted_type(cast_name, expected_type)
             return cast_name
           end
         end
