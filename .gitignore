@@ -27,6 +27,10 @@ print_diags_tmp
 .agents/
 .claude/
 
+# Local build/test directories
+.build/
+ai_tests/
+
 # OS
 .DS_Store
 
