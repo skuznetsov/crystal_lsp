@@ -3421,6 +3421,13 @@ module Crystal::HIR
         return get_type_name_from_ref(ret_type)
       end
 
+      # Try to look up struct/class field type (for typeof(struct_var.field))
+      if info = @class_info[base_type]?
+        if field = info.ivars.find { |iv| iv.name == "@#{member_name}" || iv.name == member_name }
+          return get_type_name_from_ref(field.type)
+        end
+      end
+
       "Pointer(Void)"
     end
 
