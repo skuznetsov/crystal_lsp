@@ -5372,27 +5372,30 @@ module Crystal::MIR
                    else
                      "#{expected_llvm_type} #{value_ref(a)}"
                    end
-                 elsif expected_llvm_type.starts_with?("i") && actual_llvm_type.includes?(".union")
+                 elsif expected_llvm_type.starts_with?("i") && is_union_llvm_type?(actual_llvm_type)
                    # Coerce union to int: extract payload as int
                    # Union layout: { type_id : i32, payload : [N x i8] }
+                   # Payload starts at offset 4, so max guaranteed alignment is 4
                    c = @cond_counter
                    @cond_counter += 1
                    val = value_ref(a)
                    emit "%union_to_int.#{c}.ptr = alloca #{actual_llvm_type}, align 8"
                    emit "store #{actual_llvm_type} #{val}, ptr %union_to_int.#{c}.ptr"
                    emit "%union_to_int.#{c}.payload_ptr = getelementptr #{actual_llvm_type}, ptr %union_to_int.#{c}.ptr, i32 0, i32 1"
-                   emit "%union_to_int.#{c}.val = load #{expected_llvm_type}, ptr %union_to_int.#{c}.payload_ptr"
+                   emit "%union_to_int.#{c}.val = load #{expected_llvm_type}, ptr %union_to_int.#{c}.payload_ptr, align 4"
                    "#{expected_llvm_type} %union_to_int.#{c}.val"
-                 elsif (expected_llvm_type == "float" || expected_llvm_type == "double") && actual_llvm_type.includes?(".union")
+                 elsif (expected_llvm_type == "float" || expected_llvm_type == "double") && is_union_llvm_type?(actual_llvm_type)
                    # Coerce union to float/double: extract payload as float
                    # Union layout: { type_id : i32, payload : [N x i8] }
+                   # Payload starts at offset 4, so max guaranteed alignment is 4
+                   # On ARM64, unaligned 8-byte loads require explicit align annotation
                    c = @cond_counter
                    @cond_counter += 1
                    val = value_ref(a)
                    emit "%union_to_fp.#{c}.ptr = alloca #{actual_llvm_type}, align 8"
                    emit "store #{actual_llvm_type} #{val}, ptr %union_to_fp.#{c}.ptr"
                    emit "%union_to_fp.#{c}.payload_ptr = getelementptr #{actual_llvm_type}, ptr %union_to_fp.#{c}.ptr, i32 0, i32 1"
-                   emit "%union_to_fp.#{c}.val = load #{expected_llvm_type}, ptr %union_to_fp.#{c}.payload_ptr"
+                   emit "%union_to_fp.#{c}.val = load #{expected_llvm_type}, ptr %union_to_fp.#{c}.payload_ptr, align 4"
                    "#{expected_llvm_type} %union_to_fp.#{c}.val"
                  elsif expected_llvm_type.starts_with?("i") && actual_llvm_type == "ptr"
                    # Ptr to int conversion needed (ptrtoint)
@@ -5402,7 +5405,7 @@ module Crystal::MIR
                    temp_int = "%ptrtoint.#{c}"
                    emit "#{temp_int} = ptrtoint ptr #{val} to #{expected_llvm_type}"
                    "#{expected_llvm_type} #{temp_int}"
-                 elsif expected_llvm_type.includes?(".union") &&
+                 elsif is_union_llvm_type?(expected_llvm_type) &&
                        (actual_llvm_type.starts_with?("i") || actual_llvm_type == "float" || actual_llvm_type == "double")
                    # Scalar to union conversion - wrap scalar payload with type_id=0 (non-nil)
                    val = value_ref(a)
@@ -5412,10 +5415,11 @@ module Crystal::MIR
                    emit "%scalar_to_union.#{c}.type_id_ptr = getelementptr #{expected_llvm_type}, ptr %scalar_to_union.#{c}.ptr, i32 0, i32 0"
                    emit "store i32 0, ptr %scalar_to_union.#{c}.type_id_ptr"
                    emit "%scalar_to_union.#{c}.payload_ptr = getelementptr #{expected_llvm_type}, ptr %scalar_to_union.#{c}.ptr, i32 0, i32 1"
-                   emit "store #{actual_llvm_type} #{val}, ptr %scalar_to_union.#{c}.payload_ptr"
+                   # Payload at offset 4, use align 4 for ARM64 compatibility
+                   emit "store #{actual_llvm_type} #{val}, ptr %scalar_to_union.#{c}.payload_ptr, align 4"
                    emit "%scalar_to_union.#{c}.val = load #{expected_llvm_type}, ptr %scalar_to_union.#{c}.ptr"
                    "#{expected_llvm_type} %scalar_to_union.#{c}.val"
-                 elsif expected_llvm_type.includes?(".union") && actual_llvm_type == "ptr"
+                 elsif is_union_llvm_type?(expected_llvm_type) && actual_llvm_type == "ptr"
                    # Ptr to union conversion - wrap ptr in union with type_id=0 (non-nil)
                    val = value_ref(a)
                    c = @cond_counter
@@ -7632,6 +7636,15 @@ module Crystal::MIR
         end
       end
       nil
+    end
+
+    # Check if LLVM type string represents a union type
+    # Union types are named with ".union" suffix (e.g., "%Int32_$OR$_Nil.union")
+    # This is more robust than simple string matching - checks for the pattern
+    # at the end of a type reference to avoid false positives with user types
+    private def is_union_llvm_type?(llvm_type : String) : Bool
+      # Union types end with ".union" or ".union}" for struct fields
+      llvm_type.ends_with?(".union") || llvm_type.ends_with?(".union}")
     end
 
     # Look up the LLVM type string for a value, with fallback to parameter lookup
