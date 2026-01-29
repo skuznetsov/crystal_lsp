@@ -26099,9 +26099,6 @@ module Crystal::HIR
         STDERR.puts "[LOWER_FUNC] name=#{name} base=#{base} state=#{function_state(name)} has_func=#{@module.has_function?(name)} has_def_full=#{@function_defs.has_key?(name)} has_def_base=#{@function_defs.has_key?(base)}"
       end
       debug_lookup_name = ENV["DEBUG_LOOKUP_NAME"]?
-      if debug_lookup_name && name.includes?(debug_lookup_name)
-        STDERR.puts "[DEBUG_LOOKUP_NAME] start name=#{name}"
-      end
       if ENV["DEBUG_VDISPATCH_UNION"]? && name.includes?("next_power_of_two")
         STDERR.puts "[VDISPATCH_UNION_HIR] lower_function_if_needed name=#{name}"
       end
@@ -26381,6 +26378,7 @@ module Crystal::HIR
           end
           if ENV.has_key?("DEBUG_LOOKUP") && !func_def
             STDERR.puts "[DEBUG_LOOKUP]   No match found for '#{mangled_prefix}'"
+            STDERR.puts "[DEBUG_LOOKUP]   overload_keys=#{overload_keys.join(", ")}"
           end
           # If no mangled overload found but base name exists and is the only overload,
           # use it directly. This handles methods with single overload where call-site

@@ -314,6 +314,9 @@ module CrystalV2
         unless options.no_prelude
           prelude_path = if options.prelude_file.empty?
                            File.join(STDLIB_PATH, "prelude.cr")
+                         elsif !options.prelude_file.includes?(File::SEPARATOR) && !options.prelude_file.ends_with?(".cr")
+                           # Short name like "prelude" -> resolve to stdlib path
+                           File.join(STDLIB_PATH, "#{options.prelude_file}.cr")
                          else
                            options.prelude_file
                          end
