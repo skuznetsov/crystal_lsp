@@ -3681,7 +3681,7 @@ module Crystal::HIR
         params_str = name[paren + 1, name.size - paren - 2]
         args = split_generic_type_args(params_str)
         case base
-        when "Array", "StaticArray", "Slice", "Deque", "Set", "Indexable", "Enumerable", "Iterator", "Iterable", "Range"
+        when "Array", "StaticArray", "Slice", "Deque", "Set", "Indexable", "Enumerable", "Iterator", "Iterable", "Range", "Pointer"
           return args.first?
         when "Tuple"
           return args.join(" | ") unless args.empty?
@@ -6042,8 +6042,52 @@ module Crystal::HIR
         if obj_type = infer_type_from_expr(expr_node.object, self_type_name)
           if obj_type != TypeRef::VOID
             class_name = get_type_name_from_ref(obj_type)
-            owner_name = split_generic_base_and_args(class_name).try(&.[](:base)) || class_name
-            base_name = resolve_method_with_inheritance(owner_name, member_name) || "#{owner_name}##{member_name}"
+            # For struct getters, check if there's an ivar matching the member name
+            # and return its type directly
+            if ENV["DEBUG_STRUCT_GETTER_INFER"]? && member_name == "hash"
+              STDERR.puts "[STRUCT_GETTER_INFER_CHECK] class=#{class_name} has_info=#{@class_info.has_key?(class_name)}"
+            end
+            if info = @class_info[class_name]?
+              if info.is_struct
+                if ivar_info = info.ivars.find { |iv| iv.name == "@#{member_name}" }
+                  if ENV["DEBUG_STRUCT_GETTER_INFER"]? && member_name == "hash"
+                    STDERR.puts "[STRUCT_GETTER_INFER] #{class_name}##{member_name} -> #{get_type_name_from_ref(ivar_info.type)}"
+                  end
+                  return ivar_info.type
+                end
+              end
+            elsif member_name == "hash" && class_name.starts_with?("Tuple(")
+              # Special case: block parameter might be an Entry struct mistyped as Tuple
+              # The Tuple(K, V) might actually be an Entry(K, V) struct from Hash iteration
+              # Use the tuple type args to construct the Entry type
+              if tuple_args = split_generic_type_args(class_name[6...-1])
+                # Entry has (key, value) matching Tuple(K, V)
+                entry_params = tuple_args.join(", ")
+                entry_name = "Hash::Entry(#{entry_params})"
+                if entry_info = @class_info[entry_name]?
+                  if entry_info.is_struct
+                    if ivar_info = entry_info.ivars.find { |iv| iv.name == "@hash" }
+                      if ENV["DEBUG_STRUCT_GETTER_INFER"]?
+                        STDERR.puts "[STRUCT_GETTER_INFER_ENTRY] tuple=#{class_name} -> entry=#{entry_name} type=#{get_type_name_from_ref(ivar_info.type)}"
+                      end
+                      return ivar_info.type
+                    end
+                  end
+                end
+              end
+              if ENV["DEBUG_STRUCT_GETTER_INFER"]?
+                STDERR.puts "[STRUCT_GETTER_INFER_MISS] #{class_name}##{member_name} - no class_info"
+              end
+            elsif ENV["DEBUG_STRUCT_GETTER_INFER"]? && member_name == "hash" && class_name.includes?("Entry")
+              STDERR.puts "[STRUCT_GETTER_INFER_MISS] #{class_name}##{member_name} - no class_info"
+            end
+            # First try the fully specialized class name for struct getters
+            base_name = resolve_method_with_inheritance(class_name, member_name)
+            if base_name.nil?
+              # Fall back to base name (without generic params) for inherited methods
+              owner_name = split_generic_base_and_args(class_name).try(&.[](:base)) || class_name
+              base_name = resolve_method_with_inheritance(owner_name, member_name) || "#{owner_name}##{member_name}"
+            end
             ret_type = resolve_return_type_from_def(base_name, base_name, obj_type)
             if ret_type && ret_type != TypeRef::VOID
               return ret_type
@@ -9489,6 +9533,24 @@ module Crystal::HIR
       method_name = String.new(node.name)
       base_name = "#{module_name}.#{method_name}"
 
+      if ENV["DEBUG_MATH_MIN"]? && module_name == "Math" && (method_name == "min" || method_name == "max")
+        call_types = call_arg_types || [] of TypeRef
+        call_type_names = call_types.map { |t| get_type_name_from_ref(t) }
+        # Get param type annotations from node
+        param_annotations = if params = node.params
+          params.map do |p|
+            if ta = p.type_annotation
+              String.new(ta)
+            else
+              "(untyped)"
+            end
+          end
+        else
+          [] of String
+        end
+        STDERR.puts "[MATH_MIN_MODULE] module=#{module_name} method=#{method_name} override=#{full_name_override || "nil"} call_arg_types=#{call_type_names.join(",")} param_annotations=#{param_annotations.join(",")}"
+      end
+
       # Defer lowering for untyped params until call-site types are available.
       # Allow typed overrides to seed call_arg_types from the mangled suffix.
       # Enum value tracking is per-function; preserve outer context.
@@ -11821,6 +11883,11 @@ module Crystal::HIR
       force_class_method : Bool = false
     )
       method_name = String.new(node.name)
+      if ENV["DEBUG_MATH_MIN"]? && (method_name == "min" || method_name == "max") && class_name.includes?("Math")
+        call_types = call_arg_types || [] of TypeRef
+        call_type_names = call_types.map { |t| get_type_name_from_ref(t) }
+        STDERR.puts "[MATH_MIN_LOWER] class=#{class_name} method=#{method_name} call_arg_types=#{call_type_names.join(", ")}"
+      end
       if ENV.has_key?("DEBUG_RANGE_LOWER") && method_name == "[]"
         call_types = call_arg_types || [] of TypeRef
         call_type_names = call_types.map { |t| desc = @module.get_type_descriptor(t); desc ? "#{desc.name}(id=#{t.id})" : "T#{t.id}" }
@@ -12340,6 +12407,11 @@ module Crystal::HIR
         # If a method parameter references a concrete generic instantiation (e.g., `Hash(String, ValueId)`),
         # ensure it is monomorphized before lowering the method body so calls on the value can resolve.
         ensure_monomorphized_type(param_type) unless param_type == TypeRef::VOID
+
+        if ENV["DEBUG_MATH_MIN"]? && (method_name == "min" || method_name == "max") && class_name.includes?("Math")
+          type_name = get_type_name_from_ref(param_type)
+          STDERR.puts "[MATH_MIN] class=#{class_name} method=#{method_name} param=#{param_name} type=#{type_name} (ref=#{param_type.id})"
+        end
 
         hir_param = func.add_param(param_name, param_type)
         ctx.register_local(param_name, hir_param.id)
@@ -13536,6 +13608,10 @@ module Crystal::HIR
 
       # Mangle with argument types
       mangled_name = mangle_function_name(base_method_name, arg_types, has_block_call)
+      if ENV["DEBUG_MATH_MIN"]? && (method_name == "min" || method_name == "max") && class_name.includes?("Math")
+        arg_type_names = arg_types.map { |t| get_type_name_from_ref(t) }
+        STDERR.puts "[MATH_MIN_RESOLVE] class=#{class_name} method=#{method_name} base=#{base_method_name} mangled=#{mangled_name} args=#{arg_type_names.join(",")}"
+      end
       preferred_module_class = preferred_module_typed_class_for(class_name)
       type_is_module = type_desc.try(&.kind) == TypeKind::Module
       module_like_receiver = !class_name.empty? && (type_is_module || module_like_type_name?(class_name) || module_includers_match?(class_name) || !preferred_module_class.nil?)
@@ -17837,6 +17913,10 @@ module Crystal::HIR
       if ENV["DEBUG_METHOD_INHERIT"]? && method_name == "internal_representation"
         STDERR.puts "[METHOD_INHERIT] class=#{class_name} method=#{method_name}"
       end
+      if ENV["DEBUG_ENTRY_HASH"]? && method_name == "hash" && class_name.includes?("Entry") && !class_name.includes?("(")
+        STDERR.puts "[ENTRY_HASH_RESOLVE] class=#{class_name} origin=#{origin} current_class=#{@current_class} current_method=#{@current_method}"
+        caller.first(5).each { |frame| STDERR.puts "  #{frame}" }
+      end
       ensure_method_inheritance_cache
       cache_key = "#{class_name}##{method_name}"
       if @method_inheritance_cache.has_key?(cache_key)
@@ -17848,6 +17928,11 @@ module Crystal::HIR
         break if visited.includes?(current)
         visited << current
         test_name = "#{current}##{method_name}"
+        if ENV["DEBUG_ENTRY_HASH"]? && method_name == "hash" && origin.includes?("Entry")
+          has_func = @function_types.has_key?(test_name)
+          has_base = has_function_base?(test_name)
+          STDERR.puts "[ENTRY_HASH_CHECK] current=#{current} test=#{test_name} has_func=#{has_func} has_base=#{has_base}"
+        end
         # O(1) lookup: check exact match first, then check if base name exists
         if @function_types.has_key?(test_name) || has_function_base?(test_name)
           resolved = if current == origin
@@ -17896,6 +17981,9 @@ module Crystal::HIR
       if class_name != "Object"
         object_method = "Object##{method_name}"
         if @function_types.has_key?(object_method) || has_function_base?(object_method)
+          if ENV["DEBUG_ENTRY_HASH"]? && method_name == "hash" && origin.includes?("Entry")
+            STDERR.puts "[ENTRY_HASH_FALLBACK] origin=#{origin} falling back to Object#hash"
+          end
           resolved = object_method
           @method_inheritance_cache[cache_key] = resolved
           return resolved
@@ -21987,25 +22075,30 @@ module Crystal::HIR
           enum_map[copy.id] = enum_name
         end
         return copy.id
-      elsif ENV["DEBUG_FORMAT_LOCAL"]? && name == "format"
-        STDERR.puts "[FORMAT_LOCAL] missing name=#{name} scope=#{@current_class || "nil"}##{@current_method || "nil"}"
-      elsif @inline_yield_block_body_depth > 0
-        # Inline-yield block bodies should be able to see caller locals. When a
-        # block references an outer local (e.g. kevent inside get? { ... }),
-        # fall back to the inline caller locals instead of creating a new void local.
-        if value_id = inline_caller_local_id(name)
-          ctx.register_local(name, value_id)
-          copy = Copy.new(ctx.next_id, ctx.type_of(value_id), value_id)
-          ctx.emit(copy)
-          ctx.mark_type_literal(copy.id) if ctx.type_literal?(value_id)
-          if enum_name = @enum_value_types.try(&.[value_id]?)
-            enum_map = @enum_value_types ||= {} of ValueId => String
-            enum_map[copy.id] = enum_name
+      else
+        # Local not found - try inline caller locals for block bodies
+        if @inline_yield_block_body_depth > 0
+          # Inline-yield block bodies should be able to see caller locals. When a
+          # block references an outer local (e.g. kevent inside get? { ... }),
+          # fall back to the inline caller locals instead of creating a new void local.
+          if value_id = inline_caller_local_id(name)
+            ctx.register_local(name, value_id)
+            copy = Copy.new(ctx.next_id, ctx.type_of(value_id), value_id)
+            ctx.emit(copy)
+            ctx.mark_type_literal(copy.id) if ctx.type_literal?(value_id)
+            if enum_name = @enum_value_types.try(&.[value_id]?)
+              enum_map = @enum_value_types ||= {} of ValueId => String
+              enum_map[copy.id] = enum_name
+            end
+            return copy.id
           end
-          return copy.id
         end
-      elsif ENV["DEBUG_BLOCK_PARAMS"]? && name.starts_with?("__arg")
-        STDERR.puts "[BLOCK_PARAMS] missing_local name=#{name} scope=#{ctx.current_scope}"
+        # Debug statements - non-blocking
+        if ENV["DEBUG_FORMAT_LOCAL"]? && name == "format"
+          STDERR.puts "[FORMAT_LOCAL] missing name=#{name} scope=#{@current_class || "nil"}##{@current_method || "nil"}"
+        elsif ENV["DEBUG_BLOCK_PARAMS"]? && name.starts_with?("__arg")
+          STDERR.puts "[BLOCK_PARAMS] missing_local name=#{name} scope=#{ctx.current_scope}"
+        end
       end
 
       if mapped = @type_param_map[name]?
@@ -25952,16 +26045,28 @@ module Crystal::HIR
     private def find_module_class_def(
       module_name : String,
       method_base : String,
-      expected_param_count : Int32
+      expected_param_count : Int32,
+      call_arg_types : Array(TypeRef)? = nil
     ) : Tuple(CrystalV2::Compiler::Frontend::DefNode, CrystalV2::Compiler::Frontend::ArenaLike)?
+      is_math_min_debug = ENV["DEBUG_MATH_MIN"]? && module_name == "Math" && (method_base == "min" || method_base == "max")
+      if is_math_min_debug
+        arg_type_names = call_arg_types ? call_arg_types.map { |t| get_type_name_from_ref(t) }.join(",") : "nil"
+        STDERR.puts "[MATH_MIN_FIND_DEF] module=#{module_name} method=#{method_base} param_count=#{expected_param_count} call_arg_types=#{arg_type_names}"
+      end
+
       ensure_module_def_lookup_cache
-      cache_key = "#{module_name}.#{method_base}@#{expected_param_count}"
+      # Include arg types in cache key when available
+      types_key = call_arg_types ? call_arg_types.map(&.id).join("_") : ""
+      cache_key = "#{module_name}.#{method_base}@#{expected_param_count}@#{types_key}"
       if @module_class_def_lookup_cache.has_key?(cache_key)
         return @module_class_def_lookup_cache[cache_key]
       end
 
       entries = @module_defs[module_name]?
       return nil unless entries
+
+      # Collect all matching candidates
+      candidates = [] of {CrystalV2::Compiler::Frontend::DefNode, CrystalV2::Compiler::Frontend::ArenaLike, Int32}
 
       entries.each do |mod_node, mod_arena|
         with_arena(mod_arena) do
@@ -25977,24 +26082,97 @@ module Crystal::HIR
             next unless String.new(member.name) == method_base
 
             actual_param_count = 0
+            typed_param_count = 0
             if params = member.params
               params.each do |param|
                 next if param.is_block || param.is_splat || param.is_double_splat || named_only_separator?(param)
                 actual_param_count += 1
+                typed_param_count += 1 if param.type_annotation
               end
             end
 
             if expected_param_count == 0 || expected_param_count == actual_param_count
-              result = {member, mod_arena}
-              @module_class_def_lookup_cache[cache_key] = result
-              return result
+              # Calculate score: prefer typed params that match call types, then untyped
+              score = 0
+              if call_arg_types && !call_arg_types.empty?
+                # Check type compatibility
+                compatible = true
+                if params = member.params
+                  param_idx = 0
+                  params.each do |param|
+                    next if param.is_block || param.is_splat || param.is_double_splat || named_only_separator?(param)
+                    break if param_idx >= call_arg_types.size
+
+                    call_type = call_arg_types[param_idx]
+                    if ta = param.type_annotation
+                      param_type_name = String.new(ta)
+                      param_type = type_ref_for_name(param_type_name)
+                      if param_type != TypeRef::VOID && call_type != TypeRef::VOID
+                        if param_type == call_type
+                          score += 10  # Exact match bonus
+                        elsif numeric_compatible?(call_type, param_type)
+                          score += 5  # Numeric compatible
+                        else
+                          compatible = false
+                          break
+                        end
+                      end
+                    else
+                      # Untyped param - always compatible, small bonus
+                      score += 1
+                    end
+                    param_idx += 1
+                  end
+                end
+                next unless compatible
+              else
+                # No call types - prefer untyped overloads (generic)
+                score = -typed_param_count
+              end
+
+              if is_math_min_debug
+                param_type_names = if params = member.params
+                  params.map do |p|
+                    next "" if p.is_block
+                    if ta = p.type_annotation
+                      String.new(ta)
+                    else
+                      "(untyped)"
+                    end
+                  end
+                else
+                  [] of String
+                end
+                STDERR.puts "[MATH_MIN_FIND_DEF]   candidate param_types=#{param_type_names.join(",")} score=#{score}"
+              end
+              candidates << {member, mod_arena, score}
             end
           end
         end
       end
 
-      @module_class_def_lookup_cache[cache_key] = nil
-      nil
+      return nil if candidates.empty?
+
+      # Sort by score descending and take the best
+      best = candidates.max_by { |c| c[2] }
+      if is_math_min_debug
+        best_param_types = if params = best[0].params
+          params.map do |p|
+            next "" if p.is_block
+            if ta = p.type_annotation
+              String.new(ta)
+            else
+              "(untyped)"
+            end
+          end
+        else
+          [] of String
+        end
+        STDERR.puts "[MATH_MIN_FIND_DEF]   SELECTED param_types=#{best_param_types.join(",")} score=#{best[2]}"
+      end
+      result = {best[0], best[1]}
+      @module_class_def_lookup_cache[cache_key] = result
+      result
     end
 
     # Eagerly infer return type for a function without fully lowering it.
@@ -26100,6 +26278,14 @@ module Crystal::HIR
 
     private def lower_function_if_needed_impl(name : String) : Nil
       return if name.empty?
+      is_math_min_debug = ENV["DEBUG_MATH_MIN"]? && name.includes?("Math") && (name.includes?("min") || name.includes?("max"))
+      if is_math_min_debug
+        base = name.split("$").first
+        has_def_name = @function_defs.has_key?(name)
+        has_def_base = @function_defs.has_key?(base)
+        overloads = function_def_overloads(base)
+        STDERR.puts "[MATH_MIN_LOWER_FUNC] name=#{name} base=#{base} state=#{function_state(name)} has_func=#{@module.has_function?(name)} has_def_name=#{has_def_name} has_def_base=#{has_def_base} overloads=#{overloads.join(";")}"
+      end
       debug_byte_at = ENV["DEBUG_BYTE_AT"]? && name.includes?("byte_at?") && name.includes?("String")
       if debug_byte_at
         base = name.split("$").first
@@ -26120,10 +26306,23 @@ module Crystal::HIR
         if ENV["DEBUG_FROM_CHARS"]? && name.includes?("from_chars_advanced")
           STDERR.puts "[DEBUG_FROM_CHARS] skip already lowering name=#{name}"
         end
+        if is_math_min_debug
+          STDERR.puts "[MATH_MIN_LOWER_FUNC] EARLY_RETURN: in_progress name=#{name}"
+        end
         return
       end
-      return if @module.has_function?(name)
-      return if function_state(name).completed?
+      if @module.has_function?(name)
+        if is_math_min_debug
+          STDERR.puts "[MATH_MIN_LOWER_FUNC] EARLY_RETURN: already_exists name=#{name}"
+        end
+        return
+      end
+      if function_state(name).completed?
+        if is_math_min_debug
+          STDERR.puts "[MATH_MIN_LOWER_FUNC] EARLY_RETURN: completed name=#{name}"
+        end
+        return
+      end
 
       # WORK QUEUE: If we're already inside lowering, defer this function
       # to prevent stack overflow from deep recursive lowering chains.
@@ -26144,6 +26343,9 @@ module Crystal::HIR
       func_def = @function_defs[target_name]?
       arena = @function_def_arenas[target_name]?
       lookup_branch : String? = func_def ? "direct" : nil
+      if is_math_min_debug
+        STDERR.puts "[MATH_MIN_LOWER_FUNC] LOOKUP name=#{name} target=#{target_name} base=#{base_name} direct_found=#{!!func_def}"
+      end
       if debug_lookup_name && name.includes?(debug_lookup_name) && func_def
         STDERR.puts "[DEBUG_LOOKUP_NAME] hit name=#{name} branch=#{lookup_branch} target=#{target_name}"
       end
@@ -26371,16 +26573,46 @@ module Crystal::HIR
               lookup_branch = "mangled_prefix_typed"
             end
           else
+            # Fallback: prefer untyped (generic) overloads over typed ones
+            # because generics can handle any argument type, while typed overloads
+            # may coerce arguments to wrong types (e.g., Math.min(Int32,Int32) -> Float32)
+            best_untyped_key : String? = nil
+            first_key : String? = nil
             overload_keys.each do |key|
-              next unless key.starts_with?(mangled_prefix)
-              if ENV.has_key?("DEBUG_LOOKUP")
-                STDERR.puts "[DEBUG_LOOKUP]   Found match: '#{key}'"
+              # Check keys that start with mangled_prefix OR the base name itself (generic)
+              unless key.starts_with?(mangled_prefix) || key == base_name
+                next
               end
-              func_def = @function_defs[key]
-              arena = @function_def_arenas[key]
-              target_name = key
-              lookup_branch = "mangled_prefix"
-              break
+              first_key ||= key
+              def_node = @function_defs[key]?
+              next unless def_node
+              # Check if this overload has all untyped params
+              has_all_untyped = true
+              if params = def_node.params
+                params.each do |param|
+                  next if param.is_block || param.is_splat || param.is_double_splat || named_only_separator?(param)
+                  if param.type_annotation
+                    has_all_untyped = false
+                    break
+                  end
+                end
+              end
+              if has_all_untyped
+                best_untyped_key = key
+                break  # Found untyped, use it
+              end
+            end
+            selected_key = best_untyped_key || first_key
+            if selected_key
+              if ENV.has_key?("DEBUG_LOOKUP")
+                STDERR.puts "[DEBUG_LOOKUP]   Found match: '#{selected_key}' (untyped=#{!!best_untyped_key})"
+              end
+              func_def = @function_defs[selected_key]
+              arena = @function_def_arenas[selected_key]
+              # If we selected the generic base name, use the mangled name as target
+              # so the function gets created with the call-site types
+              target_name = (selected_key == base_name) ? name : selected_key
+              lookup_branch = best_untyped_key ? "mangled_prefix_untyped" : "mangled_prefix"
             end
           end
           if ENV.has_key?("DEBUG_LOOKUP") && !func_def
@@ -26529,13 +26761,20 @@ module Crystal::HIR
             owner, method_part = base_name.split(".", 2)
             original_method_part = name.includes?(".") ? name.split(".", 2).last : method_part
             method_base = method_part.split("$").first
+            # Parse arg types from suffix for better overload selection
+            parsed_call_arg_types : Array(TypeRef)? = nil
             expected_param_count = if original_method_part.includes?("$")
                                      suffix = original_method_part.split("$", 2).last
-                                     suffix == "block" ? 0 : suffix.split("_").size
+                                     if suffix == "block"
+                                       0
+                                     else
+                                       parsed_call_arg_types = parse_types_from_suffix(suffix)
+                                       parsed_call_arg_types.size
+                                     end
                                    else
                                      0
                                    end
-            if found = find_module_class_def(owner, method_base, expected_param_count)
+            if found = find_module_class_def(owner, method_base, expected_param_count, parsed_call_arg_types)
               func_def = found[0]
               arena = found[1]
               target_name = base_name
@@ -26862,6 +27101,27 @@ module Crystal::HIR
         callsite_args = pending_callsite_args_for_def(func_def, name, target_name)
       end
       call_arg_types = callsite_args ? callsite_args.types : nil
+      if is_math_min_debug
+        types_str = call_arg_types ? call_arg_types.map { |t| get_type_name_from_ref(t) }.join(",") : "nil"
+        # Get param annotations from func_def
+        param_annotations = if params = func_def.params
+          params.map do |p|
+            next "" if p.is_block
+            if ta = p.type_annotation
+              String.new(ta)
+            else
+              "(untyped)"
+            end
+          end
+        else
+          [] of String
+        end
+        STDERR.puts "[MATH_MIN_FUNC_DEF] name=#{name} target=#{target_name} lookup_branch=#{lookup_branch || "nil"} call_arg_types=#{types_str} param_annotations=#{param_annotations.join(",")}"
+      end
+      if ENV["DEBUG_MATH_MIN"]? && (name.includes?("$Dmin") || name.includes?("$Dmax")) && name.includes?("Math")
+        types_str = call_arg_types ? call_arg_types.map { |t| get_type_name_from_ref(t) }.join(",") : "nil"
+        STDERR.puts "[MATH_MIN_LOWER_ARGS] name=#{name} call_arg_types=#{types_str}"
+      end
       if ENV.has_key?("DEBUG_RANGE_LOWER") && name.includes?("range_to_index_and_count")
         types_str = call_arg_types ? call_arg_types.map { |t| desc = @module.get_type_descriptor(t); desc ? "#{desc.name}(id=#{t.id})" : "T#{t.id}" }.join(", ") : "nil"
         STDERR.puts "[RANGE_LOWER_INDEX] name=#{name} target=#{target_name} call_arg_types=#{types_str} callsite_args_nil=#{callsite_args.nil?}"
@@ -28937,6 +29197,10 @@ module Crystal::HIR
 
       # Collect argument types for name mangling (overloading support)
       arg_types = args.map { |arg_id| ctx.type_of(arg_id) }
+      if ENV["DEBUG_MATH_MIN"]? && (method_name == "min" || method_name == "max") && (full_method_name.try(&.includes?("Math")) || (static_class_name && static_class_name.includes?("Math")))
+        arg_type_names = arg_types.map { |t| get_type_name_from_ref(t) }
+        STDERR.puts "[MATH_MIN_MANGLE] method=#{method_name} arg_types_at_mangle=#{arg_type_names.join(",")} func=#{ctx.function.name} static=#{static_class_name || "nil"} full=#{full_method_name || "nil"}"
+      end
       # Refine VOID arg types by tracing back to their source Call instructions
       # This handles cases where a call result is used before the called function is lowered
       arg_types = refine_void_args_from_source_calls(ctx, args, arg_types)
@@ -30621,6 +30885,11 @@ module Crystal::HIR
         recv_name = receiver_id ? get_type_name_from_ref(ctx.type_of(receiver_id)) : "nil"
         STDERR.puts "[BYTE_AT_CALL] return_type=#{ret_name} recv=#{recv_name} mangled=#{mangled_method_name} func=#{ctx.function.name}"
       end
+      if ENV["DEBUG_MATH_MIN"]? && (method_name == "min" || method_name == "max") && (mangled_method_name.includes?("Math") || base_method_name.includes?("Math"))
+        arg_type_names = args.map { |arg_id| get_type_name_from_ref(ctx.type_of(arg_id)) }
+        ret_name = get_type_name_from_ref(return_type)
+        STDERR.puts "[MATH_MIN_EMIT] method=#{method_name} mangled=#{mangled_method_name} base=#{base_method_name} args=#{arg_type_names.join(",")} return=#{ret_name} func=#{ctx.function.name}"
+      end
       call = Call.new(ctx.next_id, return_type, receiver_id, mangled_method_name, args, block_id, call_virtual)
       ctx.emit(call)
       ctx.register_type(call.id, return_type)
@@ -30928,32 +31197,33 @@ module Crystal::HIR
       method_name : String
     ) : Array(ValueId)
       # Find the target function to get parameter types
+      # IMPORTANT: Only use EXACT match to avoid coercing to wrong types.
+      # For example, Math.min$Int32_Int32 should NOT fuzzy-match to Math.min$Float32_Float32
+      # because that would coerce Int32 args to Float32 incorrectly.
       target_func = @module.function_by_name(method_name)
 
-      # If not found, try fuzzy match (for mangled names)
-      unless target_func
-        base_name = method_name.split("$").first
-        target_func = @module.functions_by_base_name(base_name).try(&.first?)
-      end
-
-      # Try another fuzzy match: method name may have different type suffix but same base
-      unless target_func
-        # Look for functions that match the method base (class#method or Module.method)
-        if method_name.includes?("#") || method_name.includes?(".")
-          # Extract class and method parts: "Class.method$Types" -> "Class", "method"
-          separator = method_name.includes?("#") ? "#" : "."
-          parts = method_name.split(separator, 2)
-          if parts.size == 2
-            class_part = parts[0]
-            method_with_types = parts[1]
-            # Extract just the method name (before $type suffix)
-            method_part = method_with_types.split("$").first
-            # Match: same class, same method name, possibly different type suffixes
-            base = "#{class_part}#{separator}#{method_part}"
-            target_func = @module.functions_by_base_name(base).try(&.first?)
-          end
-        end
-      end
+      # DISABLED: Fuzzy matching can cause wrong type coercion
+      # When the exact function doesn't exist yet, we should NOT coerce args
+      # based on a different typed overload.
+      #
+      # unless target_func
+      #   base_name = method_name.split("$").first
+      #   target_func = @module.functions_by_base_name(base_name).try(&.first?)
+      # end
+      #
+      # unless target_func
+      #   if method_name.includes?("#") || method_name.includes?(".")
+      #     separator = method_name.includes?("#") ? "#" : "."
+      #     parts = method_name.split(separator, 2)
+      #     if parts.size == 2
+      #       class_part = parts[0]
+      #       method_with_types = parts[1]
+      #       method_part = method_with_types.split("$").first
+      #       base = "#{class_part}#{separator}#{method_part}"
+      #       target_func = @module.functions_by_base_name(base).try(&.first?)
+      #     end
+      #   end
+      # end
 
       return args unless target_func
 
@@ -34746,6 +35016,62 @@ module Crystal::HIR
         end
       end
 
+      # Struct getter field access - getters like `entry.hash` should inline as FieldGet
+      # when the struct has an @ivar matching the getter name
+      recv_type_name = get_type_name_from_ref(receiver_type)
+      if ENV["DEBUG_STRUCT_GETTER"]? && member_name == "hash"
+        STDERR.puts "[STRUCT_GETTER_LOWERING] recv=#{recv_type_name} method=#{@current_method || "nil"} class=#{@current_class || "nil"}"
+      end
+      if info = class_info_for_type(receiver_type)
+        if info.is_struct
+          # Check for @member_name ivar
+          if ivar_info = info.ivars.find { |iv| iv.name == "@#{member_name}" }
+            # Verify this is actually a getter (the struct has a method with this name)
+            method_base = "#{info.name}##{member_name}"
+            if @function_types.has_key?(method_base) || has_function_base?(method_base)
+              if ENV["DEBUG_STRUCT_GETTER"]?
+                STDERR.puts "[STRUCT_GETTER] Inlining #{info.name}##{member_name} as FieldGet type=#{get_type_name_from_ref(ivar_info.type)}"
+              end
+              field_get = FieldGet.new(ctx.next_id, ivar_info.type, object_id, "@#{member_name}", ivar_info.offset)
+              ctx.emit(field_get)
+              ctx.register_type(field_get.id, ivar_info.type)
+              return field_get.id
+            end
+          elsif ENV["DEBUG_STRUCT_GETTER"]? && member_name == "hash" && info.name.includes?("Entry")
+            ivars_str = info.ivars.map { |iv| iv.name }.join(", ")
+            STDERR.puts "[STRUCT_GETTER_MISS] #{info.name}##{member_name} ivars=[#{ivars_str}]"
+          end
+        end
+      elsif member_name == "hash" && recv_type_name.starts_with?("Tuple(")
+        # Special case: block parameter might be an Entry struct mistyped as Tuple
+        # The Tuple(K, V) might actually be an Entry(K, V) struct from Hash iteration
+        if tuple_args = split_generic_type_args(recv_type_name[6...-1])
+          entry_params = tuple_args.join(", ")
+          entry_name = "Hash::Entry(#{entry_params})"
+          if entry_info = @class_info[entry_name]?
+            if entry_info.is_struct
+              if ivar_info = entry_info.ivars.find { |iv| iv.name == "@hash" }
+                if ENV["DEBUG_STRUCT_GETTER"]?
+                  STDERR.puts "[STRUCT_GETTER_ENTRY] tuple=#{recv_type_name} -> entry=#{entry_name} type=#{get_type_name_from_ref(ivar_info.type)}"
+                end
+                # For this to work, we need to treat the object as the Entry type
+                # Since the object_id is already lowered with Tuple type, emit a FieldGet
+                # with the hash field offset from the Entry struct
+                field_get = FieldGet.new(ctx.next_id, ivar_info.type, object_id, "@hash", ivar_info.offset)
+                ctx.emit(field_get)
+                ctx.register_type(field_get.id, ivar_info.type)
+                return field_get.id
+              end
+            end
+          end
+        end
+        if ENV["DEBUG_STRUCT_GETTER"]?
+          STDERR.puts "[STRUCT_GETTER_NO_INFO] #{recv_type_name}##{member_name} has no class_info"
+        end
+      elsif ENV["DEBUG_STRUCT_GETTER"]? && member_name == "hash"
+        STDERR.puts "[STRUCT_GETTER_NO_INFO] #{recv_type_name}##{member_name} has no class_info"
+      end
+
       # Handle nil? intrinsic (union and non-union).
       if member_name == "nil?"
         if is_union_or_nilable_type?(receiver_type)
@@ -35087,6 +35413,11 @@ module Crystal::HIR
       # Determine receiver type to find the correct method
       resolved_method_name : String? = nil
       return_type = TypeRef::VOID
+      if ENV["DEBUG_ENTRY_HASH"]? && member_name == "hash"
+        recv_name = get_type_name_from_ref(receiver_type)
+        info_name = @class_info_by_type_id[receiver_type.id]?.try(&.name) || "nil"
+        STDERR.puts "[ENTRY_HASH_MEMBER] recv_type_id=#{receiver_type.id} recv_name=#{recv_name} info_name=#{info_name}"
+      end
 
       # Try to find method by receiver type with inheritance support
       if receiver_type.id > 0
@@ -35102,6 +35433,10 @@ module Crystal::HIR
             else
               resolved_method_name = base_method
               return_type = get_function_return_type(base_method)
+            end
+            if ENV["DEBUG_ENTRY_HASH"]? && member_name == "hash" && info.name.includes?("Entry")
+              ret_name = get_type_name_from_ref(return_type)
+              STDERR.puts "[ENTRY_HASH_RESOLVED] base_method=#{base_method} resolved=#{resolved_method_name} return_type=#{ret_name}"
             end
           end
         end
