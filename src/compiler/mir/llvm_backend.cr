@@ -2761,10 +2761,10 @@ module Crystal::MIR
         emit "store i32 #{variant_type_id}, ptr %#{base_name}.type_id_ptr"
         emit "%#{base_name}.payload_ptr = getelementptr #{union_type}, ptr %#{base_name}.ptr, i32 0, i32 1"
         if val_llvm_type == "void"
-          emit "store i8 0, ptr %#{base_name}.payload_ptr"
+          emit "store i8 0, ptr %#{base_name}.payload_ptr, align 4"
         else
           val_ref = "null" if val_llvm_type == "ptr" && val_ref == "0"
-          emit "store #{val_llvm_type} #{val_ref}, ptr %#{base_name}.payload_ptr"
+          emit "store #{val_llvm_type} #{val_ref}, ptr %#{base_name}.payload_ptr, align 4"
         end
         emit "%#{wrap_name} = load #{union_type}, ptr %#{base_name}.ptr"
       end
@@ -3275,7 +3275,7 @@ module Crystal::MIR
           emit "%#{base_name}.union_ptr = alloca #{base_type_str}, align 8"
           emit "store #{base_type_str} #{normalize_union_value(base, base_type_str)}, ptr %#{base_name}.union_ptr"
           emit "%#{base_name}.payload_ptr = getelementptr #{base_type_str}, ptr %#{base_name}.union_ptr, i32 0, i32 1"
-          emit "%#{base_name}.base_ptr = load ptr, ptr %#{base_name}.payload_ptr"
+          emit "%#{base_name}.base_ptr = load ptr, ptr %#{base_name}.payload_ptr, align 4"
           base = "%#{base_name}.base_ptr"
         elsif base_type_str.starts_with?("i")
           # Integer to pointer: inttoptr
@@ -3382,7 +3382,7 @@ module Crystal::MIR
           emit "#{name}.union_ptr = alloca #{base_type_str}, align 8"
           emit "store #{base_type_str} #{normalize_union_value(base, base_type_str)}, ptr #{name}.union_ptr"
           emit "#{name}.payload_ptr = getelementptr #{base_type_str}, ptr #{name}.union_ptr, i32 0, i32 1"
-          emit "#{name}.base_ptr = load ptr, ptr #{name}.payload_ptr"
+          emit "#{name}.base_ptr = load ptr, ptr #{name}.payload_ptr, align 4"
           base = "#{name}.base_ptr"
         elsif base_type_str.starts_with?("i")
           # Integer to pointer: inttoptr (may be a value used as address)
@@ -3413,7 +3413,7 @@ module Crystal::MIR
                        else
                          "i32"
                        end
-        emit "%#{base_name}.idx_payload = load #{payload_type}, ptr %#{base_name}.idx_payload_ptr"
+        emit "%#{base_name}.idx_payload = load #{payload_type}, ptr %#{base_name}.idx_payload_ptr, align 4"
         payload64 = "%#{base_name}.idx_payload64"
         if payload_type == "i32"
           emit "#{payload64} = sext i32 %#{base_name}.idx_payload to i64"
@@ -3621,7 +3621,7 @@ module Crystal::MIR
           emit "%binop#{inst.id}.left_union_ptr = alloca #{operand_type_str}, align 8"
           emit "store #{operand_type_str} #{normalize_union_value(left, operand_type_str)}, ptr %binop#{inst.id}.left_union_ptr"
           emit "%binop#{inst.id}.left_union_payload_ptr = getelementptr #{operand_type_str}, ptr %binop#{inst.id}.left_union_ptr, i32 0, i32 1"
-          emit "%binop#{inst.id}.left_union_val = load #{float_type}, ptr %binop#{inst.id}.left_union_payload_ptr"
+          emit "%binop#{inst.id}.left_union_val = load #{float_type}, ptr %binop#{inst.id}.left_union_payload_ptr, align 4"
           left = "%binop#{inst.id}.left_union_val"
           operand_type_str = float_type
         end
@@ -3629,7 +3629,7 @@ module Crystal::MIR
           emit "%binop#{inst.id}.right_union_ptr = alloca #{right_type_str}, align 8"
           emit "store #{right_type_str} #{normalize_union_value(right, right_type_str)}, ptr %binop#{inst.id}.right_union_ptr"
           emit "%binop#{inst.id}.right_union_payload_ptr = getelementptr #{right_type_str}, ptr %binop#{inst.id}.right_union_ptr, i32 0, i32 1"
-          emit "%binop#{inst.id}.right_union_val = load #{float_type}, ptr %binop#{inst.id}.right_union_payload_ptr"
+          emit "%binop#{inst.id}.right_union_val = load #{float_type}, ptr %binop#{inst.id}.right_union_payload_ptr, align 4"
           right = "%binop#{inst.id}.right_union_val"
           right_type_str = float_type
         end
@@ -3724,7 +3724,7 @@ module Crystal::MIR
           emit "%binop#{inst.id}.left_union_ptr = alloca #{operand_type_str}, align 8"
           emit "store #{operand_type_str} #{normalize_union_value(left, operand_type_str)}, ptr %binop#{inst.id}.left_union_ptr"
           emit "%binop#{inst.id}.left_payload_ptr = getelementptr #{operand_type_str}, ptr %binop#{inst.id}.left_union_ptr, i32 0, i32 1"
-          emit "%binop#{inst.id}.left_as_ptr = load ptr, ptr %binop#{inst.id}.left_payload_ptr"
+          emit "%binop#{inst.id}.left_as_ptr = load ptr, ptr %binop#{inst.id}.left_payload_ptr, align 4"
           emit "%binop#{inst.id}.left_as_int = ptrtoint ptr %binop#{inst.id}.left_as_ptr to #{int_type}"
           left = "%binop#{inst.id}.left_as_int"
           operand_type_str = int_type
@@ -3733,7 +3733,7 @@ module Crystal::MIR
           emit "%binop#{inst.id}.right_union_ptr = alloca #{right_type_str}, align 8"
           emit "store #{right_type_str} #{normalize_union_value(right, right_type_str)}, ptr %binop#{inst.id}.right_union_ptr"
           emit "%binop#{inst.id}.right_payload_ptr = getelementptr #{right_type_str}, ptr %binop#{inst.id}.right_union_ptr, i32 0, i32 1"
-          emit "%binop#{inst.id}.right_as_ptr = load ptr, ptr %binop#{inst.id}.right_payload_ptr"
+          emit "%binop#{inst.id}.right_as_ptr = load ptr, ptr %binop#{inst.id}.right_payload_ptr, align 4"
           emit "%binop#{inst.id}.right_as_int = ptrtoint ptr %binop#{inst.id}.right_as_ptr to #{int_type}"
           right = "%binop#{inst.id}.right_as_int"
           right_type_str = int_type
@@ -4124,7 +4124,7 @@ module Crystal::MIR
           emit "%#{base_name}.bitnot_union_ptr = alloca #{actual_type}, align 8"
           emit "store #{actual_type} #{operand}, ptr %#{base_name}.bitnot_union_ptr"
           emit "%#{base_name}.bitnot_payload_ptr = getelementptr #{actual_type}, ptr %#{base_name}.bitnot_union_ptr, i32 0, i32 1"
-          emit "%#{base_name}.bitnot_val = load i64, ptr %#{base_name}.bitnot_payload_ptr"
+          emit "%#{base_name}.bitnot_val = load i64, ptr %#{base_name}.bitnot_payload_ptr, align 4"
           emit "%#{base_name}.bitnot_result = xor i64 %#{base_name}.bitnot_val, -1"
           # Store result back into union
           emit "%#{base_name}.bitnot_res_ptr = alloca #{actual_type}, align 8"
@@ -4132,7 +4132,7 @@ module Crystal::MIR
           emit "%#{base_name}.bitnot_orig_tid = load i32, ptr %#{base_name}.bitnot_union_ptr"
           emit "store i32 %#{base_name}.bitnot_orig_tid, ptr %#{base_name}.bitnot_tid_ptr"
           emit "%#{base_name}.bitnot_res_payload_ptr = getelementptr #{actual_type}, ptr %#{base_name}.bitnot_res_ptr, i32 0, i32 1"
-          emit "store i64 %#{base_name}.bitnot_result, ptr %#{base_name}.bitnot_res_payload_ptr"
+          emit "store i64 %#{base_name}.bitnot_result, ptr %#{base_name}.bitnot_res_payload_ptr, align 4"
           emit "#{name} = load #{actual_type}, ptr %#{base_name}.bitnot_res_ptr"
           @value_types[inst.id] = operand_type
         else
@@ -4249,7 +4249,7 @@ module Crystal::MIR
           # Non-nil value - store type_id=0 and payload
           emit "store i32 0, ptr %#{base_name}.type_id_ptr"  # 0 = non-nil
           emit "%#{base_name}.payload_ptr = getelementptr #{dst_type}, ptr %#{base_name}.ptr, i32 0, i32 1"
-          emit "store #{src_type} #{value}, ptr %#{base_name}.payload_ptr"
+          emit "store #{src_type} #{value}, ptr %#{base_name}.payload_ptr, align 4"
         end
         emit "#{name} = load #{dst_type}, ptr %#{base_name}.ptr"
         record_emitted_type(name, dst_type)
@@ -4355,7 +4355,7 @@ module Crystal::MIR
         emit "%#{base_name}.union_ptr = alloca #{src_type}, align 8"
         emit "store #{src_type} #{normalize_union_value(value, src_type)}, ptr %#{base_name}.union_ptr"
         emit "%#{base_name}.payload_ptr = getelementptr #{src_type}, ptr %#{base_name}.union_ptr, i32 0, i32 1"
-        emit "#{name} = load ptr, ptr %#{base_name}.payload_ptr"
+        emit "#{name} = load ptr, ptr %#{base_name}.payload_ptr, align 4"
         record_emitted_type(name, "ptr")
         @value_types[inst.id] = TypeRef::POINTER
         return
@@ -4371,7 +4371,7 @@ module Crystal::MIR
           emit "%#{base_name}.union_ptr = alloca #{src_type}, align 8"
           emit "store #{src_type} #{normalize_union_value(value, src_type)}, ptr %#{base_name}.union_ptr"
           emit "%#{base_name}.payload_ptr = getelementptr #{src_type}, ptr %#{base_name}.union_ptr, i32 0, i32 1"
-          emit "#{name} = load #{dst_type}, ptr %#{base_name}.payload_ptr"
+          emit "#{name} = load #{dst_type}, ptr %#{base_name}.payload_ptr, align 4"
           record_emitted_type(name, dst_type)
           @value_types[inst.id] = inst.type
           return
@@ -5438,7 +5438,7 @@ module Crystal::MIR
                      emit "%ptr_to_union.#{c}.payload_ptr = getelementptr #{expected_llvm_type}, ptr %ptr_to_union.#{c}.ptr, i32 0, i32 1"
                      # Use null instead of 0 for pointer types
                      ptr_val = val == "0" ? "null" : val
-                     emit "store ptr #{ptr_val}, ptr %ptr_to_union.#{c}.payload_ptr"
+                     emit "store ptr #{ptr_val}, ptr %ptr_to_union.#{c}.payload_ptr, align 4"
                      emit "%ptr_to_union.#{c}.val = load #{expected_llvm_type}, ptr %ptr_to_union.#{c}.ptr"
                      "#{expected_llvm_type} %ptr_to_union.#{c}.val"
                    end
@@ -5454,13 +5454,13 @@ module Crystal::MIR
                    emit "%union_conv.#{c}.src_type_id_ptr = getelementptr #{actual_llvm_type}, ptr %union_conv.#{c}.src_ptr, i32 0, i32 0"
                    emit "%union_conv.#{c}.type_id = load i32, ptr %union_conv.#{c}.src_type_id_ptr"
                    emit "%union_conv.#{c}.src_payload_ptr = getelementptr #{actual_llvm_type}, ptr %union_conv.#{c}.src_ptr, i32 0, i32 1"
-                   emit "%union_conv.#{c}.payload_as_ptr = load ptr, ptr %union_conv.#{c}.src_payload_ptr"
+                   emit "%union_conv.#{c}.payload_as_ptr = load ptr, ptr %union_conv.#{c}.src_payload_ptr, align 4"
                    # Store into expected union
                    emit "%union_conv.#{c}.dst_ptr = alloca #{expected_llvm_type}, align 8"
                    emit "%union_conv.#{c}.dst_type_id_ptr = getelementptr #{expected_llvm_type}, ptr %union_conv.#{c}.dst_ptr, i32 0, i32 0"
                    emit "store i32 %union_conv.#{c}.type_id, ptr %union_conv.#{c}.dst_type_id_ptr"
                    emit "%union_conv.#{c}.dst_payload_ptr = getelementptr #{expected_llvm_type}, ptr %union_conv.#{c}.dst_ptr, i32 0, i32 1"
-                   emit "store ptr %union_conv.#{c}.payload_as_ptr, ptr %union_conv.#{c}.dst_payload_ptr"
+                   emit "store ptr %union_conv.#{c}.payload_as_ptr, ptr %union_conv.#{c}.dst_payload_ptr, align 4"
                    emit "%union_conv.#{c}.val = load #{expected_llvm_type}, ptr %union_conv.#{c}.dst_ptr"
                    "#{expected_llvm_type} %union_conv.#{c}.val"
                  elsif expected_llvm_type == "float" && actual_llvm_type == "double"
@@ -6333,10 +6333,10 @@ module Crystal::MIR
       val = value_ref(inst.value)
       emit "%#{base_name}.payload_ptr = getelementptr #{union_type}, ptr %#{base_name}.ptr, i32 0, i32 1"
       if val_type_str == "void"
-        emit "store i8 0, ptr %#{base_name}.payload_ptr"
+        emit "store i8 0, ptr %#{base_name}.payload_ptr, align 4"
       else
         val = "null" if val_type_str == "ptr" && val == "0"
-        emit "store #{val_type_str} #{val}, ptr %#{base_name}.payload_ptr"
+        emit "store #{val_type_str} #{val}, ptr %#{base_name}.payload_ptr, align 4"
       end
 
       # 4. Load the completed union value from stack
@@ -6373,13 +6373,13 @@ module Crystal::MIR
           emit "%#{base_name}.actual_type_id = load i32, ptr %#{base_name}.type_id_ptr"
           emit "%#{base_name}.type_match = icmp eq i32 %#{base_name}.actual_type_id, #{inst.variant_type_id}"
           emit "%#{base_name}.payload_ptr = getelementptr #{union_type}, ptr %#{base_name}.union_ptr, i32 0, i32 1"
-          emit "%#{base_name}.payload = load #{result_type}, ptr %#{base_name}.payload_ptr"
+          emit "%#{base_name}.payload = load #{result_type}, ptr %#{base_name}.payload_ptr, align 4"
           # Select null/zero if type doesn't match
           emit "#{name} = select i1 %#{base_name}.type_match, #{result_type} %#{base_name}.payload, #{result_type} zeroinitializer"
         else
           # Unsafe unwrap: just load payload (UB if type_id doesn't match)
           emit "%#{base_name}.payload_ptr = getelementptr #{union_type}, ptr %#{base_name}.union_ptr, i32 0, i32 1"
-          emit "#{name} = load #{result_type}, ptr %#{base_name}.payload_ptr"
+          emit "#{name} = load #{result_type}, ptr %#{base_name}.payload_ptr, align 4"
         end
       else
         # Not a union struct - just use the value directly
@@ -6568,7 +6568,7 @@ module Crystal::MIR
               emit "%#{base_name}.elem#{idx}_type_id_ptr = getelementptr #{element_type}, ptr %#{base_name}.elem#{idx}_union_ptr, i32 0, i32 0"
               emit "store i32 0, ptr %#{base_name}.elem#{idx}_type_id_ptr"
               emit "%#{base_name}.elem#{idx}_payload_ptr = getelementptr #{element_type}, ptr %#{base_name}.elem#{idx}_union_ptr, i32 0, i32 1"
-              emit "store ptr #{elem_val}, ptr %#{base_name}.elem#{idx}_payload_ptr"
+              emit "store ptr #{elem_val}, ptr %#{base_name}.elem#{idx}_payload_ptr, align 4"
               emit "%#{base_name}.elem#{idx}_union = load #{element_type}, ptr %#{base_name}.elem#{idx}_union_ptr"
               elem_val = "%#{base_name}.elem#{idx}_union"
             elsif is_elem_int && is_actual_ptr
@@ -6580,7 +6580,7 @@ module Crystal::MIR
               emit "%#{base_name}.elem#{idx}_union_ptr = alloca #{actual_elem_type_str}, align 8"
               emit "store #{actual_elem_type_str} #{normalize_union_value(elem_val, actual_elem_type_str)}, ptr %#{base_name}.elem#{idx}_union_ptr"
               emit "%#{base_name}.elem#{idx}_payload_ptr = getelementptr #{actual_elem_type_str}, ptr %#{base_name}.elem#{idx}_union_ptr, i32 0, i32 1"
-              emit "%#{base_name}.elem#{idx}_val_ptr = load ptr, ptr %#{base_name}.elem#{idx}_payload_ptr"
+              emit "%#{base_name}.elem#{idx}_val_ptr = load ptr, ptr %#{base_name}.elem#{idx}_payload_ptr, align 4"
               elem_val = "%#{base_name}.elem#{idx}_val_ptr"
             elsif element_type == "ptr" && actual_elem_type_str.starts_with?("i") && !actual_elem_type_str.includes?(".union")
               # int → ptr: use inttoptr, but convert 0 to null directly
@@ -6620,7 +6620,7 @@ module Crystal::MIR
           emit "%#{base_name}.union_ptr = alloca #{array_llvm_type}, align 8"
           emit "store #{array_llvm_type} #{normalize_union_value(array_ptr, array_llvm_type)}, ptr %#{base_name}.union_ptr"
           emit "%#{base_name}.payload_ptr = getelementptr #{array_llvm_type}, ptr %#{base_name}.union_ptr, i32 0, i32 1"
-          emit "%#{base_name}.arr_ptr = load ptr, ptr %#{base_name}.payload_ptr"
+          emit "%#{base_name}.arr_ptr = load ptr, ptr %#{base_name}.payload_ptr, align 4"
           array_ptr = "%#{base_name}.arr_ptr"
         elsif array_llvm_type != "ptr" && !array_llvm_type.starts_with?("%")
           # Non-ptr, non-struct type (e.g., i1, i32) - this is a MIR type inference issue
@@ -6661,7 +6661,7 @@ module Crystal::MIR
           emit "%#{base_name}.union_ptr = alloca #{array_llvm_type}, align 8"
           emit "store #{array_llvm_type} #{normalize_union_value(array_ptr, array_llvm_type)}, ptr %#{base_name}.union_ptr"
           emit "%#{base_name}.payload_ptr = getelementptr #{array_llvm_type}, ptr %#{base_name}.union_ptr, i32 0, i32 1"
-          emit "%#{base_name}.arr_ptr = load ptr, ptr %#{base_name}.payload_ptr"
+          emit "%#{base_name}.arr_ptr = load ptr, ptr %#{base_name}.payload_ptr, align 4"
           array_ptr = "%#{base_name}.arr_ptr"
         elsif array_llvm_type != "ptr" && !array_llvm_type.starts_with?("%")
           # Non-ptr, non-struct type (e.g., i1, i32) - this is a MIR type inference issue
@@ -6690,10 +6690,10 @@ module Crystal::MIR
           emit "%#{base_name}.idx_payload_ptr = getelementptr #{index_llvm}, ptr %#{base_name}.idx_union_ptr, i32 0, i32 1"
           # Check if payload is likely pointer or integer based on union name
           if index_llvm.includes?("Pointer") || index_llvm.includes?("Int64")
-            emit "%#{base_name}.idx_payload = load i64, ptr %#{base_name}.idx_payload_ptr"
+            emit "%#{base_name}.idx_payload = load i64, ptr %#{base_name}.idx_payload_ptr, align 4"
             emit "%#{base_name}.idx_int = trunc i64 %#{base_name}.idx_payload to i32"
           else
-            emit "%#{base_name}.idx_int = load i32, ptr %#{base_name}.idx_payload_ptr"
+            emit "%#{base_name}.idx_int = load i32, ptr %#{base_name}.idx_payload_ptr, align 4"
           end
           index = "%#{base_name}.idx_int"
         elsif index_llvm == "ptr"
@@ -6741,7 +6741,7 @@ module Crystal::MIR
           emit "%#{base_name}.union_ptr = alloca #{array_llvm_type}, align 8"
           emit "store #{array_llvm_type} #{normalize_union_value(array_ptr, array_llvm_type)}, ptr %#{base_name}.union_ptr"
           emit "%#{base_name}.payload_ptr = getelementptr #{array_llvm_type}, ptr %#{base_name}.union_ptr, i32 0, i32 1"
-          emit "%#{base_name}.arr_ptr = load ptr, ptr %#{base_name}.payload_ptr"
+          emit "%#{base_name}.arr_ptr = load ptr, ptr %#{base_name}.payload_ptr, align 4"
           array_ptr = "%#{base_name}.arr_ptr"
         elsif array_llvm_type != "ptr" && !array_llvm_type.starts_with?("%")
           # Non-ptr, non-struct type (e.g., i1, i32) - this is a MIR type inference issue
@@ -6769,10 +6769,10 @@ module Crystal::MIR
           emit "store #{index_llvm} #{normalize_union_value(index, index_llvm)}, ptr %#{base_name}.idx_union_ptr"
           emit "%#{base_name}.idx_payload_ptr = getelementptr #{index_llvm}, ptr %#{base_name}.idx_union_ptr, i32 0, i32 1"
           if index_llvm.includes?("Pointer") || index_llvm.includes?("Int64")
-            emit "%#{base_name}.idx_payload = load i64, ptr %#{base_name}.idx_payload_ptr"
+            emit "%#{base_name}.idx_payload = load i64, ptr %#{base_name}.idx_payload_ptr, align 4"
             emit "%#{base_name}.idx_int = trunc i64 %#{base_name}.idx_payload to i32"
           else
-            emit "%#{base_name}.idx_int = load i32, ptr %#{base_name}.idx_payload_ptr"
+            emit "%#{base_name}.idx_int = load i32, ptr %#{base_name}.idx_payload_ptr, align 4"
           end
           index = "%#{base_name}.idx_int"
         elsif index_llvm == "ptr"
@@ -6819,14 +6819,14 @@ module Crystal::MIR
         emit "%#{base_name}.val_union_ptr = alloca #{actual_value_type}, align 8"
         emit "store #{actual_value_type} #{normalize_union_value(value, actual_value_type)}, ptr %#{base_name}.val_union_ptr"
         emit "%#{base_name}.val_payload_ptr = getelementptr #{actual_value_type}, ptr %#{base_name}.val_union_ptr, i32 0, i32 1"
-        emit "%#{base_name}.val_ptr = load ptr, ptr %#{base_name}.val_payload_ptr"
+        emit "%#{base_name}.val_ptr = load ptr, ptr %#{base_name}.val_payload_ptr, align 4"
         value = "%#{base_name}.val_ptr"
       elsif actual_value_type.includes?(".union") && element_type != actual_value_type
         # Union → different type: extract payload and convert
         emit "%#{base_name}.val_union_ptr = alloca #{actual_value_type}, align 8"
         emit "store #{actual_value_type} #{normalize_union_value(value, actual_value_type)}, ptr %#{base_name}.val_union_ptr"
         emit "%#{base_name}.val_payload_ptr = getelementptr #{actual_value_type}, ptr %#{base_name}.val_union_ptr, i32 0, i32 1"
-        emit "%#{base_name}.val_conv = load #{element_type}, ptr %#{base_name}.val_payload_ptr"
+        emit "%#{base_name}.val_conv = load #{element_type}, ptr %#{base_name}.val_payload_ptr, align 4"
         value = "%#{base_name}.val_conv"
       elsif actual_value_type == "ptr" && element_type.includes?(".union")
         # ptr → union: wrap pointer in union with type_id=0
@@ -7235,12 +7235,12 @@ module Crystal::MIR
               emit "%ret#{c}.type_id = select i1 %ret#{c}.is_nil, i32 1, i32 0"
               emit "store i32 %ret#{c}.type_id, ptr %ret#{c}.type_id_ptr"
               emit "%ret#{c}.payload_ptr = getelementptr #{@current_return_type}, ptr %ret#{c}.union_ptr, i32 0, i32 1"
-              emit "store #{val_llvm_type} #{val_ref}, ptr %ret#{c}.payload_ptr"
+              emit "store #{val_llvm_type} #{val_ref}, ptr %ret#{c}.payload_ptr, align 4"
             else
               # Non-nil value - set type_id=0 and store payload
               emit "store i32 0, ptr %ret#{c}.type_id_ptr"
               emit "%ret#{c}.payload_ptr = getelementptr #{@current_return_type}, ptr %ret#{c}.union_ptr, i32 0, i32 1"
-              emit "store #{val_llvm_type} #{val_ref}, ptr %ret#{c}.payload_ptr"
+              emit "store #{val_llvm_type} #{val_ref}, ptr %ret#{c}.payload_ptr, align 4"
             end
             emit "%ret#{c}.union = load #{@current_return_type}, ptr %ret#{c}.union_ptr"
             emit "ret #{@current_return_type} %ret#{c}.union"
@@ -7271,7 +7271,7 @@ module Crystal::MIR
               emit "%ret_union_extract.#{c}.ptr = alloca #{val_llvm_type}, align 8"
               emit "store #{val_llvm_type} #{val_ref}, ptr %ret_union_extract.#{c}.ptr"
               emit "%ret_union_extract.#{c}.payload_ptr = getelementptr #{val_llvm_type}, ptr %ret_union_extract.#{c}.ptr, i32 0, i32 1"
-              emit "%ret_union_extract.#{c}.val = load #{@current_return_type}, ptr %ret_union_extract.#{c}.payload_ptr"
+              emit "%ret_union_extract.#{c}.val = load #{@current_return_type}, ptr %ret_union_extract.#{c}.payload_ptr, align 4"
               emit "ret #{@current_return_type} %ret_union_extract.#{c}.val"
             elsif @current_return_type == "ptr" && val_llvm_type && val_llvm_type.includes?(".union")
               # Union to pointer - extract payload as ptr
@@ -7280,7 +7280,7 @@ module Crystal::MIR
               emit "%ret_union_to_ptr.#{c}.ptr = alloca #{val_llvm_type}, align 8"
               emit "store #{val_llvm_type} #{val_ref}, ptr %ret_union_to_ptr.#{c}.ptr"
               emit "%ret_union_to_ptr.#{c}.payload_ptr = getelementptr #{val_llvm_type}, ptr %ret_union_to_ptr.#{c}.ptr, i32 0, i32 1"
-              emit "%ret_union_to_ptr.#{c}.val = load ptr, ptr %ret_union_to_ptr.#{c}.payload_ptr"
+              emit "%ret_union_to_ptr.#{c}.val = load ptr, ptr %ret_union_to_ptr.#{c}.payload_ptr, align 4"
               emit "ret ptr %ret_union_to_ptr.#{c}.val"
             elsif (@current_return_type == "float" || @current_return_type == "double") && val_llvm_type && val_llvm_type.includes?(".union")
               # Union to float/double - extract payload as the float type
@@ -7289,7 +7289,7 @@ module Crystal::MIR
               emit "%ret_union_to_float.#{c}.ptr = alloca #{val_llvm_type}, align 8"
               emit "store #{val_llvm_type} #{val_ref}, ptr %ret_union_to_float.#{c}.ptr"
               emit "%ret_union_to_float.#{c}.payload_ptr = getelementptr #{val_llvm_type}, ptr %ret_union_to_float.#{c}.ptr, i32 0, i32 1"
-              emit "%ret_union_to_float.#{c}.val = load #{@current_return_type}, ptr %ret_union_to_float.#{c}.payload_ptr"
+              emit "%ret_union_to_float.#{c}.val = load #{@current_return_type}, ptr %ret_union_to_float.#{c}.payload_ptr, align 4"
               emit "ret #{@current_return_type} %ret_union_to_float.#{c}.val"
             elsif @current_return_type.includes?(".union") && val_llvm_type && val_llvm_type.includes?(".union") && @current_return_type != val_llvm_type
               # Union to different union - copy type_id and payload to new union struct
@@ -7309,8 +7309,8 @@ module Crystal::MIR
               # Copy payload bytes from source to destination (use memcpy or byte-wise copy via ptr)
               emit "%ret_union_conv.#{c}.src_payload_ptr = getelementptr #{val_llvm_type}, ptr %ret_union_conv.#{c}.src_ptr, i32 0, i32 1"
               emit "%ret_union_conv.#{c}.dst_payload_ptr = getelementptr #{@current_return_type}, ptr %ret_union_conv.#{c}.dst_ptr, i32 0, i32 1"
-              emit "%ret_union_conv.#{c}.payload_as_ptr = load ptr, ptr %ret_union_conv.#{c}.src_payload_ptr"
-              emit "store ptr %ret_union_conv.#{c}.payload_as_ptr, ptr %ret_union_conv.#{c}.dst_payload_ptr"
+              emit "%ret_union_conv.#{c}.payload_as_ptr = load ptr, ptr %ret_union_conv.#{c}.src_payload_ptr, align 4"
+              emit "store ptr %ret_union_conv.#{c}.payload_as_ptr, ptr %ret_union_conv.#{c}.dst_payload_ptr, align 4"
               # Load and return destination union
               emit "%ret_union_conv.#{c}.result = load #{@current_return_type}, ptr %ret_union_conv.#{c}.dst_ptr"
               emit "ret #{@current_return_type} %ret_union_conv.#{c}.result"
@@ -7572,7 +7572,7 @@ module Crystal::MIR
             emit "#{union_ptr} = alloca #{llvm_type}, align 8"
             emit "store #{llvm_type} #{temp_name}, ptr #{union_ptr}"
             emit "#{cast_name}.payload_ptr = getelementptr #{llvm_type}, ptr #{union_ptr}, i32 0, i32 1"
-            emit "#{cast_name} = load ptr, ptr #{cast_name}.payload_ptr"
+            emit "#{cast_name} = load ptr, ptr #{cast_name}.payload_ptr, align 4"
             record_emitted_type(cast_name, "ptr")
             return cast_name
           elsif (expected_type == "double" || expected_type == "float" || (expected_type.starts_with?("i") && !expected_type.includes?("."))) && llvm_type.includes?(".union")
@@ -7582,7 +7582,7 @@ module Crystal::MIR
             emit "#{union_ptr} = alloca #{llvm_type}, align 8"
             emit "store #{llvm_type} #{temp_name}, ptr #{union_ptr}"
             emit "#{cast_name}.payload_ptr = getelementptr #{llvm_type}, ptr #{union_ptr}, i32 0, i32 1"
-            emit "#{cast_name} = load #{expected_type}, ptr #{cast_name}.payload_ptr"
+            emit "#{cast_name} = load #{expected_type}, ptr #{cast_name}.payload_ptr, align 4"
             record_emitted_type(cast_name, expected_type)
             return cast_name
           elsif llvm_type.includes?(".union") && expected_type.includes?(".union") && llvm_type != expected_type

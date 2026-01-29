@@ -1976,6 +1976,35 @@ end
 - `acb89d4` - refactor: type-safe phi API and unified vdispatch generator
 - `2aa5960` - refactor: simplify lowering state machine (4 collections → 1 enum)
 
+### 8.12 ARM64 Alignment Fix for Union Payload Access (2026-01-28)
+
+**Problem**: Union layout is `{ i32 type_id, [N x i8] payload }`. Payload starts at offset 4.
+When loading 8-byte values (double) from offset 4, this is an unaligned access on ARM64.
+This could cause Bus Error or incorrect code generation on M2/ARM64.
+
+**Fix applied** (commit `50e0a3f`):
+- Added explicit `align 4` to load/store instructions accessing union payloads
+- Replaced fragile `.includes?(".union")` with `is_union_llvm_type?()` helper
+- Helper uses `ends_with?(".union")` to avoid false positives with user types
+
+**Affected code** (`src/compiler/mir/llvm_backend.cr`):
+- `union_to_int` coercion: load from payload with `align 4`
+- `union_to_fp` coercion: load float/double from payload with `align 4`
+- `scalar_to_union` coercion: store to payload with `align 4`
+
+**Note**: 100+ places still use `.includes?(".union")` - this is tech debt, but mass replacement
+is risky. The critical ARM64 paths are fixed.
+
+**Review feedback** (from Gemini "Близняшки"):
+1. Alignment: LLVM may generate unaligned LDR instructions assuming natural alignment
+2. Type punning: Code does bitwise reinterpretation, not value conversion (acceptable for unboxing)
+3. Stringly-typed: Using string matching for type detection is fragile (partially addressed)
+
+**Update (2026-01-29)**:
+- Applied `align 4` to all union payload loads/stores emitted in `llvm_backend.cr` (beyond just float/double paths).
+- This guards AArch64/ARM against unaligned payload loads for any union variant (ptr/int/float).
+- Reviewed float conversion paths; union→float/double conversions are handled in call-arg coercion and return lowering.
+
 ### 8.10 Bootstrap Blockers: Budgeted Callsite Lowering (PROPOSED)
 
 **Problem**: Naive “lower all tracked callsite signatures” risks compile-time blowups.  
