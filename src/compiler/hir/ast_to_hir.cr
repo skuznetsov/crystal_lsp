@@ -18199,7 +18199,7 @@ module Crystal::HIR
         if ENV.has_key?("DEBUG_TYPE_INFER")
           STDERR.puts "[TYPE_INFER] Direct MemberAccess member=#{member_name}, obj_node type: #{obj_node.class}"
         end
-        if member_name == "new" || member_name == "empty" || member_name == "null" || member_name == "malloc"
+        if member_name == "new" || member_name == "empty" || member_name == "null" || member_name == "malloc" || member_name == "create"
           type_name = extract_type_name_from_node(obj_node)
           if ENV.has_key?("DEBUG_TYPE_INFER")
             STDERR.puts "[TYPE_INFER] extracted type_name=#{type_name || "nil"}"
@@ -18226,7 +18226,7 @@ module Crystal::HIR
           if ENV.has_key?("DEBUG_TYPE_INFER")
             STDERR.puts "[TYPE_INFER] MemberAccess member=#{member_name}, obj_node type: #{obj_node.class}"
           end
-          if member_name == "new" || member_name == "empty" || member_name == "null" || member_name == "malloc"
+          if member_name == "new" || member_name == "empty" || member_name == "null" || member_name == "malloc" || member_name == "create"
             type_name = extract_type_name_from_node(obj_node)
             if ENV.has_key?("DEBUG_TYPE_INFER")
               STDERR.puts "[TYPE_INFER] extracted type_name=#{type_name || "nil"}"
@@ -27732,6 +27732,18 @@ module Crystal::HIR
               end
             end
           end
+          # For abstract numeric types (Int, UInt, Float) calling primitive operations
+          # without explicit receiver, use self as receiver so special lowering works.
+          if receiver_id.nil? && full_method_name.nil? && !@current_method_is_class
+            is_abstract_numeric = current == "Int" || current == "UInt" || current == "Float" ||
+                                  current == "Number" || current == "Comparable" ||
+                                  current.starts_with?("Int(") || current.starts_with?("Comparable(")
+            is_primitive_op = method_name == "unsafe_div" || method_name == "unsafe_mod" ||
+                              method_name == "unsafe_shl" || method_name == "unsafe_shr"
+            if is_abstract_numeric && is_primitive_op
+              receiver_id = emit_self(ctx)
+            end
+          end
           if receiver_id.nil? && full_method_name.nil? && @current_method_is_class
             top_level_exists = @function_defs.has_key?(method_name) ||
               @function_types.has_key?(method_name) ||
@@ -29010,7 +29022,20 @@ module Crystal::HIR
                              class_method_fallback || included_candidate || method_name
                            end
                          else
-                           method_name
+                           # receiver_id might be set but full_method_name is nil
+                           # Try to get type name from receiver's TypeRef if we have a receiver
+                           if receiver_id
+                             recv_type = ctx.type_of(receiver_id)
+                             type_name = get_type_name_from_ref(recv_type)
+                             if !type_name.empty? && type_name != "Unknown" && type_name != "Void"
+                               type_name = type_name.gsub(" | ", "_$OR$_") if type_name.includes?(" | ")
+                               "#{type_name}##{method_name}"
+                             else
+                               method_name
+                             end
+                           else
+                             method_name
+                           end
                          end
       base_method_name = rewrite_event_loop_method_name(base_method_name)
       base_method_name = rewrite_system_process_method_name(base_method_name)
