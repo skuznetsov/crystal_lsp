@@ -5383,6 +5383,17 @@ module Crystal::MIR
                    emit "%union_to_int.#{c}.payload_ptr = getelementptr #{actual_llvm_type}, ptr %union_to_int.#{c}.ptr, i32 0, i32 1"
                    emit "%union_to_int.#{c}.val = load #{expected_llvm_type}, ptr %union_to_int.#{c}.payload_ptr"
                    "#{expected_llvm_type} %union_to_int.#{c}.val"
+                 elsif (expected_llvm_type == "float" || expected_llvm_type == "double") && actual_llvm_type.includes?(".union")
+                   # Coerce union to float/double: extract payload as float
+                   # Union layout: { type_id : i32, payload : [N x i8] }
+                   c = @cond_counter
+                   @cond_counter += 1
+                   val = value_ref(a)
+                   emit "%union_to_fp.#{c}.ptr = alloca #{actual_llvm_type}, align 8"
+                   emit "store #{actual_llvm_type} #{val}, ptr %union_to_fp.#{c}.ptr"
+                   emit "%union_to_fp.#{c}.payload_ptr = getelementptr #{actual_llvm_type}, ptr %union_to_fp.#{c}.ptr, i32 0, i32 1"
+                   emit "%union_to_fp.#{c}.val = load #{expected_llvm_type}, ptr %union_to_fp.#{c}.payload_ptr"
+                   "#{expected_llvm_type} %union_to_fp.#{c}.val"
                  elsif expected_llvm_type.starts_with?("i") && actual_llvm_type == "ptr"
                    # Ptr to int conversion needed (ptrtoint)
                    val = value_ref(a)
