@@ -26093,6 +26093,11 @@ module Crystal::HIR
 
     private def lower_function_if_needed_impl(name : String) : Nil
       return if name.empty?
+      debug_byte_at = ENV["DEBUG_BYTE_AT"]? && name.includes?("byte_at?") && name.includes?("String")
+      if debug_byte_at
+        base = name.split("$").first
+        STDERR.puts "[LOWER_FUNC] name=#{name} base=#{base} state=#{function_state(name)} has_func=#{@module.has_function?(name)} has_def_full=#{@function_defs.has_key?(name)} has_def_base=#{@function_defs.has_key?(base)}"
+      end
       debug_lookup_name = ENV["DEBUG_LOOKUP_NAME"]?
       if debug_lookup_name && name.includes?(debug_lookup_name)
         STDERR.puts "[DEBUG_LOOKUP_NAME] start name=#{name}"
@@ -26376,6 +26381,19 @@ module Crystal::HIR
           end
           if ENV.has_key?("DEBUG_LOOKUP") && !func_def
             STDERR.puts "[DEBUG_LOOKUP]   No match found for '#{mangled_prefix}'"
+          end
+          # If no mangled overload found but base name exists and is the only overload,
+          # use it directly. This handles methods with single overload where call-site
+          # type inference adds a $ suffix (e.g., String#byte_at?$Int32 -> String#byte_at?).
+          unless func_def
+            if overload_keys.size == 1 && overload_keys.first == base_name
+              if candidate = @function_defs[base_name]?
+                func_def = candidate
+                arena = @function_def_arenas[base_name]
+                target_name = name  # Keep the mangled name as target
+                lookup_branch = "base_name_single_overload"
+              end
+            end
           end
         end
 
@@ -26791,6 +26809,11 @@ module Crystal::HIR
         arena_for_log = arena || resolve_arena_for_def(func_def, @arena)
         loc = "#{func_def.span.start_line}:#{func_def.span.start_column}"
         STDERR.puts "[DEBUG_BYTEFORMAT_LOWER] name=#{name} target=#{target_name} arena=#{arena_for_log.class} loc=#{loc} branch=#{lookup_branch || "none"}"
+      end
+      if func_def.nil? && debug_byte_at
+        STDERR.puts "[LOWER_FUNC_MISS] name=#{name} base=#{base_name} target=#{target_name}"
+        overloads = function_def_overloads(base_name)
+        STDERR.puts "[LOWER_FUNC_MISS] overloads=#{overloads.join(",")}"
       end
       return unless func_def
       is_lowering_target = function_state(target_name).in_progress?
@@ -27403,6 +27426,20 @@ module Crystal::HIR
     end
 
     private def lower_call(ctx : LoweringContext, node : CrystalV2::Compiler::Frontend::CallNode) : ValueId
+      if ENV["DEBUG_UNION_CONV_ALL"]?
+        callee_node = @arena[node.callee]
+        method_name_dbg = case callee_node
+                          when CrystalV2::Compiler::Frontend::MemberAccessNode
+                            String.new(callee_node.member)
+                          when CrystalV2::Compiler::Frontend::IdentifierNode
+                            String.new(callee_node.name)
+                          else
+                            nil
+                          end
+        if method_name_dbg && (method_name_dbg == "to_i32!" || method_name_dbg == "to_u32!" || method_name_dbg == "to_u64!")
+          STDERR.puts "[LOWER_CALL_ENTRY] method=#{method_name_dbg} func=#{ctx.function.name}"
+        end
+      end
       if ENV["DEBUG_ENUM_UNION_PREDICATE"]?
         callee_node = @arena[node.callee]
         callee_name = case callee_node
@@ -28419,8 +28456,23 @@ module Crystal::HIR
                 end
               else
                 # Use inheritance-aware method resolution
-                full_method_name = resolve_method_with_inheritance(name, method_name)
-                full_method_name ||= "#{name}##{method_name}"
+                # Check if the name is a union type and resolve to variant method
+                if name.includes?(" | ") || name.includes?("___")
+                  union_name = name.includes?("___") ? name.gsub("___", " | ") : name
+                  # At this point arg_types aren't computed yet, so use empty array to just find any matching variant
+                  if resolved = resolve_union_method_call(union_name, method_name, [] of TypeRef, false)
+                    full_method_name = resolved
+                    if ENV["DEBUG_UNION_CONV"]?
+                      STDERR.puts "[UNION_CLASS_INFO] resolved union #{union_name}##{method_name} -> #{resolved}"
+                    end
+                  else
+                    full_method_name = resolve_method_with_inheritance(name, method_name)
+                    full_method_name ||= "#{name}##{method_name}"
+                  end
+                else
+                  full_method_name = resolve_method_with_inheritance(name, method_name)
+                  full_method_name ||= "#{name}##{method_name}"
+                end
                 generate_allocator(name, info) if method_name == "new"
               end
             end
@@ -28453,6 +28505,17 @@ module Crystal::HIR
                     # Module-typed receivers should use instance-style dispatch (#),
                     # so virtual dispatch can target concrete module implementations.
                     full_method_name = "#{type_name}##{method_name}"
+                  elsif type_desc.kind == TypeKind::Union
+                    # Union types: resolve method to a concrete variant's method
+                    # This prevents generating calls to non-existent union methods like Int64|Int32#to_i32!
+                    union_name = type_name.includes?("___") ? type_name.gsub("___", " | ") : type_name
+                    # At this point arg_types aren't computed yet, so use empty array to just find any matching variant
+                    if resolved = resolve_union_method_call(union_name, method_name, [] of TypeRef, false)
+                      full_method_name = resolved
+                    else
+                      # Fallback: use union name with method (will be handled by virtual dispatch)
+                      full_method_name = "#{union_name}##{method_name}"
+                    end
                   else
                     # Try to find method with this type name
                     test_method = "#{type_name}##{method_name}"
@@ -29773,6 +29836,9 @@ module Crystal::HIR
       end
 
       # Primitive numeric conversions (to_i*, to_u*, to_f*).
+      if ENV["DEBUG_UNION_CONV"]? && method_name.starts_with?("to_") && (method_name.ends_with?("!") || method_name.includes?("32") || method_name.includes?("64"))
+        STDERR.puts "[UNION_CONV_ENTRY] method=#{method_name} receiver_id=#{receiver_id} args=#{args.size}"
+      end
       if receiver_id && args.empty?
         receiver_type = ctx.type_of(receiver_id)
         target_type = case method_name
@@ -29804,6 +29870,12 @@ module Crystal::HIR
                         nil
                       end
         if target_type
+          if ENV["DEBUG_UNION_CONV"]? && (method_name == "to_i32!" || method_name == "to_u32!" || method_name == "to_u64!")
+            desc_name = @module.get_type_descriptor(receiver_type).try(&.name) || "(nil)"
+            is_union = is_union_or_nilable_type?(receiver_type)
+            is_prim = numeric_primitive?(receiver_type)
+            STDERR.puts "[UNION_CONV] method=#{method_name} receiver_type=#{receiver_type.id} desc=#{desc_name} is_union=#{is_union} is_prim=#{is_prim}"
+          end
           if receiver_type == TypeRef::VOID
             # Treat unknown receivers as target type to avoid invalid pointer casts.
             # Call-site coercion will handle the actual conversion when needed.
@@ -30513,6 +30585,11 @@ module Crystal::HIR
         recv_name = receiver_id ? get_type_name_from_ref(ctx.type_of(receiver_id)) : "nil"
         block_kind = block_id ? "block" : "none"
         STDERR.puts "[MAP_CALL] recv=#{recv_name} block_expr=#{!block_expr.nil?} block_pass=#{!block_pass_expr.nil?} block_id=#{block_kind} return=#{get_type_name_from_ref(return_type)} mangled=#{mangled_method_name}"
+      end
+      if ENV["DEBUG_BYTE_AT"]? && method_name == "byte_at?"
+        ret_name = get_type_name_from_ref(return_type)
+        recv_name = receiver_id ? get_type_name_from_ref(ctx.type_of(receiver_id)) : "nil"
+        STDERR.puts "[BYTE_AT_CALL] return_type=#{ret_name} recv=#{recv_name} mangled=#{mangled_method_name} func=#{ctx.function.name}"
       end
       call = Call.new(ctx.next_id, return_type, receiver_id, mangled_method_name, args, block_id, call_virtual)
       ctx.emit(call)

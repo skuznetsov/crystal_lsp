@@ -4325,6 +4325,15 @@ module Crystal::MIR
         end
       end
 
+      # Guard: trunc/bitcast can't be used for float-to-int - use fptosi/fptoui instead
+      is_src_float = src_type == "float" || src_type == "double"
+      if (op == "trunc" || op == "bitcast") && is_src_float && is_dst_int
+        # Check if destination is unsigned type to choose fptoui vs fptosi
+        dst_kind = @module.type_registry.get(inst.type).try(&.kind)
+        dst_unsigned = dst_kind && dst_kind.integer? && !dst_kind.signed_integer?
+        op = dst_unsigned ? "fptoui" : "fptosi"
+      end
+
       # Guard: sext/zext/trunc can't be used with ptr - use ptrtoint instead
       if (op == "sext" || op == "zext" || op == "trunc") && src_type == "ptr"
         # ptr to int - use ptrtoint
