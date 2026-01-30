@@ -34,6 +34,7 @@ module Crystal::V2
     property optimize : Int32 = 0
     property no_prelude : Bool = false  # Skip automatic prelude loading
     property ltp_opt : Bool = true
+    property mir_opt : Bool = true
     property lto : Bool = false
     property pgo_generate : Bool = false
     property pgo_profile : String = ""
@@ -77,6 +78,8 @@ module Crystal::V2
           @no_prelude = true
         when "--no-ltp"
           @ltp_opt = false
+        when "--no-mir-opt"
+          @mir_opt = false
         when "--no-gc"
           @no_gc = true
         when .starts_with?("--mm=")
@@ -107,7 +110,7 @@ module Crystal::V2
       end
 
       if @input_file.empty?
-        STDERR.puts "Usage: driver <input.cr> [-o output] [--emit-llvm] [--no-prelude] [--no-ltp] [--lto] [--pgo-gen|--pgo-use FILE] [-v]"
+        STDERR.puts "Usage: driver <input.cr> [-o output] [--emit-llvm] [--no-prelude] [--no-mir-opt] [--no-ltp] [--lto] [--pgo-gen|--pgo-use FILE] [-v]"
         exit 1
       end
       unless valid_mm_mode?(@mm_mode)
@@ -609,15 +612,19 @@ module Crystal::V2
       log "  Functions: #{mir_module.functions.size}"
 
       # Step 4.1: Local MIR optimizations with monotone potential
-      log "  Optimizing MIR (local LTP loop)..."
-      mir_module.functions.each do |func|
-        if @ltp_opt
-          stats, ltp_potential = func.optimize_with_potential
-          log "    #{@verbose ? "#{func.name} -> #{stats.total} changes, potential #{ltp_potential}" : "optimized #{func.name}"}" if @verbose
-        else
-          stats = func.optimize
-          log "    #{@verbose ? "#{func.name} -> #{stats.total} changes (legacy)" : "optimized #{func.name} (legacy)"}" if @verbose
+      if @mir_opt
+        log "  Optimizing MIR (local LTP loop)..."
+        mir_module.functions.each do |func|
+          if @ltp_opt
+            stats, ltp_potential = func.optimize_with_potential
+            log "    #{@verbose ? "#{func.name} -> #{stats.total} changes, potential #{ltp_potential}" : "optimized #{func.name}"}" if @verbose
+          else
+            stats = func.optimize
+            log "    #{@verbose ? "#{func.name} -> #{stats.total} changes (legacy)" : "optimized #{func.name} (legacy)"}" if @verbose
+          end
         end
+      else
+        log "  Skipping MIR optimizations (--no-mir-opt)"
       end
 
       if @emit_mir

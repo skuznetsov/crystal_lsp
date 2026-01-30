@@ -123,6 +123,7 @@ module CrystalV2
           p.on("--pgo-gen", "Enable LLVM PGO instrumentation (clang)") { options.pgo_generate = true }
           p.on("--pgo-use FILE", "Use LLVM PGO profile data (clang)") { |f| options.pgo_profile = f }
           p.on("--no-link", "Skip final link step (leave .o file)") { options.link = false }
+          p.on("--no-mir-opt", "Skip MIR optimization passes (faster, less optimized)") { options.mir_opt = false }
           p.on("--no-ltp", "Disable LTP/WBA MIR optimization (benchmarking)") { options.ltp_opt = false }
           p.on("--slab-frame", "Use slab frame for no-escape functions (experimental)") { options.slab_frame = true }
           p.on("--mm=MODE", "Memory mode: conservative, balanced, aggressive") { |mode| options.mm_mode = mode }
@@ -227,6 +228,7 @@ module CrystalV2
         property link : Bool = true
         property emit_type_metadata : Bool = true
         property ltp_opt : Bool = true
+        property mir_opt : Bool = true
         property slab_frame : Bool = false
         property mm_mode : String = "balanced"
         property mm_stack_threshold : UInt32 = 4096_u32
@@ -700,25 +702,30 @@ module CrystalV2
         timings["mir_funcs"] = mir_module.functions.size.to_f if options.stats
 
         # Optimize MIR
-        log(options, out_io, "  Optimizing MIR...")
-        mir_opt_start = Time.instant
-        mir_module.functions.each_with_index do |func, idx|
-          begin
-            STDERR.puts "  Optimizing #{idx + 1}/#{mir_module.functions.size}: #{func.name}..." if options.progress
-            if options.ltp_opt
-              stats, ltp_potential = func.optimize_with_potential
-              if options.verbose
-                log(options, out_io, "    #{func.name} -> #{stats.total} changes, potential #{ltp_potential}")
+        if options.mir_opt
+          log(options, out_io, "  Optimizing MIR...")
+          mir_opt_start = Time.instant
+          mir_module.functions.each_with_index do |func, idx|
+            begin
+              STDERR.puts "  Optimizing #{idx + 1}/#{mir_module.functions.size}: #{func.name}..." if options.progress
+              if options.ltp_opt
+                stats, ltp_potential = func.optimize_with_potential
+                if options.verbose
+                  log(options, out_io, "    #{func.name} -> #{stats.total} changes, potential #{ltp_potential}")
+                end
+              else
+                stats = func.optimize
+                log(options, out_io, "    #{func.name} -> #{stats.total} changes (legacy)") if options.verbose
               end
-            else
-              stats = func.optimize
-              log(options, out_io, "    #{func.name} -> #{stats.total} changes (legacy)") if options.verbose
+            rescue ex : IndexError
+              raise "Index error in optimize for: #{func.name}\n#{ex.message}\n#{ex.backtrace.join("\n")}"
             end
-          rescue ex : IndexError
-            raise "Index error in optimize for: #{func.name}\n#{ex.message}\n#{ex.backtrace.join("\n")}"
           end
+          timings["mir_opt"] = (Time.instant - mir_opt_start).total_milliseconds if options.stats
+        else
+          log(options, out_io, "  Skipping MIR optimizations (--no-mir-opt)")
+          timings["mir_opt"] = 0.0 if options.stats
         end
-        timings["mir_opt"] = (Time.instant - mir_opt_start).total_milliseconds if options.stats
 
         if options.emit_mir
           mir_file = options.output + ".mir"
