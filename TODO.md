@@ -1234,6 +1234,7 @@ r2 = maybe(false)  # => nil
 - Self-host HIR pass completes (≈13 min) with `CRYSTAL_V2_STOP_AFTER_HIR=1` + AST cache enabled; no errors in log. (2026-01-xx)
 - `CRYSTAL_V2_STOP_AFTER_HIR=1` + `--stats` on `src/compiler/driver.cr` reports `hir=325660ms` (parse=179ms, prelude=108ms) with AST cache enabled (2026-01-xx).
 - **Update (2026-01-30)**: self-host HIR run with `DEBUG_HIR_TIMINGS=1 DEBUG_LOWER_METHOD_SLOW_MS=200` timed out at 120s but showed top hotspots dominated by `Object#in?` variants and tuple `in?` methods (2.5–4.4s each), plus `AstToHir#infer_type_from_expr_inner` (~1.4s), `Path#unc_share?` (~1.6s), `String::Grapheme.codepoints` (~1.0s). Indicates slowdown is broad stdlib lowering, not a single recursion loop (log: `/tmp/self_host_hir.log`).
+- **Update (2026-01-30)**: self-host HIR run with `DEBUG_LOWER_METHOD_SLOW_MS=1000` still timed out at 15 minutes; log shows hundreds of specialized `*#in?$Tuple(Int32, Int32, Int32)` instantiations across many types (dominant cost), suggesting monomorphization explosion rather than a single infinite loop (log: `/tmp/self_host_hir_long.log`).
 
 ### Bootstrap Stabilization Plan (prioritized, 2026-01-xx)
 
