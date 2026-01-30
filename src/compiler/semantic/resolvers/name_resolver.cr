@@ -388,7 +388,7 @@ module CrystalV2
           unless left_id.invalid?
             case left = @arena[left_id]
             when Frontend::PathNode
-              result.concat(collect_path_segments(left))
+              collect_path_segments(left).each { |entry| result << entry }
             when Frontend::IdentifierNode
               if slice = left.name
                 result << intern_name(slice)
@@ -400,7 +400,7 @@ module CrystalV2
         right = @arena[node.right]
         case right
         when Frontend::PathNode
-          result.concat(collect_path_segments(right))
+          collect_path_segments(right).each { |entry| result << entry }
         when Frontend::IdentifierNode
           if slice = right.name
             result << intern_name(slice)

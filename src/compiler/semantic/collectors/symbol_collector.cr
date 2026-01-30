@@ -641,7 +641,7 @@ module CrystalV2
             )
 
             # Collect diagnostics from expander
-            @diagnostics.concat(@macro_expander.diagnostics)
+            @macro_expander.diagnostics.each { |entry| @diagnostics << entry }
 
             # Visit expanded result (if valid)
             visit(expanded_id) unless expanded_id.invalid?

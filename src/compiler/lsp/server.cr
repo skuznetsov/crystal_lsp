@@ -2164,7 +2164,7 @@ module CrystalV2
               prelude.program,
               prelude.path
             )
-            symbols.concat(table_symbols)
+            table_symbols.each { |entry| symbols << entry }
           rescue ex
             debug("SymbolExtractor failed: #{ex.message} - using only origin symbols")
           end
@@ -5103,19 +5103,19 @@ module CrystalV2
           hints = [] of InlayHint
 
           # Collect type hints
-          hints.concat(collect_type_hints(
+          collect_type_hints(
             doc_state.program,
             type_context,
             identifier_symbols,
             range
-          ))
+          ).each { |entry| hints << entry }
 
           # Collect parameter hints
-          hints.concat(collect_parameter_hints(
+          collect_parameter_hints(
             doc_state.program,
             identifier_symbols,
             range
-          ))
+          ).each { |entry| hints << entry }
 
           debug("Returning #{hints.size} inlay hints")
           send_response(id, hints.to_json)
@@ -10420,7 +10420,7 @@ module CrystalV2
 
           # Refactor actions (context-based)
           if refactor_actions = create_refactor_actions(doc_state, uri, range)
-            actions.concat(refactor_actions)
+            refactor_actions.each { |entry| actions << entry }
           end
 
           actions

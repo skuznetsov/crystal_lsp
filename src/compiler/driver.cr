@@ -561,11 +561,13 @@ module Crystal::V2
         total_ms_stats.arc_count += stats.arc_count
         total_ms_stats.atomic_arc_count += stats.atomic_arc_count
         total_ms_stats.gc_count += stats.gc_count
-        if @no_gc && stats.gc_count > 0
-          total_gc += stats.gc_count
-          gc_functions << {func.name, stats.gc_count}
-          gc_details.concat(gc_allocation_details(func, result, hir_module, mm_config))
-        end
+          if @no_gc && stats.gc_count > 0
+            total_gc += stats.gc_count
+            gc_functions << {func.name, stats.gc_count}
+            gc_allocation_details(func, result, hir_module, mm_config).each do |detail|
+              gc_details << detail
+            end
+          end
       end
       log "  Memory strategies: #{format_memory_stats(total_ms_stats)}"
       if @no_gc && total_gc > 0

@@ -80,7 +80,9 @@ module CrystalV2
 
         # CRYSTAL_PATH from environment
         if crystal_path = ENV["CRYSTAL_PATH"]?
-          paths.concat(crystal_path.split(Process::PATH_DELIMITER))
+          crystal_path.split(Process::PATH_DELIMITER).each do |entry|
+            paths << entry
+          end
         end
 
         # Standard library path (if exists)
@@ -156,8 +158,10 @@ module CrystalV2
               @mutex.synchronize { @dependency_graph[file_path] << resolved }
               resolved_files << resolved
             when Array(String)
-              @mutex.synchronize { @dependency_graph[file_path].concat(resolved) }
-              resolved_files.concat(resolved)
+              @mutex.synchronize do
+                resolved.each { |entry| @dependency_graph[file_path] << entry }
+              end
+              resolved.each { |entry| resolved_files << entry }
             else
               puts "Warning: Could not resolve require '#{req_path}' from #{file_path}"
             end

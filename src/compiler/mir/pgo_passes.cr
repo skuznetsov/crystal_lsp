@@ -710,17 +710,17 @@ module Crystal::MIR
 
     private def merge_devirt_stats(s : DevirtualizationStats)
       @stats.devirtualization.calls_devirtualized += s.calls_devirtualized
-      @stats.devirtualization.targets.concat(s.targets)
+      s.targets.each { |target| @stats.devirtualization.targets << target }
     end
 
     private def merge_rc_stats(s : CrossFunctionRCStats)
       @stats.rc_elision.rc_ops_elided += s.rc_ops_elided
-      @stats.rc_elision.elision_candidates.concat(s.elision_candidates)
+      s.elision_candidates.each { |entry| @stats.rc_elision.elision_candidates << entry }
     end
 
     private def merge_memory_stats(s : MemoryRefinementStats)
       @stats.memory_refinement.allocations_refined += s.allocations_refined
-      @stats.memory_refinement.refinements.concat(s.refinements)
+      s.refinements.each { |entry| @stats.memory_refinement.refinements << entry }
     end
   end
 

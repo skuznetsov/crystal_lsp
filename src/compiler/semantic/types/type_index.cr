@@ -192,7 +192,7 @@ module CrystalV2
           elsif idx >= 0 && idx < @dense.size * 2
             # Grow dense array
             old_size = @dense.size
-            @dense.concat(Array(TypeId).new(idx - old_size + 1, TypeId::INVALID))
+            (idx - old_size + 1).times { @dense << TypeId::INVALID }
             @dense[idx] = type_id
           else
             # Use sparse storage for outliers

@@ -35,7 +35,7 @@ module CrystalV2
           flattened = [] of Type
           types.each do |type|
             if type.is_a?(UnionType)
-              flattened.concat(type.types)
+              type.types.each { |entry| flattened << entry }
             else
               flattened << type
             end

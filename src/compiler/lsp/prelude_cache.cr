@@ -311,13 +311,13 @@ module CrystalV2
             when Semantic::ClassSymbol
               # Extract instance methods from scope
               nested = extract_symbols(symbol.scope, program, symbol.file_path || file_path, name)
-              result.concat(nested)
+              nested.each { |entry| result << entry }
               # Extract class methods from class_scope (def self.*)
               class_nested = extract_symbols(symbol.class_scope, program, symbol.file_path || file_path, name)
-              result.concat(class_nested)
+              class_nested.each { |entry| result << entry }
             when Semantic::ModuleSymbol
               nested = extract_symbols(symbol.scope, program, symbol.file_path || file_path, name)
-              result.concat(nested)
+              nested.each { |entry| result << entry }
             end
           end
 

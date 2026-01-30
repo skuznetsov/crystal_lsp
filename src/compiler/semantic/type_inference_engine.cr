@@ -525,7 +525,7 @@ module CrystalV2
             # Arena can grow during macro expansion; keep cache aligned.
             new_size = @program.arena.size
             if new_size > @children_cache.size
-              @children_cache.concat(Array(Array(ExprId) | Nil).new(new_size - @children_cache.size, nil))
+              (new_size - @children_cache.size).times { @children_cache << nil }
             end
           end
           children = [] of ExprId
@@ -937,7 +937,7 @@ module CrystalV2
             if idx >= @identifier_name_cache.size
               new_size = @program.arena.size
               if new_size > @identifier_name_cache.size
-                @identifier_name_cache.concat(Array(String | Nil).new(new_size - @identifier_name_cache.size, nil))
+                (new_size - @identifier_name_cache.size).times { @identifier_name_cache << nil }
               end
             elsif cached = @identifier_name_cache[idx]?
               return cached
@@ -955,7 +955,7 @@ module CrystalV2
             if idx >= @member_name_cache.size
               new_size = @program.arena.size
               if new_size > @member_name_cache.size
-                @member_name_cache.concat(Array(String | Nil).new(new_size - @member_name_cache.size, nil))
+                (new_size - @member_name_cache.size).times { @member_name_cache << nil }
               end
             elsif cached = @member_name_cache[idx]?
               return cached
@@ -973,7 +973,7 @@ module CrystalV2
             if idx >= @node_kind_cache.size
               new_size = @program.arena.size
               if new_size > @node_kind_cache.size
-                @node_kind_cache.concat(Array(Frontend::NodeKind?).new(new_size - @node_kind_cache.size, nil))
+                (new_size - @node_kind_cache.size).times { @node_kind_cache << nil }
               end
             elsif cached = @node_kind_cache[idx]?
               return cached
@@ -998,8 +998,10 @@ module CrystalV2
           return if idx < @expr_state_version.size
           new_size = @program.arena.size
           return if new_size <= @expr_state_version.size
-          @expr_state_version.concat(Array(Int32).new(new_size - @expr_state_version.size, 0))
-          @expr_state_value.concat(Array(Int32).new(new_size - @expr_state_value.size, 0))
+          (new_size - @expr_state_version.size).times do
+            @expr_state_version << 0
+            @expr_state_value << 0
+          end
         end
 
         private def expr_state(expr_id : ExprId, epoch : Int32, state_hash : Hash(ExprId, Int32)) : Int32
@@ -3613,13 +3615,13 @@ module CrystalV2
                 methods << symbol
               when OverloadSetSymbol
                 # Phase 4B.2: Multiple overloads
-                methods.concat(symbol.overloads)
+                symbol.overloads.each { |entry| methods << entry }
               end
             end
 
             # Phase 4B.2: Inheritance search - look in superclass class_scope
             if methods.empty?
-              methods.concat(find_in_superclass(receiver_type.symbol, method_name, class_methods: true))
+              find_in_superclass(receiver_type.symbol, method_name, class_methods: true).each { |entry| methods << entry }
             end
           when ModuleType
             # Phase 102: Look for module methods (def self.* inside module)
@@ -3629,7 +3631,7 @@ module CrystalV2
               when MethodSymbol
                 methods << symbol
               when OverloadSetSymbol
-                methods.concat(symbol.overloads)
+                symbol.overloads.each { |entry| methods << entry }
               end
             end
           when InstanceType
@@ -3639,7 +3641,7 @@ module CrystalV2
               when MethodSymbol
                 methods << symbol
               when OverloadSetSymbol
-                methods.concat(symbol.overloads)
+                symbol.overloads.each { |entry| methods << entry }
               end
             end
 
@@ -3652,7 +3654,7 @@ module CrystalV2
                     when MethodSymbol
                       methods << sym
                     when OverloadSetSymbol
-                      methods.concat(sym.overloads)
+                      sym.overloads.each { |entry| methods << entry }
                     end
                   end
                 end
@@ -3661,33 +3663,33 @@ module CrystalV2
 
             # Phase 4B.2: Inheritance search - look in superclass
             if methods.empty?
-              methods.concat(find_in_superclass(receiver_type.class_symbol, method_name))
+              find_in_superclass(receiver_type.class_symbol, method_name).each { |entry| methods << entry }
             end
           when PrimitiveType
             # Phase 4B.3: Built-in methods for primitive types
-            methods.concat(get_builtin_methods(receiver_type.name, method_name))
+            get_builtin_methods(receiver_type.name, method_name).each { |entry| methods << entry }
           when ArrayType
             # Phase 9: Built-in methods for arrays
-            methods.concat(get_array_builtin_methods(receiver_type, method_name))
+            get_array_builtin_methods(receiver_type, method_name).each { |entry| methods << entry }
           when HashType
             # Phase 103C: Built-in methods for hashes
-            methods.concat(get_hash_builtin_methods(receiver_type, method_name))
+            get_hash_builtin_methods(receiver_type, method_name).each { |entry| methods << entry }
           when UnionType
             # Phase 4B.4: Find common method in all union members
             # Method can only be called on union if it exists in ALL constituent types
-            methods.concat(find_methods_in_union(receiver_type, method_name))
+            find_methods_in_union(receiver_type, method_name).each { |entry| methods << entry }
           when VirtualType
             # Phase 99: Virtual type method dispatch
             # Find method in base class and all known subclasses
-            methods.concat(find_methods_in_virtual(receiver_type, method_name))
+            find_methods_in_virtual(receiver_type, method_name).each { |entry| methods << entry }
           when ProcType
             # Phase 101: Built-in methods for procs
-            methods.concat(get_proc_builtin_methods(receiver_type, method_name))
+            get_proc_builtin_methods(receiver_type, method_name).each { |entry| methods << entry }
           end
 
           # Phase 103C: Universal methods available on all types
           if methods.empty?
-            methods.concat(get_universal_methods(receiver_type, method_name))
+            get_universal_methods(receiver_type, method_name).each { |entry| methods << entry }
           end
 
           methods
@@ -3767,7 +3769,7 @@ module CrystalV2
               when MethodSymbol
                 methods << symbol
               when OverloadSetSymbol
-                methods.concat(symbol.overloads)
+                symbol.overloads.each { |entry| methods << entry }
               end
             end
           end
@@ -3790,13 +3792,15 @@ module CrystalV2
             when MethodSymbol
               methods << symbol
             when OverloadSetSymbol
-              methods.concat(symbol.overloads)
+              symbol.overloads.each { |entry| methods << entry }
             end
           end
 
           # Recursively search in superclass's superclass (and its included modules)
           if methods.empty?
-            methods.concat(find_in_superclass(superclass_symbol, method_name, class_methods: class_methods, visited: visited))
+            find_in_superclass(superclass_symbol, method_name, class_methods: class_methods, visited: visited).each do |entry|
+              methods << entry
+            end
           end
 
           methods
@@ -3875,13 +3879,13 @@ module CrystalV2
             when MethodSymbol
               methods << symbol
             when OverloadSetSymbol
-              methods.concat(symbol.overloads)
+              symbol.overloads.each { |entry| methods << entry }
             end
           end
 
           # If not found in base, search superclass chain
           if methods.empty?
-            methods.concat(find_in_superclass(base_class, method_name))
+            find_in_superclass(base_class, method_name).each { |entry| methods << entry }
           end
 
           # For virtual dispatch, we need to also check subclasses
@@ -3919,7 +3923,7 @@ module CrystalV2
                 when MethodSymbol
                   overrides << method_sym
                 when OverloadSetSymbol
-                  overrides.concat(method_sym.overloads)
+                  method_sym.overloads.each { |entry| overrides << entry }
                 end
               end
             end

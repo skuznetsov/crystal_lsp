@@ -647,7 +647,9 @@ module CrystalV2
           if options.no_gc && stats.gc_count > 0
             total_gc += stats.gc_count
             gc_functions << {func.name, stats.gc_count}
-            gc_details.concat(gc_allocation_details(func, result, hir_module, memory_config))
+            gc_allocation_details(func, result, hir_module, memory_config).each do |detail|
+              gc_details << detail
+            end
           end
         end
         timings["escape"] = (Time.instant - escape_start).total_milliseconds if options.stats
@@ -1757,7 +1759,9 @@ module CrystalV2
         libraries = [] of String
         text.scan(/@\[\s*Link\s*\((.*?)\)\s*\]/m) do |match|
           args_text = match[1]
-          libraries.concat(parse_link_annotation_args(args_text))
+          parse_link_annotation_args(args_text).each do |entry|
+            libraries << entry
+          end
         end
         libraries
       end
