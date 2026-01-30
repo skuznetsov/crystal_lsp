@@ -1111,6 +1111,7 @@ r2 = maybe(false)  # => nil
   - Update (2026-01-30): avoid duplicate pending enqueues by checking state (commit `d7a9ecc`).
   - Update (2026-01-30): added `CRYSTAL_V2_DISABLE_INLINE_YIELD=1` to skip inline yield expansion during lowering (commit `1718fa6`) for faster debugging; fallback uses normal block lowering.
   - Update (2026-01-30): added `CRYSTAL_V2_LOWER_DEPTH_LIMIT` to allow limited recursive lowering before deferring to pending queue (commit `262c198`). Default 0 preserves current behavior; try 2–3 for self-host.
+  - Update (2026-01-30): added incremental stripped-overload index + cached `parse_method_name` to reduce repeated scans during lowering (commit pending). Self-host HIR lowering still slow; pending queue remains ~5k on first iteration.
 
 **Regressions (open):**
 - [ ] GH #10 (crystal_lsp): prelude build links for minimal `fib.cr`, but runtime segfault persists.

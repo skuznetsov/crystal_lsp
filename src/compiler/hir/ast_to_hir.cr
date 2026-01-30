@@ -343,6 +343,9 @@ module Crystal::HIR
     # Parse method name in single pass - O(n) instead of O(3n) for three separate splits
     @[AlwaysInline]
     private def parse_method_name(name : String) : MethodNameParts
+      if cached = @method_name_parts_cache[name]?
+        return cached
+      end
       sep_idx : Int32? = nil
       sep_char : Char? = nil
       dollar_idx : Int32? = nil
@@ -387,7 +390,7 @@ module Crystal::HIR
         base = dollar_idx ? name.byte_slice(0, dollar_idx) : name
       end
 
-      MethodNameParts.new(
+      parts = MethodNameParts.new(
         owner: owner,
         method: method,
         suffix: suffix,
@@ -396,6 +399,8 @@ module Crystal::HIR
         is_instance: sep_char == '#',
         is_class: sep_char == '.'
       )
+      @method_name_parts_cache[name] = parts
+      parts
     end
 
     # Quick check helpers that don't allocate
@@ -657,6 +662,10 @@ module Crystal::HIR
     @strip_generic_receiver_cache : Hash(String, String) = {} of String => String
     # Cache for function_def_overloads stripped receiver lookups: stripped base → overload list
     @function_def_overloads_stripped_cache : Hash(String, Array(String)) = {} of String => Array(String)
+    # Incremental index: stripped base → overload list (avoid full scan per lookup)
+    @function_def_overloads_stripped_index : Hash(String, Array(String)) = {} of String => Array(String)
+    # Cache parsed method name parts to avoid repeated scans in hot paths.
+    @method_name_parts_cache : Hash(String, MethodNameParts) = {} of String => MethodNameParts
 
     # ═══════════════════════════════════════════════════════════════════════════
     # FUNCTION LOWERING STATE MACHINE
@@ -13917,6 +13926,9 @@ module Crystal::HIR
         if cached = @function_def_overloads_stripped_cache[stripped]?
           return cached
         end
+        if indexed = @function_def_overloads_stripped_index[stripped]?
+          return indexed
+        end
         if list = @function_def_overloads[stripped]?
           return list
         end
@@ -13955,6 +13967,13 @@ module Crystal::HIR
           list << key unless list.includes?(key)
         else
           @function_def_overloads[base] = [key]
+        end
+        stripped_base = strip_generic_receiver_from_method_name(base)
+        stripped_list = @function_def_overloads_stripped_index[stripped_base]?
+        if stripped_list
+          stripped_list << key unless stripped_list.includes?(key)
+        else
+          @function_def_overloads_stripped_index[stripped_base] = [key]
         end
         @function_param_stats[key] = build_param_stats(def_node) unless @function_param_stats.has_key?(key)
       end
