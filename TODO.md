@@ -43,6 +43,7 @@ about syntax or types and should match what the original compiler would report.
 - [x] If-condition short-circuit lowering branches directly (avoids phi use-before-def) (2026-01-xx)
 - [x] HIR->MIR lowering uses CFG order to avoid forward references (2026-01-xx)
 - [x] LLVM union returns treat null as nil union (2026-01-xx)
+- [x] LLVM unsigned int → float casts use `uitofp` (and ptr→float uses `uitofp`) (2026-01-30)
 
 ### Pending (1 test)
 - 1 invalid ASM syntax test (intentionally pending)
@@ -1073,6 +1074,15 @@ r2 = maybe(false)  # => nil
   - `_property__Pointer_Slice_Pointer_Tuple_Array_Crystal__DWARF__LineNumbers__Row___UInt64____`
   - Generated detailed missing trace log with `CRYSTAL_V2_MISSING_TRACE=1`:
     - `/private/tmp/bootstrap_array_full.missing_trace.log` (shows unlowered callsites like `Slice(Fiber)#unsafe_fetch$Int32`, `Hash(Int32, String)#get_entry$Int32`, `Time::Format::Formatter#time_zone_z_or_offset$NamedTuple_double_splat`, `Object#to_s$IO` in several receivers). Use this to map callsites → def lowering gaps.
+- Update (2026-01-30): full-prelude `bootstrap_array` now links with **3** missing symbols (see `/private/tmp/bootstrap_array_full.link.log`):
+  - `_UInt32 | Hash(Tuple(UInt64, Symbol), Nil)#to_i32!`
+  - `_UInt8#[](Int32)`
+  - `_UInt8#downcase(IO::Unicode::CaseOptions)`
+  - HIR dump: `/private/tmp/bootstrap_array_full_hir.hir`.
+  - Suspected causes:
+    - LibC `alias Char = UInt8` leaking into global alias registry (Char? → UInt8 | Nil) → `UInt8#downcase`.
+    - Block return inference in `Array#map`/`Array#sort_by!` picking `UInt8` for `Char`/`Char?`, leading to `Array(UInt8)` and `UInt8#[]`.
+    - `Hash(Tuple(UInt64, Symbol), Nil)#to_i32!` due to return-type cache sticking to union when a concrete return exists.
   - Action items:
     - `MachO#read_section?` still mangles to `$block` (no typed suffix) in HIR; fix callsite arg typing or remangling for block calls.
     - `Int#upto` arity mangling still produces `_Int_upto_arity1`; ensure lowering emits the correct arity-1 overload or normalize arity suffixes.
@@ -2044,3 +2054,20 @@ is risky. The critical ARM64 paths are fixed.
    - DoD: missing symbols drop between pass 1 and pass 2 without large time regression.
 
 **Rationale**: Keeps monomorphization lazy but prevents “recorded-only” symbols from being dropped.
+
+### 8.11 Handoff Notes (2026-01-30)
+- HIR alias qualification now respects namespace context (module/class/lib aliases) and normalizes tuple literal type names during alias/type normalization.
+- Enum instance methods now attached at enum registration; enum instance dispatch uses included `Enum` methods.
+- Yield inference now prefers the current inline-yield return stack entry; falls back to parent stack when missing (aims to fix nested block return inference).
+- `block_param_types_for_call` added to infer block param types from callsite; used for inline block return inference.
+- Pointer `value` inference uses descriptor name (Pointer(T) → T) without overriding concrete receiver type.
+- Lib alias target resolution now qualifies in context and avoids leaking bare short aliases.
+
+Pending follow-ups:
+- Verify the LibC alias leakage fix eliminates `UInt8#downcase` in `String#underscore`.
+- Fix `Array#map`/`Array#sort_by!` block return inference so `Char` does not degrade to `UInt8` (remove `UInt8#[]`).
+- Ensure `get_function_return_type` prefers concrete lowered return type over union cache; confirm `Hash#key_hash` returns concrete type and removes `#to_i32!` symbol.
+
+### 8.12 Platform Parity (Bonus)
+- [ ] Track LLVM target parity (all targets from `llvm-config --targets-builtin`) and document deltas.
+- [ ] Windows support parity with Crystal (post-bootstrap).
