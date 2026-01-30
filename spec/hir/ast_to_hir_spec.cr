@@ -1740,10 +1740,10 @@ describe Crystal::HIR::AstToHir do
 
       foo_calls = foo.not_nil!.blocks.flat_map(&.instructions)
         .select { |inst| inst.is_a?(Crystal::HIR::Call) }
-        .map { |inst| inst.as(Crystal::HIR::Call).name }
+        .map { |inst| inst.as(Crystal::HIR::Call).method_name }
       bar_calls = bar.not_nil!.blocks.flat_map(&.instructions)
         .select { |inst| inst.is_a?(Crystal::HIR::Call) }
-        .map { |inst| inst.as(Crystal::HIR::Call).name }
+        .map { |inst| inst.as(Crystal::HIR::Call).method_name }
 
       foo_calls.any? { |name| name.includes?("to_i") }.should be_false
       bar_calls.any? { |name| name.includes?("value") }.should be_false
