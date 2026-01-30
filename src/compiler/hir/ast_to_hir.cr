@@ -19874,6 +19874,9 @@ module Crystal::HIR
       pending_sources_each = pending_sources_mode == "each"
       pending_sources_top = ENV["DEBUG_PENDING_SOURCES_TOP"]?.try(&.to_i?) || 15
       pending_sources_samples = ENV.has_key?("DEBUG_PENDING_SOURCES_SAMPLES")
+      mono_sources_each = ENV.has_key?("DEBUG_MONO_SOURCES_EACH")
+      mono_sources_top = ENV["DEBUG_MONO_SOURCES_TOP"]?.try(&.to_i?) || 15
+      mono_sources_samples = ENV.has_key?("DEBUG_MONO_SOURCES_SAMPLES")
 
       while pending_functions.size > 0 && iteration < max_iterations
         # Take a snapshot of currently pending functions
@@ -19895,6 +19898,20 @@ module Crystal::HIR
                     samples.each do |sample|
                       STDERR.puts "    - #{sample}"
                     end
+                  end
+                end
+              end
+          end
+          if mono_sources_each && !@mono_source_counts.empty?
+            STDERR.puts "[MONO_SOURCES] top=#{mono_sources_top} total=#{@mono_source_counts.size}"
+            @mono_source_counts.to_a
+              .sort_by { |entry| -entry[1] }
+              .first(mono_sources_top)
+              .each do |name, count|
+                STDERR.puts "  #{name}: #{count}"
+                if mono_sources_samples
+                  if samples = @mono_source_samples[name]?
+                    samples.each { |sample| STDERR.puts "    - #{sample}" }
                   end
                 end
               end

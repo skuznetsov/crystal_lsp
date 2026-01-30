@@ -1116,6 +1116,7 @@ r2 = maybe(false)  # => nil
   - Update (2026-01-30): added pending source samples (DEBUG_PENDING_SOURCES_SAMPLES) to show concrete specializations. Top fan-out comes from Array/Pointer inspect/to_s/in? for many generic instantiations (log `/tmp/self_host_hir.log`).
   - Update (2026-01-30): slow-lowering hotspots (DEBUG_LOWER_METHOD_SLOW_MS=200) include LSP AstCache load/save, parser parse_program/parse_statement, driver parse_file_recursive, and Array(Pointer(Void))#flat_map/concat; see `/tmp/self_host_hir_slow.log`.
   - Update (2026-01-30): monomorphization counters (DEBUG_MONO_SOURCES) show top generic specializations in bootstrap_array: Pointer, Iterator::WithIndexIterator, Array, Slice, StaticArray, Indexable::ItemIterator (log `/tmp/bootstrap_array_hir.log`). Use this to prioritize specialization reduction.
+  - Update (2026-01-30): self-host mono sources (DEBUG_MONO_SOURCES_EACH) show top specializations by base: Hash, Array, Pointer, StaticArray, Set, Frontend::SmallVec (log `/tmp/self_host_hir.log`). This is the primary fan-out path in self-host.
 
 **Regressions (open):**
 - [ ] GH #10 (crystal_lsp): prelude build links for minimal `fib.cr`, but runtime segfault persists.
