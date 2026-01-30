@@ -1479,6 +1479,7 @@ The return_type=16 (NIL) for `to_s` methods is incorrect - should be String type
 - **Fix applied**: constant inference for `begin` blocks + uppercase identifiers; `String::CHAR_TO_DIGIT`/`CHAR_TO_DIGIT62` now infer as `StaticArray(Int8, 256)`, so `to_unsafe` resolves to `StaticArray#to_unsafe` and the `Nlist64::Type#to_unsafe`/`___Int32` fallback disappears from HIR (2026-02-xx).
 - **Update (2026-02-xx)**: full-prelude `bootstrap_array` link now reports **31 missing symbols** (see `/private/tmp/bootstrap_array_full.link.log` and `/private/tmp/missing_symbols_latest.txt`).
 - **Update (2026-02-xx)**: canonical full-prelude `bootstrap_array` run now reports **4 missing symbols** (see `/tmp/bootstrap_array_full.trace.log` and `/tmp/missing_symbols_bootstrap_array.txt`): `_Float__Printer__Dragonbox__WUInt__UInt128_unsafe_add__UInt64`, `_Object____`, `_block_each_block`, `_property__Pointer__self_`.
+- **Fix applied**: LLVM phi forward refs now require a real defining instruction (avoid undefined `%rN` in llc). Prevents `%r8` undefined in `ENV.fetch` phi (self-host IR). Needs full self-host re-run to confirm (2026-01-30).
 
 #### Issue 6: ExprId -1 in inline_loop_vars_union (union keyword) - FIXED (2026-01-xx)
 - **Symptom**: self-host compile crashed with `ExprId out of bounds: -1` while lowering `AstToHir#inline_loop_vars_union`.
