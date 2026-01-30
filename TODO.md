@@ -1117,6 +1117,7 @@ r2 = maybe(false)  # => nil
   - Update (2026-01-30): slow-lowering hotspots (DEBUG_LOWER_METHOD_SLOW_MS=200) include LSP AstCache load/save, parser parse_program/parse_statement, driver parse_file_recursive, and Array(Pointer(Void))#flat_map/concat; see `/tmp/self_host_hir_slow.log`.
   - Update (2026-01-30): monomorphization counters (DEBUG_MONO_SOURCES) show top generic specializations in bootstrap_array: Pointer, Iterator::WithIndexIterator, Array, Slice, StaticArray, Indexable::ItemIterator (log `/tmp/bootstrap_array_hir.log`). Use this to prioritize specialization reduction.
   - Update (2026-01-30): self-host mono sources (DEBUG_MONO_SOURCES_EACH) show top specializations by base: Hash, Array, Pointer, StaticArray, Set, Frontend::SmallVec (log `/tmp/self_host_hir.log`). This is the primary fan-out path in self-host.
+  - Update (2026-01-30): self-host mono callers (DEBUG_MONO_CALLER) show most monomorphization triggered during `AstToHir#initialize` (Hash/Array), plus `LSP::AstCache#read_node` and `Module#initialize` (log `/tmp/self_host_mono.log`). This suggests high compile-time specialization load from compiler internals.
 
 **Regressions (open):**
 - [ ] GH #10 (crystal_lsp): prelude build links for minimal `fib.cr`, but runtime segfault persists.

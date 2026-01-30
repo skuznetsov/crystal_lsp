@@ -701,6 +701,8 @@ module Crystal::HIR
     # Monomorphization samples (debug only): base name → specialized names.
     @mono_source_samples : Hash(String, Array(String)) = {} of String => Array(String)
     @mono_sources_reported : Bool = false
+    # Monomorphization caller context counts (debug only): "base@caller" → count
+    @mono_caller_counts : Hash(String, Int32) = {} of String => Int32
 
     # Tracks nesting depth of lowering operations.
     # When > 0, new lower requests are queued instead of executed immediately.
@@ -10945,6 +10947,11 @@ module Crystal::HIR
       debug_hook("mono.start", "base=#{base_name} name=#{specialized_name} args=#{type_args}")
       if ENV["DEBUG_MONO_SOURCES"]?
         @mono_source_counts[base_name] = (@mono_source_counts[base_name]? || 0) + 1
+        if ENV["DEBUG_MONO_CALLER"]?
+          caller = "#{@current_class || ""}##{@current_method || ""}"
+          key = "#{base_name}@#{caller}"
+          @mono_caller_counts[key] = (@mono_caller_counts[key]? || 0) + 1
+        end
         if ENV["DEBUG_MONO_SOURCES_SAMPLES"]?
           samples = @mono_source_samples[base_name]? || [] of String
           if samples.size < 3 && !samples.includes?(specialized_name)
@@ -19660,6 +19667,16 @@ module Crystal::HIR
               end
             end
           end
+        if ENV["DEBUG_MONO_CALLER"]? && !@mono_caller_counts.empty?
+          caller_top = ENV["DEBUG_MONO_CALLER_TOP"]?.try(&.to_i?) || 20
+          STDERR.puts "[MONO_CALLERS] top=#{caller_top} total=#{@mono_caller_counts.size}"
+          @mono_caller_counts.to_a
+            .sort_by { |entry| -entry[1] }
+            .first(caller_top)
+            .each do |key, count|
+              STDERR.puts "  #{key}: #{count}"
+            end
+        end
         @mono_sources_reported = true
       end
     end
@@ -19914,6 +19931,16 @@ module Crystal::HIR
                     samples.each { |sample| STDERR.puts "    - #{sample}" }
                   end
                 end
+              end
+          end
+          if ENV["DEBUG_MONO_CALLER"]? && !@mono_caller_counts.empty?
+            caller_top = ENV["DEBUG_MONO_CALLER_TOP"]?.try(&.to_i?) || 20
+            STDERR.puts "[MONO_CALLERS] top=#{caller_top} total=#{@mono_caller_counts.size}"
+            @mono_caller_counts.to_a
+              .sort_by { |entry| -entry[1] }
+              .first(caller_top)
+              .each do |key, count|
+                STDERR.puts "  #{key}: #{count}"
               end
           end
         end
