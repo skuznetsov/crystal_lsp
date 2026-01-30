@@ -11,7 +11,7 @@ about syntax or types and should match what the original compiler would report.
 ## Current Status (2026-01-30)
 
 ### Test Coverage
-- **3400+ tests**, 5 failures (see below), minimal pending
+- **3400+ tests**, 0 failures in `spec/hir/ast_to_hir_spec.cr` (2 pending)
 - **1390 test cases** ported from Crystal's original `parser_spec.cr`
 - **97.6% parser compatibility** with original Crystal
 
@@ -48,13 +48,8 @@ about syntax or types and should match what the original compiler would report.
 ### Pending (1 test)
 - 1 invalid ASM syntax test (intentionally pending)
 
-### Recent Spec Failures (needs fixes)
-- `spec/hir/ast_to_hir_spec.cr` (5 failures):
-  - enum symbol arguments (double splat mangling + enum value typing)
-  - generic block return types (substitution)
-  - typeof in type positions (nested `Enumerable.element_type`)
-  - block param types from callee signature
-  - block param types with generic receiver
+### Recent Spec Failures (resolved)
+- `spec/hir/ast_to_hir_spec.cr`: all prior failures fixed; only 2 pending remain (module-typed receiver matching)
 
 ---
 

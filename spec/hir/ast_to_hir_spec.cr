@@ -257,7 +257,7 @@ describe Crystal::HIR::AstToHir do
       # Symbol :sched is converted to enum value 0
       text.should contain("literal 0 : Int32")
       # Double splat methods use _double_splat suffix in mangled name
-      text.should contain("call trace$NamedTuple_double_splat")
+      text.should contain("call trace$Section_NamedTuple_double_splat")
     end
 
     it "resolves module-qualified enum types in context" do
@@ -279,7 +279,7 @@ describe Crystal::HIR::AstToHir do
       converter = lower_program_with_main(code)
       text = converter.module.to_s
 
-      text.should contain("call Crystal.trace$Int32_NamedTuple")
+      text.should contain("call Crystal.trace$Crystal::Tracing::Section_NamedTuple_double_splat")
     end
   end
 

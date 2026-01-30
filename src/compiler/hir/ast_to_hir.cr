@@ -651,6 +651,8 @@ module Crystal::HIR
     # Cache for def_contains_yield? keyed by DefNode object_id → Bool.
     # Same DefNode always yields the same result regardless of fallback arena.
     @yield_check_cache : Hash(UInt64, Bool) = {} of UInt64 => Bool
+    # Cache for def_contains_block_call? keyed by DefNode object_id → Bool.
+    @block_call_check_cache : Hash(UInt64, Bool) = {} of UInt64 => Bool
     # Cache for resolve_arena_for_def keyed by DefNode object_id → resolved arena.
     @arena_for_def_cache : Hash(UInt64, CrystalV2::Compiler::Frontend::ArenaLike) = {} of UInt64 => CrystalV2::Compiler::Frontend::ArenaLike
     # Deduplicated set of unique arenas (by object_id) for resolve_arena_for_def candidates.
@@ -3313,6 +3315,9 @@ module Crystal::HIR
     # This handles the case where parser stores typeof(...) as an identifier name
     private def resolve_typeof_string_expr(expr : String) : String
       expr = expr.strip
+      if resolved = resolve_element_type_expression(expr)
+        return normalize_typeof_type_name(resolved)
+      end
 
       # Split on dots to get the call chain
       # Handle patterns like: str.to_unsafe.value, str.to_slice, @buffer.to_unsafe
@@ -3481,6 +3486,10 @@ module Crystal::HIR
             if inner_type == "Pointer(Void)" && arg_node.is_a?(CrystalV2::Compiler::Frontend::IdentifierNode)
               if type_name = lookup_typeof_local_name(String.new(arg_node.name))
                 inner_type = type_name
+              elsif locals = @current_typeof_locals
+                if ref = locals[String.new(arg_node.name)]?
+                  inner_type = get_type_name_from_ref(ref)
+                end
               end
             end
             element_type = element_type_for_type_name(inner_type)
@@ -15278,6 +15287,10 @@ module Crystal::HIR
       body.any? { |expr_id| contains_yield_in_expr?(expr_id) }
     end
 
+    private def contains_block_call?(body : Array(ExprId), block_name : String) : Bool
+      body.any? { |expr_id| contains_block_call_in_expr?(expr_id, block_name) }
+    end
+
     private def macro_text_contains_yield?(text : String) : Bool
       idx = 0
       bytesize = text.bytesize
@@ -15347,6 +15360,29 @@ module Crystal::HIR
         end
       end
       false
+    end
+
+    private def def_contains_block_call?(node : CrystalV2::Compiler::Frontend::DefNode, arena : CrystalV2::Compiler::Frontend::ArenaLike) : Bool
+      cache_key = node.object_id
+      if cached = @block_call_check_cache[cache_key]?
+        return cached
+      end
+      result = def_contains_block_call_uncached?(node, arena)
+      @block_call_check_cache[cache_key] = result
+      result
+    end
+
+    private def def_contains_block_call_uncached?(node : CrystalV2::Compiler::Frontend::DefNode, arena : CrystalV2::Compiler::Frontend::ArenaLike) : Bool
+      params = node.params
+      return false unless params
+      block_param = params.find(&.is_block)
+      return false unless block_param
+      return false unless name_slice = block_param.name
+      block_name = String.new(name_slice)
+      return false if block_name.empty?
+      return false unless body = node.body
+      resolved_arena = resolve_arena_for_def(node, arena)
+      with_arena(resolved_arena) { contains_block_call?(body, block_name) }
     end
 
     private def def_accepts_block_param?(node : CrystalV2::Compiler::Frontend::DefNode) : Bool
@@ -15927,6 +15963,130 @@ module Crystal::HIR
         end
         return true if node.else_body && contains_yield?(node.else_body.not_nil!)
         return true if node.ensure_body && contains_yield?(node.ensure_body.not_nil!)
+        false
+      else
+        false
+      end
+    end
+
+    private def contains_block_call_in_expr?(expr_id : ExprId, block_name : String) : Bool
+      return false if expr_id.invalid?
+      node = node_for_expr(expr_id)
+      return false unless node
+      case node
+      when CrystalV2::Compiler::Frontend::AssignNode
+        contains_block_call_in_expr?(node.target, block_name) || contains_block_call_in_expr?(node.value, block_name)
+      when CrystalV2::Compiler::Frontend::MultipleAssignNode
+        return true if contains_block_call_in_expr?(node.value, block_name)
+        node.targets.any? { |target| contains_block_call_in_expr?(target, block_name) }
+      when CrystalV2::Compiler::Frontend::ReturnNode
+        node.value ? contains_block_call_in_expr?(node.value.not_nil!, block_name) : false
+      when CrystalV2::Compiler::Frontend::MemberAccessNode
+        contains_block_call_in_expr?(node.object, block_name)
+      when CrystalV2::Compiler::Frontend::CallNode
+        if callee_id = node.callee
+          callee_node = node_for_expr(callee_id)
+          if callee_node.is_a?(CrystalV2::Compiler::Frontend::MemberAccessNode)
+            if String.new(callee_node.member) == "call"
+              obj_node = node_for_expr(callee_node.object)
+              if obj_node.is_a?(CrystalV2::Compiler::Frontend::IdentifierNode) &&
+                 String.new(obj_node.name) == block_name
+                return true
+              end
+            end
+          end
+          return true if contains_block_call_in_expr?(callee_id, block_name)
+        end
+        node.args.each do |arg|
+          return true if contains_block_call_in_expr?(arg, block_name)
+        end
+        if block_id = node.block
+          return true if contains_block_call_in_expr?(block_id, block_name)
+        end
+        if named = node.named_args
+          named.each do |na|
+            return true if contains_block_call_in_expr?(na.value, block_name)
+          end
+        end
+        false
+      when CrystalV2::Compiler::Frontend::UnaryNode
+        contains_block_call_in_expr?(node.operand, block_name)
+      when CrystalV2::Compiler::Frontend::BinaryNode
+        contains_block_call_in_expr?(node.left, block_name) || contains_block_call_in_expr?(node.right, block_name)
+      when CrystalV2::Compiler::Frontend::TernaryNode
+        contains_block_call_in_expr?(node.condition, block_name) ||
+          contains_block_call_in_expr?(node.true_branch, block_name) ||
+          contains_block_call_in_expr?(node.false_branch, block_name)
+      when CrystalV2::Compiler::Frontend::GroupingNode
+        contains_block_call_in_expr?(node.expression, block_name)
+      when CrystalV2::Compiler::Frontend::MacroExpressionNode
+        contains_block_call_in_expr?(node.expression, block_name)
+      when CrystalV2::Compiler::Frontend::MacroIfNode
+        return true if contains_block_call_in_expr?(node.condition, block_name)
+        return true if contains_block_call_in_expr?(node.then_body, block_name)
+        if node.else_body
+          return true if contains_block_call_in_expr?(node.else_body.not_nil!, block_name)
+        end
+        false
+      when CrystalV2::Compiler::Frontend::MacroForNode
+        return true if contains_block_call_in_expr?(node.iterable, block_name)
+        contains_block_call_in_expr?(node.body, block_name)
+      when CrystalV2::Compiler::Frontend::MacroLiteralNode
+        macro_literal_contains_yield?(node)
+      when CrystalV2::Compiler::Frontend::ConstantNode
+        contains_block_call_in_expr?(node.value, block_name)
+      when CrystalV2::Compiler::Frontend::IfNode
+        contains_block_call_in_expr?(node.condition, block_name) ||
+          contains_block_call?(node.then_body, block_name) ||
+          (node.elsifs && node.elsifs.not_nil!.any? do |branch|
+            contains_block_call_in_expr?(branch.condition, block_name) || contains_block_call?(branch.body, block_name)
+          end) ||
+          (node.else_body ? contains_block_call?(node.else_body.not_nil!, block_name) : false)
+      when CrystalV2::Compiler::Frontend::UnlessNode
+        contains_block_call_in_expr?(node.condition, block_name) ||
+          contains_block_call?(node.then_branch, block_name) ||
+          (node.else_branch ? contains_block_call?(node.else_branch.not_nil!, block_name) : false)
+      when CrystalV2::Compiler::Frontend::WhileNode
+        contains_block_call_in_expr?(node.condition, block_name) || contains_block_call?(node.body, block_name)
+      when CrystalV2::Compiler::Frontend::UntilNode
+        contains_block_call_in_expr?(node.condition, block_name) || contains_block_call?(node.body, block_name)
+      when CrystalV2::Compiler::Frontend::LoopNode
+        contains_block_call?(node.body, block_name)
+      when CrystalV2::Compiler::Frontend::BlockNode
+        contains_block_call?(node.body, block_name)
+      when CrystalV2::Compiler::Frontend::ProcLiteralNode
+        contains_block_call?(node.body, block_name)
+      when CrystalV2::Compiler::Frontend::CaseNode
+        node.when_branches.any? { |w| contains_block_call?(w.body, block_name) } ||
+          (node.else_branch ? contains_block_call?(node.else_branch.not_nil!, block_name) : false)
+      when CrystalV2::Compiler::Frontend::ArrayLiteralNode
+        return true if node.elements.any? { |el| contains_block_call_in_expr?(el, block_name) }
+        node.of_type ? contains_block_call_in_expr?(node.of_type.not_nil!, block_name) : false
+      when CrystalV2::Compiler::Frontend::TupleLiteralNode
+        node.elements.any? { |el| contains_block_call_in_expr?(el, block_name) }
+      when CrystalV2::Compiler::Frontend::HashLiteralNode
+        node.entries.any? do |entry|
+          contains_block_call_in_expr?(entry.key, block_name) || contains_block_call_in_expr?(entry.value, block_name)
+        end
+      when CrystalV2::Compiler::Frontend::NamedTupleLiteralNode
+        node.entries.any? { |entry| contains_block_call_in_expr?(entry.value, block_name) }
+      when CrystalV2::Compiler::Frontend::StringInterpolationNode
+        node.pieces.any? do |piece|
+          piece.kind == CrystalV2::Compiler::Frontend::StringPiece::Kind::Expression &&
+            piece.expr && contains_block_call_in_expr?(piece.expr.not_nil!, block_name)
+        end
+      when CrystalV2::Compiler::Frontend::IndexNode
+        return true if contains_block_call_in_expr?(node.object, block_name)
+        node.indexes.any? { |idx| contains_block_call_in_expr?(idx, block_name) }
+      when CrystalV2::Compiler::Frontend::RangeNode
+        contains_block_call_in_expr?(node.begin_expr, block_name) || contains_block_call_in_expr?(node.end_expr, block_name)
+      when CrystalV2::Compiler::Frontend::BeginNode
+        return true if contains_block_call?(node.body, block_name)
+        if clauses = node.rescue_clauses
+          return true if clauses.any? { |cl| contains_block_call?(cl.body, block_name) }
+        end
+        return true if node.else_body && contains_block_call?(node.else_body.not_nil!, block_name)
+        return true if node.ensure_body && contains_block_call?(node.ensure_body.not_nil!, block_name)
         false
       else
         false
@@ -29750,6 +29910,19 @@ module Crystal::HIR
           extra_ids.each { |arg_id| callsite_arg_enum_names << enum_map[arg_id]? }
         end
       end
+      if callsite_arg_enum_names
+        callsite_arg_enum_names.each_with_index do |enum_name, idx|
+          next unless enum_name
+          enum_ref = type_ref_for_name(enum_name)
+          next if enum_ref == TypeRef::VOID
+          if idx < arg_types.size
+            arg_types[idx] = enum_ref
+          end
+          if idx < callsite_arg_types.size
+            callsite_arg_types[idx] = enum_ref
+          end
+        end
+      end
       if receiver_id && method_name.ends_with?("=") && args.size == 1 &&
          arg_types.all? { |t| t == TypeRef::VOID }
         if inferred = ivar_type_for_setter(ctx, receiver_id, method_name)
@@ -30245,7 +30418,8 @@ module Crystal::HIR
               yield_name, yield_def = entry
               callee_arena = @function_def_arenas[yield_name]? || @arena
               has_yield = def_contains_yield?(yield_def, callee_arena)
-              if has_yield || def_accepts_block_param?(yield_def)
+              has_block_call = def_contains_block_call?(yield_def, callee_arena)
+              if has_yield || has_block_call
                 @yield_functions.add(yield_name) if has_yield
                 debug_hook("call.inline.yield", "callee=#{yield_name} current=#{@current_class || ""}")
                 return inline_yield_function(ctx, yield_def, yield_name, receiver_id, call_arg_values, block_cast, block_param_types_inline, callee_arena)
@@ -32042,6 +32216,13 @@ module Crystal::HIR
         elsif has_double_splat
           score -= 1
         end
+        if call_has_named_args && has_double_splat
+          if name.includes?("_double_splat")
+            score += 2
+          else
+            score -= 2
+          end
+        end
         if prefer_splat
           if has_splat
             score += 2
@@ -32242,6 +32423,8 @@ module Crystal::HIR
           lit = Literal.new(ctx.next_id, TypeRef::INT32, value)
           ctx.emit(lit)
           ctx.register_type(lit.id, TypeRef::INT32)
+          enum_type_name = resolve_type_alias_chain(expected_type_name)
+          (@enum_value_types ||= {} of ValueId => String)[lit.id] = enum_type_name
           return lit.id
         end
       end
