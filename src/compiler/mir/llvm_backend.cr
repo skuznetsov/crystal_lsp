@@ -4349,6 +4349,22 @@ module Crystal::MIR
         op = dst_unsigned ? "fptoui" : "fptosi"
       end
 
+      # Guard: float/double to ptr can't be bitcast directly. Bitcast to int bits, then inttoptr.
+      if op == "bitcast" && is_src_float && dst_type == "ptr"
+        base_name = name.lstrip('%')
+        if src_type == "double"
+          emit "%#{base_name}.float_bits = bitcast double #{value} to i64"
+          emit "#{name} = inttoptr i64 %#{base_name}.float_bits to ptr"
+        else
+          emit "%#{base_name}.float_bits = bitcast float #{value} to i32"
+          emit "%#{base_name}.float_bits.ext = zext i32 %#{base_name}.float_bits to i64"
+          emit "#{name} = inttoptr i64 %#{base_name}.float_bits.ext to ptr"
+        end
+        record_emitted_type(name, "ptr")
+        @value_types[inst.id] = TypeRef::POINTER
+        return
+      end
+
       # Guard: sext/zext/trunc can't be used with ptr - use ptrtoint instead
       if (op == "sext" || op == "zext" || op == "trunc") && src_type == "ptr"
         # ptr to int - use ptrtoint
@@ -4931,9 +4947,10 @@ module Crystal::MIR
         is_void_value = val_llvm_type_for_void == "void"
 
         # Check if this is a forward reference (value defined but not yet emitted)
-        # Prepass collects all types, so if value has a type, it's a valid forward reference
+        # Prepass collects all types, but we must ensure the value has a real def.
         # IMPORTANT: void values are NOT valid forward references - they don't emit %rN
-        is_forward_ref = !val_emitted && !val_is_const && @value_types.has_key?(val) && !is_void_value
+        def_inst = find_def_inst(val)
+        is_forward_ref = !val_emitted && !val_is_const && def_inst && @value_types.has_key?(val) && !is_void_value
 
         if (!val_emitted || is_void_value) && !val_is_const && !is_forward_ref
           # Truly undefined value - use safe default based on phi type
