@@ -998,6 +998,7 @@ module Crystal::V2
       end
 
       source = File.read(abs_path)
+      {% unless flag?(:bootstrap_fast) %}
       if ast_cache_enabled?
         if cached = CrystalV2::Compiler::LSP::AstCache.load(abs_path)
           arena = cached.arena
@@ -1019,6 +1020,7 @@ module Crystal::V2
           return
         end
       end
+      {% end %}
 
       lexer = CrystalV2::Compiler::Frontend::Lexer.new(source)
       parser = CrystalV2::Compiler::Frontend::Parser.new(lexer)
@@ -1038,6 +1040,7 @@ module Crystal::V2
       # Add this file's results (after dependencies)
       results << {arena, exprs, abs_path, source}
 
+      {% unless flag?(:bootstrap_fast) %}
       if ast_cache_enabled? && arena.is_a?(CrystalV2::Compiler::Frontend::AstArena)
         begin
           cache = CrystalV2::Compiler::LSP::AstCache.new(arena, exprs, lexer.string_pool)
@@ -1048,6 +1051,7 @@ module Crystal::V2
           trace_driver("[DRIVER_TRACE] AST cache save failed: #{ex.message}")
         end
       end
+      {% end %}
     end
 
     private def process_require_node(

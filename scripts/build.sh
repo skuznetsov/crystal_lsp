@@ -7,6 +7,11 @@ set -e
 MODE="${1:-debug}"
 PROJECT_ROOT="$(cd "$(dirname "$0")/.." && pwd)"
 BIN_DIR="$PROJECT_ROOT/bin"
+BOOTSTRAP_FAST_FLAG=""
+
+if [[ "${CRYSTAL_V2_BOOTSTRAP_FAST:-}" == "1" || "${CRYSTAL_V2_BOOTSTRAP_FAST:-}" == "true" ]]; then
+  BOOTSTRAP_FAST_FLAG="-Dbootstrap_fast"
+fi
 
 mkdir -p "$BIN_DIR"
 
@@ -15,6 +20,7 @@ case "$MODE" in
     echo "Building in DEBUG mode (fast compile)..."
     crystal build "$PROJECT_ROOT/src/crystal_v2.cr" \
       -o "$BIN_DIR/crystal_v2" \
+      ${BOOTSTRAP_FAST_FLAG} \
       --no-debug \
       2>&1
     echo "Done: $BIN_DIR/crystal_v2"
@@ -27,6 +33,7 @@ case "$MODE" in
     crystal build "$PROJECT_ROOT/src/crystal_v2.cr" \
       -o "$BIN_DIR/crystal_v2" \
       -O"${OPT_LEVEL}" \
+      ${BOOTSTRAP_FAST_FLAG} \
       2>&1
     echo "Done: $BIN_DIR/crystal_v2"
     ;;

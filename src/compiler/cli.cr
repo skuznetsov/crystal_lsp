@@ -15,7 +15,9 @@ require "./mir/mir"
 require "./mir/optimizations"
 require "./mir/hir_to_mir"
 require "./mir/llvm_backend"
+{% unless flag?(:bootstrap_fast) %}
 require "./lsp/ast_cache"
+{% end %}
 require "../runtime"
 
 # Module aliases for convenience
@@ -1038,6 +1040,7 @@ module CrystalV2
 
         source = File.read(abs_path)
 
+        {% unless flag?(:bootstrap_fast) %}
         if options.ast_cache
           if cached = LSP::AstCache.load(abs_path)
             @ast_cache_hits += 1
@@ -1063,6 +1066,7 @@ module CrystalV2
           end
           @ast_cache_misses += 1
         end
+        {% end %}
 
         lexer = Frontend::Lexer.new(source)
         parser = Frontend::Parser.new(lexer)
@@ -1079,6 +1083,7 @@ module CrystalV2
 
         results << {arena, exprs, abs_path, source}
 
+        {% unless flag?(:bootstrap_fast) %}
         if options.ast_cache && arena.is_a?(Frontend::AstArena)
           begin
             cache = LSP::AstCache.new(arena, exprs, lexer.string_pool)
@@ -1089,6 +1094,7 @@ module CrystalV2
             log(options, out_io, "  AST cache save failed: #{ex.message}") if options.verbose
           end
         end
+        {% end %}
       end
 
       # Process a node for require statements (recursively handles macro bodies)
