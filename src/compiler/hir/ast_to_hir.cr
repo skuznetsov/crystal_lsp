@@ -687,6 +687,9 @@ module Crystal::HIR
     # Tracks nesting depth of lowering operations.
     # When > 0, new lower requests are queued instead of executed immediately.
     @lowering_depth : Int32 = 0
+    # Allow a shallow amount of recursive lowering before deferring to the queue.
+    # 0 = current behavior (defer as soon as inside lowering).
+    @lowering_depth_limit : Int32 = ENV["CRYSTAL_V2_LOWER_DEPTH_LIMIT"]?.try(&.to_i?) || 0
 
     # Helper: get function state (defaults to NotStarted)
     private def function_state(name : String) : FunctionLoweringState
@@ -701,7 +704,7 @@ module Crystal::HIR
 
     # Helper: check if we're inside a lowering operation
     private def inside_lowering? : Bool
-      @lowering_depth > 0
+      @lowering_depth > @lowering_depth_limit
     end
 
     # Helper: get all pending functions
