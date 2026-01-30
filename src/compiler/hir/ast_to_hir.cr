@@ -4923,7 +4923,7 @@ module Crystal::HIR
                       if params = member.params
                         new_params = capture_initialize_params(params, ivars, pointerof(offset), class_name)
                         init_capture.params.clear
-                        init_capture.params.concat(new_params)
+                        new_params.each { |param| init_capture.params << param }
                         init_capture.source = :include
                       end
                     end
@@ -5448,12 +5448,12 @@ module Crystal::HIR
       namespaces = [] of String
       if override = @current_namespace_override
         if included = @class_included_modules[override]?
-          namespaces.concat(included.to_a)
+          included.each { |entry| namespaces << entry }
         end
       end
       if current = @current_class
         if included = @class_included_modules[current]?
-          namespaces.concat(included.to_a)
+          included.each { |entry| namespaces << entry }
         end
       end
 
@@ -10474,7 +10474,7 @@ module Crystal::HIR
               if params = member.params
                 new_params = capture_initialize_params(params, ivars, pointerof(offset), class_name)
                 init_params.clear
-                init_params.concat(new_params)
+                new_params.each { |param| init_params << param }
                 init_capture.source = :class
               end
             end
@@ -10978,7 +10978,7 @@ module Crystal::HIR
           # Lower methods with type substitutions across all template bodies.
           templates = [template] of GenericClassTemplate
           if reopenings = @generic_reopenings[base_name]?
-            templates.concat(reopenings)
+            reopenings.each { |entry| templates << entry }
           end
           templates.each do |tmpl|
             @arena = tmpl.arena
@@ -14491,7 +14491,7 @@ module Crystal::HIR
         end
       end
       subclasses = collect_subclasses(parent_keys)
-      candidates.concat(subclasses)
+      subclasses.each { |entry| candidates << entry }
       candidates.uniq!
       if DebugHooks::ENABLED && module_base.includes?("ByteFormat") && method_name == "decode"
         debug_hook(
@@ -23602,7 +23602,8 @@ module Crystal::HIR
         if op == "&&"
           left = truthy_narrowing_targets(node.left)
           right = truthy_narrowing_targets(node.right)
-          left.concat(right)
+          right.each { |entry| left << entry }
+          left
         else
           [] of String
         end
@@ -23757,7 +23758,8 @@ module Crystal::HIR
         if op == "&&"
           left = is_a_narrowing_targets(node.left)
           right = is_a_narrowing_targets(node.right)
-          left.concat(right)
+          right.each { |entry| left << entry }
+          left
         else
           [] of Tuple(String, TypeRef)
         end
@@ -24383,7 +24385,9 @@ module Crystal::HIR
 
       # Collect all variable names across all branches
       all_vars = Set(String).new
-      branch_info.each { |(_, locals)| all_vars.concat(locals.keys) }
+      branch_info.each do |(_, locals)|
+        locals.keys.each { |entry| all_vars << entry }
+      end
 
       all_vars.each do |var_name|
         pre_val = pre_locals[var_name]?
@@ -29575,10 +29579,12 @@ module Crystal::HIR
       end
       if splat_packed && args.size > prepack_arg_types.size
         extra_ids = args[prepack_arg_types.size..-1] || [] of ValueId
-        callsite_arg_types.concat(extra_ids.map { |arg_id| ctx.type_of(arg_id) })
-        callsite_arg_literals.concat(extra_ids.map { |arg_id| ctx.type_literal?(arg_id) })
+        extra_ids.each do |arg_id|
+          callsite_arg_types << ctx.type_of(arg_id)
+          callsite_arg_literals << ctx.type_literal?(arg_id)
+        end
         if callsite_arg_enum_names && (enum_map = @enum_value_types)
-          callsite_arg_enum_names.concat(extra_ids.map { |arg_id| enum_map[arg_id]? })
+          extra_ids.each { |arg_id| callsite_arg_enum_names << enum_map[arg_id]? }
         end
       end
       if receiver_id && method_name.ends_with?("=") && args.size == 1 &&
@@ -31032,7 +31038,7 @@ module Crystal::HIR
                 expanded = [] of String
                 [resolved_variant, variant].uniq.each do |owner|
                   if owner.includes?("|")
-                    expanded.concat(split_union_type_name(owner))
+                    split_union_type_name(owner).each { |entry| expanded << entry }
                   else
                     expanded << owner
                   end
@@ -31040,7 +31046,7 @@ module Crystal::HIR
                 expanded.uniq.each do |owner|
                   owners = [owner]
                   if class_has_subclasses?(owner)
-                    owners.concat(collect_subclasses([owner]))
+                    collect_subclasses([owner]).each { |entry| owners << entry }
                   end
                   record_virtual_target(owner, method_name, arg_types, has_block_call, has_splat)
                   owners.uniq.each do |resolved_owner|
@@ -34913,7 +34919,7 @@ module Crystal::HIR
           if type_name.ends_with?("?")
             candidates << type_name[0...-1]
           elsif type_name.includes?("|")
-            candidates.concat(type_name.split("|").map(&.strip))
+            type_name.split("|").each { |entry| candidates << entry.strip }
           end
           candidates.each do |candidate|
             if resolved = resolve_enum_name(candidate)
@@ -36099,7 +36105,7 @@ module Crystal::HIR
                 expanded = [] of String
                 [resolved_variant, variant].uniq.each do |owner|
                   if owner.includes?("|")
-                    expanded.concat(split_union_type_name(owner))
+                    split_union_type_name(owner).each { |entry| expanded << entry }
                   else
                     expanded << owner
                   end
@@ -37710,10 +37716,10 @@ module Crystal::HIR
         keys << name
       end
       if entries = @type_cache_keys_by_component[name]?
-        keys.concat(entries.to_a)
+        entries.each { |entry| keys << entry }
       end
       if entries = @type_cache_keys_by_generic_prefix[name]?
-        keys.concat(entries.to_a)
+        entries.each { |entry| keys << entry }
       end
 
       # Only compute short name if the name contains "::"
@@ -37722,10 +37728,10 @@ module Crystal::HIR
           keys << short
         end
         if entries = @type_cache_keys_by_component[short]?
-          keys.concat(entries.to_a)
+          entries.each { |entry| keys << entry }
         end
         if entries = @type_cache_keys_by_generic_prefix[short]?
-          keys.concat(entries.to_a)
+          entries.each { |entry| keys << entry }
         end
       end
 
@@ -38302,7 +38308,7 @@ module Crystal::HIR
       variant_names.each do |variant|
         resolved = resolve_type_alias_chain(variant)
         if resolved.includes?("|")
-          expanded_variants.concat(split_union_type_name(resolved))
+          split_union_type_name(resolved).each { |entry| expanded_variants << entry }
         else
           expanded_variants << resolved
         end
