@@ -2981,8 +2981,9 @@ module Crystal::MIR
             store_val = "%#{base}.slot_ftoi"
             store_type = slot_llvm_type
           elsif llvm_type.starts_with?("i") && !llvm_type.includes?(".") && (slot_llvm_type == "double" || slot_llvm_type == "float")
-            # Int → float: sitofp
-            emit "%#{base}.slot_itof = sitofp #{llvm_type} #{name} to #{slot_llvm_type}"
+            # Int → float: use uitofp for unsigned types
+            op = unsigned_type_ref?(val_type) ? "uitofp" : "sitofp"
+            emit "%#{base}.slot_itof = #{op} #{llvm_type} #{name} to #{slot_llvm_type}"
             store_val = "%#{base}.slot_itof"
             store_type = slot_llvm_type
           elsif llvm_type == "float" && slot_llvm_type == "double"
@@ -3000,8 +3001,8 @@ module Crystal::MIR
             store_type = slot_llvm_type
           elsif llvm_type == "ptr" && (slot_llvm_type == "double" || slot_llvm_type == "float")
             emit "%#{base}.slot_ptrtoint = ptrtoint ptr #{name} to i64"
-            emit "%#{base}.slot_sitofp = sitofp i64 %#{base}.slot_ptrtoint to #{slot_llvm_type}"
-            store_val = "%#{base}.slot_sitofp"
+            emit "%#{base}.slot_uitofp = uitofp i64 %#{base}.slot_ptrtoint to #{slot_llvm_type}"
+            store_val = "%#{base}.slot_uitofp"
             store_type = slot_llvm_type
           else
             # Fallback: store as the slot type (may cause issues but avoids crash)
@@ -7560,7 +7561,8 @@ module Crystal::MIR
               return cast_name
             end
           elsif llvm_type.starts_with?("i") && (expected_type == "float" || expected_type == "double")
-            emit "#{cast_name} = sitofp #{llvm_type} #{temp_name} to #{expected_type}"
+            op = (val_type && unsigned_type_ref?(val_type)) ? "uitofp" : "sitofp"
+            emit "#{cast_name} = #{op} #{llvm_type} #{temp_name} to #{expected_type}"
             record_emitted_type(cast_name, expected_type)
             return cast_name
           elsif (llvm_type == "float" || llvm_type == "double") && expected_type.starts_with?("i")
