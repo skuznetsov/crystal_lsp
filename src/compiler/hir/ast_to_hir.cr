@@ -655,6 +655,8 @@ module Crystal::HIR
     @yield_name_cache : Hash(String, String?) = {} of String => String?
     # Cache for strip_generic_receiver_from_method_name: method_name → stripped
     @strip_generic_receiver_cache : Hash(String, String) = {} of String => String
+    # Cache for function_def_overloads stripped receiver lookups: stripped base → overload list
+    @function_def_overloads_stripped_cache : Hash(String, Array(String)) = {} of String => Array(String)
 
     # ═══════════════════════════════════════════════════════════════════════════
     # FUNCTION LOWERING STATE MACHINE
@@ -13907,6 +13909,9 @@ module Crystal::HIR
 
       stripped = strip_generic_receiver_from_method_name(base_name)
       if stripped != base_name
+        if cached = @function_def_overloads_stripped_cache[stripped]?
+          return cached
+        end
         if list = @function_def_overloads[stripped]?
           return list
         end
@@ -13919,7 +13924,11 @@ module Crystal::HIR
             matches << key unless matches.includes?(key)
           end
         end
-        return matches unless matches.empty?
+        if matches.empty?
+          return [] of String
+        end
+        @function_def_overloads_stripped_cache[stripped] = matches
+        return matches
       end
 
       [] of String
@@ -13967,6 +13976,7 @@ module Crystal::HIR
 
       @function_type_keys_by_base_size = @function_types.size
       @function_defs_cache_size = @function_defs.size
+      @function_def_overloads_stripped_cache.clear
     end
 
     private def function_type_keys_for_base(base_name : String) : Array(String)
