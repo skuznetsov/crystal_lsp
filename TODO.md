@@ -2008,6 +2008,9 @@ is risky. The critical ARM64 paths are fixed.
 **Update (2026-01-29)**:
 - Incrementalized `function_type_keys_for_base` to avoid full rebuild on every new function type (hot path in `resolve_method_call`).
 - Rationale: `spec` runs were spending most time in `process_pending_lower_functions → lower_call → resolve_method_call → function_type_keys_for_base` (sampled).
+ - Added optional throttles:
+   - `CRYSTAL_V2_DISABLE_INLINE_YIELD=1` to bypass inline-yield (fallback to normal call).
+   - `CRYSTAL_V2_PENDING_BUDGET=N` to cap pending function lowering per iteration (debug/perf).
 
 ### 8.10 Bootstrap Blockers: Budgeted Callsite Lowering (PROPOSED)
 

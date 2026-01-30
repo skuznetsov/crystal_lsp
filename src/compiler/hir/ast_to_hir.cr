@@ -19507,10 +19507,18 @@ module Crystal::HIR
     private def process_pending_lower_functions
       max_iterations = 10000  # Safety limit to prevent infinite loops
       iteration = 0
+      budget = ENV["CRYSTAL_V2_PENDING_BUDGET"]?.try(&.to_i?) || 0
+      debug_pending = ENV.has_key?("DEBUG_PENDING")
 
       while pending_functions.size > 0 && iteration < max_iterations
         # Take a snapshot of currently pending functions
         pending = pending_functions
+        if budget > 0 && pending.size > budget
+          pending = pending.first(budget)
+        end
+        if debug_pending
+          STDERR.puts "[PENDING] iteration=#{iteration} pending=#{pending.size}"
+        end
 
         # Clear pending state (transition to NotStarted so they can be lowered)
         pending.each { |name| @function_lowering_states.delete(name) }
@@ -33575,6 +33583,10 @@ module Crystal::HIR
       block_param_types : Array(TypeRef)?,
       callee_arena : CrystalV2::Compiler::Frontend::ArenaLike
     ) : ValueId
+      if ENV.has_key?("CRYSTAL_V2_DISABLE_INLINE_YIELD")
+        return inline_yield_fallback_call(ctx, inline_key, receiver_id, call_args, block, block_param_types)
+      end
+
       ctx.push_scope(ScopeKind::Block)
 
       # Prevent infinite recursion / runaway stack usage in aggressive yield inlining.
