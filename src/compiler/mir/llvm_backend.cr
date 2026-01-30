@@ -4516,6 +4516,38 @@ module Crystal::MIR
           end
         end
       end
+
+      # Filter pass-through incomings where the value is defined in a different block
+      # and we don't have a predecessor load. These produce invalid IR (undefined %rN).
+      if incoming_pairs.size > 0
+        filtered = [] of Tuple(BlockId, ValueId)
+        incoming_pairs.each do |(block_id, val_id)|
+          def_inst = find_def_inst(val_id)
+          val_type = @value_types[val_id]?
+          if val_type == TypeRef::VOID && phi_type != "void"
+            unless missing_preds.includes?(block_id)
+              missing_preds << block_id
+            end
+            next
+          end
+          val_emitted = @value_names.has_key?(val_id) || @constant_values.has_key?(val_id)
+          if def_inst.nil? && !val_emitted
+            unless missing_preds.includes?(block_id)
+              missing_preds << block_id
+            end
+            next
+          end
+          def_block = @value_def_block[val_id]?
+          if def_block && def_block != block_id && !@phi_predecessor_loads.has_key?({block_id, val_id})
+            unless missing_preds.includes?(block_id)
+              missing_preds << block_id
+            end
+            next
+          end
+          filtered << {block_id, val_id}
+        end
+        incoming_pairs = filtered
+      end
       default_phi_value = ->(llvm_type : String) do
         if llvm_type == "ptr"
           "null"
