@@ -26661,9 +26661,10 @@ module Crystal::HIR
       # WORK QUEUE: If we're already inside lowering, defer this function
       # to prevent stack overflow from deep recursive lowering chains.
       if inside_lowering?
-        @function_lowering_states[name] = FunctionLoweringState::Pending
-        # Avoid duplicate entries in the pending queue.
-        @pending_function_queue << name unless @pending_function_queue.includes?(name)
+        unless function_state(name).pending?
+          @function_lowering_states[name] = FunctionLoweringState::Pending
+          @pending_function_queue << name
+        end
         return
       end
 
