@@ -692,6 +692,8 @@ module Crystal::HIR
     @function_lowering_states : Hash(String, FunctionLoweringState) = {} of String => FunctionLoweringState
     # Queue for pending lower requests to avoid O(n^2) scans of the state hash.
     @pending_function_queue : Array(String) = [] of String
+    # Pending queue source counts (debug only): stripped base name → enqueue count.
+    @pending_source_counts : Hash(String, Int32) = {} of String => Int32
 
     # Tracks nesting depth of lowering operations.
     # When > 0, new lower requests are queued instead of executed immediately.
@@ -19835,6 +19837,9 @@ module Crystal::HIR
       iteration = 0
       budget = ENV["CRYSTAL_V2_PENDING_BUDGET"]?.try(&.to_i?) || 0
       debug_pending = ENV.has_key?("DEBUG_PENDING")
+      pending_sources_mode = ENV["DEBUG_PENDING_SOURCES"]?
+      pending_sources_each = pending_sources_mode == "each"
+      pending_sources_top = ENV["DEBUG_PENDING_SOURCES_TOP"]?.try(&.to_i?) || 15
 
       while pending_functions.size > 0 && iteration < max_iterations
         # Take a snapshot of currently pending functions
@@ -19844,6 +19849,15 @@ module Crystal::HIR
         end
         if debug_pending
           STDERR.puts "[PENDING] iteration=#{iteration} pending=#{pending.size}"
+          if pending_sources_mode && (pending_sources_each || iteration == 0) && !@pending_source_counts.empty?
+            STDERR.puts "[PENDING_SOURCES] top=#{pending_sources_top} total=#{@pending_source_counts.size}"
+            @pending_source_counts.to_a
+              .sort_by { |entry| -entry[1] }
+              .first(pending_sources_top)
+              .each do |name, count|
+                STDERR.puts "  #{name}: #{count}"
+              end
+          end
         end
 
         # Clear pending state (transition to NotStarted so they can be lowered)
@@ -26686,6 +26700,15 @@ module Crystal::HIR
         unless function_state(name).pending?
           @function_lowering_states[name] = FunctionLoweringState::Pending
           @pending_function_queue << name
+          if ENV["DEBUG_PENDING_SOURCES"]?
+            base = if idx = name.index('$')
+                     name.byte_slice(0, idx)
+                   else
+                     name
+                   end
+            stripped = strip_generic_receiver_from_method_name(base)
+            @pending_source_counts[stripped] = (@pending_source_counts[stripped]? || 0) + 1
+          end
         end
         return
       end

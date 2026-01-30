@@ -1112,6 +1112,7 @@ r2 = maybe(false)  # => nil
   - Update (2026-01-30): added `CRYSTAL_V2_DISABLE_INLINE_YIELD=1` to skip inline yield expansion during lowering (commit `1718fa6`) for faster debugging; fallback uses normal block lowering.
   - Update (2026-01-30): added `CRYSTAL_V2_LOWER_DEPTH_LIMIT` to allow limited recursive lowering before deferring to pending queue (commit `262c198`). Default 0 preserves current behavior; try 2–3 for self-host.
   - Update (2026-01-30): added incremental stripped-overload index + cached `parse_method_name` to reduce repeated scans during lowering (commit pending). Self-host HIR lowering still slow; pending queue remains ~5k on first iteration.
+  - Update (2026-01-30): added pending-source counters (DEBUG_PENDING_SOURCES) to identify the biggest enqueue drivers; initial top sources are Array#inspect/Pointer#inspect/Array#to_s/Array#in?/Pointer#in? (self-host HIR log `/tmp/self_host_hir.log`).
 
 **Regressions (open):**
 - [ ] GH #10 (crystal_lsp): prelude build links for minimal `fib.cr`, but runtime segfault persists.
