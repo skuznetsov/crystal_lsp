@@ -1098,6 +1098,12 @@ r2 = maybe(false)  # => nil
   - Fixes: array `first?/last?` return types on member access now derive from element types; forced return types no longer overwritten by cached function return types; member-access `first?/last?` override restricted to array-like receivers (fixes `PointerPairingHeap#first?` incorrectly returning `PointerPairingHeap | Nil`).
   - Evidence: `./bin/crystal_v2 --no-llvm-opt --no-llvm-metadata examples/bootstrap_array.cr -o /private/tmp/bootstrap_array_full` succeeds; HIR shows `Array(Time::Location::ZoneTransition)#last?` returns `ZoneTransition | Nil` and `PointerPairingHeap(Event)#first?` returns `Pointer(Event)`.
 - **Update (2026-01-30)**: verified current debug binary links clean for `examples/bootstrap_array.cr` and `examples/bench_fib42.cr` with no undefined symbols (logs: `/private/tmp/bootstrap_array_full.link.log`, `/tmp/fib_link.log`).
+- **Update (2026-01-30)**: llc undefined phi in `ENV.fetch` (`%r7 = phi ptr [%r6, %bb3], [%r8, %bb4]`) traced to VOID incoming; emit now treats VOID incoming as missing/default (commit `19249cf`). Self-host verification pending.
+- **Update (2026-01-30)**: added `--no-mir-opt` to skip MIR optimization passes for faster debugging/bootstrap (commit `ff28791`).
+
+**Current bootstrap blockers (2026-01-30):**
+- Self-host compile stalls in `AstToHir#lower_main` → `process_pending_lower_functions`; sample shows heavy time in `function_def_overloads` and `strip_generic_receiver_from_method_name`. Suspect repeated string parsing / overload lookup in large pending queue.
+  - Next: add caching for `strip_generic_receiver_from_method_name` and `function_def_overloads`, or log pending queue size via `DEBUG_PENDING` / `CRYSTAL_V2_PENDING_BUDGET` to confirm growth.
 
 **Regressions (open):**
 - [ ] GH #10 (crystal_lsp): prelude build links for minimal `fib.cr`, but runtime segfault persists.
