@@ -27058,6 +27058,11 @@ module Crystal::HIR
             if matched_parent != name_parts.owner
               store_function_namespace_override(name, base_name, matched_parent)
             end
+            # Prevent monomorphization explosion for Object#in? by forcing the
+            # parent method target name when a subclass doesn't override it.
+            if resolved_parts.method == "in?"
+              target_name = resolved_name
+            end
             debug_hook("function.lookup.parent_fallback", "name=#{name} parent=#{matched_parent}")
           end
         end
@@ -27161,11 +27166,13 @@ module Crystal::HIR
           if base_name.includes?("#")
             owner, method_part = base_name.split("#", 2)
             if owner != "Object"
+              method_short = method_part.split("$", 2).first
+              use_object_target = method_short == "in?"
               object_base = "Object##{method_part}"
               if candidate = @function_defs[object_base]?
                 func_def = candidate
                 arena = @function_def_arenas[object_base]
-                target_name = name.includes?("$") ? name : base_name
+                target_name = use_object_target ? object_base : (name.includes?("$") ? name : base_name)
                 lookup_branch = "object_fallback"
               elsif name.includes?("$")
                 suffix = name.split("$", 2)[1]
@@ -27173,7 +27180,7 @@ module Crystal::HIR
                 if candidate = @function_defs[object_mangled]?
                   func_def = candidate
                   arena = @function_def_arenas[object_mangled]
-                  target_name = name.includes?("$") ? name : base_name
+                  target_name = use_object_target ? object_mangled : (name.includes?("$") ? name : base_name)
                   lookup_branch = "object_fallback_mangled"
                 end
               end
@@ -27184,7 +27191,7 @@ module Crystal::HIR
                   next unless key.starts_with?(mangled_prefix)
                   func_def = @function_defs[key]
                   arena = @function_def_arenas[key]
-                  target_name = name.includes?("$") ? name : base_name
+                  target_name = use_object_target ? key : (name.includes?("$") ? name : base_name)
                   lookup_branch = "object_fallback_prefix"
                   break
                 end
@@ -27658,6 +27665,11 @@ module Crystal::HIR
               # site uses concrete types (like Pointer).
               # The `name` variable contains the full mangled name from the call site.
               override = name
+              # Avoid per-receiver monomorphization for Object#in? by forcing the
+              # base method name even when the call site is mangled.
+              if resolved_parts.method == "in?" && target_name.starts_with?("Object#")
+                override = nil
+              end
               namespace_override = function_namespace_override_for(target_name, base_target_name, name)
               # Add forall type param bindings for primitive templates and FastFloat methods.
               extra_params = primitive_template_map || {} of String => String
@@ -29163,6 +29175,18 @@ module Crystal::HIR
             # NOTE: Avoid call-site monomorphization here: it can explode compilation time by creating many
             # specialized types reachable only through transient receiver types. Prefer monomorphization from
             # explicit annotations (see `ensure_monomorphized_type`) and constructor calls.
+          end
+          # Prevent monomorphization explosion for Object#in? by forcing calls to the base
+          # method when no concrete override exists on the receiver.
+          if method_name == "in?"
+            if full_method_name.nil? || (!full_method_name.starts_with?("Object#") &&
+               !@function_defs.has_key?(full_method_name) &&
+               !@function_types.has_key?(full_method_name) &&
+               !has_function_base?(full_method_name))
+              if object_in = resolve_method_with_inheritance("Object", "in?")
+                full_method_name = object_in
+              end
+            end
           end
         if ENV["DEBUG_DECODE_CALL"]? && method_name == "decode"
           recv_id = receiver_id ? receiver_id.to_s : "nil"
