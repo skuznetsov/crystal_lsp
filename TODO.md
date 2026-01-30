@@ -379,6 +379,10 @@ Goal: v2 LSP must report only real errors and match original compiler behavior.
   - MemoryStrategyRefinementPass: adjusts memory strategies based on profile
   - PGOPipeline: coordinates all passes with aggregated statistics
 
+### Pre-Bootstrap Codegen Correctness (Priority)
+- [ ] **Audit int/ptr → float conversions**: ensure `uitofp`/`sitofp` are correct for unsigned/signed and pointer casts across all backends; add specs for representative signed/unsigned/ptr cases.
+- [ ] **ARM/AArch64 alignment audit**: verify stack/alloca/struct field alignment for ARM targets (incl. AArch64); ensure align=4 where required and matches LLVM target ABI.
+
 **Test Coverage:** 307 new tests (155 HIR + 152 MIR)
 
 **Architecture (Quadrumvirate-analyzed):**
@@ -1093,6 +1097,7 @@ r2 = maybe(false)  # => nil
 - **Update (2026-01-30)**: full-prelude `bootstrap_array` now links clean (**0 missing**).
   - Fixes: array `first?/last?` return types on member access now derive from element types; forced return types no longer overwritten by cached function return types; member-access `first?/last?` override restricted to array-like receivers (fixes `PointerPairingHeap#first?` incorrectly returning `PointerPairingHeap | Nil`).
   - Evidence: `./bin/crystal_v2 --no-llvm-opt --no-llvm-metadata examples/bootstrap_array.cr -o /private/tmp/bootstrap_array_full` succeeds; HIR shows `Array(Time::Location::ZoneTransition)#last?` returns `ZoneTransition | Nil` and `PointerPairingHeap(Event)#first?` returns `Pointer(Event)`.
+- **Update (2026-01-30)**: verified current debug binary links clean for `examples/bootstrap_array.cr` and `examples/bench_fib42.cr` with no undefined symbols (logs: `/private/tmp/bootstrap_array_full.link.log`, `/tmp/fib_link.log`).
 
 **Regressions (open):**
 - [ ] GH #10 (crystal_lsp): prelude build links for minimal `fib.cr`, but runtime segfault persists.
