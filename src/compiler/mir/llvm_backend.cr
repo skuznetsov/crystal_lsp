@@ -3954,7 +3954,7 @@ module Crystal::MIR
           if payload_val == raw_name && payload_type != result_type
             store_type = result_type
           end
-          emit "store #{store_type} #{payload_val}, ptr #{payload_ptr}"
+          emit "store #{store_type} #{payload_val}, ptr #{payload_ptr}, align 4"
           emit "#{name} = load #{union_type}, ptr %#{base_name}.ptr"
           @value_types[inst.id] = inst.type
           return
@@ -5850,7 +5850,7 @@ module Crystal::MIR
           emit "%not_nil_alloca.#{c} = alloca #{arg_llvm_type}, align 8"
           emit "store #{arg_llvm_type} #{normalize_union_value(arg_val, arg_llvm_type)}, ptr %not_nil_alloca.#{c}"
           emit "%not_nil_payload_ptr.#{c} = getelementptr #{arg_llvm_type}, ptr %not_nil_alloca.#{c}, i32 0, i32 1"
-          emit "#{name} = load #{result_type}, ptr %not_nil_payload_ptr.#{c}"
+          emit "#{name} = load #{result_type}, ptr %not_nil_payload_ptr.#{c}, align 4"
 
           result_type_ref = case result_type
                             when "i32" then TypeRef::INT32
@@ -5895,7 +5895,7 @@ module Crystal::MIR
           emit "%to_i64_alloca.#{c} = alloca #{arg_llvm_type}, align 8"
           emit "store #{arg_llvm_type} #{normalize_union_value(arg_val, arg_llvm_type)}, ptr %to_i64_alloca.#{c}"
           emit "%to_i64_payload_ptr.#{c} = getelementptr #{arg_llvm_type}, ptr %to_i64_alloca.#{c}, i32 0, i32 1"
-          emit "%to_i64_val.#{c} = load i32, ptr %to_i64_payload_ptr.#{c}"  # Load as i32 (covers Int8/16/32)
+          emit "%to_i64_val.#{c} = load i32, ptr %to_i64_payload_ptr.#{c}, align 4"  # Load as i32 (covers Int8/16/32)
           emit "#{name} = sext i32 %to_i64_val.#{c} to i64"
           @value_types[inst.id] = TypeRef::INT64
         elsif arg_llvm_type == "i64"
@@ -5928,7 +5928,7 @@ module Crystal::MIR
           emit "%to_i32_alloca.#{c} = alloca #{arg_llvm_type}, align 8"
           emit "store #{arg_llvm_type} #{normalize_union_value(arg_val, arg_llvm_type)}, ptr %to_i32_alloca.#{c}"
           emit "%to_i32_payload_ptr.#{c} = getelementptr #{arg_llvm_type}, ptr %to_i32_alloca.#{c}, i32 0, i32 1"
-          emit "#{name} = load i32, ptr %to_i32_payload_ptr.#{c}"
+          emit "#{name} = load i32, ptr %to_i32_payload_ptr.#{c}, align 4"
           @value_types[inst.id] = TypeRef::INT32
         elsif arg_llvm_type == "i64"
           emit "#{name} = trunc i64 #{arg_val} to i32"
@@ -6950,7 +6950,7 @@ module Crystal::MIR
             emit "%#{base_name}.union_ptr#{idx} = alloca #{part_llvm_type}, align 8"
             emit "store #{part_llvm_type} #{normalize_union_value(part_ref, part_llvm_type)}, ptr %#{base_name}.union_ptr#{idx}"
             emit "%#{base_name}.payload_ptr#{idx} = getelementptr #{part_llvm_type}, ptr %#{base_name}.union_ptr#{idx}, i32 0, i32 1"
-            emit "%#{base_name}.str_ptr#{idx} = load ptr, ptr %#{base_name}.payload_ptr#{idx}"
+            emit "%#{base_name}.str_ptr#{idx} = load ptr, ptr %#{base_name}.payload_ptr#{idx}, align 4"
             string_parts << "%#{base_name}.str_ptr#{idx}"
           else
             # Fallback - treat as ptr
