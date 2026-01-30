@@ -29969,7 +29969,8 @@ module Crystal::HIR
         block_for_inline = build_block_from_block_pass(block_pass_expr, block_param_types_inline, node.span)
       end
 
-      if block_for_inline || proc_for_inline
+      disable_inline_yield = ENV.has_key?("CRYSTAL_V2_DISABLE_INLINE_YIELD")
+      if (block_for_inline || proc_for_inline) && !disable_inline_yield
         if block_for_inline
           @block_node_arenas[block_for_inline.object_id] = @arena
         end
