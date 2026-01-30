@@ -13856,15 +13856,23 @@ module Crystal::HIR
     private def function_type_keys_for_base(base_name : String) : Array(String)
       rebuild_function_def_overloads if @function_defs_cache_size != @function_defs.size
       if @function_type_keys_by_base_size != @function_types.size
-        @function_type_keys_by_base.clear
+        type_count = 0
         @function_types.each_key do |key|
+          type_count += 1
+          next if type_count <= @function_types_processed_for_keys
           base = if idx = key.index('$')
                    key[0, idx]
                  else
                    key
                  end
-          (@function_type_keys_by_base[base] ||= [] of String) << key
+          list = @function_type_keys_by_base[base]?
+          if list
+            list << key unless list.includes?(key)
+          else
+            @function_type_keys_by_base[base] = [key]
+          end
         end
+        @function_types_processed_for_keys = type_count
         @function_type_keys_by_base_size = @function_types.size
       end
       @function_type_keys_by_base[base_name]? || [] of String

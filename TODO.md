@@ -2005,6 +2005,10 @@ is risky. The critical ARM64 paths are fixed.
 - This guards AArch64/ARM against unaligned payload loads for any union variant (ptr/int/float).
 - Reviewed float conversion paths; union→float/double conversions are handled in call-arg coercion and return lowering.
 
+**Update (2026-01-29)**:
+- Incrementalized `function_type_keys_for_base` to avoid full rebuild on every new function type (hot path in `resolve_method_call`).
+- Rationale: `spec` runs were spending most time in `process_pending_lower_functions → lower_call → resolve_method_call → function_type_keys_for_base` (sampled).
+
 ### 8.10 Bootstrap Blockers: Budgeted Callsite Lowering (PROPOSED)
 
 **Problem**: Naive “lower all tracked callsite signatures” risks compile-time blowups.  
