@@ -654,10 +654,12 @@ The key insight is: **Don't compete with LLVM, complement it.**
 - [x] Peephole simplifications: redundant casts, constant-branch to jump, phi with identical incoming
 
 #### 5.3.4 Platform Support
-- [ ] macOS (arm64, x86_64)
-- [ ] Linux (arm64, x86_64)
-- [ ] Windows (x86_64)
-- [ ] Cross-compilation support
+- [ ] Platform parity with upstream Crystal (audit + match supported targets)
+  - [ ] macOS (arm64, x86_64)
+  - [ ] Linux (x86_64, arm64, armv7, riscv64)
+  - [ ] *BSD targets (match upstream list)
+- [ ] Windows (x86_64) **bonus** (post-bootstrap)
+- [ ] Cross-compilation support + CI matrix for all supported targets
 
 #### 5.3.5 Immediate Validation & Hardening
 - [x] **Structural NoAlias Analysis** (2025-12-11): Paradigm shift from ultra-conservative to allocation-site based.
