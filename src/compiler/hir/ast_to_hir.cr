@@ -681,6 +681,8 @@ module Crystal::HIR
 
     # Per-function lowering state
     @function_lowering_states : Hash(String, FunctionLoweringState) = {} of String => FunctionLoweringState
+    # Queue for pending lower requests to avoid O(n^2) scans of the state hash.
+    @pending_function_queue : Array(String) = [] of String
 
     # Tracks nesting depth of lowering operations.
     # When > 0, new lower requests are queued instead of executed immediately.
@@ -704,7 +706,7 @@ module Crystal::HIR
 
     # Helper: get all pending functions
     private def pending_functions : Array(String)
-      @function_lowering_states.select { |_, v| v.pending? }.keys
+      @pending_function_queue
     end
 
     # ═══════════════════════════════════════════════════════════════════════════
@@ -19814,7 +19816,7 @@ module Crystal::HIR
 
       while pending_functions.size > 0 && iteration < max_iterations
         # Take a snapshot of currently pending functions
-        pending = pending_functions
+        pending = pending_functions.dup
         if budget > 0 && pending.size > budget
           pending = pending.first(budget)
         end
@@ -19824,6 +19826,13 @@ module Crystal::HIR
 
         # Clear pending state (transition to NotStarted so they can be lowered)
         pending.each { |name| @function_lowering_states.delete(name) }
+        # Remove from queue so we don't reprocess endlessly
+        if pending.size == @pending_function_queue.size
+          @pending_function_queue.clear
+        else
+          pending_set = pending.to_set
+          @pending_function_queue.reject! { |name| pending_set.includes?(name) }
+        end
 
         # Reset lowering depth to allow these functions to be processed
         saved_depth = @lowering_depth
@@ -26577,6 +26586,7 @@ module Crystal::HIR
       # Clear pending state if set (we'll handle it now)
       if function_state(name).pending?
         @function_lowering_states.delete(name)
+        @pending_function_queue.delete(name)
       end
 
       # Temporarily disable inside_lowering to allow immediate processing
@@ -26652,6 +26662,8 @@ module Crystal::HIR
       # to prevent stack overflow from deep recursive lowering chains.
       if inside_lowering?
         @function_lowering_states[name] = FunctionLoweringState::Pending
+        # Avoid duplicate entries in the pending queue.
+        @pending_function_queue << name unless @pending_function_queue.includes?(name)
         return
       end
 
