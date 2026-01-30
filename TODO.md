@@ -660,6 +660,21 @@ The key insight is: **Don't compete with LLVM, complement it.**
 - [ ] Cross-compilation support + CI matrix for all LLVM targets above
 - [ ] Windows (x86_64) **bonus** (post-bootstrap, but still in LLVM target parity list)
 
+**Tiering (target support levels)**
+- **Tier 1 (full build + spec suite):**
+  - X86 (x86_64), AArch64 (arm64) on macOS/Linux
+  - Windows x86_64 (post-bootstrap; full spec parity goal)
+- **Tier 2 (build + smoke specs):**
+  - ARM (armv7), RISCV (riscv64), PowerPC (ppc64le), Mips (mips64), LoongArch (loongarch64)
+  - WebAssembly (wasm32), SPIRV (compute), SystemZ (s390x), Sparc (sparc64)
+- **Tier 3 (build-only / minimal sanity):**
+  - AMDGPU, NVPTX, BPF, AVR, Hexagon, Lanai, MSP430, VE, XCore
+
+**DoD (per tier)**
+- Tier 1: full bootstrap + `spec/` green (or known pendings) + hello-world runtime
+- Tier 2: build + smoke spec subset + hello-world runtime or emulator run
+- Tier 3: build-only + IR/obj generation sanity (no runtime)
+
 #### 5.3.5 Immediate Validation & Hardening
 - [x] **Structural NoAlias Analysis** (2025-12-11): Paradigm shift from ultra-conservative to allocation-site based.
   - Track allocation sites through Load/GEP chains
