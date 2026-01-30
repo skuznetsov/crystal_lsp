@@ -1233,6 +1233,7 @@ r2 = maybe(false)  # => nil
 - `DEBUG_LOWER_METHOD_SLOW_MS=500` with file paths shows main hotspots in `src/compiler/semantic/*` (SymbolCollector/NameResolver/TypeInferenceEngine), `src/compiler/frontend/parser.cr`, and stdlib `path.cr`/`file.cr`/`string.cr`. Suggests self-host HIR time is dominated by lowering the compiler/stdlib code itself, not a single stuck method. (2026-01-xx)
 - Self-host HIR pass completes (≈13 min) with `CRYSTAL_V2_STOP_AFTER_HIR=1` + AST cache enabled; no errors in log. (2026-01-xx)
 - `CRYSTAL_V2_STOP_AFTER_HIR=1` + `--stats` on `src/compiler/driver.cr` reports `hir=325660ms` (parse=179ms, prelude=108ms) with AST cache enabled (2026-01-xx).
+- **Update (2026-01-30)**: self-host HIR run with `DEBUG_HIR_TIMINGS=1 DEBUG_LOWER_METHOD_SLOW_MS=200` timed out at 120s but showed top hotspots dominated by `Object#in?` variants and tuple `in?` methods (2.5–4.4s each), plus `AstToHir#infer_type_from_expr_inner` (~1.4s), `Path#unc_share?` (~1.6s), `String::Grapheme.codepoints` (~1.0s). Indicates slowdown is broad stdlib lowering, not a single recursion loop (log: `/tmp/self_host_hir.log`).
 
 ### Bootstrap Stabilization Plan (prioritized, 2026-01-xx)
 
