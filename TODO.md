@@ -1458,6 +1458,7 @@ The return_type=16 (NIL) for `to_s` methods is incorrect - should be String type
 - **Fix applied**: inline `try` for union receivers (nil-check + block inlining) to avoid generating union `try` symbols; `*_try` entries removed from missing list (2026-01-xx).
 - **Fix applied**: preserve enum value tracking across nested lowering (push/pop) so callsite enum hints survive; `Unicode.check_downcase_turkic` now lowers to enum predicate compare (no `Int32#turkic?` in HIR).
 - **Fix applied**: propagate enum types through @param auto-assign + ivar/cvar loads; `Path#windows?` and enum predicates no longer emit `Int32#windows?` in HIR.
+- **Fix applied**: enum literal `to_i`/`value` lowered directly to literal/cast when enum value is tracked (removes `_Wednesday_to_i` missing symbol in full-prelude).
 - **Fix applied**: inline `nil?` for member access on non-union receivers; removes `Int32#nil?` / `Nil#nil?` call sites in HIR.
 - **Fix applied**: infer `try` return types when block shorthand is parsed as an argument (BlockNode in CallNode args). This avoids `Bool#each$block` from `Exception#backtrace?` by returning the block's type (nilable union). Verification: `DEBUG_INFER_TRY=1 CRYSTAL_V2_STOP_AFTER_HIR=1 ./bin/crystal_v2 --no-prelude --no-link /tmp/try_test.cr -o /tmp/try_test` logs `[INFER_TRY] return=Int32`; `rg "Bool#each" /tmp/bootstrap_array_full.hir` returns no matches (2026-01-xx).
 - **Fix applied**: infer ivar types from initialize default values for instance-var params; removed `Nil#[]`/`Nil#when` in `Time::Location` transitions (2026-01-xx).

@@ -1714,6 +1714,46 @@ describe Crystal::HIR::AstToHir do
         param_type.should eq(Crystal::HIR::TypeRef::INT32)
       end
     end
+
+    it "lowers enum literal to_i/value without a method call" do
+      code = <<-CRYSTAL
+        enum DayOfWeek
+          Monday
+          Wednesday = 3
+        end
+
+        def foo
+          DayOfWeek::Wednesday.to_i
+        end
+
+        def bar
+          DayOfWeek::Wednesday.value
+        end
+      CRYSTAL
+
+      converter = lower_program(code)
+      foo = converter.module.functions.find { |f| f.name.split("$").first == "foo" }
+      bar = converter.module.functions.find { |f| f.name.split("$").first == "bar" }
+
+      foo.should_not be_nil
+      bar.should_not be_nil
+
+      foo_calls = foo.not_nil!.blocks.flat_map(&.instructions)
+        .select { |inst| inst.is_a?(Crystal::HIR::Call) }
+        .map { |inst| inst.as(Crystal::HIR::Call).name }
+      bar_calls = bar.not_nil!.blocks.flat_map(&.instructions)
+        .select { |inst| inst.is_a?(Crystal::HIR::Call) }
+        .map { |inst| inst.as(Crystal::HIR::Call).name }
+
+      foo_calls.any? { |name| name.includes?("to_i") }.should be_false
+      bar_calls.any? { |name| name.includes?("value") }.should be_false
+
+      foo_literals = foo.not_nil!.blocks.flat_map(&.instructions)
+        .select { |inst| inst.is_a?(Crystal::HIR::Literal) }
+        .map { |inst| inst.as(Crystal::HIR::Literal).value }
+
+      foo_literals.includes?(3_i64).should be_true
+    end
   end
 
   describe "pointer overload mangling" do

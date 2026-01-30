@@ -29015,6 +29015,9 @@ module Crystal::HIR
             if predicate_id = lower_enum_predicate(ctx, receiver_id, method_name)
               return predicate_id
             end
+            if enum_value_id = lower_enum_value_call(ctx, receiver_id, method_name)
+              return enum_value_id
+            end
           end
           receiver_is_module = module_type_ref?(receiver_type)
           if receiver_is_module && (obj_node.is_a?(CrystalV2::Compiler::Frontend::ConstantNode) ||
@@ -34965,6 +34968,40 @@ module Crystal::HIR
       cmp.id
     end
 
+    private def lower_enum_value_call(
+      ctx : LoweringContext,
+      object_id : ValueId,
+      member_name : String
+    ) : ValueId?
+      enum_name = @enum_value_types.try(&.[object_id]?)
+      return nil unless enum_name
+
+      target_type = case member_name
+                    when "value" then enum_base_type(enum_name)
+                    when "to_i", "to_i32" then TypeRef::INT32
+                    when "to_i64" then TypeRef::INT64
+                    when "to_i16" then TypeRef::INT16
+                    when "to_i8" then TypeRef::INT8
+                    when "to_i128" then type_ref_for_name("Int128")
+                    when "to_u32" then TypeRef::UINT32
+                    when "to_u64" then TypeRef::UINT64
+                    when "to_u16" then TypeRef::UINT16
+                    when "to_u8" then TypeRef::UINT8
+                    when "to_u128" then type_ref_for_name("UInt128")
+                    else
+                      nil
+                    end
+      return nil unless target_type
+
+      enum_type = enum_base_type(enum_name)
+      return object_id if member_name == "value" || target_type == enum_type
+
+      cast = Cast.new(ctx.next_id, target_type, object_id, target_type, safe: false)
+      ctx.emit(cast)
+      ctx.register_type(cast.id, target_type)
+      cast.id
+    end
+
     private def lower_enum_bracket_call(
       ctx : LoweringContext,
       enum_name : String,
@@ -35701,6 +35738,9 @@ module Crystal::HIR
       # Check for enum.value -> return the enum value as-is (enums are stored as Int32)
       if receiver_type == TypeRef::INT32 && member_name == "value"
         return object_id
+      end
+      if enum_value_id = lower_enum_value_call(ctx, object_id, member_name)
+        return enum_value_id
       end
 
       # Special handling for union types containing primitives (like Int32 | Nil)
