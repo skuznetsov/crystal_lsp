@@ -1237,6 +1237,7 @@ r2 = maybe(false)  # => nil
 - **Update (2026-01-30)**: self-host HIR run with `DEBUG_LOWER_METHOD_SLOW_MS=1000` still timed out at 15 minutes; log shows hundreds of specialized `*#in?$Tuple(Int32, Int32, Int32)` instantiations across many types (dominant cost), suggesting monomorphization explosion rather than a single infinite loop (log: `/tmp/self_host_hir_long.log`).
 - **Update (2026-01-30)**: attempted mitigation for `Object#in?` monomorphization by forcing parent fallback target names to `Object#in?` when no override exists. Patch in `AstToHir#lookup_function_def` (parent fallback) + `lower_call` guard. Needs verification: re-run `CRYSTAL_V2_STOP_AFTER_HIR=1` and confirm no `Type#in?` proliferation + shorter HIR time. (log pending)
 - **Update (2026-01-30)**: further mitigation: suppress `full_name_override` for `Object#in?` so lowering uses the base name even if callsite is mangled. `DEBUG_LOWER_METHOD_SLOW_MS=1000` still times out at 120s but only logs `Object#in?` (no `Type#in?` variants) in `/tmp/self_host_hir_slow2.log`. Next check: longer `CRYSTAL_V2_STOP_AFTER_HIR=1` run to verify wall time reduction.
+- **Update (2026-01-30)**: skip callsite arg tracking for `#in?` in `remember_callsite_arg_types`. `DEBUG_LOWER_METHOD_SLOW_MS=1000` still times out at 120s; slow log shows only `Object#in?` (no per-type variants) in `/tmp/self_host_hir_slow3.log`. Self-host wall time still >120s; additional hotspots need attention.
 
 ### Bootstrap Stabilization Plan (prioritized, 2026-01-xx)
 

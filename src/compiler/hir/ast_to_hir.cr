@@ -25941,13 +25941,16 @@ module Crystal::HIR
       has_block : Bool = false
     ) : Nil
       return if name.empty?
+      base_key = base_callsite_key(name)
+      # Avoid per-receiver callsite tracking for Object#in? (defined only on Object),
+      # which otherwise causes massive monomorphization explosions.
+      return if base_key.ends_with?("#in?")
       callsite = CallsiteArgs.new(
         arg_types.dup,
         arg_literals ? arg_literals.dup : nil,
         enum_names ? enum_names.dup : nil
       )
       @pending_arg_types[name] = callsite
-      base_key = base_callsite_key(name)
       return if base_key.empty?
       literal_key = if arg_literals
                       arg_literals.map { |flag| flag ? '1' : '0' }.join
