@@ -8,10 +8,10 @@ about syntax or types and should match what the original compiler would report.
 
 ---
 
-## Current Status (2026-01-22)
+## Current Status (2026-01-30)
 
 ### Test Coverage
-- **3400+ tests**, 0 failures, minimal pending
+- **3400+ tests**, 5 failures (see below), minimal pending
 - **1390 test cases** ported from Crystal's original `parser_spec.cr`
 - **97.6% parser compatibility** with original Crystal
 
@@ -47,6 +47,14 @@ about syntax or types and should match what the original compiler would report.
 
 ### Pending (1 test)
 - 1 invalid ASM syntax test (intentionally pending)
+
+### Recent Spec Failures (needs fixes)
+- `spec/hir/ast_to_hir_spec.cr` (5 failures):
+  - enum symbol arguments (double splat mangling + enum value typing)
+  - generic block return types (substitution)
+  - typeof in type positions (nested `Enumerable.element_type`)
+  - block param types from callee signature
+  - block param types with generic receiver
 
 ---
 
@@ -381,6 +389,11 @@ Goal: v2 LSP must report only real errors and match original compiler behavior.
 
 ### Pre-Bootstrap Codegen Correctness (Priority)
 - [ ] **Audit int/ptr → float conversions**: ensure `uitofp`/`sitofp` are correct for unsigned/signed and pointer casts across all backends; add specs for representative signed/unsigned/ptr cases.
+  - **Update (2026-01-30)**: audited HIR numeric conversions + MIR CastKind mapping and LLVM backend float casts.
+    - HIR numeric conversions use Cast for `to_f*` across numeric primitives (Int64/UInt64 handled).
+    - MIR CastKind selects SIToFP/UIToFP based on signedness.
+    - LLVM backend uses `uitofp` for unsigned in call coercion/binops/returns.
+    - **Remaining**: add spec coverage for unsigned and pointer-to-float conversions.
 - [ ] **ARM/AArch64 alignment audit**: verify stack/alloca/struct field alignment for ARM targets (incl. AArch64); ensure align=4 where required and matches LLVM target ABI.
 
 **Test Coverage:** 307 new tests (155 HIR + 152 MIR)
@@ -2108,6 +2121,11 @@ Pending follow-ups:
 - Fix `Array#map`/`Array#sort_by!` block return inference so `Char` does not degrade to `UInt8` (remove `UInt8#[]`).
 - Ensure `get_function_return_type` prefers concrete lowered return type over union cache; confirm `Hash#key_hash` returns concrete type and removes `#to_i32!` symbol.
 
-### 8.12 Platform Parity (Bonus)
+### 8.12 Bootstrap Fast Mode (AstCache disabled)
+- [ ] Add `-Dbootstrap_fast` compile flag to skip `LSP::AstCache` in CLI + driver parse paths.
+  - Expose via `CRYSTAL_V2_BOOTSTRAP_FAST=1 ./scripts/build.sh`.
+  - DoD: self-host HIR run shows fewer monomorphized LSP symbols and reduced pending loop time.
+
+### 8.13 Platform Parity (Bonus)
 - [ ] Track LLVM target parity (all targets from `llvm-config --targets-builtin`) and document deltas.
 - [ ] Windows support parity with Crystal (post-bootstrap).
