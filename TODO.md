@@ -1104,6 +1104,8 @@ r2 = maybe(false)  # => nil
 **Current bootstrap blockers (2026-01-30):**
 - Self-host compile stalls in `AstToHir#lower_main` → `process_pending_lower_functions`; sample shows heavy time in `function_def_overloads` and `strip_generic_receiver_from_method_name`. Suspect repeated string parsing / overload lookup in large pending queue.
   - Next: add caching for `strip_generic_receiver_from_method_name` and `function_def_overloads`, or log pending queue size via `DEBUG_PENDING` / `CRYSTAL_V2_PENDING_BUDGET` to confirm growth.
+  - Update (2026-01-30): pending queue observed growing rapidly during self-host (`[PENDING] iteration=0 pending=1112`, `iteration=1 pending=3675` with `DEBUG_PENDING=1`), indicating aggressive fan-out in deferred lowering.
+  - Update (2026-01-30): added cache for stripped overload lookups (`@function_def_overloads_stripped_cache`) to reduce repeated generic-strip scans (commit `b50b1ec`).
 
 **Regressions (open):**
 - [ ] GH #10 (crystal_lsp): prelude build links for minimal `fib.cr`, but runtime segfault persists.
