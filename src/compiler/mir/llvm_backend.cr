@@ -342,6 +342,7 @@ module Crystal::MIR
     @value_names : Hash(ValueId, String)
     @block_names : Hash(BlockId, String)
     @current_return_type : String = "void"
+    @current_return_type_ref : TypeRef = TypeRef::VOID
     @current_func_name : String = ""
     @current_func_params : Array(Parameter) = [] of Parameter
     @current_slab_frame : Bool = false
@@ -380,6 +381,14 @@ module Crystal::MIR
       mangled = @type_mapper.mangle_name(name)
       return "__crystal_v2_fn_#{mangled}" if C_LIBRARY_FUNCTIONS.includes?(mangled)
       mangled
+    end
+
+    private def unsigned_type_ref?(type_ref : TypeRef) : Bool
+      type_ref == TypeRef::UINT8 ||
+        type_ref == TypeRef::UINT16 ||
+        type_ref == TypeRef::UINT32 ||
+        type_ref == TypeRef::UINT64 ||
+        type_ref == TypeRef::UINT128
     end
 
     # Cross-block value tracking for dominance fix
@@ -1664,6 +1673,7 @@ module Crystal::MIR
       end
       return_type = @type_mapper.llvm_type(func.return_type)
       @current_return_type = return_type  # Store for terminator emission
+      @current_return_type_ref = func.return_type
       # @current_func_name already set above before prepass
 
       mangled_name = @current_func_name
@@ -3476,6 +3486,7 @@ module Crystal::MIR
       # For comparisons, use operand type; for others, use result type
       # Use lookup_value_llvm_type which checks parameters as well as @value_types
       operand_type = @value_types[inst.left]? || TypeRef::INT32
+      right_type = @value_types[inst.right]?
       operand_type_str = lookup_value_llvm_type(inst.left)
       right_type_str = lookup_value_llvm_type(inst.right)
 
@@ -3643,27 +3654,29 @@ module Crystal::MIR
           right = "#{right}.0"
           right_type_str = float_type
         end
-        # Convert ptr operands to float (ptrtoint then sitofp)
+        # Convert ptr operands to float (ptrtoint then sitofp/uitofp)
         if left.starts_with?("%") && operand_type_str == "ptr"
           emit "%binop#{inst.id}.left_ptrtoint = ptrtoint ptr #{left} to i64"
-          emit "%binop#{inst.id}.left_itof = sitofp i64 %binop#{inst.id}.left_ptrtoint to #{float_type}"
+          emit "%binop#{inst.id}.left_itof = uitofp i64 %binop#{inst.id}.left_ptrtoint to #{float_type}"
           left = "%binop#{inst.id}.left_itof"
           operand_type_str = float_type
         end
         if right.starts_with?("%") && right_type_str == "ptr"
           emit "%binop#{inst.id}.right_ptrtoint = ptrtoint ptr #{right} to i64"
-          emit "%binop#{inst.id}.right_itof = sitofp i64 %binop#{inst.id}.right_ptrtoint to #{float_type}"
+          emit "%binop#{inst.id}.right_itof = uitofp i64 %binop#{inst.id}.right_ptrtoint to #{float_type}"
           right = "%binop#{inst.id}.right_itof"
           right_type_str = float_type
         end
         # Convert integer SSA values to float for float operations
         if left.starts_with?("%") && operand_type_str.starts_with?("i")
-          emit "%binop#{inst.id}.left_itof = sitofp #{operand_type_str} #{left} to #{float_type}"
+          op = unsigned_type_ref?(operand_type) ? "uitofp" : "sitofp"
+          emit "%binop#{inst.id}.left_itof = #{op} #{operand_type_str} #{left} to #{float_type}"
           left = "%binop#{inst.id}.left_itof"
           operand_type_str = float_type
         end
         if right.starts_with?("%") && right_type_str.starts_with?("i")
-          emit "%binop#{inst.id}.right_itof = sitofp #{right_type_str} #{right} to #{float_type}"
+          op = right_type && unsigned_type_ref?(right_type) ? "uitofp" : "sitofp"
+          emit "%binop#{inst.id}.right_itof = #{op} #{right_type_str} #{right} to #{float_type}"
           right = "%binop#{inst.id}.right_itof"
           right_type_str = float_type
         end
@@ -3913,7 +3926,8 @@ module Crystal::MIR
                 payload_val = "%binop#{inst.id}.raw_ext"
               end
             elsif (payload_type == "float" || payload_type == "double") && result_type.starts_with?("i")
-              emit "%binop#{inst.id}.raw_itof = sitofp #{result_type} #{raw_name} to #{payload_type}"
+              op = (unsigned_type_ref?(operand_type) || (right_type && unsigned_type_ref?(right_type))) ? "uitofp" : "sitofp"
+              emit "%binop#{inst.id}.raw_itof = #{op} #{result_type} #{raw_name} to #{payload_type}"
               payload_val = "%binop#{inst.id}.raw_itof"
             elsif payload_type == "ptr" && result_type.starts_with?("i")
               emit "%binop#{inst.id}.raw_inttoptr = inttoptr #{result_type} #{raw_name} to ptr"
@@ -5284,12 +5298,13 @@ module Crystal::MIR
                      emit "%ptrtofp.#{c} = bitcast i32 %ptrtofp.#{c}.int to float"
                    end
                    "#{expected_llvm_type} %ptrtofp.#{c}"
-                 elsif (expected_llvm_type == "double" || expected_llvm_type == "float") && actual_llvm_type.starts_with?("i")
-                   # Int to float conversion: sitofp (signed int to floating point)
+                elsif (expected_llvm_type == "double" || expected_llvm_type == "float") && actual_llvm_type.starts_with?("i")
+                   # Int to float conversion: signed or unsigned
                    val = value_ref(a)
                    c = @cond_counter
                    @cond_counter += 1
-                   emit "%itofp.#{c} = sitofp #{actual_llvm_type} #{val} to #{expected_llvm_type}"
+                   op = unsigned_type_ref?(actual_type) ? "uitofp" : "sitofp"
+                   emit "%itofp.#{c} = #{op} #{actual_llvm_type} #{val} to #{expected_llvm_type}"
                    "#{expected_llvm_type} %itofp.#{c}"
                  elsif expected_llvm_type.starts_with?("i") && (actual_llvm_type == "float" || actual_llvm_type == "double")
                    # Float to int conversion: fptosi/fptoui based on signedness
@@ -7328,16 +7343,19 @@ module Crystal::MIR
                 emit "ret #{@current_return_type} %ret_trunc.#{c}"
               end
             elsif (@current_return_type == "double" || @current_return_type == "float") && val_llvm_type && val_llvm_type.starts_with?("i")
-              # Integer to float conversion
+              # Integer to float conversion (signed/unsigned)
               c = @cond_counter
               @cond_counter += 1
-              emit "%ret_itof.#{c} = sitofp #{val_llvm_type} #{val_ref} to #{@current_return_type}"
+              op = (val_type && unsigned_type_ref?(val_type)) ? "uitofp" : "sitofp"
+              emit "%ret_itof.#{c} = #{op} #{val_llvm_type} #{val_ref} to #{@current_return_type}"
               emit "ret #{@current_return_type} %ret_itof.#{c}"
             elsif val_llvm_type && (val_llvm_type == "double" || val_llvm_type == "float") && @current_return_type.starts_with?("i")
-              # Float to integer conversion
+              # Float to integer conversion (signed/unsigned)
               c = @cond_counter
               @cond_counter += 1
-              emit "%ret_ftoi.#{c} = fptosi #{val_llvm_type} #{val_ref} to #{@current_return_type}"
+              unsigned = unsigned_type_ref?(@current_return_type_ref)
+              op = unsigned ? "fptoui" : "fptosi"
+              emit "%ret_ftoi.#{c} = #{op} #{val_llvm_type} #{val_ref} to #{@current_return_type}"
               emit "ret #{@current_return_type} %ret_ftoi.#{c}"
             elsif (@current_return_type == "double" || @current_return_type == "float") && val_llvm_type == "ptr"
               # Pointer to float conversion - try to load from pointer or return 0.0
