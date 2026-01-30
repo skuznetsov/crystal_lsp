@@ -1106,6 +1106,7 @@ r2 = maybe(false)  # => nil
   - Next: add caching for `strip_generic_receiver_from_method_name` and `function_def_overloads`, or log pending queue size via `DEBUG_PENDING` / `CRYSTAL_V2_PENDING_BUDGET` to confirm growth.
   - Update (2026-01-30): pending queue observed growing rapidly during self-host (`[PENDING] iteration=0 pending=1112`, `iteration=1 pending=3675` with `DEBUG_PENDING=1`), indicating aggressive fan-out in deferred lowering.
   - Update (2026-01-30): added cache for stripped overload lookups (`@function_def_overloads_stripped_cache`) to reduce repeated generic-strip scans (commit `b50b1ec`).
+  - Update (2026-01-30): switched pending lowering to an explicit queue (`@pending_function_queue`) to avoid repeated full-hash scans in `process_pending_lower_functions` (commit `c54b26f`). Still observing fan-out; monitoring self-host run with `DEBUG_PENDING=1`.
 
 **Regressions (open):**
 - [ ] GH #10 (crystal_lsp): prelude build links for minimal `fib.cr`, but runtime segfault persists.
