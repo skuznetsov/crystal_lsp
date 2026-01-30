@@ -677,6 +677,8 @@ The key insight is: **Don't compete with LLVM, complement it.**
 - Tier 3: build-only + IR/obj generation sanity (no runtime)
 
 #### 5.3.5 Immediate Validation & Hardening
+- [ ] **Unsigned→Float cast audit**: verify all unsigned integer → float (and ptr → float) use `uitofp` in LLVM backend; add a spec covering UInt32/UInt64/UInt128 conversions (cross-platform).
+- [ ] **ARM/AArch64 alignment audit**: verify struct/union layout alignment (incl. 4-byte align on ARM) matches original compiler/ABI; add a small ABI spec for ARM targets.
 - [x] **Structural NoAlias Analysis** (2025-12-11): Paradigm shift from ultra-conservative to allocation-site based.
   - Track allocation sites through Load/GEP chains
   - Track escaped allocations (stored to field/container)
@@ -1088,6 +1090,9 @@ r2 = maybe(false)  # => nil
     - `Int#upto` arity mangling still produces `_Int_upto_arity1`; ensure lowering emits the correct arity-1 overload or normalize arity suffixes.
     - `_Object____` comes from `Tuple#compare_or_raise$Object` (HIR call to `Object#<=>`); avoid Object fallback or emit concrete comparator.
     - Missing property accessor for `Pointer(Slice(Pointer(Tuple(Array(Crystal::DWARF::LineNumbers::Row), UInt64))))` likely from property macro expansion; confirm getter def exists in HIR.
+- **Update (2026-01-30)**: full-prelude `bootstrap_array` now links clean (**0 missing**).
+  - Fixes: array `first?/last?` return types on member access now derive from element types; forced return types no longer overwritten by cached function return types; member-access `first?/last?` override restricted to array-like receivers (fixes `PointerPairingHeap#first?` incorrectly returning `PointerPairingHeap | Nil`).
+  - Evidence: `./bin/crystal_v2 --no-llvm-opt --no-llvm-metadata examples/bootstrap_array.cr -o /private/tmp/bootstrap_array_full` succeeds; HIR shows `Array(Time::Location::ZoneTransition)#last?` returns `ZoneTransition | Nil` and `PointerPairingHeap(Event)#first?` returns `Pointer(Event)`.
 
 **Regressions (open):**
 - [ ] GH #10 (crystal_lsp): prelude build links for minimal `fib.cr`, but runtime segfault persists.

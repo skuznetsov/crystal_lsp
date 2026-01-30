@@ -492,9 +492,6 @@ module Crystal::HIR
       "LibC::TimeT"     => "Int64",      # 64-bit
       "LibC::ClockT"    => "UInt64",     # darwin
       # Without LibC:: prefix (for macro conditionals that define these)
-      "Char"     => "UInt8",
-      "UChar"    => "UInt8",
-      "SChar"    => "Int8",
       "Short"    => "Int16",
       "UShort"   => "UInt16",
       "Int"      => "Int32",
@@ -6104,6 +6101,16 @@ module Crystal::HIR
             if ENV["DEBUG_STRUCT_GETTER_INFER"]? && member_name == "hash"
               STDERR.puts "[STRUCT_GETTER_INFER_CHECK] class=#{class_name} has_info=#{@class_info.has_key?(class_name)}"
             end
+            if member_name == "first" || member_name == "last" || member_name == "first?" || member_name == "last?"
+              type_desc = @module.get_type_descriptor(obj_type)
+              type_name = type_desc ? type_desc.name : class_name
+              if elem_name = element_type_for_type_name(type_name)
+                elem_ref = type_ref_for_name(elem_name)
+                if elem_ref != TypeRef::VOID
+                  return member_name.ends_with?("?") ? create_union_type_for_nullable(elem_ref) : elem_ref
+                end
+              end
+            end
             if info = @class_info[class_name]?
               if info.is_struct
                 if ivar_info = info.ivars.find { |iv| iv.name == "@#{member_name}" }
@@ -6172,17 +6179,6 @@ module Crystal::HIR
                 return elem_ref if elem_ref != TypeRef::VOID
               elsif ENV["DEBUG_PTR_VALUE_INFER"]?
                 STDERR.puts "[PTR_VALUE_INFER] obj_type=#{obj_type.id} no_desc class=#{class_name}"
-              end
-            end
-            if member_name == "first" || member_name == "last" || member_name == "first?" || member_name == "last?"
-              type_desc = @module.get_type_descriptor(obj_type)
-              if type_desc
-                if elem_name = element_type_for_type_name(type_desc.name)
-                  elem_ref = type_ref_for_name(elem_name)
-                  if elem_ref != TypeRef::VOID
-                    return member_name.ends_with?("?") ? create_union_type_for_nullable(elem_ref) : elem_ref
-                  end
-                end
               end
             end
             if member_name == "clone" || member_name == "dup"
@@ -15989,6 +15985,38 @@ module Crystal::HIR
           STDERR.puts "[GET_RETURN] name=#{name} base=#{base_name} func_type=#{func_type ? get_type_name_from_ref(func_type) : "(nil)"} base_type=#{base_type ? get_type_name_from_ref(base_type) : "(nil)"} module_rt=#{func_rt ? get_type_name_from_ref(func_rt) : "(nil)"}"
         end
       end
+      if @function_types[name]?.nil?
+        if base_type = @function_types[base_name]?
+          unionish = false
+          if base_desc = @module.get_type_descriptor(base_type)
+            unionish = base_desc.kind == TypeKind::Union
+          end
+          if !unionish
+            base_type_name = get_type_name_from_ref(base_type)
+            unionish = base_type_name.includes?("|")
+          end
+          if unionish
+            def_node = @function_defs[name]? || @function_defs[base_name]?
+            if def_node
+              owner_name = nil.as(String?)
+              if idx = base_name.rindex('#')
+                owner_name = base_name[0, idx]
+              elsif idx = base_name.rindex('.')
+                owner_name = base_name[0, idx]
+              end
+              if inferred = infer_concrete_return_type_from_body(def_node, owner_name)
+                if inferred != TypeRef::VOID && inferred != TypeRef::NIL
+                  inferred_desc = @module.get_type_descriptor(inferred)
+                  if inferred_desc.nil? || inferred_desc.kind != TypeKind::Union
+                    @function_types[base_name] = inferred
+                    @function_base_return_types[base_name] = inferred unless base_name.includes?("$")
+                  end
+                end
+              end
+            end
+          end
+        end
+      end
       # First check pre-registered signatures (for forward references)
       if type = @function_types[name]?
         if func = @module.function_by_name(name)
@@ -16006,6 +16034,35 @@ module Crystal::HIR
                 if type_desc.kind == TypeKind::Union
                   @function_types[name] = func_rt
                   type = func_rt
+                end
+              end
+            end
+          end
+        end
+        unionish = false
+        if type_desc = @module.get_type_descriptor(type)
+          unionish = type_desc.kind == TypeKind::Union
+        end
+        if !unionish
+          type_name = get_type_name_from_ref(type)
+          unionish = type_name.includes?("|")
+        end
+        if unionish
+          def_node = @function_defs[name]? || @function_defs[base_name]?
+          if def_node
+            owner_name = nil.as(String?)
+            if idx = base_name.rindex('#')
+              owner_name = base_name[0, idx]
+            elsif idx = base_name.rindex('.')
+              owner_name = base_name[0, idx]
+            end
+            if inferred = infer_concrete_return_type_from_body(def_node, owner_name)
+              if inferred != TypeRef::VOID && inferred != TypeRef::NIL
+                inferred_desc = @module.get_type_descriptor(inferred)
+                if inferred_desc.nil? || inferred_desc.kind != TypeKind::Union
+                  @function_types[name] = inferred
+                  @function_base_return_types[base_name] = inferred unless base_name.includes?("$")
+                  type = inferred
                 end
               end
             end
@@ -17366,8 +17423,15 @@ module Crystal::HIR
       self_type_name : String?
     ) : String?
       old_arena = @arena
-      if block_arena = @block_node_arenas[block.object_id]?
+      block_arena = @block_node_arenas[block.object_id]?
+      block_arena ||= resolve_arena_for_block(block, old_arena)
+      if block_arena
+        @block_node_arenas[block.object_id] = block_arena
         @arena = block_arena
+      end
+      if ENV["DEBUG_BLOCK_ARENA"]?
+        mapped = @block_node_arenas[block.object_id]?
+        STDERR.puts "[BLOCK_ARENA] block=#{block.object_id} mapped=#{!!mapped} current=#{old_arena.object_id} target=#{mapped ? mapped.object_id : "nil"}"
       end
 
       body = block.body
@@ -28089,6 +28153,12 @@ module Crystal::HIR
           end
         end
       end
+      if block_expr
+        block_node = @arena[block_expr]
+        if block_node.is_a?(CrystalV2::Compiler::Frontend::BlockNode)
+          @block_node_arenas[block_node.object_id] ||= @arena
+        end
+      end
 
       receiver_id : ValueId? = nil
       receiver_type : TypeRef = TypeRef::VOID
@@ -30202,6 +30272,22 @@ module Crystal::HIR
          (return_type == TypeRef::BOOL || return_type == TypeRef::VOID || return_type == TypeRef::NIL)
         if inferred = infer_unannotated_query_return_type(method_name, ctx.type_of(receiver_id))
           return_type = inferred
+        end
+      end
+      if receiver_id && (method_name == "first" || method_name == "last" || method_name == "first?" || method_name == "last?")
+        recv_type = ctx.type_of(receiver_id)
+        recv_desc = @module.get_type_descriptor(recv_type)
+        type_name = recv_desc ? recv_desc.name : get_type_name_from_ref(recv_type)
+        if elem_name = element_type_for_type_name(type_name)
+          elem_ref = type_ref_for_name(elem_name)
+          if elem_ref != TypeRef::VOID
+            return_type = method_name.ends_with?("?") ? create_union_type_for_nullable(elem_ref) : elem_ref
+            if ENV["DEBUG_FIRST_LAST_RETURN"]?
+              recv_name = get_type_name_from_ref(recv_type)
+              ret_name = get_type_name_from_ref(return_type)
+              STDERR.puts "[FIRST_LAST_RETURN] method=#{method_name} recv=#{recv_name} elem=#{elem_name} ret=#{ret_name}"
+            end
+          end
         end
       end
 
@@ -33894,6 +33980,7 @@ module Crystal::HIR
         debug_hook("inline.yield.block_arena_missing", "callee=#{inline_key} caller=#{ctx.function.name}")
         return inline_yield_fallback_call(ctx, inline_key, receiver_id, call_args, block, block_param_types)
       end
+      @block_node_arenas[block.object_id] = block_arena
       unless block.body.empty?
         max_index = block.body.max_of(&.index)
         if max_index < 0 || max_index >= block_arena.size
@@ -35818,6 +35905,7 @@ module Crystal::HIR
       end
 
       return_type = get_function_return_type(actual_name)
+      forced_return_type = false
       if return_type == TypeRef::VOID && actual_name != base_method_name
         base_return = get_function_return_type(base_method_name)
         if base_return != TypeRef::VOID
@@ -35843,6 +35931,23 @@ module Crystal::HIR
       end
       if tuple_return = tuple_return_type_for_method(receiver_type, member_name)
         return_type = tuple_return
+      end
+      if member_name == "first" || member_name == "last" || member_name == "first?" || member_name == "last?"
+        recv_type = ctx.type_of(object_id)
+        if type_desc = @module.get_type_descriptor(recv_type)
+          if elem_name = element_type_for_type_name(type_desc.name)
+            elem_type = type_ref_for_name(elem_name)
+            if elem_type != TypeRef::VOID
+              return_type = member_name.ends_with?("?") ? create_union_type_for_nullable(elem_type) : elem_type
+              forced_return_type = true
+              if ENV["DEBUG_MEMBER_FIRST_LAST"]?
+                recv_name = get_type_name_from_ref(recv_type)
+                ret_name = get_type_name_from_ref(return_type)
+                STDERR.puts "[MEMBER_FIRST_LAST] member=#{member_name} recv=#{recv_name} elem=#{elem_name} ret=#{ret_name}"
+              end
+            end
+          end
+        end
       end
       if member_name.ends_with?("?") &&
          (return_type == TypeRef::BOOL || return_type == TypeRef::VOID || return_type == TypeRef::NIL)
@@ -36021,7 +36126,7 @@ module Crystal::HIR
           return_type = get_function_return_type(primary_name)
         end
       end
-      if func = @module.function_by_name(actual_name)
+      if !forced_return_type && (func = @module.function_by_name(actual_name))
         if func.return_type != TypeRef::VOID && func.return_type != TypeRef::NIL && func.return_type != return_type
           return_type = func.return_type
         end
@@ -36030,7 +36135,10 @@ module Crystal::HIR
       if resolved_return_type == TypeRef::VOID && actual_name != primary_name
         resolved_return_type = get_function_return_type(primary_name)
       end
-      if resolved_return_type != TypeRef::VOID && resolved_return_type != TypeRef::NIL && resolved_return_type != return_type
+      if !forced_return_type &&
+         resolved_return_type != TypeRef::VOID &&
+         resolved_return_type != TypeRef::NIL &&
+         resolved_return_type != return_type
         return_type = resolved_return_type
       end
 
@@ -36873,6 +36981,13 @@ module Crystal::HIR
         end
       end
 
+      if arg_ids.first? && block_pass_implicit_receiver?(proc_expr)
+        rewritten = rewrite_block_pass_receiver(proc_expr, arg_ids.first, span)
+        block_node = CrystalV2::Compiler::Frontend::BlockNode.new(span, params.empty? ? nil : params, [rewritten])
+        @block_node_arenas[block_node.object_id] = @arena
+        return block_node
+      end
+
       call_member = @arena.add_typed(
         CrystalV2::Compiler::Frontend::MemberAccessNode.new(span, proc_expr, "call".to_slice)
       )
@@ -36883,6 +36998,44 @@ module Crystal::HIR
       block_node = CrystalV2::Compiler::Frontend::BlockNode.new(span, params.empty? ? nil : params, [call_expr])
       @block_node_arenas[block_node.object_id] = @arena
       block_node
+    end
+
+    private def block_pass_implicit_receiver?(expr_id : ExprId) : Bool
+      node = @arena[expr_id]
+      case node
+      when CrystalV2::Compiler::Frontend::ImplicitObjNode,
+           CrystalV2::Compiler::Frontend::SelfNode
+        true
+      when CrystalV2::Compiler::Frontend::MemberAccessNode
+        block_pass_implicit_receiver?(node.object)
+      when CrystalV2::Compiler::Frontend::CallNode
+        block_pass_implicit_receiver?(node.callee)
+      else
+        false
+      end
+    end
+
+    private def rewrite_block_pass_receiver(
+      expr_id : ExprId,
+      arg_id : ExprId,
+      span : CrystalV2::Compiler::Frontend::Span
+    ) : ExprId
+      node = @arena[expr_id]
+      case node
+      when CrystalV2::Compiler::Frontend::ImplicitObjNode,
+           CrystalV2::Compiler::Frontend::SelfNode
+        arg_id
+      when CrystalV2::Compiler::Frontend::MemberAccessNode
+        new_obj = rewrite_block_pass_receiver(node.object, arg_id, span)
+        @arena.add_typed(CrystalV2::Compiler::Frontend::MemberAccessNode.new(node.span, new_obj, node.member))
+      when CrystalV2::Compiler::Frontend::CallNode
+        new_callee = rewrite_block_pass_receiver(node.callee, arg_id, span)
+        @arena.add_typed(
+          CrystalV2::Compiler::Frontend::CallNode.new(node.span, new_callee, node.args, node.block, node.named_args)
+        )
+      else
+        expr_id
+      end
     end
 
     private def lower_proc_literal(
