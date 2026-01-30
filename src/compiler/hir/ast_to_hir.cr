@@ -696,6 +696,11 @@ module Crystal::HIR
     @pending_source_counts : Hash(String, Int32) = {} of String => Int32
     # Pending queue sample names (debug only): stripped base name → sample full names.
     @pending_source_samples : Hash(String, Array(String)) = {} of String => Array(String)
+    # Monomorphization counters (debug only): base name → count.
+    @mono_source_counts : Hash(String, Int32) = {} of String => Int32
+    # Monomorphization samples (debug only): base name → specialized names.
+    @mono_source_samples : Hash(String, Array(String)) = {} of String => Array(String)
+    @mono_sources_reported : Bool = false
 
     # Tracks nesting depth of lowering operations.
     # When > 0, new lower requests are queued instead of executed immediately.
@@ -10938,6 +10943,16 @@ module Crystal::HIR
       # (e.g., Array(String) method calls something that creates Array(String) again)
       @monomorphized.add(specialized_name)
       debug_hook("mono.start", "base=#{base_name} name=#{specialized_name} args=#{type_args}")
+      if ENV["DEBUG_MONO_SOURCES"]?
+        @mono_source_counts[base_name] = (@mono_source_counts[base_name]? || 0) + 1
+        if ENV["DEBUG_MONO_SOURCES_SAMPLES"]?
+          samples = @mono_source_samples[base_name]? || [] of String
+          if samples.size < 3 && !samples.includes?(specialized_name)
+            samples << specialized_name
+            @mono_source_samples[base_name] = samples
+          end
+        end
+      end
       mono_start = nil
       if ENV.has_key?("DEBUG_MONO")
         mono_start = Time.instant
@@ -19631,6 +19646,22 @@ module Crystal::HIR
       emit_all_tracked_signatures
       # Final pass: lower any remaining call targets that already appear in HIR.
       lower_missing_call_targets
+      if ENV["DEBUG_MONO_SOURCES"]? && !@mono_sources_reported && !@mono_source_counts.empty?
+        top_n = ENV["DEBUG_MONO_SOURCES_TOP"]?.try(&.to_i?) || 15
+        STDERR.puts "[MONO_SOURCES] top=#{top_n} total=#{@mono_source_counts.size}"
+        @mono_source_counts.to_a
+          .sort_by { |entry| -entry[1] }
+          .first(top_n)
+          .each do |name, count|
+            STDERR.puts "  #{name}: #{count}"
+            if ENV["DEBUG_MONO_SOURCES_SAMPLES"]?
+              if samples = @mono_source_samples[name]?
+                samples.each { |sample| STDERR.puts "    - #{sample}" }
+              end
+            end
+          end
+        @mono_sources_reported = true
+      end
     end
 
     # Emit all tracked callsite signatures that haven't been lowered yet.
