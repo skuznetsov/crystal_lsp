@@ -694,6 +694,8 @@ module Crystal::HIR
     @pending_function_queue : Array(String) = [] of String
     # Pending queue source counts (debug only): stripped base name → enqueue count.
     @pending_source_counts : Hash(String, Int32) = {} of String => Int32
+    # Pending queue sample names (debug only): stripped base name → sample full names.
+    @pending_source_samples : Hash(String, Array(String)) = {} of String => Array(String)
 
     # Tracks nesting depth of lowering operations.
     # When > 0, new lower requests are queued instead of executed immediately.
@@ -19840,6 +19842,7 @@ module Crystal::HIR
       pending_sources_mode = ENV["DEBUG_PENDING_SOURCES"]?
       pending_sources_each = pending_sources_mode == "each"
       pending_sources_top = ENV["DEBUG_PENDING_SOURCES_TOP"]?.try(&.to_i?) || 15
+      pending_sources_samples = ENV.has_key?("DEBUG_PENDING_SOURCES_SAMPLES")
 
       while pending_functions.size > 0 && iteration < max_iterations
         # Take a snapshot of currently pending functions
@@ -19856,6 +19859,13 @@ module Crystal::HIR
               .first(pending_sources_top)
               .each do |name, count|
                 STDERR.puts "  #{name}: #{count}"
+                if pending_sources_samples
+                  if samples = @pending_source_samples[name]?
+                    samples.each do |sample|
+                      STDERR.puts "    - #{sample}"
+                    end
+                  end
+                end
               end
           end
         end
@@ -26708,6 +26718,13 @@ module Crystal::HIR
                    end
             stripped = strip_generic_receiver_from_method_name(base)
             @pending_source_counts[stripped] = (@pending_source_counts[stripped]? || 0) + 1
+            if ENV["DEBUG_PENDING_SOURCES_SAMPLES"]?
+              samples = @pending_source_samples[stripped]? || [] of String
+              if samples.size < 3 && !samples.includes?(name)
+                samples << name
+                @pending_source_samples[stripped] = samples
+              end
+            end
           end
         end
         return
