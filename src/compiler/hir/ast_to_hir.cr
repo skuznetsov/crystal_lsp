@@ -1326,6 +1326,22 @@ module Crystal::HIR
       end
     end
 
+    private def debug_env_filter_match?(env_key : String, *texts : String) : Bool
+      value = ENV[env_key]?
+      return false unless value
+      return true if value.empty? || value == "1" || value == "true"
+      tokens = value.split(',').map(&.strip).reject(&.empty?)
+      return true if tokens.empty?
+      texts.any? do |text|
+        tokens.any? { |token| text.includes?(token) }
+      end
+    end
+
+    private def debug_hook_filter_match?(*texts : String) : Bool
+      return false unless DebugHooks::ENABLED
+      debug_env_filter_match?("DEBUG_HOOK_FILTER", *texts)
+    end
+
     private def clear_pending_effect_annotations : Nil
       @pending_def_annotations.clear
     end
@@ -1457,7 +1473,7 @@ module Crystal::HIR
     private def record_module_inclusion(module_name : String, class_name : String) : Nil
       # Resolve type aliases in the module name (e.g., Engine::MatchData -> PCRE2::MatchData)
       resolved_module_name = resolve_module_alias_for_include(module_name)
-      if ENV["DEBUG_MODULE_INCLUDE"]? && (module_name.includes?("FileDescriptor") || class_name.includes?("EventLoop") || module_name.includes?("MatchData"))
+      if debug_env_filter_match?("DEBUG_MODULE_INCLUDE", module_name, class_name, resolved_module_name)
         STDERR.puts "[DEBUG_MODULE_INCLUDE] #{class_name} <= #{module_name} (resolved: #{resolved_module_name})"
       end
       cache_bump = false
@@ -1587,14 +1603,8 @@ module Crystal::HIR
       else
         debug_hook_method_register(full_name, "", base_name)
       end
-      if DebugHooks::ENABLED && (full_name.includes?("bsearch") || base_name.ends_with?("#first") || base_name.ends_with?(".first"))
+      if debug_env_filter_match?("DEBUG_METHOD_RETURN", full_name, base_name)
         debug_hook("method.return", "name=#{full_name} type=#{get_type_name_from_ref(return_type)}")
-      end
-      if ENV["DEBUG_TO_S_REGISTER"]? && base_name.ends_with?("#to_s")
-        STDERR.puts "[TO_S_REGISTER] full=#{full_name} base=#{base_name} ret=#{get_type_name_from_ref(return_type)}"
-      end
-      if ENV["DEBUG_STRING_POOL_RET"]? && full_name.includes?("StringPool#intern")
-        STDERR.puts "[STRING_POOL_RET] full=#{full_name} ret=#{get_type_name_from_ref(return_type)}"
       end
     end
 
@@ -5259,7 +5269,7 @@ module Crystal::HIR
                     method_name = String.new(member.name)
                     base_name = "#{class_name}##{method_name}"
 
-                    if DebugHooks::ENABLED && method_name == "map"
+                    if debug_hook_filter_match?(class_name, method_name)
                       block_type = ""
                       if params = member.params
                         if blk = params.find(&.is_block)
@@ -5472,7 +5482,14 @@ module Crystal::HIR
                name
              end
       return false if class_like_namespace?(base)
-      @module_defs.has_key?(base)
+      return true if @module_defs.has_key?(base)
+      return true if @module_includers.has_key?(base) || @module_includer_keys_by_suffix.has_key?(base)
+
+      short_name = last_namespace_component(base)
+      return true if @module_defs.has_key?(short_name)
+      return true if @module_includers.has_key?(short_name) || @module_includer_keys_by_suffix.has_key?(short_name)
+
+      false
     end
 
     private def module_type_ref?(type_ref : TypeRef) : Bool
@@ -7197,6 +7214,19 @@ module Crystal::HIR
         if block = expr_node.block
           collect_local_assignment_types(block, name, self_type_name, output, body, visited)
         end
+      when CrystalV2::Compiler::Frontend::BinaryNode
+        left = node_for_expr(expr_node.left)
+        right = node_for_expr(expr_node.right)
+        if left.is_a?(CrystalV2::Compiler::Frontend::IdentifierNode) && String.new(left.name) == name
+          if inferred = infer_type_from_expr(expr_node.right, self_type_name)
+            output << inferred if inferred != TypeRef::VOID
+          end
+        end
+        if right.is_a?(CrystalV2::Compiler::Frontend::IdentifierNode) && String.new(right.name) == name
+          if inferred = infer_type_from_expr(expr_node.left, self_type_name)
+            output << inferred if inferred != TypeRef::VOID
+          end
+        end
       when CrystalV2::Compiler::Frontend::ReturnNode
         if value = expr_node.value
           collect_local_assignment_types(value, name, self_type_name, output, body, visited)
@@ -7221,7 +7251,7 @@ module Crystal::HIR
         current_path = @paths_by_arena[@arena]? || "(unknown)"
         STDERR.puts "[TYPE_PATH_MODULE] name=#{module_name} file=#{File.basename(current_path)} span=#{node.span.start_line}:#{node.span.start_column}"
       end
-      if ENV.has_key?("DEBUG_NESTED_CLASS") && (module_name == "IO" || module_name.includes?("FileDescriptor"))
+      if debug_env_filter_match?("DEBUG_NESTED_CLASS", module_name)
         STDERR.puts "[DEBUG_MODULE] Processing module: #{module_name}, body_size=#{node.body.try(&.size) || 0}"
       end
 
@@ -7473,7 +7503,7 @@ module Crystal::HIR
             if ENV.has_key?("DEBUG_MODULE_THREAD") && module_name.includes?("System::Thread")
               STDERR.puts "[REG_MODULE_METHOD] #{module_name}.#{method_name} -> #{full_name}"
             end
-            if ENV["DEBUG_BYTEFORMAT_REGISTER"]? && module_name.includes?("ByteFormat") && method_name == "decode"
+            if debug_env_filter_match?("DEBUG_BYTEFORMAT_REGISTER", module_name, method_name, full_name)
               file_path = if arena = @arena.as?(CrystalV2::Compiler::Frontend::VirtualArena)
                             arena.file_for_id(expr_id)
                           end
@@ -7518,7 +7548,7 @@ module Crystal::HIR
           when CrystalV2::Compiler::Frontend::ClassNode
             class_name = String.new(member.name)
             full_class_name = "#{module_name}::#{class_name}"
-            if ENV.has_key?("DEBUG_NESTED_CLASS") && full_class_name.includes?("FileDescriptor")
+            if debug_env_filter_match?("DEBUG_NESTED_CLASS", full_class_name)
               STDERR.puts "[DEBUG_NESTED_CLASS] Registering nested class: #{full_class_name}"
             end
             register_class_with_name(member, full_class_name)
@@ -9491,7 +9521,7 @@ module Crystal::HIR
 
     # Lower a module with a specific name prefix
     private def lower_module_with_name(node : CrystalV2::Compiler::Frontend::ModuleNode, module_name : String)
-      if ENV.has_key?("DEBUG_NESTED_CLASS") && (module_name == "IO" || module_name.includes?("FileDescriptor"))
+      if debug_env_filter_match?("DEBUG_NESTED_CLASS", module_name)
         STDERR.puts "[DEBUG_LOWER_MOD] lower_module_with_name: #{module_name}, body_size=#{node.body.try(&.size) || 0}"
       end
       # DEBUG_MODULE_THREAD disabled
@@ -9509,7 +9539,7 @@ module Crystal::HIR
             elsif !member.is_a?(CrystalV2::Compiler::Frontend::DefNode)
               clear_pending_effect_annotations
             end
-            if ENV.has_key?("DEBUG_NESTED_CLASS") && (module_name == "IO" || module_name.includes?("FileDescriptor"))
+            if debug_env_filter_match?("DEBUG_NESTED_CLASS", module_name)
               STDERR.puts "[DEBUG_LOWER_MOD] #{module_name} member #{idx}: #{member.class}"
             end
           case member
@@ -9570,7 +9600,7 @@ module Crystal::HIR
               # Lower nested class with full name
               class_name = String.new(member.name)
               full_class_name = "#{module_name}::#{class_name}"
-              if ENV.has_key?("DEBUG_NESTED_CLASS") && (module_name == "IO" || class_name.includes?("FileDescriptor"))
+              if debug_env_filter_match?("DEBUG_NESTED_CLASS", module_name, class_name, full_class_name)
                 STDERR.puts "[DEBUG_LOWER_MOD] lowering nested class: #{full_class_name}"
               end
               lower_class_with_name(member, full_class_name)
@@ -9766,7 +9796,7 @@ module Crystal::HIR
       end
       call_literal_flags = call_arg_literals || [] of Bool
       call_enum_names = call_arg_enum_names || [] of String?
-      if DebugHooks::ENABLED && base_name.ends_with?("#read_bytes")
+      if debug_hook_filter_match?(base_name)
         debug_hook(
           "method.callsite_literals",
           "name=#{base_name} types=#{call_types.map(&.id).join(",")} literals=#{call_literal_flags.join(",")}"
@@ -9815,7 +9845,7 @@ module Crystal::HIR
           if !param.is_block && !param.is_splat && !param.is_double_splat && call_index < call_types.size
             param_type = refine_param_type_from_call(param_type, call_types[call_index])
           end
-          if type_ann_str && (type_ann_str == "IO::ByteFormat" || type_ann_str == "ByteFormat")
+          if type_ann_str && module_like_type_name?(type_ann_str)
             if call_index < call_types.size
               inferred = call_types[call_index]
               param_type = inferred if inferred != TypeRef::VOID
@@ -9876,7 +9906,7 @@ module Crystal::HIR
             param_types << param_type
           end
           param_literal_flags << param_literal
-          if DebugHooks::ENABLED && base_name.ends_with?("#read_bytes")
+          if debug_hook_filter_match?(base_name)
             debug_hook(
               "param.literal",
               "name=#{base_name} param=#{param_name} literal=#{param_literal}"
@@ -10045,7 +10075,7 @@ module Crystal::HIR
     # Register a class type and its methods (pass 1)
     def register_class(node : CrystalV2::Compiler::Frontend::ClassNode)
       class_name = String.new(node.name)
-      if ENV.has_key?("DEBUG_NESTED_CLASS") && (class_name == "IO" || class_name.includes?("FileDescriptor"))
+      if debug_env_filter_match?("DEBUG_NESTED_CLASS", class_name)
         STDERR.puts "[DEBUG_CLASS_REG] register_class called: #{class_name}"
       end
       old_class = @current_class
@@ -10292,6 +10322,9 @@ module Crystal::HIR
             end
           when CrystalV2::Compiler::Frontend::ExtendNode
             extend_nodes << member
+            if module_name = resolve_path_like_name(member.target)
+              record_module_inclusion(module_name, class_name)
+            end
           end
         end
         record_constants_in_body(class_name, class_body)
@@ -10429,10 +10462,6 @@ module Crystal::HIR
                         end
             return_start = mono_debug ? Time.instant : nil
             type_literal_name = infer_type_literal_return_name_from_body(member, class_name)
-            if method_name == "backend_class" &&
-               (class_name == "Crystal::EventLoop" || class_name == "EventLoop")
-              type_literal_name = preferred_event_loop_backend_class || type_literal_name
-            end
             enum_return_name : String? = nil
             return_type = if rt = member.return_type
                             rt_name = String.new(rt)
@@ -10521,7 +10550,7 @@ module Crystal::HIR
                 @function_enum_return_names[alias_base] = enum_return_name
               end
             end
-            if ENV.has_key?("DEBUG_NESTED_CLASS") && (class_name.includes?("FileDescriptor") || class_name.includes?("EventLoop"))
+            if debug_env_filter_match?("DEBUG_NESTED_CLASS", class_name, method_name)
               STDERR.puts "[DEBUG_METHOD_REG] #{class_name}: #{method_name} -> #{full_name} (class_method=#{is_class_method})"
             end
             register_function_type(full_name, return_type)
@@ -10530,7 +10559,7 @@ module Crystal::HIR
             # When registering methods from a monomorphized generic class, @arena may point
             # to a different file than where the method was actually defined.
             member_arena = resolve_arena_for_def(member, @arena)
-            if ENV["DEBUG_ARENA_RESOLVE"]? && (class_name.includes?("Slice") && method_name == "hash")
+            if debug_env_filter_match?("DEBUG_ARENA_RESOLVE", class_name, method_name, full_name)
               current_path = source_path_for(@arena) || "(unknown)"
               resolved_path = source_path_for(member_arena) || "(unknown)"
               STDERR.puts "[ARENA_RESOLVE] full=#{full_name} current=#{current_path}:#{@arena.size} resolved=#{resolved_path}:#{member_arena.size} member.span=#{member.span.start_offset}..#{member.span.end_offset}"
@@ -11350,7 +11379,7 @@ module Crystal::HIR
 
           body.each do |expr_id|
             member = unwrap_visibility_member(@arena[expr_id])
-            if ENV.has_key?("DEBUG_DEFERRED_CLASSVAR") && class_name.includes?("CallStack")
+            if debug_env_filter_match?("DEBUG_DEFERRED_CLASSVAR", class_name)
               STDERR.puts "[DEFERRED_CLASSVAR] lower_class_with_name body member: class=#{class_name} member_class=#{member.class.name.split("::").last}"
             end
             if member.is_a?(CrystalV2::Compiler::Frontend::AnnotationNode)
@@ -11965,12 +11994,17 @@ module Crystal::HIR
       ctx.terminate(Return.new(field_get.id))
     end
 
-    private def generate_setter_method_for_ivar(class_name : String, class_info : ClassInfo, ivar_info : IVarInfo)
+    private def generate_setter_method_for_ivar(
+      class_name : String,
+      class_info : ClassInfo,
+      ivar_info : IVarInfo,
+      use_base_name : Bool = false
+    )
       accessor_name = ivar_info.name.lstrip('@')
       ivar_type = ivar_info.type
 
       base_name = "#{class_name}##{accessor_name}="
-      func_name = mangle_function_name(base_name, [ivar_type])
+      func_name = use_base_name ? base_name : mangle_function_name(base_name, [ivar_type])
       register_function_type(func_name, ivar_type)
       return if @module.has_function?(func_name)
 
@@ -12183,14 +12217,14 @@ module Crystal::HIR
         end
       end
 
-      if ENV.has_key?("DEBUG_NESTED_CLASS") && (class_name.includes?("FileDescriptor") && method_name.includes?("from_stdio"))
+      if debug_env_filter_match?("DEBUG_NESTED_CLASS", class_name, method_name)
         sep = is_class_method ? "." : "#"
         STDERR.puts "[DEBUG_LOWER_METHOD] #{class_name}#{sep}#{method_name} (class_method=#{is_class_method}, receiver=#{node.receiver})"
       end
       if DebugHooks::ENABLED && class_name.includes?("(") && @type_param_map.empty?
         debug_hook("method.lower.missing_type_params", "class=#{class_name} method=#{method_name} override=#{full_name_override || ""}")
       end
-      if ENV.has_key?("DEBUG_STRING_METHOD_LOWER") && class_name == "String" && (method_name == "[]" || method_name == "char_index_to_byte_index")
+      if debug_env_filter_match?("DEBUG_STRING_METHOD_LOWER", class_name, method_name)
         sep = is_class_method ? "." : "#"
         STDERR.puts "[DEBUG_LOWER_METHOD] #{class_name}#{sep}#{method_name} override=#{full_name_override || "(none)"}"
       end
@@ -12201,13 +12235,13 @@ module Crystal::HIR
           STDERR.puts "[DEBUG_METHOD_ARENA] method=#{full_label} arena=#{@arena.class}:#{@arena.size} file=#{path}"
         end
       end
-      if DebugHooks::ENABLED && class_name.starts_with?("Array(") && method_name == "new" && is_class_method
+      if debug_hook_filter_match?(class_name, method_name)
         debug_hook("method.lower.array_new", "class=#{class_name} map=#{type_param_map_debug_string} override=#{full_name_override || ""}")
       end
-      if DebugHooks::ENABLED && method_name == "map" && !is_class_method
+      if debug_hook_filter_match?(class_name, method_name)
         debug_hook("method.lower.map", "class=#{class_name} map=#{type_param_map_debug_string} override=#{full_name_override || ""}")
       end
-      if ENV["DEBUG_STRING_COMPARE_BODY"]? && class_name == "String" && method_name == "compare"
+      if debug_env_filter_match?("DEBUG_STRING_COMPARE_BODY", class_name, method_name)
         if body = node.body
           preview = body.first(10).map do |expr_id|
             @arena[expr_id].class.to_s.split("::").last
@@ -12440,7 +12474,7 @@ module Crystal::HIR
       call_types = call_arg_types || [] of TypeRef
       call_literal_flags = call_arg_literals || [] of Bool
       call_enum_names = call_arg_enum_names || [] of String?
-      if DebugHooks::ENABLED && base_name.ends_with?("#read_bytes")
+      if debug_hook_filter_match?(base_name)
         debug_hook(
           "method.callsite_literals",
           "name=#{base_name} types=#{call_types.map(&.id).join(",")} literals=#{call_literal_flags.join(",")}"
@@ -12563,7 +12597,7 @@ module Crystal::HIR
             param_types << param_type
           end
           param_literal_flags << param_literal
-          if DebugHooks::ENABLED && base_name.ends_with?("#read_bytes")
+          if debug_hook_filter_match?(base_name)
             debug_hook(
               "param.literal",
               "name=#{base_name} param=#{param_name} literal=#{param_literal}"
@@ -12626,15 +12660,6 @@ module Crystal::HIR
                         inferred = infer_getter_return_type(node, class_info.ivars)
                         inferred || TypeRef::VOID
                       end
-        if (return_type == TypeRef::VOID || return_type == TypeRef::NIL) &&
-           is_class_method &&
-           method_name == "backend_class" &&
-           (class_name == "Crystal::EventLoop" || class_name == "EventLoop")
-          if preferred = preferred_event_loop_backend_class
-            preferred_ref = type_ref_for_name(preferred)
-            return_type = preferred_ref unless preferred_ref == TypeRef::VOID
-          end
-        end
         if return_type == TypeRef::VOID || return_type == TypeRef::NIL || unresolved_generic_return_type?(return_type)
           if inferred = infer_concrete_return_type_from_body(node, class_name)
             return_type = inferred unless inferred == TypeRef::VOID || inferred == TypeRef::NIL
@@ -12662,15 +12687,6 @@ module Crystal::HIR
                           inferred = infer_getter_return_type(node, class_info.ivars)
                           inferred || TypeRef::VOID
                         end
-          if (return_type == TypeRef::VOID || return_type == TypeRef::NIL) &&
-             is_class_method &&
-             method_name == "backend_class" &&
-             (class_name == "Crystal::EventLoop" || class_name == "EventLoop")
-            if preferred = preferred_event_loop_backend_class
-              preferred_ref = type_ref_for_name(preferred)
-              return_type = preferred_ref unless preferred_ref == TypeRef::VOID
-            end
-          end
           if return_type == TypeRef::VOID || return_type == TypeRef::NIL || unresolved_generic_return_type?(return_type)
             if inferred = infer_concrete_return_type_from_body(node, class_name)
               return_type = inferred unless inferred == TypeRef::VOID || inferred == TypeRef::NIL
@@ -12687,7 +12703,7 @@ module Crystal::HIR
       # substitutions (e.g., T => UInt8) that were stored during method registration.
       if registered_params = function_type_param_map_for(full_name, base_name)
         extra_type_params.merge!(registered_params)
-        if ENV.has_key?("DEBUG_LOWER_METHOD_TPM") && (full_name.includes?("Slice") && full_name.includes?("hash"))
+        if debug_env_filter_match?("DEBUG_LOWER_METHOD_TPM", full_name, base_name)
           STDERR.puts "[LOWER_METHOD_TPM] full=#{full_name} base=#{base_name} merged=#{registered_params}"
         end
       end
@@ -12695,18 +12711,18 @@ module Crystal::HIR
       register_pending_method_effects(full_name, param_types.size)
       register_function_type(full_name, return_type)
 
-      if base_name.includes?("from_chars")
+      if debug_env_filter_match?("DEBUG_FROM_CHARS", base_name, full_name)
         STDERR.puts "[LOWER_METHOD] base_name=#{base_name}, full_name=#{full_name}, param_types=#{param_types.map(&.to_s)}, override=#{full_name_override}"
         STDERR.flush
         STDERR.puts "[LOWER_METHOD] 1. Before create_function"
         STDERR.flush
       end
-      if ENV["DEBUG_CALL_TRACE"]? && method_name == "copy_to"
+      if debug_env_filter_match?("DEBUG_CALL_TRACE", method_name, base_name, full_name)
         STDERR.puts "[LOWER_METHOD] enter class=#{class_name} full=#{full_name}"
       end
 
       func = @module.create_function(full_name, return_type)
-      if base_name.includes?("from_chars")
+      if debug_env_filter_match?("DEBUG_FROM_CHARS", base_name, full_name)
         STDERR.puts "[LOWER_METHOD] 2. After create_function"
         STDERR.flush
       end
@@ -12743,7 +12759,7 @@ module Crystal::HIR
         # ensure it is monomorphized before lowering the method body so calls on the value can resolve.
         ensure_monomorphized_type(param_type) unless param_type == TypeRef::VOID
 
-        if ENV["DEBUG_MATH_MIN"]? && (method_name == "min" || method_name == "max") && class_name.includes?("Math")
+        if debug_env_filter_match?("DEBUG_MATH_MIN", class_name, method_name)
           type_name = get_type_name_from_ref(param_type)
           STDERR.puts "[MATH_MIN] class=#{class_name} method=#{method_name} param=#{param_name} type=#{type_name} (ref=#{param_type.id})"
         end
@@ -12802,7 +12818,7 @@ module Crystal::HIR
       last_value : ValueId? = nil
       begin
         if body = node.body
-          if ENV["DEBUG_BODY_EXPRS"]? && (class_name.includes?("Slice") && method_name == "hash")
+          if debug_env_filter_match?("DEBUG_BODY_EXPRS", class_name, method_name, base_name)
             body_indices = body.map(&.index).join(",")
             STDERR.puts "[BODY_EXPRS] class=#{class_name} method=#{method_name} body_size=#{body.size} indices=[#{body_indices}] node.span=#{node.span.start_offset}..#{node.span.end_offset}"
           end
@@ -12818,7 +12834,7 @@ module Crystal::HIR
             if progress_match
               slow_ms = ENV["DEBUG_LOWER_SLOW_MS"]?.try(&.to_f) || 50.0
             end
-            if ENV.has_key?("DEBUG_LOWER_BYTE") && (method_name == "byte_begin" || method_name == "byte_range")
+            if debug_env_filter_match?("DEBUG_LOWER_BYTE", method_name, base_name)
               STDERR.puts "[LOWER_METHOD] BODY size=#{body.size} expressions"
               body.each_with_index do |expr_id, i|
                 begin
@@ -12841,7 +12857,7 @@ module Crystal::HIR
                           else
                             @function_def_arenas[full_name]? || @arena
                           end
-            if ENV["DEBUG_METHOD_ARENA_USE"]? && (class_name.includes?("Slice") && method_name == "hash")
+            if debug_env_filter_match?("DEBUG_METHOD_ARENA_USE", class_name, method_name, full_name)
               stored_full = @function_def_arenas[full_name]?
               stored_base = @function_def_arenas[base_name]?
               current_path = source_path_for(@arena) || "(unknown)"
@@ -12880,7 +12896,7 @@ module Crystal::HIR
                   end
                 end
                 expr_start = slow_ms ? Time.instant : nil
-                if ENV["DEBUG_CALL_TRACE"]? && method_name == "copy_to"
+                if debug_env_filter_match?("DEBUG_CALL_TRACE", method_name, base_name, full_name)
                   STDERR.puts "[LOWER_METHOD] expr=#{expr_id.index} idx=#{idx} arena=#{@arena.size}"
                   begin
                     expr_node = @arena[expr_id]
@@ -13261,9 +13277,6 @@ module Crystal::HIR
         param_name = resolve_type_alias_chain(param_desc.name)
         call_name = resolve_type_alias_chain(call_desc.name)
         return call_type if param_name == call_name
-        if (param_name == "IO::ByteFormat" || param_name == "ByteFormat") && call_name.starts_with?("IO::ByteFormat::")
-          return call_type
-        end
         includers = @module_includers[param_name]?
         if includers.nil? || includers.empty?
           short_name = last_namespace_component(param_name)
@@ -13807,7 +13820,36 @@ module Crystal::HIR
         end
       end
 
+      # Fallback: numeric conversion on mixed unions (e.g., UInt32 | Hash).
+      # Prefer the numeric variant when the method is a numeric conversion.
+      if numeric_conversion_method_name?(method_name)
+        ordered.each do |variant|
+          resolved_variant = resolve_type_alias_chain(variant)
+          next unless numeric_primitive_class_name?(resolved_variant)
+          base_name = resolve_method_with_inheritance(resolved_variant, method_name) || "#{resolved_variant}##{method_name}"
+          mangled = mangle_function_name(base_name, arg_types, has_block_call)
+          if @function_types.has_key?(mangled) || @function_defs.has_key?(mangled) || @module.has_function?(mangled)
+            return mangled
+          end
+          if has_function_base?(base_name)
+            if resolved = resolve_untyped_overload(base_name, arg_types.size, has_block_call, call_has_named_args)
+              return resolved
+            end
+          end
+        end
+      end
+
       nil
+    end
+
+    private def numeric_conversion_method_name?(method_name : String) : Bool
+      name = method_name.rstrip('!')
+      return true if name == "to_i" || name == "to_u" || name == "to_f"
+      if name.starts_with?("to_i") || name.starts_with?("to_u") || name.starts_with?("to_f")
+        suffix = name.starts_with?("to_f") ? name[4..] : name[4..]
+        return suffix.empty? || suffix.each_char.all?(&.ascii_number?)
+      end
+      false
     end
 
     # Resolve method call for a receiver type and method name
@@ -13920,13 +13962,9 @@ module Crystal::HIR
       end
       class_name = normalize_method_owner_name(class_name)
       if type_desc && type_desc.kind == TypeKind::Module
-        case class_name
-        when "IO::ByteFormat", "ByteFormat", "IO::ByteFormat::SystemEndian"
-          class_name = "IO::ByteFormat::LittleEndian"
-        when "IO::ByteFormat::NetworkEndian"
-          class_name = "IO::ByteFormat::BigEndian"
-        end
-        if class_name.starts_with?("IO::ByteFormat::")
+        resolved = resolve_type_alias_chain(class_name)
+        if resolved != class_name
+          class_name = resolved
           if preferred_desc = @module.get_type_descriptor(type_ref_for_name(class_name))
             type_desc = preferred_desc
           end
@@ -13963,8 +14001,6 @@ module Crystal::HIR
 
       # Build the base method name as ClassName#method
       base_method_name = class_name.empty? ? method_name : "#{class_name}##{method_name}"
-      base_method_name = rewrite_event_loop_method_name(base_method_name)
-      base_method_name = rewrite_system_process_method_name(base_method_name)
       # `arg_types` already reflects the lowered argument list (including named args
       # after reorder_named_args). Only fall back to named_args_count when no args
       # were lowered (defensive case).
@@ -13993,6 +14029,15 @@ module Crystal::HIR
       if ENV["DEBUG_TO_S_RESOLVE"]? && method_name == "to_s"
         recv_name = type_desc ? "#{type_desc.name}(#{type_desc.kind})" : "id=#{receiver_type.id}"
         STDERR.puts "[TO_S_RESOLVE] recv=#{recv_name} class_name=#{class_name} base=#{base_method_name}"
+      end
+
+      if arg_types.all? { |t| t == TypeRef::VOID }
+        if has_function_base?(base_method_name)
+          if resolved = resolve_untyped_overload(base_method_name, effective_arg_count, has_block_call, call_has_named_args)
+            debug_hook("method.resolve", "base=#{base_method_name} resolved=#{resolved} reason=all_void_untyped")
+            return cache_method_resolution(cache_key, resolved)
+          end
+        end
       end
 
       # Mangle with argument types
@@ -14114,6 +14159,7 @@ module Crystal::HIR
             debug_hook("method.resolve", "base=#{base_method_name} resolved=#{resolved_mangled} reason=inheritance_prefer_owner")
             return cache_method_resolution(cache_key, resolved_mangled)
           elsif resolved_untyped = resolve_untyped_overload(resolved_base, effective_arg_count, has_block_call, call_has_named_args)
+            resolved_untyped = prefer_callsite_over_arity(resolved_untyped, resolved_base, arg_types, has_block_call)
             if callsite = prefer_callsite_specialization(resolved_base, resolved_untyped, arg_types, has_block_call)
               debug_hook("method.resolve", "base=#{base_method_name} resolved=#{callsite} reason=inheritance_callsite")
               return cache_method_resolution(cache_key, callsite)
@@ -14128,6 +14174,7 @@ module Crystal::HIR
       # the MIR lowering do fuzzy matching to pick a concrete overload.
       if !class_name.empty? && has_function_base?(base_method_name)
         if resolved = resolve_untyped_overload(base_method_name, effective_arg_count, has_block_call, call_has_named_args)
+          resolved = prefer_callsite_over_arity(resolved, base_method_name, arg_types, has_block_call)
           if callsite = prefer_callsite_specialization(base_method_name, resolved, arg_types, has_block_call)
             debug_hook("method.resolve", "base=#{base_method_name} resolved=#{callsite} reason=base_callsite")
             return cache_method_resolution(cache_key, callsite)
@@ -14141,6 +14188,7 @@ module Crystal::HIR
         end
         object_base = "Object##{method_name}"
         if resolved = resolve_untyped_overload(object_base, effective_arg_count, has_block_call, call_has_named_args)
+          resolved = prefer_callsite_over_arity(resolved, object_base, arg_types, has_block_call)
           debug_hook("method.resolve", "base=#{base_method_name} resolved=#{resolved} reason=object_overload_arity")
           return cache_method_resolution(cache_key, resolved)
         end
@@ -14155,6 +14203,7 @@ module Crystal::HIR
       if !class_name.empty? && class_name != "Object"
         object_base = "Object##{method_name}"
         if resolved = resolve_untyped_overload(object_base, arg_types.size, has_block_call, call_has_named_args)
+          resolved = prefer_callsite_over_arity(resolved, object_base, arg_types, has_block_call)
           debug_hook("method.resolve", "base=#{base_method_name} resolved=#{resolved} reason=object_overload_global")
           return cache_method_resolution(cache_key, resolved)
         end
@@ -14481,6 +14530,7 @@ module Crystal::HIR
         score -= 1 if has_splat
         score -= 1 if has_double_splat
         score += 1 if name.includes?("$")
+        score -= 2 if name.includes?("$arity")
 
         if param_count < best_param_count || (param_count == best_param_count && score > best_score)
           best_name = name
@@ -14502,7 +14552,7 @@ module Crystal::HIR
       return nil if arg_types.empty?
       return nil if arg_types.all? { |t| t == TypeRef::VOID }
 
-      def_node = @function_defs[base_method_name]?
+      def_node = @function_defs[base_method_name]? || @function_defs[resolved_name]?
       return nil unless def_node
       return nil unless def_params_untyped?(def_node)
 
@@ -14510,6 +14560,19 @@ module Crystal::HIR
       return nil if callsite == resolved_name
 
       callsite
+    end
+
+    private def prefer_callsite_over_arity(
+      resolved_name : String,
+      base_method_name : String,
+      arg_types : Array(TypeRef),
+      has_block_call : Bool
+    ) : String
+      return resolved_name unless resolved_name.includes?("$arity")
+      return resolved_name if arg_types.all? { |t| t == TypeRef::VOID }
+
+      callsite = mangle_function_name(base_method_name, arg_types, has_block_call)
+      callsite.empty? ? resolved_name : callsite
     end
 
     private def resolve_nilable_function_type_overload(
@@ -14632,120 +14695,9 @@ module Crystal::HIR
              else
                module_type_name
              end
-      case base
-      when "Crystal::EventLoop", "EventLoop"
-        preferred_event_loop_backend_class
-      when "Crystal::EventLoop::FileDescriptor", "EventLoop::FileDescriptor",
-           "Crystal::EventLoop::Socket", "EventLoop::Socket"
-        preferred_event_loop_interface_class
-      when "IO::ByteFormat", "ByteFormat", "IO::ByteFormat::SystemEndian"
-        "IO::ByteFormat::LittleEndian"
-      when "IO::ByteFormat::NetworkEndian"
-        "IO::ByteFormat::BigEndian"
-      when "Crystal::System::FileDescriptor", "System::FileDescriptor"
-        "IO::FileDescriptor"
-      when "Crystal::System::Socket", "System::Socket"
-        "Socket"
-      else
-        nil
-      end
-    end
-
-    private def preferred_event_loop_backend_class : String?
-      flags = CrystalV2::Runtime.target_flags
-      return "Crystal::EventLoop::Wasi" if flags.includes?("wasi")
-      return "Crystal::EventLoop::IOCP" if flags.includes?("win32") || flags.includes?("windows")
-
-      return nil unless flags.includes?("unix") || flags.includes?("linux") || flags.includes?("android") ||
-                        flags.includes?("darwin") || flags.includes?("freebsd") || flags.includes?("openbsd") ||
-                        flags.includes?("netbsd") || flags.includes?("dragonfly")
-
-      if evloop = flags.find { |flag| flag.starts_with?("evloop=") }
-        case evloop
-        when "evloop=libevent"
-          return "Crystal::EventLoop::LibEvent"
-        when "evloop=epoll"
-          return "Crystal::EventLoop::Epoll"
-        when "evloop=kqueue"
-          return "Crystal::EventLoop::Kqueue"
-        end
-      end
-
-      return "Crystal::EventLoop::Epoll" if flags.includes?("linux") || flags.includes?("android")
-      return "Crystal::EventLoop::Kqueue" if flags.includes?("darwin") || flags.includes?("freebsd")
-
-      "Crystal::EventLoop::LibEvent"
-    end
-
-    private def preferred_event_loop_interface_class : String?
-      flags = CrystalV2::Runtime.target_flags
-      return "Crystal::EventLoop::Wasi" if flags.includes?("wasi")
-      return "Crystal::EventLoop::IOCP" if flags.includes?("win32") || flags.includes?("windows")
-
-      if flags.includes?("unix") || flags.includes?("linux") || flags.includes?("android") ||
-         flags.includes?("darwin") || flags.includes?("freebsd") || flags.includes?("openbsd") ||
-         flags.includes?("netbsd") || flags.includes?("dragonfly")
-        return "Crystal::EventLoop::Polling"
-      end
-      nil
-    end
-
-    private def event_loop_interface_module_name?(name : String) : Bool
-      name.ends_with?("EventLoop::FileDescriptor") || name.ends_with?("EventLoop::Socket")
-    end
-
-    private def rewrite_event_loop_method_name(base_method_name : String) : String
-      parts = base_method_name.split("#", 2)
-      return base_method_name if parts.size != 2
-
-      owner = parts[0]
-      method = parts[1]
-
-      file_descriptor_method = case method
-                               when "pipe", "open", "read", "wait_readable", "write", "wait_writable", "reopened", "close"
-                                 true
-                               else
-                                 false
-                               end
-      socket_method = case method
-                      when "socket", "socketpair", "read", "wait_readable", "write", "wait_writable",
-                           "accept", "connect", "send_to", "receive_from", "close"
-                        true
-                      else
-                        false
-                      end
-
-      if owner == "Crystal::EventLoop::FileDescriptor"
-        if impl = preferred_event_loop_interface_class
-          return "#{impl}##{method}"
-        end
-      elsif owner == "Crystal::EventLoop::Socket"
-        if impl = preferred_event_loop_interface_class
-          return "#{impl}##{method}"
-        end
-      elsif owner == "Crystal::EventLoop"
-        if file_descriptor_method || socket_method
-          if impl = preferred_event_loop_interface_class
-            return "#{impl}##{method}"
-          end
-        else
-          if impl = preferred_event_loop_backend_class
-            return "#{impl}##{method}"
-          end
-        end
-      end
-
-      base_method_name
-    end
-
-    private def rewrite_system_process_method_name(base_method_name : String) : String
-      return base_method_name unless base_method_name.starts_with?("Crystal::System::Process.")
-      method = base_method_name.split(".", 2)[1]?
-      return base_method_name unless method
-      if method == "executable_path"
-        return "Process.executable_path"
-      end
-      base_method_name
+      resolved = resolve_type_alias_chain(base)
+      return nil if resolved == base
+      resolved
     end
 
     private def resolve_module_typed_method(
@@ -14798,29 +14750,30 @@ module Crystal::HIR
         end
       end
 
+      if prefer_class
+        unless includers.any? { |inc| prefer_class == inc || class_inherits_from?(prefer_class, inc) }
+          prefer_class = nil
+        end
+      end
+
       arg_count = arg_types.size
       module_method_base = "#{module_base}.#{method_name}"
-      skip_module_base = module_base == "IO::ByteFormat" || module_base == "ByteFormat"
-      unless skip_module_base
-        if entry = lookup_function_def_for_call(module_method_base, arg_count, has_block, arg_types)
-          def_node = entry[1]
-          func_context = function_context_from_name(entry[0])
-          if params_compatible_with_args?(def_node, arg_types, func_context)
-            mangled = mangle_function_name(module_method_base, arg_types, has_block)
-            if @function_types.has_key?(mangled) || @module.has_function?(mangled)
-              return mangled unless abstract_def?(mangled)
-            elsif has_function_base?(module_method_base)
-              return module_method_base unless abstract_def?(module_method_base)
-            end
+      if entry = lookup_function_def_for_call(module_method_base, arg_count, has_block, arg_types)
+        def_node = entry[1]
+        func_context = function_context_from_name(entry[0])
+        if params_compatible_with_args?(def_node, arg_types, func_context)
+          mangled = mangle_function_name(module_method_base, arg_types, has_block)
+          if @function_types.has_key?(mangled) || @module.has_function?(mangled)
+            return mangled unless abstract_def?(mangled)
+          elsif has_function_base?(module_method_base)
+            return module_method_base unless abstract_def?(module_method_base)
           end
         end
       end
 
       candidates = includers.to_a
       if module_like_type_name?(module_base) && !candidates.includes?(module_base)
-        unless module_base == "IO::ByteFormat" || module_base == "ByteFormat"
-          candidates << module_base
-        end
+        candidates << module_base
       end
       if prefer_class && !candidates.includes?(prefer_class)
         candidates << prefer_class
@@ -14828,22 +14781,25 @@ module Crystal::HIR
       # Also add subclasses of includers (for abstract classes like Crystal::EventLoop)
       # The concrete implementation may be in a subclass (e.g., Polling, Kqueue)
       parent_keys = includers.to_a
-      includers.each do |inc|
-        inc_short = last_namespace_component(inc)
-        if inc_short != inc
-          parent_keys << inc_short unless parent_keys.includes?(inc_short)
+      namespaced_module = module_base.includes?("::")
+      unless namespaced_module
+        includers.each do |inc|
+          inc_short = last_namespace_component(inc)
+          if inc_short != inc
+            parent_keys << inc_short unless parent_keys.includes?(inc_short)
+          end
         end
       end
       subclasses = collect_subclasses(parent_keys)
       subclasses.each { |entry| candidates << entry }
       candidates.uniq!
-      if DebugHooks::ENABLED && module_base.includes?("ByteFormat") && method_name == "decode"
+      if debug_hook_filter_match?(module_base, method_name)
         debug_hook(
           "module.resolve",
           "module=#{module_base} includers=#{includers.to_a.join(",")} candidates=#{candidates.join(",")}"
         )
       end
-      if ENV["DEBUG_MODULE_RESOLVE"]? && module_base.includes?("EventLoop::FileDescriptor")
+      if debug_env_filter_match?("DEBUG_MODULE_RESOLVE", module_base, method_name)
         STDERR.puts "[DEBUG_MODULE_RESOLVE] module=#{module_base} method=#{method_name} includers=#{includers.to_a.sort.join(",")} candidates=#{candidates.sort.join(",")}"
       end
       # RESOLVE_DEBUG2 disabled
@@ -14859,6 +14815,11 @@ module Crystal::HIR
       candidates.each do |candidate|
         sep = module_like_type_name?(candidate) ? "." : "#"
         base = "#{candidate}#{sep}#{method_name}"
+        if sep == "#" && !has_function_base?(base) && !@function_defs.has_key?(base)
+          if resolved = resolve_method_with_inheritance(candidate, method_name)
+            base = resolved
+          end
+        end
         # Filter by arity/defaults first to avoid picking mismatched overloads.
         if entry = lookup_function_def_for_call(base, arg_count, has_block, arg_types)
           def_node = entry[1]
@@ -14877,8 +14838,16 @@ module Crystal::HIR
           end
         end
       end
+      matches.uniq!
 
       return matches.first if matches.size == 1
+      if matches.size > 1
+        concrete_matches = matches.select do |name|
+          def_node = @function_defs[name]?
+          def_node && !def_node.body.nil?
+        end
+        return concrete_matches.first if concrete_matches.size == 1
+      end
       if prefer_class
         preferred = matches.find do |name|
           name.starts_with?("#{prefer_class}#") || name.starts_with?("#{prefer_class}.")
@@ -14965,12 +14934,21 @@ module Crystal::HIR
         end
       end
 
+      if prefer_class
+        unless includers.any? { |inc| prefer_class == inc || class_inherits_from?(prefer_class, inc) }
+          prefer_class = nil
+        end
+      end
+
       candidates = includers.to_a
       parent_keys = includers.to_a
-      includers.each do |inc|
-        inc_short = last_namespace_component(inc)
-        if inc_short != inc
-          parent_keys << inc_short unless parent_keys.includes?(inc_short)
+      namespaced_module = module_base.includes?("::")
+      unless namespaced_module
+        includers.each do |inc|
+          inc_short = last_namespace_component(inc)
+          if inc_short != inc
+            parent_keys << inc_short unless parent_keys.includes?(inc_short)
+          end
         end
       end
       subclasses = collect_subclasses(parent_keys)
@@ -15488,7 +15466,7 @@ module Crystal::HIR
         params_debug_str = params_debug ? params_debug.join("|") : ""
         STDERR.puts "[DEBUG_PUTS_REGISTER] name=#{base_name} params=#{params_debug_str}"
       end
-      if ENV.has_key?("DEBUG_STRING_METHOD_LOWER") && (base_name == "[]" || base_name == "char_index_to_byte_index")
+      if debug_env_filter_match?("DEBUG_STRING_METHOD_LOWER", base_name)
         STDERR.puts "[DEBUG_REGISTER_FUNCTION] name=#{base_name} receiver=#{node.receiver ? String.new(node.receiver.not_nil!) : "(none)"} span=#{node.span.start_line}-#{node.span.end_line}"
       end
       if base_name == "main" && @current_class.nil? && !fun_def?(node)
@@ -17301,23 +17279,32 @@ module Crystal::HIR
                 end
               end
             end
-            # First, check short_type_index for sibling matches in parent namespace
+            # First, check short_type_index for matches in the current namespace,
+            # then fall back to sibling matches in the parent namespace.
             if (candidates = @short_type_index[name]?) && candidates.size >= 1
-              # Find candidates that are siblings (in parent namespace, not nested)
-              parent_namespace = current_base.includes?("::") ? current_base.rpartition("::")[0] : nil
-              if parent_namespace
-                sibling_matches = candidates.select { |c| c.starts_with?("#{parent_namespace}::") && !c.starts_with?("#{current_base}::") }
-                if sibling_matches.size == 1
-                  result = sibling_matches.first
-                elsif sibling_matches.size > 1
-                  # Multiple siblings, prefer the shortest (most direct sibling)
-                  result = sibling_matches.min_by(&.size)
+              current_matches = candidates.select { |c| c.starts_with?("#{current_base}::") }
+              if current_matches.size == 1
+                result = current_matches.first
+              elsif current_matches.size > 1
+                # Multiple nested matches, prefer the shortest (closest to current namespace)
+                result = current_matches.min_by(&.size)
+              else
+                # Find candidates that are siblings (in parent namespace, not nested)
+                parent_namespace = current_base.includes?("::") ? current_base.rpartition("::")[0] : nil
+                if parent_namespace
+                  sibling_matches = candidates.select { |c| c.starts_with?("#{parent_namespace}::") && !c.starts_with?("#{current_base}::") }
+                  if sibling_matches.size == 1
+                    result = sibling_matches.first
+                  elsif sibling_matches.size > 1
+                    # Multiple siblings, prefer the shortest (most direct sibling)
+                    result = sibling_matches.min_by(&.size)
+                  elsif candidates.size == 1
+                    # No sibling matches but only one candidate - use it
+                    result = candidates.first
+                  end
                 elsif candidates.size == 1
-                  # No sibling matches but only one candidate - use it
                   result = candidates.first
                 end
-              elsif candidates.size == 1
-                result = candidates.first
               end
             end
 
@@ -17359,18 +17346,37 @@ module Crystal::HIR
               result = "#{current_base}::#{name}"
             elsif type_name_exists?("#{current_base}::#{name}")
               result = "#{current_base}::#{name}"
-            elsif parent_namespace && parent_is_module && !@top_level_type_names.includes?(name)
+            elsif (parent_name = (@class_info[current_base]?.try(&.parent_name) || @module.class_parents[current_base]?))
+              parent_full = parent_name
+              if !parent_full.includes?("::") && parent_namespace
+                parent_full = "#{parent_namespace}::#{parent_full}"
+              end
+              if parent_full.includes?("::")
+                candidate = "#{parent_full}::#{name}"
+              if type_name_exists?(candidate)
+                result = candidate
+              elsif (candidates = @short_type_index[name]?) && candidates.includes?(candidate)
+                result = candidate
+              elsif !type_name_exists?("#{current_base}::#{name}")
+                # Prefer a forward reference in the current namespace over an ancestor.
+                result = "#{current_base}::#{name}"
+              end
+              end
+            elsif parent_namespace && type_name_exists?("#{parent_namespace}::#{name}")
+              result = "#{parent_namespace}::#{name}"
+            elsif parent_namespace && !@top_level_type_names.includes?(name)
               candidate = "#{parent_namespace}::#{name}"
               if type_name_exists?(candidate)
                 result = candidate
               elsif candidates = @short_type_index[name]?
                 if candidates.includes?(candidate)
                   result = candidate
-                else
+                elsif parent_is_module || @class_info.has_key?(parent_namespace) || @module.class_parents.has_key?(parent_namespace)
+                  # Forward reference inside a known namespace (module or class).
                   result = candidate
                 end
-              else
-                # Forward reference inside a module namespace.
+              elsif parent_is_module || @class_info.has_key?(parent_namespace) || @module.class_parents.has_key?(parent_namespace)
+                # Forward reference inside a known namespace (module or class).
                 result = candidate
               end
             else
@@ -18463,7 +18469,7 @@ module Crystal::HIR
         STDERR.puts "[BLOCK_PARAMS] resolved=#{resolved_names.join(",")} map=#{map_str}"
       end
 
-      if DebugHooks::ENABLED && (base_method_name.includes?("map") || mangled_method_name.includes?("map"))
+      if debug_hook_filter_match?(base_method_name, mangled_method_name)
         map_str = param_map ? param_map.not_nil!.map { |k, v| "#{k}=#{v}" }.join(",") : ""
         debug_hook(
           "block.param.types",
@@ -19599,7 +19605,7 @@ module Crystal::HIR
       old_enum_value_types = @enum_value_types
       @enum_value_types = nil
       base_name = String.new(node.name)
-      if ENV.has_key?("DEBUG_STRING_METHOD_LOWER") && (base_name == "[]" || base_name == "char_index_to_byte_index")
+      if debug_env_filter_match?("DEBUG_STRING_METHOD_LOWER", base_name)
         STDERR.puts "[DEBUG_LOWER_DEF] name=#{base_name} override=#{full_name_override || "(none)"} current_class=#{@current_class || "(none)"}"
       end
       if base_name == "main" && @current_class.nil? && !fun_def?(node)
@@ -19769,14 +19775,6 @@ module Crystal::HIR
             return_type = inferred
           end
         end
-        if (return_type == TypeRef::VOID || return_type == TypeRef::NIL) && base_name == "backend_class"
-          if @current_class == "Crystal::EventLoop" || @current_class == "EventLoop"
-            if preferred = preferred_event_loop_backend_class
-              preferred_ref = type_ref_for_name(preferred)
-              return_type = preferred_ref unless preferred_ref == TypeRef::VOID
-            end
-          end
-        end
       else
         with_type_param_map(extra_type_params) do
           return_type = if rt = node.return_type
@@ -19790,14 +19788,6 @@ module Crystal::HIR
           if return_type == TypeRef::VOID && node.return_type.nil?
             if inferred = infer_concrete_return_type_from_body(node, @current_class)
               return_type = inferred
-            end
-          end
-          if (return_type == TypeRef::VOID || return_type == TypeRef::NIL) && base_name == "backend_class"
-            if @current_class == "Crystal::EventLoop" || @current_class == "EventLoop"
-              if preferred = preferred_event_loop_backend_class
-                preferred_ref = type_ref_for_name(preferred)
-                return_type = preferred_ref unless preferred_ref == TypeRef::VOID
-              end
             end
           end
         end
@@ -26656,21 +26646,21 @@ module Crystal::HIR
       bucket = by_arity[arg_types.size]? || [] of CallsiteArgs
       bucket << callsite
       by_arity[arg_types.size] = bucket
-      if DebugHooks::ENABLED && name.includes?("read_bytes")
+      if debug_hook_filter_match?(name)
         literal_payload = arg_literals ? arg_literals.join(",") : "nil"
         debug_hook(
           "callsite.args",
           "name=#{name} types=#{arg_types.map(&.id).join(",")} literals=#{literal_payload}"
         )
       end
-      if DebugHooks::ENABLED && name.includes?("calculate_new_capacity")
+      if debug_hook_filter_match?(name)
         literal_payload = arg_literals ? arg_literals.join(",") : "nil"
         debug_hook(
           "callsite.args",
           "name=#{name} types=#{arg_types.map(&.id).join(",")} literals=#{literal_payload}"
         )
       end
-      if DebugHooks::ENABLED && name.includes?("hexstring")
+      if debug_hook_filter_match?(name)
         literal_payload = arg_literals ? arg_literals.join(",") : "nil"
         debug_hook(
           "callsite.args",
@@ -27298,7 +27288,7 @@ module Crystal::HIR
       if ENV["DEBUG_VDISPATCH_UNION"]? && name.includes?("next_power_of_two")
         STDERR.puts "[VDISPATCH_UNION_HIR] lower_function_if_needed name=#{name}"
       end
-      if ENV["DEBUG_FROM_CHARS"]? && name.includes?("from_chars_advanced")
+      if debug_env_filter_match?("DEBUG_FROM_CHARS", name)
         STDERR.puts "[DEBUG_FROM_CHARS] lower_function_if_needed name=#{name}"
       end
       if ENV.has_key?("DEBUG_YIELD_SKIP") && name.includes?("byte_range")
@@ -27306,7 +27296,7 @@ module Crystal::HIR
         STDERR.puts "[YIELD_SKIP] name=#{name} is_yield=#{is_yield}"
       end
       if function_state(name).in_progress?
-        if ENV["DEBUG_FROM_CHARS"]? && name.includes?("from_chars_advanced")
+        if debug_env_filter_match?("DEBUG_FROM_CHARS", name)
           STDERR.puts "[DEBUG_FROM_CHARS] skip already lowering name=#{name}"
         end
         if is_math_min_debug
@@ -27509,7 +27499,7 @@ module Crystal::HIR
           if ENV.has_key?("DEBUG_LOOKUP")
             STDERR.puts "[DEBUG_LOOKUP] Searching for prefix '#{mangled_prefix}' for name '#{name}'"
           end
-          if ENV["DEBUG_FROM_CHARS"]? && name.includes?("from_chars_advanced")
+          if debug_env_filter_match?("DEBUG_FROM_CHARS", name)
             STDERR.puts "[DEBUG_FROM_CHARS] scan_prefix start prefix=#{mangled_prefix} defs=#{@function_defs.size}"
           end
           overload_keys = function_def_overloads(base_name)
@@ -27741,14 +27731,14 @@ module Crystal::HIR
                   target_name = name.includes?("$") ? name : base_name
                   deferred_lookup_used = true
                   lookup_branch = "deferred_module"
-                  if ENV.has_key?("DEBUG_DEFERRED") && method_base == "byte_range"
+                  if debug_env_filter_match?("DEBUG_DEFERRED", method_base, base_name, target_name)
                     STDERR.puts "[DEFERRED_LOOKUP] Found #{method_base} in module #{base_module} for #{base_name} target=#{target_name} func_def=#{func_def.class} arena=#{arena.class}:#{arena.size}"
                   end
-                  if method_part.includes?("from_chars")
+                  if debug_env_filter_match?("DEBUG_FROM_CHARS", method_part, method_base)
                     STDERR.puts "[DEFERRED_LOOKUP] Found #{method_base} in module #{base_module} for #{base_name}"
                   end
                   break
-                elsif method_part.includes?("from_chars")
+                elsif debug_env_filter_match?("DEBUG_FROM_CHARS", method_part, method_base)
                   STDERR.puts "[DEFERRED_LOOKUP] Skipping #{method_base} in module #{base_module} (no match)"
                 end
                 break if func_def
@@ -28071,14 +28061,14 @@ module Crystal::HIR
         end
         debug_hook("function.lookup.miss", data)
       end
-      if ENV["DEBUG_FROM_CHARS"]? && name.includes?("from_chars_advanced")
+      if debug_env_filter_match?("DEBUG_FROM_CHARS", name, target_name)
         STDERR.puts "[DEBUG_FROM_CHARS] lookup_result branch=#{lookup_branch || "none"} target=#{target_name} func_def=#{!func_def.nil?}"
       end
 
-      if ENV.has_key?("DEBUG_DEFERRED") && name.includes?("byte_range")
+      if debug_env_filter_match?("DEBUG_DEFERRED", name, target_name)
         STDERR.puts "[DEFERRED_FUNC] func_def=#{!func_def.nil?} name=#{name} target=#{target_name} lookup=#{lookup_branch || "none"}"
       end
-      if func_def && ENV["DEBUG_BYTEFORMAT_REGISTER"]? && name.includes?("ByteFormat") && name.includes?("decode")
+      if func_def && debug_env_filter_match?("DEBUG_BYTEFORMAT_REGISTER", name, target_name)
         arena_for_log = arena || resolve_arena_for_def(func_def, @arena)
         loc = "#{func_def.span.start_line}:#{func_def.span.start_column}"
         STDERR.puts "[DEBUG_BYTEFORMAT_LOWER] name=#{name} target=#{target_name} arena=#{arena_for_log.class} loc=#{loc} branch=#{lookup_branch || "none"}"
@@ -28090,7 +28080,7 @@ module Crystal::HIR
       end
       return unless func_def
       is_lowering_target = function_state(target_name).in_progress?
-      if ENV.has_key?("DEBUG_DEFERRED") && name.includes?("byte_range")
+      if debug_env_filter_match?("DEBUG_DEFERRED", name, target_name)
         STDERR.puts "[DEFERRED_CHECK] is_lowering=#{is_lowering_target}"
       end
       return if is_lowering_target
@@ -28101,7 +28091,7 @@ module Crystal::HIR
 
       if arena.nil?
         arena = resolve_arena_for_def(func_def, @arena)
-        if ENV["DEBUG_CALL_TRACE"]? && name.includes?("copy_to")
+        if debug_env_filter_match?("DEBUG_CALL_TRACE", name, target_name)
           STDERR.puts "[LOWER_TRACE] arena_fallback name=#{name} arena=#{arena.class}:#{arena.size}"
         end
       elsif body = func_def.body
@@ -28109,7 +28099,7 @@ module Crystal::HIR
           max_index = body.max_of(&.index)
           if max_index >= arena.size || !span_fits_source?(arena, func_def.span)
             arena = resolve_arena_for_def(func_def, arena)
-            if ENV["DEBUG_CALL_TRACE"]? && name.includes?("copy_to")
+            if debug_env_filter_match?("DEBUG_CALL_TRACE", name, target_name)
               STDERR.puts "[LOWER_TRACE] arena_repair name=#{name} max=#{max_index} arena=#{arena.class}:#{arena.size}"
             end
           end
@@ -28254,12 +28244,12 @@ module Crystal::HIR
       end
 
       if registered_params = function_type_param_map_for(target_name, base_target_name, name)
-        if DebugHooks::ENABLED && base_target_name.includes?("map")
+        if debug_hook_filter_match?(base_target_name)
           params_str = registered_params.map { |k, v| "#{k}=#{v}" }.join(",")
           debug_hook("function.lower.type_params", "target=#{target_name} base=#{base_target_name} params=#{params_str}")
         end
         extra_type_params = extra_type_params ? extra_type_params.merge(registered_params) : registered_params.dup
-      elsif DebugHooks::ENABLED && base_target_name.includes?("map")
+      elsif debug_hook_filter_match?(base_target_name)
         debug_hook("function.lower.type_params", "target=#{target_name} base=#{base_target_name} params=")
       end
 
@@ -28268,7 +28258,7 @@ module Crystal::HIR
           params_str = pending_params.map { |k, v| "#{k}=#{v}" }.join(",")
           STDERR.puts "[TUPLE_MAP_USE] source=name target=#{target_name} params=#{params_str}"
         end
-        if DebugHooks::ENABLED && base_target_name.includes?("map")
+        if debug_hook_filter_match?(base_target_name)
           params_str = pending_params.map { |k, v| "#{k}=#{v}" }.join(",")
           debug_hook("function.lower.pending_params", "target=#{target_name} name=#{name} params=#{params_str}")
         end
@@ -28278,7 +28268,7 @@ module Crystal::HIR
           params_str = pending_params.map { |k, v| "#{k}=#{v}" }.join(",")
           STDERR.puts "[TUPLE_MAP_USE] source=target target=#{target_name} params=#{params_str}"
         end
-        if DebugHooks::ENABLED && base_target_name.includes?("map")
+        if debug_hook_filter_match?(base_target_name)
           params_str = pending_params.map { |k, v| "#{k}=#{v}" }.join(",")
           debug_hook("function.lower.pending_params", "target=#{target_name} name=#{target_name} params=#{params_str}")
         end
@@ -28288,7 +28278,7 @@ module Crystal::HIR
           params_str = pending_params.map { |k, v| "#{k}=#{v}" }.join(",")
           STDERR.puts "[TUPLE_MAP_USE] source=base target=#{target_name} params=#{params_str}"
         end
-        if DebugHooks::ENABLED && base_target_name.includes?("map")
+        if debug_hook_filter_match?(base_target_name)
           params_str = pending_params.map { |k, v| "#{k}=#{v}" }.join(",")
           debug_hook("function.lower.pending_params", "target=#{target_name} name=#{base_target_name} params=#{params_str}")
         end
@@ -28331,7 +28321,7 @@ module Crystal::HIR
 
       has_in_module = @module.has_function?(resolved_target_name)
       is_lowering_resolved = function_state(resolved_target_name).in_progress?
-      if ENV.has_key?("DEBUG_DEFERRED") && name.includes?("byte_range")
+      if debug_env_filter_match?("DEBUG_DEFERRED", name, resolved_target_name)
         STDERR.puts "[DEFERRED_FINAL] resolved=#{resolved_target_name} has_in_module=#{has_in_module} is_lowering=#{is_lowering_resolved}"
       end
       return if has_in_module
@@ -28346,11 +28336,11 @@ module Crystal::HIR
       @lowering_depth += 1
 
       debug_hook("function.lower.start", "name=#{target_name} requested=#{name}")
-      if ENV.has_key?("DEBUG_CLASS_MODULES") && (target_name.includes?("byte_begin") || target_name.includes?("MatchData"))
+      if debug_env_filter_match?("DEBUG_CLASS_MODULES", target_name, name)
         modules = @class_included_modules[resolved_parts.owner]?
         STDERR.puts "[CLASS_MODULES] target=#{target_name} owner=#{resolved_parts.owner} modules=#{modules ? modules.to_a.join(",") : "nil"}"
       end
-      if target_name.includes?("from_chars")
+      if debug_env_filter_match?("DEBUG_FROM_CHARS", target_name, name)
         STDERR.puts "[LOWERING] Starting lower for #{target_name}, arena=#{arena.class}"
       end
       time_filter = ENV["DEBUG_LOWER_METHOD_TIME"]?
@@ -28378,7 +28368,7 @@ module Crystal::HIR
               end
               old_class = @current_class
               @current_class = owner
-              if target_name.includes?("from_chars")
+              if debug_env_filter_match?("DEBUG_FROM_CHARS", target_name, name)
                 STDERR.puts "[LOWERING] Calling lower_method for #{target_name}, deferred=#{deferred_lookup_used}"
               end
               # For deferred lookup, pass the caller's expected name (with mangled types) so the
@@ -28418,10 +28408,10 @@ module Crystal::HIR
                 dummy_info = ClassInfo.new(owner, TypeRef::INT32, [] of IVarInfo, [] of ClassVarInfo, 0, false, nil)
                 lower_method(owner, dummy_info, func_def, call_arg_types, call_arg_literals, call_arg_enum_names, name, force_class_method: force_class_method)
                 @current_class = old_class
-              elsif target_name.includes?("from_chars")
+              elsif debug_env_filter_match?("DEBUG_FROM_CHARS", target_name, name)
                 STDERR.puts "[LOWERING] No class_info for #{owner}"
               end
-            elsif target_name.includes?("from_chars")
+            elsif debug_env_filter_match?("DEBUG_FROM_CHARS", target_name, name)
               STDERR.puts "[LOWERING] No class_info for #{owner}"
             end
           elsif resolved_parts.is_class
@@ -28562,13 +28552,13 @@ module Crystal::HIR
         if ivar_info = class_info.ivars.find { |iv| iv.name == ivar_name }
           expected_name = mangle_function_name(base_name, [ivar_info.type])
           return false if name.includes?("$") && expected_name != name
-          generate_setter_method_for_ivar(owner, class_info, ivar_info)
+          generate_setter_method_for_ivar(owner, class_info, ivar_info, !name.includes?("$"))
           return true
         elsif class_info.is_struct
           if ivar_info = class_info.ivars.find { |iv| iv.name == "@@#{accessor}" }
             expected_name = mangle_function_name(base_name, [ivar_info.type])
             return false if name.includes?("$") && expected_name != name
-            generate_setter_method_for_ivar(owner, class_info, ivar_info)
+            generate_setter_method_for_ivar(owner, class_info, ivar_info, !name.includes?("$"))
             return true
           end
         end
@@ -28968,7 +28958,7 @@ module Crystal::HIR
           has_class_method = @function_types.has_key?(class_method_name) ||
             has_function_base?(class_method_name) ||
             !function_def_overloads(class_method_name).empty?
-          if has_class_method
+          if has_class_method || abstract_def?(class_method_name)
             # This is a method call on self - set receiver to self
             receiver_id = emit_self(ctx)
             full_method_name = class_method_name
@@ -28986,7 +28976,7 @@ module Crystal::HIR
                 if ENV.has_key?("DEBUG_INCLUDED") && method_name == "byte_range"
                   STDERR.puts "[INCLUDED_LOOKUP] mod_method=#{mod_method_name} has_in_types=#{has_in_types} has_in_base=#{has_in_base}"
                 end
-                if has_in_types || has_in_base
+                if has_in_types || has_in_base || abstract_def?(mod_method_name)
                   receiver_id = emit_self(ctx)
                   full_method_name = mod_method_name
                   included_method_found = true
@@ -29020,7 +29010,8 @@ module Crystal::HIR
                 parent_method_name = "#{parent_class}##{method_name}"
                 if @function_types.has_key?(parent_method_name) ||
                    has_function_base?(parent_method_name) ||
-                   !function_def_overloads(parent_method_name).empty?
+                   !function_def_overloads(parent_method_name).empty? ||
+                   abstract_def?(parent_method_name)
                   receiver_id = emit_self(ctx)
                   full_method_name = parent_method_name
                   parent_method_found = true
@@ -29597,9 +29588,6 @@ module Crystal::HIR
             raw_obj = stringify_type_expr(callee_node.object) || "(unknown)"
             STDERR.puts "[DEBUG_EXE_PATH_CALL] obj=#{obj_node.class.name.split("::").last} raw=#{raw_obj} resolved=#{class_name_str} current=#{@current_class || "nil"} override=#{@current_namespace_override || "nil"}"
           end
-          if class_name_str == "Crystal::System::Process" && @class_info.has_key?("Process")
-            class_name_str = "Process"
-          end
           if ENV["DEBUG_FIBER_CURRENT"]? && method_name == "current"
             STDERR.puts "[DEBUG_FIBER_CURRENT] owner=#{class_name_str} current_class=#{@current_class || "nil"}"
           end
@@ -29764,7 +29752,7 @@ module Crystal::HIR
             end
           end
           ensure_monomorphized_type(receiver_type) unless receiver_type == TypeRef::VOID
-          if ENV["DEBUG_EACH_RESOLVE"]? && method_name == "each"
+          if debug_env_filter_match?("DEBUG_EACH_RESOLVE", method_name)
             desc_name = @module.get_type_descriptor(receiver_type).try(&.name) || "nil"
             info_name = @class_info_by_type_id[receiver_type.id]?.try(&.name) || "nil"
             scope = "#{@current_class || ""}##{@current_method || ""}"
@@ -29968,16 +29956,16 @@ module Crystal::HIR
                       else
                         lower_args_with_expected_types(ctx, call_args, method_name, full_method_name, has_block_call, call_arena)
                       end
-        if ENV["DEBUG_CALL_TRACE"]? && method_name == "copy_to"
+        if debug_env_filter_match?("DEBUG_CALL_TRACE", method_name, base_method_name, full_method_name || "")
           STDERR.puts "[CALL_TRACE] stage=with_arena_done method=#{method_name} args=#{args_result.size} receiver=#{!!receiver_id} full=#{full_method_name || ""}"
         end
         args_result
       end
-      if ENV["DEBUG_CALL_TRACE"]? && method_name == "copy_to"
+      if debug_env_filter_match?("DEBUG_CALL_TRACE", method_name, base_method_name, full_method_name || "")
         STDERR.puts "[CALL_TRACE] stage=after_args method=#{method_name} args=#{args.size} receiver=#{!!receiver_id} full=#{full_method_name || ""}"
       end
       args = apply_default_args(ctx, args, method_name, full_method_name, has_block_call, has_named_args)
-      if ENV["DEBUG_CALL_TRACE"]? && method_name == "copy_to"
+      if debug_env_filter_match?("DEBUG_CALL_TRACE", method_name, base_method_name, full_method_name || "")
         STDERR.puts "[CALL_TRACE] stage=after_defaults method=#{method_name} args=#{args.size} receiver=#{!!receiver_id} full=#{full_method_name || ""}"
       end
       prepack_arg_types = args.map { |arg_id| ctx.type_of(arg_id) }
@@ -29990,11 +29978,11 @@ module Crystal::HIR
       pack_result = pack_splat_args_for_call(ctx, args, method_name, full_method_name, has_block_call, has_named_args, receiver_id, has_splat)
       args = pack_result[0]
       splat_packed = pack_result[1]
-      if ENV["DEBUG_CALL_TRACE"]? && method_name == "copy_to"
+      if debug_env_filter_match?("DEBUG_CALL_TRACE", method_name, base_method_name, full_method_name || "")
         STDERR.puts "[CALL_TRACE] stage=after_pack method=#{method_name} args=#{args.size} receiver=#{!!receiver_id} full=#{full_method_name || ""}"
       end
       args = ensure_double_splat_arg(ctx, args, method_name, full_method_name, has_block_call, has_named_args, receiver_id)
-      if ENV["DEBUG_CALL_TRACE"]? && method_name == "copy_to"
+      if debug_env_filter_match?("DEBUG_CALL_TRACE", method_name, base_method_name, full_method_name || "")
         STDERR.puts "[CALL_TRACE] stage=after_double_splat method=#{method_name} args=#{args.size} receiver=#{!!receiver_id} full=#{full_method_name || ""}"
       end
 
@@ -30338,14 +30326,14 @@ module Crystal::HIR
           end
         end
       end
-      if ENV["DEBUG_CALL_TRACE"]? && method_name == "copy_to"
+      if debug_env_filter_match?("DEBUG_CALL_TRACE", method_name, base_method_name, full_method_name || "")
         type_ids = arg_types.map(&.id)
         STDERR.puts "[CALL_TRACE] stage=after_arg_types method=#{method_name} arg_types=#{type_ids.join(",")}"
       end
 
       # Compute mangled name based on base name + argument types
       # If no explicit receiver and we're inside a class, try class#method first
-      if ENV.has_key?("DEBUG_BASE_METHOD") && method_name == "byte_range"
+      if debug_env_filter_match?("DEBUG_BASE_METHOD", method_name, base_method_name, full_method_name || "")
         STDERR.puts "[BASE_METHOD] method=#{method_name} full_method_name=#{full_method_name || "nil"} receiver_id=#{receiver_id.nil? ? "nil" : receiver_id.to_s} @current_class=#{@current_class || "nil"}"
       end
       base_method_name = if full_method_name
@@ -30404,31 +30392,6 @@ module Crystal::HIR
                              method_name
                            end
                          end
-      base_method_name = rewrite_event_loop_method_name(base_method_name)
-      base_method_name = rewrite_system_process_method_name(base_method_name)
-      if base_method_name == "Crystal::System::Process.executable_path"
-        base_method_name = "Process.executable_path"
-        if full_method_name == "Crystal::System::Process.executable_path"
-          full_method_name = base_method_name
-        end
-      end
-      if ENV["DEBUG_EXE_PATH_CALL"]? && method_name == "executable_path"
-        STDERR.puts "[DEBUG_EXE_PATH_CALL] base=#{base_method_name} full=#{full_method_name || "nil"} receiver=#{receiver_id.nil? ? "nil" : receiver_id.to_s}"
-      end
-      # If ByteFormat.decode/encode resolved as a static module call, but a local `format`
-      # is available, restore it as an instance receiver so module vdispatch can apply.
-      if receiver_id.nil? && (base_method_name == "IO::ByteFormat.decode" || base_method_name == "IO::ByteFormat.encode")
-        if format_id = ctx.lookup_local("format")
-          format_type = ctx.type_of(format_id)
-          if module_type_ref?(format_type)
-            receiver_id = format_id
-            owner_name = get_type_name_from_ref(format_type)
-            base_method_name = "#{owner_name}##{method_name}"
-            mangled_method_name = mangle_function_name(base_method_name, arg_types, has_block_call)
-            primary_mangled_name = mangled_method_name
-          end
-        end
-      end
       if receiver_id.nil? && full_method_name.nil? && method_name == "main" && @top_level_main_defined
         base_method_name = TOP_LEVEL_MAIN_BASE
       end
@@ -30479,12 +30442,6 @@ module Crystal::HIR
         end
       end
 
-      if mangled_method_name == "Crystal::System::Process.executable_path"
-        mangled_method_name = "Process.executable_path"
-        base_method_name = mangled_method_name
-        full_method_name = mangled_method_name
-      end
-
       lookup_name = full_method_name || base_method_name
       if entry = lookup_function_def_for_call(lookup_name, args.size, has_block_call, arg_types, has_splat, has_named_args)
         entry_name = entry[0]
@@ -30521,11 +30478,9 @@ module Crystal::HIR
           mangled_method_name = entry_name
         end
       end
-      if ENV["DEBUG_EACH_RESOLVE"]? && method_name == "each" && receiver_id
+      if receiver_id && debug_env_filter_match?("DEBUG_EACH_RESOLVE", method_name)
         recv_name = get_type_name_from_ref(ctx.type_of(receiver_id))
-        if recv_name.includes?("Slice(Pointer(Crystal::EventLoop::Polling::Event))")
-          STDERR.puts "[EACH_RESOLVE_CALL] recv=#{recv_name} lookup=#{lookup_name} base=#{base_method_name} mangled=#{mangled_method_name}"
-        end
+        STDERR.puts "[EACH_RESOLVE_CALL] recv=#{recv_name} lookup=#{lookup_name} base=#{base_method_name} mangled=#{mangled_method_name}"
       end
       if receiver_id
         # Preserve a callsite-mangled overload (typed args) to avoid collapsing
@@ -30602,6 +30557,9 @@ module Crystal::HIR
            (@function_types.has_key?(desired_mangled) || @function_defs.has_key?(desired_mangled) || @module.has_function?(desired_mangled))
           mangled_method_name = desired_mangled
         end
+        if mangled_method_name.includes?("$arity")
+          mangled_method_name = desired_mangled
+        end
       end
       primary_mangled_name = mangled_method_name
       receiver_name = ""
@@ -30611,24 +30569,24 @@ module Crystal::HIR
         end
       end
       arg_names = arg_types.map { |t| type_name_for_mangling(t) }
-      if ENV["DEBUG_CALL_TRACE"]? && method_name == "copy_to"
+      if debug_env_filter_match?("DEBUG_CALL_TRACE", method_name, base_method_name, mangled_method_name)
         STDERR.puts "[CALL_TRACE] stage=after_resolve method=#{method_name} base=#{base_method_name} mangled=#{mangled_method_name}"
       end
       debug_hook("call.resolve", "method=#{method_name} base=#{base_method_name} mangled=#{mangled_method_name} receiver=#{receiver_name} args=#{arg_names} current=#{@current_class || ""}")
-      if ENV["DEBUG_EACH_RESOLVE"]? && method_name == "each"
+      if debug_env_filter_match?("DEBUG_EACH_RESOLVE", method_name)
         recv = receiver_id ? get_type_name_from_ref(ctx.type_of(receiver_id)) : "nil"
         scope = "#{@current_class || ""}##{@current_method || ""}"
         STDERR.puts "[EACH_RESOLVE_FINAL] recv=#{recv} base=#{base_method_name} mangled=#{mangled_method_name} scope=#{scope} func=#{ctx.function.name}"
       end
-      if ENV["DEBUG_UNSAFE_FETCH"]? && method_name == "unsafe_fetch"
+      if debug_env_filter_match?("DEBUG_UNSAFE_FETCH", method_name, base_method_name, mangled_method_name)
         recv = receiver_id ? get_type_name_from_ref(ctx.type_of(receiver_id)) : "nil"
         current_scope = "#{@current_class || ""}##{@current_method || ""}"
         STDERR.puts "[UNSAFE_FETCH] recv=#{recv} base=#{base_method_name} mangled=#{mangled_method_name} current=#{current_scope} func=#{ctx.function.name}"
       end
-      if ENV["DEBUG_PUTS_CALLS"]? && method_name == "puts"
+      if debug_env_filter_match?("DEBUG_PUTS_CALLS", method_name, base_method_name, mangled_method_name)
         STDERR.puts "[DEBUG_PUTS_CALL] base=#{base_method_name} mangled=#{mangled_method_name} args=#{arg_names.join(",")}"
       end
-      if ENV["DEBUG_HIGH_CALL"]? && method_name == "high"
+      if debug_env_filter_match?("DEBUG_HIGH_CALL", method_name, base_method_name, mangled_method_name)
         recv = receiver_id ? get_type_name_from_ref(ctx.type_of(receiver_id)) : "nil"
         current_scope = "#{@current_class || ""}##{@current_method || ""}"
         STDERR.puts "[HIGH_CALL] recv=#{recv} base=#{base_method_name} mangled=#{mangled_method_name} current=#{current_scope} func=#{ctx.function.name}"
@@ -30812,10 +30770,10 @@ module Crystal::HIR
             if !skip_inline && (entry = lookup_block_function_def_for_call(base_method_name, call_args.size, arg_types, receiver_base))
               yield_name, yield_def = entry
               callee_arena = @function_def_arenas[yield_name]? || @arena
-              has_yield = def_contains_yield?(yield_def, callee_arena)
-              has_block_call = def_contains_block_call?(yield_def, callee_arena)
-              if has_yield || has_block_call
-                @yield_functions.add(yield_name) if has_yield
+              callee_has_yield = def_contains_yield?(yield_def, callee_arena)
+              callee_has_block_call = def_contains_block_call?(yield_def, callee_arena)
+              if callee_has_yield || callee_has_block_call
+                @yield_functions.add(yield_name) if callee_has_yield
                 debug_hook("call.inline.yield", "callee=#{yield_name} current=#{@current_class || ""}")
                 return inline_yield_function(ctx, yield_def, yield_name, receiver_id, call_arg_values, block_cast, block_param_types_inline, callee_arena)
               end
@@ -30860,7 +30818,7 @@ module Crystal::HIR
                          block_param_types = [ctx.type_of(receiver_id)]
                        end
                      end
-                     if DebugHooks::ENABLED && method_name == "map"
+                     if debug_hook_filter_match?(method_name, base_method_name, mangled_method_name)
                        types_str = block_param_types ? block_param_types.map { |t| get_type_name_from_ref(t) }.join(",") : ""
                        debug_hook("block.param.result", "method=#{base_method_name} mangled=#{mangled_method_name} types=#{types_str}")
                      end
@@ -31802,7 +31760,7 @@ module Crystal::HIR
         end
       end
 
-      if ENV["DEBUG_CALL_TRACE"]? && method_name == "copy_to"
+      if debug_env_filter_match?("DEBUG_CALL_TRACE", method_name, base_method_name, mangled_method_name)
         STDERR.puts "[CALL_TRACE] stage=before_lower_function method=#{method_name} mangled=#{mangled_method_name} primary=#{primary_mangled_name} return=#{return_type.id}"
       end
       if receiver_id && args.empty? && (method_name == "inspect" || method_name == "to_s")
@@ -31843,10 +31801,10 @@ module Crystal::HIR
           end
         end
       end
-      if ENV["DEBUG_CALL_TRACE"]? && method_name == "copy_to"
+      if debug_env_filter_match?("DEBUG_CALL_TRACE", method_name, base_method_name, mangled_method_name)
         STDERR.puts "[CALL_TRACE] stage=after_remember method=#{method_name} mangled=#{mangled_method_name} primary=#{primary_mangled_name}"
       end
-      if ENV["DEBUG_EACH_RESOLVE"]? && method_name == "each"
+      if debug_env_filter_match?("DEBUG_EACH_RESOLVE", method_name)
         STDERR.puts "[EACH_LOWER] primary=#{primary_mangled_name} mangled=#{mangled_method_name} func=#{ctx.function.name}"
       end
       callsite_label = nil
@@ -31866,7 +31824,7 @@ module Crystal::HIR
           lower_function_if_needed(mangled_method_name)
         end
       end
-      if ENV["DEBUG_CALL_TRACE"]? && method_name == "copy_to"
+      if debug_env_filter_match?("DEBUG_CALL_TRACE", method_name, base_method_name, mangled_method_name)
         STDERR.puts "[CALL_TRACE] stage=after_lower_function method=#{method_name} mangled=#{mangled_method_name} primary=#{primary_mangled_name}"
       end
 
@@ -31962,22 +31920,22 @@ module Crystal::HIR
 
       # Coerce arguments to union types if needed
       # This handles cases like passing Int32 to a parameter of type Int32 | Nil
-      if ENV["DEBUG_CALL_TRACE"]? && method_name == "copy_to"
+      if debug_env_filter_match?("DEBUG_CALL_TRACE", method_name, base_method_name, mangled_method_name)
         STDERR.puts "[CALL_TRACE] stage=before_coerce method=#{method_name} mangled=#{mangled_method_name} args=#{args.size}"
       end
       args = coerce_args_to_param_types(ctx, args, mangled_method_name)
-      if ENV["DEBUG_CALL_TRACE"]? && method_name == "copy_to"
+      if debug_env_filter_match?("DEBUG_CALL_TRACE", method_name, base_method_name, mangled_method_name)
         STDERR.puts "[CALL_TRACE] stage=after_coerce method=#{method_name} mangled=#{mangled_method_name} args=#{args.size}"
       end
 
-      if ENV["DEBUG_CALL_TRACE"]? && method_name == "copy_to"
+      if debug_env_filter_match?("DEBUG_CALL_TRACE", method_name, base_method_name, mangled_method_name)
         STDERR.puts "[CALL_TRACE] stage=before_emit method=#{method_name} mangled=#{mangled_method_name} return=#{return_type.id}"
       end
-      if ENV["DEBUG_DECODE_CALL"]? && method_name == "decode"
+      if debug_env_filter_match?("DEBUG_DECODE_CALL", method_name, base_method_name, mangled_method_name)
         recv_id = receiver_id ? receiver_id.to_s : "nil"
         STDERR.puts "[DECODE_CALL_EMIT] name=#{mangled_method_name} recv_id=#{recv_id}"
       end
-      if ENV["DEBUG_FROM_CHARS"]? && method_name == "from_chars_advanced"
+      if debug_env_filter_match?("DEBUG_FROM_CHARS", method_name, base_method_name, mangled_method_name)
         arg_names = args.map { |arg_id| get_type_name_from_ref(ctx.type_of(arg_id)) }
         STDERR.puts "[DEBUG_FROM_CHARS] base=#{base_method_name} mangled=#{mangled_method_name} args=#{arg_names.join(",")}"
       end
@@ -32013,7 +31971,7 @@ module Crystal::HIR
       if enum_name = enum_return_name_for(mangled_method_name)
         (@enum_value_types ||= {} of ValueId => String)[call.id] = enum_name
       end
-      if ENV["DEBUG_CALL_TRACE"]? && method_name == "copy_to"
+      if debug_env_filter_match?("DEBUG_CALL_TRACE", method_name, base_method_name, mangled_method_name)
         STDERR.puts "[CALL_TRACE] stage=after_emit method=#{method_name} mangled=#{mangled_method_name}"
       end
       call.id
@@ -35831,10 +35789,10 @@ module Crystal::HIR
     private def lower_member_access(ctx : LoweringContext, node : CrystalV2::Compiler::Frontend::MemberAccessNode) : ValueId
       obj_node = @arena[node.object]
       member_name = String.new(node.member)
-      if ENV["DEBUG_ENUM_PREDICATE"]? && member_name == "character_device?"
+      if debug_env_filter_match?("DEBUG_ENUM_PREDICATE", member_name)
         STDERR.puts "[DEBUG_ENUM_CALL_PATH] lower_member_access method=#{member_name} object=#{obj_node.class.name}"
       end
-      if ENV["DEBUG_HIGH_CALL"]? && member_name == "high"
+      if debug_env_filter_match?("DEBUG_HIGH_CALL", member_name)
         var_name = if obj_node.is_a?(CrystalV2::Compiler::Frontend::IdentifierNode)
                      String.new(obj_node.name)
                    else
@@ -36088,13 +36046,13 @@ module Crystal::HIR
           return nil_lit.id
         end
       end
-      if ENV["DEBUG_HIGH_CALL"]? && member_name == "high"
+      if debug_env_filter_match?("DEBUG_HIGH_CALL", member_name)
         recv_name = get_type_name_from_ref(receiver_type)
         STDERR.puts "[HIGH_CALL_RECV] recv_type=#{recv_name} recv_id=#{receiver_type.id} current=#{@current_class || ""} method=#{@current_method || ""}"
       end
       ensure_monomorphized_type(receiver_type) unless receiver_type == TypeRef::VOID
       receiver_is_type_literal = ctx.type_literal?(object_id)
-      if member_name == "unsafe_chr" && ENV["DEBUG_UNSAFE_CHR"]?
+      if debug_env_filter_match?("DEBUG_UNSAFE_CHR", member_name)
         STDERR.puts "[UNSAFE_CHR] receiver=#{get_type_name_from_ref(receiver_type)}"
       end
       if receiver_is_type_literal
@@ -36725,7 +36683,7 @@ module Crystal::HIR
           actual_name = base_method_name
         end
       end
-      if ENV["DEBUG_MEMBER_RETURN"]? && (member_name == "first?" || actual_name.includes?("PointerPairingHeap"))
+      if debug_env_filter_match?("DEBUG_MEMBER_RETURN", member_name, actual_name, base_method_name)
         STDERR.puts "[MEMBER_RETURN] member=#{member_name} actual=#{actual_name} base=#{base_method_name} return=#{get_type_name_from_ref(return_type)}"
       end
       if return_type == TypeRef::VOID || return_type == TypeRef::NIL
@@ -36733,10 +36691,10 @@ module Crystal::HIR
           return_type = inferred unless inferred == TypeRef::VOID || inferred == TypeRef::NIL
         end
       end
-      if ENV["DEBUG_MEMBER_RETURN"]? && (member_name == "first?" || actual_name.includes?("PointerPairingHeap"))
+      if debug_env_filter_match?("DEBUG_MEMBER_RETURN", member_name, actual_name, base_method_name)
         STDERR.puts "[MEMBER_RETURN] after member=#{member_name} actual=#{actual_name} base=#{base_method_name} return=#{get_type_name_from_ref(return_type)}"
       end
-      if DebugHooks::ENABLED && (member_name == "first" || member_name == "last" || member_name == "address")
+      if debug_hook_filter_match?(member_name, actual_name)
         recv_name = receiver_type == TypeRef::VOID ? "Void" : get_type_name_from_ref(receiver_type)
         ret_name = return_type == TypeRef::VOID ? "Void" : get_type_name_from_ref(return_type)
         debug_hook("member.access", "member=#{member_name} recv=#{recv_name} actual=#{actual_name} return=#{ret_name}")
@@ -36924,7 +36882,7 @@ module Crystal::HIR
         end
       end
 
-      if ENV["DEBUG_CALL_TRACE"]? && member_name == "copy_to"
+      if debug_env_filter_match?("DEBUG_CALL_TRACE", member_name, actual_name, primary_name)
         STDERR.puts "[CALL_TRACE] stage=before_lower_function method=#{member_name} actual=#{actual_name} primary=#{primary_name} return=#{return_type.id}"
       end
       lower_function_if_needed(primary_name)
@@ -36954,14 +36912,14 @@ module Crystal::HIR
         return_type = resolved_return_type
       end
 
-      if ENV["DEBUG_CALL_TRACE"]? && member_name == "copy_to"
+      if debug_env_filter_match?("DEBUG_CALL_TRACE", member_name, actual_name, primary_name)
         STDERR.puts "[CALL_TRACE] stage=before_coerce method=#{member_name} actual=#{actual_name} args=#{args.size}"
       end
       args = coerce_args_to_param_types(ctx, args, actual_name)
-      if ENV["DEBUG_CALL_TRACE"]? && member_name == "copy_to"
+      if debug_env_filter_match?("DEBUG_CALL_TRACE", member_name, actual_name, primary_name)
         STDERR.puts "[CALL_TRACE] stage=before_emit method=#{member_name} actual=#{actual_name} args=#{args.size}"
       end
-      if ENV["DEBUG_MEMBER_CALL"]? && member_name == "first?"
+      if debug_env_filter_match?("DEBUG_MEMBER_CALL", member_name, actual_name)
         STDERR.puts "[MEMBER_CALL] name=#{actual_name} return_id=#{return_type.id} return=#{get_type_name_from_ref(return_type)}"
       end
       call = Call.new(ctx.next_id, return_type, object_id, actual_name, args, nil, call_virtual)
@@ -36970,7 +36928,7 @@ module Crystal::HIR
       if enum_name = enum_return_name_for(actual_name)
         (@enum_value_types ||= {} of ValueId => String)[call.id] = enum_name
       end
-      if ENV["DEBUG_CALL_TRACE"]? && member_name == "copy_to"
+      if debug_env_filter_match?("DEBUG_CALL_TRACE", member_name, actual_name, primary_name)
         STDERR.puts "[CALL_TRACE] stage=after_emit method=#{member_name} actual=#{actual_name}"
       end
       call.id
@@ -37648,6 +37606,7 @@ module Crystal::HIR
                          else
                            TypeRef::POINTER  # Default to pointer for block params
                          end
+            param_type = TypeRef::POINTER if param_type == TypeRef::VOID
             if ENV["DEBUG_BLOCK_PARAMS"]? && param_types
               STDERR.puts "[BLOCK_PARAMS] block_param name=#{name} type=#{get_type_name_from_ref(param_type)}"
             end
@@ -38999,12 +38958,6 @@ module Crystal::HIR
         # Pointer(T) or just Pointer -> pointer type
         store_type_cache(cache_key, TypeRef::POINTER)
         return TypeRef::POINTER
-      end
-
-      if event_loop_interface_module_name?(lookup_name)
-        result = @module.intern_type(TypeDescriptor.new(TypeKind::Module, lookup_name))
-        store_type_cache(cache_key, result)
-        return result
       end
 
       result = case lookup_name
