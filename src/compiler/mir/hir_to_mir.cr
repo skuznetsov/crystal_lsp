@@ -869,9 +869,6 @@ module Crystal
       # We use $ as separator (: is not valid in LLVM identifiers)
       # Avoid regex by extracting up to first : or $
       method_name_str = call.method_name
-      if method_name_str == "Crystal::System::Process.executable_path"
-        method_name_str = "Process.executable_path"
-      end
       colon_pos = method_name_str.index(':')
       dollar_pos = method_name_str.index('$')
       base_method_name = if colon_pos || dollar_pos
@@ -1275,7 +1272,7 @@ module Crystal
       method_suffix = extract_method_suffix(call.method_name)
       return nil unless method_suffix
 
-      old_candidates = virtual_dispatch_candidates(recv_desc, recv_type, method_suffix)
+      old_candidates = virtual_dispatch_candidates(recv_desc, recv_type, method_suffix, call.args.size)
       return nil if old_candidates.empty?
 
       dispatch_name = "__vdispatch__#{call.method_name}"
@@ -1369,10 +1366,21 @@ module Crystal
       includers ? includers.dup : [] of String
     end
 
+    private def enclosing_class_for_module(module_name : String) : String?
+      parts = module_name.split("::")
+      while parts.size > 1
+        parts.pop
+        candidate = parts.join("::")
+        return candidate if @hir_module.class_parents.has_key?(candidate)
+      end
+      nil
+    end
+
     private def virtual_dispatch_candidates(
       recv_desc : HIR::TypeDescriptor,
       recv_type : HIR::TypeRef,
-      method_suffix : String
+      method_suffix : String,
+      arg_count : Int32
     ) : Array(NamedTuple(type_id: Int32, type_ref: TypeRef, variant_id: Int32, func: Function?, dispatch_class: String?))
       candidates = [] of NamedTuple(type_id: Int32, type_ref: TypeRef, variant_id: Int32, func: Function?, dispatch_class: String?)
 
@@ -1387,7 +1395,7 @@ module Crystal
             if variant.full_name == "Nil"
               next
             end
-            if func = resolve_virtual_method_for_class(variant.full_name, method_suffix)
+            if func = resolve_virtual_method_for_class(variant.full_name, method_suffix, arg_count)
               if ENV["DEBUG_VDISPATCH_UNION"]? && method_suffix == "next_power_of_two"
                 STDERR.puts "[VDISPATCH_UNION] candidate=#{variant.full_name} func=#{func.name}"
               end
@@ -1415,7 +1423,9 @@ module Crystal
         base = recv_desc.name
         ([base] + subclasses_for(base)).each do |class_name|
           func_name = "#{class_name}##{method_suffix}"
-          next unless func = @mir_module.get_function(func_name)
+          func = @mir_module.get_function(func_name) ||
+                 resolve_virtual_method_for_class(class_name, method_suffix, arg_count)
+          next unless func
           next unless mir_type = @mir_module.type_registry.get_by_name(class_name)
           candidates << {
             type_id: mir_type.id.to_i32,
@@ -1427,12 +1437,20 @@ module Crystal
         end
       elsif recv_desc.kind == HIR::TypeKind::Module
         seen = Set(String).new
-        module_includers_for(recv_desc.name).each do |includer|
+        includers = module_includers_for(recv_desc.name)
+        if includers.empty?
+          if outer = enclosing_class_for_module(recv_desc.name)
+            includers = [outer]
+          end
+        end
+        includers.each do |includer|
           ([includer] + subclasses_for(includer)).each do |class_name|
             next if seen.includes?(class_name)
             seen.add(class_name)
             func_name = "#{class_name}##{method_suffix}"
-            next unless func = @mir_module.get_function(func_name)
+            func = @mir_module.get_function(func_name) ||
+                   resolve_virtual_method_for_class(class_name, method_suffix, arg_count)
+            next unless func
             next unless mir_type = @mir_module.type_registry.get_by_name(class_name)
             next if mir_type.is_value_type?
             candidates << {
@@ -1463,7 +1481,7 @@ module Crystal
       # Gather candidates from class hierarchy
       old_candidates = [] of NamedTuple(type_id: Int32, func: Function)
       ([class_name] + subclasses_for(class_name)).each do |name|
-        if func = resolve_virtual_method_for_class(name, method_suffix)
+        if func = resolve_virtual_method_for_class(name, method_suffix, call.args.size)
           next unless mir_type = @mir_module.type_registry.get_by_name(name)
           next if mir_type.is_value_type?
           old_candidates << {type_id: mir_type.id.to_i32, func: func}
@@ -1509,13 +1527,31 @@ module Crystal
       dispatch_func
     end
 
-    private def resolve_virtual_method_for_class(class_name : String, method_suffix : String) : Function?
+    private def resolve_virtual_method_for_class(
+      class_name : String,
+      method_suffix : String,
+      arg_count : Int32? = nil
+    ) : Function?
       current = class_name
       seen = Set(String).new
       while !current.empty? && !seen.includes?(current)
         seen.add(current)
         if func = @mir_module.get_function("#{current}##{method_suffix}")
           return func
+        end
+        if arg_count
+          base = method_suffix
+          if dollar = base.index('$')
+            base = base[0, dollar]
+          end
+          candidates = [] of Function
+          @mir_module.functions.each do |candidate|
+            next unless candidate.name.starts_with?("#{current}##{base}")
+            # +1 for receiver
+            next unless candidate.params.size == arg_count + 1
+            candidates << candidate
+          end
+          return candidates.first if candidates.size == 1
         end
         parent = @hir_module.class_parents[current]?
         current = parent || ""

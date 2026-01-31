@@ -170,7 +170,7 @@ module Crystal
 
       @offset : Int64
 
-      def initialize(@io : IO::FileDescriptor, size, @base_address : LibC::SizeT = 0, @strings : Strings? = nil, @line_strings : Strings? = nil)
+      def initialize(@io : IO::FileDescriptor, size : Int64, @base_address : LibC::SizeT = 0, @strings : Strings? = nil, @line_strings : Strings? = nil)
         @offset = @io.tell
         @matrix = Array(Array(Row)).new
         decode_sequences(size)
@@ -188,7 +188,7 @@ module Crystal
       end
 
       # Decodes the compressed matrix of addresses to line numbers.
-      private def decode_sequences(size)
+      private def decode_sequences(size : Int64)
         while true
           pos = @io.tell
           offset = pos - @offset

@@ -5649,7 +5649,8 @@ module Crystal::MIR
     private def emit_indirect_call(inst : IndirectCall, name : String)
       return_type = @type_mapper.llvm_type(inst.type)
       callee = value_ref(inst.callee_ptr)
-      # Handle args: union types need special handling - pass ptr to slot/alloca, not loaded value
+      # Handle args: union types need special handling - pass ptr to slot/alloca, not loaded value.
+      # Non-union values should be passed by value with their LLVM type.
       arg_strs = inst.args.map do |a|
         arg_type = @value_types[a]?
         if arg_type
@@ -5667,7 +5668,7 @@ module Crystal::MIR
               "ptr #{temp_slot}"
             end
           else
-            "ptr #{value_ref(a)}"
+            "#{arg_llvm_type} #{value_ref(a)}"
           end
         else
           "ptr #{value_ref(a)}"
