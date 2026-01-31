@@ -29956,16 +29956,16 @@ module Crystal::HIR
                       else
                         lower_args_with_expected_types(ctx, call_args, method_name, full_method_name, has_block_call, call_arena)
                       end
-        if debug_env_filter_match?("DEBUG_CALL_TRACE", method_name, base_method_name, full_method_name || "")
+        if debug_env_filter_match?("DEBUG_CALL_TRACE", method_name, method_name, full_method_name || "")
           STDERR.puts "[CALL_TRACE] stage=with_arena_done method=#{method_name} args=#{args_result.size} receiver=#{!!receiver_id} full=#{full_method_name || ""}"
         end
         args_result
       end
-      if debug_env_filter_match?("DEBUG_CALL_TRACE", method_name, base_method_name, full_method_name || "")
+      if debug_env_filter_match?("DEBUG_CALL_TRACE", method_name, method_name, full_method_name || "")
         STDERR.puts "[CALL_TRACE] stage=after_args method=#{method_name} args=#{args.size} receiver=#{!!receiver_id} full=#{full_method_name || ""}"
       end
       args = apply_default_args(ctx, args, method_name, full_method_name, has_block_call, has_named_args)
-      if debug_env_filter_match?("DEBUG_CALL_TRACE", method_name, base_method_name, full_method_name || "")
+      if debug_env_filter_match?("DEBUG_CALL_TRACE", method_name, method_name, full_method_name || "")
         STDERR.puts "[CALL_TRACE] stage=after_defaults method=#{method_name} args=#{args.size} receiver=#{!!receiver_id} full=#{full_method_name || ""}"
       end
       prepack_arg_types = args.map { |arg_id| ctx.type_of(arg_id) }
@@ -29978,11 +29978,11 @@ module Crystal::HIR
       pack_result = pack_splat_args_for_call(ctx, args, method_name, full_method_name, has_block_call, has_named_args, receiver_id, has_splat)
       args = pack_result[0]
       splat_packed = pack_result[1]
-      if debug_env_filter_match?("DEBUG_CALL_TRACE", method_name, base_method_name, full_method_name || "")
+      if debug_env_filter_match?("DEBUG_CALL_TRACE", method_name, method_name, full_method_name || "")
         STDERR.puts "[CALL_TRACE] stage=after_pack method=#{method_name} args=#{args.size} receiver=#{!!receiver_id} full=#{full_method_name || ""}"
       end
       args = ensure_double_splat_arg(ctx, args, method_name, full_method_name, has_block_call, has_named_args, receiver_id)
-      if debug_env_filter_match?("DEBUG_CALL_TRACE", method_name, base_method_name, full_method_name || "")
+      if debug_env_filter_match?("DEBUG_CALL_TRACE", method_name, method_name, full_method_name || "")
         STDERR.puts "[CALL_TRACE] stage=after_double_splat method=#{method_name} args=#{args.size} receiver=#{!!receiver_id} full=#{full_method_name || ""}"
       end
 
@@ -30326,14 +30326,14 @@ module Crystal::HIR
           end
         end
       end
-      if debug_env_filter_match?("DEBUG_CALL_TRACE", method_name, base_method_name, full_method_name || "")
+      if debug_env_filter_match?("DEBUG_CALL_TRACE", method_name, method_name, full_method_name || "")
         type_ids = arg_types.map(&.id)
         STDERR.puts "[CALL_TRACE] stage=after_arg_types method=#{method_name} arg_types=#{type_ids.join(",")}"
       end
 
       # Compute mangled name based on base name + argument types
       # If no explicit receiver and we're inside a class, try class#method first
-      if debug_env_filter_match?("DEBUG_BASE_METHOD", method_name, base_method_name, full_method_name || "")
+      if debug_env_filter_match?("DEBUG_BASE_METHOD", method_name, method_name, full_method_name || "")
         STDERR.puts "[BASE_METHOD] method=#{method_name} full_method_name=#{full_method_name || "nil"} receiver_id=#{receiver_id.nil? ? "nil" : receiver_id.to_s} @current_class=#{@current_class || "nil"}"
       end
       base_method_name = if full_method_name
