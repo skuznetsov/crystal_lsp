@@ -3172,6 +3172,7 @@ module Crystal::HIR
         raw_path = collect_path_string(node)
         # Substitute type params in path prefix (e.g., D::CACHE -> ImplInfo_Float32::CACHE)
         substituted = substitute_type_params_in_type_name(raw_path)
+        return substituted if substituted.starts_with?("::")
         resolve_path_string_in_context(substituted)
       when CrystalV2::Compiler::Frontend::CallNode
         base = resolve_path_like_name(node.callee) || stringify_type_expr(node.callee)
@@ -6021,7 +6022,9 @@ module Crystal::HIR
           end
         end
       when CrystalV2::Compiler::Frontend::PathNode
-        full_name = resolve_path_string_in_context(collect_path_string(expr_node))
+        raw_path = collect_path_string(expr_node)
+        absolute = raw_path.starts_with?("::")
+        full_name = absolute ? raw_path[2..] : resolve_path_string_in_context(raw_path)
         if mapped = @type_param_map[full_name]?
           if literal = literal_for_type_param_value(mapped)
             return literal[0]
@@ -6045,7 +6048,7 @@ module Crystal::HIR
           end
         end
         if type_name_exists?(full_name)
-          return type_ref_for_name(full_name)
+          return type_ref_for_name(absolute ? raw_path : full_name)
         end
       when CrystalV2::Compiler::Frontend::ConstantNode
         name = String.new(expr_node.name)
@@ -10193,10 +10196,11 @@ module Crystal::HIR
       init_capture = InitParamsCapture.new
       init_params = init_capture.params
 
-      if body = node.body
+      class_body = node.body || [] of CrystalV2::Compiler::Frontend::ExprId
+      if !class_body.empty?
         specialized_class = class_name.includes?("(")
         if mono_debug
-          STDERR.puts "[MONO] register_concrete_class #{class_name} body_size=#{body.size}"
+          STDERR.puts "[MONO] register_concrete_class #{class_name} body_size=#{class_body.size}"
         end
         old_suppress = @suppress_monomorphization
         @suppress_monomorphization = @suppress_monomorphization || specialized_class
@@ -10208,7 +10212,7 @@ module Crystal::HIR
                         else
                           class_name
                         end
-        body.each do |expr_id|
+        class_body.each do |expr_id|
           member = unwrap_visibility_member(@arena[expr_id])
           case member
           when CrystalV2::Compiler::Frontend::ClassNode
@@ -10238,7 +10242,7 @@ module Crystal::HIR
         @current_class = class_name
         include_nodes = [] of CrystalV2::Compiler::Frontend::IncludeNode
         extend_nodes = [] of CrystalV2::Compiler::Frontend::ExtendNode
-        body.each do |expr_id|
+        class_body.each do |expr_id|
           member = unwrap_visibility_member(@arena[expr_id])
           case member
           when CrystalV2::Compiler::Frontend::IncludeNode
@@ -10250,7 +10254,7 @@ module Crystal::HIR
             extend_nodes << member
           end
         end
-        record_constants_in_body(class_name, body)
+        record_constants_in_body(class_name, class_body)
         # Seed provisional class info so return-type inference can see ivars
         # collected during registration (initialize assignments, ivar decls, etc.).
       provisional_info = ClassInfo.new(
@@ -10271,8 +10275,8 @@ module Crystal::HIR
           STDERR.puts "[DEBUG_IO] About to collect_defined_instance_method_full_names for IO"
           STDERR.puts "[DEBUG_IO]   enum_info Seek keys: #{@enum_info.try(&.keys.select { |k| k.includes?("Seek") }) || "nil"}"
         end
-        defined_instance_method_full_names = collect_defined_instance_method_full_names(class_name, body)
-        defined_class_method_full_names = collect_defined_class_method_full_names(class_name, body)
+        defined_instance_method_full_names = collect_defined_instance_method_full_names(class_name, class_body)
+        defined_class_method_full_names = collect_defined_class_method_full_names(class_name, class_body)
         if mono_debug && defined_start
           elapsed = (Time.instant - defined_start).total_milliseconds
           STDERR.puts "[MONO] #{class_name} collect_defined_instance_methods #{elapsed.round(1)}ms"
@@ -10280,7 +10284,12 @@ module Crystal::HIR
 
         begin
         body_start = Time.instant if mono_debug
-        body.each do |expr_id|
+        skip_next = false
+        class_body.each_with_index do |expr_id, idx|
+          if skip_next
+            skip_next = false
+            next
+          end
           member = unwrap_visibility_member(@arena[expr_id])
           member_start = mono_debug ? Time.instant : nil
           return_elapsed = nil
@@ -10339,6 +10348,20 @@ module Crystal::HIR
               @deferred_classvar_inits << {expr_id, @arena, class_name}
               if ENV.has_key?("DEBUG_DEFERRED_CLASSVAR")
                 STDERR.puts "[DEFERRED_CLASSVAR] Added: class=#{class_name} cvar=#{cvar_name}"
+              end
+            end
+          when CrystalV2::Compiler::Frontend::ClassVarNode
+            # Parser quirk: @@var : Type appears as ClassVarNode + PathNode.
+            raw_name = String.new(member.name)
+            cvar_name = raw_name.lstrip('@')
+            if idx + 1 < class_body.size
+              next_id = class_body[idx + 1]
+              next_node = @arena[next_id]
+              if next_node.is_a?(CrystalV2::Compiler::Frontend::PathNode)
+                type_name = collect_path_string(next_node)
+                cvar_type = type_ref_for_name(type_name)
+                class_vars << ClassVarInfo.new(cvar_name, cvar_type, nil)
+                skip_next = true
               end
             end
 
@@ -10778,8 +10801,8 @@ module Crystal::HIR
         end
         # Re-assert class-defined untyped base methods after mixins so they
         # don't get shadowed by included module defs (e.g., Tuple#hash).
-        if body
-          body.each do |expr_id|
+        if !class_body.empty?
+          class_body.each do |expr_id|
             member = unwrap_visibility_member(@arena[expr_id])
             next unless member.is_a?(CrystalV2::Compiler::Frontend::DefNode)
             next if member.is_abstract
@@ -19343,6 +19366,9 @@ module Crystal::HIR
     private def record_class_var_type(owner_name : String, cvar_name : String, cvar_type : TypeRef, initial_value : Int64? = nil) : Nil
       return if owner_name.empty?
       return if cvar_type == TypeRef::VOID
+      if ENV["DEBUG_CVAR_TYPE"]?
+        STDERR.puts "[DEBUG_CVAR_TYPE] owner=#{owner_name} var=#{cvar_name} type=#{get_type_name_from_ref(cvar_type)}"
+      end
 
       if class_info = @class_info[owner_name]?
         if idx = class_info.class_vars.index { |cv| cv.name == cvar_name }
@@ -24356,9 +24382,43 @@ module Crystal::HIR
 
     private def union_type_for_values(left_type : TypeRef, right_type : TypeRef) : TypeRef
       return left_type if left_type == right_type
+      left_desc = @module.get_type_descriptor(left_type)
+      right_desc = @module.get_type_descriptor(right_type)
+      if left_desc && left_desc.kind == TypeKind::Union && right_desc && right_desc.kind == TypeKind::Union
+        left_variants = split_union_type_name(left_desc.name)
+        right_variants = split_union_type_name(right_desc.name)
+        merged_names = merge_union_variant_names(left_variants + right_variants)
+        return left_type if merged_names.size == left_variants.size && merged_names.size == right_variants.size
+        return create_union_type(merged_names.join(" | "))
+      end
+      if left_desc && left_desc.kind == TypeKind::Union
+        left_variants = split_union_type_name(left_desc.name)
+        merged_names = merge_union_variant_names(left_variants + [get_type_name_from_ref(right_type)])
+        return left_type if merged_names.size == left_variants.size
+        return create_union_type(merged_names.join(" | "))
+      end
+      if right_desc && right_desc.kind == TypeKind::Union
+        right_variants = split_union_type_name(right_desc.name)
+        merged_names = merge_union_variant_names(right_variants + [get_type_name_from_ref(left_type)])
+        return right_type if merged_names.size == right_variants.size
+        return create_union_type(merged_names.join(" | "))
+      end
       left_name = get_type_name_from_ref(left_type)
       right_name = get_type_name_from_ref(right_type)
       create_union_type("#{left_name} | #{right_name}")
+    end
+
+    private def merge_union_variant_names(variant_names : Array(String)) : Array(String)
+      seen = Set(TypeRef).new
+      merged = [] of String
+      variant_names.each do |name|
+        next if name.empty?
+        ref = type_ref_for_name(name)
+        next if seen.includes?(ref)
+        seen << ref
+        merged << get_type_name_from_ref(ref)
+      end
+      merged
     end
 
     private def lower_truthy_check(ctx : LoweringContext, value_id : ValueId, value_type : TypeRef) : ValueId
@@ -38475,10 +38535,13 @@ module Crystal::HIR
         return TypeRef::VOID if short_type_param_name?(lookup_name)
       end
       orig_name = lookup_name
+      absolute_name = lookup_name.starts_with?("::")
+      lookup_name = lookup_name[2..] if absolute_name
+      cache_key_name = absolute_name ? "::#{lookup_name}" : lookup_name
 
       # Resolve type names in the current namespace before cache lookup.
       # This avoids poisoning the cache with names that resolve differently per scope.
-      if !lookup_name.includes?("|")
+      if !absolute_name && !lookup_name.includes?("|")
         old_lookup = lookup_name
         lookup_name = resolve_type_name_in_context(lookup_name)
         if ENV["DEBUG_WUINT128"]? && old_lookup == "UInt128"
@@ -38519,7 +38582,7 @@ module Crystal::HIR
           return result
         end
       end
-      cache_key = type_cache_key(lookup_name)
+      cache_key = type_cache_key(cache_key_name)
       debug_hook_type_cache(orig_name, type_cache_context || "", cache_key, lookup_name)
 
       if cached = @type_cache[cache_key]?
@@ -38578,7 +38641,7 @@ module Crystal::HIR
       # Check for union type syntax: "Type1 | Type2" or "Type1|Type2" (parser may not add spaces)
       # NOTE: Don't set placeholder here - create_union_type handles its own caching
       if lookup_name.includes?("|")
-        result = create_union_type(lookup_name)
+        result = create_union_type(absolute_name ? "::#{lookup_name}" : lookup_name)
         return result
       end
 
@@ -38591,7 +38654,7 @@ module Crystal::HIR
         base_name = lookup_name[0, lookup_name.size - 1]
         # Substitute type parameter if present
         base_name = @type_param_map[base_name]? || base_name
-        union_name = "#{base_name} | Nil"
+        union_name = absolute_name ? "::#{base_name} | Nil" : "#{base_name} | Nil"
         result = create_union_type(union_name)
         store_type_cache(cache_key, result)
         return result
@@ -38817,32 +38880,55 @@ module Crystal::HIR
 
       expanded_variants = [] of String
       variant_names.each do |variant|
-        resolved = resolve_type_alias_chain(variant)
+        absolute = variant.starts_with?("::")
+        raw_variant = absolute ? variant[2..] : variant
+        resolved = resolve_type_alias_chain(raw_variant)
         if resolved.includes?("|")
-          split_union_type_name(resolved).each { |entry| expanded_variants << entry }
+          split_union_type_name(resolved).each do |entry|
+            expanded_variants << (absolute ? "::#{entry}" : entry)
+          end
         else
-          expanded_variants << resolved
+          expanded_variants << (absolute ? "::#{resolved}" : resolved)
         end
       end
       expanded_variants.uniq!
 
       resolved_variant_names = expanded_variants.map do |variant|
-        resolved = variant
+        absolute = variant.starts_with?("::")
+        resolved = absolute ? variant[2..] : variant
         if !@type_param_map.empty?
           resolved = substitute_type_params_in_type_name(resolved)
         end
-        resolved = resolve_type_name_in_context(resolved)
+        resolved = resolve_type_name_in_context(resolved) unless absolute
         if type_param_like?(resolved)
           mapped = @type_param_map[resolved]?
           if mapped.nil? || mapped == resolved
             resolved = "Pointer"
           end
         end
-        resolved
+        absolute ? "::#{resolved}" : resolved
       end
+      resolved_variant_names.reject!(&.empty?)
+
+      # Canonicalize by TypeRef to avoid duplicate variants like Thread | Nil | Thread.
+      variant_refs = resolved_variant_names.map { |vn| type_ref_for_name(vn) }
+      seen_refs = Set(TypeRef).new
+      dedup_names = [] of String
+      dedup_refs = [] of TypeRef
+      variant_refs.each_with_index do |ref, idx|
+        next if seen_refs.includes?(ref)
+        seen_refs << ref
+        dedup_refs << ref
+        canonical = get_type_name_from_ref(ref)
+        canonical = resolved_variant_names[idx] if canonical == "Unknown"
+        dedup_names << canonical
+      end
+      resolved_variant_names = dedup_names
+      variant_refs = dedup_refs
+
       normalized_name = resolved_variant_names.join(" | ")
       if resolved_variant_names.size == 1
-        return type_ref_for_name(resolved_variant_names.first)
+        return variant_refs.first
       end
       cache_key = type_cache_key(normalized_name)
 
@@ -38856,7 +38942,6 @@ module Crystal::HIR
       store_type_cache(cache_key, TypeRef::VOID)
 
       # Get TypeRefs for each variant (recursive to handle nested unions)
-      variant_refs = resolved_variant_names.map { |vn| type_ref_for_name(vn) }
       if ENV["DEBUG_UNION_TYPES"]?
         refs_debug = variant_refs.map { |ref| get_type_name_from_ref(ref) }.join(", ")
         enum_debug = resolved_variant_names.map do |vn|
