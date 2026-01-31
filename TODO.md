@@ -2124,3 +2124,50 @@ Pending follow-ups:
 ### 8.13 Platform Parity (Bonus)
 - [ ] Track LLVM target parity (all targets from `llvm-config --targets-builtin`) and document deltas.
 - [ ] Windows support parity with Crystal (post-bootstrap).
+
+### 8.14 Bootstrap Session (2026-01-31) - Missing Symbols After Debug Build
+
+**Commits:**
+- `22004fb` - fix: improve HIR type/name resolution (absolute `::` handling, class var typed decl quirk, union dedupe by TypeRef)
+- `ab1f2c7` - fix: load union-of-pointer payloads before deref
+
+**Repro (debug build):**
+```
+crystal build -Ddebug_hooks src/crystal_v2.cr -o bin/crystal_v2 --no-debug
+./bin/crystal_v2 --no-llvm-opt --no-llvm-metadata examples/bench_fib42.cr -o /tmp/fib42
+```
+
+**Missing symbols (12):**
+- `Array(T)#calculate_new_capacity` (Int32, String, DWARF, etc.)
+- `Slice(UInt8)#hexstring`
+- `_Crystal::EventLoop::Polling#system_run$Bool_block`
+- `Thread#previous=` (setter)
+- `Time::Zone#dst?` (should be `Time::Location::Zone#dst?`)
+
+**Debug logs:**
+- `/tmp/fib42_missing_trace.log`
+- `/tmp/fib42_skip_untyped.log` (shows `function.lower.skip_untyped_base`)
+- `/tmp/fib42_previous.log`
+- `/tmp/fib42_system_run.log`
+
+**Root-cause hypotheses + fixes (next):**
+1) **Untyped base skip is too aggressive**  
+   `lower_function_if_needed_impl` skips untyped base defs when *any* overload exists, but untyped overloads still need lowering.  
+   **Fix**: only skip if a **typed** overload exists (use `def_params_untyped?` / param stats).  
+   **DoD**: no `calculate_new_capacity` / `hexstring` missing.
+2) **Setter base-name mismatch**  
+   `maybe_generate_accessor_for_name` emits setters with union-suffixed names, but call is base-name `Thread#previous=`.  
+   **Fix**: when call has no `$`, generate/access base-name setter (no suffix) or map to the union-suffixed method.  
+   **DoD**: `_Thread#previous=` is lowered and linked.
+3) **`Time::Zone` phantom type**  
+   `resolve_class_name_in_context` synthesizes `Time::Zone` without checking existence.  
+   **Fix**: only apply parent-namespace fallback if the type exists in index; otherwise keep nested type.  
+   **DoD**: HIR uses `Time::Location::Zone#dst?`.
+4) **Abstract base virtual call**  
+   `Polling#system_run$Bool_block` is abstract; call still targets base.  
+   **Fix**: ensure virtual dispatch selects concrete subclass (Kqueue/Epoll) or emit abstract stub when still targeted.  
+   **DoD**: no `_Crystal::EventLoop::Polling#system_run$Bool_block` missing.
+
+**Platform parity follow-ups:**
+- [ ] Audit **all** int/ptr → float conversions (`uitofp` vs `sitofp`) beyond the single fixed site; verify `float`/`double` conversions in call-arg/return lowering and union coercions.
+- [ ] Confirm **AArch64/ARM** union-payload alignment (`align 4`) in *every* payload load/store (including pointer unions). Add a spec or IR grep guard.
