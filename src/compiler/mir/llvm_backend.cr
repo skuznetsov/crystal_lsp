@@ -3190,6 +3190,20 @@ module Crystal::MIR
     private def emit_load(inst : Load, name : String)
       type = @type_mapper.llvm_type(inst.type)
       ptr = value_ref(inst.ptr)
+      ptr_type_ref = @value_types[inst.ptr]?
+      if ptr_type_ref && union_ptr_like?(ptr_type_ref)
+        union_llvm = @type_mapper.llvm_type(ptr_type_ref)
+        if union_llvm.includes?(".union")
+          raw_name = name.starts_with?("%") ? name[1..] : name
+          base_name = "#{raw_name}.ptr_union"
+          emit "%#{base_name}.ptr = alloca #{union_llvm}, align 8"
+          emit "store #{union_llvm} #{normalize_union_value(ptr, union_llvm)}, ptr %#{base_name}.ptr"
+          emit "%#{base_name}.payload_ptr = getelementptr #{union_llvm}, ptr %#{base_name}.ptr, i32 0, i32 1"
+          emit "%#{base_name}.payload = load ptr, ptr %#{base_name}.payload_ptr, align 4"
+          record_emitted_type("%#{base_name}.payload", "ptr")
+          ptr = "%#{base_name}.payload"
+        end
+      end
 
       # Can't load void - use ptr instead
       if type == "void"
@@ -3208,6 +3222,14 @@ module Crystal::MIR
 
       emit "#{name} = load #{type}, ptr #{ptr}"
       # Cross-block store is now handled centrally in emit_instruction
+    end
+
+    private def union_ptr_like?(type_ref : TypeRef) : Bool
+      union_desc = @module.get_union_descriptor(type_ref)
+      return false unless union_desc
+      variants = union_desc.variants.reject { |v| v.type_ref == TypeRef::NIL }
+      return false if variants.empty?
+      variants.all? { |v| @type_mapper.llvm_type(v.type_ref) == "ptr" }
     end
 
     private def emit_store(inst : Store)
