@@ -2137,23 +2137,27 @@ crystal build -Ddebug_hooks src/crystal_v2.cr -o bin/crystal_v2 --no-debug
 ./bin/crystal_v2 --no-llvm-opt --no-llvm-metadata examples/bench_fib42.cr -o /tmp/fib42
 ```
 
-**Missing symbols (12):**
-- `Array(T)#calculate_new_capacity` (Int32, String, DWARF, etc.)
-- `Slice(UInt8)#hexstring`
+**Missing symbols (5):**
 - `_Crystal::EventLoop::Polling#system_run$Bool_block`
 - `Thread#previous=` (setter)
 - `Time::Zone#dst?` (should be `Time::Location::Zone#dst?`)
+- `Pointer(UInt8)#bits_set?`
+- `Crystal::DWARF::LineNumbers#decode_sequences$arity1`
 
 **Debug logs:**
 - `/tmp/fib42_missing_trace.log`
 - `/tmp/fib42_skip_untyped.log` (shows `function.lower.skip_untyped_base`)
 - `/tmp/fib42_previous.log`
 - `/tmp/fib42_system_run.log`
+- `/tmp/fib42_link.log` (current missing list: 5)
+
+**Update (2026-01-31):**
+- `calculate_new_capacity` / `hexstring` no longer missing (verified via `/tmp/fib42_link.log`).
 
 **Root-cause hypotheses + fixes (next):**
-1) **Untyped base skip is too aggressive**  
-   `lower_function_if_needed_impl` skips untyped base defs when *any* overload exists, but untyped overloads still need lowering.  
-   **Fix**: only skip if a **typed** overload exists (use `def_params_untyped?` / param stats).  
+1) **Untyped base override after mixins**  
+   Untyped class defs were re-asserted onto the base name after mixins even when typed overloads exist.  
+   **Fix**: skip re-assert when any typed overload exists; prefer lower-arity base names.  
    **DoD**: no `calculate_new_capacity` / `hexstring` missing.
 2) **Setter base-name mismatch**  
    `maybe_generate_accessor_for_name` emits setters with union-suffixed names, but call is base-name `Thread#previous=`.  
