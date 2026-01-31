@@ -7265,6 +7265,23 @@ module Crystal::HIR
       (@module_defs[module_name] ||= [] of {CrystalV2::Compiler::Frontend::ModuleNode, CrystalV2::Compiler::Frontend::ArenaLike}) << {node, @arena}
       @module_defs_cache_version += 1
       invalidate_type_cache_for_namespace(module_name) if existing_defs
+      if module_name == "Enum"
+        if body = node.body
+          body.each do |expr_id|
+            member = unwrap_visibility_member(@arena[expr_id])
+            next unless member.is_a?(CrystalV2::Compiler::Frontend::DefNode)
+            if recv = member.receiver
+              next if String.new(recv) == "self"
+            end
+            register_type_method_from_def(member, "Enum")
+          end
+        end
+        if enum_info = @enum_info
+          enum_info.each_key do |enum_name|
+            attach_enum_instance_methods(enum_name)
+          end
+        end
+      end
       # Add module to short_type_index so Printer can resolve to Float::Printer
       short_name = last_namespace_component(module_name)
       if short_name != module_name
@@ -8280,14 +8297,35 @@ module Crystal::HIR
     # Attach Enum module instance methods (e.g., Enum#hash) to a concrete enum type.
     private def attach_enum_instance_methods(enum_name : String) : Nil
       enum_prefix = "Enum#"
+      has_enum_methods = false
       @function_defs.each do |full_name, def_node|
         next unless full_name.starts_with?(enum_prefix)
+        has_enum_methods = true
         method_suffix = full_name[enum_prefix.size..]
         next if method_suffix.empty?
         enum_full_name = "#{enum_name}##{method_suffix}"
         next if @function_defs.has_key?(enum_full_name)
         arena = @function_def_arenas[full_name]? || @arena
         register_function_def(enum_full_name, def_node, arena)
+        if return_type = @function_types[full_name]?
+          register_function_type(enum_full_name, return_type) unless @function_types.has_key?(enum_full_name)
+        end
+      end
+      return if has_enum_methods
+      # If Enum instance methods weren't registered yet, pull them from the Enum module body.
+      if defs = @module_defs["Enum"]?
+        defs.each do |mod_node, mod_arena|
+          with_arena(mod_arena) do
+            body = mod_node.body
+            next unless body
+            body.each do |expr_id|
+              member = unwrap_visibility_member(@arena[expr_id])
+              next unless member.is_a?(CrystalV2::Compiler::Frontend::DefNode)
+              next if member.receiver # skip class methods
+              register_type_method_from_def(member, enum_name)
+            end
+          end
+        end
       end
     end
 
@@ -16639,6 +16677,14 @@ module Crystal::HIR
       if ivar_type = ivar_return_type_for_method(base_name)
         return ivar_type
       end
+      if name.ends_with?("#value")
+        if idx = name.rindex('#')
+          owner_name = name[0, idx]
+          if enum_name = resolve_enum_name(owner_name)
+            return enum_base_type(enum_name)
+          end
+        end
+      end
       # If this is a base name (no $ suffix), use cached return type if available.
       if cached = @function_base_return_types[base_name]?
         return cached
@@ -17311,8 +17357,22 @@ module Crystal::HIR
 
             if nested && nested.includes?(name)
               result = "#{current_base}::#{name}"
-            elsif parent_namespace
-              result = "#{parent_namespace}::#{name}"
+            elsif type_name_exists?("#{current_base}::#{name}")
+              result = "#{current_base}::#{name}"
+            elsif parent_namespace && parent_is_module && !@top_level_type_names.includes?(name)
+              candidate = "#{parent_namespace}::#{name}"
+              if type_name_exists?(candidate)
+                result = candidate
+              elsif candidates = @short_type_index[name]?
+                if candidates.includes?(candidate)
+                  result = candidate
+                else
+                  result = candidate
+                end
+              else
+                # Forward reference inside a module namespace.
+                result = candidate
+              end
             else
               namespace = nil
               if current_base.includes?("::") || @module_defs.has_key?(current_base)

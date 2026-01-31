@@ -2154,6 +2154,12 @@ crystal build -Ddebug_hooks src/crystal_v2.cr -o bin/crystal_v2 --no-debug
 **Update (2026-01-31):**
 - `calculate_new_capacity` / `hexstring` no longer missing (verified via `/tmp/fib42_link.log`).
 
+**Update (2026-02-xx):**
+- Added Enum instance-method attachment from Enum module registration (fallback to Enum module body if not yet registered).
+- `get_function_return_type` now returns enum base type for `Enum#value`/`Enum#value`-style methods when receiver resolves to an enum.
+- `resolve_class_name_in_context` now allows forward ref to parent module namespace (module-only) to avoid bare short names (targets `Waiters`).
+- **Status**: not yet re-verified against `/tmp/fib42_link.log` after these changes.
+
 **Root-cause hypotheses + fixes (next):**
 1) **Untyped base override after mixins**  
    Untyped class defs were re-asserted onto the base name after mixins even when typed overloads exist.  
