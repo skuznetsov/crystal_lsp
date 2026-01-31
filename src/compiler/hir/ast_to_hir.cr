@@ -8193,6 +8193,7 @@ module Crystal::HIR
         @function_def_arenas[base_name] = @arena
       elsif !has_block
         prefer_non_yield_base_name(base_name, member, @arena)
+        prefer_lower_arity_base_name(base_name, member, @arena)
       end
 
       # Track yield-functions for inline expansion
@@ -8546,6 +8547,7 @@ module Crystal::HIR
         @function_def_arenas[base_name] = @arena
       elsif !has_block
         prefer_non_yield_base_name(base_name, member, @arena)
+        prefer_lower_arity_base_name(base_name, member, @arena)
       end
 
       if body = member.body
@@ -10812,6 +10814,15 @@ module Crystal::HIR
             next unless def_params_untyped?(member)
             method_name = String.new(member.name)
             base_name = "#{class_name}##{method_name}"
+            overloads = function_def_overloads(base_name)
+            has_typed = overloads.any? do |name|
+              if def_node = @function_defs[name]?
+                !def_params_untyped?(def_node)
+              else
+                false
+              end
+            end
+            next if has_typed
             @function_defs[base_name] = member
             @function_def_arenas[base_name] = @arena
           end
@@ -12262,6 +12273,17 @@ module Crystal::HIR
 
       # Defer lowering for untyped params until call-site types are available.
       if def_params_untyped?(node)
+        if ENV["DEBUG_UNTYPED_DEFER"]? && (base_name == "hexstring" || base_name == "calculate_new_capacity")
+          param_count = 0
+          if params = node.params
+            params.each do |param|
+              next if named_only_separator?(param) || param.is_block
+              param_count += 1
+            end
+          end
+          call_str = call_arg_types ? call_arg_types.not_nil!.map { |t| get_type_name_from_ref(t) }.join(",") : ""
+          STDERR.puts "[UNTYPED_DEFER] name=#{base_name} params=#{param_count} call_types=#{call_str.empty? ? "nil" : call_str}"
+        end
         call_types = call_arg_types || [] of TypeRef
         if (call_types.empty? || call_types.all? { |t| t == TypeRef::VOID }) &&
            full_name_override && full_name_override.includes?("$")
@@ -12293,6 +12315,57 @@ module Crystal::HIR
             if all_defaulted && inferred.any? { |t| t != TypeRef::VOID }
               call_types = inferred
               call_arg_types = inferred
+            end
+          end
+        end
+        if call_types.empty? || call_types.all? { |t| t == TypeRef::VOID }
+          if params = node.params
+            param_count = params.count { |p| !p.is_block && !named_only_separator?(p) }
+            base_key = base_callsite_key(full_name_override || base_name)
+            if !base_key.empty?
+              if by_arity = @pending_arg_types_by_arity[base_key]?
+                if bucket = by_arity[param_count]?
+                  chosen = bucket.find { |entry| entry.types.any? { |t| t != TypeRef::VOID } } || bucket.first?
+                  if chosen
+                    call_types = chosen.types.dup
+                    call_arg_types = chosen.types.dup
+                    if chosen.literals
+                      call_literal_flags = chosen.literals.not_nil!.dup
+                    end
+                    if chosen.enum_names
+                      call_enum_names = chosen.enum_names.not_nil!.dup
+                    end
+                  end
+                end
+              end
+            end
+          end
+        end
+        if call_types.empty? || call_types.all? { |t| t == TypeRef::VOID }
+          if params = node.params
+            if body = node.body
+              inferred = [] of TypeRef
+              params.each do |param|
+                next if named_only_separator?(param) || param.is_block
+                if ta = param.type_annotation
+                  inferred << type_ref_for_name(String.new(ta))
+                  next
+                end
+                param_name = param.name ? String.new(param.name.not_nil!) : ""
+                if param_name.empty?
+                  inferred << TypeRef::VOID
+                  next
+                end
+                if inferred_type = infer_local_type_from_body(body, param_name, class_name)
+                  inferred << inferred_type
+                else
+                  inferred << TypeRef::VOID
+                end
+              end
+              if inferred.any? { |t| t != TypeRef::VOID }
+                call_types = inferred
+                call_arg_types = inferred
+              end
             end
           end
         end
@@ -13525,6 +13598,13 @@ module Crystal::HIR
         full_name = full_name.includes?("$") ? "#{full_name}_splat" : "#{base_name}$splat"
       end
 
+      # Untyped params with explicit arity should not claim the bare base name.
+      # This keeps zero-arg overloads on the base name and avoids deferring to
+      # untyped multi-arg overloads.
+      if has_untyped && param_count > 0 && full_name == base_name
+        full_name = "#{base_name}$arity#{param_count}"
+      end
+
       if @function_defs.has_key?(full_name) && (full_name == base_name || has_untyped)
         full_name = "#{base_name}$arity#{param_count}"
       end
@@ -13555,6 +13635,25 @@ module Crystal::HIR
       return if def_contains_yield?(member, member_arena)
       @function_defs[base_name] = member
       @function_def_arenas[base_name] = member_arena
+    end
+
+    private def prefer_lower_arity_base_name(
+      base_name : String,
+      member : CrystalV2::Compiler::Frontend::DefNode,
+      member_arena : CrystalV2::Compiler::Frontend::ArenaLike
+    ) : Nil
+      return unless existing = @function_defs[base_name]?
+      existing_params = count_non_block_params(existing)
+      member_params = count_non_block_params(member)
+      return unless member_params < existing_params
+      @function_defs[base_name] = member
+      @function_def_arenas[base_name] = member_arena
+    end
+
+    private def count_non_block_params(def_node : CrystalV2::Compiler::Frontend::DefNode) : Int32
+      params = def_node.params
+      return 0 unless params
+      params.count { |param| !param.is_block && !named_only_separator?(param) }
     end
 
     private def split_union_type_name(type_name : String) : Array(String)
@@ -13874,13 +13973,45 @@ module Crystal::HIR
       # Many valid methods return `Nil` (VOID) in our IR, and treating VOID as "missing"
       # causes qualified calls to degrade into unqualified extern calls.
       if @function_types.has_key?(mangled_name) && !(module_like_receiver && abstract_def?(mangled_name))
-        debug_hook("method.resolve", "base=#{base_method_name} resolved=#{mangled_name} reason=mangled_exact")
-        return cache_method_resolution(cache_key, mangled_name)
+        if def_node = @function_defs[mangled_name]?
+          param_stats = function_param_stats(mangled_name, def_node)
+          arity_ok = effective_arg_count >= param_stats.required &&
+                     (param_stats.has_splat || param_stats.has_double_splat || effective_arg_count <= param_stats.param_count)
+          if has_block_call != param_stats.has_block
+            arity_ok = false
+          end
+          unless arity_ok
+            debug_hook("method.resolve.arity_mismatch", "base=#{base_method_name} resolved=#{mangled_name} reason=arity_mismatch")
+            # fall through to overload resolution
+          else
+            debug_hook("method.resolve", "base=#{base_method_name} resolved=#{mangled_name} reason=mangled_exact")
+            return cache_method_resolution(cache_key, mangled_name)
+          end
+        else
+          debug_hook("method.resolve", "base=#{base_method_name} resolved=#{mangled_name} reason=mangled_exact")
+          return cache_method_resolution(cache_key, mangled_name)
+        end
       end
       if (@function_defs.has_key?(mangled_name) && !(module_like_receiver && abstract_def?(mangled_name))) ||
          @module.has_function?(mangled_name)
-        debug_hook("method.resolve", "base=#{base_method_name} resolved=#{mangled_name} reason=mangled_def")
-        return cache_method_resolution(cache_key, mangled_name)
+        if def_node = @function_defs[mangled_name]?
+          param_stats = function_param_stats(mangled_name, def_node)
+          arity_ok = effective_arg_count >= param_stats.required &&
+                     (param_stats.has_splat || param_stats.has_double_splat || effective_arg_count <= param_stats.param_count)
+          if has_block_call != param_stats.has_block
+            arity_ok = false
+          end
+          unless arity_ok
+            debug_hook("method.resolve.arity_mismatch", "base=#{base_method_name} resolved=#{mangled_name} reason=arity_mismatch_def")
+            # fall through to overload resolution
+          else
+            debug_hook("method.resolve", "base=#{base_method_name} resolved=#{mangled_name} reason=mangled_def")
+            return cache_method_resolution(cache_key, mangled_name)
+          end
+        else
+          debug_hook("method.resolve", "base=#{base_method_name} resolved=#{mangled_name} reason=mangled_def")
+          return cache_method_resolution(cache_key, mangled_name)
+        end
       end
 
       if !class_name.empty? && method_name.ends_with?("=")
@@ -26472,6 +26603,20 @@ module Crystal::HIR
           "name=#{name} types=#{arg_types.map(&.id).join(",")} literals=#{literal_payload}"
         )
       end
+      if DebugHooks::ENABLED && name.includes?("calculate_new_capacity")
+        literal_payload = arg_literals ? arg_literals.join(",") : "nil"
+        debug_hook(
+          "callsite.args",
+          "name=#{name} types=#{arg_types.map(&.id).join(",")} literals=#{literal_payload}"
+        )
+      end
+      if DebugHooks::ENABLED && name.includes?("hexstring")
+        literal_payload = arg_literals ? arg_literals.join(",") : "nil"
+        debug_hook(
+          "callsite.args",
+          "name=#{name} types=#{arg_types.map(&.id).join(",")} literals=#{literal_payload}"
+        )
+      end
       if ENV["DEBUG_FROM_IO_CALLSITE"]? && name.includes?("from_io")
         STDERR.puts "[FROM_IO_CALLSITE] name=#{name} types=#{arg_types.map(&.id).join(",")}"
       end
@@ -28005,7 +28150,14 @@ module Crystal::HIR
           end
           if requires_args
             overloads = function_def_overloads(base_guard_name)
-            has_typed_overload = overloads.any? { |key| key != base_guard_name }
+            has_typed_overload = overloads.any? do |key|
+              next false if key == base_guard_name
+              if def_node = @function_defs[key]?
+                !def_params_untyped?(def_node)
+              else
+                false
+              end
+            end
             if has_typed_overload
               debug_hook("function.lower.skip_untyped_base", "name=#{name}") if DebugHooks::ENABLED
               return
