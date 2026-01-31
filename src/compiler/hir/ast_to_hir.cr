@@ -1191,6 +1191,10 @@ module Crystal::HIR
     @debug_callsite : String?
     @pending_def_annotations : Array(Tuple(CrystalV2::Compiler::Frontend::AnnotationNode, CrystalV2::Compiler::Frontend::ArenaLike))
 
+    # Deferred classvar initializations to be processed at start of __crystal_main.
+    # Stores: {expr_id, arena, owning_class_name}
+    @deferred_classvar_inits : Array(Tuple(CrystalV2::Compiler::Frontend::ExprId, CrystalV2::Compiler::Frontend::ArenaLike, String))
+
     def initialize(
       @arena,
       module_name : String = "main",
@@ -1307,6 +1311,7 @@ module Crystal::HIR
       @nested_type_names = {} of String => Set(String)
       @debug_callsite = nil
       @pending_def_annotations = [] of Tuple(CrystalV2::Compiler::Frontend::AnnotationNode, CrystalV2::Compiler::Frontend::ArenaLike)
+      @deferred_classvar_inits = [] of Tuple(CrystalV2::Compiler::Frontend::ExprId, CrystalV2::Compiler::Frontend::ArenaLike, String)
     end
 
     private def with_debug_callsite(label : String?, &)
@@ -10311,17 +10316,31 @@ module Crystal::HIR
             raw_name = String.new(member.name)
             cvar_name = raw_name.lstrip('@')
             cvar_type = type_ref_for_name(String.new(member.type))
+            if ENV.has_key?("DEBUG_DEFERRED_CLASSVAR")
+              STDERR.puts "[DEFERRED_CLASSVAR] Found ClassVarDeclNode: class=#{class_name} cvar=#{cvar_name} has_value=#{!member.value.nil?}"
+            end
             # Get initial value if present (only supporting literal integers for now)
             initial_value : Int64? = nil
+            needs_runtime_init = false
             if val_id = member.value
               val_node = @arena[val_id]
               if val_node.is_a?(CrystalV2::Compiler::Frontend::NumberNode)
                 # Parse the number from its text representation
                 num_str = String.new(val_node.value)
                 initial_value = num_str.to_i64?
+              else
+                # Non-numeric initializer (e.g., [] of String) - defer to runtime
+                needs_runtime_init = true
               end
             end
             class_vars << ClassVarInfo.new(cvar_name, cvar_type, initial_value)
+            # Defer complex classvar initializers to run at start of __crystal_main
+            if needs_runtime_init
+              @deferred_classvar_inits << {expr_id, @arena, class_name}
+              if ENV.has_key?("DEBUG_DEFERRED_CLASSVAR")
+                STDERR.puts "[DEFERRED_CLASSVAR] Added: class=#{class_name} cvar=#{cvar_name}"
+              end
+            end
 
           when CrystalV2::Compiler::Frontend::DefNode
             # Register method signature
@@ -10690,6 +10709,11 @@ module Crystal::HIR
                 end
               else
                 class_vars << ClassVarInfo.new(cvar_name, cvar_type, nil)
+              end
+              # Defer classvar initialization to run at start of __crystal_main
+              @deferred_classvar_inits << {expr_id, @arena, class_name}
+              if ENV.has_key?("DEBUG_DEFERRED_CLASSVAR")
+                STDERR.puts "[DEFERRED_CLASSVAR] Added AssignNode from register: class=#{class_name} cvar=#{cvar_name}"
               end
             end
           when CrystalV2::Compiler::Frontend::AliasNode
@@ -11254,6 +11278,9 @@ module Crystal::HIR
 
           body.each do |expr_id|
             member = unwrap_visibility_member(@arena[expr_id])
+            if ENV.has_key?("DEBUG_DEFERRED_CLASSVAR") && class_name.includes?("CallStack")
+              STDERR.puts "[DEFERRED_CLASSVAR] lower_class_with_name body member: class=#{class_name} member_class=#{member.class.name.split("::").last}"
+            end
             if member.is_a?(CrystalV2::Compiler::Frontend::AnnotationNode)
               remember_effect_annotation(member, @arena)
               next
@@ -11349,6 +11376,20 @@ module Crystal::HIR
                 end
               end
               lower_macro_call_in_class_body(class_name, class_info, member, defined_full_names, visited_modules)
+            when CrystalV2::Compiler::Frontend::AssignNode
+              # Check if this is a classvar assignment (@@varname = value)
+              target_node = @arena[member.target]
+              if ENV.has_key?("DEBUG_DEFERRED_CLASSVAR")
+                target_class = target_node.class.name.split("::").last
+                STDERR.puts "[DEFERRED_CLASSVAR] lower_class_with_name AssignNode: class=#{class_name} target=#{target_class}"
+              end
+              if target_node.is_a?(CrystalV2::Compiler::Frontend::ClassVarNode)
+                # Defer classvar initialization to run at start of __crystal_main
+                @deferred_classvar_inits << {expr_id, @arena, class_name}
+                if ENV.has_key?("DEBUG_DEFERRED_CLASSVAR")
+                  STDERR.puts "[DEFERRED_CLASSVAR] Added from lower_class_with_name: class=#{class_name} cvar=#{String.new(target_node.as(CrystalV2::Compiler::Frontend::ClassVarNode).name)}"
+                end
+              end
             end
           end
         end
@@ -11474,6 +11515,20 @@ module Crystal::HIR
           end
         end
         lower_macro_call_in_class_body(class_name, class_info, member, defined_full_names, visited_modules)
+      when CrystalV2::Compiler::Frontend::AssignNode
+        # Check if this is a classvar assignment (@@varname = value)
+        target_node = @arena[member.target]
+        if ENV.has_key?("DEBUG_DEFERRED_CLASSVAR")
+          target_class = target_node.class.name.split("::").last
+          STDERR.puts "[DEFERRED_CLASSVAR] Found AssignNode: class=#{class_name} target=#{target_class}"
+        end
+        if target_node.is_a?(CrystalV2::Compiler::Frontend::ClassVarNode)
+          # Defer classvar initialization to run at start of __crystal_main
+          @deferred_classvar_inits << {expr_id, @arena, class_name}
+          if ENV.has_key?("DEBUG_DEFERRED_CLASSVAR")
+            STDERR.puts "[DEFERRED_CLASSVAR] Added AssignNode: class=#{class_name} cvar=#{String.new(target_node.as(CrystalV2::Compiler::Frontend::ClassVarNode).name)}"
+          end
+        end
       end
     end
 
@@ -13529,8 +13584,26 @@ module Crystal::HIR
           base_name = resolve_method_with_inheritance(candidate, method_name) || "#{candidate}##{method_name}"
           mangled = mangle_function_name(base_name, arg_types, has_block_call)
           if @function_types.has_key?(mangled)
-            return mangled
-          elsif has_function_base?(base_name)
+            # Verify the function's arity matches before returning.
+            # This prevents returning a function like UInt32#hash(hasher) for a 0-arg call to hash().
+            arity_ok = false  # Default to false if no def found
+            if def_node = @function_defs[mangled]?
+              stats = function_param_stats(mangled, def_node)
+              arity_ok = arg_types.size >= stats.required && (stats.has_splat || arg_types.size <= stats.param_count)
+            else
+              # No def node - check if it's a base name with typed overloads
+              # If we have typed args, it should be safe to return
+              # If args are empty, check untyped overload instead
+              if !arg_types.empty?
+                arity_ok = true
+              end
+            end
+            if arity_ok
+              return mangled
+            end
+            # Arity mismatch - continue to check untyped overloads
+          end
+          if has_function_base?(base_name)
             if resolved = resolve_untyped_overload(base_name, arg_types.size, has_block_call, call_has_named_args)
               return resolved
             end
@@ -13561,6 +13634,16 @@ module Crystal::HIR
               end
             end
           end
+        end
+      end
+
+      # Fallback: check if Object has this method (inherited method)
+      # This handles cases like hash() where variant types don't have a 0-arg version
+      # but Object#hash$arity0 exists
+      object_base = "Object##{method_name}"
+      if has_function_base?(object_base)
+        if resolved = resolve_untyped_overload(object_base, arg_types.size, has_block_call, call_has_named_args)
+          return resolved
         end
       end
 
@@ -19671,6 +19754,46 @@ module Crystal::HIR
       ctx.register_type(argv_param.id, argv_type)
       ctx.register_local("ARGC_UNSAFE", argc_param.id)
       ctx.register_local("ARGV_UNSAFE", argv_param.id)
+
+      # Process deferred classvar initializations FIRST, before any other code.
+      # This ensures classvars like @@skip are initialized before being used.
+      if ENV.has_key?("DEBUG_DEFERRED_CLASSVAR")
+        STDERR.puts "[DEFERRED_CLASSVAR] Processing #{@deferred_classvar_inits.size} deferred inits"
+      end
+      old_arena = @arena
+      @deferred_classvar_inits.each do |(init_expr_id, init_arena, owner_class)|
+        @arena = init_arena
+        old_class = @current_class
+        @current_class = owner_class
+        begin
+          node = @arena[init_expr_id]
+          case node
+          when CrystalV2::Compiler::Frontend::ClassVarDeclNode
+            # Generate: @@varname = initial_value
+            if val_id = node.value
+              raw_name = String.new(node.name)
+              cvar_name = raw_name.lstrip('@')
+              value_id = lower_expr(ctx, val_id)
+              value_type = ctx.type_of(value_id)
+              # Emit ClassVarSet to store the initialized value
+              class_var_set = ClassVarSet.new(ctx.next_id, value_type, owner_class, cvar_name, value_id)
+              ctx.emit(class_var_set)
+            end
+          when CrystalV2::Compiler::Frontend::AssignNode
+            # Regular assignment - just lower it
+            if ENV.has_key?("DEBUG_DEFERRED_CLASSVAR")
+              target = @arena[node.target]
+              target_name = target.is_a?(CrystalV2::Compiler::Frontend::ClassVarNode) ? String.new(target.name) : "?"
+              STDERR.puts "[DEFERRED_CLASSVAR] Lowering AssignNode: class=#{owner_class} target=#{target_name}"
+            end
+            lower_expr(ctx, init_expr_id)
+          end
+        ensure
+          @current_class = old_class
+        end
+      end
+      @arena = old_arena
+      @deferred_classvar_inits.clear
 
       # Lower each top-level expression in order
       last_value : ValueId? = nil
@@ -36753,6 +36876,10 @@ module Crystal::HIR
         name = raw_name.lstrip('@')
         cvar_type = get_class_var_type(name)
         class_name = @current_class || ""
+        if ENV.has_key?("DEBUG_DEFERRED_CLASSVAR")
+          next_id = ctx.next_id
+          STDERR.puts "[CLASSVAR_SET] Emitting ClassVarSet: class=#{class_name} cvar=#{name} func=#{ctx.function.name} block=#{ctx.current_block} next_id=#{next_id}"
+        end
         if cvar_type == TypeRef::VOID
           value_type = ctx.type_of(value_id)
           record_class_var_type(class_name, name, value_type)
