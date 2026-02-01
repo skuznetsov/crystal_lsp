@@ -6367,6 +6367,12 @@ module Crystal::HIR
             return ret_type if ret_type && ret_type != TypeRef::VOID
           end
         end
+        if ret_type = @function_types[name]?
+          return ret_type if ret_type != TypeRef::VOID
+        end
+        if cached = @function_base_return_types[name]?
+          return cached if cached != TypeRef::VOID
+        end
       when CrystalV2::Compiler::Frontend::AssignNode
         value_id = expr_node.value
         value_node = node_for_expr(value_id)
@@ -16607,7 +16613,21 @@ module Crystal::HIR
           STDERR.puts "[GET_RETURN] name=#{name} base=#{base_name} func_type=#{func_type ? get_type_name_from_ref(func_type) : "(nil)"} base_type=#{base_type ? get_type_name_from_ref(base_type) : "(nil)"} module_rt=#{func_rt ? get_type_name_from_ref(func_rt) : "(nil)"}"
         end
       end
-      if @function_types[name]?.nil?
+      existing_type = @function_types[name]?
+      if existing_type == TypeRef::VOID || existing_type == TypeRef::NIL
+        if def_node = @function_defs[name]? || @function_defs[base_name]?
+          owner_name = function_context_from_name(base_name)
+          if inferred = infer_concrete_return_type_from_body(def_node, owner_name)
+            if inferred != TypeRef::VOID && inferred != TypeRef::NIL
+              @function_types[name] = inferred
+              @function_base_return_types[base_name] = inferred unless base_name.includes?("$")
+              existing_type = inferred
+            end
+          end
+        end
+      end
+
+      if existing_type.nil?
         if def_node = @function_defs[name]? || @function_defs[base_name]?
           owner_name = function_context_from_name(base_name)
           if inferred = infer_concrete_return_type_from_body(def_node, owner_name)

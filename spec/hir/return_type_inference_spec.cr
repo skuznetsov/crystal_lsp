@@ -8,20 +8,33 @@ require "../../src/compiler/frontend/lexer"
 # These specs verify that function return types are correctly inferred
 # BEFORE method bodies are lowered, preventing VOID→Pointer type bugs.
 
-describe Crystal::HIR::AstToHir do
-  # Helper to parse and create HIR converter
-  private def create_converter(source : String)
-    lexer = CrystalV2::Compiler::Frontend::Lexer.new(source)
-    parser = CrystalV2::Compiler::Frontend::Parser.new(lexer)
-    program = parser.parse_program
-    arena = parser.arena
+# Helper to parse and create HIR converter (top-level for Crystal spec compatibility).
+private def create_converter(source : String)
+  lexer = CrystalV2::Compiler::Frontend::Lexer.new(source)
+  parser = CrystalV2::Compiler::Frontend::Parser.new(lexer)
+  program = parser.parse_program
+  arena = parser.arena
 
-    sources_by_arena = {arena => source} of CrystalV2::Compiler::Frontend::ArenaLike => String
-    paths_by_arena = {arena => "(test)"} of CrystalV2::Compiler::Frontend::ArenaLike => String
+  sources_by_arena = {arena => source} of CrystalV2::Compiler::Frontend::ArenaLike => String
+  paths_by_arena = {arena => "(test)"} of CrystalV2::Compiler::Frontend::ArenaLike => String
 
-    converter = Crystal::HIR::AstToHir.new(arena, "(test)", sources_by_arena, paths_by_arena)
-    {converter, program, arena}
+  converter = Crystal::HIR::AstToHir.new(arena, "(test)", sources_by_arena, paths_by_arena)
+  {converter, program, arena}
+end
+
+class Crystal::HIR::AstToHir
+  # Test-only wrapper to access private return-type inference.
+  def test_function_return_type(name : String) : Crystal::HIR::TypeRef
+    get_function_return_type(name)
   end
+
+  # Test-only wrapper for type name rendering.
+  def test_type_name(type_ref : Crystal::HIR::TypeRef) : String
+    get_type_name_from_ref(type_ref)
+  end
+end
+
+describe Crystal::HIR::AstToHir do
 
   describe "Return Type Inference - Explicit Annotations" do
     it "infers return type from explicit annotation" do
@@ -36,12 +49,12 @@ describe Crystal::HIR::AstToHir do
       program.roots.each do |root_id|
         node = arena[root_id]
         if node.is_a?(CrystalV2::Compiler::Frontend::DefNode)
-          converter.register_function_signature(node, arena)
+          converter.register_function(node)
         end
       end
 
-      ret_type = converter.get_function_return_type("foo")
-      converter.get_type_name_from_ref(ret_type).should eq("Int32")
+      ret_type = converter.test_function_return_type("foo")
+      converter.test_type_name(ret_type).should eq("Int32")
     end
 
     it "infers return type from pointer annotation" do
@@ -55,12 +68,12 @@ describe Crystal::HIR::AstToHir do
       program.roots.each do |root_id|
         node = arena[root_id]
         if node.is_a?(CrystalV2::Compiler::Frontend::DefNode)
-          converter.register_function_signature(node, arena)
+          converter.register_function(node)
         end
       end
 
-      ret_type = converter.get_function_return_type("get_ptr")
-      converter.get_type_name_from_ref(ret_type).should contain("Pointer")
+      ret_type = converter.test_function_return_type("get_ptr")
+      converter.test_type_name(ret_type).should contain("Pointer")
     end
   end
 
@@ -76,12 +89,12 @@ describe Crystal::HIR::AstToHir do
       program.roots.each do |root_id|
         node = arena[root_id]
         if node.is_a?(CrystalV2::Compiler::Frontend::DefNode)
-          converter.register_function_signature(node, arena)
+          converter.register_function(node)
         end
       end
 
-      ret_type = converter.get_function_return_type("get_answer")
-      converter.get_type_name_from_ref(ret_type).should eq("Int32")
+      ret_type = converter.test_function_return_type("get_answer")
+      converter.test_type_name(ret_type).should eq("Int32")
     end
 
     it "infers String from string literal return" do
@@ -95,12 +108,12 @@ describe Crystal::HIR::AstToHir do
       program.roots.each do |root_id|
         node = arena[root_id]
         if node.is_a?(CrystalV2::Compiler::Frontend::DefNode)
-          converter.register_function_signature(node, arena)
+          converter.register_function(node)
         end
       end
 
-      ret_type = converter.get_function_return_type("greeting")
-      converter.get_type_name_from_ref(ret_type).should eq("String")
+      ret_type = converter.test_function_return_type("greeting")
+      converter.test_type_name(ret_type).should eq("String")
     end
 
     it "infers Bool for predicate methods" do
@@ -114,12 +127,12 @@ describe Crystal::HIR::AstToHir do
       program.roots.each do |root_id|
         node = arena[root_id]
         if node.is_a?(CrystalV2::Compiler::Frontend::DefNode)
-          converter.register_function_signature(node, arena)
+          converter.register_function(node)
         end
       end
 
-      ret_type = converter.get_function_return_type("empty?")
-      converter.get_type_name_from_ref(ret_type).should eq("Bool")
+      ret_type = converter.test_function_return_type("empty?")
+      converter.test_type_name(ret_type).should eq("Bool")
     end
   end
 
@@ -135,12 +148,12 @@ describe Crystal::HIR::AstToHir do
       program.roots.each do |root_id|
         node = arena[root_id]
         if node.is_a?(CrystalV2::Compiler::Frontend::DefNode)
-          converter.register_function_signature(node, arena)
+          converter.register_function(node)
         end
       end
 
-      ret_type = converter.get_function_return_type("extract_bits")
-      converter.get_type_name_from_ref(ret_type).should eq("UInt32")
+      ret_type = converter.test_function_return_type("extract_bits")
+      converter.test_type_name(ret_type).should eq("UInt32")
     end
 
     it "infers Int64 from .to_i64! call" do
@@ -154,12 +167,12 @@ describe Crystal::HIR::AstToHir do
       program.roots.each do |root_id|
         node = arena[root_id]
         if node.is_a?(CrystalV2::Compiler::Frontend::DefNode)
-          converter.register_function_signature(node, arena)
+          converter.register_function(node)
         end
       end
 
-      ret_type = converter.get_function_return_type("to_long")
-      converter.get_type_name_from_ref(ret_type).should eq("Int64")
+      ret_type = converter.test_function_return_type("to_long")
+      converter.test_type_name(ret_type).should eq("Int64")
     end
 
     it "infers Float64 from .to_f call" do
@@ -173,12 +186,12 @@ describe Crystal::HIR::AstToHir do
       program.roots.each do |root_id|
         node = arena[root_id]
         if node.is_a?(CrystalV2::Compiler::Frontend::DefNode)
-          converter.register_function_signature(node, arena)
+          converter.register_function(node)
         end
       end
 
-      ret_type = converter.get_function_return_type("as_float")
-      converter.get_type_name_from_ref(ret_type).should eq("Float64")
+      ret_type = converter.test_function_return_type("as_float")
+      converter.test_type_name(ret_type).should eq("Float64")
     end
   end
 
@@ -199,12 +212,12 @@ describe Crystal::HIR::AstToHir do
       program.roots.each do |root_id|
         node = arena[root_id]
         if node.is_a?(CrystalV2::Compiler::Frontend::ModuleNode)
-          converter.register_module(node, arena)
+          converter.register_module(node)
         end
       end
 
-      ret_type = converter.get_function_return_type("Calculator.add")
-      converter.get_type_name_from_ref(ret_type).should eq("Int32")
+      ret_type = converter.test_function_return_type("Calculator.add")
+      converter.test_type_name(ret_type).should eq("Int32")
     end
   end
 
@@ -228,13 +241,13 @@ describe Crystal::HIR::AstToHir do
       program.roots.each do |root_id|
         node = arena[root_id]
         if node.is_a?(CrystalV2::Compiler::Frontend::ModuleNode)
-          converter.register_module(node, arena)
+          converter.register_module(node)
         end
       end
 
       # After monomorphization, IntContainer.value should return Int32
-      ret_type = converter.get_function_return_type("IntContainer.value")
-      type_name = converter.get_type_name_from_ref(ret_type)
+      ret_type = converter.test_function_return_type("IntContainer.value")
+      type_name = converter.test_type_name(ret_type)
       # Should be Int32 or at least not VOID
       type_name.should_not eq("Void")
     end
@@ -258,18 +271,18 @@ describe Crystal::HIR::AstToHir do
       program.roots.each do |root_id|
         node = arena[root_id]
         if node.is_a?(CrystalV2::Compiler::Frontend::DefNode)
-          converter.register_function_signature(node, arena)
+          converter.register_function(node)
         end
       end
 
       # Both should have correct return types
-      callee_type = converter.get_function_return_type("callee")
-      converter.get_type_name_from_ref(callee_type).should eq("Int32")
+      callee_type = converter.test_function_return_type("callee")
+      converter.test_type_name(callee_type).should eq("Int32")
 
       # caller's return type depends on callee, which should now be known
-      caller_type = converter.get_function_return_type("caller")
+      caller_type = converter.test_function_return_type("caller")
       # Since callee returns Int32, caller should also return Int32
-      converter.get_type_name_from_ref(caller_type).should eq("Int32")
+      converter.test_type_name(caller_type).should eq("Int32")
     end
   end
 
@@ -287,12 +300,12 @@ describe Crystal::HIR::AstToHir do
       program.roots.each do |root_id|
         node = arena[root_id]
         if node.is_a?(CrystalV2::Compiler::Frontend::DefNode)
-          converter.register_function_signature(node, arena)
+          converter.register_function(node)
         end
       end
 
-      ret_type = converter.get_function_return_type("get_cache")
-      converter.get_type_name_from_ref(ret_type).should eq("UInt64")
+      ret_type = converter.test_function_return_type("get_cache")
+      converter.test_type_name(ret_type).should eq("UInt64")
     end
 
     it "does not type cache param as Pointer when return type is inferred" do
@@ -313,13 +326,13 @@ describe Crystal::HIR::AstToHir do
       program.roots.each do |root_id|
         node = arena[root_id]
         if node.is_a?(CrystalV2::Compiler::Frontend::DefNode)
-          converter.register_function_signature(node, arena)
+          converter.register_function(node)
         end
       end
 
       # After registration, get_cache should have UInt64 return type
-      ret_type = converter.get_function_return_type("get_cache")
-      type_name = converter.get_type_name_from_ref(ret_type)
+      ret_type = converter.test_function_return_type("get_cache")
+      type_name = converter.test_type_name(ret_type)
       type_name.should eq("UInt64")
       type_name.should_not eq("Pointer")
       type_name.should_not eq("Void")
