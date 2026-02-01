@@ -241,12 +241,87 @@ module Crystal::V2
         STDERR.puts "[HIR_TIMING] collect_top_level_nodes #{elapsed.round(1)}ms"
       end
 
+      # Pre-scan nested type names so forward references in namespaces resolve
+      # to their intended nested types (even across files).
+      nested_type_names = Set(String).new
+      nested_type_index = {} of String => Set(String)
+      collect_nested_type_names = ->(
+        prefix : String,
+        arena : CrystalV2::Compiler::Frontend::ArenaLike,
+        body : Array(CrystalV2::Compiler::Frontend::ExprId)
+      ) do
+        stack = [{prefix: prefix, body: body}]
+        while current = stack.pop?
+          current[:body].each do |expr_id|
+            expr_node = arena[expr_id]
+            while expr_node.is_a?(CrystalV2::Compiler::Frontend::VisibilityModifierNode)
+              expr_node = arena[expr_node.expression]
+            end
+            case expr_node
+            when CrystalV2::Compiler::Frontend::ModuleNode
+              next unless mod_body = expr_node.body
+              name = String.new(expr_node.name)
+              full_name = current[:prefix].empty? ? name : "#{current[:prefix]}::#{name}"
+              nested_type_names << full_name
+              if !current[:prefix].empty?
+                (nested_type_index[current[:prefix]] ||= Set(String).new) << name
+              end
+              stack << {prefix: full_name, body: mod_body}
+            when CrystalV2::Compiler::Frontend::ClassNode
+              name = String.new(expr_node.name)
+              full_name = if current[:prefix].empty? || name.includes?("::")
+                            name
+                          else
+                            "#{current[:prefix]}::#{name}"
+                          end
+              nested_type_names << full_name
+              if !current[:prefix].empty?
+                (nested_type_index[current[:prefix]] ||= Set(String).new) << name
+              end
+              if class_body = expr_node.body
+                stack << {prefix: full_name, body: class_body}
+              end
+            when CrystalV2::Compiler::Frontend::EnumNode
+              name = String.new(expr_node.name)
+              full_name = current[:prefix].empty? ? name : "#{current[:prefix]}::#{name}"
+              nested_type_names << full_name
+              if !current[:prefix].empty?
+                (nested_type_index[current[:prefix]] ||= Set(String).new) << name
+              end
+            when CrystalV2::Compiler::Frontend::AliasNode
+              name = String.new(expr_node.name)
+              full_name = current[:prefix].empty? ? name : "#{current[:prefix]}::#{name}"
+              nested_type_names << full_name
+              if !current[:prefix].empty?
+                (nested_type_index[current[:prefix]] ||= Set(String).new) << name
+              end
+            when CrystalV2::Compiler::Frontend::LibNode
+              name = String.new(expr_node.name)
+              full_name = current[:prefix].empty? ? name : "#{current[:prefix]}::#{name}"
+              nested_type_names << full_name
+              if !current[:prefix].empty?
+                (nested_type_index[current[:prefix]] ||= Set(String).new) << name
+              end
+            end
+          end
+        end
+      end
+      module_nodes.each do |module_node, arena|
+        next unless body = module_node.body
+        collect_nested_type_names.call(String.new(module_node.name), arena, body)
+      end
+      class_nodes.each do |class_node, arena|
+        next unless body = class_node.body
+        collect_nested_type_names.call(String.new(class_node.name), arena, body)
+      end
+
       top_level_type_names = Set(String).new
       class_nodes.each { |node, _| top_level_type_names.add(String.new(node.name)) }
       module_nodes.each { |node, _| top_level_type_names.add(String.new(node.name)) }
       enum_nodes.each { |node, _| top_level_type_names.add(String.new(node.name)) }
       alias_nodes.each { |node, _| top_level_type_names.add(String.new(node.name)) }
       lib_nodes.each { |node, _, _| top_level_type_names.add(String.new(node.name)) }
+      nested_type_names.each { |name| top_level_type_names.add(name) }
       hir_converter.seed_top_level_type_names(top_level_type_names)
       top_level_class_kinds = {} of String => Bool
       class_nodes.each do |node, _|
@@ -254,6 +329,7 @@ module Crystal::V2
         top_level_class_kinds[name] = node.is_struct == true
       end
       hir_converter.seed_top_level_class_kinds(top_level_class_kinds)
+      hir_converter.seed_nested_type_names(nested_type_index)
 
       # Pre-scan constant definitions so nested classes can resolve outer constants
       # across reopened types (require order interleaves files).

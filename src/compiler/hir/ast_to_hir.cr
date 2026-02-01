@@ -1377,6 +1377,14 @@ module Crystal::HIR
       kinds.each { |name, is_struct| @top_level_class_kinds[name] = is_struct }
     end
 
+    def seed_nested_type_names(names : Hash(String, Set(String))) : Nil
+      names.each do |owner, nested|
+        set = @nested_type_names[owner]? || Set(String).new
+        nested.each { |name| set << name }
+        @nested_type_names[owner] = set
+      end
+    end
+
     private def effect_annotation_name(node : CrystalV2::Compiler::Frontend::AnnotationNode) : String?
       name = resolve_annotation_name(node.name)
       return nil unless name
@@ -16952,7 +16960,9 @@ module Crystal::HIR
         @type_aliases.has_key?(name) ||
         (@enum_info && @enum_info.not_nil!.has_key?(name)) ||
         @module_defs.has_key?(name) ||
-        @module.is_lib?(name)
+        @module.is_lib?(name) ||
+        @top_level_type_names.includes?(name) ||
+        @top_level_class_kinds.has_key?(name)
     end
 
     private def constant_name_exists?(name : String) : Bool
@@ -17466,6 +17476,25 @@ module Crystal::HIR
               break
             end
             ancestor = @class_info[ancestor]?.try(&.parent_name)
+          end
+        end
+      end
+
+      unless found
+        # Prefer a forward reference in the current namespace for unresolved
+        # capitalized names (Crystal allows forward declarations in the same scope).
+        # This avoids resolving to outer namespaces when the nested type is defined later.
+        if current = @current_class
+          current_base = if info = split_generic_base_and_args(current)
+                           info[:base]
+                         else
+                           current
+                         end
+          if name[0]?.try(&.uppercase?) &&
+             !type_name_exists?(name) &&
+             !@top_level_class_kinds.has_key?(name)
+            result = "#{current_base}::#{name}"
+            found = true
           end
         end
       end
