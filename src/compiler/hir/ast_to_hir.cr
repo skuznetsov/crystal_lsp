@@ -2468,6 +2468,7 @@ module Crystal::HIR
       end
 
       lib_name = String.new(node.name)
+      @module.register_lib_name(lib_name)
 
       if body = node.body
         # First pass: register lib-local types so extern param/return types resolve correctly.
@@ -4438,6 +4439,7 @@ module Crystal::HIR
 
     private def collect_defined_instance_method_full_names(class_name : String, body : Array(ExprId)) : Set(String)
       defined = Set(String).new
+      type_cache = {} of String => TypeRef
       body.each do |expr_id|
         member = unwrap_visibility_member(@arena[expr_id])
         case member
@@ -4458,7 +4460,12 @@ module Crystal::HIR
                 next
               end
               if ta = param.type_annotation
-                param_types << type_ref_for_name(String.new(ta))
+                type_name = String.new(ta)
+                param_types << (type_cache[type_name]? || begin
+                  resolved = fast_param_type_ref(type_name)
+                  type_cache[type_name] = resolved
+                  resolved
+                end)
               else
                 param_types << TypeRef::VOID
               end
@@ -4523,6 +4530,7 @@ module Crystal::HIR
 
     private def collect_defined_class_method_full_names(class_name : String, body : Array(ExprId)) : Set(String)
       defined = Set(String).new
+      type_cache = {} of String => TypeRef
       body.each do |expr_id|
         member = unwrap_visibility_member(@arena[expr_id])
         case member
@@ -4543,7 +4551,12 @@ module Crystal::HIR
                 next
               end
               if ta = param.type_annotation
-                param_types << type_ref_for_name(String.new(ta))
+                type_name = String.new(ta)
+                param_types << (type_cache[type_name]? || begin
+                  resolved = fast_param_type_ref(type_name)
+                  type_cache[type_name] = resolved
+                  resolved
+                end)
               else
                 param_types << TypeRef::VOID
               end
@@ -13840,6 +13853,37 @@ module Crystal::HIR
       params = def_node.params
       return 0 unless params
       params.count { |param| !param.is_block && !named_only_separator?(param) }
+    end
+
+    # Fast path for parameter type annotations during signature collection.
+    # Avoids full namespace resolution when the type is already cached and
+    # can't be shadowed by nested types in the current class.
+    private def fast_param_type_ref(type_name : String) : TypeRef
+      return TypeRef::VOID if type_name.empty?
+      return type_ref_for_name(type_name) if type_name.includes?("::") ||
+                                            type_name.includes?("(") ||
+                                            type_name.includes?("|") ||
+                                            type_name.ends_with?("?") ||
+                                            type_name.ends_with?("*") ||
+                                            (type_name.starts_with?("{") && type_name.ends_with?("}"))
+      if type_param_like?(type_name) && short_type_param_name?(type_name) && !@type_param_map.has_key?(type_name)
+        return TypeRef::VOID
+      end
+      if current = @current_class
+        current_base = if info = split_generic_base_and_args(current)
+                         info[:base]
+                       else
+                         current
+                       end
+        if nested = @nested_type_names[current_base]? || @nested_type_names[current]?
+          return type_ref_for_name(type_name) if nested.includes?(type_name)
+        end
+      end
+      cache_key = type_cache_key(type_name)
+      if cached = @type_cache[cache_key]?
+        return cached
+      end
+      type_ref_for_name(type_name)
     end
 
     private def split_union_type_name(type_name : String) : Array(String)

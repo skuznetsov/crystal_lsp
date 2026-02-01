@@ -1217,6 +1217,7 @@ module Crystal::HIR
     getter method_effects : Hash(String, MethodEffectSummary)
     getter class_parents : Hash(String, String?)
     getter module_includers : Hash(String, Array(String))
+    getter lib_names : Set(String)
 
     @next_function_id : FunctionId = 0_u32
     @next_type_id : TypeId = TypeRef::FIRST_USER_TYPE
@@ -1237,6 +1238,7 @@ module Crystal::HIR
       @method_effects = {} of String => MethodEffectSummary
       @class_parents = {} of String => String?
       @module_includers = {} of String => Array(String)
+      @lib_names = Set(String).new
     end
 
     def register_class_parent(name : String, parent : String?) : Nil
@@ -1283,10 +1285,17 @@ module Crystal::HIR
       @link_libraries << lib_name unless @link_libraries.includes?(lib_name)
     end
 
+    def register_lib_name(lib_name : String) : Nil
+      return if lib_name.empty?
+      @lib_names << lib_name
+    end
+
     def add_extern_function(func : ExternFunction)
       # Don't add duplicates
       unless @extern_functions.any? { |f| f.real_name == func.real_name }
         @extern_functions << func
+        lib_name = func.lib_name
+        register_lib_name(lib_name) if lib_name
       end
     end
 
@@ -1294,6 +1303,8 @@ module Crystal::HIR
       # Don't add duplicates
       unless @extern_globals.any? { |g| g.real_name == glob.real_name }
         @extern_globals << glob
+        lib_name = glob.lib_name
+        register_lib_name(lib_name) if lib_name
       end
     end
 
@@ -1317,7 +1328,7 @@ module Crystal::HIR
 
     # Check if a name is a known lib (has any extern functions registered under it)
     def is_lib?(name : String) : Bool
-      @extern_functions.any? { |f| f.lib_name == name } || @extern_globals.any? { |g| g.lib_name == name }
+      @lib_names.includes?(name)
     end
 
     def create_function(name : String, return_type : TypeRef) : Function
