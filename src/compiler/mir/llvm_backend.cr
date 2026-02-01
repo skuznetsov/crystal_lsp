@@ -396,6 +396,7 @@ module Crystal::MIR
     @cross_block_values : Set(ValueId) = Set(ValueId).new  # values that need alloca slots
     @cross_block_slots : Hash(ValueId, String) = {} of ValueId => String  # value → alloca slot name
     @cross_block_slot_types : Hash(ValueId, String) = {} of ValueId => String  # value → slot LLVM type
+    @cross_block_slot_type_refs : Hash(ValueId, TypeRef) = {} of ValueId => TypeRef  # value → slot TypeRef (signedness)
     @in_phi_mode : Bool = false  # When true, value_ref returns default instead of emitting load
     @in_phi_block : Bool = false  # When true, we're emitting phi instructions (defer cross-block stores)
     @deferred_phi_stores : Array(String) = [] of String  # Stores to emit after all phis
@@ -1628,6 +1629,7 @@ module Crystal::MIR
       @cross_block_values.clear
       @cross_block_slots.clear
       @cross_block_slot_types.clear
+      @cross_block_slot_type_refs.clear
       @phi_predecessor_loads.clear
       @current_func_blocks.clear
       @emitted_value_types.clear
@@ -1751,6 +1753,7 @@ module Crystal::MIR
         slot_name = "%r#{val_id}.slot"
         @cross_block_slots[val_id] = "r#{val_id}.slot"
         @cross_block_slot_types[val_id] = llvm_type  # Record allocation type for consistent loads
+        @cross_block_slot_type_refs[val_id] = val_type
         emit_raw "  #{slot_name} = alloca #{llvm_type}, align 8\n"
         # Initialize to zero/null to avoid undef on unexecuted paths
         init_val = case llvm_type
@@ -2976,8 +2979,10 @@ module Crystal::MIR
             store_val = "%#{base}.slot_inttoptr"
             store_type = slot_llvm_type
           elsif (llvm_type == "double" || llvm_type == "float") && slot_llvm_type.starts_with?("i") && !slot_llvm_type.includes?(".")
-            # Float → int: fptosi
-            emit "%#{base}.slot_ftoi = fptosi #{llvm_type} #{name} to #{slot_llvm_type}"
+            # Float → int: pick signedness based on the slot type.
+            slot_type_ref = @cross_block_slot_type_refs[inst.id]?
+            op = slot_type_ref && unsigned_type_ref?(slot_type_ref) ? "fptoui" : "fptosi"
+            emit "%#{base}.slot_ftoi = #{op} #{llvm_type} #{name} to #{slot_llvm_type}"
             store_val = "%#{base}.slot_ftoi"
             store_type = slot_llvm_type
           elsif llvm_type.starts_with?("i") && !llvm_type.includes?(".") && (slot_llvm_type == "double" || slot_llvm_type == "float")
@@ -7639,7 +7644,8 @@ module Crystal::MIR
             record_emitted_type(cast_name, expected_type)
             return cast_name
           elsif (llvm_type == "float" || llvm_type == "double") && expected_type.starts_with?("i")
-            emit "#{cast_name} = fptosi #{llvm_type} #{temp_name} to #{expected_type}"
+            op = (val_type && unsigned_type_ref?(val_type)) ? "fptoui" : "fptosi"
+            emit "#{cast_name} = #{op} #{llvm_type} #{temp_name} to #{expected_type}"
             record_emitted_type(cast_name, expected_type)
             return cast_name
           elsif llvm_type == "float" && expected_type == "double"
