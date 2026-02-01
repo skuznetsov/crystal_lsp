@@ -31390,6 +31390,35 @@ module Crystal::HIR
                 STDERR.puts "[TRY_INLINE] recv_type=#{get_type_name_from_ref(recv_type)} union=#{is_union_or_nilable_type?(recv_type)}"
               end
             end
+            if !skip_inline
+              # If the method return type does not depend on the block, avoid expensive inline-yield.
+              # This keeps correctness (fallback call emits a block) while reducing lowering cost.
+              unless yield_return_function_for_call(mangled_method_name, base_method_name)
+                if block_return_type_param_name(mangled_method_name, base_method_name).nil?
+                  resolved_receiver_type = receiver_id ? ctx.type_of(receiver_id) : TypeRef::VOID
+                  receiver_hint = resolved_receiver_type == TypeRef::VOID ? nil : resolved_receiver_type
+                  if inferred = resolve_return_type_from_def(mangled_method_name, base_method_name, receiver_hint)
+                    if inferred != TypeRef::VOID && inferred != TypeRef::NIL
+                      skip_inline = true
+                      debug_hook("call.inline.skip", "callee=#{mangled_method_name} reason=return_type_known")
+                    end
+                  end
+                end
+              end
+            end
+            inline_required = yield_return_function_for_call(mangled_method_name, base_method_name) ||
+              !block_return_type_param_name(mangled_method_name, base_method_name).nil?
+            if !skip_inline && !inline_required
+              inline_body_limit = (ENV["INLINE_YIELD_BODY_LIMIT"]? || "120").to_i
+              if func_def = @function_defs[mangled_method_name]?
+                if body = func_def.body
+                  if body.size > inline_body_limit
+                    skip_inline = true
+                    debug_hook("call.inline.skip", "callee=#{mangled_method_name} reason=body_size limit=#{inline_body_limit}")
+                  end
+                end
+              end
+            end
 
             # Check if this is a call to a yield-function using mangled name
             if ENV.has_key?("DEBUG_YIELD_INLINE") && (method_name == "trace" || mangled_method_name.includes?("trace"))
