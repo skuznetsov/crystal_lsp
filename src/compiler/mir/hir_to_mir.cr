@@ -854,7 +854,15 @@ module Crystal
             # The first arg is the proc/closure, remaining are call arguments
             # For now, we emit an indirect_call MIR instruction
             # The proc value contains: {function_ptr, closure_context}
-            return builder.call_indirect(args[0], args[1..].to_a, convert_type(call.type))
+            filtered_args = [] of ValueId
+            filtered_args << args[0]
+            call.args.each_with_index do |arg_id, idx|
+              arg_type = @hir_value_types[arg_id]?
+              next if arg_type == HIR::TypeRef::VOID
+              next unless @value_map.has_key?(arg_id)
+              filtered_args << args[idx + 1]
+            end
+            return builder.call_indirect(filtered_args[0], filtered_args[1..].to_a, convert_type(call.type))
           end
         end
       end
@@ -1372,6 +1380,27 @@ module Crystal
       includers ? includers.dup : [] of String
     end
 
+    private def ensure_reference_type_for_name(name : String) : Type?
+      if mir_type = @mir_module.type_registry.get_by_name(name)
+        return mir_type
+      end
+
+      hir_index = @hir_module.types.index { |desc| desc.name == name }
+      return nil unless hir_index
+      hir_desc = @hir_module.types[hir_index]
+      return nil unless hir_desc.kind == HIR::TypeKind::Module
+
+      hir_ref = HIR::TypeRef.new(HIR::TypeRef::FIRST_USER_TYPE + hir_index.to_u32)
+      mir_ref = convert_type(hir_ref)
+      @mir_module.type_registry.create_type_with_id(
+        mir_ref.id,
+        TypeKind::Reference,
+        name,
+        8_u64,
+        8_u32
+      )
+    end
+
     private def enclosing_class_for_module(module_name : String) : String?
       parts = module_name.split("::")
       while parts.size > 1
@@ -1457,7 +1486,9 @@ module Crystal
             func = @mir_module.get_function(func_name) ||
                    resolve_virtual_method_for_class(class_name, method_suffix, arg_count, allow_module_method: true)
             next unless func
-            next unless mir_type = @mir_module.type_registry.get_by_name(class_name)
+            mir_type = ensure_reference_type_for_name(class_name) ||
+              @mir_module.type_registry.get_by_name(class_name)
+            next unless mir_type
             next if mir_type.is_value_type?
             candidates << {
               type_id: mir_type.id.to_i32,
@@ -1952,7 +1983,13 @@ module Crystal
       end
       # Yield becomes indirect call through block parameter.
       # We treat the block param as a Proc value and emit an indirect call.
-      args = yld.args.map { |arg| get_value(arg) }
+      args = [] of ValueId
+      yld.args.each do |arg|
+        arg_type = @hir_value_types[arg]?
+        next if arg_type == HIR::TypeRef::VOID
+        next unless @value_map.has_key?(arg)
+        args << get_value(arg)
+      end
       block_val = get_value(block_param_id)
       block_type = @hir_value_types[block_param_id]? || HIR::TypeRef::POINTER
       block_desc = @hir_module.get_type_descriptor(block_type)

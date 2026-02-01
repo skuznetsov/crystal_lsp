@@ -5651,8 +5651,9 @@ module Crystal::MIR
       callee = value_ref(inst.callee_ptr)
       # Handle args: union types need special handling - pass ptr to slot/alloca, not loaded value.
       # Non-union values should be passed by value with their LLVM type.
-      arg_strs = inst.args.map do |a|
+      arg_strs = inst.args.compact_map do |a|
         arg_type = @value_types[a]?
+        next if arg_type == TypeRef::VOID
         if arg_type
           arg_llvm_type = @type_mapper.llvm_type(arg_type)
           if arg_llvm_type.includes?(".union")

@@ -30485,10 +30485,18 @@ module Crystal::HIR
                            else
                              class_method_fallback : String? = nil
                              if @current_method_is_class
-                               top_level_exists = @function_defs.has_key?(method_name) ||
-                                 @function_types.has_key?(method_name) ||
-                                 has_function_base?(method_name)
-                               class_method_fallback = "#{current}.#{method_name}" unless top_level_exists
+                               candidate = "#{current}.#{method_name}"
+                               if @function_defs.has_key?(candidate) ||
+                                  @function_types.has_key?(candidate) ||
+                                  @module.has_function?(candidate) ||
+                                  has_function_base?(candidate)
+                                 class_method_fallback = candidate
+                               else
+                                 top_level_exists = @function_defs.has_key?(method_name) ||
+                                   @function_types.has_key?(method_name) ||
+                                   has_function_base?(method_name)
+                                 class_method_fallback = candidate unless top_level_exists
+                               end
                              end
                              # Check if method exists in included modules (instance methods only).
                              included_candidate : String? = nil
