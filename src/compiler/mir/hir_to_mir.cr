@@ -1492,11 +1492,20 @@ module Crystal
             dispatch_class: nil
           }
         end
-      elsif recv_desc.kind == HIR::TypeKind::Module
+      elsif recv_desc.kind == HIR::TypeKind::Module || recv_desc.kind == HIR::TypeKind::Generic
         seen = Set(String).new
-        includers = module_includers_for(recv_desc.name)
+        module_name = recv_desc.name
+        if recv_desc.kind == HIR::TypeKind::Generic
+          module_name = strip_generic_args(module_name)
+          if base_desc = @hir_module.types.find { |desc| desc.name == module_name }
+            unless base_desc.kind == HIR::TypeKind::Module
+              module_name = recv_desc.name
+            end
+          end
+        end
+        includers = module_includers_for(module_name)
         if includers.empty?
-          if outer = enclosing_class_for_module(recv_desc.name)
+          if outer = enclosing_class_for_module(module_name)
             includers = [outer]
           end
         end
