@@ -1110,6 +1110,8 @@ module Crystal::HIR
     @resolved_type_name_cache : Hash(String, String)
     # Cache resolved class names for .class/.metaclass type literals.
     @type_literal_class_cache : Hash(String, String?)
+    # Temporary cache for type_name_exists? lookups (used during signature collection).
+    @type_name_exists_cache : Hash(String, Bool)?
 
     # Temporary arena switching context for cross-file yield inlining:
     # {caller_arena, callee_arena}
@@ -1307,6 +1309,7 @@ module Crystal::HIR
       @type_cache_keys_by_generic_prefix = {} of String => Set(String)
       @resolved_type_name_cache = {} of String => String
       @type_literal_class_cache = {} of String => String?
+      @type_name_exists_cache = nil
       @short_type_index = {} of String => Set(String)
       @top_level_type_names = Set(String).new
       @top_level_class_kinds = {} of String => Bool
@@ -4440,6 +4443,10 @@ module Crystal::HIR
     private def collect_defined_instance_method_full_names(class_name : String, body : Array(ExprId)) : Set(String)
       defined = Set(String).new
       type_cache = {} of String => TypeRef
+      resolved_type_cache = {} of String => String
+      old_type_name_cache = @type_name_exists_cache
+      @type_name_exists_cache = {} of String => Bool
+      begin
       body.each do |expr_id|
         member = unwrap_visibility_member(@arena[expr_id])
         case member
@@ -4461,11 +4468,21 @@ module Crystal::HIR
               end
               if ta = param.type_annotation
                 type_name = String.new(ta)
-                param_types << (type_cache[type_name]? || begin
-                  resolved = fast_param_type_ref(type_name)
-                  type_cache[type_name] = resolved
-                  resolved
-                end)
+                if resolved_name = resolved_type_cache[type_name]?
+                  param_types << (type_cache[resolved_name]? || begin
+                    resolved_ref = fast_param_type_ref(resolved_name)
+                    type_cache[resolved_name] = resolved_ref
+                    resolved_ref
+                  end)
+                else
+                  resolved_name = fast_resolve_type_name_for_signature(type_name)
+                  resolved_type_cache[type_name] = resolved_name
+                  param_types << (type_cache[resolved_name]? || begin
+                    resolved_ref = fast_param_type_ref(resolved_name)
+                    type_cache[resolved_name] = resolved_ref
+                    resolved_ref
+                  end)
+                end
               else
                 param_types << TypeRef::VOID
               end
@@ -4525,12 +4542,19 @@ module Crystal::HIR
           end
         end
       end
+      ensure
+        @type_name_exists_cache = old_type_name_cache
+      end
       defined
     end
 
     private def collect_defined_class_method_full_names(class_name : String, body : Array(ExprId)) : Set(String)
       defined = Set(String).new
       type_cache = {} of String => TypeRef
+      resolved_type_cache = {} of String => String
+      old_type_name_cache = @type_name_exists_cache
+      @type_name_exists_cache = {} of String => Bool
+      begin
       body.each do |expr_id|
         member = unwrap_visibility_member(@arena[expr_id])
         case member
@@ -4552,11 +4576,21 @@ module Crystal::HIR
               end
               if ta = param.type_annotation
                 type_name = String.new(ta)
-                param_types << (type_cache[type_name]? || begin
-                  resolved = fast_param_type_ref(type_name)
-                  type_cache[type_name] = resolved
-                  resolved
-                end)
+                if resolved_name = resolved_type_cache[type_name]?
+                  param_types << (type_cache[resolved_name]? || begin
+                    resolved_ref = fast_param_type_ref(resolved_name)
+                    type_cache[resolved_name] = resolved_ref
+                    resolved_ref
+                  end)
+                else
+                  resolved_name = fast_resolve_type_name_for_signature(type_name)
+                  resolved_type_cache[type_name] = resolved_name
+                  param_types << (type_cache[resolved_name]? || begin
+                    resolved_ref = fast_param_type_ref(resolved_name)
+                    type_cache[resolved_name] = resolved_ref
+                    resolved_ref
+                  end)
+                end
               else
                 param_types << TypeRef::VOID
               end
@@ -4602,6 +4636,9 @@ module Crystal::HIR
             defined << mangle_function_name(setter_name, [setter_type])
           end
         end
+      end
+      ensure
+        @type_name_exists_cache = old_type_name_cache
       end
       defined
     end
@@ -13855,11 +13892,48 @@ module Crystal::HIR
       params.count { |param| !param.is_block && !named_only_separator?(param) }
     end
 
+    # Resolve type name for signature collection with minimal overhead.
+    # Prefer skipping deep namespace walks when the name is clearly top-level/builtin.
+    private def fast_resolve_type_name_for_signature(type_name : String) : String
+      return type_name if type_name.empty?
+      return type_name if type_name.includes?("::")
+      return resolve_type_name_in_context(type_name) if type_name.includes?("(") ||
+                                                       type_name.includes?("|") ||
+                                                       type_name.ends_with?("?") ||
+                                                       type_name.ends_with?("*") ||
+                                                       (type_name.starts_with?("{") && type_name.ends_with?("}"))
+      if type_param_like?(type_name) && short_type_param_name?(type_name) && !@type_param_map.has_key?(type_name)
+        return type_name
+      end
+      if BUILTIN_TYPE_NAMES.includes?(type_name) ||
+         @top_level_type_names.includes?(type_name) ||
+         @top_level_class_kinds.has_key?(type_name)
+        if current = @current_class
+          current_base = if info = split_generic_base_and_args(current)
+                           info[:base]
+                         else
+                           current
+                         end
+          if nested = @nested_type_names[current_base]? || @nested_type_names[current]?
+            return resolve_type_name_in_context(type_name) if nested.includes?(type_name)
+          end
+        end
+        return type_name
+      end
+      resolve_type_name_in_context(type_name)
+    end
+
     # Fast path for parameter type annotations during signature collection.
     # Avoids full namespace resolution when the type is already cached and
     # can't be shadowed by nested types in the current class.
     private def fast_param_type_ref(type_name : String) : TypeRef
       return TypeRef::VOID if type_name.empty?
+      if builtin_ref = builtin_type_ref_for(type_name)
+        return builtin_ref
+      end
+      if info = @class_info[type_name]?
+        return info.type_ref
+      end
       return type_ref_for_name(type_name) if type_name.includes?("::") ||
                                             type_name.includes?("(") ||
                                             type_name.includes?("|") ||
@@ -16999,7 +17073,12 @@ module Crystal::HIR
     end
 
     private def type_name_exists?(name : String) : Bool
-      @class_info.has_key?(name) ||
+      if cache = @type_name_exists_cache
+        if cached = cache[name]?
+          return cached
+        end
+      end
+      result = @class_info.has_key?(name) ||
         @generic_templates.has_key?(name) ||
         @type_aliases.has_key?(name) ||
         (@enum_info && @enum_info.not_nil!.has_key?(name)) ||
@@ -17007,6 +17086,8 @@ module Crystal::HIR
         @module.is_lib?(name) ||
         @top_level_type_names.includes?(name) ||
         @top_level_class_kinds.has_key?(name)
+      @type_name_exists_cache.try(&.[]=(name, result))
+      result
     end
 
     private def constant_name_exists?(name : String) : Bool
