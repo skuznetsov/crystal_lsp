@@ -6092,7 +6092,7 @@ module Crystal::HIR
       last = @infer_guard_last_report
       return if last && (now - last).total_seconds < 3.0 && (@infer_guard_hits % 200) != 0
       @infer_guard_last_report = now
-      expr_node = @arena[expr_id]?
+      expr_node = expr_id.index < @arena.size ? @arena[expr_id] : nil
       kind = expr_node ? last_namespace_component(expr_node.class.name) : "nil"
       current = @current_class || "nil"
       method = @current_method || "nil"
@@ -33256,7 +33256,21 @@ module Crystal::HIR
         end
       end
 
-      overload_keys = function_def_overloads(func_name)
+      overload_keys : Array(String)? = nil
+      if func_name.includes?("#") || func_name.includes?(".")
+        parts = parse_method_name(func_name)
+        if parts.separator && parts.method
+          ensure_method_index_built
+          base_owner = strip_generic_args(parts.owner)
+          if owner_methods = @method_index[base_owner]?
+            if candidates = owner_methods[parts.method.not_nil!]? 
+              overload_keys = candidates
+            end
+          end
+        end
+      end
+
+      overload_keys ||= function_def_overloads(func_name)
       if overload_keys.empty?
         # Fall back to base name if call included a mangled suffix.
         base = strip_type_suffix(func_name)
