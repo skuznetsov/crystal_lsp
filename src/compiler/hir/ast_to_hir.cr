@@ -1643,7 +1643,10 @@ module Crystal::HIR
     end
 
     private def abstract_def?(full_name : String) : Bool
-      def_node = @function_defs[full_name]?
+      def_node = @function_defs[full_name]? || begin
+        base_name = parse_method_name(full_name).base
+        @function_defs[base_name]?
+      end
       return false unless def_node
       return true if def_node.is_abstract
       def_node.body.nil?
@@ -16541,6 +16544,19 @@ module Crystal::HIR
         end
       end
       if @function_types[name]?.nil?
+        if def_node = @function_defs[name]? || @function_defs[base_name]?
+          owner_name = function_context_from_name(base_name)
+          if inferred = infer_concrete_return_type_from_body(def_node, owner_name)
+            if inferred != TypeRef::VOID && inferred != TypeRef::NIL
+              @function_types[name] = inferred
+              @function_base_return_types[base_name] = inferred unless base_name.includes?("$")
+              return inferred
+            end
+          end
+        end
+        if cached = @function_base_return_types[base_name]?
+          return cached unless cached == TypeRef::VOID || cached == TypeRef::NIL
+        end
         if base_type = @function_types[base_name]?
           unionish = false
           if base_desc = @module.get_type_descriptor(base_type)
@@ -31368,8 +31384,17 @@ module Crystal::HIR
             return receiver_id
           end
           if is_union_or_nilable_type?(receiver_type)
+            type_name = nil.as(String?)
+            variants = nil.as(Array(String)?)
             if type_desc = @module.get_type_descriptor(receiver_type)
               variants = split_union_type_name(type_desc.name)
+            else
+              type_name = get_type_name_from_ref(receiver_type)
+              if type_name.includes?("|")
+                variants = split_union_type_name(type_name)
+              end
+            end
+            if variants
               idx = variants.index do |variant|
                 next false if variant == "Nil"
                 numeric_primitive?(type_ref_for_name(variant))
@@ -32536,7 +32561,8 @@ module Crystal::HIR
       if type_desc = @module.get_type_descriptor(type)
         return type_desc.kind == TypeKind::Union || type_desc.name.includes?("___")
       end
-      false
+      type_name = get_type_name_from_ref(type)
+      type_name.includes?("|") || type_name.includes?("___")
     end
 
     # Check if a type is a nilable Int32 union (Int32 | Nil)
@@ -36447,6 +36473,32 @@ module Crystal::HIR
         if receiver_type == TypeRef::VOID
           receiver_type = TypeRef::INT32
           ctx.register_type(object_id, receiver_type)
+        end
+        variants = nil.as(Array(String)?)
+        if type_desc = @module.get_type_descriptor(receiver_type)
+          variants = split_union_type_name(type_desc.name)
+        else
+          type_name = get_type_name_from_ref(receiver_type)
+          variants = split_union_type_name(type_name) if type_name.includes?("|") || type_name.includes?("___")
+        end
+        if variants
+          idx = variants.index do |variant|
+            next false if variant == "Nil"
+            numeric_primitive?(type_ref_for_name(variant))
+          end
+          if idx
+            unwrap_type = type_ref_for_name(variants[idx])
+            unwrapped = UnionUnwrap.new(ctx.next_id, unwrap_type, object_id, idx, false)
+            ctx.emit(unwrapped)
+            ctx.register_type(unwrapped.id, unwrap_type)
+            if numeric_primitive?(unwrap_type)
+              return unwrapped.id if unwrap_type == target_type
+              cast = Cast.new(ctx.next_id, target_type, unwrapped.id, target_type)
+              ctx.emit(cast)
+              ctx.register_type(cast.id, target_type)
+              return cast.id
+            end
+          end
         end
         if numeric_primitive?(receiver_type)
           return object_id if receiver_type == target_type
