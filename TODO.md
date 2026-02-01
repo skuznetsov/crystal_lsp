@@ -1126,6 +1126,12 @@ r2 = maybe(false)  # => nil
   - Update (2026-01-30): monomorphization counters (DEBUG_MONO_SOURCES) show top generic specializations in bootstrap_array: Pointer, Iterator::WithIndexIterator, Array, Slice, StaticArray, Indexable::ItemIterator (log `/tmp/bootstrap_array_hir.log`). Use this to prioritize specialization reduction.
   - Update (2026-01-30): self-host mono sources (DEBUG_MONO_SOURCES_EACH) show top specializations by base: Hash, Array, Pointer, StaticArray, Set, Frontend::SmallVec (log `/tmp/self_host_hir.log`). This is the primary fan-out path in self-host.
   - Update (2026-01-30): self-host mono callers (DEBUG_MONO_CALLER) show most monomorphization triggered during `AstToHir#initialize` (Hash/Array), plus `LSP::AstCache#read_node` and `Module#initialize` (log `/tmp/self_host_mono.log`). This suggests high compile-time specialization load from compiler internals.
+- **Bootstrap correctness (new, high priority):**
+  - [ ] ByteFormat.decode dispatch still resolves to class call (`IO::ByteFormat.decode`) instead of module value receiver (e.g. `IO::ByteFormat::LittleEndian`), causing missing symbol `_IO$CCByteFormat$Ddecode$$UInt32_IO`. Trace shows receiver dropped. Fix resolution to keep module-typed receivers and avoid static fallback.
+  - [ ] Remove hardcoded module/method name heuristics in HIR/LLVM paths (EventLoop/FileDescriptor/ByteFormat/etc.). Generalize via module-inclusion + type-descriptor data to avoid user-code regressions.
+  - [ ] Re-audit int/uint → float conversion paths; ensure all integer→float casts use correct `uitofp`/`sitofp` (not just one patch).
+  - [ ] Verify AArch64/ARM alignment (4-byte or platform-specific) for struct layout, stack slots, and pointer arithmetic; fix misaligned GEP/alloca if present.
+  - [ ] Validate generated code output vs expected on small fixtures (sanity checks before full bootstrap runs).
 
 **Regressions (open):**
 - [ ] **Bootstrap regression (2026-01-31)**: `bootstrap_array` link fails with 10+ missing symbols after commit b135d46.
