@@ -1371,6 +1371,23 @@ module Crystal
         includers = @hir_module.module_includers[matches.first]? if matches.size == 1
       end
 
+      if includers.nil? || includers.empty?
+        generic_matches = @hir_module.module_includers.keys.select do |key|
+          strip_generic_args(key) == base_module
+        end
+        if generic_matches.size == 1
+          includers = @hir_module.module_includers[generic_matches.first]?
+        elsif generic_matches.size > 1
+          merged = [] of String
+          generic_matches.each do |key|
+            if list = @hir_module.module_includers[key]?
+              list.each { |entry| merged << entry }
+            end
+          end
+          includers = merged.uniq! if merged.any?
+        end
+      end
+
       if (includers.nil? || includers.empty?) && module_name.includes?("::")
         short_name = short_module_name(module_name)
         base_short_name = short_module_name(base_module)
@@ -1380,6 +1397,23 @@ module Crystal
             key.ends_with?("::#{short_name}") || key.ends_with?("::#{base_short_name}")
           end
           includers = @hir_module.module_includers[matches.first]? if matches.size == 1
+        end
+      end
+
+      if (includers.nil? || includers.empty?) && module_name.includes?("::")
+        generic_matches = @hir_module.module_includers.keys.select do |key|
+          strip_generic_args(key) == base_short_name
+        end
+        if generic_matches.size == 1
+          includers = @hir_module.module_includers[generic_matches.first]?
+        elsif generic_matches.size > 1
+          merged = [] of String
+          generic_matches.each do |key|
+            if list = @hir_module.module_includers[key]?
+              list.each { |entry| merged << entry }
+            end
+          end
+          includers = merged.uniq! if merged.any?
         end
       end
 
