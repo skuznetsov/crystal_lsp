@@ -9979,6 +9979,10 @@ module Crystal::HIR
         hir_param = func.add_param(param_name, param_type)
         ctx.register_local(param_name, hir_param.id)
         ctx.register_type(hir_param.id, param_type)
+        if debug_env_filter_match?("DEBUG_PARAM_TYPES", full_name, param_name)
+          type_name = get_type_name_from_ref(param_type)
+          STDERR.puts "[PARAM_TYPES] func=#{full_name} param=#{param_name} id=#{hir_param.id} type=#{type_name}(id=#{param_type.id})"
+        end
         if ENV["DEBUG_SPLAT_PARAM"]? && param_name == "args"
           STDERR.puts "[SPLAT_PARAM] func=#{full_name} param=#{param_name} type=#{get_type_name_from_ref(param_type)}"
         end
@@ -30770,7 +30774,10 @@ module Crystal::HIR
             if !skip_inline && (entry = lookup_block_function_def_for_call(base_method_name, call_args.size, arg_types, receiver_base))
               yield_name, yield_def = entry
               callee_arena = @function_def_arenas[yield_name]? || @arena
-              callee_has_yield = def_contains_yield?(yield_def, callee_arena)
+              # Check @yield_functions first - it was populated during registration when arena context was correct.
+              # This is more reliable than re-analyzing the DefNode which may fail for stdlib arenas.
+              callee_in_yield_set = @yield_functions.includes?(yield_name)
+              callee_has_yield = callee_in_yield_set || def_contains_yield?(yield_def, callee_arena)
               callee_has_block_call = def_contains_block_call?(yield_def, callee_arena)
               if callee_has_yield || callee_has_block_call
                 @yield_functions.add(yield_name) if callee_has_yield
