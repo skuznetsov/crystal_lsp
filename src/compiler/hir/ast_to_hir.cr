@@ -340,6 +340,27 @@ module Crystal::HIR
       end
     end
 
+    private struct TypeNameContextKey
+      getter override : String?
+      getter current : String?
+      getter locals_hash : UInt64
+
+      def initialize(@override : String?, @current : String?, @locals_hash : UInt64)
+      end
+
+      def hash : UInt64
+        h = 0_u64
+        h &+= @override.try(&.hash) || 0_u64
+        h &+= (@current.try(&.hash) || 0_u64) &* 31_u64
+        h &+= @locals_hash &* 131_u64
+        h
+      end
+
+      def ==(other : TypeNameContextKey) : Bool
+        @override == other.override && @current == other.current && @locals_hash == other.locals_hash
+      end
+    end
+
     # Parse method name in single pass - O(n) instead of O(3n) for three separate splits
     @[AlwaysInline]
     private def parse_method_name(name : String) : MethodNameParts
@@ -1121,7 +1142,8 @@ module Crystal::HIR
     # Guard against recursive union construction (A | B where A aliases back to union).
     @union_in_progress : Set(String)
     # Cache resolved type names per namespace to avoid repeated context scans.
-    @resolved_type_name_cache : Hash(String, String)
+    @resolved_type_name_cache_global : Hash(String, String)
+    @resolved_type_name_cache_by_ctx : Hash(TypeNameContextKey, Hash(String, String))
     # Cache resolved class names for .class/.metaclass type literals.
     @type_literal_class_cache : Hash(String, String?)
     # Temporary cache for type_name_exists? lookups (used during signature collection).
@@ -1334,7 +1356,8 @@ module Crystal::HIR
       @type_cache_keys_by_component = {} of String => Set(String)
       @type_cache_keys_by_generic_prefix = {} of String => Set(String)
       @union_in_progress = Set(String).new
-      @resolved_type_name_cache = {} of String => String
+      @resolved_type_name_cache_global = {} of String => String
+      @resolved_type_name_cache_by_ctx = {} of TypeNameContextKey => Hash(String, String)
       @type_literal_class_cache = {} of String => String?
       @type_name_exists_cache = nil
       @signature_scan_mode = false
@@ -17364,19 +17387,18 @@ module Crystal::HIR
       if local_name = @current_typeof_local_names.try(&.[name]?)
         return local_name unless local_name.empty?
       end
-      cache_key = type_name_resolution_cache_key(name)
-      if cached = @resolved_type_name_cache[cache_key]?
+      if cached = resolved_type_name_cache_get(name)
         return cached
       end
       if value_literal_name?(name)
-        @resolved_type_name_cache[cache_key] = name
+        resolved_type_name_cache_set(name, name)
         return name
       end
       if name.includes?("|")
         parts = split_union_type_name(name)
         if parts.size > 1
           resolved = parts.map { |part| resolve_type_name_in_context(part) }.join(" | ")
-          @resolved_type_name_cache[cache_key] = resolved
+          resolved_type_name_cache_set(name, resolved)
           return resolved
         end
       end
@@ -17384,7 +17406,7 @@ module Crystal::HIR
         base = name[0, name.size - 1]
         resolved_base = resolve_type_name_in_context(base)
         resolved = "#{resolved_base}?"
-        @resolved_type_name_cache[cache_key] = resolved
+        resolved_type_name_cache_set(name, resolved)
         return resolved
       end
       if name.ends_with?("*")
@@ -17397,13 +17419,13 @@ module Crystal::HIR
         base = base.strip
         resolved_base = base.empty? ? base : resolve_type_name_in_context(base)
         resolved = "#{resolved_base}#{("*" * star_count)}"
-        @resolved_type_name_cache[cache_key] = resolved
+        resolved_type_name_cache_set(name, resolved)
         return resolved
       end
       if name.starts_with?("::")
         stripped = name.size > 2 ? name[2..] : ""
         if stripped.empty?
-          @resolved_type_name_cache[cache_key] = ""
+          resolved_type_name_cache_set(name, "")
           return ""
         end
         if info = split_generic_base_and_args(stripped)
@@ -17419,33 +17441,33 @@ module Crystal::HIR
             end
           end.join(", ")
           resolved = "#{info[:base]}(#{resolved_args})"
-          @resolved_type_name_cache[cache_key] = resolved
+          resolved_type_name_cache_set(name, resolved)
           return resolved
         end
         if stripped == "self"
           resolved = @current_class || stripped
-          @resolved_type_name_cache[cache_key] = resolved
+          resolved_type_name_cache_set(name, resolved)
           return resolved
         end
-        @resolved_type_name_cache[cache_key] = stripped
+        resolved_type_name_cache_set(name, stripped)
         return stripped
       end
       if (tuple_index = name.index("::{")) && name.ends_with?("}")
         tuple_literal = name[(tuple_index + 2)..]
         resolved = resolve_type_name_in_context(tuple_literal)
-        @resolved_type_name_cache[cache_key] = resolved
+        resolved_type_name_cache_set(name, resolved)
         return resolved
       end
 
       if name == "self"
         resolved = @current_class || name
-        @resolved_type_name_cache[cache_key] = resolved
+        resolved_type_name_cache_set(name, resolved)
         return resolved
       end
       # Preserve short unbound type params (T/U/V) to avoid creating forward
       # references like Namespace::U for method generic params.
       if type_param_like?(name) && short_type_param_name?(name) && !@type_param_map.has_key?(name)
-        @resolved_type_name_cache[cache_key] = name
+        resolved_type_name_cache_set(name, name)
         return name
       end
       if name.starts_with?("{") && name.ends_with?("}")
@@ -17458,7 +17480,7 @@ module Crystal::HIR
           end
           tuple_name = "Tuple(#{tuple_args.join(", ")})"
         end
-        @resolved_type_name_cache[cache_key] = tuple_name
+        resolved_type_name_cache_set(name, tuple_name)
         return tuple_name
       end
 
@@ -17478,7 +17500,7 @@ module Crystal::HIR
           end
         end.join(", ")
         resolved = resolved_base == info[:base] && resolved_args == info[:args] ? name : "#{resolved_base}(#{resolved_args})"
-        @resolved_type_name_cache[cache_key] = resolved
+        resolved_type_name_cache_set(name, resolved)
         return resolved
       end
 
@@ -17508,47 +17530,49 @@ module Crystal::HIR
             end
           end
           unless nested_shadow
-            @resolved_type_name_cache[cache_key] = name
+            resolved_type_name_cache_set(name, name)
             return name
           end
         end
         if resolved_included = resolve_included_type_name(name)
-          @resolved_type_name_cache[cache_key] = resolved_included
+          resolved_type_name_cache_set(name, resolved_included)
           return resolved_included
         end
         resolved = resolve_class_name_in_context(name)
-        @resolved_type_name_cache[cache_key] = resolved
+        resolved_type_name_cache_set(name, resolved)
         return resolved
       end
       # Resolve relative path heads in type contexts (e.g., Location::Zone inside Time::Location).
       resolved_path = resolve_path_string_in_context(name)
       if resolved_path != name
-        @resolved_type_name_cache[cache_key] = resolved_path
+        resolved_type_name_cache_set(name, resolved_path)
         return resolved_path
       end
-      head = name.split("::", 2).first
+      head = first_namespace_component(name)
       if @top_level_type_names.includes?(head)
-        @resolved_type_name_cache[cache_key] = name
+        resolved_type_name_cache_set(name, name)
         return name
       end
       if type_name_exists?(name)
-        @resolved_type_name_cache[cache_key] = name
+        resolved_type_name_cache_set(name, name)
         return name
       end
 
       if current = @current_class
-        parts = current.split("::")
-        while parts.size > 0
-          qualified_name = (parts + [name]).join("::")
+        base = current
+        loop do
+          qualified_name = "#{base}::#{name}"
           if type_name_exists?(qualified_name)
-            @resolved_type_name_cache[cache_key] = qualified_name
+            resolved_type_name_cache_set(name, qualified_name)
             return qualified_name
           end
-          parts.pop
+          idx = base.rindex("::")
+          break unless idx
+          base = base[0, idx]
         end
       end
 
-      @resolved_type_name_cache[cache_key] = name
+      resolved_type_name_cache_set(name, name)
       if ENV["DEBUG_FIBER_RESOLVE"]? && name == "Fiber"
         STDERR.puts "[DEBUG_FIBER_RESOLVE] name=#{name} current=#{@current_class || "nil"} override=#{@current_namespace_override || "nil"} resolved=#{name} top_level=#{@top_level_type_names.includes?(name)}"
       end
@@ -39315,30 +39339,57 @@ module Crystal::HIR
       end
     end
 
-    private def type_name_resolution_cache_key(name : String) : String
+    @[AlwaysInline]
+    private def first_namespace_component(name : String) : String
+      if idx = name.index("::")
+        name[0, idx]
+      else
+        name
+      end
+    end
+
+    private def current_type_name_context_key : TypeNameContextKey?
       override = @current_namespace_override
       current = @current_class
-      return name if override.nil? && current.nil?
-      override_str = override || ""
-      current_str = current || ""
       locals = @current_typeof_local_names
-      locals_key = locals && !locals.empty? ? locals.hash.to_s : ""
-      "#{override_str}||#{current_str}||#{locals_key}||#{name}"
+      locals_hash = locals && !locals.empty? ? locals.hash : 0_u64
+      return nil if override.nil? && current.nil? && locals_hash == 0_u64
+      TypeNameContextKey.new(override, current, locals_hash)
+    end
+
+    private def resolved_type_name_cache_get(name : String) : String?
+      if ctx = current_type_name_context_key
+        if map = @resolved_type_name_cache_by_ctx[ctx]?
+          return map[name]?
+        end
+        nil
+      else
+        @resolved_type_name_cache_global[name]?
+      end
+    end
+
+    private def resolved_type_name_cache_set(name : String, value : String) : Nil
+      if ctx = current_type_name_context_key
+        map = @resolved_type_name_cache_by_ctx[ctx]?
+        unless map
+          map = {} of String => String
+          @resolved_type_name_cache_by_ctx[ctx] = map
+        end
+        map[name] = value
+      else
+        @resolved_type_name_cache_global[name] = value
+      end
     end
 
     private def invalidate_resolved_type_name_cache_for(name : String) : Nil
-      return if @resolved_type_name_cache.empty?
-      # Optimization: use ends_with? instead of split - cache key format is "override||current||name"
-      suffix_full = "||#{name}"
       short = last_namespace_component_if_nested(name)
-      suffix_short = short ? "||#{short}" : nil
-      keys = [] of String
-      @resolved_type_name_cache.each_key do |key|
-        if key.ends_with?(suffix_full) || (suffix_short && key.ends_with?(suffix_short))
-          keys << key
-        end
+      return if @resolved_type_name_cache_global.empty? && @resolved_type_name_cache_by_ctx.empty?
+      @resolved_type_name_cache_global.delete(name)
+      @resolved_type_name_cache_global.delete(short) if short
+      @resolved_type_name_cache_by_ctx.each_value do |map|
+        map.delete(name)
+        map.delete(short) if short
       end
-      keys.each { |key| @resolved_type_name_cache.delete(key) }
     end
 
     private def invalidate_type_literal_cache_for(name : String) : Nil
@@ -39400,7 +39451,8 @@ module Crystal::HIR
         @type_cache.clear
         @type_cache_keys_by_component.clear
         @type_cache_keys_by_generic_prefix.clear
-        @resolved_type_name_cache.clear
+        @resolved_type_name_cache_global.clear
+        @resolved_type_name_cache_by_ctx.clear
         @type_literal_class_cache.clear
       end
     end
@@ -39584,8 +39636,7 @@ module Crystal::HIR
               STDERR.puts "[DEBUG_WUINT128] Found nested shadow: #{nested_name}, returning nested type directly"
             end
             # Invalidate stale cache and return the nested type
-            cache_key = type_cache_key(lookup_name)
-            @resolved_type_name_cache.delete(cache_key) if @resolved_type_name_cache.has_key?(cache_key)
+            invalidate_resolved_type_name_cache_for(lookup_name)
             # Recursively call with the fully qualified name
             return type_ref_for_name(nested_name)
           end
