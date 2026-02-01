@@ -54,6 +54,7 @@ about syntax or types and should match what the original compiler would report.
 - [x] Codegen audit: union payload loads/stores use align 4 (ARM64-safe) (2026-02-01)
 - [x] Remove remaining method-name `split("$")` usage in HIR module/ast lowering (zero-copy suffix parsing) (2026-02-01)
 - [x] Normalize generic module names in MIR virtual dispatch includer lookup (prevents module-typed receiver misses) (2026-02-01)
+- [x] Infer return type for bare identifier calls (e.g., `callee` without parens) and update return-type specs (2026-02-02)
 
 ### Pending (1 test)
 - 1 invalid ASM syntax test (intentionally pending)
