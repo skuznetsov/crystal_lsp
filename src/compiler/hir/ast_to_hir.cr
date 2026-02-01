@@ -31459,6 +31459,12 @@ module Crystal::HIR
             inline_required = yield_return_function_for_call(mangled_method_name, base_method_name) ||
               !block_return_type_param_name(mangled_method_name, base_method_name).nil?
             if !skip_inline && !inline_required
+              if block_param_types_inline
+                skip_inline = true
+                debug_hook("call.inline.skip", "callee=#{mangled_method_name} reason=block_types_known")
+              end
+            end
+            if !skip_inline && !inline_required
               inline_body_limit = (ENV["INLINE_YIELD_BODY_LIMIT"]? || "120").to_i
               if func_def = @function_defs[mangled_method_name]?
                 if body = func_def.body
