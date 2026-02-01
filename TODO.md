@@ -44,6 +44,8 @@ about syntax or types and should match what the original compiler would report.
 - [x] HIR->MIR lowering uses CFG order to avoid forward references (2026-01-xx)
 - [x] LLVM union returns treat null as nil union (2026-01-xx)
 - [x] LLVM unsigned int → float casts use `uitofp` (and ptr→float uses `uitofp`) (2026-01-30)
+- [x] LLVM float → int in slot load/store respects unsigned types (`fptoui`) (2026-02-01)
+- [x] Ignore `crystal-v2` binary names in `.gitignore` (2026-02-01)
 
 ### Pending (1 test)
 - 1 invalid ASM syntax test (intentionally pending)
@@ -2203,6 +2205,11 @@ crystal build -Ddebug_hooks src/crystal_v2.cr -o bin/crystal_v2 --no-debug
 - `get_function_return_type` now returns enum base type for `Enum#value`/`Enum#value`-style methods when receiver resolves to an enum.
 - `resolve_class_name_in_context` now allows forward ref to parent module namespace (module-only) to avoid bare short names (targets `Waiters`).
 - **Status**: not yet re-verified against `/tmp/fib42_link.log` after these changes.
+
+**Update (2026-02-01):**
+- Module instance methods now lower even without ClassInfo (dummy module ClassInfo path); module-typed receiver dispatch is preserved in method resolution.
+- Param type-literal marking now respects callsite type for module-typed params (avoids erasing instance receivers like `format` in `IO::ByteFormat#decode`).
+- **DoD**: re-run `examples/bench_fib42.cr` + `/tmp/byteformat_test.cr` to confirm `IO::ByteFormat.decode` no longer lowers as static calls.
 
 **Root-cause hypotheses + fixes (next):**
 1) **Untyped base override after mixins**  
