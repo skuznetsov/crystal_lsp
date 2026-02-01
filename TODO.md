@@ -1154,6 +1154,17 @@ r2 = maybe(false)  # => nil
   2. Alternative: Add fallback in method resolution to infer receiver type from current scope context.
   3. Long-term: Consider adding `uses_block_arg` to DefNode during parsing (matches original Crystal).
   - Update (2026-02-01): infer non-nil default param types during instance method lowering. `DEBUG_PARAM_TYPES=String#index` now shows `offset` as Int32 via default `0`. Re-run `bootstrap_array` link to confirm `_upto$Int32` is gone.
+  - Update (2026-02-01): `bootstrap_array` link no longer reports `_upto$Int32`. Current missing symbols (arm64) are:
+    - `Crystal::DWARF::LineNumbers::Strings#decode(Int32)`
+    - `Crystal::EventLoop::FileDescriptor#close(IO::FileDescriptor)`
+    - `Crystal::EventLoop::FileDescriptor#read(File, Slice(UInt8))`
+    - `Crystal::EventLoop::FileDescriptor#read(IO::FileDescriptor, Slice(UInt8))`
+    - `Crystal::EventLoop::FileDescriptor#write(File, Slice(UInt8))`
+    - `Crystal::EventLoop::FileDescriptor#write(IO::FileDescriptor, Slice(UInt8))`
+    - `IO::ByteFormat#decode(Int32, IO)`
+    - `Time::TZLocation::Zone#dst?`
+    - `UInt32 | Hash(Tuple(UInt64, Symbol), Nil)#to_i32!`
+    - log: `/private/tmp/bootstrap_array_full.link.log`
 - [ ] GH #10 (crystal_lsp): prelude build links for minimal `fib.cr`, but runtime segfault persists.
   - Repro (2026-01-xx): `./bin/crystal_v2 build --release --no-llvm-metadata /tmp/fib.cr -o /tmp/fib` succeeds; `/tmp/fib` exits 139.
   - `--no-prelude` path works: `/tmp/fib_no_prelude` prints `267914296` and exits 0.
