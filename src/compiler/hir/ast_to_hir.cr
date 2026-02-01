@@ -1106,12 +1106,21 @@ module Crystal::HIR
     @type_cache : Hash(String, TypeRef)
     @type_cache_keys_by_component : Hash(String, Set(String))
     @type_cache_keys_by_generic_prefix : Hash(String, Set(String))
+    # Guard against recursive union construction (A | B where A aliases back to union).
+    @union_in_progress : Set(String)
     # Cache resolved type names per namespace to avoid repeated context scans.
     @resolved_type_name_cache : Hash(String, String)
     # Cache resolved class names for .class/.metaclass type literals.
     @type_literal_class_cache : Hash(String, String?)
     # Temporary cache for type_name_exists? lookups (used during signature collection).
     @type_name_exists_cache : Hash(String, Bool)?
+    # Signature scan mode: avoid deep namespace walks while collecting method names.
+    @signature_scan_mode : Bool
+    # Optional debug histogram for type name resolution hot paths.
+    @debug_resolve_histo_enabled : Bool
+    @debug_resolve_histo : Hash(String, Int32)?
+    @debug_resolve_histo_last_report : Time::Instant?
+    @debug_resolve_histo_calls : Int32
 
     # Temporary arena switching context for cross-file yield inlining:
     # {caller_arena, callee_arena}
@@ -1307,9 +1316,15 @@ module Crystal::HIR
       @type_cache = {} of String => TypeRef
       @type_cache_keys_by_component = {} of String => Set(String)
       @type_cache_keys_by_generic_prefix = {} of String => Set(String)
+      @union_in_progress = Set(String).new
       @resolved_type_name_cache = {} of String => String
       @type_literal_class_cache = {} of String => String?
       @type_name_exists_cache = nil
+      @signature_scan_mode = false
+      @debug_resolve_histo_enabled = ENV.has_key?("DEBUG_RESOLVE_HISTO")
+      @debug_resolve_histo = nil
+      @debug_resolve_histo_last_report = nil
+      @debug_resolve_histo_calls = 0
       @short_type_index = {} of String => Set(String)
       @top_level_type_names = Set(String).new
       @top_level_class_kinds = {} of String => Bool
@@ -4446,8 +4461,10 @@ module Crystal::HIR
       resolved_type_cache = {} of String => String
       old_type_name_cache = @type_name_exists_cache
       old_typeof_locals = @current_typeof_local_names
+      old_signature_scan = @signature_scan_mode
       @type_name_exists_cache = {} of String => Bool
       @current_typeof_local_names = nil
+      @signature_scan_mode = true
       begin
         body.each do |expr_id|
           member = unwrap_visibility_member(@arena[expr_id])
@@ -4547,6 +4564,7 @@ module Crystal::HIR
       ensure
         @type_name_exists_cache = old_type_name_cache
         @current_typeof_local_names = old_typeof_locals
+        @signature_scan_mode = old_signature_scan
       end
       defined
     end
@@ -4557,8 +4575,10 @@ module Crystal::HIR
       resolved_type_cache = {} of String => String
       old_type_name_cache = @type_name_exists_cache
       old_typeof_locals = @current_typeof_local_names
+      old_signature_scan = @signature_scan_mode
       @type_name_exists_cache = {} of String => Bool
       @current_typeof_local_names = nil
+      @signature_scan_mode = true
       begin
         body.each do |expr_id|
           member = unwrap_visibility_member(@arena[expr_id])
@@ -4645,6 +4665,7 @@ module Crystal::HIR
       ensure
         @type_name_exists_cache = old_type_name_cache
         @current_typeof_local_names = old_typeof_locals
+        @signature_scan_mode = old_signature_scan
       end
       defined
     end
@@ -8606,6 +8627,9 @@ module Crystal::HIR
 
     private def register_type_method_from_def(member : CrystalV2::Compiler::Frontend::DefNode, type_name : String)
       method_name = String.new(member.name)
+      unless @arena_for_def_cache.has_key?(member.object_id)
+        @arena_for_def_cache[member.object_id] = @arena
+      end
       is_class_method = if recv = member.receiver
                           String.new(recv) == "self"
                         else
@@ -10692,8 +10716,10 @@ module Crystal::HIR
               end
             end
             param_elapsed = param_start ? (Time.instant - param_start).total_milliseconds : nil
+            # Resolve arena once to avoid repeated resolution in def_contains_yield?
+            member_arena = resolve_arena_for_def(member, @arena)
             if !has_block
-              has_block = def_contains_yield?(member, @arena)
+              has_block = def_contains_yield?(member, member_arena)
             end
             full_name = function_full_name_for_def(base_name, method_param_types, member.params, has_block)
             alias_full_name = nil
@@ -10732,7 +10758,6 @@ module Crystal::HIR
             # Resolve correct arena for the def node to avoid cross-file contamination.
             # When registering methods from a monomorphized generic class, @arena may point
             # to a different file than where the method was actually defined.
-            member_arena = resolve_arena_for_def(member, @arena)
             if debug_env_filter_match?("DEBUG_ARENA_RESOLVE", class_name, method_name, full_name)
               current_path = source_path_for(@arena) || "(unknown)"
               resolved_path = source_path_for(member_arena) || "(unknown)"
@@ -17386,6 +17411,35 @@ module Crystal::HIR
       end
 
       unless name.includes?("::")
+        if @top_level_type_names.includes?(name) || @top_level_class_kinds.has_key?(name)
+          nested_shadow = false
+          if override = @current_namespace_override
+            override_base = if info = split_generic_base_and_args(override)
+                              info[:base]
+                            else
+                              override
+                            end
+            if nested = @nested_type_names[override_base]? || @nested_type_names[override]?
+              nested_shadow = nested.includes?(name)
+            end
+          end
+          if !nested_shadow
+            if current = @current_class
+              current_base = if info = split_generic_base_and_args(current)
+                               info[:base]
+                             else
+                               current
+                             end
+              if nested = @nested_type_names[current_base]? || @nested_type_names[current]?
+                nested_shadow = nested.includes?(name)
+              end
+            end
+          end
+          unless nested_shadow
+            @resolved_type_name_cache[cache_key] = name
+            return name
+          end
+        end
         if resolved_included = resolve_included_type_name(name)
           @resolved_type_name_cache[cache_key] = resolved_included
           return resolved_included
@@ -17472,6 +17526,12 @@ module Crystal::HIR
     # E.g., if @current_class is "CrystalV2::Compiler::Frontend::Span" and name is "Span",
     # returns "CrystalV2::Compiler::Frontend::Span"
     private def resolve_class_name_in_context(name : String) : String
+      record_resolve_histo(name) if @debug_resolve_histo_enabled
+      if @signature_scan_mode
+        if fast = resolve_class_name_in_signature_context(name)
+          return fast
+        end
+      end
       if ENV["DEBUG_FILE_RESOLVE"]? && name == "File"
         STDERR.puts "[DEBUG_FILE_RESOLVE] current=#{@current_class || ""} override=#{@current_namespace_override || ""} top_level=#{@top_level_type_names.includes?(name)}"
       end
@@ -17845,6 +17905,126 @@ module Crystal::HIR
         return "#{current}::#{name}"
       end
       name
+    end
+
+    private def record_resolve_histo(name : String) : Nil
+      histo = @debug_resolve_histo ||= {} of String => Int32
+      histo[name] = (histo[name]? || 0) + 1
+      @debug_resolve_histo_calls += 1
+      now = Time.instant
+      last = @debug_resolve_histo_last_report
+      if last.nil?
+        @debug_resolve_histo_last_report = now
+        return
+      end
+      if (now - last).total_seconds < 3.0 && (@debug_resolve_histo_calls % 50_000) != 0
+        return
+      end
+      @debug_resolve_histo_last_report = now
+      top = histo.to_a.sort_by { |entry| -entry[1] }
+      limit = top.size > 10 ? 10 : top.size
+      return if limit == 0
+      io = String::Builder.new
+      io << "[DEBUG_RESOLVE_HISTO] top="
+      idx = 0
+      while idx < limit
+        name_entry = top[idx][0]
+        count = top[idx][1]
+        io << name_entry << ":" << count
+        io << "," if idx + 1 < limit
+        idx += 1
+      end
+      STDERR.puts io.to_s
+    end
+
+    private def pick_short_type_candidate(candidates : Set(String), namespace : String) : String?
+      prefix = "#{namespace}::"
+      best : String? = nil
+      candidates.each do |candidate|
+        next unless candidate.starts_with?(prefix)
+        if best.nil? || candidate.size < best.not_nil!.size
+          best = candidate
+        end
+      end
+      best
+    end
+
+    # Fast path for signature scans: resolve simple type names using short_type_index
+    # and nested type hints without deep namespace walks or repeated type_name_exists? calls.
+    private def resolve_class_name_in_signature_context(name : String) : String?
+      return name if name.empty?
+      if primitive_self_type(name) || LIBC_TYPE_ALIASES.has_key?(name) || builtin_alias_target?(name)
+        return name
+      end
+      if name == "Int" || name == "Float" || name == "Number" || name == "Atomic"
+        return name
+      end
+      if type_param_like?(name) && short_type_param_name?(name) && !@type_param_map.has_key?(name)
+        return name
+      end
+
+      if info = split_generic_base_and_args(name)
+        resolved_base = resolve_class_name_in_signature_context(info[:base]) || info[:base]
+        resolved_args = split_generic_type_args(info[:args]).map do |arg|
+          arg = arg.strip
+          if arg.starts_with?(":")
+            arg = arg.size > 1 ? arg[1..] : ""
+          end
+          resolve_type_name_in_context(arg)
+        end.join(", ")
+        return resolved_base == info[:base] && resolved_args == info[:args] ? name : "#{resolved_base}(#{resolved_args})"
+      end
+
+      if override = @current_namespace_override
+        if last_namespace_component(override) == name
+          return override
+        end
+      end
+      if current = @current_class
+        if last_namespace_component(current) == name
+          return current
+        end
+      end
+
+      if current = @current_class
+        current_base = if info = split_generic_base_and_args(current)
+                         info[:base]
+                       else
+                         current
+                       end
+        if nested = @nested_type_names[current_base]? || @nested_type_names[current]?
+          return "#{current_base}::#{name}" if nested.includes?(name)
+        end
+      end
+
+      if candidates = @short_type_index[name]?
+        return candidates.first if candidates.size == 1
+        if override = @current_namespace_override
+          override_base = if info = split_generic_base_and_args(override)
+                            info[:base]
+                          else
+                            override
+                          end
+          if picked = pick_short_type_candidate(candidates, override_base)
+            return picked
+          end
+        end
+        if current = @current_class
+          current_base = if info = split_generic_base_and_args(current)
+                           info[:base]
+                         else
+                           current
+                         end
+          if picked = pick_short_type_candidate(candidates, current_base)
+            return picked
+          end
+        end
+        return name if candidates.includes?(name)
+        return candidates.min_by(&.size)
+      end
+
+      return name if @top_level_type_names.includes?(name) || @top_level_class_kinds.has_key?(name)
+      nil
     end
 
     private def resolve_type_alias_chain(name : String) : String
@@ -39685,8 +39865,15 @@ module Crystal::HIR
       end
       resolved_variant_names.reject!(&.empty?)
 
-      # Canonicalize by TypeRef to avoid duplicate variants like Thread | Nil | Thread.
-      variant_refs = resolved_variant_names.map { |vn| type_ref_for_name(vn) }
+      normalized_name = resolved_variant_names.join(" | ")
+      if @union_in_progress.includes?(normalized_name)
+        return TypeRef::POINTER
+      end
+
+      @union_in_progress << normalized_name
+      begin
+        # Canonicalize by TypeRef to avoid duplicate variants like Thread | Nil | Thread.
+        variant_refs = resolved_variant_names.map { |vn| type_ref_for_name(vn) }
       seen_refs = Set(TypeRef).new
       dedup_names = [] of String
       dedup_refs = [] of TypeRef
@@ -39698,23 +39885,23 @@ module Crystal::HIR
         canonical = resolved_variant_names[idx] if canonical == "Unknown"
         dedup_names << canonical
       end
-      resolved_variant_names = dedup_names
-      variant_refs = dedup_refs
+        resolved_variant_names = dedup_names
+        variant_refs = dedup_refs
 
-      normalized_name = resolved_variant_names.join(" | ")
-      if resolved_variant_names.size == 1
-        return variant_refs.first
-      end
-      cache_key = type_cache_key(normalized_name)
+        normalized_name = resolved_variant_names.join(" | ")
+        if resolved_variant_names.size == 1
+          return variant_refs.first
+        end
+        cache_key = type_cache_key(normalized_name)
 
-      # Check cache first to prevent infinite recursion
-      if cached = @type_cache[cache_key]?
-        return cached if cached == TypeRef::VOID
-        ensure_union_descriptor(cached, normalized_name, resolved_variant_names)
-        return cached
-      end
-      # Mark as being processed with placeholder to break cycles
-      store_type_cache(cache_key, TypeRef::VOID)
+        # Check cache first to prevent infinite recursion
+        if cached = @type_cache[cache_key]?
+          return cached if cached == TypeRef::VOID
+          ensure_union_descriptor(cached, normalized_name, resolved_variant_names)
+          return cached
+        end
+        # Mark as being processed with placeholder to break cycles
+        store_type_cache(cache_key, TypeRef::VOID)
 
       # Get TypeRefs for each variant (recursive to handle nested unions)
       if ENV["DEBUG_UNION_TYPES"]?
@@ -39725,14 +39912,17 @@ module Crystal::HIR
         STDERR.puts "[DEBUG_UNION_TYPES] name=#{normalized_name} variants=#{resolved_variant_names.join(", ")} refs=#{refs_debug} enum_known=#{enum_debug}"
       end
 
-      # Create union type and register descriptor
-      type_ref = @module.intern_type(TypeDescriptor.new(TypeKind::Union, normalized_name))
-      register_union_descriptor(type_ref, normalized_name, resolved_variant_names, variant_refs)
+        # Create union type and register descriptor
+        type_ref = @module.intern_type(TypeDescriptor.new(TypeKind::Union, normalized_name))
+        register_union_descriptor(type_ref, normalized_name, resolved_variant_names, variant_refs)
 
-      # Update cache with real value (replacing placeholder)
-      store_type_cache(cache_key, type_ref)
+        # Update cache with real value (replacing placeholder)
+        store_type_cache(cache_key, type_ref)
 
-      type_ref
+        type_ref
+      ensure
+        @union_in_progress.delete(normalized_name)
+      end
     end
 
     private def ensure_union_descriptor(
