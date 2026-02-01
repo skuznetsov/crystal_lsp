@@ -1584,7 +1584,7 @@ module Crystal::HIR
           # Extract owner from full_name (e.g., "Hash(...)" from "Hash(...)#method$args")
           owner = method_owner(strip_type_suffix(full_name))
           # If the new type is unrelated to the owner (e.g., IO for Hash method), skip update
-          if !new_name.includes?(owner.split("(").first) &&
+          if !new_name.includes?(strip_generic_args(owner)) &&
              !old_name.includes?(new_name) &&
              new_name != "Void" && new_name != "Nil"
             # Don't overwrite a good nilable type with a suspicious singleton type
@@ -10195,84 +10195,92 @@ module Crystal::HIR
     # Register a class with a specific name (for nested classes like Foo::Bar)
     def register_class_with_name(node : CrystalV2::Compiler::Frontend::ClassNode, class_name : String)
       class_name = resolve_class_name_for_definition(class_name)
-      if ENV["DEBUG_TYPE_PATH"]? && class_name.includes?("/")
-        current_path = @paths_by_arena[@arena]? || "(unknown)"
-        STDERR.puts "[TYPE_PATH_CLASS] name=#{class_name} file=#{File.basename(current_path)} span=#{node.span.start_line}:#{node.span.start_column}"
-      end
-      if ENV["DEBUG_WUINT128"]? && class_name.includes?("UInt128")
-        STDERR.puts "[DEBUG_WUINT128] register_class_with_name class_name=#{class_name} is_struct=#{node.is_struct}"
-      end
-      if ENV["DEBUG_WUINT128"]? && class_name.includes?("WUInt::UInt128")
-        STDERR.puts "[DEBUG_WUINT128] --> Adding to @class_info: #{class_name}"
-      end
-      if ENV["DEBUG_STRING_CLASS"]? && class_name == "String"
-        STDERR.puts "[STRING_CLASS_REG] class=#{class_name} span=#{node.span.start_line}-#{node.span.end_line}"
-      end
-      if ENV["DEBUG_LIBC_EXTERN"]? && class_name.ends_with?("DlInfo")
-        STDERR.puts "[DEBUG_LIBC_EXTERN] register_class #{class_name}"
-      end
-      if ENV["DEBUG_RECORD_CLASS"]? && class_name.ends_with?("FileEntry")
-        STDERR.puts "[DEBUG_RECORD_CLASS] class_name=#{class_name} current=#{@current_class || "(none)"}"
-      end
-      is_struct = node.is_struct == true
-      record_nested_type_names(class_name, node.body)
-
-      # Check if this is a generic class (has type parameters)
-      if type_params = node.type_params
-        if type_params.size > 0
-          # Store as generic template - don't create ClassInfo yet.
-          # Keep the template with the LARGEST body as primary, but preserve reopenings
-          # so additional methods (e.g., Range#bsearch) are not lost.
-          new_body_size = node.body.try(&.size) || 0
-          if ENV.has_key?("DEBUG_GENERIC_TEMPLATE")
-            current_path = @paths_by_arena[@arena]? || "(unknown)"
-            STDERR.puts "[GENERIC_TEMPLATE] #{class_name}: body_size=#{new_body_size} file=#{File.basename(current_path)}"
-          end
-          param_names = type_params.map { |p| String.new(p) }
-          new_template = GenericClassTemplate.new(class_name, param_names, node, @arena, is_struct)
-
-          if existing = @generic_templates[class_name]?
-            existing_body_size = existing.node.body.try(&.size) || 0
-            if new_body_size > existing_body_size
-              (@generic_reopenings[class_name] ||= [] of GenericClassTemplate) << existing
-              @generic_templates[class_name] = new_template
-            else
-              (@generic_reopenings[class_name] ||= [] of GenericClassTemplate) << new_template
-            end
-            invalidate_type_cache_for_namespace(class_name)
-          else
-            @generic_templates[class_name] = new_template
-          end
-
-          # Register nested types inside generic templates under the base namespace.
-          if body = node.body
-            body.each do |expr_id|
-              member = unwrap_visibility_member(@arena[expr_id])
-              case member
-              when CrystalV2::Compiler::Frontend::ClassNode
-                nested_name = String.new(member.name)
-                full_nested_name = "#{class_name}::#{nested_name}"
-                register_class_with_name(member, full_nested_name)
-              when CrystalV2::Compiler::Frontend::EnumNode
-                enum_name = String.new(member.name)
-                full_enum_name = "#{class_name}::#{enum_name}"
-                register_enum_with_name(member, full_enum_name)
-              when CrystalV2::Compiler::Frontend::ModuleNode
-                nested_name = String.new(member.name)
-                full_nested_name = "#{class_name}::#{nested_name}"
-                register_nested_module(member, full_nested_name)
-              when CrystalV2::Compiler::Frontend::MacroDefNode
-                register_macro(member, class_name)
-              end
-            end
-            record_constants_in_body(class_name, body)
-          end
-          return  # Don't register as concrete class
+      old_class = @current_class
+      old_override = @current_namespace_override
+      @current_class = class_name
+      begin
+        if ENV["DEBUG_TYPE_PATH"]? && class_name.includes?("/")
+          current_path = @paths_by_arena[@arena]? || "(unknown)"
+          STDERR.puts "[TYPE_PATH_CLASS] name=#{class_name} file=#{File.basename(current_path)} span=#{node.span.start_line}:#{node.span.start_column}"
         end
-      end
+        if ENV["DEBUG_WUINT128"]? && class_name.includes?("UInt128")
+          STDERR.puts "[DEBUG_WUINT128] register_class_with_name class_name=#{class_name} is_struct=#{node.is_struct}"
+        end
+        if ENV["DEBUG_WUINT128"]? && class_name.includes?("WUInt::UInt128")
+          STDERR.puts "[DEBUG_WUINT128] --> Adding to @class_info: #{class_name}"
+        end
+        if ENV["DEBUG_STRING_CLASS"]? && class_name == "String"
+          STDERR.puts "[STRING_CLASS_REG] class=#{class_name} span=#{node.span.start_line}-#{node.span.end_line}"
+        end
+        if ENV["DEBUG_LIBC_EXTERN"]? && class_name.ends_with?("DlInfo")
+          STDERR.puts "[DEBUG_LIBC_EXTERN] register_class #{class_name}"
+        end
+        if ENV["DEBUG_RECORD_CLASS"]? && class_name.ends_with?("FileEntry")
+          STDERR.puts "[DEBUG_RECORD_CLASS] class_name=#{class_name} current=#{@current_class || "(none)"}"
+        end
+        is_struct = node.is_struct == true
+        record_nested_type_names(class_name, node.body)
 
-      # Non-generic class - proceed with normal registration
-      register_concrete_class(node, class_name, is_struct)
+        # Check if this is a generic class (has type parameters)
+        if type_params = node.type_params
+          if type_params.size > 0
+            # Store as generic template - don't create ClassInfo yet.
+            # Keep the template with the LARGEST body as primary, but preserve reopenings
+            # so additional methods (e.g., Range#bsearch) are not lost.
+            new_body_size = node.body.try(&.size) || 0
+            if ENV.has_key?("DEBUG_GENERIC_TEMPLATE")
+              current_path = @paths_by_arena[@arena]? || "(unknown)"
+              STDERR.puts "[GENERIC_TEMPLATE] #{class_name}: body_size=#{new_body_size} file=#{File.basename(current_path)}"
+            end
+            param_names = type_params.map { |p| String.new(p) }
+            new_template = GenericClassTemplate.new(class_name, param_names, node, @arena, is_struct)
+
+            if existing = @generic_templates[class_name]?
+              existing_body_size = existing.node.body.try(&.size) || 0
+              if new_body_size > existing_body_size
+                (@generic_reopenings[class_name] ||= [] of GenericClassTemplate) << existing
+                @generic_templates[class_name] = new_template
+              else
+                (@generic_reopenings[class_name] ||= [] of GenericClassTemplate) << new_template
+              end
+              invalidate_type_cache_for_namespace(class_name)
+            else
+              @generic_templates[class_name] = new_template
+            end
+
+            # Register nested types inside generic templates under the base namespace.
+            if body = node.body
+              body.each do |expr_id|
+                member = unwrap_visibility_member(@arena[expr_id])
+                case member
+                when CrystalV2::Compiler::Frontend::ClassNode
+                  nested_name = String.new(member.name)
+                  full_nested_name = "#{class_name}::#{nested_name}"
+                  register_class_with_name(member, full_nested_name)
+                when CrystalV2::Compiler::Frontend::EnumNode
+                  enum_name = String.new(member.name)
+                  full_enum_name = "#{class_name}::#{enum_name}"
+                  register_enum_with_name(member, full_enum_name)
+                when CrystalV2::Compiler::Frontend::ModuleNode
+                  nested_name = String.new(member.name)
+                  full_nested_name = "#{class_name}::#{nested_name}"
+                  register_nested_module(member, full_nested_name)
+                when CrystalV2::Compiler::Frontend::MacroDefNode
+                  register_macro(member, class_name)
+                end
+              end
+              record_constants_in_body(class_name, body)
+            end
+            return  # Don't register as concrete class
+          end
+        end
+
+        # Non-generic class - proceed with normal registration
+        register_concrete_class(node, class_name, is_struct)
+      ensure
+        @current_class = old_class
+        @current_namespace_override = old_override
+      end
     end
 
     # Register a concrete (non-generic or specialized) class
