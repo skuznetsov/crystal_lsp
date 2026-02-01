@@ -1645,6 +1645,7 @@ module Crystal::HIR
     private def abstract_def?(full_name : String) : Bool
       def_node = @function_defs[full_name]?
       return false unless def_node
+      return true if def_node.is_abstract
       def_node.body.nil?
     end
 
@@ -2227,6 +2228,9 @@ module Crystal::HIR
       set = @nested_type_names[class_name]? || Set(String).new
       body.each do |expr_id|
         collect_nested_type_names(expr_id, set)
+      end
+      if debug_env_filter_match?("DEBUG_NESTED_TYPES", class_name)
+        STDERR.puts "[NESTED_TYPES] class=#{class_name} names=#{set.to_a.sort.join(",")}"
       end
       @nested_type_names[class_name] = set unless set.empty?
     end
@@ -8302,7 +8306,25 @@ module Crystal::HIR
       when CrystalV2::Compiler::Frontend::SelfNode
         @module_extend_self.add(module_name)
       when CrystalV2::Compiler::Frontend::IdentifierNode
-        @module_extend_self.add(module_name) if String.new(target_node.name) == "self"
+        if String.new(target_node.name) == "self"
+          @module_extend_self.add(module_name)
+        elsif module_target = resolve_path_like_name(node.target)
+          if !module_target.includes?("::") && module_name.includes?("::")
+            parent = module_name.rpartition("::")[0]
+            candidate = "#{parent}::#{module_target}"
+            module_target = candidate if @module_defs.has_key?(candidate)
+          end
+          record_module_inclusion(module_target, module_name)
+        end
+      else
+        if module_target = resolve_path_like_name(node.target)
+          if !module_target.includes?("::") && module_name.includes?("::")
+            parent = module_name.rpartition("::")[0]
+            candidate = "#{parent}::#{module_target}"
+            module_target = candidate if @module_defs.has_key?(candidate)
+          end
+          record_module_inclusion(module_target, module_name)
+        end
       end
     end
 
@@ -13995,6 +14017,13 @@ module Crystal::HIR
         end
       end
       class_name = normalize_method_owner_name(class_name)
+      if !class_name.empty? && class_name.includes?("::") && !@class_info.has_key?(class_name)
+        if resolved = resolve_short_type_in_namespace_chain(class_name)
+          class_name = resolved
+          receiver_type = type_ref_for_name(class_name)
+          type_desc = @module.get_type_descriptor(receiver_type)
+        end
+      end
       if type_desc && type_desc.kind == TypeKind::Module
         resolved = resolve_type_alias_chain(class_name)
         if resolved != class_name
@@ -14921,6 +14950,25 @@ module Crystal::HIR
       return true if @module_includers.has_key?(short_name)
 
       @module_includer_keys_by_suffix.has_key?(short_name)
+    end
+
+    private def resolve_short_type_in_namespace_chain(name : String) : String?
+      return nil unless name.includes?("::")
+      short = last_namespace_component(name)
+      candidates = @short_type_index[short]?
+      return nil unless candidates
+
+      parts = name.split("::")
+      parts.pop
+      while parts.size > 0
+        prefix = parts.join("::")
+        matches = candidates.select { |c| c.starts_with?("#{prefix}::") }
+        return matches.first if matches.size == 1
+        parts.pop
+      end
+
+      return candidates.first if candidates.size == 1
+      nil
     end
 
     private def resolve_module_typed_ivar(
@@ -17233,6 +17281,11 @@ module Crystal::HIR
       end
       # Prefer the override namespace (module mixins), then the current class namespace.
       namespaces.each do |namespace|
+        namespace_base = if info = split_generic_base_and_args(namespace)
+                           info[:base]
+                         else
+                           namespace
+                         end
         # Extract namespace: "Foo::Bar::Baz" -> "Foo::Bar"
         parts = namespace.split("::")
 
@@ -17245,6 +17298,14 @@ module Crystal::HIR
             STDERR.puts "[DEBUG_WUINT128] trying qualified_name=#{qualified_name} namespace=#{namespace} type_name_exists=#{type_name_exists?(qualified_name)}"
           end
           if type_name_exists?(qualified_name)
+            if qualified_name == "#{namespace_base}::#{name}"
+              if nested = @nested_type_names[namespace_base]? || @nested_type_names[namespace]?
+                unless nested.includes?(name)
+                  parts.pop
+                  next
+                end
+              end
+            end
             # Prefer a top-level class/struct over a namespaced module when the
             # short name is known to be a class (e.g., Fiber vs Crystal::System::Fiber).
             # But inside module namespaces, prefer sibling modules to avoid
@@ -17278,6 +17339,27 @@ module Crystal::HIR
           parts.pop
         end
         break if found
+      end
+
+      unless found
+        # Look in ancestor classes for nested constants/types (e.g., TZLocation -> Location::Zone).
+        if current = @current_class
+          current_base = if info = split_generic_base_and_args(current)
+                           info[:base]
+                         else
+                           current
+                         end
+          ancestor = @class_info[current_base]?.try(&.parent_name)
+          while ancestor
+            qualified_name = "#{ancestor}::#{name}"
+            if type_name_exists?(qualified_name)
+              result = qualified_name
+              found = true
+              break
+            end
+            ancestor = @class_info[ancestor]?.try(&.parent_name)
+          end
+        end
       end
 
       unless found
