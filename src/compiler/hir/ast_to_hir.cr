@@ -4445,10 +4445,12 @@ module Crystal::HIR
       type_cache = {} of String => TypeRef
       resolved_type_cache = {} of String => String
       old_type_name_cache = @type_name_exists_cache
+      old_typeof_locals = @current_typeof_local_names
       @type_name_exists_cache = {} of String => Bool
+      @current_typeof_local_names = nil
       begin
-      body.each do |expr_id|
-        member = unwrap_visibility_member(@arena[expr_id])
+        body.each do |expr_id|
+          member = unwrap_visibility_member(@arena[expr_id])
         case member
         when CrystalV2::Compiler::Frontend::DefNode
           next if member.is_abstract
@@ -4544,6 +4546,7 @@ module Crystal::HIR
       end
       ensure
         @type_name_exists_cache = old_type_name_cache
+        @current_typeof_local_names = old_typeof_locals
       end
       defined
     end
@@ -4553,10 +4556,12 @@ module Crystal::HIR
       type_cache = {} of String => TypeRef
       resolved_type_cache = {} of String => String
       old_type_name_cache = @type_name_exists_cache
+      old_typeof_locals = @current_typeof_local_names
       @type_name_exists_cache = {} of String => Bool
+      @current_typeof_local_names = nil
       begin
-      body.each do |expr_id|
-        member = unwrap_visibility_member(@arena[expr_id])
+        body.each do |expr_id|
+          member = unwrap_visibility_member(@arena[expr_id])
         case member
         when CrystalV2::Compiler::Frontend::DefNode
           next if member.is_abstract
@@ -4639,6 +4644,7 @@ module Crystal::HIR
       end
       ensure
         @type_name_exists_cache = old_type_name_cache
+        @current_typeof_local_names = old_typeof_locals
       end
       defined
     end
@@ -13919,6 +13925,9 @@ module Crystal::HIR
           end
         end
         return type_name
+      end
+      if candidates = @short_type_index[type_name]?
+        return candidates.first if candidates.size == 1
       end
       resolve_type_name_in_context(type_name)
     end
