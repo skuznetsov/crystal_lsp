@@ -1165,6 +1165,7 @@ r2 = maybe(false)  # => nil
     - `Time::TZLocation::Zone#dst?`
     - `UInt32 | Hash(Tuple(UInt64, Symbol), Nil)#to_i32!`
     - log: `/private/tmp/bootstrap_array_full.link.log`
+  - Update (2026-02-01): added fallback return-type inference from def bodies when signature type is missing, and numeric union unwrap/cast for member calls (`to_i*`/`to_u*`/`to_f*`). **Needs re-run** of `bootstrap_array` to confirm whether the `to_i32!` missing symbol is gone.
 - [ ] GH #10 (crystal_lsp): prelude build links for minimal `fib.cr`, but runtime segfault persists.
   - Repro (2026-01-xx): `./bin/crystal_v2 build --release --no-llvm-metadata /tmp/fib.cr -o /tmp/fib` succeeds; `/tmp/fib` exits 139.
   - `--no-prelude` path works: `/tmp/fib_no_prelude` prints `267914296` and exits 0.
