@@ -10794,7 +10794,11 @@ module Crystal::HIR
             end
             param_elapsed = param_start ? (Time.instant - param_start).total_milliseconds : nil
             # Resolve arena once to avoid repeated resolution in def_contains_yield?
-            member_arena = resolve_arena_for_def(member, @arena)
+            member_arena = if arena_fits_def?(@arena, member)
+                             @arena
+                           else
+                             resolve_arena_for_def(member, @arena)
+                           end
             if !has_block
               has_block = def_contains_yield?(member, member_arena)
             end
@@ -10802,7 +10806,11 @@ module Crystal::HIR
             alias_full_name = nil
             alias_base = nil
             if is_class_method
-              base_owner = class_name.split("(", 2).first
+              base_owner = if info = split_generic_base_and_args(class_name)
+                             info[:base]
+                           else
+                             class_name
+                           end
               if base_owner != class_name
                 alias_base = "#{base_owner}.#{method_name}"
                 alias_full_name = function_full_name_for_def(alias_base, method_param_types, member.params, has_block)
@@ -16019,7 +16027,7 @@ module Crystal::HIR
 
     private def def_contains_yield_uncached?(node : CrystalV2::Compiler::Frontend::DefNode, arena : CrystalV2::Compiler::Frontend::ArenaLike) : Bool
       return false unless body = node.body
-      resolved_arena = resolve_arena_for_def(node, arena)
+      resolved_arena = arena_fits_def?(arena, node) ? arena : resolve_arena_for_def(node, arena)
       return true if with_arena(resolved_arena) { contains_yield?(body) }
 
       # Fallback: scan source spans for "yield" tokens when AST misses it (macro/recovery paths).
@@ -16052,7 +16060,7 @@ module Crystal::HIR
       block_name = String.new(name_slice)
       return false if block_name.empty?
       return false unless body = node.body
-      resolved_arena = resolve_arena_for_def(node, arena)
+      resolved_arena = arena_fits_def?(arena, node) ? arena : resolve_arena_for_def(node, arena)
       with_arena(resolved_arena) { contains_block_call?(body, block_name) }
     end
 
