@@ -14893,6 +14893,9 @@ module Crystal::HIR
           end
         end
       end
+      if has_function_base?(module_method_base) && !abstract_def?(module_method_base)
+        return module_method_base
+      end
 
       candidates = includers.to_a
       if module_like_type_name?(module_base) && !candidates.includes?(module_base)
@@ -30788,6 +30791,21 @@ module Crystal::HIR
           end
         end
       end
+      if receiver_id
+        if type_desc = @module.get_type_descriptor(ctx.type_of(receiver_id))
+          if type_desc.kind == TypeKind::Module
+            module_base = type_desc.name
+            if paren = module_base.index('(')
+              module_base = module_base[0, paren]
+            end
+            module_method_base = "#{module_base}.#{method_name}"
+            if has_function_base?(module_method_base) || @function_defs.has_key?(module_method_base)
+              base_method_name = module_method_base
+              mangled_method_name = mangle_function_name(module_method_base, arg_types, has_block_call)
+            end
+          end
+        end
+      end
       if arg_types.any? { |t| t != TypeRef::VOID }
         desired_mangled = mangle_function_name(base_method_name, arg_types, has_block_call)
         if desired_mangled != mangled_method_name &&
@@ -31936,11 +31954,18 @@ module Crystal::HIR
         if type_desc = @module.get_type_descriptor(receiver_type)
           if (type_desc.kind == TypeKind::Module || module_like_type_name?(type_desc.name)) &&
              !ctx.type_literal?(receiver_id)
-            # Module-typed receivers should dispatch to instance-style (#) methods,
-            # even if includers are not yet recorded.
-            mangled_method_name = mangled_method_name.sub(".", "#")
-            primary_mangled_name = primary_mangled_name.sub(".", "#")
-            base_method_name = base_method_name.sub(".", "#") if base_method_name.includes?(".")
+            module_base = type_desc.name
+            if paren = module_base.index('(')
+              module_base = module_base[0, paren]
+            end
+            module_method_base = "#{module_base}.#{method_name}"
+            if !(has_function_base?(module_method_base) || @function_defs.has_key?(module_method_base))
+              # Module-typed receivers should dispatch to instance-style (#) methods
+              # only when no module class-method exists.
+              mangled_method_name = mangled_method_name.sub(".", "#")
+              primary_mangled_name = primary_mangled_name.sub(".", "#")
+              base_method_name = base_method_name.sub(".", "#") if base_method_name.includes?(".")
+            end
           end
         end
       end
