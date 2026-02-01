@@ -9781,7 +9781,16 @@ module Crystal::HIR
       full_name_override : String? = nil
     )
       method_name = String.new(node.name)
-      base_name = "#{module_name}.#{method_name}"
+      is_class_method = if recv = node.receiver
+                          String.new(recv) == "self"
+                        else
+                          @module_extend_self.includes?(module_name)
+                        end
+      base_name = if is_class_method
+                    "#{module_name}.#{method_name}"
+                  else
+                    "#{module_name}##{method_name}"
+                  end
 
       if ENV["DEBUG_MATH_MIN"]? && module_name == "Math" && (method_name == "min" || method_name == "max")
         call_types = call_arg_types || [] of TypeRef
@@ -9812,7 +9821,7 @@ module Crystal::HIR
       old_method_is_class = @current_method_is_class
       @current_class = module_name
       @current_method = method_name
-      @current_method_is_class = true
+      @current_method_is_class = is_class_method
 
       return_type = TypeRef::VOID
 
@@ -10026,7 +10035,29 @@ module Crystal::HIR
         end
       end
 
-      # Lower parameters (no self for module methods)
+      # Bind implicit self for module methods.
+      if is_class_method
+        self_type = type_ref_for_name(module_name)
+        if self_type == TypeRef::VOID
+          self_type = TypeRef::POINTER
+        end
+        self_literal = Literal.new(ctx.next_id, self_type, nil)
+        ctx.emit(self_literal)
+        ctx.register_local("self", self_literal.id)
+        ctx.register_type(self_literal.id, self_type)
+        ctx.mark_type_literal(self_literal.id)
+        @type_literal_values.add(self_literal.id)
+      else
+        self_type = type_ref_for_name(module_name)
+        if self_type == TypeRef::VOID
+          self_type = TypeRef::POINTER
+        end
+        self_param = func.add_param("self", self_type)
+        ctx.register_local("self", self_param.id)
+        ctx.register_type(self_param.id, self_type)
+      end
+
+      # Lower explicit parameters.
       param_infos.each_with_index do |(param_name, param_type), idx|
         hir_param = func.add_param(param_name, param_type)
         ctx.register_local(param_name, hir_param.id)
@@ -29260,7 +29291,10 @@ module Crystal::HIR
            obj_node.is_a?(CrystalV2::Compiler::Frontend::IdentifierNode) &&
            String.new(obj_node.name) == "format"
           local_id = ctx.lookup_local("format")
-          STDERR.puts "[BYTEFORMAT_FORMAT] lookup=#{local_id || "nil"} current=#{@current_class || "nil"}##{@current_method || "nil"} class_method=#{@current_method_is_class ? 1 : 0}"
+          lit_flag = local_id ? ctx.type_literal?(local_id) : false
+          local_type = local_id ? get_type_name_from_ref(ctx.type_of(local_id)) : "nil"
+          module_flag = local_id ? module_type_ref?(ctx.type_of(local_id)) : false
+          STDERR.puts "[BYTEFORMAT_FORMAT] lookup=#{local_id || "nil"} type=#{local_type} lit=#{lit_flag} module=#{module_flag} current=#{@current_class || "nil"}##{@current_method || "nil"} class_method=#{@current_method_is_class ? 1 : 0}"
         end
         if ENV["DEBUG_THREAD_RESOLVE"]? && method_name == "threads"
           STDERR.puts "[THREAD_RESOLVE_CALL] obj_node=#{obj_node.class.name} current=#{@current_class || "nil"} override=#{@current_namespace_override || "nil"}"
@@ -29346,6 +29380,16 @@ module Crystal::HIR
           obj_expr = obj_node.expression
           obj_node = @arena[obj_expr]
         end
+        force_instance_receiver = false
+        if obj_node.is_a?(CrystalV2::Compiler::Frontend::IdentifierNode)
+          name = String.new(obj_node.name)
+          if name != "self"
+            if (local_id = ctx.lookup_local(name)) && !ctx.type_literal?(local_id)
+              force_instance_receiver = true
+            end
+          end
+        end
+
         if obj_node.is_a?(CrystalV2::Compiler::Frontend::SelfNode) && @current_method_is_class
           class_name_str = @current_class
         elsif obj_node.is_a?(CrystalV2::Compiler::Frontend::ConstantNode)
@@ -29388,7 +29432,7 @@ module Crystal::HIR
               end
             end
           end
-        elsif obj_node.is_a?(CrystalV2::Compiler::Frontend::IdentifierNode)
+        elsif !force_instance_receiver && obj_node.is_a?(CrystalV2::Compiler::Frontend::IdentifierNode)
           name = String.new(obj_node.name)
           if ctx.lookup_local(name).nil? || name[0]?.try(&.uppercase?)
             if @module.is_lib?(name)
@@ -29634,7 +29678,7 @@ module Crystal::HIR
         end
         end
 
-        if class_name_str.nil? && !constant_receiver
+        if class_name_str.nil? && !constant_receiver && !force_instance_receiver
           if type_like_expr_id?(obj_expr)
             type_name = stringify_type_expr(obj_expr)
           else
@@ -29665,7 +29709,7 @@ module Crystal::HIR
           end
         end
 
-        if class_name_str.nil?
+        if class_name_str.nil? && !force_instance_receiver
           raw_name = case obj_node
                      when CrystalV2::Compiler::Frontend::IdentifierNode
                        String.new(obj_node.name)
