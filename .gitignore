@@ -13,6 +13,8 @@ crystal_v2_debug.dwarf
 crystal_v2_release.dwarf
 crystal_v2.dwarf
 crystal_v2.bin.dwarf
+crystal-v2
+crystalv2
 compare_parser_outputs
 print_diags_tmp
 *.dwarf
