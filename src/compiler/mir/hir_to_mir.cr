@@ -1362,22 +1362,44 @@ module Crystal
     end
 
     private def module_includers_for(module_name : String) : Array(String)
-      includers = @hir_module.module_includers[module_name]?
+      base_module = strip_generic_args(module_name)
+      includers = @hir_module.module_includers[module_name]? || @hir_module.module_includers[base_module]?
       if includers.nil? || includers.empty?
-        matches = @hir_module.module_includers.keys.select { |key| key.ends_with?("::#{module_name}") }
+        matches = @hir_module.module_includers.keys.select do |key|
+          key.ends_with?("::#{module_name}") || key.ends_with?("::#{base_module}")
+        end
         includers = @hir_module.module_includers[matches.first]? if matches.size == 1
       end
 
       if (includers.nil? || includers.empty?) && module_name.includes?("::")
-        short_name = module_name.split("::").last
-        includers = @hir_module.module_includers[short_name]?
+        short_name = short_module_name(module_name)
+        base_short_name = short_module_name(base_module)
+        includers = @hir_module.module_includers[short_name]? || @hir_module.module_includers[base_short_name]?
         if includers.nil? || includers.empty?
-          matches = @hir_module.module_includers.keys.select { |key| key.ends_with?("::#{short_name}") }
+          matches = @hir_module.module_includers.keys.select do |key|
+            key.ends_with?("::#{short_name}") || key.ends_with?("::#{base_short_name}")
+          end
           includers = @hir_module.module_includers[matches.first]? if matches.size == 1
         end
       end
 
       includers ? includers.dup : [] of String
+    end
+
+    @[AlwaysInline]
+    private def strip_generic_args(name : String) : String
+      if idx = name.index('(')
+        return name.byte_slice(0, idx)
+      end
+      name
+    end
+
+    @[AlwaysInline]
+    private def short_module_name(name : String) : String
+      if idx = name.rindex("::")
+        return name.byte_slice(idx + 2)
+      end
+      name
     end
 
     private def ensure_reference_type_for_name(name : String) : Type?
