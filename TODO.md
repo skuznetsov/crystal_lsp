@@ -2213,6 +2213,7 @@ crystal build -Ddebug_hooks src/crystal_v2.cr -o bin/crystal_v2 --no-debug
 - Param type-literal marking now respects callsite type for module-typed params (avoids erasing instance receivers like `format` in `IO::ByteFormat#decode`).
 - **DoD**: re-run `examples/bench_fib42.cr` + `/tmp/byteformat_test.cr` to confirm `IO::ByteFormat.decode` no longer lowers as static calls.
   - **Update (2026-02-01)**: `/tmp/byteformat_test.cr` with `DEBUG_BYTEFORMAT_STATIC=1` logs **no** `BYTEFORMAT_STATIC`; trace shows `IO::ByteFormat::LittleEndian#decode` with receiver=true in `/tmp/byteformat_trace.log`.
+  - **Update (2026-02-01)**: module-typed receiver calls now keep `.encode/.decode` when module class-methods exist; `DEBUG_CALL_TRACE=ByteFormat,decode` shows dot names before lowering (see `/tmp/byteformat_calltrace.log`).
 
 **Root-cause hypotheses + fixes (next):**
 1) **Untyped base override after mixins**  
