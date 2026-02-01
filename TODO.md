@@ -13,7 +13,7 @@ about syntax or types and should match what the original compiler would report.
 ### In Progress
 - [x] Replace method-name string `split` usage with zero-copy helpers (`parse_method_name`, `strip_type_suffix`) in HIR lowering hot paths (ast_to_hir).
 - [x] Audit remaining `split("$")`/`split("#")` in other files (if any) to ensure method-name parsing uses helpers.
-- [ ] Investigate `spec/hir/return_type_inference_spec.cr` timeout: after arena-candidate caching, hotspot shifted to `lower_call → params_compatible_with_args → needs_union_coercion` and repeated `type_ref_for_name` (string-heavy `type_name_resolution_cache_key`). Consider caching key prefix or using tuple key to avoid allocations; verify via `sample` (latest: `/tmp/rt_infer_sample_candidates.txt`).
+- [ ] Investigate `spec/hir/return_type_inference_spec.cr` timeout: string-key cache removed (TypeNameContextKey), hotspot now dominated by `lower_call → inline_yield_function` and `invalidate_resolved_type_name_cache_for` (see `/tmp/rt_infer_sample_ctxkey.txt`). Next: tighten inline-yield heuristics (skip when return unaffected) and reduce cache invalidation churn in `register_concrete_class`.
 
 ### Test Coverage
 - **3400+ tests**, 0 failures in `spec/hir/ast_to_hir_spec.cr` (2 pending)
