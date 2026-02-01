@@ -20549,11 +20549,11 @@ module Crystal::HIR
     private def force_lower_module_method_by_name(name : String) : Nil
       return unless name.includes?(".")
       return if @module.has_function?(name)
-      base_name = name.split("$", 2).first
+      base_name = strip_type_suffix(name)
       func_def = @function_defs[name]? || @function_defs[base_name]?
       return unless func_def
       func_arena = @function_def_arenas[name]? || @function_def_arenas[base_name]?
-      owner = base_name.split(".", 2).first
+      owner = method_owner(base_name)
       # Avoid re-lowering if already completed/in-progress in the state map.
       return if function_state(name).in_progress?
       if function_state(name).completed?
@@ -28730,10 +28730,12 @@ module Crystal::HIR
     end
 
     private def maybe_generate_accessor_for_name(name : String) : Bool
-      base_name = name.split("$", 2)[0]
-      return false unless base_name.includes?("#")
+      base_name = strip_type_suffix(name)
+      parts = parse_method_name(base_name)
+      return false unless parts.is_instance
 
-      owner, method_name = base_name.split("#", 2)
+      owner = parts.owner
+      method_name = parts.method || ""
       return false if owner.empty? || method_name.empty?
 
       if ENV.has_key?("DEBUG_RANGE_ACCESSOR") && owner.starts_with?("Range") && (method_name == "begin" || method_name == "end" || method_name == "excludes_end?")
@@ -29731,7 +29733,7 @@ module Crystal::HIR
             candidates.each do |candidate|
               base = resolve_class_method_with_inheritance(candidate, method_name)
               if base
-                class_name_str = base.split(".", 2)[0]? || candidate
+                class_name_str = method_owner(base)
                 break
               end
               if @function_types.has_key?("#{candidate}.#{method_name}") || has_function_base?("#{candidate}.#{method_name}")
@@ -29901,7 +29903,7 @@ module Crystal::HIR
             static_class_name = class_name_str
           else
             full_method_name = resolve_class_method_with_inheritance(class_name_str, method_name) || "#{class_name_str}.#{method_name}"
-            static_class_name = full_method_name.split(".", 2)[0]? || class_name_str
+            static_class_name = method_owner(full_method_name)
           end
           receiver_id = nil  # Static call, no receiver
           if method_name == "new"
@@ -30003,7 +30005,7 @@ module Crystal::HIR
                   static_class_name = name
                 else
                   full_method_name = resolve_class_method_with_inheritance(name, method_name) || "#{name}.#{method_name}"
-                  static_class_name = full_method_name.split(".", 2)[0]? || name
+                  static_class_name = method_owner(full_method_name)
                 end
                 receiver_id = nil
                 if method_name == "new"
@@ -30097,7 +30099,7 @@ module Crystal::HIR
             if receiver_is_type_literal && full_method_name && full_method_name.includes?("#")
               receiver_type = receiver_id ? ctx.type_of(receiver_id) : TypeRef::VOID
               unless module_type_ref?(receiver_type)
-                class_name = full_method_name.split("#", 2).first
+                class_name = method_owner(full_method_name)
                 full_method_name = "#{class_name}.#{method_name}"
                 receiver_id = nil
                 static_class_name = class_name
@@ -30639,7 +30641,7 @@ module Crystal::HIR
       arg_types = refine_void_args_from_overloads(base_method_name, arg_types)
 
       if receiver_id.nil? && method_name == "new"
-        if class_name = static_class_name || full_method_name.try(&.split(".", 2).first?)
+        if class_name = static_class_name || full_method_name.try { |name| method_owner(name) }
           if arg_types.any? { |t| t != TypeRef::VOID }
             if init_base = resolve_method_with_inheritance(class_name, "initialize")
               remember_callsite_arg_types(init_base, arg_types)
@@ -30666,11 +30668,11 @@ module Crystal::HIR
       end
 
       if receiver_id && base_method_name.includes?("|") && base_method_name.includes?("#")
-        union_name = base_method_name.split("#", 2)[0]
+        union_name = method_owner(base_method_name)
         if resolved = resolve_union_method_call(union_name, method_name, arg_types, has_block_call, has_named_args)
           if resolved.includes?("$")
             mangled_method_name = resolved
-            base_method_name = resolved.split("$", 2)[0]
+            base_method_name = strip_type_suffix(resolved)
           else
             base_method_name = resolved
             mangled_method_name = mangle_function_name(base_method_name, arg_types, has_block_call)
@@ -30682,7 +30684,7 @@ module Crystal::HIR
       if entry = lookup_function_def_for_call(lookup_name, args.size, has_block_call, arg_types, has_splat, has_named_args)
         entry_name = entry[0]
         entry_def = entry[1]
-        base_method_name = entry_name.split("$").first
+        base_method_name = strip_type_suffix(entry_name)
         if entry_name.includes?("$")
           mangled_method_name = entry_name
         elsif !arg_types.empty?
@@ -30741,7 +30743,7 @@ module Crystal::HIR
             end
             if should_override
               mangled_method_name = resolved_name
-              base_method_name = resolved_name.split("$").first
+              base_method_name = strip_type_suffix(resolved_name)
             end
           end
         end
@@ -30754,12 +30756,12 @@ module Crystal::HIR
            !node.args.any? { |arg_id| @arena[arg_id].is_a?(CrystalV2::Compiler::Frontend::SplatNode) }
           if resolved_untyped = resolve_untyped_overload(base_method_name, args.size, has_block_call, has_named_args)
             mangled_method_name = resolved_untyped
-            base_method_name = resolved_untyped.split("$").first
+            base_method_name = strip_type_suffix(resolved_untyped)
           end
         end
       end
       if method_name == "new" && full_method_name
-        if class_name = full_method_name.split(".", 2).first?
+        if class_name = method_owner(full_method_name)
           if class_info = @class_info[class_name]?
             generate_allocator(class_name, class_info, arg_types)
           end
@@ -30779,10 +30781,10 @@ module Crystal::HIR
             if type_desc.kind == TypeKind::Module || module_like_type_name?(type_desc.name)
               # Try to get module type name from AST, fall back to type_desc.name
               # This handles cases where the receiver is a call result (e.g., event_loop().write())
-              module_type_name = module_receiver_type_name(callee_node) || type_desc.name
+            module_type_name = module_receiver_type_name(callee_node) || type_desc.name
             if resolved = resolve_module_typed_method(method_name, arg_types, module_type_name, has_block_call, @current_class)
               mangled_method_name = resolved
-              base_method_name = resolved.split("$").first
+              base_method_name = strip_type_suffix(resolved)
             end
           end
         end
@@ -30962,14 +30964,8 @@ module Crystal::HIR
             if !skip_inline && @yield_functions.includes?(mangled_method_name)
               if receiver_id
                 recv_name = get_type_name_from_ref(ctx.type_of(receiver_id))
-                owner_part = mangled_method_name.split("$", 2).first
-                owner_name = if owner_part.includes?("#")
-                               owner_part.split("#", 2).first
-                             elsif owner_part.includes?(".")
-                               owner_part.split(".", 2).first
-                             else
-                               nil
-                             end
+                owner_part = strip_type_suffix(mangled_method_name)
+                owner_name = method_owner(owner_part)
                 if owner_name && owner_name.includes?("(") && recv_name.includes?("(")
                   owner_base = split_generic_base_and_args(owner_name).try(&.[](:base)) || owner_name
                   recv_base = split_generic_base_and_args(recv_name).try(&.[](:base)) || recv_name
@@ -31649,7 +31645,7 @@ module Crystal::HIR
       # Check for pointer primitive operations
       # Pointer(T).malloc(count) -> PointerMalloc
       if full_method_name && full_method_name.starts_with?("Pointer(") && method_name == "malloc" && args.size == 1
-        pointer_type_name = full_method_name.split(".", 2).first
+        pointer_type_name = method_owner(full_method_name)
         pointer_type_ref = type_ref_for_name(pointer_type_name)
         element_type = pointer_element_type(full_method_name)
         result_type = pointer_type_ref == TypeRef::VOID ? TypeRef::POINTER : pointer_type_ref
@@ -31921,7 +31917,7 @@ module Crystal::HIR
       # treat it as an instance dispatch on self (Module#method).
       if receiver_id.nil? && full_method_name && !@current_method_is_class && @current_class
         if full_method_name.includes?(".")
-          owner = full_method_name.split(".", 2).first
+          owner = method_owner(full_method_name)
           if owner == @current_class && module_like_type_name?(owner)
             receiver_id = emit_self(ctx)
             mangled_method_name = mangled_method_name.sub(".", "#")
@@ -35187,19 +35183,12 @@ module Crystal::HIR
             end
           end
         end
-        if base_inline_name.includes?("#")
-          owner, method = base_inline_name.split("#", 2)
-          unless owner.empty?
-            @current_class = owner
-            @current_method = method unless method.empty?
-            @current_method_is_class = false
-          end
-        elsif base_inline_name.includes?(".")
-          owner, method = base_inline_name.split(".", 2)
-          unless owner.empty?
-            @current_class = owner
-            @current_method = method unless method.empty?
-            @current_method_is_class = true
+        parts = parse_method_name(base_inline_name)
+        if parts.method
+          unless parts.owner.empty?
+            @current_class = parts.owner
+            @current_method = parts.method unless parts.method.empty?
+            @current_method_is_class = parts.is_class
           end
         end
         inline_param_map = type_param_map_for_receiver_name(base_inline_name)
@@ -35764,14 +35753,8 @@ module Crystal::HIR
           end
           return_type = get_function_return_type(method_name)
           owner_type_for_return = object_type
-          owner_part = method_name.split("$", 2).first
-          owner_name = if owner_part.includes?("#")
-                         owner_part.split("#", 2).first
-                       elsif owner_part.includes?(".")
-                         owner_part.split(".", 2).first
-                       else
-                         nil
-                       end
+          owner_part = strip_type_suffix(method_name)
+          owner_name = method_owner(owner_part)
           if owner_name && !owner_name.empty?
             if owner_ref = type_ref_for_name(owner_name)
               owner_type_for_return = owner_ref unless owner_ref == TypeRef::VOID
@@ -35944,14 +35927,8 @@ module Crystal::HIR
         end
         return_type = get_function_return_type(method_name)
         owner_type_for_return = object_type
-        owner_part = method_name.split("$", 2).first
-        owner_name = if owner_part.includes?("#")
-                       owner_part.split("#", 2).first
-                     elsif owner_part.includes?(".")
-                       owner_part.split(".", 2).first
-                     else
-                       nil
-                     end
+        owner_part = strip_type_suffix(method_name)
+        owner_name = method_owner(owner_part)
         if owner_name && !owner_name.empty?
           if owner_ref = type_ref_for_name(owner_name)
             owner_type_for_return = owner_ref unless owner_ref == TypeRef::VOID
