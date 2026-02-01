@@ -9854,9 +9854,22 @@ module Crystal::HIR
           if param_type == TypeRef::VOID && !param.is_block && !param.is_splat && !param.is_double_splat
             if default_value = param.default_value
               default_node = @arena[default_value]
+              if debug_env_filter_match?("DEBUG_PARAM_DEFAULT", base_name, param_name)
+                default_kind = default_node.class.name.split("::").last
+                default_extra = default_node.is_a?(CrystalV2::Compiler::Frontend::NumberNode) ? " kind=#{default_node.kind}" : ""
+                STDERR.puts "[PARAM_DEFAULT] func=#{base_name} param=#{param_name} node=#{default_kind}#{default_extra}"
+              end
               if default_node.is_a?(CrystalV2::Compiler::Frontend::NilNode)
                 object_ref = type_ref_for_name("Object")
                 param_type = create_union_type_for_nullable(object_ref) if object_ref != TypeRef::VOID
+              else
+                if inferred_default = infer_type_from_expr(default_value, module_name)
+                  if debug_env_filter_match?("DEBUG_PARAM_DEFAULT", base_name, param_name)
+                    inferred_name = get_type_name_from_ref(inferred_default)
+                    STDERR.puts "[PARAM_DEFAULT] func=#{base_name} param=#{param_name} inferred=#{inferred_name}"
+                  end
+                  param_type = inferred_default if inferred_default != TypeRef::VOID
+                end
               end
             end
           end
@@ -12541,9 +12554,22 @@ module Crystal::HIR
           if param_type == TypeRef::VOID && !param.is_block && !param.is_splat && !param.is_double_splat
             if default_value = param.default_value
               default_node = @arena[default_value]
+              if debug_env_filter_match?("DEBUG_PARAM_DEFAULT", base_name, param_name)
+                default_kind = default_node.class.name.split("::").last
+                default_extra = default_node.is_a?(CrystalV2::Compiler::Frontend::NumberNode) ? " kind=#{default_node.kind}" : ""
+                STDERR.puts "[PARAM_DEFAULT] func=#{base_name} param=#{param_name} node=#{default_kind}#{default_extra}"
+              end
               if default_node.is_a?(CrystalV2::Compiler::Frontend::NilNode)
                 object_ref = type_ref_for_name("Object")
                 param_type = create_union_type_for_nullable(object_ref) if object_ref != TypeRef::VOID
+              else
+                if inferred_default = infer_type_from_expr(default_value, class_name)
+                  if debug_env_filter_match?("DEBUG_PARAM_DEFAULT", base_name, param_name)
+                    inferred_name = get_type_name_from_ref(inferred_default)
+                    STDERR.puts "[PARAM_DEFAULT] func=#{base_name} param=#{param_name} inferred=#{inferred_name}"
+                  end
+                  param_type = inferred_default if inferred_default != TypeRef::VOID
+                end
               end
             end
           end
@@ -12771,6 +12797,10 @@ module Crystal::HIR
         hir_param = func.add_param(param_name, param_type)
         ctx.register_local(param_name, hir_param.id)
         ctx.register_type(hir_param.id, param_type)
+        if debug_env_filter_match?("DEBUG_PARAM_TYPES", full_name, param_name)
+          type_name = get_type_name_from_ref(param_type)
+          STDERR.puts "[PARAM_TYPES] func=#{full_name} param=#{param_name} id=#{hir_param.id} type=#{type_name}(id=#{param_type.id})"
+        end
         if (param_literal_flags[idx]? || param_name.ends_with?("_class")) && param_type != TypeRef::VOID
           ctx.mark_type_literal(hir_param.id) unless module_type_ref?(param_type)
         end
