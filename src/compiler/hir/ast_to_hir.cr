@@ -1612,8 +1612,8 @@ module Crystal::HIR
       end
       # Debug hook: extract class and method from base_name (Class#method or Class.method)
       parts = parse_method_name(base_name)
-      if parts.method
-        debug_hook_method_register(full_name, parts.owner, parts.method)
+      if method_name = parts.method
+        debug_hook_method_register(full_name, parts.owner, method_name)
       else
         debug_hook_method_register(full_name, "", base_name)
       end
