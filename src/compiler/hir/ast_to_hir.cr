@@ -7481,68 +7481,71 @@ module Crystal::HIR
                               else
                                 extend_self
                               end
-            next unless is_class_method
-            base_name = "#{module_name}.#{method_name}"
-            return_type = if rt = member.return_type
-                            rt_name = String.new(rt)
-                            inferred = module_like_type_name?(rt_name) ? infer_concrete_return_type_from_body(member) : nil
-                            inferred || type_ref_for_name(rt_name)
-                          elsif method_name.ends_with?("?")
-                            TypeRef::BOOL
-                          else
-                            infer_concrete_return_type_from_body(member) || TypeRef::VOID
-            end
-            param_types = [] of TypeRef
-            has_block = false
-            if params = member.params
-              params.each do |param|
-                next if named_only_separator?(param)
-                if param.is_block
-                  has_block = true
-                  next
-                end
-                param_type = if ta = param.type_annotation
-                               type_ref_for_name(String.new(ta))
-                             elsif param.is_double_splat
-                               type_ref_for_name("NamedTuple")
-                             else
-                               TypeRef::VOID
-                             end
-                param_types << param_type
+            if is_class_method
+              base_name = "#{module_name}.#{method_name}"
+              return_type = if rt = member.return_type
+                              rt_name = String.new(rt)
+                              inferred = module_like_type_name?(rt_name) ? infer_concrete_return_type_from_body(member) : nil
+                              inferred || type_ref_for_name(rt_name)
+                            elsif method_name.ends_with?("?")
+                              TypeRef::BOOL
+                            else
+                              infer_concrete_return_type_from_body(member) || TypeRef::VOID
               end
-            end
-            if !has_block
-              has_block = def_contains_yield?(member, @arena)
-            end
-            full_name = function_full_name_for_def(base_name, param_types, member.params, has_block)
-            if ENV.has_key?("DEBUG_MODULE_THREAD") && module_name.includes?("System::Thread")
-              STDERR.puts "[REG_MODULE_METHOD] #{module_name}.#{method_name} -> #{full_name}"
-            end
-            if debug_env_filter_match?("DEBUG_BYTEFORMAT_REGISTER", module_name, method_name, full_name)
-              file_path = if arena = @arena.as?(CrystalV2::Compiler::Frontend::VirtualArena)
-                            arena.file_for_id(expr_id)
-                          end
-              loc = "#{member.span.start_line}:#{member.span.start_column}"
-              STDERR.puts "[DEBUG_BYTEFORMAT_REGISTER] name=#{full_name} module=#{module_name} file=#{file_path || "unknown"} loc=#{loc}"
-            end
-            register_function_type(full_name, return_type)
-            @function_defs[full_name] = member
-            @function_def_arenas[full_name] = @arena
-            if should_register_base_name?(full_name, base_name, member, has_block)
-              @function_defs[base_name] = member
-              @function_def_arenas[base_name] = @arena
-            end
-
-            # Track yield-functions for inline expansion (module methods).
-            if def_contains_yield?(member, @arena)
-              @yield_functions.add(full_name)
-              debug_hook("yield.register", full_name)
-              unless @function_defs.has_key?(base_name)
+              param_types = [] of TypeRef
+              has_block = false
+              if params = member.params
+                params.each do |param|
+                  next if named_only_separator?(param)
+                  if param.is_block
+                    has_block = true
+                    next
+                  end
+                  param_type = if ta = param.type_annotation
+                                 type_ref_for_name(String.new(ta))
+                               elsif param.is_double_splat
+                                 type_ref_for_name("NamedTuple")
+                               else
+                                 TypeRef::VOID
+                               end
+                  param_types << param_type
+                end
+              end
+              if !has_block
+                has_block = def_contains_yield?(member, @arena)
+              end
+              full_name = function_full_name_for_def(base_name, param_types, member.params, has_block)
+              if ENV.has_key?("DEBUG_MODULE_THREAD") && module_name.includes?("System::Thread")
+                STDERR.puts "[REG_MODULE_METHOD] #{module_name}.#{method_name} -> #{full_name}"
+              end
+              if debug_env_filter_match?("DEBUG_BYTEFORMAT_REGISTER", module_name, method_name, full_name)
+                file_path = if arena = @arena.as?(CrystalV2::Compiler::Frontend::VirtualArena)
+                              arena.file_for_id(expr_id)
+                            end
+                loc = "#{member.span.start_line}:#{member.span.start_column}"
+                STDERR.puts "[DEBUG_BYTEFORMAT_REGISTER] name=#{full_name} module=#{module_name} file=#{file_path || "unknown"} loc=#{loc}"
+              end
+              register_function_type(full_name, return_type)
+              @function_defs[full_name] = member
+              @function_def_arenas[full_name] = @arena
+              if should_register_base_name?(full_name, base_name, member, has_block)
                 @function_defs[base_name] = member
                 @function_def_arenas[base_name] = @arena
               end
-              @function_defs[full_name] = member
-              @function_def_arenas[full_name] = @arena
+
+              # Track yield-functions for inline expansion (module methods).
+              if def_contains_yield?(member, @arena)
+                @yield_functions.add(full_name)
+                debug_hook("yield.register", full_name)
+                unless @function_defs.has_key?(base_name)
+                  @function_defs[base_name] = member
+                  @function_def_arenas[base_name] = @arena
+                end
+                @function_defs[full_name] = member
+                @function_def_arenas[full_name] = @arena
+              end
+            else
+              register_type_method_from_def(member, module_name)
             end
           when CrystalV2::Compiler::Frontend::GetterNode
             next unless member.is_class?
@@ -8181,7 +8184,10 @@ module Crystal::HIR
                         else
                           @module_extend_self.includes?(module_name)
                         end
-      return unless is_class_method
+      unless is_class_method
+        register_type_method_from_def(member, module_name)
+        return
+      end
       base_name = "#{module_name}.#{method_name}"
       return_type = if rt = member.return_type
                       rt_name = String.new(rt)
@@ -10033,7 +10039,12 @@ module Crystal::HIR
           STDERR.puts "[SPLAT_PARAM] func=#{full_name} param=#{param_name} type=#{get_type_name_from_ref(param_type)}"
         end
         if (param_literal_flags[idx]? || param_name.ends_with?("_class")) && param_type != TypeRef::VOID
-          ctx.mark_type_literal(hir_param.id) unless module_type_ref?(param_type)
+          call_type_for_param = idx < call_types.size ? call_types[idx] : TypeRef::VOID
+          module_param = module_type_ref?(param_type)
+          if !module_param && call_type_for_param != TypeRef::VOID
+            module_param = module_type_ref?(call_type_for_param)
+          end
+          ctx.mark_type_literal(hir_param.id) unless module_param
         end
         # Track enum types for predicate method resolution
         if type_name = param_type_names[idx]?
@@ -14216,6 +14227,13 @@ module Crystal::HIR
         if resolved = resolve_module_typed_method(method_name, arg_types, class_name, has_block_call, @current_class)
           debug_hook("method.resolve", "base=#{base_method_name} resolved=#{resolved} reason=module_typed")
           return cache_method_resolution(cache_key, resolved)
+        end
+        # Fallback: preserve module-typed receiver dispatch even when multiple
+        # includers match (e.g., IO::ByteFormat). Returning the base method name
+        # lets MIR generate vdispatch for module receivers.
+        if type_desc && type_desc.kind == TypeKind::Module
+          debug_hook("method.resolve", "base=#{base_method_name} resolved=#{base_method_name} reason=module_typed_fallback")
+          return cache_method_resolution(cache_key, base_method_name)
         end
       end
 
@@ -28548,8 +28566,25 @@ module Crystal::HIR
                 dummy_info = ClassInfo.new(owner, TypeRef::INT32, [] of IVarInfo, [] of ClassVarInfo, 0, false, nil)
                 lower_method(owner, dummy_info, func_def, call_arg_types, call_arg_literals, call_arg_enum_names, name, force_class_method: force_class_method)
                 @current_class = old_class
-              elsif debug_env_filter_match?("DEBUG_FROM_CHARS", target_name, name)
-                STDERR.puts "[LOWERING] No class_info for #{owner}"
+              else
+                # Modules don't have ClassInfo entries, but we still need to lower
+                # their instance methods (e.g., IO::ByteFormat#decode).
+                module_ref = type_ref_for_name(owner)
+                if module_ref != TypeRef::VOID
+                  if desc = @module.get_type_descriptor(module_ref)
+                    if desc.kind == TypeKind::Module || module_like_type_name?(desc.name)
+                      old_class = @current_class
+                      @current_class = owner
+                      dummy_info = ClassInfo.new(owner, module_ref, [] of IVarInfo, [] of ClassVarInfo, 0, false, nil)
+                      lower_method(owner, dummy_info, func_def, call_arg_types, call_arg_literals, call_arg_enum_names, name, force_class_method: force_class_method)
+                      @current_class = old_class
+                      return
+                    end
+                  end
+                end
+                if debug_env_filter_match?("DEBUG_FROM_CHARS", target_name, name)
+                  STDERR.puts "[LOWERING] No class_info for #{owner}"
+                end
               end
             elsif debug_env_filter_match?("DEBUG_FROM_CHARS", target_name, name)
               STDERR.puts "[LOWERING] No class_info for #{owner}"
@@ -29220,6 +29255,12 @@ module Crystal::HIR
         end
         if ENV["DEBUG_ENUM_PREDICATE"]? && method_name == "character_device?"
           STDERR.puts "[DEBUG_ENUM_CALL_PATH] lower_call method=#{method_name} callee=#{callee_node.class.name}"
+        end
+        if ENV["DEBUG_BYTEFORMAT_FORMAT"]? && method_name == "decode" &&
+           obj_node.is_a?(CrystalV2::Compiler::Frontend::IdentifierNode) &&
+           String.new(obj_node.name) == "format"
+          local_id = ctx.lookup_local("format")
+          STDERR.puts "[BYTEFORMAT_FORMAT] lookup=#{local_id || "nil"} current=#{@current_class || "nil"}##{@current_method || "nil"} class_method=#{@current_method_is_class ? 1 : 0}"
         end
         if ENV["DEBUG_THREAD_RESOLVE"]? && method_name == "threads"
           STDERR.puts "[THREAD_RESOLVE_CALL] obj_node=#{obj_node.class.name} current=#{@current_class || "nil"} override=#{@current_namespace_override || "nil"}"
@@ -30041,12 +30082,15 @@ module Crystal::HIR
               end
             end
           end
-        if ENV["DEBUG_DECODE_CALL"]? && method_name == "decode"
-          recv_id = receiver_id ? receiver_id.to_s : "nil"
-          recv_type = receiver_id ? get_type_name_from_ref(ctx.type_of(receiver_id)) : "nil"
-          recv_lit = receiver_id ? ctx.type_literal?(receiver_id) : false
-          STDERR.puts "[DECODE_CALL] obj=#{obj_node.class.name} recv_id=#{recv_id} recv_type=#{recv_type} lit=#{recv_lit} class_name=#{class_name_str || "nil"} full=#{full_method_name || "nil"}"
-        end
+      if ENV["DEBUG_DECODE_CALL"]? && method_name == "decode"
+        recv_id = receiver_id ? receiver_id.to_s : "nil"
+        recv_type = receiver_id ? get_type_name_from_ref(ctx.type_of(receiver_id)) : "nil"
+        recv_lit = receiver_id ? ctx.type_literal?(receiver_id) : false
+        cur_class = @current_class || "nil"
+        cur_method = @current_method || "nil"
+        cur_is_class = @current_method_is_class ? 1 : 0
+        STDERR.puts "[DECODE_CALL] obj=#{obj_node.class.name} recv_id=#{recv_id} recv_type=#{recv_type} lit=#{recv_lit} class_name=#{class_name_str || "nil"} full=#{full_method_name || "nil"} current=#{cur_class}##{cur_method} class_method=#{cur_is_class}"
+      end
       end
 
       else
@@ -31814,6 +31858,21 @@ module Crystal::HIR
         end
       end
 
+      # Inside module instance methods, unqualified calls can incorrectly resolve
+      # to Module.method (no receiver). If the call targets the current module,
+      # treat it as an instance dispatch on self (Module#method).
+      if receiver_id.nil? && full_method_name && !@current_method_is_class && @current_class
+        if full_method_name.includes?(".")
+          owner = full_method_name.split(".", 2).first
+          if owner == @current_class && module_like_type_name?(owner)
+            receiver_id = emit_self(ctx)
+            mangled_method_name = mangled_method_name.sub(".", "#")
+            primary_mangled_name = primary_mangled_name.sub(".", "#")
+            base_method_name = base_method_name.sub(".", "#") if base_method_name.includes?(".")
+          end
+        end
+      end
+
       if receiver_id && ctx.type_literal?(receiver_id) && mangled_method_name.includes?("#")
         receiver_type = ctx.type_of(receiver_id)
         if ENV["DEBUG_DECODE_CALL"]? && method_name == "decode"
@@ -31828,11 +31887,30 @@ module Crystal::HIR
       elsif receiver_id && mangled_method_name.includes?("#") && ENV["DEBUG_TYPE_LITERAL_CALL"]?
         STDERR.puts "[TYPE_LITERAL_CALL] recv=#{receiver_id} type_literal=#{ctx.type_literal?(receiver_id)} name=#{mangled_method_name}"
       end
+      if receiver_id && mangled_method_name.includes?(".")
+        receiver_type = ctx.type_of(receiver_id)
+        if type_desc = @module.get_type_descriptor(receiver_type)
+          if (type_desc.kind == TypeKind::Module || module_like_type_name?(type_desc.name)) &&
+             !ctx.type_literal?(receiver_id)
+            # Module-typed receivers should dispatch to instance-style (#) methods,
+            # even if includers are not yet recorded.
+            mangled_method_name = mangled_method_name.sub(".", "#")
+            primary_mangled_name = primary_mangled_name.sub(".", "#")
+            base_method_name = base_method_name.sub(".", "#") if base_method_name.includes?(".")
+          end
+        end
+      end
       if ENV["DEBUG_POINTER_LIST"]? &&
          (mangled_method_name.includes?("PointerLinkedList") ||
           base_method_name.includes?("PointerLinkedList") ||
           full_method_name.try(&.includes?("PointerLinkedList")))
         STDERR.puts "[POINTER_LIST_CALL] recv=#{receiver_id || "nil"} type_literal=#{receiver_id && ctx.type_literal?(receiver_id)} name=#{mangled_method_name} base=#{base_method_name} full=#{full_method_name || "nil"} method=#{method_name}"
+      end
+      if ENV["DEBUG_BYTEFORMAT_STATIC"]? && mangled_method_name.starts_with?("IO::ByteFormat.decode")
+        cur_class = @current_class || "nil"
+        cur_method = @current_method || "nil"
+        cur_is_class = @current_method_is_class ? 1 : 0
+        STDERR.puts "[BYTEFORMAT_STATIC] name=#{mangled_method_name} recv=#{receiver_id || "nil"} current=#{cur_class}##{cur_method} class_method=#{cur_is_class}"
       end
       if ENV["DEBUG_NEW_CALLS"]? && method_name == "new"
         STDERR.puts "[NEW_CALL] recv=#{receiver_id || "nil"} name=#{mangled_method_name}"
