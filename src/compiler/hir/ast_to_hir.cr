@@ -457,6 +457,23 @@ module Crystal::HIR
     end
 
     @[AlwaysInline]
+    private def method_suffix(name : String) : String?
+      parse_method_name(name).suffix
+    end
+
+    @[AlwaysInline]
+    private def suffix_param_count(suffix : String) : Int32
+      return 0 if suffix == "block"
+      count = 1
+      i = 0
+      while i < suffix.bytesize
+        count += 1 if suffix.to_unsafe[i] == '_'.ord
+        i += 1
+      end
+      count
+    end
+
+    @[AlwaysInline]
     private def strip_generic_args(name : String) : String
       i = 0
       while i < name.bytesize
@@ -1565,7 +1582,7 @@ module Crystal::HIR
         # that doesn't match the container type, keep the existing type.
         if old_name.includes?(" | ") && !new_name.includes?(" | ")
           # Extract owner from full_name (e.g., "Hash(...)" from "Hash(...)#method$args")
-          owner = full_name.split("#").first.split(".").first
+          owner = method_owner(strip_type_suffix(full_name))
           # If the new type is unrelated to the owner (e.g., IO for Hash method), skip update
           if !new_name.includes?(owner.split("(").first) &&
              !old_name.includes?(new_name) &&
@@ -1577,7 +1594,7 @@ module Crystal::HIR
       end
       @function_types[full_name] = return_type
       # Extract base name (without $ type suffix) for fast lookups
-      base_name = full_name.split("$").first
+      base_name = strip_type_suffix(full_name)
       @function_base_names.add(base_name)
       if hash_idx = base_name.rindex('#')
         owner = base_name[0, hash_idx]
@@ -1594,12 +1611,9 @@ module Crystal::HIR
         end
       end
       # Debug hook: extract class and method from base_name (Class#method or Class.method)
-      if base_name.includes?("#")
-        parts = base_name.split("#", 2)
-        debug_hook_method_register(full_name, parts[0], parts[1])
-      elsif base_name.includes?(".")
-        parts = base_name.split(".", 2)
-        debug_hook_method_register(full_name, parts[0], parts[1])
+      parts = parse_method_name(base_name)
+      if parts.method
+        debug_hook_method_register(full_name, parts.owner, parts.method)
       else
         debug_hook_method_register(full_name, "", base_name)
       end
@@ -1612,7 +1626,7 @@ module Crystal::HIR
       if enum_name = @function_enum_return_names[function_name]?
         return enum_name
       end
-      base_name = function_name.split("$").first
+      base_name = strip_type_suffix(function_name)
       if enum_name = @function_enum_return_names[base_name]?
         return enum_name
       end
@@ -7515,16 +7529,6 @@ module Crystal::HIR
                 has_block = def_contains_yield?(member, @arena)
               end
               full_name = function_full_name_for_def(base_name, param_types, member.params, has_block)
-              if ENV.has_key?("DEBUG_MODULE_THREAD") && module_name.includes?("System::Thread")
-                STDERR.puts "[REG_MODULE_METHOD] #{module_name}.#{method_name} -> #{full_name}"
-              end
-              if debug_env_filter_match?("DEBUG_BYTEFORMAT_REGISTER", module_name, method_name, full_name)
-                file_path = if arena = @arena.as?(CrystalV2::Compiler::Frontend::VirtualArena)
-                              arena.file_for_id(expr_id)
-                            end
-                loc = "#{member.span.start_line}:#{member.span.start_column}"
-                STDERR.puts "[DEBUG_BYTEFORMAT_REGISTER] name=#{full_name} module=#{module_name} file=#{file_path || "unknown"} loc=#{loc}"
-              end
               register_function_type(full_name, return_type)
               @function_defs[full_name] = member
               @function_def_arenas[full_name] = @arena
@@ -27465,7 +27469,7 @@ module Crystal::HIR
       return if name.empty?
       is_math_min_debug = ENV["DEBUG_MATH_MIN"]? && name.includes?("Math") && (name.includes?("min") || name.includes?("max"))
       if is_math_min_debug
-        base = name.split("$").first
+        base = strip_type_suffix(name)
         has_def_name = @function_defs.has_key?(name)
         has_def_base = @function_defs.has_key?(base)
         overloads = function_def_overloads(base)
@@ -27473,7 +27477,7 @@ module Crystal::HIR
       end
       debug_byte_at = ENV["DEBUG_BYTE_AT"]? && name.includes?("byte_at?") && name.includes?("String")
       if debug_byte_at
-        base = name.split("$").first
+        base = strip_type_suffix(name)
         STDERR.puts "[LOWER_FUNC] name=#{name} base=#{base} state=#{function_state(name)} has_func=#{@module.has_function?(name)} has_def_full=#{@function_defs.has_key?(name)} has_def_base=#{@function_defs.has_key?(base)}"
       end
       debug_lookup_name = ENV["DEBUG_LOOKUP_NAME"]?
@@ -27516,11 +27520,7 @@ module Crystal::HIR
           @function_lowering_states[name] = FunctionLoweringState::Pending
           @pending_function_queue << name
           if ENV["DEBUG_PENDING_SOURCES"]?
-            base = if idx = name.index('$')
-                     name.byte_slice(0, idx)
-                   else
-                     name
-                   end
+            base = strip_type_suffix(name)
             stripped = strip_generic_receiver_from_method_name(base)
             @pending_source_counts[stripped] = (@pending_source_counts[stripped]? || 0) + 1
             if ENV["DEBUG_PENDING_SOURCES_SAMPLES"]?
@@ -27599,10 +27599,10 @@ module Crystal::HIR
         end
         # If still not found, try monomorphizing a generic owner and retry.
         unless func_def
-          if base_name.includes?("#") || base_name.includes?(".")
-            sep = base_name.includes?("#") ? "#" : "."
-            owner, method_part = base_name.split(sep, 2)
-            if info = generic_owner_info(owner)
+          if sep = name_parts.separator
+            owner = name_parts.owner
+            method_part = name_parts.method
+            if method_part && (info = generic_owner_info(owner))
               if !@monomorphized.includes?(info[:owner]) &&
                  concrete_type_args?(info[:args]) &&
                  !@suppress_monomorphization
@@ -27610,8 +27610,7 @@ module Crystal::HIR
               end
               resolved_base = "#{info[:owner]}#{sep}#{method_part}"
               resolved_candidate = resolved_base
-              if name.includes?("$")
-                suffix = name.split("$", 2)[1]
+              if (suffix = name_parts.suffix)
                 resolved_candidate = "#{resolved_base}$#{suffix}"
               end
               if resolved_def = @function_defs[resolved_candidate]?
@@ -27631,8 +27630,7 @@ module Crystal::HIR
                   arena = @function_def_arenas[template_base]
                   target_name = name
                   lookup_branch = "generic_owner_template"
-                elsif name.includes?("$")
-                  suffix = name.split("$", 2)[1]
+                elsif (suffix = name_parts.suffix)
                   template_mangled = "#{template_base}$#{suffix}"
                   if candidate = @function_defs[template_mangled]?
                     func_def = candidate
@@ -27655,8 +27653,7 @@ module Crystal::HIR
                 # Fallback: search the generic template's body for the method
                 unless func_def
                   if template = @generic_templates[info[:base]]?
-                    method_name_part = method_part.split("$").first
-                    found_in_template = find_method_in_generic_template(template, method_name_part)
+                    found_in_template = find_method_in_generic_template(template, method_part)
                     if found_in_template
                       func_def = found_in_template[0]
                       arena = found_in_template[1]
@@ -27667,7 +27664,7 @@ module Crystal::HIR
                     unless func_def
                       if reopenings = @generic_reopenings[info[:base]]?
                         reopenings.each do |reopen_template|
-                          found_in_reopen = find_method_in_generic_template(reopen_template, method_name_part)
+                          found_in_reopen = find_method_in_generic_template(reopen_template, method_part)
                           if found_in_reopen
                             func_def = found_in_reopen[0]
                             arena = found_in_reopen[1]
@@ -27844,9 +27841,10 @@ module Crystal::HIR
         # and let the deferred module lookup handle it - that code properly considers
         # parameter count to select the right overload.
         unless func_def || name.includes?("$")
-          if base_name.includes?("#")
-            owner, method = base_name.split("#", 2)
-            if included = @class_included_modules[owner]?
+          if name_parts.is_instance
+            owner = name_parts.owner
+            method = name_parts.method
+            if method && (included = @class_included_modules[owner]?)
               included.each do |module_name|
                 # Strip generic params: IO::Buffered(T) -> IO::Buffered
                 base_module = module_name.split('(').first
@@ -27879,10 +27877,11 @@ module Crystal::HIR
         # reopenings were registered (e.g., BinaryFormat reopened across multiple files)
         deferred_lookup_used = false
         unless func_def
-          if base_name.includes?("#")
-            owner, method_part = base_name.split("#", 2)
+          if name_parts.is_instance
+            owner = name_parts.owner
+            method_part = name_parts.method
             # Extract param signature from original name (includes $params)
-            original_method_part = name.includes?("#") ? name.split("#", 2).last : method_part
+            suffix = name_parts.suffix
             # Collect all included modules from owner and its parent classes
             # This handles cases like UInt64 which inherits Comparable from Number
             all_included = Set(String).new
@@ -27898,15 +27897,10 @@ module Crystal::HIR
               break unless parent
               current_class = parent
             end
-            if !all_included.empty?
+            if method_part && !all_included.empty?
               included = all_included
-              method_base = method_part.split("$").first
-              expected_param_count = if original_method_part.includes?("$")
-                                       suffix = original_method_part.split("$", 2).last
-                                       suffix == "block" ? 0 : suffix.split("_").size
-                                     else
-                                       0
-                                     end
+              method_base = method_part
+              expected_param_count = suffix ? suffix_param_count(suffix) : 0
               if expected_param_count == 0
                 if callsite = @pending_arg_types[name]? || @pending_arg_types[target_name]?
                   expected_param_count = callsite.types.size
@@ -27966,44 +27960,45 @@ module Crystal::HIR
 
         # DEFERRED MODULE LOOKUP (class methods): direct module/class method call (Module.method)
         unless func_def
-          if base_name.includes?(".")
-            owner, method_part = base_name.split(".", 2)
-            original_method_part = name.includes?(".") ? name.split(".", 2).last : method_part
-            method_base = method_part.split("$").first
+          if name_parts.is_class
+            owner = name_parts.owner
+            method_part = name_parts.method
+            method_base = method_part
             # Parse arg types from suffix for better overload selection
             parsed_call_arg_types : Array(TypeRef)? = nil
-            expected_param_count = if original_method_part.includes?("$")
-                                     suffix = original_method_part.split("$", 2).last
-                                     if suffix == "block"
-                                       0
-                                     else
-                                       parsed_call_arg_types = parse_types_from_suffix(suffix)
-                                       parsed_call_arg_types.size
-                                     end
-                                   else
-                                     0
-                                   end
-            if found = find_module_class_def(owner, method_base, expected_param_count, parsed_call_arg_types)
-              func_def = found[0]
-              arena = found[1]
-              target_name = base_name
-              deferred_lookup_used = true
-              lookup_branch = "deferred_module_class"
+            if method_part
+              if (suffix = name_parts.suffix)
+                if suffix == "block"
+                  expected_param_count = 0
+                else
+                  parsed_call_arg_types = parse_types_from_suffix(suffix)
+                  expected_param_count = parsed_call_arg_types.size
+                end
+              else
+                expected_param_count = 0
+              end
+              if found = find_module_class_def(owner, method_base, expected_param_count, parsed_call_arg_types)
+                func_def = found[0]
+                arena = found[1]
+                target_name = base_name
+                deferred_lookup_used = true
+                lookup_branch = "deferred_module_class"
+              end
             end
           end
         end
 
         # PRIMITIVE TEMPLATE FALLBACK: use Int/Float method bodies for primitive receivers.
         unless func_def
-          if base_name.includes?("#")
-            owner, method_part = base_name.split("#", 2)
-            if template_owner = primitive_template_owner(owner)
+          if name_parts.is_instance
+            owner = name_parts.owner
+            method_part = name_parts.method
+            if method_part && (template_owner = primitive_template_owner(owner))
               template_base = "#{template_owner}##{method_part}"
               if ENV["DEBUG_PRIMITIVE_TEMPLATE_LOOKUP"]? && name.includes?("Int32#**")
                 STDERR.puts "[PRIM_TEMPLATE] name=#{name} template=#{template_base}"
               end
-              if name.includes?("$")
-                suffix = name.split("$", 2)[1]
+              if (suffix = name_parts.suffix)
                 template_mangled = "#{template_base}$#{suffix}"
                 if ENV["DEBUG_PRIMITIVE_TEMPLATE_LOOKUP"]? && name.includes?("Int32#**")
                   has_mangled = @function_defs.has_key?(template_mangled)
@@ -28012,7 +28007,7 @@ module Crystal::HIR
                 if candidate = @function_defs[template_mangled]?
                   func_def = candidate
                   arena = @function_def_arenas[template_mangled]
-                  target_name = name.includes?("$") ? name : base_name
+                  target_name = name
                   primitive_template_map = primitive_template_type_map(template_owner, owner)
                   lookup_branch = "primitive_template_mangled"
                 else
@@ -28025,7 +28020,7 @@ module Crystal::HIR
                     if candidate = @function_defs[mapped_mangled]?
                       func_def = candidate
                       arena = @function_def_arenas[mapped_mangled]
-                      target_name = name.includes?("$") ? name : base_name
+                      target_name = name
                       primitive_template_map = primitive_template_type_map(template_owner, owner)
                       lookup_branch = "primitive_template_mapped"
                     end
@@ -28060,10 +28055,11 @@ module Crystal::HIR
 
         # OBJECT FALLBACK: use Object method bodies when classes omit explicit parents.
         unless func_def
-          if base_name.includes?("#")
-            owner, method_part = base_name.split("#", 2)
-            if owner != "Object"
-              method_short = method_part.split("$", 2).first
+          if name_parts.is_instance
+            owner = name_parts.owner
+            method_part = name_parts.method
+            if method_part && owner != "Object"
+              method_short = method_part
               use_object_target = method_short == "in?"
               object_base = "Object##{method_part}"
               if candidate = @function_defs[object_base]?
@@ -28071,8 +28067,7 @@ module Crystal::HIR
                 arena = @function_def_arenas[object_base]
                 target_name = use_object_target ? object_base : (name.includes?("$") ? name : base_name)
                 lookup_branch = "object_fallback"
-              elsif name.includes?("$")
-                suffix = name.split("$", 2)[1]
+              elsif (suffix = name_parts.suffix)
                 object_mangled = "#{object_base}$#{suffix}"
                 if candidate = @function_defs[object_mangled]?
                   func_def = candidate
@@ -28099,14 +28094,16 @@ module Crystal::HIR
 
       # PARENT FALLBACK (class methods): reuse parent class method defs for subclasses.
       unless func_def
-        if base_name.includes?(".")
-          owner, method_part = base_name.split(".", 2)
+        if name_parts.is_class
+          owner = name_parts.owner
+          method_part = name_parts.method
           visited_parents = Set(String).new
           parent = @class_info[owner]?.try(&.parent_name)
           while parent
             break if visited_parents.includes?(parent)
             visited_parents << parent
-            parent_base = "#{parent}.#{method_part}"
+            parent_base = method_part ? "#{parent}.#{method_part}" : nil
+            break unless parent_base
             if candidate = @function_defs[parent_base]?
               func_def = candidate
               arena = @function_def_arenas[parent_base]
@@ -28114,8 +28111,7 @@ module Crystal::HIR
               lookup_branch = "parent_class_fallback"
               store_function_namespace_override(name, base_name, parent)
               break
-            elsif name.includes?("$")
-              suffix = name.split("$", 2)[1]
+            elsif (suffix = name_parts.suffix)
               parent_mangled = "#{parent_base}$#{suffix}"
               if candidate = @function_defs[parent_mangled]?
                 func_def = candidate
@@ -28147,17 +28143,17 @@ module Crystal::HIR
 
       # PRIMITIVE TEMPLATE FALLBACK (class methods): reuse Int/Float class methods for numeric primitives.
       unless func_def
-        if base_name.includes?(".")
-          owner, method_part = base_name.split(".", 2)
-          if template_owner = primitive_template_owner(owner)
+        if name_parts.is_class
+          owner = name_parts.owner
+          method_part = name_parts.method
+          if method_part && (template_owner = primitive_template_owner(owner))
             template_base = "#{template_owner}.#{method_part}"
             if candidate = @function_defs[template_base]?
               func_def = candidate
               arena = @function_def_arenas[template_base]
               target_name = name
               lookup_branch = "primitive_class_fallback"
-            elsif name.includes?("$")
-              suffix = name.split("$", 2)[1]
+            elsif (suffix = name_parts.suffix)
               template_mangled = "#{template_base}$#{suffix}"
               if candidate = @function_defs[template_mangled]?
                 func_def = candidate
@@ -28185,17 +28181,17 @@ module Crystal::HIR
       # OBJECT FALLBACK (class methods): reuse Object's class methods for subclasses.
       # This ensures inherited class methods are lowered with the subclass context.
       unless func_def
-        if base_name.includes?(".")
-            owner, method_part = base_name.split(".", 2)
-            if owner != "Object" && @class_info.has_key?(owner)
+        if name_parts.is_class
+            owner = name_parts.owner
+            method_part = name_parts.method
+            if method_part && owner != "Object" && @class_info.has_key?(owner)
               object_base = "Object.#{method_part}"
               if candidate = @function_defs[object_base]?
                 func_def = candidate
                 arena = @function_def_arenas[object_base]
                 target_name = name
                 lookup_branch = "object_class_fallback"
-              elsif name.includes?("$")
-                suffix = name.split("$", 2)[1]
+              elsif (suffix = name_parts.suffix)
                 object_mangled = "#{object_base}$#{suffix}"
                 if candidate = @function_defs[object_mangled]?
                   func_def = candidate

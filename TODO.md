@@ -10,6 +10,9 @@ about syntax or types and should match what the original compiler would report.
 
 ## Current Status (2026-01-30)
 
+### In Progress
+- [ ] Replace method-name string `split` usage with zero-copy helpers (`parse_method_name`, `strip_type_suffix`) in HIR lowering hot paths. Updated `lower_function_if_needed_impl` + `register_function_type`; remaining `split` sites pending.
+
 ### Test Coverage
 - **3400+ tests**, 0 failures in `spec/hir/ast_to_hir_spec.cr` (2 pending)
 - **1390 test cases** ported from Crystal's original `parser_spec.cr`
