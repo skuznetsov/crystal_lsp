@@ -5504,8 +5504,14 @@ module Crystal::HIR
     private def module_type_ref?(type_ref : TypeRef) : Bool
       return false if type_ref == TypeRef::VOID
       if desc = @module.get_type_descriptor(type_ref)
-        return desc.kind == TypeKind::Module
+        return true if desc.kind == TypeKind::Module
+        # Some module-like types can be upgraded to Class in the descriptor,
+        # but should still be treated as module values for call resolution.
+        return module_like_type_name?(desc.name)
       end
+      # Fallback: if the descriptor is missing, try resolving the type name.
+      name = get_type_name_from_ref(type_ref)
+      return module_like_type_name?(name) unless name.empty?
       false
     end
 
@@ -30038,7 +30044,8 @@ module Crystal::HIR
         if ENV["DEBUG_DECODE_CALL"]? && method_name == "decode"
           recv_id = receiver_id ? receiver_id.to_s : "nil"
           recv_type = receiver_id ? get_type_name_from_ref(ctx.type_of(receiver_id)) : "nil"
-          STDERR.puts "[DECODE_CALL] obj=#{obj_node.class.name} recv_id=#{recv_id} recv_type=#{recv_type} class_name=#{class_name_str || "nil"} full=#{full_method_name || "nil"}"
+          recv_lit = receiver_id ? ctx.type_literal?(receiver_id) : false
+          STDERR.puts "[DECODE_CALL] obj=#{obj_node.class.name} recv_id=#{recv_id} recv_type=#{recv_type} lit=#{recv_lit} class_name=#{class_name_str || "nil"} full=#{full_method_name || "nil"}"
         end
       end
 
