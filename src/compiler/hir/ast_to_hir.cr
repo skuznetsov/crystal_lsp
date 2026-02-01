@@ -32059,8 +32059,12 @@ module Crystal::HIR
                 end
               end
             end
-          elsif type_desc.kind == TypeKind::Module
+          elsif type_desc.kind == TypeKind::Module || (type_desc.kind == TypeKind::Generic &&
+                 (module_like_type_name?(type_desc.name) || module_includers_match?(type_desc.name)))
             module_base = type_desc.name
+            if type_desc.kind == TypeKind::Generic
+              module_base = strip_generic_args(module_base)
+            end
             includers = @module_includers[module_base]?
             if includers.nil? || includers.empty?
               if matches = @module_includer_keys_by_suffix[module_base]?
@@ -32120,36 +32124,6 @@ module Crystal::HIR
                 candidate = mangle_function_name(module_base_name, arg_types, has_block_call)
                 lower_function_if_needed(candidate)
                 lower_function_if_needed(module_base_name) unless candidate == module_base_name
-              end
-            end
-          elsif type_desc.kind == TypeKind::Module || (type_desc.kind == TypeKind::Generic &&
-                 (module_like_type_name?(type_desc.name) || module_includers_match?(type_desc.name)))
-            module_name = type_desc.name
-            if type_desc.kind == TypeKind::Generic
-              module_name = strip_generic_args(module_name)
-            end
-            key = "module|#{module_name}|#{method_name}|#{arg_types.map(&.id).join(",")}|#{has_block_call ? 1 : 0}"
-            unless @virtual_targets_lowered.includes?(key)
-              @virtual_targets_lowered.add(key)
-              includers = @module_includers[module_name]? || begin
-                short_name = last_namespace_component(module_name)
-                @module_includers[short_name]?
-              end
-              if includers
-                owners = includers.to_a + collect_subclasses(includers.to_a)
-                owners.each do |owner|
-                  base_name = "#{owner}##{method_name}"
-                  if resolved = lookup_function_def_for_call(base_name, arg_types.size, has_block_call, arg_types, has_splat)
-                    resolved_name = resolved[0]
-                    lower_function_if_needed(resolved_name)
-                    resolved_base = strip_type_suffix(resolved_name)
-                    lower_function_if_needed(resolved_base) unless resolved_name == resolved_base
-                  else
-                    candidate = mangle_function_name(base_name, arg_types, has_block_call)
-                    lower_function_if_needed(candidate)
-                    lower_function_if_needed(base_name) unless candidate == base_name
-                  end
-                end
               end
             end
           end
