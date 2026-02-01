@@ -1128,6 +1128,14 @@ r2 = maybe(false)  # => nil
   - Update (2026-01-30): self-host mono callers (DEBUG_MONO_CALLER) show most monomorphization triggered during `AstToHir#initialize` (Hash/Array), plus `LSP::AstCache#read_node` and `Module#initialize` (log `/tmp/self_host_mono.log`). This suggests high compile-time specialization load from compiler internals.
 
 **Regressions (open):**
+- [ ] **Bootstrap regression (2026-01-31)**: `bootstrap_array` link fails with 10+ missing symbols after commit b135d46.
+  - Root cause: b135d46 changed inline_yield logic from `has_yield || def_accepts_block_param?` to `has_yield || has_block_call`.
+  - For stdlib methods like `Int#upto` that use `yield`, `def_contains_yield?` sometimes returns false (arena resolution issue?).
+  - Missing symbols include: `_upto$Int32`, `_Crystal$CCEventLoop$CCFileDescriptor$H*`, `_IO$CCByteFormat$Ddecode`, `_Time$CCTZLocation$CCZone$Hdst$Q`.
+  - Last working commit: 052b20b (verified via git bisect).
+  - Investigation shows yield detection works for some `upto` calls (`has_yield=true`) but not all.
+  - Fix attempt: restoring `def_accepts_block_param?` as fallback breaks 3 specs added in same commit.
+  - Next: investigate why `def_contains_yield?` fails for stdlib arena resolution; consider per-arena yield caching.
 - [ ] GH #10 (crystal_lsp): prelude build links for minimal `fib.cr`, but runtime segfault persists.
   - Repro (2026-01-xx): `./bin/crystal_v2 build --release --no-llvm-metadata /tmp/fib.cr -o /tmp/fib` succeeds; `/tmp/fib` exits 139.
   - `--no-prelude` path works: `/tmp/fib_no_prelude` prints `267914296` and exits 0.
