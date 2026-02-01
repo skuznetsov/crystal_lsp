@@ -35205,20 +35205,24 @@ module Crystal::HIR
 
     # Handle String.build { |io| ... } intrinsic
     # This creates a StringBuilder, passes it to the block, and returns the final string
+    private def block_param_name(block : CrystalV2::Compiler::Frontend::BlockNode, default : String) : String
+      if params = block.params
+        if first_param = params.first?
+          if pname = first_param.name
+            return String.new(pname)
+          end
+        end
+      end
+      default
+    end
+
     private def lower_string_build_intrinsic(
       ctx : LoweringContext,
       block : CrystalV2::Compiler::Frontend::BlockNode,
       capacity_id : ValueId?
     ) : ValueId
       # Extract block parameter name (typically "io")
-      io_name = "io"
-      if params = block.params
-        if first_param = params.first?
-          if pname = first_param.name
-            io_name = String.new(pname)
-          end
-        end
-      end
+      io_name = block_param_name(block, "io")
 
       builder_type = type_ref_for_name("String::Builder")
       capacity_value = capacity_id
@@ -35231,7 +35235,7 @@ module Crystal::HIR
 
       builder_ctor = mangle_function_name("String::Builder.new", [ctx.type_of(capacity_value)])
       remember_callsite_arg_types(builder_ctor, [ctx.type_of(capacity_value)])
-      lower_function_if_needed(builder_ctor)
+      lower_function_if_needed(builder_ctor) unless @function_lowering_states[builder_ctor]?.try(&.completed?)
 
       builder_call = Call.new(ctx.next_id, builder_type, nil, builder_ctor, [capacity_value])
       ctx.emit(builder_call)
@@ -35248,13 +35252,15 @@ module Crystal::HIR
 
       # Lower the block body
       # The block will contain operations like io << "text"
-      last_value = lower_body(ctx, block.body)
+      if body = block.body
+        lower_body(ctx, body) unless body.empty?
+      end
 
       ctx.pop_scope
 
       to_s_name = resolve_method_call(ctx, builder_call.id, "to_s", [] of TypeRef, false)
       remember_callsite_arg_types(to_s_name, [] of TypeRef)
-      lower_function_if_needed(to_s_name)
+      lower_function_if_needed(to_s_name) unless @function_lowering_states[to_s_name]?.try(&.completed?)
       to_s_call = Call.new(ctx.next_id, TypeRef::STRING, builder_call.id, to_s_name, [] of ValueId)
       ctx.emit(to_s_call)
       ctx.register_type(to_s_call.id, TypeRef::STRING)
