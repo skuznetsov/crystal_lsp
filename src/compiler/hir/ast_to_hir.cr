@@ -674,6 +674,11 @@ module Crystal::HIR
     @arena_for_def_cache : Hash(UInt64, CrystalV2::Compiler::Frontend::ArenaLike) = {} of UInt64 => CrystalV2::Compiler::Frontend::ArenaLike
     # Deduplicated set of unique arenas (by object_id) for resolve_arena_for_def candidates.
     @unique_def_arenas : Hash(UInt64, CrystalV2::Compiler::Frontend::ArenaLike) = {} of UInt64 => CrystalV2::Compiler::Frontend::ArenaLike
+    # Cached list of unique arenas to avoid per-call allocations.
+    @unique_def_arenas_list : Array(CrystalV2::Compiler::Frontend::ArenaLike) = [] of CrystalV2::Compiler::Frontend::ArenaLike
+    @unique_def_arenas_list_size : Int32 = 0
+    # Cache for max body index per DefNode to avoid repeated scans.
+    @def_body_max_index_cache : Hash(UInt64, Int32) = {} of UInt64 => Int32
 
     # Cache for yield_function_name_for: method_name → yield function name (or nil)
     @yield_name_cache : Hash(String, String?) = {} of String => String?
@@ -4208,48 +4213,80 @@ module Crystal::HIR
       result
     end
 
-    private def resolve_arena_for_def_uncached(
-      func_def : CrystalV2::Compiler::Frontend::DefNode,
-      fallback : CrystalV2::Compiler::Frontend::ArenaLike
-    ) : CrystalV2::Compiler::Frontend::ArenaLike
+    private def body_max_index_for_def(func_def : CrystalV2::Compiler::Frontend::DefNode) : Int32
+      key = func_def.object_id
+      if cached = @def_body_max_index_cache[key]?
+        return cached
+      end
       max_index = if body = func_def.body
                     body.empty? ? -1 : body.max_of(&.index)
                   else
                     -1
                   end
-      # Build deduplicated arena set lazily from @function_def_arenas
+      @def_body_max_index_cache[key] = max_index
+      max_index
+    end
+
+    private def refresh_unique_def_arenas! : Nil
       if @unique_def_arenas.size < @function_def_arenas.size
         @function_def_arenas.each_value do |arena|
           oid = arena.object_id
           @unique_def_arenas[oid] = arena unless @unique_def_arenas.has_key?(oid)
         end
       end
-      # Use deduplicated arena set instead of iterating all function_def_arenas
-      candidates = [] of CrystalV2::Compiler::Frontend::ArenaLike
-      @unique_def_arenas.each_value { |arena| candidates << arena }
-      if arenas = @inline_arenas
-        arenas.each { |arena| candidates << arena }
+      if @unique_def_arenas_list_size != @unique_def_arenas.size
+        @unique_def_arenas_list = [] of CrystalV2::Compiler::Frontend::ArenaLike
+        @unique_def_arenas.each_value { |arena| @unique_def_arenas_list << arena }
+        @unique_def_arenas_list_size = @unique_def_arenas_list.size
       end
-      candidates << fallback unless @unique_def_arenas.has_key?(fallback.object_id)
+    end
 
-      fallback_path = source_path_for(fallback)
-      if fallback_path
-        same_path = candidates.select do |arena|
-          path = source_path_for(arena)
-          path == fallback_path
-        end
-        candidates = same_path unless same_path.empty?
+    private def each_def_arena_candidate(
+      fallback : CrystalV2::Compiler::Frontend::ArenaLike,
+      &block : CrystalV2::Compiler::Frontend::ArenaLike -> Nil
+    ) : Nil
+      refresh_unique_def_arenas!
+      @unique_def_arenas_list.each { |arena| yield arena }
+      if arenas = @inline_arenas
+        arenas.each { |arena| yield arena }
       end
+      unless @unique_def_arenas.has_key?(fallback.object_id)
+        yield fallback
+      end
+    end
+
+    private def resolve_arena_for_def_uncached(
+      func_def : CrystalV2::Compiler::Frontend::DefNode,
+      fallback : CrystalV2::Compiler::Frontend::ArenaLike
+    ) : CrystalV2::Compiler::Frontend::ArenaLike
+      max_index = body_max_index_for_def(func_def)
+      fallback_path = source_path_for(fallback)
 
       best = nil
       best_size = Int32::MAX
-      candidates.each do |arena|
-        next if max_index >= 0 && max_index >= arena.size
-        next unless span_fits_source?(arena, func_def.span)
-        size = arena.size
-        if size < best_size
-          best = arena
-          best_size = size
+      if fallback_path
+        each_def_arena_candidate(fallback) do |arena|
+          next if max_index >= 0 && max_index >= arena.size
+          next unless span_fits_source?(arena, func_def.span)
+          path = source_path_for(arena)
+          next unless path == fallback_path
+          size = arena.size
+          if size < best_size
+            best = arena
+            best_size = size
+          end
+        end
+      end
+
+      unless best
+        each_def_arena_candidate(fallback) do |arena|
+          next if max_index >= 0 && max_index >= arena.size
+          next unless span_fits_source?(arena, func_def.span)
+          size = arena.size
+          if size < best_size
+            best = arena
+            best_size = size
+          end
         end
       end
 
@@ -4260,11 +4297,7 @@ module Crystal::HIR
       arena : CrystalV2::Compiler::Frontend::ArenaLike,
       func_def : CrystalV2::Compiler::Frontend::DefNode
     ) : Bool
-      max_index = if body = func_def.body
-                    body.empty? ? -1 : body.max_of(&.index)
-                  else
-                    -1
-                  end
+      max_index = body_max_index_for_def(func_def)
       return false if max_index >= 0 && max_index >= arena.size
       span_fits_source?(arena, func_def.span)
     end
@@ -4278,14 +4311,7 @@ module Crystal::HIR
       end
 
       max_index = block.body.empty? ? -1 : block.body.max_of(&.index)
-      candidates = [] of CrystalV2::Compiler::Frontend::ArenaLike
-      candidates << fallback
-      if arenas = @inline_arenas
-        arenas.each { |arena| candidates << arena }
-      end
-      @function_def_arenas.each_value { |arena| candidates << arena }
-
-      candidates.each do |arena|
+      each_def_arena_candidate(fallback) do |arena|
         next if max_index >= 0 && max_index >= arena.size
         next unless span_fits_source?(arena, block.span)
         @block_node_arenas[block.object_id] = arena
