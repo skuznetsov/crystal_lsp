@@ -45,7 +45,9 @@ about syntax or types and should match what the original compiler would report.
 - [x] LLVM union returns treat null as nil union (2026-01-xx)
 - [x] LLVM unsigned int → float casts use `uitofp` (and ptr→float uses `uitofp`) (2026-01-30)
 - [x] LLVM float → int in slot load/store respects unsigned types (`fptoui`) (2026-02-01)
+- [x] LLVM union payload float→int respects unsigned variants (`fptoui`) (2026-02-01)
 - [x] Ignore `crystal-v2` binary names in `.gitignore` (2026-02-01)
+- [x] Codegen audit: union payload loads/stores use align 4 (ARM64-safe) (2026-02-01)
 
 ### Pending (1 test)
 - 1 invalid ASM syntax test (intentionally pending)

@@ -3964,7 +3964,9 @@ module Crystal::MIR
               emit "%binop#{inst.id}.raw_ptrtoint = ptrtoint ptr #{raw_name} to #{payload_type}"
               payload_val = "%binop#{inst.id}.raw_ptrtoint"
             elsif payload_type.starts_with?("i") && (result_type == "float" || result_type == "double")
-              emit "%binop#{inst.id}.raw_ftoi = fptosi #{result_type} #{raw_name} to #{payload_type}"
+              unsigned_payload = unsigned_type_ref?(variant_type_ref)
+              op = unsigned_payload ? "fptoui" : "fptosi"
+              emit "%binop#{inst.id}.raw_ftoi = #{op} #{result_type} #{raw_name} to #{payload_type}"
               payload_val = "%binop#{inst.id}.raw_ftoi"
             elsif payload_type == "double" && result_type == "float"
               emit "%binop#{inst.id}.raw_fpext = fpext float #{raw_name} to double"
