@@ -1130,12 +1130,29 @@ r2 = maybe(false)  # => nil
 **Regressions (open):**
 - [ ] **Bootstrap regression (2026-01-31)**: `bootstrap_array` link fails with 10+ missing symbols after commit b135d46.
   - Root cause: b135d46 changed inline_yield logic from `has_yield || def_accepts_block_param?` to `has_yield || has_block_call`.
-  - For stdlib methods like `Int#upto` that use `yield`, `def_contains_yield?` sometimes returns false (arena resolution issue?).
   - Missing symbols include: `_upto$Int32`, `_Crystal$CCEventLoop$CCFileDescriptor$H*`, `_IO$CCByteFormat$Ddecode`, `_Time$CCTZLocation$CCZone$Hdst$Q`.
   - Last working commit: 052b20b (verified via git bisect).
-  - Investigation shows yield detection works for some `upto` calls (`has_yield=true`) but not all.
-  - Fix attempt: restoring `def_accepts_block_param?` as fallback breaks 3 specs added in same commit.
-  - Next: investigate why `def_contains_yield?` fails for stdlib arena resolution; consider per-arena yield caching.
+
+  **Deep investigation (2026-01-31):**
+  - The `_upto$Int32` symbol comes from `String#index$Char` calling `offset.upto(bytesize - 1) { ... }`.
+  - DEBUG_EMPTY_CLASS shows: `receiver_type.id=0` (VOID), `type_desc=nil`, `recv_value=Copy(src=2)` (needs re-verify on current head).
+  - **Real root cause**: parameter `offset` in `String#index$Char` has VOID type during lowering.
+  - This causes `class_name.empty?` → `base_method_name = "upto"` (no receiver prefix).
+  - The inline_yield decision point never finds the function because `base_method_name = "upto"` doesn't match `Int32#upto$...`.
+  - Fix attempt 1: Added `@yield_functions.includes?(yield_name)` check before `def_contains_yield?` - didn't help.
+  - Fix attempt 2: Added `def_accepts_block_param?` as fallback when yield/block_call detection fails - didn't help.
+  - Both fixes fail because the `lookup_block_function_def_for_call("upto", ...)` never finds the function (it needs "Int32#upto").
+
+  **Original Crystal approach (parser.cr):**
+  - Sets `@uses_block_arg = true` during parsing when block argument name is referenced.
+  - At call time: `yields_to_block = block && !match.def.uses_block_arg?`
+  - This is reliable because info is captured at parse time, not post-hoc analysis.
+
+  **Next steps:**
+  1. Fix parameter type tracking during function lowering - `offset : Int32` should have type Int32, not VOID.
+     - Use `DEBUG_PARAM_TYPES=String#index` to confirm param types during lowering.
+  2. Alternative: Add fallback in method resolution to infer receiver type from current scope context.
+  3. Long-term: Consider adding `uses_block_arg` to DefNode during parsing (matches original Crystal).
 - [ ] GH #10 (crystal_lsp): prelude build links for minimal `fib.cr`, but runtime segfault persists.
   - Repro (2026-01-xx): `./bin/crystal_v2 build --release --no-llvm-metadata /tmp/fib.cr -o /tmp/fib` succeeds; `/tmp/fib` exits 139.
   - `--no-prelude` path works: `/tmp/fib_no_prelude` prints `267914296` and exits 0.
