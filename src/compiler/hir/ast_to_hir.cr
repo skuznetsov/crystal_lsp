@@ -1760,7 +1760,7 @@ module Crystal::HIR
         if resolved = lookup_function_def_for_call(base_name, target.arg_types.size, target.has_block, target.arg_types, target.has_splat)
           resolved_name = resolved[0]
           lower_function_if_needed(resolved_name)
-          resolved_base = resolved_name.split("$", 2).first
+          resolved_base = strip_type_suffix(resolved_name)
           lower_function_if_needed(resolved_base) unless resolved_name == resolved_base
         else
           candidate = mangle_function_name(base_name, target.arg_types, target.has_block)
@@ -5833,7 +5833,7 @@ module Crystal::HIR
 
     private def function_returns_type_literal?(mangled_name : String, base_name : String) : Bool
       return true if @function_return_type_literals.includes?(mangled_name)
-      if mangled_base = mangled_name.split("$", 2)[0]?
+      if mangled_base = strip_type_suffix(mangled_name)
         return true if @function_return_type_literals.includes?(mangled_base)
       end
       @function_return_type_literals.includes?(base_name)
@@ -6753,7 +6753,7 @@ module Crystal::HIR
                 instance_method = "#{owner}##{member_name}"
                 if ret_type = @function_base_return_types[instance_method]?
                   if unresolved_generic_return_type?(ret_type)
-                    def_base = instance_method.split("$", 2).first
+                    def_base = strip_type_suffix(instance_method)
                     def_node = @function_defs[instance_method]? || @function_defs[def_base]?
                     if def_node
                       inferred = infer_return_type_from_callsite(def_node, owner, expr_node.args, expr_node.named_args, self_type_name)
@@ -6769,7 +6769,7 @@ module Crystal::HIR
                 if ret_type = @function_types[instance_method]?
                   if unresolved_generic_return_type?(ret_type)
                     def_name = instance_method
-                    def_base = instance_method.split("$", 2).first
+                    def_base = strip_type_suffix(instance_method)
                     def_node = @function_defs[def_name]? || @function_defs[def_base]?
                     if def_node
                       inferred = infer_return_type_from_callsite(def_node, owner, expr_node.args, expr_node.named_args, self_type_name)
@@ -6804,7 +6804,7 @@ module Crystal::HIR
             base = resolve_method_with_inheritance(self_type_name, method_name) || "#{self_type_name}##{method_name}"
             if ret_type = @function_base_return_types[base]?
               if unresolved_generic_return_type?(ret_type)
-                def_base = base.split("$", 2).first
+                def_base = strip_type_suffix(base)
                 def_node = @function_defs[base]? || @function_defs[def_base]?
                 if def_node
                   inferred = infer_return_type_from_callsite(def_node, self_type_name, expr_node.args, expr_node.named_args, self_type_name)
@@ -6819,7 +6819,7 @@ module Crystal::HIR
             end
             if ret_type = @function_types[base]?
               if unresolved_generic_return_type?(ret_type)
-                def_base = base.split("$", 2).first
+                def_base = strip_type_suffix(base)
                 def_node = @function_defs[base]? || @function_defs[def_base]?
                 if def_node
                   inferred = infer_return_type_from_callsite(def_node, self_type_name, expr_node.args, expr_node.named_args, self_type_name)
@@ -8607,7 +8607,7 @@ module Crystal::HIR
         @function_enum_return_names[full_name] = enum_return_name
         @function_enum_return_names[base_name] = enum_return_name
         if alias_full_name
-          alias_base = alias_full_name.split("$", 2).first
+          alias_base = strip_type_suffix(alias_full_name)
           @function_enum_return_names[alias_full_name] = enum_return_name
           @function_enum_return_names[alias_base] = enum_return_name
         end
@@ -8650,7 +8650,7 @@ module Crystal::HIR
         @function_defs[alias_full_name] = member
         @function_def_arenas[alias_full_name] = @arena
         unless @type_param_map.empty?
-          store_function_type_param_map(alias_full_name, alias_full_name.split("$", 2).first, @type_param_map)
+          store_function_type_param_map(alias_full_name, strip_type_suffix(alias_full_name), @type_param_map)
         end
       end
       if should_register_base_name?(full_name, base_name, member, has_block)
@@ -10675,7 +10675,7 @@ module Crystal::HIR
               @function_defs[alias_full_name] = member
               @function_def_arenas[alias_full_name] = member_arena
               unless @type_param_map.empty?
-                alias_base_name = alias_full_name.split("$", 2).first
+                alias_base_name = strip_type_suffix(alias_full_name)
                 store_function_type_param_map(alias_full_name, alias_base_name, @type_param_map)
               end
             end
@@ -12415,7 +12415,7 @@ module Crystal::HIR
       end
 
       if full_name_override && full_name_override.includes?("$")
-        suffix = full_name_override.split("$", 2)[1]
+        suffix = method_suffix(full_name_override)
         if ENV["DEBUG_FROM_IO_LOWER"]? && method_name == "from_io"
           STDERR.puts "[FROM_IO_LOWER] class=#{class_name} override=#{full_name_override} suffix=#{suffix || ""}"
         end
@@ -12455,7 +12455,7 @@ module Crystal::HIR
         call_types = call_arg_types || [] of TypeRef
         if (call_types.empty? || call_types.all? { |t| t == TypeRef::VOID }) &&
            full_name_override && full_name_override.includes?("$")
-          suffix = full_name_override.split("$", 2)[1]
+          suffix = method_suffix(full_name_override) || ""
           parsed_types = parse_types_from_suffix(suffix)
           unless parsed_types.empty?
             call_types = parsed_types
@@ -14715,7 +14715,7 @@ module Crystal::HIR
 
       function_type_keys_for_base(base_method_name).each do |name|
         next if name == base_method_name
-        suffix = name.split("$", 2)[1]? || ""
+        suffix = method_suffix(name) || ""
         next if suffix.empty?
         has_block_suffix = suffix.ends_with?("_block")
         next if has_block_call != has_block_suffix
@@ -15508,7 +15508,7 @@ module Crystal::HIR
       candidates = [] of String
       seen_defs = Set(UInt64).new
       @yield_functions.each do |name|
-        base = name.split("$").first
+        base = strip_type_suffix(name)
         next unless base.ends_with?(instance_suffix) || base.ends_with?(class_suffix)
         if receiver_base
           owner = if idx = base.rindex('#')
@@ -15992,7 +15992,7 @@ module Crystal::HIR
 
     private def yield_return_function_for_call(mangled_name : String, base_name : String) : Bool
       result = yield_return_function?(mangled_name) || yield_return_function?(base_name)
-      if mangled_base = mangled_name.split("$", 2)[0]?
+      if mangled_base = strip_type_suffix(mangled_name)
         result ||= yield_return_function?(mangled_base)
       end
       STDERR.puts "[YIELD_RETURN] call mangled=#{mangled_name} base=#{base_name} result=#{result}" if ENV["DEBUG_YIELD_RETURN"]?
@@ -16598,7 +16598,7 @@ module Crystal::HIR
 
     # Look up return type of a function by name
     private def get_function_return_type(name : String) : TypeRef
-      base_name = name.split("$", 2).first
+      base_name = strip_type_suffix(name)
       if debug_name = ENV["DEBUG_GET_RETURN"]?
         if name.includes?(debug_name) || base_name.includes?(debug_name)
           func_type = @function_types[name]?
@@ -16860,7 +16860,7 @@ module Crystal::HIR
       receiver_name = name[0, hash_idx]
       method_name = name[(hash_idx + 1)..]
       if method_name.includes?("$")
-        method_name = method_name.split("$", 2).first
+        method_name = strip_type_suffix(method_name)
       end
       return nil if method_name.empty?
       return nil unless class_info = @class_info[receiver_name]?
@@ -20395,10 +20395,10 @@ module Crystal::HIR
             next
           end
           # Skip incomplete names (must have class prefix with # or .)
-          base_name = name.split("$", 2).first
+          base_name = strip_type_suffix(name)
           next unless base_name.includes?("#") || base_name.includes?(".")
           # Skip functions with bare generic types (they need concrete instantiation)
-          base_name = name.split("$", 2).first
+          base_name = strip_type_suffix(name)
           has_double_splat_def = function_def_overloads(base_name).any? { |key| key.includes?("_double_splat") }
           has_bare_generic = args.types.any? do |t|
             if desc = @module.get_type_descriptor(t)
@@ -26492,12 +26492,12 @@ module Crystal::HIR
         sep = @current_method_is_class ? "." : "#"
         caller_name = "#{@current_class}#{sep}#{@current_method}"
         if ENV["DEBUG_YIELD_RETURN"]?
-          base_candidate = caller_name.split("$", 2)[0]
+          base_candidate = strip_type_suffix(caller_name)
           STDERR.puts "[YIELD_RETURN] caller=#{caller_name} has_func=#{@function_defs.has_key?(caller_name)} has_base=#{@function_defs.has_key?(base_candidate)} ctx=#{ctx.function.name}"
         end
         func_name = caller_name
       end
-      base_name = func_name.split("$", 2)[0]
+      base_name = strip_type_suffix(func_name)
 
       func_def = @function_defs[func_name]? || @function_defs[base_name]?
       return nil unless func_def
@@ -26887,7 +26887,7 @@ module Crystal::HIR
 
     private def base_callsite_key(name : String) : String
       return "" if name.empty?
-      base = name.split("$", 2)[0]
+      base = strip_type_suffix(name)
       base = base.sub(/_(double_)?splat$/, "")
       base
     end
@@ -26903,7 +26903,7 @@ module Crystal::HIR
           candidates << stripped if stripped != key
         end
 
-        base = key.split("$", 2)[0]
+        base = strip_type_suffix(key)
         candidates << base if base != key
         if base.ends_with?("_splat") || base.ends_with?("_double_splat")
           stripped_base = base.sub(/_(double_)?splat$/, "")
@@ -28219,13 +28219,13 @@ module Crystal::HIR
 
       if !func_def && !name.includes?("#") && !name.includes?(".")
         if current = @current_class
-          base = name.split("$", 2)[0]
+          base = strip_type_suffix(name)
           qualified_base = "#{current}##{base}"
           if candidate = @function_defs[qualified_base]?
             func_def = candidate
             arena = @function_def_arenas[qualified_base]?
             if name.includes?("$")
-              suffix = name.split("$", 2)[1]
+              suffix = method_suffix(name) || ""
               target_name = "#{qualified_base}$#{suffix}"
             else
               target_name = qualified_base
@@ -28335,7 +28335,7 @@ module Crystal::HIR
       end
       # Fallback: parse types from mangled name suffix when callsite_args is nil
       if call_arg_types.nil? && name.includes?("$")
-        suffix = name.split("$", 2)[1]
+        suffix = method_suffix(name)
         if suffix && !suffix.empty?
           parsed_types = parse_types_from_suffix(suffix)
           call_arg_types = parsed_types unless parsed_types.empty?
@@ -28371,7 +28371,7 @@ module Crystal::HIR
       call_arg_literals = callsite_args ? callsite_args.literals : nil
       call_arg_enum_names = callsite_args ? callsite_args.enum_names : nil
 
-      base_guard_name = name.split("$", 2)[0]
+      base_guard_name = strip_type_suffix(name)
       allow_untyped_base = base_guard_name.ends_with?("#initialize") || base_guard_name.ends_with?(".initialize")
       if !name.includes?("$") && def_params_untyped?(func_def) && !allow_untyped_base
         callsite_void = call_arg_types.nil? || call_arg_types.all? { |t| t == TypeRef::VOID }
@@ -28833,7 +28833,7 @@ module Crystal::HIR
     private def maybe_generate_class_accessor_for_name(name : String) : Bool
       entry = @class_accessor_entries[name]?
       unless entry
-        base_name = name.split("$", 2)[0]
+        base_name = strip_type_suffix(name)
         entry = @class_accessor_entries[base_name]?
       end
       return false unless entry
@@ -32009,7 +32009,7 @@ module Crystal::HIR
                 if resolved = lookup_function_def_for_call(base_name, arg_types.size, has_block_call, arg_types, has_splat)
                   resolved_name = resolved[0]
                   lower_function_if_needed(resolved_name)
-                  resolved_base = resolved_name.split("$", 2).first
+                  resolved_base = strip_type_suffix(resolved_name)
                   lower_function_if_needed(resolved_base) unless resolved_name == resolved_base
                 else
                   candidate = mangle_function_name(base_name, arg_types, has_block_call)
@@ -32045,7 +32045,7 @@ module Crystal::HIR
                     if resolved = lookup_function_def_for_call(base_name, arg_types.size, has_block_call, arg_types, has_splat)
                       resolved_name = resolved[0]
                       lower_function_if_needed(resolved_name)
-                      resolved_base = resolved_name.split("$", 2).first
+                      resolved_base = strip_type_suffix(resolved_name)
                       lower_function_if_needed(resolved_base) unless resolved_name == resolved_base
                     else
                       candidate = mangle_function_name(base_name, arg_types, has_block_call)
@@ -32100,7 +32100,7 @@ module Crystal::HIR
               if resolved = lookup_function_def_for_call(base_name, arg_types.size, has_block_call, arg_types, has_splat)
                 resolved_name = resolved[0]
                 lower_function_if_needed(resolved_name)
-                resolved_base = resolved_name.split("$", 2).first
+                resolved_base = strip_type_suffix(resolved_name)
                 lower_function_if_needed(resolved_base) unless resolved_name == resolved_base
               else
                 candidate = mangle_function_name(base_name, arg_types, has_block_call)
@@ -32111,7 +32111,7 @@ module Crystal::HIR
               if resolved = lookup_function_def_for_call(module_base_name, arg_types.size, has_block_call, arg_types, has_splat)
                 resolved_name = resolved[0]
                 lower_function_if_needed(resolved_name)
-                resolved_base = resolved_name.split("$", 2).first
+                resolved_base = strip_type_suffix(resolved_name)
                 lower_function_if_needed(resolved_base) unless resolved_name == resolved_base
               else
                 candidate = mangle_function_name(module_base_name, arg_types, has_block_call)
@@ -35046,7 +35046,7 @@ module Crystal::HIR
         end
         return inline_yield_fallback_call(ctx, inline_key, receiver_id, call_args, block, block_param_types)
       end
-      base_inline_name = inline_key.split("$", 2)[0]
+      base_inline_name = strip_type_suffix(inline_key)
       namespace_override = function_namespace_override_for(inline_key, base_inline_name)
       if receiver = receiver_name_from_method_name(base_inline_name)
         if unresolved_generic_receiver?(receiver)

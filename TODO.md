@@ -12,7 +12,7 @@ about syntax or types and should match what the original compiler would report.
 
 ### In Progress
 - [x] Replace method-name string `split` usage with zero-copy helpers (`parse_method_name`, `strip_type_suffix`) in HIR lowering hot paths (ast_to_hir).
-- [ ] Audit remaining `split("$")`/`split("#")` in other files (if any) to ensure method-name parsing uses helpers.
+- [x] Audit remaining `split("$")`/`split("#")` in other files (if any) to ensure method-name parsing uses helpers.
 
 ### Test Coverage
 - **3400+ tests**, 0 failures in `spec/hir/ast_to_hir_spec.cr` (2 pending)
@@ -52,6 +52,7 @@ about syntax or types and should match what the original compiler would report.
 - [x] LLVM union payload float→int respects unsigned variants (`fptoui`) (2026-02-01)
 - [x] Ignore `crystal-v2` binary names in `.gitignore` (2026-02-01)
 - [x] Codegen audit: union payload loads/stores use align 4 (ARM64-safe) (2026-02-01)
+- [x] Remove remaining method-name `split("$")` usage in HIR module/ast lowering (zero-copy suffix parsing) (2026-02-01)
 
 ### Pending (1 test)
 - 1 invalid ASM syntax test (intentionally pending)

@@ -1340,7 +1340,11 @@ module Crystal::HIR
       func = Function.new(id, name, return_type)
       @functions << func
       @functions_by_name[name] = func
-      base_name = name.split("$", 2).first
+      if dollar = name.index('$')
+        base_name = name.byte_slice(0, dollar)
+      else
+        base_name = name
+      end
       (@functions_by_base_name[base_name] ||= [] of Function) << func
       func
     end
