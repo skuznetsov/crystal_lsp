@@ -14610,9 +14610,9 @@ module Crystal::HIR
     private def resolve_untyped_overload(base_method_name : String, arg_count : Int32, has_block_call : Bool, call_has_named_args : Bool = false) : String?
       return nil if base_method_name.empty?
 
-      if base_method_name.includes?("#") || base_method_name.includes?(".")
-        sep = base_method_name.includes?("#") ? "#" : "."
-        owner, _method_part = base_method_name.split(sep, 2)
+      parts = parse_method_name(base_method_name)
+      if parts.method
+        owner = parts.owner
         if info = generic_owner_info(owner)
           if !@monomorphized.includes?(info[:owner]) && concrete_type_args?(info[:args]) && !@suppress_monomorphization
             monomorphize_generic_class(info[:base], info[:args], info[:owner])
@@ -17578,9 +17578,24 @@ module Crystal::HIR
             else
               namespace = nil
               if current_base.includes?("::") || @module_defs.has_key?(current_base)
-                namespace = current_base
+                nested = @nested_type_names[current_base]? || @nested_type_names[current]?
+                if nested && nested.includes?(name)
+                  namespace = current_base
+                else
+                  parent_namespace = current_base.includes?("::") ? current_base.rpartition("::")[0] : nil
+                  if parent_namespace && !parent_namespace.empty?
+                    if @module_defs.has_key?(parent_namespace) || @class_info.has_key?(parent_namespace) || @module.class_parents.has_key?(parent_namespace)
+                      namespace = parent_namespace
+                    else
+                      namespace = current_base
+                    end
+                  else
+                    namespace = current_base
+                  end
+                end
               end
-              # Prefer the current namespace for forward references in nested scopes.
+              # Prefer parent namespace for forward references when the current scope
+              # doesn't declare the nested type (avoids PollDescriptor::Waiters).
               result = "#{namespace}::#{name}" if namespace
             end
           end
@@ -27048,10 +27063,11 @@ module Crystal::HIR
       end
 
       owner = function_context_from_name(base_key)
-      sep = base_key.includes?("#") ? "#" : "."
-      method = base_key.split(sep, 2)[1]?
+      parts = parse_method_name(base_key)
+      method = parts.method
+      sep = parts.separator
 
-      if owner && method
+      if owner && method && sep
         current = owner
         visited = Set(String).new
         while true
@@ -27963,7 +27979,6 @@ module Crystal::HIR
           if name_parts.is_class
             owner = name_parts.owner
             method_part = name_parts.method
-            method_base = method_part
             # Parse arg types from suffix for better overload selection
             parsed_call_arg_types : Array(TypeRef)? = nil
             if method_part
@@ -27974,10 +27989,10 @@ module Crystal::HIR
                   parsed_call_arg_types = parse_types_from_suffix(suffix)
                   expected_param_count = parsed_call_arg_types.size
                 end
-              else
-                expected_param_count = 0
-              end
-              if found = find_module_class_def(owner, method_base, expected_param_count, parsed_call_arg_types)
+                else
+                  expected_param_count = 0
+                end
+              if found = find_module_class_def(owner, method_part, expected_param_count, parsed_call_arg_types)
                 func_def = found[0]
                 arena = found[1]
                 target_name = base_name
@@ -35190,10 +35205,10 @@ module Crystal::HIR
           end
         end
         parts = parse_method_name(base_inline_name)
-        if parts.method
+        if method_name = parts.method
           unless parts.owner.empty?
             @current_class = parts.owner
-            @current_method = parts.method unless parts.method.empty?
+            @current_method = method_name unless method_name.empty?
             @current_method_is_class = parts.is_class
           end
         end
