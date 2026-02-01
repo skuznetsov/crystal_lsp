@@ -32822,9 +32822,8 @@ module Crystal::HIR
       overload_keys = function_def_overloads(func_name)
       if overload_keys.empty?
         # Fall back to base name if call included a mangled suffix.
-        if (base = func_name.split('$', 2)[0]?) && base != func_name
-          overload_keys = function_def_overloads(base)
-        end
+        base = strip_type_suffix(func_name)
+        overload_keys = function_def_overloads(base) if base != func_name
       end
       if overload_keys.empty?
         stripped = strip_generic_receiver_from_method_name(func_name)
