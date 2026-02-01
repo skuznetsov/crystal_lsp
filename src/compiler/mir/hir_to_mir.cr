@@ -1227,16 +1227,22 @@ module Crystal
         end
 
         if call_func
-          # Coerce args if we have HIR info
-          final_args = if hir_call
+          expects_receiver = call_func.params.size == cand_args.size
+          coerced_args = cand_args
+          if hir_call
             recv_id = hir_call.receiver
-            hir_args_with_receiver = recv_id ? [recv_id] + hir_call.args : hir_call.args
-            coerce_call_args(dispatch_builder, cand_args, hir_args_with_receiver, call_func)
-          else
-            cand_args
+            if expects_receiver
+              hir_args_with_receiver = recv_id ? [recv_id] + hir_call.args : hir_call.args
+              coerced_args = coerce_call_args(dispatch_builder, cand_args, hir_args_with_receiver, call_func)
+            else
+              hir_args_no_receiver = hir_call.args
+              coerced_args = coerce_call_args(dispatch_builder, cand_args[1..], hir_args_no_receiver, call_func)
+            end
+          elsif !expects_receiver
+            coerced_args = cand_args[1..]
           end
 
-          call_val = dispatch_builder.call(call_func.id, final_args, dispatch_func.return_type)
+          call_val = dispatch_builder.call(call_func.id, coerced_args, dispatch_func.return_type)
           if phi && call_val != 0_u32
             phi.add_incoming(from: case_block, value: call_val)
           end
@@ -1449,7 +1455,7 @@ module Crystal
             seen.add(class_name)
             func_name = "#{class_name}##{method_suffix}"
             func = @mir_module.get_function(func_name) ||
-                   resolve_virtual_method_for_class(class_name, method_suffix, arg_count)
+                   resolve_virtual_method_for_class(class_name, method_suffix, arg_count, allow_module_method: true)
             next unless func
             next unless mir_type = @mir_module.type_registry.get_by_name(class_name)
             next if mir_type.is_value_type?
@@ -1530,7 +1536,8 @@ module Crystal
     private def resolve_virtual_method_for_class(
       class_name : String,
       method_suffix : String,
-      arg_count : Int32? = nil
+      arg_count : Int32? = nil,
+      allow_module_method : Bool = false
     ) : Function?
       current = class_name
       seen = Set(String).new
@@ -1538,6 +1545,11 @@ module Crystal
         seen.add(current)
         if func = @mir_module.get_function("#{current}##{method_suffix}")
           return func
+        end
+        if allow_module_method
+          if func = @mir_module.get_function("#{current}.#{method_suffix}")
+            return func
+          end
         end
         if arg_count
           base = method_suffix
@@ -1552,6 +1564,15 @@ module Crystal
             candidates << candidate
           end
           return candidates.first if candidates.size == 1
+          if allow_module_method
+            candidates = [] of Function
+            @mir_module.functions.each do |candidate|
+              next unless candidate.name.starts_with?("#{current}.#{base}")
+              next unless candidate.params.size == arg_count
+              candidates << candidate
+            end
+            return candidates.first if candidates.size == 1
+          end
         end
         parent = @hir_module.class_parents[current]?
         current = parent || ""

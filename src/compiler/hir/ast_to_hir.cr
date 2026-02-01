@@ -1649,7 +1649,9 @@ module Crystal::HIR
       end
       return false unless def_node
       return true if def_node.is_abstract
-      def_node.body.nil?
+      body = def_node.body
+      return true if body.nil?
+      body.empty?
     end
 
     private def class_has_subclasses?(class_name : String) : Bool
@@ -31900,6 +31902,69 @@ module Crystal::HIR
                 end
               end
             end
+          elsif type_desc.kind == TypeKind::Module
+            module_base = type_desc.name
+            includers = @module_includers[module_base]?
+            if includers.nil? || includers.empty?
+              if matches = @module_includer_keys_by_suffix[module_base]?
+                if matches.size == 1
+                  module_base = matches.first
+                  includers = @module_includers[module_base]?
+                end
+              end
+            end
+            if includers.nil? || includers.empty?
+              short_name = last_namespace_component(module_base)
+              if short_name != module_base
+                includers = @module_includers[short_name]?
+                if includers.nil? || includers.empty?
+                  if matches = @module_includer_keys_by_suffix[short_name]?
+                    if matches.size == 1
+                      module_base = matches.first
+                      includers = @module_includers[module_base]?
+                    end
+                  end
+                end
+              end
+            end
+            owners = includers ? includers.to_a : [] of String
+            if module_like_type_name?(module_base) && !owners.includes?(module_base)
+              owners << module_base
+            end
+            parent_keys = owners.dup
+            namespaced_module = module_base.includes?("::")
+            unless namespaced_module
+              owners.each do |owner|
+                short_owner = last_namespace_component(owner)
+                parent_keys << short_owner unless parent_keys.includes?(short_owner)
+              end
+            end
+            collect_subclasses(parent_keys).each { |entry| owners << entry }
+            owners.uniq!
+            owners.each do |owner|
+              base_name = "#{owner}##{method_name}"
+              if resolved = lookup_function_def_for_call(base_name, arg_types.size, has_block_call, arg_types, has_splat)
+                resolved_name = resolved[0]
+                lower_function_if_needed(resolved_name)
+                resolved_base = resolved_name.split("$", 2).first
+                lower_function_if_needed(resolved_base) unless resolved_name == resolved_base
+              else
+                candidate = mangle_function_name(base_name, arg_types, has_block_call)
+                lower_function_if_needed(candidate)
+                lower_function_if_needed(base_name) unless candidate == base_name
+              end
+              module_base_name = "#{owner}.#{method_name}"
+              if resolved = lookup_function_def_for_call(module_base_name, arg_types.size, has_block_call, arg_types, has_splat)
+                resolved_name = resolved[0]
+                lower_function_if_needed(resolved_name)
+                resolved_base = resolved_name.split("$", 2).first
+                lower_function_if_needed(resolved_base) unless resolved_name == resolved_base
+              else
+                candidate = mangle_function_name(module_base_name, arg_types, has_block_call)
+                lower_function_if_needed(candidate)
+                lower_function_if_needed(module_base_name) unless candidate == module_base_name
+              end
+            end
           end
         end
       end
@@ -32067,7 +32132,8 @@ module Crystal::HIR
       if debug_env_filter_match?("DEBUG_CALL_TRACE", method_name, base_method_name, mangled_method_name)
         STDERR.puts "[CALL_TRACE] stage=before_coerce method=#{method_name} mangled=#{mangled_method_name} args=#{args.size}"
       end
-      args = coerce_args_to_param_types(ctx, args, mangled_method_name)
+      coerced_args = coerce_args_to_param_types(ctx, args, mangled_method_name)
+      args = coerced_args
       if debug_env_filter_match?("DEBUG_CALL_TRACE", method_name, base_method_name, mangled_method_name)
         STDERR.puts "[CALL_TRACE] stage=after_coerce method=#{method_name} mangled=#{mangled_method_name} args=#{args.size}"
       end
