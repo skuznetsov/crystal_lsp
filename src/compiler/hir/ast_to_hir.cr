@@ -683,6 +683,9 @@ module Crystal::HIR
     @function_def_overloads_stripped_cache : Hash(String, Array(String)) = {} of String => Array(String)
     # Incremental index: stripped base → overload list (avoid full scan per lookup)
     @function_def_overloads_stripped_index : Hash(String, Array(String)) = {} of String => Array(String)
+    # Cache for function_def_overloads results by base_name (cleared on rebuild)
+    @function_def_overloads_cache : Hash(String, Array(String)) = {} of String => Array(String)
+    @function_def_overloads_cache_size : Int32 = 0
     # Cache parsed method name parts to avoid repeated scans in hot paths.
     @method_name_parts_cache : Hash(String, MethodNameParts) = {} of String => MethodNameParts
 
@@ -1066,6 +1069,10 @@ module Crystal::HIR
     @infer_type_cache : Hash(UInt64, {Int32, TypeRef})
     @infer_type_cache_version : Int32
     @infer_type_cache_scope : String?
+    # Optional debug counters for inference recursion guard hits.
+    @debug_infer_guard_enabled : Bool
+    @infer_guard_hits : Int32
+    @infer_guard_last_report : Time::Instant?
     # Optional lowering timing stack (only used when DEBUG_LOWER_METHOD_TIME is set).
     @lower_method_time_stack : Array(LowerMethodTiming)
     @lower_method_stats_stack : Array(LowerMethodStats)
@@ -1256,6 +1263,9 @@ module Crystal::HIR
       @infer_type_cache = {} of UInt64 => {Int32, TypeRef}
       @infer_type_cache_version = 0
       @infer_type_cache_scope = nil
+      @debug_infer_guard_enabled = ENV.has_key?("DEBUG_INFER_GUARD")
+      @infer_guard_hits = 0
+      @infer_guard_last_report = nil
       @lower_method_time_stack = [] of LowerMethodTiming
       @lower_method_stats_stack = [] of LowerMethodStats
       @union_descriptors = {} of MIR::TypeRef => MIR::UnionDescriptor
@@ -1267,6 +1277,8 @@ module Crystal::HIR
       @function_type_keys_by_base = {} of String => Array(String)
       @function_type_keys_by_base_size = 0
       @function_type_keys_processed = Set(String).new
+      @function_def_overloads_cache = {} of String => Array(String)
+      @function_def_overloads_cache_size = 0
       @yield_functions = Set(String).new
       @yield_return_functions = Set(String).new
       @yield_return_checked = Set(String).new
@@ -6047,6 +6059,9 @@ module Crystal::HIR
         end
       end
       if @infer_expr_stack.includes?(key)
+        if @debug_infer_guard_enabled
+          record_infer_guard_hit(expr_id)
+        end
         if stats && stats_start
           stats.infer_ms += (Time.instant - stats_start).total_milliseconds
           stats.infer_calls += 1
@@ -6069,6 +6084,19 @@ module Crystal::HIR
         @infer_expr_stack.delete(key)
         @arena = old_arena
       end
+    end
+
+    private def record_infer_guard_hit(expr_id : ExprId) : Nil
+      @infer_guard_hits += 1
+      now = Time.instant
+      last = @infer_guard_last_report
+      return if last && (now - last).total_seconds < 3.0 && (@infer_guard_hits % 200) != 0
+      @infer_guard_last_report = now
+      expr_node = @arena[expr_id]?
+      kind = expr_node ? last_namespace_component(expr_node.class.name) : "nil"
+      current = @current_class || "nil"
+      method = @current_method || "nil"
+      STDERR.puts "[INFER_GUARD] hits=#{@infer_guard_hits} expr=#{expr_id.index} kind=#{kind} current=#{current} method=#{method}"
     end
 
     private def infer_type_from_expr_inner(expr_id : ExprId, self_type_name : String?) : TypeRef?
@@ -14577,19 +14605,30 @@ module Crystal::HIR
     # Uses arity + block presence to avoid calling an unmangled base name.
     private def function_def_overloads(base_name : String) : Array(String)
       rebuild_function_def_overloads if @function_defs_cache_size != @function_defs.size
+      if @function_def_overloads_cache_size != @function_defs_cache_size
+        @function_def_overloads_cache.clear
+        @function_def_overloads_cache_size = @function_defs_cache_size
+      end
+      if cached = @function_def_overloads_cache[base_name]?
+        return cached
+      end
       if list = @function_def_overloads[base_name]?
+        @function_def_overloads_cache[base_name] = list
         return list
       end
 
       stripped = strip_generic_receiver_from_method_name(base_name)
       if stripped != base_name
         if cached = @function_def_overloads_stripped_cache[stripped]?
+          @function_def_overloads_cache[base_name] = cached
           return cached
         end
         if indexed = @function_def_overloads_stripped_index[stripped]?
+          @function_def_overloads_cache[base_name] = indexed
           return indexed
         end
         if list = @function_def_overloads[stripped]?
+          @function_def_overloads_cache[base_name] = list
           return list
         end
 
@@ -14602,13 +14641,18 @@ module Crystal::HIR
           end
         end
         if matches.empty?
-          return [] of String
+          empty = [] of String
+          @function_def_overloads_cache[base_name] = empty
+          return empty
         end
         @function_def_overloads_stripped_cache[stripped] = matches
+        @function_def_overloads_cache[base_name] = matches
         return matches
       end
 
-      [] of String
+      empty = [] of String
+      @function_def_overloads_cache[base_name] = empty
+      empty
     end
 
     private def rebuild_function_def_overloads
@@ -14661,6 +14705,8 @@ module Crystal::HIR
       @function_type_keys_by_base_size = @function_types.size
       @function_defs_cache_size = @function_defs.size
       @function_def_overloads_stripped_cache.clear
+      @function_def_overloads_cache.clear
+      @function_def_overloads_cache_size = @function_defs_cache_size
     end
 
     private def function_type_keys_for_base(base_name : String) : Array(String)
@@ -18487,6 +18533,7 @@ module Crystal::HIR
     end
 
     private def strip_generic_receiver_from_method_name(method_name : String) : String
+      return method_name unless method_name.includes?("(")
       if cached = @strip_generic_receiver_cache[method_name]?
         return cached
       end
@@ -18500,10 +18547,14 @@ module Crystal::HIR
       return method_name unless sep
 
       receiver = method_name[0, sep]
-      return method_name unless receiver.includes?("(")
+      paren = receiver.index('(')
+      return method_name unless paren
 
-      if info = split_generic_base_and_args(receiver)
-        return "#{info[:base]}#{method_name[sep..-1]}"
+      base = receiver.byte_slice(0, paren)
+      suffix = method_name.byte_slice(sep)
+      return String.build do |io|
+        io << base
+        io << suffix
       end
 
       method_name
