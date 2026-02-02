@@ -6107,6 +6107,42 @@ module Crystal::HIR
       end
     end
 
+    private def infer_return_type_from_body_without_callsite(
+      node : CrystalV2::Compiler::Frontend::DefNode,
+      self_type_name : String? = nil
+    ) : TypeRef?
+      old_locals = @current_typeof_locals
+      old_names = @current_typeof_local_names
+      old_infer_cache = @infer_type_cache
+      old_infer_cache_version = @infer_type_cache_version
+      old_infer_cache_scope = @infer_type_cache_scope
+      old_local_cache = @infer_local_type_cache
+      old_local_nil_cache = @infer_local_type_nil_cache
+      old_local_cache_scope = @infer_local_type_cache_scope
+      @current_typeof_locals = nil
+      @current_typeof_local_names = nil
+      # Prevent cached inference results from a different callsite
+      # from polluting return type inference.
+      @infer_type_cache = {} of UInt64 => {Int32, TypeRef}
+      @infer_local_type_cache = {} of {UInt64, String, String?} => {Int32, TypeRef}
+      @infer_local_type_nil_cache = Set({UInt64, String, String?}).new
+      @infer_type_cache_scope = nil
+      @infer_local_type_cache_scope = nil
+      @infer_type_cache_version += 1
+      begin
+        infer_concrete_return_type_from_body(node, self_type_name)
+      ensure
+        @current_typeof_locals = old_locals
+        @current_typeof_local_names = old_names
+        @infer_type_cache = old_infer_cache
+        @infer_local_type_cache = old_local_cache
+        @infer_local_type_nil_cache = old_local_nil_cache
+        @infer_type_cache_scope = old_infer_cache_scope
+        @infer_local_type_cache_scope = old_local_cache_scope
+        @infer_type_cache_version = old_infer_cache_version
+      end
+    end
+
     private def record_type_literal_return(full_name : String, base_name : String) : Nil
       return if full_name.empty? && base_name.empty?
       @function_return_type_literals.add(full_name) unless full_name.empty?
@@ -7230,6 +7266,11 @@ module Crystal::HIR
             name = get_type_name_from_ref(t)
             name.starts_with?("Int") || name.starts_with?("UInt")
           end
+          numeric_like = ->(t : TypeRef) do
+            return false if t == TypeRef::VOID
+            name = get_type_name_from_ref(t)
+            name.starts_with?("Int") || name.starts_with?("UInt") || name.starts_with?("Float")
+          end
           if op == "+" || op == "-"
             if pointer_like.call(left_type) && integer_like.call(right_type)
               return left_type
@@ -7237,6 +7278,12 @@ module Crystal::HIR
               return right_type
             elsif pointer_like.call(left_type) && pointer_like.call(right_type)
               return TypeRef::INT64
+            elsif op == "+" && (left_type == TypeRef::STRING || right_type == TypeRef::STRING)
+              return TypeRef::STRING
+            elsif numeric_like.call(left_type) && numeric_like.call(right_type)
+              if common = common_numeric_type([left_type, right_type])
+                return common
+              end
             end
           end
         end
@@ -7246,6 +7293,18 @@ module Crystal::HIR
         if types.any?
           if common = common_numeric_type(types)
             return common
+          end
+          if op == "+" || op == "-"
+            if left_type && left_type != TypeRef::VOID
+              name = get_type_name_from_ref(left_type)
+              return left_type if name.starts_with?("Int") || name.starts_with?("UInt") || name.starts_with?("Float")
+            end
+            if right_type && right_type != TypeRef::VOID
+              name = get_type_name_from_ref(right_type)
+              return right_type if name.starts_with?("Int") || name.starts_with?("UInt") || name.starts_with?("Float")
+            end
+            return TypeRef::STRING if op == "+" && (left_type == TypeRef::STRING || right_type == TypeRef::STRING)
+            return nil
           end
           return left_type if left_type && left_type != TypeRef::VOID
           return right_type if right_type && right_type != TypeRef::VOID
@@ -7275,6 +7334,15 @@ module Crystal::HIR
       when CrystalV2::Compiler::Frontend::TernaryNode
         true_type = infer_type_from_expr(expr_node.true_branch, self_type_name)
         false_type = infer_type_from_expr(expr_node.false_branch, self_type_name)
+        if debug_name = ENV["DEBUG_INFER_TERNARY"]?
+          if method_name = @current_method
+            if method_name.includes?(debug_name)
+              true_name = true_type ? get_type_name_from_ref(true_type) : "nil"
+              false_name = false_type ? get_type_name_from_ref(false_type) : "nil"
+              STDERR.puts "[INFER_TERNARY] method=#{method_name} true=#{true_name} false=#{false_name}"
+            end
+          end
+        end
         if true_type && true_type != TypeRef::VOID && false_type && false_type != TypeRef::VOID
           return union_type_for_values(true_type, false_type)
         end
@@ -14330,6 +14398,19 @@ module Crystal::HIR
       parts
     end
 
+    # Prefer an inferred union when it is a non-empty, concrete union that
+    # doesn't add variants compared to the current union.
+    private def prefer_inferred_union_type?(current_name : String, inferred_name : String) : Bool
+      return false if current_name == inferred_name
+      inferred_variants = split_union_type_name(inferred_name)
+      return false if inferred_variants.empty?
+      return false if inferred_variants.any? { |v| v == "Void" || v == "Unknown" }
+      current_variants = split_union_type_name(current_name)
+      return false if current_variants.empty?
+      # Prefer the inferred union when it is not broader than current.
+      inferred_variants.size <= current_variants.size
+    end
+
     private def resolve_union_method_call(type_name : String, method_name : String, arg_types : Array(TypeRef), has_block_call : Bool, call_has_named_args : Bool = false) : String?
       if ENV["DEBUG_ENUM_UNION_PREDICATE"]? && method_name.ends_with?("?")
         STDERR.puts "[RESOLVE_UNION] type_name=#{type_name} method=#{method_name} args=#{arg_types.size} block=#{has_block_call}"
@@ -17182,6 +17263,17 @@ module Crystal::HIR
       @function_types.has_key?(base_name) || has_function_base?(base_name)
     end
 
+    private def lookup_function_def_for_return(
+      name : String,
+      base_name : String
+    ) : CrystalV2::Compiler::Frontend::DefNode?
+      @function_defs[name]? || @function_defs[base_name]? || begin
+        stripped_name = strip_generic_receiver_from_method_name(name)
+        stripped_base = strip_generic_receiver_from_method_name(base_name)
+        @function_defs[stripped_name]? || @function_defs[stripped_base]?
+      end
+    end
+
     # Look up return type of a function by name
     private def get_function_return_type(name : String) : TypeRef
       base_name = strip_type_suffix(name)
@@ -17195,9 +17287,9 @@ module Crystal::HIR
       end
       existing_type = @function_types[name]?
       if existing_type == TypeRef::VOID || existing_type == TypeRef::NIL
-        if def_node = @function_defs[name]? || @function_defs[base_name]?
+        if def_node = lookup_function_def_for_return(name, base_name)
           owner_name = function_context_from_name(base_name)
-          if inferred = infer_concrete_return_type_from_body(def_node, owner_name)
+          if inferred = infer_return_type_from_body_without_callsite(def_node, owner_name)
             if inferred != TypeRef::VOID && inferred != TypeRef::NIL
               @function_types[name] = inferred
               @function_base_return_types[base_name] = inferred unless base_name.includes?("$")
@@ -17208,9 +17300,9 @@ module Crystal::HIR
       end
 
       if existing_type.nil?
-        if def_node = @function_defs[name]? || @function_defs[base_name]?
+        if def_node = lookup_function_def_for_return(name, base_name)
           owner_name = function_context_from_name(base_name)
-          if inferred = infer_concrete_return_type_from_body(def_node, owner_name)
+          if inferred = infer_return_type_from_body_without_callsite(def_node, owner_name)
             if inferred != TypeRef::VOID && inferred != TypeRef::NIL
               @function_types[name] = inferred
               @function_base_return_types[base_name] = inferred unless base_name.includes?("$")
@@ -17231,7 +17323,7 @@ module Crystal::HIR
             unionish = base_type_name.includes?("|")
           end
           if unionish
-            def_node = @function_defs[name]? || @function_defs[base_name]?
+            def_node = lookup_function_def_for_return(name, base_name)
             if def_node
               owner_name = nil.as(String?)
               if idx = base_name.rindex('#')
@@ -17239,12 +17331,18 @@ module Crystal::HIR
               elsif idx = base_name.rindex('.')
                 owner_name = base_name[0, idx]
               end
-              if inferred = infer_concrete_return_type_from_body(def_node, owner_name)
+              if inferred = infer_return_type_from_body_without_callsite(def_node, owner_name)
                 if inferred != TypeRef::VOID && inferred != TypeRef::NIL
                   inferred_desc = @module.get_type_descriptor(inferred)
                   if inferred_desc.nil? || inferred_desc.kind != TypeKind::Union
                     @function_types[base_name] = inferred
                     @function_base_return_types[base_name] = inferred unless base_name.includes?("$")
+                  elsif inferred_desc && inferred_desc.kind == TypeKind::Union
+                    current_union_name = base_desc ? base_desc.name : get_type_name_from_ref(base_type)
+                    if prefer_inferred_union_type?(current_union_name, inferred_desc.name)
+                      @function_types[base_name] = inferred
+                      @function_base_return_types[base_name] = inferred unless base_name.includes?("$")
+                    end
                   end
                 end
               end
@@ -17283,7 +17381,7 @@ module Crystal::HIR
           unionish = type_name.includes?("|")
         end
         if unionish
-          def_node = @function_defs[name]? || @function_defs[base_name]?
+          def_node = lookup_function_def_for_return(name, base_name)
           if def_node
             owner_name = nil.as(String?)
             if idx = base_name.rindex('#')
@@ -17291,20 +17389,27 @@ module Crystal::HIR
             elsif idx = base_name.rindex('.')
               owner_name = base_name[0, idx]
             end
-            if inferred = infer_concrete_return_type_from_body(def_node, owner_name)
+            if inferred = infer_return_type_from_body_without_callsite(def_node, owner_name)
               if inferred != TypeRef::VOID && inferred != TypeRef::NIL
                 inferred_desc = @module.get_type_descriptor(inferred)
                 if inferred_desc.nil? || inferred_desc.kind != TypeKind::Union
                   @function_types[name] = inferred
                   @function_base_return_types[base_name] = inferred unless base_name.includes?("$")
                   type = inferred
+                elsif inferred_desc && inferred_desc.kind == TypeKind::Union
+                  current_union_name = type_desc ? type_desc.name : get_type_name_from_ref(type)
+                  if prefer_inferred_union_type?(current_union_name, inferred_desc.name)
+                    @function_types[name] = inferred
+                    @function_base_return_types[base_name] = inferred unless base_name.includes?("$")
+                    type = inferred
+                  end
                 end
               end
             end
           end
         end
         if unresolved_generic_return_type?(type)
-          def_node = @function_defs[name]? || @function_defs[base_name]?
+          def_node = lookup_function_def_for_return(name, base_name)
           if def_node
             owner_name = nil.as(String?)
             if idx = base_name.rindex('#')
@@ -17312,7 +17417,7 @@ module Crystal::HIR
             elsif idx = base_name.rindex('.')
               owner_name = base_name[0, idx]
             end
-            if inferred = infer_concrete_return_type_from_body(def_node, owner_name)
+            if inferred = infer_return_type_from_body_without_callsite(def_node, owner_name)
               if inferred != TypeRef::VOID && inferred != TypeRef::NIL
                 @function_types[name] = inferred
                 @function_base_return_types[base_name] = inferred unless base_name.includes?("$")
@@ -17336,14 +17441,14 @@ module Crystal::HIR
         if cached = @function_base_return_types[base_name]?
           return cached
         end
-        if def_node = @function_defs[base_name]?
+        if def_node = lookup_function_def_for_return(base_name, base_name)
           owner_name = nil.as(String?)
           if idx = base_name.rindex('#')
             owner_name = base_name[0, idx]
           elsif idx = base_name.rindex('.')
             owner_name = base_name[0, idx]
           end
-          if inferred = infer_concrete_return_type_from_body(def_node, owner_name)
+          if inferred = infer_return_type_from_body_without_callsite(def_node, owner_name)
             if inferred != TypeRef::VOID && inferred != TypeRef::NIL
               @function_base_return_types[base_name] = inferred
               @function_types[base_name] = inferred
@@ -17364,14 +17469,14 @@ module Crystal::HIR
           if func = @module.function_by_name(name)
             return func.return_type unless func.return_type == TypeRef::VOID || func.return_type == TypeRef::NIL
           end
-          if def_node = @function_defs[name]?
+          if def_node = lookup_function_def_for_return(name, base_name)
             owner_name = nil.as(String?)
             if idx = name.rindex('#')
               owner_name = name[0, idx]
             elsif idx = name.rindex('.')
               owner_name = name[0, idx]
             end
-            if inferred = infer_concrete_return_type_from_body(def_node, owner_name)
+            if inferred = infer_return_type_from_body_without_callsite(def_node, owner_name)
               if inferred != TypeRef::VOID && inferred != TypeRef::NIL
                 @function_base_return_types[name] = inferred unless name.includes?("$")
                 @function_types[name] = inferred
@@ -31615,6 +31720,19 @@ module Crystal::HIR
       # Refine VOID arg types by tracing back to their source Call instructions
       # This handles cases where a call result is used before the called function is lowered
       arg_types = refine_void_args_from_source_calls(ctx, args, arg_types)
+      # If we still have VOID args, try to infer from the original AST call args
+      # (safe only when arg counts align and no named/splat reordering happened).
+      if arg_types.any? { |t| t == TypeRef::VOID } && call_args.size == args.size &&
+         node.named_args.nil? && !has_splat
+        inferred_from_ast = with_arena(call_arena) do
+          infer_arg_types_for_call(call_args, @current_class)
+        end
+        if inferred_from_ast.size == arg_types.size
+          arg_types = arg_types.map_with_index do |t, idx|
+            t == TypeRef::VOID ? inferred_from_ast[idx] : t
+          end
+        end
+      end
       arg_literals = args.map { |arg_id| ctx.type_literal?(arg_id) }
       callsite_arg_types = splat_packed ? prepack_arg_types.dup : arg_types
       callsite_arg_literals = splat_packed ? prepack_arg_literals.dup : arg_literals
@@ -32296,6 +32414,36 @@ module Crystal::HIR
       # Try to infer return type using mangled name first, fallback to base name
       # For non-overloaded functions, prefer base name since that's how they're registered in HIR module
       return_type = get_function_return_type(mangled_method_name)
+      begin
+        unionish = false
+        if return_type != TypeRef::VOID && return_type != TypeRef::NIL
+          if ret_desc = @module.get_type_descriptor(return_type)
+            unionish = ret_desc.kind == TypeKind::Union
+          else
+            unionish = get_type_name_from_ref(return_type).includes?("|")
+          end
+        end
+        if return_type == TypeRef::VOID || return_type == TypeRef::NIL || unionish
+          if def_node = lookup_function_def_for_return(mangled_method_name, base_method_name)
+            owner_name = function_context_from_name(base_method_name)
+            if inferred = infer_return_type_from_body_without_callsite(def_node, owner_name)
+              if inferred != TypeRef::VOID && inferred != TypeRef::NIL
+                inferred_desc = @module.get_type_descriptor(inferred)
+                if return_type == TypeRef::VOID || return_type == TypeRef::NIL
+                  return_type = inferred
+                elsif inferred_desc.nil? || inferred_desc.kind != TypeKind::Union
+                  return_type = inferred
+                else
+                  current_union_name = @module.get_type_descriptor(return_type).try(&.name) || get_type_name_from_ref(return_type)
+                  if prefer_inferred_union_type?(current_union_name, inferred_desc.name)
+                    return_type = inferred
+                  end
+                end
+              end
+            end
+          end
+        end
+      end
 
       # For Proc#call, extract return type from Proc type_params (last element is return type)
       if return_type == TypeRef::VOID && method_name == "call" && receiver_id
@@ -37146,6 +37294,18 @@ module Crystal::HIR
         # Everything else (classes like Hash, custom types): call [] method
         # Resolve the method name properly (with class name and mangling)
         arg_types = index_ids.map { |idx| ctx.type_of(idx) }
+        # If arg types are still VOID, try to infer from the index AST nodes
+        # to avoid selecting the Range overload when the index is Int32.
+        if arg_types.any? { |t| t == TypeRef::VOID }
+          inferred_types = node.indexes.map do |idx|
+            infer_type_from_expr(idx, @current_class) || TypeRef::VOID
+          end
+          if inferred_types.size == arg_types.size
+            arg_types = arg_types.map_with_index do |t, i|
+              t == TypeRef::VOID ? inferred_types[i] : t
+            end
+          end
+        end
         method_name = resolve_method_call(ctx, object_id, "[]", arg_types, false)
         # Ensure the target function is lowered (IndexNode bypasses lower_call).
         object_type = ctx.type_of(object_id)
