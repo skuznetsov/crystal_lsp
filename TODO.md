@@ -13,7 +13,7 @@ about syntax or types and should match what the original compiler would report.
 ### In Progress
 - [x] Replace method-name string `split` usage with zero-copy helpers (`parse_method_name`, `strip_type_suffix`) in HIR lowering hot paths (ast_to_hir).
 - [x] Audit remaining `split("$")`/`split("#")` in other files (if any) to ensure method-name parsing uses helpers.
-- [ ] Investigate `spec/hir/return_type_inference_spec.cr` timeout: after String.build and type-name cache work, hotspot shifted to `lower_binary → lower_member_access → generate_allocator/register_concrete_class` and `refresh_unique_def_arenas!` (see `/tmp/rt_infer_sample_arena_fast.txt`). Next: reduce monomorphize churn in `register_concrete_class` and avoid repeated `refresh_unique_def_arenas!` in hot loops.
+- [ ] Investigate `spec/hir/return_type_inference_spec.cr` timeout: resolved early arena scans; current samples show hot path in HIR lowering (`lower_if → lower_body → lower_expr`), with heavy block lookup/parse in `lookup_block_function_def_for_call` and `lower_method` (see `/tmp/rt_infer6.sample`, `/tmp/rt_infer8.sample`, `/tmp/rt_infer9.sample`). Next: reduce repeated lowering work (cache block lookup + avoid re-lowering identical blocks) and consider skipping heavy inlining on debug builds.
 - [ ] Audit remaining float/int conversion sites in LLVM backend (fptosi/fptoui, sitofp/uitofp, ptrtoint/uitofp) to ensure all unsigned + ptr→float paths are correct on ARM/AArch64.
 - [ ] Re-audit union payload alignment for ARM/AArch64 (align 4 where required) to catch any remaining misaligned loads/stores.
 
