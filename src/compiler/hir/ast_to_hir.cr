@@ -18968,6 +18968,9 @@ module Crystal::HIR
       begin
         node = @arena[block_id]
         if node.is_a?(CrystalV2::Compiler::Frontend::BlockNode)
+          if shorthand = infer_try_shorthand_block_return_type(node, param_types, self_type_name)
+            return shorthand
+          end
           if name = inline_block_return_type_name(node, param_types, self_type_name)
             return type_ref_for_name(name)
           end
@@ -18978,6 +18981,72 @@ module Crystal::HIR
         end
       ensure
         @arena = old_arena
+      end
+
+      nil
+    end
+
+    # Handle &.method shorthand blocks for try (block has no params, body is implicit receiver call).
+    private def infer_try_shorthand_block_return_type(
+      block : CrystalV2::Compiler::Frontend::BlockNode,
+      param_types : Array(TypeRef),
+      self_type_name : String?
+    ) : TypeRef?
+      return nil if param_types.empty?
+      # Only handle implicit shorthand (no explicit params).
+      params = block.params
+      param_name = nil.as(String?)
+      if params && !params.empty?
+        if first = params.first?
+          if pname = first.name
+            param_name = String.new(pname)
+          end
+        end
+      end
+
+      body = block.body
+      return nil if body.empty?
+      last_expr = body.last?
+      return nil unless last_expr
+      expr_node = node_for_expr(last_expr)
+      return nil unless expr_node
+
+      member_name : String? = nil
+      receiver_is_implicit = false
+
+      case expr_node
+      when CrystalV2::Compiler::Frontend::CallNode
+        callee = node_for_expr(expr_node.callee)
+        if callee.is_a?(CrystalV2::Compiler::Frontend::MemberAccessNode)
+          member_name = String.new(callee.member)
+          recv_node = node_for_expr(callee.object)
+          receiver_is_implicit = recv_node.is_a?(CrystalV2::Compiler::Frontend::ImplicitObjNode)
+          if !receiver_is_implicit && param_name && recv_node.is_a?(CrystalV2::Compiler::Frontend::IdentifierNode)
+            receiver_is_implicit = String.new(recv_node.name) == param_name
+          end
+        end
+      when CrystalV2::Compiler::Frontend::MemberAccessNode
+        member_name = String.new(expr_node.member)
+        recv_node = node_for_expr(expr_node.object)
+        receiver_is_implicit = recv_node.is_a?(CrystalV2::Compiler::Frontend::ImplicitObjNode)
+        if !receiver_is_implicit && param_name && recv_node.is_a?(CrystalV2::Compiler::Frontend::IdentifierNode)
+          receiver_is_implicit = String.new(recv_node.name) == param_name
+        end
+      end
+
+      return nil unless receiver_is_implicit && member_name
+
+      recv_type = param_types.first
+      return nil if recv_type == TypeRef::VOID
+      owner_name = get_type_name_from_ref(recv_type)
+      return nil if owner_name.empty? || owner_name == "Void" || owner_name == "Unknown"
+
+      base_name = resolve_method_with_inheritance(owner_name, member_name) || "#{owner_name}##{member_name}"
+      if ret = resolve_return_type_from_def(base_name, base_name, recv_type)
+        return ret if ret != TypeRef::VOID
+      end
+      if ret = get_function_return_type(base_name)
+        return ret if ret != TypeRef::VOID
       end
 
       nil
