@@ -31525,6 +31525,16 @@ module Crystal::HIR
         STDERR.puts "[CALL_TRACE] stage=after_arg_types method=#{method_name} arg_types=#{type_ids.join(",")}"
       end
 
+      # Refine class/module method resolution using concrete arg types once available.
+      if receiver_id.nil? && full_method_name
+        call_has_splat = call_args.any? { |arg_expr| call_arena[arg_expr].is_a?(CrystalV2::Compiler::Frontend::SplatNode) }
+        call_has_named_args = !!(node.named_args && !node.named_args.empty?)
+        has_block_call = !!block_expr || !!block_pass_expr
+        if entry = lookup_function_def_for_call(full_method_name, arg_types.size, has_block_call, arg_types, call_has_splat, call_has_named_args)
+          full_method_name = entry[0]
+        end
+      end
+
       # Compute mangled name based on base name + argument types
       # If no explicit receiver and we're inside a class, try class#method first
       if debug_env_filter_match?("DEBUG_BASE_METHOD", method_name, method_name, full_method_name || "")
