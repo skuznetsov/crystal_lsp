@@ -33880,8 +33880,8 @@ module Crystal::HIR
         end
       end
 
-      overload_keys : Array(String)? = nil
-      if func_name.includes?("#") || func_name.includes?(".")
+      overload_keys = function_def_overloads(func_name)
+      if overload_keys.empty? && (func_name.includes?("#") || func_name.includes?("."))
         parts = parse_method_name(func_name)
         if parts.separator && parts.method
           ensure_method_index_built
@@ -33893,8 +33893,6 @@ module Crystal::HIR
           end
         end
       end
-
-      overload_keys ||= function_def_overloads(func_name)
       if overload_keys.empty?
         # Fall back to base name if call included a mangled suffix.
         base = strip_type_suffix(func_name)
