@@ -14891,10 +14891,6 @@ module Crystal::HIR
     # Uses arity + block presence to avoid calling an unmangled base name.
     private def function_def_overloads(base_name : String) : Array(String)
       rebuild_function_def_overloads if @function_defs_cache_size != @function_defs.size
-      if @function_def_overloads_cache_size != @function_defs_cache_size
-        @function_def_overloads_cache.clear
-        @function_def_overloads_cache_size = @function_defs_cache_size
-      end
       if cached = @function_def_overloads_cache[base_name]?
         return cached
       end
@@ -14993,6 +14989,7 @@ module Crystal::HIR
         elsif key.includes?("_splat")
           @function_def_has_splat[base] = true
         end
+        @function_def_overloads_cache[base] = @function_def_overloads[base]
         stripped_base = strip_generic_receiver_from_method_name(base)
         stripped_list = @function_def_overloads_stripped_index[stripped_base]?
         if stripped_list
@@ -15006,6 +15003,10 @@ module Crystal::HIR
           elsif key.includes?("_splat")
             @function_def_has_splat[stripped_base] = true
           end
+        end
+        @function_def_overloads_cache[stripped_base] = @function_def_overloads_stripped_index[stripped_base]
+        if @function_def_overloads_stripped_cache.has_key?(stripped_base)
+          @function_def_overloads_stripped_cache[stripped_base] = @function_def_overloads_stripped_index[stripped_base]
         end
         @function_param_stats[key] = build_param_stats(def_node) unless @function_param_stats.has_key?(key)
       end
@@ -15032,8 +15033,6 @@ module Crystal::HIR
 
       @function_type_keys_by_base_size = @function_types.size
       @function_defs_cache_size = @function_defs.size
-      @function_def_overloads_stripped_cache.clear
-      @function_def_overloads_cache.clear
       @function_def_overloads_cache_size = @function_defs_cache_size
     end
 
