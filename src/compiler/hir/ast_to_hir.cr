@@ -534,6 +534,19 @@ module Crystal::HIR
       name
     end
 
+    @[AlwaysInline]
+    private def slice_eq?(slice : Slice(UInt8)?, name : String) : Bool
+      return false unless slice
+      return false unless slice.size == name.bytesize
+      i = 0
+      name_ptr = name.to_unsafe
+      while i < slice.size
+        return false if slice[i] != name_ptr[i]
+        i += 1
+      end
+      true
+    end
+
     # Platform-specific LibC type aliases (fallback for unevaluated macro conditionals)
     # On 64-bit systems (aarch64-darwin, x86_64-*):
     # Includes both LibC:: prefixed and bare names for direct use
@@ -1101,6 +1114,7 @@ module Crystal::HIR
     # Method resolution cache (per-lowering scope).
     @method_resolution_cache : Hash(String, String)
     @method_resolution_cache_scope : String?
+    @generic_split_cache : Hash(String, NamedTuple(base: String, args: String)?)
     # Method resolution cache for inheritance lookups (class_name + method).
     @method_inheritance_cache : Hash(String, String?)
     @class_method_inheritance_cache : Hash(String, String?)
@@ -1133,6 +1147,9 @@ module Crystal::HIR
     @infer_type_cache : Hash(UInt64, {Int32, TypeRef})
     @infer_type_cache_version : Int32
     @infer_type_cache_scope : String?
+    @infer_local_type_cache : Hash({UInt64, String, String?}, {Int32, TypeRef})
+    @infer_local_type_nil_cache : Set({UInt64, String, String?})
+    @infer_local_type_cache_scope : String?
     # Optional debug counters for inference recursion guard hits.
     @debug_infer_guard_enabled : Bool
     @infer_guard_hits : Int32
@@ -1328,6 +1345,9 @@ module Crystal::HIR
       @infer_type_cache = {} of UInt64 => {Int32, TypeRef}
       @infer_type_cache_version = 0
       @infer_type_cache_scope = nil
+      @infer_local_type_cache = {} of {UInt64, String, String?} => {Int32, TypeRef}
+      @infer_local_type_nil_cache = Set({UInt64, String, String?}).new
+      @infer_local_type_cache_scope = nil
       @debug_infer_guard_enabled = ENV.has_key?("DEBUG_INFER_GUARD")
       @infer_guard_hits = 0
       @infer_guard_last_report = nil
@@ -1367,6 +1387,7 @@ module Crystal::HIR
       @eager_monomorphization = ENV.has_key?("CRYSTAL_V2_EAGER_MONO")
       @method_resolution_cache = {} of String => String
       @method_resolution_cache_scope = nil
+      @generic_split_cache = {} of String => NamedTuple(base: String, args: String)?
       @method_inheritance_cache = {} of String => String?
       @class_method_inheritance_cache = {} of String => String?
       @method_inheritance_cache_function_size = 0
@@ -7399,6 +7420,26 @@ module Crystal::HIR
       self_type_name : String?,
       visited : Set(String)? = nil
     ) : TypeRef?
+      if @current_class && @current_method
+        scope = "#{@current_class}##{@current_method}"
+        if scope != @infer_local_type_cache_scope
+          @infer_local_type_cache.clear
+          @infer_local_type_nil_cache.clear
+          @infer_local_type_cache_scope = scope
+        end
+      elsif @infer_local_type_cache_scope
+        @infer_local_type_cache.clear
+        @infer_local_type_nil_cache.clear
+        @infer_local_type_cache_scope = nil
+      end
+
+      cache_key = {body.object_id.to_u64, name, self_type_name}
+      if cached = @infer_local_type_cache[cache_key]?
+        cached_version, cached_type = cached
+        return cached_type if cached_version == @infer_type_cache_version
+      end
+      return nil if @infer_local_type_nil_cache.includes?(cache_key)
+
       visited ||= Set(String).new
       return nil if visited.includes?(name)
       visited.add(name)
@@ -7407,7 +7448,13 @@ module Crystal::HIR
         collect_local_assignment_types(expr_id, name, self_type_name, types, body, visited)
       end
       visited.delete(name)
-      merge_return_types(types)
+      inferred = merge_return_types(types)
+      if inferred
+        @infer_local_type_cache[cache_key] = {@infer_type_cache_version, inferred}
+      else
+        @infer_local_type_nil_cache.add(cache_key)
+      end
+      inferred
     end
 
     private def collect_local_assignment_types(
@@ -7424,7 +7471,7 @@ module Crystal::HIR
       when CrystalV2::Compiler::Frontend::AssignNode
         target = node_for_expr(expr_node.target)
         if target.is_a?(CrystalV2::Compiler::Frontend::IdentifierNode) &&
-           String.new(target.name) == name
+           slice_eq?(target.name, name)
           if inferred = infer_type_from_expr(expr_node.value, self_type_name)
             output << inferred if inferred != TypeRef::VOID
           elsif value_node = node_for_expr(expr_node.value)
@@ -7438,7 +7485,7 @@ module Crystal::HIR
         end
         collect_local_assignment_types(expr_node.value, name, self_type_name, output, body, visited)
       when CrystalV2::Compiler::Frontend::TypeDeclarationNode
-        if String.new(expr_node.name) == name
+        if slice_eq?(expr_node.name, name)
           type_ref = type_ref_for_name(String.new(expr_node.declared_type))
           output << type_ref if type_ref != TypeRef::VOID
         end
@@ -14368,8 +14415,20 @@ module Crystal::HIR
       type_literal : Bool,
       has_block_call : Bool
     ) : String
-      arg_key = arg_types.map(&.id).join(",")
-      "#{receiver_type.id}|#{method_name}|#{arg_key}|#{type_literal ? 1 : 0}|#{has_block_call ? 1 : 0}"
+      String.build do |io|
+        io << receiver_type.id
+        io << '|'
+        io << method_name
+        io << '|'
+        arg_types.each_with_index do |t, idx|
+          io << ',' if idx > 0
+          io << t.id
+        end
+        io << '|'
+        io << (type_literal ? 1 : 0)
+        io << '|'
+        io << (has_block_call ? 1 : 0)
+      end
     end
 
     private def cache_method_resolution(cache_key : String?, resolved : String) : String
@@ -18319,7 +18378,13 @@ module Crystal::HIR
     # Split a full generic type name into base and args, handling nested parens in the base.
     # Example: "Foo(Bar, Baz)::Entry(Qux)" -> base="Foo(Bar, Baz)::Entry", args="Qux"
     private def split_generic_base_and_args(name : String) : NamedTuple(base: String, args: String)?
-      return nil unless name.ends_with?(")")
+      if cached = @generic_split_cache[name]?
+        return cached
+      end
+      unless name.ends_with?(")")
+        @generic_split_cache[name] = nil
+        return nil
+      end
 
       depth = 0
       i = name.bytesize - 1
@@ -18331,14 +18396,17 @@ module Crystal::HIR
         when '('
           depth -= 1
           if depth == 0
-            base = name[0, i]
-            args = name[i + 1, name.size - i - 2]
-            return {base: base, args: args}
+            base = name.byte_slice(0, i)
+            args = name.byte_slice(i + 1, name.size - i - 2)
+            result = {base: base, args: args}
+            @generic_split_cache[name] = result
+            return result
           end
         end
         i -= 1
       end
 
+      @generic_split_cache[name] = nil
       nil
     end
 
@@ -39489,17 +39557,43 @@ module Crystal::HIR
         end
       end
 
-      parts = cache_key.split("::")
-      parts.each_with_index do |part, idx|
-        next if idx == 0
-        base = strip_generic_args(part)
-        next if base.empty?
-        set = @type_cache_keys_by_component[base]? || begin
-          created = Set(String).new
-          @type_cache_keys_by_component[base] = created
-          created
+      # Avoid split allocations; walk namespace segments and index nested ones.
+      seg_start = 0
+      seg_index = 0
+      i = 0
+      bytesize = cache_key.bytesize
+      while i < bytesize
+        if cache_key.to_unsafe[i] == ':'.ord && i + 1 < bytesize && cache_key.to_unsafe[i + 1] == ':'.ord
+          if seg_index > 0
+            part = cache_key.byte_slice(seg_start, i - seg_start)
+            base = strip_generic_args(part)
+            unless base.empty?
+              set = @type_cache_keys_by_component[base]? || begin
+                created = Set(String).new
+                @type_cache_keys_by_component[base] = created
+                created
+              end
+              set << cache_key
+            end
+          end
+          seg_index += 1
+          i += 2
+          seg_start = i
+          next
         end
-        set << cache_key
+        i += 1
+      end
+      if seg_index > 0 && seg_start < bytesize
+        part = cache_key.byte_slice(seg_start, bytesize - seg_start)
+        base = strip_generic_args(part)
+        unless base.empty?
+          set = @type_cache_keys_by_component[base]? || begin
+            created = Set(String).new
+            @type_cache_keys_by_component[base] = created
+            created
+          end
+          set << cache_key
+        end
       end
     end
 
@@ -39792,6 +39886,14 @@ module Crystal::HIR
         name.split("|").map(&.strip).join(" | ")
       else
         name
+      end
+
+      # Normalize generic spacing to avoid cache misses like "Hash(String,Int32)" vs "Hash(String, Int32)"
+      if info = split_generic_base_and_args(normalized_name)
+        arg_names = split_generic_type_args(info[:args]).map do |arg|
+          normalize_tuple_literal_type_name(arg.strip)
+        end
+        normalized_name = "#{info[:base]}(#{arg_names.join(", ")})"
       end
 
       # "_" is a wildcard type in Crystal (untyped parameter).
