@@ -28527,8 +28527,15 @@ module Crystal::HIR
         if base_name != name
           # When name has a $ suffix (e.g., clamp$Nil_Int32), don't blindly use base_name lookup
           # as it may return the wrong overload. Let the more sophisticated overload matching handle it.
-          # Only use base_name fallback for names without mangled suffixes.
-          unless name.includes?("$")
+          # Allow base_name fallback for block-suffixed calls (e.g., try$block) because defs
+          # are usually registered at the base name.
+          allow_base_fallback = !name.includes?("$")
+          if !allow_base_fallback
+            if suffix = name_parts.suffix
+              allow_base_fallback = suffix == "block" || suffix.ends_with?("_block")
+            end
+          end
+          if allow_base_fallback
             func_def = @function_defs[base_name]?
             arena = @function_def_arenas[base_name]? if func_def
             target_name = base_name if func_def
