@@ -30918,6 +30918,7 @@ module Crystal::HIR
           receiver_type = ctx.type_of(receiver_id)
           if receiver_type == TypeRef::VOID
             if obj_node.is_a?(CrystalV2::Compiler::Frontend::SelfNode) ||
+               obj_node.is_a?(CrystalV2::Compiler::Frontend::ImplicitObjNode) ||
                (obj_node.is_a?(CrystalV2::Compiler::Frontend::IdentifierNode) && String.new(obj_node.name) == "self")
               if current = @current_class
                 resolved_current = resolve_type_alias_chain(substitute_type_params_in_type_name(current))
