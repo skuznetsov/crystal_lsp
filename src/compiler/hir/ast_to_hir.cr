@@ -30860,6 +30860,15 @@ module Crystal::HIR
             full_method_name = resolve_class_method_with_inheritance(class_name_str, method_name) || "#{class_name_str}.#{method_name}"
             static_class_name = method_owner(full_method_name)
           end
+          if full_method_name
+            call_has_splat = call_args.any? { |arg_expr| call_arena[arg_expr].is_a?(CrystalV2::Compiler::Frontend::SplatNode) }
+            call_has_named_args = !!(node.named_args && !node.named_args.empty?)
+            has_block_call = !!block_expr || !!block_pass_expr
+            call_arg_types = infer_arg_types_for_call(call_args, @current_class)
+            if entry = lookup_function_def_for_call(full_method_name, call_arg_types.size, has_block_call, call_arg_types, call_has_splat, call_has_named_args)
+              full_method_name = entry[0]
+            end
+          end
           receiver_id = nil  # Static call, no receiver
           if method_name == "new"
             if class_info = @class_info[class_name_str]?
