@@ -25,6 +25,7 @@ about syntax or types and should match what the original compiler would report.
 - [x] Refactor `type_inference_engine.cr` union parsing: replace `split(" | ")` with zero‑copy scanning to respect no‑GC/zero‑copy policy. (2026-02-02)
 - [ ] Bootstrap blocker: missing symbols logged as `reason=unlowered` (e.g., `String#each$block`, `Object#try$block`, `Crystal::System.print_error$splat`, `Array(String)#push`, `Pointer(Int32)#copy_from`). Trace in `/private/tmp/bootstrap_array_full.missing_trace.log`. Investigate `lower_function_if_needed` skip paths, block mangling (`$block`), and callsite arg type inference for block methods; ensure pending queue flush lowers these defs.
   - Update (2026-02-02): allow base-name fallback for `$block`/`*_block` suffixes in `lower_function_if_needed_impl` to resolve block-only defs (commit pending).
+  - Update (2026-02-02): new trace from debug hooks `/private/tmp/bootstrap_array_full_dbg.missing_trace.log` still shows missing symbols; top offenders include `String::Grapheme.put$Array_splat`, `String.build$Int32_block`, `String.new$Int32_block`, `Object#try$block`, `Nil#try$block`, `Crystal::Hasher#permute$UInt64`, `Int32#hash$Crystal::Hasher`.
 - [ ] Check macro expansion depth for nested macros (record/def generators). Consider multi-pass macro expansion (bounded loop) so record-generated getters are lowered into real DefNodes (avoid missing `_String__ToUnsignedInfo_*`).
 - [ ] Add enum literal fast-path in HIR lowering for `.to_i` / `.value` on enum members (e.g., `DayOfWeek::Wednesday.to_i`), emitting const instead of missing call.
 - [ ] Ensure block wrapper emission for `each`/block calls: emit concrete block functions and propagate block arg type from callee signature to avoid missing `_block_each_block`.
@@ -36,6 +37,7 @@ about syntax or types and should match what the original compiler would report.
     `LibC::SizeT.zero`, `Pointer(UInt8)#@nanoseconds`, `Pointer(UInt8)#@seconds`, `Pointer(UInt8)#offset`,
     `SlicePointer(UInt8) | Int32#size`, `hash$$Crystal::Hasher`, `try$block`.
     Log: `/private/tmp/bootstrap_array_full.link.log`.
+  - Update (2026-02-02): included-module lookup now merges base owner for generic receivers (e.g., `Array(Range...)` → `Array`) and strips generic params via `strip_generic_args` instead of `split('(')`. Retest for `_Array$...#begin/end`, `Enumerable#index`, `Indexable#size`.
 - [ ] Implicit self calls: set receiver type when callee is `ImplicitObjNode` so bare method calls don't resolve to unqualified names (attempted build of `/tmp/implicit_self_test.cr` timed out at 120s; needs verification).
 - [ ] Class-method `self` should be type-literal: `emit_self` now assigns class type and marks type literal when `@current_method_is_class` (compile still times out with sig budget; needs verification).
 - [ ] `String::Grapheme.put$Array_splat`: now confirmed `function.lower.start/done` fires, yet still appears in `missing.symbol` trace. Verify whether it is actually emitted into module (check linker undefined list), and adjust missing-trace logic or lowering order if it is only transient.

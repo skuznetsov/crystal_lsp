@@ -5074,7 +5074,7 @@ module Crystal::HIR
       return offset unless module_full_name
       # Prefer nested modules under the including class (e.g., Crystal::EventLoop::FileDescriptor).
       if !module_full_name.includes?("::")
-        base_owner = class_name.split('(').first
+        base_owner = strip_generic_args(class_name)
         nested_name = "#{base_owner}::#{module_full_name}"
         module_full_name = nested_name if @module_defs.has_key?(nested_name)
       end
@@ -5399,7 +5399,7 @@ module Crystal::HIR
       return unless module_full_name
       # Prefer nested modules under the extending class.
       if !module_full_name.includes?("::")
-        base_owner = class_name.split('(').first
+        base_owner = strip_generic_args(class_name)
         nested_name = "#{base_owner}::#{module_full_name}"
         module_full_name = nested_name if @module_defs.has_key?(nested_name)
       end
@@ -5509,7 +5509,7 @@ module Crystal::HIR
       return unless module_full_name
       # Prefer nested modules under the including class.
       if !module_full_name.includes?("::")
-        base_owner = class_name.split('(').first
+        base_owner = strip_generic_args(class_name)
         nested_name = "#{base_owner}::#{module_full_name}"
         module_full_name = nested_name if @module_defs.has_key?(nested_name)
       end
@@ -5698,7 +5698,7 @@ module Crystal::HIR
       module_full_name = resolve_path_like_name(extend_target)
       return unless module_full_name
       if !module_full_name.includes?("::")
-        base_owner = class_name.split('(').first
+        base_owner = strip_generic_args(class_name)
         nested_name = "#{base_owner}::#{module_full_name}"
         module_full_name = nested_name if @module_defs.has_key?(nested_name)
       end
@@ -7036,7 +7036,7 @@ module Crystal::HIR
                 end
               end
               # Strip generic args for base lookup: Array(UInt64) -> Array
-              base_recv = recv_name.split('(').first
+              base_recv = strip_generic_args(recv_name)
               # Try exact type first, then base type
               [recv_name, base_recv].each do |owner|
                 next if owner.empty?
@@ -19821,7 +19821,7 @@ module Crystal::HIR
         if included = @class_included_modules[current]?
           included.each do |module_name|
             # Strip generic params for module lookup (Indexable(T) -> Indexable)
-            base_module = module_name.split('(').first
+            base_module = strip_generic_args(module_name)
             module_method = "#{base_module}##{method_name}"
             if @function_types.has_key?(module_method) || has_function_base?(module_method)
               # Return with class prefix so it gets lowered for this class
@@ -24457,7 +24457,7 @@ module Crystal::HIR
         included = @class_included_modules[class_lookup]? || @class_included_modules[class_base]?
         if included
           included.to_a.sort.each do |module_name|
-            module_base = resolve_module_alias_for_include(module_name).split('(').first
+            module_base = strip_generic_args(resolve_module_alias_for_include(module_name))
             visited = Set(String).new
             if found = find_module_def_recursive(module_base, method_name, args.size, visited)
               actual_func_def = found[0]
@@ -28820,10 +28820,20 @@ module Crystal::HIR
           if name_parts.is_instance
             owner = name_parts.owner
             method = name_parts.method
-            if method && (included = @class_included_modules[owner]?)
-              included.each do |module_name|
-                # Strip generic params: IO::Buffered(T) -> IO::Buffered
-                base_module = module_name.split('(').first
+              if method
+                owner_base = strip_generic_args(owner)
+                included = Set(String).new
+                if direct = @class_included_modules[owner]?
+                  direct.each { |m| included << m }
+                end
+                if owner_base != owner
+                  if base = @class_included_modules[owner_base]?
+                    base.each { |m| included << m }
+                  end
+                end
+                included.each do |module_name|
+                  # Strip generic params: IO::Buffered(T) -> IO::Buffered
+                  base_module = strip_generic_args(module_name)
                 module_method = "#{base_module}##{method}"
                 if mod_func_def = @function_defs[module_method]?
                   func_def = mod_func_def
@@ -28868,6 +28878,12 @@ module Crystal::HIR
               if modules = @class_included_modules[current_class]?
                 modules.each { |m| all_included << m }
               end
+              current_base = strip_generic_args(current_class)
+              if current_base != current_class
+                if modules = @class_included_modules[current_base]?
+                  modules.each { |m| all_included << m }
+                end
+              end
               # Get parent class
               parent = @class_info[current_class]?.try(&.parent_name) || @module.class_parents[current_class]?
               break unless parent
@@ -28883,7 +28899,7 @@ module Crystal::HIR
                 end
               end
               included.each do |module_name|
-                base_module = module_name.split('(').first
+                base_module = strip_generic_args(module_name)
                 visited = Set(String).new
                 if found = find_module_def_recursive(base_module, method_base, expected_param_count, visited)
                   func_def = found[0]
@@ -30219,7 +30235,7 @@ module Crystal::HIR
                 # If not found in function_types, try to find in module def AST
                 # This handles instance methods (def foo) that aren't pre-registered
                 unless included_method_found
-                  base_module = mod_name.split('(').first
+                  base_module = strip_generic_args(mod_name)
                   visited = Set(String).new
                   if found = find_module_def_recursive(base_module, method_name, 0, visited)
                     if ENV.has_key?("DEBUG_INCLUDED") && method_name == "byte_range"
