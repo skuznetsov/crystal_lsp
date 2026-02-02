@@ -18512,7 +18512,15 @@ module Crystal::HIR
       if name == "self" && (current = @current_class)
         return current
       end
-      if substitution = @type_param_map[name]?
+      type_param_map = @type_param_map
+      if type_param_map.empty?
+        if current = @current_class
+          if info = generic_owner_info(current)
+            type_param_map = info[:map]
+          end
+        end
+      end
+      if substitution = type_param_map[name]?
         return substitution
       end
       if local_name = @current_typeof_local_names.try(&.[name]?)
@@ -18524,7 +18532,7 @@ module Crystal::HIR
         if idx = name.index("::")
           prefix = name[0, idx]
           suffix = name[(idx + 2)..]
-          if substitution = @type_param_map[prefix]?
+          if substitution = type_param_map[prefix]?
             # Recursively substitute the suffix in case it also contains type params
             return "#{substitution}::#{substitute_type_params_in_type_name(suffix)}"
           end
@@ -18532,7 +18540,7 @@ module Crystal::HIR
         # Also check if the suffix after the last :: is a type param
         if idx = name.rindex("::")
           suffix = name[(idx + 2)..]
-          if substitution = @type_param_map[suffix]?
+          if substitution = type_param_map[suffix]?
             return substitution
           end
         end
