@@ -14982,6 +14982,23 @@ module Crystal::HIR
         return stats
       end
       stats = build_param_stats(def_node)
+      # Treat implicit-yield methods as block-accepting even without explicit &block.
+      unless stats.has_block
+        arena = @function_def_arenas[name]? || resolve_arena_for_def(def_node, @arena)
+        if def_contains_yield?(def_node, arena)
+          stats = DefParamStats.new(
+            stats.param_count,
+            stats.required,
+            stats.has_splat,
+            stats.has_double_splat,
+            true,
+            stats.has_named_only,
+            stats.typed_param_count,
+            stats.type_param_names,
+            stats.has_non_type_param_annotation
+          )
+        end
+      end
       @function_param_stats[name] = stats
       stats
     end
