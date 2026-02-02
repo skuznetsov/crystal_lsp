@@ -97,6 +97,25 @@ module Crystal
         create_function_stub(hir_func)
       end
 
+      if (dump_path = ENV["DEBUG_MIR_FUNC_NAMES"]?)
+        path = dump_path.empty? || dump_path == "1" ? "/tmp/mir_function_names.txt" : dump_path
+        match_sub = ENV["DEBUG_MIR_FUNC_MATCH"]?
+        File.open(path, "w") do |io|
+          io.puts "[HIR]"
+          @hir_module.functions.each do |hir_func|
+            name = hir_func.name
+            next if match_sub ? !name.includes?(match_sub) : !name.includes?("(")
+            io.puts name
+          end
+          io.puts "[MIR]"
+          @mir_module.functions.each do |mir_func|
+            name = mir_func.name
+            next if match_sub ? !name.includes?(match_sub) : !name.includes?("(")
+            io.puts name
+          end
+        end
+      end
+
       # Build base-name index for fuzzy call resolution (avoids O(N) scans with split)
       @mir_module.functions.each do |func|
         name = func.name
