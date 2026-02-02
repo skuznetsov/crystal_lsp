@@ -2101,6 +2101,15 @@ end
     - `Time__Format__Formatter_time_zone_offset_NamedTuple_Bool_Bool_Bool`
     - `func2663`
     - `func2694`
+  - **Update (2026-02-02)**: prefer exact generic owner overloads before base method index. `Impl(Float32/Float64, ImplInfo_*)` calls now specialize (no `ImplInfo$D*` missing symbols). Current `bootstrap_array` link failures (see `/private/tmp/bootstrap_array_full.link.log`) include:
+    - `Crystal::System::FileDescriptor.@read_timeout` / `@write_timeout`
+    - `Enumerable#index`, `Enumerable#additive_identity`
+    - `IO::DEFAULT_BUFFER_SIZE.to_u32`
+    - `Indexable::ItemIterator(Tuple, Pointer).new`
+    - `Int32/Int64/UInt32/Tuple#object_id`
+    - `Pointer(UInt8).@seconds/@nanoseconds`, `Pointer(UInt8)#offset`
+    - `String | Nil#bsearch_index$block`, `String | Nil#first`
+    - `try$block`
   - **Update (2026-01-22)**: `./bin/crystal_v2 compile examples/bench_fibonacci.cr -o /tmp/fib_test` reports **17** missing symbols (see `/tmp/fib_test` link errors):
     - `Crystal__DWARF__LineNumbers_initialize_IO__FileDescriptor_...` - DWARF debug info
     - `Crystal__MachO__CpuType_value_previous` - missing enum method
