@@ -1120,6 +1120,8 @@ module Crystal::HIR
     # Method resolution cache for inheritance lookups (class_name + method).
     @method_inheritance_cache : Hash(String, String?)
     @class_method_inheritance_cache : Hash(String, String?)
+    @allocator_debug_counts : Hash(String, Int32)
+    @allocator_debug_total : Int32
     @method_inheritance_cache_function_size : Int32
     @method_inheritance_cache_class_info_version : Int32
     @method_inheritance_cache_module_version : Int32
@@ -1394,6 +1396,8 @@ module Crystal::HIR
       @callsite_method_cache_scope = nil
       @method_inheritance_cache = {} of String => String?
       @class_method_inheritance_cache = {} of String => String?
+      @allocator_debug_counts = {} of String => Int32
+      @allocator_debug_total = 0
       @method_inheritance_cache_function_size = 0
       @method_inheritance_cache_class_info_version = 0
       @method_inheritance_cache_module_version = 0
@@ -12090,6 +12094,16 @@ module Crystal::HIR
       call_arg_types : Array(TypeRef)? = nil
     )
       func_name = "#{class_name}.new"
+
+      if ENV["DEBUG_ALLOC_STATS"]?
+        @allocator_debug_total += 1
+        @allocator_debug_counts[class_name] = (@allocator_debug_counts[class_name]? || 0) + 1
+        if (@allocator_debug_total % 50) == 0
+          top = @allocator_debug_counts.to_a.sort_by(&.[1]).last(10).reverse
+          summary = top.map { |(name, count)| "#{name}=#{count}" }.join(", ")
+          STDERR.puts "[ALLOC_STATS] total=#{@allocator_debug_total} top=#{summary}"
+        end
+      end
 
       # Debug disabled for performance
       # if class_name.includes?("Slice(UInt8)")
