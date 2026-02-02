@@ -1115,6 +1115,8 @@ module Crystal::HIR
     @method_resolution_cache : Hash(String, String)
     @method_resolution_cache_scope : String?
     @generic_split_cache : Hash(String, NamedTuple(base: String, args: String)?)
+    @callsite_method_cache : Hash(String, String)
+    @callsite_method_cache_scope : String?
     # Method resolution cache for inheritance lookups (class_name + method).
     @method_inheritance_cache : Hash(String, String?)
     @class_method_inheritance_cache : Hash(String, String?)
@@ -1388,6 +1390,8 @@ module Crystal::HIR
       @method_resolution_cache = {} of String => String
       @method_resolution_cache_scope = nil
       @generic_split_cache = {} of String => NamedTuple(base: String, args: String)?
+      @callsite_method_cache = {} of String => String
+      @callsite_method_cache_scope = nil
       @method_inheritance_cache = {} of String => String?
       @class_method_inheritance_cache = {} of String => String?
       @method_inheritance_cache_function_size = 0
@@ -27432,6 +27436,26 @@ module Crystal::HIR
       CallSignature.new(base_name, arity, has_block)
     end
 
+    private def callsite_cache_key(
+      receiver_type : TypeRef,
+      method_name : String,
+      arg_types : Array(TypeRef),
+      has_block : Bool
+    ) : String
+      String.build do |io|
+        io << receiver_type.id
+        io << '|'
+        io << method_name
+        io << '|'
+        arg_types.each_with_index do |t, idx|
+          io << ',' if idx > 0
+          io << t.id
+        end
+        io << '|'
+        io << (has_block ? 1 : 0)
+      end
+    end
+
     private def call_signature_for_call(name : String, arg_count : Int32, has_block : Bool) : CallSignature?
       base = base_callsite_key(name)
       call_signature_for_base(base, arg_count, has_block)
@@ -29657,6 +29681,16 @@ module Crystal::HIR
         end
       end
       call_arena = @arena
+      if @current_class && @current_method
+        scope = "#{@current_class}##{@current_method}"
+        if scope != @callsite_method_cache_scope
+          @callsite_method_cache.clear
+          @callsite_method_cache_scope = scope
+        end
+      elsif @callsite_method_cache_scope
+        @callsite_method_cache.clear
+        @callsite_method_cache_scope = nil
+      end
       if type_like_call_expr?(node)
         base = resolve_path_like_name(node.callee) || stringify_type_expr(node.callee)
         if base
@@ -29762,6 +29796,7 @@ module Crystal::HIR
       full_method_name : String? = nil
       static_class_name : String? = nil
       proc_return_type_name : String? = nil
+      cached_callsite_key : String? = nil
 
       case callee_node
       when CrystalV2::Compiler::Frontend::IdentifierNode
@@ -30289,7 +30324,7 @@ module Crystal::HIR
           # Substitute type params FIRST, before resolving context (e.g., D::CACHE -> ImplInfo_Float32::CACHE)
           substituted_path = substitute_type_params_in_type_name(raw_path)
           # Check if the first component was a type param (e.g., D::CACHE where D is mapped)
-          first_component = raw_path.split("::").first
+          first_component = first_namespace_component(raw_path)
           first_was_type_param = @type_param_map.has_key?(first_component)
           full_path = if absolute_path
                         substituted_path.starts_with?("::") ? substituted_path[2..] : substituted_path
@@ -30342,6 +30377,20 @@ module Crystal::HIR
             end
           end
         end
+        end
+
+        # Fast callsite cache for instance member calls when receiver and arg types are known.
+        if class_name_str.nil? && receiver_id
+          receiver_type = ctx.type_of(receiver_id)
+          if receiver_type != TypeRef::VOID
+            arg_types_for_cache = call_args.empty? ? [] of TypeRef : infer_arg_types_for_call(call_args, @current_class)
+            cache_key = callsite_cache_key(receiver_type, method_name, arg_types_for_cache, !block_expr.nil? || !block_pass_expr.nil?)
+            if cached = @callsite_method_cache[cache_key]?
+              full_method_name = cached
+            else
+              cached_callsite_key = cache_key
+            end
+          end
         end
 
         if class_name_str.nil? && !constant_receiver && !force_instance_receiver
@@ -31295,6 +31344,9 @@ module Crystal::HIR
                              method_name
                            end
                          end
+      if cached_callsite_key && receiver_id && base_method_name.includes?("#")
+        @callsite_method_cache[cached_callsite_key] = base_method_name
+      end
       if receiver_id.nil? && full_method_name.nil? && method_name == "main" && @top_level_main_defined
         base_method_name = TOP_LEVEL_MAIN_BASE
       end
