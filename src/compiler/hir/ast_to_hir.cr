@@ -1812,6 +1812,13 @@ module Crystal::HIR
         type_ids = arg_types.map(&.id).join(",")
         STDERR.puts "[VIRTUAL_TARGET] record parent=#{parent_name} method=#{method_name} args=[#{type_ids}] block=#{has_block ? 1 : 0} splat=#{has_splat ? 1 : 0}"
       end
+
+      # If subclasses are already known, lower the recorded target for them immediately.
+      if children = @children_by_parent[parent_name]?
+        children.each do |child_name|
+          lower_virtual_targets_for_child(child_name, parent_name)
+        end
+      end
     end
 
     private def lower_virtual_targets_for_child(child_name : String, parent_name : String) : Nil
