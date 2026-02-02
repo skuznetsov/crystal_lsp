@@ -28015,17 +28015,30 @@ module Crystal::HIR
       return nil unless info
 
       base = info[:base]
-      template = @generic_templates[base]?
-      return nil unless template
-
       raw_args = split_generic_type_args(info[:args]).map do |arg|
         normalize_tuple_literal_type_name(arg.strip)
       end
-      return nil unless raw_args.size == template.type_params.size
+
+      param_names : Array(String)? = nil
+      if template = @generic_templates[base]?
+        param_names = template.type_params
+      elsif mod_defs = @module_defs[base]?
+        mod_defs.each do |mod_node, _|
+          if type_params = mod_node.type_params
+            candidate = type_params.map { |param| String.new(param) }
+            if candidate.size == raw_args.size
+              param_names = candidate
+              break
+            end
+          end
+        end
+      end
+      return nil unless param_names
+      return nil unless raw_args.size == param_names.size
 
       substituted_args = raw_args.map { |arg| @type_param_map[arg]? || arg }
       map = {} of String => String
-      template.type_params.each_with_index do |param, idx|
+      param_names.each_with_index do |param, idx|
         map[param] = substituted_args[idx]
       end
 
