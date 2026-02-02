@@ -30567,7 +30567,9 @@ module Crystal::HIR
             type_name = substitute_type_params_in_type_name(type_name)
             if type_name[0]?.try(&.uppercase?) || type_name.includes?("::")
               if info = split_generic_base_and_args(type_name)
-                base_name = resolve_type_alias_chain(info[:base])
+                base_name = info[:base]
+                base_name = resolve_type_name_in_context(base_name) unless base_name.includes?("::")
+                base_name = resolve_type_alias_chain(base_name)
                 type_args = split_generic_type_args(info[:args]).map do |arg|
                   arg = substitute_type_params_in_type_name(arg)
                   normalize_tuple_literal_type_name(arg)
@@ -30579,6 +30581,9 @@ module Crystal::HIR
                 else
                   if !@monomorphized.includes?(class_name_str)
                     monomorphize_generic_class(base_name, type_args, class_name_str)
+                  end
+                  if !@monomorphized.includes?(class_name_str) && @module_defs.has_key?(base_name)
+                    monomorphize_generic_module(base_name, type_args, class_name_str)
                   end
                 end
               else
@@ -30595,14 +30600,8 @@ module Crystal::HIR
           absolute_path = path_is_absolute?(obj_node)
           # Substitute type params FIRST, before resolving context (e.g., D::CACHE -> ImplInfo_Float32::CACHE)
           substituted_path = substitute_type_params_in_type_name(raw_path)
-          # Check if the first component was a type param (e.g., D::CACHE where D is mapped)
-          first_component = first_namespace_component(raw_path)
-          first_was_type_param = @type_param_map.has_key?(first_component)
           full_path = if absolute_path
                         substituted_path.starts_with?("::") ? substituted_path[2..] : substituted_path
-                      elsif first_was_type_param && substituted_path.includes?("::")
-                        # First component was a type param that got substituted - use as-is
-                        substituted_path
                       else
                         resolve_path_string_in_context(substituted_path)
                       end
