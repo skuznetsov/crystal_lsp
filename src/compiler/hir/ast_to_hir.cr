@@ -1124,6 +1124,7 @@ module Crystal::HIR
     @allocator_debug_total : Int32
     @lower_method_debug_counts : Hash(String, Int32)
     @lower_method_debug_total : Int32
+    @lower_method_ns_counts : Hash(String, Int32)
     @method_inheritance_cache_function_size : Int32
     @method_inheritance_cache_class_info_version : Int32
     @method_inheritance_cache_module_version : Int32
@@ -1402,6 +1403,7 @@ module Crystal::HIR
       @allocator_debug_total = 0
       @lower_method_debug_counts = {} of String => Int32
       @lower_method_debug_total = 0
+      @lower_method_ns_counts = {} of String => Int32
       @method_inheritance_cache_function_size = 0
       @method_inheritance_cache_class_info_version = 0
       @method_inheritance_cache_module_version = 0
@@ -12647,6 +12649,15 @@ module Crystal::HIR
           top = @lower_method_debug_counts.to_a.sort_by(&.[1]).last(10).reverse
           summary = top.map { |(name, count)| "#{name}=#{count}" }.join(", ")
           STDERR.puts "[LOWER_METHOD_STATS] total=#{@lower_method_debug_total} top=#{summary}"
+        end
+      end
+      if ENV["DEBUG_LOWER_METHOD_NS_STATS"]?
+        ns_key = namespace_bucket_for(class_name)
+        @lower_method_ns_counts[ns_key] = (@lower_method_ns_counts[ns_key]? || 0) + 1
+        if (@lower_method_debug_total % 100) == 0
+          top = @lower_method_ns_counts.to_a.sort_by(&.[1]).last(10).reverse
+          summary = top.map { |(name, count)| "#{name}=#{count}" }.join(", ")
+          STDERR.puts "[LOWER_METHOD_NS] total=#{@lower_method_debug_total} top=#{summary}"
         end
       end
       # Check if this is a class method (def self.method_name)
@@ -39705,6 +39716,15 @@ module Crystal::HIR
         name[(idx + 2)..]
       else
         nil
+      end
+    end
+
+    @[AlwaysInline]
+    private def namespace_bucket_for(name : String) : String
+      if idx = name.index("::")
+        name[0, idx]
+      else
+        name
       end
     end
 
