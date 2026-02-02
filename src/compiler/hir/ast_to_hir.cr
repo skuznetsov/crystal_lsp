@@ -18518,23 +18518,13 @@ module Crystal::HIR
       end
       type_param_map = @type_param_map
       fallback_map : Hash(String, String)? = nil
-      lookup_param = ->(key : String) do
-        if value = type_param_map[key]?
-          value
-        else
-          if fallback_map.nil?
-            if current = @current_class
-              if info = generic_owner_info(current)
-                fallback_map = info[:map]
-              end
-            end
-          end
-          fallback_map ? fallback_map[key]? : nil
+      if current = @current_class
+        if info = generic_owner_info(current)
+          fallback_map = info[:map]
         end
       end
-      if substitution = lookup_param.call(name)
-        return substitution
-      end
+      substitution = type_param_map[name]? || (fallback_map ? fallback_map[name]? : nil)
+      return substitution if substitution
       if local_name = @current_typeof_local_names.try(&.[name]?)
         return local_name unless local_name.empty?
       end
@@ -18544,7 +18534,8 @@ module Crystal::HIR
         if idx = name.index("::")
           prefix = name[0, idx]
           suffix = name[(idx + 2)..]
-          if substitution = lookup_param.call(prefix)
+          substitution = type_param_map[prefix]? || (fallback_map ? fallback_map[prefix]? : nil)
+          if substitution
             # Recursively substitute the suffix in case it also contains type params
             return "#{substitution}::#{substitute_type_params_in_type_name(suffix)}"
           end
@@ -18552,7 +18543,8 @@ module Crystal::HIR
         # Also check if the suffix after the last :: is a type param
         if idx = name.rindex("::")
           suffix = name[(idx + 2)..]
-          if substitution = lookup_param.call(suffix)
+          substitution = type_param_map[suffix]? || (fallback_map ? fallback_map[suffix]? : nil)
+          if substitution
             return substitution
           end
         end
