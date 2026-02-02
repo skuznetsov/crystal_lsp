@@ -10457,6 +10457,12 @@ module Crystal::HIR
       if is_class_method
         self_type = type_ref_for_name(module_name)
         if self_type == TypeRef::VOID
+          module_base = strip_generic_args(module_name)
+          if module_base != module_name
+            self_type = type_ref_for_name(module_base)
+          end
+        end
+        if self_type == TypeRef::VOID
           self_type = TypeRef::POINTER
         end
         self_literal = Literal.new(ctx.next_id, self_type, nil)
@@ -10467,6 +10473,12 @@ module Crystal::HIR
         @type_literal_values.add(self_literal.id)
       else
         self_type = type_ref_for_name(module_name)
+        if self_type == TypeRef::VOID
+          module_base = strip_generic_args(module_name)
+          if module_base != module_name
+            self_type = type_ref_for_name(module_base)
+          end
+        end
         if self_type == TypeRef::VOID
           self_type = TypeRef::POINTER
         end
@@ -15667,6 +15679,60 @@ module Crystal::HIR
         end
       end
       nil
+    end
+
+    private def infer_return_type_from_includers(
+      module_type_name : String,
+      method_name : String,
+      arg_types : Array(TypeRef),
+      has_block : Bool
+    ) : TypeRef?
+      module_base = strip_generic_args(module_type_name)
+      includers = @module_includers[module_base]?.try(&.to_a)
+      if includers.nil? || includers.empty?
+        if matches = @module_includer_keys_by_suffix[module_base]?
+          if matches.size == 1
+            module_base = matches.first
+            includers = @module_includers[module_base]?.try(&.to_a)
+          end
+        end
+      end
+      if includers.nil? || includers.empty?
+        short_name = last_namespace_component(module_base)
+        if short_name != module_base
+          includers = @module_includers[short_name]?.try(&.to_a)
+          if (includers.nil? || includers.empty?) && (matches = @module_includer_keys_by_suffix[short_name]?)
+            if matches.size == 1
+              module_base = matches.first
+              includers = @module_includers[module_base]?.try(&.to_a)
+            end
+          end
+        end
+      end
+      return nil if includers.nil? || includers.empty?
+
+      candidates = includers.not_nil!.dup
+      collect_subclasses(includers.not_nil!).each { |entry| candidates << entry }
+      candidates.uniq!
+
+      merged : TypeRef? = nil
+      arg_count = arg_types.size
+      candidates.each do |candidate|
+        sep = module_like_type_name?(candidate) ? "." : "#"
+        base_name = "#{candidate}#{sep}#{method_name}"
+        return_type = nil
+        if resolved = lookup_function_def_for_call(base_name, arg_count, has_block, arg_types)
+          return_type = get_function_return_type(resolved[0])
+        end
+        if return_type.nil? || return_type == TypeRef::VOID
+          if cached = @function_base_return_types[base_name]?
+            return_type = cached
+          end
+        end
+        next if return_type.nil? || return_type == TypeRef::VOID
+        merged = merged ? union_type_for_values(merged, return_type) : return_type
+      end
+      merged
     end
 
     private def module_includers_match?(name : String) : Bool
@@ -33349,11 +33415,64 @@ module Crystal::HIR
           end
         end
       end
+      if !call_virtual
+        owner = method_owner(mangled_method_name)
+        if !owner.empty? && (module_like_type_name?(owner) || module_includers_match?(owner))
+          call_virtual = true
+        end
+      end
+      if !call_virtual && receiver_id
+        if abstract_def?(mangled_method_name) ||
+           abstract_def?(primary_mangled_name) ||
+           (base_method_name && abstract_def?(base_method_name))
+          call_virtual = true
+        end
+      end
+      if !call_virtual && receiver_id
+        if self_id = ctx.lookup_local("self") || emit_self(ctx)
+          if receiver_id == self_id
+            if current = @current_class
+              module_key = strip_generic_args(current)
+              if @module_defs.has_key?(module_key)
+                call_virtual = true
+              end
+            else
+              fn_parts = parse_method_name(ctx.function.name)
+              if fn_parts.is_instance
+                owner = strip_generic_args(fn_parts.owner)
+                if @module_defs.has_key?(owner)
+                  call_virtual = true
+                end
+              end
+            end
+          end
+        end
+      end
       if ENV.has_key?("DEBUG_VIRTUAL_CALLS") && receiver_id
         recv_type = ctx.type_of(receiver_id)
         recv_desc = @module.get_type_descriptor(recv_type)
         recv_name = recv_desc ? "#{recv_desc.name}(#{recv_desc.kind})" : recv_type.id.to_s
         STDERR.puts "[HIR_VIRTUAL_CALL] method=#{method_name} recv=#{recv_name} virtual=#{call_virtual}"
+      end
+
+      if return_type == TypeRef::VOID && receiver_id
+        abstract_target = abstract_def?(mangled_method_name) ||
+          abstract_def?(primary_mangled_name) ||
+          (base_method_name && abstract_def?(base_method_name))
+        if abstract_target || call_virtual
+          owner = ""
+          if base_method_name
+            owner = method_owner(base_method_name)
+          end
+          if owner.empty?
+            owner = method_owner(mangled_method_name)
+          end
+          if !owner.empty? && (module_like_type_name?(owner) || @module_includers.has_key?(strip_generic_args(owner)))
+            if inferred = infer_return_type_from_includers(owner, method_name, arg_types, has_block_call)
+              return_type = inferred
+            end
+          end
+        end
       end
 
       # Ensure virtual dispatch targets are lowered so MIR can build vdispatch tables.
@@ -38638,11 +38757,56 @@ module Crystal::HIR
           end
         end
       end
+      if !call_virtual && object_id
+        if abstract_def?(actual_name) ||
+           (base_method_name && abstract_def?(base_method_name))
+          call_virtual = true
+        end
+      end
+      if !call_virtual && object_id
+        if self_id = ctx.lookup_local("self") || emit_self(ctx)
+          if object_id == self_id
+            if current = @current_class
+              module_key = strip_generic_args(current)
+              if @module_defs.has_key?(module_key)
+                call_virtual = true
+              end
+            else
+              fn_parts = parse_method_name(ctx.function.name)
+              if fn_parts.is_instance
+                owner = strip_generic_args(fn_parts.owner)
+                if @module_defs.has_key?(owner)
+                  call_virtual = true
+                end
+              end
+            end
+          end
+        end
+      end
       if ENV.has_key?("DEBUG_VIRTUAL_CALLS") && object_id
         recv_type = ctx.type_of(object_id)
         recv_desc = @module.get_type_descriptor(recv_type)
         recv_name = recv_desc ? "#{recv_desc.name}(#{recv_desc.kind})" : recv_type.id.to_s
         STDERR.puts "[HIR_VIRTUAL_CALL] method=#{member_name} recv=#{recv_name} virtual=#{call_virtual}"
+      end
+
+      if return_type == TypeRef::VOID && object_id
+        abstract_target = abstract_def?(actual_name) ||
+          (base_method_name && abstract_def?(base_method_name))
+        if abstract_target || call_virtual
+          owner = ""
+          if base_method_name
+            owner = method_owner(base_method_name)
+          end
+          if owner.empty?
+            owner = method_owner(actual_name)
+          end
+          if !owner.empty? && (module_like_type_name?(owner) || @module_includers.has_key?(strip_generic_args(owner)))
+            if inferred = infer_return_type_from_includers(owner, member_name, arg_types, false)
+              return_type = inferred
+            end
+          end
+        end
       end
 
       # Ensure virtual dispatch targets are lowered so MIR can build vdispatch tables.
