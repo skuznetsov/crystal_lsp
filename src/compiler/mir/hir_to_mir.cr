@@ -327,7 +327,13 @@ module Crystal
           if is_phi_union && union_descriptor
             if hir_type = @hir_value_types[hir_value]?
               incoming_mir_type = convert_type(hir_type)
-              if !is_union_type?(incoming_mir_type)
+              if incoming_mir_type == TypeRef::VOID || incoming_mir_type == TypeRef::NIL
+                if nil_variant = union_descriptor.variants.find { |v| v.type_ref == TypeRef::NIL }
+                  builder.current_block = mir_block
+                  nil_val = builder.const_nil
+                  mir_value = builder.union_wrap(nil_val, nil_variant.type_id, mir_phi_type)
+                end
+              elsif !is_union_type?(incoming_mir_type)
                 variant = union_descriptor.variants.find { |v| v.type_ref == incoming_mir_type }
                 if variant
                   builder.current_block = mir_block

@@ -4114,6 +4114,56 @@ module Crystal::MIR
 
       case inst.op
       when .neg?
+        if operand_llvm_type.includes?(".union")
+          # Union negation: extract payload, negate, wrap back into union.
+          base_name = name.lstrip('%')
+          union_type = operand_llvm_type
+          emit "%#{base_name}.neg_union_ptr = alloca #{union_type}, align 8"
+          emit "store #{union_type} #{normalize_union_value(operand, union_type)}, ptr %#{base_name}.neg_union_ptr"
+          emit "%#{base_name}.neg_payload_ptr = getelementptr #{union_type}, ptr %#{base_name}.neg_union_ptr, i32 0, i32 1"
+
+          variant_type_id = 0
+          variant_type_ref = TypeRef::INT32
+          payload_type = "i32"
+          if descriptor = @module.get_union_descriptor(inst.type)
+            # Prefer float variants for negation when present
+            float_variant = descriptor.variants.find do |v|
+              vt = @type_mapper.llvm_type(v.type_ref)
+              vt == "double" || vt == "float"
+            end
+            if float_variant
+              variant_type_id = float_variant.type_id
+              variant_type_ref = float_variant.type_ref
+              payload_type = @type_mapper.llvm_type(float_variant.type_ref)
+            else
+              int_variant = descriptor.variants.find do |v|
+                vt = @type_mapper.llvm_type(v.type_ref)
+                vt.starts_with?("i")
+              end
+              if int_variant
+                variant_type_id = int_variant.type_id
+                variant_type_ref = int_variant.type_ref
+                payload_type = @type_mapper.llvm_type(int_variant.type_ref)
+              end
+            end
+          end
+
+          emit "%#{base_name}.neg_val = load #{payload_type}, ptr %#{base_name}.neg_payload_ptr, align 4"
+          if payload_type == "float" || payload_type == "double"
+            emit "%#{base_name}.neg_result = fsub #{payload_type} 0.0, %#{base_name}.neg_val"
+          else
+            emit "%#{base_name}.neg_result = sub #{payload_type} 0, %#{base_name}.neg_val"
+          end
+
+          emit "%#{base_name}.neg_res_ptr = alloca #{union_type}, align 8"
+          emit "%#{base_name}.neg_tid_ptr = getelementptr #{union_type}, ptr %#{base_name}.neg_res_ptr, i32 0, i32 0"
+          emit "store i32 #{variant_type_id}, ptr %#{base_name}.neg_tid_ptr"
+          emit "%#{base_name}.neg_res_payload_ptr = getelementptr #{union_type}, ptr %#{base_name}.neg_res_ptr, i32 0, i32 1"
+          emit "store #{payload_type} %#{base_name}.neg_result, ptr %#{base_name}.neg_res_payload_ptr, align 4"
+          emit "#{name} = load #{union_type}, ptr %#{base_name}.neg_res_ptr"
+          @value_types[inst.id] = inst.type
+          return
+        end
         # Handle ptr operand for negation - convert to i64 first
         if operand_llvm_type == "ptr"
           base_name = name.lstrip('%')
