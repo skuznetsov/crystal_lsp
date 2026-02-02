@@ -361,6 +361,34 @@ module Crystal::HIR
       end
     end
 
+    private struct BlockLookupKey
+      getter func_name : String
+      getter arg_count : Int32
+      getter args_hash : UInt64
+      getter receiver_base : String?
+      getter has_args : Bool
+
+      def initialize(@func_name : String, @arg_count : Int32, @args_hash : UInt64, @receiver_base : String?, @has_args : Bool)
+      end
+
+      def hash : UInt64
+        h = @func_name.hash
+        h &+= @arg_count.to_u64 &* 31_u64
+        h &+= @args_hash &* 131_u64
+        h &+= @receiver_base.try(&.hash) || 0_u64
+        h &+= @has_args ? 7_u64 : 0_u64
+        h
+      end
+
+      def ==(other : BlockLookupKey) : Bool
+        @func_name == other.func_name &&
+          @arg_count == other.arg_count &&
+          @args_hash == other.args_hash &&
+          @receiver_base == other.receiver_base &&
+          @has_args == other.has_args
+      end
+    end
+
     # Parse method name in single pass - O(n) instead of O(3n) for three separate splits
     @[AlwaysInline]
     private def parse_method_name(name : String) : MethodNameParts
@@ -698,6 +726,8 @@ module Crystal::HIR
     # Cached list of unique arenas to avoid per-call allocations.
     @unique_def_arenas_list : Array(CrystalV2::Compiler::Frontend::ArenaLike) = [] of CrystalV2::Compiler::Frontend::ArenaLike
     @unique_def_arenas_list_size : Int32 = 0
+    # Cached per-path arena list to avoid scanning all arenas for resolve_arena_for_def.
+    @unique_def_arenas_by_path : Hash(String, Array(CrystalV2::Compiler::Frontend::ArenaLike)) = {} of String => Array(CrystalV2::Compiler::Frontend::ArenaLike)
     # Cache for max body index per DefNode to avoid repeated scans.
     @def_body_max_index_cache : Hash(UInt64, Int32) = {} of UInt64 => Int32
 
@@ -714,6 +744,9 @@ module Crystal::HIR
     @function_def_overloads_cache_size : Int32 = 0
     # Cache parsed method name parts to avoid repeated scans in hot paths.
     @method_name_parts_cache : Hash(String, MethodNameParts) = {} of String => MethodNameParts
+    # Cache block function def lookup by callsite shape.
+    @block_lookup_cache : Hash(BlockLookupKey, Tuple(String, CrystalV2::Compiler::Frontend::DefNode)?) = {} of BlockLookupKey => Tuple(String, CrystalV2::Compiler::Frontend::DefNode)?
+    @block_lookup_cache_size : Int32 = 0
 
     # ═══════════════════════════════════════════════════════════════════════════
     # FUNCTION LOWERING STATE MACHINE
@@ -4178,6 +4211,17 @@ module Crystal::HIR
       slice.gsub(/\s+/, " ").strip
     end
 
+    private def slice_source_for_span(
+      span : CrystalV2::Compiler::Frontend::Span,
+      source : String
+    ) : String?
+      start = span.start_offset
+      finish = span.end_offset
+      return nil if start < 0 || finish <= start || start >= source.bytesize
+      length = finish - start
+      source.byte_slice(start, length)
+    end
+
     private def trace_missing_symbol(
       ctx : LoweringContext,
       node : CrystalV2::Compiler::Frontend::CallNode,
@@ -4261,12 +4305,13 @@ module Crystal::HIR
       if @unique_def_arenas.size < @function_def_arenas.size
         @function_def_arenas.each_value do |arena|
           oid = arena.object_id
-          @unique_def_arenas[oid] = arena unless @unique_def_arenas.has_key?(oid)
+          next if @unique_def_arenas.has_key?(oid)
+          @unique_def_arenas[oid] = arena
+          @unique_def_arenas_list << arena
+          if path = source_path_for(arena)
+            (@unique_def_arenas_by_path[path] ||= [] of CrystalV2::Compiler::Frontend::ArenaLike) << arena
+          end
         end
-      end
-      if @unique_def_arenas_list_size != @unique_def_arenas.size
-        @unique_def_arenas_list = [] of CrystalV2::Compiler::Frontend::ArenaLike
-        @unique_def_arenas.each_value { |arena| @unique_def_arenas_list << arena }
         @unique_def_arenas_list_size = @unique_def_arenas_list.size
       end
     end
@@ -4295,15 +4340,41 @@ module Crystal::HIR
       best = nil
       best_size = Int32::MAX
       if fallback_path
-        each_def_arena_candidate(fallback) do |arena|
-          next if max_index >= 0 && max_index >= arena.size
-          next unless span_fits_source?(arena, func_def.span)
-          path = source_path_for(arena)
-          next unless path == fallback_path
-          size = arena.size
-          if size < best_size
-            best = arena
-            best_size = size
+        refresh_unique_def_arenas!
+        if arenas = @unique_def_arenas_by_path[fallback_path]?
+          arenas.each do |arena|
+            next if max_index >= 0 && max_index >= arena.size
+            next unless span_fits_source?(arena, func_def.span)
+            size = arena.size
+            if size < best_size
+              best = arena
+              best_size = size
+            end
+          end
+        end
+        if arenas = @inline_arenas
+          arenas.each do |arena|
+            next unless source_path_for(arena) == fallback_path
+            next if max_index >= 0 && max_index >= arena.size
+            next unless span_fits_source?(arena, func_def.span)
+            size = arena.size
+            if size < best_size
+              best = arena
+              best_size = size
+            end
+          end
+        end
+        unless best
+          each_def_arena_candidate(fallback) do |arena|
+            next if max_index >= 0 && max_index >= arena.size
+            next unless span_fits_source?(arena, func_def.span)
+            path = source_path_for(arena)
+            next unless path == fallback_path
+            size = arena.size
+            if size < best_size
+              best = arena
+              best_size = size
+            end
           end
         end
       end
@@ -16034,6 +16105,14 @@ module Crystal::HIR
 
     private def def_contains_yield_uncached?(node : CrystalV2::Compiler::Frontend::DefNode, arena : CrystalV2::Compiler::Frontend::ArenaLike) : Bool
       return false unless body = node.body
+      if source = @sources_by_arena[arena]?
+        if snippet = slice_source_for_span(node.span, source)
+          has_macro = snippet.includes?("{%") || snippet.includes?("{{")
+          has_yield_token = macro_text_contains_yield?(snippet)
+          return true if has_yield_token && !has_macro
+          return false if !has_yield_token && !has_macro
+        end
+      end
       resolved_arena = arena_fits_def?(arena, node) ? arena : resolve_arena_for_def(node, arena)
       return true if with_arena(resolved_arena) { contains_yield?(body) }
 
@@ -31399,6 +31478,21 @@ module Crystal::HIR
 
       disable_inline_yield = ENV.has_key?("CRYSTAL_V2_DISABLE_INLINE_YIELD")
       if (block_for_inline || proc_for_inline) && !disable_inline_yield
+        try_inline_allowed = ENV.has_key?("CRYSTAL_V2_INLINE_TRY")
+        if method_name == "try"
+          if ENV.has_key?("CRYSTAL_V2_DISABLE_TRY_INLINE")
+            try_inline_allowed = false
+          elsif try_inline_allowed
+            max_inline = (ENV["CRYSTAL_V2_TRY_INLINE_MAX"]?.try(&.to_i?)) || 6
+            if block_for_inline
+              body_size = block_for_inline.body ? block_for_inline.body.not_nil!.size : 0
+              try_inline_allowed = false if body_size > max_inline
+            elsif proc_for_inline
+              body_size = proc_for_inline.body ? proc_for_inline.body.not_nil!.size : 0
+              try_inline_allowed = false if body_size > max_inline
+            end
+          end
+        end
         if block_for_inline
           @block_node_arenas[block_for_inline.object_id] = @arena
         end
@@ -31417,7 +31511,7 @@ module Crystal::HIR
               return inline_tap_with_proc(ctx, receiver_id, proc_for_inline)
             end
           end
-          if receiver_id && method_name == "try"
+          if receiver_id && method_name == "try" && try_inline_allowed
             recv_type = ctx.type_of(receiver_id)
             if block_for_inline
               return inline_try_with_block(ctx, receiver_id, recv_type, block_for_inline)
@@ -31464,6 +31558,10 @@ module Crystal::HIR
                 recv_type = ctx.type_of(receiver_id)
                 STDERR.puts "[TRY_INLINE] recv_type=#{get_type_name_from_ref(recv_type)} union=#{is_union_or_nilable_type?(recv_type)}"
               end
+            end
+            if method_name == "try" && !try_inline_allowed
+              skip_inline = true
+              debug_hook("call.inline.skip", "callee=#{mangled_method_name} reason=try_inline_limit")
             end
             if !skip_inline
               # If the method return type does not depend on the block, avoid expensive inline-yield.
@@ -33543,6 +33641,21 @@ module Crystal::HIR
       arg_types : Array(TypeRef)? = nil,
       receiver_base : String? = nil
     ) : Tuple(String, CrystalV2::Compiler::Frontend::DefNode)?
+      if @block_lookup_cache_size != @function_defs.size
+        @block_lookup_cache.clear
+        @block_lookup_cache_size = @function_defs.size
+      end
+      args_hash = 0_u64
+      if arg_types
+        arg_types.each do |arg_type|
+          args_hash = (args_hash &* 131_u64) &+ arg_type.id.to_u64
+        end
+      end
+      cache_key = BlockLookupKey.new(func_name, arg_count, args_hash, receiver_base, !arg_types.nil?)
+      if @block_lookup_cache.has_key?(cache_key)
+        return @block_lookup_cache[cache_key]
+      end
+
       best : CrystalV2::Compiler::Frontend::DefNode? = nil
       best_name : String? = nil
       best_param_count = Int32::MAX
@@ -33604,7 +33717,9 @@ module Crystal::HIR
       end
 
       if best && best_name
-        return {best_name, best}
+        result = {best_name, best}
+        @block_lookup_cache[cache_key] = result
+        return result
       end
 
       # Fallback: match by method short name across owners (for inherited yield methods).
@@ -33653,8 +33768,14 @@ module Crystal::HIR
         end
       end
 
-      return nil unless best && best_name
-      {best_name, best}
+      if best && best_name
+        result = {best_name, best}
+        @block_lookup_cache[cache_key] = result
+        return result
+      end
+
+      @block_lookup_cache[cache_key] = nil
+      nil
     end
 
     private def underscore_lower(name : String) : String
