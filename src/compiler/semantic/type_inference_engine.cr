@@ -1362,11 +1362,9 @@ module CrystalV2
             return @parse_type_cache[name] = union_of([base_type, @context.nil_type])
           end
 
-          # Handle union syntax: T | U | V
-          if name.includes?(" | ")
-            parts = name.split(" | ").map(&.strip)
-            types = parts.map { |p| parse_type_name(p) }
-            return @parse_type_cache[name] = union_of(types)
+          # Handle union syntax: T | U | V (zero-copy scan, no split)
+          if union = parse_union_type_name(name)
+            return @parse_type_cache[name] = union
           end
 
           # Check for generic type syntax: Array(T)
@@ -1429,6 +1427,47 @@ module CrystalV2
             # As a fallback, create a nominal primitive type to avoid Nil/Unknown
             @parse_type_cache[name] = PrimitiveType.new(name)
           end
+        end
+
+        @[AlwaysInline]
+        private def parse_union_type_name(name : String) : Type?
+          size = name.bytesize
+          return nil if size < 5 # "A | B" minimum
+          types = [] of Type
+          start = 0
+          i = 0
+          found = false
+          while i + 2 < size
+            if name.byte_at(i) == 32_u8 && name.byte_at(i + 1) == 124_u8 && name.byte_at(i + 2) == 32_u8
+              found = true
+              types << parse_type_name(trim_slice(name, start, i))
+              i += 3
+              start = i
+              next
+            end
+            i += 1
+          end
+          return nil unless found
+          types << parse_type_name(trim_slice(name, start, size))
+          union_of(types)
+        end
+
+        @[AlwaysInline]
+        private def trim_slice(name : String, start_idx : Int32, end_idx : Int32) : String
+          s = start_idx
+          e = end_idx
+          while s < e && whitespace_byte?(name.byte_at(s))
+            s += 1
+          end
+          while e > s && whitespace_byte?(name.byte_at(e - 1))
+            e -= 1
+          end
+          name[s, e - s]
+        end
+
+        @[AlwaysInline]
+        private def whitespace_byte?(byte : UInt8) : Bool
+          byte == 32_u8 || byte == 9_u8 || byte == 10_u8 || byte == 13_u8
         end
 
         # Resolve a scoped name like Folding::Core::Protein against the global symbol table.
