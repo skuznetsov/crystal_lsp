@@ -986,6 +986,21 @@ module Crystal::MIR
       end
     end
 
+    # Returns receiver name and method core from an extern name like "Type#+" or "Type#+$Int32".
+    # Avoids allocations from split.
+    @[AlwaysInline]
+    private def extract_receiver_and_method(name : String) : Tuple(String?, String)?
+      sep_idx = name.index('#') || name.index('.')
+      return nil unless sep_idx
+      receiver = name[0, sep_idx]
+      rest = name[(sep_idx + 1)..]
+      if dollar = rest.index('$')
+        rest = rest[0, dollar]
+      end
+      {receiver, rest}
+    end
+
+
     private def emit_string_constants
       emit_raw "\n; String constants\n"
       # Always emit empty string constant (used for void interpolation parts)
@@ -6145,43 +6160,33 @@ module Crystal::MIR
         # Check for patterns like ClassName___MethodName (accessor methods)
         returns_ptr = true if mangled_extern_name.includes?("____") || mangled_extern_name.includes?("_____")
 
-        # Check for arithmetic operators in type-prefixed methods: TypeName___ = *, TypeName__ = +
-        # e.g., UInt8___Int32 = UInt8.*(Int32), returns UInt8 (i8)
-        # Also handles standalone operators: ___ = *, __ = +
-        is_type_prefixed_mul = mangled_extern_name.includes?("___") && !mangled_extern_name.starts_with?("___")
-        is_type_prefixed_add = mangled_extern_name.includes?("__") && !mangled_extern_name.includes?("___") && !mangled_extern_name.starts_with?("__")
-        is_standalone_mul = mangled_extern_name.starts_with?("___") && !mangled_extern_name.starts_with?("____")
-        is_standalone_add = mangled_extern_name.starts_with?("__") && !mangled_extern_name.starts_with?("___")
-
-        if is_type_prefixed_mul || is_type_prefixed_add
-          # Extract type prefix (e.g., "UInt8" from "UInt8___Int32")
-          prefix = if is_type_prefixed_mul
-                     mangled_extern_name.split("___").first
-                   else
-                     mangled_extern_name.split("__").first
-                   end
-          case prefix
-          when "UInt8", "Int8"
-            return_type = "i8"
-            @value_types[inst.id] = TypeRef::INT8
-          when "UInt16", "Int16"
-            return_type = "i16"
-            @value_types[inst.id] = TypeRef::INT16
-          when "UInt32", "Int32"
-            return_type = "i32"
-            @value_types[inst.id] = TypeRef::INT32
-          when "UInt64", "Int64"
-            return_type = "i64"
-            @value_types[inst.id] = TypeRef::INT64
-          end
-        elsif (is_standalone_mul || is_standalone_add) && inst.args.size > 0
-          # Standalone operators: use first argument type
-          first_arg_type = @value_types[inst.args[0]]?
-          if first_arg_type
-            first_arg_llvm = @type_mapper.llvm_type(first_arg_type)
-            if first_arg_llvm.starts_with?("i") && !first_arg_llvm.includes?(".")
-              return_type = first_arg_llvm
-              @value_types[inst.id] = first_arg_type
+        # Check for arithmetic operators on typed receivers: use receiver type when method is "+" or "*".
+        if receiver_and_method = extract_receiver_and_method(inst.extern_name)
+          receiver_name, method_core = receiver_and_method
+          if (method_core == "+" || method_core == "*") && receiver_name
+            case receiver_name
+            when "UInt8", "Int8"
+              return_type = "i8"
+              @value_types[inst.id] = TypeRef::INT8
+            when "UInt16", "Int16"
+              return_type = "i16"
+              @value_types[inst.id] = TypeRef::INT16
+            when "UInt32", "Int32"
+              return_type = "i32"
+              @value_types[inst.id] = TypeRef::INT32
+            when "UInt64", "Int64"
+              return_type = "i64"
+              @value_types[inst.id] = TypeRef::INT64
+            end
+          elsif (method_core == "+" || method_core == "*") && inst.args.size > 0
+            # Standalone operators: use first argument type when available.
+            first_arg_type = @value_types[inst.args[0]]?
+            if first_arg_type
+              first_arg_llvm = @type_mapper.llvm_type(first_arg_type)
+              if first_arg_llvm.starts_with?("i") && !first_arg_llvm.includes?(".")
+                return_type = first_arg_llvm
+                @value_types[inst.id] = first_arg_type
+              end
             end
           end
         end
