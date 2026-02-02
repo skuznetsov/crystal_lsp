@@ -1090,6 +1090,8 @@ module Crystal::HIR
     @pending_arg_types_by_arity : Hash(String, Hash(Int32, Array(CallsiteArgs)))
     @pending_arg_types_seen_by_arity : Hash(String, Hash(Int32, Set(String)))
     @pending_arg_types_by_signature : Hash(CallSignature, Array(CallsiteArgs))
+    @function_def_has_splat : Hash(String, Bool)
+    @function_def_has_double_splat : Hash(String, Bool)
     @recorded_arg_types_by_signature : Hash(CallSignature, Array(CallsiteArgs))
     @recorded_arg_types_seen_by_signature : Hash(CallSignature, Set(String))
     # Call-site type parameter bindings for lazily lowered functions (mangled name -> map).
@@ -1380,6 +1382,8 @@ module Crystal::HIR
       @pending_arg_types_by_arity = {} of String => Hash(Int32, Array(CallsiteArgs))
       @pending_arg_types_seen_by_arity = {} of String => Hash(Int32, Set(String))
       @pending_arg_types_by_signature = {} of CallSignature => Array(CallsiteArgs)
+      @function_def_has_splat = {} of String => Bool
+      @function_def_has_double_splat = {} of String => Bool
       @recorded_arg_types_by_signature = {} of CallSignature => Array(CallsiteArgs)
       @recorded_arg_types_seen_by_signature = {} of CallSignature => Set(String)
       @pending_type_param_maps = {} of String => Hash(String, String)
@@ -14937,6 +14941,36 @@ module Crystal::HIR
       empty
     end
 
+    private def function_def_has_splat?(base_name : String) : Bool
+      rebuild_function_def_overloads if @function_defs_cache_size != @function_defs.size
+      if cached = @function_def_has_splat[base_name]?
+        return cached
+      end
+      stripped = strip_generic_receiver_from_method_name(base_name)
+      if stripped != base_name
+        if cached = @function_def_has_splat[stripped]?
+          @function_def_has_splat[base_name] = cached
+          return cached
+        end
+      end
+      false
+    end
+
+    private def function_def_has_double_splat?(base_name : String) : Bool
+      rebuild_function_def_overloads if @function_defs_cache_size != @function_defs.size
+      if cached = @function_def_has_double_splat[base_name]?
+        return cached
+      end
+      stripped = strip_generic_receiver_from_method_name(base_name)
+      if stripped != base_name
+        if cached = @function_def_has_double_splat[stripped]?
+          @function_def_has_double_splat[base_name] = cached
+          return cached
+        end
+      end
+      false
+    end
+
     private def rebuild_function_def_overloads
       # Incremental: only process new entries since last rebuild
       count = 0
@@ -14954,12 +14988,24 @@ module Crystal::HIR
         else
           @function_def_overloads[base] = [key]
         end
+        if key.includes?("_double_splat")
+          @function_def_has_double_splat[base] = true
+        elsif key.includes?("_splat")
+          @function_def_has_splat[base] = true
+        end
         stripped_base = strip_generic_receiver_from_method_name(base)
         stripped_list = @function_def_overloads_stripped_index[stripped_base]?
         if stripped_list
           stripped_list << key unless stripped_list.includes?(key)
         else
           @function_def_overloads_stripped_index[stripped_base] = [key]
+        end
+        if stripped_base != base
+          if key.includes?("_double_splat")
+            @function_def_has_double_splat[stripped_base] = true
+          elsif key.includes?("_splat")
+            @function_def_has_splat[stripped_base] = true
+          end
         end
         @function_param_stats[key] = build_param_stats(def_node) unless @function_param_stats.has_key?(key)
       end
@@ -21230,7 +21276,7 @@ module Crystal::HIR
           next unless base_name.includes?("#") || base_name.includes?(".")
           # Skip functions with bare generic types (they need concrete instantiation)
           base_name = strip_type_suffix(name)
-          has_double_splat_def = function_def_overloads(base_name).any? { |key| key.includes?("_double_splat") }
+          has_double_splat_def = function_def_has_double_splat?(base_name)
           has_bare_generic = args.types.any? do |t|
             if desc = @module.get_type_descriptor(t)
               is_bare = !desc.name.includes?("(") && KNOWN_GENERIC_TYPES.includes?(desc.name)
@@ -21259,22 +21305,13 @@ module Crystal::HIR
           base_name = signature.base_name
           next if base_name.empty?
           next unless base_name.includes?("#") || base_name.includes?(".")
-          has_double_splat_def = function_def_overloads(base_name).any? { |key| key.includes?("_double_splat") }
+          has_double_splat_def = function_def_has_double_splat?(base_name)
           entries.each do |args|
             if !args.types.empty? && args.types.all? { |t| t == TypeRef::VOID }
               skipped_void += 1 if debug_emit
               next
             end
-            has_splat_def = false
-            function_def_overloads(base_name).each do |key|
-              def_node = @function_defs[key]?
-              next unless def_node
-              stats = function_param_stats(key, def_node)
-              if stats.has_splat || stats.has_double_splat
-                has_splat_def = true
-                break
-              end
-            end
+            has_splat_def = function_def_has_splat?(base_name) || function_def_has_double_splat?(base_name)
             name = if entry = lookup_function_def_for_call(base_name, args.types.size, signature.has_block, args.types, has_splat_def)
                      entry[0]
                    else
