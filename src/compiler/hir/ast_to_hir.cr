@@ -30240,6 +30240,9 @@ module Crystal::HIR
         obj_expr = callee_node.object
         obj_node = @arena[obj_expr]
         method_name = String.new(callee_node.member)
+        if debug_env_filter_match?("DEBUG_TPM_CALL", method_name)
+          STDERR.puts "[TPM_CALL] method=#{method_name} current=#{@current_class || "nil"} map=#{type_param_map_debug_string}"
+        end
         if ENV["DEBUG_EXE_PATH_CALL"]? && method_name == "executable_path"
           raw_obj = stringify_type_expr(obj_expr) || "(unknown)"
           obj_label = obj_node.class.name.split("::").last
