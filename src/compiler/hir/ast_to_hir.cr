@@ -1122,6 +1122,8 @@ module Crystal::HIR
     @class_method_inheritance_cache : Hash(String, String?)
     @allocator_debug_counts : Hash(String, Int32)
     @allocator_debug_total : Int32
+    @lower_method_debug_counts : Hash(String, Int32)
+    @lower_method_debug_total : Int32
     @method_inheritance_cache_function_size : Int32
     @method_inheritance_cache_class_info_version : Int32
     @method_inheritance_cache_module_version : Int32
@@ -1398,6 +1400,8 @@ module Crystal::HIR
       @class_method_inheritance_cache = {} of String => String?
       @allocator_debug_counts = {} of String => Int32
       @allocator_debug_total = 0
+      @lower_method_debug_counts = {} of String => Int32
+      @lower_method_debug_total = 0
       @method_inheritance_cache_function_size = 0
       @method_inheritance_cache_class_info_version = 0
       @method_inheritance_cache_module_version = 0
@@ -12634,6 +12638,16 @@ module Crystal::HIR
       end
       if ENV.has_key?("DEBUG_LOWER_BYTE") && (method_name == "byte_begin" || method_name == "byte_range")
         STDERR.puts "[LOWER_METHOD] START class=#{class_name} method=#{method_name} override=#{full_name_override || "nil"} arena=#{@arena.class}:#{@arena.size} modules=#{@class_included_modules[class_name]?.try(&.to_a.join(",")) || "nil"}"
+      end
+      if ENV["DEBUG_LOWER_METHOD_STATS"]?
+        full_label = "#{class_name}##{method_name}"
+        @lower_method_debug_total += 1
+        @lower_method_debug_counts[full_label] = (@lower_method_debug_counts[full_label]? || 0) + 1
+        if (@lower_method_debug_total % 50) == 0
+          top = @lower_method_debug_counts.to_a.sort_by(&.[1]).last(10).reverse
+          summary = top.map { |(name, count)| "#{name}=#{count}" }.join(", ")
+          STDERR.puts "[LOWER_METHOD_STATS] total=#{@lower_method_debug_total} top=#{summary}"
+        end
       end
       # Check if this is a class method (def self.method_name)
       is_class_method = force_class_method || if recv = node.receiver
