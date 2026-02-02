@@ -30336,10 +30336,17 @@ module Crystal::HIR
           class_name_str = @current_class
         elsif obj_node.is_a?(CrystalV2::Compiler::Frontend::ConstantNode)
           name = String.new(obj_node.name)
+          substituted_name = substitute_type_params_in_type_name(name)
+          substituted = substituted_name != name
+          name = substituted_name if substituted
           if @module.is_lib?(name)
             class_name_str = name
           else
-            resolved = resolve_class_name_in_context(name)
+            resolved = if substituted && name.includes?("::")
+                         name
+                       else
+                         resolve_class_name_in_context(name)
+                       end
             resolved = resolve_type_alias_chain(resolved)
             # Prefer type/module resolution for constant receivers that are actually types.
             if class_name_str.nil? && @generic_templates.has_key?(resolved) && method_name == "new"
