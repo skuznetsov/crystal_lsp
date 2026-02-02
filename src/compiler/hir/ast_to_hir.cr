@@ -29128,8 +29128,9 @@ module Crystal::HIR
             full_override = name != target_name ? name : nil
             target_for_lower = full_override || target_name
             # For .new on classes/structs, use generate_allocator (not lower_method)
-            # This ensures correct init_params from the initialize method are used
-            # Note: resolved_parts.method already has type suffix stripped
+            # This ensures correct init_params from the initialize method are used.
+            # If an explicit new overload exists but does NOT match this callsite,
+            # we still generate the allocator for the callsite types.
             if method == "new"
               if class_info = @class_info[owner]?
                 base_new = "#{owner}.new"
@@ -29137,10 +29138,19 @@ module Crystal::HIR
                 unless explicit_new
                   explicit_new = function_def_overloads(base_new).any? { |key| key != base_new }
                 end
-                if allocator_supported?(owner) && !explicit_new
-                  generate_allocator(owner, class_info, call_arg_types)
-                  # The function was just generated (or already existed), return
-                  return
+                has_call_types = call_arg_types && call_arg_types.any? { |t| t != TypeRef::VOID }
+                if allocator_supported?(owner)
+                  if explicit_new && has_call_types
+                    matched = lookup_function_def_for_call(base_new, call_arg_types.not_nil!.size, false, call_arg_types)
+                    unless matched
+                      generate_allocator(owner, class_info, call_arg_types)
+                      return
+                    end
+                  elsif !explicit_new
+                    generate_allocator(owner, class_info, call_arg_types)
+                    # The function was just generated (or already existed), return
+                    return
+                  end
                 end
               end
             end
