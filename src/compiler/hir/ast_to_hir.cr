@@ -24820,9 +24820,21 @@ module Crystal::HIR
       end
 
       # Create implicit self parameter
-      local = Local.new(ctx.next_id, TypeRef::VOID, "self", ctx.current_scope, mutable: false)
+      local_type = TypeRef::VOID
+      if @current_method_is_class
+        if current = @current_class
+          resolved = resolve_type_alias_chain(substitute_type_params_in_type_name(current))
+          inferred = type_ref_for_name(resolved)
+          local_type = inferred unless inferred == TypeRef::VOID
+        end
+      end
+      local = Local.new(ctx.next_id, local_type, "self", ctx.current_scope, mutable: false)
       ctx.emit(local)
       ctx.register_local("self", local.id)
+      if local_type != TypeRef::VOID
+        ctx.register_type(local.id, local_type)
+        ctx.mark_type_literal(local.id) if @current_method_is_class
+      end
       local.id
     end
 
