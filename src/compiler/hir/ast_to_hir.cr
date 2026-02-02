@@ -24684,8 +24684,10 @@ module Crystal::HIR
       # Return a type reference literal (for use as receiver in static calls)
       # We use a nil literal with special type tracking
       type_ref = @class_info[class_name]?.try(&.type_ref) || TypeRef::VOID
-      if class_info = @class_info[class_name]?
-        generate_allocator(class_name, class_info)
+      if ENV["CRYSTAL_V2_TYPE_LITERAL_ALLOC"]?
+        if class_info = @class_info[class_name]?
+          generate_allocator(class_name, class_info)
+        end
       end
       lit = Literal.new(ctx.next_id, type_ref, nil)
       ctx.emit(lit)
@@ -24711,8 +24713,10 @@ module Crystal::HIR
       else
         type_name = resolve_type_alias_chain(type_name)
       end
-      if class_info = @class_info[type_name]?
-        generate_allocator(type_name, class_info)
+      if ENV["CRYSTAL_V2_TYPE_LITERAL_ALLOC"]?
+        if class_info = @class_info[type_name]?
+          generate_allocator(type_name, class_info)
+        end
       end
       type_ref = type_ref_for_name(type_name)
       lit = Literal.new(ctx.next_id, type_ref, nil)
