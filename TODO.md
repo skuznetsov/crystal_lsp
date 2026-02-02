@@ -37,6 +37,7 @@ about syntax or types and should match what the original compiler would report.
     `LibC::SizeT.zero`, `Pointer(UInt8)#@nanoseconds`, `Pointer(UInt8)#@seconds`, `Pointer(UInt8)#offset`,
     `SlicePointer(UInt8) | Int32#size`, `hash$$Crystal::Hasher`, `try$block`.
     Log: `/private/tmp/bootstrap_array_full.link.log`.
+  - Update (2026-02-02): module-typed ivar accessors now generated (`Class#@ivar` and module owner fallback), and module-owner calls forced to virtual dispatch. This removed `Crystal::System::FileDescriptor#@read_timeout` and `#@write_timeout` from missing list. Remaining focus: `Indexable#size`, `Enumerable#index`, tuple `#[]`, `$Hbegin/$Hend`, `try$block`.
   - Update (2026-02-02): included-module lookup now merges base owner for generic receivers (e.g., `Array(Range...)` → `Array`) and strips generic params via `strip_generic_args` instead of `split('(')`. Retest for `_Array$...#begin/end`, `Enumerable#index`, `Indexable#size`.
   - Update (2026-02-02): record module inclusion under base class name (e.g., `Array(T)` → `Array`) to avoid losing include methods for concrete generic instantiations. Retest missing `$Hbegin/$Hend`.
   - Update (2026-02-02): resolve_method_with_inheritance now walks transitive included modules (Array → Indexable::Mutable → Indexable) and checks base class/module names for generic owners. This should stop `Indexable#size`/`Enumerable#index` leaking into calls and restore `Range#begin` for `runs[r+1]`.
