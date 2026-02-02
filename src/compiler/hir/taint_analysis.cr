@@ -157,20 +157,21 @@ module Crystal::HIR
     # "Array(Hash(String, Node?))" → ["Array", "Hash", "String", "Node"]
     private def extract_type_references(type_ann : String) : Array(String)
       refs = [] of String
-      current = ""
-
-      type_ann.each_char do |char|
-        if char.ascii_alphanumeric? || char == '_' || char == ':'
-          current += char
-        else
-          unless current.empty?
-            refs << current
-            current = ""
-          end
+      start = nil.as(Int32?)
+      i = 0
+      while i < type_ann.bytesize
+        ch = type_ann.byte_at(i).unsafe_chr
+        if ch.ascii_alphanumeric? || ch == '_' || ch == ':'
+          start = i unless start
+        elsif start
+          refs << type_ann.byte_slice(start, i - start)
+          start = nil
         end
+        i += 1
       end
-
-      refs << current unless current.empty?
+      if start
+        refs << type_ann.byte_slice(start, type_ann.bytesize - start)
+      end
       refs
     end
 
