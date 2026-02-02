@@ -7596,6 +7596,8 @@ module Crystal::HIR
         STDERR.puts "[DEBUG_MODULE] Processing module: #{module_name}, body_size=#{node.body.try(&.size) || 0}"
       end
 
+      record_nested_type_names(module_name, node.body)
+
       if class_like_namespace?(module_name)
         if @module_defs.delete(module_name)
           @module_defs_cache_version += 1
@@ -10292,6 +10294,13 @@ module Crystal::HIR
               "name=#{base_name} param=#{param_name} literal=#{param_literal}"
             )
           end
+        end
+      end
+
+      if registered_params = function_type_param_map_for(full_name_override || base_name, base_name)
+        extra_type_params.merge!(registered_params)
+        if debug_env_filter_match?("DEBUG_LOWER_METHOD_TPM", full_name_override || base_name, base_name)
+          STDERR.puts "[LOWER_MODULE_TPM] base=#{base_name} override=#{full_name_override || "nil"} merged=#{registered_params}"
         end
       end
 
@@ -14418,6 +14427,16 @@ module Crystal::HIR
     # Returns the properly mangled method name that should be used in the Call node
     private def normalize_method_owner_name(name : String) : String
       return name if name.empty?
+      if mapped = @type_param_map[name]?
+        return mapped
+      end
+      if (idx = name.index("::"))
+        prefix = name[0, idx]
+        if mapped = @type_param_map[prefix]?
+          suffix = name[(idx + 2)..]
+          return "#{mapped}::#{suffix}"
+        end
+      end
       return "Tuple" if name.starts_with?("Tuple(")
       return "NamedTuple" if name.starts_with?("NamedTuple(")
       name
