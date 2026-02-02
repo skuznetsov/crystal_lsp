@@ -747,6 +747,11 @@ module Crystal::HIR
     # Cache block function def lookup by callsite shape.
     @block_lookup_cache : Hash(BlockLookupKey, Tuple(String, CrystalV2::Compiler::Frontend::DefNode)?) = {} of BlockLookupKey => Tuple(String, CrystalV2::Compiler::Frontend::DefNode)?
     @block_lookup_cache_size : Int32 = 0
+    # Debug-only: lower node histogram (enabled via DEBUG_LOWER_HISTO)
+    @lower_histo_counts : Hash(String, Int32) = {} of String => Int32
+    @lower_histo_last : Time::Instant? = nil
+    @lower_histo_since_check : Int32 = 0
+    @lower_histo_total : Int64 = 0
 
     # ═══════════════════════════════════════════════════════════════════════════
     # FUNCTION LOWERING STATE MACHINE
@@ -21313,6 +21318,7 @@ module Crystal::HIR
 
     # Lower an AST node to HIR
     def lower_node(ctx : LoweringContext, node : AstNode) : ValueId
+      maybe_log_lower_histo(node)
       if !@pending_def_annotations.empty? &&
          !node.is_a?(CrystalV2::Compiler::Frontend::AnnotationNode) &&
          !node.is_a?(CrystalV2::Compiler::Frontend::DefNode)
@@ -33803,6 +33809,33 @@ module Crystal::HIR
         return enum_info[short_name]? if short_name != lookup && enum_info.has_key?(short_name)
       end
       nil
+    end
+
+    private def maybe_log_lower_histo(node : AstNode) : Nil
+      return unless ENV.has_key?("DEBUG_LOWER_HISTO")
+
+      name = last_namespace_component(node.class.name)
+      @lower_histo_counts[name] = (@lower_histo_counts[name]? || 0) + 1
+      @lower_histo_total += 1
+      @lower_histo_since_check += 1
+      if @lower_histo_last.nil?
+        @lower_histo_last = Time.instant
+        @lower_histo_since_check = 0
+        return
+      end
+      return if @lower_histo_since_check < 4096
+
+      now = Time.instant
+      elapsed = now - @lower_histo_last.not_nil!
+      if elapsed.total_seconds >= 3
+        top = @lower_histo_counts.to_a.sort_by(&.last).reverse.first(12)
+        stats = top.map { |(k, v)| "#{k}=#{v}" }.join(" ")
+        STDERR.puts "[LOWER_HISTO] total=#{@lower_histo_total} #{stats}"
+        @lower_histo_counts.clear
+        @lower_histo_total = 0
+        @lower_histo_last = now
+      end
+      @lower_histo_since_check = 0
     end
 
     private def enum_member_value(type_name : String, symbol_name : String, context : String? = nil) : Int64?
