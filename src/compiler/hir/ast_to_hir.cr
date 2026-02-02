@@ -21217,7 +21217,21 @@ module Crystal::HIR
               skipped_void += 1 if debug_emit
               next
             end
-            name = mangle_function_name(base_name, args.types, signature.has_block)
+            has_splat_def = false
+            function_def_overloads(base_name).each do |key|
+              def_node = @function_defs[key]?
+              next unless def_node
+              stats = function_param_stats(key, def_node)
+              if stats.has_splat || stats.has_double_splat
+                has_splat_def = true
+                break
+              end
+            end
+            name = if entry = lookup_function_def_for_call(base_name, args.types.size, signature.has_block, args.types, has_splat_def)
+                     entry[0]
+                   else
+                     mangle_function_name(base_name, args.types, signature.has_block)
+                   end
             next if @module.has_function?(name)
             next if function_state(name).completed?
             next if function_state(name).in_progress?
@@ -28493,6 +28507,37 @@ module Crystal::HIR
         # If still not found, search for any mangled variant of the base name
         # This handles methods with default parameters where call-site arg count < defined param count
         unless func_def
+          if name.includes?("$")
+            if callsite = @pending_arg_types[name]? || @pending_arg_types[target_name]?
+              suffix = name_parts.suffix
+              has_block = suffix == "block" || (suffix && suffix.ends_with?("_block")) || name.ends_with?("$block")
+              call_has_splat = name.ends_with?("_splat") || name.ends_with?("_double_splat")
+              if entry = lookup_function_def_for_call(base_name, callsite.types.size, has_block, callsite.types, call_has_splat)
+                func_def = entry[1]
+                arena = @function_def_arenas[entry[0]]
+                target_name = name
+                lookup_branch = "callsite_args"
+              end
+            end
+          end
+        end
+        unless func_def
+          if suffix = name_parts.suffix
+            stripped = strip_mangled_suffix_flags(suffix)
+            parsed_types = parse_types_from_suffix(stripped)
+            unless parsed_types.empty?
+              has_block = suffix == "block" || suffix.ends_with?("_block")
+              call_has_splat = suffix.ends_with?("_splat") || suffix.ends_with?("_double_splat")
+              if entry = lookup_function_def_for_call(base_name, parsed_types.size, has_block, parsed_types, call_has_splat)
+                func_def = entry[1]
+                arena = @function_def_arenas[entry[0]]
+                target_name = name
+                lookup_branch = "suffix_types"
+              end
+            end
+          end
+        end
+        unless func_def
           mangled_prefix = "#{base_name}$"
           if ENV.has_key?("DEBUG_LOOKUP")
             STDERR.puts "[DEBUG_LOOKUP] Searching for prefix '#{mangled_prefix}' for name '#{name}'"
@@ -29152,25 +29197,56 @@ module Crystal::HIR
       # Skip lowering functions with bare generic types when no concrete type info is available
       # This prevents emitting functions like Indexable.range_to_index_and_count$Range_Int32 which call Range#begin on bare Range
       if call_arg_types
+        params_for_bare : Array(CrystalV2::Compiler::Frontend::Parameter)? = nil
+        splat_index : Int32? = nil
         has_double_splat_param = false
         if params = func_def.params
-          has_double_splat_param = params.any?(&.is_double_splat)
-        end
-        has_bare_generic = call_arg_types.any? do |t|
-          if desc = @module.get_type_descriptor(t)
-            # Bare generic: name without '(' but is a known generic type
-            is_bare = !desc.name.includes?("(") && KNOWN_GENERIC_TYPES.includes?(desc.name)
-            if is_bare && desc.name == "NamedTuple" && has_double_splat_param
-              false
-            else
-              if ENV.has_key?("DEBUG_RANGE_SKIP") && is_bare
-                STDERR.puts "[RANGE_SKIP] name=#{name} bare_type=#{desc.name} skipping"
-              end
-              is_bare
-            end
-          else
-            false
+          params_for_bare = [] of CrystalV2::Compiler::Frontend::Parameter
+          params.each do |param|
+            next if named_only_separator?(param) || param.is_block
+            params_for_bare << param
           end
+          has_double_splat_param = params.any?(&.is_double_splat)
+          if params_for_bare
+            params_for_bare.each_with_index do |param, idx|
+              if param.is_splat || param.is_double_splat
+                splat_index = idx
+                break
+              end
+            end
+          end
+        end
+        has_bare_generic = false
+        call_arg_types.each_with_index do |t, idx|
+          desc = @module.get_type_descriptor(t)
+          next unless desc
+          # Bare generic: name without '(' but is a known generic type
+          is_bare = !desc.name.includes?("(") && KNOWN_GENERIC_TYPES.includes?(desc.name)
+          next unless is_bare
+          if desc.name == "NamedTuple" && has_double_splat_param
+            next
+          end
+          # Allow bare generic when def param is also bare of the same base (e.g., Array)
+          if params_for_bare && !params_for_bare.empty?
+            param_idx = splat_index && idx >= splat_index ? splat_index : idx
+            if param_idx < params_for_bare.size
+              param = params_for_bare[param_idx]
+              if ta = param.type_annotation
+                type_name = String.new(ta)
+                if !type_name.includes?("(") && type_name == desc.name
+                  next
+                end
+              elsif param.is_splat || param.is_double_splat
+                # Untyped splat params accept bare generic args without requiring instantiation.
+                next
+              end
+            end
+          end
+          if ENV.has_key?("DEBUG_RANGE_SKIP") && is_bare
+            STDERR.puts "[RANGE_SKIP] name=#{name} bare_type=#{desc.name} skipping"
+          end
+          has_bare_generic = true
+          break
         end
         if has_bare_generic
           return
