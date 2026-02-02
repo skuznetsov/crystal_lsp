@@ -14,6 +14,8 @@ about syntax or types and should match what the original compiler would report.
 - [x] Replace method-name string `split` usage with zero-copy helpers (`parse_method_name`, `strip_type_suffix`) in HIR lowering hot paths (ast_to_hir).
 - [x] Audit remaining `split("$")`/`split("#")` in other files (if any) to ensure method-name parsing uses helpers.
 - [ ] Investigate `spec/hir/return_type_inference_spec.cr` timeout: after String.build and type-name cache work, hotspot shifted to `lower_binary → lower_member_access → generate_allocator/register_concrete_class` and `refresh_unique_def_arenas!` (see `/tmp/rt_infer_sample_arena_fast.txt`). Next: reduce monomorphize churn in `register_concrete_class` and avoid repeated `refresh_unique_def_arenas!` in hot loops.
+- [ ] Audit remaining float/int conversion sites in LLVM backend (fptosi/fptoui, sitofp/uitofp, ptrtoint/uitofp) to ensure all unsigned + ptr→float paths are correct on ARM/AArch64.
+- [ ] Re-audit union payload alignment for ARM/AArch64 (align 4 where required) to catch any remaining misaligned loads/stores.
 
 ### Test Coverage
 - **3400+ tests**, 0 failures in `spec/hir/ast_to_hir_spec.cr` (2 pending)
@@ -238,6 +240,15 @@ Goal: v2 LSP must report only real errors and match original compiler behavior.
 - [x] Guard hover/definition when indexing in progress (soft-fail)
 - [x] Rename guard for stdlib/prelude symbols (no-op or error)
 - [x] VSCode extension: request/response log channel and "Indexing…" status indicator in UI
+
+---
+
+## 5. Platform Coverage
+
+Goal: match original Crystal target coverage (all LLVM targets supported by upstream), and add Windows support as a bonus.
+
+### Pending
+- [ ] Add Windows support plan (linker/stdlib stubs, process/IO, path handling, CI target).
 - [x] Navigation to stdlib/prelude (tests + impl)
 - [x] Folding ranges for begin/rescue/else/ensure without overfolding; semantic tokens for symbol literals fixed
 - [x] Regression scenarios via `tools/lsp_scripts` - rename, stdlib, hover→definition chains, nested consts, class/instance vars
