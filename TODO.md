@@ -17,6 +17,7 @@ about syntax or types and should match what the original compiler would report.
 - [ ] Added `DEBUG_ALLOC_STATS=1` allocator histogram (prints every 50 allocators). Use to spot heavy classes during spec timeout and decide what to skip/cache.
 - [ ] Added `DEBUG_LOWER_METHOD_STATS=1` (prints top lowered methods every 50). Early 20s sample shows many distinct methods (IO/Socket/puts etc.) with low per-method counts; indicates breadth rather than a single hot method.
 - [ ] Added `DEBUG_LOWER_METHOD_NS_STATS=1` (namespace histogram). 20s sample dominated by IO, Compress, HTTP, OpenSSL, CrystalV2/Spec; suggests spec pulls large stdlib surface (puts/print/socket) and time is spent in breadth of lowering, not one hot method.
+- [ ] Plan: parallel lowering workers (post‑registration) using work queue; keep macro/generic instantiation single‑thread, isolate per‑worker caches, guard shared state. Gate with `CRYSTAL_V2_PARALLEL_LOWER=1` and enable once specs pass.
 - [x] Gate allocator generation during type‑literal lowering (skip unless `CRYSTAL_V2_TYPE_LITERAL_ALLOC` is set) to avoid `lower_method` churn when only type objects are needed. (2026-02-02)
 - [x] Refactor `type_inference_engine.cr` union parsing: replace `split(" | ")` with zero‑copy scanning to respect no‑GC/zero‑copy policy. (2026-02-02)
 - [ ] Audit remaining float/int conversion sites in LLVM backend (fptosi/fptoui, sitofp/uitofp, ptrtoint/uitofp) to ensure all unsigned + ptr→float paths are correct on ARM/AArch64.
