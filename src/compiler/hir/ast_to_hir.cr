@@ -14899,7 +14899,7 @@ module Crystal::HIR
         return list
       end
 
-      stripped = strip_generic_receiver_from_method_name(base_name)
+      stripped = strip_generic_receiver_for_lookup(base_name)
       if stripped != base_name
         if cached = @function_def_overloads_stripped_cache[stripped]?
           @function_def_overloads_cache[base_name] = cached
@@ -14917,7 +14917,7 @@ module Crystal::HIR
         # Last-resort: scan bases that match after stripping generics.
         matches = [] of String
         @function_def_overloads.each do |base, keys|
-          next unless strip_generic_receiver_from_method_name(base) == stripped
+          next unless strip_generic_receiver_for_lookup(base) == stripped
           keys.each do |key|
             matches << key unless matches.includes?(key)
           end
@@ -18910,6 +18910,12 @@ module Crystal::HIR
       result = strip_generic_receiver_uncached(method_name)
       @strip_generic_receiver_cache[method_name] = result
       result
+    end
+
+    # Hot-path variant for overload lookup: avoid cache hash cost.
+    private def strip_generic_receiver_for_lookup(method_name : String) : String
+      return method_name unless method_name.includes?("(")
+      strip_generic_receiver_uncached(method_name)
     end
 
     private def strip_generic_receiver_uncached(method_name : String) : String
