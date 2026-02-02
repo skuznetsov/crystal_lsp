@@ -1663,6 +1663,20 @@ module Crystal::HIR
         class_set.add(resolved_module_name)
         cache_bump = true
       end
+      # Also record includes on the base class name (Array(T) -> Array) so
+      # generic instantiations can resolve module methods via base lookup.
+      class_base = strip_generic_args(class_name)
+      if class_base != class_name && !class_base.empty?
+        base_set = @class_included_modules[class_base]? || begin
+          new_set = Set(String).new
+          @class_included_modules[class_base] = new_set
+          new_set
+        end
+        unless base_set.includes?(resolved_module_name)
+          base_set.add(resolved_module_name)
+          cache_bump = true
+        end
+      end
       @module_includers_version += 1 if cache_bump
       debug_hook("module.include", "#{class_name} <= #{resolved_module_name}")
     end
@@ -19817,17 +19831,39 @@ module Crystal::HIR
           @method_inheritance_cache[cache_key] = resolved
           return resolved  # Return base name - caller will mangle
         end
-        # Also check included modules for this class
-        if included = @class_included_modules[current]?
-          included.each do |module_name|
-            # Strip generic params for module lookup (Indexable(T) -> Indexable)
-            base_module = strip_generic_args(module_name)
+        # Also check included modules for this class (transitive).
+        # This is required for chains like Array(T) -> Indexable::Mutable(T) -> Indexable(T).
+        included = Set(String).new
+        if direct = @class_included_modules[current]?
+          direct.each { |m| included << m }
+        end
+        current_base = strip_generic_args(current)
+        if current_base != current
+          if base = @class_included_modules[current_base]?
+            base.each { |m| included << m }
+          end
+        end
+        unless included.empty?
+          queue = included.to_a
+          visited_modules = Set(String).new
+          while mod = queue.pop?
+            next if visited_modules.includes?(mod)
+            visited_modules << mod
+            base_module = strip_generic_args(mod)
             module_method = "#{base_module}##{method_name}"
             if @function_types.has_key?(module_method) || has_function_base?(module_method)
               # Return with class prefix so it gets lowered for this class
               resolved = current == origin ? test_name : "#{origin}##{method_name}"
               @method_inheritance_cache[cache_key] = resolved
               return resolved
+            end
+            if submods = @class_included_modules[mod]?
+              submods.each { |m| queue << m }
+            end
+            if base_module != mod
+              if submods = @class_included_modules[base_module]?
+                submods.each { |m| queue << m }
+              end
             end
           end
         end

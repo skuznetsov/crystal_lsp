@@ -38,6 +38,8 @@ about syntax or types and should match what the original compiler would report.
     `SlicePointer(UInt8) | Int32#size`, `hash$$Crystal::Hasher`, `try$block`.
     Log: `/private/tmp/bootstrap_array_full.link.log`.
   - Update (2026-02-02): included-module lookup now merges base owner for generic receivers (e.g., `Array(Range...)` → `Array`) and strips generic params via `strip_generic_args` instead of `split('(')`. Retest for `_Array$...#begin/end`, `Enumerable#index`, `Indexable#size`.
+  - Update (2026-02-02): record module inclusion under base class name (e.g., `Array(T)` → `Array`) to avoid losing include methods for concrete generic instantiations. Retest missing `$Hbegin/$Hend`.
+  - Update (2026-02-02): resolve_method_with_inheritance now walks transitive included modules (Array → Indexable::Mutable → Indexable) and checks base class/module names for generic owners. This should stop `Indexable#size`/`Enumerable#index` leaking into calls and restore `Range#begin` for `runs[r+1]`.
 - [ ] Implicit self calls: set receiver type when callee is `ImplicitObjNode` so bare method calls don't resolve to unqualified names (attempted build of `/tmp/implicit_self_test.cr` timed out at 120s; needs verification).
 - [ ] Class-method `self` should be type-literal: `emit_self` now assigns class type and marks type literal when `@current_method_is_class` (compile still times out with sig budget; needs verification).
 - [ ] `String::Grapheme.put$Array_splat`: now confirmed `function.lower.start/done` fires, yet still appears in `missing.symbol` trace. Verify whether it is actually emitted into module (check linker undefined list), and adjust missing-trace logic or lowering order if it is only transient.
