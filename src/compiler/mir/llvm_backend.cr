@@ -1000,6 +1000,29 @@ module Crystal::MIR
       {receiver, rest}
     end
 
+    @[AlwaysInline]
+    private def operator_method?(name : String) : Bool
+      case name
+      when "+", "-", "*", "/", "%", "**", "<<", ">>", "&", "|", "^", "<", ">", "<=", ">=", "==", "!="
+        true
+      else
+        false
+      end
+    end
+
+    @[AlwaysInline]
+    private def crystalish_extern_name?(name : String) : Bool
+      # Namespaced or receiver-qualified: definitely Crystal.
+      return true if name.includes?("#") || name.includes?(".") || name.includes?("::")
+      # Type-suffixed or type-like: likely Crystal (Int32/UInt64/etc).
+      return true if name.includes?("_Int") || name.includes?("_UInt") || name.includes?("_Float")
+      # Uppercase letters are uncommon in C lib symbols, common in Crystal types.
+      name.each_byte do |byte|
+        return true if byte >= 'A'.ord && byte <= 'Z'.ord
+      end
+      false
+    end
+
 
     private def emit_string_constants
       emit_raw "\n; String constants\n"
@@ -1962,17 +1985,23 @@ module Crystal::MIR
             # This handles cases like String#index returning Int32|Nil
             mangled_extern_name = @type_mapper.mangle_name(inst.extern_name)
             # Skip suffix matching for:
-            # 1. Arithmetic operators (___* = *, __* = +) - can match unrelated methods
-            # 2. C library functions (simple names without namespace) - avoid matching Crystal methods
-            is_arithmetic_op = mangled_extern_name.starts_with?("___") ||
-                               (mangled_extern_name.starts_with?("__") && !mangled_extern_name.starts_with?("___"))
-            # C library functions are typically simple names like "write", "read", "malloc"
-            # Crystal methods would have namespace prefixes like "IO_write" or "String_size"
-            is_c_lib_function = !mangled_extern_name.includes?("_") || mangled_extern_name.starts_with?("__")
+            # 1. Operator methods (avoid accidental suffix hits)
+            # 2. Likely C library functions (simple names without namespace/type hints)
+            extern_name = inst.extern_name
+            receiver_and_method = extract_receiver_and_method(extern_name)
+            is_operator = false
+            if receiver_and_method
+              _receiver_name, method_core = receiver_and_method
+              is_operator = operator_method?(method_core)
+            else
+              # Bare operator names still count as operator methods.
+              is_operator = operator_method?(extern_name)
+            end
+            is_c_lib_function = !crystalish_extern_name?(extern_name)
             # Search for exact match OR suffix match (for non-arithmetic, non-C-lib operators)
             matching_func = @module.functions.find do |f|
               mangled = @type_mapper.mangle_name(f.name)
-              if is_arithmetic_op || is_c_lib_function
+              if is_operator || is_c_lib_function
                 # Only exact match for arithmetic operators and C lib functions
                 mangled == mangled_extern_name
               else
