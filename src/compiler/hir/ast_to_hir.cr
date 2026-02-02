@@ -12507,7 +12507,8 @@ module Crystal::HIR
       class_name : String,
       class_info : ClassInfo,
       ivar_info : IVarInfo,
-      accessor_name : String? = nil
+      accessor_name : String? = nil,
+      self_type_ref : TypeRef? = nil
     )
       accessor_name = accessor_name || ivar_info.name.lstrip('@')
       ivar_type = ivar_info.type
@@ -12520,9 +12521,10 @@ module Crystal::HIR
       func = @module.create_function(func_name, ivar_type)
       ctx = LoweringContext.new(func, @module, @arena)
 
-      self_param = func.add_param("self", class_info.type_ref)
+      self_type_ref ||= class_info.type_ref
+      self_param = func.add_param("self", self_type_ref)
       ctx.register_local("self", self_param.id)
-      ctx.register_type(self_param.id, class_info.type_ref)
+      ctx.register_type(self_param.id, self_type_ref)
 
       field_get = FieldGet.new(ctx.next_id, ivar_type, self_param.id, ivar_info.name, ivar_info.offset)
       ctx.emit(field_get)
@@ -29910,6 +29912,25 @@ module Crystal::HIR
       owner = parts.owner
       method_name = parts.method || ""
       return false if owner.empty? || method_name.empty?
+      if method_name.starts_with?("@") && !method_name.ends_with?("=")
+        ivar_name = method_name
+        if class_info = @class_info[owner]?
+          if ivar_info = class_info.ivars.find { |iv| iv.name == ivar_name }
+            expected_name = mangle_function_name(base_name, [] of TypeRef)
+            return false if name.includes?("$") && expected_name != name
+            generate_getter_method_for_ivar(owner, class_info, ivar_info, method_name)
+            return true
+          end
+        end
+        if resolved = resolve_module_typed_ivar(owner, ivar_name)
+          class_info, ivar_info = resolved
+          module_type = type_ref_for_name(owner)
+          expected_name = mangle_function_name(base_name, [] of TypeRef)
+          return false if name.includes?("$") && expected_name != name
+          generate_getter_method_for_ivar(owner, class_info, ivar_info, method_name, module_type)
+          return true
+        end
+      end
 
       if ENV.has_key?("DEBUG_RANGE_ACCESSOR") && owner.starts_with?("Range") && (method_name == "begin" || method_name == "end" || method_name == "excludes_end?")
         STDERR.puts "[RANGE_ACCESSOR] name=#{name} owner=#{owner} method=#{method_name}"
@@ -33311,10 +33332,20 @@ module Crystal::HIR
           if !call_virtual && type_desc.kind == TypeKind::Generic
             call_virtual = module_like_type_name?(type_desc.name) || module_includers_match?(type_desc.name)
           end
+          if !call_virtual && (module_like_type_name?(type_desc.name) || module_includers_match?(type_desc.name))
+            call_virtual = true
+          end
           if !call_virtual && type_desc.kind == TypeKind::Class
             call_virtual = class_has_subclasses?(type_desc.name) ||
               abstract_def?(mangled_method_name) ||
               (mangled_method_name != primary_mangled_name && abstract_def?(primary_mangled_name))
+          end
+        end
+      end
+      if !call_virtual && base_method_name
+        if owner = method_owner(base_method_name)
+          if @module_defs.has_key?(owner) || module_like_type_name?(owner) || module_includers_match?(owner)
+            call_virtual = true
           end
         end
       end
@@ -38592,9 +38623,19 @@ module Crystal::HIR
         if !call_virtual && type_desc.kind == TypeKind::Generic
           call_virtual = module_like_type_name?(type_desc.name) || module_includers_match?(type_desc.name)
         end
+        if !call_virtual && (module_like_type_name?(type_desc.name) || module_includers_match?(type_desc.name))
+          call_virtual = true
+        end
         if !call_virtual && type_desc.kind == TypeKind::Class
           abstract_base = base_method_name ? abstract_def?(base_method_name) : false
           call_virtual = class_has_subclasses?(type_desc.name) || abstract_base
+        end
+      end
+      if !call_virtual && base_method_name
+        if owner = method_owner(base_method_name)
+          if @module_defs.has_key?(owner) || module_like_type_name?(owner) || module_includers_match?(owner)
+            call_virtual = true
+          end
         end
       end
       if ENV.has_key?("DEBUG_VIRTUAL_CALLS") && object_id
