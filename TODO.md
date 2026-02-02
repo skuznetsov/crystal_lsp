@@ -28,6 +28,13 @@ about syntax or types and should match what the original compiler would report.
 - [ ] Add enum literal fast-path in HIR lowering for `.to_i` / `.value` on enum members (e.g., `DayOfWeek::Wednesday.to_i`), emitting const instead of missing call.
 - [ ] Ensure block wrapper emission for `each`/block calls: emit concrete block functions and propagate block arg type from callee signature to avoid missing `_block_each_block`.
 - [ ] Bootstrap linker undefined list (from `/tmp/undefined_symbols_latest.txt`) still non-empty after latest lowering tweaks. Prioritize these exact missing symbols (e.g., `_Unicode$Dput$$Pointer_Int32_Int32_Int32_Int32`, `_String$_$OR$_Nil$Hbsearch_index$$block`, `_try$block`, `_Array$LRange$LInt32$C$_Int32$R$R$Hbegin/end`, `Crystal::EventLoop::Kqueue/ Polling` methods). Focus on linker list, not just `missing.symbol` trace (trace includes transient unlowered).
+  - Update (2026-02-02): latest `bootstrap_array` link (debug, `--no-llvm-opt --no-llvm-metadata`) fails with missing symbols:
+    `_Array$LRange$LInt32$C$_Int32$R$R$Hbegin`, `_Array$LRange$LInt32$C$_Int32$R$R$Hend`, `Crystal::System::FileDescriptor#@read_timeout`,
+    `Crystal::System::FileDescriptor#@write_timeout`, `Crystal::System::Tuple(String | Nil, String)#[Int32]`,
+    `Enumerable#index`, `Indexable::ItemIterator(Tuple, Pointer).new`, `Indexable#size`, `Int32#exception_*`,
+    `LibC::SizeT.zero`, `Pointer(UInt8)#@nanoseconds`, `Pointer(UInt8)#@seconds`, `Pointer(UInt8)#offset`,
+    `SlicePointer(UInt8) | Int32#size`, `hash$$Crystal::Hasher`, `try$block`.
+    Log: `/private/tmp/bootstrap_array_full.link.log`.
 - [ ] Implicit self calls: set receiver type when callee is `ImplicitObjNode` so bare method calls don't resolve to unqualified names (attempted build of `/tmp/implicit_self_test.cr` timed out at 120s; needs verification).
 - [ ] Class-method `self` should be type-literal: `emit_self` now assigns class type and marks type literal when `@current_method_is_class` (compile still times out with sig budget; needs verification).
 - [ ] `String::Grapheme.put$Array_splat`: now confirmed `function.lower.start/done` fires, yet still appears in `missing.symbol` trace. Verify whether it is actually emitted into module (check linker undefined list), and adjust missing-trace logic or lowering order if it is only transient.
