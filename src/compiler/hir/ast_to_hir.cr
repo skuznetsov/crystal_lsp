@@ -30893,7 +30893,7 @@ module Crystal::HIR
           end
           if full_method_name
             call_has_splat = call_args.any? { |arg_expr| call_arena[arg_expr].is_a?(CrystalV2::Compiler::Frontend::SplatNode) }
-            call_has_named_args = !!(node.named_args && !node.named_args.empty?)
+            call_has_named_args = node.named_args.try(&.empty?) == false
             has_block_call = !!block_expr || !!block_pass_expr
             call_arg_types = infer_arg_types_for_call(call_args, @current_class)
             if entry = lookup_function_def_for_call(full_method_name, call_arg_types.size, has_block_call, call_arg_types, call_has_splat, call_has_named_args)
@@ -31559,7 +31559,7 @@ module Crystal::HIR
       # Refine class/module method resolution using concrete arg types once available.
       if receiver_id.nil? && full_method_name
         call_has_splat = call_args.any? { |arg_expr| call_arena[arg_expr].is_a?(CrystalV2::Compiler::Frontend::SplatNode) }
-        call_has_named_args = !!(node.named_args && !node.named_args.empty?)
+        call_has_named_args = node.named_args.try(&.empty?) == false
         has_block_call = !!block_expr || !!block_pass_expr
         if entry = lookup_function_def_for_call(full_method_name, arg_types.size, has_block_call, arg_types, call_has_splat, call_has_named_args)
           full_method_name = entry[0]
