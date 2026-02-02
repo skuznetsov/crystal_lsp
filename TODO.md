@@ -2110,6 +2110,7 @@ end
     - `Pointer(UInt8).@seconds/@nanoseconds`, `Pointer(UInt8)#offset`
     - `String | Nil#bsearch_index$block`, `String | Nil#first`
     - `try$block`
+  - **Update (2026-02-02)**: `bootstrap_array` still links with **47** missing symbols when run with debug flags (`/tmp/undefined_symbols_latest.txt`, log `/tmp/bootstrap_array_full_current.link.log`). HIR shows specialized generic module names (e.g. `Float::Printer::Dragonbox::Impl(Float32, ImplInfo_Float32)` and `ImplInfo_Float32.get_cache`), but LLVM output uses base names (e.g. `Float::Printer::Dragonbox::Impl` and `ImplInfo$D*`), indicating generic args are being stripped between HIR and LLVM. **Next**: inspect HIR→MIR naming (function name normalization) and LLVM mangling input; add a debug dump of MIR function names containing `(` to confirm whether specialization is lost before mangling.
   - **Update (2026-01-22)**: `./bin/crystal_v2 compile examples/bench_fibonacci.cr -o /tmp/fib_test` reports **17** missing symbols (see `/tmp/fib_test` link errors):
     - `Crystal__DWARF__LineNumbers_initialize_IO__FileDescriptor_...` - DWARF debug info
     - `Crystal__MachO__CpuType_value_previous` - missing enum method

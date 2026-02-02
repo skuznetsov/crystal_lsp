@@ -9881,6 +9881,10 @@ module Crystal::HIR
 
     # Lower a module with a specific name prefix
     private def lower_module_with_name(node : CrystalV2::Compiler::Frontend::ModuleNode, module_name : String)
+      # Skip generic module templates; they are lowered via monomorphization.
+      if node.type_params && !module_name.includes?("(")
+        return
+      end
       if debug_env_filter_match?("DEBUG_NESTED_CLASS", module_name)
         STDERR.puts "[DEBUG_LOWER_MOD] lower_module_with_name: #{module_name}, body_size=#{node.body.try(&.size) || 0}"
       end
@@ -18513,14 +18517,22 @@ module Crystal::HIR
         return current
       end
       type_param_map = @type_param_map
-      if type_param_map.empty?
-        if current = @current_class
-          if info = generic_owner_info(current)
-            type_param_map = info[:map]
+      fallback_map : Hash(String, String)? = nil
+      lookup_param = ->(key : String) do
+        if value = type_param_map[key]?
+          value
+        else
+          if fallback_map.nil?
+            if current = @current_class
+              if info = generic_owner_info(current)
+                fallback_map = info[:map]
+              end
+            end
           end
+          fallback_map ? fallback_map[key]? : nil
         end
       end
-      if substitution = type_param_map[name]?
+      if substitution = lookup_param.call(name)
         return substitution
       end
       if local_name = @current_typeof_local_names.try(&.[name]?)
@@ -18532,7 +18544,7 @@ module Crystal::HIR
         if idx = name.index("::")
           prefix = name[0, idx]
           suffix = name[(idx + 2)..]
-          if substitution = type_param_map[prefix]?
+          if substitution = lookup_param.call(prefix)
             # Recursively substitute the suffix in case it also contains type params
             return "#{substitution}::#{substitute_type_params_in_type_name(suffix)}"
           end
@@ -18540,7 +18552,7 @@ module Crystal::HIR
         # Also check if the suffix after the last :: is a type param
         if idx = name.rindex("::")
           suffix = name[(idx + 2)..]
-          if substitution = type_param_map[suffix]?
+          if substitution = lookup_param.call(suffix)
             return substitution
           end
         end
@@ -30394,14 +30406,14 @@ module Crystal::HIR
                 class_name_str = fallback
               end
             end
-            if class_name_str.nil?
-              if class_like_namespace?(resolved) || primitive_self_type(resolved) ||
-                 @enum_info.try(&.has_key?(resolved))
-                class_name_str = resolved
-              elsif is_module_method?(resolved, method_name)
-                class_name_str = resolved
-              elsif resolve_constant_name_in_context(name)
-                constant_receiver = true
+              if class_name_str.nil?
+                if class_like_namespace?(resolved) || module_like_type_name?(resolved) ||
+                   primitive_self_type(resolved) || @enum_info.try(&.has_key?(resolved))
+                  class_name_str = resolved
+                elsif is_module_method?(resolved, method_name)
+                  class_name_str = resolved
+                elsif resolve_constant_name_in_context(name)
+                  constant_receiver = true
               end
             end
           end
@@ -30453,8 +30465,8 @@ module Crystal::HIR
               end
               # Prefer class/module resolution when the identifier maps to a known type.
               if class_name_str.nil?
-                if class_like_namespace?(resolved_name) || @enum_info.try(&.has_key?(resolved_name)) ||
-                   primitive_self_type(resolved_name)
+                if class_like_namespace?(resolved_name) || module_like_type_name?(resolved_name) ||
+                   @enum_info.try(&.has_key?(resolved_name)) || primitive_self_type(resolved_name)
                   class_name_str = resolved_name
                 elsif is_module_method?(resolved_name, method_name)
                   class_name_str = resolved_name
