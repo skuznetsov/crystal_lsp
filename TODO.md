@@ -20,8 +20,11 @@ about syntax or types and should match what the original compiler would report.
 - [ ] Plan: parallel lowering workers (post‑registration) using work queue; keep macro/generic instantiation single‑thread, isolate per‑worker caches, guard shared state. Gate with `CRYSTAL_V2_PARALLEL_LOWER=1` and enable once specs pass.
 - [x] Gate allocator generation during type‑literal lowering (skip unless `CRYSTAL_V2_TYPE_LITERAL_ALLOC` is set) to avoid `lower_method` churn when only type objects are needed. (2026-02-02)
 - [x] Refactor `type_inference_engine.cr` union parsing: replace `split(" | ")` with zero‑copy scanning to respect no‑GC/zero‑copy policy. (2026-02-02)
+- [ ] Bootstrap blocker: missing symbols logged as `reason=unlowered` (e.g., `String#each$block`, `Object#try$block`, `Crystal::System.print_error$splat`, `Array(String)#push`, `Pointer(Int32)#copy_from`). Trace in `/private/tmp/bootstrap_array_full.missing_trace.log`. Investigate `lower_function_if_needed` skip paths, block mangling (`$block`), and callsite arg type inference for block methods; ensure pending queue flush lowers these defs.
+- [ ] Fix LLVM backend extern-return heuristics to match new mangling (remove legacy prefix assumptions). Ensure any name parsing uses helper functions (no `split`) and matches current mangle scheme.
 - [ ] Audit remaining float/int conversion sites in LLVM backend (fptosi/fptoui, sitofp/uitofp, ptrtoint/uitofp) to ensure all unsigned + ptr→float paths are correct on ARM/AArch64.
 - [ ] Re-audit union payload alignment for ARM/AArch64 (align 4 where required) to catch any remaining misaligned loads/stores.
+  - [ ] Windows support: track parity with original Crystal target coverage; add Windows backend tasks once bootstrap is stable.
 
 ### Test Coverage
 - **3400+ tests**, 0 failures in `spec/hir/ast_to_hir_spec.cr` (2 pending)
