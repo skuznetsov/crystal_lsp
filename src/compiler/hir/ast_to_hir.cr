@@ -1570,7 +1570,7 @@ module Crystal::HIR
         cache_bump = true
       end
       @module.register_module_includer(resolved_module_name, class_name)
-      module_base = resolved_module_name.split("(", 2).first
+      module_base = strip_generic_args(resolved_module_name)
       parts = module_base.split("::")
       parts.each_index do |idx|
         suffix = parts[idx..].join("::")
@@ -1745,7 +1745,7 @@ module Crystal::HIR
       if short_name != parent_name
         @classes_with_subclasses.add(short_name)
       end
-      parent_base = parent_name.split("(", 2).first
+      parent_base = strip_generic_args(parent_name)
       keys = Set(String).new
       keys << parent_name
       keys << parent_base if parent_base != parent_name
@@ -4023,7 +4023,7 @@ module Crystal::HIR
     private def bare_generic_annotation?(type_name : String) : Bool
       return false if type_name.includes?("(")
       resolved = resolve_type_name_in_context(type_name)
-      base = resolved.split("(", 2).first
+      base = strip_generic_args(resolved)
       @generic_templates.has_key?(base)
     end
 
@@ -8775,7 +8775,7 @@ module Crystal::HIR
       end
       alias_full_name = nil
       if is_class_method
-        base_owner = type_name.split("(", 2).first
+        base_owner = strip_generic_args(type_name)
         if base_owner != type_name
           alias_base = "#{base_owner}.#{method_name}"
           alias_full_name = function_full_name_for_def(alias_base, param_types, member.params, has_block)
@@ -13391,7 +13391,7 @@ module Crystal::HIR
     end
 
     private def builtin_parent_for(class_name : String, is_struct : Bool) : String?
-      base = class_name.split("(", 2)[0]
+      base = strip_generic_args(class_name)
       case base
       when "Int8", "Int16", "Int32", "Int64", "Int128",
            "UInt8", "UInt16", "UInt32", "UInt64", "UInt128"
@@ -13599,7 +13599,7 @@ module Crystal::HIR
       param_name = param_desc.name
       return param_type if param_name.includes?("(")
 
-      call_base = call_desc.name.split("(", 2).first
+      call_base = strip_generic_args(call_desc.name)
       return call_type if call_base == param_name && call_desc.name.includes?("(")
 
       param_type
@@ -24013,7 +24013,7 @@ module Crystal::HIR
       # Find parent class
       class_info = @class_info[class_name]?
       if class_info.nil?
-        class_base = class_name.split("(", 2)[0]
+        class_base = strip_generic_args(class_name)
         class_info = @class_info[class_base]?
       end
       parent_name = class_info.try(&.parent_name)
@@ -24067,7 +24067,7 @@ module Crystal::HIR
 
       if class_info
         class_lookup = class_name
-        class_base = class_name.split("(", 2)[0]
+        class_base = strip_generic_args(class_name)
         included = @class_included_modules[class_lookup]? || @class_included_modules[class_base]?
         if included
           included.to_a.sort.each do |module_name|
@@ -39301,7 +39301,7 @@ module Crystal::HIR
       return name if builtin_alias_target?(name) || LIBC_TYPE_ALIASES.has_key?(name)
       return name if BUILTIN_TYPE_NAMES.includes?(name)
       if name.includes?("(")
-        base = name.split("(", 2)[0]
+        base = strip_generic_args(name)
         return name if BUILTIN_GENERIC_BASES.includes?(base)
       end
       context = type_cache_context
@@ -39314,7 +39314,7 @@ module Crystal::HIR
       # Track generic prefix keys like "Foo(" at the start.
       if idx = cache_key.index("::")
         first_segment = cache_key[0, idx]
-        base = first_segment.split("(", 2)[0]
+        base = strip_generic_args(first_segment)
         if !base.empty? && cache_key.starts_with?("#{base}(")
           set = @type_cache_keys_by_generic_prefix[base]? || begin
             created = Set(String).new
@@ -39324,7 +39324,7 @@ module Crystal::HIR
           set << cache_key
         end
       else
-        base = cache_key.split("(", 2)[0]
+        base = strip_generic_args(cache_key)
         if !base.empty? && cache_key.starts_with?("#{base}(")
           set = @type_cache_keys_by_generic_prefix[base]? || begin
             created = Set(String).new
@@ -39338,7 +39338,7 @@ module Crystal::HIR
       parts = cache_key.split("::")
       parts.each_with_index do |part, idx|
         next if idx == 0
-        base = part.split("(", 2)[0]
+        base = strip_generic_args(part)
         next if base.empty?
         set = @type_cache_keys_by_component[base]? || begin
           created = Set(String).new
