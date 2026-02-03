@@ -1149,6 +1149,8 @@ module Crystal::HIR
     @current_method : String?
     # Track whether the current method is a class/module method (self.)
     @current_method_is_class : Bool
+    # Current def node (used for parameter type inference in bodies).
+    @current_def_node : CrystalV2::Compiler::Frontend::DefNode?
 
     # Locals available for resolving typeof(...) in type positions (per def)
     @current_typeof_locals : Hash(String, TypeRef)?
@@ -1158,6 +1160,7 @@ module Crystal::HIR
     @infer_expr_stack : Set(UInt64)
     @infer_type_cache : Hash(UInt64, {Int32, TypeRef})
     @infer_type_cache_version : Int32
+    @infer_type_guarded : Hash(UInt64, Int32)
     @infer_type_cache_scope : String?
     @infer_local_type_cache : Hash({UInt64, String, String?}, {Int32, TypeRef})
     @infer_local_type_nil_cache : Set({UInt64, String, String?})
@@ -1369,11 +1372,13 @@ module Crystal::HIR
       @current_namespace_override = nil
       @current_method = nil
       @current_method_is_class = false
+      @current_def_node = nil
       @current_typeof_locals = nil
       @infer_body_context = nil
       @infer_expr_stack = Set(UInt64).new
       @infer_type_cache = {} of UInt64 => {Int32, TypeRef}
       @infer_type_cache_version = 0
+      @infer_type_guarded = {} of UInt64 => Int32
       @infer_type_cache_scope = nil
       @infer_local_type_cache = {} of {UInt64, String, String?} => {Int32, TypeRef}
       @infer_local_type_nil_cache = Set({UInt64, String, String?}).new
@@ -6059,6 +6064,7 @@ module Crystal::HIR
       old_body_context = @infer_body_context
       old_method = @current_method
       old_class = @current_class
+      old_def = @current_def_node
       resolved_arena = resolve_arena_for_def(node, @arena)
       if self_type_name
         sep = if recv = node.receiver
@@ -6075,6 +6081,7 @@ module Crystal::HIR
       @infer_body_context = body
       @current_method = method_name
       @current_class = self_type_name if self_type_name
+      @current_def_node = node
       begin
         with_arena(resolved_arena) do
           return_types = [] of TypeRef
@@ -6170,6 +6177,7 @@ module Crystal::HIR
         @infer_body_context = old_body_context
         @current_method = old_method
         @current_class = old_class
+        @current_def_node = old_def
       end
     end
 
@@ -6323,11 +6331,13 @@ module Crystal::HIR
         if scope != @infer_type_cache_scope
           @infer_type_cache.clear
           @infer_type_cache_version = 0
+          @infer_type_guarded.clear
           @infer_type_cache_scope = scope
         end
       elsif @infer_type_cache_scope
         @infer_type_cache.clear
         @infer_type_cache_version = 0
+        @infer_type_guarded.clear
         @infer_type_cache_scope = nil
       end
 
@@ -6349,12 +6359,23 @@ module Crystal::HIR
         if @debug_infer_guard_enabled
           record_infer_guard_hit(expr_id)
         end
+        @infer_type_guarded[key] = @infer_type_cache_version
         if stats && stats_start
           stats.infer_ms += (Time.instant - stats_start).total_milliseconds
           stats.infer_calls += 1
         end
         @arena = old_arena
         return nil
+      end
+      if guarded_version = @infer_type_guarded[key]?
+        if guarded_version == @infer_type_cache_version
+          if stats && stats_start
+            stats.infer_ms += (Time.instant - stats_start).total_milliseconds
+            stats.infer_calls += 1
+          end
+          @arena = old_arena
+          return nil
+        end
       end
       @infer_expr_stack.add(key)
       begin
@@ -6383,7 +6404,15 @@ module Crystal::HIR
       kind = expr_node ? last_namespace_component(expr_node.class.name) : "nil"
       current = @current_class || "nil"
       method = @current_method || "nil"
-      STDERR.puts "[INFER_GUARD] hits=#{@infer_guard_hits} expr=#{expr_id.index} kind=#{kind} current=#{current} method=#{method}"
+      path = source_path_for(@arena) || "(unknown)"
+      span_info = ""
+      if expr_node
+        span = expr_node.span
+        if span_fits_source?(@arena, span)
+          span_info = " span=#{span.start_line}:#{span.start_column}-#{span.end_line}:#{span.end_column}"
+        end
+      end
+      STDERR.puts "[INFER_GUARD] hits=#{@infer_guard_hits} expr=#{expr_id.index} kind=#{kind} current=#{current} method=#{method} file=#{File.basename(path)}#{span_info}"
     end
 
     private def infer_type_from_expr_inner(expr_id : ExprId, self_type_name : String?) : TypeRef?
@@ -6734,6 +6763,37 @@ module Crystal::HIR
         end
         if type_name = lookup_typeof_local_name(String.new(expr_node.name))
           return type_ref_for_name(type_name)
+        end
+        if @current_method
+          owner_name = self_type_name || @current_class
+          if owner_name
+            def_node = @current_def_node
+            if def_node.nil?
+              base = "#{owner_name}#{@current_method_is_class ? "." : "#"}#{@current_method}"
+              def_node = lookup_function_def_for_return(base, base)
+              if def_node.nil?
+                alt_base = @current_method_is_class ? "#{owner_name}##{@current_method}" : "#{owner_name}.#{@current_method}"
+                def_node = lookup_function_def_for_return(alt_base, alt_base)
+              end
+            end
+            if def_node
+              if params = def_node.params
+                params.each do |param|
+                  next unless param.name && slice_eq?(param.name, name)
+                  if type_slice = param.type_annotation
+                    type_name = normalize_declared_type_name(String.new(type_slice), owner_name)
+                    param_ref = type_ref_for_name(type_name)
+                    if filter = ENV["DEBUG_PARAM_INFER"]?
+                      if filter == "1" || name.includes?(filter) || owner_name.includes?(filter)
+                        STDERR.puts "[PARAM_INFER] owner=#{owner_name} method=#{@current_method} name=#{name} type=#{type_name}"
+                      end
+                    end
+                    return param_ref if param_ref != TypeRef::VOID
+                  end
+                end
+              end
+            end
+          end
         end
         if body = @infer_body_context
           if inferred = infer_local_type_from_body(body, name, self_type_name)
@@ -7638,7 +7698,9 @@ module Crystal::HIR
         target = node_for_expr(expr_node.target)
         if target.is_a?(CrystalV2::Compiler::Frontend::IdentifierNode) &&
            slice_eq?(target.name, name)
-          if inferred = infer_type_from_expr(expr_node.value, self_type_name)
+          if expr_mentions_identifier?(expr_node.value, name)
+            # Avoid recursive inference from self-referential assignments (e.g. a = a + 1).
+          elsif inferred = infer_type_from_expr(expr_node.value, self_type_name)
             output << inferred if inferred != TypeRef::VOID
           elsif value_node = node_for_expr(expr_node.value)
             if value_node.is_a?(CrystalV2::Compiler::Frontend::IdentifierNode)
@@ -7742,6 +7804,37 @@ module Crystal::HIR
         collect_local_assignment_types(expr_node.expression, name, self_type_name, output, body, visited)
       when CrystalV2::Compiler::Frontend::MacroExpressionNode
         collect_local_assignment_types(expr_node.expression, name, self_type_name, output, body, visited)
+      end
+    end
+
+    private def expr_mentions_identifier?(expr_id : ExprId, name : String, depth : Int32 = 0) : Bool
+      return false if depth > 4
+      expr_node = node_for_expr(expr_id)
+      return false unless expr_node
+      case expr_node
+      when CrystalV2::Compiler::Frontend::IdentifierNode
+        slice_eq?(expr_node.name, name)
+      when CrystalV2::Compiler::Frontend::BinaryNode
+        expr_mentions_identifier?(expr_node.left, name, depth + 1) ||
+          expr_mentions_identifier?(expr_node.right, name, depth + 1)
+      when CrystalV2::Compiler::Frontend::UnaryNode
+        expr_mentions_identifier?(expr_node.operand, name, depth + 1)
+      when CrystalV2::Compiler::Frontend::MemberAccessNode
+        expr_mentions_identifier?(expr_node.object, name, depth + 1)
+      when CrystalV2::Compiler::Frontend::CallNode
+        return true if expr_mentions_identifier?(expr_node.callee, name, depth + 1)
+        expr_node.args.any? { |arg| expr_mentions_identifier?(arg, name, depth + 1) }
+      when CrystalV2::Compiler::Frontend::AssignNode
+        expr_mentions_identifier?(expr_node.value, name, depth + 1)
+      when CrystalV2::Compiler::Frontend::GroupingNode
+        expr_mentions_identifier?(expr_node.expression, name, depth + 1)
+      when CrystalV2::Compiler::Frontend::MacroExpressionNode
+        expr_mentions_identifier?(expr_node.expression, name, depth + 1)
+      when CrystalV2::Compiler::Frontend::IndexNode
+        return true if expr_mentions_identifier?(expr_node.object, name, depth + 1)
+        expr_node.indexes.any? { |idx| expr_mentions_identifier?(idx, name, depth + 1) }
+      else
+        false
       end
     end
 
