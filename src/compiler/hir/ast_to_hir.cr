@@ -19171,7 +19171,6 @@ module Crystal::HIR
     end
 
     private def strip_generic_receiver_from_method_name(method_name : String) : String
-      return method_name unless method_name.includes?("(")
       method_id = method_name.object_id
       if cached = @strip_generic_receiver_cache[method_id]?
         record_cache_stat("strip_generic_receiver", true)
@@ -19213,26 +19212,35 @@ module Crystal::HIR
 
     # Hot-path variant for overload lookup: avoid cache hash cost.
     private def strip_generic_receiver_for_lookup(method_name : String) : String
-      return method_name unless method_name.includes?("(")
-      strip_generic_receiver_uncached(method_name)
+      strip_generic_receiver_from_method_name(method_name)
     end
 
     private def strip_generic_receiver_uncached(method_name : String) : String
-      sep = method_name.index('#') || method_name.index('.')
-      return method_name unless sep
+      bytesize = method_name.bytesize
+      sep_idx : Int32? = nil
+      paren_idx : Int32? = nil
+      sep_char : UInt8? = nil
+      i = 0
+      while i < bytesize
+        byte = method_name.to_unsafe[i]
+        if byte == '('.ord
+          paren_idx ||= i
+        elsif byte == '#'.ord || byte == '.'.ord
+          sep_idx = i
+          sep_char = byte
+          break
+        end
+        i += 1
+      end
 
-      receiver = method_name[0, sep]
-      paren = receiver.index('(')
-      return method_name unless paren
+      return method_name unless sep_idx && paren_idx && paren_idx < sep_idx
 
-      base = receiver.byte_slice(0, paren)
-      suffix = method_name.byte_slice(sep)
-      return String.build do |io|
+      base = method_name.byte_slice(0, paren_idx)
+      suffix = method_name.byte_slice(sep_idx)
+      String.build do |io|
         io << base
         io << suffix
       end
-
-      method_name
     end
 
     private def block_return_type_name(ctx : LoweringContext, block_id : BlockId) : String?
