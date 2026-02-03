@@ -393,8 +393,10 @@ module Crystal::HIR
     @[AlwaysInline]
     private def parse_method_name(name : String) : MethodNameParts
       if cached = @method_name_parts_cache[name]?
+        record_cache_stat("method_name_parts", true)
         return cached
       end
+      record_cache_stat("method_name_parts", false)
       sep_idx : Int32? = nil
       sep_char : Char? = nil
       dollar_idx : Int32? = nil
@@ -1185,6 +1187,9 @@ module Crystal::HIR
     # Reverse mapping: track which modules each class includes (for method lookup)
     @class_included_modules : Hash(String, Array(String))
     @union_type_cache : Hash(UInt32, Bool)
+    @debug_cache_histo : Bool
+    @debug_cache_stats : Hash(String, Tuple(Int32, Int32))
+    @debug_cache_last : Time::Instant?
     # Modules that have `extend self` applied (treat defs without receiver as class methods).
     @module_extend_self : Set(String)
     @module_defs_cache_version : Int32
@@ -1422,6 +1427,9 @@ module Crystal::HIR
       @module_includers_version = 0
       @class_included_modules = {} of String => Array(String)
       @union_type_cache = {} of UInt32 => Bool
+      @debug_cache_histo = !ENV["DEBUG_CACHE_HISTO"]?.nil?
+      @debug_cache_stats = {} of String => Tuple(Int32, Int32)
+      @debug_cache_last = @debug_cache_histo ? Time.instant : nil
       @module_extend_self = Set(String).new
       @module_defs_cache_version = 0
       @module_def_lookup_cache_version = 0
@@ -19135,11 +19143,41 @@ module Crystal::HIR
     private def strip_generic_receiver_from_method_name(method_name : String) : String
       return method_name unless method_name.includes?("(")
       if cached = @strip_generic_receiver_cache[method_name]?
+        record_cache_stat("strip_generic_receiver", true)
         return cached
       end
+      record_cache_stat("strip_generic_receiver", false)
       result = strip_generic_receiver_uncached(method_name)
       @strip_generic_receiver_cache[method_name] = result
       result
+    end
+
+    private def record_cache_stat(name : String, hit : Bool) : Nil
+      return unless @debug_cache_histo
+      counts = @debug_cache_stats[name]? || {0, 0}
+      if hit
+        counts = {counts[0] + 1, counts[1]}
+      else
+        counts = {counts[0], counts[1] + 1}
+      end
+      @debug_cache_stats[name] = counts
+
+      last = @debug_cache_last
+      return unless last
+      now = Time.instant
+      return if (now - last).total_milliseconds < 3000
+
+      @debug_cache_last = now
+      entries = @debug_cache_stats.to_a
+      entries.sort_by! { |entry| -(entry[1][0] + entry[1][1]) }
+      top = entries.first(5)
+      formatted = top.map do |entry|
+        key = entry[0]
+        hits = entry[1][0]
+        misses = entry[1][1]
+        "#{key}=#{hits}/#{misses}"
+      end
+      STDERR.puts "[CACHE_HISTO] " + formatted.join(", ")
     end
 
     # Hot-path variant for overload lookup: avoid cache hash cost.
@@ -40520,11 +40558,22 @@ module Crystal::HIR
     private def resolved_type_name_cache_get(name : String) : String?
       if ctx = current_type_name_context_key
         if map = @resolved_type_name_cache_by_ctx[ctx]?
-          return map[name]?
+          if cached = map[name]?
+            record_cache_stat("resolved_type_ctx", true)
+            return cached
+          end
+          record_cache_stat("resolved_type_ctx", false)
+          return nil
         end
+        record_cache_stat("resolved_type_ctx", false)
         nil
       else
-        @resolved_type_name_cache_global[name]?
+        if cached = @resolved_type_name_cache_global[name]?
+          record_cache_stat("resolved_type_global", true)
+          return cached
+        end
+        record_cache_stat("resolved_type_global", false)
+        nil
       end
     end
 
