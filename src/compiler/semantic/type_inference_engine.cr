@@ -91,8 +91,9 @@ module CrystalV2
           getter receiver_id : UInt64
           getter name : String
           getter arg_sig : UInt64
+          getter has_block : Bool
 
-          def initialize(receiver : Type, @name : String, arg_types : Array(Type))
+          def initialize(receiver : Type, @name : String, arg_types : Array(Type), @has_block : Bool)
             @receiver_id = receiver.object_id
             sig = arg_types.size.hash
             arg_types.each do |arg|
@@ -102,11 +103,11 @@ module CrystalV2
           end
 
           def hash : UInt64
-            receiver_id.hash ^ name.hash ^ arg_sig.hash
+            receiver_id.hash ^ name.hash ^ arg_sig.hash ^ has_block.hash
           end
 
           def ==(other : MethodLookupKey) : Bool
-            receiver_id == other.receiver_id && name == other.name && arg_sig == other.arg_sig
+            receiver_id == other.receiver_id && name == other.name && arg_sig == other.arg_sig && has_block == other.has_block
           end
         end
 
@@ -1554,7 +1555,7 @@ module CrystalV2
                         when "+", "-", "*", "/", "//", "%", "**", "<<", ">>", "&", "|", "^", "&+", "&-", "&*", "&**"
                           # Phase 4B.3/4B.5/18/19/21/22/78/89: Try method lookup first for built-in methods
                           # Phase 89: Wrapping arithmetic operators (&+, &-, &*, &**)
-                          if method = lookup_method(left_type, op, [right_type])
+                          if method = lookup_method(left_type, op, [right_type], false)
                             debug("  lookup_method found: #{method.name}, return_annotation=#{method.return_annotation.inspect}")
                             if ann = method.return_annotation
                               result = parse_type_name(ann)
@@ -1580,7 +1581,7 @@ module CrystalV2
                           # Phase 50: === (case equality) returns Bool like ==
                           # Phase 79: in (containment) returns Bool
                           # Phase 80: =~ (regex match), !~ (regex not match) return Bool
-                          if method = lookup_method(left_type, op, [right_type])
+                          if method = lookup_method(left_type, op, [right_type], false)
                             if ann = method.return_annotation
                               parse_type_name(ann)
                             else
@@ -1594,7 +1595,7 @@ module CrystalV2
                           # Phase 48: Spaceship operator (three-way comparison)
                           # Returns Int32: -1 (less), 0 (equal), or 1 (greater)
                           # Try method lookup first
-                          if method = lookup_method(left_type, op, [right_type])
+                          if method = lookup_method(left_type, op, [right_type], false)
                             if ann = method.return_annotation
                               parse_type_name(ann)
                             else
@@ -3078,7 +3079,7 @@ module CrystalV2
           end
 
           # Lookup method with overload resolution
-          method = lookup_method(receiver_type, method_name, arg_types)
+          method = lookup_method(receiver_type, method_name, arg_types, false)
           debug("  lookup_method returned: #{method ? "MethodSymbol(#{method.name})" : "nil"}")
 
           result_type = if method
@@ -3121,6 +3122,7 @@ module CrystalV2
           # (like `try` on union types) where the block parameter type depends on receiver
 
           callee_node = @program.arena[node.callee]
+          has_block = call_has_block?(node)
 
           debug("infer_call: callee_node type = #{callee_node.class.name}")
           debug_hook("infer.call.start", "expr_id=#{expr_id} callee_node=#{callee_node.class.name}")
@@ -3399,7 +3401,7 @@ module CrystalV2
                     body_node = @program.arena[body_id]
                     if body_node.is_a?(Frontend::MemberAccessNode)
                       member_name = intern_name(body_node.member)
-                      if method = lookup_method(non_nil_type, member_name, [] of Type)
+                      if method = lookup_method(non_nil_type, member_name, [] of Type, false)
                         if ann = method.return_annotation
                           block_result = parse_type_name(ann)
                         end
@@ -3432,7 +3434,7 @@ module CrystalV2
             end
           end
 
-          if method = lookup_method(receiver_type, method_name, arg_types)
+          if method = lookup_method(receiver_type, method_name, arg_types, has_block)
             if ann = method.return_annotation
               # Week 1: Substitute type parameters in return type
               if receiver_type.is_a?(InstanceType) && (type_args = receiver_type.type_args) && (type_params = receiver_type.class_symbol.type_parameters)
@@ -3462,6 +3464,16 @@ module CrystalV2
         private def ensure_block_inferred(node : Frontend::CallNode)
           if block_id = node.block
             infer_expression(block_id)
+          end
+        end
+
+        # Helper: detect block presence (explicit or passed as BlockNode argument).
+        private def call_has_block?(node : Frontend::CallNode) : Bool
+          return true if node.block
+          if args = node.args
+            args.any? { |arg_id| @program.arena[arg_id].is_a?(Frontend::BlockNode) }
+          else
+            false
           end
         end
 
@@ -3587,9 +3599,9 @@ module CrystalV2
         # 2. Filter by parameter count
         # 3. Filter by parameter types (if annotated)
         # 4. Return best match
-        private def lookup_method(receiver_type : Type, method_name : String, arg_types : Array(Type)) : MethodSymbol?
+        private def lookup_method(receiver_type : Type, method_name : String, arg_types : Array(Type), has_block : Bool) : MethodSymbol?
           debug_hook("infer.lookup.start", "method=#{method_name} receiver=#{receiver_type} args=#{arg_types.size}")
-          lookup_key = MethodLookupKey.new(receiver_type, method_name, arg_types)
+          lookup_key = MethodLookupKey.new(receiver_type, method_name, arg_types, has_block)
           if @method_lookup_cache.has_key?(lookup_key)
             return @method_lookup_cache[lookup_key]
           end
@@ -3613,6 +3625,13 @@ module CrystalV2
             @method_lookup_cache[lookup_key] = nil
             return nil
           end
+
+          # Prefer overloads that match block presence.
+          block_filtered = matching_count.select do |method|
+            method_has_block = method.params.any?(&.is_block)
+            method_has_block == has_block
+          end
+          matching_count = block_filtered unless block_filtered.empty?
 
           # Filter by parameter types (for typed parameters)
           matches = matching_count.select do |method|
@@ -3861,7 +3880,7 @@ module CrystalV2
           # Get return type from each union member
           union_type.types.each do |member_type|
             # Find and resolve method for this specific type
-            if method = lookup_method(member_type, method_name, arg_types)
+            if method = lookup_method(member_type, method_name, arg_types, false)
               if ann = method.return_annotation
                 return_types << parse_type_name(ann)
               else
