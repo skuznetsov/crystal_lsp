@@ -1294,6 +1294,8 @@ module Crystal::HIR
     # Map block node object ids to their defining scope (class/method).
     @block_owner : Hash(UInt64, {class_name: String?, method_name: String?, is_class: Bool}) = {} of UInt64 => {class_name: String?, method_name: String?, is_class: Bool}
     @block_owner_self_ids : Hash(UInt64, ValueId) = {} of UInt64 => ValueId
+    @last_block_arena_id : UInt64 = 0_u64
+    @last_block_arena : CrystalV2::Compiler::Frontend::ArenaLike?
 
     # Track declared type names for locals (used to resolve module-typed receivers).
     @current_typeof_local_names : Hash(String, String)?
@@ -4483,7 +4485,8 @@ module Crystal::HIR
       block : CrystalV2::Compiler::Frontend::BlockNode,
       fallback : CrystalV2::Compiler::Frontend::ArenaLike
     ) : CrystalV2::Compiler::Frontend::ArenaLike?
-      if cached = @block_node_arenas[block.object_id]?
+      block_id = block.object_id
+      if cached = cached_block_arena(block_id)
         return cached
       end
 
@@ -4491,11 +4494,29 @@ module Crystal::HIR
       each_def_arena_candidate(fallback) do |arena|
         next if max_index >= 0 && max_index >= arena.size
         next unless span_fits_source?(arena, block.span)
-        @block_node_arenas[block.object_id] = arena
+        store_block_arena(block_id, arena)
         return arena
       end
 
       nil
+    end
+
+    private def cached_block_arena(block_id : UInt64) : CrystalV2::Compiler::Frontend::ArenaLike?
+      if @last_block_arena_id == block_id
+        return @last_block_arena
+      end
+      if cached = @block_node_arenas[block_id]?
+        @last_block_arena_id = block_id
+        @last_block_arena = cached
+        return cached
+      end
+      nil
+    end
+
+    private def store_block_arena(block_id : UInt64, arena : CrystalV2::Compiler::Frontend::ArenaLike) : Nil
+      @block_node_arenas[block_id] = arena
+      @last_block_arena_id = block_id
+      @last_block_arena = arena
     end
 
     private def with_type_param_map(extra : Hash(String, String), &)
@@ -19227,14 +19248,15 @@ module Crystal::HIR
       self_type_name : String?
     ) : String?
       old_arena = @arena
-      block_arena = @block_node_arenas[block.object_id]?
+      block_id = block.object_id
+      block_arena = cached_block_arena(block_id)
       block_arena ||= resolve_arena_for_block(block, old_arena)
       if block_arena
-        @block_node_arenas[block.object_id] = block_arena
+        store_block_arena(block_id, block_arena)
         @arena = block_arena
       end
       if ENV["DEBUG_BLOCK_ARENA"]?
-        mapped = @block_node_arenas[block.object_id]?
+        mapped = cached_block_arena(block_id)
         STDERR.puts "[BLOCK_ARENA] block=#{block.object_id} mapped=#{!!mapped} current=#{old_arena.object_id} target=#{mapped ? mapped.object_id : "nil"}"
       end
 
