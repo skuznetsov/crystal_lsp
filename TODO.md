@@ -58,9 +58,11 @@ about syntax or types and should match what the original compiler would report.
 - [ ] Class-method `self` should be type-literal: `emit_self` now assigns class type and marks type literal when `@current_method_is_class` (compile still times out with sig budget; needs verification).
 - [ ] `String::Grapheme.put$Array_splat`: now confirmed `function.lower.start/done` fires, yet still appears in `missing.symbol` trace. Verify whether it is actually emitted into module (check linker undefined list), and adjust missing-trace logic or lowering order if it is only transient.
 - [ ] Fix LLVM backend extern-return heuristics to match new mangling (remove legacy prefix assumptions). Ensure any name parsing uses helper functions (no `split`) and matches current mangle scheme.
+  - Update (2026-02-03): switched extern heuristics to derive method core from HIR names (no underscore/legacy suffix matching), and parse typed suffix via `$` only (commit `f6e3e12`). Needs rebuild + validation (hello/mini compile).
 - [ ] Audit remaining float/int conversion sites in LLVM backend (fptosi/fptoui, sitofp/uitofp, ptrtoint/uitofp) to ensure all unsigned + ptr→float paths are correct on ARM/AArch64.
 - [ ] Re-audit union payload alignment for ARM/AArch64 (align 4 where required) to catch any remaining misaligned loads/stores.
   - [ ] Windows support: track parity with original Crystal target coverage; add Windows backend tasks once bootstrap is stable.
+ - [ ] Stack overflow in `substitute_type_params_in_type_name` during compile (hello) traced to recursive substitution; added recursion guard + depth limit (commit `be80713`). Rebuild debug binary and verify; if still recurses, inspect `generic_owner_info`/type-param map for cyclic expansion.
 
 ### Test Coverage
 - **3400+ tests**, 0 failures in `spec/hir/ast_to_hir_spec.cr` (2 pending)
