@@ -6102,100 +6102,27 @@ module Crystal::HIR
           resolved_arena = arena if arena_fits_def?(arena, node)
         end
       end
+      extra_type_params = {} of String => String
+      if self_type_name
+        full_name ||= "#{self_type_name}##{method_name}"
+        if map = function_type_param_map_for(full_name, method_name)
+          extra_type_params.merge!(map)
+        end
+        receiver_map = type_param_map_for_receiver_name(full_name)
+        extra_type_params.merge!(receiver_map) unless receiver_map.empty?
+      end
       @infer_body_context = body
       @current_method = method_name
       @current_class = self_type_name if self_type_name
       @current_def_node = node
       begin
         with_arena(resolved_arena) do
-          return_types = [] of TypeRef
-          body.each do |expr_id|
-            collect_return_types(expr_id, self_type_name, return_types)
+          if extra_type_params.empty?
+            return infer_concrete_return_type_from_body_inner(body, self_type_name, method_name, resolved_arena, debug_infer)
           end
-          if return_types.any?
-            inferred = merge_return_types(return_types)
-            # If we have explicit returns, still consider the final expression
-            # as a possible implicit return type.
-            expr_id = body.last
-            loop do
-              expr_node = node_for_expr(expr_id)
-              break unless expr_node
-              case expr_node
-              when CrystalV2::Compiler::Frontend::GroupingNode
-                expr_id = expr_node.expression
-              when CrystalV2::Compiler::Frontend::MacroExpressionNode
-                expr_id = expr_node.expression
-              when CrystalV2::Compiler::Frontend::ReturnNode
-                value = expr_node.value
-                break unless value
-                expr_id = value
-              else
-                break
-              end
-            end
-            if inferred && (tail_type = infer_type_from_expr(expr_id, self_type_name))
-              inferred = union_type_for_values(inferred, tail_type) if tail_type != inferred
-            end
-            return inferred
+          return with_type_param_map(extra_type_params) do
+            infer_concrete_return_type_from_body_inner(body, self_type_name, method_name, resolved_arena, debug_infer)
           end
-
-          # Use the last expression as a heuristic return (handles simple multi-line bodies).
-          expr_id = body.last
-          loop do
-            expr_node = node_for_expr(expr_id)
-            break unless expr_node
-            case expr_node
-            when CrystalV2::Compiler::Frontend::GroupingNode
-              expr_id = expr_node.expression
-            when CrystalV2::Compiler::Frontend::MacroExpressionNode
-              expr_id = expr_node.expression
-            when CrystalV2::Compiler::Frontend::ReturnNode
-              value = expr_node.value
-              return nil unless value
-              expr_id = value
-            else
-              break
-            end
-          end
-
-          if inferred = infer_type_from_expr(expr_id, self_type_name)
-            if debug_infer
-              inferred_name = get_type_name_from_ref(inferred)
-              expr_node = node_for_expr(expr_id)
-              expr_kind = expr_node ? expr_node.class.name.split("::").last : "nil"
-              snippet = nil
-              if source = @sources_by_arena[resolved_arena]?
-                snippet = slice_source_for_expr_in_arena(expr_id, resolved_arena, source)
-              end
-              snippet_label = snippet ? " snippet=#{snippet}" : ""
-              STDERR.puts "[INFER_BODY] method=#{method_name} expr=#{expr_kind} inferred=#{inferred_name}#{snippet_label}"
-            end
-            return inferred
-          elsif debug_infer
-            expr_node = node_for_expr(expr_id)
-            expr_kind = expr_node ? expr_node.class.name.split("::").last : "nil"
-            snippet = nil
-            if source = @sources_by_arena[resolved_arena]?
-              snippet = slice_source_for_expr_in_arena(expr_id, resolved_arena, source)
-            end
-            snippet_label = snippet ? " snippet=#{snippet}" : ""
-            STDERR.puts "[INFER_BODY] method=#{method_name} expr=#{expr_kind} inferred=nil#{snippet_label}"
-          end
-
-          expr_node = node_for_expr(expr_id)
-          case expr_node
-          when CrystalV2::Compiler::Frontend::IdentifierNode
-            name = String.new(expr_node.name)
-            if inferred = infer_local_type_from_body(body, name, self_type_name)
-              return inferred
-            end
-          when CrystalV2::Compiler::Frontend::AssignNode
-            return infer_type_from_expr(expr_node.value, self_type_name)
-          when CrystalV2::Compiler::Frontend::TypeDeclarationNode
-            return type_ref_for_name(String.new(expr_node.declared_type))
-          end
-
-          nil
         end
       ensure
         @infer_body_context = old_body_context
@@ -6203,6 +6130,103 @@ module Crystal::HIR
         @current_class = old_class
         @current_def_node = old_def
       end
+    end
+
+    private def infer_concrete_return_type_from_body_inner(
+      body : Array(CrystalV2::Compiler::Frontend::ExprId),
+      self_type_name : String?,
+      method_name : String,
+      resolved_arena : CrystalV2::Compiler::Frontend::ArenaLike,
+      debug_infer : Bool
+    ) : TypeRef?
+      return_types = [] of TypeRef
+      body.each do |expr_id|
+        collect_return_types(expr_id, self_type_name, return_types)
+      end
+      if return_types.any?
+        inferred = merge_return_types(return_types)
+        # If we have explicit returns, still consider the final expression
+        # as a possible implicit return type.
+        expr_id = body.last
+        loop do
+          expr_node = node_for_expr(expr_id)
+          break unless expr_node
+          case expr_node
+          when CrystalV2::Compiler::Frontend::GroupingNode
+            expr_id = expr_node.expression
+          when CrystalV2::Compiler::Frontend::MacroExpressionNode
+            expr_id = expr_node.expression
+          when CrystalV2::Compiler::Frontend::ReturnNode
+            value = expr_node.value
+            break unless value
+            expr_id = value
+          else
+            break
+          end
+        end
+        if inferred && (tail_type = infer_type_from_expr(expr_id, self_type_name))
+          inferred = union_type_for_values(inferred, tail_type) if tail_type != inferred
+        end
+        return inferred
+      end
+
+      # Use the last expression as a heuristic return (handles simple multi-line bodies).
+      expr_id = body.last
+      loop do
+        expr_node = node_for_expr(expr_id)
+        break unless expr_node
+        case expr_node
+        when CrystalV2::Compiler::Frontend::GroupingNode
+          expr_id = expr_node.expression
+        when CrystalV2::Compiler::Frontend::MacroExpressionNode
+          expr_id = expr_node.expression
+        when CrystalV2::Compiler::Frontend::ReturnNode
+          value = expr_node.value
+          return nil unless value
+          expr_id = value
+        else
+          break
+        end
+      end
+
+      if inferred = infer_type_from_expr(expr_id, self_type_name)
+        if debug_infer
+          inferred_name = get_type_name_from_ref(inferred)
+          expr_node = node_for_expr(expr_id)
+          expr_kind = expr_node ? expr_node.class.name.split("::").last : "nil"
+          snippet = nil
+          if source = @sources_by_arena[resolved_arena]?
+            snippet = slice_source_for_expr_in_arena(expr_id, resolved_arena, source)
+          end
+          snippet_label = snippet ? " snippet=#{snippet}" : ""
+          STDERR.puts "[INFER_BODY] method=#{method_name} expr=#{expr_kind} inferred=#{inferred_name}#{snippet_label}"
+        end
+        return inferred
+      elsif debug_infer
+        expr_node = node_for_expr(expr_id)
+        expr_kind = expr_node ? expr_node.class.name.split("::").last : "nil"
+        snippet = nil
+        if source = @sources_by_arena[resolved_arena]?
+          snippet = slice_source_for_expr_in_arena(expr_id, resolved_arena, source)
+        end
+        snippet_label = snippet ? " snippet=#{snippet}" : ""
+        STDERR.puts "[INFER_BODY] method=#{method_name} expr=#{expr_kind} inferred=nil#{snippet_label}"
+      end
+
+      expr_node = node_for_expr(expr_id)
+      case expr_node
+      when CrystalV2::Compiler::Frontend::IdentifierNode
+        name = String.new(expr_node.name)
+        if inferred = infer_local_type_from_body(body, name, self_type_name)
+          return inferred
+        end
+      when CrystalV2::Compiler::Frontend::AssignNode
+        return infer_type_from_expr(expr_node.value, self_type_name)
+      when CrystalV2::Compiler::Frontend::TypeDeclarationNode
+        return type_ref_for_name(String.new(expr_node.declared_type))
+      end
+
+      nil
     end
 
     private def infer_return_type_from_body_without_callsite(
@@ -16725,19 +16749,17 @@ module Crystal::HIR
 
     private def def_contains_yield_uncached?(node : CrystalV2::Compiler::Frontend::DefNode, arena : CrystalV2::Compiler::Frontend::ArenaLike) : Bool
       return false unless body = node.body
-      if source = @sources_by_arena[arena]?
-        if snippet = slice_source_for_span(node.span, source)
-          has_macro = snippet.includes?("{%") || snippet.includes?("{{")
-          has_yield_token = macro_text_contains_yield?(snippet)
-          return true if has_yield_token && !has_macro
-          return false if !has_yield_token && !has_macro
-        end
-      end
       resolved_arena = arena_fits_def?(arena, node) ? arena : resolve_arena_for_def(node, arena)
       return true if with_arena(resolved_arena) { contains_yield?(body) }
 
       # Fallback: scan source spans for "yield" tokens when AST misses it (macro/recovery paths).
       if source = @sources_by_arena[resolved_arena]?
+        if snippet = slice_source_for_span(node.span, source)
+          has_macro = snippet.includes?("{%") || snippet.includes?("{{")
+          if has_macro && macro_text_contains_yield?(snippet)
+            return true
+          end
+        end
         body.each do |expr_id|
           snippet = slice_source_for_expr_in_arena(expr_id, resolved_arena, source)
           next unless snippet
@@ -18118,6 +18140,13 @@ module Crystal::HIR
 
     private def resolve_type_name_in_context(name : String) : String
       return name if name.empty?
+      if (idx = name.index("::"))
+        prefix = name[0, idx]
+        if mapped = @type_param_map[prefix]?
+          mapped_name = "#{mapped}#{name[idx..]}"
+          return resolve_type_name_in_context(mapped_name) if mapped_name != name
+        end
+      end
       if name.starts_with?(":")
         stripped = name.size > 1 ? name[1..] : ""
         return stripped.empty? ? "" : resolve_type_name_in_context(stripped)
