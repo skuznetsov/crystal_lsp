@@ -18994,32 +18994,49 @@ module Crystal::HIR
       if cached = @generic_split_cache[name]?
         return cached
       end
-      unless name.ends_with?(")")
+
+      parse_name = name
+      if !name.ends_with?(")") && !name.includes?("(") && name.includes?(",")
+        normalized = normalize_missing_generic_parens(name)
+        parse_name = normalized unless normalized == name
+      end
+
+      if parse_name != name
+        if cached = @generic_split_cache[parse_name]?
+          @generic_split_cache[name] = cached
+          return cached
+        end
+      end
+
+      unless parse_name.ends_with?(")")
         @generic_split_cache[name] = nil
+        @generic_split_cache[parse_name] = nil unless parse_name == name
         return nil
       end
 
       depth = 0
-      i = name.bytesize - 1
+      i = parse_name.bytesize - 1
       while i >= 0
-        ch = name.byte_at(i).unsafe_chr
+        ch = parse_name.byte_at(i).unsafe_chr
         case ch
         when ')'
           depth += 1
         when '('
           depth -= 1
           if depth == 0
-            base = name.byte_slice(0, i)
-            args = name.byte_slice(i + 1, name.size - i - 2)
+            base = parse_name.byte_slice(0, i)
+            args = parse_name.byte_slice(i + 1, parse_name.size - i - 2)
             result = {base: base, args: args}
-            @generic_split_cache[name] = result
+            @generic_split_cache[parse_name] = result
+            @generic_split_cache[name] = result unless parse_name == name
             return result
           end
         end
         i -= 1
       end
 
-      @generic_split_cache[name] = nil
+      @generic_split_cache[parse_name] = nil
+      @generic_split_cache[name] = nil unless parse_name == name
       nil
     end
 
@@ -19112,7 +19129,7 @@ module Crystal::HIR
         return "#{info[:base]}(#{new_args.join(", ")})"
       end
 
-      name
+      normalize_missing_generic_parens(name)
       ensure
         @substitute_type_params_depth -= 1
         @substitute_type_params_stack.delete(name)
@@ -41611,6 +41628,7 @@ module Crystal::HIR
       end
       resolved_alias = resolve_type_alias_chain(lookup_name)
       lookup_name = resolved_alias if resolved_alias != lookup_name
+      lookup_name = normalize_missing_generic_parens(lookup_name)
       cache_key_name = absolute_name ? "::#{lookup_name}" : lookup_name
       if !@type_param_map.empty? && !lookup_name.includes?("(") && lookup_name.includes?("::")
         if current = @current_class
