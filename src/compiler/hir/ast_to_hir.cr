@@ -29120,6 +29120,37 @@ module Crystal::HIR
           debug_hook("function.lookup.generated", "name=#{name} kind=ivar_accessor")
           return
         end
+        if !func_def
+          if (suffix = name_parts.suffix) && suffix_has_block_flag?(suffix)
+            block_base = "#{base_name}$block"
+            if block_def = @function_defs[block_base]?
+              func_def = block_def
+              arena = @function_def_arenas[block_base]
+              target_name = block_base
+              lookup_branch = "block_base"
+            else
+              overloads = function_def_overloads(base_name)
+              block_candidate = overloads.find do |cand|
+                cand_suffix = method_suffix(cand)
+                cand_suffix && suffix_has_block_flag?(cand_suffix) && strip_mangled_suffix_flags(cand_suffix).empty?
+              end
+              if block_candidate.nil?
+                block_candidate = overloads.find do |cand|
+                  cand_suffix = method_suffix(cand)
+                  cand_suffix && suffix_has_block_flag?(cand_suffix)
+                end
+              end
+              if block_candidate
+                if cand_def = @function_defs[block_candidate]?
+                  func_def = cand_def
+                  arena = @function_def_arenas[block_candidate]
+                  target_name = block_candidate
+                  lookup_branch = "block_overload"
+                end
+              end
+            end
+          end
+        end
         if base_name != name
           # When name has a $ suffix (e.g., clamp$Nil_Int32), don't blindly use base_name lookup
           # as it may return the wrong overload. Let the more sophisticated overload matching handle it.
@@ -34859,7 +34890,17 @@ module Crystal::HIR
         end
       end
 
-      return nil unless best && best_name
+      unless best && best_name
+        # If this is a block call and no overload matched, try a block-only lookup
+        # on the base name (e.g., Foo#each_with_index$block).
+        if has_block
+          base = strip_type_suffix(func_name)
+          if block_entry = lookup_block_function_def_for_call(base, arg_count, arg_types)
+            return block_entry
+          end
+        end
+        return nil
+      end
       if ENV["DEBUG_PUTS_LOOKUP"]? && func_name.includes?("IO#puts")
         type_names = if arg_types
                        arg_types.map { |t| type_name_for_mangling(t) }.join(",")
@@ -41503,6 +41544,13 @@ module Crystal::HIR
         break unless removed
       end
       stripped
+    end
+
+    private def suffix_has_block_flag?(suffix : String) : Bool
+      return true if suffix == "block"
+      return true if suffix.ends_with?("_block")
+      return true if suffix.includes?("_block_")
+      false
     end
 
     private def map_suffix_for_primitive_template(suffix : String, template_owner : String) : String?
