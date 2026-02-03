@@ -4661,7 +4661,21 @@ module Crystal::HIR
 
       arg_strings = [] of String
       target_node = include_arena[include_target]
-      unless target_node.is_a?(CrystalV2::Compiler::Frontend::GenericNode)
+      base_node = nil
+      type_args = nil
+      case target_node
+      when CrystalV2::Compiler::Frontend::GenericNode
+        base_node = target_node.base_type
+        type_args = target_node.type_args
+      when CrystalV2::Compiler::Frontend::CallNode
+        if type_like_call_expr?(target_node)
+          base_node = target_node.callee
+          type_args = target_node.args
+        else
+          base_node = nil
+        end
+      end
+      if base_node.nil? || type_args.nil?
         if DebugHooks::ENABLED
           module_name = String.new(module_node.name)
           debug_hook("include.param.missing", "module=#{module_name} target=#{target_node.class.name}")
@@ -4669,7 +4683,7 @@ module Crystal::HIR
         return extra
       end
       with_arena(include_arena) do
-        target_node.type_args.each do |arg|
+        type_args.each do |arg|
           arg_node = include_arena[arg]
           # Handle self specially - resolve to the including class/module
           if arg_node.is_a?(CrystalV2::Compiler::Frontend::SelfNode)
@@ -4684,7 +4698,7 @@ module Crystal::HIR
       if arg_strings.empty?
         if DebugHooks::ENABLED
           module_name = String.new(module_node.name)
-          base_name = resolve_path_like_name(target_node.base_type) || "unknown"
+          base_name = base_node ? (resolve_path_like_name(base_node) || "unknown") : "unknown"
           debug_hook("include.param.empty", "module=#{module_name} target=#{base_name}")
         end
         return extra
@@ -21221,98 +21235,106 @@ module Crystal::HIR
       splat_param_info_index : Int32? = nil
       splat_param_types_index : Int32? = nil
       splat_param_name : String? = nil
+      registered_param_map = function_type_param_map_for(full_name_override || base_name, base_name)
 
       if params = node.params
-        params.each do |param|
-          next if named_only_separator?(param)
-          param_name = param.name.nil? ? "_" : String.new(param.name.not_nil!)
-          type_ann_str : String? = nil
-          param_type = if ta = param.type_annotation
-                         type_ann_str = String.new(ta)
-                         type_ref_for_name(type_ann_str)
-                       elsif param.is_double_splat
-                         type_ref_for_name("NamedTuple")
-                       else
-                         TypeRef::VOID  # Unknown type
-                       end
-          if type_ann_str && bare_generic_annotation?(type_ann_str)
-            param_type = TypeRef::VOID
-          end
-          call_type_for_param = if !param.is_block && !param.is_splat && !param.is_double_splat && call_index < call_types.size
-                                  call_types[call_index]
-                                else
-                                  TypeRef::VOID
-                                end
-          if param_type == TypeRef::VOID && base_name == "hash" && param_name == "hasher"
-            inferred = type_ref_for_name("Crystal::Hasher")
-            param_type = inferred if inferred != TypeRef::VOID
-          end
-          if param_type == TypeRef::VOID && !param.is_block && !param.is_splat && !param.is_double_splat
-            if call_index < call_types.size
-              inferred = call_types[call_index]
+        param_loop = ->{
+          params.each do |param|
+            next if named_only_separator?(param)
+            param_name = param.name.nil? ? "_" : String.new(param.name.not_nil!)
+            type_ann_str : String? = nil
+            param_type = if ta = param.type_annotation
+                           type_ann_str = String.new(ta)
+                           type_ref_for_name(type_ann_str)
+                         elsif param.is_double_splat
+                           type_ref_for_name("NamedTuple")
+                         else
+                           TypeRef::VOID  # Unknown type
+                         end
+            if type_ann_str && bare_generic_annotation?(type_ann_str)
+              param_type = TypeRef::VOID
+            end
+            call_type_for_param = if !param.is_block && !param.is_splat && !param.is_double_splat && call_index < call_types.size
+                                    call_types[call_index]
+                                  else
+                                    TypeRef::VOID
+                                  end
+            if param_type == TypeRef::VOID && base_name == "hash" && param_name == "hasher"
+              inferred = type_ref_for_name("Crystal::Hasher")
               param_type = inferred if inferred != TypeRef::VOID
             end
-          end
-          if !param.is_block && !param.is_splat && !param.is_double_splat && call_index < call_types.size
-            param_type = refine_param_type_from_call(param_type, call_types[call_index])
-          end
-
-          if base_name == "fit_in_indices"
-            current_class = @current_class
-            if current_class && current_class.starts_with?("Hash(")
-            type_name = get_type_name_from_ref(param_type)
-            if type_name.includes?("|")
-              variants = split_union_type_name(type_name)
-              if chosen = variants.find { |v| v.starts_with?("UInt") || v.starts_with?("Int") }
-                resolved = type_ref_for_name(chosen)
-                param_type = resolved if resolved != TypeRef::VOID
+            if param_type == TypeRef::VOID && !param.is_block && !param.is_splat && !param.is_double_splat
+              if call_index < call_types.size
+                inferred = call_types[call_index]
+                param_type = inferred if inferred != TypeRef::VOID
               end
             end
+            if !param.is_block && !param.is_splat && !param.is_double_splat && call_index < call_types.size
+              param_type = refine_param_type_from_call(param_type, call_types[call_index])
             end
-          end
 
-          if param_name.ends_with?("_class") && call_type_for_param != TypeRef::VOID
-            param_type = call_type_for_param
-          end
+            if base_name == "fit_in_indices"
+              current_class = @current_class
+              if current_class && current_class.starts_with?("Hash(")
+              type_name = get_type_name_from_ref(param_type)
+              if type_name.includes?("|")
+                variants = split_union_type_name(type_name)
+                if chosen = variants.find { |v| v.starts_with?("UInt") || v.starts_with?("Int") }
+                  resolved = type_ref_for_name(chosen)
+                  param_type = resolved if resolved != TypeRef::VOID
+                end
+              end
+              end
+            end
 
-          param_type_map[param_name] = param_type
-          param_infos << {param_name, param_type}
-          # Track type annotation name for enum detection
-          enum_name = call_index < call_enum_names.size ? call_enum_names[call_index] : nil
-          param_type_names << (param.type_annotation ? String.new(param.type_annotation.not_nil!) : enum_name)
-          if ta = param.type_annotation
-            update_typeof_local_name(param_name, String.new(ta))
-          end
-          param_literal = !param.is_block && !param.is_splat && !param.is_double_splat &&
-                          call_index < call_literal_flags.size && call_literal_flags[call_index]
-          if param_name.ends_with?("_class")
-            chosen_type = call_type_for_param == TypeRef::VOID ? param_type : call_type_for_param
-            type_name = get_type_name_from_ref(chosen_type)
-            if !type_name.empty? && type_name != "Void" && type_name != "Unknown"
-              param_literal = true
+            if param_name.ends_with?("_class") && call_type_for_param != TypeRef::VOID
+              param_type = call_type_for_param
             end
-          end
-          if param_literal
-            chosen_type = call_type_for_param == TypeRef::VOID ? param_type : call_type_for_param
-            type_name = get_type_name_from_ref(chosen_type)
-            if !type_name.empty? && type_name != "Void" && type_name != "Unknown"
-              update_typeof_local_name(param_name, type_name)
-              extra_type_params[param_name] = type_name
+
+            param_type_map[param_name] = param_type
+            param_infos << {param_name, param_type}
+            # Track type annotation name for enum detection
+            enum_name = call_index < call_enum_names.size ? call_enum_names[call_index] : nil
+            param_type_names << (param.type_annotation ? String.new(param.type_annotation.not_nil!) : enum_name)
+            if ta = param.type_annotation
+              update_typeof_local_name(param_name, String.new(ta))
             end
-          end
-          if param.is_block
-            has_block = true
-          else
-            if param.is_splat
-              splat_param_info_index = param_infos.size - 1
-              splat_param_types_index = param_types.size
-              splat_param_name = param_name
-            elsif !param.is_double_splat
-              call_index += 1
+            param_literal = !param.is_block && !param.is_splat && !param.is_double_splat &&
+                            call_index < call_literal_flags.size && call_literal_flags[call_index]
+            if param_name.ends_with?("_class")
+              chosen_type = call_type_for_param == TypeRef::VOID ? param_type : call_type_for_param
+              type_name = get_type_name_from_ref(chosen_type)
+              if !type_name.empty? && type_name != "Void" && type_name != "Unknown"
+                param_literal = true
+              end
             end
-            param_types << param_type
+            if param_literal
+              chosen_type = call_type_for_param == TypeRef::VOID ? param_type : call_type_for_param
+              type_name = get_type_name_from_ref(chosen_type)
+              if !type_name.empty? && type_name != "Void" && type_name != "Unknown"
+                update_typeof_local_name(param_name, type_name)
+                extra_type_params[param_name] = type_name
+              end
+            end
+            if param.is_block
+              has_block = true
+            else
+              if param.is_splat
+                splat_param_info_index = param_infos.size - 1
+                splat_param_types_index = param_types.size
+                splat_param_name = param_name
+              elsif !param.is_double_splat
+                call_index += 1
+              end
+              param_types << param_type
+            end
+            param_literal_flags << param_literal
           end
-          param_literal_flags << param_literal
+        }
+        if registered_param_map
+          with_type_param_map(registered_param_map) { param_loop.call }
+        else
+          param_loop.call
         end
       end
 
@@ -40902,6 +40924,8 @@ module Crystal::HIR
     end
 
     private def sanitize_type_name_part(name : String) : String
+      name = normalize_missing_generic_parens(name)
+
       # Count parens to check balance
       open_count = name.count('(')
       close_count = name.count(')')
@@ -40937,7 +40961,7 @@ module Crystal::HIR
           end
         end
 
-        return result.to_s
+        return normalize_missing_generic_parens(result.to_s)
       end
 
       # Remove extra opening parens from the end (less common)
@@ -40971,10 +40995,54 @@ module Crystal::HIR
           end
         end
 
-        return kept_chars.reverse.join
+        return normalize_missing_generic_parens(kept_chars.reverse.join)
       end
 
       name
+    end
+
+    # Fix cases like "TupleString, String" (missing parens around args).
+    # Only applies when there is a comma but no "(" to avoid changing valid names.
+    private def normalize_missing_generic_parens(name : String) : String
+      return name if name.empty?
+      return name if name.includes?("(")
+      return name unless name.includes?(",")
+      return name if name.includes?("->")
+
+      prefix = ""
+      suffix_start = 0
+      if idx = name.rindex("::")
+        prefix = name[0, idx + 2]
+        suffix_start = idx + 2
+      end
+      suffix = name[suffix_start..]
+      base = generic_base_prefix_for_missing_parens(suffix)
+      return name unless base
+      rest = suffix.byte_slice(base.bytesize, suffix.bytesize - base.bytesize).strip
+      return name if rest.empty?
+
+      normalized = "#{base}(#{rest})"
+      return normalized if prefix.empty?
+
+      qualified = "#{prefix}#{normalized}"
+      if BUILTIN_GENERIC_BASES.includes?(base) && !type_name_exists?(qualified)
+        return normalized
+      end
+      qualified
+    end
+
+    private def generic_base_prefix_for_missing_parens(name : String) : String?
+      BUILTIN_GENERIC_BASES.each do |base|
+        next unless name.starts_with?(base)
+        next if name.bytesize <= base.bytesize
+        return base
+      end
+      @generic_templates.each_key do |base|
+        next unless name.starts_with?(base)
+        next if name.bytesize <= base.bytesize
+        return base
+      end
+      nil
     end
 
     private def normalize_tuple_literal_type_name(name : String) : String
