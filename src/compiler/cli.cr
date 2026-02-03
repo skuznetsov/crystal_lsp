@@ -560,6 +560,8 @@ module CrystalV2
 
         # Refresh union descriptors now that all types are registered
         hir_converter.refresh_union_descriptors
+        # Refresh generic type params that were captured as VOID before aliases existed
+        hir_converter.refresh_void_type_params
 
         # Pass 2: Register function signatures
         log(options, out_io, "  Pass 2: Registering #{def_nodes.size} function signatures...")
@@ -594,6 +596,9 @@ module CrystalV2
         end
         hir_converter.flush_pending_functions unless did_flush
         STDERR.puts "  Main function created" if options.progress
+
+        # Refresh generic type params that were captured as VOID after lowering.
+        hir_converter.refresh_void_type_params
 
         STDERR.puts "  Getting HIR module..." if options.progress
         hir_module = hir_converter.module

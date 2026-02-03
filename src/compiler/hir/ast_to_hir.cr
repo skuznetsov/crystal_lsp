@@ -11865,6 +11865,46 @@ module Crystal::HIR
       end
     end
 
+    # Refresh generic type descriptors that captured VOID type params
+    # before aliases were registered (e.g., Value alias inside DWARF::Info).
+    # This fixes tuple/array element types that would otherwise lower as void.
+    def refresh_void_type_params : Nil
+      return if @module.types.empty?
+
+      old_class = @current_class
+      old_override = @current_namespace_override
+      @current_class = nil
+      @current_namespace_override = nil
+      begin
+        @module.types.each_with_index do |desc, idx|
+          next if desc.type_params.empty?
+          next unless desc.type_params.any? { |t| t == TypeRef::VOID }
+          next unless (info = split_generic_base_and_args(desc.name))
+          param_names = split_generic_type_args(info[:args]).map(&.strip)
+          next unless param_names.size == desc.type_params.size
+
+          updated = false
+          new_params = desc.type_params.each_with_index.map do |ref, i|
+            next ref unless ref == TypeRef::VOID
+            pname = param_names[i]
+            next ref if pname.empty? || pname == "_"
+            resolved = resolve_type_alias_chain(pname)
+            resolved = resolve_type_name_in_context(resolved)
+            new_ref = type_ref_for_name(resolved)
+            updated = true if new_ref != ref
+            new_ref
+          end.to_a
+
+          if updated
+            @module.types[idx] = TypeDescriptor.new(desc.kind, desc.name, new_params)
+          end
+        end
+      ensure
+        @current_class = old_class
+        @current_namespace_override = old_override
+      end
+    end
+
     private def concrete_type_args?(type_args : Array(String)) : Bool
       # NOTE: unions like `String | Nil` are concrete and must be allowed here.
       unresolved_token_re = /(?:^|[^A-Za-z0-9_:])(K2|V2|K|V|T|U|L|W|self)(?:$|[^A-Za-z0-9_:])/
@@ -42009,7 +42049,33 @@ module Crystal::HIR
         # Intern a parameterized type descriptor so downstream passes can recover element/key/value types.
         # This is critical for arrays/hashes/pointers where runtime representation is "ptr", but codegen
         # still needs the generic parameters for correct loads/stores.
-        type_params = substituted_params.map { |p| type_ref_for_name(p) }
+        type_params = substituted_params.map do |param|
+          ref = type_ref_for_name(param)
+          if ref == TypeRef::VOID
+            stripped = param.strip
+            if !stripped.empty? && stripped != "_" && !short_type_param_name?(stripped)
+              resolved = stripped
+              # Avoid keeping VOID for named types that should resolve (e.g. nested aliases).
+              if alias_target = @type_aliases[stripped]?
+                ref = type_ref_for_name(alias_target)
+              elsif current = @current_class
+                if alias_target = @type_aliases["#{current}::#{stripped}"]?
+                  ref = type_ref_for_name(alias_target)
+                end
+              end
+              if ref == TypeRef::VOID
+                resolved = resolve_type_alias_chain(resolve_type_name_in_context(stripped))
+                if resolved != stripped
+                  ref = type_ref_for_name(resolved)
+                end
+              end
+              if ref == TypeRef::VOID && !type_param_like?(stripped)
+                ref = @module.intern_type(TypeDescriptor.new(TypeKind::Class, resolved))
+              end
+            end
+          end
+          ref
+        end
         type_kind = case base_name
                     when "Array", "StaticArray" then TypeKind::Array
                     when "Hash"                then TypeKind::Hash

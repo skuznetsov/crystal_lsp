@@ -492,6 +492,8 @@ module Crystal::V2
 
       # Refresh union descriptors now that all types are registered
       hir_converter.refresh_union_descriptors
+      # Refresh generic type params that were captured as VOID before aliases existed
+      hir_converter.refresh_void_type_params
 
       # Pass 2: Register all top-level function signatures
       pass2_start = Time.instant if debug_hir_timings
@@ -604,6 +606,9 @@ module Crystal::V2
       end
       # Ensure deferred callsite signatures are lowered in non-fun-main flows.
       hir_converter.flush_pending_functions
+
+      # Refresh generic type params that were captured as VOID after lowering.
+      hir_converter.refresh_void_type_params
 
       hir_module = hir_converter.module
       @link_libraries = hir_module.link_libraries.dup
