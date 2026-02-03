@@ -13538,6 +13538,8 @@ module Crystal::HIR
         @inline_arenas = saved_inline_arenas
       end
 
+      fixup_module_receiver_calls(ctx)
+
       # Infer return type from the last expression for unannotated methods.
       # This is a pragmatic bootstrap improvement for stdlib-style combinators and nilable query methods
       # that often omit return annotations (e.g., `Hash#[]?`, `Array#first?`).
@@ -15733,6 +15735,38 @@ module Crystal::HIR
         merged = merged ? union_type_for_values(merged, return_type) : return_type
       end
       merged
+    end
+
+    private def fixup_module_receiver_calls(ctx : LoweringContext) : Nil
+      ctx.function.blocks.each do |block|
+        block.instructions.each_with_index do |inst, idx|
+          next unless inst.is_a?(Call)
+          next if inst.virtual
+          recv = inst.receiver
+          next unless recv
+          recv_type = ctx.type_of(recv)
+          desc = @module.get_type_descriptor(recv_type)
+          next unless desc
+          next unless desc.kind == TypeKind::Module || module_like_type_name?(desc.name) || module_includers_match?(desc.name)
+
+          parts = parse_method_name(inst.method_name)
+          method_base = parts.method || inst.method_name
+          owner = parts.owner
+          if owner.empty?
+            owner = strip_generic_args(desc.name)
+          end
+          arg_types = inst.args.map { |arg| ctx.type_of(arg) }
+          return_type = inst.type
+          if return_type == TypeRef::VOID
+            if inferred = infer_return_type_from_includers(owner, method_base, arg_types, !!inst.block)
+              return_type = inferred
+            end
+          end
+          new_call = Call.new(inst.id, return_type, recv, inst.method_name, inst.args, inst.block, true)
+          block.instructions[idx] = new_call
+          ctx.register_type(inst.id, return_type)
+        end
+      end
     end
 
     private def module_includers_match?(name : String) : Bool
@@ -30542,6 +30576,14 @@ module Crystal::HIR
           end
         else
           receiver_id = nil
+        end
+        if receiver_id.nil? && full_method_name.nil? && !@current_method_is_class
+          if current = @current_class
+            if module_like_type_name?(current)
+              receiver_id = emit_self(ctx)
+              full_method_name = "#{current}##{method_name}"
+            end
+          end
         end
 
       when CrystalV2::Compiler::Frontend::MemberAccessNode
