@@ -484,7 +484,7 @@ module CrystalV2
         @prelude_method_index : Hash(String, Location)
         @prelude_loading : Bool = false
         @prelude_load_channel : Channel(PreludeState?)?
-        @prelude_guard_deadline : Time::Span?
+        @prelude_guard_deadline : Time::Instant?
         @project_root : String?
         @project_cache_dirty : Bool = false
         @project_cache_loaded : Bool = false
@@ -500,7 +500,7 @@ module CrystalV2
         @method_file_cache : Hash(String, Location?)
         @indexing_active : Bool
         @indexing_message : String?
-        @indexing_last_sent : Time::Span
+        @indexing_last_sent : Time::Instant?
         @semantic_token_cache : Hash(String, {Int32, SemanticTokens})  # URI -> {version, tokens}
 
         def initialize(@input = STDIN, @output = STDOUT, config : ServerConfig = ServerConfig.load)
@@ -1616,7 +1616,7 @@ module CrystalV2
             next if root_id.invalid?
             next unless expr_in_document?(program, root_id, target_path)
             stack << {root_id, [] of Frontend::Span, [] of Frontend::Span}
-            expr_index.try &.roots << root_id
+            expr_index.try { |idx| idx.roots << root_id }
           end
 
           while item = stack.pop?
@@ -2596,7 +2596,7 @@ module CrystalV2
           source : String,
           diagnostics : Array(Diagnostic),
           symbol_only : Bool = false,
-          deadline : Time::Span? = nil,
+          deadline : Time::Instant? = nil,
         ) : PreludeState?
           # debug("Starting real prelude build for #{path} (symbol_only=#{symbol_only})")
           context = Semantic::Context.new(Semantic::SymbolTable.new)
@@ -2621,7 +2621,7 @@ module CrystalV2
           program_cache : Hash(String, Frontend::Program),
           source_cache : Hash(String, String),
           symbol_only : Bool,
-          deadline : Time::Span? = nil,
+          deadline : Time::Instant? = nil,
         ) : Bool
           if deadline && Time.instant > deadline
             debug("Prelude guard deadline hit at #{path}; skipping further inference")
@@ -3475,7 +3475,7 @@ module CrystalV2
         private def build_line_offsets(text : String) : Array(Int32)
           offsets = [] of Int32
           offsets << 0
-          text.each_byte_with_index do |byte, idx|
+          text.to_slice.each_with_index do |byte, idx|
             offsets << (idx + 1) if byte == '\n'.ord
           end
           offsets
@@ -4583,7 +4583,7 @@ module CrystalV2
           nil
         end
 
-        private def elapsed_ms_since(start : Time::Span?) : Float64
+        private def elapsed_ms_since(start : Time::Instant?) : Float64
           return 0.0 unless start
           (Time.instant - start).total_milliseconds.round(2)
         end
@@ -5863,7 +5863,9 @@ module CrystalV2
           now = Time.instant
           # Throttle to avoid client flood
           if @indexing_active && @indexing_message == message
-            return if (now - @indexing_last_sent) < 300.milliseconds
+            if last_sent = @indexing_last_sent
+              return if (now - last_sent) < 300.milliseconds
+            end
           end
           @indexing_active = true
           @indexing_message = message
