@@ -763,6 +763,9 @@ module Crystal::HIR
     # Recursion guard for substitute_type_params_in_type_name.
     @substitute_type_params_stack : Set(String) = Set(String).new
     @substitute_type_params_depth : Int32 = 0
+    # Recursion guard for unresolved_generic_type_arg? to avoid cyclic alias/union loops.
+    @unresolved_generic_arg_stack : Set(String) = Set(String).new
+    @unresolved_generic_arg_depth : Int32 = 0
     # Cache block function def lookup by callsite shape.
     @block_lookup_cache : Hash(BlockLookupKey, Tuple(String, CrystalV2::Compiler::Frontend::DefNode)?) = {} of BlockLookupKey => Tuple(String, CrystalV2::Compiler::Frontend::DefNode)?
     @block_lookup_cache_size : Int32 = 0
@@ -14762,27 +14765,41 @@ module Crystal::HIR
     private def unresolved_generic_type_arg?(arg : String) : Bool
       arg = normalize_tuple_literal_type_name(arg.strip)
       return true if arg.empty?
-      if arg.includes?("|")
-        return split_union_type_name(arg).any? { |part| unresolved_generic_type_arg?(part.strip) }
+      if @unresolved_generic_arg_stack.includes?(arg)
+        return true
       end
-      if arg.ends_with?("?")
-        return unresolved_generic_type_arg?(arg[0...-1])
+      @unresolved_generic_arg_stack << arg
+      @unresolved_generic_arg_depth += 1
+      begin
+        return true if @unresolved_generic_arg_depth > 64
+        if arg.includes?("|")
+          parts = split_union_type_name(arg)
+          if parts.size > 1
+            return parts.any? { |part| unresolved_generic_type_arg?(part.strip) }
+          end
+        end
+        if arg.ends_with?("?")
+          return unresolved_generic_type_arg?(arg[0...-1])
+        end
+        if info = split_generic_base_and_args(arg)
+          base = resolve_type_alias_chain(info[:base])
+          base_known = known_type_name?(base) || @generic_templates.has_key?(base)
+          return true unless base_known
+          inner_args = split_generic_type_args(info[:args]).map(&.strip)
+          return inner_args.any? { |inner| unresolved_generic_type_arg?(inner) }
+        end
+        if type_param_like?(arg)
+          return !@type_param_map.has_key?(arg)
+        end
+        first = arg[0]?
+        if first && first.ascii_lowercase?
+          return !known_type_name?(arg)
+        end
+        false
+      ensure
+        @unresolved_generic_arg_depth -= 1
+        @unresolved_generic_arg_stack.delete(arg)
       end
-      if info = split_generic_base_and_args(arg)
-        base = resolve_type_alias_chain(info[:base])
-        base_known = known_type_name?(base) || @generic_templates.has_key?(base)
-        return true unless base_known
-        inner_args = split_generic_type_args(info[:args]).map(&.strip)
-        return inner_args.any? { |inner| unresolved_generic_type_arg?(inner) }
-      end
-      if type_param_like?(arg)
-        return !@type_param_map.has_key?(arg)
-      end
-      first = arg[0]?
-      if first && first.ascii_lowercase?
-        return !known_type_name?(arg)
-      end
-      false
     end
 
     private def method_resolution_cache_key(
