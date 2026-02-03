@@ -1438,6 +1438,12 @@ module Crystal::HIR
     end
 
     def intern_type(desc : TypeDescriptor) : TypeRef
+      if ENV["DEBUG_MALFORMED_TYPE"]? && desc.name.includes?(",") && !desc.name.includes?("(") && !desc.name.includes?("->")
+        STDERR.puts "[MALFORMED_TYPE] kind=#{desc.kind} name=#{desc.name}"
+        if ENV["DEBUG_MALFORMED_TYPE_STACK"]?
+          caller.each { |line| STDERR.puts "  #{line}" }
+        end
+      end
       # Check if already interned
       @types.each_with_index do |existing, idx|
         if existing == desc

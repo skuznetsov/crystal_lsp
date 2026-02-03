@@ -18767,11 +18767,11 @@ module Crystal::HIR
       if name.starts_with?("::")
         name = name.size > 2 ? name[2..] : ""
       end
-      return name if name.includes?("::")
+      return normalize_missing_generic_parens(name) if name.includes?("::")
       if current = @current_class
-        return "#{current}::#{name}"
+        return normalize_missing_generic_parens("#{current}::#{name}")
       end
-      name
+      normalize_missing_generic_parens(name)
     end
 
     private def record_resolve_histo(name : String) : Nil
@@ -41067,6 +41067,21 @@ module Crystal::HIR
       return name unless name.includes?(",")
       return name if name.includes?("->")
 
+      # Handle "Tuple::String, String" (generic base + "::" + args).
+      if idx = name.rindex("::")
+        prefix = name[0, idx]
+        suffix = name[idx + 2..]
+        base = last_namespace_component(prefix)
+        if (BUILTIN_GENERIC_BASES.includes?(base) || @generic_templates.has_key?(base)) &&
+           suffix && !suffix.empty?
+          rest = suffix.strip
+          return name if rest.empty? || rest.ends_with?(",")
+          normalized = "#{base}(#{rest})"
+          head = prefix.byte_slice(0, prefix.bytesize - base.bytesize)
+          return head.empty? ? normalized : "#{head}#{normalized}"
+        end
+      end
+
       prefix = ""
       suffix_start = 0
       if idx = name.rindex("::")
@@ -41077,7 +41092,7 @@ module Crystal::HIR
       base = generic_base_prefix_for_missing_parens(suffix)
       return name unless base
       rest = suffix.byte_slice(base.bytesize, suffix.bytesize - base.bytesize).strip
-      return name if rest.empty?
+      return name if rest.empty? || rest.ends_with?(",")
 
       normalized = "#{base}(#{rest})"
       return normalized if prefix.empty?
@@ -41518,8 +41533,14 @@ module Crystal::HIR
     end
 
     private def type_ref_for_name(name : String) : TypeRef
+      if ENV["DEBUG_TUPLE_PAREN"]? && name.includes?(",") && name.includes?("Tuple") && !name.includes?("(")
+        STDERR.puts "[DEBUG_TUPLE_PAREN_INPUT] name=#{name}"
+      end
       # Sanitize malformed type names (extra parens etc)
       name = sanitize_type_name(name)
+      if ENV["DEBUG_TUPLE_PAREN"]? && name.includes?(",") && name.includes?("Tuple") && !name.includes?("(")
+        STDERR.puts "[DEBUG_TUPLE_PAREN_SANITIZED] name=#{name}"
+      end
 
       # Normalize union type names: "Int32|Nil" -> "Int32 | Nil"
       # This ensures consistent caching regardless of spacing and avoids splitting
