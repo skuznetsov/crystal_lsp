@@ -6080,7 +6080,7 @@ module Crystal::HIR
       body = node.body
       method_name = String.new(node.name)
       debug_name = ENV["DEBUG_INFER_BODY_NAME"]?
-      debug_infer = debug_name && method_name.includes?(debug_name)
+      debug_infer = debug_name ? method_name.includes?(debug_name) : false
       if ENV["DEBUG_INFER_BODY"]? && method_name.includes?("internal_representation")
         STDERR.puts "[INFER_BODY] method=#{method_name} body_size=#{body.try(&.size) || 0} self=#{self_type_name || "nil"}"
       end
@@ -7564,7 +7564,7 @@ module Crystal::HIR
       old_body_context = @infer_body_context
       debug_name = ENV["DEBUG_INFER_BRANCH"]?
       method_name = @current_method
-      debug_infer = debug_name && method_name && method_name.includes?(debug_name)
+      debug_infer = debug_name ? (method_name ? method_name.includes?(debug_name) : false) : false
       @infer_body_context = body
       begin
         expr_id = body.last
