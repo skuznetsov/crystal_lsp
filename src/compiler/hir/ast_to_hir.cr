@@ -5439,7 +5439,7 @@ module Crystal::HIR
                         STDERR.puts "[EACH_REGISTER] yield=#{full_name}"
                       end
                       debug_hook("yield.register", full_name)
-                      unless @function_defs.has_key?(base_name)
+                      if !has_block && !@function_defs.has_key?(base_name)
                         @function_defs[base_name] = member
                         @function_def_arenas[base_name] = @arena
                       end
@@ -8160,7 +8160,7 @@ module Crystal::HIR
               if def_contains_yield?(member, @arena)
                 @yield_functions.add(full_name)
                 debug_hook("yield.register", full_name)
-                unless @function_defs.has_key?(base_name)
+                if !has_block && !@function_defs.has_key?(base_name)
                   @function_defs[base_name] = member
                   @function_def_arenas[base_name] = @arena
                 end
@@ -8891,7 +8891,7 @@ module Crystal::HIR
       if def_contains_yield?(member, @arena)
         @yield_functions.add(full_name)
         debug_hook("yield.register", full_name)
-        unless @function_defs.has_key?(base_name)
+        if !has_block && !@function_defs.has_key?(base_name)
           @function_defs[base_name] = member
           @function_def_arenas[base_name] = @arena
         end
@@ -9287,7 +9287,9 @@ module Crystal::HIR
         if def_contains_yield?(member, @arena)
           @yield_functions.add(full_name)
           debug_hook("yield.register", full_name)
-          unless @function_defs.has_key?(base_name)
+          # Don't let yield-based block overloads claim the bare base name.
+          # This avoids routing no-block calls to block-only defs.
+          if !has_block && !@function_defs.has_key?(base_name)
             @function_defs[base_name] = member
             @function_def_arenas[base_name] = @arena
           end
@@ -11353,7 +11355,7 @@ module Crystal::HIR
             if def_contains_yield?(member, member_arena)
               @yield_functions.add(full_name)
               debug_hook("yield.register", full_name)
-              unless @function_defs.has_key?(base_name)
+              if !has_block && !@function_defs.has_key?(base_name)
                 @function_defs[base_name] = member
                 @function_def_arenas[base_name] = member_arena
               end
@@ -11362,7 +11364,7 @@ module Crystal::HIR
               if alias_full_name
                 @yield_functions.add(alias_full_name)
                 debug_hook("yield.register", alias_full_name)
-                if alias_base && !@function_defs.has_key?(alias_base)
+                if alias_base && !has_block && !@function_defs.has_key?(alias_base)
                   @function_defs[alias_base] = member
                   @function_def_arenas[alias_base] = member_arena
                 end
