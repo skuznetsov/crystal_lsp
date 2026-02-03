@@ -1002,6 +1002,35 @@ module Crystal::MIR
       {receiver, rest}
     end
 
+    # Extract the unqualified method core from a possibly-mangled HIR name.
+    # Examples: "String#size$Int32" -> "size", "puts$Int32" -> "puts".
+    @[AlwaysInline]
+    private def method_core_from_name(name : String) : String
+      base = name
+      if dollar = base.index('$')
+        base = base[0, dollar]
+      end
+      sep_idx = nil
+      i = base.bytesize - 1
+      while i >= 0
+        byte = base.byte_at(i)
+        if byte == '#'.ord || byte == '.'.ord
+          sep_idx = i
+          break
+        end
+        i -= 1
+      end
+      sep_idx ? base[(sep_idx + 1)..] : base
+    end
+
+    @[AlwaysInline]
+    private def suffix_after_dollar(name : String) : String?
+      if dollar = name.index('$')
+        return name[(dollar + 1)..]
+      end
+      nil
+    end
+
     @[AlwaysInline]
     private def operator_method?(name : String) : Bool
       case name
@@ -2007,9 +2036,9 @@ module Crystal::MIR
                 # Only exact match for arithmetic operators and C lib functions
                 mangled == mangled_extern_name
               else
-                # Exact match OR suffix match (e.g., index_UInt8 matches String_index_UInt8)
+                # Exact match OR suffix match (e.g., index$UInt8 matches String#index$UInt8)
                 mangled == mangled_extern_name ||
-                mangled.ends_with?("_#{mangled_extern_name}")
+                mangled.ends_with?(mangled_extern_name)
               end
             end
             if matching_func
@@ -2021,24 +2050,21 @@ module Crystal::MIR
               end
             else
               # Fallback: apply type suffix heuristics for method names with type suffixes
-              # e.g., ___UInt32 (multiplication) should return i32, unsafe_shr_UInt64 → i64
-              type_suffix_returns_i64 = mangled_extern_name.ends_with?("_UInt64") || mangled_extern_name.ends_with?("_Int64") ||
-                                        mangled_extern_name.ends_with?("UInt64") || mangled_extern_name.ends_with?("Int64")
-              type_suffix_returns_i32 = mangled_extern_name.ends_with?("_UInt32") || mangled_extern_name.ends_with?("_Int32") ||
-                                        mangled_extern_name.ends_with?("UInt32") || mangled_extern_name.ends_with?("Int32")
-              type_suffix_returns_i16 = mangled_extern_name.ends_with?("_UInt16") || mangled_extern_name.ends_with?("_Int16") ||
-                                        mangled_extern_name.ends_with?("UInt16") || mangled_extern_name.ends_with?("Int16")
-              type_suffix_returns_i8 = mangled_extern_name.ends_with?("_UInt8") || mangled_extern_name.ends_with?("_Int8") ||
-                                       mangled_extern_name.ends_with?("UInt8") || mangled_extern_name.ends_with?("Int8")
-              if type_suffix_returns_i64
-                effective_type = TypeRef::INT64
-              elsif type_suffix_returns_i32
-                effective_type = TypeRef::INT32
-              elsif type_suffix_returns_i16
-                effective_type = TypeRef::INT16
-              elsif type_suffix_returns_i8
-                effective_type = TypeRef::INT8
-              else
+              if suffix = suffix_after_dollar(extern_name)
+                if !suffix.includes?("_")
+                  case suffix
+                  when "UInt64", "Int64"
+                    effective_type = TypeRef::INT64
+                  when "UInt32", "Int32"
+                    effective_type = TypeRef::INT32
+                  when "UInt16", "Int16"
+                    effective_type = TypeRef::INT16
+                  when "UInt8", "Int8"
+                    effective_type = TypeRef::INT8
+                  end
+                end
+              end
+              if effective_type == TypeRef::VOID
                 # Default fallback: use inst.type
                 extern_type_str = @type_mapper.llvm_type(inst.type)
                 if extern_type_str == "void"
@@ -5290,47 +5316,27 @@ module Crystal::MIR
         if prepass_type && @type_mapper.llvm_type(prepass_type) != "void"
           return_type = @type_mapper.llvm_type(prepass_type)
         else
-          # Minimal fallback: constructors and some methods that return their argument
+          # Minimal fallback: constructors and common conversion methods.
+          # Use the method core (no receiver/typed suffix) to avoid mangling assumptions.
+          method_core = method_core_from_name(callee_name)
           ptr_returning_methods = ["new", "allocate", "clone", "dup", "tap"]
-          # Methods that return i64
           i64_returning_methods = ["to_i64", "to_u64"]
-          # Methods that return i32 (includes chr which returns Char, a 32-bit Unicode codepoint)
           i32_returning_methods = ["size", "length", "count", "hash", "to_i32", "to_i", "ord", "chr"]
-          # Type conversion methods
           i16_returning_methods = ["to_i16", "to_u16"] of String
           i8_returning_methods = ["to_i8", "to_u8"] of String
           f32_returning_methods = ["to_f32"] of String
-          # Methods that return float64
           f64_returning_methods = ["to_f64", "to_f"]
 
-        # Helper to check name matches (handles type suffixes like _Void_Void)
-        matches_name = ->(m : String, name : String) {
-          name == m ||
-          name.ends_with?("_#{m}") ||
-          name.includes?("##{m}") ||
-          name.ends_with?("__#{m}") ||
-          name.includes?("_#{m}_")  # Handle method_name_TypeSuffix patterns
-        }
+          returns_ptr = ptr_returning_methods.includes?(method_core)
+          returns_i64 = i64_returning_methods.includes?(method_core)
+          returns_i32 = i32_returning_methods.includes?(method_core)
+          returns_i16 = i16_returning_methods.includes?(method_core)
+          returns_i8 = i8_returning_methods.includes?(method_core)
+          returns_f32 = f32_returning_methods.includes?(method_core)
+          returns_f64 = f64_returning_methods.includes?(method_core)
 
-        returns_ptr = ptr_returning_methods.any? { |m| matches_name.call(m, callee_name) }
-        returns_i64 = i64_returning_methods.any? { |m| matches_name.call(m, callee_name) }
-        returns_i32 = i32_returning_methods.any? { |m| matches_name.call(m, callee_name) }
-        returns_i16 = i16_returning_methods.any? { |m| matches_name.call(m, callee_name) }
-        returns_i8 = i8_returning_methods.any? { |m| matches_name.call(m, callee_name) }
-        returns_f32 = f32_returning_methods.any? { |m| matches_name.call(m, callee_name) }
-        returns_f64 = f64_returning_methods.any? { |m| matches_name.call(m, callee_name) }
-        # Known predicate methods (methods ending in ?) that return Bool
-        # Note: Can't just check ends_with?("_") because bang methods (!) also mangle to _
-        # Also exclude "not_" prefixed methods as those are bang methods returning values
-        bool_returning_methods = ["nil_", "empty_", "valid_", "invalid_", "blank_", "present_",
-                                   "includes_", "any_", "all_", "none_", "one_", "starts_with_",
-                                   "ends_with_", "ascii_letter_", "ascii_digit_", "whitespace_",
-                                   "is_a_", "responds_to_", "same_", "equal_", "definition_start_",
-                                   "is_identifier_part_", "operator_token_", "keyword_token_"]
-        # Bang methods that return values, not booleans (e.g., not_nil! returns the unwrapped value)
-        is_bang_method = callee_name.includes?("not_nil_") || callee_name.includes?("_not_nil") ||
-                         callee_name.ends_with?("_") && !bool_returning_methods.any? { |m| callee_name.ends_with?(m) }
-        returns_bool = !is_bang_method && bool_returning_methods.any? { |m| callee_name.ends_with?(m) || callee_name.includes?("_#{m}") }
+          is_bang_method = method_core.ends_with?('!')
+          returns_bool = !is_bang_method && method_core.ends_with?('?')
 
         # Check ptr first (bang methods like not_nil! return ptr, not bool)
         if returns_ptr
@@ -6208,28 +6214,25 @@ module Crystal::MIR
       end
 
       # Type suffix heuristics - apply BEFORE void check since MIR might have wrong ptr type
-      # Methods with type suffix (e.g., unsafe_shr_UInt64, unsafe_shl_UInt32)
-      # These typically return the type specified in their suffix
-      type_suffix_returns_i64 = mangled_extern_name.ends_with?("_UInt64") || mangled_extern_name.ends_with?("_Int64") ||
-                                mangled_extern_name.ends_with?("UInt64") || mangled_extern_name.ends_with?("Int64")
-      type_suffix_returns_i32 = mangled_extern_name.ends_with?("_UInt32") || mangled_extern_name.ends_with?("_Int32") ||
-                                mangled_extern_name.ends_with?("UInt32") || mangled_extern_name.ends_with?("Int32")
-      type_suffix_returns_i16 = mangled_extern_name.ends_with?("_UInt16") || mangled_extern_name.ends_with?("_Int16") ||
-                                mangled_extern_name.ends_with?("UInt16") || mangled_extern_name.ends_with?("Int16")
-      type_suffix_returns_i8 = mangled_extern_name.ends_with?("_UInt8") || mangled_extern_name.ends_with?("_Int8") ||
-                               mangled_extern_name.ends_with?("UInt8") || mangled_extern_name.ends_with?("Int8")
-      if type_suffix_returns_i64
-        return_type = "i64"
-        @value_types[inst.id] = TypeRef::INT64
-      elsif type_suffix_returns_i32
-        return_type = "i32"
-        @value_types[inst.id] = TypeRef::INT32
-      elsif type_suffix_returns_i16
-        return_type = "i16"
-        @value_types[inst.id] = TypeRef::INT16
-      elsif type_suffix_returns_i8
-        return_type = "i8"
-        @value_types[inst.id] = TypeRef::INT8
+      # Methods with type suffix in HIR (e.g., "unsafe_shr$UInt64").
+      extern_name = inst.extern_name
+      if suffix = suffix_after_dollar(extern_name)
+        if !suffix.includes?("_")
+          case suffix
+          when "UInt64", "Int64"
+            return_type = "i64"
+            @value_types[inst.id] = TypeRef::INT64
+          when "UInt32", "Int32"
+            return_type = "i32"
+            @value_types[inst.id] = TypeRef::INT32
+          when "UInt16", "Int16"
+            return_type = "i16"
+            @value_types[inst.id] = TypeRef::INT16
+          when "UInt8", "Int8"
+            return_type = "i8"
+            @value_types[inst.id] = TypeRef::INT8
+          end
+        end
       end
 
       if !matching_func
@@ -6245,23 +6248,15 @@ module Crystal::MIR
         if prepass_type && @type_mapper.llvm_type(prepass_type) != "void"
           return_type = @type_mapper.llvm_type(prepass_type)
         else
-          # Minimal fallback: constructors and some methods that return their argument
+          # Minimal fallback: constructors and common conversion methods.
+          method_core = method_core_from_name(extern_name)
           ptr_returning_methods = ["new", "allocate", "clone", "dup", "tap"]
-          # Methods that return i64
           i64_returning_methods = ["to_i64", "to_u64"]
-          # Methods that return i32 (includes chr which returns Char, a 32-bit Unicode codepoint)
           i32_returning_methods = ["size", "length", "count", "hash", "to_i32", "to_i", "ord", "chr"]
-          # Type conversion methods
           i16_returning_methods = ["to_i16", "to_u16"] of String
           i8_returning_methods = ["to_i8", "to_u8"] of String
 
-        # Check for ptr-returning methods (also check with _Method_ pattern for type suffixes)
-        matches_extern = ->(m : String, name : String) {
-          name == m || name.ends_with?("_#{m}") || name.includes?("_#{m}_")
-        }
-        returns_ptr = ptr_returning_methods.any? { |m| matches_extern.call(m, mangled_extern_name) }
-        # Check for patterns like ClassName___MethodName (accessor methods)
-        returns_ptr = true if mangled_extern_name.includes?("____") || mangled_extern_name.includes?("_____")
+        returns_ptr = ptr_returning_methods.includes?(method_core)
 
         # Check for arithmetic operators on typed receivers: use receiver type when method is "+" or "*".
         if receiver_and_method = extract_receiver_and_method(inst.extern_name)
@@ -6294,38 +6289,29 @@ module Crystal::MIR
           end
         end
 
-        # Check for type conversion methods (to_u64, to_i64, etc.) - handles trailing underscores from method names
-        is_u64_conversion = mangled_extern_name.includes?("to_u64") || mangled_extern_name.includes?("to_UInt64")
-        is_i64_conversion = mangled_extern_name.includes?("to_i64") || mangled_extern_name.includes?("to_Int64")
+        # Check for type conversion methods (to_u64, to_i64, etc.)
+        is_u64_conversion = method_core == "to_u64"
+        is_i64_conversion = method_core == "to_i64"
         if is_u64_conversion || is_i64_conversion
           return_type = "i64"
           @value_types[inst.id] = TypeRef::INT64
         end
 
         # Check for i64-returning methods
-        returns_i64 = i64_returning_methods.any? { |m| matches_extern.call(m, mangled_extern_name) }
+        returns_i64 = i64_returning_methods.includes?(method_core)
 
         # Check for i32-returning methods
-        returns_i32 = i32_returning_methods.any? { |m| matches_extern.call(m, mangled_extern_name) }
+        returns_i32 = i32_returning_methods.includes?(method_core)
 
         # Check for i16-returning methods
-        returns_i16 = i16_returning_methods.any? { |m| matches_extern.call(m, mangled_extern_name) }
+        returns_i16 = i16_returning_methods.includes?(method_core)
 
         # Check for i8-returning methods
-        returns_i8 = i8_returning_methods.any? { |m| matches_extern.call(m, mangled_extern_name) }
+        returns_i8 = i8_returning_methods.includes?(method_core)
 
-        # Known predicate methods (methods ending in ?) that return Bool
-        # Note: Can't just check ends_with?("_") because bang methods (!) also mangle to _
-        # Also exclude "not_" prefixed methods as those are bang methods returning values
-        bool_returning_methods = ["nil_", "empty_", "valid_", "invalid_", "blank_", "present_",
-                                   "includes_", "any_", "all_", "none_", "one_", "starts_with_",
-                                   "ends_with_", "ascii_letter_", "ascii_digit_", "whitespace_",
-                                   "is_a_", "responds_to_", "same_", "equal_", "definition_start_",
-                                   "is_identifier_part_", "operator_token_", "keyword_token_"]
-        # Bang methods that return values, not booleans (e.g., not_nil! returns the unwrapped value)
-        is_bang_method = mangled_extern_name.includes?("not_nil_") || mangled_extern_name.includes?("_not_nil") ||
-                         mangled_extern_name.ends_with?("_") && !bool_returning_methods.any? { |m| mangled_extern_name.ends_with?(m) }
-        returns_bool = !is_bang_method && bool_returning_methods.any? { |m| mangled_extern_name.ends_with?(m) || mangled_extern_name.includes?("_#{m}") }
+        # Predicate methods (ending in ?) return Bool, unless it's a bang method.
+        is_bang_method = method_core.ends_with?('!')
+        returns_bool = !is_bang_method && method_core.ends_with?('?')
 
         # Check ptr first (bang methods like not_nil! return ptr, not bool)
         if returns_ptr
