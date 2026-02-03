@@ -32503,7 +32503,7 @@ module Crystal::HIR
 
       disable_inline_yield = ENV.has_key?("CRYSTAL_V2_DISABLE_INLINE_YIELD")
       if (block_for_inline || proc_for_inline) && !disable_inline_yield
-        try_inline_allowed = ENV.has_key?("CRYSTAL_V2_INLINE_TRY")
+        try_inline_allowed = ENV.has_key?("CRYSTAL_V2_INLINE_TRY") || !ENV.has_key?("CRYSTAL_V2_DISABLE_TRY_INLINE")
         if method_name == "try"
           if ENV.has_key?("CRYSTAL_V2_DISABLE_TRY_INLINE")
             try_inline_allowed = false
@@ -38210,6 +38210,19 @@ module Crystal::HIR
 
       # Check for pointer.value -> PointerLoad
       receiver_type = ctx.type_of(object_id)
+      # If the receiver is still VOID/Pointer but we have a typeof-local name,
+      # refine it before ivar access (e.g., timeout : Time::Span?).
+      if (receiver_type == TypeRef::POINTER || receiver_type == TypeRef::VOID) &&
+         obj_node.is_a?(CrystalV2::Compiler::Frontend::IdentifierNode)
+        obj_name = String.new(obj_node.name)
+        if type_name = lookup_typeof_local_name(obj_name)
+          inferred = type_ref_for_name(type_name)
+          if inferred != TypeRef::VOID && inferred != receiver_type
+            receiver_type = inferred
+            ctx.register_type(object_id, receiver_type)
+          end
+        end
+      end
       if (member_name == "to_i" || member_name == "value")
         if @enum_value_types.try(&.[object_id]?)
           if ctx.value_for(object_id).is_a?(Literal)
@@ -41115,7 +41128,11 @@ module Crystal::HIR
         lookup_name = resolve_typeof_in_type_string(lookup_name)
       end
       # Resolve type parameters (including nested generics) before cache and namespace resolution.
-      if !@type_param_map.empty? || (@current_typeof_local_names.try(&.empty?) == false)
+      # Also substitute `self` and generic owner params even when the explicit map is empty.
+      if !@type_param_map.empty? ||
+         (@current_typeof_local_names.try(&.empty?) == false) ||
+         lookup_name.includes?("self") ||
+         (@current_class && @current_class.not_nil!.includes?("("))
         substituted_name = substitute_type_params_in_type_name(lookup_name)
         lookup_name = substituted_name if substituted_name != lookup_name
       end
