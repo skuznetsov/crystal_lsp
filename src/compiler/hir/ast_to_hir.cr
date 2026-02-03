@@ -8057,8 +8057,6 @@ module Crystal::HIR
             class_name = String.new(member.name)
             full_class_name = "#{module_name}::#{class_name}"
             register_type_alias(full_class_name, full_class_name)
-            # Also register short name -> full name for local resolution (for both classes and structs)
-            register_type_alias(class_name, full_class_name)
             register_class_aliases(member, full_class_name)
           end
         end
@@ -18554,8 +18552,12 @@ module Crystal::HIR
           if name[0]?.try(&.uppercase?) &&
              !type_name_exists?(name) &&
              !@top_level_class_kinds.has_key?(name)
-            result = "#{current_base}::#{name}"
-            found = true
+            if nested = @nested_type_names[current_base]? || @nested_type_names[current]?
+              if nested.includes?(name)
+                result = "#{current_base}::#{name}"
+                found = true
+              end
+            end
           end
         end
       end
@@ -18586,6 +18588,17 @@ module Crystal::HIR
                            else
                              current
                            end
+            if current_base.includes?("::")
+              parent_namespace = current_base.rpartition("::")[0]
+              nested = @nested_type_names[current_base]? || @nested_type_names[current]?
+              if parent_namespace &&
+                 (nested.nil? || !nested.includes?(name)) &&
+                 (@module_defs.has_key?(parent_namespace) || @class_info.has_key?(parent_namespace) || @generic_templates.has_key?(parent_namespace) || @module.class_parents.has_key?(parent_namespace))
+                result = "#{parent_namespace}::#{name}"
+                found = true
+              end
+            end
+            return result if found
             if result == name
               if nested = @nested_type_names[current_base]? || @nested_type_names[current]?
                 if nested.includes?(name)
@@ -18685,11 +18698,11 @@ module Crystal::HIR
               elsif candidates = @short_type_index[name]?
                 if candidates.includes?(candidate)
                   result = candidate
-                elsif parent_is_module || @class_info.has_key?(parent_namespace) || @module.class_parents.has_key?(parent_namespace)
+                elsif parent_is_module || @class_info.has_key?(parent_namespace) || @generic_templates.has_key?(parent_namespace) || @module.class_parents.has_key?(parent_namespace)
                   # Forward reference inside a known namespace (module or class).
                   result = candidate
                 end
-              elsif parent_is_module || @class_info.has_key?(parent_namespace) || @module.class_parents.has_key?(parent_namespace)
+              elsif parent_is_module || @class_info.has_key?(parent_namespace) || @generic_templates.has_key?(parent_namespace) || @module.class_parents.has_key?(parent_namespace)
                 # Forward reference inside a known namespace (module or class).
                 result = candidate
               end
@@ -18702,7 +18715,7 @@ module Crystal::HIR
                 else
                   parent_namespace = current_base.includes?("::") ? current_base.rpartition("::")[0] : nil
                   if parent_namespace && !parent_namespace.empty?
-                    if @module_defs.has_key?(parent_namespace) || @class_info.has_key?(parent_namespace) || @module.class_parents.has_key?(parent_namespace)
+                    if @module_defs.has_key?(parent_namespace) || @class_info.has_key?(parent_namespace) || @generic_templates.has_key?(parent_namespace) || @module.class_parents.has_key?(parent_namespace)
                       namespace = parent_namespace
                     else
                       namespace = current_base
