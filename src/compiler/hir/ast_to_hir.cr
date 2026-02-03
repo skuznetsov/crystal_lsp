@@ -2051,7 +2051,7 @@ module Crystal::HIR
 
       candidates = [] of String
       if type_name.includes?("|")
-        candidates = type_name.split("|").map(&.strip)
+        candidates = split_union_type_name(type_name).map(&.strip)
       elsif type_name.ends_with?("?")
         candidates << type_name[0, type_name.size - 1]
       else
@@ -3956,7 +3956,7 @@ module Crystal::HIR
     private def element_type_for_type_name(type_name : String) : String?
       name = type_name.strip
       if name.includes?("|")
-        variants = name.split("|").map(&.strip)
+        variants = split_union_type_name(name).map(&.strip)
         element_variants = variants.compact_map { |v| element_type_for_type_name(v) }
         uniq = element_variants.uniq
         return uniq.join(" | ") unless uniq.empty?
@@ -4017,7 +4017,7 @@ module Crystal::HIR
       return type_name unless index
       name = type_name.strip
       if name.includes?("|")
-        variants = name.split("|").map(&.strip)
+        variants = split_union_type_name(name).map(&.strip)
         indexed = variants.compact_map { |v| apply_index_to_type_name(v, index) }
         uniq = indexed.uniq
         return uniq.join(" | ") unless uniq.empty?
@@ -4040,7 +4040,7 @@ module Crystal::HIR
 
     private def drop_nil_from_union(type_name : String) : String
       return type_name unless type_name.includes?("|")
-      parts = type_name.split("|").map(&.strip)
+      parts = split_union_type_name(type_name).map(&.strip)
       filtered = parts.reject { |p| p == "Nil" }
       return "Nil" if filtered.empty?
       filtered.uniq.join(" | ")
@@ -4147,7 +4147,7 @@ module Crystal::HIR
       @current_class = context if context
       begin
         if resolved.includes?("|")
-          resolved.split("|").map do |part|
+          split_union_type_name(resolved).map do |part|
             normalized = normalize_tuple_literal_type_name(part.strip)
             resolve_type_name_in_context(normalized)
           end.join(" | ")
@@ -16336,8 +16336,8 @@ module Crystal::HIR
     # Check if a type name represents a union of integer types
     # e.g., "UInt32 | Int32", "Int32 | Int64", etc.
     private def union_of_integers?(type_name : String) : Bool
-      return false unless type_name.includes?(" | ")
-      parts = type_name.split(" | ")
+      return false unless type_name.includes?("|")
+      parts = split_union_type_name(type_name)
       parts.all? do |part|
         stripped = part.strip
         INTEGER_TYPE_NAMES.includes?(stripped)
@@ -18993,7 +18993,7 @@ module Crystal::HIR
       end
 
       if name.includes?("|")
-        parts = name.split("|").map(&.strip)
+        parts = split_union_type_name(name).map(&.strip)
         return parts.map { |part| substitute_type_params_in_type_name(part) }.join(" | ")
       end
 
@@ -34899,7 +34899,7 @@ module Crystal::HIR
         candidates << normalized[0...-1]
       end
       if normalized.includes?("|")
-        normalized.split("|").each do |part|
+        split_union_type_name(normalized).each do |part|
           candidates << part.strip
         end
       end
@@ -37806,7 +37806,7 @@ module Crystal::HIR
           if type_name.ends_with?("?")
             candidates << type_name[0...-1]
           elsif type_name.includes?("|")
-            type_name.split("|").each { |entry| candidates << entry.strip }
+            split_union_type_name(type_name).each { |entry| candidates << entry.strip }
           end
           candidates.each do |candidate|
             if resolved = resolve_enum_name(candidate)
@@ -39733,6 +39733,21 @@ module Crystal::HIR
     private def lower_multiple_assign(ctx : LoweringContext, node : CrystalV2::Compiler::Frontend::MultipleAssignNode) : ValueId
       # MultipleAssignNode has a single value (destructured)
       # e.g., a, b, c = expr  where expr is a tuple/array
+      if value_node = @arena[node.value]
+        if tuple_node = value_node.as?(CrystalV2::Compiler::Frontend::TupleLiteralNode)
+          element_ids = tuple_node.elements.map { |elem| lower_expr(ctx, elem) }
+          node.targets.each_with_index do |target_expr, idx|
+            next unless value_id = element_ids[idx]?
+            assign_value_to_target(ctx, target_expr, value_id)
+          end
+          return element_ids.last? || begin
+            nil_lit = Literal.new(ctx.next_id, TypeRef::NIL, nil)
+            ctx.emit(nil_lit)
+            nil_lit.id
+          end
+        end
+      end
+
       rhs_id = lower_expr(ctx, node.value)
       rhs_type = ctx.type_of(rhs_id)
 
@@ -39748,26 +39763,303 @@ module Crystal::HIR
         ctx.emit(element_id)
         ctx.register_type(element_id.id, element_type)
 
-        case target_node
-        when CrystalV2::Compiler::Frontend::IdentifierNode
-          name = String.new(target_node.name)
-          local = Local.new(ctx.next_id, TypeRef::VOID, name, ctx.current_scope)
-          ctx.emit(local)
-          ctx.register_local(name, element_id.id)
-
-        when CrystalV2::Compiler::Frontend::InstanceVarNode
-          name = String.new(target_node.name)
-          ivar_offset = get_ivar_offset(name)
-          self_id = emit_self(ctx)
-          field_set = FieldSet.new(ctx.next_id, TypeRef::VOID, self_id, name, element_id.id, ivar_offset)
-          ctx.emit(field_set)
-
-        else
-          # Other target types can be added as needed
-        end
+        assign_value_to_target(ctx, target_expr, element_id.id)
       end
 
       rhs_id
+    end
+
+    private def assign_value_to_target(
+      ctx : LoweringContext,
+      target_expr : CrystalV2::Compiler::Frontend::ExprId,
+      value_id : ValueId
+    ) : ValueId
+      target_node = @arena[target_expr]
+
+      case target_node
+      when CrystalV2::Compiler::Frontend::IdentifierNode
+        name = String.new(target_node.name)
+        value_type = ctx.type_of(value_id)
+        if debug_name = ENV["DEBUG_ASSIGN_VAR"]?
+          if debug_name == name
+            type_name = value_type == TypeRef::VOID ? "Void" : get_type_name_from_ref(value_type)
+            STDERR.puts "[ASSIGN_VAR] scope=#{@current_class || ""}##{@current_method || ""} name=#{name} type=#{type_name}"
+          end
+        end
+        if existing = ctx.lookup_local(name)
+          copy = Copy.new(ctx.next_id, value_type, value_id)
+          ctx.emit(copy)
+          ctx.register_local(name, copy.id)
+          if enum_name = @enum_value_types.try(&.[value_id]?)
+            enum_map = @enum_value_types ||= {} of ValueId => String
+            enum_map[copy.id] = enum_name
+          end
+          update_typeof_local(name, value_type)
+          if concrete_name = concrete_type_name_for(value_type)
+            existing_name = lookup_typeof_local_name(name)
+            if existing_name.nil? || module_like_type_name?(existing_name)
+              update_typeof_local_name(name, concrete_name)
+            end
+          end
+          copy.id
+        else
+          local = Local.new(ctx.next_id, value_type, name, ctx.current_scope)
+          ctx.emit(local)
+          ctx.register_local(name, value_id)
+          copy = Copy.new(ctx.next_id, value_type, value_id)
+          ctx.emit(copy)
+          ctx.register_local(name, copy.id)
+          if enum_name = @enum_value_types.try(&.[value_id]?)
+            enum_map = @enum_value_types ||= {} of ValueId => String
+            enum_map[local.id] = enum_name
+            enum_map[copy.id] = enum_name
+          end
+          update_typeof_local(name, value_type)
+          if concrete_name = concrete_type_name_for(value_type)
+            update_typeof_local_name(name, concrete_name)
+          end
+          copy.id
+        end
+
+      when CrystalV2::Compiler::Frontend::InstanceVarNode
+        name = String.new(target_node.name)
+        value_type = ctx.type_of(value_id)
+        ivar_offset = get_ivar_offset(name)
+        ivar_type = get_ivar_type(name)
+        if class_name = @current_class
+          if class_info = @class_info[class_name]?
+            ivars = class_info.ivars
+            if idx = ivars.index { |iv| iv.name == name }
+              existing = ivars[idx]
+              merged_type = existing.type
+              if existing.type == TypeRef::VOID && value_type != TypeRef::VOID
+                merged_type = value_type
+              elsif value_type != TypeRef::VOID && existing.type != value_type
+                merged_type = union_type_for_values(existing.type, value_type)
+              end
+              if merged_type != existing.type
+                if existing.type == TypeRef::VOID || type_size(merged_type) == type_size(existing.type)
+                  ivars[idx] = IVarInfo.new(name, merged_type, existing.offset)
+                  ivar_type = merged_type
+                else
+                  ivar_type = existing.type
+                  debug_hook("ivar.union.skip", "class=#{class_name} ivar=#{name} from=#{get_type_name_from_ref(existing.type)} to=#{get_type_name_from_ref(merged_type)}")
+                end
+              else
+                ivar_type = existing.type
+              end
+              ivar_offset = existing.offset
+            elsif value_type != TypeRef::VOID
+              new_offset = class_info.size
+              ivars << IVarInfo.new(name, value_type, new_offset)
+              new_size = new_offset + type_size(value_type)
+              @class_info[class_name] = ClassInfo.new(
+                class_info.name,
+                class_info.type_ref,
+                ivars,
+                class_info.class_vars,
+                new_size,
+                class_info.is_struct,
+                class_info.parent_name
+              )
+              @class_info_by_type_id[class_info.type_ref.id] = @class_info[class_name]
+              @class_info_version += 1
+              ivar_type = value_type
+              ivar_offset = new_offset
+            end
+          end
+        end
+        self_id = emit_self(ctx)
+        if class_name && (enum_name = @enum_value_types.try(&.[value_id]?))
+          enum_map = @enum_ivar_types ||= {} of String => Hash(String, String)
+          class_map = enum_map[class_name]? || begin
+            new_map = {} of String => String
+            enum_map[class_name] = new_map
+            new_map
+          end
+          class_map[name] = enum_name
+        end
+
+        if ivar_type && is_union_type?(ivar_type)
+          value_type = ctx.type_of(value_id)
+          variant_id = get_union_variant_id(ivar_type, value_type)
+          if variant_id >= 0
+            union_wrap = UnionWrap.new(ctx.next_id, ivar_type, value_id, variant_id)
+            ctx.emit(union_wrap)
+            ctx.register_type(union_wrap.id, ivar_type)
+            field_set = FieldSet.new(ctx.next_id, TypeRef::VOID, self_id, name, union_wrap.id, ivar_offset)
+            ctx.emit(field_set)
+            return value_id
+          end
+        end
+
+        field_set = FieldSet.new(ctx.next_id, TypeRef::VOID, self_id, name, value_id, ivar_offset)
+        ctx.emit(field_set)
+        value_id
+
+      when CrystalV2::Compiler::Frontend::ClassVarNode
+        raw_name = String.new(target_node.name)
+        name = raw_name.lstrip('@')
+        cvar_type = get_class_var_type(name)
+        class_name = @current_class || ""
+        if cvar_type == TypeRef::VOID
+          value_type = ctx.type_of(value_id)
+          record_class_var_type(class_name, name, value_type)
+          cvar_type = value_type unless value_type == TypeRef::VOID
+        end
+        if enum_name = @enum_value_types.try(&.[value_id]?)
+          enum_map = @enum_cvar_types ||= {} of String => Hash(String, String)
+          class_map = enum_map[class_name]? || begin
+            new_map = {} of String => String
+            enum_map[class_name] = new_map
+            new_map
+          end
+          class_map[name] = enum_name
+        end
+        class_var_set = ClassVarSet.new(ctx.next_id, cvar_type, class_name, name, value_id)
+        ctx.emit(class_var_set)
+        class_var_set.id
+
+      when CrystalV2::Compiler::Frontend::IndexNode
+        object_id = lower_expr(ctx, target_node.object)
+        index_ids = target_node.indexes.map { |idx| lower_expr(ctx, idx) }
+
+        object_type = ctx.type_of(object_id)
+        type_desc = @module.get_type_descriptor(object_type)
+        if type_desc && type_desc.kind == TypeKind::Union
+          if unwrapped = unwrap_pointer_union(ctx, object_id, object_type, ctx.type_of(value_id))
+            object_id, object_type = unwrapped
+            type_desc = @module.get_type_descriptor(object_type)
+          end
+        end
+        is_pointer_type = object_type == TypeRef::POINTER ||
+                          (type_desc && type_desc.kind == TypeKind::Pointer)
+
+        if is_pointer_type && index_ids.size == 1
+          store_type = ctx.type_of(value_id)
+          store_node = PointerStore.new(ctx.next_id, store_type, object_id, value_id, index_ids.first)
+          ctx.emit(store_node)
+          return value_id
+        end
+
+        is_array_type = type_desc && (type_desc.kind == TypeKind::Array ||
+                                       type_desc.name.starts_with?("Array") ||
+                                       type_desc.name.starts_with?("StaticArray") ||
+                                       type_desc.name.starts_with?("Slice"))
+
+        if is_array_type && index_ids.size == 1
+          element_type = type_desc.not_nil!.type_params.first? || ctx.type_of(value_id)
+          element_type = TypeRef::INT32 if element_type == TypeRef::VOID
+          index_set = IndexSet.new(ctx.next_id, element_type, object_id, index_ids.first, value_id)
+          ctx.emit(index_set)
+          value_id
+        else
+          all_args = index_ids + [value_id]
+          arg_types = all_args.map { |arg| ctx.type_of(arg) }
+          method_name = resolve_method_call(ctx, object_id, "[]=", arg_types, false)
+          return_type = get_function_return_type(method_name)
+          remember_callsite_arg_types(method_name, arg_types)
+          lower_function_if_needed(method_name)
+          call = Call.new(ctx.next_id, return_type, object_id, method_name, all_args)
+          ctx.emit(call)
+          ctx.register_type(call.id, return_type)
+          call.id
+        end
+
+      when CrystalV2::Compiler::Frontend::MemberAccessNode
+        field_name = String.new(target_node.member)
+        lib_name = case obj_node = @arena[target_node.object]
+                   when CrystalV2::Compiler::Frontend::ConstantNode
+                     resolved = resolve_class_name_in_context(String.new(obj_node.name))
+                     resolved = resolve_type_alias_chain(resolved)
+                     @module.is_lib?(resolved) ? resolved : nil
+                   when CrystalV2::Compiler::Frontend::IdentifierNode
+                     name = String.new(obj_node.name)
+                     if ctx.lookup_local(name).nil? && name[0]?.try(&.uppercase?)
+                       resolved = resolve_class_name_in_context(name)
+                       resolved = resolve_type_alias_chain(resolved)
+                       @module.is_lib?(resolved) ? resolved : nil
+                     end
+                   when CrystalV2::Compiler::Frontend::PathNode
+                     raw_path = collect_path_string(obj_node)
+                     full_path = path_is_absolute?(obj_node) ? raw_path.sub(/^::/, "") : resolve_path_string_in_context(raw_path)
+                     @module.is_lib?(full_path) ? full_path : nil
+                   else
+                     nil
+                   end
+        if lib_name
+          if extern_global = @module.get_extern_global(lib_name, field_name)
+            value_type = extern_global.type
+            class_var_set = ClassVarSet.new(ctx.next_id, value_type, lib_name, field_name, value_id)
+            ctx.emit(class_var_set)
+            return class_var_set.id
+          end
+        end
+
+        object_id = lower_expr(ctx, target_node.object)
+        object_type = ctx.type_of(object_id)
+        type_desc = @module.get_type_descriptor(object_type)
+
+        if field_name == "value"
+          if type_desc && type_desc.kind == TypeKind::Union
+            if unwrapped = unwrap_pointer_union(ctx, object_id, object_type, ctx.type_of(value_id))
+              object_id, object_type = unwrapped
+              type_desc = @module.get_type_descriptor(object_type)
+            end
+          end
+          is_pointer_type = object_type == TypeRef::POINTER ||
+                            (type_desc && type_desc.kind == TypeKind::Pointer)
+          if is_pointer_type
+            store_node = PointerStore.new(ctx.next_id, TypeRef::VOID, object_id, value_id, nil)
+            ctx.emit(store_node)
+            return store_node.id
+          end
+        end
+
+        class_name = type_desc ? type_desc.name : nil
+        if class_name && @class_info.has_key?(class_name)
+          class_info = @class_info[class_name]
+          ivar_name = "@#{field_name}"
+          if ivar_info = class_info.ivars.find { |iv| iv.name == ivar_name }
+            field_set = FieldSet.new(ctx.next_id, TypeRef::VOID, object_id, ivar_name, value_id, ivar_info.offset)
+            ctx.emit(field_set)
+            return field_set.id
+          elsif class_info.is_struct && @lib_structs.includes?(class_name)
+            if ivar_info = class_info.ivars.find { |iv| iv.name == field_name }
+              field_set = FieldSet.new(ctx.next_id, TypeRef::VOID, object_id, field_name, value_id, ivar_info.offset)
+              ctx.emit(field_set)
+              return field_set.id
+            end
+          end
+        end
+
+        setter_name = "#{field_name}="
+        arg_types = [ctx.type_of(value_id)]
+        method_name = resolve_method_call(ctx, object_id, setter_name, arg_types, false)
+        return_type = get_function_return_type(method_name)
+        if !@module.has_function?(method_name)
+          if accessor = ensure_accessor_method(ctx, object_id, setter_name)
+            return_type = accessor[0]
+            method_name = accessor[1]
+          end
+        end
+        remember_callsite_arg_types(method_name, arg_types)
+        lower_function_if_needed(method_name)
+        call = Call.new(ctx.next_id, return_type, object_id, method_name, [value_id])
+        ctx.emit(call)
+        ctx.register_type(call.id, return_type)
+        call.id
+
+      when CrystalV2::Compiler::Frontend::GlobalNode
+        name = String.new(target_node.name)
+        value_type = ctx.type_of(value_id)
+        class_var_set = ClassVarSet.new(ctx.next_id, value_type, "$", name, value_id)
+        ctx.emit(class_var_set)
+        class_var_set.id
+
+      else
+        raise LoweringError.new("Unsupported assignment target: #{target_node.class}", target_node)
+      end
     end
 
     # ═══════════════════════════════════════════════════════════════════════
@@ -40555,9 +40847,10 @@ module Crystal::HIR
 
     # Sanitize malformed type names with unbalanced parentheses
     private def sanitize_type_name(name : String) : String
-      # Handle union types by sanitizing each part separately
-      if name.includes?(" | ")
-        parts = name.split(" | ").map { |part| sanitize_type_name_part(part.strip) }
+      # Handle union types by sanitizing each part separately, without splitting
+      # unions nested inside generics.
+      if name.includes?("|")
+        parts = split_union_type_name(name).map { |part| sanitize_type_name_part(part.strip) }
         return parts.join(" | ")
       end
 
@@ -41059,9 +41352,10 @@ module Crystal::HIR
       name = sanitize_type_name(name)
 
       # Normalize union type names: "Int32|Nil" -> "Int32 | Nil"
-      # This ensures consistent caching regardless of spacing
+      # This ensures consistent caching regardless of spacing and avoids splitting
+      # nested unions inside generics.
       normalized_name = if name.includes?("|")
-        name.split("|").map(&.strip).join(" | ")
+        split_union_type_name(name).map(&.strip).join(" | ")
       else
         name
       end
