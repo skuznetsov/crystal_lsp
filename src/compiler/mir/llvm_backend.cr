@@ -215,7 +215,7 @@ module Crystal::MIR
       when .struct?                     then "ptr"  # Structs passed by pointer in our ABI
       when .union?                      then "%#{mangle_name(type.name)}.union"
       when .proc?                       then "%__crystal_proc"  # { ptr, ptr }
-      when .tuple?                      then compute_tuple_type(type)
+      when .tuple?                      then "ptr"  # Tuple values are represented by pointer in current ABI
       when .array?                      then compute_array_type(type)
       else                                   "ptr"
       end
@@ -224,6 +224,8 @@ module Crystal::MIR
     private def compute_tuple_type(type : Type) : String
       if elements = type.element_types
         element_types = elements.map { |e| compute_llvm_type_for_type(e) }
+        element_types = element_types.reject { |t| t == "void" }
+        return "{}" if element_types.empty?
         "{ #{element_types.join(", ")} }"
       else
         "{}"
@@ -5714,6 +5716,7 @@ module Crystal::MIR
         @void_values << inst.id
       else
         emit "#{name} = call #{return_type} @#{callee_name}(#{args})"
+        record_emitted_type(name, return_type)
         # Update value_types to match EMITTED return type (not callee's return type)
         # This is critical because prepass may have determined a different type
         if return_type.includes?(".union")
@@ -5730,19 +5733,40 @@ module Crystal::MIR
             end
           end
         else
-          actual_type_ref = case return_type
-                            when "i1" then TypeRef::BOOL
-                            when "i8" then TypeRef::INT8
-                            when "i16" then TypeRef::INT16
-                            when "i32" then TypeRef::INT32
-                            when "i64" then TypeRef::INT64
-                            when "i128" then TypeRef::INT128
-                            when "float" then TypeRef::FLOAT32
-                            when "double" then TypeRef::FLOAT64
-                            when "ptr" then TypeRef::POINTER
-                            else TypeRef::POINTER  # Default fallback
-                            end
-          @value_types[inst.id] = actual_type_ref
+          # If the MIR type is a tuple, preserve it even if ABI uses ptr.
+          if tuple_type = @module.type_registry.get(inst.type)
+            if tuple_type.kind.tuple?
+              @value_types[inst.id] = inst.type
+            else
+              actual_type_ref = case return_type
+                                when "i1" then TypeRef::BOOL
+                                when "i8" then TypeRef::INT8
+                                when "i16" then TypeRef::INT16
+                                when "i32" then TypeRef::INT32
+                                when "i64" then TypeRef::INT64
+                                when "i128" then TypeRef::INT128
+                                when "float" then TypeRef::FLOAT32
+                                when "double" then TypeRef::FLOAT64
+                                when "ptr" then TypeRef::POINTER
+                                else TypeRef::POINTER  # Default fallback
+                                end
+              @value_types[inst.id] = actual_type_ref
+            end
+          else
+            actual_type_ref = case return_type
+                              when "i1" then TypeRef::BOOL
+                              when "i8" then TypeRef::INT8
+                              when "i16" then TypeRef::INT16
+                              when "i32" then TypeRef::INT32
+                              when "i64" then TypeRef::INT64
+                              when "i128" then TypeRef::INT128
+                              when "float" then TypeRef::FLOAT32
+                              when "double" then TypeRef::FLOAT64
+                              when "ptr" then TypeRef::POINTER
+                              else TypeRef::POINTER  # Default fallback
+                              end
+            @value_types[inst.id] = actual_type_ref
+          end
         end
       end
     end
@@ -6793,12 +6817,23 @@ module Crystal::MIR
 
       # Check if array value is a union type - need to extract ptr from payload
       array_value_type = @value_types[inst.array_value]?
+      if array_value_type == TypeRef::POINTER
+        if alloc_elem = @alloc_element_types[inst.array_value]?
+          array_value_type = alloc_elem
+        end
+      end
       if array_value_type
         array_llvm_type = @type_mapper.llvm_type(array_value_type)
         if array_llvm_type.includes?(".union")
           # Extract pointer from union payload
           emit "%#{base_name}.union_ptr = alloca #{array_llvm_type}, align 8"
-          emit "store #{array_llvm_type} #{normalize_union_value(array_ptr, array_llvm_type)}, ptr %#{base_name}.union_ptr"
+          union_val = array_ptr
+          actual_val_type = lookup_value_llvm_type(inst.array_value, "")
+          if actual_val_type == "ptr"
+            emit "%#{base_name}.union_val = load #{array_llvm_type}, ptr #{array_ptr}"
+            union_val = "%#{base_name}.union_val"
+          end
+          emit "store #{array_llvm_type} #{normalize_union_value(union_val, array_llvm_type)}, ptr %#{base_name}.union_ptr"
           emit "%#{base_name}.payload_ptr = getelementptr #{array_llvm_type}, ptr %#{base_name}.union_ptr, i32 0, i32 1"
           emit "%#{base_name}.arr_ptr = load ptr, ptr %#{base_name}.payload_ptr, align 4"
           array_ptr = "%#{base_name}.arr_ptr"
@@ -6832,14 +6867,39 @@ module Crystal::MIR
       index = value_ref(inst.index_value)
       element_type = @type_mapper.llvm_type(inst.element_type)
 
+      # If the array value is actually a tuple value (struct), use extractvalue
+      actual_array_llvm = lookup_value_llvm_type(inst.array_value, "")
+      if actual_array_llvm.starts_with?("{")
+        idx_const = nil
+        if !index.starts_with?("%") && index != "null"
+          idx_const = index.to_i?
+        end
+        if idx_const
+          emit "#{name} = extractvalue #{actual_array_llvm} #{array_ptr}, #{idx_const}"
+          @value_types[inst.id] = inst.element_type
+          return
+        end
+      end
+
       # Check if array value is a union type - need to extract ptr from payload
       array_value_type = @value_types[inst.array_value]?
+      if array_value_type == TypeRef::POINTER
+        if alloc_elem = @alloc_element_types[inst.array_value]?
+          array_value_type = alloc_elem
+        end
+      end
       if array_value_type
         array_llvm_type = @type_mapper.llvm_type(array_value_type)
         if array_llvm_type.includes?(".union")
           # Extract pointer from union payload
           emit "%#{base_name}.union_ptr = alloca #{array_llvm_type}, align 8"
-          emit "store #{array_llvm_type} #{normalize_union_value(array_ptr, array_llvm_type)}, ptr %#{base_name}.union_ptr"
+          union_val = array_ptr
+          actual_val_type = lookup_value_llvm_type(inst.array_value, "")
+          if actual_val_type == "ptr"
+            emit "%#{base_name}.union_val = load #{array_llvm_type}, ptr #{array_ptr}"
+            union_val = "%#{base_name}.union_val"
+          end
+          emit "store #{array_llvm_type} #{normalize_union_value(union_val, array_llvm_type)}, ptr %#{base_name}.union_ptr"
           emit "%#{base_name}.payload_ptr = getelementptr #{array_llvm_type}, ptr %#{base_name}.union_ptr, i32 0, i32 1"
           emit "%#{base_name}.arr_ptr = load ptr, ptr %#{base_name}.payload_ptr, align 4"
           array_ptr = "%#{base_name}.arr_ptr"
@@ -6856,6 +6916,36 @@ module Crystal::MIR
             emit "%#{base_name}.arr_ptr = inttoptr i64 0 to ptr"
           end
           array_ptr = "%#{base_name}.arr_ptr"
+        end
+      end
+
+      # Tuple element access: use struct GEP with constant index instead of array layout.
+      if array_value_type
+        tuple_type_ref = array_value_type
+        if array_value_type == TypeRef::POINTER
+          if alloc_elem = @alloc_element_types[inst.array_value]?
+            tuple_type_ref = alloc_elem
+          end
+        end
+        if union_desc = @module.get_union_descriptor(tuple_type_ref)
+          if tuple_variant = union_desc.variants.find { |v| (t = @module.type_registry.get(v.type_ref)) && t.kind.tuple? }
+            tuple_type_ref = tuple_variant.type_ref
+          end
+        end
+        if tuple_type = @module.type_registry.get(tuple_type_ref)
+          if tuple_type.kind.tuple?
+            idx_const = nil
+            if !index.starts_with?("%") && index != "null"
+              idx_const = index.to_i?
+            end
+            if idx_const
+              tuple_struct = tuple_struct_llvm_type(tuple_type)
+              emit "%#{base_name}.elem_ptr = getelementptr #{tuple_struct}, ptr #{array_ptr}, i32 0, i32 #{idx_const}"
+              emit "#{name} = load #{element_type}, ptr %#{base_name}.elem_ptr"
+              @value_types[inst.id] = inst.element_type
+              return
+            end
+          end
         end
       end
 
@@ -7830,6 +7920,17 @@ module Crystal::MIR
     private def is_union_llvm_type?(llvm_type : String) : Bool
       # Union types end with ".union" or ".union}" for struct fields
       llvm_type.ends_with?(".union") || llvm_type.ends_with?(".union}")
+    end
+
+    private def tuple_struct_llvm_type(type : Type) : String
+      if elements = type.element_types
+        element_types = elements.map { |e| @type_mapper.llvm_type(e) }
+        element_types = element_types.reject { |t| t == "void" }
+        return "{}" if element_types.empty?
+        "{ #{element_types.join(", ")} }"
+      else
+        "{}"
+      end
     end
 
     # Look up the LLVM type string for a value, with fallback to parameter lookup

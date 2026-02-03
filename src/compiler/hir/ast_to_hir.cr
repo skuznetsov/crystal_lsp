@@ -41257,11 +41257,15 @@ module Crystal::HIR
         return result
       end
 
-      # Check for union type syntax: "Type1 | Type2" or "Type1|Type2" (parser may not add spaces)
-      # NOTE: Don't set placeholder here - create_union_type handles its own caching
+      # Check for union type syntax (top-level only): "Type1 | Type2"
+      # NOTE: Don't treat nested unions inside generics as unions here.
+      # create_union_type handles its own caching.
       if lookup_name.includes?("|")
-        result = create_union_type(absolute_name ? "::#{lookup_name}" : lookup_name)
-        return result
+        variants = split_union_type_name(lookup_name)
+        if variants.size > 1
+          result = create_union_type(absolute_name ? "::#{lookup_name}" : lookup_name)
+          return result
+        end
       end
 
       # Mark as being processed with placeholder to break cycles (BEFORE any recursion)
@@ -41486,7 +41490,7 @@ module Crystal::HIR
     # Create a union type from "Type1 | Type2 | Type3" syntax
     private def create_union_type(name : String) : TypeRef
       # Parse variant type names (handle both "Type1 | Type2" and "Type1|Type2")
-      variant_names = name.split("|").map(&.strip).reject(&.empty?)
+      variant_names = split_union_type_name(name)
       if variant_names.empty?
         return TypeRef::VOID
       end

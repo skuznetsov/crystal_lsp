@@ -248,6 +248,50 @@ module Crystal
       end
     end
 
+    # Register tuple/named tuple types from HIR descriptors.
+    # This enables tuple element access to lower as struct GEPs instead of array layout.
+    def register_tuple_types(type_descriptors : Array(Crystal::HIR::TypeDescriptor))
+      type_descriptors.each_with_index do |desc, idx|
+        next unless desc.kind == Crystal::HIR::TypeKind::Tuple || desc.kind == Crystal::HIR::TypeKind::NamedTuple
+
+        hir_ref = Crystal::HIR::TypeRef.new(Crystal::HIR::TypeRef::FIRST_USER_TYPE + idx.to_u32)
+        mir_ref = convert_type(hir_ref)
+        next if @mir_module.type_registry.get(mir_ref)
+
+        element_refs = desc.type_params.map { |t| convert_type(t) }
+
+        size = 0_u64
+        align = 1_u32
+        element_refs.each do |elem_ref|
+          elem_type = @mir_module.type_registry.get(elem_ref)
+          elem_size = elem_type ? elem_type.size : 8_u64
+          elem_align = elem_type ? elem_type.alignment : 8_u32
+          size = align_u64(size, elem_align)
+          size += elem_size
+          align = elem_align if elem_align > align
+        end
+        size = align_u64(size, align)
+
+        mir_type = @mir_module.type_registry.create_type_with_id(
+          mir_ref.id,
+          TypeKind::Tuple,
+          desc.name,
+          size,
+          align
+        )
+        element_refs.each do |elem_ref|
+          elem_type = @mir_module.type_registry.get(elem_ref) || @mir_module.type_registry.get(TypeRef::POINTER)
+          mir_type.add_element_type(elem_type) if elem_type
+        end
+      end
+    end
+
+    private def align_u64(value : UInt64, align : UInt32) : UInt64
+      a = align.to_u64
+      return value if a <= 1
+      ((value + a - 1) // a) * a
+    end
+
     # Create function stub with params and return type (no body)
     private def create_function_stub(hir_func : HIR::Function)
       mir_return_type = convert_type(hir_func.return_type)

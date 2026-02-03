@@ -696,6 +696,7 @@ module CrystalV2
         mir_lowering.register_extern_globals(hir_module.extern_globals)
         mir_lowering.register_union_types(hir_converter.union_descriptors)
         mir_lowering.register_class_types(hir_converter.class_info)
+        mir_lowering.register_tuple_types(hir_module.types)
 
         STDERR.puts "  Lowering #{hir_module.functions.size} functions to MIR..." if options.progress
         mir_module = mir_lowering.lower(options.progress)
