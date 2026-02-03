@@ -4381,7 +4381,11 @@ module Crystal::HIR
 
     private def refresh_unique_def_arenas! : Nil
       if @unique_def_arenas.size < @function_def_arenas.size
+        # Incremental: only scan new def arenas since the last refresh.
+        count = 0
         @function_def_arenas.each_value do |arena|
+          count += 1
+          next if count <= @unique_def_arenas_list_size
           oid = arena.object_id
           next if @unique_def_arenas.has_key?(oid)
           @unique_def_arenas[oid] = arena
