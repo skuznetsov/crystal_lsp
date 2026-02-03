@@ -3381,6 +3381,11 @@ module Crystal::HIR
         inner ? resolve_typeof_expr(inner) : "Pointer(Void)"
       when CrystalV2::Compiler::Frontend::IdentifierNode
         name = String.new(node.name)
+        if name == "self" || name == "Self"
+          if self_name = @current_class || @current_namespace_override
+            return self_name
+          end
+        end
         if local_name = @current_typeof_local_names.try(&.[name]?)
           return local_name unless local_name.empty?
         elsif local_ref = @current_typeof_locals.try(&.[name]?)
@@ -3390,6 +3395,11 @@ module Crystal::HIR
         @type_param_map[name]? || name
       when CrystalV2::Compiler::Frontend::ConstantNode
         name = String.new(node.name)
+        if name == "self" || name == "Self"
+          if self_name = @current_class || @current_namespace_override
+            return self_name
+          end
+        end
         if local_name = @current_typeof_local_names.try(&.[name]?)
           return local_name unless local_name.empty?
         elsif local_ref = @current_typeof_locals.try(&.[name]?)
@@ -7649,6 +7659,20 @@ module Crystal::HIR
           collect_local_assignment_types(value_id, name, self_type_name, output, body, visited)
         end
       when CrystalV2::Compiler::Frontend::MultipleAssignNode
+        value_node = node_for_expr(expr_node.value)
+        if value_node.is_a?(CrystalV2::Compiler::Frontend::TupleLiteralNode)
+          value_node.elements.each_with_index do |val_id, idx|
+            target_id = expr_node.targets[idx]?
+            next unless target_id
+            target_node = node_for_expr(target_id)
+            if target_node.is_a?(CrystalV2::Compiler::Frontend::IdentifierNode) &&
+               slice_eq?(target_node.name, name)
+              if inferred = infer_type_from_expr(val_id, self_type_name)
+                output << inferred if inferred != TypeRef::VOID
+              end
+            end
+          end
+        end
         collect_local_assignment_types(expr_node.value, name, self_type_name, output, body, visited)
       when CrystalV2::Compiler::Frontend::DefNode
         if body = expr_node.body
@@ -20627,10 +20651,18 @@ module Crystal::HIR
     private def extract_type_name_from_node(node) : String?
       case node
       when CrystalV2::Compiler::Frontend::ConstantNode
-        String.new(node.name)
+        name = String.new(node.name)
+        if name == "self" || name == "Self"
+          return @current_class || @current_namespace_override
+        end
+        name
       when CrystalV2::Compiler::Frontend::IdentifierNode
         # Identifiers can be type names (uppercase) or constants used as type args
-        String.new(node.name)
+        name = String.new(node.name)
+        if name == "self" || name == "Self"
+          return @current_class || @current_namespace_override
+        end
+        name
       when CrystalV2::Compiler::Frontend::GenericNode
         # GenericClass(T, U) -> "GenericClass(T, U)"
         base_node = @arena[node.base_type]
@@ -30684,6 +30716,26 @@ module Crystal::HIR
             end
           end
         end
+        if receiver_id.nil? && full_method_name.nil? && !@current_method_is_class
+          top_level_exists = @function_defs.has_key?(method_name) ||
+            @function_types.has_key?(method_name) ||
+            has_function_base?(method_name)
+          unless top_level_exists
+            object_owner = "Object"
+            resolved = resolve_method_with_inheritance(object_owner, method_name)
+            object_method_name = resolved || "#{object_owner}##{method_name}"
+            if resolved || @function_types.has_key?(object_method_name) ||
+               has_function_base?(object_method_name) || @function_defs.has_key?(object_method_name) ||
+               !function_def_overloads(object_method_name).empty?
+              receiver_id = emit_self(ctx)
+              if receiver_id && ctx.type_of(receiver_id) == TypeRef::VOID
+                object_ref = type_ref_for_name(object_owner)
+                ctx.register_type(receiver_id, object_ref) if object_ref != TypeRef::VOID
+              end
+              full_method_name = object_method_name
+            end
+          end
+        end
 
       when CrystalV2::Compiler::Frontend::MemberAccessNode
         # Could be method call: obj.method() or class method: ClassName.new()
@@ -38168,6 +38220,30 @@ module Crystal::HIR
             ctx.emit(field_get)
             ctx.register_type(field_get.id, ivar_info.type)
             return field_get.id
+          end
+        end
+        if is_union_or_nilable_type?(receiver_type)
+          type_name = if desc = @module.get_type_descriptor(receiver_type)
+                        desc.name
+                      else
+                        get_type_name_from_ref(receiver_type)
+                      end
+          variants = split_union_type_name(type_name)
+          variants.each_with_index do |variant_name, idx|
+            next if variant_name == "Nil"
+            variant_ref = type_ref_for_name(variant_name)
+            next if variant_ref == TypeRef::VOID
+            if info = class_info_for_type(variant_ref)
+              if ivar_info = info.ivars.find { |iv| iv.name == member_name }
+                unwrapped = UnionUnwrap.new(ctx.next_id, variant_ref, object_id, idx, false)
+                ctx.emit(unwrapped)
+                ctx.register_type(unwrapped.id, variant_ref)
+                field_get = FieldGet.new(ctx.next_id, ivar_info.type, unwrapped.id, member_name, ivar_info.offset)
+                ctx.emit(field_get)
+                ctx.register_type(field_get.id, ivar_info.type)
+                return field_get.id
+              end
+            end
           end
         end
         module_type_name = get_type_name_from_ref(receiver_type)
