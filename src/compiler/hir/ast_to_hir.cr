@@ -760,6 +760,9 @@ module Crystal::HIR
     @function_def_overloads_cache_size : Int32 = 0
     # Cache parsed method name parts to avoid repeated scans in hot paths.
     @method_name_parts_cache : Hash(UInt64, MethodNameParts) = {} of UInt64 => MethodNameParts
+    # Recursion guard for substitute_type_params_in_type_name.
+    @substitute_type_params_stack : Set(String) = Set(String).new
+    @substitute_type_params_depth : Int32 = 0
     # Cache block function def lookup by callsite shape.
     @block_lookup_cache : Hash(BlockLookupKey, Tuple(String, CrystalV2::Compiler::Frontend::DefNode)?) = {} of BlockLookupKey => Tuple(String, CrystalV2::Compiler::Frontend::DefNode)?
     @block_lookup_cache_size : Int32 = 0
@@ -3957,6 +3960,7 @@ module Crystal::HIR
       name = type_name.strip
       if name.includes?("|")
         variants = split_union_type_name(name).map(&.strip)
+        return nil unless variants.size > 1
         element_variants = variants.compact_map { |v| element_type_for_type_name(v) }
         uniq = element_variants.uniq
         return uniq.join(" | ") unless uniq.empty?
@@ -4018,6 +4022,7 @@ module Crystal::HIR
       name = type_name.strip
       if name.includes?("|")
         variants = split_union_type_name(name).map(&.strip)
+        return type_name unless variants.size > 1
         indexed = variants.compact_map { |v| apply_index_to_type_name(v, index) }
         uniq = indexed.uniq
         return uniq.join(" | ") unless uniq.empty?
@@ -4041,6 +4046,7 @@ module Crystal::HIR
     private def drop_nil_from_union(type_name : String) : String
       return type_name unless type_name.includes?("|")
       parts = split_union_type_name(type_name).map(&.strip)
+      return type_name if parts.size <= 1
       filtered = parts.reject { |p| p == "Nil" }
       return "Nil" if filtered.empty?
       filtered.uniq.join(" | ")
@@ -16338,6 +16344,7 @@ module Crystal::HIR
     private def union_of_integers?(type_name : String) : Bool
       return false unless type_name.includes?("|")
       parts = split_union_type_name(type_name)
+      return false if parts.size <= 1
       parts.all? do |part|
         stripped = part.strip
         INTEGER_TYPE_NAMES.includes?(stripped)
@@ -18953,6 +18960,20 @@ module Crystal::HIR
     end
 
     private def substitute_type_params_in_type_name(name : String) : String
+      if @substitute_type_params_stack.includes?(name)
+        return name
+      end
+      @substitute_type_params_stack << name
+      @substitute_type_params_depth += 1
+      if @substitute_type_params_depth > 128
+        if ENV["DEBUG_SUBSTITUTE_GUARD"]?
+          STDERR.puts "[SUBSTITUTE_GUARD] depth=#{@substitute_type_params_depth} name=#{name}"
+        end
+        @substitute_type_params_depth -= 1
+        @substitute_type_params_stack.delete(name)
+        return name
+      end
+      begin
       # Replace 'self' with @current_class in type annotations
       # e.g., "(self, K -> V)?" becomes "(Hash(String, Int32), String -> Int32)?"
       if name == "self" && (current = @current_class)
@@ -18994,7 +19015,9 @@ module Crystal::HIR
 
       if name.includes?("|")
         parts = split_union_type_name(name).map(&.strip)
-        return parts.map { |part| substitute_type_params_in_type_name(part) }.join(" | ")
+        if parts.size > 1
+          return parts.map { |part| substitute_type_params_in_type_name(part) }.join(" | ")
+        end
       end
 
       if name.ends_with?("?")
@@ -19026,6 +19049,10 @@ module Crystal::HIR
       end
 
       name
+      ensure
+        @substitute_type_params_depth -= 1
+        @substitute_type_params_stack.delete(name)
+      end
     end
 
     private def find_top_level_arrow(name : String) : Int32?
