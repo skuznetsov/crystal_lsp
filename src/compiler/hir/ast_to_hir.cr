@@ -1183,7 +1183,7 @@ module Crystal::HIR
     @module_includer_keys_by_suffix : Hash(String, Set(String))
     @module_includers_version : Int32
     # Reverse mapping: track which modules each class includes (for method lookup)
-    @class_included_modules : Hash(String, Set(String))
+    @class_included_modules : Hash(String, Array(String))
     # Modules that have `extend self` applied (treat defs without receiver as class methods).
     @module_extend_self : Set(String)
     @module_defs_cache_version : Int32
@@ -1419,7 +1419,7 @@ module Crystal::HIR
       @module_includers = {} of String => Set(String)
       @module_includer_keys_by_suffix = {} of String => Set(String)
       @module_includers_version = 0
-      @class_included_modules = {} of String => Set(String)
+      @class_included_modules = {} of String => Array(String)
       @module_extend_self = Set(String).new
       @module_defs_cache_version = 0
       @module_def_lookup_cache_version = 0
@@ -1630,6 +1630,12 @@ module Crystal::HIR
       end
     end
 
+    private def push_unique_module_name(list : Array(String), name : String) : Bool
+      return false if list.includes?(name)
+      list << name
+      true
+    end
+
     private def record_module_inclusion(module_name : String, class_name : String) : Nil
       # Resolve type aliases in the module name (e.g., Engine::MatchData -> PCRE2::MatchData)
       resolved_module_name = resolve_module_alias_for_include(module_name)
@@ -1655,27 +1661,21 @@ module Crystal::HIR
       end
       # Also record reverse mapping (class -> modules it includes)
       class_set = @class_included_modules[class_name]? || begin
-        new_set = Set(String).new
-        @class_included_modules[class_name] = new_set
-        new_set
+        new_list = [] of String
+        @class_included_modules[class_name] = new_list
+        new_list
       end
-      unless class_set.includes?(resolved_module_name)
-        class_set.add(resolved_module_name)
-        cache_bump = true
-      end
+      cache_bump = true if push_unique_module_name(class_set, resolved_module_name)
       # Also record includes on the base class name (Array(T) -> Array) so
       # generic instantiations can resolve module methods via base lookup.
       class_base = strip_generic_args(class_name)
       if class_base != class_name && !class_base.empty?
         base_set = @class_included_modules[class_base]? || begin
-          new_set = Set(String).new
-          @class_included_modules[class_base] = new_set
-          new_set
+          new_list = [] of String
+          @class_included_modules[class_base] = new_list
+          new_list
         end
-        unless base_set.includes?(resolved_module_name)
-          base_set.add(resolved_module_name)
-          cache_bump = true
-        end
+        cache_bump = true if push_unique_module_name(base_set, resolved_module_name)
       end
       @module_includers_version += 1 if cache_bump
       debug_hook("module.include", "#{class_name} <= #{resolved_module_name}")
@@ -2044,7 +2044,8 @@ module Crystal::HIR
         end
         register_enum_methods(node, enum_name)
         # Register Enum as included module so enum instances can dispatch Enum methods
-        (@class_included_modules[enum_name] ||= Set(String).new) << "Enum"
+        enum_list = @class_included_modules[enum_name] ||= [] of String
+        push_unique_module_name(enum_list, "Enum")
         return
       end
 
@@ -2072,7 +2073,8 @@ module Crystal::HIR
       register_enum_base_type(enum_name, enum_base_type_for_node(node))
       register_enum_methods(node, enum_name)
       # Register Enum as included module so enum instances can dispatch Enum methods
-      (@class_included_modules[enum_name] ||= Set(String).new) << "Enum"
+      enum_list = @class_included_modules[enum_name] ||= [] of String
+      push_unique_module_name(enum_list, "Enum")
       attach_enum_instance_methods(enum_name)
     end
 
@@ -2086,7 +2088,8 @@ module Crystal::HIR
         end
         register_enum_methods(node, full_enum_name)
         # Register Enum as included module so enum instances can dispatch Enum methods
-        (@class_included_modules[full_enum_name] ||= Set(String).new) << "Enum"
+        enum_list = @class_included_modules[full_enum_name] ||= [] of String
+        push_unique_module_name(enum_list, "Enum")
         return
       end
 
@@ -2116,7 +2119,8 @@ module Crystal::HIR
       debug_hook_enum_register(full_enum_name, @module.get_type_descriptor(base_type).try(&.name) || "?")
       register_enum_methods(node, full_enum_name)
       # Register Enum as included module so enum instances can dispatch Enum methods
-      (@class_included_modules[full_enum_name] ||= Set(String).new) << "Enum"
+      enum_list = @class_included_modules[full_enum_name] ||= [] of String
+      push_unique_module_name(enum_list, "Enum")
       attach_enum_instance_methods(full_enum_name)
     end
 
@@ -18029,7 +18033,7 @@ module Crystal::HIR
       end
 
       unless name.includes?("::")
-        if @top_level_type_names.includes?(name) || @top_level_class_kinds.has_key?(name)
+        if @top_level_type_names.includes?(name) || @top_level_class_kinds.has_key?(name) || BUILTIN_TYPE_NAMES.includes?(name)
           nested_shadow = false
           if override = @current_namespace_override
             override_base = if info = split_generic_base_and_args(override)
@@ -18162,6 +18166,9 @@ module Crystal::HIR
         end
       end
       if primitive_self_type(name) || LIBC_TYPE_ALIASES.has_key?(name) || builtin_alias_target?(name)
+        return name
+      end
+      if BUILTIN_TYPE_NAMES.includes?(name)
         return name
       end
       if name == "Int" || name == "Float" || name == "Number" || name == "Atomic"
@@ -20040,18 +20047,18 @@ module Crystal::HIR
         end
         # Also check included modules for this class (transitive).
         # This is required for chains like Array(T) -> Indexable::Mutable(T) -> Indexable(T).
-        included = Set(String).new
+        included = [] of String
         if direct = @class_included_modules[current]?
-          direct.each { |m| included << m }
+          direct.each { |m| push_unique_module_name(included, m) }
         end
         current_base = strip_generic_args(current)
         if current_base != current
           if base = @class_included_modules[current_base]?
-            base.each { |m| included << m }
+            base.each { |m| push_unique_module_name(included, m) }
           end
         end
         unless included.empty?
-          queue = included.to_a
+          queue = included.dup
           visited_modules = Set(String).new
           while mod = queue.pop?
             next if visited_modules.includes?(mod)
@@ -40883,6 +40890,18 @@ module Crystal::HIR
       end
       cache_key = type_cache_key(cache_key_name)
       debug_hook_type_cache(orig_name, type_cache_context || "", cache_key, lookup_name)
+
+      if lookup_name.ends_with?("?")
+        base_name = lookup_name[0, lookup_name.size - 1]
+        if base_name.empty?
+          store_type_cache(cache_key, TypeRef::NIL)
+          return TypeRef::NIL
+        end
+        union_name = "#{base_name} | Nil"
+        result = create_union_type(absolute_name ? "::#{union_name}" : union_name)
+        store_type_cache(cache_key, result)
+        return result
+      end
 
       if cached = @type_cache[cache_key]?
         if !lookup_name.empty? && !lookup_name.includes?("(")
