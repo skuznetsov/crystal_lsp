@@ -28193,6 +28193,13 @@ module Crystal::HIR
       ensure_block = ctx.create_block if has_ensure
       exit_block = ctx.create_block
 
+      # Track locals for rescue merging (only when no else/ensure).
+      pre_locals : Hash(String, ValueId)? = has_rescue ? ctx.save_locals : nil
+      body_locals : Hash(String, ValueId)? = nil
+      rescue_locals : Hash(String, ValueId)? = nil
+      body_exit_block : BlockId? = nil
+      rescue_exit_block : BlockId? = nil
+
       # If we have rescue clauses, set up exception handling
       if has_rescue
         # Call TryBegin - returns 0 for normal path, non-zero for exception
@@ -28230,9 +28237,15 @@ module Crystal::HIR
         ctx.emit(try_end)
       end
 
+      # Snapshot locals after body for rescue-merge.
+      if has_rescue
+        body_locals = ctx.save_locals
+      end
+
       # After body, jump to else (if exists) or ensure (if exists) or exit
       after_body_target = else_block || ensure_block || exit_block
       ctx.terminate(Jump.new(after_body_target))
+      body_exit_block = after_body_target
 
       # Lower rescue clauses if any
       if has_rescue
@@ -28300,9 +28313,13 @@ module Crystal::HIR
         try_end = TryEnd.new(ctx.next_id)
         ctx.emit(try_end)
 
+        # Snapshot locals after rescue for rescue-merge.
+        rescue_locals = ctx.save_locals
+
         # After rescue, jump to ensure or exit
         after_rescue_target = ensure_block || exit_block
         ctx.terminate(Jump.new(after_rescue_target))
+        rescue_exit_block = after_rescue_target
       end
 
       # Lower else block if any
@@ -28328,6 +28345,13 @@ module Crystal::HIR
 
       # Continue from exit block
       ctx.switch_to_block(exit_block)
+
+      # Merge locals from body/rescue when both paths converge directly to exit
+      if has_rescue && body_locals && rescue_locals &&
+         body_exit_block == exit_block && rescue_exit_block == exit_block &&
+         pre_locals
+        merge_branch_locals(ctx, pre_locals, body_locals, rescue_locals, body_block, rescue_block.not_nil!)
+      end
 
       result_id
     end
@@ -42175,19 +42199,25 @@ module Crystal::HIR
       begin
         # Canonicalize by TypeRef to avoid duplicate variants like Thread | Nil | Thread.
         variant_refs = resolved_variant_names.map { |vn| type_ref_for_name(vn) }
-      seen_refs = Set(TypeRef).new
-      dedup_names = [] of String
-      dedup_refs = [] of TypeRef
-      variant_refs.each_with_index do |ref, idx|
-        next if seen_refs.includes?(ref)
-        seen_refs << ref
-        dedup_refs << ref
-        canonical = get_type_name_from_ref(ref)
-        canonical = resolved_variant_names[idx] if canonical == "Unknown"
-        dedup_names << canonical
-      end
-        resolved_variant_names = dedup_names
-        variant_refs = dedup_refs
+        seen_refs = Set(TypeRef).new
+        dedup_names = [] of String
+        dedup_refs = [] of TypeRef
+        variant_refs.each_with_index do |ref, idx|
+          next if seen_refs.includes?(ref)
+          seen_refs << ref
+          dedup_refs << ref
+          canonical = get_type_name_from_ref(ref)
+          canonical = resolved_variant_names[idx] if canonical == "Unknown"
+          dedup_names << canonical
+        end
+        # Canonicalize order: sort by name, but keep Nil last (matches Crystal semantics).
+        ordered = dedup_names.zip(dedup_refs)
+        ordered.sort_by! do |(vname, vref)|
+          nil_flag = (vref == TypeRef::NIL || vname == "Nil" || vname.ends_with?("::Nil")) ? 1 : 0
+          {nil_flag, vname}
+        end
+        resolved_variant_names = ordered.map(&.[0])
+        variant_refs = ordered.map(&.[1])
 
         normalized_name = resolved_variant_names.join(" | ")
         if resolved_variant_names.size == 1
@@ -42204,14 +42234,14 @@ module Crystal::HIR
         # Mark as being processed with placeholder to break cycles
         store_type_cache(cache_key, TypeRef::VOID)
 
-      # Get TypeRefs for each variant (recursive to handle nested unions)
-      if ENV["DEBUG_UNION_TYPES"]?
-        refs_debug = variant_refs.map { |ref| get_type_name_from_ref(ref) }.join(", ")
-        enum_debug = resolved_variant_names.map do |vn|
-          @enum_info ? @enum_info.not_nil!.has_key?(vn) : false
-        end.join(", ")
-        STDERR.puts "[DEBUG_UNION_TYPES] name=#{normalized_name} variants=#{resolved_variant_names.join(", ")} refs=#{refs_debug} enum_known=#{enum_debug}"
-      end
+        # Get TypeRefs for each variant (recursive to handle nested unions)
+        if ENV["DEBUG_UNION_TYPES"]?
+          refs_debug = variant_refs.map { |ref| get_type_name_from_ref(ref) }.join(", ")
+          enum_debug = resolved_variant_names.map do |vn|
+            @enum_info ? @enum_info.not_nil!.has_key?(vn) : false
+          end.join(", ")
+          STDERR.puts "[DEBUG_UNION_TYPES] name=#{normalized_name} variants=#{resolved_variant_names.join(", ")} refs=#{refs_debug} enum_known=#{enum_debug}"
+        end
 
         # Create union type and register descriptor
         type_ref = @module.intern_type(TypeDescriptor.new(TypeKind::Union, normalized_name))
