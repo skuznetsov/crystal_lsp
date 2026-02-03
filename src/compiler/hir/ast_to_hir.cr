@@ -1184,6 +1184,7 @@ module Crystal::HIR
     @module_includers_version : Int32
     # Reverse mapping: track which modules each class includes (for method lookup)
     @class_included_modules : Hash(String, Array(String))
+    @union_type_cache : Hash(UInt32, Bool)
     # Modules that have `extend self` applied (treat defs without receiver as class methods).
     @module_extend_self : Set(String)
     @module_defs_cache_version : Int32
@@ -1420,6 +1421,7 @@ module Crystal::HIR
       @module_includer_keys_by_suffix = {} of String => Set(String)
       @module_includers_version = 0
       @class_included_modules = {} of String => Array(String)
+      @union_type_cache = {} of UInt32 => Bool
       @module_extend_self = Set(String).new
       @module_defs_cache_version = 0
       @module_def_lookup_cache_version = 0
@@ -34278,44 +34280,36 @@ module Crystal::HIR
       value_id
     end
 
+    private def union_type_cached?(type : TypeRef) : Bool
+      cached = @union_type_cache[type.id]?
+      return cached unless cached.nil?
+
+      union = false
+      if type_desc = @module.get_type_descriptor(type)
+        union = type_desc.kind == TypeKind::Union || type_desc.name.includes?("___")
+      else
+        type_name = get_type_name_from_ref(type)
+        union = type_name.includes?("|") || type_name.includes?("___")
+      end
+
+      @union_type_cache[type.id] = union
+      union
+    end
+
     # Check if arg_type needs to be wrapped into param_type union
     private def needs_union_coercion?(arg_type : TypeRef, param_type : TypeRef) : Bool
       # Quick check: same type, no coercion needed
       return false if arg_type == param_type
 
-      # Check if param_type is a union type (has type descriptor with union marker)
-      if type_desc = @module.get_type_descriptor(param_type)
-        if type_desc.kind == TypeKind::Union
-          # Check if arg_type is one of the union variants
-          # For now, assume simple unions like Int32 | Nil
-          # The arg_type should be a non-union type that's part of the union
-          return true if arg_type != param_type && !is_union_type?(arg_type)
-        end
-      end
+      return false unless union_type_cached?(param_type)
 
-      # Also check by type naming convention: types with "___" are usually unions
-      # e.g., Int32___Nil is Int32 | Nil
-      if param_type.id > 0
-        @module.types.each_with_index do |desc, idx|
-          if TypeRef.new(TypeRef::FIRST_USER_TYPE + idx.to_u32) == param_type
-            if desc.name.includes?("___") || desc.kind == TypeKind::Union
-              # Param is union type - check if arg is a concrete type
-              return !is_union_type?(arg_type)
-            end
-          end
-        end
-      end
-
-      false
+      # Param is union type - check if arg is a concrete type
+      !union_type_cached?(arg_type)
     end
 
     # Check if a type is a union type
     private def is_union_type?(type : TypeRef) : Bool
-      if type_desc = @module.get_type_descriptor(type)
-        return type_desc.kind == TypeKind::Union || type_desc.name.includes?("___")
-      end
-      type_name = get_type_name_from_ref(type)
-      type_name.includes?("|") || type_name.includes?("___")
+      union_type_cached?(type)
     end
 
     # Check if a type is a nilable Int32 union (Int32 | Nil)
