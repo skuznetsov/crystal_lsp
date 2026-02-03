@@ -1297,6 +1297,8 @@ module Crystal::HIR
 
     # Track declared type names for locals (used to resolve module-typed receivers).
     @current_typeof_local_names : Hash(String, String)?
+    @current_typeof_local_names_hash : UInt64
+    @current_typeof_local_names_hash_owner : UInt64?
     # Short name index for class/struct lookups (short -> full names).
     @short_type_index : Hash(String, Set(String))
     @top_level_type_names : Set(String)
@@ -1456,6 +1458,8 @@ module Crystal::HIR
       @top_level_type_names = Set(String).new
       @top_level_class_kinds = {} of String => Bool
       @current_typeof_local_names = nil
+      @current_typeof_local_names_hash = 0_u64
+      @current_typeof_local_names_hash_owner = nil
       @top_level_main_defined = false
       @block_captures = {} of BlockId => Array(CapturedVar)
       @block_node_arenas = {} of UInt64 => CrystalV2::Compiler::Frontend::ArenaLike
@@ -40550,7 +40554,17 @@ module Crystal::HIR
       override = @current_namespace_override
       current = @current_class
       locals = @current_typeof_local_names
-      locals_hash = locals && !locals.empty? ? locals.hash : 0_u64
+      locals_hash = 0_u64
+      if locals && !locals.empty?
+        owner = locals.object_id
+        if @current_typeof_local_names_hash_owner == owner
+          locals_hash = @current_typeof_local_names_hash
+        else
+          locals_hash = locals.hash
+          @current_typeof_local_names_hash = locals_hash
+          @current_typeof_local_names_hash_owner = owner
+        end
+      end
       return nil if override.nil? && current.nil? && locals_hash == 0_u64
       TypeNameContextKey.new(override, current, locals_hash)
     end
