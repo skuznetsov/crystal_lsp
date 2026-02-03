@@ -1212,9 +1212,19 @@ module Crystal::HIR
     @type_cache_keys_by_generic_prefix : Hash(String, Set(String))
     # Guard against recursive union construction (A | B where A aliases back to union).
     @union_in_progress : Set(String)
+    private struct ResolvedTypeNameCacheEntry
+      getter value : String
+      getter epoch : Int32
+
+      def initialize(@value : String, @epoch : Int32)
+      end
+    end
+
     # Cache resolved type names per namespace to avoid repeated context scans.
-    @resolved_type_name_cache_global : Hash(String, String)
-    @resolved_type_name_cache_by_ctx : Hash(TypeNameContextKey, Hash(String, String))
+    @resolved_type_name_cache_global : Hash(String, ResolvedTypeNameCacheEntry)
+    @resolved_type_name_cache_by_ctx : Hash(TypeNameContextKey, Hash(String, ResolvedTypeNameCacheEntry))
+    @resolved_type_name_cache_epoch : Int32
+    @resolved_type_name_invalidations : Hash(String, Int32)
     # Cache resolved class names for .class/.metaclass type literals.
     @type_literal_class_cache : Hash(String, String?)
     # Temporary cache for type_name_exists? lookups (used during signature collection).
@@ -1448,8 +1458,10 @@ module Crystal::HIR
       @type_cache_keys_by_component = {} of String => Set(String)
       @type_cache_keys_by_generic_prefix = {} of String => Set(String)
       @union_in_progress = Set(String).new
-      @resolved_type_name_cache_global = {} of String => String
-      @resolved_type_name_cache_by_ctx = {} of TypeNameContextKey => Hash(String, String)
+      @resolved_type_name_cache_global = {} of String => ResolvedTypeNameCacheEntry
+      @resolved_type_name_cache_by_ctx = {} of TypeNameContextKey => Hash(String, ResolvedTypeNameCacheEntry)
+      @resolved_type_name_cache_epoch = 0
+      @resolved_type_name_invalidations = {} of String => Int32
       @type_literal_class_cache = {} of String => String?
       @type_name_exists_cache = nil
       @signature_scan_mode = false
@@ -40608,9 +40620,11 @@ module Crystal::HIR
     private def resolved_type_name_cache_get(name : String) : String?
       if ctx = current_type_name_context_key
         if map = @resolved_type_name_cache_by_ctx[ctx]?
-          if cached = map[name]?
-            record_cache_stat("resolved_type_ctx", true)
-            return cached
+          if entry = map[name]?
+            if resolved_type_name_cache_entry_valid?(name, entry)
+              record_cache_stat("resolved_type_ctx", true)
+              return entry.value
+            end
           end
           record_cache_stat("resolved_type_ctx", false)
           return nil
@@ -40618,9 +40632,11 @@ module Crystal::HIR
         record_cache_stat("resolved_type_ctx", false)
         nil
       else
-        if cached = @resolved_type_name_cache_global[name]?
-          record_cache_stat("resolved_type_global", true)
-          return cached
+        if entry = @resolved_type_name_cache_global[name]?
+          if resolved_type_name_cache_entry_valid?(name, entry)
+            record_cache_stat("resolved_type_global", true)
+            return entry.value
+          end
         end
         record_cache_stat("resolved_type_global", false)
         nil
@@ -40631,23 +40647,27 @@ module Crystal::HIR
       if ctx = current_type_name_context_key
         map = @resolved_type_name_cache_by_ctx[ctx]?
         unless map
-          map = {} of String => String
+          map = {} of String => ResolvedTypeNameCacheEntry
           @resolved_type_name_cache_by_ctx[ctx] = map
         end
-        map[name] = value
+        map[name] = ResolvedTypeNameCacheEntry.new(value, @resolved_type_name_cache_epoch)
       else
-        @resolved_type_name_cache_global[name] = value
+        @resolved_type_name_cache_global[name] = ResolvedTypeNameCacheEntry.new(value, @resolved_type_name_cache_epoch)
       end
     end
 
     private def invalidate_resolved_type_name_cache_for(name : String) : Nil
       short = last_namespace_component_if_nested(name)
-      return if @resolved_type_name_cache_global.empty? && @resolved_type_name_cache_by_ctx.empty?
-      @resolved_type_name_cache_global.delete(name)
-      @resolved_type_name_cache_global.delete(short) if short
-      @resolved_type_name_cache_by_ctx.each_value do |map|
-        map.delete(name)
-        map.delete(short) if short
+      @resolved_type_name_cache_epoch &+= 1
+      @resolved_type_name_invalidations[name] = @resolved_type_name_cache_epoch
+      @resolved_type_name_invalidations[short] = @resolved_type_name_cache_epoch if short
+    end
+
+    private def resolved_type_name_cache_entry_valid?(name : String, entry : ResolvedTypeNameCacheEntry) : Bool
+      if invalid = @resolved_type_name_invalidations[name]?
+        entry.epoch >= invalid
+      else
+        true
       end
     end
 
@@ -40712,6 +40732,8 @@ module Crystal::HIR
         @type_cache_keys_by_generic_prefix.clear
         @resolved_type_name_cache_global.clear
         @resolved_type_name_cache_by_ctx.clear
+        @resolved_type_name_invalidations.clear
+        @resolved_type_name_cache_epoch = 0
         @type_literal_class_cache.clear
       end
     end
