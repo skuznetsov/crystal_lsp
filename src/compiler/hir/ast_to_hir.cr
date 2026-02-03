@@ -3515,7 +3515,8 @@ module Crystal::HIR
            CrystalV2::Compiler::Frontend::PathNode,
            CrystalV2::Compiler::Frontend::GenericNode,
            CrystalV2::Compiler::Frontend::TypeofNode,
-           CrystalV2::Compiler::Frontend::NumberNode
+           CrystalV2::Compiler::Frontend::NumberNode,
+           CrystalV2::Compiler::Frontend::SelfNode
         true
       when CrystalV2::Compiler::Frontend::IndexNode
         return false unless type_like_expr_id?(node.object)
@@ -14745,6 +14746,8 @@ module Crystal::HIR
       if mapped = @type_param_map[name]?
         return mapped
       end
+      resolved_alias = resolve_type_alias_chain(name)
+      return resolved_alias if resolved_alias != name
       if (idx = name.index("::"))
         prefix = name[0, idx]
         if mapped = @type_param_map[prefix]?
@@ -41550,7 +41553,6 @@ module Crystal::HIR
       orig_name = lookup_name
       absolute_name = lookup_name.starts_with?("::")
       lookup_name = lookup_name[2..] if absolute_name
-      cache_key_name = absolute_name ? "::#{lookup_name}" : lookup_name
 
       # Resolve type names in the current namespace before cache lookup.
       # This avoids poisoning the cache with names that resolve differently per scope.
@@ -41569,6 +41571,9 @@ module Crystal::HIR
           return TypeRef::VOID if short_type_param_name?(lookup_name)
         end
       end
+      resolved_alias = resolve_type_alias_chain(lookup_name)
+      lookup_name = resolved_alias if resolved_alias != lookup_name
+      cache_key_name = absolute_name ? "::#{lookup_name}" : lookup_name
       if !@type_param_map.empty? && !lookup_name.includes?("(") && lookup_name.includes?("::")
         if current = @current_class
           current_base = if info = split_generic_base_and_args(current)
