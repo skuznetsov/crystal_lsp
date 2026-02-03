@@ -10593,7 +10593,8 @@ module Crystal::HIR
                          TypeRef::VOID
                        end
           if type_ann_str && bare_generic_annotation?(type_ann_str)
-            param_type = TypeRef::VOID
+            # Keep the generic base type for dispatch; allow callsite refinement.
+            param_type = type_ref_for_name(strip_generic_args(type_ann_str))
           end
           call_type_for_param = if !param.is_block && !param.is_splat && !param.is_double_splat && call_index < call_types.size
                                   call_types[call_index]
@@ -13382,7 +13383,8 @@ module Crystal::HIR
                          TypeRef::VOID
                        end
           if type_ann_str && bare_generic_annotation?(type_ann_str)
-            param_type = TypeRef::VOID
+            # Keep the generic base type for dispatch; allow callsite refinement.
+            param_type = type_ref_for_name(strip_generic_args(type_ann_str))
           end
           call_type_for_param = if !param.is_block && !param.is_splat && !param.is_double_splat && call_index < call_types.size
                                   call_types[call_index]
@@ -21405,7 +21407,8 @@ module Crystal::HIR
                            TypeRef::VOID  # Unknown type
                          end
             if type_ann_str && bare_generic_annotation?(type_ann_str)
-              param_type = TypeRef::VOID
+              # Keep the generic base type for dispatch; allow callsite refinement.
+              param_type = type_ref_for_name(strip_generic_args(type_ann_str))
             end
             call_type_for_param = if !param.is_block && !param.is_splat && !param.is_double_splat && call_index < call_types.size
                                     call_types[call_index]
@@ -42192,7 +42195,12 @@ module Crystal::HIR
 
       normalized_name = resolved_variant_names.join(" | ")
       if @union_in_progress.includes?(normalized_name)
-        return TypeRef::POINTER
+        # If we're already building this union, prefer a cached concrete type
+        # and avoid falling back to Pointer (which corrupts inference).
+        if cached = @type_cache[type_cache_key(normalized_name)]?
+          return cached unless cached == TypeRef::VOID
+        end
+        return TypeRef::VOID
       end
 
       @union_in_progress << normalized_name
