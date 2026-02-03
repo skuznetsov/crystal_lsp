@@ -6334,6 +6334,31 @@ module Crystal::HIR
         if body = expr_node.body
           body.each { |child| collect_return_types(child, self_type_name, output) }
         end
+      when CrystalV2::Compiler::Frontend::CallNode
+        block_expr = expr_node.block
+        if block_expr.nil? && !expr_node.args.empty?
+          last_id = expr_node.args.last
+          last_node = node_for_expr(last_id)
+          case last_node
+          when CrystalV2::Compiler::Frontend::BlockNode
+            block_expr = last_id
+          when CrystalV2::Compiler::Frontend::UnaryNode
+            if slice_eq?(last_node.operator, "&")
+              operand = last_node.operand
+              operand_node = node_for_expr(operand)
+              block_expr = operand if operand_node.is_a?(CrystalV2::Compiler::Frontend::BlockNode)
+            end
+          end
+        end
+        if block_expr
+          if block_node = node_for_expr(block_expr)
+            if block_node.is_a?(CrystalV2::Compiler::Frontend::BlockNode)
+              if body = block_node.body
+                body.each { |child| collect_return_types(child, self_type_name, output) }
+              end
+            end
+          end
+        end
       when CrystalV2::Compiler::Frontend::LoopNode
         expr_node.body.each { |child| collect_return_types(child, self_type_name, output) }
       when CrystalV2::Compiler::Frontend::ForNode
@@ -7784,6 +7809,49 @@ module Crystal::HIR
           end
         end
         collect_local_assignment_types(expr_node.value, name, self_type_name, output, body, visited)
+      when CrystalV2::Compiler::Frontend::CallNode
+        block_expr = expr_node.block
+        if block_expr.nil? && !expr_node.args.empty?
+          last_id = expr_node.args.last
+          last_node = node_for_expr(last_id)
+          case last_node
+          when CrystalV2::Compiler::Frontend::BlockNode
+            block_expr = last_id
+          when CrystalV2::Compiler::Frontend::UnaryNode
+            if slice_eq?(last_node.operator, "&")
+              operand = last_node.operand
+              operand_node = node_for_expr(operand)
+              block_expr = operand if operand_node.is_a?(CrystalV2::Compiler::Frontend::BlockNode)
+            end
+          end
+        end
+
+        if block_expr
+          block_node = node_for_expr(block_expr)
+          if block_node.is_a?(CrystalV2::Compiler::Frontend::BlockNode)
+            if params = block_node.params
+              param_index = nil
+              params.each_with_index do |param, idx|
+                next unless param.name
+                if slice_eq?(param.name, name)
+                  param_index = idx
+                  break
+                end
+              end
+              if param_index
+                if param_types = infer_block_param_types_for_call(expr_node, self_type_name)
+                  if inferred = param_types[param_index]?
+                    output << inferred if inferred != TypeRef::VOID
+                  end
+                end
+              end
+            end
+            if body = block_node.body
+              body.each { |child| collect_local_assignment_types(child, name, self_type_name, output, body, visited) }
+            end
+          end
+        end
+        expr_node.args.each { |arg| collect_local_assignment_types(arg, name, self_type_name, output, body, visited) }
       when CrystalV2::Compiler::Frontend::DefNode
         if body = expr_node.body
           body.each { |child| collect_local_assignment_types(child, name, self_type_name, output, body, visited) }
@@ -7827,10 +7895,6 @@ module Crystal::HIR
         expr_node.body.each { |child| collect_local_assignment_types(child, name, self_type_name, output, body, visited) }
       when CrystalV2::Compiler::Frontend::ForNode
         expr_node.body.each { |child| collect_local_assignment_types(child, name, self_type_name, output, body, visited) }
-      when CrystalV2::Compiler::Frontend::CallNode
-        if block = expr_node.block
-          collect_local_assignment_types(block, name, self_type_name, output, body, visited)
-        end
       when CrystalV2::Compiler::Frontend::BinaryNode
         left = node_for_expr(expr_node.left)
         right = node_for_expr(expr_node.right)
@@ -7853,6 +7917,30 @@ module Crystal::HIR
       when CrystalV2::Compiler::Frontend::MacroExpressionNode
         collect_local_assignment_types(expr_node.expression, name, self_type_name, output, body, visited)
       end
+    end
+
+    private def infer_block_param_types_for_call(
+      expr_node : CrystalV2::Compiler::Frontend::CallNode,
+      self_type_name : String?
+    ) : Array(TypeRef)?
+      callee_node = node_for_expr(expr_node.callee)
+      if callee_node.is_a?(CrystalV2::Compiler::Frontend::MemberAccessNode)
+        member_name = String.new(callee_node.member)
+        receiver_type = infer_type_from_expr(callee_node.object, self_type_name)
+        return nil if receiver_type.nil? || receiver_type == TypeRef::VOID
+        receiver_name = get_type_name_from_ref(receiver_type)
+        resolved = resolve_method_with_inheritance(receiver_name, member_name) || "#{receiver_name}##{member_name}"
+        return block_param_types_for_call(resolved, resolved, receiver_type)
+      elsif callee_node.is_a?(CrystalV2::Compiler::Frontend::IdentifierNode)
+        method_name = String.new(callee_node.name)
+        owner_name = self_type_name || @current_class
+        return nil unless owner_name
+        base = resolve_method_with_inheritance(owner_name, method_name) || "#{owner_name}##{method_name}"
+        receiver_ref = type_ref_for_name(owner_name)
+        return nil if receiver_ref == TypeRef::VOID
+        return block_param_types_for_call(base, base, receiver_ref)
+      end
+      nil
     end
 
     private def expr_mentions_identifier?(expr_id : ExprId, name : String, depth : Int32 = 0) : Bool
