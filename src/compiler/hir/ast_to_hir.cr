@@ -392,7 +392,8 @@ module Crystal::HIR
     # Parse method name in single pass - O(n) instead of O(3n) for three separate splits
     @[AlwaysInline]
     private def parse_method_name(name : String) : MethodNameParts
-      if cached = @method_name_parts_cache[name]?
+      name_id = name.object_id
+      if cached = @method_name_parts_cache[name_id]?
         record_cache_stat("method_name_parts", true)
         return cached
       end
@@ -450,7 +451,7 @@ module Crystal::HIR
         is_instance: sep_char == '#',
         is_class: sep_char == '.'
       )
-      @method_name_parts_cache[name] = parts
+      @method_name_parts_cache[name_id] = parts
       parts
     end
 
@@ -748,8 +749,8 @@ module Crystal::HIR
 
     # Cache for yield_function_name_for: method_name → yield function name (or nil)
     @yield_name_cache : Hash(String, String?) = {} of String => String?
-    # Cache for strip_generic_receiver_from_method_name: method_name → stripped
-    @strip_generic_receiver_cache : Hash(String, String) = {} of String => String
+    # Cache for strip_generic_receiver_from_method_name: method_name object_id → stripped
+    @strip_generic_receiver_cache : Hash(UInt64, String) = {} of UInt64 => String
     # Cache for function_def_overloads stripped receiver lookups: stripped base → overload list
     @function_def_overloads_stripped_cache : Hash(String, Array(String)) = {} of String => Array(String)
     # Incremental index: stripped base → overload list (avoid full scan per lookup)
@@ -758,7 +759,7 @@ module Crystal::HIR
     @function_def_overloads_cache : Hash(String, Array(String)) = {} of String => Array(String)
     @function_def_overloads_cache_size : Int32 = 0
     # Cache parsed method name parts to avoid repeated scans in hot paths.
-    @method_name_parts_cache : Hash(String, MethodNameParts) = {} of String => MethodNameParts
+    @method_name_parts_cache : Hash(UInt64, MethodNameParts) = {} of UInt64 => MethodNameParts
     # Cache block function def lookup by callsite shape.
     @block_lookup_cache : Hash(BlockLookupKey, Tuple(String, CrystalV2::Compiler::Frontend::DefNode)?) = {} of BlockLookupKey => Tuple(String, CrystalV2::Compiler::Frontend::DefNode)?
     @block_lookup_cache_size : Int32 = 0
@@ -19171,13 +19172,14 @@ module Crystal::HIR
 
     private def strip_generic_receiver_from_method_name(method_name : String) : String
       return method_name unless method_name.includes?("(")
-      if cached = @strip_generic_receiver_cache[method_name]?
+      method_id = method_name.object_id
+      if cached = @strip_generic_receiver_cache[method_id]?
         record_cache_stat("strip_generic_receiver", true)
         return cached
       end
       record_cache_stat("strip_generic_receiver", false)
       result = strip_generic_receiver_uncached(method_name)
-      @strip_generic_receiver_cache[method_name] = result
+      @strip_generic_receiver_cache[method_id] = result
       result
     end
 
