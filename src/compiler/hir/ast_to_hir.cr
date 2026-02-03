@@ -18140,6 +18140,7 @@ module Crystal::HIR
 
     private def resolve_type_name_in_context(name : String) : String
       return name if name.empty?
+      name = normalize_missing_generic_parens(name)
       if (idx = name.index("::"))
         prefix = name[0, idx]
         if mapped = @type_param_map[prefix]?
@@ -40945,6 +40946,7 @@ module Crystal::HIR
 
     # Sanitize malformed type names with unbalanced parentheses
     private def sanitize_type_name(name : String) : String
+      name = normalize_missing_generic_parens(name)
       # Handle union types by sanitizing each part separately, without splitting
       # unions nested inside generics.
       if name.includes?("|")
@@ -40957,6 +40959,13 @@ module Crystal::HIR
 
     private def sanitize_type_name_part(name : String) : String
       name = normalize_missing_generic_parens(name)
+
+      if info = split_generic_base_and_args(name)
+        args = split_generic_type_args(info[:args]).map do |arg|
+          sanitize_type_name(arg.strip)
+        end
+        name = "#{info[:base]}(#{args.join(", ")})"
+      end
 
       # Count parens to check balance
       open_count = name.count('(')
