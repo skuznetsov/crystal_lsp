@@ -6824,6 +6824,7 @@ module Crystal::MIR
       end
       if array_value_type
         array_llvm_type = @type_mapper.llvm_type(array_value_type)
+        actual_val_type = lookup_value_llvm_type(inst.array_value, "")
         if array_llvm_type.includes?(".union")
           # Extract pointer from union payload
           emit "%#{base_name}.union_ptr = alloca #{array_llvm_type}, align 8"
@@ -6837,7 +6838,7 @@ module Crystal::MIR
           emit "%#{base_name}.payload_ptr = getelementptr #{array_llvm_type}, ptr %#{base_name}.union_ptr, i32 0, i32 1"
           emit "%#{base_name}.arr_ptr = load ptr, ptr %#{base_name}.payload_ptr, align 4"
           array_ptr = "%#{base_name}.arr_ptr"
-        elsif array_llvm_type != "ptr" && !array_llvm_type.starts_with?("%")
+        elsif array_llvm_type != "ptr" && !array_llvm_type.starts_with?("%") && !array_llvm_type.starts_with?("[") && actual_val_type != "ptr"
           # Non-ptr, non-struct type (e.g., i1, i32) - this is a MIR type inference issue
           # Use inttoptr conversion as fallback
           if array_llvm_type == "i1" || array_llvm_type == "i8" || array_llvm_type == "i16" || array_llvm_type == "i32"
@@ -6890,6 +6891,7 @@ module Crystal::MIR
       end
       if array_value_type
         array_llvm_type = @type_mapper.llvm_type(array_value_type)
+        actual_val_type = lookup_value_llvm_type(inst.array_value, "")
         if array_llvm_type.includes?(".union")
           # Extract pointer from union payload
           emit "%#{base_name}.union_ptr = alloca #{array_llvm_type}, align 8"
@@ -6903,7 +6905,7 @@ module Crystal::MIR
           emit "%#{base_name}.payload_ptr = getelementptr #{array_llvm_type}, ptr %#{base_name}.union_ptr, i32 0, i32 1"
           emit "%#{base_name}.arr_ptr = load ptr, ptr %#{base_name}.payload_ptr, align 4"
           array_ptr = "%#{base_name}.arr_ptr"
-        elsif array_llvm_type != "ptr" && !array_llvm_type.starts_with?("%")
+        elsif array_llvm_type != "ptr" && !array_llvm_type.starts_with?("%") && !array_llvm_type.starts_with?("[") && actual_val_type != "ptr"
           # Non-ptr, non-struct type (e.g., i1, i32) - this is a MIR type inference issue
           # Use inttoptr conversion as fallback
           if array_llvm_type == "i1" || array_llvm_type == "i8" || array_llvm_type == "i16" || array_llvm_type == "i32"
