@@ -8281,7 +8281,16 @@ module Crystal::HIR
     # Modules are like classes but with only class methods (self.method)
     # Also handles nested classes: module Foo; class Bar; end; end -> Foo::Bar
     def register_module(node : CrystalV2::Compiler::Frontend::ModuleNode)
-      register_module_with_name(node, String.new(node.name))
+      old_class = @current_class
+      old_override = @current_namespace_override
+      @current_class = nil
+      @current_namespace_override = nil
+      begin
+        register_module_with_name(node, String.new(node.name))
+      ensure
+        @current_class = old_class
+        @current_namespace_override = old_override
+      end
     end
 
     private def register_module_with_name(node : CrystalV2::Compiler::Frontend::ModuleNode, module_name : String)
