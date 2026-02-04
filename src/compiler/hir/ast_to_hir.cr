@@ -42157,26 +42157,47 @@ module Crystal::HIR
     end
 
     private def type_ref_for_name(name : String) : TypeRef
-      if ENV["DEBUG_TUPLE_PAREN"]? && name.includes?(",") && name.includes?("Tuple") && !name.includes?("(")
+      has_union = false
+      has_comma = false
+      has_paren = false
+      has_brace = false
+      i = 0
+      while i < name.bytesize
+        byte = name.to_unsafe[i]
+        case byte
+        when '|'.ord
+          has_union = true
+        when ','.ord
+          has_comma = true
+        when '('.ord, ')'.ord
+          has_paren = true
+        when '{'.ord, '}'.ord
+          has_brace = true
+        end
+        i += 1
+      end
+      if ENV["DEBUG_TUPLE_PAREN"]? && has_comma && name.includes?("Tuple") && !has_paren
         STDERR.puts "[DEBUG_TUPLE_PAREN_INPUT] name=#{name}"
       end
       # Sanitize malformed type names (extra parens etc)
-      name = sanitize_type_name(name)
-      if ENV["DEBUG_TUPLE_PAREN"]? && name.includes?(",") && name.includes?("Tuple") && !name.includes?("(")
+      if has_union || has_comma || has_paren || has_brace
+        name = sanitize_type_name(name)
+      end
+      if ENV["DEBUG_TUPLE_PAREN"]? && has_comma && name.includes?("Tuple") && !name.includes?("(")
         STDERR.puts "[DEBUG_TUPLE_PAREN_SANITIZED] name=#{name}"
       end
 
       # Normalize union type names: "Int32|Nil" -> "Int32 | Nil"
       # This ensures consistent caching regardless of spacing and avoids splitting
       # nested unions inside generics.
-      normalized_name = if name.includes?("|")
+      normalized_name = if has_union && name.includes?("|")
         split_union_type_name(name).map(&.strip).join(" | ")
       else
         name
       end
 
       # Normalize generic spacing to avoid cache misses like "Hash(String,Int32)" vs "Hash(String, Int32)"
-      if info = split_generic_base_and_args(normalized_name)
+      if (has_paren || has_comma) && (info = split_generic_base_and_args(normalized_name))
         arg_names = split_generic_type_args(info[:args]).map do |arg|
           normalize_tuple_literal_type_name(arg.strip)
         end
