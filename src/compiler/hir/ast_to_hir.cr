@@ -393,8 +393,16 @@ module Crystal::HIR
     @[AlwaysInline]
     private def parse_method_name(name : String) : MethodNameParts
       name_id = name.object_id
+      if name_id == @method_name_parts_last_id
+        if last = @method_name_parts_last
+          record_cache_stat("method_name_parts", true)
+          return last
+        end
+      end
       if cached = @method_name_parts_cache[name_id]?
         record_cache_stat("method_name_parts", true)
+        @method_name_parts_last_id = name_id
+        @method_name_parts_last = cached
         return cached
       end
       record_cache_stat("method_name_parts", false)
@@ -452,6 +460,8 @@ module Crystal::HIR
         is_class: sep_char == '.'
       )
       @method_name_parts_cache[name_id] = parts
+      @method_name_parts_last_id = name_id
+      @method_name_parts_last = parts
       parts
     end
 
@@ -760,6 +770,8 @@ module Crystal::HIR
     @function_def_overloads_cache_size : Int32 = 0
     # Cache parsed method name parts to avoid repeated scans in hot paths.
     @method_name_parts_cache : Hash(UInt64, MethodNameParts) = {} of UInt64 => MethodNameParts
+    @method_name_parts_last_id : UInt64 = 0
+    @method_name_parts_last : MethodNameParts? = nil
     # Recursion guard for substitute_type_params_in_type_name.
     @substitute_type_params_stack : Set(String) = Set(String).new
     @substitute_type_params_depth : Int32 = 0
@@ -35314,8 +35326,7 @@ module Crystal::HIR
       best_param_count = Int32::MAX
       best_score = Int32::MIN
 
-      func_parts = parse_method_name(func_name)
-      base_name = func_parts.base
+      base_name = strip_type_suffix(func_name)
       func_name_dollar = "#{func_name}$"
       debug_lookup = ENV.has_key?("DEBUG_YIELD_INLINE") && func_name.includes?("trace")
       function_def_overloads(base_name).each do |name|
@@ -35377,6 +35388,7 @@ module Crystal::HIR
 
       # Fallback: match by method short name across owners (for inherited yield methods).
       # Example: Int32#try should inline Object#try when receiver_base allows it.
+      func_parts = parse_method_name(func_name)
       method_short = func_parts.method
       if method_short
         instance_suffix = "##{method_short}"
