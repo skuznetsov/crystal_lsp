@@ -11889,8 +11889,33 @@ module Crystal::HIR
             pname = param_names[i]
             next ref if pname.empty? || pname == "_"
             resolved = resolve_type_alias_chain(pname)
+            if resolved == pname && !pname.includes?("::")
+              if alias_target = resolve_type_alias_by_suffix(pname)
+                resolved = alias_target
+              end
+            end
             resolved = resolve_type_name_in_context(resolved)
-            new_ref = type_ref_for_name(resolved)
+            new_ref = if resolved.includes?("|")
+                        union_ref = create_union_type(resolved)
+                        if union_ref == TypeRef::VOID
+                          parts = split_union_type_name(resolved)
+                          if parts.empty?
+                            TypeRef::VOID
+                          else
+                            variant_refs = parts.map do |part|
+                              builtin_type_ref_for(part) || type_ref_for_name(part)
+                            end
+                            normalized = parts.join(" | ")
+                            union_ref = @module.intern_type(TypeDescriptor.new(TypeKind::Union, normalized))
+                            register_union_descriptor(union_ref, normalized, parts, variant_refs)
+                            union_ref
+                          end
+                        else
+                          union_ref
+                        end
+                      else
+                        type_ref_for_name(resolved)
+                      end
             updated = true if new_ref != ref
             new_ref
           end.to_a
@@ -19047,6 +19072,18 @@ module Crystal::HIR
         depth += 1
       end
       resolved
+    end
+
+    private def resolve_type_alias_by_suffix(name : String) : String?
+      return nil if name.empty? || name.includes?("::")
+      suffix = "::#{name}"
+      match = nil
+      @type_aliases.each_key do |key|
+        next unless key.ends_with?(suffix)
+        return nil if match
+        match = key
+      end
+      match ? @type_aliases[match]? : nil
     end
 
     # Split a generic type argument list like "String, Array(Int32), Hash(K, V)"
@@ -41911,6 +41948,20 @@ module Crystal::HIR
       end
 
       if cached = @type_cache[cache_key]?
+        # If a union-like name was previously cached as a non-union descriptor,
+        # invalidate and recompute so we don't treat unions as classes.
+        if (lookup_name.includes?("|") || lookup_name.includes?("___"))
+          if cached && (desc = @module.get_type_descriptor(cached))
+            if desc.kind == TypeKind::Union
+              return cached
+            end
+          end
+          @type_cache.delete(cache_key)
+          cached = nil
+        end
+        if cached.nil?
+          # Fall through to recompute after cache invalidation.
+        end
         if !lookup_name.empty? && !lookup_name.includes?("(")
           module_name = lookup_name
           if !@module_defs.has_key?(module_name) && !module_name.starts_with?("Crystal::") && module_name.includes?("::")
@@ -41918,7 +41969,7 @@ module Crystal::HIR
             module_name = crystal_prefixed if @module_defs.has_key?(crystal_prefixed)
           end
           if @module_defs.has_key?(module_name) && !class_like_namespace?(module_name)
-            if desc = @module.get_type_descriptor(cached)
+            if cached && (desc = @module.get_type_descriptor(cached))
               if desc.kind != TypeKind::Module
                 result = @module.intern_type(TypeDescriptor.new(TypeKind::Module, module_name))
                 store_type_cache(cache_key, result)
@@ -41931,19 +41982,21 @@ module Crystal::HIR
             end
           end
         end
-        if info = split_generic_base_and_args(lookup_name)
-          if template = @generic_templates[info[:base]]?
-            if desc = @module.get_type_descriptor(cached)
-              expected_kind = template.is_struct ? TypeKind::Struct : TypeKind::Class
-              return cached if desc.kind == expected_kind
+        if cached
+          if info = split_generic_base_and_args(lookup_name)
+            if template = @generic_templates[info[:base]]?
+              if desc = @module.get_type_descriptor(cached)
+                expected_kind = template.is_struct ? TypeKind::Struct : TypeKind::Class
+                return cached if desc.kind == expected_kind
+              else
+                return cached
+              end
             else
               return cached
             end
           else
             return cached
           end
-        else
-          return cached
         end
       end
 
@@ -41971,6 +42024,21 @@ module Crystal::HIR
         if variants.size > 1
           result = create_union_type(absolute_name ? "::#{lookup_name}" : lookup_name)
           return result
+        end
+      end
+
+      if !lookup_name.empty? && !lookup_name.includes?("::")
+        if current = @current_class
+          current_base = if info = split_generic_base_and_args(current)
+                           info[:base]
+                         else
+                           current
+                         end
+          if alias_target = @type_aliases["#{current_base}::#{lookup_name}"]?
+            result = type_ref_for_name(alias_target)
+            store_type_cache(cache_key, result)
+            return result
+          end
         end
       end
 
@@ -42070,7 +42138,13 @@ module Crystal::HIR
                 end
               end
               if ref == TypeRef::VOID && !type_param_like?(stripped)
-                ref = @module.intern_type(TypeDescriptor.new(TypeKind::Class, resolved))
+                unless resolved == "Void" || resolved == "Unknown"
+                  if resolved.includes?("|") || resolved.includes?("___")
+                    ref = create_union_type(resolved)
+                  else
+                    ref = @module.intern_type(TypeDescriptor.new(TypeKind::Class, resolved))
+                  end
+                end
               end
             end
           end
@@ -42203,17 +42277,24 @@ module Crystal::HIR
                  end
                  if !lookup_name.starts_with?("Crystal::") && lookup_name.includes?("::")
                    crystal_prefixed = "Crystal::#{lookup_name}"
-                   if @module_defs.has_key?(crystal_prefixed) && !class_like_namespace?(crystal_prefixed)
-                     result = @module.intern_type(TypeDescriptor.new(TypeKind::Module, crystal_prefixed))
-                     store_type_cache(cache_key, result)
-                     return result
-                   end
+                 if @module_defs.has_key?(crystal_prefixed) && !class_like_namespace?(crystal_prefixed)
+                   result = @module.intern_type(TypeDescriptor.new(TypeKind::Module, crystal_prefixed))
+                   store_type_cache(cache_key, result)
+                   return result
                  end
-
-                 # For unknown types, keep the unqualified name to avoid poisoning
-                 # the cache with a context-specific namespace.
-                 @module.intern_type(TypeDescriptor.new(TypeKind::Class, lookup_name))
                end
+
+                # Final guard: if this still looks like a union, prefer a union descriptor.
+                if lookup_name.includes?("|") || lookup_name.includes?("___")
+                  union_ref = create_union_type(lookup_name)
+                  store_type_cache(cache_key, union_ref)
+                  return union_ref if union_ref != TypeRef::VOID
+                end
+
+                # For unknown types, keep the unqualified name to avoid poisoning
+                # the cache with a context-specific namespace.
+                @module.intern_type(TypeDescriptor.new(TypeKind::Class, lookup_name))
+              end
       # Cache the result to avoid VOID placeholder being returned on subsequent calls
       store_type_cache(cache_key, result)
       result
