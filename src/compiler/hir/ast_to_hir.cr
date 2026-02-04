@@ -7413,7 +7413,26 @@ module Crystal::HIR
               if template = @generic_templates[type_str]?
                 if template.type_params.size == 1
                   inferred_name = nil.as(String?)
-                  if !expr_node.args.empty?
+                  if type_str == "Array"
+                    if expr_node.args.size >= 2
+                      if inferred_ref = infer_type_from_expr(expr_node.args[1], self_type_name)
+                        inferred_name = get_type_name_from_ref(inferred_ref)
+                      end
+                    end
+                    if (inferred_name.nil? || inferred_name.empty? || inferred_name == "Void" || inferred_name == "Unknown") && block_expr
+                      block_node = node_for_expr(block_expr)
+                      if block_node.is_a?(CrystalV2::Compiler::Frontend::BlockNode)
+                        if body = block_node.body
+                          if last_id = body.last?
+                            if inferred_ref = infer_type_from_expr(last_id, self_type_name)
+                              inferred_name = get_type_name_from_ref(inferred_ref)
+                            end
+                          end
+                        end
+                      end
+                    end
+                  end
+                  if (inferred_name.nil? || inferred_name.empty? || inferred_name == "Void" || inferred_name == "Unknown") && !expr_node.args.empty?
                     if inferred_ref = infer_type_from_expr(expr_node.args[0], self_type_name)
                       inferred_name = get_type_name_from_ref(inferred_ref)
                     end
@@ -14612,7 +14631,7 @@ module Crystal::HIR
       else
         # User-defined type - look up name from module's type descriptors
         if desc = @module.get_type_descriptor(type)
-          result = desc.name
+          result = resolve_type_alias_chain(desc.name)
           if ENV.has_key?("DEBUG_RANGE_MANGLE") && result.includes?("Range")
             STDERR.puts "[RANGE_MANGLE] type.id=#{type.id} desc.name=#{result}"
           end
@@ -21578,7 +21597,29 @@ module Crystal::HIR
           member_name = String.new(callee_node.member)
           if obj_node.is_a?(CrystalV2::Compiler::Frontend::ConstantNode) && member_name == "new"
             # ClassName.new() returns ClassName
-            return String.new(obj_node.name)
+            name = String.new(obj_node.name)
+            if name == "Array"
+              if args = node.args
+                if args.size >= 2
+                  if inferred = infer_type_from_expr(@arena[args[1]])
+                    return "Array(#{inferred})"
+                  end
+                end
+              end
+              if block_id = node.block
+                block_node = @arena[block_id]
+                if block_node.is_a?(CrystalV2::Compiler::Frontend::BlockNode)
+                  if body = block_node.body
+                    if last_id = body.last?
+                      if inferred = infer_type_from_expr(@arena[last_id])
+                        return "Array(#{inferred})"
+                      end
+                    end
+                  end
+                end
+              end
+            end
+            return name
           elsif obj_node.is_a?(CrystalV2::Compiler::Frontend::IdentifierNode) && member_name == "new"
             name = String.new(obj_node.name)
             if name[0].uppercase?
@@ -22510,6 +22551,10 @@ module Crystal::HIR
       ctx.register_type(argv_param.id, argv_type)
       ctx.register_local("ARGC_UNSAFE", argc_param.id)
       ctx.register_local("ARGV_UNSAFE", argv_param.id)
+      old_main_class = @current_class
+      old_main_namespace = @current_namespace_override
+      @current_class = nil
+      @current_namespace_override = nil
 
       # Process deferred classvar initializations FIRST, before any other code.
       # This ensures classvars like @@skip are initialized before being used.
@@ -22620,6 +22665,8 @@ module Crystal::HIR
       # This breaks the recursive cycle by processing functions iteratively.
       process_pending_lower_functions
 
+      @current_class = old_main_class
+      @current_namespace_override = old_main_namespace
       func
     end
 
