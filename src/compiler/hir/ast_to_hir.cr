@@ -8445,6 +8445,57 @@ module Crystal::HIR
           end
         end
         @current_class = old_class
+        # PASS 1.75: Expand macros that define types before method registration.
+        # This ensures nested types (e.g., record structs) are available for type resolution
+        # when registering module methods.
+        body.each do |expr_id|
+          member = unwrap_visibility_member(@arena[expr_id])
+          case member
+          when CrystalV2::Compiler::Frontend::CallNode
+            callee = @arena[member.callee]
+            next unless callee.is_a?(CrystalV2::Compiler::Frontend::IdentifierNode)
+            method_name = String.new(callee.name)
+            macro_lookup = lookup_macro_entry_with_inheritance(method_name, module_name)
+            if macro_lookup.nil? && module_name != "Object"
+              macro_lookup = lookup_macro_entry(method_name, "Object")
+            end
+            next unless macro_lookup
+            macro_entry, macro_key = macro_lookup
+            macro_def, macro_arena = macro_entry
+            next unless macro_def_maybe_defines_type?(macro_def, macro_arena)
+            macro_args, macro_block = extract_macro_block_from_args(member.args, member.block)
+            expanded_id = expand_macro_expr(macro_def, macro_arena, macro_args, member.named_args, macro_block, macro_key)
+            unless expanded_id.invalid?
+              old_arena = @arena
+              @arena = macro_arena
+              begin
+                register_module_members_from_macro_expansion(module_name, expanded_id)
+              ensure
+                @arena = old_arena
+              end
+            end
+          when CrystalV2::Compiler::Frontend::IdentifierNode
+            method_name = String.new(member.name)
+            macro_lookup = lookup_macro_entry_with_inheritance(method_name, module_name)
+            if macro_lookup.nil? && module_name != "Object"
+              macro_lookup = lookup_macro_entry(method_name, "Object")
+            end
+            next unless macro_lookup
+            macro_entry, macro_key = macro_lookup
+            macro_def, macro_arena = macro_entry
+            next unless macro_def_maybe_defines_type?(macro_def, macro_arena)
+            expanded_id = expand_macro_expr(macro_def, macro_arena, [] of ExprId, nil, nil, macro_key)
+            unless expanded_id.invalid?
+              old_arena = @arena
+              @arena = macro_arena
+              begin
+                register_module_members_from_macro_expansion(module_name, expanded_id)
+              ensure
+                @arena = old_arena
+              end
+            end
+          end
+        end
         # PASS 2: Register functions and classes (now that aliases and enums are available)
         old_class = @current_class
         @current_class = module_name
@@ -8587,9 +8638,17 @@ module Crystal::HIR
             callee = @arena[member.callee]
             if callee.is_a?(CrystalV2::Compiler::Frontend::IdentifierNode)
               method_name = String.new(callee.name)
-              if macro_lookup = lookup_macro_entry(method_name, module_name)
+              macro_lookup = lookup_macro_entry_with_inheritance(method_name, module_name)
+              if macro_lookup.nil? && module_name != "Object"
+                macro_lookup = lookup_macro_entry(method_name, "Object")
+              end
+              if macro_lookup
                 macro_entry, macro_key = macro_lookup
                 macro_def, macro_arena = macro_entry
+                if macro_def_maybe_defines_type?(macro_def, macro_arena)
+                  # Already handled in PASS 1.75 to ensure type availability.
+                  next
+                end
                 macro_args, macro_block = extract_macro_block_from_args(member.args, member.block)
                 expanded_id = expand_macro_expr(macro_def, macro_arena, macro_args, member.named_args, macro_block, macro_key)
                 unless expanded_id.invalid?
@@ -8605,9 +8664,17 @@ module Crystal::HIR
             end
           when CrystalV2::Compiler::Frontend::IdentifierNode
             method_name = String.new(member.name)
-            if macro_lookup = lookup_macro_entry(method_name, module_name)
+            macro_lookup = lookup_macro_entry_with_inheritance(method_name, module_name)
+            if macro_lookup.nil? && module_name != "Object"
+              macro_lookup = lookup_macro_entry(method_name, "Object")
+            end
+            if macro_lookup
               macro_entry, macro_key = macro_lookup
               macro_def, macro_arena = macro_entry
+              if macro_def_maybe_defines_type?(macro_def, macro_arena)
+                # Already handled in PASS 1.75 to ensure type availability.
+                next
+              end
               expanded_id = expand_macro_expr(macro_def, macro_arena, [] of ExprId, nil, nil, macro_key)
               unless expanded_id.invalid?
                 old_arena = @arena
@@ -10380,6 +10447,55 @@ module Crystal::HIR
             @current_class = old_class
           end
         end
+        # PASS 1.75: Expand macros that define types before method registration.
+        body.each do |expr_id|
+          member = unwrap_visibility_member(@arena[expr_id])
+          case member
+          when CrystalV2::Compiler::Frontend::CallNode
+            callee = @arena[member.callee]
+            next unless callee.is_a?(CrystalV2::Compiler::Frontend::IdentifierNode)
+            method_name = String.new(callee.name)
+            macro_lookup = lookup_macro_entry_with_inheritance(method_name, full_name)
+            if macro_lookup.nil? && full_name != "Object"
+              macro_lookup = lookup_macro_entry(method_name, "Object")
+            end
+            next unless macro_lookup
+            macro_entry, macro_key = macro_lookup
+            macro_def, macro_arena = macro_entry
+            next unless macro_def_maybe_defines_type?(macro_def, macro_arena)
+            macro_args, macro_block = extract_macro_block_from_args(member.args, member.block)
+            expanded_id = expand_macro_expr(macro_def, macro_arena, macro_args, member.named_args, macro_block, macro_key)
+            unless expanded_id.invalid?
+              old_arena = @arena
+              @arena = macro_arena
+              begin
+                register_module_members_from_macro_expansion(full_name, expanded_id)
+              ensure
+                @arena = old_arena
+              end
+            end
+          when CrystalV2::Compiler::Frontend::IdentifierNode
+            method_name = String.new(member.name)
+            macro_lookup = lookup_macro_entry_with_inheritance(method_name, full_name)
+            if macro_lookup.nil? && full_name != "Object"
+              macro_lookup = lookup_macro_entry(method_name, "Object")
+            end
+            next unless macro_lookup
+            macro_entry, macro_key = macro_lookup
+            macro_def, macro_arena = macro_entry
+            next unless macro_def_maybe_defines_type?(macro_def, macro_arena)
+            expanded_id = expand_macro_expr(macro_def, macro_arena, [] of ExprId, nil, nil, macro_key)
+            unless expanded_id.invalid?
+              old_arena = @arena
+              @arena = macro_arena
+              begin
+                register_module_members_from_macro_expansion(full_name, expanded_id)
+              ensure
+                @arena = old_arena
+              end
+            end
+          end
+        end
         # PASS 2: Register functions and other members (now that aliases are available)
         old_class = @current_class
         @current_class = full_name
@@ -10479,9 +10595,17 @@ module Crystal::HIR
             callee = @arena[member.callee]
             if callee.is_a?(CrystalV2::Compiler::Frontend::IdentifierNode)
               method_name = String.new(callee.name)
-              if macro_lookup = lookup_macro_entry(method_name, full_name)
+              macro_lookup = lookup_macro_entry_with_inheritance(method_name, full_name)
+              if macro_lookup.nil? && full_name != "Object"
+                macro_lookup = lookup_macro_entry(method_name, "Object")
+              end
+              if macro_lookup
                 macro_entry, macro_key = macro_lookup
                 macro_def, macro_arena = macro_entry
+                if macro_def_maybe_defines_type?(macro_def, macro_arena)
+                  # Already handled in PASS 1.75 to ensure type availability.
+                  next
+                end
                 macro_args, macro_block = extract_macro_block_from_args(member.args, member.block)
                 expanded_id = expand_macro_expr(macro_def, macro_arena, macro_args, member.named_args, macro_block, macro_key)
                 unless expanded_id.invalid?
@@ -10495,6 +10619,29 @@ module Crystal::HIR
                 end
               end
             end
+          when CrystalV2::Compiler::Frontend::IdentifierNode
+            method_name = String.new(member.name)
+            macro_lookup = lookup_macro_entry_with_inheritance(method_name, full_name)
+            if macro_lookup.nil? && full_name != "Object"
+              macro_lookup = lookup_macro_entry(method_name, "Object")
+            end
+            if macro_lookup
+              macro_entry, macro_key = macro_lookup
+              macro_def, macro_arena = macro_entry
+              if macro_def_maybe_defines_type?(macro_def, macro_arena)
+                # Already handled in PASS 1.75 to ensure type availability.
+                next
+              end
+              expanded_id = expand_macro_expr(macro_def, macro_arena, [] of ExprId, nil, nil, macro_key)
+              unless expanded_id.invalid?
+                old_arena = @arena
+                @arena = macro_arena
+                begin
+                  register_module_members_from_macro_expansion(full_name, expanded_id)
+                ensure
+                  @arena = old_arena
+                end
+              end
             end
           end
         ensure
@@ -11349,7 +11496,17 @@ module Crystal::HIR
         @module_defs.delete(class_name)
         @module_defs_cache_version += 1
       end
-      invalidate_type_cache_for_namespace(class_name) if existing_info || had_module_defs
+      if existing_info || had_module_defs
+        invalidate_type_cache_for_namespace(class_name)
+      else
+        # Ensure short-name caches are invalidated when introducing nested types
+        # that can shadow builtins or top-level types (e.g., WUInt::UInt128).
+        if short = last_namespace_component_if_nested(class_name)
+          if BUILTIN_TYPE_NAMES.includes?(short) || @top_level_class_kinds.has_key?(short) || @top_level_type_names.includes?(short)
+            invalidate_type_cache_for_namespace(class_name)
+          end
+        end
+      end
 
       # Collect instance variables and their types
       ivars = [] of IVarInfo
@@ -20482,6 +20639,21 @@ module Crystal::HIR
 
       return_type_name = String.new(return_type_slice)
       return nil if return_type_name.empty?
+
+      if cached = @function_types[mangled_method_name]? || @function_types[base_method_name]?
+        if cached != TypeRef::VOID &&
+           return_type_name != "self" &&
+           !return_type_name.includes?("typeof(") &&
+           !return_type_name.includes?("(") &&
+           !return_type_name.includes?("|") &&
+           !return_type_name.includes?(",") &&
+           !return_type_name.includes?("{") &&
+           !return_type_name.ends_with?("?") &&
+           !return_type_name.ends_with?("*") &&
+           !(type_param_like?(return_type_name) && !@type_param_map.has_key?(return_type_name))
+          return cached
+        end
+      end
 
       if return_type_name == "self"
         if receiver_type && receiver_type != TypeRef::VOID
