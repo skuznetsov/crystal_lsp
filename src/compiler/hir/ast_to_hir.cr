@@ -14904,6 +14904,14 @@ module Crystal::HIR
             if resolved = resolve_untyped_overload(base_fallback, arg_types.size, has_block_call, call_has_named_args)
               return resolved
             end
+            if inherited = resolve_method_with_inheritance(base_owner, method_name)
+              if resolved = resolve_untyped_overload(inherited, arg_types.size, has_block_call, call_has_named_args)
+                return resolved
+              end
+              if !function_def_overloads(inherited).empty?
+                return inherited
+              end
+            end
             mangled_fallback = mangle_function_name(base_fallback, arg_types, has_block_call)
             if @function_types.has_key?(mangled_fallback)
               return mangled_fallback
@@ -15297,6 +15305,9 @@ module Crystal::HIR
 
       if ENV["DEBUG_ENUM_UNION_PREDICATE"]? && method_name.ends_with?("?") && (method_name == "kill?" || method_name == "hup?" || method_name == "quit?")
         STDERR.puts "[RESOLVE_METHOD] class_name=#{class_name} method=#{method_name} has_pipe=#{class_name.includes?("|")}"
+      end
+      if ENV["DEBUG_UNION_CALL"]? && (class_name.includes?("|") || class_name.includes?("$OR$"))
+        STDERR.puts "[UNION_CALL] class=#{class_name} method=#{method_name} base=#{base_method_name} union=#{union_type_name?(class_name)}"
       end
       if !class_name.empty? && union_type_name?(class_name)
         union_name = normalize_union_type_name(class_name)
@@ -20620,13 +20631,20 @@ module Crystal::HIR
           @method_inheritance_cache[cache_key] = resolved
           return resolved  # Return base name - caller will mangle
         end
+        current_base = strip_generic_args(current)
+        if current_base != current
+          base_test = "#{current_base}##{method_name}"
+          if @function_types.has_key?(base_test) || has_function_base?(base_test)
+            @method_inheritance_cache[cache_key] = base_test
+            return base_test
+          end
+        end
         # Also check included modules for this class (transitive).
         # This is required for chains like Array(T) -> Indexable::Mutable(T) -> Indexable(T).
         included = [] of String
         if direct = @class_included_modules[current]?
           direct.each { |m| push_unique_module_name(included, m) }
         end
-        current_base = strip_generic_args(current)
         if current_base != current
           if base = @class_included_modules[current_base]?
             base.each { |m| push_unique_module_name(included, m) }
@@ -22245,6 +22263,7 @@ module Crystal::HIR
       max_iterations = 20
       budget = ENV["CRYSTAL_V2_MISSING_BUDGET"]?.try(&.to_i?) || 0
       iteration = 0
+      STDERR.puts "[MISSING_LOWER] start" if ENV["DEBUG_MISSING_LOWER"]?
 
       while iteration < max_iterations
         missing = [] of String
@@ -22253,6 +22272,23 @@ module Crystal::HIR
             block.instructions.each do |inst|
               next unless inst.is_a?(Call)
               name = inst.method_name
+              if parts = parse_method_name(name)
+                owner = parts.owner
+                method = parts.method
+                if owner && method && union_type_name?(owner)
+                  union_name = normalize_union_type_name(owner)
+                  arg_types = inst.args.map { TypeRef::VOID }
+                  has_block_call = !!inst.block
+                  if ENV["DEBUG_UNION_REWRITE"]?
+                    STDERR.puts "[UNION_REWRITE] call=#{name} union=#{union_name} method=#{method} args=#{arg_types.size}"
+                  end
+                  if resolved = resolve_union_method_call(union_name, method, arg_types, has_block_call)
+                    STDERR.puts "[UNION_REWRITE] resolved=#{resolved}" if ENV["DEBUG_UNION_REWRITE"]?
+                    inst.method_name = resolved
+                    name = resolved
+                  end
+                end
+              end
               next if name.empty?
               next if @module.has_function?(name)
               if function_state(name).completed?
@@ -32734,8 +32770,7 @@ module Crystal::HIR
                              recv_type = ctx.type_of(receiver_id)
                              type_name = get_type_name_from_ref(recv_type)
                              if !type_name.empty? && type_name != "Unknown" && type_name != "Void"
-                               type_name = type_name.gsub(" | ", "_$OR$_") if type_name.includes?(" | ")
-                               "#{type_name}##{method_name}"
+                              "#{type_name}##{method_name}"
                              else
                                method_name
                              end
@@ -39416,13 +39451,11 @@ module Crystal::HIR
       if entry = lookup_function_def_for_call(base_method_name, args.size, false, arg_types)
         actual_name = entry[0]
       end
-      if actual_name.includes?(" | ")
-        if type_desc = @module.get_type_descriptor(receiver_type)
-          if type_desc.kind == TypeKind::Union
-            union_name = normalize_union_type_name(type_desc.name)
-            if resolved = resolve_union_method_call(union_name, member_name, arg_types, false)
-              actual_name = resolved
-            end
+      if type_desc = @module.get_type_descriptor(receiver_type)
+        if type_desc.kind == TypeKind::Union
+          union_name = normalize_union_type_name(type_desc.name)
+          if resolved = resolve_union_method_call(union_name, member_name, arg_types, false)
+            actual_name = resolved
           end
         end
       end
@@ -40210,19 +40243,6 @@ module Crystal::HIR
                     else
                       mangled_name
                     end
-      if actual_name.includes?(" | ") && receiver_type != TypeRef::VOID
-        if type_desc = @module.get_type_descriptor(receiver_type)
-          if type_desc.kind == TypeKind::Union
-            union_name = normalize_union_type_name(type_desc.name)
-            has_block_call = !block_expr.nil?
-            if resolved = resolve_union_method_call(union_name, member_name, arg_types, has_block_call)
-              actual_name = resolved
-              mangled_name = mangle_function_name(actual_name, arg_types, has_block_call)
-            end
-          end
-        end
-      end
-
       return_type = get_function_return_type(actual_name)
       if member_name == "new" && class_name_str == "Range" && arg_types.size >= 2
         begin_name = get_type_name_from_ref(arg_types[0])

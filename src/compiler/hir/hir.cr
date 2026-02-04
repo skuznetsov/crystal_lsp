@@ -527,7 +527,7 @@ module Crystal::HIR
   # Method/function call
   class Call < Value
     getter receiver : ValueId?
-    getter method_name : String
+    property method_name : String
     getter args : Array(ValueId)
     getter block : BlockId?
     getter virtual : Bool
