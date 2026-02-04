@@ -35176,6 +35176,17 @@ module Crystal::HIR
       end
 
       overload_keys = function_def_overloads(func_name)
+      if overload_keys.empty?
+        # Fall back to base name if call included a mangled suffix.
+        base = strip_type_suffix(func_name)
+        overload_keys = function_def_overloads(base) if base != func_name
+      end
+      if overload_keys.empty?
+        stripped = strip_generic_receiver_from_method_name(func_name)
+        if stripped != func_name
+          overload_keys = function_def_overloads(stripped)
+        end
+      end
       if overload_keys.empty? && (func_name.includes?("#") || func_name.includes?("."))
         parts = parse_method_name_uncached(func_name)
         if parts.separator && parts.method
@@ -35186,17 +35197,6 @@ module Crystal::HIR
               overload_keys = candidates
             end
           end
-        end
-      end
-      if overload_keys.empty?
-        # Fall back to base name if call included a mangled suffix.
-        base = strip_type_suffix(func_name)
-        overload_keys = function_def_overloads(base) if base != func_name
-      end
-      if overload_keys.empty?
-        stripped = strip_generic_receiver_from_method_name(func_name)
-        if stripped != func_name
-          overload_keys = function_def_overloads(stripped)
         end
       end
       prefer_non_named = false
