@@ -2470,15 +2470,35 @@ module Crystal::HIR
       old_arena = @arena
       @arena = macro_arena
       begin
-        body = @arena[macro_def.body]
-        if body.is_a?(CrystalV2::Compiler::Frontend::MacroLiteralNode)
-          if raw_text = macro_literal_raw_text(body)
-            return raw_text.includes?("class") || raw_text.includes?("struct") ||
-                   raw_text.includes?("module") || raw_text.includes?("enum")
-          end
-        end
+        return macro_expr_maybe_defines_type?(macro_def.body)
       ensure
         @arena = old_arena
+      end
+      false
+    end
+
+    private def macro_text_defines_type?(text : String) : Bool
+      text.includes?("class") || text.includes?("struct") ||
+        text.includes?("module") || text.includes?("enum")
+    end
+
+    private def macro_expr_maybe_defines_type?(expr_id : ExprId) : Bool
+      return false if expr_id.invalid?
+      node = @arena[expr_id]
+      case node
+      when CrystalV2::Compiler::Frontend::MacroLiteralNode
+        if raw_text = macro_literal_raw_text(node)
+          return macro_text_defines_type?(raw_text)
+        end
+      when CrystalV2::Compiler::Frontend::MacroIfNode
+        return true if macro_expr_maybe_defines_type?(node.then_body)
+        if else_body = node.else_body
+          return true if macro_expr_maybe_defines_type?(else_body)
+        end
+      when CrystalV2::Compiler::Frontend::MacroForNode
+        return true if macro_expr_maybe_defines_type?(node.body)
+      when CrystalV2::Compiler::Frontend::MacroExpressionNode
+        return true if macro_expr_maybe_defines_type?(node.expression)
       end
       false
     end
