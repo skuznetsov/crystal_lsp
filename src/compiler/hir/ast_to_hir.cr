@@ -9243,106 +9243,112 @@ module Crystal::HIR
 
     # Register a class method from a DefNode inside a module
     private def register_module_method_from_def(member : CrystalV2::Compiler::Frontend::DefNode, module_name : String)
-      method_name = String.new(member.name)
-      if ENV["DEBUG_DRAGONBOX_REGISTER"]? && module_name.includes?("Dragonbox")
-        recv_name = member.receiver ? String.new(member.receiver.not_nil!) : "(none)"
-        STDERR.puts "[DRAGONBOX_MACRO_DEF] owner=#{module_name} method=#{method_name} receiver=#{recv_name}"
-      end
-      is_class_method = if recv = member.receiver
-                          String.new(recv) == "self"
-                        else
-                          @module_extend_self.includes?(module_name)
-                        end
-      unless is_class_method
-        register_type_method_from_def(member, module_name)
-        return
-      end
-      base_name = "#{module_name}.#{method_name}"
-      return_type = if rt = member.return_type
-                      rt_name = String.new(rt)
-                      inferred = module_like_type_name?(rt_name) ? infer_concrete_return_type_from_body(member) : nil
-                      inferred || type_ref_for_name(rt_name)
-                    elsif method_name.ends_with?("?")
-                      TypeRef::BOOL
-                    else
-                      infer_concrete_return_type_from_body(member) || TypeRef::VOID
-                    end
-      param_types = [] of TypeRef
-      has_block = false
-      if params = member.params
-        params.each do |param|
-          next if named_only_separator?(param)
-          if param.is_block
-            has_block = true
-            next
-          end
-          param_type = if ta = param.type_annotation
-                         type_ref_for_name(String.new(ta))
-                       elsif param.is_double_splat
-                         type_ref_for_name("NamedTuple")
-                       else
-                         TypeRef::VOID
-                       end
-          param_types << param_type
+      old_class = @current_class
+      @current_class = module_name
+      begin
+        method_name = String.new(member.name)
+        if ENV["DEBUG_DRAGONBOX_REGISTER"]? && module_name.includes?("Dragonbox")
+          recv_name = member.receiver ? String.new(member.receiver.not_nil!) : "(none)"
+          STDERR.puts "[DRAGONBOX_MACRO_DEF] owner=#{module_name} method=#{method_name} receiver=#{recv_name}"
         end
-      end
-      contains_yield = false
-      if !has_block
-        contains_yield = def_contains_yield?(member, @arena)
-        has_block = contains_yield
-      end
-      if ENV["DEBUG_TRACE_REGISTER"]? && module_name == "Crystal" && method_name == "trace"
-        params_str = (member.params || [] of CrystalV2::Compiler::Frontend::Parameter).map do |param|
-          name = param.name ? String.new(param.name.not_nil!) : "(nil)"
-          "#{name}:block=#{param.is_block ? 1 : 0},splat=#{param.is_splat ? 1 : 0},dsplat=#{param.is_double_splat ? 1 : 0}"
-        end.join(",")
-        STDERR.puts "[TRACE_REGISTER] module=#{module_name} name=#{method_name} has_block=#{has_block ? 1 : 0} yield=#{contains_yield ? 1 : 0} params=[#{params_str}]"
-      end
-      full_name = function_full_name_for_def(base_name, param_types, member.params, has_block)
-      # Prefer class-defined methods over included module methods when the base name
-      # is already occupied by an untyped overload. This prevents module defs from
-      # shadowing the class's own implementation (e.g., Tuple#hash).
-      if full_name.starts_with?("#{base_name}$arity") && @function_defs.has_key?(base_name)
-        full_name = base_name
-      end
-      if ENV.has_key?("DEBUG_MODULE_THREAD") && module_name.includes?("System::Thread")
-        STDERR.puts "[REG_MODULE_METHOD_MACRO] #{module_name}.#{method_name} -> #{full_name}"
-      end
-      if @function_defs.has_key?(full_name)
+        is_class_method = if recv = member.receiver
+                            String.new(recv) == "self"
+                          else
+                            @module_extend_self.includes?(module_name)
+                          end
+        unless is_class_method
+          register_type_method_from_def(member, module_name)
+          return
+        end
+        base_name = "#{module_name}.#{method_name}"
+        return_type = if rt = member.return_type
+                        rt_name = String.new(rt)
+                        inferred = module_like_type_name?(rt_name) ? infer_concrete_return_type_from_body(member) : nil
+                        inferred || type_ref_for_name(rt_name)
+                      elsif method_name.ends_with?("?")
+                        TypeRef::BOOL
+                      else
+                        infer_concrete_return_type_from_body(member) || TypeRef::VOID
+                      end
+        param_types = [] of TypeRef
+        has_block = false
+        if params = member.params
+          params.each do |param|
+            next if named_only_separator?(param)
+            if param.is_block
+              has_block = true
+              next
+            end
+            param_type = if ta = param.type_annotation
+                           type_ref_for_name(String.new(ta))
+                         elsif param.is_double_splat
+                           type_ref_for_name("NamedTuple")
+                         else
+                           TypeRef::VOID
+                         end
+            param_types << param_type
+          end
+        end
+        contains_yield = false
+        if !has_block
+          contains_yield = def_contains_yield?(member, @arena)
+          has_block = contains_yield
+        end
+        if ENV["DEBUG_TRACE_REGISTER"]? && module_name == "Crystal" && method_name == "trace"
+          params_str = (member.params || [] of CrystalV2::Compiler::Frontend::Parameter).map do |param|
+            name = param.name ? String.new(param.name.not_nil!) : "(nil)"
+            "#{name}:block=#{param.is_block ? 1 : 0},splat=#{param.is_splat ? 1 : 0},dsplat=#{param.is_double_splat ? 1 : 0}"
+          end.join(",")
+          STDERR.puts "[TRACE_REGISTER] module=#{module_name} name=#{method_name} has_block=#{has_block ? 1 : 0} yield=#{contains_yield ? 1 : 0} params=[#{params_str}]"
+        end
+        full_name = function_full_name_for_def(base_name, param_types, member.params, has_block)
+        # Prefer class-defined methods over included module methods when the base name
+        # is already occupied by an untyped overload. This prevents module defs from
+        # shadowing the class's own implementation (e.g., Tuple#hash).
+        if full_name.starts_with?("#{base_name}$arity") && @function_defs.has_key?(base_name)
+          full_name = base_name
+        end
+        if ENV.has_key?("DEBUG_MODULE_THREAD") && module_name.includes?("System::Thread")
+          STDERR.puts "[REG_MODULE_METHOD_MACRO] #{module_name}.#{method_name} -> #{full_name}"
+        end
+        if @function_defs.has_key?(full_name)
+          if def_contains_yield?(member, @arena)
+            @yield_functions.add(full_name)
+            debug_hook("yield.register", full_name)
+          end
+          if ENV.has_key?("DEBUG_DUP_FUNCTION")
+            STDERR.puts "[DEBUG_DUP_FUNCTION] Skipping duplicate module method: #{full_name}"
+          end
+          return
+        end
+        register_function_type(full_name, return_type)
+        @function_defs[full_name] = member
+        @function_def_arenas[full_name] = @arena
+        if ENV["DEBUG_ARENA_WRITE"]? && (module_name.includes?("Slice") || full_name.includes?("Slice")) && method_name == "hash"
+          arena_path = source_path_for(@arena) || "(unknown)"
+          STDERR.puts "[ARENA_WRITE_MOD_METHOD] full=#{full_name} base=#{base_name} module=#{module_name} arena=#{arena_path}:#{@arena.size}"
+        end
+        if should_register_base_name?(full_name, base_name, member, has_block)
+          @function_defs[base_name] = member
+          @function_def_arenas[base_name] = @arena
+        elsif !has_block
+          prefer_non_yield_base_name(base_name, member, @arena)
+          prefer_lower_arity_base_name(base_name, member, @arena)
+        end
+
+        # Track yield-functions for inline expansion
         if def_contains_yield?(member, @arena)
           @yield_functions.add(full_name)
           debug_hook("yield.register", full_name)
+          if !has_block && !@function_defs.has_key?(base_name)
+            @function_defs[base_name] = member
+            @function_def_arenas[base_name] = @arena
+          end
+          @function_defs[full_name] = member
+          @function_def_arenas[full_name] = @arena
         end
-        if ENV.has_key?("DEBUG_DUP_FUNCTION")
-          STDERR.puts "[DEBUG_DUP_FUNCTION] Skipping duplicate module method: #{full_name}"
-        end
-        return
-      end
-      register_function_type(full_name, return_type)
-      @function_defs[full_name] = member
-      @function_def_arenas[full_name] = @arena
-      if ENV["DEBUG_ARENA_WRITE"]? && (module_name.includes?("Slice") || full_name.includes?("Slice")) && method_name == "hash"
-        arena_path = source_path_for(@arena) || "(unknown)"
-        STDERR.puts "[ARENA_WRITE_MOD_METHOD] full=#{full_name} base=#{base_name} module=#{module_name} arena=#{arena_path}:#{@arena.size}"
-      end
-      if should_register_base_name?(full_name, base_name, member, has_block)
-        @function_defs[base_name] = member
-        @function_def_arenas[base_name] = @arena
-      elsif !has_block
-        prefer_non_yield_base_name(base_name, member, @arena)
-        prefer_lower_arity_base_name(base_name, member, @arena)
-      end
-
-      # Track yield-functions for inline expansion
-      if def_contains_yield?(member, @arena)
-        @yield_functions.add(full_name)
-        debug_hook("yield.register", full_name)
-        if !has_block && !@function_defs.has_key?(base_name)
-          @function_defs[base_name] = member
-          @function_def_arenas[base_name] = @arena
-        end
-        @function_defs[full_name] = member
-        @function_def_arenas[full_name] = @arena
+      ensure
+        @current_class = old_class
       end
     end
 
@@ -18331,6 +18337,11 @@ module Crystal::HIR
 
       if existing_type.nil?
         if def_node = lookup_function_def_for_return(name, base_name)
+          if def_node.return_type
+            if resolved = resolve_return_type_from_def(name, base_name, nil)
+              return resolved unless resolved == TypeRef::VOID || resolved == TypeRef::NIL
+            end
+          end
           owner_name = function_context_from_name(base_name)
           if inferred = infer_return_type_from_body_without_callsite(def_node, owner_name)
             if inferred != TypeRef::VOID && inferred != TypeRef::NIL
@@ -20640,6 +20651,11 @@ module Crystal::HIR
       return_type_name = String.new(return_type_slice)
       return nil if return_type_name.empty?
 
+      owner_override = method_owner(base_method_name)
+      if owner_override.empty?
+        owner_override = method_owner(mangled_method_name)
+      end
+
       if cached = @function_types[mangled_method_name]? || @function_types[base_method_name]?
         if cached != TypeRef::VOID &&
            return_type_name != "self" &&
@@ -20651,6 +20667,15 @@ module Crystal::HIR
            !return_type_name.ends_with?("?") &&
            !return_type_name.ends_with?("*") &&
            !(type_param_like?(return_type_name) && !@type_param_map.has_key?(return_type_name))
+          if !owner_override.empty? && !return_type_name.includes?("::")
+            old_class = @current_class
+            @current_class = owner_override
+            resolved = type_ref_for_name(return_type_name)
+            @current_class = old_class
+            if resolved != TypeRef::VOID && resolved != TypeRef::NIL && resolved != cached
+              return resolved
+            end
+          end
           return cached
         end
       end
@@ -20689,7 +20714,17 @@ module Crystal::HIR
       end
 
       if merged.empty?
-        resolved = type_ref_for_name(return_type_name)
+        resolved = if owner_override.empty?
+                     type_ref_for_name(return_type_name)
+                   else
+                     old_class = @current_class
+                     @current_class = owner_override
+                     begin
+                       type_ref_for_name(return_type_name)
+                     ensure
+                       @current_class = old_class
+                     end
+                   end
         if ENV["DEBUG_RETURN_DEF"]? && (mangled_method_name.includes?("PointerPairingHeap") || base_method_name.includes?("PointerPairingHeap"))
           STDERR.puts "[RETURN_DEF] name=#{mangled_method_name} base=#{base_method_name} rt=#{return_type_name} map=none resolved=#{get_type_name_from_ref(resolved)}"
         end
@@ -20697,7 +20732,17 @@ module Crystal::HIR
       end
 
       with_type_param_map(merged) do
-        resolved = type_ref_for_name(return_type_name)
+        resolved = if owner_override.empty?
+                     type_ref_for_name(return_type_name)
+                   else
+                     old_class = @current_class
+                     @current_class = owner_override
+                     begin
+                       type_ref_for_name(return_type_name)
+                     ensure
+                       @current_class = old_class
+                     end
+                   end
         if ENV["DEBUG_RETURN_DEF"]? && (mangled_method_name.includes?("PointerPairingHeap") || base_method_name.includes?("PointerPairingHeap"))
           params_str = merged.map { |k, v| "#{k}=#{v}" }.join(",")
           STDERR.puts "[RETURN_DEF] name=#{mangled_method_name} base=#{base_method_name} rt=#{return_type_name} map=#{params_str} resolved=#{get_type_name_from_ref(resolved)}"
@@ -33868,6 +33913,14 @@ module Crystal::HIR
         end
       end
 
+      # If no concrete signature was registered for the mangled name, prefer
+      # resolving the return type from the def in the owner's namespace.
+      if !@function_types.has_key?(mangled_method_name)
+        if inferred = resolve_return_type_from_def(mangled_method_name, base_method_name, receiver_id ? ctx.type_of(receiver_id) : nil)
+          return_type = inferred unless inferred == TypeRef::VOID || inferred == TypeRef::NIL
+        end
+      end
+
       # For Proc#call, extract return type from Proc type_params (last element is return type)
       if return_type == TypeRef::VOID && method_name == "call" && receiver_id
         recv_type = ctx.type_of(receiver_id)
@@ -35098,6 +35151,13 @@ module Crystal::HIR
       if resolved_return_type != TypeRef::VOID && resolved_return_type != TypeRef::NIL && resolved_return_type != return_type
         if !(unresolved_generic_return_type?(resolved_return_type) && !unresolved_generic_return_type?(return_type))
           return_type = resolved_return_type
+        end
+      end
+      # Prefer the actual lowered function return type when available.
+      if func = @module.function_by_name(mangled_method_name)
+        func_rt = func.return_type
+        if func_rt != TypeRef::VOID && func_rt != TypeRef::NIL && func_rt != return_type
+          return_type = func_rt
         end
       end
 
