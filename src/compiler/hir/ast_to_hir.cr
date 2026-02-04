@@ -7289,8 +7289,14 @@ module Crystal::HIR
                 next if owner.empty?
                 instance_method = "#{owner}##{member_name}"
                 if ret_type = @function_base_return_types[instance_method]?
-                  if unresolved_generic_return_type?(ret_type)
-                    def_base = strip_type_suffix(instance_method)
+                  def_base = strip_type_suffix(instance_method)
+                  needs_callsite = unresolved_generic_return_type?(ret_type)
+                  if !needs_callsite && ret_type == TypeRef::POINTER
+                    if map = function_type_param_map_for(instance_method, def_base)
+                      needs_callsite = !map.empty?
+                    end
+                  end
+                  if needs_callsite
                     def_node = @function_defs[instance_method]? || @function_defs[def_base]?
                     if def_node
                       inferred = infer_return_type_from_callsite(def_node, owner, expr_node.args, expr_node.named_args, self_type_name)
@@ -7304,9 +7310,15 @@ module Crystal::HIR
                   return ret_type if ret_type != TypeRef::VOID
                 end
                 if ret_type = @function_types[instance_method]?
-                  if unresolved_generic_return_type?(ret_type)
-                    def_name = instance_method
-                    def_base = strip_type_suffix(instance_method)
+                  def_name = instance_method
+                  def_base = strip_type_suffix(instance_method)
+                  needs_callsite = unresolved_generic_return_type?(ret_type)
+                  if !needs_callsite && ret_type == TypeRef::POINTER
+                    if map = function_type_param_map_for(def_name, def_base)
+                      needs_callsite = !map.empty?
+                    end
+                  end
+                  if needs_callsite
                     def_node = @function_defs[def_name]? || @function_defs[def_base]?
                     if def_node
                       inferred = infer_return_type_from_callsite(def_node, owner, expr_node.args, expr_node.named_args, self_type_name)
@@ -7340,8 +7352,14 @@ module Crystal::HIR
           if self_type_name
             base = resolve_method_with_inheritance(self_type_name, method_name) || "#{self_type_name}##{method_name}"
             if ret_type = @function_base_return_types[base]?
-              if unresolved_generic_return_type?(ret_type)
-                def_base = strip_type_suffix(base)
+              def_base = strip_type_suffix(base)
+              needs_callsite = unresolved_generic_return_type?(ret_type)
+              if !needs_callsite && ret_type == TypeRef::POINTER
+                if map = function_type_param_map_for(base, def_base)
+                  needs_callsite = !map.empty?
+                end
+              end
+              if needs_callsite
                 def_node = @function_defs[base]? || @function_defs[def_base]?
                 if def_node
                   inferred = infer_return_type_from_callsite(def_node, self_type_name, expr_node.args, expr_node.named_args, self_type_name)
@@ -7355,8 +7373,14 @@ module Crystal::HIR
               return ret_type if ret_type != TypeRef::VOID
             end
             if ret_type = @function_types[base]?
-              if unresolved_generic_return_type?(ret_type)
-                def_base = strip_type_suffix(base)
+              def_base = strip_type_suffix(base)
+              needs_callsite = unresolved_generic_return_type?(ret_type)
+              if !needs_callsite && ret_type == TypeRef::POINTER
+                if map = function_type_param_map_for(base, def_base)
+                  needs_callsite = !map.empty?
+                end
+              end
+              if needs_callsite
                 def_node = @function_defs[base]? || @function_defs[def_base]?
                 if def_node
                   inferred = infer_return_type_from_callsite(def_node, self_type_name, expr_node.args, expr_node.named_args, self_type_name)
