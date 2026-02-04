@@ -9339,6 +9339,9 @@ module Crystal::HIR
       old_class = @current_class
       @current_class = module_name
       begin
+        if ENV["DEBUG_WUINT128"]? && module_name.includes?("Dragonbox::WUInt")
+          STDERR.puts "[DEBUG_WUINT128] register_module_method_from_def module=#{module_name} current=#{@current_class || "(nil)"}"
+        end
         method_name = String.new(member.name)
         if ENV["DEBUG_DRAGONBOX_REGISTER"]? && module_name.includes?("Dragonbox")
           recv_name = member.receiver ? String.new(member.receiver.not_nil!) : "(none)"
@@ -9359,7 +9362,7 @@ module Crystal::HIR
         has_block = false
         with_namespace_override(module_name) do
           return_type = if rt = member.return_type
-                          rt_name = String.new(rt)
+                          rt_name = qualify_unqualified_type_in_namespace(String.new(rt), module_name)
                           inferred = module_like_type_name?(rt_name) ? infer_concrete_return_type_from_body(member) : nil
                           inferred || type_ref_for_name(rt_name)
                         elsif method_name.ends_with?("?")
@@ -9375,7 +9378,7 @@ module Crystal::HIR
                 next
               end
               param_type = if ta = param.type_annotation
-                             type_ref_for_name(String.new(ta))
+                             type_ref_for_name(qualify_unqualified_type_in_namespace(String.new(ta), module_name))
                            elsif param.is_double_splat
                              type_ref_for_name("NamedTuple")
                            else
@@ -10634,9 +10637,11 @@ module Crystal::HIR
             return_type = nil.as(TypeRef?)
             param_types = [] of TypeRef
             has_block = false
+            old_class = @current_class
+            @current_class = full_name
             with_namespace_override(full_name) do
               return_type = if rt = member.return_type
-                              rt_name = String.new(rt)
+                              rt_name = qualify_unqualified_type_in_namespace(String.new(rt), full_name)
                               inferred = module_like_type_name?(rt_name) ? infer_concrete_return_type_from_body(member) : nil
                               inferred || type_ref_for_name(rt_name)
                             elsif method_name.ends_with?("?")
@@ -10652,7 +10657,7 @@ module Crystal::HIR
                     next
                   end
                   param_type = if ta = param.type_annotation
-                                 type_ref_for_name(String.new(ta))
+                                 type_ref_for_name(qualify_unqualified_type_in_namespace(String.new(ta), full_name))
                                elsif param.is_double_splat
                                  type_ref_for_name("NamedTuple")
                                else
@@ -10662,6 +10667,7 @@ module Crystal::HIR
                 end
               end
             end
+            @current_class = old_class
             return_type ||= TypeRef::VOID
             if ENV["DEBUG_WUINT128"]? && full_name.includes?("Dragonbox::WUInt")
               ret_name = get_type_name_from_ref(return_type)
@@ -19213,6 +19219,23 @@ module Crystal::HIR
         end
       end
       false
+    end
+
+    private def qualify_unqualified_type_in_namespace(name : String, namespace : String) : String
+      name = name.strip
+      return name if name.empty?
+      return name if name.includes?("::")
+      candidate = "#{namespace}::#{name}"
+      if ENV["DEBUG_WUINT128"]? && name == "UInt128" && namespace.includes?("Dragonbox::WUInt")
+        exists = type_name_exists?(candidate) ||
+          @class_info.has_key?(candidate) ||
+          @generic_templates.has_key?(candidate)
+        STDERR.puts "[DEBUG_WUINT128] qualify name=#{name} namespace=#{namespace} candidate=#{candidate} exists=#{exists ? 1 : 0}"
+      end
+      return candidate if type_name_exists?(candidate) ||
+        @class_info.has_key?(candidate) ||
+        @generic_templates.has_key?(candidate)
+      name
     end
 
     private def resolve_nested_builtin_shadow(name : String) : String?
@@ -42825,17 +42848,8 @@ module Crystal::HIR
           lookup_name = resolve_type_name_in_context(lookup_name) unless absolute_name
           cache_key_name = absolute_name ? "::#{lookup_name}" : lookup_name
           cache_key = type_cache_key(cache_key_name)
-          if @current_class && BUILTIN_TYPE_NAMES.includes?(lookup_name)
-            nested_name = "#{@current_class}::#{lookup_name}"
-            unless @class_info.has_key?(nested_name) || @generic_templates.has_key?(nested_name)
-              if cached = @type_cache[cache_key]?
-                return cached
-              end
-            end
-          else
-            if cached = @type_cache[cache_key]?
-              return cached
-            end
+          if cached = @type_cache[cache_key]?
+            return cached unless nested_shadowed_type_name?(lookup_name)
           end
         end
       end
@@ -42911,19 +42925,14 @@ module Crystal::HIR
           end
         end
         # Before returning builtin type, check if there's a nested type
-        # that shadows this name in the current context (e.g., WUInt::UInt128
-        # should resolve to the record, not the global primitive UInt128).
-        if current = @current_class
-          nested_name = "#{current}::#{lookup_name}"
-          if @class_info.has_key?(nested_name)
-            if ENV["DEBUG_WUINT128"]? && lookup_name == "UInt128"
-              STDERR.puts "[DEBUG_WUINT128] Found nested shadow: #{nested_name}, returning nested type directly"
-            end
-            # Invalidate stale cache and return the nested type
-            invalidate_resolved_type_name_cache_for(lookup_name)
-            # Recursively call with the fully qualified name
-            return type_ref_for_name(nested_name)
+        # that shadows this name in the current context or namespace override
+        # (e.g., WUInt::UInt128 should resolve to the record, not global UInt128).
+        if shadow = resolve_nested_builtin_shadow(lookup_name)
+          if ENV["DEBUG_WUINT128"]? && lookup_name == "UInt128"
+            STDERR.puts "[DEBUG_WUINT128] Found nested shadow: #{shadow}, returning nested type directly"
           end
+          invalidate_resolved_type_name_cache_for(lookup_name)
+          return type_ref_for_name(shadow)
         end
         # No nested shadow found, return builtin type
         if builtin_ref = builtin_type_ref_for(lookup_name)
