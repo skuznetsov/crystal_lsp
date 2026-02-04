@@ -18869,13 +18869,20 @@ module Crystal::HIR
                          namespace
                        end
       nested = @nested_type_names[namespace_base]? || @nested_type_names[namespace]?
-      return nil unless nested && nested.includes?(name)
 
       candidate = "#{namespace}::#{name}"
-      return candidate if type_name_exists?(candidate)
-      if namespace_base != namespace
-        base_candidate = "#{namespace_base}::#{name}"
-        return base_candidate if type_name_exists?(base_candidate)
+      if nested && nested.includes?(name)
+        return candidate if type_name_exists?(candidate)
+        if namespace_base != namespace
+          base_candidate = "#{namespace_base}::#{name}"
+          return base_candidate if type_name_exists?(base_candidate)
+        end
+      else
+        return candidate if type_name_exists?(candidate)
+        if namespace_base != namespace
+          base_candidate = "#{namespace_base}::#{name}"
+          return base_candidate if type_name_exists?(base_candidate)
+        end
       end
       nil
     end
