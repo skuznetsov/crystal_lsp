@@ -465,6 +465,60 @@ module Crystal::HIR
       parts
     end
 
+    # Parse method name without touching caches (avoid Hash churn in hot paths).
+    @[AlwaysInline]
+    private def parse_method_name_uncached(name : String) : MethodNameParts
+      sep_idx : Int32? = nil
+      sep_char : Char? = nil
+      dollar_idx : Int32? = nil
+
+      i = 0
+      while i < name.bytesize
+        byte = name.to_unsafe[i]
+        case byte
+        when '#'.ord
+          sep_idx = i
+          sep_char = '#'
+        when '.'.ord
+          if sep_idx.nil?
+            sep_idx = i
+            sep_char = '.'
+          end
+        when '$'.ord
+          dollar_idx = i
+          break
+        end
+        i += 1
+      end
+
+      if sep_idx
+        owner = name.byte_slice(0, sep_idx)
+        if dollar_idx
+          method = name.byte_slice(sep_idx + 1, dollar_idx - sep_idx - 1)
+          suffix = name.byte_slice(dollar_idx + 1, name.bytesize - dollar_idx - 1)
+          base = name.byte_slice(0, dollar_idx)
+        else
+          method = name.byte_slice(sep_idx + 1, name.bytesize - sep_idx - 1)
+          suffix = nil
+          base = name
+        end
+      else
+        owner = name
+        method = nil
+        if dollar_idx
+          suffix = name.byte_slice(dollar_idx + 1, name.bytesize - dollar_idx - 1)
+          base = name.byte_slice(0, dollar_idx)
+        else
+          suffix = nil
+          base = name
+        end
+      end
+
+      is_instance = sep_char == '#'
+      is_class = sep_char == '.'
+      MethodNameParts.new(owner, method, suffix, sep_char, base, is_instance, is_class)
+    end
+
     # Quick check helpers that don't allocate
     @[AlwaysInline]
     private def has_method_separator?(name : String) : Bool
@@ -35123,7 +35177,7 @@ module Crystal::HIR
 
       overload_keys = function_def_overloads(func_name)
       if overload_keys.empty? && (func_name.includes?("#") || func_name.includes?("."))
-        parts = parse_method_name(func_name)
+        parts = parse_method_name_uncached(func_name)
         if parts.separator && parts.method
           ensure_method_index_built
           base_owner = strip_generic_args(parts.owner)
