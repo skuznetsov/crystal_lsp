@@ -10666,6 +10666,7 @@ module Crystal::HIR
         end
       end
     end
+    end
 
     # Register aliases inside a class (for nested alias-first processing)
     private def register_class_aliases(node : CrystalV2::Compiler::Frontend::ClassNode, class_name : String)
