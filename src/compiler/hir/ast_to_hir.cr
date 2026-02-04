@@ -42401,6 +42401,12 @@ module Crystal::HIR
       end
 
       if BUILTIN_TYPE_NAMES.includes?(lookup_name)
+        if !lookup_name.includes?("::")
+          resolved = resolve_class_name_in_context(lookup_name)
+          if resolved != lookup_name
+            return type_ref_for_name(resolved)
+          end
+        end
         # Before returning builtin type, check if there's a nested type
         # that shadows this name in the current context (e.g., WUInt::UInt128
         # should resolve to the record, not the global primitive UInt128).
