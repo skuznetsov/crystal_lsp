@@ -1032,6 +1032,17 @@ module Crystal::MIR
     end
 
     @[AlwaysInline]
+    private def pointer_constructor_name?(name : String) : Bool
+      if parts = extract_receiver_and_method(name)
+        receiver, method = parts
+        return false unless receiver
+        return false unless receiver.starts_with?("Pointer")
+        return method == "new" || method == "new!"
+      end
+      false
+    end
+
+    @[AlwaysInline]
     private def operator_method?(name : String) : Bool
       case name
       when "+", "-", "*", "/", "%", "**", "<<", ">>", "&", "|", "^", "<", ">", "<=", ">=", "==", "!="
@@ -5278,7 +5289,8 @@ module Crystal::MIR
                       undefined_name
                     end
 
-      if callee_name.starts_with?("Pointer_") && callee_name.ends_with?("__new") && inst.args.size == 1
+      raw_callee_name = callee_func.try(&.name)
+      if raw_callee_name && pointer_constructor_name?(raw_callee_name) && inst.args.size == 1
         arg_id = inst.args[0]
         arg = value_ref(arg_id)
         arg_type = lookup_value_llvm_type(arg_id)
@@ -5335,7 +5347,7 @@ module Crystal::MIR
         else
           # Minimal fallback: constructors and common conversion methods.
           # Use the method core (no receiver/typed suffix) to avoid mangling assumptions.
-          method_core = method_core_from_name(callee_name)
+          method_core = method_core_from_name(raw_callee_name || callee_name)
           ptr_returning_methods = ["new", "allocate", "clone", "dup", "tap"]
           i64_returning_methods = ["to_i64", "to_u64"]
           i32_returning_methods = ["size", "length", "count", "hash", "to_i32", "to_i", "ord", "chr"]
@@ -5926,7 +5938,7 @@ module Crystal::MIR
       end
 
       # Handle Pointer.new / Pointer.new! - convert integer to pointer
-      if mangled_extern_name.starts_with?("Pointer_") && (mangled_extern_name.includes?("__new") || mangled_extern_name.includes?("_new_")) && inst.args.size == 1
+      if pointer_constructor_name?(inst.extern_name) && inst.args.size == 1
         arg_id = inst.args[0]
         arg = value_ref(arg_id)
         arg_type = lookup_value_llvm_type(arg_id)
