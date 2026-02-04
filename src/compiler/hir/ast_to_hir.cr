@@ -2673,6 +2673,37 @@ module Crystal::HIR
             end
           end
         end
+      when CrystalV2::Compiler::Frontend::CallNode
+        callee = @arena[member.callee]
+        if callee.is_a?(CrystalV2::Compiler::Frontend::IdentifierNode)
+          method_name = String.new(callee.name)
+          macro_lookup = lookup_macro_entry_with_inheritance(method_name, class_name)
+          if macro_lookup.nil? && class_name != "Object"
+            macro_lookup = lookup_macro_entry(method_name, "Object")
+          end
+          if macro_lookup
+            macro_entry, macro_key = macro_lookup
+            macro_def, macro_arena = macro_entry
+            macro_args, macro_block = extract_macro_block_from_args(member.args, member.block)
+            expanded_id = expand_macro_expr(macro_def, macro_arena, macro_args, member.named_args, macro_block, macro_key)
+            unless expanded_id.invalid?
+              old_arena = @arena
+              @arena = macro_arena
+              begin
+                register_class_members_from_expansion(
+                  class_name,
+                  expanded_id,
+                  defined_class_method_full_names,
+                  visited_extends,
+                  ivars,
+                  offset_ref
+                )
+              ensure
+                @arena = old_arena
+              end
+            end
+          end
+        end
       end
     end
 
@@ -8482,6 +8513,13 @@ module Crystal::HIR
                                else
                                  TypeRef::VOID
                                end
+                  if ENV["DEBUG_WUINT128"]? && module_name.includes?("Dragonbox::WUInt")
+                    if ta = param.type_annotation
+                      ta_name = String.new(ta)
+                      resolved_name = get_type_name_from_ref(param_type)
+                      STDERR.puts "[DEBUG_WUINT128] module=#{module_name} param=#{ta_name} resolved=#{resolved_name}"
+                    end
+                  end
                   param_types << param_type
                 end
               end
@@ -11780,28 +11818,36 @@ module Crystal::HIR
               if ENV["DEBUG_CLASS_BODY_CALLS"]? && class_name.includes?("LineNumbers")
                 STDERR.puts "[DEBUG_CLASS_BODY_CALLS] #{class_name} call=#{method_name}"
               end
-              if macro_lookup = lookup_macro_entry(method_name, class_name)
+              macro_lookup = lookup_macro_entry_with_inheritance(method_name, class_name)
+              if macro_lookup.nil? && class_name != "Object"
+                macro_lookup = lookup_macro_entry(method_name, "Object")
+              end
+              if macro_lookup
                 macro_entry, macro_key = macro_lookup
                 macro_def, macro_arena = macro_entry
-                if macro_def_maybe_defines_type?(macro_def, macro_arena)
-                  if ENV["DEBUG_MACRO_TYPE_REG"]?
-                    STDERR.puts "[DEBUG_MACRO_TYPE_REG] expand name=#{method_name} in #{class_name}"
-                  end
-                  macro_args, macro_block = extract_macro_block_from_args(member.args, member.block)
-                  expanded_id = expand_macro_expr(macro_def, macro_arena, macro_args, member.named_args, macro_block, macro_key)
-                  unless expanded_id.invalid?
-                    old_arena = @arena
-                    @arena = macro_arena
-                    begin
-                      register_nested_types_from_macro_expansion(class_name, expanded_id)
-                    ensure
-                      @arena = old_arena
-                    end
+                if ENV["DEBUG_MACRO_TYPE_REG"]? && macro_def_maybe_defines_type?(macro_def, macro_arena)
+                  STDERR.puts "[DEBUG_MACRO_TYPE_REG] expand name=#{method_name} in #{class_name}"
+                end
+                macro_args, macro_block = extract_macro_block_from_args(member.args, member.block)
+                expanded_id = expand_macro_expr(macro_def, macro_arena, macro_args, member.named_args, macro_block, macro_key)
+                unless expanded_id.invalid?
+                  old_arena = @arena
+                  @arena = macro_arena
+                  begin
+                    register_class_members_from_expansion(
+                      class_name,
+                      expanded_id,
+                      defined_class_method_full_names,
+                      Set(String).new,
+                      ivars,
+                      pointerof(offset)
+                    )
+                  ensure
+                    @arena = old_arena
                   end
                 end
               end
             end
-
           when CrystalV2::Compiler::Frontend::GetterNode
             # Getter declarations: getter name : Type
             # Creates @name ivar and def name; @name; end method
@@ -18872,17 +18918,13 @@ module Crystal::HIR
 
       candidate = "#{namespace}::#{name}"
       if nested && nested.includes?(name)
-        return candidate if type_name_exists?(candidate)
-        if namespace_base != namespace
-          base_candidate = "#{namespace_base}::#{name}"
-          return base_candidate if type_name_exists?(base_candidate)
-        end
-      else
-        return candidate if type_name_exists?(candidate)
-        if namespace_base != namespace
-          base_candidate = "#{namespace_base}::#{name}"
-          return base_candidate if type_name_exists?(base_candidate)
-        end
+        return candidate if namespace_base == namespace
+        return "#{namespace_base}::#{name}"
+      end
+      return candidate if type_name_exists?(candidate)
+      if namespace_base != namespace
+        base_candidate = "#{namespace_base}::#{name}"
+        return base_candidate if type_name_exists?(base_candidate)
       end
       nil
     end
@@ -42383,6 +42425,7 @@ module Crystal::HIR
       return TypeRef::VOID if normalized_name == "_"
 
       lookup_name = normalized_name
+      resolved_in_context = false
       if lookup_name == "Bytes"
         lookup_name = "Slice(UInt8)"
       end
@@ -42397,6 +42440,16 @@ module Crystal::HIR
           result = type_ref_for_name(base_name)
           store_type_cache(cache_key, result)
           return result
+        end
+      end
+
+      absolute_name = lookup_name.starts_with?("::")
+      if !absolute_name && !lookup_name.includes?("|")
+        old_lookup = lookup_name
+        lookup_name = resolve_type_name_in_context(lookup_name)
+        resolved_in_context = true
+        if ENV["DEBUG_WUINT128"]? && old_lookup == "UInt128"
+          STDERR.puts "[DEBUG_WUINT128] type_ref_for_name: UInt128 resolved to #{lookup_name}, current=#{@current_class || "(nil)"}"
         end
       end
 
@@ -42454,16 +42507,6 @@ module Crystal::HIR
       orig_name = lookup_name
       absolute_name = lookup_name.starts_with?("::")
       lookup_name = lookup_name[2..] if absolute_name
-
-      # Resolve type names in the current namespace before cache lookup.
-      # This avoids poisoning the cache with names that resolve differently per scope.
-      if !absolute_name && !lookup_name.includes?("|")
-        old_lookup = lookup_name
-        lookup_name = resolve_type_name_in_context(lookup_name)
-        if ENV["DEBUG_WUINT128"]? && old_lookup == "UInt128"
-          STDERR.puts "[DEBUG_WUINT128] type_ref_for_name: UInt128 resolved to #{lookup_name}, current=#{@current_class || "(nil)"}"
-        end
-      end
       if type_param_like?(lookup_name)
         mapped = @type_param_map[lookup_name]?
         if mapped.nil? || mapped == lookup_name
