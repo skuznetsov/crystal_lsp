@@ -1403,6 +1403,7 @@ module Crystal::HIR
     @type_cache : Hash(String, TypeRef)
     @type_cache_keys_by_component : Hash(String, Set(String))
     @type_cache_keys_by_generic_prefix : Hash(String, Set(String))
+    @type_name_normalize_cache : Hash(String, String)
     # Guard against recursive union construction (A | B where A aliases back to union).
     @union_in_progress : Set(String)
     private struct ResolvedTypeNameCacheEntry
@@ -1652,6 +1653,7 @@ module Crystal::HIR
       @type_cache = {} of String => TypeRef
       @type_cache_keys_by_component = {} of String => Set(String)
       @type_cache_keys_by_generic_prefix = {} of String => Set(String)
+      @type_name_normalize_cache = {} of String => String
       @union_in_progress = Set(String).new
       @resolved_type_name_cache_global = {} of String => ResolvedTypeNameCacheEntry
       @resolved_type_name_cache_by_ctx = {} of TypeNameContextKey => Hash(String, ResolvedTypeNameCacheEntry)
@@ -42012,6 +42014,7 @@ module Crystal::HIR
         @resolved_type_name_invalidations.clear
         @resolved_type_name_cache_epoch = 0
         @type_literal_class_cache.clear
+        @type_name_normalize_cache.clear
       end
     end
 
@@ -42157,6 +42160,7 @@ module Crystal::HIR
     end
 
     private def type_ref_for_name(name : String) : TypeRef
+      raw_name = name
       has_union = false
       has_comma = false
       has_paren = false
@@ -42203,28 +42207,31 @@ module Crystal::HIR
       end
       # Sanitize malformed type names (extra parens etc)
       if has_union || has_comma || has_paren || has_brace
-        name = sanitize_type_name(name)
+        if cached = @type_name_normalize_cache[raw_name]?
+          name = cached
+        else
+          name = sanitize_type_name(name)
+          # Normalize union type names: "Int32|Nil" -> "Int32 | Nil"
+          # This ensures consistent caching regardless of spacing and avoids splitting
+          # nested unions inside generics.
+          if has_union && name.includes?("|")
+            name = split_union_type_name(name).map(&.strip).join(" | ")
+          end
+          # Normalize generic spacing to avoid cache misses like "Hash(String,Int32)" vs "Hash(String, Int32)"
+          if (has_paren || has_comma) && (info = split_generic_base_and_args(name))
+            arg_names = split_generic_type_args(info[:args]).map do |arg|
+              normalize_tuple_literal_type_name(arg.strip)
+            end
+            name = "#{info[:base]}(#{arg_names.join(", ")})"
+          end
+          @type_name_normalize_cache[raw_name] = name
+        end
       end
       if ENV["DEBUG_TUPLE_PAREN"]? && has_comma && name.includes?("Tuple") && !name.includes?("(")
         STDERR.puts "[DEBUG_TUPLE_PAREN_SANITIZED] name=#{name}"
       end
 
-      # Normalize union type names: "Int32|Nil" -> "Int32 | Nil"
-      # This ensures consistent caching regardless of spacing and avoids splitting
-      # nested unions inside generics.
-      normalized_name = if has_union && name.includes?("|")
-        split_union_type_name(name).map(&.strip).join(" | ")
-      else
-        name
-      end
-
-      # Normalize generic spacing to avoid cache misses like "Hash(String,Int32)" vs "Hash(String, Int32)"
-      if (has_paren || has_comma) && (info = split_generic_base_and_args(normalized_name))
-        arg_names = split_generic_type_args(info[:args]).map do |arg|
-          normalize_tuple_literal_type_name(arg.strip)
-        end
-        normalized_name = "#{info[:base]}(#{arg_names.join(", ")})"
-      end
+      normalized_name = name
 
       # "_" is a wildcard type in Crystal (untyped parameter).
       # Treat it as VOID to allow callsite-driven specialization.
