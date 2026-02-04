@@ -42161,6 +42161,7 @@ module Crystal::HIR
       has_comma = false
       has_paren = false
       has_brace = false
+      simple_name = true
       i = 0
       while i < name.bytesize
         byte = name.to_unsafe[i]
@@ -42173,8 +42174,29 @@ module Crystal::HIR
           has_paren = true
         when '{'.ord, '}'.ord
           has_brace = true
+        when ':'.ord, '_'.ord
+          # allowed in simple names
+        else
+          simple_name = false unless (byte >= 'A'.ord && byte <= 'Z'.ord) ||
+                                   (byte >= 'a'.ord && byte <= 'z'.ord) ||
+                                   (byte >= '0'.ord && byte <= '9'.ord)
         end
         i += 1
+      end
+      if simple_name && !has_union && !has_comma && !has_paren && !has_brace
+        if @type_param_map.empty? && (@current_typeof_local_names.nil? || @current_typeof_local_names.not_nil!.empty?) &&
+           !name.includes?("self") && !name.includes?("typeof(")
+          return TypeRef::VOID if name == "_"
+          lookup_name = name
+          absolute_name = lookup_name.starts_with?("::")
+          lookup_name = lookup_name[2..] if absolute_name
+          lookup_name = resolve_type_name_in_context(lookup_name) unless absolute_name
+          cache_key_name = absolute_name ? "::#{lookup_name}" : lookup_name
+          cache_key = type_cache_key(cache_key_name)
+          if cached = @type_cache[cache_key]?
+            return cached
+          end
+        end
       end
       if ENV["DEBUG_TUPLE_PAREN"]? && has_comma && name.includes?("Tuple") && !has_paren
         STDERR.puts "[DEBUG_TUPLE_PAREN_INPUT] name=#{name}"
