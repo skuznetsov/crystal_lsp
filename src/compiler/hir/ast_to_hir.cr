@@ -7796,6 +7796,11 @@ module Crystal::HIR
           if expr_mentions_identifier?(expr_node.value, name)
             # Avoid recursive inference from self-referential assignments (e.g. a = a + 1).
           elsif inferred = infer_type_from_expr(expr_node.value, self_type_name)
+            if ENV["DEBUG_INFER_LOCAL"]? && name == String.new(target.name)
+              scope = "#{@current_class || ""}##{@current_method || ""}"
+              expr_kind = node_for_expr(expr_node.value).class.name.split("::").last
+              STDERR.puts "[INFER_LOCAL] scope=#{scope} name=#{name} expr=#{expr_kind} type=#{get_type_name_from_ref(inferred)}"
+            end
             output << inferred if inferred != TypeRef::VOID
           elsif value_node = node_for_expr(expr_node.value)
             if value_node.is_a?(CrystalV2::Compiler::Frontend::IdentifierNode)
@@ -21518,6 +21523,20 @@ module Crystal::HIR
                          else
                            TypeRef::VOID  # Unknown type
                          end
+            if param_type == TypeRef::VOID && type_ann_str && type_ann_str.includes?("|")
+              union_name = normalize_union_type_name(type_ann_str)
+              union_ref = create_union_type(union_name)
+              param_type = union_ref if union_ref != TypeRef::VOID
+            end
+            if param_type == TypeRef::VOID && type_ann_str
+              resolved_name = resolve_type_name_in_context(type_ann_str)
+              resolved = resolve_type_alias_chain(resolved_name)
+              if resolved.includes?("|")
+                union_name = normalize_union_type_name(resolved)
+                union_ref = create_union_type(union_name)
+                param_type = union_ref if union_ref != TypeRef::VOID
+              end
+            end
             if type_ann_str && bare_generic_annotation?(type_ann_str)
               # Keep the generic base type for dispatch; allow callsite refinement.
               param_type = type_ref_for_name(strip_generic_args(type_ann_str))
@@ -27110,7 +27129,8 @@ module Crystal::HIR
       begin
         assigned_vars.each do |var_name|
           if inferred = infer_local_type_from_body(node.body, var_name, @current_class)
-            assigned_var_types[var_name] = inferred
+            # Skip VOID: unioning with VOID corrupts phi types and breaks pointer arithmetic.
+            assigned_var_types[var_name] = inferred unless inferred == TypeRef::VOID
           end
         end
       ensure
@@ -27130,8 +27150,40 @@ module Crystal::HIR
       assigned_vars.each do |var_name|
         if initial_val = initial_values[var_name]?
           var_type = ctx.type_of(initial_val)
+          if var_type == TypeRef::VOID
+            if value = ctx.value_for(initial_val)
+              var_type = value.type unless value.type == TypeRef::VOID
+            end
+          end
+          if var_type == TypeRef::VOID
+            if locals = @current_typeof_locals
+              if inferred_ref = locals[var_name]?
+                var_type = inferred_ref unless inferred_ref == TypeRef::VOID
+              end
+            end
+          end
+          if var_type == TypeRef::VOID && ENV["DEBUG_LOOP_PHI"]?
+            value_type = ctx.value_for(initial_val).try(&.type) || TypeRef::VOID
+            local_type = @current_typeof_locals.try(&.[var_name]?) || TypeRef::VOID
+            STDERR.puts "[LOOP_PHI] var=#{var_name} init=#{ctx.type_of(initial_val).id} value=#{value_type.id} local=#{local_type.id}"
+          end
+          if var_type == TypeRef::VOID
+            if inferred = assigned_var_types[var_name]?
+              var_type = inferred
+            end
+          end
           if inferred = assigned_var_types[var_name]?
-            var_type = union_type_for_values(var_type, inferred)
+            pointer_type = var_type == TypeRef::POINTER || @module.get_type_descriptor(var_type).try(&.kind) == TypeKind::Pointer
+            if pointer_type && numeric_primitive?(inferred)
+              # Avoid widening pointer phis to numeric types based on brittle inference.
+            else
+              merged = union_type_for_values(var_type, inferred)
+              if merged == TypeRef::VOID && ENV["DEBUG_LOOP_PHI"]?
+                scope = "#{@current_class || ""}##{@current_method || ""}"
+                STDERR.puts "[LOOP_PHI_MERGE] scope=#{scope} var=#{var_name} left=#{var_type.id} right=#{inferred.id}"
+              end
+              var_type = merged
+            end
           end
           phi = Phi.new(ctx.next_id, var_type)
           # Add incoming from pre-loop block
@@ -27248,7 +27300,8 @@ module Crystal::HIR
       begin
         assigned_vars.each do |var_name|
           if inferred = infer_local_type_from_body(node.body, var_name, @current_class)
-            assigned_var_types[var_name] = inferred
+            # Skip VOID: unioning with VOID corrupts phi types and breaks pointer arithmetic.
+            assigned_var_types[var_name] = inferred unless inferred == TypeRef::VOID
           end
         end
       ensure
@@ -27268,8 +27321,30 @@ module Crystal::HIR
       assigned_vars.each do |var_name|
         if initial_val = initial_values[var_name]?
           var_type = ctx.type_of(initial_val)
+          if var_type == TypeRef::VOID
+            if value = ctx.value_for(initial_val)
+              var_type = value.type unless value.type == TypeRef::VOID
+            end
+          end
+          if var_type == TypeRef::VOID
+            if locals = @current_typeof_locals
+              if inferred_ref = locals[var_name]?
+                var_type = inferred_ref unless inferred_ref == TypeRef::VOID
+              end
+            end
+          end
+          if var_type == TypeRef::VOID
+            if inferred = assigned_var_types[var_name]?
+              var_type = inferred
+            end
+          end
           if inferred = assigned_var_types[var_name]?
-            var_type = union_type_for_values(var_type, inferred)
+            pointer_type = var_type == TypeRef::POINTER || @module.get_type_descriptor(var_type).try(&.kind) == TypeKind::Pointer
+            if pointer_type && numeric_primitive?(inferred)
+              # Avoid widening pointer phis to numeric types based on brittle inference.
+            else
+              var_type = union_type_for_values(var_type, inferred)
+            end
           end
           phi = Phi.new(ctx.next_id, var_type)
           incoming = {pre_loop_block, initial_val}
