@@ -1856,7 +1856,7 @@ module Crystal
       if type.id >= HIR::TypeRef::FIRST_USER_TYPE
         @hir_module.types.each_with_index do |desc, idx|
           if HIR::TypeRef.new(HIR::TypeRef::FIRST_USER_TYPE + idx.to_u32) == type
-            return desc.kind == HIR::TypeKind::Union || desc.name.includes?("___")
+            return desc.kind == HIR::TypeKind::Union
           end
         end
       end

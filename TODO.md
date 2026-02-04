@@ -72,6 +72,7 @@ about syntax or types and should match what the original compiler would report.
 - [ ] Fix LLVM backend extern-return heuristics to match new mangling (remove legacy prefix assumptions). Ensure any name parsing uses helper functions (no `split`) and matches current mangle scheme.
   - Update (2026-02-03): switched extern heuristics to derive method core from HIR names (no underscore/legacy suffix matching), and parse typed suffix via `$` only (commit `f6e3e12`). Needs rebuild + validation (hello/mini compile).
   - Update (2026-02-03): user flagged legacy split‑based prefix parsing (e.g., `__`/`___` separators). Current `llvm_backend.cr` uses `extract_receiver_and_method`/`method_core_from_name`, but re‑audit any remaining extern helpers that still rely on legacy separators.
+  - Update (2026-02-04): removed legacy `___` union checks outside the union parser: added `normalize_union_type_name`/`union_type_name?` and switched union detection to `TypeKind::Union` in HIR/MIR (mangling now `$`‑escaped). Quick sanity: `./bin/crystal_v2 --no-prelude examples/hello.cr -o /tmp/hello` ok.
 - [ ] Audit remaining float/int conversion sites in LLVM backend (fptosi/fptoui, sitofp/uitofp, ptrtoint/uitofp) to ensure all unsigned + ptr→float paths are correct on ARM/AArch64.
 - [ ] Re-audit union payload alignment for ARM/AArch64 (align 4 where required) to catch any remaining misaligned loads/stores.
   - [ ] Windows support: track parity with original Crystal target coverage; add Windows backend tasks once bootstrap is stable.

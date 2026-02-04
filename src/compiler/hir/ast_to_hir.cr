@@ -4221,9 +4221,7 @@ module Crystal::HIR
 
       if desc = @module.get_type_descriptor(type_ref)
         return nil if desc.kind == TypeKind::Module
-        if desc.kind == TypeKind::Union
-          return desc.name.includes?("___") ? desc.name.gsub("___", " | ") : desc.name
-        end
+        return normalize_union_type_name(desc.name) if desc.kind == TypeKind::Union
         return desc.name
       end
 
@@ -14790,6 +14788,19 @@ module Crystal::HIR
       parts
     end
 
+    # Normalize union type names to "A | B" spacing (handles legacy "A___B" too).
+    @[AlwaysInline]
+    private def normalize_union_type_name(type_name : String) : String
+      return type_name unless type_name.includes?("|") || type_name.includes?("___")
+      split_union_type_name(type_name).join(" | ")
+    end
+
+    @[AlwaysInline]
+    private def union_type_name?(type_name : String) : Bool
+      return false unless type_name.includes?("|") || type_name.includes?("___")
+      split_union_type_name(type_name).size > 1
+    end
+
     # Prefer an inferred union when it is a non-empty, concrete union that
     # doesn't add variants compared to the current union.
     private def prefer_inferred_union_type?(current_name : String, inferred_name : String) : Bool
@@ -15236,8 +15247,8 @@ module Crystal::HIR
       if ENV["DEBUG_ENUM_UNION_PREDICATE"]? && method_name.ends_with?("?") && (method_name == "kill?" || method_name == "hup?" || method_name == "quit?")
         STDERR.puts "[RESOLVE_METHOD] class_name=#{class_name} method=#{method_name} has_pipe=#{class_name.includes?("|")}"
       end
-      if !class_name.empty? && (class_name.includes?("|") || class_name.includes?("___"))
-        union_name = class_name.includes?("___") ? class_name.gsub("___", "|") : class_name
+      if !class_name.empty? && union_type_name?(class_name)
+        union_name = normalize_union_type_name(class_name)
         if resolved = resolve_union_method_call(union_name, method_name, arg_types, has_block_call, call_has_named_args)
           if ENV["DEBUG_TO_S_RESOLVE"]? && method_name == "to_s"
             STDERR.puts "[TO_S_RESOLVE] union resolved=#{resolved}"
@@ -16609,7 +16620,7 @@ module Crystal::HIR
              end
       name = normalize_method_owner_name(name)
       return nil if name.empty?
-      return nil if name.includes?("|") || name.includes?("___")
+      return nil if union_type_name?(name)
       if split = split_generic_base_and_args(name)
         name = split[:base]
       end
@@ -21153,7 +21164,7 @@ module Crystal::HIR
       best_variant_count = Int32::MAX
 
       @module.types.each_with_index do |desc, idx|
-        next unless desc.kind == TypeKind::Union || desc.name.includes?("___")
+        next unless desc.kind == TypeKind::Union
 
         hir_union_ref = TypeRef.new(TypeRef::FIRST_USER_TYPE + idx.to_u32)
         mir_union_ref = hir_to_mir_type_ref(hir_union_ref)
@@ -31961,8 +31972,8 @@ module Crystal::HIR
               else
                 # Use inheritance-aware method resolution
                 # Check if the name is a union type and resolve to variant method
-                if name.includes?(" | ") || name.includes?("___")
-                  union_name = name.includes?("___") ? name.gsub("___", " | ") : name
+                if union_type_name?(name)
+                  union_name = normalize_union_type_name(name)
                   # At this point arg_types aren't computed yet, so use empty array to just find any matching variant
                   if resolved = resolve_union_method_call(union_name, method_name, [] of TypeRef, false)
                     full_method_name = resolved
@@ -32012,7 +32023,7 @@ module Crystal::HIR
                   elsif type_desc.kind == TypeKind::Union
                     # Union types: resolve method to a concrete variant's method
                     # This prevents generating calls to non-existent union methods like Int64|Int32#to_i32!
-                    union_name = type_name.includes?("___") ? type_name.gsub("___", " | ") : type_name
+                    union_name = normalize_union_type_name(type_name)
                     # At this point arg_types aren't computed yet, so use empty array to just find any matching variant
                     if resolved = resolve_union_method_call(union_name, method_name, [] of TypeRef, false)
                       full_method_name = resolved
@@ -34139,7 +34150,7 @@ module Crystal::HIR
               end
             end
           elsif type_desc.kind == TypeKind::Union
-            union_name = type_desc.name.includes?("___") ? type_desc.name.gsub("___", "|") : type_desc.name
+            union_name = normalize_union_type_name(type_desc.name)
             key = "union|#{union_name}|#{method_name}|#{arg_types.map(&.id).join(",")}|#{has_block_call ? 1 : 0}"
             unless @virtual_targets_lowered.includes?(key)
               @virtual_targets_lowered.add(key)
@@ -34875,10 +34886,10 @@ module Crystal::HIR
 
       union = false
       if type_desc = @module.get_type_descriptor(type)
-        union = type_desc.kind == TypeKind::Union || type_desc.name.includes?("___")
+        union = type_desc.kind == TypeKind::Union
       else
         type_name = get_type_name_from_ref(type)
-        union = type_name.includes?("|") || type_name.includes?("___")
+        union = union_type_name?(type_name)
       end
 
       @union_type_cache[type.id] = union
@@ -34905,7 +34916,7 @@ module Crystal::HIR
     private def is_nilable_int32_union?(type : TypeRef) : Bool
       if type_desc = @module.get_type_descriptor(type)
         # Check if it's a union with Int32 in the name (Int32___Nil or Int32 | Nil)
-        if type_desc.kind == TypeKind::Union || type_desc.name.includes?("___")
+        if type_desc.kind == TypeKind::Union
           name = type_desc.name
           return name.includes?("Int32") && (name.includes?("Nil") || name.includes?("nil"))
         end
@@ -38922,7 +38933,7 @@ module Crystal::HIR
           variants = split_union_type_name(type_desc.name)
         else
           type_name = get_type_name_from_ref(receiver_type)
-          variants = split_union_type_name(type_name) if type_name.includes?("|") || type_name.includes?("___")
+          variants = split_union_type_name(type_name) if union_type_name?(type_name)
         end
         if variants
           idx = variants.index do |variant|
@@ -39504,7 +39515,7 @@ module Crystal::HIR
               end
             end
           elsif type_desc.kind == TypeKind::Union
-            union_name = type_desc.name.includes?("___") ? type_desc.name.gsub("___", "|") : type_desc.name
+            union_name = normalize_union_type_name(type_desc.name)
             key = "union|#{union_name}|#{member_name}|#{arg_types.map(&.id).join(",")}|0"
             unless @virtual_targets_lowered.includes?(key)
               @virtual_targets_lowered.add(key)
@@ -41950,7 +41961,7 @@ module Crystal::HIR
       if cached = @type_cache[cache_key]?
         # If a union-like name was previously cached as a non-union descriptor,
         # invalidate and recompute so we don't treat unions as classes.
-        if (lookup_name.includes?("|") || lookup_name.includes?("___"))
+        if union_type_name?(lookup_name)
           if cached && (desc = @module.get_type_descriptor(cached))
             if desc.kind == TypeKind::Union
               return cached
@@ -42019,7 +42030,7 @@ module Crystal::HIR
       # Check for union type syntax (top-level only): "Type1 | Type2"
       # NOTE: Don't treat nested unions inside generics as unions here.
       # create_union_type handles its own caching.
-      if lookup_name.includes?("|")
+      if union_type_name?(lookup_name)
         variants = split_union_type_name(lookup_name)
         if variants.size > 1
           result = create_union_type(absolute_name ? "::#{lookup_name}" : lookup_name)
@@ -42139,8 +42150,8 @@ module Crystal::HIR
               end
               if ref == TypeRef::VOID && !type_param_like?(stripped)
                 unless resolved == "Void" || resolved == "Unknown"
-                  if resolved.includes?("|") || resolved.includes?("___")
-                    ref = create_union_type(resolved)
+                  if union_type_name?(resolved)
+                    ref = create_union_type(normalize_union_type_name(resolved))
                   else
                     ref = @module.intern_type(TypeDescriptor.new(TypeKind::Class, resolved))
                   end
@@ -42285,8 +42296,8 @@ module Crystal::HIR
                end
 
                 # Final guard: if this still looks like a union, prefer a union descriptor.
-                if lookup_name.includes?("|") || lookup_name.includes?("___")
-                  union_ref = create_union_type(lookup_name)
+                if union_type_name?(lookup_name)
+                  union_ref = create_union_type(normalize_union_type_name(lookup_name))
                   store_type_cache(cache_key, union_ref)
                   return union_ref if union_ref != TypeRef::VOID
                 end
