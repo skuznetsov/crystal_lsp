@@ -594,6 +594,41 @@ module Crystal::HIR
       parts
     end
 
+    @[AlwaysInline]
+    private def strip_type_suffix_uncached(name : String) : String
+      if dollar = name.index('$')
+        name.byte_slice(0, dollar)
+      else
+        name
+      end
+    end
+
+    @[AlwaysInline]
+    private def method_short_from_name(name : String) : String?
+      sep_idx : Int32? = nil
+      dollar_idx : Int32? = nil
+      i = name.bytesize - 1
+      while i >= 0
+        byte = name.to_unsafe[i]
+        if byte == '$'.ord
+          dollar_idx = i
+        elsif byte == '#'.ord || byte == '.'.ord
+          sep_idx = i
+          break
+        end
+        i -= 1
+      end
+      return nil unless sep_idx
+      end_idx = dollar_idx || name.bytesize
+      name.byte_slice(sep_idx + 1, end_idx - sep_idx - 1)
+    end
+
+    @[AlwaysInline]
+    private def method_owner_from_name(name : String) : String
+      sep_idx = name.index('#') || name.index('.')
+      sep_idx ? name.byte_slice(0, sep_idx) : name
+    end
+
     # Quick check helpers that don't allocate
     @[AlwaysInline]
     private def has_method_separator?(name : String) : Bool
@@ -15901,9 +15936,8 @@ module Crystal::HIR
     private def resolve_untyped_overload(base_method_name : String, arg_count : Int32, has_block_call : Bool, call_has_named_args : Bool = false) : String?
       return nil if base_method_name.empty?
 
-      parts = parse_method_name(base_method_name)
-      if parts.method
-        owner = parts.owner
+      if method_short_from_name(base_method_name)
+        owner = method_owner_from_name(base_method_name)
         if info = generic_owner_info(owner)
           if !@monomorphized.includes?(info[:owner]) && concrete_type_args?(info[:args]) && !@suppress_monomorphization
             monomorphize_generic_class(info[:base], info[:args], info[:owner])
@@ -35525,17 +35559,15 @@ module Crystal::HIR
 
       # Fallback: match by method short name across owners (for inherited yield methods).
       # Example: Int32#try should inline Object#try when receiver_base allows it.
-      func_parts = parse_method_name(func_name)
-      method_short = func_parts.method
+      method_short = method_short_from_name(func_name)
       if method_short
         instance_suffix = "##{method_short}"
         class_suffix = ".#{method_short}"
         @function_defs.each do |name, def_node|
-          name_parts = parse_method_name(name)
-          candidate_base = name_parts.base
+          candidate_base = strip_type_suffix_uncached(name)
           next unless candidate_base.ends_with?(instance_suffix) || candidate_base.ends_with?(class_suffix)
           if receiver_base
-            owner = name_parts.owner
+            owner = method_owner_from_name(candidate_base)
             owner_base = strip_generic_args(owner)
             next unless receiver_allows_yield_owner?(receiver_base, owner_base)
           end
