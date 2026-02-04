@@ -76,6 +76,7 @@ about syntax or types and should match what the original compiler would report.
 - [ ] Audit remaining float/int conversion sites in LLVM backend (fptosi/fptoui, sitofp/uitofp, ptrtoint/uitofp) to ensure all unsigned + ptr→float paths are correct on ARM/AArch64.
   - Update (2026-02-04): switched ptr→float arg conversion to `ptrtoint + uitofp` (replaced ptr→int + bitcast). Remaining: re-audit return/cast paths for ptr→float and unsigned float→int.
   - Update (2026-02-04): float→ptr slot stores now preserve bit patterns via bitcast + inttoptr (no fptosi).
+  - Update (2026-02-04): ptr→float returns/casts now use `ptrtoint + uitofp` (no pointer loads or bitcast).
 - [ ] Re-audit union payload alignment for ARM/AArch64 (align 4 where required) to catch any remaining misaligned loads/stores.
   - [ ] Windows support: track parity with original Crystal target coverage; add Windows backend tasks once bootstrap is stable.
  - [ ] Stack overflow in `substitute_type_params_in_type_name` during compile (hello) traced to recursive substitution; added recursion guard + depth limit (commit `be80713`). Rebuild debug binary and verify; if still recurses, inspect `generic_owner_info`/type-param map for cyclic expansion.
