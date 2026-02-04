@@ -1088,6 +1088,11 @@ module Crystal::V2
           exprs = cached.roots
           base_dir = File.dirname(abs_path)
           if cached_requires = load_require_cache(abs_path)
+            if source_has_glob_require?(source) || cached_requires.any? { |path| !File.exists?(path) }
+              cached_requires = nil
+            end
+          end
+          if cached_requires
             cached_requires.each do |req_path|
               parse_file_recursive(req_path, results, loaded)
             end
@@ -2140,6 +2145,16 @@ module Crystal::V2
       end
 
       nil
+    end
+
+    private def source_has_glob_require?(source : String) : Bool
+      source.each_line do |line|
+        next unless line.includes?("require")
+        if line.matches?(/\brequire\s+["'][^"']*[\*\?\[]/)
+          return true
+        end
+      end
+      false
     end
   end
 end
