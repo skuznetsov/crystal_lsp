@@ -10538,6 +10538,10 @@ module Crystal::HIR
                           else
                             infer_concrete_return_type_from_body(member) || TypeRef::VOID
                           end
+            if ENV["DEBUG_WUINT128"]? && full_name.includes?("Dragonbox::WUInt")
+              ret_name = get_type_name_from_ref(return_type)
+              STDERR.puts "[DEBUG_WUINT128] register return method=#{method_name} return=#{ret_name}"
+            end
             param_types = [] of TypeRef
             has_block = false
             if params = member.params
@@ -10554,6 +10558,13 @@ module Crystal::HIR
                              else
                                TypeRef::VOID
                              end
+                if ENV["DEBUG_WUINT128"]? && full_name.includes?("Dragonbox::WUInt")
+                  if ta = param.type_annotation
+                    ta_name = String.new(ta)
+                    resolved_name = get_type_name_from_ref(param_type)
+                    STDERR.puts "[DEBUG_WUINT128] register param #{ta_name} resolved=#{resolved_name}"
+                  end
+                end
                 param_types << param_type
               end
             end
@@ -18322,6 +18333,19 @@ module Crystal::HIR
         end
       end
       existing_type = @function_types[name]?
+      if existing_type && existing_type != TypeRef::VOID && existing_type != TypeRef::NIL
+        if def_node = lookup_function_def_for_return(name, base_name)
+          if def_node.return_type
+            if resolved = resolve_return_type_from_def(name, base_name, nil)
+              if resolved != TypeRef::VOID && resolved != TypeRef::NIL && resolved != existing_type
+                @function_types[name] = resolved
+                @function_base_return_types[base_name] = resolved unless base_name.includes?("$")
+                existing_type = resolved
+              end
+            end
+          end
+        end
+      end
       if existing_type == TypeRef::VOID || existing_type == TypeRef::NIL
         if def_node = lookup_function_def_for_return(name, base_name)
           owner_name = function_context_from_name(base_name)
@@ -20655,6 +20679,13 @@ module Crystal::HIR
       if owner_override.empty?
         owner_override = method_owner(mangled_method_name)
       end
+      qualified_return_type = return_type_name
+      if !owner_override.empty? && !return_type_name.includes?("::")
+        candidate = "#{owner_override}::#{return_type_name}"
+        if @class_info.has_key?(candidate) || @generic_templates.has_key?(candidate) || @module_defs.has_key?(candidate)
+          qualified_return_type = candidate
+        end
+      end
 
       if cached = @function_types[mangled_method_name]? || @function_types[base_method_name]?
         if cached != TypeRef::VOID &&
@@ -20667,14 +20698,19 @@ module Crystal::HIR
            !return_type_name.ends_with?("?") &&
            !return_type_name.ends_with?("*") &&
            !(type_param_like?(return_type_name) && !@type_param_map.has_key?(return_type_name))
-          if !owner_override.empty? && !return_type_name.includes?("::")
-            old_class = @current_class
-            @current_class = owner_override
-            resolved = type_ref_for_name(return_type_name)
-            @current_class = old_class
-            if resolved != TypeRef::VOID && resolved != TypeRef::NIL && resolved != cached
-              return resolved
-            end
+          resolved = if qualified_return_type == return_type_name && !owner_override.empty? && !return_type_name.includes?("::")
+                       old_class = @current_class
+                       @current_class = owner_override
+                       begin
+                         type_ref_for_name(return_type_name)
+                       ensure
+                         @current_class = old_class
+                       end
+                     else
+                       type_ref_for_name(qualified_return_type)
+                     end
+          if resolved != TypeRef::VOID && resolved != TypeRef::NIL && resolved != cached
+            return resolved
           end
           return cached
         end
@@ -20714,9 +20750,7 @@ module Crystal::HIR
       end
 
       if merged.empty?
-        resolved = if owner_override.empty?
-                     type_ref_for_name(return_type_name)
-                   else
+        resolved = if qualified_return_type == return_type_name && !owner_override.empty? && !return_type_name.includes?("::")
                      old_class = @current_class
                      @current_class = owner_override
                      begin
@@ -20724,17 +20758,17 @@ module Crystal::HIR
                      ensure
                        @current_class = old_class
                      end
+                   else
+                     type_ref_for_name(qualified_return_type)
                    end
-        if ENV["DEBUG_RETURN_DEF"]? && (mangled_method_name.includes?("PointerPairingHeap") || base_method_name.includes?("PointerPairingHeap"))
+        if debug_env_filter_match?("DEBUG_RETURN_DEF", mangled_method_name, base_method_name)
           STDERR.puts "[RETURN_DEF] name=#{mangled_method_name} base=#{base_method_name} rt=#{return_type_name} map=none resolved=#{get_type_name_from_ref(resolved)}"
         end
         return resolved
       end
 
       with_type_param_map(merged) do
-        resolved = if owner_override.empty?
-                     type_ref_for_name(return_type_name)
-                   else
+        resolved = if qualified_return_type == return_type_name && !owner_override.empty? && !return_type_name.includes?("::")
                      old_class = @current_class
                      @current_class = owner_override
                      begin
@@ -20742,8 +20776,10 @@ module Crystal::HIR
                      ensure
                        @current_class = old_class
                      end
+                   else
+                     type_ref_for_name(qualified_return_type)
                    end
-        if ENV["DEBUG_RETURN_DEF"]? && (mangled_method_name.includes?("PointerPairingHeap") || base_method_name.includes?("PointerPairingHeap"))
+        if debug_env_filter_match?("DEBUG_RETURN_DEF", mangled_method_name, base_method_name)
           params_str = merged.map { |k, v| "#{k}=#{v}" }.join(",")
           STDERR.puts "[RETURN_DEF] name=#{mangled_method_name} base=#{base_method_name} rt=#{return_type_name} map=#{params_str} resolved=#{get_type_name_from_ref(resolved)}"
         end
@@ -33883,6 +33919,22 @@ module Crystal::HIR
       # For non-overloaded functions, prefer base name since that's how they're registered in HIR module
       return_type = get_function_return_type(mangled_method_name)
       begin
+        if def_node = lookup_function_def_for_return(mangled_method_name, base_method_name)
+          if debug_env_filter_match?("DEBUG_RETURN_DEF", mangled_method_name, base_method_name)
+            rt_name = def_node.return_type ? String.new(def_node.return_type.not_nil!) : "(nil)"
+            STDERR.puts "[CALL_RETURN_DEF] name=#{mangled_method_name} base=#{base_method_name} rt=#{rt_name}"
+          end
+          if def_node.return_type
+            if resolved = resolve_return_type_from_def(mangled_method_name, base_method_name, receiver_id ? ctx.type_of(receiver_id) : nil)
+              if debug_env_filter_match?("DEBUG_RETURN_DEF", mangled_method_name, base_method_name)
+                STDERR.puts "[CALL_RETURN_DEF] resolved=#{get_type_name_from_ref(resolved)}"
+              end
+              if resolved != TypeRef::VOID && resolved != TypeRef::NIL && resolved != return_type
+                return_type = resolved
+              end
+            end
+          end
+        end
         unionish = false
         if return_type != TypeRef::VOID && return_type != TypeRef::NIL
           if ret_desc = @module.get_type_descriptor(return_type)
@@ -42616,8 +42668,17 @@ module Crystal::HIR
           lookup_name = resolve_type_name_in_context(lookup_name) unless absolute_name
           cache_key_name = absolute_name ? "::#{lookup_name}" : lookup_name
           cache_key = type_cache_key(cache_key_name)
-          if cached = @type_cache[cache_key]?
-            return cached
+          if @current_class && BUILTIN_TYPE_NAMES.includes?(lookup_name)
+            nested_name = "#{@current_class}::#{lookup_name}"
+            unless @class_info.has_key?(nested_name) || @generic_templates.has_key?(nested_name)
+              if cached = @type_cache[cache_key]?
+                return cached
+              end
+            end
+          else
+            if cached = @type_cache[cache_key]?
+              return cached
+            end
           end
         end
       end
