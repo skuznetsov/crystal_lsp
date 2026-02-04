@@ -8603,41 +8603,45 @@ module Crystal::HIR
                               end
             if is_class_method
               base_name = "#{module_name}.#{method_name}"
-              return_type = if rt = member.return_type
-                              rt_name = String.new(rt)
-                              inferred = module_like_type_name?(rt_name) ? infer_concrete_return_type_from_body(member) : nil
-                              inferred || type_ref_for_name(rt_name)
-                            elsif method_name.ends_with?("?")
-                              TypeRef::BOOL
-                            else
-                              infer_concrete_return_type_from_body(member) || TypeRef::VOID
-              end
+              return_type = nil.as(TypeRef?)
               param_types = [] of TypeRef
               has_block = false
-              if params = member.params
-                params.each do |param|
-                  next if named_only_separator?(param)
-                  if param.is_block
-                    has_block = true
-                    next
-                  end
-                  param_type = if ta = param.type_annotation
-                                 type_ref_for_name(String.new(ta))
-                               elsif param.is_double_splat
-                                 type_ref_for_name("NamedTuple")
-                               else
-                                 TypeRef::VOID
-                               end
-                  if ENV["DEBUG_WUINT128"]? && module_name.includes?("Dragonbox::WUInt")
-                    if ta = param.type_annotation
-                      ta_name = String.new(ta)
-                      resolved_name = get_type_name_from_ref(param_type)
-                      STDERR.puts "[DEBUG_WUINT128] module=#{module_name} param=#{ta_name} resolved=#{resolved_name}"
+              with_namespace_override(module_name) do
+                return_type = if rt = member.return_type
+                                rt_name = String.new(rt)
+                                inferred = module_like_type_name?(rt_name) ? infer_concrete_return_type_from_body(member) : nil
+                                inferred || type_ref_for_name(rt_name)
+                              elsif method_name.ends_with?("?")
+                                TypeRef::BOOL
+                              else
+                                infer_concrete_return_type_from_body(member) || TypeRef::VOID
+                              end
+                if params = member.params
+                  params.each do |param|
+                    next if named_only_separator?(param)
+                    if param.is_block
+                      has_block = true
+                      next
                     end
+                    param_type = if ta = param.type_annotation
+                                   type_ref_for_name(String.new(ta))
+                                 elsif param.is_double_splat
+                                   type_ref_for_name("NamedTuple")
+                                 else
+                                   TypeRef::VOID
+                                 end
+                    if ENV["DEBUG_WUINT128"]? && module_name.includes?("Dragonbox::WUInt")
+                      if ta = param.type_annotation
+                        ta_name = String.new(ta)
+                        resolved_name = get_type_name_from_ref(param_type)
+                        STDERR.puts "[DEBUG_WUINT128] module=#{module_name} param=#{ta_name} resolved=#{resolved_name}"
+                      end
+                    end
+                    param_types << param_type
                   end
-                  param_types << param_type
                 end
               end
+              return_type ||= TypeRef::VOID
               if !has_block
                 has_block = def_contains_yield?(member, @arena)
               end
@@ -9350,34 +9354,38 @@ module Crystal::HIR
           return
         end
         base_name = "#{module_name}.#{method_name}"
-        return_type = if rt = member.return_type
-                        rt_name = String.new(rt)
-                        inferred = module_like_type_name?(rt_name) ? infer_concrete_return_type_from_body(member) : nil
-                        inferred || type_ref_for_name(rt_name)
-                      elsif method_name.ends_with?("?")
-                        TypeRef::BOOL
-                      else
-                        infer_concrete_return_type_from_body(member) || TypeRef::VOID
-                      end
+        return_type = nil.as(TypeRef?)
         param_types = [] of TypeRef
         has_block = false
-        if params = member.params
-          params.each do |param|
-            next if named_only_separator?(param)
-            if param.is_block
-              has_block = true
-              next
+        with_namespace_override(module_name) do
+          return_type = if rt = member.return_type
+                          rt_name = String.new(rt)
+                          inferred = module_like_type_name?(rt_name) ? infer_concrete_return_type_from_body(member) : nil
+                          inferred || type_ref_for_name(rt_name)
+                        elsif method_name.ends_with?("?")
+                          TypeRef::BOOL
+                        else
+                          infer_concrete_return_type_from_body(member) || TypeRef::VOID
+                        end
+          if params = member.params
+            params.each do |param|
+              next if named_only_separator?(param)
+              if param.is_block
+                has_block = true
+                next
+              end
+              param_type = if ta = param.type_annotation
+                             type_ref_for_name(String.new(ta))
+                           elsif param.is_double_splat
+                             type_ref_for_name("NamedTuple")
+                           else
+                             TypeRef::VOID
+                           end
+              param_types << param_type
             end
-            param_type = if ta = param.type_annotation
-                           type_ref_for_name(String.new(ta))
-                         elsif param.is_double_splat
-                           type_ref_for_name("NamedTuple")
-                         else
-                           TypeRef::VOID
-                         end
-            param_types << param_type
           end
         end
+        return_type ||= TypeRef::VOID
         contains_yield = false
         if !has_block
           contains_yield = def_contains_yield?(member, @arena)
@@ -10623,43 +10631,55 @@ module Crystal::HIR
               STDERR.puts "[DEBUG_MODULE_LOOKUP] register #{full_name}.#{method_name}"
             end
             base_name = "#{full_name}.#{method_name}"
-            return_type = if rt = member.return_type
-                            rt_name = String.new(rt)
-                            inferred = module_like_type_name?(rt_name) ? infer_concrete_return_type_from_body(member) : nil
-                            inferred || type_ref_for_name(rt_name)
-                          elsif method_name.ends_with?("?")
-                            TypeRef::BOOL
-                          else
-                            infer_concrete_return_type_from_body(member) || TypeRef::VOID
-                          end
+            return_type = nil.as(TypeRef?)
+            param_types = [] of TypeRef
+            has_block = false
+            with_namespace_override(full_name) do
+              return_type = if rt = member.return_type
+                              rt_name = String.new(rt)
+                              inferred = module_like_type_name?(rt_name) ? infer_concrete_return_type_from_body(member) : nil
+                              inferred || type_ref_for_name(rt_name)
+                            elsif method_name.ends_with?("?")
+                              TypeRef::BOOL
+                            else
+                              infer_concrete_return_type_from_body(member) || TypeRef::VOID
+                            end
+              if params = member.params
+                params.each do |param|
+                  next if named_only_separator?(param)
+                  if param.is_block
+                    has_block = true
+                    next
+                  end
+                  param_type = if ta = param.type_annotation
+                                 type_ref_for_name(String.new(ta))
+                               elsif param.is_double_splat
+                                 type_ref_for_name("NamedTuple")
+                               else
+                                 TypeRef::VOID
+                               end
+                  param_types << param_type
+                end
+              end
+            end
+            return_type ||= TypeRef::VOID
             if ENV["DEBUG_WUINT128"]? && full_name.includes?("Dragonbox::WUInt")
               ret_name = get_type_name_from_ref(return_type)
               STDERR.puts "[DEBUG_WUINT128] register return method=#{method_name} return=#{ret_name}"
-            end
-            param_types = [] of TypeRef
-            has_block = false
-            if params = member.params
-              params.each do |param|
-                next if named_only_separator?(param)
-                if param.is_block
-                  has_block = true
-                  next
-                end
-                param_type = if ta = param.type_annotation
-                               type_ref_for_name(String.new(ta))
-                             elsif param.is_double_splat
-                               type_ref_for_name("NamedTuple")
-                             else
-                               TypeRef::VOID
-                             end
-                if ENV["DEBUG_WUINT128"]? && full_name.includes?("Dragonbox::WUInt")
+              if params = member.params
+                param_index = 0
+                params.each do |param|
+                  next if named_only_separator?(param)
+                  if param.is_block
+                    next
+                  end
                   if ta = param.type_annotation
                     ta_name = String.new(ta)
-                    resolved_name = get_type_name_from_ref(param_type)
+                    resolved_name = get_type_name_from_ref(param_types[param_index]? || TypeRef::VOID)
                     STDERR.puts "[DEBUG_WUINT128] register param #{ta_name} resolved=#{resolved_name}"
                   end
+                  param_index += 1
                 end
-                param_types << param_type
               end
             end
             if !has_block
@@ -19000,7 +19020,7 @@ module Crystal::HIR
         return local_name unless local_name.empty?
       end
       if cached = resolved_type_name_cache_get(name)
-        return cached
+        return cached unless nested_shadowed_type_name?(name)
       end
       if value_literal_name?(name)
         resolved_type_name_cache_set(name, name)
@@ -19118,30 +19138,7 @@ module Crystal::HIR
 
       unless name.includes?("::")
         if @top_level_type_names.includes?(name) || @top_level_class_kinds.has_key?(name) || BUILTIN_TYPE_NAMES.includes?(name)
-          nested_shadow = false
-          if override = @current_namespace_override
-            override_base = if info = split_generic_base_and_args(override)
-                              info[:base]
-                            else
-                              override
-                            end
-            if nested = @nested_type_names[override_base]? || @nested_type_names[override]?
-              nested_shadow = nested.includes?(name)
-            end
-          end
-          if !nested_shadow
-            if current = @current_class
-              current_base = if info = split_generic_base_and_args(current)
-                               info[:base]
-                             else
-                               current
-                             end
-              if nested = @nested_type_names[current_base]? || @nested_type_names[current]?
-                nested_shadow = nested.includes?(name)
-              end
-            end
-          end
-          unless nested_shadow
+          unless nested_shadowed_type_name?(name)
             resolved_type_name_cache_set(name, name)
             return name
           end
@@ -19189,6 +19186,33 @@ module Crystal::HIR
         STDERR.puts "[DEBUG_FIBER_RESOLVE] name=#{name} current=#{@current_class || "nil"} override=#{@current_namespace_override || "nil"} resolved=#{name} top_level=#{@top_level_type_names.includes?(name)}"
       end
       name
+    end
+
+    private def nested_shadowed_type_name?(name : String) : Bool
+      return false unless @top_level_type_names.includes?(name) ||
+        @top_level_class_kinds.has_key?(name) ||
+        BUILTIN_TYPE_NAMES.includes?(name)
+      if override = @current_namespace_override
+        override_base = if info = split_generic_base_and_args(override)
+                          info[:base]
+                        else
+                          override
+                        end
+        if nested = @nested_type_names[override_base]? || @nested_type_names[override]?
+          return true if nested.includes?(name)
+        end
+      end
+      if current = @current_class
+        current_base = if info = split_generic_base_and_args(current)
+                         info[:base]
+                       else
+                         current
+                       end
+        if nested = @nested_type_names[current_base]? || @nested_type_names[current]?
+          return true if nested.includes?(name)
+        end
+      end
+      false
     end
 
     private def resolve_nested_builtin_shadow(name : String) : String?
