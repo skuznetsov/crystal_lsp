@@ -629,27 +629,31 @@ module Crystal::HIR
     # Legacy helpers for compatibility - use parse_method_name for hot paths
     @[AlwaysInline]
     private def strip_type_suffix(name : String) : String
-      parse_method_name(name).base
+      parse_method_name_compact(name).base
     end
 
     @[AlwaysInline]
     private def method_owner(name : String) : String
-      parse_method_name(name).owner
+      parse_method_name_compact(name).owner
     end
 
     @[AlwaysInline]
     private def method_part(name : String) : String?
-      parse_method_name(name).method
+      parse_method_name_compact(name).method
     end
 
     @[AlwaysInline]
     private def method_separator(name : String) : Char?
-      parse_method_name(name).separator
+      parse_method_name_compact(name).separator
     end
 
     @[AlwaysInline]
     private def method_suffix(name : String) : String?
-      parse_method_name(name).suffix
+      if dollar = name.index('$')
+        name.byte_slice(dollar + 1, name.bytesize - dollar - 1)
+      else
+        nil
+      end
     end
 
     @[AlwaysInline]
