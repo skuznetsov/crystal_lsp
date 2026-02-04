@@ -340,6 +340,16 @@ module Crystal::HIR
       end
     end
 
+    private struct MethodNamePartsCompact
+      getter owner : String
+      getter method : String?
+      getter separator : Char?
+      getter base : String
+
+      def initialize(@owner, @method, @separator, @base)
+      end
+    end
+
     private struct TypeNameContextKey
       getter override : String?
       getter current : String?
@@ -517,6 +527,71 @@ module Crystal::HIR
       is_instance = sep_char == '#'
       is_class = sep_char == '.'
       MethodNameParts.new(owner, method, suffix, sep_char, base, is_instance, is_class)
+    end
+
+    @[AlwaysInline]
+    private def parse_method_name_compact(name : String) : MethodNamePartsCompact
+      name_id = name.object_id
+      if name_id == @method_name_compact_last_id
+        if last = @method_name_compact_last
+          return last
+        end
+      end
+      if cached = @method_name_compact_cache[name_id]?
+        @method_name_compact_last_id = name_id
+        @method_name_compact_last = cached
+        return cached
+      end
+      sep_idx : Int32? = nil
+      sep_char : Char? = nil
+      dollar_idx : Int32? = nil
+
+      i = 0
+      while i < name.bytesize
+        byte = name.to_unsafe[i]
+        case byte
+        when '#'.ord
+          sep_idx = i
+          sep_char = '#'
+        when '.'.ord
+          if sep_idx.nil?
+            sep_idx = i
+            sep_char = '.'
+          end
+        when '$'.ord
+          dollar_idx = i
+          break
+        end
+        i += 1
+      end
+
+      if sep_idx
+        owner = name.byte_slice(0, sep_idx)
+        method = if dollar_idx
+                   name.byte_slice(sep_idx + 1, dollar_idx - sep_idx - 1)
+                 else
+                   name.byte_slice(sep_idx + 1, name.bytesize - sep_idx - 1)
+                 end
+        base = if dollar_idx
+                 name.byte_slice(0, dollar_idx)
+               else
+                 name
+               end
+      else
+        owner = name
+        method = nil
+        base = if dollar_idx
+                 name.byte_slice(0, dollar_idx)
+               else
+                 name
+               end
+      end
+
+      parts = MethodNamePartsCompact.new(owner, method, sep_char, base)
+      @method_name_compact_cache[name_id] = parts
+      @method_name_compact_last_id = name_id
+      @method_name_compact_last = parts
+      parts
     end
 
     # Quick check helpers that don't allocate
@@ -826,6 +901,10 @@ module Crystal::HIR
     @method_name_parts_cache : Hash(UInt64, MethodNameParts) = {} of UInt64 => MethodNameParts
     @method_name_parts_last_id : UInt64 = 0
     @method_name_parts_last : MethodNameParts? = nil
+    # Lightweight owner/method cache used in def lookup (avoids parse_method_name).
+    @method_name_compact_cache : Hash(UInt64, MethodNamePartsCompact) = {} of UInt64 => MethodNamePartsCompact
+    @method_name_compact_last_id : UInt64 = 0
+    @method_name_compact_last : MethodNamePartsCompact? = nil
     # Recursion guard for substitute_type_params_in_type_name.
     @substitute_type_params_stack : Set(String) = Set(String).new
     @substitute_type_params_depth : Int32 = 0
@@ -35188,7 +35267,7 @@ module Crystal::HIR
         end
       end
       if overload_keys.empty? && (func_name.includes?("#") || func_name.includes?("."))
-        parts = parse_method_name_uncached(func_name)
+        parts = parse_method_name_compact(func_name)
         if parts.separator && parts.method
           ensure_method_index_built
           base_owner = strip_generic_args(parts.owner)
