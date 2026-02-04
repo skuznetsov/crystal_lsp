@@ -17858,6 +17858,10 @@ module Crystal::HIR
           if unionish
             def_node = lookup_function_def_for_return(name, base_name)
             if def_node
+              if rt = def_node.return_type
+                # Respect explicit return annotations; do not override them with body inference.
+                return base_type if rt.size > 0
+              end
               owner_name = nil.as(String?)
               if idx = base_name.rindex('#')
                 owner_name = base_name[0, idx]
@@ -17916,6 +17920,10 @@ module Crystal::HIR
         if unionish
           def_node = lookup_function_def_for_return(name, base_name)
           if def_node
+            if rt = def_node.return_type
+              # Respect explicit return annotations; do not override them with body inference.
+              return type if rt.size > 0
+            end
             owner_name = nil.as(String?)
             if idx = base_name.rindex('#')
               owner_name = base_name[0, idx]
@@ -17944,6 +17952,10 @@ module Crystal::HIR
         if unresolved_generic_return_type?(type)
           def_node = lookup_function_def_for_return(name, base_name)
           if def_node
+            if rt = def_node.return_type
+              # Respect explicit return annotations; do not override them with body inference.
+              return type if rt.size > 0
+            end
             owner_name = nil.as(String?)
             if idx = base_name.rindex('#')
               owner_name = base_name[0, idx]
@@ -42452,12 +42464,14 @@ module Crystal::HIR
 
       normalized_name = resolved_variant_names.join(" | ")
       if @union_in_progress.includes?(normalized_name)
-        # If we're already building this union, prefer a cached concrete type
-        # and avoid falling back to Pointer (which corrupts inference).
+        # If we're already building this union, prefer a cached concrete type.
         if cached = @type_cache[type_cache_key(normalized_name)]?
           return cached unless cached == TypeRef::VOID
         end
-        return TypeRef::VOID
+        # Return a provisional union type to avoid VOID cascading into inference.
+        provisional = @module.intern_type(TypeDescriptor.new(TypeKind::Union, normalized_name))
+        store_type_cache(type_cache_key(normalized_name), provisional)
+        return provisional
       end
 
       @union_in_progress << normalized_name
@@ -42475,10 +42489,10 @@ module Crystal::HIR
           canonical = resolved_variant_names[idx] if canonical == "Unknown"
           dedup_names << canonical
         end
-        # Canonicalize order: sort by name, but keep Nil last (matches Crystal semantics).
+        # Canonicalize order: sort by name, but keep Nil first (matches Crystal semantics).
         ordered = dedup_names.zip(dedup_refs)
         ordered.sort_by! do |(vname, vref)|
-          nil_flag = (vref == TypeRef::NIL || vname == "Nil" || vname.ends_with?("::Nil")) ? 1 : 0
+          nil_flag = (vref == TypeRef::NIL || vname == "Nil" || vname.ends_with?("::Nil")) ? 0 : 1
           {nil_flag, vname}
         end
         resolved_variant_names = ordered.map(&.[0])
