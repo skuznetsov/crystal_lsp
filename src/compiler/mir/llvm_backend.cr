@@ -4500,6 +4500,7 @@ module Crystal::MIR
 
       # Guard: trunc/bitcast can't be used for float-to-int - use fptosi/fptoui instead
       is_src_float = src_type == "float" || src_type == "double"
+      is_dst_float = dst_type == "float" || dst_type == "double"
       if (op == "trunc" || op == "bitcast") && is_src_float && is_dst_int
         # Check if destination is unsigned type to choose fptoui vs fptosi
         dst_kind = @module.type_registry.get(inst.type).try(&.kind)
@@ -4520,6 +4521,15 @@ module Crystal::MIR
         end
         record_emitted_type(name, "ptr")
         @value_types[inst.id] = TypeRef::POINTER
+        return
+      end
+
+      # Guard: ptr to float can't be bitcast directly. Convert ptr value to unsigned int, then uitofp.
+      if op == "bitcast" && src_type == "ptr" && is_dst_float
+        base_name = name.lstrip('%')
+        emit "%#{base_name}.ptr_int = ptrtoint ptr #{value} to i64"
+        emit "#{name} = uitofp i64 %#{base_name}.ptr_int to #{dst_type}"
+        @value_types[inst.id] = inst.type
         return
       end
 
@@ -7603,11 +7613,12 @@ module Crystal::MIR
               emit "%ret_ftoi.#{c} = #{op} #{val_llvm_type} #{val_ref} to #{@current_return_type}"
               emit "ret #{@current_return_type} %ret_ftoi.#{c}"
             elsif (@current_return_type == "double" || @current_return_type == "float") && val_llvm_type == "ptr"
-              # Pointer to float conversion - try to load from pointer or return 0.0
-              # This often happens with incomplete function bodies
+              # Pointer to float conversion - interpret pointer value as unsigned and convert.
+              # Avoids dereferencing unknown pointers from incomplete bodies.
               c = @cond_counter
               @cond_counter += 1
-              emit "%ret_ptr_to_float.#{c} = load #{@current_return_type}, ptr #{val_ref}"
+              emit "%ret_ptr_to_float.#{c}.int = ptrtoint ptr #{val_ref} to i64"
+              emit "%ret_ptr_to_float.#{c} = uitofp i64 %ret_ptr_to_float.#{c}.int to #{@current_return_type}"
               emit "ret #{@current_return_type} %ret_ptr_to_float.#{c}"
             elsif @current_return_type == "ptr" && val_llvm_type == "double"
               # Double to ptr conversion - bitcast to i64 then inttoptr
