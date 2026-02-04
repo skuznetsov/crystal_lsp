@@ -11929,12 +11929,13 @@ module Crystal::HIR
                           if parts.empty?
                             TypeRef::VOID
                           else
-                            variant_refs = parts.map do |part|
+                            normalized = normalize_union_type_name(resolved)
+                            ordered_parts = split_union_type_name(normalized)
+                            variant_refs = ordered_parts.map do |part|
                               builtin_type_ref_for(part) || type_ref_for_name(part)
                             end
-                            normalized = parts.join(" | ")
                             union_ref = @module.intern_type(TypeDescriptor.new(TypeKind::Union, normalized))
-                            register_union_descriptor(union_ref, normalized, parts, variant_refs)
+                            register_union_descriptor(union_ref, normalized, ordered_parts, variant_refs)
                             union_ref
                           end
                         else
@@ -14821,7 +14822,19 @@ module Crystal::HIR
     @[AlwaysInline]
     private def normalize_union_type_name(type_name : String) : String
       return type_name unless type_name.includes?("|") || type_name.includes?("___")
-      split_union_type_name(type_name).join(" | ")
+      parts = split_union_type_name(type_name)
+      return type_name if parts.empty?
+      dedup = [] of String
+      parts.each do |part|
+        trimmed = part.strip
+        next if trimmed.empty?
+        dedup << trimmed unless dedup.includes?(trimmed)
+      end
+      ordered = dedup.sort_by do |name|
+        nil_flag = (name == "Nil" || name.ends_with?("::Nil")) ? 0 : 1
+        {nil_flag, name}
+      end
+      ordered.join(" | ")
     end
 
     @[AlwaysInline]
@@ -14882,9 +14895,18 @@ module Crystal::HIR
             end
             # Arity mismatch - continue to check untyped overloads
           end
-          if has_function_base?(base_name)
-            if resolved = resolve_untyped_overload(base_name, arg_types.size, has_block_call, call_has_named_args)
+          if resolved = resolve_untyped_overload(base_name, arg_types.size, has_block_call, call_has_named_args)
+            return resolved
+          end
+          base_owner = strip_generic_args(candidate)
+          if base_owner != candidate
+            base_fallback = "#{base_owner}##{method_name}"
+            if resolved = resolve_untyped_overload(base_fallback, arg_types.size, has_block_call, call_has_named_args)
               return resolved
+            end
+            mangled_fallback = mangle_function_name(base_fallback, arg_types, has_block_call)
+            if @function_types.has_key?(mangled_fallback)
+              return mangled_fallback
             end
           end
 
@@ -15284,6 +15306,8 @@ module Crystal::HIR
           end
           debug_hook("method.resolve", "base=#{base_method_name} resolved=#{resolved} reason=union")
           return cache_method_resolution(cache_key, resolved)
+        elsif ENV["DEBUG_UNION_RESOLVE"]?
+          STDERR.puts "[UNION_RESOLVE] union=#{union_name} method=#{method_name} args=#{arg_types.size} block=#{has_block_call} resolved=nil"
         end
       end
 
@@ -39392,6 +39416,16 @@ module Crystal::HIR
       if entry = lookup_function_def_for_call(base_method_name, args.size, false, arg_types)
         actual_name = entry[0]
       end
+      if actual_name.includes?(" | ")
+        if type_desc = @module.get_type_descriptor(receiver_type)
+          if type_desc.kind == TypeKind::Union
+            union_name = normalize_union_type_name(type_desc.name)
+            if resolved = resolve_union_method_call(union_name, member_name, arg_types, false)
+              actual_name = resolved
+            end
+          end
+        end
+      end
 
       # Special handling for Tuple#size - return compile-time constant based on type parameters
       if member_name == "size"
@@ -40176,6 +40210,18 @@ module Crystal::HIR
                     else
                       mangled_name
                     end
+      if actual_name.includes?(" | ") && receiver_type != TypeRef::VOID
+        if type_desc = @module.get_type_descriptor(receiver_type)
+          if type_desc.kind == TypeKind::Union
+            union_name = normalize_union_type_name(type_desc.name)
+            has_block_call = !block_expr.nil?
+            if resolved = resolve_union_method_call(union_name, member_name, arg_types, has_block_call)
+              actual_name = resolved
+              mangled_name = mangle_function_name(actual_name, arg_types, has_block_call)
+            end
+          end
+        end
+      end
 
       return_type = get_function_return_type(actual_name)
       if member_name == "new" && class_name_str == "Range" && arg_types.size >= 2
@@ -42462,7 +42508,8 @@ module Crystal::HIR
       end
       resolved_variant_names.reject!(&.empty?)
 
-      normalized_name = resolved_variant_names.join(" | ")
+      normalized_name = normalize_union_type_name(resolved_variant_names.join(" | "))
+      resolved_variant_names = split_union_type_name(normalized_name)
       if @union_in_progress.includes?(normalized_name)
         # If we're already building this union, prefer a cached concrete type.
         if cached = @type_cache[type_cache_key(normalized_name)]?
@@ -42608,7 +42655,7 @@ module Crystal::HIR
     private def create_union_type_for_nullable(concrete_type : TypeRef) : TypeRef
       # Get the name of the concrete type
       type_name = get_type_name_from_ref(concrete_type)
-      union_name = "#{type_name} | Nil"
+      union_name = type_name == "Nil" ? "Nil" : "Nil | #{type_name}"
 
       # Create the union type via the string-based method
       create_union_type(union_name)
