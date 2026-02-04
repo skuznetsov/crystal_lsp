@@ -8582,7 +8582,7 @@ module Crystal::HIR
               end
             end
           end
-        end
+          end
           visited_extends = Set(String).new
           extend_nodes.each do |ext|
             if ENV["DEBUG_EXTEND_REGISTER"]? && module_name.includes?("ImplInfo")
@@ -10213,6 +10213,7 @@ module Crystal::HIR
 
     # Register a nested module with full path
     private def register_nested_module(node : CrystalV2::Compiler::Frontend::ModuleNode, full_name : String)
+      record_nested_type_names(full_name, node.body)
       # Keep nested module AST around for mixin expansion.
       existing_defs = @module_defs.has_key?(full_name)
       (@module_defs[full_name] ||= [] of {CrystalV2::Compiler::Frontend::ModuleNode, CrystalV2::Compiler::Frontend::ArenaLike}) << {node, @arena}
@@ -18814,6 +18815,38 @@ module Crystal::HIR
       name
     end
 
+    private def resolve_nested_builtin_shadow(name : String) : String?
+      if override = @current_namespace_override
+        if shadow = nested_type_shadow_in_namespace(name, override)
+          return shadow
+        end
+      end
+      if current = @current_class
+        if shadow = nested_type_shadow_in_namespace(name, current)
+          return shadow
+        end
+      end
+      nil
+    end
+
+    private def nested_type_shadow_in_namespace(name : String, namespace : String) : String?
+      namespace_base = if info = split_generic_base_and_args(namespace)
+                         info[:base]
+                       else
+                         namespace
+                       end
+      nested = @nested_type_names[namespace_base]? || @nested_type_names[namespace]?
+      return nil unless nested && nested.includes?(name)
+
+      candidate = "#{namespace}::#{name}"
+      return candidate if type_name_exists?(candidate)
+      if namespace_base != namespace
+        base_candidate = "#{namespace_base}::#{name}"
+        return base_candidate if type_name_exists?(base_candidate)
+      end
+      nil
+    end
+
     private def resolve_path_string_in_context(path : String) : String
       return path if path.empty?
       return path if value_literal_name?(path)
@@ -18876,6 +18909,9 @@ module Crystal::HIR
         return name
       end
       if BUILTIN_TYPE_NAMES.includes?(name)
+        if shadow = resolve_nested_builtin_shadow(name)
+          return shadow
+        end
         return name
       end
       if name == "Int" || name == "Float" || name == "Number" || name == "Atomic"
