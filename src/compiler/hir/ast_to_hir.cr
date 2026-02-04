@@ -7772,6 +7772,22 @@ module Crystal::HIR
         left_type = infer_type_from_expr(expr_node.left, self_type_name)
         right_type = infer_type_from_expr(expr_node.right, self_type_name)
         if left_type && right_type
+          integer_op = op == "+" || op == "-" || op == "*" || op == "&" || op == "|" ||
+                       op == "^" || op == "<<" || op == ">>"
+          if integer_op
+            left_node = node_for_expr(expr_node.left)
+            right_node = node_for_expr(expr_node.right)
+            if left_node.is_a?(CrystalV2::Compiler::Frontend::NumberNode) &&
+               unsigned_integer_type?(right_type) && signed_integer_type?(left_type)
+              return right_type
+            end
+            if right_node.is_a?(CrystalV2::Compiler::Frontend::NumberNode) &&
+               unsigned_integer_type?(left_type) && signed_integer_type?(right_type)
+              return left_type
+            end
+          end
+        end
+        if left_type && right_type
           pointer_like = ->(t : TypeRef) do
             return false if t == TypeRef::VOID
             return true if @module.get_type_descriptor(t).try(&.kind) == TypeKind::Pointer
@@ -8782,6 +8798,11 @@ module Crystal::HIR
                   case expr_node
                   when CrystalV2::Compiler::Frontend::DefNode
                     register_module_method_from_def(expr_node, module_name)
+                  when CrystalV2::Compiler::Frontend::AliasNode
+                    old_class = @current_class
+                    @current_class = module_name
+                    register_alias(expr_node)
+                    @current_class = old_class
                   when CrystalV2::Compiler::Frontend::ClassNode
                     class_name = String.new(expr_node.name)
                     full_class_name = "#{module_name}::#{class_name}"
@@ -8945,6 +8966,11 @@ module Crystal::HIR
             case expr_node
             when CrystalV2::Compiler::Frontend::DefNode
               register_module_method_from_def(expr_node, module_name)
+            when CrystalV2::Compiler::Frontend::AliasNode
+              old_class = @current_class
+              @current_class = module_name
+              register_alias(expr_node)
+              @current_class = old_class
             when CrystalV2::Compiler::Frontend::ClassNode
               class_name = String.new(expr_node.name)
               full_class_name = "#{module_name}::#{class_name}"
@@ -8984,6 +9010,11 @@ module Crystal::HIR
               case expr_node
               when CrystalV2::Compiler::Frontend::DefNode
                 register_module_method_from_def(expr_node, module_name)
+              when CrystalV2::Compiler::Frontend::AliasNode
+                old_class = @current_class
+                @current_class = module_name
+                register_alias(expr_node)
+                @current_class = old_class
               when CrystalV2::Compiler::Frontend::ClassNode
                 class_name = String.new(expr_node.name)
                 full_class_name = "#{module_name}::#{class_name}"
@@ -9044,6 +9075,11 @@ module Crystal::HIR
             case expr_node
             when CrystalV2::Compiler::Frontend::DefNode
               register_module_method_from_def(expr_node, module_name)
+            when CrystalV2::Compiler::Frontend::AliasNode
+              old_class = @current_class
+              @current_class = module_name
+              register_alias(expr_node)
+              @current_class = old_class
             when CrystalV2::Compiler::Frontend::ClassNode
               class_name = String.new(expr_node.name)
               full_class_name = "#{module_name}::#{class_name}"
@@ -9096,15 +9132,20 @@ module Crystal::HIR
         if program
           parsed_any = true
           with_arena(program.arena) do
-            program.roots.each do |expr_id|
-              expr_node = @arena[expr_id]
-              case expr_node
-              when CrystalV2::Compiler::Frontend::DefNode
-                register_module_method_from_def(expr_node, module_name)
-              when CrystalV2::Compiler::Frontend::ClassNode
-                class_name = String.new(expr_node.name)
-                full_class_name = "#{module_name}::#{class_name}"
-                register_class_with_name(expr_node, full_class_name)
+          program.roots.each do |expr_id|
+            expr_node = @arena[expr_id]
+            case expr_node
+            when CrystalV2::Compiler::Frontend::DefNode
+              register_module_method_from_def(expr_node, module_name)
+            when CrystalV2::Compiler::Frontend::AliasNode
+              old_class = @current_class
+              @current_class = module_name
+              register_alias(expr_node)
+              @current_class = old_class
+            when CrystalV2::Compiler::Frontend::ClassNode
+              class_name = String.new(expr_node.name)
+              full_class_name = "#{module_name}::#{class_name}"
+              register_class_with_name(expr_node, full_class_name)
               when CrystalV2::Compiler::Frontend::ModuleNode
                 nested_name = String.new(expr_node.name)
                 full_nested_name = "#{module_name}::#{nested_name}"
@@ -9415,6 +9456,11 @@ module Crystal::HIR
         end
       when CrystalV2::Compiler::Frontend::DefNode
         register_module_method_from_def(member, module_name)
+      when CrystalV2::Compiler::Frontend::AliasNode
+        old_class = @current_class
+        @current_class = module_name
+        register_alias(member)
+        @current_class = old_class
       when CrystalV2::Compiler::Frontend::ClassNode
         class_name = String.new(member.name)
         full_class_name = "#{module_name}::#{class_name}"
@@ -15011,6 +15057,16 @@ module Crystal::HIR
       end
 
       has_unsigned && !has_signed ? unsigned_integer_type_for_width(max_bits) : signed_integer_type_for_width(max_bits)
+    end
+
+    private def unsigned_integer_type?(type : TypeRef) : Bool
+      type == TypeRef::UINT8 || type == TypeRef::UINT16 || type == TypeRef::UINT32 ||
+        type == TypeRef::UINT64 || type == TypeRef::UINT128
+    end
+
+    private def signed_integer_type?(type : TypeRef) : Bool
+      type == TypeRef::INT8 || type == TypeRef::INT16 || type == TypeRef::INT32 ||
+        type == TypeRef::INT64 || type == TypeRef::INT128 || type == TypeRef::CHAR
     end
 
     # Extract element type from Pointer(T) class name or method name
