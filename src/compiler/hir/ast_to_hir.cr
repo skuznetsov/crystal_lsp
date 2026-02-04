@@ -10713,6 +10713,39 @@ module Crystal::HIR
         enum_name = String.new(member.name)
         full_enum_name = "#{module_name}::#{enum_name}"
         register_enum_with_name(member, full_enum_name)
+      when CrystalV2::Compiler::Frontend::MacroLiteralNode
+        # Parse macro literal output and lower its contents (defs/classes/modules).
+        if raw_text = macro_literal_raw_text(member)
+          expanded = expand_flag_macro_text(raw_text) || raw_text
+          sanitized = strip_macro_lines(expanded)
+          program = parse_macro_literal_program(expanded)
+          if program.nil? && sanitized != expanded
+            program = parse_macro_literal_program(sanitized)
+          end
+          if program
+            with_arena(program.arena) do
+              program.roots.each do |child_id|
+                lower_module_body_expr(module_name, child_id)
+              end
+            end
+            return
+          end
+        end
+
+        texts = macro_literal_active_texts(member)
+        combined = texts.join("\n")
+        sanitized = strip_macro_lines(combined)
+        program = parse_macro_literal_program(combined)
+        if program.nil? && sanitized != combined
+          program = parse_macro_literal_program(sanitized)
+        end
+        if program
+          with_arena(program.arena) do
+            program.roots.each do |child_id|
+              lower_module_body_expr(module_name, child_id)
+            end
+          end
+        end
       when CrystalV2::Compiler::Frontend::CallNode
         lower_macro_call_in_module_body(module_name, member)
       end
