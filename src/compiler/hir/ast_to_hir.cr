@@ -399,6 +399,43 @@ module Crystal::HIR
       end
     end
 
+    private struct FunctionLookupKey
+      getter func_name : String
+      getter arg_count : Int32
+      getter args_hash : UInt64
+      getter has_block : Bool
+      getter has_args : Bool
+      getter has_splat : Bool
+      getter has_named : Bool
+      getter unknown_args : Bool
+
+      def initialize(@func_name : String, @arg_count : Int32, @args_hash : UInt64, @has_block : Bool, @has_args : Bool, @has_splat : Bool, @has_named : Bool, @unknown_args : Bool)
+      end
+
+      def hash : UInt64
+        h = @func_name.hash
+        h &+= @arg_count.to_u64 &* 31_u64
+        h &+= @args_hash &* 131_u64
+        h &+= (@has_block ? 7_u64 : 0_u64)
+        h &+= (@has_args ? 17_u64 : 0_u64)
+        h &+= (@has_splat ? 23_u64 : 0_u64)
+        h &+= (@has_named ? 29_u64 : 0_u64)
+        h &+= (@unknown_args ? 37_u64 : 0_u64)
+        h
+      end
+
+      def ==(other : FunctionLookupKey) : Bool
+        @func_name == other.func_name &&
+          @arg_count == other.arg_count &&
+          @args_hash == other.args_hash &&
+          @has_block == other.has_block &&
+          @has_args == other.has_args &&
+          @has_splat == other.has_splat &&
+          @has_named == other.has_named &&
+          @unknown_args == other.unknown_args
+      end
+    end
+
     # Parse method name in single pass - O(n) instead of O(3n) for three separate splits
     @[AlwaysInline]
     private def parse_method_name(name : String) : MethodNameParts
@@ -953,6 +990,9 @@ module Crystal::HIR
     # Cache block function def lookup by callsite shape.
     @block_lookup_cache : Hash(BlockLookupKey, Tuple(String, CrystalV2::Compiler::Frontend::DefNode)?) = {} of BlockLookupKey => Tuple(String, CrystalV2::Compiler::Frontend::DefNode)?
     @block_lookup_cache_size : Int32 = 0
+    # Cache function def lookup by callsite shape.
+    @function_lookup_cache : Hash(FunctionLookupKey, Tuple(String, CrystalV2::Compiler::Frontend::DefNode)?) = {} of FunctionLookupKey => Tuple(String, CrystalV2::Compiler::Frontend::DefNode)?
+    @function_lookup_cache_size : Int32 = 0
     # Debug-only: lower node histogram (enabled via DEBUG_LOWER_HISTO)
     @lower_histo_counts : Hash(String, Int32) = {} of String => Int32
     @lower_histo_last : Time::Instant? = nil
@@ -35288,8 +35328,33 @@ module Crystal::HIR
       call_has_named_args : Bool = false
     ) : Tuple(String, CrystalV2::Compiler::Frontend::DefNode)?
       unknown_args = arg_types && arg_types.all? { |t| t == TypeRef::VOID }
+      if @function_lookup_cache_size != @function_defs.size
+        @function_lookup_cache.clear
+        @function_lookup_cache_size = @function_defs.size
+      end
+      args_hash = 0_u64
+      if arg_types
+        arg_types.each do |arg_type|
+          args_hash = (args_hash &* 131_u64) &+ arg_type.id.to_u64
+        end
+      end
+      cache_key = FunctionLookupKey.new(
+        func_name,
+        arg_count,
+        args_hash,
+        has_block,
+        !arg_types.nil?,
+        call_has_splat,
+        call_has_named_args,
+        !!unknown_args
+      )
+      if @function_lookup_cache.has_key?(cache_key)
+        return @function_lookup_cache[cache_key]
+      end
       if func_name.includes?("$")
         if func_def = @function_defs[func_name]?
+          result = {func_name, func_def}
+          @function_lookup_cache[cache_key] = result
           return {func_name, func_def}
         end
       end
@@ -35456,9 +35521,11 @@ module Crystal::HIR
         if has_block
           base = strip_type_suffix(func_name)
           if block_entry = lookup_block_function_def_for_call(base, arg_count, arg_types)
+            @function_lookup_cache[cache_key] = block_entry
             return block_entry
           end
         end
+        @function_lookup_cache[cache_key] = nil
         return nil
       end
       if ENV["DEBUG_PUTS_LOOKUP"]? && func_name.includes?("IO#puts")
@@ -35469,7 +35536,9 @@ module Crystal::HIR
                      end
         STDERR.puts "[DEBUG_PUTS_LOOKUP] func=#{func_name} count=#{arg_count} args=#{type_names} best=#{best_name}"
       end
-      {best_name, best}
+      result = {best_name, best}
+      @function_lookup_cache[cache_key] = result
+      result
     end
 
 
