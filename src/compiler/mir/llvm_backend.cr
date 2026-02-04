@@ -3072,8 +3072,15 @@ module Crystal::MIR
             store_val = "%#{base}.slot_fptrunc"
             store_type = "float"
           elsif (llvm_type == "double" || llvm_type == "float") && slot_llvm_type == "ptr"
-            emit "%#{base}.slot_fptoint = fptosi #{llvm_type} #{name} to i64"
-            emit "%#{base}.slot_inttoptr = inttoptr i64 %#{base}.slot_fptoint to ptr"
+            # Float → ptr: preserve bit pattern (bitcast), then inttoptr.
+            if llvm_type == "double"
+              emit "%#{base}.slot_float_bits = bitcast double #{name} to i64"
+              emit "%#{base}.slot_inttoptr = inttoptr i64 %#{base}.slot_float_bits to ptr"
+            else
+              emit "%#{base}.slot_float_bits = bitcast float #{name} to i32"
+              emit "%#{base}.slot_float_bits_ext = zext i32 %#{base}.slot_float_bits to i64"
+              emit "%#{base}.slot_inttoptr = inttoptr i64 %#{base}.slot_float_bits_ext to ptr"
+            end
             store_val = "%#{base}.slot_inttoptr"
             store_type = slot_llvm_type
           elsif llvm_type == "ptr" && (slot_llvm_type == "double" || slot_llvm_type == "float")
