@@ -5466,19 +5466,14 @@ module Crystal::MIR
                      emit "%fptoptr.#{c} = inttoptr i64 %fptoptr.#{c}.ext to ptr"
                    end
                    "ptr %fptoptr.#{c}"
-                 elsif (expected_llvm_type == "double" || expected_llvm_type == "float") && actual_llvm_type == "ptr"
-                   # Ptr to float conversion: ptrtoint, then bitcast to float
-                   val = value_ref(a)
-                   c = @cond_counter
-                   @cond_counter += 1
-                   if expected_llvm_type == "double"
-                     emit "%ptrtofp.#{c}.int = ptrtoint ptr #{val} to i64"
-                     emit "%ptrtofp.#{c} = bitcast i64 %ptrtofp.#{c}.int to double"
-                   else
-                     emit "%ptrtofp.#{c}.int = ptrtoint ptr #{val} to i32"
-                     emit "%ptrtofp.#{c} = bitcast i32 %ptrtofp.#{c}.int to float"
-                   end
-                   "#{expected_llvm_type} %ptrtofp.#{c}"
+                elsif (expected_llvm_type == "double" || expected_llvm_type == "float") && actual_llvm_type == "ptr"
+                  # Ptr to float conversion: ptrtoint, then unsigned int→float
+                  val = value_ref(a)
+                  c = @cond_counter
+                  @cond_counter += 1
+                  emit "%ptrtofp.#{c}.int = ptrtoint ptr #{val} to i64"
+                  emit "%ptrtofp.#{c} = uitofp i64 %ptrtofp.#{c}.int to #{expected_llvm_type}"
+                  "#{expected_llvm_type} %ptrtofp.#{c}"
                 elsif (expected_llvm_type == "double" || expected_llvm_type == "float") && actual_llvm_type.starts_with?("i")
                    # Int to float conversion: signed or unsigned
                    val = value_ref(a)
