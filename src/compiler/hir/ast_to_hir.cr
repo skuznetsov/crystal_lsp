@@ -16106,7 +16106,7 @@ module Crystal::HIR
         @function_def_overloads_cache[base_name] = list
         return list
       end
-      if stripped_base.nil? && (base_name.includes?("#") || base_name.includes?("."))
+      if base_name.includes?("#") || base_name.includes?(".")
         parts = parse_method_name_compact(base_name)
         if parts.separator && parts.method
           ensure_method_index_built
@@ -16169,6 +16169,20 @@ module Crystal::HIR
       if cached = @function_def_has_splat[base_name]?
         return cached
       end
+      if base_name.includes?("#") || base_name.includes?(".")
+        parts = parse_method_name_compact(base_name)
+        if parts.separator && parts.method
+          ensure_method_index_built
+          base_owner = strip_generic_args(parts.owner)
+          if owner_methods = @method_index[base_owner]?
+            if candidates = owner_methods[parts.method.not_nil!]? 
+              value = candidates.any? { |name| name.includes?("_splat") }
+              @function_def_has_splat[base_name] = value
+              return value
+            end
+          end
+        end
+      end
       stripped = strip_generic_receiver_from_method_name(base_name)
       if stripped != base_name
         if cached = @function_def_has_splat[stripped]?
@@ -16183,6 +16197,20 @@ module Crystal::HIR
       rebuild_function_def_overloads if @function_defs_cache_size != @function_defs.size
       if cached = @function_def_has_double_splat[base_name]?
         return cached
+      end
+      if base_name.includes?("#") || base_name.includes?(".")
+        parts = parse_method_name_compact(base_name)
+        if parts.separator && parts.method
+          ensure_method_index_built
+          base_owner = strip_generic_args(parts.owner)
+          if owner_methods = @method_index[base_owner]?
+            if candidates = owner_methods[parts.method.not_nil!]? 
+              value = candidates.any? { |name| name.includes?("_double_splat") }
+              @function_def_has_double_splat[base_name] = value
+              return value
+            end
+          end
+        end
       end
       stripped = strip_generic_receiver_from_method_name(base_name)
       if stripped != base_name
@@ -20418,6 +20446,21 @@ module Crystal::HIR
           return cached
         end
       end
+      bytesize = method_name.bytesize
+      sep_idx : Int32? = nil
+      paren_idx : Int32? = nil
+      i = 0
+      while i < bytesize
+        byte = method_name.to_unsafe[i]
+        if byte == '('.ord
+          paren_idx ||= i
+        elsif byte == '#'.ord || byte == '.'.ord
+          sep_idx = i
+          break
+        end
+        i += 1
+      end
+      return method_name unless sep_idx && paren_idx && paren_idx < sep_idx
       if cached = @strip_generic_receiver_name_cache[method_name]?
         record_cache_stat("strip_generic_receiver", true)
         @strip_generic_receiver_last_id = method_id
@@ -20425,7 +20468,12 @@ module Crystal::HIR
         return cached
       end
       record_cache_stat("strip_generic_receiver", false)
-      result = strip_generic_receiver_uncached(method_name)
+      total = bytesize - (sep_idx - paren_idx)
+      ptr = method_name.to_unsafe
+      result = String.build(total) do |io|
+        io.write Slice.new(ptr, paren_idx)
+        io.write Slice.new(ptr + sep_idx, bytesize - sep_idx)
+      end
       @strip_generic_receiver_last_id = method_id
       @strip_generic_receiver_last = result
       @strip_generic_receiver_table_keys[slot] = method_id
@@ -20469,7 +20517,20 @@ module Crystal::HIR
 
     # Hot-path variant for overload lookup: avoid cache hash cost.
     private def strip_generic_receiver_for_lookup(method_name : String) : String
-      strip_generic_receiver_from_method_name(method_name)
+      bytesize = method_name.bytesize
+      saw_paren = false
+      i = 0
+      while i < bytesize
+        byte = method_name.to_unsafe[i]
+        if byte == '('.ord
+          saw_paren = true
+        elsif byte == '#'.ord || byte == '.'.ord
+          return strip_generic_receiver_from_method_name(method_name) if saw_paren
+          return method_name
+        end
+        i += 1
+      end
+      method_name
     end
 
     private def strip_generic_receiver_uncached(method_name : String) : String
