@@ -21884,6 +21884,17 @@ module Crystal::HIR
     # Infer type argument for generic class constructor call
     # E.g., Array.new(size, value) -> infer T from value's type
     #       Array.new(size) { block } -> infer T from block's return type
+    private def infer_type_name_from_expr_id(expr_id : ExprId) : String?
+      if inferred = infer_type_from_expr(@arena[expr_id])
+        return inferred
+      end
+      if inferred_ref = infer_type_from_expr(expr_id, @current_class)
+        inferred_name = get_type_name_from_ref(inferred_ref)
+        return inferred_name unless inferred_name.empty? || inferred_name == "Void" || inferred_name == "Unknown"
+      end
+      nil
+    end
+
     private def infer_generic_type_arg(
       class_name : String,
       args : Array(CrystalV2::Compiler::Frontend::ExprId)?,
@@ -32723,19 +32734,31 @@ module Crystal::HIR
             resolved = resolve_type_alias_chain(resolved)
             # Prefer type/module resolution for constant receivers that are actually types.
             if class_name_str.nil? && @generic_templates.has_key?(resolved) && method_name == "new"
-              inferred_type = infer_generic_type_arg(resolved, call_args, block_expr, ctx, node.named_args)
-              if inferred_type
-                specialized_name = "#{resolved}(#{inferred_type})"
-                if !@monomorphized.includes?(specialized_name)
-                  monomorphize_generic_class(resolved, [inferred_type], specialized_name)
+              if resolved == "Range" && call_args && call_args.size >= 2
+                left_name = infer_type_name_from_expr_id(call_args[0])
+                right_name = infer_type_name_from_expr_id(call_args[1])
+                if left_name && right_name
+                  specialized_name = "#{resolved}(#{left_name}, #{right_name})"
+                  if !@monomorphized.includes?(specialized_name)
+                    monomorphize_generic_class(resolved, [left_name, right_name], specialized_name)
+                  end
+                  class_name_str = specialized_name
                 end
-                class_name_str = specialized_name
-              elsif resolved == "Array"
-                specialized_name = "Array(String)"
-                if !@monomorphized.includes?(specialized_name)
-                  monomorphize_generic_class(resolved, ["String"], specialized_name)
+              else
+                inferred_type = infer_generic_type_arg(resolved, call_args, block_expr, ctx, node.named_args)
+                if inferred_type
+                  specialized_name = "#{resolved}(#{inferred_type})"
+                  if !@monomorphized.includes?(specialized_name)
+                    monomorphize_generic_class(resolved, [inferred_type], specialized_name)
+                  end
+                  class_name_str = specialized_name
+                elsif resolved == "Array"
+                  specialized_name = "Array(String)"
+                  if !@monomorphized.includes?(specialized_name)
+                    monomorphize_generic_class(resolved, ["String"], specialized_name)
+                  end
+                  class_name_str = specialized_name
                 end
-                class_name_str = specialized_name
               end
             end
             if class_name_str.nil?
@@ -32793,19 +32816,31 @@ module Crystal::HIR
                 STDERR.puts "[THREAD_RESOLVE] name=#{name} resolved=#{resolved_name} current=#{@current_class || "nil"} override=#{@current_namespace_override || "nil"}"
               end
               if class_name_str.nil? && @generic_templates.has_key?(resolved_name) && method_name == "new"
-                inferred_type = infer_generic_type_arg(resolved_name, call_args, block_expr, ctx, node.named_args)
-                if inferred_type
-                  specialized_name = "#{resolved_name}(#{inferred_type})"
-                  if !@monomorphized.includes?(specialized_name)
-                    monomorphize_generic_class(resolved_name, [inferred_type], specialized_name)
+                if resolved_name == "Range" && call_args && call_args.size >= 2
+                  left_name = infer_type_name_from_expr_id(call_args[0])
+                  right_name = infer_type_name_from_expr_id(call_args[1])
+                  if left_name && right_name
+                    specialized_name = "#{resolved_name}(#{left_name}, #{right_name})"
+                    if !@monomorphized.includes?(specialized_name)
+                      monomorphize_generic_class(resolved_name, [left_name, right_name], specialized_name)
+                    end
+                    class_name_str = specialized_name
                   end
-                  class_name_str = specialized_name
-                elsif resolved_name == "Array"
-                  specialized_name = "Array(String)"
-                  if !@monomorphized.includes?(specialized_name)
-                    monomorphize_generic_class(resolved_name, ["String"], specialized_name)
+                else
+                  inferred_type = infer_generic_type_arg(resolved_name, call_args, block_expr, ctx, node.named_args)
+                  if inferred_type
+                    specialized_name = "#{resolved_name}(#{inferred_type})"
+                    if !@monomorphized.includes?(specialized_name)
+                      monomorphize_generic_class(resolved_name, [inferred_type], specialized_name)
+                    end
+                    class_name_str = specialized_name
+                  elsif resolved_name == "Array"
+                    specialized_name = "Array(String)"
+                    if !@monomorphized.includes?(specialized_name)
+                      monomorphize_generic_class(resolved_name, ["String"], specialized_name)
+                    end
+                    class_name_str = specialized_name
                   end
-                  class_name_str = specialized_name
                 end
               end
               # Prefer class/module resolution when the identifier maps to a known type.
