@@ -354,8 +354,9 @@ module Crystal::HIR
       getter override : String?
       getter current : String?
       getter locals_hash : UInt64
+      getter type_params_hash : UInt64
 
-      def initialize(@override : String?, @current : String?, @locals_hash : UInt64)
+      def initialize(@override : String?, @current : String?, @locals_hash : UInt64, @type_params_hash : UInt64)
       end
 
       def hash : UInt64
@@ -363,11 +364,15 @@ module Crystal::HIR
         h &+= @override.try(&.hash) || 0_u64
         h &+= (@current.try(&.hash) || 0_u64) &* 31_u64
         h &+= @locals_hash &* 131_u64
+        h &+= @type_params_hash &* 521_u64
         h
       end
 
       def ==(other : TypeNameContextKey) : Bool
-        @override == other.override && @current == other.current && @locals_hash == other.locals_hash
+        @override == other.override &&
+          @current == other.current &&
+          @locals_hash == other.locals_hash &&
+          @type_params_hash == other.type_params_hash
       end
     end
 
@@ -8693,6 +8698,11 @@ module Crystal::HIR
             register_class_with_name(member, full_class_name)
           when CrystalV2::Compiler::Frontend::EnumNode
             # Already registered in PASS 1.5 - skip
+          when CrystalV2::Compiler::Frontend::AliasNode
+            old_class = @current_class
+            @current_class = module_name
+            register_alias(member)
+            @current_class = old_class
           when CrystalV2::Compiler::Frontend::MacroIfNode
             # Handle macro conditionals inside module body
             process_macro_if_in_module(member, module_name)
@@ -42543,8 +42553,12 @@ module Crystal::HIR
           @current_typeof_local_names_hash_owner = owner
         end
       end
-      return nil if override.nil? && current.nil? && locals_hash == 0_u64
-      TypeNameContextKey.new(override, current, locals_hash)
+      type_params_hash = 0_u64
+      if !@type_param_map.empty?
+        type_params_hash = @type_param_map.hash
+      end
+      return nil if override.nil? && current.nil? && locals_hash == 0_u64 && type_params_hash == 0_u64
+      TypeNameContextKey.new(override, current, locals_hash, type_params_hash)
     end
 
     private def resolved_type_name_cache_get(name : String) : String?
