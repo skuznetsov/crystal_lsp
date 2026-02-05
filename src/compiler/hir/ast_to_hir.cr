@@ -6247,6 +6247,9 @@ module Crystal::HIR
       return nil if name.empty?
       return nil if name.includes?("::")
 
+      # Nested types of the current class/namespace shadow included module types.
+      return nil if current_or_override_has_nested_type?(name)
+
       namespaces = [] of String
       if override = @current_namespace_override
         if included = @class_included_modules[override]?
@@ -19412,6 +19415,15 @@ module Crystal::HIR
       end
 
       unless name.includes?("::")
+        # Nested types of the current class/namespace take priority over
+        # top-level names, included module types, and type aliases.
+        # E.g., bare "Entry" inside Hash must resolve to Hash::Entry,
+        # not to Crystal::System::Dir::Entry via alias/include.
+        if current_or_override_has_nested_type?(name)
+          resolved = resolve_class_name_in_context(name)
+          resolved_type_name_cache_set(name, resolved)
+          return resolved
+        end
         if @top_level_type_names.includes?(name) || @top_level_class_kinds.has_key?(name) || BUILTIN_TYPE_NAMES.includes?(name)
           unless nested_shadowed_type_name?(name)
             resolved_type_name_cache_set(name, name)
@@ -19466,6 +19478,38 @@ module Crystal::HIR
         STDERR.puts "[DEBUG_FIBER_RESOLVE] name=#{name} current=#{@current_class || "nil"} override=#{@current_namespace_override || "nil"} resolved=#{name} top_level=#{@top_level_type_names.includes?(name)}"
       end
       name
+    end
+
+    # Check if the current class or namespace override (or any ancestor
+    # namespace) has a nested type with the given short name.  Unlike
+    # nested_shadowed_type_name? this does NOT require the name to also be
+    # a top-level type.  Walks up the namespace hierarchy so that code
+    # inside Hash::Entry can still see Hash::Entry via the parent Hash.
+    private def current_or_override_has_nested_type?(name : String) : Bool
+      if override = @current_namespace_override
+        return true if namespace_chain_has_nested?(override, name)
+      end
+      if current = @current_class
+        return true if namespace_chain_has_nested?(current, name)
+      end
+      false
+    end
+
+    private def namespace_chain_has_nested?(ns : String, name : String) : Bool
+      base = if info = split_generic_base_and_args(ns)
+               info[:base]
+             else
+               ns
+             end
+      loop do
+        if (nested = @nested_type_names[base]?) && nested.includes?(name)
+          return true
+        end
+        idx = base.rindex("::")
+        break unless idx
+        base = base[0, idx]
+      end
+      false
     end
 
     private def nested_shadowed_type_name?(name : String) : Bool
