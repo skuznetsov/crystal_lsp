@@ -1005,6 +1005,10 @@ module Crystal::HIR
     @method_name_parts_cache : Hash(UInt64, MethodNameParts) = {} of UInt64 => MethodNameParts
     @method_name_parts_last_id : UInt64 = 0
     @method_name_parts_last : MethodNameParts? = nil
+    @type_param_map_hash_owner : UInt64 = 0
+    @type_param_map_hash_value : UInt64 = 0
+    @resolved_type_name_cache_last_ctx_key : TypeNameContextKey? = nil
+    @resolved_type_name_cache_last_ctx_map : Hash(String, ResolvedTypeNameCacheEntry)? = nil
     # Lightweight owner/method cache used in def lookup (avoids parse_method_name).
     @method_name_compact_cache : Hash(UInt64, MethodNamePartsCompact) = {} of UInt64 => MethodNamePartsCompact
     @method_name_compact_last_id : UInt64 = 0
@@ -42694,7 +42698,14 @@ module Crystal::HIR
       end
       type_params_hash = 0_u64
       if !@type_param_map.empty?
-        type_params_hash = @type_param_map.hash
+        owner = @type_param_map.object_id
+        if @type_param_map_hash_owner == owner
+          type_params_hash = @type_param_map_hash_value
+        else
+          type_params_hash = @type_param_map.hash
+          @type_param_map_hash_value = type_params_hash
+          @type_param_map_hash_owner = owner
+        end
       end
       return nil if override.nil? && current.nil? && locals_hash == 0_u64 && type_params_hash == 0_u64
       TypeNameContextKey.new(override, current, locals_hash, type_params_hash)
@@ -42702,7 +42713,16 @@ module Crystal::HIR
 
     private def resolved_type_name_cache_get(name : String) : String?
       if ctx = current_type_name_context_key
-        if map = @resolved_type_name_cache_by_ctx[ctx]?
+        map = nil
+        if @resolved_type_name_cache_last_ctx_key == ctx
+          map = @resolved_type_name_cache_last_ctx_map
+        end
+        unless map
+          map = @resolved_type_name_cache_by_ctx[ctx]?
+          @resolved_type_name_cache_last_ctx_key = ctx
+          @resolved_type_name_cache_last_ctx_map = map
+        end
+        if map
           if entry = map[name]?
             if resolved_type_name_cache_entry_valid?(name, entry)
               record_cache_stat("resolved_type_ctx", true)
@@ -42728,12 +42748,20 @@ module Crystal::HIR
 
     private def resolved_type_name_cache_set(name : String, value : String) : Nil
       if ctx = current_type_name_context_key
-        map = @resolved_type_name_cache_by_ctx[ctx]?
+        map = nil
+        if @resolved_type_name_cache_last_ctx_key == ctx
+          map = @resolved_type_name_cache_last_ctx_map
+        end
+        unless map
+          map = @resolved_type_name_cache_by_ctx[ctx]?
+        end
         unless map
           map = {} of String => ResolvedTypeNameCacheEntry
           @resolved_type_name_cache_by_ctx[ctx] = map
         end
         map[name] = ResolvedTypeNameCacheEntry.new(value, @resolved_type_name_cache_epoch)
+        @resolved_type_name_cache_last_ctx_key = ctx
+        @resolved_type_name_cache_last_ctx_map = map
       else
         @resolved_type_name_cache_global[name] = ResolvedTypeNameCacheEntry.new(value, @resolved_type_name_cache_epoch)
       end
