@@ -10677,12 +10677,17 @@ module Crystal::HIR
           end
         end
         # PASS 2: Register functions and other members (now that aliases are available)
+        # Skip method signature registration for generic module templates -
+        # their methods will be registered during monomorphization when
+        # type parameters are substituted with concrete types.
+        is_generic_module_template = node.type_params.try(&.size.>(0)) && !full_name.includes?("(")
         old_class = @current_class
         @current_class = full_name
         begin
           # Register constants before functions (e.g., CACHE constant in ImplInfo_Float32)
-          record_constants_in_body(full_name, body)
+          record_constants_in_body(full_name, body) unless is_generic_module_template
           body.each do |expr_id|
+            next if is_generic_module_template
             member = unwrap_visibility_member(@arena[expr_id])
             case member
           when CrystalV2::Compiler::Frontend::DefNode
