@@ -32325,7 +32325,7 @@ module Crystal::HIR
           full_method_name = method_name
           if owner = method_owner(method_name)
             static_class_name = owner
-            method_name = method_short_from_name(method_name)
+            method_name = method_short_from_name(method_name) || method_name
           end
         end
         if method_name == "system_init" && @current_class == "File"
@@ -32654,6 +32654,12 @@ module Crystal::HIR
           obj_node = @arena[obj_expr]
         end
         force_instance_receiver = false
+        if !@current_method_is_class &&
+           (obj_node.is_a?(CrystalV2::Compiler::Frontend::SelfNode) ||
+            obj_node.is_a?(CrystalV2::Compiler::Frontend::ImplicitObjNode) ||
+            (obj_node.is_a?(CrystalV2::Compiler::Frontend::IdentifierNode) && String.new(obj_node.name) == "self"))
+          force_instance_receiver = true
+        end
         type_param_receiver_name : String? = nil
         if obj_node.is_a?(CrystalV2::Compiler::Frontend::IdentifierNode)
           name = String.new(obj_node.name)
@@ -33169,6 +33175,11 @@ module Crystal::HIR
             end
           end
         end
+        if ENV["DEBUG_SELF_TO_S"]? && method_name == "to_s"
+          recv_id = receiver_id ? receiver_id.to_s : "nil"
+          recv_lit = receiver_id ? ctx.type_literal?(receiver_id) : false
+          STDERR.puts "[SELF_TO_S] explicit=#{explicit_self_receiver} force=#{force_instance_receiver} recv_id=#{recv_id} lit=#{recv_lit} class_name=#{class_name_str || "nil"} current=#{@current_class || "nil"}##{@current_method || "nil"} class_method=#{@current_method_is_class}"
+        end
 
         if ENV["DEBUG_FIBER_CURRENT"]? && method_name == "current"
           obj_kind = obj_node.class.name.split("::").last
@@ -33355,6 +33366,10 @@ module Crystal::HIR
               obj_node.is_a?(CrystalV2::Compiler::Frontend::ImplicitObjNode) ||
               (obj_node.is_a?(CrystalV2::Compiler::Frontend::IdentifierNode) && String.new(obj_node.name) == "self"))
             receiver_is_type_literal = false
+          end
+          if ENV["DEBUG_SELF_TO_S"]? && method_name == "to_s"
+            recv_name = receiver_id ? get_type_name_from_ref(ctx.type_of(receiver_id)) : "nil"
+            STDERR.puts "[SELF_TO_S_LIT] explicit=#{explicit_self_receiver} force=#{force_instance_receiver} lit=#{receiver_is_type_literal} recv_type=#{recv_name}"
           end
           if !receiver_is_type_literal
             raw_name = case obj_node
@@ -33593,7 +33608,7 @@ module Crystal::HIR
       # Normalize any fully-qualified method name that may have slipped into method_name.
       # This keeps method_name as the short identifier for later resolution.
       if method_name.includes?(".")
-        method_name = method_short_from_name(method_name)
+        method_name = method_short_from_name(method_name) || method_name
       end
 
       # Handle named arguments by reordering them to match parameter positions
@@ -34339,7 +34354,8 @@ module Crystal::HIR
          !@function_defs.has_key?(mangled_method_name)
         owner = method_owner(mangled_method_name) || method_owner(base_method_name)
         if owner && !owner.empty? && type_name_exists?(owner)
-          wrapper = ensure_unbound_instance_method_wrapper(owner, method_short_from_name(mangled_method_name), arg_types)
+          short_name = method_short_from_name(mangled_method_name) || method_name
+          wrapper = ensure_unbound_instance_method_wrapper(owner, short_name, arg_types)
           if wrapper
             base_method_name = strip_type_suffix(wrapper)
             mangled_method_name = wrapper
@@ -34348,7 +34364,7 @@ module Crystal::HIR
           else
             owner_ref = type_ref_for_name(owner)
             meta_owner = module_type_ref?(owner_ref) ? "Module" : "Class"
-            short_method = method_short_from_name(mangled_method_name)
+            short_method = method_short_from_name(mangled_method_name) || method_name
             if resolve_class_method_with_inheritance(owner, short_method).nil?
               if wrapper = ensure_type_literal_class_method(owner, short_method, arg_types, meta_owner)
                 base_method_name = strip_type_suffix(wrapper)
@@ -36060,6 +36076,9 @@ module Crystal::HIR
         arg_type_names = args.map { |arg_id| get_type_name_from_ref(ctx.type_of(arg_id)) }
         ret_name = get_type_name_from_ref(return_type)
         STDERR.puts "[MATH_MIN_EMIT] method=#{method_name} mangled=#{mangled_method_name} base=#{base_method_name} args=#{arg_type_names.join(",")} return=#{ret_name} func=#{ctx.function.name}"
+      end
+      if ENV["DEBUG_SELF_TO_S"]? && method_name == "to_s"
+        STDERR.puts "[SELF_TO_S_EMIT] mangled=#{mangled_method_name} base=#{base_method_name} full=#{full_method_name || "nil"} recv=#{receiver_id || "nil"} current=#{@current_class || "nil"}##{@current_method || "nil"}"
       end
       call = Call.new(ctx.next_id, return_type, receiver_id, mangled_method_name, args, block_id, call_virtual)
       ctx.emit(call)
