@@ -976,6 +976,10 @@ module Crystal::HIR
     @strip_generic_receiver_table_keys : Array(UInt64) = Array(UInt64).new(2048, 0_u64)
     @strip_generic_receiver_table_vals : Array(String?) = Array(String?).new(2048, nil)
     @strip_generic_receiver_table_mask : UInt64 = 2047_u64
+    # Content-keyed cache for strip_generic_receiver to avoid per-call allocations.
+    @strip_generic_receiver_name_cache : Hash(String, String) = {} of String => String
+    @strip_generic_receiver_name_cache_size : Int32 = 0
+    @strip_generic_receiver_name_cache_limit : Int32 = 20000
     # Cache for function_def_overloads stripped receiver lookups: stripped base → overload list
     @function_def_overloads_stripped_cache : Hash(String, Array(String)) = {} of String => Array(String)
     # Incremental index: stripped base → overload list (avoid full scan per lookup)
@@ -20401,12 +20405,24 @@ module Crystal::HIR
           return cached
         end
       end
+      if cached = @strip_generic_receiver_name_cache[method_name]?
+        record_cache_stat("strip_generic_receiver", true)
+        @strip_generic_receiver_last_id = method_id
+        @strip_generic_receiver_last = cached
+        return cached
+      end
       record_cache_stat("strip_generic_receiver", false)
       result = strip_generic_receiver_uncached(method_name)
       @strip_generic_receiver_last_id = method_id
       @strip_generic_receiver_last = result
       @strip_generic_receiver_table_keys[slot] = method_id
       @strip_generic_receiver_table_vals[slot] = result
+      @strip_generic_receiver_name_cache[method_name] = result
+      @strip_generic_receiver_name_cache_size += 1
+      if @strip_generic_receiver_name_cache_size > @strip_generic_receiver_name_cache_limit
+        @strip_generic_receiver_name_cache.clear
+        @strip_generic_receiver_name_cache_size = 0
+      end
       result
     end
 
@@ -35976,31 +35992,35 @@ module Crystal::HIR
         end
       end
 
-      stripped_func = func_name.includes?('(') ? strip_generic_receiver_for_lookup(func_name) : func_name
-      overload_keys = function_def_overloads(func_name, stripped_func)
-      if overload_keys.empty?
-        # Fall back to base name if call included a mangled suffix.
-        base = strip_type_suffix(func_name)
-        if base != func_name
-          stripped_base = stripped_func != func_name ? strip_type_suffix(stripped_func) : nil
-          overload_keys = function_def_overloads(base, stripped_base)
-        end
-      end
-      if overload_keys.empty?
-        stripped = stripped_func
-        if stripped != func_name
-          overload_keys = function_def_overloads(stripped, stripped)
-        end
-      end
-      if overload_keys.empty? && (func_name.includes?("#") || func_name.includes?("."))
+      overload_keys = [] of String
+      if func_name.includes?("#") || func_name.includes?(".")
         parts = parse_method_name_compact(func_name)
         if parts.separator && parts.method
           ensure_method_index_built
           base_owner = strip_generic_args(parts.owner)
           if owner_methods = @method_index[base_owner]?
             if candidates = owner_methods[parts.method.not_nil!]? 
-              overload_keys = candidates
+              overload_keys = candidates unless candidates.empty?
             end
+          end
+        end
+      end
+
+      if overload_keys.empty?
+        stripped_func = func_name.includes?('(') ? strip_generic_receiver_for_lookup(func_name) : func_name
+        overload_keys = function_def_overloads(func_name, stripped_func)
+        if overload_keys.empty?
+          # Fall back to base name if call included a mangled suffix.
+          base = strip_type_suffix(func_name)
+          if base != func_name
+            stripped_base = stripped_func != func_name ? strip_type_suffix(stripped_func) : nil
+            overload_keys = function_def_overloads(base, stripped_base)
+          end
+        end
+        if overload_keys.empty?
+          stripped = stripped_func
+          if stripped != func_name
+            overload_keys = function_def_overloads(stripped, stripped)
           end
         end
       end
