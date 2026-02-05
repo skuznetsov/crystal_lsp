@@ -33682,8 +33682,15 @@ module Crystal::HIR
         STDERR.puts "[CALL_TRACE] stage=after_double_splat method=#{method_name} args=#{args.size} receiver=#{!!receiver_id} full=#{full_method_name || ""}"
       end
 
-      if static_class_name && method_name == "new"
-        if enum_name = resolve_enum_name(static_class_name)
+      if method_name == "new"
+        enum_owner = static_class_name || class_name_str
+        enum_name = enum_owner ? resolve_enum_name(enum_owner) : nil
+        if ENV["DEBUG_ENUM_NEW"]? && (enum_owner || enum_name)
+          if enum_owner && (enum_owner.includes?("DWARF") || enum_owner.includes?("MachO") || enum_owner == "Errno" || enum_owner == "Signal")
+            STDERR.puts "[ENUM_NEW] owner=#{enum_owner} enum=#{enum_name || "nil"} static=#{static_class_name || "nil"} args=#{args.size}"
+          end
+        end
+        if enum_owner && enum_name
           enum_type = enum_base_type(enum_name)
           if args.size == 1
             value_id = args.first
