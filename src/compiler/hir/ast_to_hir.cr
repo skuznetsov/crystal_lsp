@@ -21748,6 +21748,7 @@ module Crystal::HIR
       return false if overloads.empty?
       expected_base = strip_type_suffix(base_name)
       overloads.any? do |name|
+        next false unless @function_defs.has_key?(name)
         parts = parse_method_name_compact(name)
         parts.separator == '.' && parts.base == expected_base
       end
@@ -32505,6 +32506,10 @@ module Crystal::HIR
           local_hit = obj_name ? ctx.lookup_local(obj_name) : nil
           STDERR.puts "[FROM_IO_CALL] obj=#{obj_kind} name=#{obj_name || "nil"} local=#{local_hit || "nil"} force_instance=#{force_instance_receiver}"
         end
+        if type_param_receiver_name && class_name_str.nil?
+          class_name_str = type_param_receiver_name
+          force_instance_receiver = false
+        end
 
         if obj_node.is_a?(CrystalV2::Compiler::Frontend::SelfNode) && @current_method_is_class
           class_name_str = @current_class
@@ -33278,8 +33283,14 @@ module Crystal::HIR
             # Fallback: if not found in class_info, try type descriptor name
             # This handles records, generic structs, and module types
             unless full_method_name
-              if type_desc = @module.get_type_descriptor(receiver_type)
-                type_name = normalize_method_owner_name(type_desc.name)
+              type_desc = @module.get_type_descriptor(receiver_type)
+              type_name = type_desc ? normalize_method_owner_name(type_desc.name) : ""
+              if type_name.empty?
+                if primitive_name = primitive_class_name(receiver_type)
+                  type_name = primitive_name unless primitive_name.starts_with?("Pointer(")
+                end
+              end
+              if !type_name.empty?
                 # DEBUG: Detect type name mismatches for any type that doesn't include ::
                 if ENV.has_key?("DEBUG_TYPE_RESOLVE") && !type_name.includes?("::")
                   STDERR.puts "[DEBUG_TYPE] method=#{method_name}, receiver_type_id=#{receiver_type.id}, type_name=#{type_name}"
@@ -33289,45 +33300,50 @@ module Crystal::HIR
                    (type_name == "Seek" || type_name == "Section" || type_name == "LoadCommand" || type_name == "Sequence")
                   STDERR.puts "[SHORT_NAME_FALLBACK] type=#{type_name}, method=#{method_name}, receiver_id=#{receiver_type.id}"
                 end
-                unless type_name.empty?
-                  if receiver_is_type_literal
-                    full_method_name = "#{type_name}.#{method_name}"
-                    receiver_id = nil
-                    static_class_name = type_name
-                    if method_name == "new"
-                      if class_info = @class_info[type_name]?
-                        generate_allocator(type_name, class_info)
-                      end
-                    end
-                  elsif type_desc.kind == TypeKind::Module
-                    # Module-typed receivers should use instance-style dispatch (#),
-                    # so virtual dispatch can target concrete module implementations.
-                    full_method_name = "#{type_name}##{method_name}"
-                  elsif type_desc.kind == TypeKind::Union
-                    # Union types: resolve method to a concrete variant's method
-                    # This prevents generating calls to non-existent union methods like Int64|Int32#to_i32!
-                    union_name = normalize_union_type_name(type_name)
-                    # At this point arg_types aren't computed yet, so use empty array to just find any matching variant
-                    if resolved = resolve_union_method_call(union_name, method_name, [] of TypeRef, false)
-                      full_method_name = resolved
-                    else
-                      # Fallback: use union name with method (will be handled by virtual dispatch)
-                      full_method_name = "#{union_name}##{method_name}"
-                    end
+                if receiver_is_type_literal
+                  full_method_name = resolve_class_method_with_inheritance(type_name, method_name) || "#{type_name}.#{method_name}"
+                  static_class_name = method_owner(full_method_name)
+                  if !@function_defs.has_key?(full_method_name) &&
+                     !class_method_overload_exists?(full_method_name)
+                    meta_owner = receiver_is_module ? "Module" : "Class"
+                    full_method_name = resolve_method_with_inheritance(meta_owner, method_name) || "#{meta_owner}##{method_name}"
+                    static_class_name = nil
                   else
-                    # Try to find method with this type name
-                    test_method = "#{type_name}##{method_name}"
-                    if @function_types.has_key?(test_method) || has_function_base?(test_method)
-                      full_method_name = test_method
-                    else
-                      # Even if method not registered, use type name as prefix
-                      # This ensures proper symbol naming
-                      full_method_name = test_method
+                    receiver_id = nil
+                  end
+                  if method_name == "new"
+                    if class_info = @class_info[type_name]?
+                      generate_allocator(type_name, class_info)
                     end
-                    if method_name == "new"
-                      if class_info = @class_info[type_name]?
-                        generate_allocator(type_name, class_info)
-                      end
+                  end
+                elsif type_desc && type_desc.kind == TypeKind::Module
+                  # Module-typed receivers should use instance-style dispatch (#),
+                  # so virtual dispatch can target concrete module implementations.
+                  full_method_name = "#{type_name}##{method_name}"
+                elsif type_desc && type_desc.kind == TypeKind::Union
+                  # Union types: resolve method to a concrete variant's method
+                  # This prevents generating calls to non-existent union methods like Int64|Int32#to_i32!
+                  union_name = normalize_union_type_name(type_name)
+                  # At this point arg_types aren't computed yet, so use empty array to just find any matching variant
+                  if resolved = resolve_union_method_call(union_name, method_name, [] of TypeRef, false)
+                    full_method_name = resolved
+                  else
+                    # Fallback: use union name with method (will be handled by virtual dispatch)
+                    full_method_name = "#{union_name}##{method_name}"
+                  end
+                else
+                  # Try to find method with this type name
+                  test_method = "#{type_name}##{method_name}"
+                  if @function_types.has_key?(test_method) || has_function_base?(test_method)
+                    full_method_name = test_method
+                  else
+                    # Even if method not registered, use type name as prefix
+                    # This ensures proper symbol naming
+                    full_method_name = test_method
+                  end
+                  if method_name == "new"
+                    if class_info = @class_info[type_name]?
+                      generate_allocator(type_name, class_info)
                     end
                   end
                 end
