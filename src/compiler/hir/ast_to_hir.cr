@@ -969,14 +969,13 @@ module Crystal::HIR
 
     # Cache for yield_function_name_for: method_name → yield function name (or nil)
     @yield_name_cache : Hash(String, String?) = {} of String => String?
-    # Cache for strip_generic_receiver_from_method_name: method_name object_id → stripped
-    @strip_generic_receiver_cache : Hash(UInt64, String) = {} of UInt64 => String
+    # Cache for strip_generic_receiver_from_method_name: last-hit + direct-mapped table
     @strip_generic_receiver_last_id : UInt64 = 0
     @strip_generic_receiver_last : String? = nil
     # Direct-mapped cache for strip_generic_receiver (reduces hash churn).
-    @strip_generic_receiver_table_keys : Array(UInt64) = Array(UInt64).new(256, 0_u64)
-    @strip_generic_receiver_table_vals : Array(String?) = Array(String?).new(256, nil)
-    @strip_generic_receiver_table_mask : UInt64 = 255_u64
+    @strip_generic_receiver_table_keys : Array(UInt64) = Array(UInt64).new(2048, 0_u64)
+    @strip_generic_receiver_table_vals : Array(String?) = Array(String?).new(2048, nil)
+    @strip_generic_receiver_table_mask : UInt64 = 2047_u64
     # Cache for function_def_overloads stripped receiver lookups: stripped base → overload list
     @function_def_overloads_stripped_cache : Hash(String, Array(String)) = {} of String => Array(String)
     # Incremental index: stripped base → overload list (avoid full scan per lookup)
@@ -16104,7 +16103,13 @@ module Crystal::HIR
         return list
       end
 
-      stripped = stripped_base || strip_generic_receiver_for_lookup(base_name)
+      stripped = if stripped_base
+                   stripped_base
+                 elsif base_name.includes?('(')
+                   strip_generic_receiver_for_lookup(base_name)
+                 else
+                   base_name
+                 end
       if stripped != base_name
         if cached = @function_def_overloads_stripped_cache[stripped]?
           @function_def_overloads_cache[base_name] = cached
@@ -20396,17 +20401,8 @@ module Crystal::HIR
           return cached
         end
       end
-      if cached = @strip_generic_receiver_cache[method_id]?
-        record_cache_stat("strip_generic_receiver", true)
-        @strip_generic_receiver_last_id = method_id
-        @strip_generic_receiver_last = cached
-        @strip_generic_receiver_table_keys[slot] = method_id
-        @strip_generic_receiver_table_vals[slot] = cached
-        return cached
-      end
       record_cache_stat("strip_generic_receiver", false)
       result = strip_generic_receiver_uncached(method_name)
-      @strip_generic_receiver_cache[method_id] = result
       @strip_generic_receiver_last_id = method_id
       @strip_generic_receiver_last = result
       @strip_generic_receiver_table_keys[slot] = method_id
@@ -20467,11 +20463,11 @@ module Crystal::HIR
 
       return method_name unless sep_idx && paren_idx && paren_idx < sep_idx
 
-      base = method_name.byte_slice(0, paren_idx)
-      suffix = method_name.byte_slice(sep_idx)
-      String.build do |io|
-        io << base
-        io << suffix
+      total = bytesize - (sep_idx - paren_idx)
+      ptr = method_name.to_unsafe
+      String.build(total) do |io|
+        io.write Slice.new(ptr, paren_idx)
+        io.write Slice.new(ptr + sep_idx, bytesize - sep_idx)
       end
     end
 
@@ -35980,7 +35976,7 @@ module Crystal::HIR
         end
       end
 
-      stripped_func = strip_generic_receiver_for_lookup(func_name)
+      stripped_func = func_name.includes?('(') ? strip_generic_receiver_for_lookup(func_name) : func_name
       overload_keys = function_def_overloads(func_name, stripped_func)
       if overload_keys.empty?
         # Fall back to base name if call included a mangled suffix.
