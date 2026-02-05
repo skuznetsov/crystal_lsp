@@ -971,6 +971,8 @@ module Crystal::HIR
     @yield_name_cache : Hash(String, String?) = {} of String => String?
     # Cache for strip_generic_receiver_from_method_name: method_name object_id → stripped
     @strip_generic_receiver_cache : Hash(UInt64, String) = {} of UInt64 => String
+    @strip_generic_receiver_last_id : UInt64 = 0
+    @strip_generic_receiver_last : String? = nil
     # Cache for function_def_overloads stripped receiver lookups: stripped base → overload list
     @function_def_overloads_stripped_cache : Hash(String, Array(String)) = {} of String => Array(String)
     # Incremental index: stripped base → overload list (avoid full scan per lookup)
@@ -20375,13 +20377,23 @@ module Crystal::HIR
 
     private def strip_generic_receiver_from_method_name(method_name : String) : String
       method_id = method_name.object_id
+      if method_id == @strip_generic_receiver_last_id
+        if cached = @strip_generic_receiver_last
+          record_cache_stat("strip_generic_receiver", true)
+          return cached
+        end
+      end
       if cached = @strip_generic_receiver_cache[method_id]?
         record_cache_stat("strip_generic_receiver", true)
+        @strip_generic_receiver_last_id = method_id
+        @strip_generic_receiver_last = cached
         return cached
       end
       record_cache_stat("strip_generic_receiver", false)
       result = strip_generic_receiver_uncached(method_name)
       @strip_generic_receiver_cache[method_id] = result
+      @strip_generic_receiver_last_id = method_id
+      @strip_generic_receiver_last = result
       result
     end
 
