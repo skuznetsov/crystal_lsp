@@ -32480,19 +32480,30 @@ module Crystal::HIR
           obj_node = @arena[obj_expr]
         end
         force_instance_receiver = false
+        type_param_receiver_name : String? = nil
         if obj_node.is_a?(CrystalV2::Compiler::Frontend::IdentifierNode)
           name = String.new(obj_node.name)
           if name != "self"
-            if (local_id = ctx.lookup_local(name)) && !ctx.type_literal?(local_id)
+            if local_id = ctx.lookup_local(name)
               force_instance_receiver = true
-            elsif @type_param_map.has_key?(name)
+            elsif mapped = @type_param_map[name]?
+              type_param_receiver_name = mapped
               force_instance_receiver = true
             elsif @type_param_map.empty?
               if inferred_map = fallback_type_param_map_for_current
-                force_instance_receiver = true if inferred_map.has_key?(name)
+                if mapped = inferred_map[name]?
+                  type_param_receiver_name = mapped
+                  force_instance_receiver = true
+                end
               end
             end
           end
+        end
+        if ENV["DEBUG_FROM_IO_CALL"]? && method_name == "from_io"
+          obj_kind = obj_node.class.name.split("::").last
+          obj_name = obj_node.is_a?(CrystalV2::Compiler::Frontend::IdentifierNode) ? String.new(obj_node.name) : nil
+          local_hit = obj_name ? ctx.lookup_local(obj_name) : nil
+          STDERR.puts "[FROM_IO_CALL] obj=#{obj_kind} name=#{obj_name || "nil"} local=#{local_hit || "nil"} force_instance=#{force_instance_receiver}"
         end
 
         if obj_node.is_a?(CrystalV2::Compiler::Frontend::SelfNode) && @current_method_is_class
@@ -32502,12 +32513,17 @@ module Crystal::HIR
           substituted_name = substitute_type_params_in_type_name(name)
           substituted = substituted_name != name
           if substituted
+            type_param_receiver_name = substituted_name
             force_instance_receiver = true
-          elsif @type_param_map.has_key?(name)
+          elsif mapped = @type_param_map[name]?
+            type_param_receiver_name = mapped
             force_instance_receiver = true
           elsif @type_param_map.empty?
             if inferred_map = fallback_type_param_map_for_current
-              force_instance_receiver = true if inferred_map.has_key?(name)
+              if mapped = inferred_map[name]?
+                type_param_receiver_name = mapped
+                force_instance_receiver = true
+              end
             end
           end
           unless force_instance_receiver
@@ -32752,10 +32768,14 @@ module Crystal::HIR
           # Path like Foo::Bar for nested classes/modules
           raw_path = collect_path_string(obj_node)
           if mapped = @type_param_map[raw_path]?
+            type_param_receiver_name = mapped
             force_instance_receiver = true
           elsif @type_param_map.empty?
             if inferred_map = fallback_type_param_map_for_current
-              force_instance_receiver = true if inferred_map.has_key?(raw_path)
+              if mapped = inferred_map[raw_path]?
+                type_param_receiver_name = mapped
+                force_instance_receiver = true
+              end
             end
           end
           unless force_instance_receiver
@@ -32906,6 +32926,11 @@ module Crystal::HIR
           end
         end
 
+        if receiver_id.nil? && type_param_receiver_name
+          receiver_id = lower_type_literal_from_name(ctx, type_param_receiver_name)
+          receiver_type = ctx.type_of(receiver_id)
+        end
+
         if class_name_str.nil?
           if receiver_id.nil? && obj_node.is_a?(CrystalV2::Compiler::Frontend::IdentifierNode) && ctx.lookup_local(String.new(obj_node.name)).nil?
             obj_name = String.new(obj_node.name)
@@ -32972,6 +32997,9 @@ module Crystal::HIR
           STDERR.puts "[DEBUG_FIBER_CURRENT] obj=#{obj_kind} owner=#{class_name_str || "nil"} current_class=#{@current_class || "nil"}"
         end
         if class_name_str
+          if ENV["DEBUG_FROM_IO_CALL"]? && method_name == "from_io"
+            STDERR.puts "[FROM_IO_CLASS] owner=#{class_name_str} receiver_id=#{receiver_id || "nil"} force_instance=#{force_instance_receiver}"
+          end
           if ENV["DEBUG_EXE_PATH_CALL"]? && method_name == "executable_path"
             raw_obj = stringify_type_expr(callee_node.object) || "(unknown)"
             STDERR.puts "[DEBUG_EXE_PATH_CALL] obj=#{obj_node.class.name.split("::").last} raw=#{raw_obj} resolved=#{class_name_str} current=#{@current_class || "nil"} override=#{@current_namespace_override || "nil"}"
@@ -33076,10 +33104,8 @@ module Crystal::HIR
             receiver_type = ctx.type_of(literal_id)
             receiver_is_module = module_type_ref?(receiver_type)
             meta_owner = receiver_is_module ? "Module" : "Class"
-            if meta_method = resolve_method_with_inheritance(meta_owner, method_name)
-              full_method_name = meta_method
-              static_class_name = nil
-            end
+            full_method_name = resolve_method_with_inheritance(meta_owner, method_name) || "#{meta_owner}##{method_name}"
+            static_class_name = nil
           end
           if full_method_name
             call_has_splat = call_args.any? { |arg_expr| call_arena[arg_expr].is_a?(CrystalV2::Compiler::Frontend::SplatNode) }
@@ -33168,6 +33194,11 @@ module Crystal::HIR
               end
             end
           end
+          if ENV["DEBUG_FROM_IO_CALL"]? && method_name == "from_io"
+            recv_desc = @module.get_type_descriptor(receiver_type)
+            recv_name = recv_desc ? recv_desc.name : "nil"
+            STDERR.puts "[FROM_IO_RECV] type=#{recv_name} id=#{receiver_type.id} literal=#{receiver_is_type_literal}"
+          end
           ensure_monomorphized_type(receiver_type) unless receiver_type == TypeRef::VOID
           if debug_env_filter_match?("DEBUG_EACH_RESOLVE", method_name)
             desc_name = @module.get_type_descriptor(receiver_type).try(&.name) || "nil"
@@ -33191,13 +33222,6 @@ module Crystal::HIR
                 STDERR.puts "[CLASS_MATCH] method=#{method_name}, receiver_id=#{receiver_type.id}, name=#{name}"
               end
             if receiver_is_type_literal
-                if method_name != "new"
-                  meta_owner = receiver_is_module ? "Module" : "Class"
-                  if meta_method = resolve_method_with_inheritance(meta_owner, method_name)
-                    full_method_name = meta_method
-                    static_class_name = nil
-                  end
-                end
                 if method_name == "new"
                   full_method_name = "#{name}.#{method_name}"
                   static_class_name = name
