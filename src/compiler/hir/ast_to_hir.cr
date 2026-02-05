@@ -948,6 +948,9 @@ module Crystal::HIR
     @method_index_built : Bool = false
     @method_index_size_at_build : Int32 = 0
     @method_index_processed_count : Int32 = 0
+    @method_index_last_owner : String? = nil
+    @method_index_last_method : String? = nil
+    @method_index_last_candidates : Array(String)? = nil
     @parent_lookup_cache : Hash(String, ParentLookupResult?) = {} of String => ParentLookupResult?
     # Second-tier cache: maps base name ("Owner#method") → parent class that defines it.
     # All overloads of the same method share this, avoiding repeated parent chain walks.
@@ -16141,8 +16144,18 @@ module Crystal::HIR
         if parts.separator && parts.method
           ensure_method_index_built
           base_owner = strip_generic_args(parts.owner)
+          method_name = parts.method.not_nil!
+          if @method_index_last_owner == base_owner && @method_index_last_method == method_name
+            if cached_candidates = @method_index_last_candidates
+              @function_def_overloads_cache[base_name] = cached_candidates
+              return cached_candidates
+            end
+          end
           if owner_methods = @method_index[base_owner]?
-            if candidates = owner_methods[parts.method.not_nil!]? 
+            if candidates = owner_methods[method_name]?
+              @method_index_last_owner = base_owner
+              @method_index_last_method = method_name
+              @method_index_last_candidates = candidates
               @function_def_overloads_cache[base_name] = candidates
               return candidates
             end
