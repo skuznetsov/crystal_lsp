@@ -2539,7 +2539,8 @@ module Crystal::HIR
 
     private def macro_text_defines_type?(text : String) : Bool
       text.includes?("class") || text.includes?("struct") ||
-        text.includes?("module") || text.includes?("enum")
+        text.includes?("module") || text.includes?("enum") ||
+        text.includes?("def")
     end
 
     private def macro_expr_maybe_defines_type?(expr_id : ExprId) : Bool

@@ -118,6 +118,14 @@ about syntax or types and should match what the original compiler would report.
     `lower_function_if_needed_impl` runs (consider deriving arg types from suffix when callsite cache is empty).
   - Update (2026-02-06): HIR shows `Int32.to_s$Int32` inside `func @Int#chr` (instance method). Likely receiver misclassified as
     type-literal, so `#` calls are rewritten to `.` and routed through class-method fallback. Next: instrument `lower_call` to confirm
+  - Update (2026-02-05): debug hooks on `bootstrap_array` show missing symbols still clustered around:
+    `Float::Printer::Dragonbox::ImplInfo.get_cache/check_divisibility`, `ImplInfo::CarrierUInt.new!/<<`, `String#convert/handle_invalid/close`,
+    `Time::POSIXTransition#time/unix_date_in_year`, `Indexable#size`, `Nil#with_index`, `Pointer(Void)#size`. HIR shows:
+    `Crystal::Iconv.new` resolving as `String.new` (causing missing `String#convert/...`), `Unicode.category_Lu` local = VOID (no class_getter call),
+    and generic module `ImplInfo` not substituted to `ImplInfo_Float32/64`. Suspected fixes:
+    (1) ensure class_getter macros are expanded/registered during module/class registration pass (currently macro expansion only when “defines type”),
+    (2) map long type param names in `resolve_type_name_in_context` (not just T/U/V) so `ImplInfo` substitutes,
+    (3) fix `Crystal::Iconv` path/receiver resolution in `lower_path` or `resolve_type_name_in_context`.
     `ctx.type_literal?(receiver_id)` is true for `self` in instance methods, and fix the heuristic (only rewrite to class method when a
     real class method exists or receiver is a true type literal, not `self`/instance). Re-test `/private/tmp/test_to_s.hir`.
   - Update (2026-02-07): quick sanity compile `/tmp/fib_v2.cr` (puts fib(10)) with full prelude still fails at link with the usual
