@@ -1107,7 +1107,7 @@ module Crystal::HIR
       @function_def_arenas[full_name] = arena
 
       # Update method index: base_owner → method_name → [full_names]
-      parts = parse_method_name(full_name)
+      parts = parse_method_name_compact(full_name)
       if parts.separator && parts.method
         base_owner = strip_generic_args(parts.owner)
         method_name = parts.method.not_nil!
@@ -1135,7 +1135,7 @@ module Crystal::HIR
       @function_defs.each_key do |full_name|
         count += 1
         next if count <= @method_index_processed_count
-        parts = parse_method_name(full_name)
+        parts = parse_method_name_compact(full_name)
         next unless parts.separator && parts.method
         base_owner = strip_generic_args(parts.owner)
         method_name = parts.method.not_nil!
@@ -2062,7 +2062,7 @@ module Crystal::HIR
         end
       end
       # Debug hook: extract class and method from base_name (Class#method or Class.method)
-      parts = parse_method_name(base_name)
+      parts = parse_method_name_compact(base_name)
       if method_name = parts.method
         debug_hook_method_register(full_name, parts.owner, method_name)
       else
@@ -2109,7 +2109,7 @@ module Crystal::HIR
 
     private def abstract_def?(full_name : String) : Bool
       def_node = @function_defs[full_name]? || begin
-        base_name = parse_method_name(full_name).base
+        base_name = parse_method_name_compact(full_name).base
         @function_defs[base_name]?
       end
       return false unless def_node
@@ -16918,7 +16918,7 @@ module Crystal::HIR
           next unless desc
           next unless desc.kind == TypeKind::Module || module_like_type_name?(desc.name) || module_includers_match?(desc.name)
 
-          parts = parse_method_name(inst.method_name)
+          parts = parse_method_name_compact(inst.method_name)
           method_base = parts.method || inst.method_name
           owner = parts.owner
           if owner.empty?
@@ -17948,7 +17948,7 @@ module Crystal::HIR
     private def yield_function_name_for_uncached(method_name : String) : String?
       return method_name if @yield_functions.includes?(method_name)
 
-      parts = parse_method_name(method_name)
+      parts = parse_method_name_compact(method_name)
       base_name = parts.base
       return base_name if @yield_functions.includes?(base_name)
 
@@ -17956,7 +17956,7 @@ module Crystal::HIR
       return stripped if @yield_functions.includes?(stripped)
 
       @yield_functions.each do |name|
-        name_parts = parse_method_name(name)
+        name_parts = parse_method_name_compact(name)
         yield_base = name_parts.base
         next unless strip_generic_receiver_from_base_name(yield_base) == stripped
         return name
@@ -23189,7 +23189,7 @@ module Crystal::HIR
             block.instructions.each do |inst|
               next unless inst.is_a?(Call)
               name = inst.method_name
-              if parts = parse_method_name(name)
+              if parts = parse_method_name_compact(name)
                 owner = parts.owner
                 method = parts.method
                 if owner && method && union_type_name?(owner)
@@ -29861,7 +29861,7 @@ module Crystal::HIR
       end
 
       owner = function_context_from_name(base_key)
-      parts = parse_method_name(base_key)
+      parts = parse_method_name_compact(base_key)
       method = parts.method
       sep = parts.separator
 
