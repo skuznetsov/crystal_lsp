@@ -441,6 +441,14 @@ module Crystal::HIR
       end
     end
 
+    private struct FunctionLookupEntry
+      getter result : Tuple(String, CrystalV2::Compiler::Frontend::DefNode)?
+      getter base_epoch : Int32
+
+      def initialize(@result : Tuple(String, CrystalV2::Compiler::Frontend::DefNode)?, @base_epoch : Int32)
+      end
+    end
+
     # Parse method name in single pass - O(n) instead of O(3n) for three separate splits
     @[AlwaysInline]
     private def parse_method_name(name : String) : MethodNameParts
@@ -1030,7 +1038,7 @@ module Crystal::HIR
     @block_lookup_cache : Hash(BlockLookupKey, Tuple(String, CrystalV2::Compiler::Frontend::DefNode)?) = {} of BlockLookupKey => Tuple(String, CrystalV2::Compiler::Frontend::DefNode)?
     @block_lookup_cache_size : Int32 = 0
     # Cache function def lookup by callsite shape.
-    @function_lookup_cache : Hash(FunctionLookupKey, Tuple(String, CrystalV2::Compiler::Frontend::DefNode)?) = {} of FunctionLookupKey => Tuple(String, CrystalV2::Compiler::Frontend::DefNode)?
+    @function_lookup_cache : Hash(FunctionLookupKey, FunctionLookupEntry) = {} of FunctionLookupKey => FunctionLookupEntry
     @function_lookup_cache_size : Int32 = 0
     @function_lookup_last_name_id : UInt64 = 0
     @function_lookup_last_arg_count : Int32 = -1
@@ -1038,8 +1046,10 @@ module Crystal::HIR
     @function_lookup_last_flags : UInt8 = 0_u8
     @function_lookup_last_result : Tuple(String, CrystalV2::Compiler::Frontend::DefNode)? = nil
     @function_lookup_last_result_valid : Bool = false
+    @function_lookup_last_base_epoch : Int32 = 0
     @function_lookup_args_hash_owner : UInt64 = 0
     @function_lookup_args_hash_value : UInt64 = 0
+    @function_lookup_base_epoch : Hash(String, Int32) = {} of String => Int32
     # Debug-only: lower node histogram (enabled via DEBUG_LOWER_HISTO)
     @lower_histo_counts : Hash(String, Int32) = {} of String => Int32
     @lower_histo_last : Time::Instant? = nil
@@ -1124,6 +1134,9 @@ module Crystal::HIR
     )
       @function_defs[full_name] = def_node
       @function_def_arenas[full_name] = arena
+      base_name = strip_type_suffix(full_name)
+      @function_lookup_base_epoch[base_name] = (@function_lookup_base_epoch[base_name]? || 0) + 1
+      @function_lookup_last_result_valid = false
 
       # Update method index: base_owner → method_name → [full_names]
       parts = parse_method_name_compact(full_name)
@@ -36081,9 +36094,7 @@ module Crystal::HIR
     ) : Tuple(String, CrystalV2::Compiler::Frontend::DefNode)?
       unknown_args = arg_types && arg_types.all? { |t| t == TypeRef::VOID }
       if @function_lookup_cache_size != @function_defs.size
-        @function_lookup_cache.clear
         @function_lookup_cache_size = @function_defs.size
-        @function_lookup_last_result_valid = false
       end
       args_hash = 0_u64
       if arg_types
@@ -36105,11 +36116,14 @@ module Crystal::HIR
       flags |= 8_u8 if call_has_named_args
       flags |= 16_u8 if unknown_args
       name_id = func_name.object_id
+      base_name = strip_type_suffix(func_name)
+      base_epoch = @function_lookup_base_epoch[base_name]? || 0
       if @function_lookup_last_result_valid &&
          @function_lookup_last_name_id == name_id &&
          @function_lookup_last_arg_count == arg_count &&
          @function_lookup_last_args_hash == args_hash &&
-         @function_lookup_last_flags == flags
+         @function_lookup_last_flags == flags &&
+         @function_lookup_last_base_epoch == base_epoch
         return @function_lookup_last_result
       end
       cache_key = FunctionLookupKey.new(
@@ -36122,24 +36136,28 @@ module Crystal::HIR
         call_has_named_args,
         !!unknown_args
       )
-      if @function_lookup_cache.has_key?(cache_key)
-        result = @function_lookup_cache[cache_key]
-        @function_lookup_last_name_id = name_id
-        @function_lookup_last_arg_count = arg_count
-        @function_lookup_last_args_hash = args_hash
-        @function_lookup_last_flags = flags
-        @function_lookup_last_result = result
-        @function_lookup_last_result_valid = true
-        return result
-      end
-      if func_name.includes?("$")
-        if func_def = @function_defs[func_name]?
-          result = {func_name, func_def}
-          @function_lookup_cache[cache_key] = result
+      if entry = @function_lookup_cache[cache_key]?
+        if entry.base_epoch == base_epoch
+          result = entry.result
           @function_lookup_last_name_id = name_id
           @function_lookup_last_arg_count = arg_count
           @function_lookup_last_args_hash = args_hash
           @function_lookup_last_flags = flags
+          @function_lookup_last_base_epoch = base_epoch
+          @function_lookup_last_result = result
+          @function_lookup_last_result_valid = true
+          return result
+        end
+      end
+      if func_name.includes?("$")
+        if func_def = @function_defs[func_name]?
+          result = {func_name, func_def}
+          @function_lookup_cache[cache_key] = FunctionLookupEntry.new(result, base_epoch)
+          @function_lookup_last_name_id = name_id
+          @function_lookup_last_arg_count = arg_count
+          @function_lookup_last_args_hash = args_hash
+          @function_lookup_last_flags = flags
+          @function_lookup_last_base_epoch = base_epoch
           @function_lookup_last_result = result
           @function_lookup_last_result_valid = true
           return {func_name, func_def}
@@ -36316,21 +36334,23 @@ module Crystal::HIR
         if has_block
           base = strip_type_suffix(func_name)
           if block_entry = lookup_block_function_def_for_call(base, arg_count, arg_types)
-            @function_lookup_cache[cache_key] = block_entry
+            @function_lookup_cache[cache_key] = FunctionLookupEntry.new(block_entry, base_epoch)
             @function_lookup_last_name_id = name_id
             @function_lookup_last_arg_count = arg_count
             @function_lookup_last_args_hash = args_hash
             @function_lookup_last_flags = flags
+            @function_lookup_last_base_epoch = base_epoch
             @function_lookup_last_result = block_entry
             @function_lookup_last_result_valid = true
             return block_entry
           end
         end
-        @function_lookup_cache[cache_key] = nil
+        @function_lookup_cache[cache_key] = FunctionLookupEntry.new(nil, base_epoch)
         @function_lookup_last_name_id = name_id
         @function_lookup_last_arg_count = arg_count
         @function_lookup_last_args_hash = args_hash
         @function_lookup_last_flags = flags
+        @function_lookup_last_base_epoch = base_epoch
         @function_lookup_last_result = nil
         @function_lookup_last_result_valid = true
         return nil
@@ -36344,11 +36364,12 @@ module Crystal::HIR
         STDERR.puts "[DEBUG_PUTS_LOOKUP] func=#{func_name} count=#{arg_count} args=#{type_names} best=#{best_name}"
       end
       result = {best_name, best}
-      @function_lookup_cache[cache_key] = result
+      @function_lookup_cache[cache_key] = FunctionLookupEntry.new(result, base_epoch)
       @function_lookup_last_name_id = name_id
       @function_lookup_last_arg_count = arg_count
       @function_lookup_last_args_hash = args_hash
       @function_lookup_last_flags = flags
+      @function_lookup_last_base_epoch = base_epoch
       @function_lookup_last_result = result
       @function_lookup_last_result_valid = true
       result
