@@ -21718,7 +21718,7 @@ module Crystal::HIR
         if @function_types.has_key?(test_name) ||
            has_function_base?(test_name) ||
            @function_defs.has_key?(test_name) ||
-           !function_def_overloads(test_name).empty?
+           class_method_overload_exists?(test_name)
           resolved = current == origin ? test_name : "#{origin}.#{method_name}"
           @class_method_inheritance_cache[cache_key] = resolved
           return resolved
@@ -21736,7 +21736,7 @@ module Crystal::HIR
         if @function_types.has_key?(object_method) ||
            has_function_base?(object_method) ||
            @function_defs.has_key?(object_method) ||
-           !function_def_overloads(object_method).empty?
+           class_method_overload_exists?(object_method)
           resolved = "#{origin}.#{method_name}"
           @class_method_inheritance_cache[cache_key] = resolved
           return resolved
@@ -21744,6 +21744,13 @@ module Crystal::HIR
       end
       @class_method_inheritance_cache[cache_key] = nil
       nil
+    end
+
+    private def class_method_overload_exists?(base_name : String) : Bool
+      return false unless base_name.includes?(".")
+      overloads = function_def_overloads(base_name)
+      return false if overloads.empty?
+      overloads.any? { |name| name.starts_with?(base_name) }
     end
 
     # Infer type argument for generic class constructor call
