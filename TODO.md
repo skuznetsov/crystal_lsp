@@ -67,6 +67,7 @@ about syntax or types and should match what the original compiler would report.
   - Update (2026-02-02): allow base-name fallback for `$block`/`*_block` suffixes in `lower_function_if_needed_impl` to resolve block-only defs (commit pending).
   - Update (2026-02-02): new trace from debug hooks `/private/tmp/bootstrap_array_full_dbg.missing_trace.log` still shows missing symbols; top offenders include `String::Grapheme.put$Array_splat`, `String.build$Int32_block`, `String.new$Int32_block`, `Object#try$block`, `Nil#try$block`, `Crystal::Hasher#permute$UInt64`, `Int32#hash$Crystal::Hasher`.
 - [ ] Check macro expansion depth for nested macros (record/def generators). Consider multi-pass macro expansion (bounded loop) so record-generated getters are lowered into real DefNodes (avoid missing `_String__ToUnsignedInfo_*`).
+  - Update (2026-02-05): expanded macros unconditionally during PASS 1.75 (module/class registration) so macro‑generated defs like `class_getter` are registered before method lookup. Re-test bootstrap missing list to confirm `Unicode.category_*` no longer becomes VOID locals.
 - [ ] Add enum literal fast-path in HIR lowering for `.to_i` / `.value` on enum members (e.g., `DayOfWeek::Wednesday.to_i`), emitting const instead of missing call.
 - [ ] Ensure block wrapper emission for `each`/block calls: emit concrete block functions and propagate block arg type from callee signature to avoid missing `_block_each_block`.
 - [ ] Bootstrap linker undefined list (from `/tmp/undefined_symbols_latest.txt`) still non-empty after latest lowering tweaks. Prioritize these exact missing symbols (e.g., `_Unicode$Dput$$Pointer_Int32_Int32_Int32_Int32`, `_String$_$OR$_Nil$Hbsearch_index$$block`, `_try$block`, `_Array$LRange$LInt32$C$_Int32$R$R$Hbegin/end`, `Crystal::EventLoop::Kqueue/ Polling` methods). Focus on linker list, not just `missing.symbol` trace (trace includes transient unlowered).
@@ -126,6 +127,8 @@ about syntax or types and should match what the original compiler would report.
     (1) ensure class_getter macros are expanded/registered during module/class registration pass (currently macro expansion only when “defines type”),
     (2) map long type param names in `resolve_type_name_in_context` (not just T/U/V) so `ImplInfo` substitutes,
     (3) fix `Crystal::Iconv` path/receiver resolution in `lower_path` or `resolve_type_name_in_context`.
+  - Update (2026-02-05): resolve_type_name_in_context now maps full type‑param names (not just T/U/V), so `ImplInfo` should substitute to
+    `ImplInfo_Float32/64` during call resolution. Re-test Dragonbox missing symbols (`ImplInfo.get_cache/check_divisibility`, `CarrierUInt` ops).
     `ctx.type_literal?(receiver_id)` is true for `self` in instance methods, and fix the heuristic (only rewrite to class method when a
     real class method exists or receiver is a true type literal, not `self`/instance). Re-test `/private/tmp/test_to_s.hir`.
   - Update (2026-02-07): quick sanity compile `/tmp/fib_v2.cr` (puts fib(10)) with full prelude still fails at link with the usual
