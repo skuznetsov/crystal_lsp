@@ -19278,6 +19278,9 @@ module Crystal::HIR
     private def resolve_type_name_in_context(name : String) : String
       return name if name.empty?
       name = normalize_missing_generic_parens(name)
+      if mapped = @type_param_map[name]?
+        return resolve_type_name_in_context(mapped) if mapped != name
+      end
       if (idx = name.index("::"))
         prefix = name[0, idx]
         if mapped = @type_param_map[prefix]?
