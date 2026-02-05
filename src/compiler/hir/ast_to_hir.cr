@@ -973,6 +973,10 @@ module Crystal::HIR
     @strip_generic_receiver_cache : Hash(UInt64, String) = {} of UInt64 => String
     @strip_generic_receiver_last_id : UInt64 = 0
     @strip_generic_receiver_last : String? = nil
+    # Direct-mapped cache for strip_generic_receiver (reduces hash churn).
+    @strip_generic_receiver_table_keys : Array(UInt64) = Array(UInt64).new(256, 0_u64)
+    @strip_generic_receiver_table_vals : Array(String?) = Array(String?).new(256, nil)
+    @strip_generic_receiver_table_mask : UInt64 = 255_u64
     # Cache for function_def_overloads stripped receiver lookups: stripped base → overload list
     @function_def_overloads_stripped_cache : Hash(String, Array(String)) = {} of String => Array(String)
     # Incremental index: stripped base → overload list (avoid full scan per lookup)
@@ -16090,7 +16094,7 @@ module Crystal::HIR
 
     # Resolve a single overload when argument types are unknown (all VOID).
     # Uses arity + block presence to avoid calling an unmangled base name.
-    private def function_def_overloads(base_name : String) : Array(String)
+    private def function_def_overloads(base_name : String, stripped_base : String? = nil) : Array(String)
       rebuild_function_def_overloads if @function_defs_cache_size != @function_defs.size
       if cached = @function_def_overloads_cache[base_name]?
         return cached
@@ -16100,7 +16104,7 @@ module Crystal::HIR
         return list
       end
 
-      stripped = strip_generic_receiver_for_lookup(base_name)
+      stripped = stripped_base || strip_generic_receiver_for_lookup(base_name)
       if stripped != base_name
         if cached = @function_def_overloads_stripped_cache[stripped]?
           @function_def_overloads_cache[base_name] = cached
@@ -20383,10 +20387,21 @@ module Crystal::HIR
           return cached
         end
       end
+      slot = (method_id & @strip_generic_receiver_table_mask).to_i
+      if @strip_generic_receiver_table_keys[slot] == method_id
+        if cached = @strip_generic_receiver_table_vals[slot]
+          record_cache_stat("strip_generic_receiver", true)
+          @strip_generic_receiver_last_id = method_id
+          @strip_generic_receiver_last = cached
+          return cached
+        end
+      end
       if cached = @strip_generic_receiver_cache[method_id]?
         record_cache_stat("strip_generic_receiver", true)
         @strip_generic_receiver_last_id = method_id
         @strip_generic_receiver_last = cached
+        @strip_generic_receiver_table_keys[slot] = method_id
+        @strip_generic_receiver_table_vals[slot] = cached
         return cached
       end
       record_cache_stat("strip_generic_receiver", false)
@@ -20394,6 +20409,8 @@ module Crystal::HIR
       @strip_generic_receiver_cache[method_id] = result
       @strip_generic_receiver_last_id = method_id
       @strip_generic_receiver_last = result
+      @strip_generic_receiver_table_keys[slot] = method_id
+      @strip_generic_receiver_table_vals[slot] = result
       result
     end
 
@@ -35963,16 +35980,20 @@ module Crystal::HIR
         end
       end
 
-      overload_keys = function_def_overloads(func_name)
+      stripped_func = strip_generic_receiver_for_lookup(func_name)
+      overload_keys = function_def_overloads(func_name, stripped_func)
       if overload_keys.empty?
         # Fall back to base name if call included a mangled suffix.
         base = strip_type_suffix(func_name)
-        overload_keys = function_def_overloads(base) if base != func_name
+        if base != func_name
+          stripped_base = stripped_func != func_name ? strip_type_suffix(stripped_func) : nil
+          overload_keys = function_def_overloads(base, stripped_base)
+        end
       end
       if overload_keys.empty?
-        stripped = strip_generic_receiver_from_method_name(func_name)
+        stripped = stripped_func
         if stripped != func_name
-          overload_keys = function_def_overloads(stripped)
+          overload_keys = function_def_overloads(stripped, stripped)
         end
       end
       if overload_keys.empty? && (func_name.includes?("#") || func_name.includes?("."))
