@@ -2825,7 +2825,8 @@ module Crystal::HIR
         end
       when CrystalV2::Compiler::Frontend::ClassNode,
            CrystalV2::Compiler::Frontend::ModuleNode,
-           CrystalV2::Compiler::Frontend::EnumNode
+           CrystalV2::Compiler::Frontend::EnumNode,
+           CrystalV2::Compiler::Frontend::AliasNode
         set << String.new(node.name)
       end
     end
@@ -21307,6 +21308,16 @@ module Crystal::HIR
       if resolved_base == "String#new" || resolved_base == "String.new" || resolved_mangled.starts_with?("String$Dnew")
         return [type_ref_for_name("Pointer(UInt8)")]
       end
+      if resolved_base.ends_with?(".new") ||
+         (resolved_base == "new" && resolved_mangled.includes?(".new"))
+        owner = method_owner(resolved_base)
+        if owner.empty?
+          owner = method_owner(resolved_mangled)
+        end
+        unless owner.empty?
+          return [type_ref_for_name(owner)]
+        end
+      end
 
       # String#each_char yields a Char; each_char_with_index yields (Char, Int32)
       if resolved_base == "String#each_char" || resolved_base.ends_with?("String#each_char")
@@ -26885,6 +26896,11 @@ module Crystal::HIR
     end
 
     private def emit_self(ctx : LoweringContext) : ValueId
+      if @inline_yield_block_body_depth > 0
+        if value_id = inline_caller_local_id("self")
+          return value_id
+        end
+      end
       # Check if we have a 'self' local
       if self_id = ctx.lookup_local("self")
         return self_id
@@ -32335,6 +32351,18 @@ module Crystal::HIR
       when CrystalV2::Compiler::Frontend::IdentifierNode
         # Simple function call: foo()
         method_name = String.new(callee_node.name)
+        current_is_class = @current_method_is_class
+        if !current_is_class
+          current_is_class = class_method?(strip_type_suffix(ctx.function.name))
+        end
+        if current_is_class && (current = @current_class) && method_name == "new"
+          full_method_name = "#{current}.#{method_name}"
+          static_class_name = current
+        end
+        if @current_method == "new" && (current = @current_class) && method_name == "new"
+          full_method_name = "#{current}.#{method_name}"
+          static_class_name = current
+        end
         # Handle qualified calls like Int32.to_s that may appear as IdentifierNodes
         # (e.g., from macro expansion or type-literal printing).
         if method_name.includes?(".")
@@ -32373,29 +32401,31 @@ module Crystal::HIR
             ctx.register_type(value_id, ctx.type_of(value_id))
           end
         end
-        if self_id = ctx.lookup_local("self")
-          self_type = ctx.type_of(self_id)
-          if self_type != TypeRef::VOID
-            self_name = if info = @class_info_by_type_id[self_type.id]?
-                          info.name
-                        elsif desc = @module.get_type_descriptor(self_type)
-                          normalize_method_owner_name(desc.name)
-                        else
-                          ""
-                        end
-            if !self_name.empty?
-              self_method_name = "#{self_name}##{method_name}"
-              if @function_types.has_key?(self_method_name) ||
-                 has_function_base?(self_method_name) ||
-                 @function_defs.has_key?(self_method_name)
-                receiver_id = self_id
-                full_method_name = resolve_method_with_inheritance(self_name, method_name) || self_method_name
-              end
-              if receiver_id.nil? && !@current_method_is_class
-                # In instance methods, unqualified calls default to self even if the
-                # target method isn't registered yet (avoid class-method fallback).
-                receiver_id = self_id
-                full_method_name = resolve_method_with_inheritance(self_name, method_name) || self_method_name
+        if !current_is_class
+          if self_id = ctx.lookup_local("self")
+            self_type = ctx.type_of(self_id)
+            if self_type != TypeRef::VOID
+              self_name = if info = @class_info_by_type_id[self_type.id]?
+                            info.name
+                          elsif desc = @module.get_type_descriptor(self_type)
+                            normalize_method_owner_name(desc.name)
+                          else
+                            ""
+                          end
+              if !self_name.empty?
+                self_method_name = "#{self_name}##{method_name}"
+                if @function_types.has_key?(self_method_name) ||
+                   has_function_base?(self_method_name) ||
+                   @function_defs.has_key?(self_method_name)
+                  receiver_id = self_id
+                  full_method_name = resolve_method_with_inheritance(self_name, method_name) || self_method_name
+                end
+                if receiver_id.nil?
+                  # In instance methods, unqualified calls default to self even if the
+                  # target method isn't registered yet (avoid class-method fallback).
+                  receiver_id = self_id
+                  full_method_name = resolve_method_with_inheritance(self_name, method_name) || self_method_name
+                end
               end
             end
           end
@@ -32480,7 +32510,7 @@ module Crystal::HIR
                 # Only resolve class/module methods for implicit calls when we are in a class method.
                 # In instance methods, implicit calls should remain instance dispatch (self), not
                 # accidentally bind to Class.method and lose the receiver.
-                if @current_method_is_class
+                if current_is_class
                   if class_method_base = resolve_class_method_with_inheritance(current, method_name)
                     # This is a module/class method call (no receiver)
                     receiver_id = nil
@@ -32500,7 +32530,7 @@ module Crystal::HIR
           end
           # For abstract numeric types (Int, UInt, Float) calling primitive operations
           # without explicit receiver, use self as receiver so special lowering works.
-          if receiver_id.nil? && full_method_name.nil? && !@current_method_is_class
+          if receiver_id.nil? && full_method_name.nil? && !current_is_class
             is_abstract_numeric = current == "Int" || current == "UInt" || current == "Float" ||
                                   current == "Number" || current == "Comparable" ||
                                   current.starts_with?("Int(") || current.starts_with?("Comparable(")
@@ -32510,7 +32540,7 @@ module Crystal::HIR
               receiver_id = emit_self(ctx)
             end
           end
-          if receiver_id.nil? && full_method_name.nil? && @current_method_is_class
+          if receiver_id.nil? && full_method_name.nil? && current_is_class
             top_level_exists = @function_defs.has_key?(method_name) ||
               @function_types.has_key?(method_name) ||
               has_function_base?(method_name)
@@ -32526,7 +32556,7 @@ module Crystal::HIR
         else
           receiver_id = nil
         end
-        if receiver_id.nil? && full_method_name.nil? && !@current_method_is_class
+        if receiver_id.nil? && full_method_name.nil? && !current_is_class
           if current = @current_class
             if module_like_type_name?(current)
               receiver_id = emit_self(ctx)
@@ -32534,7 +32564,7 @@ module Crystal::HIR
             end
           end
         end
-        if receiver_id.nil? && full_method_name.nil? && !@current_method_is_class
+        if receiver_id.nil? && full_method_name.nil? && !current_is_class
           top_level_exists = @function_defs.has_key?(method_name) ||
             @function_types.has_key?(method_name) ||
             has_function_base?(method_name)
@@ -32553,6 +32583,11 @@ module Crystal::HIR
               full_method_name = object_method_name
             end
           end
+        end
+        if method_name == "new" && @current_method == "new" && (current = @current_class)
+          full_method_name = "#{current}.#{method_name}"
+          receiver_id = nil
+          static_class_name = current
         end
 
       when CrystalV2::Compiler::Frontend::MemberAccessNode
@@ -32706,7 +32741,9 @@ module Crystal::HIR
           force_instance_receiver = false
         end
 
-        if obj_node.is_a?(CrystalV2::Compiler::Frontend::SelfNode) && @current_method_is_class
+        if @current_method_is_class &&
+           (obj_node.is_a?(CrystalV2::Compiler::Frontend::SelfNode) ||
+            obj_node.is_a?(CrystalV2::Compiler::Frontend::ImplicitObjNode))
           class_name_str = @current_class
         elsif obj_node.is_a?(CrystalV2::Compiler::Frontend::ConstantNode)
           name = String.new(obj_node.name)
@@ -32993,12 +33030,14 @@ module Crystal::HIR
           raw_path = collect_path_string(obj_node)
           if mapped = @type_param_map[raw_path]?
             type_param_receiver_name = mapped
-            force_instance_receiver = true
+            class_name_str = mapped
+            force_instance_receiver = false
           elsif @type_param_map.empty?
             if inferred_map = fallback_type_param_map_for_current
               if mapped = inferred_map[raw_path]?
                 type_param_receiver_name = mapped
-                force_instance_receiver = true
+                class_name_str = mapped
+                force_instance_receiver = false
               end
             end
           end
@@ -34492,6 +34531,9 @@ module Crystal::HIR
           end
         end
         block_for_inline = build_block_from_block_pass(block_pass_expr, block_param_types_inline, node.span)
+      end
+      if block_param_types_inline.nil? && static_class_name && method_name == "new"
+        block_param_types_inline = [type_ref_for_name(static_class_name)]
       end
 
       disable_inline_yield = ENV.has_key?("CRYSTAL_V2_DISABLE_INLINE_YIELD")
@@ -39096,9 +39138,6 @@ module Crystal::HIR
       caller_locals = ctx.save_locals
       @inline_caller_locals_stack << caller_locals
       preserved_locals = {} of String => ValueId
-      if self_id = caller_locals["self"]?
-        preserved_locals["self"] = self_id
-      end
       ctx.restore_locals(preserved_locals)
 
       begin
@@ -39168,6 +39207,12 @@ module Crystal::HIR
             @current_method_is_class = parts.is_class
           end
         end
+        if recv = func_def.receiver
+          recv_name = String.new(recv)
+          if recv_name == "self"
+            @current_method_is_class = true
+          end
+        end
         inline_param_map = type_param_map_for_receiver_name(base_inline_name)
         if receiver_id
           receiver_type_map = type_param_map_for_receiver_type(ctx.type_of(receiver_id))
@@ -39195,11 +39240,16 @@ module Crystal::HIR
           end
         end
         result_value = nil_value(ctx)
+        callee_is_class = class_method?(base_inline_name)
         apply_inline = -> do
-          # If inlining an instance method, bind the receiver as `self`.
+          # Bind `self` for inlined callee.
           if receiver_id
             ctx.register_local("self", receiver_id)
             ctx.register_type(receiver_id, ctx.type_of(receiver_id))
+          elsif callee_is_class && (class_name = @current_class)
+            class_self = lower_type_literal_from_name(ctx, class_name)
+            ctx.register_local("self", class_self)
+            ctx.register_type(class_self, ctx.type_of(class_self))
           end
 
           # Bind function parameters to call arguments
