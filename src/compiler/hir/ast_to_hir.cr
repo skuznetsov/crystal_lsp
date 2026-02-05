@@ -15810,6 +15810,18 @@ module Crystal::HIR
           class_name = substituted
         end
       end
+      if !class_name.empty? && @type_param_map.empty? && type_param_like?(class_name)
+        if inferred_map = fallback_type_param_map_for_current
+          if mapped = inferred_map[class_name]?
+            class_name = mapped
+            mapped_ref = type_ref_for_name(mapped)
+            if mapped_ref != TypeRef::VOID
+              receiver_type = mapped_ref
+              type_desc = @module.get_type_descriptor(mapped_ref)
+            end
+          end
+        end
+      end
       class_name = normalize_method_owner_name(class_name)
       if !class_name.empty? && class_name.includes?("::") && !@class_info.has_key?(class_name)
         if resolved = resolve_short_type_in_namespace_chain(class_name)
@@ -20495,6 +20507,19 @@ module Crystal::HIR
         mapping[param] = args[i].strip
       end
       mapping
+    end
+
+    private def fallback_type_param_map_for_current : Hash(String, String)?
+      return nil unless @type_param_map.empty?
+      if current = @current_class
+        map = type_param_map_for_receiver_name("#{current}#_")
+        return map unless map.empty?
+      end
+      if override = @current_namespace_override
+        map = type_param_map_for_receiver_name("#{override}#_")
+        return map unless map.empty?
+      end
+      nil
     end
 
     private def strip_generic_receiver_from_method_name(method_name : String) : String
@@ -32501,6 +32526,13 @@ module Crystal::HIR
             if @module.is_lib?(name)
               class_name_str = name
             else
+              if @type_param_map.empty? && type_param_like?(name)
+                if inferred_map = fallback_type_param_map_for_current
+                  if mapped = inferred_map[name]?
+                    name = mapped
+                  end
+                end
+              end
               if type_name = lookup_typeof_local_name(name)
                 if ENV["DEBUG_TYPE_CLASS"]? && type_name.ends_with?(".class")
                   STDERR.puts "[DEBUG_TYPE_CLASS] method=#{method_name} name=#{name} type_name=#{type_name}"
@@ -32684,6 +32716,17 @@ module Crystal::HIR
         elsif obj_node.is_a?(CrystalV2::Compiler::Frontend::PathNode)
           # Path like Foo::Bar for nested classes/modules
           raw_path = collect_path_string(obj_node)
+          if @type_param_map.empty? && raw_path.includes?("::")
+            prefix = first_namespace_component(raw_path)
+            if type_param_like?(prefix)
+              if inferred_map = fallback_type_param_map_for_current
+                if mapped = inferred_map[prefix]?
+                  suffix = raw_path[(prefix.size + 2)..]?
+                  raw_path = suffix ? "#{mapped}::#{suffix}" : mapped
+                end
+              end
+            end
+          end
           if ENV["DEBUG_CONST_RECV"]? && method_name == "unsafe_fetch"
             STDERR.puts "[CONST_RECV_PATH] raw_path=#{raw_path} method=#{method_name}"
           end
@@ -33013,6 +33056,11 @@ module Crystal::HIR
                   receiver_type = inferred_self
                   ctx.register_type(receiver_id, receiver_type)
                 end
+              end
+            else
+              if inferred = infer_type_from_expr(obj_expr, @current_class)
+                receiver_type = inferred
+                ctx.register_type(receiver_id, receiver_type)
               end
             end
           end
