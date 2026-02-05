@@ -758,6 +758,18 @@ module Crystal::HIR
     end
 
     @[AlwaysInline]
+    private def strip_generic_receiver_from_base_name(base_name : String) : String
+      if base_name.includes?("#") || base_name.includes?(".")
+        parts = parse_method_name_compact(base_name)
+        if parts.separator && parts.method
+          owner_base = strip_generic_args(parts.owner)
+          return parts.separator == '#' ? "#{owner_base}##{parts.method.not_nil!}" : "#{owner_base}.#{parts.method.not_nil!}"
+        end
+      end
+      strip_generic_args(base_name)
+    end
+
+    @[AlwaysInline]
     private def slice_eq?(slice : Slice(UInt8)?, name : String) : Bool
       return false unless slice
       return false unless slice.size == name.bytesize
@@ -16187,7 +16199,7 @@ module Crystal::HIR
           end
         end
       end
-      stripped = @function_def_overloads_stripped_by_base[base_name]? || strip_generic_receiver_from_method_name(base_name)
+      stripped = @function_def_overloads_stripped_by_base[base_name]? || strip_generic_receiver_from_base_name(base_name)
       if stripped != base_name
         if cached = @function_def_has_splat[stripped]?
           @function_def_has_splat[base_name] = cached
@@ -16216,7 +16228,7 @@ module Crystal::HIR
           end
         end
       end
-      stripped = @function_def_overloads_stripped_by_base[base_name]? || strip_generic_receiver_from_method_name(base_name)
+      stripped = @function_def_overloads_stripped_by_base[base_name]? || strip_generic_receiver_from_base_name(base_name)
       if stripped != base_name
         if cached = @function_def_has_double_splat[stripped]?
           @function_def_has_double_splat[base_name] = cached
@@ -16249,7 +16261,14 @@ module Crystal::HIR
           @function_def_has_splat[base] = true
         end
         @function_def_overloads_cache[base] = @function_def_overloads[base]
-        stripped_base = strip_generic_receiver_from_method_name(base)
+        stripped_base = base
+        if base.includes?("#") || base.includes?(".")
+          parts = parse_method_name_compact(base)
+          if parts.separator && parts.method
+            owner_base = strip_generic_args(parts.owner)
+            stripped_base = parts.separator == '#' ? "#{owner_base}##{parts.method.not_nil!}" : "#{owner_base}.#{parts.method.not_nil!}"
+          end
+        end
         if stripped_base != base && !@function_def_overloads_stripped_by_base.has_key?(base)
           @function_def_overloads_stripped_by_base[base] = stripped_base
         end
@@ -17933,13 +17952,13 @@ module Crystal::HIR
       base_name = parts.base
       return base_name if @yield_functions.includes?(base_name)
 
-      stripped = strip_generic_receiver_from_method_name(base_name)
+      stripped = strip_generic_receiver_from_base_name(base_name)
       return stripped if @yield_functions.includes?(stripped)
 
       @yield_functions.each do |name|
         name_parts = parse_method_name(name)
         yield_base = name_parts.base
-        next unless strip_generic_receiver_from_method_name(yield_base) == stripped
+        next unless strip_generic_receiver_from_base_name(yield_base) == stripped
         return name
       end
 
@@ -18519,8 +18538,8 @@ module Crystal::HIR
       base_name : String
     ) : CrystalV2::Compiler::Frontend::DefNode?
       @function_defs[name]? || @function_defs[base_name]? || begin
-        stripped_name = strip_generic_receiver_from_method_name(name)
-        stripped_base = strip_generic_receiver_from_method_name(base_name)
+        stripped_name = strip_generic_receiver_from_base_name(name)
+        stripped_base = strip_generic_receiver_from_base_name(base_name)
         @function_defs[stripped_name]? || @function_defs[stripped_base]?
       end
     end
@@ -20524,18 +20543,8 @@ module Crystal::HIR
 
     # Hot-path variant for overload lookup: avoid cache hash cost.
     private def strip_generic_receiver_for_lookup(method_name : String) : String
-      bytesize = method_name.bytesize
-      saw_paren = false
-      i = 0
-      while i < bytesize
-        byte = method_name.to_unsafe[i]
-        if byte == '('.ord
-          saw_paren = true
-        elsif byte == '#'.ord || byte == '.'.ord
-          return strip_generic_receiver_from_method_name(method_name) if saw_paren
-          return method_name
-        end
-        i += 1
+      if method_name.includes?("#") || method_name.includes?(".")
+        return strip_generic_receiver_from_base_name(method_name)
       end
       method_name
     end
@@ -21080,8 +21089,8 @@ module Crystal::HIR
       resolved_mangled = mangled_method_name
       func_def = @function_defs[resolved_mangled]? || @function_defs[resolved_base]?
       if func_def.nil?
-        stripped_base = strip_generic_receiver_from_method_name(base_method_name)
-        stripped_mangled = strip_generic_receiver_from_method_name(mangled_method_name)
+        stripped_base = strip_generic_receiver_from_base_name(base_method_name)
+        stripped_mangled = strip_generic_receiver_from_base_name(mangled_method_name)
         if stripped_base != base_method_name || stripped_mangled != mangled_method_name
           resolved_base = stripped_base
           resolved_mangled = stripped_mangled
@@ -30339,7 +30348,7 @@ module Crystal::HIR
           @pending_function_queue << name
           if ENV["DEBUG_PENDING_SOURCES"]?
             base = strip_type_suffix(name)
-            stripped = strip_generic_receiver_from_method_name(base)
+            stripped = strip_generic_receiver_from_base_name(base)
             @pending_source_counts[stripped] = (@pending_source_counts[stripped]? || 0) + 1
             if ENV["DEBUG_PENDING_SOURCES_SAMPLES"]?
               samples = @pending_source_samples[stripped]? || [] of String
