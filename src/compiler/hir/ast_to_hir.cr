@@ -19422,6 +19422,11 @@ module Crystal::HIR
           resolved_type_name_cache_set(name, resolved_included)
           return resolved_included
         end
+        if alias_target = resolve_type_alias_by_suffix(name)
+          resolved = resolve_type_name_in_context(alias_target)
+          resolved_type_name_cache_set(name, resolved)
+          return resolved
+        end
         resolved = resolve_class_name_in_context(name)
         resolved_type_name_cache_set(name, resolved)
         return resolved
@@ -32352,9 +32357,14 @@ module Crystal::HIR
         # Simple function call: foo()
         method_name = String.new(callee_node.name)
         current_is_class = @current_method_is_class
-        if !current_is_class
-          current_is_class = class_method?(strip_type_suffix(ctx.function.name))
+      if !current_is_class
+        current_is_class = class_method?(strip_type_suffix(ctx.function.name))
+      end
+      if !current_is_class
+        if self_id = ctx.lookup_local("self")
+          current_is_class = true if ctx.type_literal?(self_id)
         end
+      end
         if current_is_class && (current = @current_class) && method_name == "new"
           full_method_name = "#{current}.#{method_name}"
           static_class_name = current
@@ -32750,64 +32760,64 @@ module Crystal::HIR
           substituted_name = substitute_type_params_in_type_name(name)
           substituted = substituted_name != name
           if substituted
-            type_param_receiver_name = substituted_name
-            force_instance_receiver = true
+            class_name_str = substituted_name
+            force_instance_receiver = false
           elsif mapped = @type_param_map[name]?
-            type_param_receiver_name = mapped
-            force_instance_receiver = true
+            class_name_str = mapped
+            force_instance_receiver = false
           elsif @type_param_map.empty?
             if inferred_map = fallback_type_param_map_for_current
               if mapped = inferred_map[name]?
-                type_param_receiver_name = mapped
-                force_instance_receiver = true
+                class_name_str = mapped
+                force_instance_receiver = false
               end
             end
           end
           unless force_instance_receiver
-          name = substituted_name if substituted
-          if @module.is_lib?(name)
-            class_name_str = name
-          else
-            resolved = if substituted && name.includes?("::")
-                         name
-                       else
-                         resolve_class_name_in_context(name)
-                       end
-            resolved = resolve_type_alias_chain(resolved)
-            # Prefer type/module resolution for constant receivers that are actually types.
-            if class_name_str.nil? && @generic_templates.has_key?(resolved) && method_name == "new"
-              if resolved == "Range" && call_args && call_args.size >= 2
-                left_name = infer_type_name_from_expr_id(call_args[0])
-                right_name = infer_type_name_from_expr_id(call_args[1])
-                if left_name && right_name
-                  specialized_name = "#{resolved}(#{left_name}, #{right_name})"
-                  if !@monomorphized.includes?(specialized_name)
-                    monomorphize_generic_class(resolved, [left_name, right_name], specialized_name)
+            name = substituted_name if substituted
+            if @module.is_lib?(name)
+              class_name_str = name
+            else
+              resolved = if substituted && name.includes?("::")
+                           name
+                         else
+                           resolve_class_name_in_context(name)
+                         end
+              resolved = resolve_type_alias_chain(resolved)
+              # Prefer type/module resolution for constant receivers that are actually types.
+              if class_name_str.nil? && @generic_templates.has_key?(resolved) && method_name == "new"
+                if resolved == "Range" && call_args && call_args.size >= 2
+                  left_name = infer_type_name_from_expr_id(call_args[0])
+                  right_name = infer_type_name_from_expr_id(call_args[1])
+                  if left_name && right_name
+                    specialized_name = "#{resolved}(#{left_name}, #{right_name})"
+                    if !@monomorphized.includes?(specialized_name)
+                      monomorphize_generic_class(resolved, [left_name, right_name], specialized_name)
+                    end
+                    class_name_str = specialized_name
                   end
-                  class_name_str = specialized_name
-                end
-              else
-                inferred_type = infer_generic_type_arg(resolved, call_args, block_expr, ctx, node.named_args)
-                if inferred_type
-                  specialized_name = "#{resolved}(#{inferred_type})"
-                  if !@monomorphized.includes?(specialized_name)
-                    monomorphize_generic_class(resolved, [inferred_type], specialized_name)
+                else
+                  inferred_type = infer_generic_type_arg(resolved, call_args, block_expr, ctx, node.named_args)
+                  if inferred_type
+                    specialized_name = "#{resolved}(#{inferred_type})"
+                    if !@monomorphized.includes?(specialized_name)
+                      monomorphize_generic_class(resolved, [inferred_type], specialized_name)
+                    end
+                    class_name_str = specialized_name
+                  elsif resolved == "Array"
+                    specialized_name = "Array(String)"
+                    if !@monomorphized.includes?(specialized_name)
+                      monomorphize_generic_class(resolved, ["String"], specialized_name)
+                    end
+                    class_name_str = specialized_name
                   end
-                  class_name_str = specialized_name
-                elsif resolved == "Array"
-                  specialized_name = "Array(String)"
-                  if !@monomorphized.includes?(specialized_name)
-                    monomorphize_generic_class(resolved, ["String"], specialized_name)
-                  end
-                  class_name_str = specialized_name
                 end
               end
-            end
-            if class_name_str.nil?
-              if fallback = class_method_fallback_from_module(resolved, method_name)
-                class_name_str = fallback
+              if class_name_str.nil?
+                if fallback = class_method_fallback_from_module(resolved, method_name)
+                  class_name_str = fallback
+                end
               end
-            end
               if class_name_str.nil?
                 if class_like_namespace?(resolved) || module_like_type_name?(resolved) ||
                    primitive_self_type(resolved) || @enum_info.try(&.has_key?(resolved))
@@ -32816,9 +32826,9 @@ module Crystal::HIR
                   class_name_str = resolved
                 elsif resolve_constant_name_in_context(name)
                   constant_receiver = true
+                end
               end
             end
-          end
           end
         elsif !force_instance_receiver && obj_node.is_a?(CrystalV2::Compiler::Frontend::IdentifierNode)
           name = String.new(obj_node.name)
@@ -39246,10 +39256,16 @@ module Crystal::HIR
           if receiver_id
             ctx.register_local("self", receiver_id)
             ctx.register_type(receiver_id, ctx.type_of(receiver_id))
-          elsif callee_is_class && (class_name = @current_class)
-            class_self = lower_type_literal_from_name(ctx, class_name)
-            ctx.register_local("self", class_self)
-            ctx.register_type(class_self, ctx.type_of(class_self))
+          elsif callee_is_class
+            class_name = method_owner(base_inline_name)
+            if class_name.empty?
+              class_name = @current_class || ""
+            end
+            unless class_name.empty?
+              class_self = lower_type_literal_from_name(ctx, class_name)
+              ctx.register_local("self", class_self)
+              ctx.register_type(class_self, ctx.type_of(class_self))
+            end
           end
 
           # Bind function parameters to call arguments
