@@ -1035,6 +1035,8 @@ module Crystal::HIR
     @function_lookup_last_flags : UInt8 = 0_u8
     @function_lookup_last_result : Tuple(String, CrystalV2::Compiler::Frontend::DefNode)? = nil
     @function_lookup_last_result_valid : Bool = false
+    @function_lookup_args_hash_owner : UInt64 = 0
+    @function_lookup_args_hash_value : UInt64 = 0
     # Debug-only: lower node histogram (enabled via DEBUG_LOWER_HISTO)
     @lower_histo_counts : Hash(String, Int32) = {} of String => Int32
     @lower_histo_last : Time::Instant? = nil
@@ -36072,8 +36074,15 @@ module Crystal::HIR
       end
       args_hash = 0_u64
       if arg_types
-        arg_types.each do |arg_type|
-          args_hash = (args_hash &* 131_u64) &+ arg_type.id.to_u64
+        owner = arg_types.object_id
+        if @function_lookup_args_hash_owner == owner
+          args_hash = @function_lookup_args_hash_value
+        else
+          arg_types.each do |arg_type|
+            args_hash = (args_hash &* 131_u64) &+ arg_type.id.to_u64
+          end
+          @function_lookup_args_hash_owner = owner
+          @function_lookup_args_hash_value = args_hash
         end
       end
       flags = 0_u8
