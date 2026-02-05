@@ -987,6 +987,8 @@ module Crystal::HIR
     # Cache for function_def_overloads results by base_name (cleared on rebuild)
     @function_def_overloads_cache : Hash(String, Array(String)) = {} of String => Array(String)
     @function_def_overloads_cache_size : Int32 = 0
+    # Precomputed base -> stripped base (generic receiver removed) to avoid per-call stripping.
+    @function_def_overloads_stripped_by_base : Hash(String, String) = {} of String => String
     # Cache parsed method name parts to avoid repeated scans in hot paths.
     @method_name_parts_cache : Hash(UInt64, MethodNameParts) = {} of UInt64 => MethodNameParts
     @method_name_parts_last_id : UInt64 = 0
@@ -16122,6 +16124,8 @@ module Crystal::HIR
 
       stripped = if stripped_base
                    stripped_base
+                 elsif cached = @function_def_overloads_stripped_by_base[base_name]?
+                   cached
                  elsif base_name.includes?('(')
                    strip_generic_receiver_for_lookup(base_name)
                  else
@@ -16183,7 +16187,7 @@ module Crystal::HIR
           end
         end
       end
-      stripped = strip_generic_receiver_from_method_name(base_name)
+      stripped = @function_def_overloads_stripped_by_base[base_name]? || strip_generic_receiver_from_method_name(base_name)
       if stripped != base_name
         if cached = @function_def_has_splat[stripped]?
           @function_def_has_splat[base_name] = cached
@@ -16212,7 +16216,7 @@ module Crystal::HIR
           end
         end
       end
-      stripped = strip_generic_receiver_from_method_name(base_name)
+      stripped = @function_def_overloads_stripped_by_base[base_name]? || strip_generic_receiver_from_method_name(base_name)
       if stripped != base_name
         if cached = @function_def_has_double_splat[stripped]?
           @function_def_has_double_splat[base_name] = cached
@@ -16246,6 +16250,9 @@ module Crystal::HIR
         end
         @function_def_overloads_cache[base] = @function_def_overloads[base]
         stripped_base = strip_generic_receiver_from_method_name(base)
+        if stripped_base != base && !@function_def_overloads_stripped_by_base.has_key?(base)
+          @function_def_overloads_stripped_by_base[base] = stripped_base
+        end
         stripped_list = @function_def_overloads_stripped_index[stripped_base]?
         if stripped_list
           stripped_list << key unless stripped_list.includes?(key)
