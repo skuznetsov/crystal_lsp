@@ -1009,6 +1009,10 @@ module Crystal::HIR
     @type_param_map_hash_value : UInt64 = 0
     @resolved_type_name_cache_last_ctx_key : TypeNameContextKey? = nil
     @resolved_type_name_cache_last_ctx_map : Hash(String, ResolvedTypeNameCacheEntry)? = nil
+    @resolved_type_name_last_entry_ctx : TypeNameContextKey? = nil
+    @resolved_type_name_last_entry_name_id : UInt64 = 0
+    @resolved_type_name_last_entry_value : String? = nil
+    @resolved_type_name_last_entry_epoch : Int32 = 0
     # Lightweight owner/method cache used in def lookup (avoids parse_method_name).
     @method_name_compact_cache : Hash(UInt64, MethodNamePartsCompact) = {} of UInt64 => MethodNamePartsCompact
     @method_name_compact_last_id : UInt64 = 0
@@ -42713,6 +42717,15 @@ module Crystal::HIR
 
     private def resolved_type_name_cache_get(name : String) : String?
       if ctx = current_type_name_context_key
+        if @resolved_type_name_last_entry_ctx == ctx && @resolved_type_name_last_entry_name_id == name.object_id
+          if value = @resolved_type_name_last_entry_value
+            invalid = @resolved_type_name_invalidations[name]?
+            if invalid.nil? || @resolved_type_name_last_entry_epoch >= invalid
+              record_cache_stat("resolved_type_ctx", true)
+              return value
+            end
+          end
+        end
         map = nil
         if @resolved_type_name_cache_last_ctx_key == ctx
           map = @resolved_type_name_cache_last_ctx_map
@@ -42726,6 +42739,10 @@ module Crystal::HIR
           if entry = map[name]?
             if resolved_type_name_cache_entry_valid?(name, entry)
               record_cache_stat("resolved_type_ctx", true)
+              @resolved_type_name_last_entry_ctx = ctx
+              @resolved_type_name_last_entry_name_id = name.object_id
+              @resolved_type_name_last_entry_value = entry.value
+              @resolved_type_name_last_entry_epoch = entry.epoch
               return entry.value
             end
           end
@@ -42759,9 +42776,14 @@ module Crystal::HIR
           map = {} of String => ResolvedTypeNameCacheEntry
           @resolved_type_name_cache_by_ctx[ctx] = map
         end
-        map[name] = ResolvedTypeNameCacheEntry.new(value, @resolved_type_name_cache_epoch)
+        entry = ResolvedTypeNameCacheEntry.new(value, @resolved_type_name_cache_epoch)
+        map[name] = entry
         @resolved_type_name_cache_last_ctx_key = ctx
         @resolved_type_name_cache_last_ctx_map = map
+        @resolved_type_name_last_entry_ctx = ctx
+        @resolved_type_name_last_entry_name_id = name.object_id
+        @resolved_type_name_last_entry_value = value
+        @resolved_type_name_last_entry_epoch = entry.epoch
       else
         @resolved_type_name_cache_global[name] = ResolvedTypeNameCacheEntry.new(value, @resolved_type_name_cache_epoch)
       end
@@ -42845,6 +42867,10 @@ module Crystal::HIR
         @resolved_type_name_cache_by_ctx.clear
         @resolved_type_name_invalidations.clear
         @resolved_type_name_cache_epoch = 0
+        @resolved_type_name_last_entry_ctx = nil
+        @resolved_type_name_last_entry_name_id = 0_u64
+        @resolved_type_name_last_entry_value = nil
+        @resolved_type_name_last_entry_epoch = 0
         @type_literal_class_cache.clear
         @type_name_normalize_cache.clear
       end
