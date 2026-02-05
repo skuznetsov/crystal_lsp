@@ -33354,12 +33354,25 @@ module Crystal::HIR
               receiver_type = receiver_id ? ctx.type_of(receiver_id) : TypeRef::VOID
               unless module_type_ref?(receiver_type)
                 class_name = method_owner(full_method_name)
-                full_method_name = "#{class_name}.#{method_name}"
-                receiver_id = nil
-                static_class_name = class_name
-                if method_name == "new"
-                  if class_info = @class_info[class_name]?
-                    generate_allocator(class_name, class_info)
+                literal_owner = class_name_str
+                if literal_owner.nil? || literal_owner.empty?
+                  if desc = @module.get_type_descriptor(receiver_type)
+                    literal_owner = desc.name unless desc.name.empty?
+                  elsif info = @class_info_by_type_id[receiver_type.id]?
+                    literal_owner = info.name
+                  end
+                end
+                # Only convert instance-method resolution to class-method call when the
+                # owner matches the literal type (avoid rewriting Class#to_s to Class.to_s).
+                if literal_owner && !literal_owner.empty? &&
+                   normalize_method_owner_name(literal_owner) == normalize_method_owner_name(class_name)
+                  full_method_name = "#{class_name}.#{method_name}"
+                  receiver_id = nil
+                  static_class_name = class_name
+                  if method_name == "new"
+                    if class_info = @class_info[class_name]?
+                      generate_allocator(class_name, class_info)
+                    end
                   end
                 end
               end
