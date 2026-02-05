@@ -21715,9 +21715,7 @@ module Crystal::HIR
         break if visited.includes?(current)
         visited << current
         test_name = "#{current}.#{method_name}"
-        if @function_types.has_key?(test_name) ||
-           has_function_base?(test_name) ||
-           @function_defs.has_key?(test_name) ||
+        if @function_defs.has_key?(test_name) ||
            class_method_overload_exists?(test_name)
           resolved = current == origin ? test_name : "#{origin}.#{method_name}"
           @class_method_inheritance_cache[cache_key] = resolved
@@ -21733,9 +21731,7 @@ module Crystal::HIR
       end
       if class_name != "Object"
         object_method = "Object.#{method_name}"
-        if @function_types.has_key?(object_method) ||
-           has_function_base?(object_method) ||
-           @function_defs.has_key?(object_method) ||
+        if @function_defs.has_key?(object_method) ||
            class_method_overload_exists?(object_method)
           resolved = "#{origin}.#{method_name}"
           @class_method_inheritance_cache[cache_key] = resolved
@@ -21750,7 +21746,11 @@ module Crystal::HIR
       return false unless base_name.includes?(".")
       overloads = function_def_overloads(base_name)
       return false if overloads.empty?
-      overloads.any? { |name| name.starts_with?(base_name) }
+      expected_base = strip_type_suffix(base_name)
+      overloads.any? do |name|
+        parts = parse_method_name_compact(name)
+        parts.separator == '.' && parts.base == expected_base
+      end
     end
 
     # Infer type argument for generic class constructor call
@@ -32485,6 +32485,12 @@ module Crystal::HIR
           if name != "self"
             if (local_id = ctx.lookup_local(name)) && !ctx.type_literal?(local_id)
               force_instance_receiver = true
+            elsif @type_param_map.has_key?(name)
+              force_instance_receiver = true
+            elsif @type_param_map.empty?
+              if inferred_map = fallback_type_param_map_for_current
+                force_instance_receiver = true if inferred_map.has_key?(name)
+              end
             end
           end
         end
@@ -32495,6 +32501,16 @@ module Crystal::HIR
           name = String.new(obj_node.name)
           substituted_name = substitute_type_params_in_type_name(name)
           substituted = substituted_name != name
+          if substituted
+            force_instance_receiver = true
+          elsif @type_param_map.has_key?(name)
+            force_instance_receiver = true
+          elsif @type_param_map.empty?
+            if inferred_map = fallback_type_param_map_for_current
+              force_instance_receiver = true if inferred_map.has_key?(name)
+            end
+          end
+          unless force_instance_receiver
           name = substituted_name if substituted
           if @module.is_lib?(name)
             class_name_str = name
@@ -32537,6 +32553,7 @@ module Crystal::HIR
                   constant_receiver = true
               end
             end
+          end
           end
         elsif !force_instance_receiver && obj_node.is_a?(CrystalV2::Compiler::Frontend::IdentifierNode)
           name = String.new(obj_node.name)
@@ -32734,6 +32751,14 @@ module Crystal::HIR
         elsif obj_node.is_a?(CrystalV2::Compiler::Frontend::PathNode)
           # Path like Foo::Bar for nested classes/modules
           raw_path = collect_path_string(obj_node)
+          if mapped = @type_param_map[raw_path]?
+            force_instance_receiver = true
+          elsif @type_param_map.empty?
+            if inferred_map = fallback_type_param_map_for_current
+              force_instance_receiver = true if inferred_map.has_key?(raw_path)
+            end
+          end
+          unless force_instance_receiver
           if @type_param_map.empty? && raw_path.includes?("::")
             prefix = first_namespace_component(raw_path)
             if type_param_like?(prefix)
@@ -32784,6 +32809,7 @@ module Crystal::HIR
             # Even if not in class_info, treat path as class name for class method calls
             # This handles nested classes/modules that may not be fully registered
             class_name_str = full_path
+          end
           end
           if class_name_str && method_name == "new"
             resolved = resolve_type_alias_chain(class_name_str)
@@ -32872,7 +32898,7 @@ module Crystal::HIR
                 class_name_str = method_owner(base)
                 break
               end
-              if @function_types.has_key?("#{candidate}.#{method_name}") || has_function_base?("#{candidate}.#{method_name}")
+              if class_method_overload_exists?("#{candidate}.#{method_name}") || @function_defs.has_key?("#{candidate}.#{method_name}")
                 class_name_str = candidate
                 break
               end
@@ -33042,8 +33068,7 @@ module Crystal::HIR
             static_class_name = method_owner(full_method_name)
           end
           if !@function_defs.has_key?(full_method_name) &&
-             !@function_types.has_key?(full_method_name) &&
-             !has_function_base?(full_method_name)
+             !class_method_overload_exists?(full_method_name)
             # Treat type literal receivers as Class/Module instance methods when available (e.g., T.to_s).
             literal_id = lower_type_literal_from_name(ctx, class_name_str)
             ctx.mark_type_literal(literal_id)
@@ -33166,23 +33191,35 @@ module Crystal::HIR
                 STDERR.puts "[CLASS_MATCH] method=#{method_name}, receiver_id=#{receiver_type.id}, name=#{name}"
               end
             if receiver_is_type_literal
+                if method_name != "new"
+                  meta_owner = receiver_is_module ? "Module" : "Class"
+                  if meta_method = resolve_method_with_inheritance(meta_owner, method_name)
+                    full_method_name = meta_method
+                    static_class_name = nil
+                  end
+                end
                 if method_name == "new"
                   full_method_name = "#{name}.#{method_name}"
                   static_class_name = name
                   receiver_id = nil
                 else
-                  full_method_name = resolve_class_method_with_inheritance(name, method_name) || "#{name}.#{method_name}"
-                  static_class_name = method_owner(full_method_name)
-                  if !@function_defs.has_key?(full_method_name) &&
-                     !@function_types.has_key?(full_method_name) &&
-                     !has_function_base?(full_method_name)
-                    # Fall back to Class/Module instance methods for type literals (e.g., T.to_s).
-                    meta_owner = receiver_is_module ? "Module" : "Class"
-                    meta_base = resolve_method_with_inheritance(meta_owner, method_name) || "#{meta_owner}##{method_name}"
-                    full_method_name = meta_base
-                    static_class_name = nil
-                  else
-                    receiver_id = nil
+                  if full_method_name.nil?
+                    full_method_name = resolve_class_method_with_inheritance(name, method_name) || "#{name}.#{method_name}"
+                    static_class_name = method_owner(full_method_name)
+                    if !@function_defs.has_key?(full_method_name) &&
+                       !class_method_overload_exists?(full_method_name)
+                      # Fall back to Class/Module instance methods for type literals (e.g., T.to_s).
+                      meta_owner = receiver_is_module ? "Module" : "Class"
+                      if meta_method = resolve_method_with_inheritance(meta_owner, method_name)
+                        full_method_name = meta_method
+                        static_class_name = nil
+                      else
+                        full_method_name = "#{meta_owner}##{method_name}"
+                        static_class_name = nil
+                      end
+                    else
+                      receiver_id = nil
+                    end
                   end
                 end
                 if method_name == "new"
@@ -33297,7 +33334,6 @@ module Crystal::HIR
           if method_name == "in?"
             if full_method_name.nil? || (!full_method_name.starts_with?("Object#") &&
                !@function_defs.has_key?(full_method_name) &&
-               !@function_types.has_key?(full_method_name) &&
                !has_function_base?(full_method_name))
               if object_in = resolve_method_with_inheritance("Object", "in?")
                 full_method_name = object_in
