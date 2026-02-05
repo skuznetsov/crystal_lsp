@@ -16106,6 +16106,19 @@ module Crystal::HIR
         @function_def_overloads_cache[base_name] = list
         return list
       end
+      if stripped_base.nil? && (base_name.includes?("#") || base_name.includes?("."))
+        parts = parse_method_name_compact(base_name)
+        if parts.separator && parts.method
+          ensure_method_index_built
+          base_owner = strip_generic_args(parts.owner)
+          if owner_methods = @method_index[base_owner]?
+            if candidates = owner_methods[parts.method.not_nil!]? 
+              @function_def_overloads_cache[base_name] = candidates
+              return candidates
+            end
+          end
+        end
+      end
 
       stripped = if stripped_base
                    stripped_base
