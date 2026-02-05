@@ -143,6 +143,11 @@ about syntax or types and should match what the original compiler would report.
     `Indexable#size`, `Nil#succ`, `Pointer(Void)#size`, `Range(Int32, Void)#bsearch_internal(...)`,
     `String#close/convert/handle_invalid`, `Time::POSIXTransition#time/unix_date_in_year(Int32)`,
     `Unicode::Unknown#unsafe_fetch`. Link output in `/tmp/bootstrap_array.hir` run.
+  - Update (2026-02-07): class-level setter handling in `lower_assign` fixed `Errno.value=` (now resolves to class method).
+    Current missing list (arm64): `Dragonbox::ImplInfo.get_cache/check_divisibility`, `ImplInfo::CarrierUInt.new!`,
+    `Indexable#size`, `Nil#succ`, `Pointer(Void)#size`, `Range(Int32, Void)#bsearch_internal(...)`,
+    `String#close/convert/handle_invalid`, `Time::POSIXTransition#time/unix_date_in_year(Int32)`,
+    `Unicode::Unknown#unsafe_fetch`.
   - Update (2026-02-05): `resolve_class_method_with_inheritance` now filters overloads to class-method names (must start with `Type.method`), avoiding false positives from instance methods. This should allow `T.to_s` to fall back to `Class#to_s` instead of emitting `_UInt8$Dto_s`/`_Int32$Dto_s`.
   - Update (2026-02-03): `bench_fib42` (full prelude) link still fails with missing `_Pointer(UInt8)#begin/end/includes?/excludes_end?`, `_Pointer(UInt8)#size/offset/time/unix_date_in_year`, `_Pointer(Void)#size`, `_Int32#to_s(Int32)` and `_Errno#value=`, plus `_each$block`. This suggests range/Indexable inference still mis-resolves to `Pointer(UInt8)` in `Indexable.range_to_index_and_count` and pointer methods are not being lowered/resolved; re-check arg-type inference for Range and included-module lookup for Pointer receivers.
   - Update (2026-02-03): fixed bare-generic param handling (keep base type instead of VOID) and union recursion fallback (avoid Pointer on union_in_progress). HIR no longer shows `Indexable.range_to_index_and_count$Pointer_Int32` nor `Pointer(UInt8)#begin/includes?` in `Path.separators`. New blocker: `bench_fib42` fails in `opt` with invalid GEP (struct `{ ptr, ptr }` indexed at 2) in `Crystal::DWARF::Info#read_ulong` when loading tuple element. Suspect tuple layout/LLVM struct building mismatch for `Tuple(LibC::SizeT, LibC::SizeT, String)`; inspect tuple type emission and element access lowering.

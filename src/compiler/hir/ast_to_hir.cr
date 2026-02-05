@@ -41701,6 +41701,39 @@ module Crystal::HIR
           end
         end
 
+        static_owner = case obj_node
+                       when CrystalV2::Compiler::Frontend::ConstantNode
+                         resolved = resolve_class_name_in_context(String.new(obj_node.name))
+                         resolve_type_alias_chain(resolved)
+                       when CrystalV2::Compiler::Frontend::IdentifierNode
+                         name = String.new(obj_node.name)
+                         if ctx.lookup_local(name).nil? && name[0]?.try(&.uppercase?)
+                           resolved = resolve_class_name_in_context(name)
+                           resolve_type_alias_chain(resolved)
+                         end
+                       when CrystalV2::Compiler::Frontend::PathNode
+                         raw_path = collect_path_string(obj_node)
+                         full_path = path_is_absolute?(obj_node) ? raw_path.sub(/^::/, "") : resolve_path_string_in_context(raw_path)
+                         resolve_type_alias_chain(full_path)
+                       else
+                         nil
+                       end
+        if static_owner
+          if class_like_namespace?(static_owner) || module_like_type_name?(static_owner) ||
+             @enum_info.try(&.has_key?(static_owner))
+            setter_name = "#{field_name}="
+            full_method_name = resolve_class_method_with_inheritance(static_owner, setter_name) || "#{static_owner}.#{setter_name}"
+            arg_types = [ctx.type_of(value_id)]
+            return_type = get_function_return_type(full_method_name)
+            remember_callsite_arg_types(full_method_name, arg_types)
+            lower_function_if_needed(full_method_name)
+            call = Call.new(ctx.next_id, return_type, nil, full_method_name, [value_id])
+            ctx.emit(call)
+            ctx.register_type(call.id, return_type)
+            return call.id
+          end
+        end
+
         object_id = lower_expr(ctx, target_node.object)
 
         # Get the object's type to resolve the setter method
