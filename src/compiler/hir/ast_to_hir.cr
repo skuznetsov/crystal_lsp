@@ -36223,6 +36223,17 @@ module Crystal::HIR
               overload_keys = candidates unless candidates.empty?
             end
           end
+          # If the callsite owner is a concrete generic instance, prefer
+          # candidates that match the exact owner (avoid falling back to
+          # generic-template defs without type args).
+          if !overload_keys.empty? && parts.owner.includes?("(")
+            owner_prefix = "#{parts.owner}#{parts.separator}"
+            filtered = [] of String
+            overload_keys.each do |cand|
+              filtered << cand if cand.starts_with?(owner_prefix)
+            end
+            overload_keys = filtered unless filtered.empty?
+          end
         end
       end
 
