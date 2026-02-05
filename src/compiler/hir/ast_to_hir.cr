@@ -13746,6 +13746,46 @@ module Crystal::HIR
       ctx.terminate(Return.new(value_param.id))
     end
 
+    # Generate a class-method wrapper for type-literal calls that should dispatch to
+    # meta-instance methods (e.g., Int32.to_s -> Class#to_s).
+    private def ensure_type_literal_class_method(
+      owner_name : String,
+      method_name : String,
+      arg_types : Array(TypeRef),
+      meta_method : String
+    ) : String
+      full_name = mangle_function_name("#{owner_name}.#{method_name}", arg_types)
+      return full_name if @module.has_function?(full_name)
+
+      return_type = get_function_return_type(meta_method)
+      func = @module.create_function(full_name, return_type)
+      ctx = LoweringContext.new(func, @module, @arena)
+
+      arg_ids = [] of ValueId
+      arg_types.each_with_index do |arg_type, idx|
+        param = func.add_param("arg#{idx}", arg_type)
+        ctx.register_local("arg#{idx}", param.id)
+        ctx.register_type(param.id, arg_type)
+        arg_ids << param.id
+      end
+
+      literal_id = lower_type_literal_from_name(ctx, owner_name)
+      ctx.mark_type_literal(literal_id)
+
+      remember_callsite_arg_types(meta_method, arg_types)
+      lower_function_if_needed(meta_method)
+
+      call = Call.new(ctx.next_id, return_type, literal_id, meta_method, arg_ids)
+      ctx.emit(call)
+      ctx.register_type(call.id, return_type)
+      if return_type == TypeRef::VOID
+        ctx.terminate(Return.new(nil))
+      else
+        ctx.terminate(Return.new(call.id))
+      end
+      full_name
+    end
+
     private def class_accessor_init_flag_name(accessor_name : String) : String
       "__class_accessor_init_#{accessor_name}"
     end
@@ -30499,6 +30539,20 @@ module Crystal::HIR
           debug_hook("function.lookup.generated", "name=#{name} kind=ivar_accessor")
           return
         end
+        if sep = name_parts.separator
+          if sep == '.' && (owner = name_parts.owner) && (method_part = name_parts.method)
+            if type_name_exists?(owner) && resolve_class_method_with_inheritance(owner, method_part).nil?
+              meta_owner = module_type_ref?(type_ref_for_name(owner)) ? "Module" : "Class"
+              if meta_method = resolve_method_with_inheritance(meta_owner, method_part)
+                callsite = pop_pending_callsite_args(name, base_name)
+                arg_types = callsite ? callsite.types : [] of TypeRef
+                wrapper = ensure_type_literal_class_method(owner, method_part, arg_types, meta_method)
+                @function_lowering_states[wrapper] = FunctionLoweringState::Completed
+                return
+              end
+            end
+          end
+        end
         if !func_def
           if (suffix = name_parts.suffix) && suffix_has_block_flag?(suffix)
             block_base = "#{base_name}$block"
@@ -32170,6 +32224,15 @@ module Crystal::HIR
       when CrystalV2::Compiler::Frontend::IdentifierNode
         # Simple function call: foo()
         method_name = String.new(callee_node.name)
+        # Handle qualified calls like Int32.to_s that may appear as IdentifierNodes
+        # (e.g., from macro expansion or type-literal printing).
+        if method_name.includes?(".")
+          full_method_name = method_name
+          if owner = method_owner(method_name)
+            static_class_name = owner
+            method_name = method_short_from_name(method_name)
+          end
+        end
         if method_name == "system_init" && @current_class == "File"
           lit = Literal.new(ctx.next_id, TypeRef::NIL, nil)
           ctx.emit(lit)
@@ -33410,6 +33473,11 @@ module Crystal::HIR
         receiver_id = lower_node(ctx, callee_node)
         method_name = "call"
       end
+      # Normalize any fully-qualified method name that may have slipped into method_name.
+      # This keeps method_name as the short identifier for later resolution.
+      if method_name.includes?(".")
+        method_name = method_short_from_name(method_name)
+      end
 
       # Handle named arguments by reordering them to match parameter positions
       # Also expand splat arguments (*array -> individual elements)
@@ -34138,6 +34206,26 @@ module Crystal::HIR
         end
         if mangled_method_name.includes?("$arity")
           mangled_method_name = desired_mangled
+        end
+      end
+      # Final safety net: if we ended with a class-method call that has no definition,
+      # fall back to Class/Module instance methods on the type literal.
+      if receiver_id.nil? && mangled_method_name.includes?(".") &&
+         !@function_defs.has_key?(mangled_method_name)
+        owner = method_owner(mangled_method_name) || method_owner(base_method_name)
+        if owner && !owner.empty? && type_name_exists?(owner)
+          owner_ref = type_ref_for_name(owner)
+          meta_owner = module_type_ref?(owner_ref) ? "Module" : "Class"
+          short_method = method_short_from_name(mangled_method_name)
+          if resolve_class_method_with_inheritance(owner, short_method).nil?
+            if meta_method = resolve_method_with_inheritance(meta_owner, short_method)
+              wrapper = ensure_type_literal_class_method(owner, short_method, arg_types, meta_method)
+              base_method_name = strip_type_suffix(wrapper)
+              mangled_method_name = wrapper
+              full_method_name = base_method_name
+              static_class_name = owner
+            end
+          end
         end
       end
       primary_mangled_name = mangled_method_name
