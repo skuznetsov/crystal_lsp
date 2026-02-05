@@ -6925,7 +6925,8 @@ module Crystal::HIR
           if enum_name = resolve_enum_name(enum_candidate)
             if enum_info = @enum_info
               if enum_info[enum_name]?.try(&.has_key?(member))
-                return enum_base_type(enum_name)
+                enum_ref = type_ref_for_name(enum_name)
+                return enum_ref == TypeRef::VOID ? enum_base_type(enum_name) : enum_ref
               end
             end
           end
@@ -19468,6 +19469,16 @@ module Crystal::HIR
           return fast
         end
       end
+      if mapped = @type_param_map[name]?
+        return mapped
+      end
+      if current = @current_class
+        if info = generic_owner_info(current)
+          if mapped = info[:map][name]?
+            return mapped
+          end
+        end
+      end
       if ENV["DEBUG_FILE_RESOLVE"]? && name == "File"
         STDERR.puts "[DEBUG_FILE_RESOLVE] current=#{@current_class || ""} override=#{@current_namespace_override || ""} top_level=#{@top_level_type_names.includes?(name)}"
       end
@@ -26643,7 +26654,7 @@ module Crystal::HIR
           if members = enum_info[resolved_left]?
             if right_name[0]?.try(&.uppercase?)
               value = members[right_name]? || 0_i64
-              # Found enum value - emit as Int32 literal but remember enum type.
+              # Found enum value - emit as base literal but remember enum type.
               enum_type = enum_base_type(resolved_left)
               lit = Literal.new(ctx.next_id, enum_type, value)
               ctx.emit(lit)
@@ -33023,6 +33034,21 @@ module Crystal::HIR
             full_method_name = resolve_class_method_with_inheritance(class_name_str, method_name) || "#{class_name_str}.#{method_name}"
             static_class_name = method_owner(full_method_name)
           end
+          if !@function_defs.has_key?(full_method_name) &&
+             !@function_types.has_key?(full_method_name) &&
+             !has_function_base?(full_method_name)
+            # Treat type literal receivers as Class/Module instance methods when available (e.g., T.to_s).
+            literal_id = lower_type_literal_from_name(ctx, class_name_str)
+            ctx.mark_type_literal(literal_id)
+            receiver_id = literal_id
+            receiver_type = ctx.type_of(literal_id)
+            receiver_is_module = module_type_ref?(receiver_type)
+            meta_owner = receiver_is_module ? "Module" : "Class"
+            if meta_method = resolve_method_with_inheritance(meta_owner, method_name)
+              full_method_name = meta_method
+              static_class_name = nil
+            end
+          end
           if full_method_name
             call_has_splat = call_args.any? { |arg_expr| call_arena[arg_expr].is_a?(CrystalV2::Compiler::Frontend::SplatNode) }
             call_has_named_args = node.named_args.try(&.empty?) == false
@@ -33032,7 +33058,7 @@ module Crystal::HIR
               full_method_name = entry[0]
             end
           end
-          receiver_id = nil  # Static call, no receiver
+          receiver_id = nil if static_class_name  # Static call, no receiver
           if method_name == "new"
             if class_info = @class_info[class_name_str]?
               call_arg_types = call_args.map do |arg|
@@ -33132,15 +33158,26 @@ module Crystal::HIR
               if ENV.has_key?("DEBUG_CLASS_MATCH") && !name.includes?("::")
                 STDERR.puts "[CLASS_MATCH] method=#{method_name}, receiver_id=#{receiver_type.id}, name=#{name}"
               end
-              if receiver_is_type_literal
+            if receiver_is_type_literal
                 if method_name == "new"
                   full_method_name = "#{name}.#{method_name}"
                   static_class_name = name
+                  receiver_id = nil
                 else
                   full_method_name = resolve_class_method_with_inheritance(name, method_name) || "#{name}.#{method_name}"
                   static_class_name = method_owner(full_method_name)
+                  if !@function_defs.has_key?(full_method_name) &&
+                     !@function_types.has_key?(full_method_name) &&
+                     !has_function_base?(full_method_name)
+                    # Fall back to Class/Module instance methods for type literals (e.g., T.to_s).
+                    meta_owner = receiver_is_module ? "Module" : "Class"
+                    meta_base = resolve_method_with_inheritance(meta_owner, method_name) || "#{meta_owner}##{method_name}"
+                    full_method_name = meta_base
+                    static_class_name = nil
+                  else
+                    receiver_id = nil
+                  end
                 end
-                receiver_id = nil
                 if method_name == "new"
                   call_arg_types = call_args.map do |arg|
                     infer_type_from_expr(arg, @current_class) || TypeRef::VOID
