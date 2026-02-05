@@ -10,6 +10,15 @@ about syntax or types and should match what the original compiler would report.
 
 ## Current Status (2026-01-30)
 
+### Handoff (2026-02-05)
+- Working tree clean; no uncommitted changes. `bin/` is already ignored and not tracked (`git ls-files bin` empty).
+- Do **not** hardcode method/module names as fixes; remove any hacks that hide missing symbols (use original compiler behavior as reference).
+- Re-audit LLVM mangling helpers: legacy `__`/`___` parsing must be removed; current scheme is `$`-escaped and affects unions.
+- Add/confirm refactors to avoid `split` in hot paths (method-name parsing + union parsing). Use zero-copy helpers only.
+- Re-audit float/int/ptr conversion paths in LLVM backend (fptosi/uitofp/ptrtoint) for ARM/AArch64 correctness.
+- Re-audit union payload alignment (align 4 for ARM/AArch64).
+- Platform parity: keep target coverage aligned with original Crystal; add Windows support to TODO (later, after bootstrap).
+
 ### In Progress
 - [x] Replace method-name string `split` usage with zero-copy helpers (`parse_method_name`, `strip_type_suffix`) in HIR lowering hot paths (ast_to_hir).
 - [x] Audit remaining `split("$")`/`split("#")` in other files (if any) to ensure method-name parsing uses helpers.
