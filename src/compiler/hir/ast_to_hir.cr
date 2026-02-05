@@ -33849,6 +33849,23 @@ module Crystal::HIR
           full_method_name = entry[0]
         end
       end
+      # If a class-method call is unresolved but the owner is a type literal,
+      # fall back to Class/Module instance methods (e.g., Int32.to_s → Class#to_s).
+      if receiver_id.nil? && full_method_name && full_method_name.includes?(".") &&
+         !@function_defs.has_key?(full_method_name) && !class_method_overload_exists?(full_method_name)
+        owner = method_owner(full_method_name)
+        if owner && !owner.empty? && type_name_exists?(owner)
+          owner_ref = type_ref_for_name(owner)
+          meta_owner = module_type_ref?(owner_ref) ? "Module" : "Class"
+          if meta_method = resolve_method_with_inheritance(meta_owner, method_name)
+            literal_id = lower_type_literal_from_name(ctx, owner)
+            ctx.mark_type_literal(literal_id)
+            receiver_id = literal_id
+            full_method_name = meta_method
+            static_class_name = nil
+          end
+        end
+      end
 
       # Compute mangled name based on base name + argument types
       # If no explicit receiver and we're inside a class, try class#method first
