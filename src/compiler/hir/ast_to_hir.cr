@@ -8571,9 +8571,9 @@ module Crystal::HIR
           end
         end
         @current_class = old_class
-        # PASS 1.75: Expand macros that define types before method registration.
-        # This ensures nested types (e.g., record structs) are available for type resolution
-        # when registering module methods.
+        # PASS 1.75: Expand macros before method registration.
+        # This ensures nested types (e.g., record structs) and macro‑generated defs
+        # (e.g., class_getter) are available for type resolution when registering methods.
         body.each do |expr_id|
           member = unwrap_visibility_member(@arena[expr_id])
           case member
@@ -8588,7 +8588,6 @@ module Crystal::HIR
             next unless macro_lookup
             macro_entry, macro_key = macro_lookup
             macro_def, macro_arena = macro_entry
-            next unless macro_def_maybe_defines_type?(macro_def, macro_arena)
             macro_args, macro_block = extract_macro_block_from_args(member.args, member.block)
             expanded_id = expand_macro_expr(macro_def, macro_arena, macro_args, member.named_args, macro_block, macro_key)
             unless expanded_id.invalid?
@@ -8609,7 +8608,6 @@ module Crystal::HIR
             next unless macro_lookup
             macro_entry, macro_key = macro_lookup
             macro_def, macro_arena = macro_entry
-            next unless macro_def_maybe_defines_type?(macro_def, macro_arena)
             expanded_id = expand_macro_expr(macro_def, macro_arena, [] of ExprId, nil, nil, macro_key)
             unless expanded_id.invalid?
               old_arena = @arena
