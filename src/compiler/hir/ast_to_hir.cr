@@ -21873,6 +21873,14 @@ module Crystal::HIR
       end
     end
 
+    private def class_method_defined?(name : String) : Bool
+      return false if name.empty?
+      @function_defs.has_key?(name) ||
+        @function_types.has_key?(name) ||
+        has_function_base?(name) ||
+        class_method_overload_exists?(name)
+    end
+
     # Infer type argument for generic class constructor call
     # E.g., Array.new(size, value) -> infer T from value's type
     #       Array.new(size) { block } -> infer T from block's return type
@@ -30620,7 +30628,11 @@ module Crystal::HIR
         end
         if sep = name_parts.separator
           if sep == '.' && (owner = name_parts.owner) && (method_part = name_parts.method)
-            if type_name_exists?(owner) && resolve_class_method_with_inheritance(owner, method_part).nil?
+            if type_name_exists?(owner)
+              resolved_class = resolve_class_method_with_inheritance(owner, method_part)
+              resolved_class = nil unless resolved_class && class_method_defined?(resolved_class)
+            end
+            if type_name_exists?(owner) && resolved_class.nil?
               callsite = pop_pending_callsite_args(name, base_name)
               arg_types = callsite ? callsite.types : parse_types_from_suffix(name_parts.suffix || "")
               if wrapper = ensure_unbound_instance_method_wrapper(owner, method_part, arg_types)
@@ -32301,6 +32313,7 @@ module Crystal::HIR
       static_class_name : String? = nil
       proc_return_type_name : String? = nil
       cached_callsite_key : String? = nil
+      explicit_self_receiver = false
 
       case callee_node
       when CrystalV2::Compiler::Frontend::IdentifierNode
@@ -32359,6 +32372,12 @@ module Crystal::HIR
               if @function_types.has_key?(self_method_name) ||
                  has_function_base?(self_method_name) ||
                  @function_defs.has_key?(self_method_name)
+                receiver_id = self_id
+                full_method_name = resolve_method_with_inheritance(self_name, method_name) || self_method_name
+              end
+              if receiver_id.nil? && !@current_method_is_class
+                # In instance methods, unqualified calls default to self even if the
+                # target method isn't registered yet (avoid class-method fallback).
                 receiver_id = self_id
                 full_method_name = resolve_method_with_inheritance(self_name, method_name) || self_method_name
               end
@@ -32442,15 +32461,21 @@ module Crystal::HIR
               end
 
               unless parent_method_found
-                # Also check for module-style method (Module.method), including inherited class methods.
-                if class_method_base = resolve_class_method_with_inheritance(current, method_name)
-                  # This is a module/class method call (no receiver)
-                  receiver_id = nil
-                  full_method_name = class_method_base
-                elsif find_module_class_def(current, method_name, call_args.size)
-                  # Class method exists in AST but wasn't registered yet.
-                  receiver_id = nil
-                  full_method_name = "#{current}.#{method_name}"
+                # Only resolve class/module methods for implicit calls when we are in a class method.
+                # In instance methods, implicit calls should remain instance dispatch (self), not
+                # accidentally bind to Class.method and lose the receiver.
+                if @current_method_is_class
+                  if class_method_base = resolve_class_method_with_inheritance(current, method_name)
+                    # This is a module/class method call (no receiver)
+                    receiver_id = nil
+                    full_method_name = class_method_base
+                  elsif find_module_class_def(current, method_name, call_args.size)
+                    # Class method exists in AST but wasn't registered yet.
+                    receiver_id = nil
+                    full_method_name = "#{current}.#{method_name}"
+                  else
+                    receiver_id = nil
+                  end
                 else
                   receiver_id = nil
                 end
@@ -32519,6 +32544,9 @@ module Crystal::HIR
         obj_expr = callee_node.object
         obj_node = @arena[obj_expr]
         method_name = String.new(callee_node.member)
+        explicit_self_receiver = obj_node.is_a?(CrystalV2::Compiler::Frontend::SelfNode) ||
+          obj_node.is_a?(CrystalV2::Compiler::Frontend::ImplicitObjNode) ||
+          (obj_node.is_a?(CrystalV2::Compiler::Frontend::IdentifierNode) && String.new(obj_node.name) == "self")
         if debug_env_filter_match?("DEBUG_TPM_CALL", method_name)
           STDERR.puts "[TPM_CALL] method=#{method_name} current=#{@current_class || "nil"} map=#{type_param_map_debug_string}"
         end
@@ -33321,6 +33349,13 @@ module Crystal::HIR
             ctx.mark_type_literal(receiver_id)
           end
           receiver_is_type_literal = ctx.type_literal?(receiver_id)
+          # Explicit self/implicit receiver in instance methods must never be treated as type literals.
+          if !@current_method_is_class &&
+             (obj_node.is_a?(CrystalV2::Compiler::Frontend::SelfNode) ||
+              obj_node.is_a?(CrystalV2::Compiler::Frontend::ImplicitObjNode) ||
+              (obj_node.is_a?(CrystalV2::Compiler::Frontend::IdentifierNode) && String.new(obj_node.name) == "self"))
+            receiver_is_type_literal = false
+          end
           if !receiver_is_type_literal
             raw_name = case obj_node
                        when CrystalV2::Compiler::Frontend::IdentifierNode
@@ -34014,6 +34049,14 @@ module Crystal::HIR
             full_method_name = meta_method
             static_class_name = nil
           end
+        end
+      end
+      # If this was an explicit self receiver, never rewrite to class methods.
+      if explicit_self_receiver && receiver_id.nil? && !@current_method_is_class
+        if current = @current_class
+          receiver_id = emit_self(ctx)
+          full_method_name = resolve_method_with_inheritance(current, method_name) || "#{current}##{method_name}"
+          static_class_name = nil
         end
       end
 
@@ -35543,11 +35586,15 @@ module Crystal::HIR
         if ENV["DEBUG_DECODE_CALL"]? && method_name == "decode"
           STDERR.puts "[DECODE_CALL_CONVERT] recv_type=#{get_type_name_from_ref(receiver_type)} module=#{module_type_ref?(receiver_type)}"
         end
-        unless module_type_ref?(receiver_type)
-          mangled_method_name = mangled_method_name.sub("#", ".")
-          primary_mangled_name = primary_mangled_name.sub("#", ".")
-          base_method_name = base_method_name.sub("#", ".") if base_method_name.includes?("#")
-          receiver_id = nil
+        self_id = ctx.lookup_local("self")
+        # Never rewrite explicit/implicit self in instance methods to class-method calls.
+        unless (self_id && receiver_id == self_id && !@current_method_is_class)
+          unless module_type_ref?(receiver_type)
+            mangled_method_name = mangled_method_name.sub("#", ".")
+            primary_mangled_name = primary_mangled_name.sub("#", ".")
+            base_method_name = base_method_name.sub("#", ".") if base_method_name.includes?("#")
+            receiver_id = nil
+          end
         end
       elsif receiver_id && mangled_method_name.includes?("#") && ENV["DEBUG_TYPE_LITERAL_CALL"]?
         STDERR.puts "[TYPE_LITERAL_CALL] recv=#{receiver_id} type_literal=#{ctx.type_literal?(receiver_id)} name=#{mangled_method_name}"
