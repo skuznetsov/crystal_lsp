@@ -33935,6 +33935,24 @@ module Crystal::HIR
                              method_name
                            end
                          end
+      # Late fallback: if this is an unresolved class-method call on a type literal,
+      # use meta-instance methods (e.g., Int32.to_s -> Class#to_s).
+      if receiver_id.nil? && base_method_name.includes?(".") &&
+         !@function_defs.has_key?(base_method_name) && !class_method_overload_exists?(base_method_name)
+        owner = method_owner(base_method_name)
+        if owner && !owner.empty? && type_name_exists?(owner)
+          owner_ref = type_ref_for_name(owner)
+          meta_owner = module_type_ref?(owner_ref) ? "Module" : "Class"
+          if meta_method = resolve_method_with_inheritance(meta_owner, method_name)
+            literal_id = lower_type_literal_from_name(ctx, owner)
+            ctx.mark_type_literal(literal_id)
+            receiver_id = literal_id
+            base_method_name = meta_method
+            full_method_name = meta_method
+            static_class_name = nil
+          end
+        end
+      end
       if cached_callsite_key && receiver_id && base_method_name.includes?("#")
         @callsite_method_cache[cached_callsite_key] = base_method_name
       end
