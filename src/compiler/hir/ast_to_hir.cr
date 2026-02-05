@@ -39117,6 +39117,13 @@ module Crystal::HIR
       object_id = lower_expr(ctx, node.object)
       obj_node = @arena[node.object]
       if ctx.type_of(object_id) == TypeRef::VOID
+        if inferred = infer_type_from_expr(node.object, @current_class)
+          if inferred != TypeRef::VOID && inferred != TypeRef::NIL
+            ctx.register_type(object_id, inferred)
+          end
+        end
+      end
+      if ctx.type_of(object_id) == TypeRef::VOID
         if obj_node.is_a?(CrystalV2::Compiler::Frontend::SelfNode) ||
            (obj_node.is_a?(CrystalV2::Compiler::Frontend::IdentifierNode) && String.new(obj_node.name) == "self")
           if current = @current_class
