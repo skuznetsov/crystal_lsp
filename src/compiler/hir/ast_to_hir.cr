@@ -13746,14 +13746,43 @@ module Crystal::HIR
       ctx.terminate(Return.new(value_param.id))
     end
 
+    # Resolve a meta-instance method (Class/Module/Object) for a type-literal call,
+    # using arity + arg types to pick the correct overload across inheritance.
+    private def resolve_meta_method_overload(
+      meta_owner : String,
+      method_name : String,
+      arg_types : Array(TypeRef)
+    ) : String?
+      current = meta_owner
+      visited = Set(String).new
+      while true
+        break if visited.includes?(current)
+        visited << current
+        base = "#{current}##{method_name}"
+        if entry = lookup_function_def_for_call(base, arg_types.size, false, arg_types, false, false)
+          return entry[0]
+        end
+        if info = @class_info[current]?
+          if parent = info.parent_name
+            current = parent
+            next
+          end
+        end
+        break
+      end
+      nil
+    end
+
     # Generate a class-method wrapper for type-literal calls that should dispatch to
-    # meta-instance methods (e.g., Int32.to_s -> Class#to_s).
+    # meta-instance methods (e.g., Int32.to_s -> Class#to_s / Object#to_s).
     private def ensure_type_literal_class_method(
       owner_name : String,
       method_name : String,
       arg_types : Array(TypeRef),
-      meta_method : String
-    ) : String
+      meta_owner : String
+    ) : String?
+      meta_method = resolve_meta_method_overload(meta_owner, method_name, arg_types)
+      return nil unless meta_method
       full_name = mangle_function_name("#{owner_name}.#{method_name}", arg_types)
       return full_name if @module.has_function?(full_name)
 
@@ -13784,6 +13813,56 @@ module Crystal::HIR
         ctx.terminate(Return.new(call.id))
       end
       full_name
+    end
+
+    # Generate a class-method wrapper that forwards to an instance method using
+    # the first argument as the receiver (unbound instance call).
+    private def ensure_unbound_instance_method_wrapper(
+      owner_name : String,
+      method_name : String,
+      arg_types : Array(TypeRef)
+    ) : String?
+      return nil if arg_types.empty?
+      owner_ref = type_ref_for_name(owner_name)
+      return nil if owner_ref == TypeRef::VOID
+      return nil unless arg_types.first == owner_ref
+
+      instance_arg_types = arg_types[1..]
+      instance_base = "#{owner_name}##{method_name}"
+      if entry = lookup_function_def_for_call(instance_base, instance_arg_types.size, false, instance_arg_types, false, false)
+        instance_name = entry[0]
+      else
+        return nil
+      end
+
+      wrapper_name = mangle_function_name("#{owner_name}.#{method_name}", arg_types)
+      return wrapper_name if @module.has_function?(wrapper_name)
+
+      return_type = get_function_return_type(instance_name)
+      func = @module.create_function(wrapper_name, return_type)
+      ctx = LoweringContext.new(func, @module, @arena)
+
+      arg_ids = [] of ValueId
+      arg_types.each_with_index do |arg_type, idx|
+        param = func.add_param("arg#{idx}", arg_type)
+        ctx.register_local("arg#{idx}", param.id)
+        ctx.register_type(param.id, arg_type)
+        arg_ids << param.id
+      end
+
+      receiver_id = arg_ids.shift
+      remember_callsite_arg_types(instance_name, instance_arg_types)
+      lower_function_if_needed(instance_name)
+
+      call = Call.new(ctx.next_id, return_type, receiver_id, instance_name, arg_ids)
+      ctx.emit(call)
+      ctx.register_type(call.id, return_type)
+      if return_type == TypeRef::VOID
+        ctx.terminate(Return.new(nil))
+      else
+        ctx.terminate(Return.new(call.id))
+      end
+      wrapper_name
     end
 
     private def class_accessor_init_flag_name(accessor_name : String) : String
@@ -30542,11 +30621,14 @@ module Crystal::HIR
         if sep = name_parts.separator
           if sep == '.' && (owner = name_parts.owner) && (method_part = name_parts.method)
             if type_name_exists?(owner) && resolve_class_method_with_inheritance(owner, method_part).nil?
+              callsite = pop_pending_callsite_args(name, base_name)
+              arg_types = callsite ? callsite.types : parse_types_from_suffix(name_parts.suffix || "")
+              if wrapper = ensure_unbound_instance_method_wrapper(owner, method_part, arg_types)
+                @function_lowering_states[wrapper] = FunctionLoweringState::Completed
+                return
+              end
               meta_owner = module_type_ref?(type_ref_for_name(owner)) ? "Module" : "Class"
-              if meta_method = resolve_method_with_inheritance(meta_owner, method_part)
-                callsite = pop_pending_callsite_args(name, base_name)
-                arg_types = callsite ? callsite.types : [] of TypeRef
-                wrapper = ensure_type_literal_class_method(owner, method_part, arg_types, meta_method)
+              if wrapper = ensure_type_literal_class_method(owner, method_part, arg_types, meta_owner)
                 @function_lowering_states[wrapper] = FunctionLoweringState::Completed
                 return
               end
@@ -34214,16 +34296,23 @@ module Crystal::HIR
          !@function_defs.has_key?(mangled_method_name)
         owner = method_owner(mangled_method_name) || method_owner(base_method_name)
         if owner && !owner.empty? && type_name_exists?(owner)
-          owner_ref = type_ref_for_name(owner)
-          meta_owner = module_type_ref?(owner_ref) ? "Module" : "Class"
-          short_method = method_short_from_name(mangled_method_name)
-          if resolve_class_method_with_inheritance(owner, short_method).nil?
-            if meta_method = resolve_method_with_inheritance(meta_owner, short_method)
-              wrapper = ensure_type_literal_class_method(owner, short_method, arg_types, meta_method)
-              base_method_name = strip_type_suffix(wrapper)
-              mangled_method_name = wrapper
-              full_method_name = base_method_name
-              static_class_name = owner
+          wrapper = ensure_unbound_instance_method_wrapper(owner, method_short_from_name(mangled_method_name), arg_types)
+          if wrapper
+            base_method_name = strip_type_suffix(wrapper)
+            mangled_method_name = wrapper
+            full_method_name = base_method_name
+            static_class_name = owner
+          else
+            owner_ref = type_ref_for_name(owner)
+            meta_owner = module_type_ref?(owner_ref) ? "Module" : "Class"
+            short_method = method_short_from_name(mangled_method_name)
+            if resolve_class_method_with_inheritance(owner, short_method).nil?
+              if wrapper = ensure_type_literal_class_method(owner, short_method, arg_types, meta_owner)
+                base_method_name = strip_type_suffix(wrapper)
+                mangled_method_name = wrapper
+                full_method_name = base_method_name
+                static_class_name = owner
+              end
             end
           end
         end
