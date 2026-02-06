@@ -8575,6 +8575,13 @@ module Crystal::HIR
           end
         end
         @current_class = old_class
+        # PASS 1.7: Register macros BEFORE macro expansion.
+        # Macro calls inside a module body must see macros defined earlier in the same module.
+        body.each do |expr_id|
+          member = unwrap_visibility_member(@arena[expr_id])
+          next unless member.is_a?(CrystalV2::Compiler::Frontend::MacroDefNode)
+          register_macro(member, module_name)
+        end
         # PASS 1.75: Expand macros before method registration.
         # This ensures nested types (e.g., record structs) and macro‑generated defs
         # (e.g., class_getter) are available for type resolution when registering methods.
@@ -10953,7 +10960,7 @@ module Crystal::HIR
             is_class_method = if recv = member.receiver
                                 String.new(recv) == "self"
                               else
-                                  false
+                                  @module_extend_self.includes?(module_name)
                                 end
               next unless is_class_method
               STDERR.puts "      [#{module_name}] Method #{idx}: #{method_name}" if ENV["HIR_DEBUG"]?
@@ -11016,6 +11023,8 @@ module Crystal::HIR
               lower_module_with_name(member, full_nested_name)
             when CrystalV2::Compiler::Frontend::CallNode
               lower_macro_call_in_module_body(module_name, member)
+            when CrystalV2::Compiler::Frontend::IdentifierNode
+              lower_macro_identifier_in_module_body(module_name, member)
             end
           end
         ensure
@@ -11040,11 +11049,13 @@ module Crystal::HIR
         end
       when CrystalV2::Compiler::Frontend::AnnotationNode
         remember_effect_annotation(member, @arena)
+      when CrystalV2::Compiler::Frontend::ExtendNode
+        mark_module_extend_self(member, module_name)
       when CrystalV2::Compiler::Frontend::DefNode
         is_class_method = if recv = member.receiver
                             String.new(recv) == "self"
                           else
-                            false
+                            @module_extend_self.includes?(module_name)
                           end
         if is_class_method
           method_name = String.new(member.name)
@@ -11140,6 +11151,8 @@ module Crystal::HIR
         end
       when CrystalV2::Compiler::Frontend::CallNode
         lower_macro_call_in_module_body(module_name, member)
+      when CrystalV2::Compiler::Frontend::IdentifierNode
+        lower_macro_identifier_in_module_body(module_name, member)
       end
     end
 
@@ -11152,13 +11165,41 @@ module Crystal::HIR
       return unless callee_node.is_a?(CrystalV2::Compiler::Frontend::IdentifierNode)
 
       method_name = String.new(callee_node.name)
-      macro_lookup = lookup_macro_entry(method_name, module_name)
+      macro_lookup = lookup_macro_entry_with_inheritance(method_name, module_name)
+      if macro_lookup.nil? && module_name != "Object"
+        macro_lookup = lookup_macro_entry(method_name, "Object")
+      end
       return unless macro_lookup
 
       macro_entry, macro_key = macro_lookup
       macro_def, macro_arena = macro_entry
       macro_args, macro_block = extract_macro_block_from_args(node.args, node.block)
       expanded_id = expand_macro_expr(macro_def, macro_arena, macro_args, node.named_args, macro_block, macro_key)
+      return if expanded_id.invalid?
+
+      old_arena = @arena
+      @arena = macro_arena
+      begin
+        lower_module_body_expr(module_name, expanded_id)
+      ensure
+        @arena = old_arena
+      end
+    end
+
+    private def lower_macro_identifier_in_module_body(
+      module_name : String,
+      node : CrystalV2::Compiler::Frontend::IdentifierNode
+    )
+      method_name = String.new(node.name)
+      macro_lookup = lookup_macro_entry_with_inheritance(method_name, module_name)
+      if macro_lookup.nil? && module_name != "Object"
+        macro_lookup = lookup_macro_entry(method_name, "Object")
+      end
+      return unless macro_lookup
+
+      macro_entry, macro_key = macro_lookup
+      macro_def, macro_arena = macro_entry
+      expanded_id = expand_macro_expr(macro_def, macro_arena, [] of ExprId, nil, nil, macro_key)
       return if expanded_id.invalid?
 
       old_arena = @arena
@@ -16038,7 +16079,8 @@ module Crystal::HIR
         STDERR.puts "[TO_S_RESOLVE] recv=#{recv_name} class_name=#{class_name} base=#{base_method_name}"
       end
 
-      if arg_types.all? { |t| t == TypeRef::VOID }
+      type_is_module = type_desc.try(&.kind) == TypeKind::Module
+      if arg_types.all? { |t| t == TypeRef::VOID } && !type_is_module
         if has_function_base?(base_method_name)
           if resolved = resolve_untyped_overload(base_method_name, effective_arg_count, has_block_call, call_has_named_args)
             debug_hook("method.resolve", "base=#{base_method_name} resolved=#{resolved} reason=all_void_untyped")
@@ -16054,8 +16096,16 @@ module Crystal::HIR
         STDERR.puts "[MATH_MIN_RESOLVE] class=#{class_name} method=#{method_name} base=#{base_method_name} mangled=#{mangled_name} args=#{arg_type_names.join(",")}"
       end
       preferred_module_class = preferred_module_typed_class_for(class_name)
-      type_is_module = type_desc.try(&.kind) == TypeKind::Module
       module_like_receiver = !class_name.empty? && (type_is_module || module_like_type_name?(class_name) || module_includers_match?(class_name) || !preferred_module_class.nil?)
+
+      # For module-typed receivers, prefer module-typed dispatch (unique includer or `extend self`)
+      # before returning an exact match on the module's own instance method (e.g. `M#value`).
+      if module_like_receiver
+        if resolved = resolve_module_typed_method(method_name, arg_types, class_name, has_block_call, @current_class)
+          debug_hook("method.resolve", "base=#{base_method_name} resolved=#{resolved} reason=module_typed_prefer")
+          return cache_method_resolution(cache_key, resolved)
+        end
+      end
 
       # Try to find the function in the module.
       #
@@ -34606,7 +34656,7 @@ module Crystal::HIR
         end
       end
 
-      if receiver_id && full_method_name.nil? && callee_node.is_a?(CrystalV2::Compiler::Frontend::MemberAccessNode)
+      if receiver_id && callee_node.is_a?(CrystalV2::Compiler::Frontend::MemberAccessNode)
         # Module-typed dispatch is only for *value receivers* whose static type is a module-like type.
         # Do not apply it to implicit/self receivers, otherwise we can accidentally bind to a generic
         # template module (e.g. Impl(F, Info)) instead of the concrete generic instance.
@@ -41269,8 +41319,15 @@ module Crystal::HIR
         STDERR.puts "[ENTRY_HASH_MEMBER] recv_type_id=#{receiver_type.id} recv_name=#{recv_name} info_name=#{info_name}"
       end
 
-      # Try to find method by receiver type with inheritance support
-      if receiver_type.id > 0
+      # Some module-like types can end up with a non-Module descriptor kind (e.g. upgraded),
+      # but should still be treated as module receivers for dispatch.
+      receiver_is_module_type = module_type_ref?(receiver_type)
+
+      # Try to find method by receiver type with inheritance support.
+      # For module-typed value receivers (e.g. `x : M; x.foo`), do NOT resolve to `M#foo`
+      # directly here. We need module-typed dispatch (`resolve_method_call`) which can
+      # pick a unique includer (e.g. `Box#foo`) or prefer `M.foo` when `extend self` applies.
+      if receiver_type.id > 0 && !receiver_is_module_type
         if info = @class_info_by_type_id[receiver_type.id]?
           # Use inheritance-aware method resolution
           if base_method = resolve_method_with_inheritance(info.name, member_name)
@@ -41293,7 +41350,7 @@ module Crystal::HIR
       end
 
       # Fallback 1: Try to match by type descriptor name (when type_ref IDs don't match)
-      if resolved_method_name.nil? && receiver_type.id > 0
+      if resolved_method_name.nil? && receiver_type.id > 0 && !receiver_is_module_type
         if type_desc = @module.get_type_descriptor(receiver_type)
           type_name = type_desc.name
           # Try full name first
