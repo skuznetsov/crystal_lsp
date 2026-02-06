@@ -19,6 +19,14 @@ about syntax or types and should match what the original compiler would report.
 - Re-audit union payload alignment (align 4 for ARM/AArch64).
 - Platform parity: keep target coverage aligned with original Crystal; add Windows support to TODO (later, after bootstrap).
 
+### Update (2026-02-06)
+- Fixed: generic receiver specialization was collapsing union type args to `Pointer(Void)`, producing `Indexable::ItemIterator(Pointer(Void), Pointer(Void))` and `Pointer(Void)#size` in HIR. This was a real missing-symbol cascade. Verified by:
+  - `CRYSTAL_V2_STOP_AFTER_HIR=1 ./bin/crystal_v2_dbg_hooks --emit hir examples/bootstrap_array.cr -o /tmp/bootstrap_array_out_fix2`
+  - `rg "Indexable::ItemIterator\\(Pointer\\(Void\\)" /tmp/bootstrap_array_out_fix2.hir` -> no hits
+  - `./bin/crystal_v2_dbg_hooks examples/bootstrap_array.cr -o /tmp/bootstrap_array_bin2` -> links and runs (`EXIT:0`)
+  - Commit: `63c824e`
+- Fixed: sequential lowering now stops after terminal ops (`raise`/`return`) in method/def bodies to avoid emitting unreachable calls and spurious monomorphizations from dead code. Verified by successful compile+run of `examples/bootstrap_array.cr`. Commit: `9b5c49f`
+
 ### In Progress
 - [x] Replace method-name string `split` usage with zero-copy helpers (`parse_method_name`, `strip_type_suffix`) in HIR lowering hot paths (ast_to_hir).
 - [x] Audit remaining `split("$")`/`split("#")` in other files (if any) to ensure method-name parsing uses helpers.
