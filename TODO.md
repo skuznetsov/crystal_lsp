@@ -33,6 +33,11 @@ about syntax or types and should match what the original compiler would report.
   - `crystal spec spec/hir/ast_to_hir_spec.cr` -> `119 examples, 0 failures`
   - `timeout 120 crystal spec spec/hir/return_type_inference_spec.cr` -> `13 examples, 0 failures`
   - Commit: `c712ec9`
+- Fix/Perf: follow-up on lowering-time inference deferral:
+  - `resolve_alias_target` no longer qualifies targets under `context` (prevents mis-classifying `typeof(...)` as a generic type and fixes `alias SelfType = typeof(self)`).
+  - When a def is deferred due to untyped params, method effect summaries are still registered on the base name, so analyses see `@[ThreadShared]` / `@[Taints]` on call arguments.
+  - Verified by: `crystal spec spec/hir` -> `222 examples, 0 failures` (2 pending)
+  - Commit: `48bc2f8`
 
 ### In Progress
 - [x] Replace method-name string `split` usage with zero-copy helpers (`parse_method_name`, `strip_type_suffix`) in HIR lowering hot paths (ast_to_hir).
