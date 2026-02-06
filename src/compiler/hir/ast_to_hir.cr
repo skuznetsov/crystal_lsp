@@ -27004,7 +27004,10 @@ module Crystal::HIR
 
       # Extract type arguments, substituting any type parameters
       normalize_typeof_name = ->(type_name : String) : String {
-        if type_name == "Void" || type_name == "Unknown" || type_name.includes?("|")
+        # Keep unions in generic args (e.g. `Slice(Int32 | Pointer(UInt8))`),
+        # otherwise we lose specialization and end up with `Pointer(Void)`-based
+        # instantiations like `Indexable::ItemIterator(Pointer(Void), Pointer(Void))`.
+        if type_name == "Void" || type_name == "Unknown"
           "Pointer(Void)"
         else
           type_name
@@ -33020,7 +33023,9 @@ module Crystal::HIR
             base_name = resolve_type_name_in_context(base_name)
             base_name = resolve_type_alias_chain(base_name)
             normalize_typeof_name = ->(type_name : String) : String {
-              if type_name == "Void" || type_name == "Unknown" || type_name.includes?("|")
+              # Keep unions in generic args (e.g. `Slice(Int32 | Pointer(UInt8))`)
+              # so we don't degrade specialization to `Pointer(Void)`.
+              if type_name == "Void" || type_name == "Unknown"
                 "Pointer(Void)"
               else
                 type_name
@@ -40349,7 +40354,9 @@ module Crystal::HIR
           base_name = resolve_type_name_in_context(base_name)
           base_name = resolve_type_alias_chain(base_name)
           normalize_typeof_name = ->(type_name : String) : String {
-            if type_name == "Void" || type_name == "Unknown" || type_name.includes?("|")
+            # Keep unions in generic args (e.g. `Slice(Int32 | Pointer(UInt8))`)
+            # so we don't degrade specialization to `Pointer(Void)`.
+            if type_name == "Void" || type_name == "Unknown"
               "Pointer(Void)"
             else
               type_name
