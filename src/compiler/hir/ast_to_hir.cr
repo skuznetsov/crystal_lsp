@@ -12748,8 +12748,8 @@ module Crystal::HIR
       if ENV["DEBUG_MONO_SOURCES"]?
         @mono_source_counts[base_name] = (@mono_source_counts[base_name]? || 0) + 1
         if ENV["DEBUG_MONO_CALLER"]?
-          caller = "#{@current_class || ""}##{@current_method || ""}"
-          key = "#{base_name}@#{caller}"
+          callsite = "#{@current_class || ""}##{@current_method || ""}"
+          key = "#{base_name}@#{callsite}"
           @mono_caller_counts[key] = (@mono_caller_counts[key]? || 0) + 1
         end
         if ENV["DEBUG_MONO_SOURCES_SAMPLES"]?
@@ -12770,6 +12770,11 @@ module Crystal::HIR
       if template.type_params.size != type_args.size
         if ENV.has_key?("DEBUG_MONO")
           STDERR.puts "[MONO] arity_mismatch base=#{base_name} name=#{specialized_name} args=#{type_args.join(",")}"
+        end
+        if ENV["DEBUG_ARITY_MISMATCH"]?
+          STDERR.puts "[ARITY_MISMATCH] base=#{base_name} name=#{specialized_name} expected=#{template.type_params.size} got=#{type_args.size}"
+          STDERR.puts "[ARITY_MISMATCH] current_class=#{@current_class || "nil"} current_method=#{@current_method || "nil"} ns=#{@current_namespace_override || "nil"}"
+          caller.first(20).each { |frame| STDERR.puts "  #{frame}" }
         end
         raise "Generic #{base_name} expects #{template.type_params.size} type args, got #{type_args.size}"
       end
@@ -19583,6 +19588,28 @@ module Crystal::HIR
       false
     end
 
+    # Resolve a short name to the closest nested type in the current namespace
+    # chain (including forward references discovered during the pre-scan).
+    #
+    # This is a hot path during stdlib lowering and avoids deep namespace walks
+    # and repeated type_name_exists? calls for nested constants/types.
+    private def nested_type_full_name_in_namespace_chain(ns : String, name : String) : String?
+      base = if info = split_generic_base_and_args(ns)
+               info[:base]
+             else
+               ns
+             end
+      loop do
+        if (nested = @nested_type_names[base]?) && nested.includes?(name)
+          return "#{base}::#{name}"
+        end
+        idx = base.rindex("::")
+        break unless idx
+        base = base[0, idx]
+      end
+      nil
+    end
+
     private def nested_shadowed_type_name?(name : String) : Bool
       return false unless @top_level_type_names.includes?(name) ||
         @top_level_class_kinds.has_key?(name) ||
@@ -19744,6 +19771,31 @@ module Crystal::HIR
       end
       if type_param_like?(name) && short_type_param_name?(name) && !@type_param_map.has_key?(name)
         return name
+      end
+
+      # Fast path: if this is a known nested type in the current namespace chain,
+      # resolve it directly without a deep namespace walk.
+      if override = @current_namespace_override
+        if nested = nested_type_full_name_in_namespace_chain(override, name)
+          return nested
+        end
+      end
+      if current = @current_class
+        if nested = nested_type_full_name_in_namespace_chain(current, name)
+          return nested
+        end
+      end
+
+      # Performance fast path: reuse the signature-scan resolver even outside
+      # signature collection. It is based on nested hints + short_type_index and
+      # avoids deep namespace walks with repeated type_name_exists? calls.
+      #
+      # This is critical for stdlib-heavy lowering (e.g., OpenSSL) where naive
+      # namespace scanning becomes O(N^2).
+      unless @signature_scan_mode
+        if fast = resolve_class_name_in_signature_context(name)
+          return fast
+        end
       end
 
       # If this is a generic type name, resolve the base in context and
@@ -20325,6 +20377,23 @@ module Crystal::HIR
       depth = 0
       i = start_idx
       seen_type = false
+
+      # If the next argument is an explicitly delimited proc type (`{...} -> ...`),
+      # the preceding comma is a generic-arg separator, not part of an unbraced proc
+      # type like `A, B -> C`.
+      j = i
+      while j < source.bytesize
+        byte = source.byte_at(j)
+        if byte == 32_u8 || byte == 9_u8 || byte == 10_u8 || byte == 13_u8
+          j += 1
+          next
+        end
+        break
+      end
+      if j < source.bytesize && source.byte_at(j) == '{'.ord.to_u8
+        return false
+      end
+
       while i + 1 < source.bytesize
         ch = source.byte_at(i).unsafe_chr
         case ch
@@ -20601,6 +20670,21 @@ module Crystal::HIR
       if arrow_index = find_top_level_arrow(stripped)
         left = stripped[0, arrow_index].strip
         return [] of String if left.empty?
+        # Support explicitly braced proc inputs to avoid ambiguity inside generic
+        # argument lists (e.g. `Hash(String, {String, _} ->)`).
+        #
+        # If the arrow's RHS is empty, we interpret `{A, B} ->` as:
+        # inputs=[A] return=B  (so `{String, _} ->` means `String -> _`).
+        if left.starts_with?("{") && left.ends_with?("}")
+          inner = left[1, left.size - 2].strip
+          parts = inner.empty? ? ([] of String) : split_proc_type_inputs(inner)
+          right = stripped[arrow_index + 2, stripped.size - arrow_index - 2].strip
+          if right.empty?
+            return parts if parts.size <= 1
+            return parts[0...-1]
+          end
+          return parts
+        end
         return split_generic_type_args(left)
       end
 
@@ -21795,6 +21879,27 @@ module Crystal::HIR
       if arrow_index = find_top_level_arrow(stripped)
         left = stripped[0, arrow_index].strip
         right = stripped[arrow_index + 2, stripped.size - arrow_index - 2].strip
+        if left.starts_with?("{") && left.ends_with?("}")
+          inner = left[1, left.size - 2].strip
+          parts = inner.empty? ? ([] of String) : split_proc_type_inputs(inner)
+          if right.empty?
+            if parts.empty?
+              return intern_proc_type(["Nil"])
+            elsif parts.size == 1
+              # `{A} ->` is treated as a single input with implicit Nil return.
+              return intern_proc_type([parts.first, "Nil"])
+            else
+              # `{A, B} ->` means `A -> B` (last part is return type).
+              inputs = parts[0...-1]
+              ret_name = parts.last
+              return intern_proc_type(inputs + [ret_name])
+            end
+          else
+            # `{A, B} -> C` means `A, B -> C` (parts are inputs).
+            return intern_proc_type(parts + [right])
+          end
+        end
+
         args = left.empty? ? [] of String : split_generic_type_args(left)
         ret_name = right.empty? ? "Nil" : right
         return intern_proc_type(args + [ret_name])
@@ -43563,6 +43668,11 @@ module Crystal::HIR
       return name if name.includes?("(")
       return name unless name.includes?(",")
       return name if name.includes?("->")
+      # `Foo::{A, B}` is not a generic instantiation. It represents a tuple
+      # literal in a namespace (used by some internal type printers). Don't
+      # rewrite it into `Foo({A, B})` because that collapses arity and can
+      # trigger invalid monomorphization like `Hash(Tuple(K, V))`.
+      return name if name.includes?("::{")
 
       # Handle "Tuple::String, String" (generic base + "::" + args).
       if idx = name.rindex("::")
@@ -44428,11 +44538,33 @@ module Crystal::HIR
         base_name = info[:base]
         params_str = info[:args]
 
+        # First split generic args with proc-arrow disambiguation (so `A, B -> C`
+        # stays a single arg). If arity doesn't match the template, retry with a
+        # strict split (treat commas as separators) because `T, U ->` can also be
+        # the *second* generic argument (e.g. `Hash(String, String ->)`), not a
+        # proc continuation for the full args list.
+        raw_params = split_generic_type_args(params_str)
+        if template = @generic_templates[base_name]?
+          expected_arity = template.type_params.size
+          if raw_params.size != expected_arity
+            strict_params = split_proc_type_inputs(params_str)
+            raw_params = strict_params if strict_params.size == expected_arity
+          end
+        end
+
         # Substitute each type parameter
-        substituted_params = split_generic_type_args(params_str).map do |param|
+        substituted_params = raw_params.map do |param|
           param = param.strip
           param = @type_param_map[param]? || param
           normalize_tuple_literal_type_name(param)
+        end
+
+        # Debug: some call sites accidentally create `Hash(Tuple(K, V))` instead of `Hash(K, V)`.
+        # This is a bootstrap blocker because Hash expects 2 type args. Track who generates it.
+        if ENV["DEBUG_HASH_ARITY"]? && base_name == "Hash" && substituted_params.size == 1 && substituted_params[0].starts_with?("Tuple(")
+          STDERR.puts "[HASH_ARITY] raw=#{raw_name} lookup=#{lookup_name} args=#{params_str}"
+          STDERR.puts "[HASH_ARITY] substituted=#{substituted_params[0]} current_class=#{@current_class || "nil"} current_method=#{@current_method || "nil"} ns=#{@current_namespace_override || "nil"}"
+          caller.first(10).each { |frame| STDERR.puts "  #{frame}" }
         end
 
         # Reconstruct with substituted params
