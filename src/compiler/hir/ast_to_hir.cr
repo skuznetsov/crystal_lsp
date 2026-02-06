@@ -20367,9 +20367,24 @@ module Crystal::HIR
           depth -= 1 if depth > 0
         when ','
           if depth == 0
+            # If the next argument begins with `{`, this comma is a generic-arg
+            # separator even if a top-level `->` appears later. This avoids
+            # mis-parsing lists like `String, {String, _} ->` as a single proc
+            # continuation arg.
+            j = i + 1
+            while j < params_str.bytesize
+              byte = params_str.byte_at(j)
+              if byte == 32_u8 || byte == 9_u8 || byte == 10_u8 || byte == 13_u8
+                j += 1
+                next
+              end
+              break
+            end
+            next_arg_is_braced = j < params_str.bytesize && params_str.byte_at(j) == '{'.ord.to_u8
+
             # If a top-level proc arrow appears before the next top-level comma,
             # this comma belongs to a proc type like "A, B -> C".
-            if proc_arrow_ahead?(params_str, i + 1)
+            if !next_arg_is_braced && proc_arrow_ahead?(params_str, i + 1)
               i += 1
               next
             end

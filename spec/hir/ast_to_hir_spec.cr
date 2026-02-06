@@ -3,6 +3,13 @@ require "../../src/compiler/hir/ast_to_hir"
 require "../../src/compiler/frontend/parser"
 require "../../src/compiler/frontend/lexer"
 
+# Test-only access to private parsing helpers (keeps production API small).
+class Crystal::HIR::AstToHir
+  def __test_split_generic_type_args(params_str : String) : Array(String)
+    split_generic_type_args(params_str)
+  end
+end
+
 # Helper to parse Crystal code and get AST
 private def parse(code : String) : {CrystalV2::Compiler::Frontend::ArenaLike, Array(CrystalV2::Compiler::Frontend::ExprId)}
   lexer = CrystalV2::Compiler::Frontend::Lexer.new(code)
@@ -1776,6 +1783,16 @@ describe Crystal::HIR::AstToHir do
       names = converter.module.functions.map(&.name)
       names.should contain("foo$Pointer(Int32)")
       names.should contain("foo$Pointer(Float64)")
+    end
+  end
+
+  describe "generic arg splitting" do
+    it "does not treat braced proc type args as a proc continuation" do
+      arena, _exprs = parse("1")
+      converter = Crystal::HIR::AstToHir.new(arena)
+
+      converter.__test_split_generic_type_args("String, {String, _} ->")
+        .should eq(["String", "{String, _} ->"])
     end
   end
 
