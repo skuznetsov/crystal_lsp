@@ -61,8 +61,8 @@ describe Crystal::MIR::LLVMTypeMapper do
       registry = Crystal::MIR::TypeRegistry.new
       mapper = Crystal::MIR::LLVMTypeMapper.new(registry)
 
-      mapper.mangle_name("Array(Int32)").should eq("Array_Int32_")
-      mapper.mangle_name("Hash(String, Int32)").should eq("Hash_String__Int32_")
+      mapper.mangle_name("Array(Int32)").should eq("Array$LInt32$R")
+      mapper.mangle_name("Hash(String, Int32)").should eq("Hash$LString$C$_Int32$R")
     end
   end
 end
@@ -346,8 +346,8 @@ describe Crystal::MIR::LLVMIRGenerator do
 
       builder.current_block = merge_block
       phi = builder.phi(union_ref)
-      phi.add_incoming(then_block, wrapped_ptr)
-      phi.add_incoming(else_block, wrapped_nil)
+      phi.add_incoming(from: then_block, value: wrapped_ptr)
+      phi.add_incoming(from: else_block, value: wrapped_nil)
       builder.ret
 
       gen = Crystal::MIR::LLVMIRGenerator.new(mod)
