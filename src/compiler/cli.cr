@@ -530,7 +530,14 @@ module CrystalV2
         end
         STDERR.puts if options.progress
         log(options, out_io, "    Modules: #{module_nodes.size}")
-        module_nodes.each { |n, a| hir_converter.arena = a; hir_converter.register_module(n) }
+        module_nodes.each_with_index do |(n, a), i|
+          hir_converter.arena = a
+          hir_converter.register_module(n)
+          if options.progress && (i % 10 == 0 || i == module_nodes.size - 1)
+            STDERR.print "\r    Registered module #{i + 1}/#{module_nodes.size}"
+          end
+        end
+        STDERR.puts if options.progress
         log(options, out_io, "    Classes: #{class_nodes.size}")
         class_nodes.each_with_index do |(n, a), i|
           hir_converter.arena = a
