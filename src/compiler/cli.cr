@@ -532,6 +532,9 @@ module CrystalV2
         log(options, out_io, "    Modules: #{module_nodes.size}")
         module_nodes.each_with_index do |(n, a), i|
           hir_converter.arena = a
+          if options.progress && ENV["CRYSTAL_V2_PROGRESS_MODULE_NAMES"]?
+            STDERR.puts "\n    Module #{i + 1}/#{module_nodes.size}: #{String.new(n.name)}"
+          end
           hir_converter.register_module(n)
           if options.progress && (i % 10 == 0 || i == module_nodes.size - 1)
             STDERR.print "\r    Registered module #{i + 1}/#{module_nodes.size}"
