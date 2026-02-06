@@ -27599,6 +27599,14 @@ module Crystal::HIR
                    else
                      lower_expr(ctx, node.right)
                    end
+      # In the then-branch, `left` is proven truthy by `cond_id`.
+      # For common nilable unions (T | Nil), narrow to the non-nil payload so
+      # `x || y` returns `T` (not `T | Nil`) and downstream overload selection
+      # doesn't accidentally pick slice/Range paths (e.g. `arr[idx]`).
+      if op_str == "||"
+        then_type = ctx.type_of(then_value)
+        then_value = unwrap_non_nil_to_block(ctx, ctx.current_block, then_value, then_type)
+      end
       then_exit = ctx.current_block
       then_locals = ctx.save_locals
       then_block_data = ctx.get_block(ctx.current_block)
