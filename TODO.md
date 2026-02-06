@@ -29,6 +29,10 @@ about syntax or types and should match what the original compiler would report.
 - Perf: avoid speculative AST-walk return type inference during lowering. Prefer discovering function return types from lowered `Return` terminators (and only fall back to last-expression). This reduces self-host pending explosions triggered by `infer_concrete_return_type_from_body`. Verified by:
   - `crystal spec spec/hir/ast_to_hir_spec.cr` -> `119 examples, 0 failures`
   - Commit: `e979c8f`
+- Perf: treat `Nil` as a valid return type during return-type caching (only `Void` means "unknown"), and prefer forced lowering to learn return types before falling back to AST-walk inference. This reduces repeated speculative inference for `Nil`-returning methods (e.g. `each`). Verified by:
+  - `crystal spec spec/hir/ast_to_hir_spec.cr` -> `119 examples, 0 failures`
+  - `timeout 120 crystal spec spec/hir/return_type_inference_spec.cr` -> `13 examples, 0 failures`
+  - Commit: `c712ec9`
 
 ### In Progress
 - [x] Replace method-name string `split` usage with zero-copy helpers (`parse_method_name`, `strip_type_suffix`) in HIR lowering hot paths (ast_to_hir).
