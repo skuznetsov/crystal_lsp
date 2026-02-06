@@ -11524,18 +11524,31 @@ module Crystal::HIR
         if body_exprs
           assigned_vars = collect_assigned_vars(body_exprs).to_set
           @assigned_vars_stack << assigned_vars
-          body_proc = ->{
-            method_arena = @arena
-            body_exprs.each do |expr_id|
+          method_arena = @arena
+          if extra_type_params.empty?
+            i = 0
+            while i < body_exprs.size
+              expr_id = body_exprs[i]
               with_arena(method_arena) do
                 last_value = lower_expr(ctx, expr_id)
               end
+              break if should_stop_sequential_lowering?(ctx)
+
+              i += 1
             end
-          }
-          if extra_type_params.empty?
-            body_proc.call
           else
-            with_type_param_map(extra_type_params) { body_proc.call }
+            with_type_param_map(extra_type_params) do
+              i = 0
+              while i < body_exprs.size
+                expr_id = body_exprs[i]
+              with_arena(method_arena) do
+                last_value = lower_expr(ctx, expr_id)
+              end
+              break if should_stop_sequential_lowering?(ctx)
+
+              i += 1
+            end
+          end
           end
         end
       ensure
@@ -14714,6 +14727,8 @@ module Crystal::HIR
                   end
                 end
               end
+
+              break if should_stop_sequential_lowering?(ctx)
             end
           }
           if extra_type_params.empty?
@@ -23053,10 +23068,14 @@ module Crystal::HIR
         if body = node.body
           body_proc = ->{
             def_arena = @arena
-            body.each do |expr_id|
+            i = 0
+            while i < body.size
+              expr_id = body[i]
               with_arena(def_arena) do
                 last_value = lower_expr(ctx, expr_id)
               end
+              break if should_stop_sequential_lowering?(ctx)
+              i += 1
             end
           }
           if extra_type_params.empty?
@@ -27593,6 +27612,99 @@ module Crystal::HIR
       end
     end
 
+    private def static_instance_var_type_ref(name : String) : TypeRef?
+      search_name = @current_class
+      while search_name
+        if class_info = @class_info[search_name]?
+          class_info.ivars.each do |ivar|
+            return ivar.type if ivar.name == name
+          end
+          parent_name = class_info.parent_name
+          parent_name ||= @module.class_parents[search_name]?
+          search_name = parent_name
+        else
+          break
+        end
+      end
+      nil
+    end
+
+    private def static_nil_condition_value(ctx : LoweringContext, condition_id : ExprId) : Bool?
+      return nil if condition_id.invalid?
+
+      node = @arena[condition_id]
+      case node
+      when CrystalV2::Compiler::Frontend::GroupingNode
+        static_nil_condition_value(ctx, node.expression)
+      when CrystalV2::Compiler::Frontend::BinaryNode
+        op = node.operator_string
+        if op == "&&" || op == "||"
+          left = static_nil_condition_value(ctx, node.left)
+          right = static_nil_condition_value(ctx, node.right)
+          return nil if left.nil? || right.nil?
+          return op == "&&" ? (left && right) : (left || right)
+        end
+        nil
+      when CrystalV2::Compiler::Frontend::UnaryNode
+        op = String.new(node.operator)
+        return nil unless op == "!"
+        inner = static_nil_condition_value(ctx, node.operand)
+        inner.nil? ? nil : !inner
+      when CrystalV2::Compiler::Frontend::CallNode
+        callee_node = @arena[node.callee]
+        if callee_node.is_a?(CrystalV2::Compiler::Frontend::MemberAccessNode) &&
+           String.new(callee_node.member) == "nil?" &&
+           node.args.empty?
+          recv_node = @arena[callee_node.object]
+          recv_type : TypeRef? = nil
+          case recv_node
+          when CrystalV2::Compiler::Frontend::IdentifierNode
+            if local_id = ctx.lookup_local(String.new(recv_node.name))
+              recv_type = ctx.type_of(local_id)
+            end
+          when CrystalV2::Compiler::Frontend::InstanceVarNode
+            recv_type = static_instance_var_type_ref(String.new(recv_node.name))
+          end
+
+          return nil unless recv_type
+          return true if recv_type == TypeRef::NIL
+          # Non-union, non-nil type => cannot be nil.
+          unless is_union_type?(recv_type)
+            return false
+          end
+          # Union without Nil variant => cannot be nil.
+          return false if get_union_variant_id(recv_type, TypeRef::NIL) < 0
+          # Nilable union => unknown at compile time.
+          return nil
+        end
+        nil
+      when CrystalV2::Compiler::Frontend::MemberAccessNode
+        # Some nil? predicates are represented as bare member access nodes.
+        return nil unless String.new(node.member) == "nil?"
+
+        recv_node = @arena[node.object]
+        recv_type2 : TypeRef? = nil
+        case recv_node
+        when CrystalV2::Compiler::Frontend::IdentifierNode
+          if local_id = ctx.lookup_local(String.new(recv_node.name))
+            recv_type2 = ctx.type_of(local_id)
+          end
+        when CrystalV2::Compiler::Frontend::InstanceVarNode
+          recv_type2 = static_instance_var_type_ref(String.new(recv_node.name))
+        end
+
+        return nil unless recv_type2
+        return true if recv_type2 == TypeRef::NIL
+        unless is_union_type?(recv_type2)
+          return false
+        end
+        return false if get_union_variant_id(recv_type2, TypeRef::NIL) < 0
+        nil
+      else
+        nil
+      end
+    end
+
     private def is_a_narrowing_targets(condition_id : ExprId) : Array(Tuple(String, TypeRef))
       return [] of Tuple(String, TypeRef) if condition_id.invalid?
 
@@ -27947,6 +28059,7 @@ module Crystal::HIR
       truthy_targets = truthy_narrowing_targets(node.condition)
       is_a_targets = is_a_narrowing_targets(node.condition)
       static_cond = static_is_a_condition_value(ctx, node.condition)
+      static_cond = static_nil_condition_value(ctx, node.condition) if static_cond.nil?
       if !static_cond.nil? && (node.elsifs.nil? || node.elsifs.try(&.empty?))
         if static_cond
           ctx.push_scope(ScopeKind::Block)
@@ -28005,6 +28118,35 @@ module Crystal::HIR
         cond_id = lower_expr(ctx, node.condition)
         cond_type = ctx.type_of(cond_id)
         cond_bool = lower_truthy_check(ctx, cond_id, cond_type)
+        # If the condition is constant, don't build both branches (this avoids
+        # emitting unreachable code like beginless range iterators).
+        if !has_elsifs && (lit = static_truthy_value(ctx, cond_bool))
+          if lit
+            ctx.push_scope(ScopeKind::Block)
+            apply_truthy_narrowing(ctx, truthy_targets)
+            apply_is_a_narrowing(ctx, is_a_targets)
+            then_value = lower_body(ctx, node.then_body)
+            ctx.pop_scope
+            return then_value
+          end
+
+          ctx.push_scope(ScopeKind::Block)
+          else_value = if else_body = node.else_body
+                         if else_body.empty?
+                           nil_lit = Literal.new(ctx.next_id, TypeRef::NIL, nil)
+                           ctx.emit(nil_lit)
+                           nil_lit.id
+                         else
+                           lower_body(ctx, else_body)
+                         end
+                       else
+                         nil_lit = Literal.new(ctx.next_id, TypeRef::NIL, nil)
+                         ctx.emit(nil_lit)
+                         nil_lit.id
+                       end
+          ctx.pop_scope
+          return else_value
+        end
         ctx.terminate(Branch.new(cond_bool, then_block, next_test_block))
       end
 
@@ -43114,6 +43256,33 @@ module Crystal::HIR
     # HELPERS
     # ═══════════════════════════════════════════════════════════════════════
 
+    # Sequential lowering (method/def bodies) should stop after a terminal
+    # instruction. Crystal still type-checks unreachable code, but codegen must
+    # not emit calls from it, or we can end up monomorphizing "dead" generic
+    # instantiations and triggering spurious missing symbols at link time.
+    private def should_stop_sequential_lowering?(ctx : LoweringContext) : Bool
+      block = ctx.get_block(ctx.current_block)
+      term = block.terminator
+
+      # Explicit return always terminates the current control-flow path.
+      return true if term.is_a?(Return)
+
+      # We use Unreachable as both a default placeholder terminator and the
+      # explicit terminator for `raise`. Disambiguate by checking whether this
+      # block actually ends in a Raise instruction.
+      if term.is_a?(Unreachable)
+        insts = block.instructions
+        if insts.size > 0
+          last = insts[insts.size - 1]
+          return true if last.is_a?(Raise)
+          prev = insts.size > 1 ? insts[insts.size - 2] : nil
+          return true if prev && prev.is_a?(Raise)
+        end
+      end
+
+      false
+    end
+
     private def lower_body(ctx : LoweringContext, body : Array(ExprId)) : ValueId
       last_value : ValueId? = nil
       progress_filter = ENV["DEBUG_LOWER_PROGRESS"]?
@@ -43183,6 +43352,7 @@ module Crystal::HIR
         else
           last_value = lower_expr(ctx, expr_id)
         end
+        break if should_stop_sequential_lowering?(ctx)
       end
 
       last_value || begin
