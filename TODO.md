@@ -26,6 +26,9 @@ about syntax or types and should match what the original compiler would report.
   - `./bin/crystal_v2_dbg_hooks examples/bootstrap_array.cr -o /tmp/bootstrap_array_bin2` -> links and runs (`EXIT:0`)
   - Commit: `63c824e`
 - Fixed: sequential lowering now stops after terminal ops (`raise`/`return`) in method/def bodies to avoid emitting unreachable calls and spurious monomorphizations from dead code. Verified by successful compile+run of `examples/bootstrap_array.cr`. Commit: `9b5c49f`
+- Perf: avoid speculative AST-walk return type inference during lowering. Prefer discovering function return types from lowered `Return` terminators (and only fall back to last-expression). This reduces self-host pending explosions triggered by `infer_concrete_return_type_from_body`. Verified by:
+  - `crystal spec spec/hir/ast_to_hir_spec.cr` -> `119 examples, 0 failures`
+  - Commit: `e979c8f`
 
 ### In Progress
 - [x] Replace method-name string `split` usage with zero-copy helpers (`parse_method_name`, `strip_type_suffix`) in HIR lowering hot paths (ast_to_hir).
