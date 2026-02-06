@@ -6247,9 +6247,6 @@ module Crystal::HIR
       return nil if name.empty?
       return nil if name.includes?("::")
 
-      # Nested types of the current class/namespace shadow included module types.
-      return nil if current_or_override_has_nested_type?(name)
-
       namespaces = [] of String
       if override = @current_namespace_override
         if included = @class_included_modules[override]?
@@ -10677,17 +10674,12 @@ module Crystal::HIR
           end
         end
         # PASS 2: Register functions and other members (now that aliases are available)
-        # Skip method signature registration for generic module templates -
-        # their methods will be registered during monomorphization when
-        # type parameters are substituted with concrete types.
-        is_generic_module_template = node.type_params.try(&.size.>(0)) && !full_name.includes?("(")
         old_class = @current_class
         @current_class = full_name
         begin
           # Register constants before functions (e.g., CACHE constant in ImplInfo_Float32)
-          record_constants_in_body(full_name, body) unless is_generic_module_template
+          record_constants_in_body(full_name, body)
           body.each do |expr_id|
-            next if is_generic_module_template
             member = unwrap_visibility_member(@arena[expr_id])
             case member
           when CrystalV2::Compiler::Frontend::DefNode
@@ -19420,15 +19412,6 @@ module Crystal::HIR
       end
 
       unless name.includes?("::")
-        # Nested types of the current class/namespace take priority over
-        # top-level names, included module types, and type aliases.
-        # E.g., bare "Entry" inside Hash must resolve to Hash::Entry,
-        # not to Crystal::System::Dir::Entry via alias/include.
-        if current_or_override_has_nested_type?(name)
-          resolved = resolve_class_name_in_context(name)
-          resolved_type_name_cache_set(name, resolved)
-          return resolved
-        end
         if @top_level_type_names.includes?(name) || @top_level_class_kinds.has_key?(name) || BUILTIN_TYPE_NAMES.includes?(name)
           unless nested_shadowed_type_name?(name)
             resolved_type_name_cache_set(name, name)
@@ -19483,38 +19466,6 @@ module Crystal::HIR
         STDERR.puts "[DEBUG_FIBER_RESOLVE] name=#{name} current=#{@current_class || "nil"} override=#{@current_namespace_override || "nil"} resolved=#{name} top_level=#{@top_level_type_names.includes?(name)}"
       end
       name
-    end
-
-    # Check if the current class or namespace override (or any ancestor
-    # namespace) has a nested type with the given short name.  Unlike
-    # nested_shadowed_type_name? this does NOT require the name to also be
-    # a top-level type.  Walks up the namespace hierarchy so that code
-    # inside Hash::Entry can still see Hash::Entry via the parent Hash.
-    private def current_or_override_has_nested_type?(name : String) : Bool
-      if override = @current_namespace_override
-        return true if namespace_chain_has_nested?(override, name)
-      end
-      if current = @current_class
-        return true if namespace_chain_has_nested?(current, name)
-      end
-      false
-    end
-
-    private def namespace_chain_has_nested?(ns : String, name : String) : Bool
-      base = if info = split_generic_base_and_args(ns)
-               info[:base]
-             else
-               ns
-             end
-      loop do
-        if (nested = @nested_type_names[base]?) && nested.includes?(name)
-          return true
-        end
-        idx = base.rindex("::")
-        break unless idx
-        base = base[0, idx]
-      end
-      false
     end
 
     private def nested_shadowed_type_name?(name : String) : Bool
@@ -20258,19 +20209,30 @@ module Crystal::HIR
     private def proc_arrow_ahead?(source : String, start_idx : Int32) : Bool
       depth = 0
       i = start_idx
+      seen_type = false
       while i + 1 < source.bytesize
         ch = source.byte_at(i).unsafe_chr
         case ch
         when '(', '{', '['
           depth += 1
+          seen_type = true
         when ')', '}', ']'
           depth -= 1 if depth > 0
+          seen_type = true
         when ','
           return false if depth == 0
         when '-'
           if depth == 0 && source.byte_at(i + 1).unsafe_chr == '>'
-            return true
+            # Only treat as proc continuation if there's a type name before
+            # the arrow (e.g., "B -> C" in "A, B -> C"). A bare "-> C" after
+            # a comma is a separate zero-arg proc type, not a continuation.
+            return seen_type
           end
+          seen_type = true
+        when ' ', '\t', '\n'
+          # whitespace doesn't count as type content
+        else
+          seen_type = true
         end
         i += 1
       end
