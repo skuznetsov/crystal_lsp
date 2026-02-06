@@ -19166,10 +19166,11 @@ module Crystal::HIR
     end
 
     private def type_name_exists?(name : String) : Bool
-      if cache = @type_name_exists_cache
-        if cached = cache[name]?
-          return cached
-        end
+      # Hot path: type resolution calls this millions of times when lowering stdlib.
+      # Cache positive results aggressively (monotonic as the type set only grows).
+      cache = (@type_name_exists_cache ||= {} of String => Bool)
+      if cached = cache[name]?
+        return cached
       end
       result = @class_info.has_key?(name) ||
         @generic_templates.has_key?(name) ||
@@ -19179,7 +19180,12 @@ module Crystal::HIR
         @module.is_lib?(name) ||
         @top_level_type_names.includes?(name) ||
         @top_level_class_kinds.has_key?(name)
-      @type_name_exists_cache.try(&.[]=(name, result))
+      # Only cache false results during signature scans (where the type universe is stable).
+      if @signature_scan_mode
+        cache[name] = result
+      elsif result
+        cache[name] = true
+      end
       result
     end
 
