@@ -20332,6 +20332,25 @@ module Crystal::HIR
           return false if depth == 0
         when '-'
           if depth == 0 && source.byte_at(i + 1).unsafe_chr == '>'
+            # Disambiguate generic arg lists from proc type continuations.
+            #
+            # In a generic arg list like `Foo(A, -> B)` we must split at the comma,
+            # even though a top-level `->` appears later. Our heuristic for proc
+            # continuations ("A, B -> C") should not trigger when the arrow is
+            # preceded by a namespace separator (e.g. `X::->`), which is never a
+            # valid proc input type token and typically comes from unresolved /
+            # partially-resolved proc shorthand types.
+            prev = i - 1
+            while prev >= start_idx
+              pch = source.byte_at(prev).unsafe_chr
+              break unless pch == ' ' || pch == '\t' || pch == '\n'
+              prev -= 1
+            end
+            if prev >= 1
+              if source.byte_at(prev).unsafe_chr == ':' && source.byte_at(prev - 1).unsafe_chr == ':'
+                return false
+              end
+            end
             # Only treat as proc continuation if there's a type name before
             # the arrow (e.g., "B -> C" in "A, B -> C"). A bare "-> C" after
             # a comma is a separate zero-arg proc type, not a continuation.
