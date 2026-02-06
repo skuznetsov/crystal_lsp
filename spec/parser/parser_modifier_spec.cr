@@ -163,6 +163,32 @@ describe "CrystalV2::Compiler::Frontend::Parser" do
       CrystalV2::Compiler::Frontend.node_kind(call).should eq(CrystalV2::Compiler::Frontend::NodeKind::Call)
     end
 
+    it "binds postfix if weaker than infix operators" do
+      source = <<-CRYSTAL
+        io << '0' if cond
+      CRYSTAL
+
+      parser = CrystalV2::Compiler::Frontend::Parser.new(CrystalV2::Compiler::Frontend::Lexer.new(source))
+      program = parser.parse_program
+
+      program.roots.size.should eq(1)
+      arena = program.arena
+
+      if_node = arena[program.roots.first]
+      CrystalV2::Compiler::Frontend.node_kind(if_node).should eq(CrystalV2::Compiler::Frontend::NodeKind::If)
+
+      then_body = CrystalV2::Compiler::Frontend.node_if_then(if_node).not_nil!
+      then_body.size.should eq(1)
+
+      expr = arena[then_body[0]]
+      CrystalV2::Compiler::Frontend.node_kind(expr).should eq(CrystalV2::Compiler::Frontend::NodeKind::Binary)
+
+      # Ensure the RHS is the char literal, not another nested postfix-if expression.
+      rhs_id = CrystalV2::Compiler::Frontend.node_right(expr).not_nil!
+      rhs = arena[rhs_id]
+      CrystalV2::Compiler::Frontend.node_kind(rhs).should eq(CrystalV2::Compiler::Frontend::NodeKind::Char)
+    end
+
     it "parses postfix if with complex condition" do
       source = <<-CRYSTAL
         return if x > 10 && y < 20

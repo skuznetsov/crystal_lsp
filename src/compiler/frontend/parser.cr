@@ -8335,7 +8335,12 @@ module CrystalV2
             # Disable type declarations for ternary true_branch (identifier: would conflict)
             if token.kind == Token::Kind::Question
               @no_type_declaration += 1
-              right = parse_expression(current_precedence + 1)
+              # Postfix modifiers (if/unless/while/until) must bind weaker than
+              # infix operators, matching the original Crystal parser.
+              #
+              # Example: `io << '0' if cond` should parse as `(io << '0') if cond`,
+              # not `io << ('0' if cond)`.
+              right = without_postfix_modifiers { parse_expression(current_precedence + 1) }
               @no_type_declaration -= 1
             else
               # Special-case endless ranges: `a..` or `a...` → missing right side
@@ -8345,7 +8350,9 @@ module CrystalV2
                                           Token::Kind::Else, Token::Kind::Elsif, Token::Kind::Do, Token::Kind::LBrace))
                 right = @arena.add_typed(NilNode.new(current_token.span))
               else
-                right = parse_expression(current_precedence + 1)
+                # See comment above (ternary case): postfix modifiers should not
+                # be consumed while parsing the RHS of an infix operator.
+                right = without_postfix_modifiers { parse_expression(current_precedence + 1) }
               end
             end
             if right.invalid?
@@ -8380,7 +8387,7 @@ module CrystalV2
               # Parse false branch with same precedence (right-associative)
               # Disable type declarations (identifier: would conflict)
               @no_type_declaration += 1
-              false_branch = parse_expression(current_precedence)
+              false_branch = without_postfix_modifiers { parse_expression(current_precedence) }
               @no_type_declaration -= 1
               if false_branch.invalid?
                 left = PREFIX_ERROR
