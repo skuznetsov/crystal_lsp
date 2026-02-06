@@ -1805,6 +1805,22 @@ The return_type=16 (NIL) for `to_s` methods is incorrect - should be String type
 - **Fix**: treat namespaced type params as unresolved by checking the last path segment; skip monomorphization for path-like args; add DEBUG_MONO arg/arity diagnostics.
 - **Verification**: `rg "Generic Hash expects" /tmp/selfhost_hir_mono.log` returns no matches with `DEBUG_MONO=1` run.
 
+#### Issue 8: `Hash::{...}` tuple-literal normalization causes generic arity collapse - FIXED (2026-02-06)
+- **Symptom**: self-host `CRYSTAL_V2_STOP_AFTER_HIR=1` fails with `Generic Hash expects 2 type args, got 1` while lowering stdlib, with monomorphized
+  type strings like `Hash(Tuple(String, {String, _} ->))` appearing in debug output.
+- **Root cause**: an internal type printer form `Foo::{A, B}` (tuple literal in a namespace) was being rewritten by `normalize_missing_generic_parens`
+  into `Foo({A, B})`, collapsing the original arity. This leaked into `type_ref_for_name` and triggered invalid monomorphizations like `Hash(Tuple(K, V))`.
+  Additionally, generic arg splitting treated some proc-like fragments as a single argument when the proc was actually the *second* generic parameter.
+- **Fix applied**:
+  - `normalize_missing_generic_parens`: do **not** rewrite names containing `::{` into generic parens form.
+  - `type_ref_for_name`: split generic args first using proc-arrow disambiguation; if arity doesn't match the template, retry with a strict top-level comma
+    split to recover cases like `Hash(String, {String, _} ->)`.
+  - Added support for explicitly braced proc inputs (`{A, B} -> C` and `{A, B} ->`) to remove ambiguity inside generic arg lists.
+- **Verification**:
+  - `timeout 180 crystal spec spec/hir/ast_to_hir_spec.cr` passes.
+  - Self-host now reaches `Creating main function...` instead of crashing early on Hash arity (still times out; see pending-lowering investigation).
+- **Commit**: `7293f64`
+
 #### Issue 8: Parser lowering time spikes (parse_expression / macro parsing) - IN PROGRESS (2026-01-xx)
 - **Symptom**: self-host compile appears to stall; `DEBUG_LOWER_METHOD_TIME=Parser#` shows large lowering times:
   - `Parser#parse_expression` ~45s
