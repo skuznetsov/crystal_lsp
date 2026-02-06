@@ -34460,31 +34460,69 @@ module Crystal::HIR
       end
 
       if receiver_id && full_method_name.nil? && callee_node.is_a?(CrystalV2::Compiler::Frontend::MemberAccessNode)
-        receiver_type = ctx.type_of(receiver_id)
+        # Module-typed dispatch is only for *value receivers* whose static type is a module-like type.
+        # Do not apply it to implicit/self receivers, otherwise we can accidentally bind to a generic
+        # template module (e.g. Impl(F, Info)) instead of the concrete generic instance.
+        obj_node = @arena[callee_node.object]
+        unless obj_node.is_a?(CrystalV2::Compiler::Frontend::SelfNode) ||
+               obj_node.is_a?(CrystalV2::Compiler::Frontend::ImplicitObjNode)
+          receiver_type = ctx.type_of(receiver_id)
           if type_desc = @module.get_type_descriptor(receiver_type)
             # LOWER_CALL_DEBUG disabled
-            if type_desc.kind == TypeKind::Module || module_like_type_name?(type_desc.name)
+            # Only treat non-type-literal receivers as "module-typed" dispatch
+            # (i.e., resolve against includers). For type literals (including
+            # concrete generic module instances), prefer direct Class/Module.method
+            # resolution so we don't accidentally bind to the generic template.
+            if (type_desc.kind == TypeKind::Module || module_like_type_name?(type_desc.name)) &&
+               !ctx.type_literal?(receiver_id)
               # Try to get module type name from AST, fall back to type_desc.name
               # This handles cases where the receiver is a call result (e.g., event_loop().write())
-            module_type_name = module_receiver_type_name(callee_node) || type_desc.name
-            if resolved = resolve_module_typed_method(method_name, arg_types, module_type_name, has_block_call, @current_class)
-              mangled_method_name = resolved
-              base_method_name = strip_type_suffix(resolved)
+              module_type_name = module_receiver_type_name(callee_node) || type_desc.name
+              if resolved = resolve_module_typed_method(method_name, arg_types, module_type_name, has_block_call, @current_class)
+                mangled_method_name = resolved
+                base_method_name = strip_type_suffix(resolved)
+              end
             end
           end
         end
       end
       if receiver_id
         if type_desc = @module.get_type_descriptor(ctx.type_of(receiver_id))
-          if type_desc.kind == TypeKind::Module
-            module_base = type_desc.name
-            if paren = module_base.index('(')
-              module_base = module_base[0, paren]
+          if type_desc.kind == TypeKind::Module || (type_desc.kind == TypeKind::Generic && module_like_type_name?(type_desc.name))
+            # Prefer the fully-qualified (possibly generic) module name first.
+            # Generic module instances (e.g. Impl(Float32, ImplInfo_Float32)) can
+            # have specialized method bodies and type-param substitutions. Only
+            # fall back to the stripped base module when no specialized method exists.
+            module_full = type_desc.name
+            used_full = false
+            if module_full.includes?("(")
+              ensure_method_index_built
+              base_owner = strip_generic_args(module_full)
+              if owner_methods = @method_index[base_owner]?
+                if candidates = owner_methods[method_name]?
+                  owner_prefix = "#{module_full}."
+                  candidates.each do |cand|
+                    if cand.starts_with?(owner_prefix)
+                      module_method_full = "#{module_full}.#{method_name}"
+                      base_method_name = module_method_full
+                      mangled_method_name = mangle_function_name(module_method_full, arg_types, has_block_call)
+                      used_full = true
+                      break
+                    end
+                  end
+                end
+              end
             end
-            module_method_base = "#{module_base}.#{method_name}"
-            if has_function_base?(module_method_base) || @function_defs.has_key?(module_method_base)
-              base_method_name = module_method_base
-              mangled_method_name = mangle_function_name(module_method_base, arg_types, has_block_call)
+            unless used_full
+              module_base = module_full
+              if paren = module_base.index('(')
+                module_base = module_base[0, paren]
+              end
+              module_method_base = "#{module_base}.#{method_name}"
+              if has_function_base?(module_method_base) || @function_defs.has_key?(module_method_base)
+                base_method_name = module_method_base
+                mangled_method_name = mangle_function_name(module_method_base, arg_types, has_block_call)
+              end
             end
           end
         end
