@@ -38,6 +38,10 @@ about syntax or types and should match what the original compiler would report.
   - When a def is deferred due to untyped params, method effect summaries are still registered on the base name, so analyses see `@[ThreadShared]` / `@[Taints]` on call arguments.
   - Verified by: `crystal spec spec/hir` -> `222 examples, 0 failures` (2 pending)
   - Commit: `48bc2f8`
+- Fix: generic-arg splitting now handles braced proc type args in owner names (e.g. `Hash::Entry(String, {String, _} ->)`), preventing generic arity mismatches during monomorphization. Verified by:
+  - `crystal spec spec/hir/ast_to_hir_spec.cr` -> `120 examples, 0 failures` (2 pending)
+  - `CRYSTAL_V2_STOP_AFTER_HIR=1 ./bin/crystal_v2 -p -s src/crystal_v2.cr ...` no longer reports `Hash::Entry expects 2 type args` (see `tmp/self_hir.stderr.log`).
+  - Commit: `4e732e6`
 
 ### In Progress
 - [x] Replace method-name string `split` usage with zero-copy helpers (`parse_method_name`, `strip_type_suffix`) in HIR lowering hot paths (ast_to_hir).
