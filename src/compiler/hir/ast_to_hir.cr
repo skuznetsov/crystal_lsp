@@ -18817,6 +18817,26 @@ module Crystal::HIR
         end
       end
       if existing_type == TypeRef::VOID || existing_type == TypeRef::NIL
+        # Prefer lowering the function body to discover the return type, instead of
+        # running a separate AST-walk inference pass. This is significantly cheaper
+        # during self-host when pending queues are large.
+        #
+        # Fall back to body inference only when we cannot safely lower (e.g. recursion
+        # or when we are already inside an inference-only context).
+        if @infer_body_context.nil? && !function_state(name).in_progress? && !@module.has_function?(name)
+          if lookup_function_def_for_return(name, base_name)
+            lower_function_if_needed(name)
+            if func = @module.function_by_name(name)
+              func_rt = func.return_type
+              if func_rt != TypeRef::VOID && func_rt != TypeRef::NIL
+                @function_types[name] = func_rt
+                @function_base_return_types[base_name] = func_rt unless base_name.includes?("$")
+                existing_type = func_rt
+              end
+            end
+          end
+        end
+
         if def_node = lookup_function_def_for_return(name, base_name)
           owner_name = function_context_from_name(base_name)
           if inferred = infer_return_type_from_body_without_callsite(def_node, owner_name)
@@ -18830,6 +18850,23 @@ module Crystal::HIR
       end
 
       if existing_type.nil?
+        # If the function hasn't been registered yet, prefer lowering it (or at least
+        # attempting to) instead of immediately falling back to AST-walk inference.
+        # This reduces the amount of speculative body inference during self-host.
+        if @infer_body_context.nil? && !function_state(name).in_progress?
+          if lookup_function_def_for_return(name, base_name)
+            lower_function_if_needed(name)
+            if func = @module.function_by_name(name)
+              func_rt = func.return_type
+              if func_rt != TypeRef::VOID && func_rt != TypeRef::NIL
+                @function_types[name] = func_rt
+                @function_base_return_types[base_name] = func_rt unless base_name.includes?("$")
+                return func_rt
+              end
+            end
+          end
+        end
+
         if def_node = lookup_function_def_for_return(name, base_name)
           if def_node.return_type
             if resolved = resolve_return_type_from_def(name, base_name, nil)
@@ -23128,11 +23165,6 @@ module Crystal::HIR
                       else
                         TypeRef::VOID
                       end
-        if return_type == TypeRef::VOID && node.return_type.nil?
-          if inferred = infer_concrete_return_type_from_body(node, @current_class)
-            return_type = inferred
-          end
-        end
       else
         with_type_param_map(extra_type_params) do
           return_type = if rt = node.return_type
@@ -23143,11 +23175,6 @@ module Crystal::HIR
                         else
                           TypeRef::VOID
                         end
-          if return_type == TypeRef::VOID && node.return_type.nil?
-            if inferred = infer_concrete_return_type_from_body(node, @current_class)
-              return_type = inferred
-            end
-          end
         end
       end
 
@@ -23283,13 +23310,37 @@ module Crystal::HIR
 
       # Infer return type from last expression if not explicitly specified
       # This handles methods with implicit returns like `def root_buffer; @buffer - @offset; end`
-      if return_type == TypeRef::VOID && (last_id = last_value)
-        inferred_type = ctx.type_of(last_id)
-        if inferred_type != TypeRef::VOID
-          func.return_type = inferred_type
-          # Update function type registry to match
-          register_function_type(full_name, inferred_type)
-          register_function_type(base_name, inferred_type)
+      if return_type == TypeRef::VOID
+        inferred_types = [] of TypeRef
+
+        # Prefer actual lowered return terminators over a separate AST-walk inference pass.
+        # This avoids doubling work (and avoids triggering extra monomorphization while
+        # lowering large pending queues during self-host).
+        func.blocks.each do |block|
+          term = block.terminator
+          next unless term.is_a?(Return)
+          if value = term.value
+            t = ctx.type_of(value)
+            inferred_types << t unless t == TypeRef::VOID
+          else
+            inferred_types << TypeRef::NIL
+          end
+        end
+
+        # Also consider the last expression as a fallback (covers single-expression bodies
+        # where lowering didn't emit an explicit return terminator yet).
+        if (last_id = last_value)
+          t = ctx.type_of(last_id)
+          inferred_types << t unless t == TypeRef::VOID
+        end
+
+        if inferred_types.any?
+          inferred_type = merge_return_types(inferred_types)
+          if inferred_type && inferred_type != TypeRef::VOID
+            func.return_type = inferred_type
+            register_function_type(full_name, inferred_type)
+            register_function_type(base_name, inferred_type)
+          end
         end
       end
 
