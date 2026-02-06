@@ -47,6 +47,12 @@ about syntax or types and should match what the original compiler would report.
   - `timeout 180 crystal spec spec/hir/return_type_inference_spec.cr` -> `13 examples, 0 failures`
   - Repro HIR no longer contains `Crystal::DWARF::LineNumbers#begin/end/excludes_end?/bsearch_internal` call targets when lowering stdlib `Crystal::DWARF::LineNumbers#find` bsearch paths.
   - Commit: `fee15a4`
+- Fix: narrow the truthy branch of short-circuit `||` for common nilable unions (`T | Nil`). Previously, `x || y` was returning `T | Nil` even when `y` ensured a non-nil result, which cascaded into wrong overload selection (e.g. `Array#[](Range)` instead of `Array#[](Int32)`), and then into spurious link-undefined symbol sets. Verified by:
+  - `CRYSTAL_V2_STOP_AFTER_HIR=1 ./bin/crystal_v2 --emit hir examples/bootstrap_array.cr -o /tmp/bootstrap_array_hir_only2`
+    - `Crystal::DWARF::LineNumbers#find` now returns `Row` and ends with `index_get rows[idx]` (not `Array#[]$Range`).
+    - `Exception::CallStack.decode_line_number` now uses `field_get row.@@path/@@line/@@column` (no `Array(Row)#path/line/column` calls).
+  - `./bin/crystal_v2 examples/bootstrap_array.cr -o /tmp/bootstrap_array_smoke2` now links much further; remaining undefined symbols are reduced to a small set (Char `<<`, `IO::ByteFormat.from_io`, `Regex::MatchData#byte_range` block path, `UInt64#high`, and a few mis-resolved `Module#...` targets).
+  - Commit: `973e647`
 
 ### In Progress
 - [x] Replace method-name string `split` usage with zero-copy helpers (`parse_method_name`, `strip_type_suffix`) in HIR lowering hot paths (ast_to_hir).
