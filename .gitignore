@@ -53,5 +53,6 @@ cv2*
 bin/
 logs/
 tools/lldb/__pycache__/
-examples/bootstrap_struct.crsrc/stdlib_crystal/
+examples/bootstrap_struct.cr
+src/stdlib_crystal/
 spec/fib42
