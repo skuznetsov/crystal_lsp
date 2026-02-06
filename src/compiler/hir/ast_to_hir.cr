@@ -18803,11 +18803,11 @@ module Crystal::HIR
         end
       end
       existing_type = @function_types[name]?
-      if existing_type && existing_type != TypeRef::VOID && existing_type != TypeRef::NIL
+      if existing_type && existing_type != TypeRef::VOID
         if def_node = lookup_function_def_for_return(name, base_name)
           if def_node.return_type
             if resolved = resolve_return_type_from_def(name, base_name, nil)
-              if resolved != TypeRef::VOID && resolved != TypeRef::NIL && resolved != existing_type
+              if resolved != TypeRef::VOID && resolved != existing_type
                 @function_types[name] = resolved
                 @function_base_return_types[base_name] = resolved unless base_name.includes?("$")
                 existing_type = resolved
@@ -18816,7 +18816,7 @@ module Crystal::HIR
           end
         end
       end
-      if existing_type == TypeRef::VOID || existing_type == TypeRef::NIL
+      if existing_type == TypeRef::VOID
         # Prefer lowering the function body to discover the return type, instead of
         # running a separate AST-walk inference pass. This is significantly cheaper
         # during self-host when pending queues are large.
@@ -18825,10 +18825,14 @@ module Crystal::HIR
         # or when we are already inside an inference-only context).
         if @infer_body_context.nil? && !function_state(name).in_progress? && !@module.has_function?(name)
           if lookup_function_def_for_return(name, base_name)
-            lower_function_if_needed(name)
+            # Prefer forcing a real lower to learn the return type (cheaper than AST-walk inference).
+            unless force_lower_function_for_return_type(name)
+              lower_function_if_needed(name)
+            end
             if func = @module.function_by_name(name)
               func_rt = func.return_type
-              if func_rt != TypeRef::VOID && func_rt != TypeRef::NIL
+              # Treat Nil as a valid return type. Only Void means "unknown".
+              if func_rt != TypeRef::VOID
                 @function_types[name] = func_rt
                 @function_base_return_types[base_name] = func_rt unless base_name.includes?("$")
                 existing_type = func_rt
@@ -18837,13 +18841,16 @@ module Crystal::HIR
           end
         end
 
-        if def_node = lookup_function_def_for_return(name, base_name)
-          owner_name = function_context_from_name(base_name)
-          if inferred = infer_return_type_from_body_without_callsite(def_node, owner_name)
-            if inferred != TypeRef::VOID && inferred != TypeRef::NIL
-              @function_types[name] = inferred
-              @function_base_return_types[base_name] = inferred unless base_name.includes?("$")
-              existing_type = inferred
+        # Only fall back to AST-walk inference if lowering didn't discover anything.
+        if existing_type == TypeRef::VOID
+          if def_node = lookup_function_def_for_return(name, base_name)
+            owner_name = function_context_from_name(base_name)
+            if inferred = infer_return_type_from_body_without_callsite(def_node, owner_name)
+              if inferred != TypeRef::VOID
+                @function_types[name] = inferred
+                @function_base_return_types[base_name] = inferred unless base_name.includes?("$")
+                existing_type = inferred
+              end
             end
           end
         end
@@ -18855,10 +18862,12 @@ module Crystal::HIR
         # This reduces the amount of speculative body inference during self-host.
         if @infer_body_context.nil? && !function_state(name).in_progress?
           if lookup_function_def_for_return(name, base_name)
-            lower_function_if_needed(name)
+            unless force_lower_function_for_return_type(name)
+              lower_function_if_needed(name)
+            end
             if func = @module.function_by_name(name)
               func_rt = func.return_type
-              if func_rt != TypeRef::VOID && func_rt != TypeRef::NIL
+              if func_rt != TypeRef::VOID
                 @function_types[name] = func_rt
                 @function_base_return_types[base_name] = func_rt unless base_name.includes?("$")
                 return func_rt
@@ -18870,12 +18879,12 @@ module Crystal::HIR
         if def_node = lookup_function_def_for_return(name, base_name)
           if def_node.return_type
             if resolved = resolve_return_type_from_def(name, base_name, nil)
-              return resolved unless resolved == TypeRef::VOID || resolved == TypeRef::NIL
+              return resolved unless resolved == TypeRef::VOID
             end
           end
           owner_name = function_context_from_name(base_name)
           if inferred = infer_return_type_from_body_without_callsite(def_node, owner_name)
-            if inferred != TypeRef::VOID && inferred != TypeRef::NIL
+            if inferred != TypeRef::VOID
               @function_types[name] = inferred
               @function_base_return_types[base_name] = inferred unless base_name.includes?("$")
               return inferred
@@ -18883,7 +18892,7 @@ module Crystal::HIR
           end
         end
         if cached = @function_base_return_types[base_name]?
-          return cached unless cached == TypeRef::VOID || cached == TypeRef::NIL
+          return cached unless cached == TypeRef::VOID
         end
         if base_type = @function_types[base_name]?
           unionish = false
@@ -18908,7 +18917,7 @@ module Crystal::HIR
                 owner_name = base_name[0, idx]
               end
               if inferred = infer_return_type_from_body_without_callsite(def_node, owner_name)
-                if inferred != TypeRef::VOID && inferred != TypeRef::NIL
+                if inferred != TypeRef::VOID
                   inferred_desc = @module.get_type_descriptor(inferred)
                   if inferred_desc.nil? || inferred_desc.kind != TypeKind::Union
                     @function_types[base_name] = inferred
@@ -18930,7 +18939,7 @@ module Crystal::HIR
       if type = @function_types[name]?
         if func = @module.function_by_name(name)
           func_rt = func.return_type
-          if func_rt != TypeRef::VOID && func_rt != TypeRef::NIL
+          if func_rt != TypeRef::VOID
             if unresolved_generic_return_type?(type) && !unresolved_generic_return_type?(func_rt)
               @function_types[name] = func_rt
               type = func_rt
@@ -18970,7 +18979,7 @@ module Crystal::HIR
               owner_name = base_name[0, idx]
             end
             if inferred = infer_return_type_from_body_without_callsite(def_node, owner_name)
-              if inferred != TypeRef::VOID && inferred != TypeRef::NIL
+              if inferred != TypeRef::VOID
                 inferred_desc = @module.get_type_descriptor(inferred)
                 if inferred_desc.nil? || inferred_desc.kind != TypeKind::Union
                   @function_types[name] = inferred
@@ -19002,7 +19011,7 @@ module Crystal::HIR
               owner_name = base_name[0, idx]
             end
             if inferred = infer_return_type_from_body_without_callsite(def_node, owner_name)
-              if inferred != TypeRef::VOID && inferred != TypeRef::NIL
+              if inferred != TypeRef::VOID
                 @function_types[name] = inferred
                 @function_base_return_types[base_name] = inferred unless base_name.includes?("$")
                 type = inferred
@@ -19013,14 +19022,14 @@ module Crystal::HIR
         # For base names (no $ suffix), treat VOID/NIL as unknown and fall back
         # to cached base return types from other overloads.
         if name.includes?("$")
-          if type != TypeRef::VOID && type != TypeRef::NIL
+          if type != TypeRef::VOID
             return type
           end
           if ivar_type = ivar_return_type_for_method(base_name)
             return ivar_type
           end
           if base_type = @function_types[base_name]?
-            return base_type unless base_type == TypeRef::VOID || base_type == TypeRef::NIL
+            return base_type unless base_type == TypeRef::VOID
           end
         if cached = @function_base_return_types[base_name]?
           return cached
@@ -19033,7 +19042,7 @@ module Crystal::HIR
             owner_name = base_name[0, idx]
           end
           if inferred = infer_return_type_from_body_without_callsite(def_node, owner_name)
-            if inferred != TypeRef::VOID && inferred != TypeRef::NIL
+            if inferred != TypeRef::VOID
               @function_base_return_types[base_name] = inferred
               @function_types[base_name] = inferred
               return inferred
@@ -19049,9 +19058,9 @@ module Crystal::HIR
           end
           return type
         end
-        if type == TypeRef::VOID || type == TypeRef::NIL
+        if type == TypeRef::VOID
           if func = @module.function_by_name(name)
-            return func.return_type unless func.return_type == TypeRef::VOID || func.return_type == TypeRef::NIL
+            return func.return_type unless func.return_type == TypeRef::VOID
           end
           if def_node = lookup_function_def_for_return(name, base_name)
             owner_name = nil.as(String?)
@@ -19061,7 +19070,7 @@ module Crystal::HIR
               owner_name = name[0, idx]
             end
             if inferred = infer_return_type_from_body_without_callsite(def_node, owner_name)
-              if inferred != TypeRef::VOID && inferred != TypeRef::NIL
+              if inferred != TypeRef::VOID
                 @function_base_return_types[name] = inferred unless name.includes?("$")
                 @function_types[name] = inferred
                 return inferred
@@ -19096,12 +19105,12 @@ module Crystal::HIR
         if (type == TypeRef::VOID || type == TypeRef::NIL) && name.ends_with?("#to_s")
           return TypeRef::STRING
         end
-        if type == TypeRef::VOID || type == TypeRef::NIL
+        if type == TypeRef::VOID
           if ivar_type = ivar_return_type_for_method(name)
             return ivar_type
           end
         end
-        return type unless type == TypeRef::VOID || type == TypeRef::NIL
+        return type unless type == TypeRef::VOID
       end
       if ivar_type = ivar_return_type_for_method(base_name)
         return ivar_type
