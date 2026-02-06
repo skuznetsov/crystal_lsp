@@ -14150,7 +14150,12 @@ module Crystal::HIR
             STDERR.puts "[FROM_IO_LOWER] class=#{class_name} parsed=#{parsed_ids}"
           end
           unless parsed_types.empty?
-            if call_arg_types.nil?
+            # `full_name_override` is already a concrete callsite-specialized name.
+            # If the caller passed stale/partial `call_arg_types` (common when
+            # untyped params are inferred incrementally), trusting them can
+            # produce a signature/body mismatch and cascade into undefined
+            # symbols. Prefer the types encoded in the override suffix.
+            if call_arg_types.nil? || call_arg_types.size != parsed_types.size || call_arg_types != parsed_types
               call_arg_types = parsed_types
             else
               call_arg_types = merge_call_arg_types_from_suffix(call_arg_types, parsed_types)
