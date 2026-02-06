@@ -493,7 +493,8 @@ describe Crystal::HIR::AstToHir do
 
   describe "control flow lowering" do
     it "lowers if expression" do
-      func = lower_function("def foo; if true; 1; end; end")
+      # Use a non-constant condition so the lowering must build a real CFG.
+      func = lower_function("def foo(x : Bool); if x; 1; end; end")
       text = hir_text(func)
 
       text.should contain("branch")
@@ -502,7 +503,7 @@ describe Crystal::HIR::AstToHir do
     end
 
     it "lowers if-else expression" do
-      func = lower_function("def foo; if true; 1; else; 2; end; end")
+      func = lower_function("def foo(x : Bool); if x; 1; else; 2; end; end")
       text = hir_text(func)
 
       text.should contain("branch")
@@ -510,7 +511,7 @@ describe Crystal::HIR::AstToHir do
     end
 
     it "lowers unless expression" do
-      func = lower_function("def foo; unless false; 1; end; end")
+      func = lower_function("def foo(x : Bool); unless x; 1; end; end")
       text = hir_text(func)
 
       text.should contain("unop Not")  # Condition negated
@@ -518,7 +519,7 @@ describe Crystal::HIR::AstToHir do
     end
 
     it "lowers while loop" do
-      func = lower_function("def foo; while true; 1; end; end")
+      func = lower_function("def foo(x : Bool); while x; 1; end; end")
       text = hir_text(func)
 
       text.should contain("branch")
@@ -526,7 +527,7 @@ describe Crystal::HIR::AstToHir do
     end
 
     it "lowers until loop" do
-      func = lower_function("def foo; until false; 1; end; end")
+      func = lower_function("def foo(x : Bool); until x; 1; end; end")
       text = hir_text(func)
 
       text.should contain("unop Not")
@@ -534,7 +535,7 @@ describe Crystal::HIR::AstToHir do
     end
 
     it "lowers ternary expression" do
-      func = lower_function("def foo; true ? 1 : 2; end")
+      func = lower_function("def foo(x : Bool); x ? 1 : 2; end")
       text = hir_text(func)
 
       text.should contain("branch")
@@ -550,7 +551,7 @@ describe Crystal::HIR::AstToHir do
     end
 
     it "lowers nested if" do
-      func = lower_function("def foo; if true; if false; 1; end; end; end")
+      func = lower_function("def foo(a : Bool, b : Bool); if a; if b; 1; end; end; end")
       text = hir_text(func)
 
       # Multiple branches
@@ -1611,7 +1612,7 @@ describe Crystal::HIR::AstToHir do
     end
 
     it "terminates all blocks" do
-      func = lower_function("def foo; if true; 1; else; 2; end; end")
+      func = lower_function("def foo(x : Bool); if x; 1; else; 2; end; end")
 
       func.blocks.each do |block|
         block.terminator.should_not be_a(Crystal::HIR::Unreachable)
@@ -1619,7 +1620,7 @@ describe Crystal::HIR::AstToHir do
     end
 
     it "creates correct CFG for if" do
-      func = lower_function("def foo; if true; 1; else; 2; end; end")
+      func = lower_function("def foo(x : Bool); if x; 1; else; 2; end; end")
 
       # Should have: entry -> branch -> then/else -> merge
       func.blocks.size.should be >= 4
@@ -1642,7 +1643,7 @@ describe Crystal::HIR::AstToHir do
     end
 
     it "phi nodes have correct incoming edges" do
-      func = lower_function("def foo; if true; 1; else; 2; end; end")
+      func = lower_function("def foo(x : Bool); if x; 1; else; 2; end; end")
 
       phi = func.blocks.flat_map(&.instructions).find { |i| i.is_a?(Crystal::HIR::Phi) }
       phi.should_not be_nil
@@ -1775,6 +1776,82 @@ describe Crystal::HIR::AstToHir do
       names = converter.module.functions.map(&.name)
       names.should contain("foo$Pointer(Int32)")
       names.should contain("foo$Pointer(Float64)")
+    end
+  end
+
+  describe "unreachable sequential lowering" do
+    it "does not lower statements after an explicit return" do
+      func = lower_function("def foo; return 1; 2; end")
+      text = hir_text(func)
+
+      text.should contain("literal 1")
+      text.should_not contain("literal 2")
+    end
+
+    it "does not lower statements after raise" do
+      func = lower_function("def foo; raise \"x\"; 1; end")
+      text = hir_text(func)
+
+      text.should_not contain("literal 1")
+    end
+  end
+
+  describe "generic receiver union specialization" do
+    it "does not collapse union type args to Pointer(Void) when instantiating generic receivers" do
+      code = <<-CRYSTAL
+        module Indexable(T)
+          abstract def size : Int32
+          abstract def unsafe_fetch(i : Int32) : T
+
+          def [](i : Int32) : T
+            unsafe_fetch(i)
+          end
+
+          private class ItemIterator(A, T)
+            def initialize(@array : A, @index = 0)
+            end
+
+            def next : T
+              if @index >= @array.size
+                raise "stop"
+              end
+              value = @array[@index]
+              @index += 1
+              value
+            end
+          end
+
+          def each
+            ItemIterator(self, T).new(self)
+          end
+        end
+
+        struct Box(T)
+          include Indexable(T)
+
+          def size : Int32
+            0
+          end
+
+          def unsafe_fetch(i : Int32) : T
+            uninitialized T
+          end
+        end
+
+        def foo(b : Box(Int32 | Pointer(UInt8)))
+          b.each
+        end
+
+        foo(Box(Int32 | Pointer(UInt8)).new)
+      CRYSTAL
+
+      converter = lower_program_with_main(code)
+      func = converter.module.functions.find { |f| f.name.starts_with?("Box(") && f.name.includes?("#each") }
+      func.should_not be_nil
+
+      text = hir_text(func.not_nil!)
+      text.should_not contain("ItemIterator(Pointer(Void), Pointer(Void))")
+      text.should_not contain("Pointer(Void)#size")
     end
   end
 end
