@@ -4519,6 +4519,22 @@ module Crystal::MIR
         op = dst_unsigned ? "fptoui" : "fptosi"
       end
 
+      # Guard: int-to-float casts.
+      #
+      # - For unsafe_as semantics we allow same-width bitcasts (i32<->float, i64<->double).
+      # - For width-changing casts (i32->double, i64->float, etc.) bitcast/trunc is invalid;
+      #   fall back to numeric conversion.
+      if (op == "bitcast" || op == "trunc") && is_src_int && is_dst_float
+        src_bits = src_type[1..].to_i?
+        dst_bits = dst_type == "float" ? 32 : 64
+        needs_numeric = op == "trunc"
+        needs_numeric ||= src_bits && src_bits != dst_bits
+        if needs_numeric
+          signed_src = @module.type_registry.get(src_type_ref).try(&.kind).try(&.signed_integer?) || false
+          op = signed_src ? "sitofp" : "uitofp"
+        end
+      end
+
       # Guard: float/double to ptr can't be bitcast directly. Bitcast to int bits, then inttoptr.
       if op == "bitcast" && is_src_float && dst_type == "ptr"
         base_name = name.lstrip('%')
@@ -5884,6 +5900,27 @@ module Crystal::MIR
 
         if expected_type == "ptr" && actual_type.starts_with?("i")
           emit "#{cast_name} = inttoptr #{actual_type} #{value} to ptr"
+          return cast_name
+        end
+
+        # Int <-> float conversions (avoid invalid LLVM bitcasts)
+        if (expected_type == "double" || expected_type == "float") && actual_type.starts_with?("i")
+          emit "#{cast_name} = sitofp #{actual_type} #{value} to #{expected_type}"
+          return cast_name
+        end
+
+        if expected_type.starts_with?("i") && (actual_type == "double" || actual_type == "float")
+          emit "#{cast_name} = fptosi #{actual_type} #{value} to #{expected_type}"
+          return cast_name
+        end
+
+        if expected_type == "double" && actual_type == "float"
+          emit "#{cast_name} = fpext float #{value} to double"
+          return cast_name
+        end
+
+        if expected_type == "float" && actual_type == "double"
+          emit "#{cast_name} = fptrunc double #{value} to float"
           return cast_name
         end
 
