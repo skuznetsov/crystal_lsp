@@ -4434,15 +4434,14 @@ module Crystal::HIR
 
     private def resolve_alias_target(target_name : String, context : String? = nil) : String
       raw = target_name
-      if context && !context.empty?
-        raw = qualify_alias_target_in_context(raw, context)
-      end
+      # IMPORTANT: When `context` is provided we intentionally avoid pre/post qualification here.
+      # `normalize_declared_type_name(..., context)` already resolves names under `@current_class=context`
+      # (including `typeof(self)`), and qualifying first can mis-classify `typeof(...)` as a generic
+      # type and produce invalid names like `Box::typeof(Box::self)`.
       resolved = normalize_declared_type_name(raw, context)
       return target_name if resolved.includes?("Pointer(Void)") || resolved.includes?("Unknown")
 
-      if context && !context.empty?
-        resolved = qualify_alias_target_in_context(resolved, context)
-      else
+      if !context || context.empty?
         # If the alias target is an unqualified constant and nothing is registered yet,
         # keep it relative to the current namespace so later lookup resolves correctly.
         if current = @current_class
@@ -14264,6 +14263,10 @@ module Crystal::HIR
         end
         if call_types.empty? || call_types.all? { |t| t == TypeRef::VOID }
           debug_hook("method.lower.defer", "class=#{class_name} method=#{method_name} reason=untyped_params") if DebugHooks::ENABLED
+          # Even when we defer lowering (no call-site types yet), the method-level effect
+          # annotations are still valid and should influence analyses of callers. Register
+          # them on the base name so calls like `Foo#bar$T` can still discover them.
+          register_pending_method_effects(base_name, 0)
           return
         end
       end
@@ -14495,11 +14498,9 @@ module Crystal::HIR
                         inferred = infer_getter_return_type(node, class_info.ivars)
                         inferred || TypeRef::VOID
                       end
-        if return_type == TypeRef::VOID || return_type == TypeRef::NIL || unresolved_generic_return_type?(return_type)
-          if inferred = infer_concrete_return_type_from_body(node, class_name)
-            return_type = inferred unless inferred == TypeRef::VOID || inferred == TypeRef::NIL
-          end
-        end
+        # Avoid AST-walk return type inference during lowering. We'll infer/refresh the return
+        # type after lowering from the lowered body (terminators/last expression), which is
+        # significantly cheaper during self-host.
       else
         with_type_param_map(extra_type_params) do
           return_type = if rt = node.return_type
@@ -14508,25 +14509,18 @@ module Crystal::HIR
                           if rt_name == "self"
                             class_info.type_ref
                           elsif module_like_type_name?(rt_name)
-                            inferred = infer_concrete_return_type_from_body(node, class_name)
-                            inferred || type_ref_for_name(rt_name)
+                            type_ref_for_name(rt_name)
                           else
                             type_ref_for_name(rt_name)
                           end
                         elsif method_name.ends_with?("?")
                           inferred = infer_unannotated_query_return_type(method_name, class_info.type_ref)
-                          inferred ||= infer_concrete_return_type_from_body(node, class_name)
                           inferred || fallback_query_return_type(method_name)
                         else
                           # Try to infer return type from getter-style methods (single ivar access)
                           inferred = infer_getter_return_type(node, class_info.ivars)
                           inferred || TypeRef::VOID
                         end
-          if return_type == TypeRef::VOID || return_type == TypeRef::NIL || unresolved_generic_return_type?(return_type)
-            if inferred = infer_concrete_return_type_from_body(node, class_name)
-              return_type = inferred unless inferred == TypeRef::VOID || inferred == TypeRef::NIL
-            end
-          end
         end
       end
 
