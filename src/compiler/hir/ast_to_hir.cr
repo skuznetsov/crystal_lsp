@@ -27224,11 +27224,6 @@ module Crystal::HIR
     end
 
     private def emit_self(ctx : LoweringContext) : ValueId
-      if @inline_yield_block_body_depth > 0
-        if value_id = inline_caller_local_id("self")
-          return value_id
-        end
-      end
       # Check if we have a 'self' local
       if self_id = ctx.lookup_local("self")
         return self_id
@@ -39566,6 +39561,17 @@ module Crystal::HIR
       end
       base_inline_name = strip_type_suffix(inline_key)
       namespace_override = function_namespace_override_for(inline_key, base_inline_name)
+      debug_inline_self = false
+      if filter = ENV["DEBUG_INLINE_SELF"]?
+        if filter.empty? || filter == "1" || inline_key.includes?(filter) || base_inline_name.includes?(filter)
+          debug_inline_self = true
+          recv_id = receiver_id ? receiver_id.to_s : "nil"
+          recv_type = receiver_id ? get_type_name_from_ref(ctx.type_of(receiver_id)) : "nil"
+          STDERR.puts(
+            "[INLINE_SELF] callee=#{inline_key} base=#{base_inline_name} recv_id=#{recv_id} recv_type=#{recv_type} depth=#{@inline_yield_block_body_depth} func=#{ctx.function.name}"
+          )
+        end
+      end
       if receiver = receiver_name_from_method_name(base_inline_name)
         if unresolved_generic_receiver?(receiver)
           if receiver_id
@@ -39755,6 +39761,16 @@ module Crystal::HIR
               ctx.register_local("self", class_self)
               ctx.register_type(class_self, ctx.type_of(class_self))
             end
+          end
+          if debug_inline_self
+            bound_id = ctx.lookup_local("self")
+            bound_str = bound_id ? bound_id.to_s : "nil"
+            bound_type = bound_id ? get_type_name_from_ref(ctx.type_of(bound_id)) : "nil"
+            expected_str = receiver_id ? receiver_id.to_s : "nil"
+            expected_type = receiver_id ? get_type_name_from_ref(ctx.type_of(receiver_id)) : "nil"
+            STDERR.puts(
+              "[INLINE_SELF_BOUND] callee=#{inline_key} bound_id=#{bound_str} bound_type=#{bound_type} expected_id=#{expected_str} expected_type=#{expected_type} depth=#{@inline_yield_block_body_depth} func=#{ctx.function.name}"
+            )
           end
 
           # Bind function parameters to call arguments
