@@ -1599,12 +1599,10 @@ module Crystal
         seen = Set(String).new
         module_name = recv_desc.name
         if recv_desc.kind == HIR::TypeKind::Generic
-          module_name = strip_generic_args(module_name)
-          if base_desc = @hir_module.types.find { |desc| desc.name == module_name }
-            unless base_desc.kind == HIR::TypeKind::Module
-              module_name = recv_desc.name
-            end
-          end
+          # Keep the full generic name (e.g., "Enumerable(Fiber)") so that
+          # module_includers_for can narrow to type-parameter-specific includers.
+          # This matches the original compiler's per-type-parameter including_types.
+          # module_includers_for has fallback logic to the base name if needed.
         end
         includers = module_includers_for(module_name)
         if includers.empty?
