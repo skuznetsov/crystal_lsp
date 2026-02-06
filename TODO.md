@@ -42,6 +42,11 @@ about syntax or types and should match what the original compiler would report.
   - `crystal spec spec/hir/ast_to_hir_spec.cr` -> `120 examples, 0 failures` (2 pending)
   - `CRYSTAL_V2_STOP_AFTER_HIR=1 ./bin/crystal_v2 -p -s src/crystal_v2.cr ...` no longer reports `Hash::Entry expects 2 type args` (see `tmp/self_hir.stderr.log`).
   - Commit: `4e732e6`
+- Fix: prevent inline-yield lowering from leaking the caller's `self` into callee bodies. This was producing wrong receiver resolution (notably `Range#begin/end` calls resolving as `Crystal::DWARF::LineNumbers#begin/end` in bsearch-inlined contexts) and cascading “missing symbol” sets that appeared/disappeared across runs. Verified by:
+  - `timeout 180 crystal spec spec/hir/ast_to_hir_spec.cr` -> `120 examples, 0 failures` (2 pending)
+  - `timeout 180 crystal spec spec/hir/return_type_inference_spec.cr` -> `13 examples, 0 failures`
+  - Repro HIR no longer contains `Crystal::DWARF::LineNumbers#begin/end/excludes_end?/bsearch_internal` call targets when lowering stdlib `Crystal::DWARF::LineNumbers#find` bsearch paths.
+  - Commit: `fee15a4`
 
 ### In Progress
 - [x] Replace method-name string `split` usage with zero-copy helpers (`parse_method_name`, `strip_type_suffix`) in HIR lowering hot paths (ast_to_hir).
