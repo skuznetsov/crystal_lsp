@@ -11428,12 +11428,28 @@ module Crystal::HIR
         splat_type = TypeRef::VOID
         if !call_types.empty?
           remaining = call_types[call_index..-1]? || [] of TypeRef
-          splat_type = tuple_type_from_arg_types(remaining, allow_void: true)
+          # Avoid re-wrapping: if single remaining arg is already a Tuple, use it directly
+          if remaining.size == 1
+            rname = get_type_name_from_ref(remaining[0])
+            if rname.starts_with?("Tuple")
+              splat_type = remaining[0]
+            else
+              splat_type = tuple_type_from_arg_types(remaining, allow_void: true)
+            end
+          else
+            splat_type = tuple_type_from_arg_types(remaining, allow_void: true)
+          end
         end
         if splat_type == TypeRef::VOID
           if elem_type = param_type_map[splat_param_name.not_nil!]?
             if elem_type != TypeRef::VOID
-              splat_type = tuple_type_from_arg_types([elem_type], allow_void: true)
+              # Avoid re-wrapping: if elem_type is already a Tuple, use it directly
+              elem_name = get_type_name_from_ref(elem_type)
+              if elem_name.starts_with?("Tuple")
+                splat_type = elem_type
+              else
+                splat_type = tuple_type_from_arg_types([elem_type], allow_void: true)
+              end
             end
           end
         end
@@ -14449,12 +14465,28 @@ module Crystal::HIR
         splat_type = TypeRef::VOID
         if !call_types.empty?
           remaining = call_types[call_index..-1]? || [] of TypeRef
-          splat_type = tuple_type_from_arg_types(remaining, allow_void: true)
+          # Avoid re-wrapping: if single remaining arg is already a Tuple, use it directly
+          if remaining.size == 1
+            rname = get_type_name_from_ref(remaining[0])
+            if rname.starts_with?("Tuple")
+              splat_type = remaining[0]
+            else
+              splat_type = tuple_type_from_arg_types(remaining, allow_void: true)
+            end
+          else
+            splat_type = tuple_type_from_arg_types(remaining, allow_void: true)
+          end
         end
         if splat_type == TypeRef::VOID
           if elem_type = param_type_map[splat_param_name.not_nil!]?
             if elem_type != TypeRef::VOID
-              splat_type = tuple_type_from_arg_types([elem_type], allow_void: true)
+              # Avoid re-wrapping: if elem_type is already a Tuple, use it directly
+              elem_name = get_type_name_from_ref(elem_type)
+              if elem_name.starts_with?("Tuple")
+                splat_type = elem_type
+              else
+                splat_type = tuple_type_from_arg_types([elem_type], allow_void: true)
+              end
             end
           end
         end
@@ -16409,6 +16441,7 @@ module Crystal::HIR
         end
         if matches.empty?
           empty = [] of String
+          @function_def_overloads_stripped_cache[stripped] = empty
           @function_def_overloads_cache[base_name] = empty
           return empty
         end
@@ -23846,9 +23879,11 @@ module Crystal::HIR
       mono_sources_top = ENV["DEBUG_MONO_SOURCES_TOP"]?.try(&.to_i?) || 15
       mono_sources_samples = ENV.has_key?("DEBUG_MONO_SOURCES_SAMPLES")
 
+      attempt_counts = Hash(String, Int32).new(0)
       while pending_functions.size > 0 && iteration < max_iterations
-        # Take a snapshot of currently pending functions
+        # Take a snapshot of currently pending functions — skip stuck ones (max 3 attempts)
         pending = pending_functions.dup
+        pending.reject! { |name| attempt_counts[name] >= 3 }
         if budget > 0 && pending.size > budget
           pending = pending.first(budget)
         end
@@ -23916,11 +23951,13 @@ module Crystal::HIR
           next if function_state(name).completed?
           next if function_state(name).in_progress?
 
+          attempt_counts[name] += 1
           lower_function_if_needed(name)
         end
 
         @lowering_depth = saved_depth
         iteration += 1
+        break if pending.empty?
       end
 
       pending_remaining = pending_functions

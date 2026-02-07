@@ -552,6 +552,7 @@ module Crystal::V2
       end
 
       # Create synthetic main function from top-level expressions (or user-defined main)
+      trace_driver("[DRIVER_TRACE] pass3_classes done, funcs=#{hir_converter.module.functions.size}")
       STDERR.puts "[HIR_TIMING] start lower_main" if debug_hir_timings
       main_start = Time.instant if debug_hir_timings
       if main_exprs.size > 0
