@@ -223,8 +223,10 @@ module Crystal::MIR
 
     private def compute_tuple_type(type : Type) : String
       if elements = type.element_types
-        element_types = elements.map { |e| compute_llvm_type_for_type(e) }
-        element_types = element_types.reject { |t| t == "void" }
+        element_types = elements.map { |e|
+          t = compute_llvm_type_for_type(e)
+          t == "void" ? "i8" : t  # Preserve struct index positions for Nil elements
+        }
         return "{}" if element_types.empty?
         "{ #{element_types.join(", ")} }"
       else
@@ -7982,8 +7984,10 @@ module Crystal::MIR
 
     private def tuple_struct_llvm_type(type : Type) : String
       if elements = type.element_types
-        element_types = elements.map { |e| @type_mapper.llvm_type(e) }
-        element_types = element_types.reject { |t| t == "void" }
+        element_types = elements.map { |e|
+          t = @type_mapper.llvm_type(e)
+          t == "void" ? "i8" : t  # Preserve struct index positions for Nil elements
+        }
         return "{}" if element_types.empty?
         "{ #{element_types.join(", ")} }"
       else
