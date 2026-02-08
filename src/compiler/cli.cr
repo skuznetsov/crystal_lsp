@@ -582,6 +582,10 @@ module CrystalV2
         end
         STDERR.puts if options.progress
 
+        # Fix inherited ivars: ensure subclasses include parent ivars with correct offsets.
+        # Must run before function lowering since GEP offsets are baked into HIR instructions.
+        hir_converter.fixup_inherited_ivars
+
         # Pass 3: Lower bodies (lazy)
         # Only lower top-level expressions; function bodies are lowered on demand.
         log(options, out_io, "  Pass 3: Lowering bodies (lazy)...")

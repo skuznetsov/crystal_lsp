@@ -12756,6 +12756,82 @@ module Crystal::HIR
       end
     end
 
+    # Fix inherited ivars for subclasses.
+    # Due to registration order, a child class may be registered before its parent
+    # has its ivars populated. This pass ensures all classes include their parent's
+    # ivars with correct offsets.
+    def fixup_inherited_ivars : Nil
+      fixed = Set(String).new
+      fixup_count = 0
+      @class_info.keys.each do |class_name|
+        old_size = @class_info[class_name]?.try(&.ivars.size) || 0
+        fixup_class_inherited_ivars(class_name, fixed)
+        new_size = @class_info[class_name]?.try(&.ivars.size) || 0
+        if new_size != old_size
+          info = @class_info[class_name]
+          ivar_dump = info.ivars.map { |iv| "#{iv.name}@#{iv.offset}" }.join(", ")
+          STDERR.puts "[FIXUP] #{class_name}: #{old_size}→#{new_size} ivars, size=#{info.size} [#{ivar_dump}]"
+          fixup_count += 1
+        end
+      end
+      STDERR.puts "[FIXUP] Fixed #{fixup_count} classes" if fixup_count > 0
+    end
+
+    private def fixup_class_inherited_ivars(class_name : String, fixed : Set(String))
+      return if fixed.includes?(class_name)
+      info = @class_info[class_name]?
+      return unless info
+      return if info.is_struct # value types don't share layout with parent
+
+      parent_name = info.parent_name
+      if parent_name && @class_info.has_key?(parent_name)
+        # Fix parent first (topological order)
+        fixup_class_inherited_ivars(parent_name, fixed)
+
+        parent_info = @class_info[parent_name].not_nil!
+
+        if !parent_info.ivars.empty?
+          # Check if child already has all parent ivars at correct offsets
+          has_all = parent_info.ivars.all? do |piv|
+            info.ivars.any? { |iv| iv.name == piv.name && iv.offset == piv.offset }
+          end
+
+          unless has_all
+            # Identify child's OWN ivars (not from parent)
+            parent_ivar_names = parent_info.ivars.map(&.name).to_set
+            own_ivars = info.ivars.reject { |iv| parent_ivar_names.includes?(iv.name) }
+
+            # Compute offset adjustment:
+            # Parent ivars occupy 8..parent_size-1 (8 = type_id header)
+            # Child's own ivars currently start at 8
+            # Need to shift to start at parent_size
+            own_start = own_ivars.first?.try(&.offset) || 8
+            offset_adjust = parent_info.size - own_start
+
+            if offset_adjust > 0
+              # Build new ivar list: parent ivars + adjusted child ivars
+              new_ivars = [] of IVarInfo
+              parent_info.ivars.each { |piv| new_ivars << piv }
+              own_ivars.each do |ivar|
+                new_ivars << IVarInfo.new(ivar.name, ivar.type, ivar.offset + offset_adjust)
+              end
+
+              new_size = info.size + offset_adjust
+
+              new_info = ClassInfo.new(
+                info.name, info.type_ref, new_ivars, info.class_vars,
+                new_size, info.is_struct, info.parent_name
+              )
+              @class_info[class_name] = new_info
+              @class_info_by_type_id[info.type_ref.id] = new_info
+            end
+          end
+        end
+      end
+
+      fixed << class_name
+    end
+
     private def concrete_type_args?(type_args : Array(String)) : Bool
       # NOTE: unions like `String | Nil` are concrete and must be allowed here.
       unresolved_token_re = /(?:^|[^A-Za-z0-9_:])(K2|V2|K|V|T|U|L|W|self)(?:$|[^A-Za-z0-9_:])/
@@ -37149,12 +37225,33 @@ module Crystal::HIR
                 end
               end
             else
-              # Non-literal splat - just pass through (runtime behavior not fully supported)
+              # Non-literal splat - lower the expression, then check if it's a Tuple
               @arena = call_arena
-              result << lower_expr(ctx, arg_node.expr)
+              inner_val = lower_expr(ctx, arg_node.expr)
               @arena = call_arena
-              if ENV["DEBUG_SPLAT_TRACE"]?
-                STDERR.puts "[SPLAT_TRACE_DONE] inner=#{arg_node.expr.index}"
+              inner_type = ctx.type_of(inner_val)
+              desc = @module.get_type_descriptor(inner_type)
+              if desc && (desc.kind == TypeKind::Tuple || desc.name.starts_with?("Tuple("))
+                # Tuple splat: extract each element as a separate argument
+                elem_types = desc.type_params.reject { |t| t == TypeRef::VOID }
+                elem_types.each_with_index do |elem_type, idx|
+                  idx_lit = Literal.new(ctx.next_id, TypeRef::INT32, idx.to_i64)
+                  ctx.emit(idx_lit)
+                  ctx.register_type(idx_lit.id, TypeRef::INT32)
+                  extract = IndexGet.new(ctx.next_id, elem_type, inner_val, idx_lit.id)
+                  ctx.emit(extract)
+                  ctx.register_type(extract.id, elem_type)
+                  result << extract.id
+                end
+                if ENV["DEBUG_SPLAT_TRACE"]?
+                  STDERR.puts "[SPLAT_TRACE_DONE] tuple_unpack=#{elem_types.size} inner=#{arg_node.expr.index}"
+                end
+              else
+                # Not a Tuple - pass through as single argument
+                result << inner_val
+                if ENV["DEBUG_SPLAT_TRACE"]?
+                  STDERR.puts "[SPLAT_TRACE_DONE] inner=#{arg_node.expr.index}"
+                end
               end
             end
           else

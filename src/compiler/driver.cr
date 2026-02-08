@@ -506,6 +506,9 @@ module Crystal::V2
         STDERR.puts "[HIR_TIMING] register_functions #{elapsed.round(1)}ms"
       end
 
+      # Fix inherited ivars: ensure subclasses include parent ivars with correct offsets.
+      hir_converter.fixup_inherited_ivars
+
       # Pass 3: Lower all function and method bodies
       func_count = 0
       pass3_start = Time.instant if debug_hir_timings
