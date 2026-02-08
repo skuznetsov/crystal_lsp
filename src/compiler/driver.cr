@@ -510,7 +510,7 @@ module Crystal::V2
       func_count = 0
       pass3_start = Time.instant if debug_hir_timings
       slow_ms = ENV["DEBUG_HIR_SLOW_MS"]?.try(&.to_f)
-      unless ENV.has_key?("CRYSTAL_V2_LAZY_HIR")
+      if ENV.has_key?("CRYSTAL_V2_EAGER_HIR")
         module_nodes.each do |module_node, arena|
           hir_converter.arena = arena
           if slow_ms
@@ -544,7 +544,7 @@ module Crystal::V2
           func_count += 1
         end
       else
-        trace_driver("[DRIVER_TRACE] CRYSTAL_V2_LAZY_HIR=1; skipping eager module/class lowering")
+        trace_driver("[DRIVER_TRACE] demand-driven mode; skipping eager module/class lowering")
       end
       if debug_hir_timings && pass3_start
         elapsed = (Time.instant - pass3_start).total_milliseconds
@@ -583,27 +583,30 @@ module Crystal::V2
 
       # Lower remaining top-level function bodies after main to allow
       # call-site types to guide inference for used functions.
-      STDERR.puts "[HIR_TIMING] start lower_defs" if debug_hir_timings
-      defs_start = Time.instant if debug_hir_timings
-      def_nodes.each do |node, arena|
-        hir_converter.arena = arena
-        if slow_ms
-          start = Time.instant
-          hir_converter.lower_def(node)
-          elapsed = (Time.instant - start).total_milliseconds
-          if elapsed >= slow_ms
-            name = String.new(node.name)
-            source_path = paths_by_arena[arena]?
-            STDERR.puts "[HIR_SLOW] #{name} #{elapsed.round(1)}ms#{source_path ? " file=#{source_path}" : ""}"
+      # In demand-driven mode (default), flush_pending_functions handles this.
+      if ENV.has_key?("CRYSTAL_V2_EAGER_HIR")
+        STDERR.puts "[HIR_TIMING] start lower_defs" if debug_hir_timings
+        defs_start = Time.instant if debug_hir_timings
+        def_nodes.each do |node, arena|
+          hir_converter.arena = arena
+          if slow_ms
+            start = Time.instant
+            hir_converter.lower_def(node)
+            elapsed = (Time.instant - start).total_milliseconds
+            if elapsed >= slow_ms
+              name = String.new(node.name)
+              source_path = paths_by_arena[arena]?
+              STDERR.puts "[HIR_SLOW] #{name} #{elapsed.round(1)}ms#{source_path ? " file=#{source_path}" : ""}"
+            end
+          else
+            hir_converter.lower_def(node)
           end
-        else
-          hir_converter.lower_def(node)
+          func_count += 1
         end
-        func_count += 1
-      end
-      if debug_hir_timings && defs_start
-        elapsed = (Time.instant - defs_start).total_milliseconds
-        STDERR.puts "[HIR_TIMING] lower_defs #{elapsed.round(1)}ms"
+        if debug_hir_timings && defs_start
+          elapsed = (Time.instant - defs_start).total_milliseconds
+          STDERR.puts "[HIR_TIMING] lower_defs #{elapsed.round(1)}ms"
+        end
       end
       # Ensure deferred callsite signatures are lowered in non-fun-main flows.
       hir_converter.flush_pending_functions
@@ -614,6 +617,14 @@ module Crystal::V2
       hir_module = hir_converter.module
       @link_libraries = hir_module.link_libraries.dup
       log "  Functions: #{hir_module.functions.size}"
+
+      # Reduce later phases by keeping only functions reachable from entrypoints.
+      reachable = hir_module.reachable_function_names(["__crystal_main", "main"])
+      if !reachable.empty? && reachable.size < hir_module.functions.size
+        total_before = hir_module.functions.size
+        hir_module.functions.select! { |func| reachable.includes?(func.name) }
+        log "  Reachable functions: #{hir_module.functions.size}/#{total_before}"
+      end
 
       if @emit_hir
         hir_file = @output_file.gsub(/\.[^.]+$/, ".hir")

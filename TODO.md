@@ -1713,7 +1713,7 @@ r2 = maybe(false)  # => nil
 - `CRYSTAL_V2_STOP_AFTER_PARSE=1` - stops driver after parse (self-host parse + AST cache ≈ 5.5s on 273 files, 2026-01-xx)
 - `CRYSTAL_V2_STOP_AFTER_HIR=1` - stops driver after HIR lowering (useful to isolate post-HIR stalls)
 - `CRYSTAL_V2_STOP_AFTER_MIR=1` - stops driver after MIR lowering (useful to isolate LLVM/llc stalls)
-- `CRYSTAL_V2_LAZY_HIR=1` - skips eager module/class lowering (relies on lazy lower on call)
+- `CRYSTAL_V2_EAGER_HIR=1` - forces eager module/class + def lowering (default is demand-driven)
 - `DEBUG_HIR_SLOW_MS=NN` - logs per-method HIR lowering slower than NN ms (driver only)
 - `DEBUG_HIR_TIMINGS=1` - logs per-pass HIR timings in driver (collect/register/lower)
 - `DEBUG_MAIN_SLOW_ONLY=1` - only log slow main expressions (no per-expr start spam)

@@ -1375,7 +1375,9 @@ module Crystal::HIR
       @functions_by_base_name[base_name]?
     end
 
-    # Compute reachable function names from a set of entry roots by following Call instructions.
+    # Compute reachable function names using Rapid Type Analysis (RTA).
+    # Virtual dispatch is restricted to types that are actually instantiated
+    # somewhere in the codebase, avoiding the "Object has 243 subclasses" explosion.
     def reachable_function_names(roots : Array(String)) : Set(String)
       reachable = Set(String).new
       worklist = [] of String
@@ -1415,6 +1417,59 @@ module Crystal::HIR
         end
       end
 
+      # ── RTA Phase 1: Collect instantiated types from ALL functions ──
+      # Scan every function for Allocate instructions to build the set of
+      # types that can actually exist at runtime. This is conservative
+      # (includes allocations from unreachable code) but sound.
+      instantiated_types = Set(String).new
+      # Primitives and built-in types are always considered instantiated
+      {"Int8", "Int16", "Int32", "Int64", "UInt8", "UInt16", "UInt32", "UInt64",
+       "Float32", "Float64", "Bool", "Char", "String", "Nil", "Pointer", "Symbol"}.each do |t|
+        instantiated_types << t
+      end
+      # Also scan union type descriptors: if a Union contains a type, that type
+      # can exist at runtime (it was stored in a variable/field of that union type)
+      @types.each do |desc|
+        if desc.kind == TypeKind::Union
+          # Union names look like "Nil | Crystal::EventLoop::Polling"
+          desc.name.split(" | ").each do |variant|
+            base = strip_generics.call(variant.strip)
+            instantiated_types << base unless base.empty?
+          end
+        end
+      end
+      @functions.each do |func|
+        func.blocks.each do |block|
+          block.instructions.each do |inst|
+            case inst
+            when Allocate
+              if desc = get_type_descriptor(inst.type)
+                instantiated_types << strip_generics.call(desc.name)
+              end
+            when ArrayLiteral
+              if desc = get_type_descriptor(inst.type)
+                instantiated_types << strip_generics.call(desc.name)
+              end
+              if desc = get_type_descriptor(inst.element_type)
+                instantiated_types << strip_generics.call(desc.name)
+              end
+            when StringInterpolation
+              instantiated_types << "String"
+            when Call
+              # Track types from .new calls: "ClassName.new$Args" → ClassName is instantiated
+              mname = inst.method_name
+              if dot_idx = mname.rindex('.')
+                after_dot = mname[(dot_idx + 1)..]
+                if after_dot.starts_with?("new") && (after_dot.size == 3 || after_dot[3] == '$')
+                  owner_name = strip_generics.call(mname[0, dot_idx])
+                  instantiated_types << owner_name unless owner_name.empty?
+                end
+              end
+            end
+          end
+        end
+      end
+
       # Build class hierarchy (parent → children)
       class_children = Hash(String, Array(String)).new { |h, k| h[k] = [] of String }
       @class_parents.each do |name, parent|
@@ -1434,10 +1489,13 @@ module Crystal::HIR
         base_to_funcs[method_base] << func.name
       end
 
-      # BFS subclasses (cached)
-      subclass_cache = Hash(String, Array(String)).new
-      subclasses_of = ->(base : String) do
-        cached = subclass_cache[base]?
+      # BFS subclasses (cached), with optional RTA filter.
+      subclass_cache_rta = Hash(String, Array(String)).new
+      subclass_cache_all = Hash(String, Array(String)).new
+
+      bfs_subclasses = ->(base : String, use_rta : Bool) do
+        cache = use_rta ? subclass_cache_rta : subclass_cache_all
+        cached = cache[base]?
         if cached
           cached
         else
@@ -1447,13 +1505,17 @@ module Crystal::HIR
           while child = queue.shift?
             unless seen.includes?(child)
               seen.add(child)
-              result << child
+              if use_rta
+                result << child if instantiated_types.includes?(child)
+              else
+                result << child
+              end
               if grand = class_children[child]?
                 grand.each { |g| queue << g }
               end
             end
           end
-          subclass_cache[base] = result
+          cache[base] = result
           result
         end
       end
@@ -1475,6 +1537,7 @@ module Crystal::HIR
         end
       end
 
+      # ── RTA Phase 2: BFS with instantiation-aware virtual dispatch ──
       while name = worklist.pop?
         func = func_by_name[name]?
         next unless func
@@ -1502,16 +1565,36 @@ module Crystal::HIR
                               else
                                 [callee_owner]
                               end
+
+                # Try RTA-filtered subclasses first, fall back to all if no
+                # method candidates exist in the RTA-filtered set at all.
                 owners = [] of String
                 root_owners.each do |ro|
                   owners << ro unless owners.includes?(ro)
-                  subclasses_of.call(ro).each { |sub| owners << sub unless owners.includes?(sub) }
-                  # Also check module includers if owner is a module
+                  bfs_subclasses.call(ro, true).each { |sub| owners << sub unless owners.includes?(sub) }
                   if mod_includers = module_includers_base[ro]?
                     mod_includers.each do |inc|
                       owners << inc unless owners.includes?(inc)
-                      subclasses_of.call(inc).each do |sub|
+                      bfs_subclasses.call(inc, true).each do |sub|
                         owners << sub unless owners.includes?(sub)
+                      end
+                    end
+                  end
+                end
+                # Check if ANY candidate method exists (even already-reachable ones)
+                has_candidate = owners.any? { |o| owner_method_funcs.has_key?("#{o}|#{method_base}") }
+                unless has_candidate
+                  # RTA found no methods — fall back to unfiltered subclasses
+                  owners.clear
+                  root_owners.each do |ro|
+                    owners << ro unless owners.includes?(ro)
+                    bfs_subclasses.call(ro, false).each { |sub| owners << sub unless owners.includes?(sub) }
+                    if mod_includers = module_includers_base[ro]?
+                      mod_includers.each do |inc|
+                        owners << inc unless owners.includes?(inc)
+                        bfs_subclasses.call(inc, false).each do |sub|
+                          owners << sub unless owners.includes?(sub)
+                        end
                       end
                     end
                   end
