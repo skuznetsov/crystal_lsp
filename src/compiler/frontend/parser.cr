@@ -3837,12 +3837,19 @@ module CrystalV2
           advance
           skip_trivia
 
+          # Bare raise with no value (raise without arguments, or raise followed by
+          # postfix modifier like `raise if cond`).  Match parse_return behavior.
           token = current_token
-          if token.kind.in?(Token::Kind::Newline, Token::Kind::EOF, Token::Kind::End, Token::Kind::Else, Token::Kind::Elsif, Token::Kind::Rescue, Token::Kind::Ensure)
+          if token.kind.in?(Token::Kind::Newline, Token::Kind::EOF, Token::Kind::End,
+               Token::Kind::Else, Token::Kind::Elsif, Token::Kind::Rescue,
+               Token::Kind::Ensure, Token::Kind::If, Token::Kind::Unless,
+               Token::Kind::While, Token::Kind::Until)
             return @arena.add_typed(RaiseNode.new(raise_token.span, nil))
           end
 
-          value_expr = parse_expression(0)
+          # Don't consume postfix if/unless as part of the value expression.
+          # `raise X if Y` must parse as `if Y then raise X end`, not `raise(X if Y)`.
+          value_expr = without_postfix_modifiers { parse_expression(0) }
           return PREFIX_ERROR if value_expr.invalid?
 
           raise_span = raise_token.span.cover(@arena[value_expr].span)
