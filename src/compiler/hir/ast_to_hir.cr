@@ -40801,6 +40801,29 @@ module Crystal::HIR
         ctx.emit(index_get)
         ctx.register_type(index_get.id, element_type)
         index_get.id
+      # Check if this is a tuple type — intercept to avoid calling Tuple#[]
+      # which relies on T.size macro (resolves to 0) causing infinite recursion.
+      elsif type_desc && (type_desc.kind == TypeKind::Tuple || type_desc.name.starts_with?("Tuple(")) && index_ids.size == 1
+        td = type_desc.not_nil!
+        # Determine element type from literal index or use first element type
+        element_type = TypeRef::INT32 # default fallback
+        idx_node = @arena[node.indexes.first]
+        if idx_node.is_a?(CrystalV2::Compiler::Frontend::NumberNode)
+          idx_val = String.new(idx_node.value).to_i?
+          if idx_val && idx_val >= 0 && idx_val < td.type_params.size
+            element_type = td.type_params[idx_val]
+          elsif !td.type_params.empty?
+            element_type = td.type_params.first
+          end
+        elsif !td.type_params.empty?
+          element_type = td.type_params.first
+        end
+        element_type = TypeRef::INT32 if element_type == TypeRef::VOID
+
+        index_get = IndexGet.new(ctx.next_id, element_type, object_id, index_ids.first)
+        ctx.emit(index_get)
+        ctx.register_type(index_get.id, element_type)
+        index_get.id
       else
         # Everything else (classes like Hash, custom types): call [] method
         # Resolve the method name properly (with class name and mangling)

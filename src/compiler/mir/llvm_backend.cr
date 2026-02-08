@@ -7104,8 +7104,22 @@ module Crystal::MIR
               idx_const = index.to_i?
             end
             if idx_const
-              tuple_struct = tuple_struct_llvm_type(tuple_type)
-              emit "%#{base_name}.elem_ptr = getelementptr #{tuple_struct}, ptr #{array_ptr}, i32 0, i32 #{idx_const}"
+              element_count = tuple_type.element_types.try(&.size) || 0
+              if idx_const >= 0 && idx_const < element_count
+                tuple_struct = tuple_struct_llvm_type(tuple_type)
+                emit "%#{base_name}.elem_ptr = getelementptr #{tuple_struct}, ptr #{array_ptr}, i32 0, i32 #{idx_const}"
+              else
+                # Index exceeds detected tuple element count — type tracking mismatch.
+                # Fall back to byte-level GEP using element size.
+                elem_size = case element_type
+                            when "i8" then 1
+                            when "i16" then 2
+                            when "i32", "float" then 4
+                            else 8
+                            end
+                byte_offset = idx_const * elem_size
+                emit "%#{base_name}.elem_ptr = getelementptr i8, ptr #{array_ptr}, i32 #{byte_offset}"
+              end
               emit "#{name} = load #{element_type}, ptr %#{base_name}.elem_ptr"
               @value_types[inst.id] = inst.element_type
               return
