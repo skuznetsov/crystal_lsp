@@ -12256,6 +12256,9 @@ module Crystal::HIR
               if should_register_base_name?(full_name, base_name, member, has_block)
                 @function_defs[base_name] = member
                 @function_def_arenas[base_name] = member_arena
+              elsif !has_block
+                prefer_non_yield_base_name(base_name, member, member_arena)
+                prefer_lower_arity_base_name(base_name, member, member_arena)
               end
 
               # Track yield-functions for inline expansion.
