@@ -12587,6 +12587,25 @@ module Crystal::HIR
             elapsed = (Time.instant - include_start).total_milliseconds
             STDERR.puts "[MONO] #{class_name} include expansion #{elapsed.round(1)}ms"
           end
+
+          # Discover implicit ivars from method bodies (e.g. `out @mutex` in initialize).
+          # This runs AFTER module mixin expansion so that ivars from included modules
+          # are already registered, preventing duplicate registrations.
+          class_body.each do |expr_id|
+            member = unwrap_visibility_member(@arena[expr_id])
+            next unless member.is_a?(CrystalV2::Compiler::Frontend::DefNode)
+            next unless (body = member.body)
+            discovered = discover_implicit_ivars_in_body(body, @arena, class_name)
+            discovered.each do |ivar_name, ivar_type|
+              unless ivars.any? { |iv| iv.name == ivar_name }
+                if ENV["DEBUG_IVAR_REG"]?
+                  STDERR.puts "[IVAR_REG] #{class_name}##{ivar_name} discovered from method body type=#{ivar_type.id}"
+                end
+                ivars << IVarInfo.new(ivar_name, ivar_type, offset)
+                offset += type_size(ivar_type)
+              end
+            end
+          end
         ensure
           @current_class = old_class
           @suppress_monomorphization = old_suppress
@@ -22708,6 +22727,114 @@ module Crystal::HIR
         true
       else
         false
+      end
+    end
+
+    # Discover implicit ivars from method body AST nodes.
+    # Looks for `out @ivar` and `@ivar = expr` patterns, returning {name, type} pairs.
+    private def discover_implicit_ivars_in_body(
+      body : Array(CrystalV2::Compiler::Frontend::ExprId),
+      arena : CrystalV2::Compiler::Frontend::ArenaLike,
+      class_name : String,
+    ) : Array({String, TypeRef})
+      result = [] of {String, TypeRef}
+      seen = Set(String).new
+      scan_nodes_for_ivars(body, arena, class_name, result, seen, 0)
+      result
+    end
+
+    private def scan_nodes_for_ivars(
+      exprs : Array(CrystalV2::Compiler::Frontend::ExprId),
+      arena : CrystalV2::Compiler::Frontend::ArenaLike,
+      class_name : String,
+      result : Array({String, TypeRef}),
+      seen : Set(String),
+      depth : Int32,
+    )
+      return if depth > 5  # Limit recursion depth
+      exprs.each do |expr_id|
+        node = arena[expr_id]
+        case node
+        when CrystalV2::Compiler::Frontend::AssignNode
+          # @ivar = expr — register ivar with inferred type
+          target = arena[node.target]
+          if target.is_a?(CrystalV2::Compiler::Frontend::InstanceVarNode)
+            ivar_name = String.new(target.name)
+            unless seen.includes?(ivar_name)
+              seen << ivar_name
+              value_node = arena[node.value]
+              ivar_type = infer_type_from_class_ivar_assign(value_node)
+              result << {ivar_name, ivar_type} unless ivar_type == TypeRef::VOID
+            end
+          end
+          # Recurse into value
+          scan_nodes_for_ivars([node.value], arena, class_name, result, seen, depth + 1)
+        when CrystalV2::Compiler::Frontend::CallNode
+          # Look for extern calls with `out @ivar` args
+          scan_call_for_out_ivars(node, arena, class_name, result, seen)
+          # Recurse into args
+          scan_nodes_for_ivars(node.args.to_a, arena, class_name, result, seen, depth + 1)
+          # Recurse into callee
+          scan_nodes_for_ivars([node.callee], arena, class_name, result, seen, depth + 1)
+        when CrystalV2::Compiler::Frontend::IfNode
+          scan_nodes_for_ivars([node.condition], arena, class_name, result, seen, depth + 1)
+          if then_body = node.then_body
+            scan_nodes_for_ivars(then_body, arena, class_name, result, seen, depth + 1)
+          end
+          if else_body = node.else_body
+            scan_nodes_for_ivars(else_body, arena, class_name, result, seen, depth + 1)
+          end
+        when CrystalV2::Compiler::Frontend::UnlessNode
+          scan_nodes_for_ivars([node.condition], arena, class_name, result, seen, depth + 1)
+          scan_nodes_for_ivars(node.then_branch, arena, class_name, result, seen, depth + 1)
+          if else_branch = node.else_branch
+            scan_nodes_for_ivars(else_branch, arena, class_name, result, seen, depth + 1)
+          end
+        end
+      end
+    end
+
+    private def scan_call_for_out_ivars(
+      call : CrystalV2::Compiler::Frontend::CallNode,
+      arena : CrystalV2::Compiler::Frontend::ArenaLike,
+      class_name : String,
+      result : Array({String, TypeRef}),
+      seen : Set(String),
+    )
+      # Check if this is a call to an extern function with `out @ivar` args
+      # Pattern: LibC.func_name(out @ivar, ...) — callee is MemberAccessNode
+      callee_node = arena[call.callee]
+      return unless callee_node.is_a?(CrystalV2::Compiler::Frontend::MemberAccessNode)
+      obj_node = arena[callee_node.object]
+      lib_name = case obj_node
+                 when CrystalV2::Compiler::Frontend::ConstantNode
+                   String.new(obj_node.name)
+                 when CrystalV2::Compiler::Frontend::IdentifierNode
+                   String.new(obj_node.name)
+                 else
+                   nil
+                 end
+      return unless lib_name
+      method_name = String.new(callee_node.member)
+
+      extern_func = @module.get_extern_function(lib_name, method_name)
+      return unless extern_func
+
+      call.args.each_with_index do |arg_expr, idx|
+        arg_node = arena[arg_expr]
+        next unless arg_node.is_a?(CrystalV2::Compiler::Frontend::OutNode)
+        out_name = String.new(arg_node.identifier)
+        next unless out_name.starts_with?("@")
+        ivar_name = out_name
+        next if seen.includes?(ivar_name)
+        seen << ivar_name
+
+        # Infer type from extern function parameter (it's a pointer, we want the element type)
+        param_type = extern_func.param_types[idx]?
+        if param_type
+          alloc_type = out_alloc_type_for_param(param_type)
+          result << {ivar_name, alloc_type} unless alloc_type == TypeRef::VOID
+        end
       end
     end
 
@@ -37404,6 +37531,35 @@ module Crystal::HIR
       param_type : TypeRef,
     ) : ValueId
       var_name = String.new(node.identifier)
+
+      # For instance variables (@ivar), compute the field address directly from self.
+      # This ensures the C function writes directly into the object's field,
+      # instead of a temporary alloca that never gets copied back.
+      if var_name.starts_with?("@")
+        ivar_name = var_name[1..]
+        self_id = ctx.lookup_local("self")
+        if ENV["DEBUG_OUT_IVAR"]?
+          STDERR.puts "[OUT_IVAR] var=#{var_name} ivar=#{ivar_name} self=#{self_id} class=#{@current_class} has_info=#{@current_class && @class_info[@current_class]?}"
+          if (cn = @current_class) && (ci2 = @class_info[cn]?)
+            STDERR.puts "[OUT_IVAR] ivars=#{ci2.ivars.map(&.name)}"
+          end
+        end
+        if self_id && (class_name = @current_class) && (ci = @class_info[class_name]?)
+          # Ivar names may be stored with or without @ prefix
+          if ivar_info = ci.ivars.find { |iv| iv.name == ivar_name || iv.name == var_name }
+            # Emit: self + ivar_offset (byte-level pointer arithmetic)
+            offset_lit = Literal.new(ctx.next_id, TypeRef::INT64, ivar_info.offset.to_i64)
+            ctx.emit(offset_lit)
+            ctx.register_type(offset_lit.id, TypeRef::INT64)
+            field_ptr = PointerAdd.new(ctx.next_id, TypeRef::POINTER, self_id, offset_lit.id, TypeRef::INT8)
+            ctx.emit(field_ptr)
+            ctx.register_type(field_ptr.id, TypeRef::POINTER)
+            return field_ptr.id  # Already a pointer — no AddressOf needed
+          end
+        end
+      end
+
+      # Local variable: create temp alloca + AddressOf
       var_id = ctx.lookup_local(var_name)
       if var_id.nil?
         alloc_type = out_alloc_type_for_param(param_type)
