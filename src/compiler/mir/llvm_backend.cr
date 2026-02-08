@@ -1358,9 +1358,11 @@ module Crystal::MIR
       emit_raw "@.str.false = private constant [6 x i8] c\"false\\00\"\n"
       emit_raw "\n"
 
-      # Memory allocation - just wrap malloc
+      # Memory allocation - use calloc for zero-initialized memory
+      # Crystal semantics require zero-init (like GC_MALLOC in original compiler).
+      # The .new allocator only sets known fields; union/composite gaps need zeroing.
       emit_raw "define ptr @__crystal_v2_malloc64(i64 %size) {\n"
-      emit_raw "  %ptr = call ptr @malloc(i64 %size)\n"
+      emit_raw "  %ptr = call ptr @calloc(i64 1, i64 %size)\n"
       emit_raw "  ret ptr %ptr\n"
       emit_raw "}\n\n"
 
@@ -1396,11 +1398,11 @@ module Crystal::MIR
       emit_raw "  ret void\n"
       emit_raw "}\n\n"
 
-      # Slab allocator - just use malloc for bootstrap
+      # Slab allocator - use calloc for zero-init
       emit_raw "define ptr @__crystal_v2_slab_alloc(i32 %size_class) {\n"
       emit_raw "  %size = sext i32 %size_class to i64\n"
       emit_raw "  %shift = shl i64 16, %size\n"
-      emit_raw "  %ptr = call ptr @malloc(i64 %shift)\n"
+      emit_raw "  %ptr = call ptr @calloc(i64 1, i64 %shift)\n"
       emit_raw "  ret ptr %ptr\n"
       emit_raw "}\n\n"
 
@@ -3517,50 +3519,34 @@ module Crystal::MIR
       @value_types[inst.id] = TypeRef::POINTER  # GEP always returns pointer
     end
 
-    # Compute field index from byte offset by examining the type's field layout
+    # Compute LLVM struct field index from byte offset.
+    # Each MIR Field stores its byte offset; the LLVM struct fields are emitted
+    # in MIR field order with an optional vtable ptr at index 0 for classes.
+    # We match by the stored byte offset rather than recomputing sizes, since
+    # LLVM alignment differs from our packed byte layout.
     private def compute_field_index(mir_type : Type, byte_offset : UInt32) : Int32
-      # Class layout: vtable ptr (8 bytes) + fields
-      # Struct layout: just fields
-      base_offset = mir_type.kind.reference? ? 8_u32 : 0_u32
-
-      if byte_offset < base_offset
-        return 0  # Accessing vtable or pre-field area
-      end
-
       fields = mir_type.fields
       return 0 unless fields
 
-      adjusted_offset = byte_offset - base_offset
-      current_offset = 0_u32
-      field_idx = 0
+      class_offset = mir_type.kind.reference? ? 1 : 0
 
+      # Exact match on stored byte offset
       fields.each_with_index do |field, idx|
-        if current_offset >= adjusted_offset
-          return mir_type.kind.reference? ? idx + 1 : idx  # +1 for vtable in classes
+        if field.offset == byte_offset
+          return idx + class_offset
         end
-        # Compute field size (8 for pointers, 4 for i32, etc.)
-        field_size = compute_type_size(field.type_ref)
-        current_offset += field_size
-        field_idx = idx
       end
 
-      # If we're at or past the offset, return the last matching field index
-      # +1 for classes to account for vtable at index 0
-      mir_type.kind.reference? ? field_idx + 1 : field_idx
-    end
-
-    private def compute_type_size(type_ref : TypeRef) : UInt32
-      case type_ref
-      when TypeRef::BOOL then 1_u32
-      when TypeRef::INT8, TypeRef::UINT8 then 1_u32
-      when TypeRef::INT16, TypeRef::UINT16 then 2_u32
-      when TypeRef::INT32, TypeRef::UINT32, TypeRef::FLOAT32 then 4_u32
-      when TypeRef::INT64, TypeRef::UINT64, TypeRef::FLOAT64 then 8_u32
-      when TypeRef::INT128, TypeRef::UINT128 then 16_u32
-      else
-        # Pointers, references, etc. - 8 bytes on 64-bit
-        8_u32
+      # Fallback: closest field at or below the target byte offset
+      best_idx = 0
+      best_offset = 0_u32
+      fields.each_with_index do |field, idx|
+        if field.offset <= byte_offset && field.offset >= best_offset
+          best_idx = idx
+          best_offset = field.offset
+        end
       end
+      best_idx + class_offset
     end
 
     private def emit_gep_dynamic(inst : GetElementPtrDynamic, name : String)
@@ -5502,6 +5488,27 @@ module Crystal::MIR
           call_args = inst.args[1..]
         end
       end
+      # Pad missing args with zero/null defaults to avoid UB from arg count mismatch.
+      # This handles cases where callers omit default parameters (e.g., .new with defaults).
+      pad_args_extra = nil.as(Array(String)?)
+      if callee_func && call_args.size < callee_func.params.size
+        extra = [] of String
+        (call_args.size...callee_func.params.size).each do |i|
+          param = callee_func.params[i]
+          param_llvm = @type_mapper.llvm_type(param.type)
+          pad_val = case param_llvm
+                    when "i1"    then "i1 0"
+                    when "ptr"   then "ptr null"
+                    when "void"  then "ptr null"
+                    when .includes?(".union") then "#{param_llvm} zeroinitializer"
+                    when "float" then "float 0.0"
+                    when "double" then "double 0.0"
+                    else "#{param_llvm} 0"
+                    end
+          extra << pad_val
+        end
+        pad_args_extra = extra unless extra.empty?
+      end
       use_callee_params = callee_func && callee_func.params.size == call_args.size
       # Debug void args
       has_void_arg = call_args.any? { |a| @type_mapper.llvm_type(@value_types[a]? || TypeRef::POINTER) == "void" }
@@ -5843,6 +5850,15 @@ module Crystal::MIR
                  end
                }.join(", ")
              end
+
+      # Append zero-value padding for missing default args
+      if pad_args_extra
+        if args.empty?
+          args = pad_args_extra.join(", ")
+        else
+          args = args + ", " + pad_args_extra.join(", ")
+        end
+      end
 
       if return_type == "void"
         emit "call void @#{callee_name}(#{args})"
