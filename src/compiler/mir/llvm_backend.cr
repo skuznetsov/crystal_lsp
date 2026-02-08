@@ -362,6 +362,8 @@ module Crystal::MIR
     @string_constants : Hash(String, String)  # String value -> global name
     @emitted_value_types : Hash(String, String)  # SSA name -> LLVM type (per function)
     @emitted_allocas : Set(ValueId) = Set(ValueId).new  # Track pre-emitted allocas
+    @addressable_allocas : Hash(ValueId, String) = {} of ValueId => String  # operand_id -> alloca SSA name
+    @addressable_alloca_initialized : Set(ValueId) = Set(ValueId).new  # Track which addressable allocas have been stored to
     @pending_allocas : Array({String, String, Int32}) = [] of {String, String, Int32}  # name, type, align
     @string_counter : Int32 = 0
     @cond_counter : Int32 = 0  # For unique branch condition variable names
@@ -1805,6 +1807,8 @@ module Crystal::MIR
     private def emit_function(func : Function)
       reset_value_names(func)
       @emitted_allocas.clear
+      @addressable_allocas.clear
+      @addressable_alloca_initialized.clear
       @value_def_block.clear
       @cross_block_values.clear
       @cross_block_slots.clear
@@ -1917,6 +1921,27 @@ module Crystal::MIR
           @value_types[inst.id] = TypeRef::POINTER
           # Track element type for GEP
           @alloc_element_types[inst.id] = inst.alloc_type
+        end
+      end
+
+      # Pre-create allocas for AddressOf operands that aren't already stack allocas.
+      # This ensures pointerof(x) has a properly-sized alloca in the entry block,
+      # and multiple pointerof(x) calls share the same alloca.
+      seen_addressof_operands = Set(ValueId).new
+      func.blocks.each do |block|
+        block.instructions.each do |inst|
+          next unless inst.is_a?(AddressOf)
+          operand_id = inst.operand
+          next if @emitted_allocas.includes?(operand_id)
+          next if seen_addressof_operands.includes?(operand_id)
+          seen_addressof_operands << operand_id
+
+          operand_type = @value_types[operand_id]? || TypeRef::POINTER
+          alloca_type = @type_mapper.llvm_alloca_type(operand_type)
+          alloca_type = "i8" if alloca_type == "void"
+          alloca_name = "r#{operand_id}.addr"
+          emit_raw "  %#{alloca_name} = alloca #{alloca_type}, align 8\n"
+          @addressable_allocas[operand_id] = "%#{alloca_name}"
         end
       end
 
@@ -3262,9 +3287,9 @@ module Crystal::MIR
         # Union types can't use add instruction - create zeroinit union
         base_name = name.lstrip('%')
         emit "%#{base_name}.ptr = alloca #{type}, align 8"
-        # Zero-initialize by setting type_id to 1 (nil variant)
+        # Zero-initialize by setting type_id to 0 (nil variant)
         emit "%#{base_name}.type_id_ptr = getelementptr #{type}, ptr %#{base_name}.ptr, i32 0, i32 0"
-        emit "store i32 1, ptr %#{base_name}.type_id_ptr"
+        emit "store i32 0, ptr %#{base_name}.type_id_ptr"
         emit "#{name} = load #{type}, ptr %#{base_name}.ptr"
         @value_types[inst.id] = inst.type
       elsif (type == "void" || value == "null" || type == "ptr") &&
@@ -3668,7 +3693,7 @@ module Crystal::MIR
         else
           emit "#{payload64} = add i64 %#{base_name}.idx_payload, 0"
         end
-        emit "%#{base_name}.idx_is_nil = icmp eq i32 %#{base_name}.idx_type_id, 1"
+        emit "%#{base_name}.idx_is_nil = icmp eq i32 %#{base_name}.idx_type_id, 0"
         emit "%#{base_name}.idx64 = select i1 %#{base_name}.idx_is_nil, i64 0, i64 #{payload64}"
         index = "%#{base_name}.idx64"
         index_type_str = "i64"
@@ -3786,17 +3811,17 @@ module Crystal::MIR
       # Handle union types in comparisons - check type_id for nil comparison
       if is_comparison && operand_type_str.includes?(".union")
         base_name = name.lstrip('%')
-        # Union comparison: compare type_id (0=non-nil, 1=nil)
+        # Union comparison: compare type_id (0=nil, 1+=non-nil)
         # For == 0 or != 0, compare type_id to 0 (non-nil check)
         emit "%#{base_name}.union_ptr = alloca #{operand_type_str}, align 8"
         emit "store #{operand_type_str} #{normalize_union_value(left, operand_type_str)}, ptr %#{base_name}.union_ptr"
         emit "%#{base_name}.type_id_ptr = getelementptr #{operand_type_str}, ptr %#{base_name}.union_ptr, i32 0, i32 0"
         emit "%#{base_name}.type_id = load i32, ptr %#{base_name}.type_id_ptr"
-        # type_id 0 = non-nil (truthy), type_id 1 = nil
+        # type_id 0 = nil, type_id 1+ = non-nil (matches union variant table)
         if inst.op.eq?
-          emit "#{name} = icmp eq i32 %#{base_name}.type_id, 1"  # Check if nil
+          emit "#{name} = icmp eq i32 %#{base_name}.type_id, 0"  # Check if nil (== 0)
         else
-          emit "#{name} = icmp ne i32 %#{base_name}.type_id, 1"  # Check if not nil
+          emit "#{name} = icmp ne i32 %#{base_name}.type_id, 0"  # Check if not nil (!= 0)
         end
         @value_types[inst.id] = TypeRef::BOOL  # Comparisons return i1
         return
@@ -4391,12 +4416,12 @@ module Crystal::MIR
             emit "%#{base_name}.bool = fcmp one #{operand_llvm_type} #{operand}, 0.0"
             emit "#{name} = xor i1 %#{base_name}.bool, 1"
           elsif operand_llvm_type.includes?(".union")
-            # For unions, check if type_id != 1 (1 = nil)
+            # For unions, check if type_id != 0 (0 = nil)
             emit "%#{base_name}.union_ptr = alloca #{operand_llvm_type}, align 8"
             emit "store #{operand_llvm_type} #{normalize_union_value(operand, operand_llvm_type)}, ptr %#{base_name}.union_ptr"
             emit "%#{base_name}.type_id_ptr = getelementptr #{operand_llvm_type}, ptr %#{base_name}.union_ptr, i32 0, i32 0"
             emit "%#{base_name}.type_id = load i32, ptr %#{base_name}.type_id_ptr"
-            emit "%#{base_name}.bool = icmp ne i32 %#{base_name}.type_id, 1"
+            emit "%#{base_name}.bool = icmp ne i32 %#{base_name}.type_id, 0"
             emit "#{name} = xor i1 %#{base_name}.bool, 1"
           else
             emit "%#{base_name}.bool = icmp ne #{operand_llvm_type} #{operand}, 0"
@@ -4548,10 +4573,10 @@ module Crystal::MIR
         # Check if source is null/nil - create nil union
         is_nil_cast = value == "null" || src_type == "void" || src_type_ref == TypeRef::VOID
         if is_nil_cast
-          emit "store i32 1, ptr %#{base_name}.type_id_ptr"  # 1 = nil
+          emit "store i32 0, ptr %#{base_name}.type_id_ptr"  # 0 = nil
         else
-          # Non-nil value - store type_id=0 and payload
-          emit "store i32 0, ptr %#{base_name}.type_id_ptr"  # 0 = non-nil
+          # Non-nil value - store type_id=1 and payload
+          emit "store i32 1, ptr %#{base_name}.type_id_ptr"  # 1 = non-nil
           emit "%#{base_name}.payload_ptr = getelementptr #{dst_type}, ptr %#{base_name}.ptr, i32 0, i32 1"
           emit "store #{src_type} #{value}, ptr %#{base_name}.payload_ptr, align 4"
         end
@@ -5812,17 +5837,17 @@ module Crystal::MIR
                    val = value_ref(a)
                    c = @cond_counter
                    @cond_counter += 1
-                   # Check for null - use nil union (type_id=1)
+                   # Check for null - use nil union (type_id=0)
                    if val == "null"
                      emit "%ptr_to_union.#{c}.ptr = alloca #{expected_llvm_type}, align 8"
                      emit "%ptr_to_union.#{c}.type_id_ptr = getelementptr #{expected_llvm_type}, ptr %ptr_to_union.#{c}.ptr, i32 0, i32 0"
-                     emit "store i32 1, ptr %ptr_to_union.#{c}.type_id_ptr"
+                     emit "store i32 0, ptr %ptr_to_union.#{c}.type_id_ptr"
                      emit "%ptr_to_union.#{c}.val = load #{expected_llvm_type}, ptr %ptr_to_union.#{c}.ptr"
                      "#{expected_llvm_type} %ptr_to_union.#{c}.val"
                    else
                      emit "%ptr_to_union.#{c}.ptr = alloca #{expected_llvm_type}, align 8"
                      emit "%ptr_to_union.#{c}.type_id_ptr = getelementptr #{expected_llvm_type}, ptr %ptr_to_union.#{c}.ptr, i32 0, i32 0"
-                     emit "store i32 0, ptr %ptr_to_union.#{c}.type_id_ptr"
+                     emit "store i32 1, ptr %ptr_to_union.#{c}.type_id_ptr"
                      emit "%ptr_to_union.#{c}.payload_ptr = getelementptr #{expected_llvm_type}, ptr %ptr_to_union.#{c}.ptr, i32 0, i32 1"
                      # Use null instead of 0 for pointer types
                      ptr_val = val == "0" ? "null" : val
@@ -6637,24 +6662,50 @@ module Crystal::MIR
 
     private def emit_address_of(inst : AddressOf, name : String)
       # Get address of a value (pointerof)
-      # We need to alloca storage for the value, store it, and return the pointer
+      # For variables that already have stack allocas, return the alloca directly.
+      # This ensures pointerof(x) returns the ACTUAL address of x, not a copy.
+
+      # Case 1: Operand is already a stack alloca (from Alloc(Stack)) → return it directly
+      if @emitted_allocas.includes?(inst.operand)
+        operand_ref = value_ref(inst.operand)
+        emit "#{name} = getelementptr i8, ptr #{operand_ref}, i64 0"
+        @value_types[inst.id] = TypeRef::POINTER
+        return
+      end
+
+      # Case 2: Hoisted addressable alloca exists (from pre-scan in emit_hoisted_allocas)
+      if alloca_ref = @addressable_allocas[inst.operand]?
+        # Store the operand value on first use (subsequent uses reuse same alloca)
+        unless @addressable_alloca_initialized.includes?(inst.operand)
+          operand_type = @value_types[inst.operand]? || TypeRef::POINTER
+          llvm_type = @type_mapper.llvm_type(operand_type)
+          operand_ref = value_ref(inst.operand)
+          if llvm_type == "void"
+            llvm_type = "ptr"
+            operand_ref = "null"
+          end
+          store_val = (llvm_type == "ptr" && operand_ref == "0") ? "null" : operand_ref
+          emit "store #{llvm_type} #{store_val}, ptr #{alloca_ref}"
+          @addressable_alloca_initialized << inst.operand
+        end
+        emit "#{name} = getelementptr i8, ptr #{alloca_ref}, i64 0"
+        @value_types[inst.id] = TypeRef::POINTER
+        return
+      end
+
+      # Case 3: Fallback — create inline alloca (should rarely be hit with hoisting)
       operand_type = @value_types[inst.operand]? || TypeRef::POINTER
       llvm_type = @type_mapper.llvm_type(operand_type)
       operand_ref = value_ref(inst.operand)
-
-      # Can't alloca void - use ptr instead
       if llvm_type == "void"
         llvm_type = "ptr"
-        operand_ref = "null"  # void has no value, use null for ptr
+        operand_ref = "null"
       end
-
-      # Allocate space for the value and store it
-      emit "#{name}.alloca = alloca #{llvm_type}"
-      # For pointer types, convert 0 to null
+      alloca_ref = "#{name}.addr"
+      emit "#{alloca_ref} = alloca #{llvm_type}"
       store_val = (llvm_type == "ptr" && operand_ref == "0") ? "null" : operand_ref
-      emit "store #{llvm_type} #{store_val}, ptr #{name}.alloca"
-      # Return the pointer
-      emit "#{name} = bitcast ptr #{name}.alloca to ptr"
+      emit "store #{llvm_type} #{store_val}, ptr #{alloca_ref}"
+      emit "#{name} = getelementptr i8, ptr #{alloca_ref}, i64 0"
       @value_types[inst.id] = TypeRef::POINTER
     end
 
@@ -6847,7 +6898,7 @@ module Crystal::MIR
         emit "#{name} = load i32, ptr %#{base_name}.type_id_ptr"
       else
         # Not a union struct - determine type_id from ptr null check
-        # type_id 0 = non-nil, type_id 1 = nil
+        # type_id 0 = nil, type_id 1+ = non-nil
         # Handle case where union_val is an integer literal
         if def_inst = find_def_inst(inst.union_value)
           if def_inst.type == TypeRef::BOOL || @type_mapper.llvm_type(def_inst.type) == "i1"
@@ -6876,7 +6927,7 @@ module Crystal::MIR
           end
         end
         emit "%#{base_name}.is_null = icmp eq ptr #{ptr_val}, null"
-        emit "#{name} = select i1 %#{base_name}.is_null, i32 1, i32 0"
+        emit "#{name} = select i1 %#{base_name}.is_null, i32 0, i32 1"
       end
     end
 
@@ -6902,11 +6953,11 @@ module Crystal::MIR
         emit "#{name} = icmp eq i32 %#{base_name}.actual_type_id, #{inst.variant_type_id}"
       else
         # Not a union struct - compare pointer against null
-        # variant_type_id 0 typically means non-nil, 1 means nil
+        # variant_type_id 0 = nil, 1+ = non-nil (matches union variant table)
         # Handle case where union_val is an integer literal (convert to ptr first)
         if def_inst = find_def_inst(inst.union_value)
           if def_inst.type == TypeRef::BOOL || @type_mapper.llvm_type(def_inst.type) == "i1"
-            const_val = inst.variant_type_id == 1 ? "0" : "1"
+            const_val = inst.variant_type_id == 0 ? "0" : "1"
             emit "#{name} = add i1 0, #{const_val}"
             return
           end
@@ -6919,7 +6970,7 @@ module Crystal::MIR
            union_type_ref == TypeRef::INT128 || union_type_ref == TypeRef::UINT128 ||
            union_type_ref == TypeRef::FLOAT32 || union_type_ref == TypeRef::FLOAT64 ||
            union_type_ref == TypeRef::CHAR || union_type_ref == TypeRef::SYMBOL
-          const_val = inst.variant_type_id == 1 ? "0" : "1"
+          const_val = inst.variant_type_id == 0 ? "0" : "1"
           emit "#{name} = add i1 0, #{const_val}"
           return
         end
@@ -7707,12 +7758,12 @@ module Crystal::MIR
             if @current_return_type == "ptr"
               emit "ret ptr null"
             elsif @current_return_type.includes?(".union")
-              # Return nil union
+              # Return nil union (type_id = 0)
               c = @cond_counter
               @cond_counter += 1
               emit "%ret_nil.#{c}.ptr = alloca #{@current_return_type}, align 8"
               emit "%ret_nil.#{c}.type_id_ptr = getelementptr #{@current_return_type}, ptr %ret_nil.#{c}.ptr, i32 0, i32 0"
-              emit "store i32 1, ptr %ret_nil.#{c}.type_id_ptr"
+              emit "store i32 0, ptr %ret_nil.#{c}.type_id_ptr"
               emit "%ret_nil.#{c}.val = load #{@current_return_type}, ptr %ret_nil.#{c}.ptr"
               emit "ret #{@current_return_type} %ret_nil.#{c}.val"
             else
@@ -7732,7 +7783,7 @@ module Crystal::MIR
               @cond_counter += 1
               emit "%ret_nil_union.#{c}.ptr = alloca #{@current_return_type}, align 8"
               emit "%ret_nil_union.#{c}.type_id_ptr = getelementptr #{@current_return_type}, ptr %ret_nil_union.#{c}.ptr, i32 0, i32 0"
-              emit "store i32 1, ptr %ret_nil_union.#{c}.type_id_ptr"
+              emit "store i32 0, ptr %ret_nil_union.#{c}.type_id_ptr"
               emit "%ret_nil_union.#{c}.val = load #{@current_return_type}, ptr %ret_nil_union.#{c}.ptr"
               emit "ret #{@current_return_type} %ret_nil_union.#{c}.val"
               return
@@ -7745,22 +7796,24 @@ module Crystal::MIR
             emit "%ret#{c}.union_ptr = alloca #{@current_return_type}, align 8"
             emit "%ret#{c}.type_id_ptr = getelementptr #{@current_return_type}, ptr %ret#{c}.union_ptr, i32 0, i32 0"
 
-            # Check if this is a nil/void return - set type_id=1 (nil variant)
+            # Check if this is a nil/void return - set type_id=0 (nil variant)
+            # Convention: Nil = variant 0 (type_id 0), non-nil = variant 1+ (type_id 1+)
+            # Must match union variant table and IsA check convention.
             if val_llvm_type == "void" || val_ref == "null"
-              emit "store i32 1, ptr %ret#{c}.type_id_ptr"
+              emit "store i32 0, ptr %ret#{c}.type_id_ptr"
               # Don't store payload for nil
             elsif @phi_nil_incoming_blocks.has_key?(val) && val_llvm_type.starts_with?("i")
               # Value comes from a phi that has nil incoming - emit conditional type_id
               # When nil flows into an integer phi, it becomes 0, so check if val == 0
               # TODO: This heuristic assumes non-nil values are never 0, which may not always be true
               emit "%ret#{c}.is_nil = icmp eq #{val_llvm_type} #{val_ref}, 0"
-              emit "%ret#{c}.type_id = select i1 %ret#{c}.is_nil, i32 1, i32 0"
+              emit "%ret#{c}.type_id = select i1 %ret#{c}.is_nil, i32 0, i32 1"
               emit "store i32 %ret#{c}.type_id, ptr %ret#{c}.type_id_ptr"
               emit "%ret#{c}.payload_ptr = getelementptr #{@current_return_type}, ptr %ret#{c}.union_ptr, i32 0, i32 1"
               emit "store #{val_llvm_type} #{val_ref}, ptr %ret#{c}.payload_ptr, align 4"
             else
-              # Non-nil value - set type_id=0 and store payload
-              emit "store i32 0, ptr %ret#{c}.type_id_ptr"
+              # Non-nil value - set type_id=1 and store payload
+              emit "store i32 1, ptr %ret#{c}.type_id_ptr"
               emit "%ret#{c}.payload_ptr = getelementptr #{@current_return_type}, ptr %ret#{c}.union_ptr, i32 0, i32 1"
               emit "store #{val_llvm_type} #{val_ref}, ptr %ret#{c}.payload_ptr, align 4"
             end
@@ -7923,12 +7976,12 @@ module Crystal::MIR
           elsif @current_return_type.starts_with?("i")
             emit "ret #{@current_return_type} 0"
           elsif @current_return_type.includes?(".union")
-            # Return nil union (type_id = 1)
+            # Return nil union (type_id = 0, matches variant table convention)
             c = @cond_counter
             @cond_counter += 1
             emit "%ret_nil_union.#{c}.ptr = alloca #{@current_return_type}, align 8"
             emit "%ret_nil_union.#{c}.type_id_ptr = getelementptr #{@current_return_type}, ptr %ret_nil_union.#{c}.ptr, i32 0, i32 0"
-            emit "store i32 1, ptr %ret_nil_union.#{c}.type_id_ptr"
+            emit "store i32 0, ptr %ret_nil_union.#{c}.type_id_ptr"
             emit "%ret_nil_union.#{c}.val = load #{@current_return_type}, ptr %ret_nil_union.#{c}.ptr"
             emit "ret #{@current_return_type} %ret_nil_union.#{c}.val"
           elsif @current_return_type == "double" || @current_return_type == "float"
@@ -7954,15 +8007,15 @@ module Crystal::MIR
         union_llvm_type = slot_llvm_type || (cond_type ? @type_mapper.llvm_type(cond_type) : nil)
         if union_llvm_type && union_llvm_type.includes?(".union")
           # Union layout: { i32 type_id, [N x i8] payload }
-          # Extract type_id and compare with 1 (nil variant)
+          # Extract type_id and compare with 0 (nil variant)
           c = @cond_counter
           @cond_counter += 1
           emit "%cond#{c}.union_ptr = alloca #{union_llvm_type}, align 8"
           emit "store #{union_llvm_type} #{normalize_union_value(cond, union_llvm_type)}, ptr %cond#{c}.union_ptr"
           emit "%cond#{c}.type_id_ptr = getelementptr #{union_llvm_type}, ptr %cond#{c}.union_ptr, i32 0, i32 0"
           emit "%cond#{c}.type_id = load i32, ptr %cond#{c}.type_id_ptr"
-          # type_id 0 = non-nil (truthy), type_id 1 = nil (falsy)
-          emit "%cond#{c}.is_not_nil = icmp ne i32 %cond#{c}.type_id, 1"
+          # type_id 0 = nil (falsy), type_id 1+ = non-nil (truthy)
+          emit "%cond#{c}.is_not_nil = icmp ne i32 %cond#{c}.type_id, 0"
           emit "br i1 %cond#{c}.is_not_nil, label %#{then_block}, label %#{else_block}"
         elsif cond_type && @type_mapper.llvm_type(cond_type) == "ptr" && (slot_llvm_type.nil? || slot_llvm_type == "ptr")
           # Pointer type: compare against null
