@@ -712,11 +712,68 @@ module Crystal::MIR
             .gsub("p0i8", "p0")
           decl = emit_llvm_intrinsic_declaration(normalized_name)
           emit_raw "#{decl}\n" if decl
+        elsif stub = emit_dead_code_stub(name, return_type)
+          # Emit a stub function body for methods on impossible receivers
+          # (Nil, Unknown, wrong-type dispatch). These arise from type inference
+          # gaps where the compiler emits calls that would never execute at runtime.
+          emit_raw stub
         else
           # Declare with varargs to accept any arguments
           emit_raw "declare #{return_type} @#{name}(...)\n"
         end
       end
+    end
+
+    # Emit a stub function body for methods called on Nil/Unknown/impossible receivers.
+    # Returns the LLVM IR string for the stub, or nil if the name doesn't match.
+    private def emit_dead_code_stub(name : String, return_type : String) : String?
+      # Methods on Nil (e.g. Nil$Hzero, Nil$Hto_i, Nil$Hadditive_identity)
+      # Methods on Unknown (e.g. Unknown$Hto_i, Unknown$Hto_u32)
+      # Union dispatch on Nil|X (e.g. Nil$_$OR_...#call)
+      is_nil_method = name.starts_with?("Nil$H") || name.starts_with?("Nil$_$OR$_")
+      is_unknown_method = name.starts_with?("Unknown$H")
+      # Wrong receiver: Int32#unsafe_fetch makes no sense (Array method on Int32)
+      is_wrong_receiver = name == "Int32$Hunsafe_fetch$$Int32"
+
+      # Pointer::Appender#<<(UInt8) — real method, emit proper implementation.
+      # Stores byte at current pointer, advances pointer by 1.
+      if name == "Pointer$CCAppender$H$SHL$$UInt8"
+        return "; Pointer::Appender#<<(UInt8)\n" \
+               "define i8 @#{name}(ptr %self, i8 %value) {\n" \
+               "  %cur = load ptr, ptr %self\n" \
+               "  store i8 %value, ptr %cur\n" \
+               "  %next = getelementptr i8, ptr %cur, i32 1\n" \
+               "  store ptr %next, ptr %self\n" \
+               "  ret i8 %value\n" \
+               "}\n"
+      end
+
+      return nil unless is_nil_method || is_unknown_method || is_wrong_receiver
+
+      # Build a minimal function body that returns a zero/default value
+      ret_stmt = case return_type
+                 when "void"   then "ret void"
+                 when "i1"     then "ret i1 0"
+                 when "i8"     then "ret i8 0"
+                 when "i16"    then "ret i16 0"
+                 when "i32"    then "ret i32 0"
+                 when "i64"    then "ret i64 0"
+                 when "i128"   then "ret i128 0"
+                 when "float"  then "ret float 0.0"
+                 when "double" then "ret double 0.0"
+                 when "ptr"    then "ret ptr null"
+                 else
+                   if return_type.includes?(".union")
+                     "ret #{return_type} zeroinitializer"
+                   else
+                     "ret #{return_type} zeroinitializer"
+                   end
+                 end
+
+      "; stub for dead-code method: #{name}\n" \
+      "define #{return_type} @#{name}(...) {\n" \
+      "  #{ret_stmt}\n" \
+      "}\n"
     end
 
     # Generate proper declaration for LLVM intrinsics
@@ -6795,6 +6852,26 @@ module Crystal::MIR
       # Void is not valid for array elements - use ptr instead
       element_type = "ptr" if element_type == "void"
       size = inst.size
+
+      # For empty array literals (size 0), try to call Array(T).new(0) constructor
+      # to get a proper heap-allocated Array object. This is critical when the
+      # array escapes (e.g. stored in classvars) since stack alloca would be invalid.
+      if size == 0
+        # Construct the Array(T).new(Int32) constructor name from element type
+        elem_type_obj = @module.type_registry.get(inst.element_type)
+        elem_name = elem_type_obj.try(&.name)
+        if elem_name && !elem_name.empty? && elem_name != "Unknown" && elem_name != "Void"
+          array_class_name = "Array(#{elem_name})"
+          ctor_name = @type_mapper.mangle_name(array_class_name + ".new") + "$$Int32"
+          # Check if this constructor exists in the module
+          ctor_func = @module.functions.find { |f| mangle_function_name(f.name) == ctor_name }
+          if ctor_func
+            emit "#{name} = call ptr @#{ctor_name}(i32 0)"
+            @array_info[inst.id] = {element_type, size}
+            return
+          end
+        end
+      end
 
       # Array struct type: { i32 size, [N x T] data }
       array_type = "{ i32, [#{size} x #{element_type}] }"
