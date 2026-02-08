@@ -1154,7 +1154,7 @@ module Crystal::HIR
         end
         list = owner_methods[method_name]?
         if list
-          list << full_name unless list.includes?(full_name)
+          list << full_name
         else
           owner_methods[method_name] = [full_name]
         end
@@ -1182,7 +1182,7 @@ module Crystal::HIR
         end
         list = owner_methods[method_name]?
         if list
-          list << full_name unless list.includes?(full_name)
+          list << full_name
         else
           owner_methods[method_name] = [full_name]
         end
@@ -16498,10 +16498,14 @@ module Crystal::HIR
 
         # Last-resort: scan bases that match after stripping generics.
         matches = [] of String
+        seen = Set(String).new
         @function_def_overloads.each do |base, keys|
           next unless strip_generic_receiver_for_lookup(base) == stripped
           keys.each do |key|
-            matches << key unless matches.includes?(key)
+            unless seen.includes?(key)
+              seen << key
+              matches << key
+            end
           end
         end
         if matches.empty?
@@ -16591,7 +16595,7 @@ module Crystal::HIR
                end
         list = @function_def_overloads[base]?
         if list
-          list << key unless list.includes?(key)
+          list << key
         else
           @function_def_overloads[base] = [key]
         end
@@ -16614,7 +16618,7 @@ module Crystal::HIR
         end
         stripped_list = @function_def_overloads_stripped_index[stripped_base]?
         if stripped_list
-          stripped_list << key unless stripped_list.includes?(key)
+          stripped_list << key
         else
           @function_def_overloads_stripped_index[stripped_base] = [key]
         end

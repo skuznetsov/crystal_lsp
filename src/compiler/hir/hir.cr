@@ -1230,11 +1230,14 @@ module Crystal::HIR
       @functions_by_name = {} of String => Function
       @functions_by_base_name = {} of String => Array(Function)
       @types = [] of TypeDescriptor
+      @type_intern = {} of String => TypeRef
       @strings = [] of String
       @string_intern = {} of String => StringId
       @link_libraries = [] of String
       @extern_functions = [] of ExternFunction
+      @extern_function_names = Set(String).new
       @extern_globals = [] of ExternGlobal
+      @extern_global_names = Set(String).new
       @method_effects = {} of String => MethodEffectSummary
       @class_parents = {} of String => String?
       @module_includers = {} of String => Array(String)
@@ -1291,21 +1294,21 @@ module Crystal::HIR
     end
 
     def add_extern_function(func : ExternFunction)
-      # Don't add duplicates
-      unless @extern_functions.any? { |f| f.real_name == func.real_name }
-        @extern_functions << func
-        lib_name = func.lib_name
-        register_lib_name(lib_name) if lib_name
-      end
+      # Don't add duplicates (O(1) with Set instead of O(N) scan)
+      return if @extern_function_names.includes?(func.real_name)
+      @extern_function_names.add(func.real_name)
+      @extern_functions << func
+      lib_name = func.lib_name
+      register_lib_name(lib_name) if lib_name
     end
 
     def add_extern_global(glob : ExternGlobal)
-      # Don't add duplicates
-      unless @extern_globals.any? { |g| g.real_name == glob.real_name }
-        @extern_globals << glob
-        lib_name = glob.lib_name
-        register_lib_name(lib_name) if lib_name
-      end
+      # Don't add duplicates (O(1) with Set instead of O(N) scan)
+      return if @extern_global_names.includes?(glob.real_name)
+      @extern_global_names.add(glob.real_name)
+      @extern_globals << glob
+      lib_name = glob.lib_name
+      register_lib_name(lib_name) if lib_name
     end
 
     def get_extern_function(name : String) : ExternFunction?
@@ -1377,7 +1380,8 @@ module Crystal::HIR
       reachable = Set(String).new
       worklist = [] of String
       func_by_name = @functions_by_name
-      base_to_funcs = Hash(String, Array(String)).new { |h, k| h[k] = [] of String }
+
+      # Extract method base name (strip owner + type suffix)
       base_name_for = ->(name : String) do
         base = name
         if hash_idx = base.rindex('#')
@@ -1390,8 +1394,78 @@ module Crystal::HIR
         end
         base
       end
+
+      # Extract owner class from function name (before # or .)
+      owner_for = ->(name : String) do
+        if hash_idx = name.rindex('#')
+          name[0, hash_idx]
+        elsif dot_idx = name.rindex('.')
+          name[0, dot_idx]
+        else
+          ""
+        end
+      end
+
+      # Strip generic args: "Array(Int32)" → "Array"
+      strip_generics = ->(name : String) do
+        if idx = name.index('(')
+          name[0, idx]
+        else
+          name
+        end
+      end
+
+      # Build class hierarchy (parent → children)
+      class_children = Hash(String, Array(String)).new { |h, k| h[k] = [] of String }
+      @class_parents.each do |name, parent|
+        next unless parent
+        class_children[strip_generics.call(parent)] << strip_generics.call(name)
+      end
+
+      # Build owner+method index: "Owner|method" → [func_names]
+      owner_method_funcs = Hash(String, Array(String)).new { |h, k| h[k] = [] of String }
+      # Also keep the old base-only index as fallback for unresolvable owners
+      base_to_funcs = Hash(String, Array(String)).new { |h, k| h[k] = [] of String }
       @functions.each do |func|
-        base_to_funcs[base_name_for.call(func.name)] << func.name
+        owner = owner_for.call(func.name)
+        method_base = base_name_for.call(func.name)
+        owner_base = strip_generics.call(owner)
+        owner_method_funcs["#{owner_base}|#{method_base}"] << func.name
+        base_to_funcs[method_base] << func.name
+      end
+
+      # BFS subclasses (cached)
+      subclass_cache = Hash(String, Array(String)).new
+      subclasses_of = ->(base : String) do
+        cached = subclass_cache[base]?
+        if cached
+          cached
+        else
+          result = [] of String
+          seen = Set(String).new
+          queue = class_children[base]?.dup || [] of String
+          while child = queue.shift?
+            unless seen.includes?(child)
+              seen.add(child)
+              result << child
+              if grand = class_children[child]?
+                grand.each { |g| queue << g }
+              end
+            end
+          end
+          subclass_cache[base] = result
+          result
+        end
+      end
+
+      # Collect module includers by base name
+      module_includers_base = Hash(String, Array(String)).new { |h, k| h[k] = [] of String }
+      @module_includers.each do |mod_name, includers|
+        base = strip_generics.call(mod_name)
+        includers.each do |inc|
+          inc_base = strip_generics.call(inc)
+          module_includers_base[base] << inc_base unless module_includers_base[base].includes?(inc_base)
+        end
       end
 
       roots.each do |root|
@@ -1410,11 +1484,57 @@ module Crystal::HIR
             next unless inst.is_a?(Call)
             callee = inst.method_name
             if inst.virtual
-              base = base_name_for.call(callee)
-              base_to_funcs[base].each do |candidate|
-                next if reachable.includes?(candidate)
-                reachable << candidate
-                worklist << candidate
+              callee_owner = strip_generics.call(owner_for.call(callee))
+              method_base = base_name_for.call(callee)
+
+              if callee_owner.empty?
+                # No owner — fallback to base-name-only matching
+                base_to_funcs[method_base].each do |candidate|
+                  next if reachable.includes?(candidate)
+                  reachable << candidate
+                  worklist << candidate
+                end
+              else
+                # Type-aware: check owner + subclasses + module includers
+                # For union types (contains "|"), expand to all variant types
+                root_owners = if callee_owner.includes?(" | ") || callee_owner.includes?("$_$OR$_")
+                                callee_owner.gsub("$_$OR$_", " | ").split(" | ").map { |v| strip_generics.call(v.strip) }
+                              else
+                                [callee_owner]
+                              end
+                owners = [] of String
+                root_owners.each do |ro|
+                  owners << ro unless owners.includes?(ro)
+                  subclasses_of.call(ro).each { |sub| owners << sub unless owners.includes?(sub) }
+                  # Also check module includers if owner is a module
+                  if mod_includers = module_includers_base[ro]?
+                    mod_includers.each do |inc|
+                      owners << inc unless owners.includes?(inc)
+                      subclasses_of.call(inc).each do |sub|
+                        owners << sub unless owners.includes?(sub)
+                      end
+                    end
+                  end
+                end
+                owners.each do |owner|
+                  key = "#{owner}|#{method_base}"
+                  if funcs = owner_method_funcs[key]?
+                    funcs.each do |candidate|
+                      next if reachable.includes?(candidate)
+                      reachable << candidate
+                      worklist << candidate
+                    end
+                  end
+                end
+                # Also include the union type's own dispatch function
+                union_key = "#{callee_owner}|#{method_base}"
+                if funcs = owner_method_funcs[union_key]?
+                  funcs.each do |candidate|
+                    next if reachable.includes?(candidate)
+                    reachable << candidate
+                    worklist << candidate
+                  end
+                end
               end
               next
             end
@@ -1444,17 +1564,21 @@ module Crystal::HIR
           caller.each { |line| STDERR.puts "  #{line}" }
         end
       end
-      # Check if already interned
-      @types.each_with_index do |existing, idx|
-        if existing == desc
-          return TypeRef.new(TypeRef::FIRST_USER_TYPE + idx.to_u32)
-        end
+      # O(1) hash lookup instead of O(N) linear scan
+      key = String.build do |io|
+        io << desc.kind.value << ':' << desc.name
+        desc.type_params.each { |t| io << ',' << t.id }
+      end
+      if existing_ref = @type_intern[key]?
+        return existing_ref
       end
       # Add new type
       id = @next_type_id
       @next_type_id += 1
       @types << desc
-      TypeRef.new(id)
+      ref = TypeRef.new(id)
+      @type_intern[key] = ref
+      ref
     end
 
     # Get TypeDescriptor for a TypeRef

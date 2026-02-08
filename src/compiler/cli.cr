@@ -653,8 +653,6 @@ module CrystalV2
           if options.progress && (idx % 1000 == 0 || idx == total_funcs - 1)
             STDERR.puts "  Escape analysis: #{idx + 1}/#{total_funcs}..."
           end
-          escape = HIR::EscapeAnalyzer.new(func)
-          escape.analyze
           ms = HIR::MemoryStrategyAssigner.new(func, memory_config, type_provider, hir_module)
           result = ms.assign
           stats = result.stats

@@ -48,6 +48,7 @@ module Crystal::HIR
     @definitions : Hash(ValueId, Value)
 
     @effect_provider : MethodEffectProvider?
+    @param_by_id : Hash(ValueId, Value)
 
     def initialize(
       @function : Function,
@@ -58,6 +59,8 @@ module Crystal::HIR
       @worklist = Deque(ValueId).new
       @users = Hash(ValueId, Array(ValueId)).new { |h, k| h[k] = [] of ValueId }
       @definitions = Hash(ValueId, Value).new
+      @param_by_id = Hash(ValueId, Value).new
+      @function.params.each { |p| @param_by_id[p.id] = p }
     end
 
     # Run escape analysis on the function
@@ -295,8 +298,8 @@ module Crystal::HIR
     end
 
     private def mark_escape(value_id : ValueId, tag : LifetimeTag)
-      # Check if it's a parameter
-      param = @function.params.find { |p| p.id == value_id }
+      # Check if it's a parameter (O(1) hash lookup)
+      param = @param_by_id[value_id]?
       if param
         if tag.escapes_more_than?(param.lifetime)
           param.lifetime = tag
@@ -327,7 +330,7 @@ module Crystal::HIR
       return if visited.includes?(value_id)
       visited.add(value_id)
 
-      param = @function.params.find { |p| p.id == value_id }
+      param = @param_by_id[value_id]?
       if param
         if tag.escapes_more_than?(param.lifetime)
           param.lifetime = tag
@@ -357,8 +360,8 @@ module Crystal::HIR
     end
 
     private def get_lifetime(value_id : ValueId) : LifetimeTag
-      # Check parameters first
-      param = @function.params.find { |p| p.id == value_id }
+      # Check parameters first (O(1) hash lookup)
+      param = @param_by_id[value_id]?
       return param.lifetime if param
 
       # Then definitions
@@ -366,7 +369,7 @@ module Crystal::HIR
     end
 
     private def is_parameter?(value_id : ValueId) : Bool
-      @function.params.any? { |p| p.id == value_id }
+      @param_by_id.has_key?(value_id)
     end
 
     private def is_container_add?(method_name : String) : Bool

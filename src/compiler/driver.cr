@@ -635,9 +635,7 @@ module Crystal::V2
       gc_details = [] of String
       total_gc = 0
       hir_module.functions.each do |func|
-        escape = HIR::EscapeAnalyzer.new(func, type_provider, hir_module)
-        escape.analyze
-        # Memory strategy (includes taint/thread_shared)
+        # Memory strategy runs escape analysis + taint analysis internally
         ms = HIR::MemoryStrategyAssigner.new(func, mm_config, type_provider, hir_module)
         result = ms.assign
         stats = result.stats

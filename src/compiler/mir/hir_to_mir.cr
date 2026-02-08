@@ -54,6 +54,11 @@ module Crystal
     # Eliminates O(N) linear scans during fuzzy call resolution.
     @function_by_base_name : Hash(String, Function) = {} of String => Function
 
+    # Caches for virtual dispatch (avoid repeated hierarchy traversals)
+    @subclass_cache : Hash(String, Array(String)) = {} of String => Array(String)
+    @module_includers_cache : Hash(String, Array(String)) = {} of String => Array(String)
+    @resolve_virtual_cache : Hash(String, Function?) = {} of String => Function?
+
     # Memory strategy (note: we use inline selection, not global assigner)
 
     # Statistics
@@ -1417,20 +1422,29 @@ module Crystal
     end
 
     private def subclasses_for(base : String) : Array(String)
+      if cached = @subclass_cache[base]?
+        return cached
+      end
       result = [] of String
+      seen = Set(String).new
       queue = @class_children[base]?.dup || [] of String
       until queue.empty?
         name = queue.shift
-        next if result.includes?(name)
+        next if seen.includes?(name)
+        seen.add(name)
         result << name
         if children = @class_children[name]?
           children.each { |child| queue << child }
         end
       end
+      @subclass_cache[base] = result
       result
     end
 
     private def module_includers_for(module_name : String) : Array(String)
+      if cached = @module_includers_cache[module_name]?
+        return cached
+      end
       base_module = strip_generic_args(module_name)
       includers = @hir_module.module_includers[module_name]? || @hir_module.module_includers[base_module]?
       if includers.nil? || includers.empty?
@@ -1486,7 +1500,9 @@ module Crystal
         end
       end
 
-      includers ? includers.dup : [] of String
+      result = includers ? includers.dup : [] of String
+      @module_includers_cache[module_name] = result
+      result
     end
 
     @[AlwaysInline]
@@ -1701,6 +1717,21 @@ module Crystal
       method_suffix : String,
       arg_count : Int32? = nil,
       allow_module_method : Bool = false
+    ) : Function?
+      cache_key = "#{class_name}|#{method_suffix}|#{arg_count}|#{allow_module_method}"
+      if @resolve_virtual_cache.has_key?(cache_key)
+        return @resolve_virtual_cache[cache_key]
+      end
+      result = _resolve_virtual_walk(class_name, method_suffix, arg_count, allow_module_method)
+      @resolve_virtual_cache[cache_key] = result
+      result
+    end
+
+    private def _resolve_virtual_walk(
+      class_name : String,
+      method_suffix : String,
+      arg_count : Int32?,
+      allow_module_method : Bool
     ) : Function?
       current = class_name
       seen = Set(String).new
