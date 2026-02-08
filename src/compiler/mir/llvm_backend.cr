@@ -734,6 +734,9 @@ module Crystal::MIR
       is_unknown_method = name.starts_with?("Unknown$H")
       # Wrong receiver: Int32#unsafe_fetch makes no sense (Array method on Int32)
       is_wrong_receiver = name == "Int32$Hunsafe_fetch$$Int32"
+      # Any V2-mangled method name (contains $H, $D, or $CC) that has no body
+      # is dead code from type-inference gaps. Emit a stub to avoid linker errors.
+      is_v2_mangled = name.includes?("$H") || name.includes?("$D") || name.includes?("$CC")
 
       # Pointer::Appender#<<(UInt8) — real method, emit proper implementation.
       # Stores byte at current pointer, advances pointer by 1.
@@ -748,7 +751,7 @@ module Crystal::MIR
                "}\n"
       end
 
-      return nil unless is_nil_method || is_unknown_method || is_wrong_receiver
+      return nil unless is_nil_method || is_unknown_method || is_wrong_receiver || is_v2_mangled
 
       # Build a minimal function body that returns a zero/default value
       ret_stmt = case return_type
@@ -1127,8 +1130,29 @@ module Crystal::MIR
 
     private def emit_string_constants
       emit_raw "\n; String constants\n"
-      # Always emit empty string constant (used for void interpolation parts)
-      emit_raw "@.str.empty = private unnamed_addr constant [1 x i8] c\"\\00\", align 1\n"
+
+      # Check if Crystal String type is available (prelude loaded).
+      # If so, emit as Crystal String objects: { i32 type_id, i32 bytesize, i32 length, [N x i8] bytes }
+      # Otherwise (--no-prelude), emit as C strings for printf compatibility.
+      string_mir_type = @module.type_registry.get_by_name("String")
+      string_type_id = string_mir_type ? string_mir_type.name.hash & 0x7fffffff : 0
+      # Try to get type_id from the type_ref if registered
+      if string_mir_type
+        @module.type_registry.types.each_with_index do |t, idx|
+          if t.name == "String"
+            string_type_id = idx + 1 # 1-based like original Crystal
+            break
+          end
+        end
+      end
+
+      if string_mir_type
+        # Prelude mode: Crystal String objects
+        emit_raw "@.str.empty = private unnamed_addr constant { i32, i32, i32, [1 x i8] } { i32 #{string_type_id}, i32 0, i32 0, [1 x i8] c\"\\00\" }, align 8\n"
+      else
+        # No-prelude mode: C strings
+        emit_raw "@.str.empty = private unnamed_addr constant [1 x i8] c\"\\00\", align 1\n"
+      end
 
       return if @string_constants.empty?
 
@@ -1140,7 +1164,15 @@ module Crystal::MIR
                     .gsub("\t", "\\09")
                     .gsub("\"", "\\22")
         len = str.bytesize + 1  # +1 for null terminator
-        emit_raw "#{global_name} = private unnamed_addr constant [#{len} x i8] c\"#{escaped}\\00\", align 1\n"
+        if string_mir_type
+          # Crystal String: { i32 type_id, i32 bytesize, i32 length, [len x i8] bytes_with_null }
+          bytesize = str.bytesize
+          charsize = str.size  # character count (may differ for multibyte)
+          emit_raw "#{global_name} = private unnamed_addr constant { i32, i32, i32, [#{len} x i8] } { i32 #{string_type_id}, i32 #{bytesize}, i32 #{charsize}, [#{len} x i8] c\"#{escaped}\\00\" }, align 8\n"
+        else
+          # C string
+          emit_raw "#{global_name} = private unnamed_addr constant [#{len} x i8] c\"#{escaped}\\00\", align 1\n"
+        end
       end
     end
 
@@ -1329,9 +1361,16 @@ module Crystal::MIR
 
     private def emit_union_type(type : Type, payload_size : UInt64? = nil)
       name = @type_mapper.mangle_name(type.name)
-      # Union = { i32 discriminator, [max_size x i8] data }
-      max_size = payload_size || type.variants.try(&.map(&.size).max) || 8_u64
-      emit_raw "%#{name}.union = type { i32, [#{max_size} x i8] }\n"
+      # Union = { i32 discriminator, [payload_bytes x i8] data }
+      # Use type.size (total_size from MIR, which includes alignment padding)
+      # minus 4 (discriminator) to get the payload array size.
+      # This ensures the LLVM struct size matches the MIR total_size used for byte offsets.
+      if type.size > 4
+        payload_bytes = type.size - 4
+      else
+        payload_bytes = payload_size || type.variants.try(&.map(&.size).max) || 8_u64
+      end
+      emit_raw "%#{name}.union = type { i32, [#{payload_bytes} x i8] }\n"
     end
 
     private def emit_runtime_declarations
@@ -2789,6 +2828,13 @@ module Crystal::MIR
       @indent = 1
       @current_block_id = block.id
 
+      if ENV["DEBUG_EMIT_BLOCK"]? && func.name == "__crystal_main"
+        STDERR.puts "[EMIT_BLOCK] func=#{func.name} block=#{block.id} insts=#{block.instructions.size}"
+        block.instructions.each do |inst|
+          STDERR.puts "[EMIT_BLOCK]   id=#{inst.id} type=#{inst.class.name}"
+        end
+      end
+
       # LLVM requires all phi nodes to be at the top of the basic block.
       # Emit phi nodes first, then other instructions.
       phi_insts = [] of Value
@@ -2825,7 +2871,13 @@ module Crystal::MIR
 
       # Emit non-phi instructions
       non_phi_insts.each do |inst|
+        if ENV["DEBUG_EMIT_INST"]? && func.name == "__crystal_main" && inst.id >= 79 && inst.id <= 83
+          STDERR.puts "[EMIT_INST] BEFORE id=#{inst.id} type=#{inst.class.name}"
+        end
         emit_instruction(inst, func)
+        if ENV["DEBUG_EMIT_INST"]? && func.name == "__crystal_main" && inst.id >= 79 && inst.id <= 83
+          STDERR.puts "[EMIT_INST] AFTER  id=#{inst.id}"
+        end
       end
 
       # Emit predecessor loads for cross-block phi incoming values
@@ -3529,6 +3581,11 @@ module Crystal::MIR
       return 0 unless fields
 
       class_offset = mir_type.kind.reference? ? 1 : 0
+
+      # For reference types, byte offsets < 8 access the type_id header (LLVM field 0)
+      if mir_type.kind.reference? && byte_offset < 8
+        return 0
+      end
 
       # Exact match on stored byte offset
       fields.each_with_index do |field, idx|

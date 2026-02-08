@@ -668,6 +668,22 @@ module Crystal
         end
       end
 
+      # Store constructor_args into tuple/struct fields
+      unless alloc.constructor_args.empty?
+        if ENV["DEBUG_ALLOC_ARGS"]?
+          func_name = builder.@function.name
+          STDERR.puts "[ALLOC_ARGS] func=#{func_name} type=#{mir_type_ref.id} alloc_ptr=#{ptr} args=#{alloc.constructor_args.size}"
+        end
+        alloc.constructor_args.each_with_index do |arg_hir_id, idx|
+          arg_val = get_value(arg_hir_id)
+          field_ptr = builder.gep(ptr, [idx.to_u32], TypeRef::POINTER)
+          store_id = builder.store(field_ptr, arg_val)
+          if ENV["DEBUG_ALLOC_ARGS"]?
+            STDERR.puts "[ALLOC_ARGS]   [#{idx}] hir=#{arg_hir_id} mir_val=#{arg_val} gep=#{field_ptr} store=#{store_id}"
+          end
+        end
+      end
+
       # Insert RC increment for ARC allocations
       case strategy
       when MemoryStrategy::ARC
