@@ -6529,7 +6529,15 @@ module Crystal::MIR
 
       # Handle type mismatches for union types
       if llvm_type.includes?(".union")
-        if val_type_str.nil? || !val_type_str.includes?(".union")
+        if val_type_str && val_type_str.includes?(".union") && val_type_str != llvm_type
+          # Both are unions but different types - reinterpret through memory
+          c = @cond_counter
+          @cond_counter += 1
+          emit "%gs_conv.#{c}.ptr = alloca #{val_type_str}, align 8"
+          emit "store #{val_type_str} #{val}, ptr %gs_conv.#{c}.ptr"
+          emit "%gs_conv.#{c}.result = load #{llvm_type}, ptr %gs_conv.#{c}.ptr"
+          val = "%gs_conv.#{c}.result"
+        elsif val_type_str.nil? || !val_type_str.includes?(".union")
           # Value is not a union (or type unknown) - use zeroinitializer for the union
           val = "zeroinitializer"
         end
