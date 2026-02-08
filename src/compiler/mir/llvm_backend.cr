@@ -3213,6 +3213,24 @@ module Crystal::MIR
         emit "store i32 1, ptr %#{base_name}.type_id_ptr"
         emit "#{name} = load #{type}, ptr %#{base_name}.ptr"
         @value_types[inst.id] = inst.type
+      elsif (type == "void" || value == "null" || type == "ptr") &&
+            (sa_type = @module.type_registry.get(inst.type)) &&
+            sa_type.name.starts_with?("StaticArray(")
+        # uninitialized StaticArray(T, N) — emit stack alloca.
+        # Parse element type and count from name, look up element size from registry.
+        total_bytes = 0_u64
+        if m = sa_type.name.match(/StaticArray\((.+),\s*(\d+)\)/)
+          elem_name = m[1].strip
+          array_count = m[2].to_u64
+          elem_mir_type = @module.type_registry.get_by_name(elem_name)
+          elem_size = elem_mir_type ? elem_mir_type.size : 8_u64 # default to pointer size
+          total_bytes = elem_size * array_count
+        end
+        total_bytes = 8_u64 if total_bytes == 0 # safety fallback
+        emit "#{name} = alloca [#{total_bytes} x i8], align 8"
+        # Override constant_values so call sites use the alloca ptr, not "null"
+        @constant_values[inst.id] = name
+        @value_types[inst.id] = TypeRef::POINTER
       elsif type == "void" || value == "null" || type == "ptr"
         # void/null/ptr constants are treated as ptr type in LLVM
         # Must emit real instruction (not comment) so phi nodes can reference it
@@ -5472,13 +5490,24 @@ module Crystal::MIR
       end
 
       # Format arguments with proper types, handling type coercion where needed
-      # Use callee function params only if param count matches arg count
-      use_callee_params = callee_func && callee_func.params.size == inst.args.size
+      # Use callee function params only if param count matches arg count.
+      # For class methods (self.foo), MIR call includes self as first arg but the
+      # callee definition doesn't. Strip the leading self arg when count is off by 1.
+      call_args = inst.args
+      if callee_func && callee_func.params.size == inst.args.size - 1 && inst.args.size > 0
+        first_arg_type = @value_types[inst.args[0]]?
+        first_arg_llvm = first_arg_type ? @type_mapper.llvm_type(first_arg_type) : "void"
+        if first_arg_llvm == "void" || first_arg_llvm == "ptr"
+          # Likely a self arg for a class method — drop it
+          call_args = inst.args[1..]
+        end
+      end
+      use_callee_params = callee_func && callee_func.params.size == call_args.size
       # Debug void args
-      has_void_arg = inst.args.any? { |a| @type_mapper.llvm_type(@value_types[a]? || TypeRef::POINTER) == "void" }
+      has_void_arg = call_args.any? { |a| @type_mapper.llvm_type(@value_types[a]? || TypeRef::POINTER) == "void" }
       # STDERR.puts "[CALL-DEBUG] #{callee_name}, use_callee_params=#{use_callee_params}, has_void_arg=#{has_void_arg}" if has_void_arg
       args = if use_callee_params && callee_func
-               inst.args.map_with_index { |a, i|
+               call_args.map_with_index { |a, i|
                  param_type = callee_func.params[i].type
                  expected_llvm_type = @type_mapper.llvm_type(param_type)
                  actual_type = @value_types[a]? || TypeRef::POINTER
@@ -5797,7 +5826,7 @@ module Crystal::MIR
                }.join(", ")
              else
                # Fallback: use actual argument types from value registry
-               inst.args.map { |a|
+               call_args.map { |a|
                  arg_type = @value_types[a]? || TypeRef::POINTER
                  arg_llvm_type = @type_mapper.llvm_type(arg_type)
                  # Guard against void argument type - use ptr null
