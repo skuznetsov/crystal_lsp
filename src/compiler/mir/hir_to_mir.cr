@@ -269,8 +269,19 @@ module Crystal
         align = 1_u32
         element_refs.each do |elem_ref|
           elem_type = @mir_module.type_registry.get(elem_ref)
-          elem_size = elem_type ? elem_type.size : 8_u64
-          elem_align = elem_type ? elem_type.alignment : 8_u32
+          # Use actual size/alignment, with fallback for missing or zero-sized types.
+          # Pointer types (e.g. Pointer(Void)) may be registered with size 0
+          # but actually occupy 8 bytes at runtime.
+          elem_size = if elem_type && elem_type.size > 0
+                        elem_type.size
+                      else
+                        8_u64  # Default pointer/reference size
+                      end
+          elem_align = if elem_type && elem_type.alignment > 0
+                         elem_type.alignment
+                       else
+                         8_u32  # Default pointer alignment
+                       end
           size = align_u64(size, elem_align)
           size += elem_size
           align = elem_align if elem_align > align
@@ -654,6 +665,9 @@ module Crystal
       alloc_size = 8_u64  # Default pointer size
       if mir_type = @mir_module.type_registry.get(mir_type_ref)
         alloc_size = mir_type.size
+      elsif !alloc.constructor_args.empty?
+        # Fallback for tuples not in registry: estimate from constructor arg count
+        alloc_size = (alloc.constructor_args.size * 8).to_u64
       end
 
       # Create allocation with proper size
@@ -676,12 +690,40 @@ module Crystal
           func_name = builder.@function.name
           STDERR.puts "[ALLOC_ARGS] func=#{func_name} type=#{mir_type_ref.id} alloc_ptr=#{ptr} args=#{alloc.constructor_args.size}"
         end
+
+        # Pre-compute byte offsets for tuple element types (instead of using field index)
+        tuple_byte_offsets : Array(UInt32)? = nil
+        if mir_type = @mir_module.type_registry.get(mir_type_ref)
+          if mir_type.kind.tuple? && (elements = mir_type.element_types)
+            offsets = [] of UInt32
+            current_offset = 0_u64
+            elements.each do |elem|
+              elem_size = elem.size > 0 ? elem.size : 8_u64
+              elem_align = elem.alignment > 0 ? elem.alignment : 8_u32
+              current_offset = align_u64(current_offset, elem_align)
+              offsets << current_offset.to_u32
+              current_offset += elem_size
+            end
+            tuple_byte_offsets = offsets
+          elsif fields = mir_type.fields
+            # For struct types with fields, use field byte offsets
+            offsets = fields.map(&.offset)
+            tuple_byte_offsets = offsets unless offsets.empty?
+          end
+        end
+
         alloc.constructor_args.each_with_index do |arg_hir_id, idx|
           arg_val = get_value(arg_hir_id)
-          field_ptr = builder.gep(ptr, [idx.to_u32], TypeRef::POINTER)
+          byte_offset = if (offsets = tuple_byte_offsets) && idx < offsets.size
+                          offsets[idx]
+                        else
+                          # Fallback: estimate byte offset assuming 8-byte elements
+                          (idx * 8).to_u32
+                        end
+          field_ptr = builder.gep(ptr, [byte_offset], TypeRef::POINTER)
           store_id = builder.store(field_ptr, arg_val)
           if ENV["DEBUG_ALLOC_ARGS"]?
-            STDERR.puts "[ALLOC_ARGS]   [#{idx}] hir=#{arg_hir_id} mir_val=#{arg_val} gep=#{field_ptr} store=#{store_id}"
+            STDERR.puts "[ALLOC_ARGS]   [#{idx}] hir=#{arg_hir_id} mir_val=#{arg_val} byte_offset=#{byte_offset} gep=#{field_ptr} store=#{store_id}"
           end
         end
       end

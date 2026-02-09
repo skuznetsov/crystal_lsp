@@ -1504,6 +1504,7 @@ module Crystal::HIR
 
     # Track which allocators have been generated (to avoid duplicates for reopened classes)
     @generated_allocators : Set(String)
+    @deferred_allocators : Set(String)
 
     # Type cache to prevent infinite recursion in type_ref_for_name/create_union_type
     @type_cache : Hash(String, TypeRef)
@@ -1760,6 +1761,7 @@ module Crystal::HIR
       @instance_method_names_cache_version = 0
       @type_aliases = {} of String => String
       @generated_allocators = Set(String).new
+      @deferred_allocators = Set(String).new
       @type_cache = {} of String => TypeRef
       @type_cache_keys_by_component = {} of String => Set(String)
       @type_cache_keys_by_generic_prefix = {} of String => Set(String)
@@ -5470,6 +5472,7 @@ module Crystal::HIR
                   end
 
       unless ivars.any? { |iv| iv.name == ivar_name }
+        offset = align_offset(offset, type_alignment(ivar_type))
         ivars << IVarInfo.new(ivar_name, ivar_type, offset)
         offset += type_size(ivar_type)
       end
@@ -5682,6 +5685,7 @@ module Crystal::HIR
                     ivar_name = String.new(member.name)
                     ivar_type = type_ref_for_name(String.new(member.type))
                     unless ivars.any? { |iv| iv.name == ivar_name }
+                      offset = align_offset(offset, type_alignment(ivar_type))
                       ivars << IVarInfo.new(ivar_name, ivar_type, offset)
                       offset += type_size(ivar_type)
                     end
@@ -5701,6 +5705,7 @@ module Crystal::HIR
                       end
                       inferred = TypeRef::POINTER if inferred == TypeRef::VOID
                       unless ivars.any? { |iv| iv.name == ivar_name }
+                        offset = align_offset(offset, type_alignment(inferred))
                         ivars << IVarInfo.new(ivar_name, inferred, offset)
                         offset += type_size(inferred)
                       end
@@ -6443,6 +6448,35 @@ module Crystal::HIR
             base = info[:base]
             return type_name if @generic_templates.has_key?(base) || type_name_exists?(base)
           end
+        end
+      when CrystalV2::Compiler::Frontend::MacroIfNode
+        result = try_evaluate_macro_condition(node.condition)
+        if result == true
+          return infer_type_literal_name_from_expr(node.then_body)
+        elsif result == false
+          if else_body = node.else_body
+            return infer_type_literal_name_from_expr(else_body)
+          end
+        end
+      when CrystalV2::Compiler::Frontend::MacroLiteralNode
+        if raw_text = macro_literal_raw_text(node)
+          text = raw_text.strip
+          if text.includes?("{%")
+            if expanded = expand_flag_macro_text(text)
+              text = expanded.strip
+            else
+              return nil
+            end
+          end
+          if text.match(/\A[A-Z][A-Za-z0-9_]*(::[A-Z][A-Za-z0-9_]*)*\z/)
+            resolved = resolve_path_string_in_context(text)
+            resolved = resolve_type_alias_chain(resolved)
+            return resolved if type_name_exists?(resolved) || @module_defs.has_key?(resolved) || @generic_templates.has_key?(resolved)
+          end
+        end
+      when CrystalV2::Compiler::Frontend::BlockNode
+        if !node.body.empty?
+          return infer_type_literal_name_from_expr(node.body.last)
         end
       end
 
@@ -12051,6 +12085,7 @@ module Crystal::HIR
               # Instance variable declaration: @value : Int32
               ivar_name = String.new(member.name)
               ivar_type = type_ref_for_name(String.new(member.type))
+              offset = align_offset(offset, type_alignment(ivar_type, is_c_struct))
               ivars << IVarInfo.new(ivar_name, ivar_type, offset)
               offset += type_size(ivar_type, is_c_struct)
             when CrystalV2::Compiler::Frontend::TypeDeclarationNode
@@ -12060,6 +12095,7 @@ module Crystal::HIR
                 ivar_name = field_name.starts_with?("@") ? field_name : "@#{field_name}"
                 ivar_type = type_ref_for_name(String.new(member.declared_type))
                 unless ivars.any? { |iv| iv.name == ivar_name }
+                  offset = align_offset(offset, type_alignment(ivar_type, is_c_struct))
                   ivars << IVarInfo.new(ivar_name, ivar_type, offset)
                   offset += type_size(ivar_type, is_c_struct)
                 end
@@ -12380,6 +12416,7 @@ module Crystal::HIR
                               end
                   # Register ivar if not already declared
                   unless ivars.any? { |iv| iv.name == ivar_name }
+                    offset = align_offset(offset, type_alignment(ivar_type, is_c_struct))
                     ivars << IVarInfo.new(ivar_name, ivar_type, offset,
                       default_expr_id: spec.default_value,
                       default_arena: spec.default_value ? @arena : nil)
@@ -12414,6 +12451,7 @@ module Crystal::HIR
                               end
                   # Register ivar if not already declared
                   unless ivars.any? { |iv| iv.name == ivar_name }
+                    offset = align_offset(offset, type_alignment(ivar_type, is_c_struct))
                     ivars << IVarInfo.new(ivar_name, ivar_type, offset)
                     offset += type_size(ivar_type, is_c_struct)
                   end
@@ -12448,6 +12486,7 @@ module Crystal::HIR
                               end
                   # Register ivar if not already declared
                   unless ivars.any? { |iv| iv.name == ivar_name }
+                    offset = align_offset(offset, type_alignment(ivar_type, is_c_struct))
                     ivars << IVarInfo.new(ivar_name, ivar_type, offset)
                     offset += type_size(ivar_type, is_c_struct)
                   end
@@ -12480,6 +12519,7 @@ module Crystal::HIR
                   default_expr = member.value
                   # Skip trivial defaults that generate_allocator already handles (literal 0, nil)
                   needs_expr = !is_trivial_default(value_node)
+                  offset = align_offset(offset, type_alignment(ivar_type, is_c_struct))
                   ivars << IVarInfo.new(ivar_name, ivar_type, offset,
                     default_expr_id: needs_expr ? default_expr : nil,
                     default_arena: needs_expr ? @arena : nil)
@@ -12607,6 +12647,7 @@ module Crystal::HIR
                 if ENV["DEBUG_IVAR_REG"]?
                   STDERR.puts "[IVAR_REG] #{class_name}##{ivar_name} discovered from method body type=#{ivar_type.id}"
                 end
+                offset = align_offset(offset, type_alignment(ivar_type, is_c_struct))
                 ivars << IVarInfo.new(ivar_name, ivar_type, offset)
                 offset += type_size(ivar_type, is_c_struct)
               end
@@ -12622,6 +12663,11 @@ module Crystal::HIR
         end
       end
 
+      # Align total size to max field alignment (matches LLVM struct padding)
+      if !ivars.empty?
+        max_align = ivars.max_of { |iv| type_alignment(iv.type, is_c_struct) }
+        offset = align_offset(offset, max_align)
+      end
       final_info = ClassInfo.new(class_name, type_ref, ivars, class_vars, offset, is_struct, parent_name)
       @class_info[class_name] = final_info
       @class_info_by_type_id[type_ref.id] = final_info
@@ -12632,7 +12678,7 @@ module Crystal::HIR
       end
       @module.register_class_parent(class_name, parent_name)
       if ENV.has_key?("DEBUG_CLASS_INFO") &&
-         (class_name == "Crystal::MachO" || class_name == "IO" || class_name.includes?("FileDescriptor"))
+         (class_name == "Crystal::MachO" || class_name == "IO" || class_name.includes?("FileDescriptor") || class_name == "Thread" || class_name == "Crystal::Scheduler")
         ivar_dump = ivars.map { |iv| "#{iv.name}:#{get_type_name_from_ref(iv.type)}@#{iv.offset}" }.join(", ")
         STDERR.puts "[CLASS_INFO] #{class_name} ivars=[#{ivar_dump}] size=#{offset}"
       end
@@ -12815,6 +12861,71 @@ module Crystal::HIR
         end
       end
       STDERR.puts "[FIXUP] Fixed #{fixup_count} classes" if fixup_count > 0
+      # Final alignment pass: recompute all ivar offsets with proper alignment
+      align_all_class_ivars
+      # Generate any allocators that were deferred because class had empty ivars
+      flush_deferred_allocators
+    end
+
+    # Generate allocators that were deferred because the class had empty ivars
+    # when the allocator was first requested. Now that all classes are registered,
+    # we can generate them with the correct ivar info.
+    def flush_deferred_allocators : Nil
+      return if @deferred_allocators.empty?
+      count = 0
+      @deferred_allocators.each do |class_name|
+        next if @generated_allocators.includes?(class_name)
+        class_info = @class_info[class_name]?
+        next unless class_info
+        generate_allocator(class_name, class_info)
+        count += 1
+      end
+      STDERR.puts "[ALLOC_FLUSH] Generated #{count} deferred allocators" if count > 0
+      @deferred_allocators.clear
+    end
+
+    # Recompute ivar offsets with proper alignment to match LLVM struct layout.
+    # This is called AFTER all ivar registration and inheritance fixup to ensure
+    # all classes have correctly aligned field offsets regardless of which code
+    # path registered the ivars.
+    def align_all_class_ivars : Nil
+      realigned = 0
+      @class_info.each do |class_name, info|
+        next if info.ivars.empty?
+        is_c_struct = info.name.starts_with?("LibC::") || info.name.includes?("::Lib")
+
+        needs_fix = false
+        offset = 8 # skip type_id (Int32 padded to 8 on 64-bit)
+        info.ivars.each do |ivar|
+          aligned = align_offset(offset, type_alignment(ivar.type, is_c_struct))
+          if aligned != ivar.offset
+            needs_fix = true
+            break
+          end
+          offset = aligned + type_size(ivar.type, is_c_struct)
+        end
+
+        if needs_fix
+          new_ivars = [] of IVarInfo
+          offset = 8
+          info.ivars.each do |ivar|
+            offset = align_offset(offset, type_alignment(ivar.type, is_c_struct))
+            new_ivars << IVarInfo.new(ivar.name, ivar.type, offset,
+              default_expr_id: ivar.default_expr_id, default_arena: ivar.default_arena)
+            offset += type_size(ivar.type, is_c_struct)
+          end
+          # Align total size to max field alignment
+          max_align = new_ivars.max_of { |iv| type_alignment(iv.type, is_c_struct) }
+          offset = align_offset(offset, max_align)
+
+          new_info = ClassInfo.new(info.name, info.type_ref, new_ivars, info.class_vars,
+            offset, info.is_struct, info.parent_name)
+          @class_info[class_name] = new_info
+          @class_info_by_type_id[info.type_ref.id] = new_info
+          realigned += 1
+        end
+      end
+      STDERR.puts "[ALIGN] Realigned #{realigned} classes" if realigned > 0
     end
 
     private def fixup_class_inherited_ivars(class_name : String, fixed : Set(String))
@@ -13568,6 +13679,12 @@ module Crystal::HIR
         return
       end
 
+      # Re-lookup class_info to get the latest version (the passed-in copy may
+      # be stale if the class was registered with empty ivars and later updated).
+      if latest = @class_info[class_name]?
+        class_info = latest
+      end
+
       # Skip if allocator already generated (for reopened classes), but
       # still feed callsite arg types to initialize lowering when available.
       if @generated_allocators.includes?(class_name)
@@ -13580,10 +13697,24 @@ module Crystal::HIR
         end
         return
       end
+
+      # Don't generate allocator with empty ivars for non-struct classes — defer
+      # until class is fully registered so field defaults are properly evaluated.
+      if class_info.ivars.empty? && !class_info.is_struct
+        STDERR.puts "[ALLOC_DEFER] #{class_name}: deferred (empty ivars)" if class_name.includes?("Scheduler")
+        @deferred_allocators << class_name
+        return
+      end
+
       @generated_allocators.add(class_name)
 
       # Also check if function already exists in HIR module (belt and suspenders)
-      return if @module.has_function?(func_name)
+      if @module.has_function?(func_name)
+        if class_name.includes?("Scheduler")
+          STDERR.puts "[ALLOC_SKIP] #{func_name}: already exists in module, skipping body generation"
+        end
+        return
+      end
 
       # Get initialize parameters for this class
       init_params = @init_params[class_name]? || [] of {String, TypeRef}
@@ -13638,26 +13769,35 @@ module Crystal::HIR
         end
 
         # If ivar has a non-trivial default expression, evaluate it
+        # BUT skip BlockNode defaults: those are lazy getter patterns
+        # (getter x : T { expr }) where @x starts as nil and the getter
+        # method handles initialization on first access.
         if (default_expr_id = ivar.default_expr_id) && (default_arena = ivar.default_arena)
-          saved_arena = @arena
-          saved_class = @current_class
-          @arena = default_arena
-          @current_class = class_name
-          begin
-            default_id = lower_expr(ctx, default_expr_id)
-            ivar_store = FieldSet.new(ctx.next_id, TypeRef::VOID, alloc.id, ivar.name, default_id, ivar.offset)
-            ctx.emit(ivar_store)
-          rescue ex
-            # Fallback to zero/nil if expression can't be lowered
-            default_val = Literal.new(ctx.next_id, ivar.type, nil)
-            ctx.emit(default_val)
-            ivar_store = FieldSet.new(ctx.next_id, TypeRef::VOID, alloc.id, ivar.name, default_val.id, ivar.offset)
-            ctx.emit(ivar_store)
-          ensure
-            @arena = saved_arena
-            @current_class = saved_class
+          default_node = default_arena[default_expr_id]
+          is_lazy_getter = default_node.is_a?(CrystalV2::Compiler::Frontend::BlockNode)
+          unless is_lazy_getter
+            saved_arena = @arena
+            saved_class = @current_class
+            @arena = default_arena
+            @current_class = class_name
+            begin
+              default_id = lower_expr(ctx, default_expr_id)
+              ivar_store = FieldSet.new(ctx.next_id, TypeRef::VOID, alloc.id, ivar.name, default_id, ivar.offset)
+              ctx.emit(ivar_store)
+            rescue ex
+              # Fallback to zero/nil if expression can't be lowered
+              STDERR.puts "[ALLOC_DEFAULT_FAIL] #{class_name}##{ivar.name}: #{ex.message} (#{ex.class})"
+              default_val = Literal.new(ctx.next_id, ivar.type, nil)
+              ctx.emit(default_val)
+              ivar_store = FieldSet.new(ctx.next_id, TypeRef::VOID, alloc.id, ivar.name, default_val.id, ivar.offset)
+              ctx.emit(ivar_store)
+            ensure
+              @arena = saved_arena
+              @current_class = saved_class
+            end
+            next
           end
-          next
+          # Fall through for lazy getters: zero/nil the field below
         end
 
         # Use nil for pointer types, 0 for others
@@ -13747,6 +13887,11 @@ module Crystal::HIR
       return if call_arg_types.empty?
       return if call_arg_types.all? { |t| t == TypeRef::VOID }
 
+      # Re-lookup class_info to get the latest version with all ivars
+      if latest = @class_info[class_name]?
+        class_info = latest
+      end
+
       base_name = "#{class_name}.new"
       overload_name = mangle_function_name(base_name, call_arg_types)
       return if overload_name == base_name
@@ -13787,6 +13932,34 @@ module Crystal::HIR
         if type_desc && type_desc.kind == TypeKind::Union
           next
         end
+
+        # Evaluate non-trivial default expressions (same as generate_allocator)
+        # Skip BlockNode defaults (lazy getter pattern)
+        if (default_expr_id = ivar.default_expr_id) && (default_arena = ivar.default_arena)
+          default_node = default_arena[default_expr_id]
+          is_lazy_getter = default_node.is_a?(CrystalV2::Compiler::Frontend::BlockNode)
+          unless is_lazy_getter
+            saved_arena = @arena
+            saved_class = @current_class
+            @arena = default_arena
+            @current_class = class_name
+            begin
+              default_id = lower_expr(ctx, default_expr_id)
+              ivar_store = FieldSet.new(ctx.next_id, TypeRef::VOID, alloc.id, ivar.name, default_id, ivar.offset)
+              ctx.emit(ivar_store)
+            rescue ex
+              default_val = Literal.new(ctx.next_id, ivar.type, nil)
+              ctx.emit(default_val)
+              ivar_store = FieldSet.new(ctx.next_id, TypeRef::VOID, alloc.id, ivar.name, default_val.id, ivar.offset)
+              ctx.emit(ivar_store)
+            ensure
+              @arena = saved_arena
+              @current_class = saved_class
+            end
+            next
+          end
+        end
+
         is_pointer = ivar.type == TypeRef::POINTER ||
                      (type_desc && type_desc.kind == TypeKind::Pointer) ||
                      (type_desc && type_desc.name.starts_with?("Pointer"))
@@ -18145,6 +18318,33 @@ module Crystal::HIR
       count * elem_size
     end
 
+    # Get natural alignment for a type (matches LLVM ABI alignment rules)
+    private def type_alignment(type : TypeRef, c_context : Bool = false) : Int32
+      case type
+      when TypeRef::BOOL, TypeRef::INT8, TypeRef::UINT8
+        1
+      when TypeRef::INT16, TypeRef::UINT16
+        2
+      when TypeRef::INT32, TypeRef::UINT32, TypeRef::FLOAT32
+        4
+      when TypeRef::CHAR
+        c_context ? 1 : 4
+      when TypeRef::INT64, TypeRef::UINT64, TypeRef::FLOAT64
+        8
+      when TypeRef::INT128, TypeRef::UINT128
+        16
+      else
+        8 # Pointer/reference types align to 8
+      end
+    end
+
+    # Align offset to the given alignment boundary
+    private def align_offset(offset : Int32, alignment : Int32) : Int32
+      return offset if alignment <= 1
+      remainder = offset % alignment
+      remainder == 0 ? offset : offset + (alignment - remainder)
+    end
+
     # Register a function signature (for forward reference support)
     # Call this for all functions before lowering any function bodies
     def register_function(node : CrystalV2::Compiler::Frontend::DefNode)
@@ -19630,6 +19830,75 @@ module Crystal::HIR
         const_name = full_name
       end
       {owner, const_name}
+    end
+
+    # Try to resolve a self class-method that returns a type literal.
+    # Looks up the method body, expands macros, and checks if it returns a known type path.
+    # Used for patterns like: backend_class.new → Crystal::EventLoop::Kqueue.new
+    private def try_resolve_type_returning_method(class_name : String, method_name : String) : String?
+      # Look up the class method definition
+      func_name = "#{class_name}.#{method_name}"
+      if def_node = @function_defs[func_name]?
+        arena = @function_def_arenas[func_name]?
+        return nil unless arena
+        body = def_node.body
+        return nil unless body
+        with_arena(arena) do
+          body.each do |body_id|
+            body_node = @arena[body_id]
+            resolved_type = extract_type_from_macro_body(body_node)
+            if resolved_type && type_name_exists?(resolved_type)
+              return resolved_type
+            end
+          end
+        end
+      end
+      nil
+    end
+
+    # Extract a type name from a macro body (handles MacroIfNode → MacroLiteralNode → type path)
+    private def extract_type_from_macro_body(node : AstNode) : String?
+      case node
+      when CrystalV2::Compiler::Frontend::MacroIfNode
+        result = try_evaluate_macro_condition(node.condition)
+        if result == true
+          body = @arena[node.then_body]
+          return extract_type_from_macro_body(body)
+        elsif result == false
+          if else_node = node.else_body
+            else_body = @arena[else_node]
+            return extract_type_from_macro_body(else_body)
+          end
+        end
+      when CrystalV2::Compiler::Frontend::MacroLiteralNode
+        if raw_text = macro_literal_raw_text(node)
+          text = raw_text.strip
+          # If text contains nested {% %}, expand them
+          if text.includes?("{%")
+            if expanded = expand_flag_macro_text(text)
+              text = expanded.strip
+            else
+              return nil
+            end
+          end
+          # Check if the text is a valid type path (e.g., Crystal::EventLoop::Kqueue)
+          if text.match(/\A[A-Z][A-Za-z0-9_]*(::[A-Z][A-Za-z0-9_]*)*\z/)
+            return text
+          end
+        end
+      when CrystalV2::Compiler::Frontend::PathNode
+        path = collect_path_string(node)
+        resolved = resolve_path_string_in_context(path)
+        return resolved if type_name_exists?(resolved)
+      when CrystalV2::Compiler::Frontend::BlockNode
+        # Method body is a block — check last expression
+        if !node.body.empty?
+          last_id = node.body.last
+          last_node = @arena[last_id]
+          return extract_type_from_macro_body(last_node)
+        end
+      end
+      nil
     end
 
     private def resolve_constant_name_in_context(name : String) : String?
@@ -27786,6 +28055,9 @@ module Crystal::HIR
 
       # Fallback: treat as constant or module access (for future expansion)
       # For now, just return 0
+      if full_path.includes?("Kqueue") || full_path.includes?("EventLoop")
+        STDERR.puts "[PATH_FALLBACK] full_path=#{full_path} raw_path=#{raw_path} exists=#{type_name_exists?(full_path)} class_info=#{@class_info.has_key?(full_path)} func=#{ctx.function.name} class=#{@current_class} method=#{@current_method}"
+      end
       lit = Literal.new(ctx.next_id, TypeRef::INT32, 0_i64)
       ctx.emit(lit)
       lit.id
@@ -34743,7 +35015,8 @@ module Crystal::HIR
             static_class_name = method_owner(full_method_name)
           end
           if !@function_defs.has_key?(full_method_name) &&
-             !class_method_overload_exists?(full_method_name)
+             !class_method_overload_exists?(full_method_name) &&
+             !(method_name == "new" && @class_info.has_key?(class_name_str.not_nil!))
             # Treat type literal receivers as Class/Module instance methods when available (e.g., T.to_s).
             original_full_name = full_method_name
             original_static_class = static_class_name
@@ -34837,6 +35110,25 @@ module Crystal::HIR
           if ENV["DEBUG_SELF_TO_S"]? && method_name == "to_s"
             recv_name = receiver_id ? get_type_name_from_ref(ctx.type_of(receiver_id)) : "nil"
             STDERR.puts "[SELF_TO_S_LIT] explicit=#{explicit_self_receiver} force=#{force_instance_receiver} lit=#{receiver_is_type_literal} recv_type=#{recv_name}"
+          end
+          # Fallback: when .new is called on a method that returns a type (e.g. backend_class.new),
+          # resolve the method body to find the actual class and generate the allocator.
+          if !receiver_is_type_literal && method_name == "new" &&
+             obj_node.is_a?(CrystalV2::Compiler::Frontend::IdentifierNode)
+            obj_name = String.new(obj_node.name)
+            if obj_name != "self" && obj_name[0]?.try(&.lowercase?) && (current = @current_class)
+              resolved_type = try_resolve_type_returning_method(current, obj_name)
+              if resolved_type
+                if ci = @class_info[resolved_type]?
+                  call_arg_types = call_args.map { |a| infer_type_from_expr(a, @current_class) || TypeRef::VOID }
+                  generate_allocator(resolved_type, ci, call_arg_types)
+                  full_method_name = "#{resolved_type}.new"
+                  static_class_name = resolved_type
+                  receiver_is_type_literal = true
+                  ctx.mark_type_literal(receiver_id.not_nil!)
+                end
+              end
+            end
           end
           if !receiver_is_type_literal
             raw_name = case obj_node
@@ -46429,24 +46721,6 @@ module Crystal::HIR
         else
           TypeRef::POINTER
         end
-      end
-    end
-
-    # Get type alignment in bytes
-    private def type_alignment(type : TypeRef) : Int32
-      case type
-      when TypeRef::BOOL, TypeRef::INT8, TypeRef::UINT8
-        1
-      when TypeRef::INT16, TypeRef::UINT16
-        2
-      when TypeRef::INT32, TypeRef::UINT32, TypeRef::FLOAT32, TypeRef::CHAR
-        4
-      when TypeRef::INT64, TypeRef::UINT64, TypeRef::FLOAT64
-        8
-      when TypeRef::INT128, TypeRef::UINT128
-        16
-      else
-        8 # Pointer alignment for reference types
       end
     end
 
