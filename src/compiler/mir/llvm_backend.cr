@@ -664,6 +664,15 @@ module Crystal::MIR
                   STDERR.puts "  [REACHABILITY] Unresolved extern: #{extern_name} (mangled: #{mangled_extern})"
                 end
               end
+            when FuncPointer
+              # C callback function pointer — resolve by name
+              matching_func = func_by_name[inst.func_name]? || func_by_name[@type_mapper.mangle_name(inst.func_name)]?
+              if matching_func
+                unless reachable.includes?(matching_func.id)
+                  reachable << matching_func.id
+                  worklist << matching_func.id
+                end
+              end
             when RCDecrement
               # Destructor is also a function reference
               if destructor_id = inst.destructor
@@ -3125,6 +3134,8 @@ module Crystal::MIR
         emit_try_begin(inst, name)
       when TryEnd
         emit_try_end(inst, name)
+      when FuncPointer
+        emit_func_pointer(inst, name)
       end
 
       # Store to cross-block slot if this value is used across blocks
@@ -7730,6 +7741,15 @@ module Crystal::MIR
     private def emit_try_end(inst : TryEnd, name : String)
       emit "store i1 false, ptr @__crystal_exc_handler_active"
       emit "store ptr null, ptr @__crystal_exc_ptr"
+    end
+
+    private def emit_func_pointer(inst : FuncPointer, name : String)
+      mangled = mangle_function_name(inst.func_name)
+      # In LLVM IR, a function name @foo is a valid ptr value
+      @constant_values[inst.id] = "@#{mangled}"
+      @value_types[inst.id] = TypeRef::POINTER
+      # Emit a bitcast to materialize it as a register (needed for phi/cross-block use)
+      emit "#{name} = bitcast ptr @#{mangled} to ptr"
     end
 
     private def emit_terminator(term : Terminator)

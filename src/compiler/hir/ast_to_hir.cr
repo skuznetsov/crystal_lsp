@@ -3068,8 +3068,8 @@ module Crystal::HIR
         return unless pass == :types
         struct_name = String.new(node.name)
         full_struct_name = "#{lib_name}::#{struct_name}"
-        register_class_with_name(node, full_struct_name)
         @lib_structs.add(full_struct_name)
+        register_class_with_name(node, full_struct_name)
       when CrystalV2::Compiler::Frontend::FunNode
         return unless pass == :externs
         register_extern_fun(lib_name, node)
@@ -10515,7 +10515,9 @@ module Crystal::HIR
                         TypeRef::VOID
                       end
           unless ivars.any? { |iv| iv.name == ivar_name }
-            ivars << IVarInfo.new(ivar_name, ivar_type, offset_ref.value)
+            ivars << IVarInfo.new(ivar_name, ivar_type, offset_ref.value,
+              default_expr_id: spec.default_value,
+              default_arena: spec.default_value ? @arena : nil)
             offset_ref.value += type_size(ivar_type)
           end
           getter_base = "#{class_name}##{getter_name}"
@@ -11856,6 +11858,8 @@ module Crystal::HIR
       # Collect instance variables and their types
       ivars = [] of IVarInfo
       class_vars = [] of ClassVarInfo
+      # C lib structs use C type sizes (Char=1 byte instead of 4)
+      is_c_struct = @lib_structs.includes?(class_name)
       # Struct has no type_id header (value type), class starts at 8 for header
       offset = is_struct ? 0 : 8
 
@@ -12048,7 +12052,7 @@ module Crystal::HIR
               ivar_name = String.new(member.name)
               ivar_type = type_ref_for_name(String.new(member.type))
               ivars << IVarInfo.new(ivar_name, ivar_type, offset)
-              offset += type_size(ivar_type)
+              offset += type_size(ivar_type, is_c_struct)
             when CrystalV2::Compiler::Frontend::TypeDeclarationNode
               # Lib struct field declaration: value : Type
               if is_struct
@@ -12057,7 +12061,7 @@ module Crystal::HIR
                 ivar_type = type_ref_for_name(String.new(member.declared_type))
                 unless ivars.any? { |iv| iv.name == ivar_name }
                   ivars << IVarInfo.new(ivar_name, ivar_type, offset)
-                  offset += type_size(ivar_type)
+                  offset += type_size(ivar_type, is_c_struct)
                 end
               end
             when CrystalV2::Compiler::Frontend::ClassVarDeclNode
@@ -12376,8 +12380,10 @@ module Crystal::HIR
                               end
                   # Register ivar if not already declared
                   unless ivars.any? { |iv| iv.name == ivar_name }
-                    ivars << IVarInfo.new(ivar_name, ivar_type, offset)
-                    offset += type_size(ivar_type)
+                    ivars << IVarInfo.new(ivar_name, ivar_type, offset,
+                      default_expr_id: spec.default_value,
+                      default_arena: spec.default_value ? @arena : nil)
+                    offset += type_size(ivar_type, is_c_struct)
                   end
                   # Register getter method: def name : Type
                   getter_base = "#{class_name}##{getter_name}"
@@ -12409,7 +12415,7 @@ module Crystal::HIR
                   # Register ivar if not already declared
                   unless ivars.any? { |iv| iv.name == ivar_name }
                     ivars << IVarInfo.new(ivar_name, ivar_type, offset)
-                    offset += type_size(ivar_type)
+                    offset += type_size(ivar_type, is_c_struct)
                   end
                   # Register setter method: def name=(value : Type) : Type
                   setter_name = "#{class_name}##{storage_name}="
@@ -12443,7 +12449,7 @@ module Crystal::HIR
                   # Register ivar if not already declared
                   unless ivars.any? { |iv| iv.name == ivar_name }
                     ivars << IVarInfo.new(ivar_name, ivar_type, offset)
-                    offset += type_size(ivar_type)
+                    offset += type_size(ivar_type, is_c_struct)
                   end
                   # Register getter method
                   getter_base = "#{class_name}##{getter_name}"
@@ -12477,7 +12483,7 @@ module Crystal::HIR
                   ivars << IVarInfo.new(ivar_name, ivar_type, offset,
                     default_expr_id: needs_expr ? default_expr : nil,
                     default_arena: needs_expr ? @arena : nil)
-                  offset += type_size(ivar_type)
+                  offset += type_size(ivar_type, is_c_struct)
                 end
               elsif target_node.is_a?(CrystalV2::Compiler::Frontend::ClassVarNode)
                 raw_name = String.new(target_node.name)
@@ -12602,7 +12608,7 @@ module Crystal::HIR
                   STDERR.puts "[IVAR_REG] #{class_name}##{ivar_name} discovered from method body type=#{ivar_type.id}"
                 end
                 ivars << IVarInfo.new(ivar_name, ivar_type, offset)
-                offset += type_size(ivar_type)
+                offset += type_size(ivar_type, is_c_struct)
               end
             end
           end
@@ -13841,7 +13847,94 @@ module Crystal::HIR
       ivar_info = class_info.ivars.find { |iv| iv.name == ivar_name }
       return unless ivar_info
 
-      generate_getter_method_for_ivar(class_name, class_info, ivar_info, getter_name)
+      if ENV["DEBUG_LAZY_GETTER"]?
+        STDERR.puts "[LAZY_GETTER_CHECK] class=#{class_name} getter=#{getter_name} has_default=#{!spec.default_value.nil?}"
+      end
+      if default_expr = spec.default_value
+        if ENV["DEBUG_LAZY_GETTER"]?
+          STDERR.puts "[LAZY_GETTER] class=#{class_name} getter=#{getter_name} ivar=#{ivar_name} default_expr=#{default_expr}"
+        end
+        generate_lazy_getter_method(class_name, class_info, ivar_info, getter_name, default_expr)
+      else
+        generate_getter_method_for_ivar(class_name, class_info, ivar_info, getter_name)
+      end
+    end
+
+    # Generate a lazy getter: def name; if @ivar.nil?; @ivar = default; end; @ivar; end
+    private def generate_lazy_getter_method(
+      class_name : String,
+      class_info : ClassInfo,
+      ivar_info : IVarInfo,
+      accessor_name : String,
+      default_expr : ExprId,
+    )
+      ivar_type = ivar_info.type
+      base_name = "#{class_name}##{accessor_name}"
+      func_name = mangle_function_name(base_name, [] of TypeRef)
+      register_function_type(func_name, ivar_type)
+      return if @module.has_function?(func_name)
+
+      func = @module.create_function(func_name, ivar_type)
+      ctx = LoweringContext.new(func, @module, @arena)
+
+      self_type_ref = class_info.type_ref
+      self_param = func.add_param("self", self_type_ref)
+      ctx.register_local("self", self_param.id)
+      ctx.register_type(self_param.id, self_type_ref)
+
+      # Read the current ivar value
+      field_get = FieldGet.new(ctx.next_id, ivar_type, self_param.id, ivar_info.name, ivar_info.offset)
+      ctx.emit(field_get)
+      ctx.register_type(field_get.id, ivar_type)
+
+      # Check if it's nil (null pointer for reference types)
+      nil_lit = Literal.new(ctx.next_id, TypeRef::NIL, nil)
+      ctx.emit(nil_lit)
+      ctx.register_type(nil_lit.id, TypeRef::NIL)
+
+      is_nil = BinaryOperation.new(ctx.next_id, TypeRef::BOOL, BinaryOp::Eq, field_get.id, nil_lit.id)
+      ctx.emit(is_nil)
+      ctx.register_type(is_nil.id, TypeRef::BOOL)
+
+      # Branch: if nil → init block, else → return block
+      scope = ctx.current_scope
+      init_block = func.create_block(scope)
+      return_block = func.create_block(scope)
+
+      ctx.terminate(Branch.new(is_nil.id, init_block, return_block))
+
+      # Init block: evaluate default expression, store it, jump to return
+      ctx.switch_to_block(init_block)
+      old_class = @current_class
+      @current_class = class_name
+      begin
+        # Unwrap BlockNode: getter x : T { expr } stores a BlockNode as default.
+        # We need to evaluate the body expressions inline, not create a Proc.
+        default_node = @arena[default_expr]
+        if default_node.is_a?(CrystalV2::Compiler::Frontend::BlockNode)
+          default_val = 0_u32
+          default_node.body.each do |body_expr|
+            default_val = lower_expr(ctx, body_expr)
+          end
+        else
+          default_val = lower_expr(ctx, default_expr)
+        end
+      ensure
+        @current_class = old_class
+      end
+      ctx.register_type(default_val, ivar_type)
+
+      # Store the default value to the ivar
+      field_set = FieldSet.new(ctx.next_id, ivar_type, self_param.id, ivar_info.name, default_val, ivar_info.offset)
+      ctx.emit(field_set)
+      ctx.terminate(Jump.new(return_block))
+
+      # Return block: read the ivar again and return
+      ctx.switch_to_block(return_block)
+      field_get2 = FieldGet.new(ctx.next_id, ivar_type, self_param.id, ivar_info.name, ivar_info.offset)
+      ctx.emit(field_get2)
+      ctx.register_type(field_get2.id, ivar_type)
+      ctx.terminate(Return.new(field_get2.id))
     end
 
     # Generate synthetic setter method: def name=(value); @name = value; end
@@ -13868,6 +13961,15 @@ module Crystal::HIR
       func_name = mangle_function_name(base_name, [] of TypeRef)
       register_function_type(func_name, ivar_type)
       return if @module.has_function?(func_name)
+
+      # If this ivar has a default expression (lazy getter), generate lazy init
+      if (default_expr = ivar_info.default_expr_id) && (default_arena = ivar_info.default_arena)
+        saved_arena = @arena
+        with_arena(default_arena) do
+          generate_lazy_getter_method(class_name, class_info, ivar_info, accessor_name || ivar_info.name.lstrip('@'), default_expr)
+        end
+        return
+      end
 
       func = @module.create_function(func_name, ivar_type)
       ctx = LoweringContext.new(func, @module, @arena)
@@ -17986,14 +18088,16 @@ module Crystal::HIR
     end
 
     # Helper to get type size in bytes
-    private def type_size(type : TypeRef) : Int32
+    private def type_size(type : TypeRef, c_context : Bool = false) : Int32
       case type
       when TypeRef::BOOL, TypeRef::INT8, TypeRef::UINT8
         1
       when TypeRef::INT16, TypeRef::UINT16
         2
-      when TypeRef::INT32, TypeRef::UINT32, TypeRef::FLOAT32, TypeRef::CHAR
+      when TypeRef::INT32, TypeRef::UINT32, TypeRef::FLOAT32
         4
+      when TypeRef::CHAR
+        c_context ? 1 : 4 # C char = 1 byte, Crystal Char = 4 bytes
       when TypeRef::INT64, TypeRef::UINT64, TypeRef::FLOAT64
         8
       when TypeRef::INT128, TypeRef::UINT128
@@ -18004,11 +18108,41 @@ module Crystal::HIR
         # Check if it's a union type we've registered
         mir_type_ref = hir_to_mir_type_ref(type)
         if descriptor = @union_descriptors[mir_type_ref]?
-          descriptor.total_size
-        else
-          8 # Pointer size for reference types
+          return descriptor.total_size
         end
+        # Check if it's a struct (value type) with known layout
+        if info = @class_info_by_type_id[type.id]?
+          if info.is_struct && info.size > 0
+            return info.size
+          end
+        end
+        # Check for StaticArray(T, N) by type name
+        type_name = get_type_name_from_ref(type)
+        if type_name.starts_with?("StaticArray(")
+          if sa_size = compute_static_array_byte_size(type_name, c_context)
+            return sa_size
+          end
+        end
+        8 # Pointer size for reference types
       end
+    end
+
+    # Compute byte size of StaticArray(T, N) from its type name
+    private def compute_static_array_byte_size(type_name : String, c_context : Bool = false) : Int32?
+      paren_start = type_name.index('(')
+      return nil unless paren_start
+      inner = type_name[(paren_start + 1)..-2] # Remove "StaticArray(" and ")"
+      # Split on last comma to separate element type from count
+      last_comma = inner.rindex(',')
+      return nil unless last_comma
+      elem_type_name = inner[0, last_comma].strip
+      count_str = inner[(last_comma + 1)..].strip
+      count = count_str.to_i?
+      return nil unless count
+      elem_type_ref = type_ref_for_name(elem_type_name)
+      elem_size = type_size(elem_type_ref, c_context)
+      return nil if elem_size <= 0
+      count * elem_size
     end
 
     # Register a function signature (for forward reference support)
@@ -25043,9 +25177,9 @@ module Crystal::HIR
             # Struct/union within lib are parsed as ClassNode with flags.
             struct_name = String.new(body_node.name)
             full_struct_name = "#{lib_name}::#{struct_name}"
+            @lib_structs.add(full_struct_name)
             register_class_with_name(body_node, full_struct_name)
             lower_class_with_name(body_node, full_struct_name)
-            @lib_structs.add(full_struct_name)
           end
         end
 
@@ -26639,9 +26773,32 @@ module Crystal::HIR
                        lower_expr(ctx, node.args.first)
                      end
                    when CrystalV2::Compiler::Frontend::InstanceVarNode
-                     # For ivars, we need the field address, not the loaded value
-                     # Use lower_expr for now (handled at LLVM level)
-                     lower_expr(ctx, node.args.first)
+                     # For pointerof(@ivar), compute field address: self + ivar_offset
+                     # Do NOT load the value — we need the address.
+                     ivar_name = String.new(arg_node.name)
+                     ivar_offset = 0
+                     if class_name = @current_class
+                       search_name : String? = class_name
+                       while search_name
+                         if class_info = @class_info[search_name]?
+                           if found_ivar = class_info.ivars.find { |iv| iv.name == ivar_name }
+                             ivar_offset = found_ivar.offset
+                             break
+                           end
+                           search_name = class_info.parent_name
+                         else
+                           break
+                         end
+                       end
+                     end
+                     self_id = emit_self(ctx)
+                     offset_lit = Literal.new(ctx.next_id, TypeRef::INT64, ivar_offset.to_i64)
+                     ctx.emit(offset_lit)
+                     ctx.register_type(offset_lit.id, TypeRef::INT64)
+                     ptr_add = PointerAdd.new(ctx.next_id, TypeRef::POINTER, self_id, offset_lit.id, TypeRef::INT8)
+                     ctx.emit(ptr_add)
+                     ctx.register_type(ptr_add.id, TypeRef::POINTER)
+                     return ptr_add.id # Return field address directly, skip AddressOf
                    else
                      lower_expr(ctx, node.args.first)
                    end
@@ -37590,8 +37747,16 @@ module Crystal::HIR
           if arg_node.is_a?(CrystalV2::Compiler::Frontend::OutNode)
             expected_type = param_types[idx]? || TypeRef::POINTER
             result << lower_out_arg(ctx, arg_node, expected_type)
+          elsif arg_node.is_a?(CrystalV2::Compiler::Frontend::ProcLiteralNode)
+            # Proc literal passed to C function — generate a standalone callback
+            # function and pass its address as a raw function pointer.
+            result << lower_proc_as_c_callback(ctx, arg_node, extern_func, idx)
           else
-            result << lower_expr(ctx, arg_expr)
+            arg_val = lower_expr(ctx, arg_expr)
+            # Crystal implicitly calls to_unsafe when passing a class instance
+            # to a C function. Check if the arg is `self` and the class has to_unsafe.
+            arg_val = try_implicit_to_unsafe(ctx, arg_val, arg_node)
+            result << arg_val
           end
         end
       ensure
@@ -37599,6 +37764,111 @@ module Crystal::HIR
       end
 
       result
+    end
+
+    # Crystal implicitly calls to_unsafe when passing a class instance to a C function.
+    # For example, `LibC.pthread_mutex_lock(self)` where self is Thread::Mutex
+    # becomes `LibC.pthread_mutex_lock(self.to_unsafe)`.
+    private def try_implicit_to_unsafe(
+      ctx : LoweringContext,
+      arg_val : ValueId,
+      arg_node,
+    ) : ValueId
+      # Only handle `self` for now
+      class_name : String? = nil
+      case arg_node
+      when CrystalV2::Compiler::Frontend::SelfNode
+        class_name = @current_class
+      end
+      return arg_val unless class_name
+
+      # Check if this class has a `to_unsafe` method
+      to_unsafe_name = "#{class_name}#to_unsafe"
+      if @function_defs.has_key?(to_unsafe_name) || @module.has_function?(to_unsafe_name)
+        # Emit call: self.to_unsafe (receiver=self, no extra args)
+        call = Call.new(ctx.next_id, TypeRef::POINTER, arg_val, to_unsafe_name, [] of ValueId)
+        ctx.emit(call)
+        ctx.register_type(call.id, TypeRef::POINTER)
+        return call.id
+      end
+
+      arg_val
+    end
+
+    # Lower a ProcLiteralNode as a C-compatible callback function.
+    # Instead of creating a Proc object (MakeClosure), generates a standalone
+    # top-level function and returns a FuncPointer to it.
+    private def lower_proc_as_c_callback(
+      ctx : LoweringContext,
+      proc_node : CrystalV2::Compiler::Frontend::ProcLiteralNode,
+      extern_func : ExternFunction,
+      arg_idx : Int32,
+    ) : ValueId
+      # Generate a unique callback function name
+      callback_name = "__crystal_callback_#{extern_func.real_name}_#{arg_idx}"
+
+      # Determine param types from the extern function's expected callback signature.
+      # The C function parameter at arg_idx should be a function pointer type.
+      # We use the proc literal's declared params to build the callback.
+      param_types = extern_func.param_types
+
+      # Determine return type — C callbacks for GC are void
+      return_type = TypeRef::VOID
+
+      # Create a new top-level function for the callback
+      callback_func = @module.create_function(callback_name, return_type)
+      callback_ctx = LoweringContext.new(callback_func, @module, @arena)
+
+      # Add parameters from the proc literal
+      if params = proc_node.params
+        params.each_with_index do |param, idx|
+          if param_name = param.name
+            name = String.new(param_name)
+            param_type = if ta = param.type_annotation
+                           type_ref_for_name(String.new(ta))
+                         else
+                           # Infer from C function signature if possible
+                           TypeRef::POINTER
+                         end
+            hir_param = callback_func.add_param(name, param_type)
+            callback_ctx.register_local(name, hir_param.id)
+            callback_ctx.register_type(hir_param.id, param_type)
+          end
+        end
+      end
+
+      # Lower the proc body into the callback function
+      saved_class = @current_class
+      saved_typeof_locals = @current_typeof_locals
+      saved_typeof_local_names = @current_typeof_local_names
+      @current_typeof_locals = nil
+      @current_typeof_local_names = nil
+      begin
+        body = proc_node.body
+        if body && !body.empty?
+          last_value = lower_body(callback_ctx, body)
+          # Terminate the callback function
+          block = callback_func.get_block(callback_ctx.current_block)
+          unless block.terminator.is_a?(Return) || block.terminator.is_a?(Unreachable)
+            callback_ctx.terminate(Return.new(last_value))
+          end
+        else
+          # Empty body — just return void
+          nil_lit = Literal.new(callback_ctx.next_id, TypeRef::NIL, nil)
+          callback_ctx.emit(nil_lit)
+          callback_ctx.terminate(Return.new(nil_lit.id))
+        end
+      ensure
+        @current_class = saved_class
+        @current_typeof_locals = saved_typeof_locals
+        @current_typeof_local_names = saved_typeof_local_names
+      end
+
+      # Emit a FuncPointer in the CALLER's context referencing the callback
+      fp = FuncPointer.new(ctx.next_id, TypeRef::POINTER, callback_name)
+      ctx.emit(fp)
+      ctx.register_type(fp.id, TypeRef::POINTER)
+      fp.id
     end
 
     private def expand_splat_args(

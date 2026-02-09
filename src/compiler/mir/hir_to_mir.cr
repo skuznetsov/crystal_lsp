@@ -534,6 +534,8 @@ module Crystal
                  lower_copy(hir_value)
                when HIR::MakeClosure
                  lower_closure(hir_value)
+               when HIR::FuncPointer
+                 lower_func_pointer(hir_value)
                when HIR::Yield
                  lower_yield(hir_value)
                when HIR::ClassVarGet
@@ -2148,6 +2150,13 @@ module Crystal
 
       @stats.closures_lowered += 1
       env_ptr
+    end
+
+    private def lower_func_pointer(fp : HIR::FuncPointer) : ValueId
+      builder = @builder.not_nil!
+      mir_fp = MIR::FuncPointer.new(builder.next_id, TypeRef::POINTER, fp.func_name)
+      builder.emit(mir_fp)
+      mir_fp.id
     end
 
     # ─────────────────────────────────────────────────────────────────────────

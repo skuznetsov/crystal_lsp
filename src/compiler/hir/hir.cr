@@ -642,6 +642,19 @@ module Crystal::HIR
     end
   end
 
+  # Raw function pointer (for passing Crystal proc literals to C functions)
+  class FuncPointer < Value
+    getter func_name : String
+
+    def initialize(id : ValueId, type : TypeRef, @func_name : String)
+      super(id, type)
+    end
+
+    def to_s(io : IO) : Nil
+      io << "%" << @id << " = func_pointer @" << @func_name << " : " << @type.id
+    end
+  end
+
   # ─────────────────────────────────────────────────────────────────────────────
   # Type Operations
   # ─────────────────────────────────────────────────────────────────────────────
@@ -1544,6 +1557,15 @@ module Crystal::HIR
 
         func.blocks.each do |block|
           block.instructions.each do |inst|
+            # FuncPointer references (C callbacks) are always reachable
+            if inst.is_a?(FuncPointer)
+              callee_fn = inst.func_name
+              if func_by_name.has_key?(callee_fn) && !reachable.includes?(callee_fn)
+                reachable << callee_fn
+                worklist << callee_fn
+              end
+              next
+            end
             next unless inst.is_a?(Call)
             callee = inst.method_name
             if inst.virtual

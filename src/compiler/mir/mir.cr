@@ -1478,6 +1478,23 @@ module Crystal::MIR
     end
   end
 
+  # Raw function pointer — produces ptr to a named function (for C callbacks)
+  class FuncPointer < Value
+    getter func_name : String
+
+    def initialize(id : ValueId, type : TypeRef, @func_name : String)
+      super(id, type)
+    end
+
+    def operands : Array(ValueId)
+      [] of ValueId
+    end
+
+    def to_s(io : IO) : Nil
+      io << "%" << @id << " = func_pointer @" << @func_name << " : ptr"
+    end
+  end
+
   # ═══════════════════════════════════════════════════════════════════════════
   # TERMINATORS - End a basic block
   # ═══════════════════════════════════════════════════════════════════════════
