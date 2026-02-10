@@ -424,6 +424,7 @@ module Crystal::MIR
     @phi_predecessor_union_wraps : Hash({BlockId, ValueId}, {String, TypeRef, Int32}) = {} of {BlockId, ValueId} => {String, TypeRef, Int32}
     @current_func_blocks : Hash(BlockId, BasicBlock) = {} of BlockId => BasicBlock
     @current_block_id : BlockId? = nil
+    @entry_user_block_id : BlockId = 0_u32  # First user block — dominates all others
 
     # Track phi nodes that have nil incoming values (for union return type handling)
     # Maps phi value_id -> set of blocks that contribute nil
@@ -1840,6 +1841,7 @@ module Crystal::MIR
 
       # Populate block lookup for phi predecessor load emission
       func.blocks.each { |block| @current_func_blocks[block.id] = block }
+      @entry_user_block_id = func.blocks.first?.try(&.id) || 0_u32
 
       # Pre-pass: collect constant values for phi node resolution
       # This ensures forward-referenced constants are available
@@ -4887,10 +4889,15 @@ module Crystal::MIR
           end
           def_block = @value_def_block[val_id]?
           if def_block && def_block != block_id && !@phi_predecessor_loads.has_key?({block_id, val_id})
-            unless missing_preds.includes?(block_id)
-              missing_preds << block_id
+            # Entry block values dominate all other blocks — safe to reference directly
+            # (they are excluded from cross_block_values/slots for efficiency,
+            # but are always available in LLVM IR)
+            unless def_block == @entry_user_block_id
+              unless missing_preds.includes?(block_id)
+                missing_preds << block_id
+              end
+              next
             end
-            next
           end
           filtered << {block_id, val_id}
         end

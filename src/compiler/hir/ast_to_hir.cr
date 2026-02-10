@@ -7037,6 +7037,18 @@ module Crystal::HIR
           if const_type = @constant_types[resolved]?
             return const_type if const_type != TypeRef::VOID
           end
+          # Constant exists but type not yet determined — try literal value
+          if literal = @constant_literal_values[resolved]?
+            literal_type_name = literal.type_name
+            inferred = type_ref_for_name(literal_type_name)
+            if inferred != TypeRef::VOID
+              @constant_types[resolved] = inferred
+              return inferred
+            end
+          end
+          # This IS a constant, not a type — don't fall through to type_name_exists
+          # which would incorrectly treat the constant name as a type name
+          return nil
         end
         parts = full_name.split("::")
         if parts.size >= 2
@@ -7067,13 +7079,26 @@ module Crystal::HIR
           if const_type = @constant_types[resolved]?
             return const_type if const_type != TypeRef::VOID
           end
+          # Constant exists but type not yet determined — try literal value
+          if literal = @constant_literal_values[resolved]?
+            literal_type_name = literal.type_name
+            inferred = type_ref_for_name(literal_type_name)
+            if inferred != TypeRef::VOID
+              @constant_types[resolved] = inferred
+              return inferred
+            end
+          end
         end
         # Fallback: if the constant name is a known type, treat as type literal.
         # This handles patterns like read_bytes(UInt32, format) where UInt32 is
         # passed as a type value (metaclass argument).
-        qualified = resolve_class_name_in_context(name)
-        if type_name_exists?(qualified)
-          return type_ref_for_name(qualified)
+        # Only do this if the name was NOT resolved as a constant — constants
+        # should use their value type, not be treated as type names.
+        unless resolved
+          qualified = resolve_class_name_in_context(name)
+          if type_name_exists?(qualified)
+            return type_ref_for_name(qualified)
+          end
         end
       when CrystalV2::Compiler::Frontend::GroupingNode
         return infer_type_from_expr(expr_node.expression, self_type_name)
@@ -23450,7 +23475,22 @@ module Crystal::HIR
       when CrystalV2::Compiler::Frontend::NilNode
         "Nil"
       when CrystalV2::Compiler::Frontend::PathNode
-        resolve_path_string_in_context(collect_path_string(node))
+        full_name = resolve_path_string_in_context(collect_path_string(node))
+        # Check if this is a constant — if so, return the constant's value type, not its name
+        if resolved = resolve_constant_name_in_context(full_name)
+          if const_type = @constant_types[resolved]?
+            if const_type != TypeRef::VOID
+              return get_type_name_from_ref(const_type)
+            end
+          end
+          # Try literal value
+          if literal = @constant_literal_values[resolved]?
+            return literal.type_name
+          end
+          # Known constant but type unknown — return nil (don't use constant name as type)
+          return nil
+        end
+        full_name
       when CrystalV2::Compiler::Frontend::IdentifierNode
         name = String.new(node.name)
         if locals = @current_typeof_locals
@@ -29669,6 +29709,19 @@ module Crystal::HIR
         ne_check = BinaryOperation.new(ctx.next_id, TypeRef::BOOL, BinaryOp::Ne, value_id, nil_val.id)
         ctx.emit(ne_check)
         return ne_check.id
+      end
+
+      # User-registered pointer types like Pointer(UInt8) also need null checks.
+      # Our compiler heap-allocates structs, so these appear as user types, not TypeRef::POINTER.
+      if value_type.id >= TypeRef::FIRST_USER_TYPE
+        type_desc = @module.get_type_descriptor(value_type)
+        if type_desc && type_desc.kind == TypeKind::Pointer
+          nil_val = Literal.new(ctx.next_id, TypeRef::POINTER, 0_i64)
+          ctx.emit(nil_val)
+          ne_check = BinaryOperation.new(ctx.next_id, TypeRef::BOOL, BinaryOp::Ne, value_id, nil_val.id)
+          ctx.emit(ne_check)
+          return ne_check.id
+        end
       end
 
       if is_union_or_nilable_type?(value_type)
@@ -38637,23 +38690,35 @@ module Crystal::HIR
     # Crystal implicitly calls to_unsafe when passing a class instance to a C function.
     # For example, `LibC.pthread_mutex_lock(self)` where self is Thread::Mutex
     # becomes `LibC.pthread_mutex_lock(self.to_unsafe)`.
+    # Also handles Slice/String/Array arguments: `LibC.write(fd, slice, size)`
+    # becomes `LibC.write(fd, slice.to_unsafe, size)`.
     private def try_implicit_to_unsafe(
       ctx : LoweringContext,
       arg_val : ValueId,
       arg_node,
     ) : ValueId
-      # Only handle `self` for now
       class_name : String? = nil
       case arg_node
       when CrystalV2::Compiler::Frontend::SelfNode
         class_name = @current_class
+      else
+        # For any other expression, try to determine the type from the value's TypeRef.
+        # This handles VarNode (local/param refs), CallNode results, etc.
+        type_ref = ctx.type_of(arg_val)
+        if type_ref && type_ref != TypeRef::POINTER && type_ref != TypeRef::VOID &&
+           type_ref.id >= TypeRef::FIRST_USER_TYPE
+          resolved_name = get_type_name_from_ref(type_ref)
+          if resolved_name != "Unknown" && resolved_name != "Pointer"
+            class_name = resolved_name
+          end
+        end
       end
       return arg_val unless class_name
 
       # Check if this class has a `to_unsafe` method
       to_unsafe_name = "#{class_name}#to_unsafe"
       if @function_defs.has_key?(to_unsafe_name) || @module.has_function?(to_unsafe_name)
-        # Emit call: self.to_unsafe (receiver=self, no extra args)
+        # Emit call: obj.to_unsafe (receiver=obj, no extra args)
         call = Call.new(ctx.next_id, TypeRef::POINTER, arg_val, to_unsafe_name, [] of ValueId)
         ctx.emit(call)
         ctx.register_type(call.id, TypeRef::POINTER)
