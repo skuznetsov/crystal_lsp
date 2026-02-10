@@ -1644,6 +1644,7 @@ module Crystal::HIR
     @type_literal_values : Set(ValueId)
     @debug_callsite : String?
     @pending_def_annotations : Array(Tuple(CrystalV2::Compiler::Frontend::AnnotationNode, CrystalV2::Compiler::Frontend::ArenaLike))
+    @pending_primitive_kind : String? = nil
 
     # Deferred classvar initializations to be processed at start of __crystal_main.
     # Stores: {expr_id, arena, owning_class_name}
@@ -1839,6 +1840,7 @@ module Crystal::HIR
 
     private def clear_pending_effect_annotations : Nil
       @pending_def_annotations.clear
+      @pending_primitive_kind = nil
     end
 
     def seed_top_level_type_names(names : Enumerable(String)) : Nil
@@ -1933,6 +1935,27 @@ module Crystal::HIR
       arena : CrystalV2::Compiler::Frontend::ArenaLike,
     ) : Nil
       with_arena(arena) do
+        name = resolve_annotation_name(node.name)
+        if name == "Primitive"
+          # Extract symbol argument: @[Primitive(:binary)] → "binary"
+          if node.args.size == 1
+            arg = arena[node.args[0]]
+            if arg.is_a?(CrystalV2::Compiler::Frontend::SymbolNode)
+              kind = String.new(arg.name)
+              kind = kind.lstrip(':')
+              @pending_primitive_kind = kind
+              STDERR.puts "[PRIM_DETECT] Detected @[Primitive(:#{kind})] pending_primitive_kind set" if ENV["DEBUG_PRIMITIVES"]?
+            else
+              STDERR.puts "[PRIM_DETECT] Primitive arg is #{arg.class}, not SymbolNode" if ENV["DEBUG_PRIMITIVES"]?
+            end
+          else
+            STDERR.puts "[PRIM_DETECT] Primitive has #{node.args.size} args (expected 1)" if ENV["DEBUG_PRIMITIVES"]?
+          end
+          return
+        elsif name == "AlwaysInline"
+          # Store for later use (currently informational)
+          return
+        end
         return unless effect_annotation_name(node)
       end
       @pending_def_annotations << {node, arena}
@@ -12149,6 +12172,10 @@ module Crystal::HIR
                   skip_next = true
                 end
               end
+            when CrystalV2::Compiler::Frontend::AnnotationNode
+              # Scan for @[Primitive(:name)] during registration so demand-driven
+              # lowering knows which methods are primitives (skip body compilation).
+              remember_effect_annotation(member, @arena)
             when CrystalV2::Compiler::Frontend::DefNode
               # Register method signature
               method_name = String.new(member.name)
@@ -12171,6 +12198,14 @@ module Crystal::HIR
                           else
                             "#{class_name}##{method_name}"
                           end
+              # Register primitive from preceding @[Primitive(:name)] annotation
+              if prim = @pending_primitive_kind
+                @pending_primitive_kind = nil
+                @module.register_primitive(base_name, prim)
+                if ENV["DEBUG_PRIMITIVES"]?
+                  STDERR.puts "[PRIMITIVE_REG] #{base_name} → :#{prim}"
+                end
+              end
               return_start = mono_debug ? Time.instant : nil
               type_literal_name = infer_type_literal_return_name_from_body(member, class_name)
               enum_return_name : String? = nil
@@ -14672,6 +14707,18 @@ module Crystal::HIR
 
       # Skip abstract methods - they have no implementation
       if node.is_abstract
+        clear_pending_effect_annotations
+        return
+      end
+
+      # Skip primitive methods — they are handled at call site via intrinsics.
+      if prim = @pending_primitive_kind
+        @pending_primitive_kind = nil
+        @module.register_primitive(base_name, prim)
+        if ENV["DEBUG_PRIMITIVES"]?
+          STDERR.puts "[PRIMITIVE] Registered #{base_name} as primitive :#{prim}"
+        end
+        clear_pending_effect_annotations
         return
       end
 
@@ -15857,6 +15904,311 @@ module Crystal::HIR
     end
 
     # Check if a TypeRef is a numeric primitive type (supports binary ops)
+    # ── Primitive call dispatch ──────────────────────────────────────────
+    # Handles @[Primitive(:kind)] methods by emitting intrinsic HIR nodes
+    # instead of a regular Call.  Returns nil if the primitive is unhandled
+    # and the caller should fall through to a normal call.
+
+    private def lower_primitive_call(
+      ctx : LoweringContext,
+      kind : String,
+      method_name : String,
+      receiver_id : ValueId?,
+      args : Array(ValueId),
+      return_type : TypeRef,
+      mangled_name : String,
+    ) : ValueId?
+      case kind
+      when "binary"
+        lower_primitive_binary(ctx, method_name, receiver_id, args, return_type)
+      when "convert", "unchecked_convert"
+        lower_primitive_convert(ctx, method_name, receiver_id, args, return_type, mangled_name)
+      when "pointer_get"
+        lower_primitive_pointer_get(ctx, receiver_id, return_type, mangled_name)
+      when "pointer_set"
+        lower_primitive_pointer_set(ctx, receiver_id, args, mangled_name)
+      when "pointer_add"
+        lower_primitive_pointer_add(ctx, method_name, receiver_id, args, mangled_name)
+      when "pointer_address"
+        lower_primitive_pointer_address(ctx, receiver_id)
+      when "pointer_new"
+        lower_primitive_pointer_new_intrinsic(ctx, args, return_type, mangled_name)
+      when "pointer_malloc"
+        lower_primitive_pointer_malloc(ctx, args, return_type, mangled_name)
+      when "pointer_realloc"
+        lower_primitive_pointer_realloc(ctx, receiver_id, args)
+      when "pointer_diff"
+        lower_primitive_pointer_diff(ctx, receiver_id, args, mangled_name)
+      when "object_crystal_type_id"
+        lower_primitive_crystal_type_id(ctx, receiver_id)
+      when "object_id"
+        lower_primitive_object_id(ctx, receiver_id)
+      when "allocate"
+        nil # Handled by existing allocator path
+      when "enum_value", "enum_new"
+        receiver_id || args.first? # Pass-through (identity)
+      when "symbol_to_s"
+        nil # TODO: symbol table lookup
+      when "class"
+        nil # Complex — defer to normal dispatch
+      when "load_atomic"
+        nil # Already handled via Atomic method dispatch in MIR
+      when "store_atomic"
+        nil # Already handled via Atomic method dispatch in MIR
+      when "tuple_indexer_known_index"
+        nil # Already handled by existing tuple code
+      when "proc_call"
+        nil # Already handled separately
+      else
+        nil # Unknown primitive — fall through to normal call
+      end
+    end
+
+    private def lower_primitive_binary(
+      ctx : LoweringContext,
+      method_name : String,
+      receiver_id : ValueId?,
+      args : Array(ValueId),
+      return_type : TypeRef,
+    ) : ValueId?
+      return nil unless receiver_id && args.size == 1
+      receiver_type = ctx.type_of(receiver_id)
+      return nil unless numeric_primitive?(receiver_type)
+      bin_op = binary_op_for_method(method_name)
+      return nil unless bin_op
+      result_type = case bin_op
+                    when BinaryOp::Eq, BinaryOp::Ne, BinaryOp::Lt, BinaryOp::Le,
+                         BinaryOp::Gt, BinaryOp::Ge, BinaryOp::And, BinaryOp::Or
+                      TypeRef::BOOL
+                    else
+                      receiver_type
+                    end
+      bin_node = BinaryOperation.new(ctx.next_id, result_type, bin_op, receiver_id, args[0])
+      ctx.emit(bin_node)
+      ctx.register_type(bin_node.id, result_type)
+      bin_node.id
+    end
+
+    private def lower_primitive_convert(
+      ctx : LoweringContext,
+      method_name : String,
+      receiver_id : ValueId?,
+      args : Array(ValueId),
+      return_type : TypeRef,
+      mangled_name : String,
+    ) : ValueId?
+      # Convert primitives: the receiver is cast to the return type.
+      # The return type is determined by the enclosing class (e.g. Int32#to_u8! → UInt8).
+      return nil unless receiver_id
+      target = return_type
+      if target == TypeRef::VOID
+        # Try to infer from method name
+        target = type_ref_for_conversion_method(method_name) || return nil
+      end
+      cast = Cast.new(ctx.next_id, target, receiver_id, target)
+      ctx.emit(cast)
+      ctx.register_type(cast.id, target)
+      cast.id
+    end
+
+    private def type_ref_for_conversion_method(method_name : String) : TypeRef?
+      case method_name
+      when "to_i", "to_i32", "to_i32!" then TypeRef::INT32
+      when "to_i8", "to_i8!"           then TypeRef::INT8
+      when "to_i16", "to_i16!"         then TypeRef::INT16
+      when "to_i64", "to_i64!"         then TypeRef::INT64
+      when "to_i128"                    then TypeRef::INT128
+      when "to_u", "to_u32", "to_u32!" then TypeRef::UINT32
+      when "to_u8", "to_u8!"           then TypeRef::UINT8
+      when "to_u16", "to_u16!"         then TypeRef::UINT16
+      when "to_u64", "to_u64!"         then TypeRef::UINT64
+      when "to_u128"                    then TypeRef::UINT128
+      when "to_f", "to_f64", "to_f64!" then TypeRef::FLOAT64
+      when "to_f32", "to_f32!"         then TypeRef::FLOAT32
+      else                                   nil
+      end
+    end
+
+    private def lower_primitive_pointer_get(
+      ctx : LoweringContext,
+      receiver_id : ValueId?,
+      return_type : TypeRef,
+      mangled_name : String,
+    ) : ValueId?
+      return nil unless receiver_id
+      receiver_type = ctx.type_of(receiver_id)
+      recv_desc = @module.get_type_descriptor(receiver_type)
+      is_pointer = receiver_type == TypeRef::POINTER ||
+                   (recv_desc && recv_desc.kind == TypeKind::Pointer)
+      return nil unless is_pointer
+      deref_type = if recv_desc && recv_desc.name.starts_with?("Pointer(") && recv_desc.name.ends_with?(")")
+                     type_ref_for_name(recv_desc.name[8...-1])
+                   else
+                     TypeRef::UINT8
+                   end
+      load_node = PointerLoad.new(ctx.next_id, deref_type, receiver_id, nil)
+      ctx.emit(load_node)
+      ctx.register_type(load_node.id, deref_type)
+      load_node.id
+    end
+
+    private def lower_primitive_pointer_set(
+      ctx : LoweringContext,
+      receiver_id : ValueId?,
+      args : Array(ValueId),
+      mangled_name : String,
+    ) : ValueId?
+      return nil unless receiver_id && args.size == 1
+      store_node = PointerStore.new(ctx.next_id, TypeRef::VOID, receiver_id, args[0], nil)
+      ctx.emit(store_node)
+      store_node.id
+    end
+
+    private def lower_primitive_pointer_add(
+      ctx : LoweringContext,
+      method_name : String,
+      receiver_id : ValueId?,
+      args : Array(ValueId),
+      mangled_name : String,
+    ) : ValueId?
+      return nil unless receiver_id && args.size == 1
+      receiver_type = ctx.type_of(receiver_id)
+      recv_desc = @module.get_type_descriptor(receiver_type)
+      is_pointer = receiver_type == TypeRef::POINTER ||
+                   (recv_desc && recv_desc.kind == TypeKind::Pointer)
+      return nil unless is_pointer
+      offset_id = args[0]
+      if method_name == "-"
+        neg_one = Literal.new(ctx.next_id, TypeRef::INT32, -1_i64)
+        ctx.emit(neg_one)
+        ctx.register_type(neg_one.id, TypeRef::INT32)
+        neg_offset = BinaryOperation.new(ctx.next_id, TypeRef::INT32, BinaryOp::Mul, offset_id, neg_one.id)
+        ctx.emit(neg_offset)
+        ctx.register_type(neg_offset.id, TypeRef::INT32)
+        offset_id = neg_offset.id
+      end
+      element_type = if recv_desc && recv_desc.name.starts_with?("Pointer(")
+                       pointer_element_type(recv_desc.name)
+                     else
+                       TypeRef::INT32
+                     end
+      result_type = receiver_type == TypeRef::VOID ? TypeRef::POINTER : receiver_type
+      add_node = PointerAdd.new(ctx.next_id, result_type, receiver_id, offset_id, element_type)
+      ctx.emit(add_node)
+      ctx.register_type(add_node.id, result_type)
+      add_node.id
+    end
+
+    private def lower_primitive_pointer_address(
+      ctx : LoweringContext,
+      receiver_id : ValueId?,
+    ) : ValueId?
+      return nil unless receiver_id
+      # Pointer#address returns UInt64 (ptrtoint)
+      cast = Cast.new(ctx.next_id, TypeRef::UINT64, receiver_id, TypeRef::UINT64)
+      ctx.emit(cast)
+      ctx.register_type(cast.id, TypeRef::UINT64)
+      cast.id
+    end
+
+    private def lower_primitive_pointer_new_intrinsic(
+      ctx : LoweringContext,
+      args : Array(ValueId),
+      return_type : TypeRef,
+      mangled_name : String,
+    ) : ValueId?
+      return nil unless args.size == 1
+      # Pointer(T).new(address : UInt64) → inttoptr
+      result_type = return_type == TypeRef::VOID ? TypeRef::POINTER : return_type
+      cast = Cast.new(ctx.next_id, result_type, args[0], result_type)
+      ctx.emit(cast)
+      ctx.register_type(cast.id, result_type)
+      cast.id
+    end
+
+    private def lower_primitive_pointer_malloc(
+      ctx : LoweringContext,
+      args : Array(ValueId),
+      return_type : TypeRef,
+      mangled_name : String,
+    ) : ValueId?
+      return nil unless args.size == 1
+      # Extract element type from the mangled class name (e.g. "Pointer(UInt8).malloc")
+      element_type = if mangled_name.includes?("Pointer(")
+                       pointer_element_type(mangled_name)
+                     else
+                       TypeRef::UINT8
+                     end
+      result_type = return_type == TypeRef::VOID ? TypeRef::POINTER : return_type
+      malloc_node = PointerMalloc.new(ctx.next_id, result_type, element_type, args[0])
+      ctx.emit(malloc_node)
+      ctx.register_type(malloc_node.id, result_type)
+      malloc_node.id
+    end
+
+    private def lower_primitive_pointer_realloc(
+      ctx : LoweringContext,
+      receiver_id : ValueId?,
+      args : Array(ValueId),
+    ) : ValueId?
+      return nil unless receiver_id && args.size == 1
+      receiver_type = ctx.type_of(receiver_id)
+      result_type = receiver_type == TypeRef::VOID ? TypeRef::POINTER : receiver_type
+      realloc_node = PointerRealloc.new(ctx.next_id, result_type, receiver_id, args[0])
+      ctx.emit(realloc_node)
+      ctx.register_type(realloc_node.id, result_type)
+      realloc_node.id
+    end
+
+    private def lower_primitive_pointer_diff(
+      ctx : LoweringContext,
+      receiver_id : ValueId?,
+      args : Array(ValueId),
+      mangled_name : String,
+    ) : ValueId?
+      return nil unless receiver_id && args.size == 1
+      # Pointer#-(other : Pointer) → Int64 (element count difference)
+      # First cast both pointers to Int64
+      lhs = Cast.new(ctx.next_id, TypeRef::INT64, receiver_id, TypeRef::INT64)
+      ctx.emit(lhs)
+      ctx.register_type(lhs.id, TypeRef::INT64)
+      rhs = Cast.new(ctx.next_id, TypeRef::INT64, args[0], TypeRef::INT64)
+      ctx.emit(rhs)
+      ctx.register_type(rhs.id, TypeRef::INT64)
+      # Subtract
+      diff = BinaryOperation.new(ctx.next_id, TypeRef::INT64, BinaryOp::Sub, lhs.id, rhs.id)
+      ctx.emit(diff)
+      ctx.register_type(diff.id, TypeRef::INT64)
+      # Divide by element size — for now emit raw byte diff (MIR/LLVM can handle sizing)
+      diff.id
+    end
+
+    private def lower_primitive_crystal_type_id(
+      ctx : LoweringContext,
+      receiver_id : ValueId?,
+    ) : ValueId?
+      return nil unless receiver_id
+      # Read the type_id field at offset 0 (i32)
+      type_id_field = FieldGet.new(ctx.next_id, TypeRef::INT32, receiver_id, "__type_id", 0)
+      ctx.emit(type_id_field)
+      ctx.register_type(type_id_field.id, TypeRef::INT32)
+      type_id_field.id
+    end
+
+    private def lower_primitive_object_id(
+      ctx : LoweringContext,
+      receiver_id : ValueId?,
+    ) : ValueId?
+      return nil unless receiver_id
+      # object_id returns the pointer address as UInt64
+      cast = Cast.new(ctx.next_id, TypeRef::UINT64, receiver_id, TypeRef::UINT64)
+      ctx.emit(cast)
+      ctx.register_type(cast.id, TypeRef::UINT64)
+      cast.id
+    end
+
+    # ── End primitive dispatch ────────────────────────────────────────────
+
     private def numeric_primitive?(type : TypeRef) : Bool
       case type
       when TypeRef::INT8, TypeRef::INT16, TypeRef::INT32, TypeRef::INT64, TypeRef::INT128,
@@ -27243,16 +27595,22 @@ module Crystal::HIR
                      ivar_offset = 0
                      if class_name = @current_class
                        search_name : String? = class_name
+                       found = false
                        while search_name
                          if class_info = @class_info[search_name]?
                            if found_ivar = class_info.ivars.find { |iv| iv.name == ivar_name }
                              ivar_offset = found_ivar.offset
+                             found = true
                              break
                            end
                            search_name = class_info.parent_name
                          else
                            break
                          end
+                       end
+                       # Fallback: implicit field at end of known ivars (e.g. String's @c)
+                       if !found && (ci = @class_info[@current_class]?) && !ci.ivars.empty?
+                         ivar_offset = ci.size
                        end
                      end
                      self_id = emit_self(ctx)
@@ -38157,6 +38515,14 @@ module Crystal::HIR
           return lit.id
         end
       end
+
+      # Check if callee is a registered primitive — emit intrinsic instead of Call
+      if prim_kind = @module.primitive_for(mangled_method_name) || @module.primitive_for(base_method_name)
+        if prim_result = lower_primitive_call(ctx, prim_kind, method_name, receiver_id, args, return_type, mangled_method_name)
+          return prim_result
+        end
+      end
+
       call = Call.new(ctx.next_id, return_type, receiver_id, mangled_method_name, args, block_id, call_virtual)
       ctx.emit(call)
       ctx.register_type(call.id, return_type)

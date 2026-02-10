@@ -1231,6 +1231,7 @@ module Crystal::HIR
     getter class_parents : Hash(String, String?)
     getter module_includers : Hash(String, Array(String))
     getter lib_names : Set(String)
+    getter primitive_methods : Hash(String, String)
 
     @next_function_id : FunctionId = 0_u32
     @next_type_id : TypeId = TypeRef::FIRST_USER_TYPE
@@ -1255,10 +1256,23 @@ module Crystal::HIR
       @class_parents = {} of String => String?
       @module_includers = {} of String => Array(String)
       @lib_names = Set(String).new
+      @primitive_methods = {} of String => String
     end
 
     def register_class_parent(name : String, parent : String?) : Nil
       @class_parents[name] = parent
+    end
+
+    def register_primitive(name : String, kind : String) : Nil
+      @primitive_methods[name] = kind
+    end
+
+    def primitive_for(name : String) : String?
+      @primitive_methods[name]? || begin
+        if dollar = name.index('$')
+          @primitive_methods[name[0, dollar]]?
+        end
+      end
     end
 
     def register_module_includer(module_name : String, class_name : String) : Nil
