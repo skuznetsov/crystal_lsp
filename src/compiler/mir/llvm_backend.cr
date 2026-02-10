@@ -4078,7 +4078,44 @@ module Crystal::MIR
         end
       end
 
-      is_signed = operand_type.id <= TypeRef::INT128.id
+      # Determine signedness from both operands for correct mixed-sign handling.
+      # When comparing signed Int32 against unsigned UInt32, UInt32::MAX (0xFFFFFFFF)
+      # is -1 in signed i32 → icmp sgt i32 5, -1 = true → wrong!
+      # Fix: promote both to wider signed type (i64) before comparing.
+      left_is_signed = operand_type.id >= TypeRef::INT8.id && operand_type.id <= TypeRef::INT128.id
+      left_is_unsigned = operand_type.id >= TypeRef::UINT8.id && operand_type.id <= TypeRef::UINT128.id
+      right_is_signed = right_type ? (right_type.id >= TypeRef::INT8.id && right_type.id <= TypeRef::INT128.id) : left_is_signed
+      right_is_unsigned = right_type ? (right_type.id >= TypeRef::UINT8.id && right_type.id <= TypeRef::UINT128.id) : left_is_unsigned
+
+      mixed_sign = (left_is_signed && right_is_unsigned) || (left_is_unsigned && right_is_signed)
+
+      if mixed_sign && is_comparison && operand_type_str.starts_with?("i") && right_type_str.starts_with?("i")
+        # Promote both operands to a wider signed type that can represent both ranges
+        left_bits = operand_type_str[1..].to_i? || 32
+        right_bits = right_type_str[1..].to_i? || 32
+        max_bits = {left_bits, right_bits}.max
+        wider_bits = max_bits < 64 ? max_bits * 2 : (max_bits < 128 ? 128 : 0)
+
+        if wider_bits > 0
+          wider_type = "i#{wider_bits}"
+          if left_bits < wider_bits
+            emit "%mix.#{inst.id}.left = #{left_is_signed ? "sext" : "zext"} #{operand_type_str} #{left} to #{wider_type}"
+            left = "%mix.#{inst.id}.left"
+          end
+          if right_bits < wider_bits
+            emit "%mix.#{inst.id}.right = #{right_is_signed ? "sext" : "zext"} #{right_type_str} #{right} to #{wider_type}"
+            right = "%mix.#{inst.id}.right"
+          end
+          operand_type_str = wider_type
+          right_type_str = wider_type
+          is_signed = true  # signed comparison on promoted values
+        else
+          # Can't promote further (i128 vs i128); use unsigned comparison
+          is_signed = false
+        end
+      else
+        is_signed = left_is_signed || (operand_type.id <= TypeRef::INT128.id)
+      end
 
       # Use float operations for float/double types
       op = if is_float_op

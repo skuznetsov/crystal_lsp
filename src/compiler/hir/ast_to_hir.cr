@@ -5732,8 +5732,14 @@ module Crystal::HIR
                       end
                       inferred = TypeRef::POINTER if inferred == TypeRef::VOID
                       unless ivars.any? { |iv| iv.name == ivar_name }
+                        # Store the default value expression for later evaluation in the allocator
+                        # (same as class body handler at line 12583)
+                        default_expr = member.value
+                        needs_expr = !is_trivial_default(value_node)
                         offset = align_offset(offset, type_alignment(inferred))
-                        ivars << IVarInfo.new(ivar_name, inferred, offset)
+                        ivars << IVarInfo.new(ivar_name, inferred, offset,
+                          default_expr_id: needs_expr ? default_expr : nil,
+                          default_arena: needs_expr ? @arena : nil)
                         offset += type_size(inferred)
                       end
                     end
@@ -13895,6 +13901,17 @@ module Crystal::HIR
           default_node = default_arena[default_expr_id]
           is_lazy_getter = default_node.is_a?(CrystalV2::Compiler::Frontend::BlockNode)
           unless is_lazy_getter
+            # Try to resolve simple defaults without full lower_expr (avoids
+            # triggering demand-driven compilation for module ivar defaults)
+            resolved_literal = try_resolve_simple_default(default_node, default_arena, ivar.type)
+            if resolved_literal
+              default_val = Literal.new(ctx.next_id, ivar.type, resolved_literal)
+              ctx.emit(default_val)
+              ivar_store = FieldSet.new(ctx.next_id, TypeRef::VOID, alloc.id, ivar.name, default_val.id, ivar.offset)
+              ctx.emit(ivar_store)
+              next
+            end
+
             saved_arena = @arena
             saved_class = @current_class
             @arena = default_arena
@@ -15912,7 +15929,7 @@ module Crystal::HIR
       when "^"  then BinaryOp::BitXor
       when "<<" then BinaryOp::Shl
       when ">>" then BinaryOp::Shr
-      when "==" then BinaryOp::Eq
+      when "==", "===" then BinaryOp::Eq
       when "!=" then BinaryOp::Ne
       when "<"  then BinaryOp::Lt
       when "<=" then BinaryOp::Le
@@ -23588,8 +23605,66 @@ module Crystal::HIR
         !value_node.value # false is handled by 0 default
       when CrystalV2::Compiler::Frontend::NilNode
         true
+      when CrystalV2::Compiler::Frontend::MemberAccessNode
+        # Pointer(T).null, Bytes.empty, etc. — all produce zero/null values
+        member_name = String.new(value_node.member)
+        member_name == "null" || member_name == "empty"
       else
         false
+      end
+    end
+
+    # Try to resolve a simple default expression to a literal value without calling lower_expr.
+    # This avoids triggering demand-driven compilation for module ivar defaults.
+    # Returns the literal value (Int64 or nil) if resolvable, nil otherwise.
+    private def try_resolve_simple_default(
+      default_node,
+      default_arena : CrystalV2::Compiler::Frontend::ArenaLike,
+      ivar_type : TypeRef,
+    ) : (Int64 | Nil)?
+      case default_node
+      when CrystalV2::Compiler::Frontend::BoolNode
+        return default_node.value ? 1_i64 : 0_i64
+      when CrystalV2::Compiler::Frontend::NumberNode
+        num_str = String.new(default_node.value)
+        # Strip type suffix (e.g., "10_u8" → "10")
+        num_str = num_str.gsub('_', "")
+        if num_str.includes?('.')
+          return nil # Float — can't represent as Int64 literal
+        end
+        return num_str.to_i64?
+      when CrystalV2::Compiler::Frontend::PathNode
+        # Constant reference like IO::DEFAULT_BUFFER_SIZE
+        old_arena = @arena
+        @arena = default_arena
+        begin
+          raw_path = collect_path_string(default_node)
+          full_name = resolve_path_string_in_context(raw_path)
+          if resolved = resolve_constant_name_in_context(full_name)
+            if literal = @constant_literal_values[resolved]?
+              if literal.is_a?(CrystalV2::Compiler::Semantic::MacroNumberValue)
+                val = literal.value
+                return val.is_a?(Int64) ? val : val.to_i64
+              end
+            end
+          end
+        ensure
+          @arena = old_arena
+        end
+        nil
+      when CrystalV2::Compiler::Frontend::ConstantNode
+        name = String.new(default_node.name)
+        if resolved = resolve_constant_name_in_context(name)
+          if literal = @constant_literal_values[resolved]?
+            if literal.is_a?(CrystalV2::Compiler::Semantic::MacroNumberValue)
+              val = literal.value
+              return val.is_a?(Int64) ? val : val.to_i64
+            end
+          end
+        end
+        nil
+      else
+        nil
       end
     end
 
@@ -29038,7 +29113,9 @@ module Crystal::HIR
                      left_type == TypeRef::BOOL || left_type == TypeRef::CHAR ||
                      left_type == TypeRef::STRING || left_type == TypeRef::NIL ||
                      left_type == TypeRef::VOID
-      if !is_primitive && (op_str == "+" || op_str == "-" || op_str == "*" || op_str == "/" || op_str == "%")
+      if !is_primitive && (op_str == "+" || op_str == "-" || op_str == "*" || op_str == "/" || op_str == "%" ||
+                            op_str == "===" || op_str == "==" || op_str == "!=" ||
+                            op_str == "<" || op_str == "<=" || op_str == ">" || op_str == ">=")
         return emit_binary_call(ctx, left_id, op_str, right_id)
       end
 
@@ -29054,7 +29131,7 @@ module Crystal::HIR
            when "^"  then BinaryOp::BitXor
            when "<<" then BinaryOp::Shl
            when ">>" then BinaryOp::Shr
-           when "==" then BinaryOp::Eq
+           when "==", "===" then BinaryOp::Eq
            when "!=" then BinaryOp::Ne
            when "<"  then BinaryOp::Lt
            when "<=" then BinaryOp::Le
