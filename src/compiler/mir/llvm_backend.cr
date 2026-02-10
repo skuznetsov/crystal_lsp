@@ -7217,11 +7217,11 @@ module Crystal::MIR
           end
         end
         if inst.variant_type_id == 0
-          # Checking for non-nil variant: ptr != null
-          emit "#{name} = icmp ne ptr #{ptr_val}, null"
-        else
-          # Checking for nil variant: ptr == null
+          # Checking if value IS variant 0 (nil): ptr == null
           emit "#{name} = icmp eq ptr #{ptr_val}, null"
+        else
+          # Checking if value IS a non-nil variant: ptr != null
+          emit "#{name} = icmp ne ptr #{ptr_val}, null"
         end
       end
     end
