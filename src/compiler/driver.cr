@@ -693,6 +693,26 @@ module Crystal::V2
           globals << {global_name, cvar.type, cvar.initial_value}
         end
       end
+
+      # Register lib/module/class constants as globals with initial values
+      registered_globals = globals.map { |g| g[0] }.to_set
+      hir_converter.constant_literal_values.each do |full_name, macro_value|
+        next unless macro_value.is_a?(CrystalV2::Compiler::Semantic::MacroNumberValue)
+        next if macro_value.value.is_a?(Float64)
+        if idx = full_name.rindex("::")
+          owner = full_name[0, idx]
+          const_name = full_name[(idx + 2)..]
+        else
+          owner = "Object"
+          const_name = full_name
+        end
+        global_name = MIR::HIRToMIRLowering.class_var_global_name(owner, const_name)
+        next if registered_globals.includes?(global_name)
+        const_type = hir_converter.constant_types[full_name]? || HIR::TypeRef::INT32
+        globals << {global_name, const_type, macro_value.value.as(Int64)}
+        registered_globals.add(global_name)
+      end
+
       mir_lowering.register_globals(globals)
       mir_lowering.register_extern_globals(hir_module.extern_globals)
 
