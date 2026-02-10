@@ -748,7 +748,7 @@ module Crystal::MIR
       is_wrong_receiver = name == "Int32$Hunsafe_fetch$$Int32"
       # Any V2-mangled method name (contains $H, $D, or $CC) that has no body
       # is dead code from type-inference gaps. Emit a stub to avoid linker errors.
-      is_v2_mangled = name.includes?("$H") || name.includes?("$D") || name.includes?("$CC")
+      is_v2_mangled = name.includes?("$H") || name.includes?("$D") || name.includes?("$CC") || name.includes?("$$")
 
       # Pointer::Appender#<<(UInt8) — real method, emit proper implementation.
       # Stores byte at current pointer, advances pointer by 1.
@@ -1362,8 +1362,23 @@ module Crystal::MIR
 
         emit_raw "%#{name} = type { #{field_types.join(", ")} }\n"
       else
-        # For types without fields, still emit proper layout for classes
-        if type.kind.reference?
+        # StaticArray(T, N) — emit as [N * elem_size x i8] to ensure correct alloca size.
+        # StaticArray has no fields in the MIR registry but needs storage for N elements.
+        if type.name.starts_with?("StaticArray(")
+          if m = type.name.match(/StaticArray\((.+),\s*(\d+)\)/)
+            elem_name = m[1].strip
+            array_count = m[2].to_u64
+            elem_mir_type = @module.type_registry.get_by_name(elem_name)
+            elem_size = elem_mir_type ? elem_mir_type.size : 1_u64
+            total_bytes = elem_size * array_count
+            total_bytes = 8_u64 if total_bytes == 0
+            emit_raw "%#{name} = type { [#{total_bytes} x i8] }\n"
+          else
+            # Can't parse — use type.size if available
+            total_bytes = type.size > 0 ? type.size : 8_u64
+            emit_raw "%#{name} = type { [#{total_bytes} x i8] }\n"
+          end
+        elsif type.kind.reference?
           emit_raw "%#{name} = type { ptr }\n"  # just vtable
         else
           emit_raw "%#{name} = type {}\n"
@@ -7330,6 +7345,9 @@ module Crystal::MIR
         elsif index_llvm == "i64"
           emit "%#{base_name}.idx_int = trunc i64 #{index} to i32"
           index = "%#{base_name}.idx_int"
+        elsif index_llvm == "i128"
+          emit "%#{base_name}.idx_int = trunc i128 #{index} to i32"
+          index = "%#{base_name}.idx_int"
         elsif index_llvm == "double"
           emit "%#{base_name}.idx_int = fptosi double #{index} to i32"
           index = "%#{base_name}.idx_int"
@@ -7408,6 +7426,9 @@ module Crystal::MIR
           index = "%#{base_name}.idx_int"
         elsif index_llvm == "i64"
           emit "%#{base_name}.idx_int = trunc i64 #{index} to i32"
+          index = "%#{base_name}.idx_int"
+        elsif index_llvm == "i128"
+          emit "%#{base_name}.idx_int = trunc i128 #{index} to i32"
           index = "%#{base_name}.idx_int"
         elsif index_llvm == "double"
           emit "%#{base_name}.idx_int = fptosi double #{index} to i32"

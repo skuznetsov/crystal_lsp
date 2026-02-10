@@ -7753,15 +7753,20 @@ module CrystalV2
             return PREFIX_ERROR
           # Phase 103H: Arithmetic operators (Plus, Minus, Star) need special handling
           # They can be unary (no space after) or binary (space after)
-          # Example: "foo +1" is call, "foo + 1" is binary operation
+          # Example: "foo -1" is call with arg -1, "foo - 1" is binary operation
           when Token::Kind::Plus, Token::Kind::Minus, Token::Kind::Star, Token::Kind::StarStar
-            # Check if next token is whitespace (binary) or not (unary)
             next_tok = peek_token(1)
-            if next_tok.kind == Token::Kind::Whitespace || next_tok.kind == Token::Kind::Newline
-              # Binary operator context - don't parse as call argument
+            # Newline after operator = binary context
+            if next_tok.kind == Token::Kind::Newline
               return PREFIX_ERROR
             end
-            # Otherwise, allow as unary prefix in argument (foo +1)
+            # Use span offsets to detect whitespace gap (whitespace tokens are stripped)
+            # "puts -1" → minus ends at 6, number starts at 6 → no gap → unary (call arg)
+            # "puts - 1" → minus ends at 6, number starts at 7 → gap → binary
+            if next_tok.span.start_offset > current_token.span.end_offset
+              return PREFIX_ERROR
+            end
+            # No space after operator: unary prefix in argument (foo -1)
           # Don't parse as call if followed by binary/logical operators that can't start an argument
           # Phase 103K: Slash and FloorDiv can't be unary, always return error
           # Phase 103Q: ThinArrow is proc type notation, not call argument
@@ -11522,7 +11527,15 @@ module CrystalV2
                   !(prev_token && prev_token.kind == Token::Kind::Operator && slice_eq?(prev_token.slice, "."))))
             boundary_token = current_token
             force_call = macro_call_candidate || colon_immediate
-            if !force_call && call_without_parens_disallowed?(boundary_token)
+            # Allow Plus/Minus through as potential unary prefix when immediately
+            # followed by operand (no whitespace gap): "puts -1" → call, "size - 1" → binary
+            is_unary_prefix = (boundary_token.kind == Token::Kind::Plus || boundary_token.kind == Token::Kind::Minus) &&
+                              begin
+                                peeked = peek_token(1)
+                                peeked.kind != Token::Kind::Newline &&
+                                peeked.span.start_offset <= boundary_token.span.end_offset
+                              end
+            if !force_call && call_without_parens_disallowed?(boundary_token) && !is_unary_prefix
               @arena.add_typed(IdentifierNode.new(identifier_token.span, @string_pool.intern(identifier_token.slice)))
             else
               maybe_call = try_parse_call_args_without_parens(identifier_token)
