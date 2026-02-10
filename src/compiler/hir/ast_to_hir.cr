@@ -22977,6 +22977,13 @@ module Crystal::HIR
                        else
                          input_names.map { |name| substitute_type_params(name, param_map.not_nil!) }
                        end
+      # Resolve `self` type in block parameter annotations (e.g., Int32#upto(&block : self ->))
+      if receiver_type && receiver_type != TypeRef::VOID
+        recv_name = get_type_name_from_ref(receiver_type)
+        if recv_name != "Void" && recv_name != "Unknown"
+          resolved_names = resolved_names.map { |name| name == "self" ? recv_name : name }
+        end
+      end
       if receiver_type && receiver_type != TypeRef::VOID
         if recv_desc = @module.get_type_descriptor(receiver_type)
           if elem_name = element_type_for_type_name(recv_desc.name)
