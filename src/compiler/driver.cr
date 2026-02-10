@@ -1,9 +1,12 @@
+# DEPRECATED: Legacy compiler driver — use cli.cr via crystal_v2.cr instead.
+#
+# This file is kept for reference only. The active entry point is:
+#   crystal build src/crystal_v2.cr -o bin/crystal_v2
+#   bin/crystal_v2 <input.cr>
+#
+# Original description:
 # Crystal v2 Compiler Driver
-#
 # End-to-end compilation: Crystal source → HIR → MIR → LLVM IR → binary
-#
-# Usage:
-#   crystal run src/compiler/driver.cr -- input.cr -o output
 
 require "digest/sha256"
 require "./frontend/lexer"
