@@ -1756,6 +1756,7 @@ module Crystal::MIR
       emit_raw "}\n\n"
 
       # string_concat: allocate new buffer and concatenate
+      # String concat: works with Crystal String layout {type_id:i32, bytesize:i32, size:i32, bytes:[N x i8]}
       emit_raw "define ptr @__crystal_v2_string_concat(ptr %a, ptr %b) {\n"
       emit_raw "entry:\n"
       emit_raw "  %a_null = icmp eq ptr %a, null\n"
@@ -1773,13 +1774,37 @@ module Crystal::MIR
       emit_raw "ret_a:\n"
       emit_raw "  ret ptr %a\n"
       emit_raw "do_concat:\n"
-      emit_raw "  %len_a = call i64 @strlen(ptr %a)\n"
-      emit_raw "  %len_b = call i64 @strlen(ptr %b)\n"
-      emit_raw "  %total = add i64 %len_a, %len_b\n"
-      emit_raw "  %total_plus_1 = add i64 %total, 1\n"
-      emit_raw "  %buf = call ptr @malloc(i64 %total_plus_1)\n"
-      emit_raw "  call ptr @strcpy(ptr %buf, ptr %a)\n"
-      emit_raw "  call ptr @strcat(ptr %buf, ptr %b)\n"
+      # Read bytesize from offset 4 of each Crystal String
+      emit_raw "  %a_bs_ptr = getelementptr i8, ptr %a, i32 4\n"
+      emit_raw "  %a_bs = load i32, ptr %a_bs_ptr\n"
+      emit_raw "  %b_bs_ptr = getelementptr i8, ptr %b, i32 4\n"
+      emit_raw "  %b_bs = load i32, ptr %b_bs_ptr\n"
+      emit_raw "  %total = add i32 %a_bs, %b_bs\n"
+      # Allocate new Crystal String: 12 bytes header + total bytes + 1 null terminator
+      emit_raw "  %alloc_size_32 = add i32 %total, 13\n"
+      emit_raw "  %alloc_size = sext i32 %alloc_size_32 to i64\n"
+      emit_raw "  %buf = call ptr @malloc(i64 %alloc_size)\n"
+      # Set type_id = 17 (String)
+      emit_raw "  store i32 17, ptr %buf\n"
+      # Set bytesize
+      emit_raw "  %buf_bs = getelementptr i8, ptr %buf, i32 4\n"
+      emit_raw "  store i32 %total, ptr %buf_bs\n"
+      # Set size (= bytesize for ASCII, good enough for now)
+      emit_raw "  %buf_sz = getelementptr i8, ptr %buf, i32 8\n"
+      emit_raw "  store i32 %total, ptr %buf_sz\n"
+      # Copy a's bytes (from offset 12)
+      emit_raw "  %a_data = getelementptr i8, ptr %a, i32 12\n"
+      emit_raw "  %buf_data = getelementptr i8, ptr %buf, i32 12\n"
+      emit_raw "  %a_bs_64 = sext i32 %a_bs to i64\n"
+      emit_raw "  call void @llvm.memcpy.p0.p0.i64(ptr %buf_data, ptr %a_data, i64 %a_bs_64, i1 false)\n"
+      # Copy b's bytes after a's bytes
+      emit_raw "  %b_data = getelementptr i8, ptr %b, i32 12\n"
+      emit_raw "  %buf_data2 = getelementptr i8, ptr %buf_data, i32 %a_bs\n"
+      emit_raw "  %b_bs_64 = sext i32 %b_bs to i64\n"
+      emit_raw "  call void @llvm.memcpy.p0.p0.i64(ptr %buf_data2, ptr %b_data, i64 %b_bs_64, i1 false)\n"
+      # Null-terminate
+      emit_raw "  %null_pos = getelementptr i8, ptr %buf_data, i32 %total\n"
+      emit_raw "  store i8 0, ptr %null_pos\n"
       emit_raw "  ret ptr %buf\n"
       emit_raw "}\n\n"
 
