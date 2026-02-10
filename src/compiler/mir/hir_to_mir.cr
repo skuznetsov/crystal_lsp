@@ -2166,7 +2166,9 @@ module Crystal
       end
 
       # No-op cast
-      return value if src_type == dst_type
+      if src_type == dst_type
+        return value
+      end
 
       # Helpers (HIR types carry signedness via Int*/UInt*)
       int_like = ->(t : HIR::TypeRef) do
@@ -2230,7 +2232,8 @@ module Crystal
                CastKind::Bitcast
              end
 
-      builder.cast(kind, value, dst_type)
+      result = builder.cast(kind, value, dst_type)
+      result
     end
 
     private def lower_is_a(isa : HIR::IsA) : ValueId

@@ -293,6 +293,8 @@ module CrystalV2
             return Token::Kind::PreviousDef if id == "previous_def".to_slice
           when 13
             return Token::Kind::Uninitialized if id == "uninitialized".to_slice
+          when 15
+            return Token::Kind::Sizeof if id == "instance_sizeof".to_slice
           when 16
             return Token::Kind::InstanceAlignof if id == "instance_alignof".to_slice
           end

@@ -397,6 +397,9 @@ module Crystal::MIR
         type_ref == TypeRef::UINT128
     end
 
+    # String type_id for runtime helpers and string literals
+    @string_type_id : Int32 = 16  # TypeRef::STRING.id default, updated during prelude emission
+
     # Cross-block value tracking for dominance fix
     @value_def_block : Hash(ValueId, BlockId) = {} of ValueId => BlockId  # value → block where defined
     @cross_block_values : Set(ValueId) = Set(ValueId).new  # values that need alloca slots
@@ -760,6 +763,15 @@ module Crystal::MIR
                "  %next = getelementptr i8, ptr %cur, i32 1\n" \
                "  store ptr %next, ptr %self\n" \
                "  ret i8 %value\n" \
+               "}\n"
+      end
+
+      # Pointer#address — primitive that returns pointer value as UInt64
+      if name.includes?("$Haddress") && name.includes?("Pointer$L")
+        return "; Pointer#address (primitive: ptrtoint)\n" \
+               "define i64 @#{name}(ptr %self) {\n" \
+               "  %addr = ptrtoint ptr %self to i64\n" \
+               "  ret i64 %addr\n" \
                "}\n"
       end
 
@@ -1147,16 +1159,9 @@ module Crystal::MIR
       # If so, emit as Crystal String objects: { i32 type_id, i32 bytesize, i32 length, [N x i8] bytes }
       # Otherwise (--no-prelude), emit as C strings for printf compatibility.
       string_mir_type = @module.type_registry.get_by_name("String")
-      string_type_id = string_mir_type ? string_mir_type.name.hash & 0x7fffffff : 0
-      # Try to get type_id from the type_ref if registered
-      if string_mir_type
-        @module.type_registry.types.each_with_index do |t, idx|
-          if t.name == "String"
-            string_type_id = idx + 1 # 1-based like original Crystal
-            break
-          end
-        end
-      end
+      # Use MIR type id directly — must match vdispatch tables and class allocations
+      string_type_id = string_mir_type ? string_mir_type.id.to_i32 : 0
+      @string_type_id = string_type_id
 
       if string_mir_type
         # Prelude mode: Crystal String objects
@@ -1421,9 +1426,9 @@ module Crystal::MIR
       emit_raw "@.long_fmt_no_nl = private constant [4 x i8] c\"%ld\\00\"\n"
       emit_raw "@.float_fmt_no_nl = private constant [3 x i8] c\"%g\\00\"\n"
       emit_raw "@.float_fmt = private constant [4 x i8] c\"%g\\0A\\00\"\n"
-      # Crystal String structs for bool_to_string: {type_id=17, bytesize, size, bytes}
-      emit_raw "@.str.true = private constant { i32, i32, i32, [5 x i8] } { i32 17, i32 4, i32 4, [5 x i8] c\"true\\00\" }, align 8\n"
-      emit_raw "@.str.false = private constant { i32, i32, i32, [6 x i8] } { i32 17, i32 5, i32 5, [6 x i8] c\"false\\00\" }, align 8\n"
+      # Crystal String structs for bool_to_string: {type_id, bytesize, size, bytes}
+      emit_raw "@.str.true = private constant { i32, i32, i32, [5 x i8] } { i32 #{@string_type_id}, i32 4, i32 4, [5 x i8] c\"true\\00\" }, align 8\n"
+      emit_raw "@.str.false = private constant { i32, i32, i32, [6 x i8] } { i32 #{@string_type_id}, i32 5, i32 5, [6 x i8] c\"false\\00\" }, align 8\n"
       emit_raw "\n"
 
       # Memory allocation - use calloc for zero-initialized memory
@@ -1693,7 +1698,7 @@ module Crystal::MIR
       emit_raw "  %alloc_32 = add i32 %len, 13\n"
       emit_raw "  %alloc_64 = sext i32 %alloc_32 to i64\n"
       emit_raw "  %str = call ptr @__crystal_v2_malloc64(i64 %alloc_64)\n"
-      emit_raw "  store i32 17, ptr %str\n"
+      emit_raw "  store i32 #{@string_type_id}, ptr %str\n"
       emit_raw "  %bs = getelementptr i8, ptr %str, i32 4\n"
       emit_raw "  store i32 %len, ptr %bs\n"
       emit_raw "  %sz = getelementptr i8, ptr %str, i32 8\n"
@@ -1714,7 +1719,7 @@ module Crystal::MIR
       emit_raw "  %alloc_32 = add i32 %len, 13\n"
       emit_raw "  %alloc_64 = sext i32 %alloc_32 to i64\n"
       emit_raw "  %str = call ptr @__crystal_v2_malloc64(i64 %alloc_64)\n"
-      emit_raw "  store i32 17, ptr %str\n"
+      emit_raw "  store i32 #{@string_type_id}, ptr %str\n"
       emit_raw "  %bs = getelementptr i8, ptr %str, i32 4\n"
       emit_raw "  store i32 %len, ptr %bs\n"
       emit_raw "  %sz = getelementptr i8, ptr %str, i32 8\n"
@@ -1767,7 +1772,7 @@ module Crystal::MIR
       emit_raw "  %alloc_32 = add i32 %len, 13\n"
       emit_raw "  %alloc_64 = sext i32 %alloc_32 to i64\n"
       emit_raw "  %str = call ptr @__crystal_v2_malloc64(i64 %alloc_64)\n"
-      emit_raw "  store i32 17, ptr %str\n"
+      emit_raw "  store i32 #{@string_type_id}, ptr %str\n"
       emit_raw "  %bs = getelementptr i8, ptr %str, i32 4\n"
       emit_raw "  store i32 %len, ptr %bs\n"
       emit_raw "  %sz = getelementptr i8, ptr %str, i32 8\n"
@@ -1829,7 +1834,7 @@ module Crystal::MIR
       emit_raw "  %alloc_32 = add i32 %total, 13\n"
       emit_raw "  %alloc_64 = sext i32 %alloc_32 to i64\n"
       emit_raw "  %buf = call ptr @__crystal_v2_malloc64(i64 %alloc_64)\n"
-      emit_raw "  store i32 17, ptr %buf\n"
+      emit_raw "  store i32 #{@string_type_id}, ptr %buf\n"
       emit_raw "  %buf_bs = getelementptr i8, ptr %buf, i32 4\n"
       emit_raw "  store i32 %total, ptr %buf_bs\n"
       emit_raw "  %buf_sz = getelementptr i8, ptr %buf, i32 8\n"
@@ -1884,7 +1889,7 @@ module Crystal::MIR
       emit_raw "  %a32 = add i32 %total, 13\n"
       emit_raw "  %a64 = sext i32 %a32 to i64\n"
       emit_raw "  %buf = call ptr @__crystal_v2_malloc64(i64 %a64)\n"
-      emit_raw "  store i32 17, ptr %buf\n"
+      emit_raw "  store i32 #{@string_type_id}, ptr %buf\n"
       emit_raw "  %bbs = getelementptr i8, ptr %buf, i32 4\n"
       emit_raw "  store i32 %total, ptr %bbs\n"
       emit_raw "  %bsz = getelementptr i8, ptr %buf, i32 8\n"
@@ -2217,6 +2222,15 @@ module Crystal::MIR
         return
       end
       @emitted_functions << mangled_name
+
+      # Pointer#address — primitive: return ptrtoint of self pointer
+      if mangled_name.includes?("Pointer$L") && mangled_name.ends_with?("$Haddress")
+        emit_raw "define i64 @#{mangled_name}(ptr %self) {\n"
+        emit_raw "  %addr = ptrtoint ptr %self to i64\n"
+        emit_raw "  ret i64 %addr\n"
+        emit_raw "}\n\n"
+        return
+      end
 
       emit_raw "define #{return_type} @#{mangled_name}(#{param_types.join(", ")}) {\n"
 
@@ -3058,7 +3072,10 @@ module Crystal::MIR
               def_inst = b.instructions.find { |i| i.id == cond_id }
               break if def_inst
             end
-            if def_inst.is_a?(BinaryOp) || def_inst.is_a?(Load)
+            is_non_value_inst = def_inst.is_a?(Store) || def_inst.is_a?(Free) ||
+                                def_inst.is_a?(RCIncrement) || def_inst.is_a?(RCDecrement) ||
+                                def_inst.is_a?(GlobalStore) || def_inst.is_a?(AtomicStore)
+            if !is_non_value_inst
               @cross_block_values << cond_id
             end
           end
@@ -3202,13 +3219,6 @@ module Crystal::MIR
       emit_raw "#{@block_names[block.id]}:\n"
       @indent = 1
       @current_block_id = block.id
-
-      if ENV["DEBUG_EMIT_BLOCK"]? && func.name == "__crystal_main"
-        STDERR.puts "[EMIT_BLOCK] func=#{func.name} block=#{block.id} insts=#{block.instructions.size}"
-        block.instructions.each do |inst|
-          STDERR.puts "[EMIT_BLOCK]   id=#{inst.id} type=#{inst.class.name}"
-        end
-      end
 
       # LLVM requires all phi nodes to be at the top of the basic block.
       # Emit phi nodes first, then other instructions.
@@ -4856,7 +4866,6 @@ module Crystal::MIR
       src_type = @type_mapper.llvm_type(src_type_ref)
       dst_type = @type_mapper.llvm_type(inst.type)
       value = value_ref(inst.value)
-
       # If the value was emitted earlier with a known LLVM type, prefer it.
       emitted_type = @emitted_value_types[value]?
       if emitted_type
@@ -4873,11 +4882,6 @@ module Crystal::MIR
                        else src_type_ref
                        end
       end
-      if ENV["DEBUG_CAST_SLOT"]? && value.includes?(".fromslot.cast")
-        emitted_dbg = @emitted_value_types[value]?
-        STDERR.puts "[CAST_SLOT] func=#{@current_func_name} name=#{name} value=#{value} src=#{src_type} dst=#{dst_type} emitted=#{emitted_dbg}"
-      end
-
       # If this value is stored in a cross-block slot, prefer the slot's LLVM type.
       # Skip if we already have an emitted cast type for the value.
       if !emitted_type && (slot_type = @cross_block_slot_types[inst.value]?)
@@ -8198,7 +8202,7 @@ module Crystal::MIR
           # @value_names is only set when instruction is emitted, not by prepass
           # Also check for VOID type - void calls don't emit %rN even if value_names is set
           val_llvm_type = val_type ? @type_mapper.llvm_type(val_type) : nil
-          is_undefined = (@value_names[val]?.nil? && @constant_values[val]?.nil?) ||
+          is_undefined = (@value_names[val]?.nil? && @constant_values[val]?.nil? && @cross_block_slots[val]?.nil?) ||
                          val_llvm_type == "void"
           if is_undefined
             # Undefined value - use safe default

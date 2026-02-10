@@ -12158,6 +12158,18 @@ module Crystal::HIR
             nested_name = String.new(member.name)
             full_nested_name = "#{nested_prefix}::#{nested_name}"
             register_class_with_name(member, full_nested_name)
+            # When parent has active type substitutions and nested type is generic,
+            # also monomorphize the nested type with the substituted type args.
+            # E.g., Hash(String, Int32)::Entry(K, V) → Hash::Entry(String, Int32)
+            if !@type_param_map.empty? && (nested_type_params = member.type_params) && nested_type_params.size > 0
+              type_args = nested_type_params.map { |p| @type_param_map[String.new(p)]? || String.new(p) }
+              if concrete_type_args?(type_args)
+                specialized_nested = "#{full_nested_name}(#{type_args.join(", ")})"
+                unless @monomorphized.includes?(specialized_nested)
+                  monomorphize_generic_class(full_nested_name, type_args, specialized_nested)
+                end
+              end
+            end
           when CrystalV2::Compiler::Frontend::EnumNode
             enum_name = String.new(member.name)
             full_enum_name = "#{nested_prefix}::#{enum_name}"
@@ -13148,6 +13160,28 @@ module Crystal::HIR
       STDERR.puts "[ALIGN] Realigned #{realigned} classes" if realigned > 0 && ENV.has_key?("CRYSTAL_V2_DEBUG_FIXUP")
     end
 
+    # Align ivars for a single class (used after late monomorphization)
+    private def align_class_ivars(class_name : String) : Nil
+      info = @class_info[class_name]?
+      return unless info
+      return if info.ivars.empty?
+      is_c_struct = info.name.starts_with?("LibC::") || info.name.includes?("::Lib")
+      offset = info.is_struct ? 0 : 4
+      new_ivars = [] of IVarInfo
+      info.ivars.each do |ivar|
+        offset = align_offset(offset, type_alignment(ivar.type, is_c_struct))
+        new_ivars << IVarInfo.new(ivar.name, ivar.type, offset,
+          default_expr_id: ivar.default_expr_id, default_arena: ivar.default_arena)
+        offset += type_size(ivar.type, is_c_struct)
+      end
+      max_align = new_ivars.max_of { |iv| type_alignment(iv.type, is_c_struct) }
+      offset = align_offset(offset, max_align)
+      new_info = ClassInfo.new(info.name, info.type_ref, new_ivars, info.class_vars,
+        offset, info.is_struct, info.parent_name)
+      @class_info[class_name] = new_info
+      @class_info_by_type_id[info.type_ref.id] = new_info
+    end
+
     private def fixup_class_inherited_ivars(class_name : String, fixed : Set(String))
       return if fixed.includes?(class_name)
       info = @class_info[class_name]?
@@ -13329,6 +13363,10 @@ module Crystal::HIR
           register_concrete_class(reopen.node, specialized_name, reopen.is_struct)
         end
       end
+
+      # Align ivars for this newly monomorphized class (align_all_class_ivars
+      # may have already run before this monomorphization happened).
+      align_class_ivars(specialized_name)
 
       if mono_start && ENV.has_key?("DEBUG_MONO")
         elapsed_ms = (Time.instant - mono_start).total_milliseconds
@@ -16429,11 +16467,11 @@ module Crystal::HIR
           if info = @class_info[type_arg]?
             info.type_ref
           else
-            TypeRef::VOID # Unknown type
+            TypeRef::POINTER # Unknown type → pointer size (all non-primitives are heap-allocated)
           end
         end
       else
-        TypeRef::VOID
+        TypeRef::POINTER # No Pointer(...) pattern → pointer size
       end
     end
 
@@ -20300,7 +20338,12 @@ module Crystal::HIR
       if class_name = @current_class
         if class_info = @class_info[class_name]?
           class_info.ivars.each do |ivar|
-            return ivar.offset if ivar.name == name
+            if ivar.name == name
+              if ENV.has_key?("DEBUG_IVAR_OFFSET") && class_name.includes?("Entry")
+                STDERR.puts "[IVAR_OFFSET] #{class_name}##{name} FOUND offset=#{ivar.offset} (#{class_info.ivars.map { |iv| "#{iv.name}:#{iv.offset}" }.join(", ")})"
+              end
+              return ivar.offset
+            end
           end
         end
       end
@@ -26561,6 +26604,13 @@ module Crystal::HIR
             are_equal = left_type == right_type
             return op_str == "==" ? are_equal : !are_equal
           end
+        when "<"
+          # Handle subtype check: {% if K < Number::Primitive %}
+          left_type = macro_condition_type_name(cond_node.left)
+          right_type = macro_condition_type_name(cond_node.right)
+          if left_type && right_type
+            return macro_is_subtype(left_type, right_type)
+          end
         end
       end
       nil # Can't evaluate
@@ -26597,6 +26647,68 @@ module Crystal::HIR
       else
         nil
       end
+    end
+
+    # Check if left_type is a subtype of right_type for macro {% if K < SomeType %}.
+    # Walks class hierarchy via @class_info and @module.class_parents,
+    # with hardcoded fallback for Crystal's core type hierarchy.
+    private def macro_is_subtype(left_type : String, right_type : String) : Bool
+      # Same type is not a strict subtype
+      return false if left_type == right_type
+
+      # Walk the class parent chain
+      current = left_type
+      visited = Set(String).new
+      visited.add(current)
+      100.times do
+        parent = @class_info[current]?.try(&.parent_name) || @module.class_parents[current]?
+        break unless parent
+        break if visited.includes?(parent)
+        return true if parent == right_type
+        visited.add(parent)
+        current = parent
+      end
+
+      # Hardcoded fallback for Crystal's core type hierarchy
+      # (class_info may not have all types registered at macro evaluation time)
+      number_primitives = {"Int8", "Int16", "Int32", "Int64", "Int128",
+                           "UInt8", "UInt16", "UInt32", "UInt64", "UInt128",
+                           "Float32", "Float64"}
+      case right_type
+      when "Number::Primitive"
+        return number_primitives.includes?(left_type)
+      when "Number"
+        return number_primitives.includes?(left_type) ||
+               left_type == "Number::Primitive" ||
+               left_type == "BigInt" || left_type == "BigFloat" ||
+               left_type == "BigDecimal" || left_type == "BigRational"
+      when "Int"
+        return {"Int8", "Int16", "Int32", "Int64", "Int128",
+                "UInt8", "UInt16", "UInt32", "UInt64", "UInt128"}.includes?(left_type)
+      when "Float"
+        return left_type == "Float32" || left_type == "Float64"
+      when "Enum"
+        # Check if the type is registered as an enum in class_info
+        if info = @class_info[left_type]?
+          return info.parent_name == "Enum"
+        end
+        return false
+      when "Value"
+        return number_primitives.includes?(left_type) ||
+               left_type == "Bool" || left_type == "Char" || left_type == "Symbol" ||
+               left_type == "Nil" || left_type == "Pointer" || left_type == "StaticArray"
+      when "Struct"
+        return number_primitives.includes?(left_type) ||
+               left_type == "Bool" || left_type == "Char" || left_type == "Symbol"
+      when "Reference", "Object"
+        return left_type == "String" || left_type == "Array" || left_type == "Hash" ||
+               @class_info[left_type]?.try { |info|
+                 p = info.parent_name
+                 p && p != "Struct" && p != "Value" && p != "Enum"
+               } || false
+      end
+
+      false
     end
 
     private def macro_for_iterable_values(iterable_id : ExprId) : Array(CrystalV2::Compiler::Semantic::MacroValue)?
@@ -27819,8 +27931,11 @@ module Crystal::HIR
       case type_node
       when CrystalV2::Compiler::Frontend::IdentifierNode
         name = String.new(type_node.name)
+        # Resolve type parameters if present
+        name = @type_param_map[name]? || name
         case name
-        when "Int8", "UInt8", "Bool"              then 1_i64
+        when "Nil"                                then 0_i64
+        when "Void", "Int8", "UInt8", "Bool"      then 1_i64
         when "Int16", "UInt16"                    then 2_i64
         when "Int32", "UInt32", "Float32", "Char" then 4_i64
         when "Int64", "UInt64", "Float64"         then 8_i64
@@ -27829,8 +27944,10 @@ module Crystal::HIR
         end
       when CrystalV2::Compiler::Frontend::ConstantNode
         name = String.new(type_node.name)
+        name = @type_param_map[name]? || name
         case name
-        when "Int8", "UInt8", "Bool"              then 1_i64
+        when "Nil"                                then 0_i64
+        when "Void", "Int8", "UInt8", "Bool"      then 1_i64
         when "Int16", "UInt16"                    then 2_i64
         when "Int32", "UInt32", "Float32", "Char" then 4_i64
         when "Int64", "UInt64", "Float64"         then 8_i64
@@ -30189,8 +30306,9 @@ module Crystal::HIR
         cond_bool = lower_truthy_check(ctx, cond_id, cond_type)
         # If the condition is constant, don't build both branches (this avoids
         # emitting unreachable code like beginless range iterators).
-        if !has_elsifs && (lit = static_truthy_value(ctx, cond_bool))
-          if lit
+        static_val = static_truthy_value(ctx, cond_bool)
+        if !has_elsifs && !static_val.nil?
+          if static_val
             ctx.push_scope(ScopeKind::Block)
             apply_truthy_narrowing(ctx, truthy_targets)
             apply_is_a_narrowing(ctx, is_a_targets)
@@ -30380,6 +30498,11 @@ module Crystal::HIR
           phi.add_incoming(exit_block, value)
         end
         ctx.emit(phi)
+
+        # Merge local variables from flowing branches.
+        flowing_branch_info = flowing_branches.map { |exit_block, _, locals, _| {exit_block, locals} }
+        merge_if_branch_locals(ctx, pre_branch_locals, flowing_branch_info)
+
         return phi.id
       end
     end
@@ -30463,6 +30586,169 @@ module Crystal::HIR
 
         merge_phi = Phi.new(ctx.next_id, var_type)
         coerced_incoming.each { |blk, val| merge_phi.add_incoming(blk, val) }
+        ctx.emit(merge_phi)
+        ctx.register_local(var_name, merge_phi.id)
+      end
+    end
+
+    # Merge locals from N branches (for if/elsif/else), creating phi nodes where needed
+    # Only merges variables that were actually modified in at least one branch.
+    private def merge_if_branch_locals(ctx : LoweringContext,
+                                       pre_locals : Hash(String, ValueId),
+                                       branch_info : Array(Tuple(BlockId, Hash(String, ValueId))))
+      return if branch_info.empty?
+
+      # Collect all variable names across all branches (NOT pre_locals — only branch-modified)
+      all_vars = Set(String).new
+      branch_info.each do |(_, locals)|
+        locals.keys.each { |k| all_vars << k }
+      end
+
+      all_vars.each do |var_name|
+        pre_val = pre_locals[var_name]?
+
+        # Check if any branch actually changed this variable
+        any_modified = false
+        branch_info.each do |(_, locals)|
+          if val = locals[var_name]?
+            if pre_val.nil? || val != pre_val
+              any_modified = true
+              break
+            end
+          end
+        end
+        next unless any_modified
+
+        # Collect values from all branches
+        branch_values = [] of Tuple(BlockId, ValueId)
+        branch_info.each do |(block, locals)|
+          if val = locals[var_name]?
+            branch_values << {block, val}
+          elsif pre_val
+            branch_values << {block, pre_val}
+          end
+        end
+
+        # Variable must exist in ALL branches (or have pre-value fallback)
+        next if branch_values.size != branch_info.size
+
+        # If all branches have the same value, no phi needed
+        first_val = branch_values.first[1]
+        if branch_values.all? { |(_, v)| v == first_val }
+          ctx.register_local(var_name, first_val)
+          next
+        end
+
+        # Determine merged type
+        var_types = branch_values.map { |(_, v)| ctx.type_of(v) }.uniq
+        var_type = if var_types.size == 1
+                     var_types.first
+                   else
+                     var_types.reduce { |acc, t| union_type_for_values(acc, t) }
+                   end
+        next if var_type == TypeRef::VOID
+
+        # Coerce values to var_type and create phi
+        coerced = branch_values.map do |(blk, val)|
+          val_type = ctx.type_of(val)
+          if val_type == var_type
+            {blk, val}
+          elsif is_union_type?(var_type)
+            variant_id = get_union_variant_id(var_type, val_type)
+            if variant_id >= 0
+              wrap = UnionWrap.new(ctx.next_id, var_type, val, variant_id)
+              ctx.emit_to_block(blk, wrap)
+              {blk, wrap.id}
+            else
+              {blk, val}
+            end
+          elsif numeric_primitive?(val_type) && numeric_primitive?(var_type)
+            cast = Cast.new(ctx.next_id, var_type, val, var_type, safe: false)
+            ctx.emit_to_block(blk, cast)
+            {blk, cast.id}
+          else
+            {blk, val}
+          end
+        end
+
+        merge_phi = Phi.new(ctx.next_id, var_type)
+        coerced.each { |(blk, val)| merge_phi.add_incoming(blk, val) }
+        ctx.emit(merge_phi)
+        ctx.register_local(var_name, merge_phi.id)
+      end
+    end
+
+    # Safe version of merge_if_branch_locals that ONLY merges variables
+    # already existing in pre_branch_locals. This avoids SSA domination errors
+    # from variables first defined inside branches (e.g. in loops with if/else).
+    private def merge_if_branch_locals_safe(ctx : LoweringContext,
+                                            pre_locals : Hash(String, ValueId),
+                                            branch_info : Array(Tuple(BlockId, Hash(String, ValueId))))
+      return if branch_info.empty? || pre_locals.empty?
+
+      pre_locals.each do |var_name, pre_val|
+        # Check if any branch actually changed this variable
+        any_modified = false
+        branch_info.each do |(_, locals)|
+          if val = locals[var_name]?
+            if val != pre_val
+              any_modified = true
+              break
+            end
+          end
+        end
+        next unless any_modified
+
+        # Collect values from all branches (use pre_val as fallback)
+        branch_values = [] of Tuple(BlockId, ValueId)
+        branch_info.each do |(block, locals)|
+          val = locals[var_name]? || pre_val
+          branch_values << {block, val}
+        end
+
+        next if branch_values.size != branch_info.size
+
+        # If all branches have the same value, no phi needed
+        first_val = branch_values.first[1]
+        if branch_values.all? { |(_, v)| v == first_val }
+          ctx.register_local(var_name, first_val)
+          next
+        end
+
+        # Determine merged type
+        var_types = branch_values.map { |(_, v)| ctx.type_of(v) }.uniq
+        var_type = if var_types.size == 1
+                     var_types.first
+                   else
+                     var_types.reduce { |acc, t| union_type_for_values(acc, t) }
+                   end
+        next if var_type == TypeRef::VOID
+
+        # Coerce values to var_type and create phi
+        coerced = branch_values.map do |(blk, val)|
+          val_type = ctx.type_of(val)
+          if val_type == var_type
+            {blk, val}
+          elsif is_union_type?(var_type)
+            variant_id = get_union_variant_id(var_type, val_type)
+            if variant_id >= 0
+              wrap = UnionWrap.new(ctx.next_id, var_type, val, variant_id)
+              ctx.emit_to_block(blk, wrap)
+              {blk, wrap.id}
+            else
+              {blk, val}
+            end
+          elsif numeric_primitive?(val_type) && numeric_primitive?(var_type)
+            cast = Cast.new(ctx.next_id, var_type, val, var_type, safe: false)
+            ctx.emit_to_block(blk, cast)
+            {blk, cast.id}
+          else
+            {blk, val}
+          end
+        end
+
+        merge_phi = Phi.new(ctx.next_id, var_type)
+        coerced.each { |(blk, val)| merge_phi.add_incoming(blk, val) }
         ctx.emit(merge_phi)
         ctx.register_local(var_name, merge_phi.id)
       end
@@ -33090,6 +33376,10 @@ module Crystal::HIR
       func_def = @function_defs[target_name]?
       arena = @function_def_arenas[target_name]?
       lookup_branch : String? = func_def ? "direct" : nil
+      if ENV["DEBUG_ENTRY_MATCHES"]? && name.includes?("entry_matches")
+        param_count = func_def.try { |fd| fd.params.try(&.size) || 0 } || -1
+        STDERR.puts "[ENTRY_MATCHES_LOOKUP] name=#{name} target=#{target_name} base=#{base_name} direct_found=#{!!func_def} param_count=#{param_count}"
+      end
       if is_math_min_debug
         STDERR.puts "[MATH_MIN_LOWER_FUNC] LOOKUP name=#{name} target=#{target_name} base=#{base_name} direct_found=#{!!func_def}"
       end
@@ -33976,6 +34266,40 @@ module Crystal::HIR
         callsite_args = pending_callsite_args_for_def(func_def, name, target_name)
       end
       call_arg_types = callsite_args ? callsite_args.types : nil
+
+      # Arity mismatch fix: when the found func_def has fewer params than the
+      # callsite provides, the base name lookup picked the wrong overload
+      # (e.g., 2-param entry_matches? instead of 3-param version).
+      # Look for an arity-specific version that matches.
+      if func_def && call_arg_types && call_arg_types.size > 0
+        actual_arity = count_non_block_params(func_def)
+        expected_arity = call_arg_types.size
+        if expected_arity > actual_arity
+          arity_key = "#{name_parts.base}$arity#{expected_arity}"
+          if ENV["DEBUG_ENTRY_MATCHES"]? && name.includes?("entry_matches")
+            STDERR.puts "[ARITY_FIX] name=#{name} base=#{name_parts.base} target=#{target_name} expected=#{expected_arity} actual=#{actual_arity} arity_key=#{arity_key} has_key=#{@function_defs.has_key?(arity_key)}"
+          end
+          if arity_def = @function_defs[arity_key]?
+            func_def = arity_def
+            arena = @function_def_arenas[arity_key]
+            target_name = arity_key
+          else
+            # Also try generic template base (e.g., Hash(K,V)#method$arity3)
+            if (sep = name_parts.separator) && (method_part = name_parts.method)
+              owner = name_parts.owner
+              if ginfo = generic_owner_info(owner)
+                template_arity_key = "#{ginfo[:base]}#{sep}#{method_part}$arity#{expected_arity}"
+                if arity_def = @function_defs[template_arity_key]?
+                  func_def = arity_def
+                  arena = @function_def_arenas[template_arity_key]
+                  target_name = arity_key
+                end
+              end
+            end
+          end
+        end
+      end
+
       if is_math_min_debug
         types_str = call_arg_types ? call_arg_types.map { |t| get_type_name_from_ref(t) }.join(",") : "nil"
         # Get param annotations from func_def
@@ -34346,6 +34670,38 @@ module Crystal::HIR
               with_type_param_map(merged_params) do
                 with_namespace_override_or_clear(namespace_override) do
                   begin
+                    # Arity mismatch fix: if func_def has fewer params than
+                    # call_arg_types, the base-name lookup found the wrong
+                    # overload. Try to find the correct arity version.
+                    if call_arg_types && call_arg_types.size > 0
+                      actual_arity = count_non_block_params(func_def)
+                      expected_arity = call_arg_types.size
+                      if expected_arity > actual_arity
+                        base_for_arity = strip_type_suffix(target_name)
+                        arity_key = "#{base_for_arity}$arity#{expected_arity}"
+                        if arity_def = @function_defs[arity_key]?
+                          func_def = arity_def
+                          arena_override = @function_def_arenas[arity_key]?
+                        else
+                          # Try generic template base
+                          if (ginfo = generic_owner_info(owner))
+                            sep = resolved_parts.separator || '#'
+                            mpart = resolved_parts.method
+                            if mpart
+                              template_arity = "#{ginfo[:base]}#{sep}#{mpart}$arity#{expected_arity}"
+                              if arity_def = @function_defs[template_arity]?
+                                func_def = arity_def
+                                arena_override = @function_def_arenas[template_arity]?
+                              end
+                            end
+                          end
+                        end
+                      end
+                    end
+                    if ENV["DEBUG_ENTRY_MATCHES"]? && name.includes?("entry_matches")
+                      param_count = func_def.params.try(&.size) || 0
+                      STDERR.puts "[ENTRY_MATCHES_LOWER] name=#{name} target=#{target_name} owner=#{owner} override=#{override} param_count=#{param_count} call_arg_types=#{call_arg_types.try(&.map(&.id).join(",")) || "nil"} type_params=#{type_param_map_debug_string}"
+                    end
                     lower_method(owner, class_info, func_def, call_arg_types, call_arg_literals, call_arg_enum_names, override, force_class_method: force_class_method)
                   rescue ex : KeyError
                     STDERR.puts "[KEY_ERROR_DEFERRED] target=#{target_name} owner=#{owner} override=#{override} call_arg_types=#{call_arg_types.try(&.map(&.id).join(",")) || "nil"}"
@@ -38196,6 +38552,17 @@ module Crystal::HIR
             ctx.emit(cast)
             ctx.register_type(cast.id, TypeRef::UINT64)
             return cast.id
+          when "null?"
+            # Pointer#null? → ptrtoint self == 0
+            addr = Cast.new(ctx.next_id, TypeRef::UINT64, receiver_id, TypeRef::UINT64)
+            ctx.emit(addr)
+            ctx.register_type(addr.id, TypeRef::UINT64)
+            zero = Literal.new(ctx.next_id, TypeRef::UINT64, 0_i64)
+            ctx.emit(zero)
+            cmp = BinaryOperation.new(ctx.next_id, TypeRef::BOOL, BinaryOp::Eq, addr.id, zero.id)
+            ctx.emit(cmp)
+            ctx.register_type(cmp.id, TypeRef::BOOL)
+            return cmp.id
           when "to_i", "to_i64"
             cast = Cast.new(ctx.next_id, TypeRef::INT64, receiver_id, TypeRef::INT64)
             ctx.emit(cast)
@@ -39028,6 +39395,22 @@ module Crystal::HIR
       if prim_kind = @module.primitive_for(mangled_method_name) || @module.primitive_for(base_method_name)
         if prim_result = lower_primitive_call(ctx, prim_kind, method_name, receiver_id, args, return_type, mangled_method_name)
           return prim_result
+        end
+      end
+
+      # Fallback: handle numeric conversion methods (to_u32!, to_i64!, etc.)
+      # as Cast instructions even when not registered as primitives.
+      # Primitives defined via macros in Crystal's primitives.cr may not be
+      # registered because our macro expansion is incomplete.
+      if ENV["DEBUG_TO_U32"]? && (method_name.includes?("to_u32") || method_name.includes?("to_u!"))
+        STDERR.puts "[TO_U32_CALL_FB] method=#{method_name} receiver_id=#{receiver_id} is_conv=#{numeric_conversion_method_name?(method_name)} func=#{ctx.function.name}"
+      end
+      if receiver_id && numeric_conversion_method_name?(method_name)
+        if target = type_ref_for_conversion_method(method_name)
+          cast = Cast.new(ctx.next_id, target, receiver_id, target)
+          ctx.emit(cast)
+          ctx.register_type(cast.id, target)
+          return cast.id
         end
       end
 
@@ -43533,6 +43916,9 @@ module Crystal::HIR
     private def lower_member_access(ctx : LoweringContext, node : CrystalV2::Compiler::Frontend::MemberAccessNode) : ValueId
       obj_node = @arena[node.object]
       member_name = String.new(node.member)
+      if ENV["DEBUG_TO_U32"]? && ctx.function.name.includes?("key_hash")
+        STDERR.puts "[KEY_HASH_MEMBER] member=#{member_name} func=#{ctx.function.name}"
+      end
       if debug_env_filter_match?("DEBUG_ENUM_PREDICATE", member_name)
         STDERR.puts "[DEBUG_ENUM_CALL_PATH] lower_member_access method=#{member_name} object=#{obj_node.class.name}"
       end
@@ -44145,6 +44531,11 @@ module Crystal::HIR
                       nil
                     end
       if target_type
+        if ENV["DEBUG_TO_U32"]?
+          recv_name = get_type_name_from_ref(receiver_type)
+          is_prim = numeric_primitive?(receiver_type)
+          STDERR.puts "[TO_U32_MEMBER] member=#{member_name} recv_type=#{receiver_type.id} recv_name=#{recv_name} is_prim=#{is_prim} func=#{ctx.function.name}"
+        end
         if receiver_type == TypeRef::VOID
           receiver_type = TypeRef::INT32
           ctx.register_type(object_id, receiver_type)
@@ -44176,6 +44567,11 @@ module Crystal::HIR
           end
         end
         if numeric_primitive?(receiver_type)
+          if ENV["DEBUG_TO_U32"]? && ctx.function.name.includes?("key_hash")
+            recv_name = get_type_name_from_ref(receiver_type)
+            target_name = get_type_name_from_ref(target_type)
+            STDERR.puts "[KEY_HASH_CAST] receiver=#{recv_name}(#{receiver_type.id}) target=#{target_name}(#{target_type.id}) same=#{receiver_type == target_type} func=#{ctx.function.name}"
+          end
           return object_id if receiver_type == target_type
           cast = Cast.new(ctx.next_id, target_type, object_id, target_type)
           ctx.emit(cast)
@@ -44319,35 +44715,39 @@ module Crystal::HIR
       if receiver_type == TypeRef::INT32
         case member_name
         when "to_s"
-          # Call __crystal_v2_int_to_string intrinsic
           call = Call.new(ctx.next_id, TypeRef::POINTER, nil, "__crystal_v2_int_to_string", [object_id])
           ctx.emit(call)
           ctx.register_type(call.id, TypeRef::POINTER)
           return call.id
         when "abs"
-          # For abs, we could emit inline: (x < 0) ? -x : x, or extern call
-          # For now, emit as extern
           call = Call.new(ctx.next_id, TypeRef::INT32, nil, "__crystal_v2_int_abs", [object_id])
           ctx.emit(call)
           ctx.register_type(call.id, TypeRef::INT32)
           return call.id
-        when "to_i", "to_i32"
-          # Int32.to_i is identity
+        when "to_i", "to_i32", "to_i32!"
           return object_id
-        when "to_i64"
-          # Sign-extend to i64
-          call = Call.new(ctx.next_id, TypeRef::INT64, nil, "__crystal_v2_int_to_i64", [object_id])
-          ctx.emit(call)
-          ctx.register_type(call.id, TypeRef::INT64)
-          return call.id
+        when "to_u32", "to_u32!"
+          cast = Cast.new(ctx.next_id, TypeRef::UINT32, object_id, TypeRef::UINT32, safe: false)
+          ctx.emit(cast)
+          ctx.register_type(cast.id, TypeRef::UINT32)
+          return cast.id
+        when "to_i64", "to_i64!"
+          cast = Cast.new(ctx.next_id, TypeRef::INT64, object_id, TypeRef::INT64, safe: false)
+          ctx.emit(cast)
+          ctx.register_type(cast.id, TypeRef::INT64)
+          return cast.id
+        when "to_u64", "to_u64!"
+          cast = Cast.new(ctx.next_id, TypeRef::UINT64, object_id, TypeRef::UINT64, safe: false)
+          ctx.emit(cast)
+          ctx.register_type(cast.id, TypeRef::UINT64)
+          return cast.id
         when "to_f", "to_f64"
           call = Call.new(ctx.next_id, TypeRef::FLOAT64, nil, "__crystal_v2_int_to_f64", [object_id])
           ctx.emit(call)
           ctx.register_type(call.id, TypeRef::FLOAT64)
           return call.id
         when "times"
-          # Int32#times with block - handle as intrinsic loop
-          # Will be handled in lower_call for blocks, skip here
+          # Int32#times with block - handled in lower_call for blocks
         end
       elsif receiver_type == TypeRef::INT64
         case member_name
@@ -44356,14 +44756,31 @@ module Crystal::HIR
           ctx.emit(call)
           ctx.register_type(call.id, TypeRef::POINTER)
           return call.id
-        when "to_i", "to_i32"
+        when "to_i", "to_i32", "to_i32!"
           # Truncate to i32
-          call = Call.new(ctx.next_id, TypeRef::INT32, nil, "__crystal_v2_int64_to_i32", [object_id])
-          ctx.emit(call)
-          ctx.register_type(call.id, TypeRef::INT32)
-          return call.id
+          cast = Cast.new(ctx.next_id, TypeRef::INT32, object_id, TypeRef::INT32, safe: false)
+          ctx.emit(cast)
+          ctx.register_type(cast.id, TypeRef::INT32)
+          return cast.id
+        when "to_u32", "to_u32!", "to_u"
+          # Truncate to u32 (unchecked)
+          cast = Cast.new(ctx.next_id, TypeRef::UINT32, object_id, TypeRef::UINT32, safe: false)
+          ctx.emit(cast)
+          ctx.register_type(cast.id, TypeRef::UINT32)
+          return cast.id
+        when "to_u64", "to_u64!"
+          # Reinterpret as u64 (same bit pattern)
+          cast = Cast.new(ctx.next_id, TypeRef::UINT64, object_id, TypeRef::UINT64, safe: false)
+          ctx.emit(cast)
+          ctx.register_type(cast.id, TypeRef::UINT64)
+          return cast.id
         when "to_i64"
           return object_id
+        when "to_f", "to_f64", "to_f64!"
+          cast = Cast.new(ctx.next_id, TypeRef::FLOAT64, object_id, TypeRef::FLOAT64, safe: false)
+          ctx.emit(cast)
+          ctx.register_type(cast.id, TypeRef::FLOAT64)
+          return cast.id
         end
       elsif receiver_type == TypeRef::FLOAT64
         case member_name
@@ -46237,50 +46654,47 @@ module Crystal::HIR
     end
 
     private def lower_hash_literal(ctx : LoweringContext, node : CrystalV2::Compiler::Frontend::HashLiteralNode) : ValueId
-      if ENV["DEBUG_HASH_OF_TYPE"]?
-        current_path = @paths_by_arena[@arena]? || "(unknown)"
-        key_str = node.of_key_type ? String.new(node.of_key_type.not_nil!) : "(nil)"
-        val_str = node.of_value_type ? String.new(node.of_value_type.not_nil!) : "(nil)"
-        STDERR.puts "[HASH_OF] file=#{File.basename(current_path)} key=#{key_str} val=#{val_str} entries=#{node.entries.size}"
-      end
-      # Lower key-value pairs
-      args = [] of ValueId
+      # Lower key-value pairs first to infer types
+      entries = [] of {ValueId, ValueId}
       node.entries.each do |entry|
         key_id = lower_expr(ctx, entry.key)
         value_id = lower_expr(ctx, entry.value)
-        args << key_id
-        args << value_id
+        entries << {key_id, value_id}
       end
 
       key_type = if key_type_expr = node.of_key_type
                    type_ref_for_name(normalize_declared_type_name(String.new(key_type_expr)))
-                 elsif args.size >= 2
-                   ctx.type_of(args[0])
+                 elsif entries.size > 0
+                   ctx.type_of(entries[0][0])
                  else
                    TypeRef::VOID
                  end
       value_type = if value_type_expr = node.of_value_type
                      type_ref_for_name(normalize_declared_type_name(String.new(value_type_expr)))
-                   elsif args.size >= 2
-                     ctx.type_of(args[1])
+                   elsif entries.size > 0
+                     ctx.type_of(entries[0][1])
                    else
                      TypeRef::VOID
                    end
-      hash_type = if key_type != TypeRef::VOID && value_type != TypeRef::VOID
-                    key_name = get_type_name_from_ref(key_type)
-                    value_name = get_type_name_from_ref(value_type)
-                    if key_name != "Unknown" && value_name != "Unknown"
-                      type_ref_for_name("Hash(#{key_name}, #{value_name})")
-                    else
-                      ctx.get_type("Hash")
-                    end
-                  else
-                    ctx.get_type("Hash")
-                  end
-      alloc = Allocate.new(ctx.next_id, hash_type, args)
-      ctx.emit(alloc)
-      record_allocation_location(ctx, alloc.id, @arena, node)
-      alloc.id
+      key_name = get_type_name_from_ref(key_type)
+      value_name = get_type_name_from_ref(value_type)
+      hash_type_name = "Hash(#{key_name}, #{value_name})"
+      hash_type = type_ref_for_name(hash_type_name)
+
+      # Call Hash(K,V).new constructor (no args — default no block, no capacity)
+      ctor_name = "#{hash_type_name}.new"
+      hash_call = Call.new(ctx.next_id, hash_type, nil, ctor_name, [] of ValueId, nil, false)
+      ctx.emit(hash_call)
+      ctx.register_type(hash_call.id, hash_type)
+
+      # For each entry, call hash[key] = value
+      entries.each do |key_id, value_id|
+        set_name = "#{hash_type_name}#[]="
+        set_call = Call.new(ctx.next_id, value_type, hash_call.id, set_name, [key_id, value_id], nil, false)
+        ctx.emit(set_call)
+      end
+
+      hash_call.id
     end
 
     private def lower_tuple_literal(ctx : LoweringContext, node : CrystalV2::Compiler::Frontend::TupleLiteralNode) : ValueId
