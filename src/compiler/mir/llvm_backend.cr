@@ -1807,10 +1807,21 @@ module Crystal::MIR
 
       # Entry point: main() calls __crystal_main()
       emit_raw "; Program entry point\n"
-      emit_raw "define i32 @main(i32 %argc, ptr %argv) {\n"
-      emit_raw "  call void @__crystal_main(i32 %argc, ptr %argv)\n"
-      emit_raw "  ret i32 0\n"
-      emit_raw "}\n\n"
+      if ENV.has_key?("CRYSTAL_V2_DEBUG_MAIN")
+        emit_raw "@.dbg_main_enter = private unnamed_addr constant [13 x i8] c\"[MAIN_ENTER]\\0A\\00\"\n"
+        emit_raw "@.dbg_main_exit = private unnamed_addr constant [12 x i8] c\"[MAIN_EXIT]\\0A\\00\"\n"
+        emit_raw "define i32 @main(i32 %argc, ptr %argv) {\n"
+        emit_raw "  call i64 @write(i32 2, ptr @.dbg_main_enter, i64 12)\n"
+        emit_raw "  call void @__crystal_main(i32 %argc, ptr %argv)\n"
+        emit_raw "  call i64 @write(i32 2, ptr @.dbg_main_exit, i64 11)\n"
+        emit_raw "  ret i32 0\n"
+        emit_raw "}\n\n"
+      else
+        emit_raw "define i32 @main(i32 %argc, ptr %argv) {\n"
+        emit_raw "  call void @__crystal_main(i32 %argc, ptr %argv)\n"
+        emit_raw "  ret i32 0\n"
+        emit_raw "}\n\n"
+      end
     end
 
     private def emit_function(func : Function)
@@ -3584,24 +3595,10 @@ module Crystal::MIR
         end
       end
 
-      # Check if base is a struct or reference type (from registered types)
-      base_value_type = @value_types[inst.base]?
-      if base_value_type && (mir_type = @module.type_registry.get(base_value_type))
-        has_fields = (mir_type.fields && !mir_type.fields.not_nil!.empty?) || mir_type.kind.reference?
-        if has_fields && (mir_type.kind.struct? || mir_type.kind.reference?)
-          # Struct/Class GEP: use actual struct type and field index
-          struct_type = "%#{@type_mapper.mangle_name(mir_type.name)}"
-          # Convert byte offset to field index
-          # We need to lookup the field layout of the struct to get correct index
-          field_byte_offset = inst.indices.first? || 0_u32
-          field_index = compute_field_index(mir_type, field_byte_offset)
-          emit "#{name} = getelementptr #{struct_type}, ptr #{base}, i32 0, i32 #{field_index}"
-          @value_types[inst.id] = TypeRef::POINTER  # GEP always returns pointer
-          return
-        end
-      end
-
-      # Default: byte-level pointer arithmetic GEP
+      # Always use byte-level GEP for field access.
+      # Our byte offsets (from align_all_class_ivars) are correct, but LLVM struct
+      # types may have incorrect field types (e.g. ptr instead of i32), causing
+      # struct-level GEP to compute wrong offsets. Byte-level GEP is always safe.
       byte_offset = inst.indices.first? || 0_u32
       emit "#{name} = getelementptr i8, ptr #{base}, i32 #{byte_offset}"
       @value_types[inst.id] = TypeRef::POINTER  # GEP always returns pointer
@@ -3618,8 +3615,8 @@ module Crystal::MIR
 
       class_offset = mir_type.kind.reference? ? 1 : 0
 
-      # For reference types, byte offsets < 8 access the type_id header (LLVM field 0)
-      if mir_type.kind.reference? && byte_offset < 8
+      # For reference types, byte offsets < 4 access the type_id header (i32, LLVM field 0)
+      if mir_type.kind.reference? && byte_offset < 4
         return 0
       end
 

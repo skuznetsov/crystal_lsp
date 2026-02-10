@@ -136,7 +136,7 @@ module Crystal::MIR
     getter id : TypeId
     getter kind : TypeKind
     getter name : String
-    getter size : UInt64
+    property size : UInt64
     getter alignment : UInt32
     getter fields : Array(Field)?
     getter variants : Array(Type)?     # For union types

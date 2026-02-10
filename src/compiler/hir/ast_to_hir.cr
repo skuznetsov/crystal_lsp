@@ -1445,6 +1445,8 @@ module Crystal::HIR
     @current_method : String?
     # Track whether the current method is a class/module method (self.)
     @current_method_is_class : Bool
+    # Track which module provided the current _super body (to avoid infinite recursion)
+    @current_super_source_module : String?
     # Current def node (used for parameter type inference in bodies).
     @current_def_node : CrystalV2::Compiler::Frontend::DefNode?
 
@@ -1623,8 +1625,8 @@ module Crystal::HIR
     @top_level_class_kinds : Hash(String, Bool)
     # Track constant definitions and inferred types for constant resolution.
     @constant_defs : Set(String)
-    @constant_types : Hash(String, TypeRef)
-    @constant_literal_values : Hash(String, CrystalV2::Compiler::Semantic::MacroValue)
+    getter constant_types : Hash(String, TypeRef)
+    getter constant_literal_values : Hash(String, CrystalV2::Compiler::Semantic::MacroValue)
     @nested_type_names : Hash(String, Set(String))
 
     # Track top-level `def main` so we can remap calls and avoid entrypoint collisions.
@@ -1674,6 +1676,7 @@ module Crystal::HIR
       @current_namespace_override = nil
       @current_method = nil
       @current_method_is_class = false
+      @current_super_source_module = nil
       @current_def_node = nil
       @current_typeof_locals = nil
       @infer_body_context = nil
@@ -1803,6 +1806,7 @@ module Crystal::HIR
       @debug_callsite = nil
       @pending_def_annotations = [] of Tuple(CrystalV2::Compiler::Frontend::AnnotationNode, CrystalV2::Compiler::Frontend::ArenaLike)
       @deferred_classvar_inits = [] of Tuple(CrystalV2::Compiler::Frontend::ExprId, CrystalV2::Compiler::Frontend::ArenaLike, String)
+      @pending_offsetof_constants = [] of Tuple(String, CrystalV2::Compiler::Frontend::ExprId, CrystalV2::Compiler::Frontend::ArenaLike, String?)
     end
 
     private def with_debug_callsite(label : String?, &)
@@ -11894,8 +11898,8 @@ module Crystal::HIR
       class_vars = [] of ClassVarInfo
       # C lib structs use C type sizes (Char=1 byte instead of 4)
       is_c_struct = @lib_structs.includes?(class_name)
-      # Struct has no type_id header (value type), class starts at 8 for header
-      offset = is_struct ? 0 : 8
+      # Struct has no type_id header (value type), class starts at 4 for i32 type_id header
+      offset = is_struct ? 0 : 4
 
       # If class already exists, preserve existing ivars and class_vars
       if existing_info
@@ -12634,12 +12638,30 @@ module Crystal::HIR
             STDERR.puts "[MONO] #{class_name} include expansion #{elapsed.round(1)}ms"
           end
 
-          # Discover implicit ivars from method bodies (e.g. `out @mutex` in initialize).
+          # Discover implicit ivars from method parameters (e.g. `def initialize(@bytesize : Int32)`)
+          # and method bodies (e.g. `out @mutex` in initialize).
           # This runs AFTER module mixin expansion so that ivars from included modules
           # are already registered, preventing duplicate registrations.
           class_body.each do |expr_id|
             member = unwrap_visibility_member(@arena[expr_id])
             next unless member.is_a?(CrystalV2::Compiler::Frontend::DefNode)
+            # Scan parameters for ivar shortcuts: def foo(@field : Type)
+            if params = member.params
+              params.each do |param|
+                next unless param.is_instance_var
+                next unless (pname = param.name)
+                ivar_name = "@#{String.new(pname)}"
+                next if ivars.any? { |iv| iv.name == ivar_name }
+                if ta = param.type_annotation
+                  ivar_type = type_ref_for_name(String.new(ta))
+                  if ivar_type != TypeRef::VOID
+                    offset = align_offset(offset, type_alignment(ivar_type, is_c_struct))
+                    ivars << IVarInfo.new(ivar_name, ivar_type, offset)
+                    offset += type_size(ivar_type, is_c_struct)
+                  end
+                end
+              end
+            end
             next unless (body = member.body)
             discovered = discover_implicit_ivars_in_body(body, @arena, class_name)
             discovered.each do |ivar_name, ivar_type|
@@ -12678,7 +12700,7 @@ module Crystal::HIR
       end
       @module.register_class_parent(class_name, parent_name)
       if ENV.has_key?("DEBUG_CLASS_INFO") &&
-         (class_name == "Crystal::MachO" || class_name == "IO" || class_name.includes?("FileDescriptor") || class_name == "Thread" || class_name == "Crystal::Scheduler")
+         (class_name == "Crystal::MachO" || class_name == "IO" || class_name.includes?("FileDescriptor") || class_name == "Thread" || class_name == "Crystal::Scheduler" || class_name == "String")
         ivar_dump = ivars.map { |iv| "#{iv.name}:#{get_type_name_from_ref(iv.type)}@#{iv.offset}" }.join(", ")
         STDERR.puts "[CLASS_INFO] #{class_name} ivars=[#{ivar_dump}] size=#{offset}"
       end
@@ -12863,8 +12885,37 @@ module Crystal::HIR
       STDERR.puts "[FIXUP] Fixed #{fixup_count} classes" if fixup_count > 0
       # Final alignment pass: recompute all ivar offsets with proper alignment
       align_all_class_ivars
+      # Re-evaluate offsetof constants now that class info is finalized
+      reevaluate_offsetof_constants
       # Generate any allocators that were deferred because class had empty ivars
       flush_deferred_allocators
+    end
+
+    # Re-evaluate offsetof constants that couldn't be computed during scanning
+    # because class_info wasn't populated yet. Now that inherited ivars are fixed
+    # up and aligned, we can compute the correct offsets.
+    def reevaluate_offsetof_constants : Nil
+      return if @pending_offsetof_constants.empty?
+      @pending_offsetof_constants.each do |(full_name, value_id, arena, owner_name)|
+        next if @constant_literal_values.has_key?(full_name)
+        old_arena = @arena
+        old_class = @current_class
+        @arena = arena
+        @current_class = owner_name
+        begin
+          if literal = constant_literal_value_from_expr(value_id, arena, owner_name)
+            @constant_literal_values[full_name] = literal
+            # Also ensure the type is set correctly (Int32 for offsetof)
+            if !@constant_types.has_key?(full_name) || @constant_types[full_name] == TypeRef::VOID
+              @constant_types[full_name] = TypeRef::INT32
+            end
+          end
+        ensure
+          @current_class = old_class
+          @arena = old_arena
+        end
+      end
+      @pending_offsetof_constants.clear
     end
 
     # Generate allocators that were deferred because the class had empty ivars
@@ -12895,7 +12946,8 @@ module Crystal::HIR
         is_c_struct = info.name.starts_with?("LibC::") || info.name.includes?("::Lib")
 
         needs_fix = false
-        offset = 8 # skip type_id (Int32 padded to 8 on 64-bit)
+        # Structs (including C structs) have no type_id header, classes start at 4 (i32 type_id)
+        offset = info.is_struct ? 0 : 4
         info.ivars.each do |ivar|
           aligned = align_offset(offset, type_alignment(ivar.type, is_c_struct))
           if aligned != ivar.offset
@@ -12907,7 +12959,7 @@ module Crystal::HIR
 
         if needs_fix
           new_ivars = [] of IVarInfo
-          offset = 8
+          offset = info.is_struct ? 0 : 4
           info.ivars.each do |ivar|
             offset = align_offset(offset, type_alignment(ivar.type, is_c_struct))
             new_ivars << IVarInfo.new(ivar.name, ivar.type, offset,
@@ -13464,6 +13516,9 @@ module Crystal::HIR
                   STDERR.puts "[DEFERRED_CLASSVAR] Added from lower_class_with_name: class=#{class_name} cvar=#{String.new(target_node.as(CrystalV2::Compiler::Frontend::ClassVarNode).name)}"
                 end
               end
+            when CrystalV2::Compiler::Frontend::ConstantNode
+              # Defer constant initialization (e.g. HEADER_SIZE = offsetof(String, @c))
+              @deferred_classvar_inits << {expr_id, @arena, class_name}
             end
           end
         end
@@ -13603,6 +13658,10 @@ module Crystal::HIR
             STDERR.puts "[DEFERRED_CLASSVAR] Added AssignNode: class=#{class_name} cvar=#{String.new(target_node.as(CrystalV2::Compiler::Frontend::ClassVarNode).name)}"
           end
         end
+      when CrystalV2::Compiler::Frontend::ConstantNode
+        # Defer constant initialization (e.g. HEADER_SIZE = offsetof(String, @c))
+        # so it runs at start of __crystal_main when class info is available
+        @deferred_classvar_inits << {expr_id, @arena, class_name}
       end
     end
 
@@ -19962,6 +20021,15 @@ module Crystal::HIR
       else
         if literal = constant_literal_value_from_expr(value_id, arena, owner_name)
           @constant_literal_values[full_name] = literal
+        else
+          # Check if expression is an offsetof — save for re-evaluation after class info is ready
+          old_a = @arena
+          @arena = arena
+          expr_node = @arena[value_id]
+          if expr_node.is_a?(CrystalV2::Compiler::Frontend::OffsetofNode)
+            @pending_offsetof_constants << {full_name, value_id, arena, owner_name}
+          end
+          @arena = old_a
         end
       end
 
@@ -23467,9 +23535,14 @@ module Crystal::HIR
     private def pointer_like_type?(type_ref : TypeRef) : Bool
       return true if type_ref == TypeRef::POINTER || type_ref == TypeRef::STRING
       if desc = @module.get_type_descriptor(type_ref)
+        # Class, Struct, Pointer all stored as ptr in LLVM.
+        # Module can appear when a value is typed by its enclosing module context
+        # (e.g., @@current_thread in Crystal::System::Thread typed as Thread).
         return desc.kind == TypeKind::Struct || desc.kind == TypeKind::Class ||
-          desc.kind == TypeKind::Pointer
+          desc.kind == TypeKind::Pointer || desc.kind == TypeKind::Module
       end
+      # Types without descriptors that are not primitives are likely reference types
+      return true if type_ref.id >= TypeRef::FIRST_USER_TYPE
       false
     end
 
@@ -24213,6 +24286,9 @@ module Crystal::HIR
               target_name = target.is_a?(CrystalV2::Compiler::Frontend::ClassVarNode) ? String.new(target.name) : "?"
               STDERR.puts "[DEFERRED_CLASSVAR] Lowering AssignNode: class=#{owner_class} target=#{target_name}"
             end
+            lower_expr(ctx, init_expr_id)
+          when CrystalV2::Compiler::Frontend::ConstantNode
+            # Constant definition (e.g. HEADER_SIZE = offsetof(String, @c))
             lower_expr(ctx, init_expr_id)
           end
         ensure
@@ -26054,6 +26130,32 @@ module Crystal::HIR
           end
         end
         nil
+      when CrystalV2::Compiler::Frontend::UnaryNode
+        op = String.new(expr_node.operator)
+        inner = macro_value_for_expr(expr_node.operand)
+        if inner && inner.is_a?(CrystalV2::Compiler::Semantic::MacroNumberValue)
+          case op
+          when "-"
+            raw = inner.value
+            negated = raw.is_a?(Int64) ? -raw : -(raw.as(Float64))
+            CrystalV2::Compiler::Semantic::MacroNumberValue.new(negated)
+          when "~"
+            raw = inner.value
+            if raw.is_a?(Int64)
+              CrystalV2::Compiler::Semantic::MacroNumberValue.new(~raw)
+            else
+              nil
+            end
+          when "+"
+            inner
+          else
+            nil
+          end
+        elsif inner && inner.is_a?(CrystalV2::Compiler::Semantic::MacroBoolValue) && op == "!"
+          CrystalV2::Compiler::Semantic::MacroBoolValue.new(!inner.value)
+        else
+          nil
+        end
       when CrystalV2::Compiler::Frontend::ConstantNode
         raw_name = String.new(expr_node.name)
         resolved = resolve_constant_name_in_context(raw_name) || raw_name
@@ -26080,6 +26182,49 @@ module Crystal::HIR
           end
         end
         CrystalV2::Compiler::Semantic::MacroIdValue.new(path)
+      when CrystalV2::Compiler::Frontend::OffsetofNode
+        if expr_node.args.size >= 2
+          type_node = @arena[expr_node.args[0]]
+          type_name = case type_node
+                      when CrystalV2::Compiler::Frontend::IdentifierNode
+                        String.new(type_node.name)
+                      when CrystalV2::Compiler::Frontend::ConstantNode
+                        String.new(type_node.name)
+                      else
+                        nil
+                      end
+          field_node = @arena[expr_node.args[1]]
+          field_name = case field_node
+                       when CrystalV2::Compiler::Frontend::InstanceVarNode
+                         String.new(field_node.name)
+                       when CrystalV2::Compiler::Frontend::IdentifierNode
+                         "@#{String.new(field_node.name)}"
+                       else
+                         nil
+                       end
+          if type_name && field_name
+            ci = @class_info[type_name]?
+            unless ci
+              if current = @current_class
+                ci = @class_info["#{current}::#{type_name}"]?
+                ci ||= @class_info["#{current.split("::").first}::#{type_name}"]? if current.includes?("::")
+              end
+            end
+            if ci
+              ci.ivars.each do |ivar|
+                if ivar.name == field_name
+                  return CrystalV2::Compiler::Semantic::MacroNumberValue.new(ivar.offset.to_i64)
+                end
+              end
+              # Field not explicitly registered — it's at the end of the struct
+              # (e.g. String's @c : UInt8 is the first byte after the header fields)
+              if !ci.ivars.empty?
+                return CrystalV2::Compiler::Semantic::MacroNumberValue.new(ci.size.to_i64)
+              end
+            end
+          end
+        end
+        nil
       else
         nil
       end
@@ -26930,6 +27075,56 @@ module Crystal::HIR
     private def lower_offsetof(ctx : LoweringContext, node : CrystalV2::Compiler::Frontend::OffsetofNode) : ValueId
       # offsetof(T, @field) returns the byte offset of a field
       offset = 0_i64 # Default
+
+      if node.args.size >= 2
+        # Extract type name from first arg
+        type_node = @arena[node.args[0]]
+        type_name = case type_node
+                    when CrystalV2::Compiler::Frontend::IdentifierNode
+                      String.new(type_node.name)
+                    when CrystalV2::Compiler::Frontend::ConstantNode
+                      String.new(type_node.name)
+                    else
+                      nil
+                    end
+
+        # Extract field name from second arg
+        field_node = @arena[node.args[1]]
+        field_name = case field_node
+                     when CrystalV2::Compiler::Frontend::InstanceVarNode
+                       String.new(field_node.name) # includes @ prefix
+                     when CrystalV2::Compiler::Frontend::IdentifierNode
+                       "@#{String.new(field_node.name)}"
+                     else
+                       nil
+                     end
+
+        if type_name && field_name
+          # Look up class info - try exact name, then with current namespace
+          ci = @class_info[type_name]?
+          unless ci
+            if current = @current_class
+              ci = @class_info["#{current}::#{type_name}"]?
+              ci ||= @class_info["#{current.split("::").first}::#{type_name}"]? if current.includes?("::")
+            end
+          end
+          if ci
+            found = false
+            ci.ivars.each do |ivar|
+              if ivar.name == field_name
+                offset = ivar.offset.to_i64
+                found = true
+                break
+              end
+            end
+            # Field not explicitly registered — it's at the end of the struct
+            if !found && !ci.ivars.empty?
+              offset = ci.size.to_i64
+            end
+          end
+        end
+      end
+
       lit = Literal.new(ctx.next_id, TypeRef::INT32, offset)
       ctx.emit(lit)
       lit.id
@@ -27681,6 +27876,12 @@ module Crystal::HIR
         if included
           included.to_a.sort.each do |module_name|
             module_base = strip_generic_args(resolve_module_alias_for_include(module_name))
+            # Skip the module that provided the current _super body to avoid infinite recursion.
+            # E.g., IO::FileDescriptor includes IO::Buffered; IO::Buffered#write_byte calls super
+            # → should skip IO::Buffered and go to parent class IO, not back to IO::Buffered.
+            if skip_mod = @current_super_source_module
+              next if module_base == skip_mod || module_name == skip_mod
+            end
             visited = Set(String).new
             if found = find_module_def_recursive(module_base, method_name, args.size, visited)
               actual_func_def = found[0]
@@ -27711,11 +27912,14 @@ module Crystal::HIR
               super_name = mangle_function_name(super_base, arg_types)
               unless @module.has_function?(super_name)
                 receiver_map = type_param_map_for_receiver_name("#{class_name}##{method_name}")
+                old_super_source = @current_super_source_module
+                @current_super_source_module = module_base
                 with_arena(def_arena) do
                   with_type_param_map(receiver_map) do
                     lower_method(class_name, class_info, actual_func_def, arg_types, nil, nil, super_name, force_class_method: @current_method_is_class)
                   end
                 end
+                @current_super_source_module = old_super_source
               end
               return_type = @function_types[super_name]? || TypeRef::VOID
               self_id = emit_self(ctx)
@@ -31207,6 +31411,12 @@ module Crystal::HIR
             copy = Copy.new(ctx.next_id, exc_type_ref, get_exc.id)
             ctx.emit(copy)
             ctx.register_type(copy.id, exc_type_ref)
+
+            # Update local to point to the copy result (exception value),
+            # not the Local alloca. Without this, phi merges and rescue body
+            # code that references 'ex' would use the alloca pointer instead
+            # of the actual exception.
+            ctx.register_local(String.new(var_name), copy.id)
           end
 
           # Lower rescue body
@@ -42379,6 +42589,43 @@ module Crystal::HIR
         return lower_static_member_access_call(ctx, class_name_str, member_name)
       end
 
+      # Detect ptr.value.field pattern (READ): use pointer directly for FieldGet
+      # instead of dereferencing first (which would load garbage for struct pointers)
+      inner_node = @arena[node.object]
+      if inner_node.is_a?(CrystalV2::Compiler::Frontend::MemberAccessNode) &&
+         String.new(inner_node.member) == "value"
+        ptr_id = lower_expr(ctx, inner_node.object)
+        ptr_type = ctx.type_of(ptr_id)
+        ptr_desc = @module.get_type_descriptor(ptr_type)
+        is_pointer = ptr_type == TypeRef::POINTER ||
+                     (ptr_desc && ptr_desc.kind == TypeKind::Pointer)
+        if is_pointer
+          element_type_name = if ptr_desc && ptr_desc.name.starts_with?("Pointer(")
+                                ptr_desc.name[8...-1]
+                              else
+                                nil
+                              end
+          if element_type_name
+            element_type_ref = type_ref_for_name(element_type_name)
+            element_desc = @module.get_type_descriptor(element_type_ref)
+            element_class_name = element_desc ? element_desc.name : element_type_name
+            if ci = @class_info[element_class_name]?
+              ivar_name = "@#{member_name}"
+              ivar_info = ci.ivars.find { |iv| iv.name == ivar_name }
+              if !ivar_info && ci.is_struct && @lib_structs.includes?(element_class_name)
+                ivar_info = ci.ivars.find { |iv| iv.name == member_name || iv.name == "@#{member_name}" }
+              end
+              if ivar_info
+                field_get = FieldGet.new(ctx.next_id, ivar_info.type, ptr_id, ivar_info.name, ivar_info.offset)
+                ctx.emit(field_get)
+                ctx.register_type(field_get.id, ivar_info.type)
+                return field_get.id
+              end
+            end
+          end
+        end
+      end
+
       # Otherwise it's an instance method call - evaluate object first
       object_id = lower_expr(ctx, node.object)
 
@@ -43692,6 +43939,10 @@ module Crystal::HIR
           end
           class_map[name] = enum_name
         end
+        # Coerce value to classvar type (e.g., wrap bare ptr into union)
+        if cvar_type != TypeRef::VOID
+          value_id = coerce_value_to_type(ctx, value_id, cvar_type)
+        end
         class_var_set = ClassVarSet.new(ctx.next_id, cvar_type, class_name, name, value_id)
         ctx.emit(class_var_set)
         class_var_set.id
@@ -43808,6 +44059,43 @@ module Crystal::HIR
             ctx.emit(call)
             ctx.register_type(call.id, return_type)
             return call.id
+          end
+        end
+
+        # Detect ptr.value.field = val pattern: use pointer directly
+        # instead of dereferencing (which would load garbage for struct pointers)
+        inner_node = @arena[target_node.object]
+        if inner_node.is_a?(CrystalV2::Compiler::Frontend::MemberAccessNode) &&
+           String.new(inner_node.member) == "value"
+          ptr_id = lower_expr(ctx, inner_node.object)
+          ptr_type = ctx.type_of(ptr_id)
+          ptr_desc = @module.get_type_descriptor(ptr_type)
+          is_pointer = ptr_type == TypeRef::POINTER ||
+                       (ptr_desc && ptr_desc.kind == TypeKind::Pointer)
+          if is_pointer
+            # Resolve pointed-to type for field layout
+            element_type_name = if ptr_desc && ptr_desc.name.starts_with?("Pointer(")
+                                  ptr_desc.name[8...-1]
+                                else
+                                  nil
+                                end
+            if element_type_name
+              element_type_ref = type_ref_for_name(element_type_name)
+              element_desc = @module.get_type_descriptor(element_type_ref)
+              element_class_name = element_desc ? element_desc.name : element_type_name
+              if ci = @class_info[element_class_name]?
+                ivar_name = "@#{field_name}"
+                ivar_info = ci.ivars.find { |iv| iv.name == ivar_name }
+                if !ivar_info && ci.is_struct && @lib_structs.includes?(element_class_name)
+                  ivar_info = ci.ivars.find { |iv| iv.name == field_name }
+                end
+                if ivar_info
+                  field_set = FieldSet.new(ctx.next_id, TypeRef::VOID, ptr_id, ivar_info.name, value_id, ivar_info.offset)
+                  ctx.emit(field_set)
+                  return field_set.id
+                end
+              end
+            end
           end
         end
 
@@ -44178,6 +44466,10 @@ module Crystal::HIR
             new_map
           end
           class_map[name] = enum_name
+        end
+        # Coerce value to classvar type (e.g., wrap bare ptr into union)
+        if cvar_type != TypeRef::VOID
+          value_id = coerce_value_to_type(ctx, value_id, cvar_type)
         end
         class_var_set = ClassVarSet.new(ctx.next_id, cvar_type, class_name, name, value_id)
         ctx.emit(class_var_set)

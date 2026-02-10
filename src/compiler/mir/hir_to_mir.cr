@@ -229,13 +229,19 @@ module Crystal
         # Determine TypeKind (class = reference type, struct = value type)
         type_kind = info.is_struct ? TypeKind::Struct : TypeKind::Reference
 
-        # Calculate total size (struct: just ivars, class: 8-byte header + ivars)
+        # Calculate total size (struct: just ivars, class: 4-byte i32 type_id header + ivars)
         total_size = info.size.to_u64
 
         # Create type in registry, or get existing type by name (for built-in types like String)
         # First check if a type with this name already exists (e.g., String as primitive)
         mir_type = @mir_module.type_registry.get_by_name(class_name)
-        unless mir_type
+        if mir_type
+          # Update size from class_info if it has ivars (e.g., String primitive registered with
+          # size=8 but actual class_info has size=12 after ivar discovery)
+          if total_size > mir_type.size && !info.ivars.empty?
+            mir_type.size = total_size
+          end
+        else
           mir_type = @mir_module.type_registry.create_type_with_id(
             mir_type_ref.id,
             type_kind,
@@ -670,6 +676,20 @@ module Crystal
         alloc_size = (alloc.constructor_args.size * 8).to_u64
       end
 
+      # Fix StaticArray size: if type is StaticArray but size is 0, compute from name
+      if alloc_size == 0
+        type_name = @mir_module.type_registry.get(mir_type_ref).try(&.name) || ""
+        if m = type_name.match(/StaticArray\((.+),\s*(\d+)\)/)
+          elem_name = m[1].strip
+          count = m[2].to_u64
+          elem_type = @mir_module.type_registry.get_by_name(elem_name)
+          elem_size = elem_type ? elem_type.size : 1_u64
+          elem_size = 1_u64 if elem_size == 0
+          alloc_size = elem_size * count
+        end
+        alloc_size = 8_u64 if alloc_size == 0  # safety fallback
+      end
+
       # Create allocation with proper size
       ptr = builder.alloc(strategy, mir_type_ref, alloc_size)
 
@@ -960,6 +980,34 @@ module Crystal
       # Check if this is an external/runtime call
       if call.method_name.starts_with?("__crystal_v2_")
         return builder.extern_call(call.method_name, args, convert_type(call.type))
+      end
+
+      # Atomic intrinsics: Atomic(T)#get → load from self+0, Atomic(T)#set → store to self+0
+      # Original Crystal uses @[Primitive(:load_atomic)] / @[Primitive(:store_atomic)]
+      # but our compiler can't lower those primitives, so we inline them here.
+      if call.method_name.includes?("Atomic") && call.receiver
+        method_suffix = call.method_name.rpartition("#").last.split("$").first
+        if method_suffix == "get" || method_suffix == "Hget"
+          # Atomic#get: load value from self + 0
+          self_ptr = args[0]
+          val_ptr = builder.gep(self_ptr, [0_u32], TypeRef::POINTER)
+          return builder.load(val_ptr, convert_type(call.type))
+        elsif method_suffix == "set" || method_suffix == "Hset"
+          # Atomic#set: store value to self + 0
+          self_ptr = args[0]
+          new_val = args.size > 2 ? args[2] : (args.size > 1 ? args[1] : builder.const_int(0, TypeRef::INT32))
+          val_ptr = builder.gep(self_ptr, [0_u32], TypeRef::POINTER)
+          builder.store(val_ptr, new_val)
+          return new_val
+        elsif method_suffix == "swap" || method_suffix == "Hswap"
+          # Atomic#swap: load old, store new, return old
+          self_ptr = args[0]
+          new_val = args.size > 2 ? args[2] : (args.size > 1 ? args[1] : builder.const_int(0, TypeRef::INT32))
+          val_ptr = builder.gep(self_ptr, [0_u32], TypeRef::POINTER)
+          old_val = builder.load(val_ptr, convert_type(call.type))
+          builder.store(val_ptr, new_val)
+          return old_val
+        end
       end
 
       # Special handling for Proc#call - emit indirect call through function pointer
@@ -1369,19 +1417,28 @@ module Crystal
         end
 
         if call_func
-          expects_receiver = call_func.params.size == cand_args.size
+          callee_param_count = call_func.params.size
           coerced_args = cand_args
           if hir_call
             recv_id = hir_call.receiver
-            if expects_receiver
+            if callee_param_count == cand_args.size
+              # Same param count — pass all args including receiver
               hir_args_with_receiver = recv_id ? [recv_id] + hir_call.args : hir_call.args
               coerced_args = coerce_call_args(dispatch_builder, cand_args, hir_args_with_receiver, call_func)
+            elsif callee_param_count < cand_args.size
+              # Callee has fewer params (e.g. subclass doesn't take optional arg).
+              # Truncate dispatch args to match callee's param count, keeping receiver.
+              truncated_args = cand_args[0, callee_param_count]
+              hir_args_with_receiver = recv_id ? [recv_id] + hir_call.args : hir_call.args
+              truncated_hir = hir_args_with_receiver[0, callee_param_count]? || hir_args_with_receiver
+              coerced_args = coerce_call_args(dispatch_builder, truncated_args, truncated_hir, call_func)
             else
-              hir_args_no_receiver = hir_call.args
-              coerced_args = coerce_call_args(dispatch_builder, cand_args[1..], hir_args_no_receiver, call_func)
+              # Callee expects more args than dispatch provides — pass all, let coercion handle it
+              hir_args_with_receiver = recv_id ? [recv_id] + hir_call.args : hir_call.args
+              coerced_args = coerce_call_args(dispatch_builder, cand_args, hir_args_with_receiver, call_func)
             end
-          elsif !expects_receiver
-            coerced_args = cand_args[1..]
+          elsif callee_param_count < cand_args.size
+            coerced_args = cand_args[0, callee_param_count]
           end
 
           call_val = dispatch_builder.call(call_func.id, coerced_args, dispatch_func.return_type)
@@ -1425,11 +1482,26 @@ module Crystal
 
       dispatch_name = "__vdispatch__#{call.method_name}"
       if existing = @mir_module.get_function(dispatch_name)
-        return @builder.not_nil!.call(existing.id, args, convert_type(call.type))
+        return @builder.not_nil!.call(existing.id, args, existing.return_type)
+      end
+
+      # Determine return type: prefer candidate function return type over call.type
+      # because the call site may discard the result (VOID) while the function actually
+      # returns a value (e.g. property getters returning union types).
+      ret_type = convert_type(call.type)
+      if ret_type == TypeRef::VOID
+        old_candidates.each do |c|
+          if f = c[:func]
+            if f.return_type != TypeRef::VOID
+              ret_type = f.return_type
+              break
+            end
+          end
+        end
       end
 
       # Create dispatch function
-      dispatch_func = @mir_module.create_function(dispatch_name, convert_type(call.type))
+      dispatch_func = @mir_module.create_function(dispatch_name, ret_type)
       param_values = [] of ValueId
 
       # Receiver param
@@ -1734,8 +1806,19 @@ module Crystal
       end
       return nil if old_candidates.empty?
 
+      # Determine return type from candidates (not call.type which may be VOID)
+      ret_type = convert_type(call.type)
+      if ret_type == TypeRef::VOID
+        old_candidates.each do |c|
+          if c[:func].return_type != TypeRef::VOID
+            ret_type = c[:func].return_type
+            break
+          end
+        end
+      end
+
       # Create dispatch function
-      dispatch_func = @mir_module.create_function(dispatch_name, convert_type(call.type))
+      dispatch_func = @mir_module.create_function(dispatch_name, ret_type)
       param_values = [] of ValueId
       dispatch_func.add_param("recv", receiver_type)
       param_values << 0_u32
