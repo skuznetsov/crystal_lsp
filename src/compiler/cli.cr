@@ -377,7 +377,14 @@ module CrystalV2
             digest.update(f.to_slice)
             digest.update(File.read(f).to_slice)
           end
-          digest.update("v1|mm=#{options.mm_mode}|thresh=#{options.mm_stack_threshold}|slab=#{options.slab_frame}|opt=#{options.optimize}".to_slice)
+          digest.update("v2|mm=#{options.mm_mode}|thresh=#{options.mm_stack_threshold}|slab=#{options.slab_frame}|opt=#{options.optimize}".to_slice)
+          # Include compiler binary mtime to invalidate cache when compiler changes
+          if _exe_path = Process.executable_path
+            begin
+              digest.update("cmtime=#{File.info(_exe_path).modification_time.to_unix}".to_slice)
+            rescue
+            end
+          end
           pipeline_hash = digest.hexfinal
           pipeline_cache_file = File.join(pipeline_cache_dir, "#{pipeline_hash}.ll")
 

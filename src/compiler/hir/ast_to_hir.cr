@@ -7351,6 +7351,10 @@ module Crystal::HIR
                 STDERR.puts "[PTR_VALUE_INFER] obj_type=#{obj_type.id} no_desc class=#{class_name}"
               end
             end
+            # Enum#value — enums are stored as their base integer type, .value is identity
+            if member_name == "value" && (signed_integer_type?(obj_type) || unsigned_integer_type?(obj_type))
+              return obj_type
+            end
             if member_name == "clone" || member_name == "dup"
               return obj_type
             end
@@ -36433,6 +36437,48 @@ module Crystal::HIR
         names = args.map { |arg_id| enum_map[arg_id]? }
         prepack_arg_enum_names = names if names.any?
       end
+
+      # Post-lowering puts/print interception for primitive types.
+      # This catches cases where the AST-level inference failed (e.g., top-level locals,
+      # enum .value calls, comparison results). For primitive types (int/float/bool),
+      # puts$splat wraps the value as a pointer → crashes. Redirect to IO#puts$<Type> directly.
+      if receiver_id.nil? && (method_name == "puts" || method_name == "print") &&
+         prepack_arg_types.size == 1 && block_expr.nil? && block_pass_expr.nil? &&
+         full_method_name.nil?
+        _post_arg_type = prepack_arg_types[0]
+        _post_is_primitive = signed_integer_type?(_post_arg_type) ||
+                             unsigned_integer_type?(_post_arg_type) ||
+                             _post_arg_type == TypeRef::BOOL ||
+                             _post_arg_type == TypeRef::FLOAT32 ||
+                             _post_arg_type == TypeRef::FLOAT64
+        if _post_is_primitive
+          _post_arg_id = args[0]
+          # Float special handling
+          _float_extern = case _post_arg_type
+                          when TypeRef::FLOAT64
+                            method_name == "puts" ? "__crystal_v2_print_float64_ln" : "__crystal_v2_print_float64"
+                          when TypeRef::FLOAT32
+                            method_name == "puts" ? "__crystal_v2_print_float32_ln" : "__crystal_v2_print_float32"
+                          else
+                            nil
+                          end
+          if _float_extern
+            _ext_call = ExternCall.new(ctx.next_id, TypeRef::VOID, _float_extern, [_post_arg_id])
+            ctx.emit(_ext_call)
+            ctx.register_type(_ext_call.id, TypeRef::NIL)
+            return _ext_call.id
+          end
+          _stdout_get = ClassVarGet.new(ctx.next_id, TypeRef::POINTER, "Object", "STDOUT")
+          ctx.emit(_stdout_get)
+          ctx.register_type(_stdout_get.id, TypeRef::POINTER)
+          _mangled = mangle_function_name("IO##{method_name}", [_post_arg_type])
+          _call_instr = Call.new(ctx.next_id, TypeRef::NIL, _stdout_get.id, _mangled, [_post_arg_id], nil, true)
+          ctx.emit(_call_instr)
+          ctx.register_type(_call_instr.id, TypeRef::NIL)
+          return _call_instr.id
+        end
+      end
+
       pack_result = pack_splat_args_for_call(ctx, args, method_name, full_method_name, has_block_call, has_named_args, receiver_id, has_splat)
       args = pack_result[0]
       splat_packed = pack_result[1]
