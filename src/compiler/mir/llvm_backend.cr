@@ -702,7 +702,7 @@ module Crystal::MIR
       already_declared << "setjmp" << "longjmp"
       # Crystal v2 runtime functions
       already_declared << "__crystal_v2_raise" << "__crystal_v2_int_to_string"
-      already_declared << "__crystal_v2_string_concat" << "__crystal_v2_f64_to_string"
+      already_declared << "__crystal_v2_string_concat" << "__crystal_v2_string_interpolate" << "__crystal_v2_f64_to_string"
       already_declared << "__crystal_v2_char_to_string" << "__crystal_v2_malloc64"
       already_declared << "__crystal_v2_init_buffer" << "__crystal_v2_string_repeat"
       # Skip any function starting with __crystal_v2_ (runtime functions)
@@ -1421,8 +1421,9 @@ module Crystal::MIR
       emit_raw "@.long_fmt_no_nl = private constant [4 x i8] c\"%ld\\00\"\n"
       emit_raw "@.float_fmt_no_nl = private constant [3 x i8] c\"%g\\00\"\n"
       emit_raw "@.float_fmt = private constant [4 x i8] c\"%g\\0A\\00\"\n"
-      emit_raw "@.str.true = private constant [5 x i8] c\"true\\00\"\n"
-      emit_raw "@.str.false = private constant [6 x i8] c\"false\\00\"\n"
+      # Crystal String structs for bool_to_string: {type_id=17, bytesize, size, bytes}
+      emit_raw "@.str.true = private constant { i32, i32, i32, [5 x i8] } { i32 17, i32 4, i32 4, [5 x i8] c\"true\\00\" }, align 8\n"
+      emit_raw "@.str.false = private constant { i32, i32, i32, [6 x i8] } { i32 17, i32 5, i32 5, [6 x i8] c\"false\\00\" }, align 8\n"
       emit_raw "\n"
 
       # Memory allocation - use calloc for zero-initialized memory
@@ -1683,16 +1684,47 @@ module Crystal::MIR
       emit_raw "\n"
 
       # int_to_string: allocate buffer and sprintf
+      # int_to_string: sprintf to temp buffer, then wrap in Crystal String struct
       emit_raw "define ptr @__crystal_v2_int_to_string(i32 %val) {\n"
-      emit_raw "  %buf = call ptr @malloc(i64 16)\n"
-      emit_raw "  call i32 (ptr, ptr, ...) @sprintf(ptr %buf, ptr @.int_fmt_no_nl, i32 %val)\n"
-      emit_raw "  ret ptr %buf\n"
+      emit_raw "  %tmp = alloca [16 x i8]\n"
+      emit_raw "  call i32 (ptr, ptr, ...) @sprintf(ptr %tmp, ptr @.int_fmt_no_nl, i32 %val)\n"
+      emit_raw "  %len64 = call i64 @strlen(ptr %tmp)\n"
+      emit_raw "  %len = trunc i64 %len64 to i32\n"
+      emit_raw "  %alloc_32 = add i32 %len, 13\n"
+      emit_raw "  %alloc_64 = sext i32 %alloc_32 to i64\n"
+      emit_raw "  %str = call ptr @__crystal_v2_malloc64(i64 %alloc_64)\n"
+      emit_raw "  store i32 17, ptr %str\n"
+      emit_raw "  %bs = getelementptr i8, ptr %str, i32 4\n"
+      emit_raw "  store i32 %len, ptr %bs\n"
+      emit_raw "  %sz = getelementptr i8, ptr %str, i32 8\n"
+      emit_raw "  store i32 %len, ptr %sz\n"
+      emit_raw "  %data = getelementptr i8, ptr %str, i32 12\n"
+      emit_raw "  %len64c = sext i32 %len to i64\n"
+      emit_raw "  call void @llvm.memcpy.p0.p0.i64(ptr %data, ptr %tmp, i64 %len64c, i1 false)\n"
+      emit_raw "  %null_pos = getelementptr i8, ptr %data, i32 %len\n"
+      emit_raw "  store i8 0, ptr %null_pos\n"
+      emit_raw "  ret ptr %str\n"
       emit_raw "}\n\n"
 
       emit_raw "define ptr @__crystal_v2_int64_to_string(i64 %val) {\n"
-      emit_raw "  %buf = call ptr @malloc(i64 24)\n"
-      emit_raw "  call i32 (ptr, ptr, ...) @sprintf(ptr %buf, ptr @.long_fmt_no_nl, i64 %val)\n"
-      emit_raw "  ret ptr %buf\n"
+      emit_raw "  %tmp = alloca [24 x i8]\n"
+      emit_raw "  call i32 (ptr, ptr, ...) @sprintf(ptr %tmp, ptr @.long_fmt_no_nl, i64 %val)\n"
+      emit_raw "  %len64 = call i64 @strlen(ptr %tmp)\n"
+      emit_raw "  %len = trunc i64 %len64 to i32\n"
+      emit_raw "  %alloc_32 = add i32 %len, 13\n"
+      emit_raw "  %alloc_64 = sext i32 %alloc_32 to i64\n"
+      emit_raw "  %str = call ptr @__crystal_v2_malloc64(i64 %alloc_64)\n"
+      emit_raw "  store i32 17, ptr %str\n"
+      emit_raw "  %bs = getelementptr i8, ptr %str, i32 4\n"
+      emit_raw "  store i32 %len, ptr %bs\n"
+      emit_raw "  %sz = getelementptr i8, ptr %str, i32 8\n"
+      emit_raw "  store i32 %len, ptr %sz\n"
+      emit_raw "  %data = getelementptr i8, ptr %str, i32 12\n"
+      emit_raw "  %len64c = sext i32 %len to i64\n"
+      emit_raw "  call void @llvm.memcpy.p0.p0.i64(ptr %data, ptr %tmp, i64 %len64c, i1 false)\n"
+      emit_raw "  %null_pos = getelementptr i8, ptr %data, i32 %len\n"
+      emit_raw "  store i8 0, ptr %null_pos\n"
+      emit_raw "  ret ptr %str\n"
       emit_raw "}\n\n"
 
       # int64 to i32 (truncate)
@@ -1728,9 +1760,24 @@ module Crystal::MIR
 
       # float64 to string
       emit_raw "define ptr @__crystal_v2_f64_to_string(double %val) {\n"
-      emit_raw "  %buf = call ptr @malloc(i64 32)\n"
-      emit_raw "  call i32 (ptr, ptr, ...) @sprintf(ptr %buf, ptr @.float_fmt_no_nl, double %val)\n"
-      emit_raw "  ret ptr %buf\n"
+      emit_raw "  %tmp = alloca [32 x i8]\n"
+      emit_raw "  call i32 (ptr, ptr, ...) @sprintf(ptr %tmp, ptr @.float_fmt_no_nl, double %val)\n"
+      emit_raw "  %len64 = call i64 @strlen(ptr %tmp)\n"
+      emit_raw "  %len = trunc i64 %len64 to i32\n"
+      emit_raw "  %alloc_32 = add i32 %len, 13\n"
+      emit_raw "  %alloc_64 = sext i32 %alloc_32 to i64\n"
+      emit_raw "  %str = call ptr @__crystal_v2_malloc64(i64 %alloc_64)\n"
+      emit_raw "  store i32 17, ptr %str\n"
+      emit_raw "  %bs = getelementptr i8, ptr %str, i32 4\n"
+      emit_raw "  store i32 %len, ptr %bs\n"
+      emit_raw "  %sz = getelementptr i8, ptr %str, i32 8\n"
+      emit_raw "  store i32 %len, ptr %sz\n"
+      emit_raw "  %data = getelementptr i8, ptr %str, i32 12\n"
+      emit_raw "  %len64c = sext i32 %len to i64\n"
+      emit_raw "  call void @llvm.memcpy.p0.p0.i64(ptr %data, ptr %tmp, i64 %len64c, i1 false)\n"
+      emit_raw "  %null_pos = getelementptr i8, ptr %data, i32 %len\n"
+      emit_raw "  store i8 0, ptr %null_pos\n"
+      emit_raw "  ret ptr %str\n"
       emit_raw "}\n\n"
 
       # float64 to int32
@@ -1755,8 +1802,8 @@ module Crystal::MIR
       emit_raw "  ret ptr @.str.false\n"
       emit_raw "}\n\n"
 
-      # string_concat: allocate new buffer and concatenate
-      # String concat: works with Crystal String layout {type_id:i32, bytesize:i32, size:i32, bytes:[N x i8]}
+      # ── string_concat: two Crystal Strings → one new Crystal String ──
+      # Crystal String layout: {type_id:i32, bytesize:i32, size:i32, bytes:[N x i8]}
       emit_raw "define ptr @__crystal_v2_string_concat(ptr %a, ptr %b) {\n"
       emit_raw "entry:\n"
       emit_raw "  %a_null = icmp eq ptr %a, null\n"
@@ -1774,37 +1821,110 @@ module Crystal::MIR
       emit_raw "ret_a:\n"
       emit_raw "  ret ptr %a\n"
       emit_raw "do_concat:\n"
-      # Read bytesize from offset 4 of each Crystal String
       emit_raw "  %a_bs_ptr = getelementptr i8, ptr %a, i32 4\n"
       emit_raw "  %a_bs = load i32, ptr %a_bs_ptr\n"
       emit_raw "  %b_bs_ptr = getelementptr i8, ptr %b, i32 4\n"
       emit_raw "  %b_bs = load i32, ptr %b_bs_ptr\n"
       emit_raw "  %total = add i32 %a_bs, %b_bs\n"
-      # Allocate new Crystal String: 12 bytes header + total bytes + 1 null terminator
-      emit_raw "  %alloc_size_32 = add i32 %total, 13\n"
-      emit_raw "  %alloc_size = sext i32 %alloc_size_32 to i64\n"
-      emit_raw "  %buf = call ptr @malloc(i64 %alloc_size)\n"
-      # Set type_id = 17 (String)
+      emit_raw "  %alloc_32 = add i32 %total, 13\n"
+      emit_raw "  %alloc_64 = sext i32 %alloc_32 to i64\n"
+      emit_raw "  %buf = call ptr @__crystal_v2_malloc64(i64 %alloc_64)\n"
       emit_raw "  store i32 17, ptr %buf\n"
-      # Set bytesize
       emit_raw "  %buf_bs = getelementptr i8, ptr %buf, i32 4\n"
       emit_raw "  store i32 %total, ptr %buf_bs\n"
-      # Set size (= bytesize for ASCII, good enough for now)
       emit_raw "  %buf_sz = getelementptr i8, ptr %buf, i32 8\n"
       emit_raw "  store i32 %total, ptr %buf_sz\n"
-      # Copy a's bytes (from offset 12)
       emit_raw "  %a_data = getelementptr i8, ptr %a, i32 12\n"
       emit_raw "  %buf_data = getelementptr i8, ptr %buf, i32 12\n"
       emit_raw "  %a_bs_64 = sext i32 %a_bs to i64\n"
       emit_raw "  call void @llvm.memcpy.p0.p0.i64(ptr %buf_data, ptr %a_data, i64 %a_bs_64, i1 false)\n"
-      # Copy b's bytes after a's bytes
-      emit_raw "  %b_data = getelementptr i8, ptr %b, i32 12\n"
       emit_raw "  %buf_data2 = getelementptr i8, ptr %buf_data, i32 %a_bs\n"
+      emit_raw "  %b_data = getelementptr i8, ptr %b, i32 12\n"
       emit_raw "  %b_bs_64 = sext i32 %b_bs to i64\n"
       emit_raw "  call void @llvm.memcpy.p0.p0.i64(ptr %buf_data2, ptr %b_data, i64 %b_bs_64, i1 false)\n"
-      # Null-terminate
       emit_raw "  %null_pos = getelementptr i8, ptr %buf_data, i32 %total\n"
       emit_raw "  store i8 0, ptr %null_pos\n"
+      emit_raw "  ret ptr %buf\n"
+      emit_raw "}\n\n"
+
+      # ── string_interpolate: N Crystal Strings → one new Crystal String (single alloc) ──
+      # Takes a ptr to array of String ptrs and a count.
+      # Pass 1: sum bytesizes. Pass 2: alloc once, memcpy all parts.
+      emit_raw "define ptr @__crystal_v2_string_interpolate(ptr %parts, i32 %count) {\n"
+      emit_raw "entry:\n"
+      emit_raw "  %total_ptr = alloca i32\n"
+      emit_raw "  store i32 0, ptr %total_ptr\n"
+      emit_raw "  %i_ptr = alloca i32\n"
+      emit_raw "  store i32 0, ptr %i_ptr\n"
+      emit_raw "  br label %sum_loop\n"
+      # ── pass 1: compute total bytesize ──
+      emit_raw "sum_loop:\n"
+      emit_raw "  %si = load i32, ptr %i_ptr\n"
+      emit_raw "  %sdone = icmp sge i32 %si, %count\n"
+      emit_raw "  br i1 %sdone, label %alloc, label %sum_body\n"
+      emit_raw "sum_body:\n"
+      emit_raw "  %sp = getelementptr ptr, ptr %parts, i32 %si\n"
+      emit_raw "  %spart = load ptr, ptr %sp\n"
+      emit_raw "  %snull = icmp eq ptr %spart, null\n"
+      emit_raw "  br i1 %snull, label %sum_next, label %sum_add\n"
+      emit_raw "sum_add:\n"
+      emit_raw "  %sbs_ptr = getelementptr i8, ptr %spart, i32 4\n"
+      emit_raw "  %sbs = load i32, ptr %sbs_ptr\n"
+      emit_raw "  %sold = load i32, ptr %total_ptr\n"
+      emit_raw "  %snew = add i32 %sold, %sbs\n"
+      emit_raw "  store i32 %snew, ptr %total_ptr\n"
+      emit_raw "  br label %sum_next\n"
+      emit_raw "sum_next:\n"
+      emit_raw "  %snxi = add i32 %si, 1\n"
+      emit_raw "  store i32 %snxi, ptr %i_ptr\n"
+      emit_raw "  br label %sum_loop\n"
+      # ── allocate result string ──
+      emit_raw "alloc:\n"
+      emit_raw "  %total = load i32, ptr %total_ptr\n"
+      emit_raw "  %a32 = add i32 %total, 13\n"
+      emit_raw "  %a64 = sext i32 %a32 to i64\n"
+      emit_raw "  %buf = call ptr @__crystal_v2_malloc64(i64 %a64)\n"
+      emit_raw "  store i32 17, ptr %buf\n"
+      emit_raw "  %bbs = getelementptr i8, ptr %buf, i32 4\n"
+      emit_raw "  store i32 %total, ptr %bbs\n"
+      emit_raw "  %bsz = getelementptr i8, ptr %buf, i32 8\n"
+      emit_raw "  store i32 %total, ptr %bsz\n"
+      emit_raw "  %off_ptr = alloca i32\n"
+      emit_raw "  store i32 0, ptr %off_ptr\n"
+      emit_raw "  store i32 0, ptr %i_ptr\n"
+      emit_raw "  br label %copy_loop\n"
+      # ── pass 2: memcpy each part into buffer ──
+      emit_raw "copy_loop:\n"
+      emit_raw "  %ci = load i32, ptr %i_ptr\n"
+      emit_raw "  %cdone = icmp sge i32 %ci, %count\n"
+      emit_raw "  br i1 %cdone, label %finish, label %copy_body\n"
+      emit_raw "copy_body:\n"
+      emit_raw "  %cp = getelementptr ptr, ptr %parts, i32 %ci\n"
+      emit_raw "  %cpart = load ptr, ptr %cp\n"
+      emit_raw "  %cnull = icmp eq ptr %cpart, null\n"
+      emit_raw "  br i1 %cnull, label %copy_next, label %copy_do\n"
+      emit_raw "copy_do:\n"
+      emit_raw "  %cbs_ptr = getelementptr i8, ptr %cpart, i32 4\n"
+      emit_raw "  %cbs = load i32, ptr %cbs_ptr\n"
+      emit_raw "  %cdata = getelementptr i8, ptr %cpart, i32 12\n"
+      emit_raw "  %coff = load i32, ptr %off_ptr\n"
+      emit_raw "  %dst = getelementptr i8, ptr %buf, i32 12\n"
+      emit_raw "  %dst2 = getelementptr i8, ptr %dst, i32 %coff\n"
+      emit_raw "  %cbs64 = sext i32 %cbs to i64\n"
+      emit_raw "  call void @llvm.memcpy.p0.p0.i64(ptr %dst2, ptr %cdata, i64 %cbs64, i1 false)\n"
+      emit_raw "  %noff = add i32 %coff, %cbs\n"
+      emit_raw "  store i32 %noff, ptr %off_ptr\n"
+      emit_raw "  br label %copy_next\n"
+      emit_raw "copy_next:\n"
+      emit_raw "  %cnxi = add i32 %ci, 1\n"
+      emit_raw "  store i32 %cnxi, ptr %i_ptr\n"
+      emit_raw "  br label %copy_loop\n"
+      # ── null-terminate and return ──
+      emit_raw "finish:\n"
+      emit_raw "  %foff = load i32, ptr %off_ptr\n"
+      emit_raw "  %ndst = getelementptr i8, ptr %buf, i32 12\n"
+      emit_raw "  %ndst2 = getelementptr i8, ptr %ndst, i32 %foff\n"
+      emit_raw "  store i8 0, ptr %ndst2\n"
       emit_raw "  ret ptr %buf\n"
       emit_raw "}\n\n"
 
@@ -7786,16 +7906,14 @@ module Crystal::MIR
         # Two parts - call __crystal_v2_string_concat
         emit "#{name} = call ptr @__crystal_v2_string_concat(ptr #{string_parts[0]}, ptr #{string_parts[1]})"
       else
-        # Multiple parts - chain concatenation
-        emit "%#{base_name}.tmp0 = bitcast ptr #{string_parts[0]} to ptr"
-        (1...string_parts.size).each do |i|
-          prev = i == 1 ? "%#{base_name}.tmp0" : "%#{base_name}.tmp#{i-1}"
-          if i == string_parts.size - 1
-            emit "#{name} = call ptr @__crystal_v2_string_concat(ptr #{prev}, ptr #{string_parts[i]})"
-          else
-            emit "%#{base_name}.tmp#{i} = call ptr @__crystal_v2_string_concat(ptr #{prev}, ptr #{string_parts[i]})"
-          end
+        # 3+ parts: alloca array, store parts, call single-alloc __crystal_v2_string_interpolate
+        n = string_parts.size
+        emit "%#{base_name}.arr = alloca [#{n} x ptr]"
+        string_parts.each_with_index do |part, i|
+          emit "%#{base_name}.slot#{i} = getelementptr [#{n} x ptr], ptr %#{base_name}.arr, i32 0, i32 #{i}"
+          emit "store ptr #{part}, ptr %#{base_name}.slot#{i}"
         end
+        emit "#{name} = call ptr @__crystal_v2_string_interpolate(ptr %#{base_name}.arr, i32 #{n})"
       end
     end
 
