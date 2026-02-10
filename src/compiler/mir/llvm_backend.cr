@@ -1420,6 +1420,7 @@ module Crystal::MIR
       emit_raw "@.long_fmt = private constant [5 x i8] c\"%ld\\0A\\00\"\n"
       emit_raw "@.long_fmt_no_nl = private constant [4 x i8] c\"%ld\\00\"\n"
       emit_raw "@.float_fmt_no_nl = private constant [3 x i8] c\"%g\\00\"\n"
+      emit_raw "@.float_fmt = private constant [4 x i8] c\"%g\\0A\\00\"\n"
       emit_raw "@.str.true = private constant [5 x i8] c\"true\\00\"\n"
       emit_raw "@.str.false = private constant [6 x i8] c\"false\\00\"\n"
       emit_raw "\n"
@@ -1508,6 +1509,169 @@ module Crystal::MIR
 
       emit_raw "define void @__crystal_v2_print_int64_ln(i64 %val) {\n"
       emit_raw "  call i32 (ptr, ...) @printf(ptr @.long_fmt, i64 %val)\n"
+      emit_raw "  ret void\n"
+      emit_raw "}\n\n"
+
+      # Float print helper: finds shortest round-trip representation, handles -0.0
+      # Uses write(2) syscall directly (like Crystal IO) to preserve output ordering.
+      emit_raw "declare ptr @strchr(ptr, i32)\n"
+      emit_raw "declare double @strtod(ptr, ptr)\n"
+      emit_raw "declare i32 @snprintf(ptr, i64, ptr, ...)\n"
+      emit_raw "declare double @llvm.copysign.f64(double, double)\n"
+      emit_raw "declare double @llvm.fabs.f64(double)\n"
+      emit_raw "declare void @llvm.memmove.p0.p0.i64(ptr, ptr, i64, i1)\n"
+      emit_raw "@.str_newline = private constant [2 x i8] c\"\\0A\\00\"\n"
+      emit_raw "@.fixed_fmt = private constant [6 x i8] c\"%.17f\\00\"\n"
+      emit_raw "@.prec_fmt = private constant [5 x i8] c\"%.*g\\00\"\n"
+      emit_raw "@.str_neg_zero = private constant [5 x i8] c\"-0.0\\00\"\n\n"
+
+      emit_raw "define void @__crystal_v2_print_float_impl(double %val, i1 %newline) {\n"
+      emit_raw "entry:\n"
+      emit_raw "  %buf = alloca [64 x i8], align 8\n"
+      # Check for negative zero: val == 0.0 && copysign(1.0, val) < 0.0
+      emit_raw "  %is_zero = fcmp oeq double %val, 0.0\n"
+      emit_raw "  %sign = call double @llvm.copysign.f64(double 1.0, double %val)\n"
+      emit_raw "  %is_neg = fcmp olt double %sign, 0.0\n"
+      emit_raw "  %is_neg_zero = and i1 %is_zero, %is_neg\n"
+      emit_raw "  br i1 %is_neg_zero, label %neg_zero, label %try_format\n"
+
+      # Negative zero: write "-0.0" directly
+      emit_raw "neg_zero:\n"
+      emit_raw "  call i64 @write(i32 1, ptr @.str_neg_zero, i64 4)\n"
+      emit_raw "  br i1 %newline, label %write_nl, label %done\n"
+
+      # Try increasing precision until round-trip matches (shortest representation)
+      emit_raw "try_format:\n"
+      emit_raw "  br label %try_prec\n"
+      emit_raw "try_prec:\n"
+      emit_raw "  %prec = phi i32 [1, %try_format], [%next_prec, %try_next]\n"
+      emit_raw "  call i32 (ptr, i64, ptr, ...) @snprintf(ptr %buf, i64 64, ptr @.prec_fmt, i32 %prec, double %val)\n"
+      emit_raw "  %parsed = call double @strtod(ptr %buf, ptr null)\n"
+      emit_raw "  %matches = fcmp oeq double %parsed, %val\n"
+      emit_raw "  br i1 %matches, label %found, label %try_next\n"
+      emit_raw "try_next:\n"
+      emit_raw "  %next_prec = add i32 %prec, 1\n"
+      emit_raw "  %too_many = icmp sgt i32 %next_prec, 17\n"
+      emit_raw "  br i1 %too_many, label %fallback, label %try_prec\n"
+      emit_raw "fallback:\n"
+      emit_raw "  call i32 (ptr, i64, ptr, ...) @snprintf(ptr %buf, i64 64, ptr @.prec_fmt, i32 17, double %val)\n"
+      emit_raw "  br label %found\n"
+
+      # Found shortest representation - check for scientific notation in normal range
+      emit_raw "found:\n"
+      emit_raw "  %has_e_f = call ptr @strchr(ptr %buf, i32 101)\n"
+      emit_raw "  %is_sci = icmp ne ptr %has_e_f, null\n"
+      emit_raw "  br i1 %is_sci, label %check_range, label %check_dot\n"
+
+      # If scientific notation, check if value is in [0.001, 1e15) — use decimal instead
+      # Crystal's point_range default is -3..15, meaning exponent 15+ → scientific
+      emit_raw "check_range:\n"
+      emit_raw "  %abs_val = call double @llvm.fabs.f64(double %val)\n"
+      emit_raw "  %ge_min = fcmp oge double %abs_val, 0.001\n"
+      emit_raw "  %lt_max = fcmp olt double %abs_val, 1.0e15\n"
+      emit_raw "  %in_range = and i1 %ge_min, %lt_max\n"
+      emit_raw "  br i1 %in_range, label %reformat_dec, label %sci_ensure_dot\n"
+
+      # Scientific notation: ensure ".0" before 'e' (e.g. "1e+16" → "1.0e+16")
+      emit_raw "sci_ensure_dot:\n"
+      emit_raw "  %sci_has_dot = call ptr @strchr(ptr %buf, i32 46)\n"
+      emit_raw "  %sci_needs_dot = icmp eq ptr %sci_has_dot, null\n"
+      emit_raw "  br i1 %sci_needs_dot, label %sci_insert_dot, label %do_print\n"
+      # Insert ".0" before 'e': shift tail right by 2, insert ".0"
+      emit_raw "sci_insert_dot:\n"
+      emit_raw "  %e_pos = ptrtoint ptr %has_e_f to i64\n"
+      emit_raw "  %buf_start = ptrtoint ptr %buf to i64\n"
+      emit_raw "  %e_offset = sub i64 %e_pos, %buf_start\n"
+      emit_raw "  %tail_len = call i64 @strlen(ptr %has_e_f)\n"
+      emit_raw "  %tail_len_1 = add i64 %tail_len, 1\n"
+      emit_raw "  %dst = getelementptr i8, ptr %has_e_f, i32 2\n"
+      emit_raw "  call void @llvm.memmove.p0.p0.i64(ptr %dst, ptr %has_e_f, i64 %tail_len_1, i1 0)\n"
+      emit_raw "  store i8 46, ptr %has_e_f\n"
+      emit_raw "  %dot_next = getelementptr i8, ptr %has_e_f, i32 1\n"
+      emit_raw "  store i8 48, ptr %dot_next\n"
+      emit_raw "  br label %do_print\n"
+
+      # Reformat as %.17f and trim trailing zeros
+      emit_raw "reformat_dec:\n"
+      emit_raw "  call i32 (ptr, i64, ptr, ...) @snprintf(ptr %buf, i64 64, ptr @.fixed_fmt, double %val)\n"
+      emit_raw "  %trim_len = call i64 @strlen(ptr %buf)\n"
+      emit_raw "  br label %trim_loop\n"
+      emit_raw "trim_loop:\n"
+      emit_raw "  %tpos = phi i64 [%trim_len, %reformat_dec], [%tprev, %trim_cont]\n"
+      emit_raw "  %tprev = sub i64 %tpos, 1\n"
+      emit_raw "  %tch_ptr = getelementptr i8, ptr %buf, i64 %tprev\n"
+      emit_raw "  %tch = load i8, ptr %tch_ptr\n"
+      emit_raw "  %is_tzero = icmp eq i8 %tch, 48\n"
+      emit_raw "  br i1 %is_tzero, label %trim_cont, label %trim_check\n"
+      emit_raw "trim_cont:\n"
+      emit_raw "  br label %trim_loop\n"
+      emit_raw "trim_check:\n"
+      # If we stopped at '.', keep one zero after it → ".0"
+      emit_raw "  %is_tdot = icmp eq i8 %tch, 46\n"
+      emit_raw "  br i1 %is_tdot, label %keep_dot_zero, label %trim_end\n"
+      emit_raw "keep_dot_zero:\n"
+      emit_raw "  %kdz_pos = add i64 %tpos, 1\n"
+      emit_raw "  %kdz_ptr = getelementptr i8, ptr %buf, i64 %kdz_pos\n"
+      emit_raw "  store i8 0, ptr %kdz_ptr\n"
+      emit_raw "  br label %do_print\n"
+      emit_raw "trim_end:\n"
+      # Null-terminate after last non-zero char
+      emit_raw "  %te_ptr = getelementptr i8, ptr %buf, i64 %tpos\n"
+      emit_raw "  store i8 0, ptr %te_ptr\n"
+      emit_raw "  br label %do_print\n"
+
+      # Check if needs ".0" suffix (no decimal point, no exponent, no special)
+      emit_raw "check_dot:\n"
+      emit_raw "  %has_dot = call ptr @strchr(ptr %buf, i32 46)\n"
+      emit_raw "  %has_n = call ptr @strchr(ptr %buf, i32 110)\n"
+      emit_raw "  %has_i = call ptr @strchr(ptr %buf, i32 105)\n"
+      emit_raw "  %pd = icmp ne ptr %has_dot, null\n"
+      emit_raw "  %pn = icmp ne ptr %has_n, null\n"
+      emit_raw "  %pi = icmp ne ptr %has_i, null\n"
+      emit_raw "  %or_dn = or i1 %pd, %pn\n"
+      emit_raw "  %has_special = or i1 %or_dn, %pi\n"
+      emit_raw "  br i1 %has_special, label %do_print, label %append_dot\n"
+      emit_raw "append_dot:\n"
+      emit_raw "  %len0 = call i64 @strlen(ptr %buf)\n"
+      emit_raw "  %end_ptr = getelementptr i8, ptr %buf, i64 %len0\n"
+      emit_raw "  store i8 46, ptr %end_ptr\n"
+      emit_raw "  %z_ptr = getelementptr i8, ptr %end_ptr, i32 1\n"
+      emit_raw "  store i8 48, ptr %z_ptr\n"
+      emit_raw "  %n_ptr = getelementptr i8, ptr %z_ptr, i32 1\n"
+      emit_raw "  store i8 0, ptr %n_ptr\n"
+      emit_raw "  br label %do_print\n"
+
+      # Write the formatted number
+      emit_raw "do_print:\n"
+      emit_raw "  %len = call i64 @strlen(ptr %buf)\n"
+      emit_raw "  call i64 @write(i32 1, ptr %buf, i64 %len)\n"
+      emit_raw "  br i1 %newline, label %write_nl, label %done\n"
+      emit_raw "write_nl:\n"
+      emit_raw "  call i64 @write(i32 1, ptr @.str_newline, i64 1)\n"
+      emit_raw "  br label %done\n"
+      emit_raw "done:\n"
+      emit_raw "  ret void\n"
+      emit_raw "}\n\n"
+
+      emit_raw "define void @__crystal_v2_print_float64(double %val) {\n"
+      emit_raw "  call void @__crystal_v2_print_float_impl(double %val, i1 0)\n"
+      emit_raw "  ret void\n"
+      emit_raw "}\n\n"
+
+      emit_raw "define void @__crystal_v2_print_float64_ln(double %val) {\n"
+      emit_raw "  call void @__crystal_v2_print_float_impl(double %val, i1 1)\n"
+      emit_raw "  ret void\n"
+      emit_raw "}\n\n"
+
+      emit_raw "define void @__crystal_v2_print_float32(float %val) {\n"
+      emit_raw "  %ext = fpext float %val to double\n"
+      emit_raw "  call void @__crystal_v2_print_float_impl(double %ext, i1 0)\n"
+      emit_raw "  ret void\n"
+      emit_raw "}\n\n"
+
+      emit_raw "define void @__crystal_v2_print_float32_ln(float %val) {\n"
+      emit_raw "  %ext = fpext float %val to double\n"
+      emit_raw "  call void @__crystal_v2_print_float_impl(double %ext, i1 1)\n"
       emit_raw "  ret void\n"
       emit_raw "}\n\n"
 
@@ -4403,7 +4567,7 @@ module Crystal::MIR
 
           emit "%#{base_name}.neg_val = load #{payload_type}, ptr %#{base_name}.neg_payload_ptr, align 4"
           if payload_type == "float" || payload_type == "double"
-            emit "%#{base_name}.neg_result = fsub #{payload_type} 0.0, %#{base_name}.neg_val"
+            emit "%#{base_name}.neg_result = fneg #{payload_type} %#{base_name}.neg_val"
           else
             emit "%#{base_name}.neg_result = sub #{payload_type} 0, %#{base_name}.neg_val"
           end
@@ -4424,8 +4588,8 @@ module Crystal::MIR
           emit "#{name} = sub i64 0, %#{base_name}.ptr_to_int"
           @value_types[inst.id] = TypeRef::INT64  # Negated ptr becomes i64
         elsif operand_llvm_type == "float" || operand_llvm_type == "double"
-          # Float negation uses fsub with 0.0
-          emit "#{name} = fsub #{operand_llvm_type} 0.0, #{operand}"
+          # Float negation uses fneg (preserves -0.0 correctly, unlike fsub 0.0)
+          emit "#{name} = fneg #{operand_llvm_type} #{operand}"
           @value_types[inst.id] = operand_type
         else
           # Handle type mismatch: if result type is larger than operand type, extend operand

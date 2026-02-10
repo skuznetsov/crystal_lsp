@@ -1049,6 +1049,27 @@ module Crystal
         end
       end
 
+      # Intercept IO#puts/print for Float64/Float32 BEFORE virtual dispatch.
+      # Float::Printer.shortest is broken (yield/block issues), so redirect to printf-based helpers.
+      if args.size == 2 # self (IO) + float value
+        _mn = call.method_name
+        float_extern = if _mn.includes?("puts$Float64")
+                          "__crystal_v2_print_float64_ln"
+                        elsif _mn.includes?("puts$Float32")
+                          "__crystal_v2_print_float32_ln"
+                        elsif _mn.includes?("print$Float64")
+                          "__crystal_v2_print_float64"
+                        elsif _mn.includes?("print$Float32")
+                          "__crystal_v2_print_float32"
+                        else
+                          nil
+                        end
+        if float_extern
+          # Pass only the float argument (args[1]), not the IO self
+          return builder.extern_call(float_extern, [args[1]], TypeRef::VOID)
+        end
+      end
+
       if call.virtual
         if dispatched = lower_virtual_dispatch(call, args)
           return dispatched
@@ -1135,6 +1156,10 @@ module Crystal
                           "__crystal_v2_print_int32_ln"
                         when TypeRef::INT64, TypeRef::UINT64
                           "__crystal_v2_print_int64_ln"
+                        when TypeRef::FLOAT32
+                          "__crystal_v2_print_float32_ln"
+                        when TypeRef::FLOAT64
+                          "__crystal_v2_print_float64_ln"
                         when TypeRef::STRING, TypeRef::POINTER
                           "__crystal_v2_puts"
                         else
@@ -1161,6 +1186,10 @@ module Crystal
                           "__crystal_v2_print_int32"
                         when TypeRef::INT64, TypeRef::UINT64
                           "__crystal_v2_print_int64"
+                        when TypeRef::FLOAT32
+                          "__crystal_v2_print_float32"
+                        when TypeRef::FLOAT64
+                          "__crystal_v2_print_float64"
                         else
                           "__crystal_v2_print_int32"
                         end

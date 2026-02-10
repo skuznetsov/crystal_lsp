@@ -36340,6 +36340,24 @@ module Crystal::HIR
           if type_suffix != "Void" && type_suffix != "Unknown"
             # Lower the argument
             arg_id = with_arena(call_arena) { lower_expr(ctx, call_args[0]) }
+
+            # For Float32/Float64, use direct printf-based extern calls to avoid
+            # broken Float::Printer.shortest (yield/block issues)
+            float_extern = case arg_type
+                           when TypeRef::FLOAT64
+                             method_name == "puts" ? "__crystal_v2_print_float64_ln" : "__crystal_v2_print_float64"
+                           when TypeRef::FLOAT32
+                             method_name == "puts" ? "__crystal_v2_print_float32_ln" : "__crystal_v2_print_float32"
+                           else
+                             nil
+                           end
+            if float_extern
+              extern_call = ExternCall.new(ctx.next_id, TypeRef::VOID, float_extern, [arg_id])
+              ctx.emit(extern_call)
+              ctx.register_type(extern_call.id, TypeRef::NIL)
+              return extern_call.id
+            end
+
             # Load STDOUT from classvar
             stdout_get = ClassVarGet.new(ctx.next_id, TypeRef::POINTER, "Object", "STDOUT")
             ctx.emit(stdout_get)
