@@ -13042,11 +13042,11 @@ module Crystal::HIR
         if new_size != old_size
           info = @class_info[class_name]
           ivar_dump = info.ivars.map { |iv| "#{iv.name}@#{iv.offset}" }.join(", ")
-          STDERR.puts "[FIXUP] #{class_name}: #{old_size}→#{new_size} ivars, size=#{info.size} [#{ivar_dump}]"
+          STDERR.puts "[FIXUP] #{class_name}: #{old_size}→#{new_size} ivars, size=#{info.size} [#{ivar_dump}]" if ENV.has_key?("CRYSTAL_V2_DEBUG_FIXUP")
           fixup_count += 1
         end
       end
-      STDERR.puts "[FIXUP] Fixed #{fixup_count} classes" if fixup_count > 0
+      STDERR.puts "[FIXUP] Fixed #{fixup_count} classes" if fixup_count > 0 && ENV.has_key?("CRYSTAL_V2_DEBUG_FIXUP")
       # Final alignment pass: recompute all ivar offsets with proper alignment
       align_all_class_ivars
       # Re-evaluate offsetof constants now that class info is finalized
@@ -13141,7 +13141,7 @@ module Crystal::HIR
           realigned += 1
         end
       end
-      STDERR.puts "[ALIGN] Realigned #{realigned} classes" if realigned > 0
+      STDERR.puts "[ALIGN] Realigned #{realigned} classes" if realigned > 0 && ENV.has_key?("CRYSTAL_V2_DEBUG_FIXUP")
     end
 
     private def fixup_class_inherited_ivars(class_name : String, fixed : Set(String))
