@@ -7402,20 +7402,25 @@ module Crystal::MIR
         end
       end
 
-      # Array struct type: { i32 size, [N x T] data }
-      array_type = "{ i32, [#{size} x #{element_type}] }"
+      # Array struct type: { i32 type_id, i32 size, [N x T] data }
+      # type_id at offset 0 matches Crystal class layout so Array#size reads @size at offset 4
+      array_type = "{ i32, i32, [#{size} x #{element_type}] }"
 
       # Allocate array struct on stack
       emit "%#{base_name}.ptr = alloca #{array_type}, align 8"
 
-      # Store size
-      emit "%#{base_name}.size_ptr = getelementptr #{array_type}, ptr %#{base_name}.ptr, i32 0, i32 0"
+      # Store type_id (0 = inline array, distinguishes from heap-allocated Array)
+      emit "%#{base_name}.tid_ptr = getelementptr #{array_type}, ptr %#{base_name}.ptr, i32 0, i32 0"
+      emit "store i32 0, ptr %#{base_name}.tid_ptr"
+
+      # Store size at field 1 (byte offset 4)
+      emit "%#{base_name}.size_ptr = getelementptr #{array_type}, ptr %#{base_name}.ptr, i32 0, i32 1"
       emit "store i32 #{size}, ptr %#{base_name}.size_ptr"
 
       # Store elements
       original_element_type = @type_mapper.llvm_type(inst.element_type)
       inst.elements.each_with_index do |elem_id, idx|
-        emit "%#{base_name}.elem#{idx}_ptr = getelementptr #{array_type}, ptr %#{base_name}.ptr, i32 0, i32 1, i32 #{idx}"
+        emit "%#{base_name}.elem#{idx}_ptr = getelementptr #{array_type}, ptr %#{base_name}.ptr, i32 0, i32 2, i32 #{idx}"
         # If original element was void, store null; otherwise store actual value
         if original_element_type == "void"
           emit "store ptr null, ptr %#{base_name}.elem#{idx}_ptr"
@@ -7517,8 +7522,8 @@ module Crystal::MIR
         end
       end
 
-      # Get size from array struct (first field)
-      emit "%#{base_name}.size_ptr = getelementptr { i32, [0 x i32] }, ptr #{array_ptr}, i32 0, i32 0"
+      # Get size from array struct field 1 (byte offset 4), matching Crystal class layout
+      emit "%#{base_name}.size_ptr = getelementptr { i32, i32, [0 x i32] }, ptr #{array_ptr}, i32 0, i32 1"
       emit "#{name} = load i32, ptr %#{base_name}.size_ptr"
 
       # Update @value_types - size is always i32
@@ -7668,8 +7673,8 @@ module Crystal::MIR
       # Guard against null index (MIR type mismatch) - default to 0
       index = "0" if index == "null"
 
-      # Get element from data array (second field)
-      emit "%#{base_name}.elem_ptr = getelementptr { i32, [0 x #{element_type}] }, ptr #{array_ptr}, i32 0, i32 1, i32 #{index}"
+      # Get element from data array (field 2, after type_id and size)
+      emit "%#{base_name}.elem_ptr = getelementptr { i32, i32, [0 x #{element_type}] }, ptr #{array_ptr}, i32 0, i32 2, i32 #{index}"
       emit "#{name} = load #{element_type}, ptr %#{base_name}.elem_ptr"
 
       # Update @value_types with actual emitted LLVM type (may differ from MIR type)
@@ -7810,8 +7815,8 @@ module Crystal::MIR
         value = "null"
       end
 
-      # Get element pointer from data array (second field) and store
-      emit "%#{base_name}.elem_ptr = getelementptr { i32, [0 x #{element_type}] }, ptr #{array_ptr}, i32 0, i32 1, i32 #{index}"
+      # Get element pointer from data array (third field: { type_id, size, [N x T] })
+      emit "%#{base_name}.elem_ptr = getelementptr { i32, i32, [0 x #{element_type}] }, ptr #{array_ptr}, i32 0, i32 2, i32 #{index}"
       emit "store #{element_type} #{value}, ptr %#{base_name}.elem_ptr"
     end
 
