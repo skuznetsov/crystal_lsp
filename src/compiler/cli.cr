@@ -36,6 +36,8 @@ module CrystalV2
       @ast_cache_misses : Int32 = 0
       @llvm_cache_hits : Int32 = 0
       @llvm_cache_misses : Int32 = 0
+      @pipeline_cache_hits : Int32 = 0
+      @pipeline_cache_misses : Int32 = 0
       # Top-level macro variable assignments (e.g., {% nums = %w(Int8 ...) %})
       @macro_text_vars = {} of String => String
 
@@ -227,6 +229,7 @@ module CrystalV2
         property ast_cache : Bool = ENV["CRYSTAL_V2_AST_CACHE"]? != "0"
         property llvm_opt : Bool = true
         property llvm_cache : Bool = ENV["CRYSTAL_V2_LLVM_CACHE"]? != "0"
+        property pipeline_cache : Bool = ENV["CRYSTAL_V2_PIPELINE_CACHE"]? != "0"
         property link : Bool = true
         property emit_type_metadata : Bool = true
         property ltp_opt : Bool = true
@@ -302,6 +305,8 @@ module CrystalV2
         @ast_cache_misses = 0
         @llvm_cache_hits = 0
         @llvm_cache_misses = 0
+        @pipeline_cache_hits = 0
+        @pipeline_cache_misses = 0
 
         log(options, out_io, "=== Crystal v2 Compiler ===")
         log(options, out_io, "Input: #{input_file}")
@@ -358,6 +363,36 @@ module CrystalV2
           emit_timings(options, out_io, timings, total_start)
           return 0
         end
+
+        # Pipeline cache: hash all source files → skip HIR/MIR/LLVM on hit
+        pipeline_cache_hit = false
+        pipeline_cache_file = ""
+        ll_file = options.output + ".ll"
+
+        if options.pipeline_cache
+          pipeline_cache_dir = File.expand_path("tmp/pipeline_cache", Dir.current)
+          FileUtils.mkdir_p(pipeline_cache_dir)
+          digest = Digest::SHA256.new
+          loaded_files.to_a.sort.each do |f|
+            digest.update(f.to_slice)
+            digest.update(File.read(f).to_slice)
+          end
+          digest.update("v1|mm=#{options.mm_mode}|thresh=#{options.mm_stack_threshold}|slab=#{options.slab_frame}|opt=#{options.optimize}".to_slice)
+          pipeline_hash = digest.hexfinal
+          pipeline_cache_file = File.join(pipeline_cache_dir, "#{pipeline_hash}.ll")
+
+          pipeline_cache_libs_file = pipeline_cache_file + ".libs"
+          if File.exists?(pipeline_cache_file) && File.exists?(pipeline_cache_libs_file)
+            pipeline_cache_hit = true
+            FileUtils.cp(pipeline_cache_file, ll_file)
+            options.link_libraries = File.read_lines(pipeline_cache_libs_file).reject(&.empty?)
+            @pipeline_cache_hits += 1
+            log(options, out_io, "  Pipeline cache HIT (#{pipeline_hash[0, 12]})")
+            timings["pipeline_cache_hit"] = 1.0 if options.stats
+          end
+        end
+
+        unless pipeline_cache_hit
 
         # Step 2: Lower to HIR
         log(options, out_io, "\n[2/6] Lowering to HIR...")
@@ -653,10 +688,28 @@ module CrystalV2
         gc_functions = [] of Tuple(String, Int32)
         gc_details = [] of String
         total_gc = 0
+        ea_skipped = 0
         hir_module.functions.each_with_index do |func, idx|
           if options.progress && (idx % 1000 == 0 || idx == total_funcs - 1)
             STDERR.puts "  Escape analysis: #{idx + 1}/#{total_funcs}..."
           end
+
+          # Fast-path: skip EA for functions with no allocation instructions
+          has_alloc = false
+          func.blocks.each do |block|
+            block.instructions.each do |inst|
+              if inst.is_a?(HIR::Allocate) || inst.is_a?(HIR::ArrayLiteral) || inst.is_a?(HIR::StringInterpolation)
+                has_alloc = true
+                break
+              end
+            end
+            break if has_alloc
+          end
+          unless has_alloc
+            ea_skipped += 1
+            next
+          end
+
           ms = HIR::MemoryStrategyAssigner.new(func, memory_config, type_provider, hir_module)
           result = ms.assign
           stats = result.stats
@@ -674,6 +727,7 @@ module CrystalV2
           end
         end
         timings["escape"] = (Time.instant - escape_start).total_milliseconds if options.stats
+        timings["ea_skipped"] = ea_skipped.to_f if options.stats
         if options.stats
           timings["mm_stack"] = total_ms_stats.stack_count.to_f
           timings["mm_slab"] = total_ms_stats.slab_count.to_f
@@ -801,6 +855,16 @@ module CrystalV2
           out_io.puts llvm_ir
           return 0
         end
+
+        # Save to pipeline cache on miss
+        if options.pipeline_cache && !pipeline_cache_file.empty?
+          FileUtils.cp(ll_file, pipeline_cache_file)
+          File.write(pipeline_cache_file + ".libs", options.link_libraries.join("\n") + "\n")
+          @pipeline_cache_misses += 1
+          log(options, out_io, "  Pipeline cache MISS → saved")
+        end
+
+        end # unless pipeline_cache_hit
 
         # Step 6: Compile to binary
         log(options, out_io, "\n[6/6] Compiling to binary...")
@@ -2731,6 +2795,9 @@ module CrystalV2
         if (escape = timings["escape"]?)
           parts << "escape=#{escape.round(1)}"
         end
+        if (ea_skip = timings["ea_skipped"]?)
+          parts << "ea_skipped=#{ea_skip.to_i}"
+        end
         if (mir = timings["mir"]?)
           parts << "mir=#{mir.round(1)}"
         end
@@ -2773,6 +2840,7 @@ module CrystalV2
         parts << "total=#{total_ms.round(1)}"
         parts << "ast_cache=#{@ast_cache_hits} hit/#{@ast_cache_misses} miss" if options.ast_cache
         parts << "llvm_cache=#{@llvm_cache_hits} hit/#{@llvm_cache_misses} miss" if options.llvm_cache
+        parts << "pipeline_cache=#{@pipeline_cache_hits} hit/#{@pipeline_cache_misses} miss" if options.pipeline_cache
         out_io.puts "Timing (ms): #{parts.join(" ")}"
       end
 
