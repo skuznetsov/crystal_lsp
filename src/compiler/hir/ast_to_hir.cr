@@ -1260,15 +1260,48 @@ module Crystal::HIR
         end
       end
 
-      # Fallback: any candidate from this parent (regardless of suffix)
+      # Fallback: use overload resolution on the parent class to pick the right overload.
+      # This is critical when a subclass inherits multiple overloads (e.g., IO#puts(String) vs
+      # IO#puts(obj : _)) and the suffix encodes a type that doesn't match any overload exactly.
+      if suffix
+        parent_base = "#{parent}##{method}"
+        parsed_types = parse_types_from_suffix(suffix)
+        unless parsed_types.empty?
+          if entry = lookup_function_def_for_call(parent_base, parsed_types.size, false, parsed_types, false)
+            return {entry[1], @function_def_arenas[entry[0]], entry[0]}
+          end
+        end
+      end
+
+      # Last resort: any candidate from this parent (regardless of suffix).
+      # Prefer untyped (generic) overloads over typed ones, since they are more
+      # broadly compatible with different argument types.
+      best_untyped : ParentLookupResult? = nil
+      first_found : ParentLookupResult? = nil
       candidates.each do |candidate_name|
         candidate_parts = parse_method_name(candidate_name)
         next unless candidate_parts.owner == parent || strip_generic_args(candidate_parts.owner) == base_parent
         if def_node = @function_defs[candidate_name]?
           arena = @function_def_arenas[candidate_name]
-          return {def_node, arena, candidate_name}
+          result = {def_node, arena, candidate_name}
+          first_found ||= result
+          # Check if this is an untyped (generic) overload
+          if params = def_node.params
+            all_untyped = params.all? do |p|
+              p.is_block || p.is_splat || p.is_double_splat ||
+                named_only_separator?(p) || p.type_annotation.nil?
+            end
+            if all_untyped
+              best_untyped = result
+              break
+            end
+          else
+            best_untyped = result
+            break
+          end
         end
       end
+      return best_untyped || first_found if best_untyped || first_found
 
       nil
     end
@@ -29078,7 +29111,7 @@ module Crystal::HIR
         # Debug: log the resolution attempt
         if ENV.has_key?("DEBUG_SHOVEL")
           type_desc = @module.get_type_descriptor(left_type)
-          STDERR.puts "[SHOVEL] left_type=#{left_type.id}, type_desc=#{type_desc.try(&.name) || "nil"}, right_type=#{right_type.id}"
+          STDERR.puts "[SHOVEL] fn=#{ctx.function.name} left_type=#{left_type.id}, type_desc=#{type_desc.try(&.name) || "nil"}, right_type=#{right_type.id} right_name=#{@module.get_type_descriptor(right_type).try(&.name) || type_name_for_mangling(right_type)}"
         end
         method_name = resolve_method_call(ctx, left_id, "<<", [right_type], false)
         if ENV.has_key?("DEBUG_SHOVEL")
