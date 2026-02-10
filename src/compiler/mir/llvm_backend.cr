@@ -2845,6 +2845,8 @@ module Crystal::MIR
             used << inst.array_value
           when ArraySetSize
             used << inst.array_value << inst.size_value
+          when ArrayNew
+            used << inst.capacity_value
           when ArrayLiteral
             inst.elements.each { |elem| used << elem }
           when UnionIs
@@ -3442,6 +3444,8 @@ module Crystal::MIR
         emit_array_size(inst, name)
       when ArraySetSize
         emit_array_set_size(inst, name)
+      when ArrayNew
+        emit_array_new(inst, name)
       when ArrayGet
         emit_array_get(inst, name)
       when ArraySet
@@ -7542,6 +7546,41 @@ module Crystal::MIR
       # Store new size to array struct field 1 (byte offset 4)
       emit "%#{base_name}.size_ptr = getelementptr { i32, i32, [0 x i32] }, ptr #{array_ptr}, i32 0, i32 1"
       emit "store i32 #{size_val}, ptr %#{base_name}.size_ptr"
+    end
+
+    private def emit_array_new(inst : ArrayNew, name : String)
+      base_name = name.lstrip('%')
+      capacity_val = value_ref(inst.capacity_value)
+      element_type = @type_mapper.llvm_type(inst.element_type_ref)
+      element_type = "ptr" if element_type == "void"
+      elem_size = case element_type
+                  when "i1", "i8"   then 1
+                  when "i16"        then 2
+                  when "i32", "float" then 4
+                  when "i64", "double", "ptr" then 8
+                  when "i128"       then 16
+                  else                   8 # default for complex types
+                  end
+
+      # Compute total bytes: 8 (header: i32 type_id + i32 size) + capacity * elem_size
+      emit "%#{base_name}.elem_bytes = mul i32 #{capacity_val}, #{elem_size}"
+      emit "%#{base_name}.total = add i32 %#{base_name}.elem_bytes, 8"
+
+      # Dynamic stack allocation
+      emit "%#{base_name}.raw = alloca i8, i32 %#{base_name}.total, align 8"
+
+      # Zero-initialize type_id = 0
+      emit "store i32 0, ptr %#{base_name}.raw"
+
+      # Zero-initialize size = 0
+      emit "%#{base_name}.size_ptr = getelementptr i8, ptr %#{base_name}.raw, i32 4"
+      emit "store i32 0, ptr %#{base_name}.size_ptr"
+
+      # Alias so %name resolves to the alloca pointer
+      emit "#{name} = bitcast ptr %#{base_name}.raw to ptr"
+
+      # Register as array for IndexGet/IndexSet/ArraySize
+      @array_info[inst.id] = {element_type, 0}
     end
 
     private def emit_array_get(inst : ArrayGet, name : String)

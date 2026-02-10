@@ -1278,6 +1278,24 @@ module Crystal::MIR
     end
   end
 
+  # Allocate new empty array with given capacity
+  class ArrayNew < Value
+    getter capacity_value : ValueId
+    getter element_type_ref : TypeRef
+
+    def initialize(id : ValueId, @element_type_ref : TypeRef, @capacity_value : ValueId)
+      super(id, TypeRef::VOID)
+    end
+
+    def operands : Array(ValueId)
+      [@capacity_value]
+    end
+
+    def to_s(io : IO) : Nil
+      io << "%" << @id << " = array_new capacity=%" << @capacity_value << " : " << @element_type_ref.id
+    end
+  end
+
   # Get array element by index
   class ArrayGet < Value
     getter array_value : ValueId

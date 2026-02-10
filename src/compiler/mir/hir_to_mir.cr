@@ -573,6 +573,8 @@ module Crystal
                  lower_array_size(hir_value)
                when HIR::ArraySetSize
                  lower_array_set_size(hir_value)
+               when HIR::ArrayNew
+                 lower_array_new(hir_value)
                when HIR::StringInterpolation
                  lower_string_interpolation(hir_value)
                when HIR::Raise
@@ -2519,6 +2521,17 @@ module Crystal
         size_val
       )
       builder.emit(mir_set_size)
+    end
+
+    private def lower_array_new(array_new : HIR::ArrayNew) : ValueId
+      builder = @builder.not_nil!
+      capacity_val = get_value(array_new.capacity_value)
+      mir_new = MIR::ArrayNew.new(
+        builder.next_id,
+        convert_type(array_new.element_type),
+        capacity_val
+      )
+      builder.emit(mir_new)
     end
 
     private def lower_string_interpolation(interp : HIR::StringInterpolation) : ValueId

@@ -534,6 +534,22 @@ module Crystal::HIR
     end
   end
 
+  # Allocate a new empty array with given capacity (from another array's size)
+  # Returns pointer to new array struct { i32 type_id, i32 size, [capacity x T] }
+  class ArrayNew < Value
+    getter capacity_value : ValueId
+    getter element_type : TypeRef
+
+    def initialize(id : ValueId, @element_type : TypeRef, @capacity_value : ValueId)
+      super(id, TypeRef::VOID)
+      @lifetime = LifetimeTag::StackLocal
+    end
+
+    def to_s(io : IO) : Nil
+      io << "%" << @id << " = array_new capacity=%" << @capacity_value << " : " << @element_type.id
+    end
+  end
+
   # ─────────────────────────────────────────────────────────────────────────────
   # Calls
   # ─────────────────────────────────────────────────────────────────────────────

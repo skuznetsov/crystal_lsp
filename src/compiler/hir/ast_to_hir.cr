@@ -41371,16 +41371,20 @@ module Crystal::HIR
       array_id : ValueId,
       block : CrystalV2::Compiler::Frontend::BlockNode,
     ) : ValueId
-      # TODO: Implement dynamic map with runtime allocation
-      # For now, just process inline similar to static case but use ArraySize
+      # Crystal semantics: map returns a NEW array, source is not modified
       param_name = block.params.try(&.first?).try(&.name).try { |n| String.new(n) } || "__map_elem"
 
-      # Get element type from array - not hardcoded!
       element_type = array_element_type_for_value(ctx, array_id, TypeRef::INT32)
+      source_type = ctx.type_of(array_id)
 
       # Get size dynamically
       size_val = ArraySize.new(ctx.next_id, TypeRef::INT32, array_id)
       ctx.emit(size_val)
+
+      # Allocate new array with same size as source
+      new_array = ArrayNew.new(ctx.next_id, element_type, size_val.id)
+      ctx.emit(new_array)
+      ctx.register_type(new_array.id, source_type)
 
       entry_block = ctx.current_block
       zero = Literal.new(ctx.next_id, TypeRef::INT32, 0_i64)
@@ -41405,18 +41409,18 @@ module Crystal::HIR
       ctx.current_block = body_block
       ctx.push_scope(ScopeKind::Block)
 
+      # Read from SOURCE array
       index_get = IndexGet.new(ctx.next_id, element_type, array_id, index_phi.id)
       ctx.emit(index_get)
       ctx.register_type(index_get.id, element_type)
       ctx.register_local(param_name, index_get.id)
 
-      # Lower block body (transformed value stored in-place for now)
       result_value = lower_body(ctx, block.body)
       ctx.pop_scope
 
-      # Store transformed value back to source array (in-place map)
+      # Write to NEW array
       if result_value
-        index_set = IndexSet.new(ctx.next_id, element_type, array_id, index_phi.id, result_value)
+        index_set = IndexSet.new(ctx.next_id, element_type, new_array.id, index_phi.id, result_value)
         ctx.emit(index_set)
       end
 
@@ -41430,9 +41434,11 @@ module Crystal::HIR
       index_phi.add_incoming(incr_block, new_i.id)
       ctx.terminate(Jump.new(cond_block))
 
+      # Exit block: set size on new array and return it
       ctx.current_block = exit_block
-      # Return the modified source array
-      array_id
+      set_size = ArraySetSize.new(ctx.next_id, TypeRef::VOID, new_array.id, size_val.id)
+      ctx.emit(set_size)
+      new_array.id
     end
 
     # Select intrinsic for compile-time sized arrays with AST access
@@ -41585,16 +41591,21 @@ module Crystal::HIR
       array_id : ValueId,
       block : CrystalV2::Compiler::Frontend::BlockNode,
     ) : ValueId
-      # In-place compaction: iterate source, copy matching elements to front, update size.
-      # This modifies the source array — acceptable since our arrays are stack-allocated
-      # and Crystal select semantics create a new array.
+      # Crystal semantics: select returns a NEW array, source is not modified
       param_name = block.params.try(&.first?).try(&.name).try { |n| String.new(n) } || "__select_elem"
 
       element_type = array_element_type_for_value(ctx, array_id, TypeRef::INT32)
+      source_type = ctx.type_of(array_id)
 
-      # Get size
+      # Get source size — this is the max capacity for the result
       size_val = ArraySize.new(ctx.next_id, TypeRef::INT32, array_id)
       ctx.emit(size_val)
+
+      # Allocate new array with capacity = source size
+      new_array = ArrayNew.new(ctx.next_id, element_type, size_val.id)
+      ctx.emit(new_array)
+      # Register same array type so array_intrinsic_receiver? recognizes it
+      ctx.register_type(new_array.id, source_type)
 
       entry_block = ctx.current_block
       zero = Literal.new(ctx.next_id, TypeRef::INT32, 0_i64)
@@ -41622,7 +41633,7 @@ module Crystal::HIR
       ctx.emit(cmp)
       ctx.terminate(Branch.new(cmp.id, body_block, exit_block))
 
-      # Body block: get element, evaluate predicate
+      # Body block: get element from SOURCE array, evaluate predicate
       ctx.current_block = body_block
       ctx.push_scope(ScopeKind::Block)
 
@@ -41631,20 +41642,18 @@ module Crystal::HIR
       ctx.register_type(index_get.id, element_type)
       ctx.register_local(param_name, index_get.id)
 
-      # Lower block body — result is the predicate bool
       predicate_result = lower_body(ctx, block.body)
       ctx.pop_scope
 
-      # Branch: if predicate true → copy, else → skip to incr
       if predicate_result
         ctx.terminate(Branch.new(predicate_result, copy_block, incr_block))
       else
         ctx.terminate(Jump.new(incr_block))
       end
 
-      # Copy block: store element at result_count position, increment result_count
+      # Copy block: store element to NEW array at result_count position
       ctx.current_block = copy_block
-      index_set = IndexSet.new(ctx.next_id, element_type, array_id, result_count_phi.id, index_get.id)
+      index_set = IndexSet.new(ctx.next_id, element_type, new_array.id, result_count_phi.id, index_get.id)
       ctx.emit(index_set)
 
       one_copy = Literal.new(ctx.next_id, TypeRef::INT32, 1_i64)
@@ -41655,7 +41664,6 @@ module Crystal::HIR
 
       # Incr block: increment index, update phis
       ctx.current_block = incr_block
-      # PHI for result_count: from body (no copy) keeps same count, from copy_block gets new_count
       count_incr_phi = Phi.new(ctx.next_id, TypeRef::INT32)
       count_incr_phi.add_incoming(body_block, result_count_phi.id)
       count_incr_phi.add_incoming(copy_block, new_count.id)
@@ -41670,12 +41678,12 @@ module Crystal::HIR
       result_count_phi.add_incoming(incr_block, count_incr_phi.id)
       ctx.terminate(Jump.new(cond_block))
 
-      # Exit block: update size to result_count
+      # Exit block: set size on NEW array
       ctx.current_block = exit_block
-      set_size = ArraySetSize.new(ctx.next_id, TypeRef::VOID, array_id, result_count_phi.id)
+      set_size = ArraySetSize.new(ctx.next_id, TypeRef::VOID, new_array.id, result_count_phi.id)
       ctx.emit(set_size)
 
-      array_id
+      new_array.id
     end
 
     # Lower Array#any? { |x| condition } intrinsic
