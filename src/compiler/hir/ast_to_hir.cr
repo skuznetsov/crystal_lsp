@@ -35007,8 +35007,13 @@ module Crystal::HIR
                 if receiver_id.nil?
                   # In instance methods, unqualified calls default to self even if the
                   # target method isn't registered yet (avoid class-method fallback).
-                  receiver_id = self_id
-                  full_method_name = resolve_method_with_inheritance(self_name, method_name) || self_method_name
+                  # BUT: skip for puts/print — these are top-level output functions
+                  # that must reach the direct STDOUT interception below, not become
+                  # dead-code stubs like Foo#puts(String).
+                  unless method_name == "puts" || method_name == "print" || method_name == "p" || method_name == "pp"
+                    receiver_id = self_id
+                    full_method_name = resolve_method_with_inheritance(self_name, method_name) || self_method_name
+                  end
                 end
               end
             end
