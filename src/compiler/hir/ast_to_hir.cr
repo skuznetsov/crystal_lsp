@@ -36764,6 +36764,48 @@ module Crystal::HIR
         end
       end
 
+      # Handle Array#any? { |x| condition } intrinsic
+      if method_name == "any?"
+        if receiver_id
+          if blk_expr = block_expr
+            blk_node = @arena[blk_expr]
+            if blk_node.is_a?(CrystalV2::Compiler::Frontend::BlockNode)
+              if array_intrinsic_receiver?(ctx, receiver_id)
+                return lower_array_any_dynamic(ctx, receiver_id, blk_node)
+              end
+            end
+          end
+        end
+      end
+
+      # Handle Array#all? { |x| condition } intrinsic
+      if method_name == "all?"
+        if receiver_id
+          if blk_expr = block_expr
+            blk_node = @arena[blk_expr]
+            if blk_node.is_a?(CrystalV2::Compiler::Frontend::BlockNode)
+              if array_intrinsic_receiver?(ctx, receiver_id)
+                return lower_array_all_dynamic(ctx, receiver_id, blk_node)
+              end
+            end
+          end
+        end
+      end
+
+      # Handle Array#none? { |x| condition } intrinsic
+      if method_name == "none?"
+        if receiver_id
+          if blk_expr = block_expr
+            blk_node = @arena[blk_expr]
+            if blk_node.is_a?(CrystalV2::Compiler::Frontend::BlockNode)
+              if array_intrinsic_receiver?(ctx, receiver_id)
+                return lower_array_none_dynamic(ctx, receiver_id, blk_node)
+              end
+            end
+          end
+        end
+      end
+
       # Fallback: treat bare unsafe_* calls inside numeric primitives as self-calls.
       if receiver_id.nil? && (current_class = @current_class) && numeric_primitive_class_name?(current_class)
         if method_name == "unsafe_div" || method_name == "unsafe_mod" ||
@@ -40606,19 +40648,7 @@ module Crystal::HIR
     # Uses phi nodes for loop variable AND mutable external variables
     private def lower_times_intrinsic(ctx : LoweringContext, count_id : ValueId, block : CrystalV2::Compiler::Frontend::BlockNode) : ValueId
       # Get block param name (default to "i" if not specified)
-      param_name = if params = block.params
-                     if first_param = params.first?
-                       if pname = first_param.name
-                         String.new(pname)
-                       else
-                         "__times_i"
-                       end
-                     else
-                       "__times_i"
-                     end
-                   else
-                     "__times_i"
-                   end
+      param_name = block.params.try(&.first?).try(&.name).try { |n| String.new(n) } || "__times_i"
 
       # Collect variables that might be assigned in the block body (same as while loop)
       assigned_vars = collect_assigned_vars(block.body)
@@ -40742,19 +40772,7 @@ module Crystal::HIR
       block : CrystalV2::Compiler::Frontend::BlockNode,
     ) : ValueId
       # Get block param name
-      param_name = if params = block.params
-                     if first_param = params.first?
-                       if pname = first_param.name
-                         String.new(pname)
-                       else
-                         "__range_i"
-                       end
-                     else
-                       "__range_i"
-                     end
-                   else
-                     "__range_i"
-                   end
+      param_name = block.params.try(&.first?).try(&.name).try { |n| String.new(n) } || "__range_i"
 
       # Lower range bounds
       begin_id = lower_expr(ctx, range.begin_expr)
@@ -40867,19 +40885,7 @@ module Crystal::HIR
       block : CrystalV2::Compiler::Frontend::BlockNode,
     ) : ValueId
       # Get block param name
-      param_name = if params = block.params
-                     if first_param = params.first?
-                       if pname = first_param.name
-                         String.new(pname)
-                       else
-                         "__arr_elem"
-                       end
-                     else
-                       "__arr_elem"
-                     end
-                   else
-                     "__arr_elem"
-                   end
+      param_name = block.params.try(&.first?).try(&.name).try { |n| String.new(n) } || "__arr_elem"
 
       # Collect mutable vars
       assigned_vars = collect_assigned_vars(block.body)
@@ -41020,19 +41026,7 @@ module Crystal::HIR
       block : CrystalV2::Compiler::Frontend::BlockNode,
     ) : ValueId
       # Get block param name
-      param_name = if params = block.params
-                     if first_param = params.first?
-                       if pname = first_param.name
-                         String.new(pname)
-                       else
-                         "__arr_elem"
-                       end
-                     else
-                       "__arr_elem"
-                     end
-                   else
-                     "__arr_elem"
-                   end
+      param_name = block.params.try(&.first?).try(&.name).try { |n| String.new(n) } || "__arr_elem"
 
       # Collect mutable vars
       assigned_vars = collect_assigned_vars(block.body)
@@ -41326,19 +41320,7 @@ module Crystal::HIR
       block : CrystalV2::Compiler::Frontend::BlockNode,
     ) : ValueId
       # Get block param name
-      param_name = if params = block.params
-                     if first_param = params.first?
-                       if pname = first_param.name
-                         String.new(pname)
-                       else
-                         "__map_elem"
-                       end
-                     else
-                       "__map_elem"
-                     end
-                   else
-                     "__map_elem"
-                   end
+      param_name = block.params.try(&.first?).try(&.name).try { |n| String.new(n) } || "__map_elem"
 
       # Get element type from source array
       source_element_type = array_element_type_for_value(ctx, array_id, TypeRef::INT32)
@@ -41391,19 +41373,7 @@ module Crystal::HIR
     ) : ValueId
       # TODO: Implement dynamic map with runtime allocation
       # For now, just process inline similar to static case but use ArraySize
-      param_name = if params = block.params
-                     if first_param = params.first?
-                       if pname = first_param.name
-                         String.new(pname)
-                       else
-                         "__map_elem"
-                       end
-                     else
-                       "__map_elem"
-                     end
-                   else
-                     "__map_elem"
-                   end
+      param_name = block.params.try(&.first?).try(&.name).try { |n| String.new(n) } || "__map_elem"
 
       # Get element type from array - not hardcoded!
       element_type = array_element_type_for_value(ctx, array_id, TypeRef::INT32)
@@ -41473,19 +41443,7 @@ module Crystal::HIR
       block : CrystalV2::Compiler::Frontend::BlockNode,
     ) : ValueId
       # Get block param name
-      param_name = if params = block.params
-                     if first_param = params.first?
-                       if pname = first_param.name
-                         String.new(pname)
-                       else
-                         "__select_elem"
-                       end
-                     else
-                       "__select_elem"
-                     end
-                   else
-                     "__select_elem"
-                   end
+      param_name = block.params.try(&.first?).try(&.name).try { |n| String.new(n) } || "__select_elem"
 
       source_element_type = TypeRef::INT32 # Default to Int32
 
@@ -41627,10 +41585,276 @@ module Crystal::HIR
       array_id : ValueId,
       block : CrystalV2::Compiler::Frontend::BlockNode,
     ) : ValueId
-      # For dynamic select, we need runtime allocation which is not yet supported
-      # Fall back to returning original array (partial implementation)
-      # This works for cases where the array is only read, not modified
+      # In-place compaction: iterate source, copy matching elements to front, update size.
+      # This modifies the source array — acceptable since our arrays are stack-allocated
+      # and Crystal select semantics create a new array.
+      param_name = block.params.try(&.first?).try(&.name).try { |n| String.new(n) } || "__select_elem"
+
+      element_type = array_element_type_for_value(ctx, array_id, TypeRef::INT32)
+
+      # Get size
+      size_val = ArraySize.new(ctx.next_id, TypeRef::INT32, array_id)
+      ctx.emit(size_val)
+
+      entry_block = ctx.current_block
+      zero = Literal.new(ctx.next_id, TypeRef::INT32, 0_i64)
+      ctx.emit(zero)
+
+      cond_block = ctx.create_block
+      body_block = ctx.create_block
+      copy_block = ctx.create_block
+      incr_block = ctx.create_block
+      exit_block = ctx.create_block
+
+      ctx.terminate(Jump.new(cond_block))
+
+      # Condition block: check i < size
+      ctx.current_block = cond_block
+      index_phi = Phi.new(ctx.next_id, TypeRef::INT32)
+      index_phi.add_incoming(entry_block, zero.id)
+      ctx.emit(index_phi)
+
+      result_count_phi = Phi.new(ctx.next_id, TypeRef::INT32)
+      result_count_phi.add_incoming(entry_block, zero.id)
+      ctx.emit(result_count_phi)
+
+      cmp = BinaryOperation.new(ctx.next_id, TypeRef::BOOL, BinaryOp::Lt, index_phi.id, size_val.id)
+      ctx.emit(cmp)
+      ctx.terminate(Branch.new(cmp.id, body_block, exit_block))
+
+      # Body block: get element, evaluate predicate
+      ctx.current_block = body_block
+      ctx.push_scope(ScopeKind::Block)
+
+      index_get = IndexGet.new(ctx.next_id, element_type, array_id, index_phi.id)
+      ctx.emit(index_get)
+      ctx.register_type(index_get.id, element_type)
+      ctx.register_local(param_name, index_get.id)
+
+      # Lower block body — result is the predicate bool
+      predicate_result = lower_body(ctx, block.body)
+      ctx.pop_scope
+
+      # Branch: if predicate true → copy, else → skip to incr
+      if predicate_result
+        ctx.terminate(Branch.new(predicate_result, copy_block, incr_block))
+      else
+        ctx.terminate(Jump.new(incr_block))
+      end
+
+      # Copy block: store element at result_count position, increment result_count
+      ctx.current_block = copy_block
+      index_set = IndexSet.new(ctx.next_id, element_type, array_id, result_count_phi.id, index_get.id)
+      ctx.emit(index_set)
+
+      one_copy = Literal.new(ctx.next_id, TypeRef::INT32, 1_i64)
+      ctx.emit(one_copy)
+      new_count = BinaryOperation.new(ctx.next_id, TypeRef::INT32, BinaryOp::Add, result_count_phi.id, one_copy.id)
+      ctx.emit(new_count)
+      ctx.terminate(Jump.new(incr_block))
+
+      # Incr block: increment index, update phis
+      ctx.current_block = incr_block
+      # PHI for result_count: from body (no copy) keeps same count, from copy_block gets new_count
+      count_incr_phi = Phi.new(ctx.next_id, TypeRef::INT32)
+      count_incr_phi.add_incoming(body_block, result_count_phi.id)
+      count_incr_phi.add_incoming(copy_block, new_count.id)
+      ctx.emit(count_incr_phi)
+
+      one_incr = Literal.new(ctx.next_id, TypeRef::INT32, 1_i64)
+      ctx.emit(one_incr)
+      new_i = BinaryOperation.new(ctx.next_id, TypeRef::INT32, BinaryOp::Add, index_phi.id, one_incr.id)
+      ctx.emit(new_i)
+
+      index_phi.add_incoming(incr_block, new_i.id)
+      result_count_phi.add_incoming(incr_block, count_incr_phi.id)
+      ctx.terminate(Jump.new(cond_block))
+
+      # Exit block: update size to result_count
+      ctx.current_block = exit_block
+      set_size = ArraySetSize.new(ctx.next_id, TypeRef::VOID, array_id, result_count_phi.id)
+      ctx.emit(set_size)
+
       array_id
+    end
+
+    # Lower Array#any? { |x| condition } intrinsic
+    # Returns true if any element matches predicate, false otherwise
+    private def lower_array_any_dynamic(
+      ctx : LoweringContext,
+      array_id : ValueId,
+      block : CrystalV2::Compiler::Frontend::BlockNode,
+    ) : ValueId
+      param_name = block.params.try(&.first?).try(&.name).try { |n| String.new(n) } || "__arr_elem"
+
+      entry_block = ctx.current_block
+
+      # Emit constants in entry block (must dominate phi references)
+      zero = Literal.new(ctx.next_id, TypeRef::INT32, 0_i64)
+      ctx.emit(zero)
+      false_val = Literal.new(ctx.next_id, TypeRef::BOOL, 0_i64)
+      ctx.emit(false_val)
+
+      cond_block = ctx.create_block
+      body_block = ctx.create_block
+      incr_block = ctx.create_block
+      found_block = ctx.create_block
+      exit_block = ctx.create_block
+
+      ctx.terminate(Jump.new(cond_block))
+
+      # Condition block: i < size ?
+      ctx.current_block = cond_block
+      index_phi = Phi.new(ctx.next_id, TypeRef::INT32)
+      index_phi.add_incoming(entry_block, zero.id)
+      ctx.emit(index_phi)
+
+      size_val = ArraySize.new(ctx.next_id, TypeRef::INT32, array_id)
+      ctx.emit(size_val)
+
+      cmp = BinaryOperation.new(ctx.next_id, TypeRef::BOOL, BinaryOp::Lt, index_phi.id, size_val.id)
+      ctx.emit(cmp)
+      ctx.terminate(Branch.new(cmp.id, body_block, exit_block))
+
+      # Body block: evaluate predicate
+      ctx.current_block = body_block
+      ctx.push_scope(ScopeKind::Block)
+
+      element_type = array_element_type_for_value(ctx, array_id, TypeRef::INT32)
+      index_get = IndexGet.new(ctx.next_id, element_type, array_id, index_phi.id)
+      ctx.emit(index_get)
+      ctx.register_type(index_get.id, element_type)
+      ctx.register_local(param_name, index_get.id)
+
+      predicate_result = lower_body(ctx, block.body)
+      ctx.pop_scope
+
+      if predicate_result
+        ctx.terminate(Branch.new(predicate_result, found_block, incr_block))
+      else
+        ctx.terminate(Jump.new(incr_block))
+      end
+
+      # Incr block: i++
+      ctx.current_block = incr_block
+      one = Literal.new(ctx.next_id, TypeRef::INT32, 1_i64)
+      ctx.emit(one)
+      new_i = BinaryOperation.new(ctx.next_id, TypeRef::INT32, BinaryOp::Add, index_phi.id, one.id)
+      ctx.emit(new_i)
+      index_phi.add_incoming(incr_block, new_i.id)
+      ctx.terminate(Jump.new(cond_block))
+
+      # Found block: return true
+      ctx.current_block = found_block
+      true_val = Literal.new(ctx.next_id, TypeRef::BOOL, 1_i64)
+      ctx.emit(true_val)
+      ctx.terminate(Jump.new(exit_block))
+
+      # Exit block: phi(false from cond, true from found)
+      ctx.current_block = exit_block
+      result_phi = Phi.new(ctx.next_id, TypeRef::BOOL)
+      result_phi.add_incoming(cond_block, false_val.id)
+      result_phi.add_incoming(found_block, true_val.id)
+      ctx.emit(result_phi)
+
+      result_phi.id
+    end
+
+    # Lower Array#all? { |x| condition } intrinsic
+    # Returns true if all elements match predicate, false if any doesn't
+    private def lower_array_all_dynamic(
+      ctx : LoweringContext,
+      array_id : ValueId,
+      block : CrystalV2::Compiler::Frontend::BlockNode,
+    ) : ValueId
+      param_name = block.params.try(&.first?).try(&.name).try { |n| String.new(n) } || "__arr_elem"
+
+      entry_block = ctx.current_block
+
+      # Emit constants in entry block (must dominate phi references)
+      zero = Literal.new(ctx.next_id, TypeRef::INT32, 0_i64)
+      ctx.emit(zero)
+      true_val = Literal.new(ctx.next_id, TypeRef::BOOL, 1_i64)
+      ctx.emit(true_val)
+
+      cond_block = ctx.create_block
+      body_block = ctx.create_block
+      incr_block = ctx.create_block
+      fail_block = ctx.create_block
+      exit_block = ctx.create_block
+
+      ctx.terminate(Jump.new(cond_block))
+
+      # Condition block: i < size ?
+      ctx.current_block = cond_block
+      index_phi = Phi.new(ctx.next_id, TypeRef::INT32)
+      index_phi.add_incoming(entry_block, zero.id)
+      ctx.emit(index_phi)
+
+      size_val = ArraySize.new(ctx.next_id, TypeRef::INT32, array_id)
+      ctx.emit(size_val)
+
+      cmp = BinaryOperation.new(ctx.next_id, TypeRef::BOOL, BinaryOp::Lt, index_phi.id, size_val.id)
+      ctx.emit(cmp)
+      ctx.terminate(Branch.new(cmp.id, body_block, exit_block))
+
+      # Body block: evaluate predicate
+      ctx.current_block = body_block
+      ctx.push_scope(ScopeKind::Block)
+
+      element_type = array_element_type_for_value(ctx, array_id, TypeRef::INT32)
+      index_get = IndexGet.new(ctx.next_id, element_type, array_id, index_phi.id)
+      ctx.emit(index_get)
+      ctx.register_type(index_get.id, element_type)
+      ctx.register_local(param_name, index_get.id)
+
+      predicate_result = lower_body(ctx, block.body)
+      ctx.pop_scope
+
+      if predicate_result
+        # If predicate FALSE → fail; if TRUE → continue
+        ctx.terminate(Branch.new(predicate_result, incr_block, fail_block))
+      else
+        ctx.terminate(Jump.new(incr_block))
+      end
+
+      # Incr block: i++
+      ctx.current_block = incr_block
+      one = Literal.new(ctx.next_id, TypeRef::INT32, 1_i64)
+      ctx.emit(one)
+      new_i = BinaryOperation.new(ctx.next_id, TypeRef::INT32, BinaryOp::Add, index_phi.id, one.id)
+      ctx.emit(new_i)
+      index_phi.add_incoming(incr_block, new_i.id)
+      ctx.terminate(Jump.new(cond_block))
+
+      # Fail block: return false
+      ctx.current_block = fail_block
+      false_val = Literal.new(ctx.next_id, TypeRef::BOOL, 0_i64)
+      ctx.emit(false_val)
+      ctx.terminate(Jump.new(exit_block))
+
+      # Exit block: phi(true from cond loop-done, false from fail)
+      ctx.current_block = exit_block
+      result_phi = Phi.new(ctx.next_id, TypeRef::BOOL)
+      result_phi.add_incoming(cond_block, true_val.id)
+      result_phi.add_incoming(fail_block, false_val.id)
+      ctx.emit(result_phi)
+
+      result_phi.id
+    end
+
+    # Lower Array#none? { |x| condition } intrinsic
+    # Returns true if no elements match predicate
+    private def lower_array_none_dynamic(
+      ctx : LoweringContext,
+      array_id : ValueId,
+      block : CrystalV2::Compiler::Frontend::BlockNode,
+    ) : ValueId
+      # none? is just !any? — reuse any? and negate
+      any_result = lower_array_any_dynamic(ctx, array_id, block)
+      not_result = UnaryOperation.new(ctx.next_id, TypeRef::BOOL, UnaryOp::Not, any_result)
+      ctx.emit(not_result)
+      not_result.id
     end
 
     # Lower Array#reduce { |acc, elem| ... } intrinsic

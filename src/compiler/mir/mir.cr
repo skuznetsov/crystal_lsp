@@ -1260,6 +1260,24 @@ module Crystal::MIR
     end
   end
 
+  # Set array size (for in-place compaction)
+  class ArraySetSize < Value
+    getter array_value : ValueId
+    getter size_value : ValueId
+
+    def initialize(id : ValueId, @array_value : ValueId, @size_value : ValueId)
+      super(id, TypeRef::VOID)
+    end
+
+    def operands : Array(ValueId)
+      [@array_value, @size_value]
+    end
+
+    def to_s(io : IO) : Nil
+      io << "%" << @id << " = array_set_size %" << @array_value << ", %" << @size_value
+    end
+  end
+
   # Get array element by index
   class ArrayGet < Value
     getter array_value : ValueId

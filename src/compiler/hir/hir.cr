@@ -520,6 +520,20 @@ module Crystal::HIR
     end
   end
 
+  # Set array size (for in-place compaction in select/reject)
+  class ArraySetSize < Value
+    getter array_value : ValueId
+    getter size_value : ValueId
+
+    def initialize(id : ValueId, type : TypeRef, @array_value : ValueId, @size_value : ValueId)
+      super(id, type)
+    end
+
+    def to_s(io : IO) : Nil
+      io << "%" << @id << " = array_set_size %" << @array_value << ", %" << @size_value
+    end
+  end
+
   # ─────────────────────────────────────────────────────────────────────────────
   # Calls
   # ─────────────────────────────────────────────────────────────────────────────

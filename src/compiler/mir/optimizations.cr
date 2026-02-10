@@ -327,7 +327,7 @@ module Crystal::MIR
 
     private def has_side_effects?(inst : Value) : Bool
       case inst
-      when Store, GlobalStore, Free, RCDecrement, ArraySet
+      when Store, GlobalStore, Free, RCDecrement, ArraySet, ArraySetSize
         true
       when Call, IndirectCall, ExternCall
         # Calls always have potential side effects
@@ -1291,6 +1291,11 @@ module Crystal::MIR
         value_id = resolve(inst.value_id, replacements, block_id, inst_index, def_blocks, def_index, dominators)
         return inst if array_val == inst.array_value && index_val == inst.index_value && value_id == inst.value_id
         ArraySet.new(inst.id, inst.element_type, array_val, index_val, value_id)
+      when ArraySetSize
+        array_val = resolve(inst.array_value, replacements, block_id, inst_index, def_blocks, def_index, dominators)
+        size_val = resolve(inst.size_value, replacements, block_id, inst_index, def_blocks, def_index, dominators)
+        return inst if array_val == inst.array_value && size_val == inst.size_value
+        ArraySetSize.new(inst.id, array_val, size_val)
       when StringInterpolation
         new_parts = inst.parts.map { |p| resolve(p, replacements, block_id, inst_index, def_blocks, def_index, dominators) }
         return inst if new_parts == inst.parts

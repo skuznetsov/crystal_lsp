@@ -2843,6 +2843,8 @@ module Crystal::MIR
             used << inst.array_value << inst.index_value << inst.value_id
           when ArraySize
             used << inst.array_value
+          when ArraySetSize
+            used << inst.array_value << inst.size_value
           when ArrayLiteral
             inst.elements.each { |elem| used << elem }
           when UnionIs
@@ -3438,6 +3440,8 @@ module Crystal::MIR
         emit_array_literal(inst, name)
       when ArraySize
         emit_array_size(inst, name)
+      when ArraySetSize
+        emit_array_set_size(inst, name)
       when ArrayGet
         emit_array_get(inst, name)
       when ArraySet
@@ -7528,6 +7532,16 @@ module Crystal::MIR
 
       # Update @value_types - size is always i32
       @value_types[inst.id] = TypeRef::INT32
+    end
+
+    private def emit_array_set_size(inst : ArraySetSize, name : String)
+      base_name = name.lstrip('%')
+      array_ptr = value_ref(inst.array_value)
+      size_val = value_ref(inst.size_value)
+
+      # Store new size to array struct field 1 (byte offset 4)
+      emit "%#{base_name}.size_ptr = getelementptr { i32, i32, [0 x i32] }, ptr #{array_ptr}, i32 0, i32 1"
+      emit "store i32 #{size_val}, ptr %#{base_name}.size_ptr"
     end
 
     private def emit_array_get(inst : ArrayGet, name : String)
