@@ -1037,6 +1037,13 @@ module Crystal::HIR
     # Recursion guard for substitute_type_params_in_type_name.
     @substitute_type_params_stack : Set(String) = Set(String).new
     @substitute_type_params_depth : Int32 = 0
+    # Cache for substitute_type_params_in_type_name — invalidated on type_param_map/current_class change.
+    @subst_cache : Hash(String, String) = {} of String => String
+    @subst_cache_class : String? = nil
+    @subst_cache_gen : UInt64 = 0
+    @subst_cache_last_gen : UInt64 = 0
+    # Cache for split_generic_type_args (pure function of input string).
+    @split_generic_args_cache : Hash(String, Array(String)) = {} of String => Array(String)
     # Recursion guard for unresolved_generic_type_arg? to avoid cyclic alias/union loops.
     @unresolved_generic_arg_stack : Set(String) = Set(String).new
     @unresolved_generic_arg_depth : Int32 = 0
@@ -1260,23 +1267,14 @@ module Crystal::HIR
         end
       end
 
-      # Fallback: use overload resolution on the parent class to pick the right overload.
-      # This is critical when a subclass inherits multiple overloads (e.g., IO#puts(String) vs
-      # IO#puts(obj : _)) and the suffix encodes a type that doesn't match any overload exactly.
-      if suffix
-        parent_base = "#{parent}##{method}"
-        parsed_types = parse_types_from_suffix(suffix)
-        unless parsed_types.empty?
-          if entry = lookup_function_def_for_call(parent_base, parsed_types.size, false, parsed_types, false)
-            return {entry[1], @function_def_arenas[entry[0]], entry[0]}
-          end
-        end
-      end
-
-      # Last resort: any candidate from this parent (regardless of suffix).
-      # Prefer untyped (generic) overloads over typed ones, since they are more
-      # broadly compatible with different argument types.
+      # Fallback: any candidate from this parent (regardless of suffix).
+      # When the suffix doesn't match any candidate exactly, prefer untyped (generic)
+      # overloads over typed ones with matching arity.  This ensures that e.g.
+      # IO#puts(obj : _) is chosen over IO#puts(string : String) when the subclass
+      # calls puts with an Int32.
+      expected_arity = suffix ? parse_types_from_suffix(suffix).size : 0
       best_untyped : ParentLookupResult? = nil
+      best_untyped_splat : ParentLookupResult? = nil
       first_found : ParentLookupResult? = nil
       candidates.each do |candidate_name|
         candidate_parts = parse_method_name(candidate_name)
@@ -1285,23 +1283,37 @@ module Crystal::HIR
           arena = @function_def_arenas[candidate_name]
           result = {def_node, arena, candidate_name}
           first_found ||= result
-          # Check if this is an untyped (generic) overload
+          # Check if this is an untyped (generic) overload with matching arity
           if params = def_node.params
-            all_untyped = params.all? do |p|
-              p.is_block || p.is_splat || p.is_double_splat ||
-                named_only_separator?(p) || p.type_annotation.nil?
+            real_params = params.reject { |p| p.is_block || named_only_separator?(p) }
+            has_splat = real_params.any?(&.is_splat)
+            param_count = real_params.count { |p| !p.is_splat && !p.is_double_splat }
+            # Arity check: splat can absorb any number of args; otherwise match count
+            arity_ok = has_splat || param_count == expected_arity
+            next unless arity_ok || expected_arity == 0
+            all_untyped = real_params.all? do |p|
+              p.is_splat || p.is_double_splat || p.type_annotation.nil? ||
+                (ann = p.type_annotation) && String.new(ann) == "_"
             end
             if all_untyped
+              if has_splat
+                # Splat overloads are a last resort — prefer non-splat exact arity matches
+                best_untyped_splat ||= result
+              else
+                best_untyped = result
+                break
+              end
+            end
+          else
+            # No params = no-arg version. Only pick if we expect 0 args.
+            if expected_arity == 0
               best_untyped = result
               break
             end
-          else
-            best_untyped = result
-            break
           end
         end
       end
-      return best_untyped || first_found if best_untyped || first_found
+      return best_untyped || best_untyped_splat || first_found if best_untyped || best_untyped_splat || first_found
 
       nil
     end
@@ -5017,10 +5029,12 @@ module Crystal::HIR
     private def with_type_param_map(extra : Hash(String, String), &)
       old_map = @type_param_map
       @type_param_map = old_map.merge(extra)
+      @subst_cache_gen &+= 1
       begin
         yield
       ensure
         @type_param_map = old_map
+        @subst_cache_gen &+= 1
       end
     end
 
@@ -13237,6 +13251,7 @@ module Crystal::HIR
       template.type_params.each_with_index do |param, i|
         @type_param_map[param] = type_args[i]
       end
+      @subst_cache_gen &+= 1
 
       # Switch to the template's arena for AST node lookup
       old_arena = @arena
@@ -13317,6 +13332,7 @@ module Crystal::HIR
       # Restore arena, type param map, and current class
       @arena = old_arena
       @type_param_map = old_map
+      @subst_cache_gen &+= 1
       @current_class = old_class
       @monomorphized.add(specialized_name)
     end
@@ -13351,6 +13367,7 @@ module Crystal::HIR
         type_params.each_with_index do |param, i|
           @type_param_map[String.new(param)] = type_args[i]
         end
+        @subst_cache_gen &+= 1
       end
 
       old_arena = @arena
@@ -13421,6 +13438,7 @@ module Crystal::HIR
 
       @arena = old_arena
       @type_param_map = old_map
+      @subst_cache_gen &+= 1
     end
 
     # Lower a class and all its methods (pass 3)
@@ -21499,6 +21517,9 @@ module Crystal::HIR
     # Split a generic type argument list like "String, Array(Int32), Hash(K, V)"
     # into top-level arguments, respecting nested parentheses and proc type arrows.
     private def split_generic_type_args(params_str : String) : Array(String)
+      if cached = @split_generic_args_cache[params_str]?
+        return cached
+      end
       args = [] of String
       depth = 0
       start = 0
@@ -21542,6 +21563,7 @@ module Crystal::HIR
       end
       tail = params_str[start, params_str.size - start].strip
       args << tail unless tail.empty?
+      @split_generic_args_cache[params_str] = args
       args
     end
 
@@ -21695,15 +21717,24 @@ module Crystal::HIR
     end
 
     private def substitute_type_params_in_type_name(name : String) : String
+      # --- Cache check (invalidate on type_param_map or current_class change) ---
+      cc = @current_class
+      if cc != @subst_cache_class || @subst_cache_gen != @subst_cache_last_gen
+        @subst_cache.clear
+        @subst_cache_class = cc
+        @subst_cache_last_gen = @subst_cache_gen
+      end
+      if cached = @subst_cache[name]?
+        return cached
+      end
+
+      # --- Recursion guard (do NOT cache cycle-break returns) ---
       if @substitute_type_params_stack.includes?(name)
         return name
       end
       @substitute_type_params_stack << name
       @substitute_type_params_depth += 1
-      if @substitute_type_params_depth > 128
-        if ENV["DEBUG_SUBSTITUTE_GUARD"]?
-          STDERR.puts "[SUBSTITUTE_GUARD] depth=#{@substitute_type_params_depth} name=#{name}"
-        end
+      if @substitute_type_params_depth > 40
         @substitute_type_params_depth -= 1
         @substitute_type_params_stack.delete(name)
         return name
@@ -21712,7 +21743,7 @@ module Crystal::HIR
         # Replace 'self' with @current_class in type annotations
         # e.g., "(self, K -> V)?" becomes "(Hash(String, Int32), String -> Int32)?"
         if name == "self" && (current = @current_class)
-          return current
+          return @subst_cache[name] = current
         end
         type_param_map = @type_param_map
         fallback_map : Hash(String, String)? = nil
@@ -21722,9 +21753,13 @@ module Crystal::HIR
           end
         end
         substitution = type_param_map[name]? || (fallback_map ? fallback_map[name]? : nil)
-        return substitution if substitution
+        if substitution
+          return @subst_cache[name] = substitution
+        end
         if local_name = @current_typeof_local_names.try(&.[name]?)
-          return local_name unless local_name.empty?
+          unless local_name.empty?
+            return @subst_cache[name] = local_name
+          end
         end
 
         if name.includes?("::")
@@ -21735,7 +21770,7 @@ module Crystal::HIR
             substitution = type_param_map[prefix]? || (fallback_map ? fallback_map[prefix]? : nil)
             if substitution
               # Recursively substitute the suffix in case it also contains type params
-              return "#{substitution}::#{substitute_type_params_in_type_name(suffix)}"
+              return @subst_cache[name] = "#{substitution}::#{substitute_type_params_in_type_name(suffix)}"
             end
           end
           # Also check if the suffix after the last :: is a type param
@@ -21743,7 +21778,7 @@ module Crystal::HIR
             suffix = name[(idx + 2)..]
             substitution = type_param_map[suffix]? || (fallback_map ? fallback_map[suffix]? : nil)
             if substitution
-              return substitution
+              return @subst_cache[name] = substitution
             end
           end
         end
@@ -21751,13 +21786,13 @@ module Crystal::HIR
         if name.includes?("|")
           parts = split_union_type_name(name).map(&.strip)
           if parts.size > 1
-            return parts.map { |part| substitute_type_params_in_type_name(part) }.join(" | ")
+            return @subst_cache[name] = parts.map { |part| substitute_type_params_in_type_name(part) }.join(" | ")
           end
         end
 
         if name.ends_with?("?")
           base = name[0, name.size - 1]
-          return "#{substitute_type_params_in_type_name(base)}?"
+          return @subst_cache[name] = "#{substitute_type_params_in_type_name(base)}?"
         end
 
         # Handle Proc shorthand syntax: (A, B -> C) or (A -> B)
@@ -21771,7 +21806,7 @@ module Crystal::HIR
             inputs = split_proc_type_inputs(inputs_str)
             new_inputs = inputs.map { |inp| substitute_type_params_in_type_name(inp.strip) }
             new_output = substitute_type_params_in_type_name(output_str)
-            return "(#{new_inputs.join(", ")} -> #{new_output})"
+            return @subst_cache[name] = "(#{new_inputs.join(", ")} -> #{new_output})"
           end
         end
 
@@ -21780,10 +21815,10 @@ module Crystal::HIR
           new_args = args.map do |arg|
             normalize_tuple_literal_type_name(substitute_type_params_in_type_name(arg.strip))
           end
-          return "#{info[:base]}(#{new_args.join(", ")})"
+          return @subst_cache[name] = "#{info[:base]}(#{new_args.join(", ")})"
         end
 
-        normalize_missing_generic_parens(name)
+        @subst_cache[name] = normalize_missing_generic_parens(name)
       ensure
         @substitute_type_params_depth -= 1
         @substitute_type_params_stack.delete(name)
@@ -29111,7 +29146,7 @@ module Crystal::HIR
         # Debug: log the resolution attempt
         if ENV.has_key?("DEBUG_SHOVEL")
           type_desc = @module.get_type_descriptor(left_type)
-          STDERR.puts "[SHOVEL] fn=#{ctx.function.name} left_type=#{left_type.id}, type_desc=#{type_desc.try(&.name) || "nil"}, right_type=#{right_type.id} right_name=#{@module.get_type_descriptor(right_type).try(&.name) || type_name_for_mangling(right_type)}"
+          STDERR.puts "[SHOVEL] left_type=#{left_type.id}, type_desc=#{type_desc.try(&.name) || "nil"}, right_type=#{right_type.id}"
         end
         method_name = resolve_method_call(ctx, left_id, "<<", [right_type], false)
         if ENV.has_key?("DEBUG_SHOVEL")
@@ -33404,6 +33439,9 @@ module Crystal::HIR
             matched_parent = resolved_parts.owner
             if matched_parent != name_parts.owner
               store_function_namespace_override(name, base_name, matched_parent)
+            end
+            if ENV["DEBUG_PARENT_FALLBACK"]? && name.includes?("FileDescriptor") && name.includes?("puts")
+              STDERR.puts "[PARENT_FB] name=#{name} resolved=#{resolved_name} target=#{target_name} matched_parent=#{matched_parent}"
             end
             # Prevent monomorphization explosion for Object#in? by forcing the
             # parent method target name when a subclass doesn't override it.
@@ -39031,6 +39069,19 @@ module Crystal::HIR
           end
         end
       end
+
+      # When the call does NOT use splat syntax and args are already Tuple types,
+      # don't re-wrap to prevent infinite Tuple nesting (e.g., Object#in? calling
+      # in?(values) where values is Tuple(Object) — should resolve to
+      # in?(collection : Object), not re-pack into Tuple(Tuple(Object))).
+      unless call_has_splat
+        has_tuple_arg = args.any? do |arg_id|
+          if desc = @module.get_type_descriptor(ctx.type_of(arg_id))
+            desc.kind == TypeKind::Tuple || desc.name.starts_with?("Tuple(")
+          end
+        end
+        return {args, false} if has_tuple_arg
+      end
       func_name = if full_method_name
                     full_method_name
                   elsif receiver_id
@@ -39092,6 +39143,10 @@ module Crystal::HIR
       return {args, false} if splat_args.empty?
 
       splat_types = splat_args.map { |arg_id| ctx.type_of(arg_id) }
+      if ENV["DEBUG_SPLAT_PACK"]?
+        type_names = splat_types.map { |t| type_name_for_mangling(t) }
+        STDERR.puts "[SPLAT_PACK] fn=#{ctx.function.name} method=#{method_name} types=#{type_names.join(", ")}"
+      end
       tuple_type = tuple_type_from_arg_types(splat_types, allow_void: true)
       return {args, false} if tuple_type == TypeRef::VOID
 
@@ -40177,6 +40232,9 @@ module Crystal::HIR
       func_name = full_method_name || method_name
       arg_types = args.map { |arg_id| ctx.type_of(arg_id) }
       func_entry = lookup_function_def_for_call(func_name, args.size, has_block_call, arg_types, false, call_has_named_args)
+      if ENV.has_key?("DEBUG_DEFAULT_ARGS") && method_name.includes?("to_s")
+        STDERR.puts "[DEFAULT_ARGS] func=#{func_name} args=#{args.size} found=#{!!func_entry} entry=#{func_entry.try(&.[0]) || "nil"}"
+      end
       return args unless func_entry
       func_def = func_entry[1]
       func_context = function_context_from_name(func_entry[0])
@@ -42246,6 +42304,7 @@ module Crystal::HIR
                    @current_method_is_class = caller_is_class
                    if caller_type_map = @inline_caller_type_param_map_stack.last?
                      @type_param_map = caller_type_map
+                     @subst_cache_gen &+= 1
                    end
                    begin
                      saved_callee_locals = ctx.save_locals
@@ -42354,6 +42413,7 @@ module Crystal::HIR
                      @current_method = old_inline_method
                      @current_method_is_class = old_inline_method_is_class || false
                      @type_param_map = old_type_param_map
+                     @subst_cache_gen &+= 1
                    end
                  else
                    # No yield inlining context; just lower block normally.
