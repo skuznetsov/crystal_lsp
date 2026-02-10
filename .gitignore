@@ -56,3 +56,4 @@ tools/lldb/__pycache__/
 examples/bootstrap_struct.cr
 src/stdlib_crystal/
 spec/fib42
+examples/bootstrap_array
