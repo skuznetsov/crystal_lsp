@@ -2312,9 +2312,43 @@ module Crystal
 
     private def lower_is_a(isa : HIR::IsA) : ValueId
       builder = @builder.not_nil!
-      # Type check would involve runtime type info
-      # For now, return bool constant
-      builder.const_bool(true)
+      obj = get_value(isa.value)
+      mir_check_type = convert_type(isa.check_type)
+
+      # Collect all type_ids that should match: the check_type itself
+      # plus all its subclasses (for parent type checks like is_a?(Base))
+      matching_type_ids = [] of UInt32
+      matching_type_ids << mir_check_type.id
+
+      # Find check type name and add subclass type_ids
+      if check_mir_type = @mir_module.type_registry.get(mir_check_type)
+        check_name = check_mir_type.name
+        subclasses_for(check_name).each do |sub_name|
+          if sub_mir_type = @mir_module.type_registry.get_by_name(sub_name)
+            matching_type_ids << sub_mir_type.id unless matching_type_ids.includes?(sub_mir_type.id)
+          end
+        end
+      end
+
+      # Load type_id from object header (offset 0, i32)
+      type_id_ptr = builder.gep(obj, [0_u32], TypeRef::POINTER)
+      loaded_type_id = builder.load(type_id_ptr, TypeRef::INT32)
+
+      # Compare against all matching type_ids with OR chain
+      if matching_type_ids.size == 1
+        expected = builder.const_int(matching_type_ids[0].to_i64, TypeRef::INT32)
+        builder.eq(loaded_type_id, expected)
+      else
+        # Multiple possible type_ids — OR chain
+        first_expected = builder.const_int(matching_type_ids[0].to_i64, TypeRef::INT32)
+        result = builder.eq(loaded_type_id, first_expected)
+        matching_type_ids[1..].each do |tid|
+          expected = builder.const_int(tid.to_i64, TypeRef::INT32)
+          check = builder.eq(loaded_type_id, expected)
+          result = builder.bit_or(result, check, TypeRef::BOOL)
+        end
+        result
+      end
     end
 
     # ─────────────────────────────────────────────────────────────────────────

@@ -13147,15 +13147,17 @@ module Crystal::HIR
     def flush_deferred_allocators : Nil
       return if @deferred_allocators.empty?
       count = 0
-      @deferred_allocators.each do |class_name|
+      deferred_copy = @deferred_allocators.dup
+      @deferred_allocators.clear
+      deferred_copy.each do |class_name|
         next if @generated_allocators.includes?(class_name)
         class_info = @class_info[class_name]?
         next unless class_info
-        generate_allocator(class_name, class_info)
+        STDERR.puts "[ALLOC_FLUSH] Generating allocator for #{class_name} ivars=#{class_info.ivars.size}"
+        generate_allocator(class_name, class_info, force: true)
         count += 1
       end
       STDERR.puts "[ALLOC_FLUSH] Generated #{count} deferred allocators" if count > 0
-      @deferred_allocators.clear
     end
 
     # Recompute ivar offsets with proper alignment to match LLVM struct layout.
@@ -13955,6 +13957,7 @@ module Crystal::HIR
       class_name : String,
       class_info : ClassInfo,
       call_arg_types : Array(TypeRef)? = nil,
+      force : Bool = false,
     )
       func_name = "#{class_name}.new"
 
@@ -14012,7 +14015,8 @@ module Crystal::HIR
 
       # Don't generate allocator with empty ivars for non-struct classes — defer
       # until class is fully registered so field defaults are properly evaluated.
-      if class_info.ivars.empty? && !class_info.is_struct
+      # When force=true (from flush_deferred_allocators), generate anyway.
+      if !force && class_info.ivars.empty? && !class_info.is_struct
         STDERR.puts "[ALLOC_DEFER] #{class_name}: deferred (empty ivars)" if class_name.includes?("Scheduler")
         @deferred_allocators << class_name
         return
@@ -30110,11 +30114,22 @@ module Crystal::HIR
       check_name = check_desc.name
       return true if value_name == check_name
 
+      # Walk UP from value_type: if check_type is an ancestor, return true
       current = @class_info[value_name]?
       while current
         parent = current.parent_name
-        return false unless parent
+        break unless parent
         return true if parent == check_name
+        current = @class_info[parent]?
+      end
+
+      # Walk UP from check_type: if value_type is an ancestor of check_type,
+      # then check_type is a subclass — can't determine statically (need runtime check)
+      current = @class_info[check_name]?
+      while current
+        parent = current.parent_name
+        break unless parent
+        return nil if parent == value_name
         current = @class_info[parent]?
       end
 
@@ -46056,7 +46071,7 @@ module Crystal::HIR
                          end
       if member_name == "new"
         if class_info = @class_info[class_name_str]?
-          generate_allocator(class_name_str, class_info)
+          generate_allocator(class_name_str, class_info, force: true)
         end
       end
 
