@@ -259,6 +259,26 @@ module Crystal
       end
     end
 
+    # Register enum types so the LLVM backend maps them to i32 instead of ptr.
+    # Enums in Crystal are integer types (i32 by default).
+    def register_enum_types(enum_names : Set(String), type_descriptors : Array(Crystal::HIR::TypeDescriptor))
+      type_descriptors.each_with_index do |desc, idx|
+        next unless enum_names.includes?(desc.name)
+
+        hir_ref = Crystal::HIR::TypeRef.new(Crystal::HIR::TypeRef::FIRST_USER_TYPE + idx.to_u32)
+        mir_ref = convert_type(hir_ref)
+        next if @mir_module.type_registry.get(mir_ref)
+
+        @mir_module.type_registry.create_type_with_id(
+          mir_ref.id,
+          TypeKind::Enum,
+          desc.name,
+          4_u64,   # i32 size
+          4_u32    # i32 alignment
+        )
+      end
+    end
+
     # Register tuple/named tuple types from HIR descriptors.
     # This enables tuple element access to lower as struct GEPs instead of array layout.
     def register_tuple_types(type_descriptors : Array(Crystal::HIR::TypeDescriptor))

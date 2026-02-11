@@ -69,6 +69,7 @@ module Crystal::MIR
     Proc
     Tuple
     Array
+    Enum
 
     def primitive?
       case self

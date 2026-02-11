@@ -899,6 +899,15 @@ module Crystal::HIR
     @function_base_return_types : Hash(String, TypeRef)
     # Enum return type names for functions whose declared return is an enum.
     @function_enum_return_names : Hash(String, String)
+
+    # Public accessor for enum names (used by MIR lowering to register enum types)
+    def enum_names : Set(String)
+      if enum_info = @enum_info
+        enum_info.keys.to_set
+      else
+        Set(String).new
+      end
+    end
     # Functions whose return value is a type literal (e.g., EventLoop.backend_class).
     @function_return_type_literals : Set(String)
 

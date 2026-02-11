@@ -217,6 +217,7 @@ module Crystal::MIR
       when .proc?                       then "%__crystal_proc"  # { ptr, ptr }
       when .tuple?                      then "ptr"  # Tuple values are represented by pointer in current ABI
       when .array?                      then compute_array_type(type)
+      when .enum?                       then "i32"
       else                                   "ptr"
       end
     end
