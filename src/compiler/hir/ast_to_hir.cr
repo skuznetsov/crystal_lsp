@@ -44594,35 +44594,54 @@ module Crystal::HIR
 
       # Detect ptr.value.field pattern (READ): use pointer directly for FieldGet
       # instead of dereferencing first (which would load garbage for struct pointers)
+      # GUARD: Only enter this optimization when inner_node.object is a local
+      # variable that has already been lowered (has a known type). This avoids
+      # speculatively lowering expressions with side effects (calls, etc.) which
+      # would cause double evaluation if the optimization fails.
       inner_node = @arena[node.object]
       if inner_node.is_a?(CrystalV2::Compiler::Frontend::MemberAccessNode) &&
          String.new(inner_node.member) == "value"
-        ptr_id = lower_expr(ctx, inner_node.object)
-        ptr_type = ctx.type_of(ptr_id)
-        ptr_desc = @module.get_type_descriptor(ptr_type)
-        is_pointer = ptr_type == TypeRef::POINTER ||
-                     (ptr_desc && ptr_desc.kind == TypeKind::Pointer)
-        if is_pointer
-          element_type_name = if ptr_desc && ptr_desc.name.starts_with?("Pointer(")
-                                ptr_desc.name[8...-1]
-                              else
-                                nil
-                              end
-          if element_type_name
-            element_type_ref = type_ref_for_name(element_type_name)
-            element_desc = @module.get_type_descriptor(element_type_ref)
-            element_class_name = element_desc ? element_desc.name : element_type_name
-            if ci = @class_info[element_class_name]?
-              ivar_name = "@#{member_name}"
-              ivar_info = ci.ivars.find { |iv| iv.name == ivar_name }
-              if !ivar_info && ci.is_struct && @lib_structs.includes?(element_class_name)
-                ivar_info = ci.ivars.find { |iv| iv.name == member_name || iv.name == "@#{member_name}" }
-              end
-              if ivar_info
-                field_get = FieldGet.new(ctx.next_id, ivar_info.type, ptr_id, ivar_info.name, ivar_info.offset)
-                ctx.emit(field_get)
-                ctx.register_type(field_get.id, ivar_info.type)
-                return field_get.id
+        inner_obj_node = @arena[inner_node.object]
+        # Only proceed if inner object is a local variable that's already assigned
+        is_safe_to_lower = false
+        if inner_obj_node.is_a?(CrystalV2::Compiler::Frontend::IdentifierNode)
+          var_name = String.new(inner_obj_node.name)
+          if local_id = ctx.lookup_local(var_name)
+            local_type = ctx.type_of(local_id)
+            if local_type == TypeRef::POINTER ||
+               (@module.get_type_descriptor(local_type).try(&.kind) == TypeKind::Pointer)
+              is_safe_to_lower = true
+            end
+          end
+        end
+        if is_safe_to_lower
+          ptr_id = lower_expr(ctx, inner_node.object)
+          ptr_type = ctx.type_of(ptr_id)
+          ptr_desc = @module.get_type_descriptor(ptr_type)
+          is_pointer = ptr_type == TypeRef::POINTER ||
+                       (ptr_desc && ptr_desc.kind == TypeKind::Pointer)
+          if is_pointer
+            element_type_name = if ptr_desc && ptr_desc.name.starts_with?("Pointer(")
+                                  ptr_desc.name[8...-1]
+                                else
+                                  nil
+                                end
+            if element_type_name
+              element_type_ref = type_ref_for_name(element_type_name)
+              element_desc = @module.get_type_descriptor(element_type_ref)
+              element_class_name = element_desc ? element_desc.name : element_type_name
+              if ci = @class_info[element_class_name]?
+                ivar_name = "@#{member_name}"
+                ivar_info = ci.ivars.find { |iv| iv.name == ivar_name }
+                if !ivar_info && ci.is_struct && @lib_structs.includes?(element_class_name)
+                  ivar_info = ci.ivars.find { |iv| iv.name == member_name || iv.name == "@#{member_name}" }
+                end
+                if ivar_info
+                  field_get = FieldGet.new(ctx.next_id, ivar_info.type, ptr_id, ivar_info.name, ivar_info.offset)
+                  ctx.emit(field_get)
+                  ctx.register_type(field_get.id, ivar_info.type)
+                  return field_get.id
+                end
               end
             end
           end
