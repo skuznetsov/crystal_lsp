@@ -410,6 +410,7 @@ module Crystal::MIR
     @in_phi_mode : Bool = false  # When true, value_ref returns default instead of emitting load
     @in_phi_block : Bool = false  # When true, we're emitting phi instructions (defer cross-block stores)
     @deferred_phi_stores : Array(String) = [] of String  # Stores to emit after all phis
+    @deferred_phi_store_ops : Array({ValueId, String, String}) = [] of {ValueId, String, String}  # {inst_id, value_name, slot_name}
 
     # Phi-related type conversions: ExternCall values that need zext for phi compatibility
     # Maps value_id -> (from_bits, to_bits) where we need zext from iN to iM
@@ -3779,6 +3780,7 @@ module Crystal::MIR
       # Emit phi nodes first (without cross-block stores - those go after all phis)
       @in_phi_block = true
       @deferred_phi_stores.clear
+      @deferred_phi_store_ops.clear
       phi_insts.each do |inst|
         emit_instruction(inst, func)
       end
@@ -3789,6 +3791,12 @@ module Crystal::MIR
         emit store_stmt
       end
       @deferred_phi_stores.clear
+
+      # Emit deferred slot store operations (wrapping + store) that were skipped during PHI emission
+      @deferred_phi_store_ops.each do |(inst_id, val_name, slot_name)|
+        emit_cross_block_slot_store(inst_id, val_name, slot_name)
+      end
+      @deferred_phi_store_ops.clear
 
       # TSan: emit function entry after phi nodes (if first block)
       if @tsan_needs_func_entry
@@ -4062,127 +4070,113 @@ module Crystal::MIR
 
       # Store to cross-block slot if this value is used across blocks
       # This centralizes the logic that was previously only in emit_load
-      if produces_value && (slot_name = @cross_block_slots[inst.id]?)
-        val_type = @value_types[inst.id]? || inst.type
-        llvm_type = @type_mapper.llvm_type(val_type)
-        llvm_type = "ptr" if llvm_type == "void"
-        slot_llvm_type = @cross_block_slot_types[inst.id]?
-        # Guard: if MIR reuses value IDs, skip store when types are completely incompatible
-        # (e.g., double result into Slice|Nil slot)
-        if slot_llvm_type && slot_llvm_type != llvm_type &&
-           slot_llvm_type.includes?(".union") && !llvm_type.includes?(".union")
-          # Check if the scalar type could reasonably be a payload of the union
-          # Union payload occupies field 1 with size [N x i8]
-          # A double (8 bytes) fits in [8 x i8], i32 fits in [4 x i8], ptr fits in [8 x i8]
-          # Skip store if the union name doesn't relate to the scalar type
-          scalar_compatible = llvm_type == "ptr" || llvm_type.starts_with?("i") ||
-                              llvm_type == "double" || llvm_type == "float"
-          # Check if the union name contains a type related to the scalar
-          union_has_float = slot_llvm_type.includes?("Float") || slot_llvm_type.includes?("float")
-          union_has_int = slot_llvm_type.includes?("Int") || slot_llvm_type.includes?("UInt")
-          value_is_float = llvm_type == "double" || llvm_type == "float"
-          value_is_int = llvm_type.starts_with?("i") && !llvm_type.includes?(".")
-          if scalar_compatible && !((value_is_float && union_has_float) || (value_is_int && union_has_int) || llvm_type == "ptr")
-            # Incompatible types — MIR likely reused this value ID. Skip store.
-            slot_llvm_type = nil  # Signal to skip
-          end
-        end
-        store_val = name
-        store_type = llvm_type
-        # If the slot type differs from the value type, convert value to match slot type.
-        # The slot type is fixed from prepass; loads always use the slot type.
-        if slot_llvm_type && slot_llvm_type != llvm_type
-          base = name.lstrip('%')
-          if slot_llvm_type.includes?(".union") && !llvm_type.includes?(".union")
-            # Scalar → union: wrap value in union struct
-            emit "%#{base}.slot_wrap_ptr = alloca #{slot_llvm_type}, align 8"
-            emit "store #{slot_llvm_type} zeroinitializer, ptr %#{base}.slot_wrap_ptr"
-            emit "%#{base}.slot_wrap_tid = getelementptr #{slot_llvm_type}, ptr %#{base}.slot_wrap_ptr, i32 0, i32 0"
-            emit "store i32 0, ptr %#{base}.slot_wrap_tid"
-            emit "%#{base}.slot_wrap_pay = getelementptr #{slot_llvm_type}, ptr %#{base}.slot_wrap_ptr, i32 0, i32 1"
-            emit "store #{llvm_type} #{name}, ptr %#{base}.slot_wrap_pay"
-            emit "%#{base}.slot_wrap_val = load #{slot_llvm_type}, ptr %#{base}.slot_wrap_ptr"
-            store_val = "%#{base}.slot_wrap_val"
-            store_type = slot_llvm_type
-          elsif !slot_llvm_type.includes?(".union") && llvm_type.includes?(".union")
-            # Union → scalar: extract payload
-            emit "%#{base}.slot_unwrap_ptr = alloca #{llvm_type}, align 8"
-            emit "store #{llvm_type} #{name}, ptr %#{base}.slot_unwrap_ptr"
-            emit "%#{base}.slot_unwrap_pay = getelementptr #{llvm_type}, ptr %#{base}.slot_unwrap_ptr, i32 0, i32 1"
-            emit "%#{base}.slot_unwrap_val = load #{slot_llvm_type}, ptr %#{base}.slot_unwrap_pay"
-            store_val = "%#{base}.slot_unwrap_val"
-            store_type = slot_llvm_type
-          elsif llvm_type.starts_with?("i") && slot_llvm_type.starts_with?("i") && !llvm_type.includes?(".") && !slot_llvm_type.includes?(".")
-            # Integer width mismatch: sext/trunc
-            val_bits = llvm_type[1..].to_i? || 64
-            slot_bits = slot_llvm_type[1..].to_i? || 64
-            if val_bits < slot_bits
-              emit "%#{base}.slot_ext = sext #{llvm_type} #{name} to #{slot_llvm_type}"
-              store_val = "%#{base}.slot_ext"
-            elsif val_bits > slot_bits
-              emit "%#{base}.slot_trunc = trunc #{llvm_type} #{name} to #{slot_llvm_type}"
-              store_val = "%#{base}.slot_trunc"
-            end
-            store_type = slot_llvm_type
-          elsif llvm_type == "ptr" && slot_llvm_type.starts_with?("i")
-            emit "%#{base}.slot_ptrtoint = ptrtoint ptr #{name} to #{slot_llvm_type}"
-            store_val = "%#{base}.slot_ptrtoint"
-            store_type = slot_llvm_type
-          elsif llvm_type.starts_with?("i") && slot_llvm_type == "ptr"
-            emit "%#{base}.slot_inttoptr = inttoptr #{llvm_type} #{name} to ptr"
-            store_val = "%#{base}.slot_inttoptr"
-            store_type = slot_llvm_type
-          elsif (llvm_type == "double" || llvm_type == "float") && slot_llvm_type.starts_with?("i") && !slot_llvm_type.includes?(".")
-            # Float → int: pick signedness based on the slot type.
-            slot_type_ref = @cross_block_slot_type_refs[inst.id]?
-            op = slot_type_ref && unsigned_type_ref?(slot_type_ref) ? "fptoui" : "fptosi"
-            emit "%#{base}.slot_ftoi = #{op} #{llvm_type} #{name} to #{slot_llvm_type}"
-            store_val = "%#{base}.slot_ftoi"
-            store_type = slot_llvm_type
-          elsif llvm_type.starts_with?("i") && !llvm_type.includes?(".") && (slot_llvm_type == "double" || slot_llvm_type == "float")
-            # Int → float: use uitofp for unsigned types
-            op = unsigned_type_ref?(val_type) ? "uitofp" : "sitofp"
-            emit "%#{base}.slot_itof = #{op} #{llvm_type} #{name} to #{slot_llvm_type}"
-            store_val = "%#{base}.slot_itof"
-            store_type = slot_llvm_type
-          elsif llvm_type == "float" && slot_llvm_type == "double"
-            emit "%#{base}.slot_fpext = fpext float #{name} to double"
-            store_val = "%#{base}.slot_fpext"
-            store_type = "double"
-          elsif llvm_type == "double" && slot_llvm_type == "float"
-            emit "%#{base}.slot_fptrunc = fptrunc double #{name} to float"
-            store_val = "%#{base}.slot_fptrunc"
-            store_type = "float"
-          elsif (llvm_type == "double" || llvm_type == "float") && slot_llvm_type == "ptr"
-            # Float → ptr: preserve bit pattern (bitcast), then inttoptr.
-            if llvm_type == "double"
-              emit "%#{base}.slot_float_bits = bitcast double #{name} to i64"
-              emit "%#{base}.slot_inttoptr = inttoptr i64 %#{base}.slot_float_bits to ptr"
-            else
-              emit "%#{base}.slot_float_bits = bitcast float #{name} to i32"
-              emit "%#{base}.slot_float_bits_ext = zext i32 %#{base}.slot_float_bits to i64"
-              emit "%#{base}.slot_inttoptr = inttoptr i64 %#{base}.slot_float_bits_ext to ptr"
-            end
-            store_val = "%#{base}.slot_inttoptr"
-            store_type = slot_llvm_type
-          elsif llvm_type == "ptr" && (slot_llvm_type == "double" || slot_llvm_type == "float")
-            emit "%#{base}.slot_ptrtoint = ptrtoint ptr #{name} to i64"
-            emit "%#{base}.slot_uitofp = uitofp i64 %#{base}.slot_ptrtoint to #{slot_llvm_type}"
-            store_val = "%#{base}.slot_uitofp"
-            store_type = slot_llvm_type
-          else
-            # Fallback: store as the slot type (may cause issues but avoids crash)
-            store_type = slot_llvm_type
-          end
-        end
-        store_stmt = "store #{store_type} #{store_val}, ptr %#{slot_name}"
-        if @in_phi_block
-          # Defer store until after all phi nodes (LLVM requires phis to be grouped at top)
-          @deferred_phi_stores << store_stmt
-        else
-          emit store_stmt
+      # When in phi block, defer EVERYTHING (including wrapping) to after all phis
+      if @in_phi_block && produces_value && (slot_name = @cross_block_slots[inst.id]?)
+        @deferred_phi_store_ops << {inst.id, name, slot_name}
+      elsif produces_value && (slot_name = @cross_block_slots[inst.id]?)
+        emit_cross_block_slot_store(inst.id, name, slot_name)
+      end
+    end
+
+    private def emit_cross_block_slot_store(inst_id : ValueId, name : String, slot_name : String)
+      val_type = @value_types[inst_id]?
+      return unless val_type
+      llvm_type = @type_mapper.llvm_type(val_type)
+      llvm_type = "ptr" if llvm_type == "void"
+      slot_llvm_type = @cross_block_slot_types[inst_id]?
+      # Guard: if MIR reuses value IDs, skip store when types are completely incompatible
+      if slot_llvm_type && slot_llvm_type != llvm_type &&
+         slot_llvm_type.includes?(".union") && !llvm_type.includes?(".union")
+        scalar_compatible = llvm_type == "ptr" || llvm_type.starts_with?("i") ||
+                            llvm_type == "double" || llvm_type == "float"
+        union_has_float = slot_llvm_type.includes?("Float") || slot_llvm_type.includes?("float")
+        union_has_int = slot_llvm_type.includes?("Int") || slot_llvm_type.includes?("UInt")
+        value_is_float = llvm_type == "double" || llvm_type == "float"
+        value_is_int = llvm_type.starts_with?("i") && !llvm_type.includes?(".")
+        if scalar_compatible && !((value_is_float && union_has_float) || (value_is_int && union_has_int) || llvm_type == "ptr")
+          slot_llvm_type = nil
         end
       end
+      store_val = name
+      store_type = llvm_type
+      if slot_llvm_type && slot_llvm_type != llvm_type
+        base = name.lstrip('%')
+        if slot_llvm_type.includes?(".union") && !llvm_type.includes?(".union")
+          emit "%#{base}.slot_wrap_ptr = alloca #{slot_llvm_type}, align 8"
+          emit "store #{slot_llvm_type} zeroinitializer, ptr %#{base}.slot_wrap_ptr"
+          emit "%#{base}.slot_wrap_tid = getelementptr #{slot_llvm_type}, ptr %#{base}.slot_wrap_ptr, i32 0, i32 0"
+          emit "store i32 0, ptr %#{base}.slot_wrap_tid"
+          emit "%#{base}.slot_wrap_pay = getelementptr #{slot_llvm_type}, ptr %#{base}.slot_wrap_ptr, i32 0, i32 1"
+          emit "store #{llvm_type} #{name}, ptr %#{base}.slot_wrap_pay"
+          emit "%#{base}.slot_wrap_val = load #{slot_llvm_type}, ptr %#{base}.slot_wrap_ptr"
+          store_val = "%#{base}.slot_wrap_val"
+          store_type = slot_llvm_type
+        elsif !slot_llvm_type.includes?(".union") && llvm_type.includes?(".union")
+          emit "%#{base}.slot_unwrap_ptr = alloca #{llvm_type}, align 8"
+          emit "store #{llvm_type} #{name}, ptr %#{base}.slot_unwrap_ptr"
+          emit "%#{base}.slot_unwrap_pay = getelementptr #{llvm_type}, ptr %#{base}.slot_unwrap_ptr, i32 0, i32 1"
+          emit "%#{base}.slot_unwrap_val = load #{slot_llvm_type}, ptr %#{base}.slot_unwrap_pay"
+          store_val = "%#{base}.slot_unwrap_val"
+          store_type = slot_llvm_type
+        elsif llvm_type.starts_with?("i") && slot_llvm_type.starts_with?("i") && !llvm_type.includes?(".") && !slot_llvm_type.includes?(".")
+          val_bits = llvm_type[1..].to_i? || 64
+          slot_bits = slot_llvm_type[1..].to_i? || 64
+          if val_bits < slot_bits
+            emit "%#{base}.slot_ext = sext #{llvm_type} #{name} to #{slot_llvm_type}"
+            store_val = "%#{base}.slot_ext"
+          elsif val_bits > slot_bits
+            emit "%#{base}.slot_trunc = trunc #{llvm_type} #{name} to #{slot_llvm_type}"
+            store_val = "%#{base}.slot_trunc"
+          end
+          store_type = slot_llvm_type
+        elsif llvm_type == "ptr" && slot_llvm_type.starts_with?("i")
+          emit "%#{base}.slot_ptrtoint = ptrtoint ptr #{name} to #{slot_llvm_type}"
+          store_val = "%#{base}.slot_ptrtoint"
+          store_type = slot_llvm_type
+        elsif llvm_type.starts_with?("i") && slot_llvm_type == "ptr"
+          emit "%#{base}.slot_inttoptr = inttoptr #{llvm_type} #{name} to ptr"
+          store_val = "%#{base}.slot_inttoptr"
+          store_type = slot_llvm_type
+        elsif (llvm_type == "double" || llvm_type == "float") && slot_llvm_type.starts_with?("i") && !slot_llvm_type.includes?(".")
+          slot_type_ref = @cross_block_slot_type_refs[inst_id]?
+          op = slot_type_ref && unsigned_type_ref?(slot_type_ref) ? "fptoui" : "fptosi"
+          emit "%#{base}.slot_ftoi = #{op} #{llvm_type} #{name} to #{slot_llvm_type}"
+          store_val = "%#{base}.slot_ftoi"
+          store_type = slot_llvm_type
+        elsif llvm_type.starts_with?("i") && !llvm_type.includes?(".") && (slot_llvm_type == "double" || slot_llvm_type == "float")
+          op = unsigned_type_ref?(val_type) ? "uitofp" : "sitofp"
+          emit "%#{base}.slot_itof = #{op} #{llvm_type} #{name} to #{slot_llvm_type}"
+          store_val = "%#{base}.slot_itof"
+          store_type = slot_llvm_type
+        elsif llvm_type == "float" && slot_llvm_type == "double"
+          emit "%#{base}.slot_fpext = fpext float #{name} to double"
+          store_val = "%#{base}.slot_fpext"
+          store_type = "double"
+        elsif llvm_type == "double" && slot_llvm_type == "float"
+          emit "%#{base}.slot_fptrunc = fptrunc double #{name} to float"
+          store_val = "%#{base}.slot_fptrunc"
+          store_type = "float"
+        elsif (llvm_type == "double" || llvm_type == "float") && slot_llvm_type == "ptr"
+          if llvm_type == "double"
+            emit "%#{base}.slot_float_bits = bitcast double #{name} to i64"
+            emit "%#{base}.slot_inttoptr = inttoptr i64 %#{base}.slot_float_bits to ptr"
+          else
+            emit "%#{base}.slot_float_bits = bitcast float #{name} to i32"
+            emit "%#{base}.slot_float_bits_ext = zext i32 %#{base}.slot_float_bits to i64"
+            emit "%#{base}.slot_inttoptr = inttoptr i64 %#{base}.slot_float_bits_ext to ptr"
+          end
+          store_val = "%#{base}.slot_inttoptr"
+          store_type = slot_llvm_type
+        elsif llvm_type == "ptr" && (slot_llvm_type == "double" || slot_llvm_type == "float")
+          emit "%#{base}.slot_ptrtoint = ptrtoint ptr #{name} to i64"
+          emit "%#{base}.slot_uitofp = uitofp i64 %#{base}.slot_ptrtoint to #{slot_llvm_type}"
+          store_val = "%#{base}.slot_uitofp"
+          store_type = slot_llvm_type
+        else
+          store_type = slot_llvm_type
+        end
+      end
+      emit "store #{store_type} #{store_val}, ptr %#{slot_name}"
     end
 
     private def emit_constant(inst : Constant, name : String)

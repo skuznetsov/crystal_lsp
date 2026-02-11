@@ -30693,10 +30693,14 @@ module Crystal::HIR
           end
         end
 
-        # Don't create phi for void/nil types
+        # Don't create phi for void/nil types — but STILL merge local variables!
         if phi_type == TypeRef::VOID || phi_type == TypeRef::NIL
           nil_lit = Literal.new(ctx.next_id, TypeRef::NIL, nil)
           ctx.emit(nil_lit)
+          # Must merge locals even when the if value itself is void/nil,
+          # because variables may have been modified in the branches.
+          flowing_branch_info = flowing_branches.map { |exit_block, _, locals, _| {exit_block, locals} }
+          merge_if_branch_locals(ctx, pre_branch_locals, flowing_branch_info)
           return nil_lit.id
         end
 
@@ -31202,8 +31206,15 @@ module Crystal::HIR
             # Avoid widening pointer or struct/class phis to unrelated primitive types.
             var_desc = @module.get_type_descriptor(var_type)
             struct_or_class = var_desc && (var_desc.kind == TypeKind::Struct || var_desc.kind == TypeKind::Class)
-            if (pointer_type || struct_or_class) && numeric_primitive?(inferred)
-              # Avoid widening pointer/struct phis to numeric types based on brittle inference.
+            var_type_name = get_type_name_from_ref(var_type)
+            inferred_type_name = get_type_name_from_ref(inferred)
+            enum_var = @enum_info.try(&.has_key?(var_type_name))
+            enum_inferred = @enum_info.try(&.has_key?(inferred_type_name))
+            # Enum + numeric or numeric + enum should not widen to union — keep Int32
+            enum_numeric_mismatch = (enum_var && numeric_primitive?(inferred)) || (enum_inferred && numeric_primitive?(var_type))
+            if ((pointer_type || struct_or_class) && numeric_primitive?(inferred)) || enum_numeric_mismatch
+              # Avoid widening pointer/struct/enum phis to numeric types based on brittle inference.
+              # Keep the Int32 type (enums are Int32 at runtime)
             else
               merged = union_type_for_values(var_type, inferred)
               if merged == TypeRef::VOID && ENV["DEBUG_LOOP_PHI"]?
@@ -31288,6 +31299,9 @@ module Crystal::HIR
                 ctx.emit_to_block(body_exit_block, cast)
                 incoming_val = cast.id
               end
+            end
+            if ENV["DEBUG_LOOP_PHI"]?
+              STDERR.puts "[LOOP_PHI_BACKEDGE] var=#{var_name} phi=#{phi.id} updated_val=#{updated_val} incoming_val=#{incoming_val} body_exit=#{body_exit_block} phi_type=#{phi_type.id} val_type=#{ctx.type_of(updated_val).id} same_as_phi=#{updated_val == phi.id}"
             end
             phi.add_incoming(body_exit_block, incoming_val)
             # Reset local to point back to phi for next iteration
