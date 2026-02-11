@@ -1720,6 +1720,33 @@ module Crystal::MIR
       emit_raw "  ret i1 %found\n"
       emit_raw "}\n\n"
 
+      # String#== — compare two Crystal Strings by content
+      # 1. Pointer equality (same object → true)
+      # 2. Bytesize comparison (different lengths → false)
+      # 3. memcmp on the data bytes
+      emit_raw "define i1 @__crystal_v2_string_eq(ptr %a, ptr %b) {\n"
+      emit_raw "entry:\n"
+      emit_raw "  %same = icmp eq ptr %a, %b\n"
+      emit_raw "  br i1 %same, label %ret_true, label %check_size\n"
+      emit_raw "check_size:\n"
+      emit_raw "  %a_bs_ptr = getelementptr i8, ptr %a, i32 4\n"
+      emit_raw "  %a_bs = load i32, ptr %a_bs_ptr\n"
+      emit_raw "  %b_bs_ptr = getelementptr i8, ptr %b, i32 4\n"
+      emit_raw "  %b_bs = load i32, ptr %b_bs_ptr\n"
+      emit_raw "  %size_eq = icmp eq i32 %a_bs, %b_bs\n"
+      emit_raw "  br i1 %size_eq, label %check_data, label %ret_false\n"
+      emit_raw "check_data:\n"
+      emit_raw "  %a_data = getelementptr i8, ptr %a, i32 12\n"
+      emit_raw "  %b_data = getelementptr i8, ptr %b, i32 12\n"
+      emit_raw "  %cmp = call i32 @memcmp(ptr %a_data, ptr %b_data, i32 %a_bs)\n"
+      emit_raw "  %eq = icmp eq i32 %cmp, 0\n"
+      emit_raw "  br i1 %eq, label %ret_true, label %ret_false\n"
+      emit_raw "ret_true:\n"
+      emit_raw "  ret i1 1\n"
+      emit_raw "ret_false:\n"
+      emit_raw "  ret i1 0\n"
+      emit_raw "}\n\n"
+
       # String#to_i — convert Crystal String to Int32 via strtol
       # Data starts at offset 12 in Crystal String layout
       emit_raw "define i32 @__crystal_v2_string_to_i(ptr %self) {\n"

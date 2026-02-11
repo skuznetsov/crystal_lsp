@@ -29562,6 +29562,22 @@ module Crystal::HIR
         return call.id
       end
 
+      # String == / != must use content comparison, not pointer comparison.
+      # Intercept here and emit a call to __crystal_v2_string_eq runtime helper.
+      if left_type == TypeRef::STRING && (op_str == "==" || op_str == "!=")
+        call = Call.new(ctx.next_id, TypeRef::BOOL, left_id, "__crystal_v2_string_eq", [right_id])
+        ctx.emit(call)
+        ctx.register_type(call.id, TypeRef::BOOL)
+        if op_str == "!="
+          # Negate the result for !=
+          neg = UnaryOperation.new(ctx.next_id, TypeRef::BOOL, UnaryOp::Not, call.id)
+          ctx.emit(neg)
+          ctx.register_type(neg.id, TypeRef::BOOL)
+          return neg.id
+        end
+        return call.id
+      end
+
       # For non-primitive types (struct/class), arithmetic operators should be method calls.
       # This handles Slice#+, Time#-, etc.
       is_float_type = left_type == TypeRef::FLOAT32 || left_type == TypeRef::FLOAT64
