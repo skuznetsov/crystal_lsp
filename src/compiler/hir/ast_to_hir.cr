@@ -36971,6 +36971,20 @@ module Crystal::HIR
         end
       end
 
+      # String#split(String) intercept: bypass wrong overload resolution and call runtime helper
+      if method_name == "split" && receiver_id && args.size == 1 &&
+         prepack_arg_types.size == 1 && prepack_arg_types[0] == TypeRef::STRING
+        recv_type = ctx.type_of(receiver_id)
+        if recv_type == TypeRef::STRING || recv_type == TypeRef::POINTER
+          arr_type = type_ref_for_name("Array(String)")
+          arr_type = TypeRef::POINTER if arr_type == TypeRef::VOID
+          ext_call = ExternCall.new(ctx.next_id, arr_type, "__crystal_v2_string_split_string", [receiver_id, args[0]])
+          ctx.emit(ext_call)
+          ctx.register_type(ext_call.id, arr_type)
+          return ext_call.id
+        end
+      end
+
       # String#includes? intercept: when argument type is known, bypass the union-param
       # function and directly call the correct implementation.
       # String includes?(String) → strstr-based check via __crystal_v2_string_includes_string
