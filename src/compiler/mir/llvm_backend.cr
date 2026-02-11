@@ -704,6 +704,7 @@ module Crystal::MIR
       already_declared << "printf" << "puts" << "exit" << "abort"
       already_declared << "strlen" << "strcpy" << "strcat" << "sprintf"
       already_declared << "strstr" << "write" << "strchr" << "strtod" << "snprintf"
+      already_declared << "open" << "lseek" << "read" << "close"
       already_declared << "setjmp" << "longjmp"
       # Crystal v2 runtime functions
       already_declared << "__crystal_v2_raise" << "__crystal_v2_int_to_string"
@@ -1697,6 +1698,10 @@ module Crystal::MIR
       emit_raw "declare i32 @sprintf(ptr, ptr, ...)\n"
       emit_raw "declare ptr @strstr(ptr, ptr)\n"
       emit_raw "declare i64 @write(i32, ptr, i64)\n"
+      emit_raw "declare i32 @open(ptr, i32, ...)\n"
+      emit_raw "declare i64 @lseek(i32, i64, i32)\n"
+      emit_raw "declare i64 @read(i32, ptr, i64)\n"
+      emit_raw "declare i32 @close(i32)\n"
       emit_raw "\n"
 
       # String#includes?(String) — compares byte data via strstr
@@ -1864,6 +1869,63 @@ module Crystal::MIR
       emit_raw "  %null_pos = getelementptr i8, ptr %data, i32 %len\n"
       emit_raw "  store i8 0, ptr %null_pos\n"
       emit_raw "  ret ptr %str\n"
+      emit_raw "}\n\n"
+
+      # File.read — reads entire file into Crystal String
+      emit_raw "define ptr @__crystal_v2_file_read(ptr %path) {\n"
+      emit_raw "entry:\n"
+      emit_raw "  %cstr = getelementptr i8, ptr %path, i32 12\n"
+      emit_raw "  %fd = call i32 (ptr, i32, ...) @open(ptr %cstr, i32 0)\n"
+      emit_raw "  %fd_bad = icmp slt i32 %fd, 0\n"
+      emit_raw "  br i1 %fd_bad, label %err, label %opened\n"
+      emit_raw "opened:\n"
+      emit_raw "  %size = call i64 @lseek(i32 %fd, i64 0, i32 2)\n"
+      emit_raw "  %ignore = call i64 @lseek(i32 %fd, i64 0, i32 0)\n"
+      emit_raw "  %size32 = trunc i64 %size to i32\n"
+      emit_raw "  %alloc_i32 = add i32 %size32, 13\n"
+      emit_raw "  %alloc = sext i32 %alloc_i32 to i64\n"
+      emit_raw "  %str = call ptr @__crystal_v2_malloc64(i64 %alloc)\n"
+      emit_raw "  store i32 #{@string_type_id}, ptr %str\n"
+      emit_raw "  %bs = getelementptr i8, ptr %str, i32 4\n"
+      emit_raw "  store i32 %size32, ptr %bs\n"
+      emit_raw "  %sz = getelementptr i8, ptr %str, i32 8\n"
+      emit_raw "  store i32 %size32, ptr %sz\n"
+      emit_raw "  %data = getelementptr i8, ptr %str, i32 12\n"
+      emit_raw "  %rsize = call i64 @read(i32 %fd, ptr %data, i64 %size)\n"
+      emit_raw "  %null_pos = getelementptr i8, ptr %data, i32 %size32\n"
+      emit_raw "  store i8 0, ptr %null_pos\n"
+      emit_raw "  %ignore2 = call i32 @close(i32 %fd)\n"
+      emit_raw "  ret ptr %str\n"
+      emit_raw "err:\n"
+      emit_raw "  %empty = call ptr @__crystal_v2_malloc64(i64 13)\n"
+      emit_raw "  store i32 #{@string_type_id}, ptr %empty\n"
+      emit_raw "  %ebs = getelementptr i8, ptr %empty, i32 4\n"
+      emit_raw "  store i32 0, ptr %ebs\n"
+      emit_raw "  %esz = getelementptr i8, ptr %empty, i32 8\n"
+      emit_raw "  store i32 0, ptr %esz\n"
+      emit_raw "  %edata = getelementptr i8, ptr %empty, i32 12\n"
+      emit_raw "  store i8 0, ptr %edata\n"
+      emit_raw "  ret ptr %empty\n"
+      emit_raw "}\n\n"
+
+      # File.write — writes Crystal String to file (returns nil)
+      emit_raw "define void @__crystal_v2_file_write(ptr %path, ptr %content) {\n"
+      emit_raw "entry:\n"
+      emit_raw "  %cstr = getelementptr i8, ptr %path, i32 12\n"
+      # O_WRONLY=1 | O_CREAT=0x200 | O_TRUNC=0x400 = 0x601 = 1537
+      emit_raw "  %fd = call i32 (ptr, i32, ...) @open(ptr %cstr, i32 1537, i32 420)\n"
+      emit_raw "  %fd_bad = icmp slt i32 %fd, 0\n"
+      emit_raw "  br i1 %fd_bad, label %done, label %opened\n"
+      emit_raw "opened:\n"
+      emit_raw "  %bs_ptr = getelementptr i8, ptr %content, i32 4\n"
+      emit_raw "  %bs = load i32, ptr %bs_ptr\n"
+      emit_raw "  %data = getelementptr i8, ptr %content, i32 12\n"
+      emit_raw "  %bs64 = sext i32 %bs to i64\n"
+      emit_raw "  %ignore = call i64 @write(i32 %fd, ptr %data, i64 %bs64)\n"
+      emit_raw "  %ignore2 = call i32 @close(i32 %fd)\n"
+      emit_raw "  br label %done\n"
+      emit_raw "done:\n"
+      emit_raw "  ret void\n"
       emit_raw "}\n\n"
 
       # int64 to i32 (truncate)
@@ -6102,12 +6164,10 @@ module Crystal::MIR
       # callee definition doesn't. Strip the leading self arg when count is off by 1.
       call_args = inst.args
       if callee_func && callee_func.params.size == inst.args.size - 1 && inst.args.size > 0
-        first_arg_type = @value_types[inst.args[0]]?
-        first_arg_llvm = first_arg_type ? @type_mapper.llvm_type(first_arg_type) : "void"
-        if first_arg_llvm == "void" || first_arg_llvm == "ptr"
-          # Likely a self arg for a class method — drop it
-          call_args = inst.args[1..]
-        end
+        # Off-by-1 arg count is the hallmark of class method self arg mismatch.
+        # The MIR call includes self (void/ptr/union) but the callee definition doesn't.
+        # Strip the leading self arg regardless of its LLVM type.
+        call_args = inst.args[1..]
       end
       # Pad missing args with default values or zero/null to avoid UB from arg count mismatch.
       # This handles cases where callers omit default parameters (e.g., .new with defaults).

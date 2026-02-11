@@ -36391,6 +36391,23 @@ module Crystal::HIR
               return emit_mem_intrinsic(ctx, method_name, arg_ids)
             end
           end
+          # File.read(String) / File.write(String, String) intercept:
+          # bypass broken Crystal::System::File.open chain, use direct C I/O
+          if class_name_str == "File" && method_name == "read" && call_args.size >= 1
+            arg_id = with_arena(call_arena) { lower_expr(ctx, call_args[0]) }
+            ext_call = ExternCall.new(ctx.next_id, TypeRef::STRING, "__crystal_v2_file_read", [arg_id])
+            ctx.emit(ext_call)
+            ctx.register_type(ext_call.id, TypeRef::STRING)
+            return ext_call.id
+          end
+          if class_name_str == "File" && method_name == "write" && call_args.size >= 2
+            path_id = with_arena(call_arena) { lower_expr(ctx, call_args[0]) }
+            content_id = with_arena(call_arena) { lower_expr(ctx, call_args[1]) }
+            ext_call = ExternCall.new(ctx.next_id, TypeRef::VOID, "__crystal_v2_file_write", [path_id, content_id])
+            ctx.emit(ext_call)
+            ctx.register_type(ext_call.id, TypeRef::VOID)
+            return ext_call.id
+          end
           # Class method call like Counter.new()
           if method_name == "new"
             full_method_name = "#{class_name_str}.#{method_name}"
@@ -39707,11 +39724,17 @@ module Crystal::HIR
         # For any other expression, try to determine the type from the value's TypeRef.
         # This handles VarNode (local/param refs), CallNode results, etc.
         type_ref = ctx.type_of(arg_val)
-        if type_ref && type_ref != TypeRef::POINTER && type_ref != TypeRef::VOID &&
-           type_ref.id >= TypeRef::FIRST_USER_TYPE
-          resolved_name = get_type_name_from_ref(type_ref)
-          if resolved_name != "Unknown" && resolved_name != "Pointer"
-            class_name = resolved_name
+        if type_ref
+          # Handle built-in types that have to_unsafe (String, Slice, StaticArray)
+          # These have IDs below FIRST_USER_TYPE but still need auto-cast for C calls
+          if type_ref == TypeRef::STRING
+            class_name = "String"
+          elsif type_ref != TypeRef::POINTER && type_ref != TypeRef::VOID &&
+                type_ref.id >= TypeRef::FIRST_USER_TYPE
+            resolved_name = get_type_name_from_ref(type_ref)
+            if resolved_name != "Unknown" && resolved_name != "Pointer"
+              class_name = resolved_name
+            end
           end
         end
       end
