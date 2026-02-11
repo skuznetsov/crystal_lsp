@@ -69,6 +69,17 @@ describe Crystal::HIR do
       )
       main.blocks[0].add(call)
 
+      # Register B as subclass of A, so virtual call to A#foo reaches B#foo
+      mod.class_parents["B"] = "A"
+
+      # RTA needs types to be instantiated (via Allocate) to include them
+      a_type_ref = mod.intern_type(Crystal::HIR::TypeDescriptor.new(Crystal::HIR::TypeKind::Class, "A"))
+      b_type_ref = mod.intern_type(Crystal::HIR::TypeDescriptor.new(Crystal::HIR::TypeKind::Class, "B"))
+      alloc_a = Crystal::HIR::Allocate.new(2_u32, a_type_ref)
+      alloc_b = Crystal::HIR::Allocate.new(3_u32, b_type_ref)
+      main.blocks[0].add(alloc_a)
+      main.blocks[0].add(alloc_b)
+
       mod.create_function("A#foo", Crystal::HIR::TypeRef::VOID)
       mod.create_function("B#foo", Crystal::HIR::TypeRef::VOID)
       mod.create_function("C#bar", Crystal::HIR::TypeRef::VOID)

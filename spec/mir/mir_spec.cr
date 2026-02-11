@@ -245,8 +245,8 @@ describe Crystal::MIR do
       # Merge block: phi
       builder.current_block = merge_block
       phi = builder.phi(Crystal::MIR::TypeRef::INT32)
-      phi.add_incoming(then_block, val1)
-      phi.add_incoming(else_block, val2)
+      phi.add_incoming(from: then_block, value: val1)
+      phi.add_incoming(from: else_block, value: val2)
       builder.ret(phi.id)
 
       func.compute_predecessors

@@ -712,7 +712,7 @@ describe Crystal::HIR::AstToHir do
     end
 
     it "lowers method call with args" do
-      func = lower_function("def foo; x.bar(1, 2); end")
+      func = lower_function("def foo; puts(1, 2); end")
       text = hir_text(func)
 
       text.should contain("call")
@@ -814,7 +814,8 @@ describe Crystal::HIR::AstToHir do
       func = lower_function("def foo; {\"a\" => 1}; end")
       text = hir_text(func)
 
-      text.should contain("allocate")
+      # Hash literals now lower to Hash.new() + []= calls
+      text.should contain("Hash")
     end
 
     it "lowers tuple literal" do

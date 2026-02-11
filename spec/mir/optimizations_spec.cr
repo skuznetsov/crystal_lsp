@@ -380,8 +380,8 @@ describe Crystal::MIR do
 
       builder.current_block = join_block
       phi = builder.phi(Crystal::MIR::TypeRef::INT32)
-      phi.add_incoming(then_block, value)
-      phi.add_incoming(else_block, value)
+      phi.add_incoming(from: then_block, value: value)
+      phi.add_incoming(from: else_block, value: value)
 
       sum = builder.add(phi.id, value, Crystal::MIR::TypeRef::INT32)
       builder.ret(sum)
@@ -908,8 +908,8 @@ describe Crystal::MIR do
 
       builder.current_block = merge_block
       phi = builder.phi(Crystal::MIR::TypeRef::INT32)
-      phi.add_incoming(then_block, val1)
-      phi.add_incoming(else_block, val2)
+      phi.add_incoming(from: then_block, value: val1)
+      phi.add_incoming(from: else_block, value: val2)
       builder.ret(phi.id)
 
       # Phi operands should keep values alive

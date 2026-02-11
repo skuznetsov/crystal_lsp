@@ -52,12 +52,13 @@ describe "MIR ABI layout sanity" do
     a_type = mir_mod.type_registry.get_by_name("A").not_nil!
 
     a_type.kind.reference?.should be_true
-    a_type.size.should eq(20)
+    # 4-byte type_id header + Int32(4) + Int64(8) = 16, aligned to 8
+    a_type.size.should eq(16)
     a_type.alignment.should eq(8)
 
     fields = a_type.fields.not_nil!
-    fields.find(&.name.==("@x")).not_nil!.offset.should eq(8)
-    fields.find(&.name.==("@y")).not_nil!.offset.should eq(12)
+    fields.find(&.name.==("@x")).not_nil!.offset.should eq(4)
+    fields.find(&.name.==("@y")).not_nil!.offset.should eq(8)
   end
 
   it "lays out subclass ivars after parent fields" do
@@ -75,12 +76,13 @@ describe "MIR ABI layout sanity" do
     child_type = mir_mod.type_registry.get_by_name("Child").not_nil!
 
     child_type.kind.reference?.should be_true
-    child_type.size.should eq(20)
+    # 4-byte type_id header + Int32(4) + Int64(8) = 16, aligned to 8
+    child_type.size.should eq(16)
     child_type.alignment.should eq(8)
 
     fields = child_type.fields.not_nil!
-    fields.find(&.name.==("@x")).not_nil!.offset.should eq(8)
-    fields.find(&.name.==("@y")).not_nil!.offset.should eq(12)
+    fields.find(&.name.==("@x")).not_nil!.offset.should eq(4)
+    fields.find(&.name.==("@y")).not_nil!.offset.should eq(8)
   end
 
   it "lays out struct ivars without a header offset" do
@@ -95,12 +97,13 @@ describe "MIR ABI layout sanity" do
     s_type = mir_mod.type_registry.get_by_name("S").not_nil!
 
     s_type.kind.struct?.should be_true
-    s_type.size.should eq(12)
+    # Struct has no header. @a:Int32@0(4) + 4 padding + @b:Int64@8(8) = 16
+    s_type.size.should eq(16)
     s_type.alignment.should eq(8)
 
     fields = s_type.fields.not_nil!
     fields.find(&.name.==("@a")).not_nil!.offset.should eq(0)
-    fields.find(&.name.==("@b")).not_nil!.offset.should eq(4)
+    fields.find(&.name.==("@b")).not_nil!.offset.should eq(8)
   end
 
   it "computes union header and payload offsets" do
