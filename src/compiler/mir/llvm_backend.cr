@@ -425,6 +425,9 @@ module Crystal::MIR
     # Phi predecessor union wraps: for ptr/void values that must be wrapped into union before phi
     # Maps (pred_block, value_id) -> (wrapped_name, union_type_ref, variant_type_id)
     @phi_predecessor_union_wraps : Hash({BlockId, ValueId}, {String, TypeRef, Int32}) = {} of {BlockId, ValueId} => {String, TypeRef, Int32}
+    # Phi predecessor union-to-ptr extracts: for union values that must be unwrapped to ptr before phi
+    # Maps (pred_block, value_id) -> (extract_name, union_llvm_type)
+    @phi_union_to_ptr_extracts : Hash({BlockId, ValueId}, {String, String}) = {} of {BlockId, ValueId} => {String, String}
     @current_func_blocks : Hash(BlockId, BasicBlock) = {} of BlockId => BasicBlock
     @current_block_id : BlockId? = nil
     @entry_user_block_id : BlockId = 0_u32  # First user block — dominates all others
@@ -2405,6 +2408,7 @@ module Crystal::MIR
       @cross_block_slot_types.clear
       @cross_block_slot_type_refs.clear
       @phi_predecessor_loads.clear
+      @phi_union_to_ptr_extracts.clear
       @current_func_blocks.clear
       @emitted_value_types.clear
 
@@ -3513,6 +3517,8 @@ module Crystal::MIR
       emit_phi_predecessor_conversions(block)
       # Emit union wraps for ptr/void values used in successor union phi nodes
       emit_phi_predecessor_union_wraps(block)
+      # Emit union-to-ptr extractions for union values used in successor ptr phi nodes
+      emit_phi_union_to_ptr_extracts(block)
 
       emit_terminator(block.terminator)
       @indent = 0
@@ -3601,6 +3607,27 @@ module Crystal::MIR
           emit "store #{val_llvm_type} #{val_ref}, ptr %#{base_name}.payload_ptr, align 4"
         end
         emit "%#{wrap_name} = load #{union_type}, ptr %#{base_name}.ptr"
+      end
+    end
+
+    # Emit union-to-ptr payload extractions for union values used in successor ptr phi nodes.
+    # When a ptr phi has a union-typed incoming value, we extract the ptr payload in the
+    # predecessor block. Uses alloca+store+GEP+load to safely extract the pointer from
+    # the union struct's payload field (index 1).
+    private def emit_phi_union_to_ptr_extracts(block : BasicBlock)
+      @phi_union_to_ptr_extracts.each do |(key, info)|
+        pred_block_id, val_id = key
+        # Only emit extractions for THIS block
+        next unless pred_block_id == block.id
+
+        extract_name, union_type = info
+        val_ref_str = value_ref(val_id)
+
+        # Extract ptr from union: alloca → store → GEP to payload → load ptr
+        emit "%#{extract_name}.alloca = alloca #{union_type}, align 8"
+        emit "store #{union_type} #{val_ref_str}, ptr %#{extract_name}.alloca"
+        emit "%#{extract_name}.pay_ptr = getelementptr #{union_type}, ptr %#{extract_name}.alloca, i32 0, i32 1"
+        emit "%#{extract_name} = load ptr, ptr %#{extract_name}.pay_ptr, align 4"
       end
     end
 
@@ -5574,8 +5601,10 @@ module Crystal::MIR
           val_type = @value_types[val]?
           val_type_str = val_type ? @type_mapper.llvm_type(val_type) : nil
           if val_type_str && val_type_str.includes?(".union")
-            # Union value can't be used in ptr phi - use null
-            "[null, %#{block_name.call(block)}]"
+            # Union value → extract ptr payload in predecessor block (deferred)
+            extract_name = "r#{val}.u2p.#{block}"
+            @phi_union_to_ptr_extracts[{block, val}] = {extract_name, val_type_str}
+            "[%#{extract_name}, %#{block_name.call(block)}]"
           elsif val_type_str && val_type_str.starts_with?("i") && !val_type_str.includes?(".union")
             # Int value can't be used in ptr phi - use null
             "[null, %#{block_name.call(block)}]"
@@ -5775,8 +5804,10 @@ module Crystal::MIR
             val_type = @value_types[val]?
             val_type_str = val_type ? @type_mapper.llvm_type(val_type) : nil
             if val_type_str && val_type_str.includes?(".union")
-              # Union value can't be directly used in ptr phi - use null
-              "[null, %#{block_name.call(block)}]"
+              # Union value → extract ptr payload in predecessor block (deferred)
+              extract_name = "r#{val}.u2p.#{block}"
+              @phi_union_to_ptr_extracts[{block, val}] = {extract_name, val_type_str}
+              "[%#{extract_name}, %#{block_name.call(block)}]"
             elsif val_type_str && val_type_str.starts_with?("i") && !val_type_str.includes?(".union")
               # Int value in ptr phi - use null
               "[null, %#{block_name.call(block)}]"
@@ -5852,9 +5883,10 @@ module Crystal::MIR
                 # UnionUnwrap produced a ptr value; keep it.
                 "[#{value_ref(val)}, %#{block_name.call(block)}]"
               else
-                # Union value can't be used in ptr phi - use null
-                # This is lossy but allows compilation to proceed
-                "[null, %#{block_name.call(block)}]"
+                # Union value → extract ptr payload in predecessor block (deferred)
+                extract_name = "r#{val}.u2p.#{block}"
+                @phi_union_to_ptr_extracts[{block, val}] = {extract_name, val_type_str}
+                "[%#{extract_name}, %#{block_name.call(block)}]"
               end
             elsif val_type_str && val_type_str.starts_with?("i") && !val_type_str.includes?(".union")
               # Int value can't be used in ptr phi - use null
