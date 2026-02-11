@@ -141,15 +141,27 @@ module CrystalV2
           File.join(cache_dir, "crystal_v2_lsp", "ast", "v#{VERSION}", "#{hash}.ast")
         end
 
+        # Compiler binary mtime — if compiler is rebuilt, all AST caches are stale
+        # because the parser/AST format may have changed.
+        @@compiler_mtime : Time? = nil
+
+        def self.compiler_mtime : Time
+          @@compiler_mtime ||= begin
+            exe = Process.executable_path
+            exe ? File.info(exe).modification_time : Time.utc
+          end
+        end
+
         def self.load(file_path : String) : AstCache?
           cache_path = self.cache_path(file_path)
           return nil unless File.exists?(cache_path)
           return nil unless File.exists?(file_path)
 
-          # Check mtime
+          # Check mtime — invalidate if source file OR compiler binary is newer
           cache_mtime = File.info(cache_path).modification_time
           file_mtime = File.info(file_path).modification_time
           return nil if file_mtime > cache_mtime
+          return nil if compiler_mtime > cache_mtime
 
           File.open(cache_path, "rb") do |io|
             # Read header
