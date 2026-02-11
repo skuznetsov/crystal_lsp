@@ -605,6 +605,10 @@ module Crystal::MIR
         emit_union_metadata_globals
       end
 
+      # Always emit type name table (needed for self.class at runtime)
+      STDERR.puts "  [LLVM] emit_type_name_table..." if @progress
+      emit_type_name_table
+
       STDERR.puts "  [LLVM] finalizing output..." if @progress
       @output.to_s
     end
@@ -9561,6 +9565,92 @@ module Crystal::MIR
       end
 
       emit_raw "\n"
+    end
+
+    # ═══════════════════════════════════════════════════════════════════════
+    # TYPE NAME TABLE (runtime type_id → class name lookup)
+    # ═══════════════════════════════════════════════════════════════════════
+
+    private def emit_type_name_table
+      string_type_id = @string_type_id || 0
+
+      # Collect all type_id → name mappings
+      # Start with primitive types (IDs 0-18)
+      type_names = {} of UInt32 => String
+      primitive_names = {
+         0_u32 => "Void",    1_u32 => "Nil",      2_u32 => "Bool",
+         3_u32 => "Int8",    4_u32 => "Int16",     5_u32 => "Int32",
+         6_u32 => "Int64",   7_u32 => "Int128",    8_u32 => "UInt8",
+         9_u32 => "UInt16", 10_u32 => "UInt32",   11_u32 => "UInt64",
+        12_u32 => "UInt128",13_u32 => "Float32",  14_u32 => "Float64",
+        15_u32 => "Char",   16_u32 => "String",   17_u32 => "Symbol",
+        18_u32 => "Pointer",
+      }
+      primitive_names.each { |id, name| type_names[id] = name }
+
+      # Add types from the type registry
+      @type_info_entries.each do |entry|
+        # Look up name from string table using name_offset
+        name = read_string_from_table(entry.name_offset)
+        type_names[entry.type_id] = name unless name.empty?
+      end
+
+      return if type_names.empty?
+
+      max_id = type_names.keys.max
+      table_size = max_id + 1
+
+      emit_raw "\n; Type name table: type_id → Crystal String pointer (for self.class)\n"
+
+      # Emit Crystal String constants for each type name
+      type_names.each do |tid, name|
+        escaped = name.gsub("\\", "\\\\").gsub("\"", "\\22")
+        len = name.bytesize + 1 # +1 for null terminator
+        bytesize = name.bytesize
+        charsize = name.size
+        emit_raw "@.str.typename.#{tid} = private unnamed_addr constant { i32, i32, i32, [#{len} x i8] } { i32 #{string_type_id}, i32 #{bytesize}, i32 #{charsize}, [#{len} x i8] c\"#{escaped}\\00\" }, align 8\n"
+      end
+
+      # Emit the "Unknown" fallback string
+      emit_raw "@.str.unknown_type = private unnamed_addr constant { i32, i32, i32, [8 x i8] } { i32 #{string_type_id}, i32 7, i32 7, [8 x i8] c\"Unknown\\00\" }, align 8\n"
+
+      # Emit the table: array of ptrs indexed by type_id
+      emit_raw "@__crystal_type_name_table = private constant [#{table_size} x ptr] [\n"
+      table_size.times do |i|
+        comma = i < table_size - 1 ? "," : ""
+        if type_names.has_key?(i.to_u32)
+          emit_raw "  ptr @.str.typename.#{i}#{comma}\n"
+        else
+          emit_raw "  ptr null#{comma}\n"
+        end
+      end
+      emit_raw "]\n"
+
+      # Emit the lookup function
+      emit_raw "\ndefine ptr @__crystal_v2_type_name(i32 %tid) {\n"
+      emit_raw "entry:\n"
+      emit_raw "  %inbounds = icmp ult i32 %tid, #{table_size}\n"
+      emit_raw "  br i1 %inbounds, label %lookup, label %unknown\n"
+      emit_raw "lookup:\n"
+      emit_raw "  %slot = getelementptr [#{table_size} x ptr], ptr @__crystal_type_name_table, i32 0, i32 %tid\n"
+      emit_raw "  %str = load ptr, ptr %slot\n"
+      emit_raw "  %nonnull = icmp ne ptr %str, null\n"
+      emit_raw "  br i1 %nonnull, label %done, label %unknown\n"
+      emit_raw "done:\n"
+      emit_raw "  ret ptr %str\n"
+      emit_raw "unknown:\n"
+      emit_raw "  ret ptr @.str.unknown_type\n"
+      emit_raw "}\n"
+    end
+
+    private def read_string_from_table(offset : UInt32) : String
+      bytes = @string_table.to_slice
+      return "" if offset >= bytes.size
+      end_pos = offset
+      while end_pos < bytes.size && bytes[end_pos] != 0
+        end_pos += 1
+      end
+      String.new(bytes[offset...end_pos])
     end
 
     # ═══════════════════════════════════════════════════════════════════════

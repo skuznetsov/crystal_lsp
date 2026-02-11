@@ -29634,6 +29634,8 @@ module Crystal::HIR
           STDERR.puts "[SHOVEL] resolved to: #{method_name}"
         end
         # Convert .class type literal to String when used as << argument (e.g., io << self.class)
+        # For static (monomorphized) methods, use compile-time class name string.
+        # For dynamic dispatch (union types), will use __crystal_v2_type_name(type_id) in the future.
         if ctx.dot_class_literal?(right_id)
           dcl_class_name = get_type_name_from_ref(right_type)
           unless dcl_class_name.empty?
@@ -37917,13 +37919,11 @@ module Crystal::HIR
           end
         end
       end
-      # Replace type literal args with String literals of their class name.
+      # Convert .class type literal args to String (compile-time class name).
       # Type literals (from .class calls) are nil pointers at runtime.
       # When used as call args (e.g., `io << self.class`), they must become
       # actual String values. Receivers (e.g., `self.class.new`) are unaffected.
-      # Replace .class type literal args with String literals of their class name.
-      # Only .class results (not direct type refs like Int32) are converted.
-      # This makes `io << self.class` produce a class name string at runtime.
+      # For dynamic dispatch (union types), __crystal_v2_type_name(type_id) will be used.
       args.each_with_index do |arg_id, i|
         next unless ctx.dot_class_literal?(arg_id)
         class_name_for_lit = get_type_name_from_ref(arg_types[i])
