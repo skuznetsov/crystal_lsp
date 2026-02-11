@@ -46580,8 +46580,20 @@ module Crystal::HIR
           # Check if this is a known field (ivar)
           ivar_name = "@#{field_name}"
           if ivar_info = class_info.ivars.find { |iv| iv.name == ivar_name }
-            # Direct field set
-            field_set = FieldSet.new(ctx.next_id, TypeRef::VOID, object_id, ivar_name, value_id, ivar_info.offset)
+            # Check if ivar is a union type - need to wrap the value
+            ivar_type = ivar_info.type
+            store_val = value_id
+            if is_union_type?(ivar_type)
+              value_type = ctx.type_of(value_id)
+              variant_id = get_union_variant_id(ivar_type, value_type)
+              if variant_id >= 0
+                union_wrap = UnionWrap.new(ctx.next_id, ivar_type, value_id, variant_id)
+                ctx.emit(union_wrap)
+                ctx.register_type(union_wrap.id, ivar_type)
+                store_val = union_wrap.id
+              end
+            end
+            field_set = FieldSet.new(ctx.next_id, TypeRef::VOID, object_id, ivar_name, store_val, ivar_info.offset)
             ctx.emit(field_set)
             return field_set.id
           elsif class_info.is_struct && @lib_structs.includes?(class_name)
@@ -47025,7 +47037,20 @@ module Crystal::HIR
           class_info = @class_info[class_name]
           ivar_name = "@#{field_name}"
           if ivar_info = class_info.ivars.find { |iv| iv.name == ivar_name }
-            field_set = FieldSet.new(ctx.next_id, TypeRef::VOID, object_id, ivar_name, value_id, ivar_info.offset)
+            # Check if ivar is a union type - need to wrap the value
+            ivar_type = ivar_info.type
+            store_val = value_id
+            if is_union_type?(ivar_type)
+              value_type = ctx.type_of(value_id)
+              variant_id = get_union_variant_id(ivar_type, value_type)
+              if variant_id >= 0
+                union_wrap = UnionWrap.new(ctx.next_id, ivar_type, value_id, variant_id)
+                ctx.emit(union_wrap)
+                ctx.register_type(union_wrap.id, ivar_type)
+                store_val = union_wrap.id
+              end
+            end
+            field_set = FieldSet.new(ctx.next_id, TypeRef::VOID, object_id, ivar_name, store_val, ivar_info.offset)
             ctx.emit(field_set)
             return field_set.id
           elsif class_info.is_struct && @lib_structs.includes?(class_name)

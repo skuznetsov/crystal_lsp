@@ -2126,7 +2126,7 @@ module Crystal
           is_arg_union = is_union_type?(arg_type)
           if arg_type != param_type && is_param_union && !is_arg_union
             # Wrap concrete value in union type
-            variant_id = get_union_variant_id(arg_type)
+            variant_id = get_union_variant_id(arg_type, param_type)
             # Debug disabled for performance:
             # STDERR.puts "[MIR-COERCE] Wrapping arg #{mir_arg} type #{arg_type.id} into union type #{param_type.id} (variant #{variant_id})"
             wrapped = builder.union_wrap(mir_arg, variant_id, param_type)
@@ -2163,8 +2163,26 @@ module Crystal
     end
 
     # Get the variant ID for a concrete type when wrapping into a union
-    private def get_union_variant_id(concrete_type : TypeRef) : Int32
-      # Convention: Nil is variant 1, other concrete types are variant 0
+    private def get_union_variant_id(concrete_type : TypeRef, union_type : TypeRef? = nil) : Int32
+      # Look up from union descriptor if available (authoritative source)
+      if union_type
+        if descriptor = @mir_module.union_descriptors[union_type]?
+          descriptor.variants.each do |variant|
+            if variant.type_ref == concrete_type
+              return variant.type_id
+            end
+          end
+          # For pointer-like types (classes), try matching against POINTER variant
+          if concrete_type != TypeRef::NIL
+            descriptor.variants.each do |variant|
+              if variant.type_ref == TypeRef::POINTER
+                return variant.type_id
+              end
+            end
+          end
+        end
+      end
+      # Fallback: Nil is variant 1, other concrete types are variant 0
       if concrete_type == TypeRef::NIL
         1
       else

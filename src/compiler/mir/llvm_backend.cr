@@ -4621,17 +4621,17 @@ module Crystal::MIR
       # Handle union types in comparisons - check type_id for nil comparison
       if is_comparison && operand_type_str.includes?(".union")
         base_name = name.lstrip('%')
-        # Union comparison: compare type_id (0=nil, 1+=non-nil)
-        # For == 0 or != 0, compare type_id to 0 (non-nil check)
+        # Union comparison: compare type_id (0=non-nil concrete, 1=nil)
+        # For nilable checks, compare type_id to 1 (nil variant)
         emit "%#{base_name}.union_ptr = alloca #{operand_type_str}, align 8"
         emit "store #{operand_type_str} #{normalize_union_value(left, operand_type_str)}, ptr %#{base_name}.union_ptr"
         emit "%#{base_name}.type_id_ptr = getelementptr #{operand_type_str}, ptr %#{base_name}.union_ptr, i32 0, i32 0"
         emit "%#{base_name}.type_id = load i32, ptr %#{base_name}.type_id_ptr"
-        # type_id 0 = nil, type_id 1+ = non-nil (matches union variant table)
+        # type_id 0 = non-nil (concrete variant), type_id 1 = nil (matches UnionWrap convention)
         if inst.op.eq?
-          emit "#{name} = icmp eq i32 %#{base_name}.type_id, 0"  # Check if nil (== 0)
+          emit "#{name} = icmp eq i32 %#{base_name}.type_id, 1"  # Check if nil (type_id == 1)
         else
-          emit "#{name} = icmp ne i32 %#{base_name}.type_id, 0"  # Check if not nil (!= 0)
+          emit "#{name} = icmp ne i32 %#{base_name}.type_id, 1"  # Check if not nil (type_id != 1)
         end
         @value_types[inst.id] = TypeRef::BOOL  # Comparisons return i1
         return
