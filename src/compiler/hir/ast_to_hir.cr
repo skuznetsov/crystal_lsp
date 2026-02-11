@@ -45693,6 +45693,20 @@ module Crystal::HIR
           ctx.register_type(call.id, TypeRef::INT64)
           return call.id
         end
+      elsif receiver_type == TypeRef::CHAR
+        case member_name
+        when "to_s"
+          call = Call.new(ctx.next_id, TypeRef::STRING, nil, "__crystal_v2_char_to_string", [object_id])
+          ctx.emit(call)
+          ctx.register_type(call.id, TypeRef::STRING)
+          return call.id
+        when "ord"
+          # Char#ord returns Int32 (the codepoint)
+          cast = Cast.new(ctx.next_id, TypeRef::INT32, object_id, TypeRef::INT32, safe: false)
+          ctx.emit(cast)
+          ctx.register_type(cast.id, TypeRef::INT32)
+          return cast.id
+        end
       elsif receiver_type == TypeRef::BOOL
         case member_name
         when "to_s"
