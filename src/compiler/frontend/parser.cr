@@ -8076,17 +8076,70 @@ module CrystalV2
 
           # Parse optional block: do...end or {...}
           # Example: record Point, x : Int32 do ... end
+          # Crystal rule: { } binds to the closest method call, do...end to the outer call.
+          # So `puts arr.any? { block }` → `puts(arr.any? { block })`  (block on any?)
+          # But `puts arr.any? do block end` → `puts(arr.any?) do block end` (block on puts)
           consume_newlines  # Allow newlines before block
           block_expr : ExprId? = nil
           if current_token.kind == Token::Kind::Do || current_token.kind == Token::Kind::LBrace
-            # Allow blocks to contain their own call-without-parens expressions by
-            # temporarily releasing the guard.
-            @parsing_call_args -= 1
-            block_expr = parse_block
-            @parsing_call_args += 1
-            if block_expr.invalid?
+            is_brace_block = current_token.kind == Token::Kind::LBrace
+            # For { } blocks: if the last argument is a call, attach the block to it
+            # (Crystal: brace blocks bind tighter to nearest call)
+            if is_brace_block && args_b.size > 0
+              last_arg = args_b.last
+              last_arg_node = @arena[last_arg]
+              last_arg_kind = Frontend.node_kind(last_arg_node)
+              if last_arg_kind == Frontend::NodeKind::Call || last_arg_kind == Frontend::NodeKind::MemberAccess
+                @parsing_call_args -= 1
+                brace_block = parse_block
+                @parsing_call_args += 1
+                if brace_block.invalid?
+                  @parsing_call_args -= 1
+                  return PREFIX_ERROR
+                end
+                # Attach block to the last argument call
+                block_span = node_span(brace_block)
+                rewritten = case last_arg_node
+                            when CallNode
+                              @arena.add_typed(CallNode.new(
+                                last_arg_node.span.cover(block_span),
+                                last_arg_node.callee,
+                                last_arg_node.args,
+                                brace_block,
+                                last_arg_node.named_args
+                              ))
+                            when MemberAccessNode
+                              @arena.add_typed(CallNode.new(
+                                last_arg_node.span.cover(block_span),
+                                last_arg,
+                                Array(ExprId).new(0),
+                                brace_block
+                              ))
+                            else
+                              last_arg # shouldn't happen
+                            end
+                args_b.pop
+                args_b << rewritten
+                # Don't set block_expr — the outer call has no block
+              else
+                # Last arg isn't a call — attach to outer call
+                @parsing_call_args -= 1
+                block_expr = parse_block
+                @parsing_call_args += 1
+                if block_expr.invalid?
+                  @parsing_call_args -= 1
+                  return PREFIX_ERROR
+                end
+              end
+            else
+              # do...end blocks always attach to outer call
               @parsing_call_args -= 1
-              return PREFIX_ERROR
+              block_expr = parse_block
+              @parsing_call_args += 1
+              if block_expr.invalid?
+                @parsing_call_args -= 1
+                return PREFIX_ERROR
+              end
             end
           end
 

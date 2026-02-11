@@ -64,6 +64,16 @@ module CrystalV2
           end
         end
 
+        def pop : T
+          if arr = @heap
+            arr.pop
+          else
+            raise IndexError.new("SmallVec is empty") if @len == 0
+            @len -= 1
+            @inline.not_nil![@len]
+          end
+        end
+
         def each(&block : T ->)
           if arr = @heap
             arr.each { |e| yield e }
