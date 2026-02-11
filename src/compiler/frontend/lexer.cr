@@ -1643,13 +1643,17 @@ module CrystalV2
           start_offset, start_line, start_column = capture_position
           from = @offset
           while @offset < @rope.size && current_byte != NEWLINE
-            # Stop before {% or {{ sequences — these are macro control/expression
-            # boundaries that must remain as separate tokens for macro body parsing.
-            # Without this, `{% begin %}...#{...}{% end %}` would swallow {% end %}
-            # inside the comment and cause "Expected {% end %}" errors.
+            # Stop before {% or {{ sequences that follow } (end of interpolation)
+            # so macro body parser sees the closing {% end %}.
+            # Do NOT stop for {%/{{ that appear after space, letters etc.
+            # as those are genuinely inside comments (e.g., `# {%`).
             if current_byte == '{'.ord.to_u8 && @offset + 1 < @rope.size
               next_b = @rope.bytes[@offset + 1]
-              break if next_b == '%'.ord.to_u8 || next_b == '{'.ord.to_u8
+              if next_b == '%'.ord.to_u8 || next_b == '{'.ord.to_u8
+                # Only break if preceded by } (typical pattern: #{close}{% end %})
+                prev_b = @offset > from ? @rope.bytes[@offset - 1] : 0_u8
+                break if prev_b == '}'.ord.to_u8
+              end
             end
             advance
           end

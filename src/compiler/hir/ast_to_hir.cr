@@ -2602,6 +2602,138 @@ module Crystal::HIR
       attach_enum_instance_methods(full_enum_name)
     end
 
+    # Lazy-discover an enum definition from sibling Crystal stdlib files.
+    # When a type like Crystal::NumberKind is referenced but its enum members
+    # aren't registered (because the defining file wasn't in the require chain),
+    # search sibling .cr files for the enum definition, parse it, and register it.
+    @lazy_enum_searched = Set(String).new
+
+    private def lazy_discover_enum_from_source(qualified_name : String) : Bool
+      return false if @enum_info.try(&.has_key?(qualified_name))
+      return false if @lazy_enum_searched.includes?(qualified_name)
+      @lazy_enum_searched << qualified_name
+
+      # Extract bare enum name (last component after ::)
+      bare_name = qualified_name.includes?("::") ? qualified_name.split("::").last : qualified_name
+      # Extract module prefix for matching (e.g., "Crystal" from "Crystal::NumberKind")
+      module_prefix = qualified_name.includes?("::") ? qualified_name.rpartition("::")[0] : ""
+
+      # Search directories of already-loaded files for sibling .cr files
+      searched_dirs = Set(String).new
+      @paths_by_arena.each_value do |path|
+        dir = File.dirname(path)
+        next if searched_dirs.includes?(dir)
+        searched_dirs << dir
+
+        Dir.glob(File.join(dir, "*.cr")).each do |cr_file|
+          # Skip already-loaded files
+          next if @paths_by_arena.values.includes?(cr_file)
+
+          # Quick check: does the file likely contain the enum?
+          begin
+            source = File.read(cr_file)
+          rescue
+            next
+          end
+          next unless source.includes?("enum #{bare_name}")
+
+          # Parse the file
+          begin
+            lexer = CrystalV2::Compiler::Frontend::Lexer.new(source)
+            parser = CrystalV2::Compiler::Frontend::Parser.new(lexer)
+            program = parser.parse_program
+          rescue
+            next
+          end
+
+          # Walk AST to find and register the enum
+          if find_and_register_enum_from_ast(program.arena, program.roots, qualified_name, bare_name, module_prefix)
+            return true
+          end
+        end
+      end
+
+      false
+    end
+
+    # Walk a parsed AST to find a specific enum and register it.
+    private def find_and_register_enum_from_ast(
+      arena : CrystalV2::Compiler::Frontend::ArenaLike,
+      roots : Array(CrystalV2::Compiler::Frontend::ExprId),
+      qualified_name : String,
+      bare_name : String,
+      module_prefix : String,
+    ) : Bool
+      roots.each do |root_id|
+        node = arena[root_id]
+        case node
+        when CrystalV2::Compiler::Frontend::ModuleNode
+          mod_name = String.new(node.name)
+          if body = node.body
+            # Check if this module matches the prefix
+            if module_prefix == mod_name || module_prefix.starts_with?("#{mod_name}::")
+              remaining_prefix = module_prefix == mod_name ? "" : module_prefix[(mod_name.size + 2)..]
+              body.each do |child_id|
+                child = arena[child_id]
+                case child
+                when CrystalV2::Compiler::Frontend::EnumNode
+                  enum_name = String.new(child.name)
+                  if enum_name == bare_name
+                    full_name = mod_name.empty? ? enum_name : "#{mod_name}::#{enum_name}"
+                    saved_arena = @arena
+                    @arena = arena
+                    register_enum_with_name(child, full_name)
+                    @arena = saved_arena
+                    return true if @enum_info.try(&.has_key?(qualified_name))
+                  end
+                when CrystalV2::Compiler::Frontend::ModuleNode
+                  if find_and_register_enum_from_ast(arena, [child_id], qualified_name, bare_name, remaining_prefix)
+                    return true
+                  end
+                when CrystalV2::Compiler::Frontend::ClassNode
+                  if find_and_register_enum_from_ast(arena, [child_id], qualified_name, bare_name, remaining_prefix)
+                    return true
+                  end
+                end
+              end
+            end
+          end
+        when CrystalV2::Compiler::Frontend::ClassNode
+          cls_name = String.new(node.name)
+          if body = node.body
+            if module_prefix == cls_name || module_prefix.starts_with?("#{cls_name}::")
+              remaining_prefix = module_prefix == cls_name ? "" : module_prefix[(cls_name.size + 2)..]
+              body.each do |child_id|
+                child = arena[child_id]
+                if child.is_a?(CrystalV2::Compiler::Frontend::EnumNode)
+                  enum_name = String.new(child.name)
+                  if enum_name == bare_name
+                    full_name = "#{cls_name}::#{enum_name}"
+                    saved_arena = @arena
+                    @arena = arena
+                    register_enum_with_name(child, full_name)
+                    @arena = saved_arena
+                    return true if @enum_info.try(&.has_key?(qualified_name))
+                  end
+                end
+              end
+            end
+          end
+        when CrystalV2::Compiler::Frontend::EnumNode
+          # Top-level enum (no module wrapper)
+          enum_name = String.new(node.name)
+          if enum_name == bare_name && module_prefix.empty?
+            saved_arena = @arena
+            @arena = arena
+            register_enum_with_name(node, qualified_name)
+            @arena = saved_arena
+            return true if @enum_info.try(&.has_key?(qualified_name))
+          end
+        end
+      end
+      false
+    end
+
     def register_constant(node : CrystalV2::Compiler::Frontend::ConstantNode, owner_name : String? = nil)
       const_name = String.new(node.name)
       record_constant_definition(owner_name, const_name, node.value, @arena)
@@ -5684,6 +5816,13 @@ module Crystal::HIR
           end
           init_params << {param_name, param_type}
         else
+          # For non-ivar params without type annotation, try to infer from default value
+          if param_type == TypeRef::VOID
+            if default_value = param.default_value
+              inferred = infer_type_from_expr(default_value, owner_name)
+              param_type = inferred if inferred && inferred != TypeRef::VOID
+            end
+          end
           init_params << {param_name, param_type}
         end
       end
@@ -14125,6 +14264,25 @@ module Crystal::HIR
         ctx.register_local(param_name, hir_param.id)
         ctx.register_type(hir_param.id, param_type)
         param_ids << hir_param.id
+      end
+
+      # Propagate default literal values from the initialize DefNode to allocator params.
+      # Without this, the LLVM backend pads missing args with 0 instead of the actual default.
+      init_def_for_defaults = @function_defs["#{class_name}#initialize"]?
+      if init_def_for_defaults && (init_def_params = init_def_for_defaults.params)
+        init_arena_for_defaults = @function_def_arenas["#{class_name}#initialize"]? || @arena
+        with_arena(init_arena_for_defaults) do
+          param_idx = 0
+          init_def_params.each do |ast_param|
+            next if named_only_separator?(ast_param)
+            next if ast_param.is_block
+            break if param_idx >= func.params.size
+            if default_lit = extract_param_default_literal(ast_param)
+              func.params[param_idx].default_literal = default_lit
+            end
+            param_idx += 1
+          end
+        end
       end
 
       # Allocate object (struct=stack, class=heap determined by escape analysis)
@@ -28066,33 +28224,42 @@ module Crystal::HIR
 
     private def compute_type_size(type_node : CrystalV2::Compiler::Frontend::Node) : Int64
       case type_node
+      when CrystalV2::Compiler::Frontend::SelfNode
+        # sizeof(self) — resolve to current monomorphized class
+        if current = @current_class
+          return size_for_type_name(current)
+        end
+        8_i64
       when CrystalV2::Compiler::Frontend::IdentifierNode
         name = String.new(type_node.name)
         # Resolve type parameters if present
         name = @type_param_map[name]? || name
-        case name
-        when "Nil"                                then 0_i64
-        when "Void", "Int8", "UInt8", "Bool"      then 1_i64
-        when "Int16", "UInt16"                    then 2_i64
-        when "Int32", "UInt32", "Float32", "Char" then 4_i64
-        when "Int64", "UInt64", "Float64"         then 8_i64
-        when "Int128", "UInt128"                  then 16_i64
-        else                                           8_i64 # Pointer/reference size
+        # sizeof(self) can also appear as IdentifierNode("self")
+        if name == "self"
+          if current = @current_class
+            return size_for_type_name(current)
+          end
+          return 8_i64
         end
+        size_for_type_name(name)
       when CrystalV2::Compiler::Frontend::ConstantNode
         name = String.new(type_node.name)
         name = @type_param_map[name]? || name
-        case name
-        when "Nil"                                then 0_i64
-        when "Void", "Int8", "UInt8", "Bool"      then 1_i64
-        when "Int16", "UInt16"                    then 2_i64
-        when "Int32", "UInt32", "Float32", "Char" then 4_i64
-        when "Int64", "UInt64", "Float64"         then 8_i64
-        when "Int128", "UInt128"                  then 16_i64
-        else                                           8_i64
-        end
+        size_for_type_name(name)
       else
         8_i64 # Default pointer size
+      end
+    end
+
+    private def size_for_type_name(name : String) : Int64
+      case name
+      when "Nil"                                then 0_i64
+      when "Void", "Int8", "UInt8", "Bool"      then 1_i64
+      when "Int16", "UInt16"                    then 2_i64
+      when "Int32", "UInt32", "Float32", "Char" then 4_i64
+      when "Int64", "UInt64", "Float64"         then 8_i64
+      when "Int128", "UInt128"                  then 16_i64
+      else                                           8_i64 # Pointer/reference size
       end
     end
 
@@ -30253,7 +30420,43 @@ module Crystal::HIR
       else
         resolved = resolve_type_name_in_context(resolved)
         resolved = resolve_type_alias_chain(resolved)
+        # For primitive types, resolve is_a? against known abstract ancestors at compile time.
+        # This avoids runtime type_id loads from value types (which crashes for i32/f64/etc.).
+        value_type = ctx.type_of(value_id)
+        if value_name = primitive_class_name(value_type)
+          static_result = primitive_is_a_hierarchy?(value_name, resolved)
+          unless static_result.nil?
+            lit = Literal.new(ctx.next_id, TypeRef::BOOL, static_result)
+            ctx.emit(lit)
+            ctx.register_type(lit.id, TypeRef::BOOL)
+            return lit.id
+          end
+        end
         emit_is_a_check_for_type(ctx, value_id, type_ref_for_name(resolved))
+      end
+    end
+
+    # Statically resolve is_a? for primitive value types against known abstract ancestor types.
+    # Returns true/false if deterministic, nil if unknown.
+    private def primitive_is_a_hierarchy?(value_name : String, check_name : String) : Bool?
+      return true if value_name == check_name
+      signed_ints = {"Int8", "Int16", "Int32", "Int64", "Int128"}
+      unsigned_ints = {"UInt8", "UInt16", "UInt32", "UInt64", "UInt128"}
+      floats = {"Float32", "Float64"}
+      is_signed = signed_ints.includes?(value_name)
+      is_unsigned = unsigned_ints.includes?(value_name)
+      is_float = floats.includes?(value_name)
+      is_numeric = is_signed || is_unsigned || is_float
+      return nil unless is_numeric
+      case check_name
+      when "Int::Signed"   then is_signed
+      when "Int::Unsigned"  then is_unsigned
+      when "Int::Primitive", "Int" then is_signed || is_unsigned
+      when "Float::Primitive", "Float" then is_float
+      when "Number::Primitive", "Number" then true
+      when "Value", "Struct" then true
+      when "Reference", "Object" then false
+      else nil
       end
     end
 
@@ -32082,6 +32285,18 @@ module Crystal::HIR
                 end
               end
             end
+            # Lazy-discover enum from stdlib if type descriptor is known but not in @enum_info
+            if enum_name.nil?
+              subject_type_check = ctx.type_of(subject_id)
+              if td = @module.get_type_descriptor(subject_type_check)
+                td_name = td.name
+                if !td_name.empty? && !(@enum_info.try(&.has_key?(td_name)) || false)
+                  if lazy_discover_enum_from_source(td_name)
+                    enum_name = td_name
+                  end
+                end
+              end
+            end
             # As a fallback, search all enums for a matching member.
             # GUARD: Only do global enum search if subject type is unknown or is itself an enum.
             # Do NOT match when subject is a known non-enum type (Char, Int32, String, etc.)
@@ -32180,6 +32395,15 @@ module Crystal::HIR
               type_name = type_desc.name
               if @enum_info.try(&.has_key?(type_name))
                 enum_name = type_name
+              end
+            end
+
+            # Lazy-discover enum from stdlib if type descriptor is known but not in @enum_info
+            if enum_name.nil?
+              if (td2 = @module.get_type_descriptor(obj_type)) && !td2.name.empty?
+                if lazy_discover_enum_from_source(td2.name)
+                  enum_name = td2.name
+                end
               end
             end
 
@@ -36654,9 +36878,7 @@ module Crystal::HIR
           # Intrinsics.* macros lower to LibIntrinsics.* extern calls. In codegen
           # we bypass macro expansion and rewrite the target here to avoid missing symbols.
           if class_name_str == "Intrinsics"
-            if method_name == "memcpy" || method_name == "memmove" || method_name == "memset"
-              class_name_str = "LibIntrinsics"
-            end
+            class_name_str = "LibIntrinsics"
           end
           if method_name == "[]"
             enum_name = resolve_enum_name(class_name_str)
@@ -36722,6 +36944,23 @@ module Crystal::HIR
             ctx.emit(ext_call)
             ctx.register_type(ext_call.id, TypeRef::VOID)
             return ext_call.id
+          end
+          # Math.pw2ceil(v) → v.next_power_of_two (inline to avoid union return type loss)
+          if class_name_str == "Math" && method_name == "pw2ceil" && call_args.size == 1
+            arg_id = with_arena(call_arena) { lower_expr(ctx, call_args[0]) }
+            arg_type = ctx.type_of(arg_id)
+            arg_class = primitive_class_name(arg_type)
+            if arg_class
+              npt_name = resolve_method_with_inheritance(arg_class, "next_power_of_two")
+              if npt_name
+                npt_mangled = mangle_function_name(npt_name, [] of TypeRef)
+                lower_function_if_needed(npt_mangled)
+                npt_call = Call.new(ctx.next_id, arg_type, arg_id, npt_mangled, [] of ValueId)
+                ctx.emit(npt_call)
+                ctx.register_type(npt_call.id, arg_type)
+                return npt_call.id
+              end
+            end
           end
           # Class method call like Counter.new()
           if method_name == "new"
@@ -44741,6 +44980,15 @@ module Crystal::HIR
             end
           end
         end
+        # Lazy-discover enum from stdlib if type descriptor exists but enum not registered
+        if enum_name.nil? && !type_name.empty?
+          obj_type = ctx.type_of(object_id)
+          if td = @module.get_type_descriptor(obj_type)
+            if lazy_discover_enum_from_source(td.name)
+              enum_name = td.name
+            end
+          end
+        end
         if enum_name
           (@enum_value_types ||= {} of ValueId => String)[object_id] = enum_name
         end
@@ -47858,7 +48106,8 @@ module Crystal::HIR
     private def lower_is_a(ctx : LoweringContext, node : CrystalV2::Compiler::Frontend::IsANode) : ValueId
       value_id = lower_expr(ctx, node.expression)
       # target_type is Slice(UInt8) - type name as bytes
-      check_type = type_ref_for_name(String.new(node.target_type))
+      target_name = String.new(node.target_type)
+      check_type = type_ref_for_name(target_name)
 
       # Check if value is a union type - use UnionIs for runtime type check
       value_type = ctx.type_of(value_id)
@@ -47870,6 +48119,40 @@ module Crystal::HIR
           ctx.emit(union_is)
           return union_is.id
         end
+      end
+
+      # Try to resolve is_a? statically using known type hierarchies.
+      # This is critical for primitive types (Int32, etc.) where runtime type_id
+      # loads from value types would crash (no object header).
+      if value_name = primitive_class_name(value_type)
+        # Try with original target name first (e.g., "Int::Signed")
+        static_result = primitive_is_a_hierarchy?(value_name, target_name)
+        if static_result.nil?
+          # Try with resolved target (might be a union like "Int8 | Int16 | ...")
+          resolved_target = resolve_type_name_in_context(target_name)
+          resolved_target = resolve_type_alias_chain(resolved_target)
+          if resolved_target.includes?("|")
+            # Union type — check if value_name is one of the variants
+            variants = resolved_target.split("|").map(&.strip)
+            static_result = variants.includes?(value_name)
+          else
+            static_result = primitive_is_a_hierarchy?(value_name, resolved_target)
+          end
+        end
+        unless static_result.nil?
+          lit = Literal.new(ctx.next_id, TypeRef::BOOL, static_result)
+          ctx.emit(lit)
+          ctx.register_type(lit.id, TypeRef::BOOL)
+          return lit.id
+        end
+      end
+      # Also try statically_is_a_type? for non-primitive types
+      static = statically_is_a_type?(value_type, check_type)
+      unless static.nil?
+        lit = Literal.new(ctx.next_id, TypeRef::BOOL, static)
+        ctx.emit(lit)
+        ctx.register_type(lit.id, TypeRef::BOOL)
+        return lit.id
       end
 
       # Regular is_a check for non-union types
