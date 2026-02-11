@@ -1223,8 +1223,9 @@ module Crystal::MIR
   class ArrayLiteral < Value
     getter element_type : TypeRef
     getter elements : Array(ValueId)
+    property strategy : MemoryStrategy
 
-    def initialize(id : ValueId, @element_type : TypeRef, @elements : Array(ValueId))
+    def initialize(id : ValueId, @element_type : TypeRef, @elements : Array(ValueId), @strategy : MemoryStrategy = MemoryStrategy::GC)
       super(id, TypeRef::POINTER)  # Returns ptr to array struct
     end
 
@@ -1237,7 +1238,7 @@ module Crystal::MIR
     end
 
     def to_s(io : IO) : Nil
-      io << "%" << @id << " = array_literal ["
+      io << "%" << @id << " = array_literal " << @strategy << " ["
       @elements.join(io, ", ") { |e, o| o << "%" << e }
       io << "] : " << @element_type.id
     end

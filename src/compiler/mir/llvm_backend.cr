@@ -7498,8 +7498,13 @@ module Crystal::MIR
 
       capacity = size < 4 ? 4 : size  # minimum capacity like Crystal's Array
 
-      # Allocate Array object on stack (24 bytes, correct layout)
-      emit "%#{base_name}.ptr = alloca { i32, i32, i32, i32, ptr }, align 8"
+      # Allocate Array object (24 bytes) based on memory strategy.
+      # Stack = alloca (fast, auto-freed), anything else = heap (survives function).
+      if inst.strategy == MIR::MemoryStrategy::Stack
+        emit "%#{base_name}.ptr = alloca { i32, i32, i32, i32, ptr }, align 8"
+      else
+        emit "%#{base_name}.ptr = call ptr @__crystal_v2_malloc64(i64 24)"
+      end
 
       # Store type_id at offset 0
       emit "%#{base_name}.tid_ptr = getelementptr i8, ptr %#{base_name}.ptr, i32 0"

@@ -2566,11 +2566,31 @@ module Crystal
       elements = arr.elements.map { |e| get_value(e) }
       element_type = convert_type(arr.element_type)
 
+      # Determine memory strategy from HIR lifetime tag.
+      # Array is a reference type — default to GC (heap) for safety.
+      # The memory optimizer can demote to Stack when escape analysis proves it safe.
+      strategy = case arr.lifetime
+                 when HIR::LifetimeTag::StackLocal
+                   # Conservative: Array commonly escapes (stored in ivars, returned, etc.)
+                   # Only use Stack if escape analysis explicitly confirms non-escape.
+                   # For now, default to GC since HIR lacks array escape analysis.
+                   MIR::MemoryStrategy::GC
+                 when HIR::LifetimeTag::ArgEscape
+                   MIR::MemoryStrategy::Slab
+                 when HIR::LifetimeTag::HeapEscape
+                   MIR::MemoryStrategy::ARC
+                 when HIR::LifetimeTag::GlobalEscape
+                   MIR::MemoryStrategy::AtomicARC
+                 else
+                   MIR::MemoryStrategy::GC
+                 end
+
       # Create MIR ArrayLiteral instruction
       mir_arr = MIR::ArrayLiteral.new(
         builder.next_id,
         element_type,
-        elements
+        elements,
+        strategy
       )
       builder.emit(mir_arr)
     end
