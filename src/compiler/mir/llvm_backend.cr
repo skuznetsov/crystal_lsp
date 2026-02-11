@@ -7653,22 +7653,37 @@ module Crystal::MIR
                   else                   8 # default for complex types
                   end
 
-      # Compute total bytes: 8 (header: i32 type_id + i32 size) + capacity * elem_size
-      emit "%#{base_name}.elem_bytes = mul i32 #{capacity_val}, #{elem_size}"
-      emit "%#{base_name}.total = add i32 %#{base_name}.elem_bytes, 8"
+      # Allocate proper Crystal Array object (24 bytes):
+      #   offset 0:  type_id (i32), offset 4: @size (i32), offset 8: @capacity (i32),
+      #   offset 12: @offset_to_buffer (i32), offset 16: @buffer (ptr)
+      emit "%#{base_name}.arr = call ptr @__crystal_v2_malloc64(i64 24)"
 
-      # Dynamic stack allocation
-      emit "%#{base_name}.raw = alloca i8, i32 %#{base_name}.total, align 8"
+      # Set type_id = 0
+      emit "store i32 0, ptr %#{base_name}.arr"
 
-      # Zero-initialize type_id = 0
-      emit "store i32 0, ptr %#{base_name}.raw"
-
-      # Zero-initialize size = 0
-      emit "%#{base_name}.size_ptr = getelementptr i8, ptr %#{base_name}.raw, i32 4"
+      # Set @size = 0 at offset 4
+      emit "%#{base_name}.size_ptr = getelementptr i8, ptr %#{base_name}.arr, i32 4"
       emit "store i32 0, ptr %#{base_name}.size_ptr"
 
-      # Alias so %name resolves to the alloca pointer
-      emit "#{name} = bitcast ptr %#{base_name}.raw to ptr"
+      # Set @capacity at offset 8
+      emit "%#{base_name}.cap_ptr = getelementptr i8, ptr %#{base_name}.arr, i32 8"
+      emit "store i32 #{capacity_val}, ptr %#{base_name}.cap_ptr"
+
+      # Set @offset_to_buffer = 0 at offset 12
+      emit "%#{base_name}.otb_ptr = getelementptr i8, ptr %#{base_name}.arr, i32 12"
+      emit "store i32 0, ptr %#{base_name}.otb_ptr"
+
+      # Allocate buffer for elements
+      emit "%#{base_name}.elem_bytes = mul i32 #{capacity_val}, #{elem_size}"
+      emit "%#{base_name}.buf_size = sext i32 %#{base_name}.elem_bytes to i64"
+      emit "%#{base_name}.buf = call ptr @__crystal_v2_malloc64(i64 %#{base_name}.buf_size)"
+
+      # Set @buffer at offset 16
+      emit "%#{base_name}.buf_addr = getelementptr i8, ptr %#{base_name}.arr, i32 16"
+      emit "store ptr %#{base_name}.buf, ptr %#{base_name}.buf_addr"
+
+      # Alias so %name resolves to the Array pointer
+      emit "#{name} = bitcast ptr %#{base_name}.arr to ptr"
 
       # Register as array for IndexGet/IndexSet/ArraySize
       @array_info[inst.id] = {element_type, 0}
@@ -7828,8 +7843,11 @@ module Crystal::MIR
       # Guard against null index (MIR type mismatch) - default to 0
       index = "0" if index == "null"
 
-      # Get element from data array (field 2, after type_id and size)
-      emit "%#{base_name}.elem_ptr = getelementptr { i32, i32, [0 x #{element_type}] }, ptr #{array_ptr}, i32 0, i32 2, i32 #{index}"
+      # Load buffer pointer from Crystal Array layout (offset 16 = @buffer field)
+      emit "%#{base_name}.buf_addr = getelementptr i8, ptr #{array_ptr}, i32 16"
+      emit "%#{base_name}.buf = load ptr, ptr %#{base_name}.buf_addr"
+      # Get element from buffer
+      emit "%#{base_name}.elem_ptr = getelementptr #{element_type}, ptr %#{base_name}.buf, i32 #{index}"
       emit "#{name} = load #{element_type}, ptr %#{base_name}.elem_ptr"
 
       # Update @value_types with actual emitted LLVM type (may differ from MIR type)
@@ -7970,8 +7988,11 @@ module Crystal::MIR
         value = "null"
       end
 
-      # Get element pointer from data array (third field: { type_id, size, [N x T] })
-      emit "%#{base_name}.elem_ptr = getelementptr { i32, i32, [0 x #{element_type}] }, ptr #{array_ptr}, i32 0, i32 2, i32 #{index}"
+      # Load buffer pointer from Crystal Array layout (offset 16 = @buffer field)
+      emit "%#{base_name}.buf_addr = getelementptr i8, ptr #{array_ptr}, i32 16"
+      emit "%#{base_name}.buf = load ptr, ptr %#{base_name}.buf_addr"
+      # Set element in buffer
+      emit "%#{base_name}.elem_ptr = getelementptr #{element_type}, ptr %#{base_name}.buf, i32 #{index}"
       emit "store #{element_type} #{value}, ptr %#{base_name}.elem_ptr"
     end
 
