@@ -1710,6 +1710,30 @@ module Crystal::MIR
       emit_raw "  ret i1 %found\n"
       emit_raw "}\n\n"
 
+      # Array#sum for Int32 — loops over Crystal Array buffer and sums elements
+      # Crystal Array layout: { i32 type_id, i32 @size, i32 @capacity, i32 @offset_to_buffer, ptr @buffer }
+      emit_raw "define i32 @__crystal_v2_array_sum_int32(ptr %arr) {\n"
+      emit_raw "entry:\n"
+      emit_raw "  %size_ptr = getelementptr i8, ptr %arr, i32 4\n"
+      emit_raw "  %size = load i32, ptr %size_ptr\n"
+      emit_raw "  %buf_ptr = getelementptr i8, ptr %arr, i32 16\n"
+      emit_raw "  %buffer = load ptr, ptr %buf_ptr\n"
+      emit_raw "  %cmp0 = icmp sle i32 %size, 0\n"
+      emit_raw "  br i1 %cmp0, label %done, label %loop\n"
+      emit_raw "loop:\n"
+      emit_raw "  %i = phi i32 [0, %entry], [%i_next, %loop]\n"
+      emit_raw "  %sum = phi i32 [0, %entry], [%sum_next, %loop]\n"
+      emit_raw "  %elem_ptr = getelementptr i32, ptr %buffer, i32 %i\n"
+      emit_raw "  %elem = load i32, ptr %elem_ptr\n"
+      emit_raw "  %sum_next = add i32 %sum, %elem\n"
+      emit_raw "  %i_next = add i32 %i, 1\n"
+      emit_raw "  %cmp = icmp slt i32 %i_next, %size\n"
+      emit_raw "  br i1 %cmp, label %loop, label %done\n"
+      emit_raw "done:\n"
+      emit_raw "  %result = phi i32 [0, %entry], [%sum_next, %loop]\n"
+      emit_raw "  ret i32 %result\n"
+      emit_raw "}\n\n"
+
       # int_to_string: allocate buffer and sprintf
       # int_to_string: sprintf to temp buffer, then wrap in Crystal String struct
       emit_raw "define ptr @__crystal_v2_int_to_string(i32 %val) {\n"
@@ -5861,6 +5885,23 @@ module Crystal::MIR
                     end
 
       raw_callee_name = callee_func.try(&.name)
+
+      # Intercept Array#sum() with no args (only self) to avoid infinite recursion
+      # from overload name collision (sum() and sum(initial) get same mangled name)
+      if callee_name.includes?("$Hsum") && inst.args.size == 1
+        # Extract element type from Array$L<Type>$R
+        if callee_name =~ /Array\$L(Int32|UInt32)\$R\$Hsum$/
+          elem_type = $1
+          self_arg = value_ref(inst.args[0])
+          case elem_type
+          when "Int32", "UInt32"
+            emit "#{name} = call i32 @__crystal_v2_array_sum_int32(ptr #{self_arg})"
+            @value_types[inst.id] = TypeRef::INT32
+            return
+          end
+        end
+      end
+
       if raw_callee_name && pointer_constructor_name?(raw_callee_name) && inst.args.size == 1
         arg_id = inst.args[0]
         arg = value_ref(arg_id)

@@ -36800,13 +36800,19 @@ module Crystal::HIR
             end
           end
         end
+        # Fallback 2: for method calls (arr.sum, arr.size, etc.) lower eagerly and check type
+        eager_arg_id : ValueId? = nil
+        if (arg_type.nil? || arg_type == TypeRef::VOID) && call_arena
+          eager_arg_id = with_arena(call_arena) { lower_expr(ctx, call_args[0]) }
+          arg_type = ctx.type_of(eager_arg_id)
+        end
         if arg_type && arg_type != TypeRef::VOID
           type_suffix = type_name_for_mangling(arg_type)
           if type_suffix != "Void" && type_suffix != "Unknown"
             is_union = type_suffix.includes?("|") || type_suffix.starts_with?("Union(")
             if is_union
               # Union types: emit x.to_s(STDOUT) via vdispatch + newline
-              arg_id = with_arena(call_arena) { lower_expr(ctx, call_args[0]) }
+              arg_id = eager_arg_id || with_arena(call_arena) { lower_expr(ctx, call_args[0]) }
               stdout_get = ClassVarGet.new(ctx.next_id, TypeRef::POINTER, "Object", "STDOUT")
               ctx.emit(stdout_get)
               ctx.register_type(stdout_get.id, TypeRef::POINTER)
@@ -36828,8 +36834,8 @@ module Crystal::HIR
               end
               return to_s_call.id
             end
-            # Lower the argument
-            arg_id = with_arena(call_arena) { lower_expr(ctx, call_args[0]) }
+            # Lower the argument (reuse eagerly lowered result if available)
+            arg_id = eager_arg_id || with_arena(call_arena) { lower_expr(ctx, call_args[0]) }
 
             # For Float32/Float64, use direct printf-based extern calls to avoid
             # broken Float::Printer.shortest (yield/block issues)
@@ -39545,6 +39551,17 @@ module Crystal::HIR
           ctx.register_type(cast.id, target)
           return cast.id
         end
+      end
+
+      # Intercept Array#sum() (no args, no block) on numeric arrays → runtime helper
+      # Avoids infinite recursion from sum()/sum(initial) overload name collision
+      if receiver_id && block_id.nil? &&
+         (method_name == "sum" || mangled_method_name.ends_with?("#sum")) &&
+         mangled_method_name.starts_with?("Array(")
+        ext_call = ExternCall.new(ctx.next_id, TypeRef::INT32, "__crystal_v2_array_sum_int32", [receiver_id])
+        ctx.emit(ext_call)
+        ctx.register_type(ext_call.id, TypeRef::INT32)
+        return ext_call.id
       end
 
       call = Call.new(ctx.next_id, return_type, receiver_id, mangled_method_name, args, block_id, call_virtual)
@@ -43259,7 +43276,7 @@ module Crystal::HIR
             expanded_param_types = param_types
             tuple_source_type = if expanded_param_types && expanded_param_types.size == 1
                                   expanded_param_types.first
-                                elsif expanded_param_types.nil?
+                                elsif expanded_param_types.nil? || expanded_param_types.empty?
                                   ctx.type_of(yield_args.first)
                                 end
             if tuple_source_type
