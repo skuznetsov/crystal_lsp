@@ -35177,8 +35177,8 @@ module Crystal::HIR
       if type_like_call_expr?(node)
         base = resolve_path_like_name(node.callee) || stringify_type_expr(node.callee)
         if base
-          args = node.args.map { |arg| stringify_type_expr(arg) }
-          if args.all?(&.itself)
+          args = node.args.compact_map { |arg| stringify_type_expr(arg) }
+          if args.size == node.args.size
             type_name = "#{base}(#{args.join(", ")})"
             return lower_type_literal_from_name(ctx, type_name)
           end

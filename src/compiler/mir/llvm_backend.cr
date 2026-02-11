@@ -7668,8 +7668,19 @@ module Crystal::MIR
             if idx_const
               element_count = tuple_type.element_types.try(&.size) || 0
               if idx_const >= 0 && idx_const < element_count
-                tuple_struct = tuple_struct_llvm_type(tuple_type)
-                emit "%#{base_name}.elem_ptr = getelementptr #{tuple_struct}, ptr #{array_ptr}, i32 0, i32 #{idx_const}"
+                # Use byte-level GEP with MIR type sizes/alignment to match how tuple
+                # stores compute offsets (hir_to_mir.cr:722-731). Struct-level GEP uses
+                # LLVM type sizes which differ (e.g., String is ptr=8 in LLVM but size=12 in MIR).
+                elements = tuple_type.element_types.not_nil!
+                byte_offset = 0_u64
+                elements.each_with_index do |elem, i|
+                  elem_size = elem.size > 0 ? elem.size : 8_u64
+                  elem_align = elem.alignment > 0 ? elem.alignment : 8_u32
+                  byte_offset = (byte_offset + elem_align - 1) & ~(elem_align.to_u64 - 1)
+                  break if i == idx_const
+                  byte_offset += elem_size
+                end
+                emit "%#{base_name}.elem_ptr = getelementptr i8, ptr #{array_ptr}, i32 #{byte_offset}"
               else
                 # Index exceeds detected tuple element count — type tracking mismatch.
                 # Fall back to byte-level GEP using element size.

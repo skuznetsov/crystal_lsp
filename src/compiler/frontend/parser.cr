@@ -13999,41 +13999,43 @@ module CrystalV2
           Span.new(f.start_offset, l.end_offset, f.start_line, f.start_column, l.end_line, l.end_column)
         end
 
+        # Precedence follows Crystal/Ruby operator precedence (high number = binds tighter):
+        # Original Crystal parser chain: or → and → equality → cmp → logical_or → logical_and → shift → add → mul → pow
         BINARY_PRECEDENCE = {
           Token::Kind::Rescue    => 1,   # Inline rescue (lowest precedence)
-          Token::Kind::Question  => 2,   # Ternary operator (Phase 23, second lowest)
-          Token::Kind::NilCoalesce => 3, # Nil-coalescing (Phase 81)
+          Token::Kind::Question  => 2,   # Ternary operator
+          Token::Kind::NilCoalesce => 3, # Nil-coalescing
           Token::Kind::OrOr      => 3,   # Logical OR
           Token::Kind::AndAnd    => 4,   # Logical AND
-          Token::Kind::DotDot    => 5,   # Inclusive range (Phase 13)
-          Token::Kind::DotDotDot => 5,   # Exclusive range (Phase 13)
-          Token::Kind::Pipe      => 6,   # Bitwise OR (Phase 21)
-          Token::Kind::Caret     => 6,   # Bitwise XOR (Phase 21)
-          Token::Kind::Amp       => 6,   # Bitwise AND (Phase 21)
-          Token::Kind::EqEq      => 7,   # Equality
-          Token::Kind::EqEqEq    => 7,   # Case equality (Phase 50)
+          Token::Kind::DotDot    => 5,   # Inclusive range
+          Token::Kind::DotDotDot => 5,   # Exclusive range
+          Token::Kind::Less      => 6,   # Less than             (equality group in Crystal parser)
+          Token::Kind::Greater   => 6,   # Greater than
+          Token::Kind::LessEq    => 6,   # Less or equal
+          Token::Kind::GreaterEq => 6,   # Greater or equal
+          Token::Kind::Spaceship => 6,   # Three-way comparison
+          Token::Kind::EqEq      => 7,   # Equality              (cmp group in Crystal parser)
+          Token::Kind::EqEqEq    => 7,   # Case equality
           Token::Kind::NotEq     => 7,   # Inequality
-          Token::Kind::Less      => 7,   # Less than
-          Token::Kind::Greater   => 7,   # Greater than
-          Token::Kind::LessEq    => 7,   # Less or equal
-          Token::Kind::GreaterEq => 7,   # Greater or equal
-          Token::Kind::Spaceship => 7,   # Three-way comparison (Phase 48)
-          Token::Kind::Match     => 7,   # Regex match (Phase 80)
-          Token::Kind::NotMatch  => 7,   # Regex not match (Phase 80)
-          Token::Kind::In        => 7,   # Containment check (Phase 79)
-          Token::Kind::Plus      => 10,  # Addition
-          Token::Kind::Minus     => 10,  # Subtraction
-          Token::Kind::AmpPlus   => 10,  # Wrapping addition (Phase 89)
-          Token::Kind::AmpMinus  => 10,  # Wrapping subtraction (Phase 89)
-          Token::Kind::LShift    => 10,  # Left shift / array push (Phase 9)
-          Token::Kind::RShift    => 10,  # Right shift (Phase 22)
-          Token::Kind::Star      => 20,  # Multiplication
+          Token::Kind::Match     => 7,   # Regex match
+          Token::Kind::NotMatch  => 7,   # Regex not match
+          Token::Kind::In        => 7,   # Containment check
+          Token::Kind::Pipe      => 8,   # Bitwise OR            (logical_or group)
+          Token::Kind::Caret     => 8,   # Bitwise XOR
+          Token::Kind::Amp       => 9,   # Bitwise AND           (logical_and group)
+          Token::Kind::LShift    => 10,  # Left shift / array push (shift group)
+          Token::Kind::RShift    => 10,  # Right shift
+          Token::Kind::Plus      => 11,  # Addition              (add group)
+          Token::Kind::Minus     => 11,  # Subtraction
+          Token::Kind::AmpPlus   => 11,  # Wrapping addition
+          Token::Kind::AmpMinus  => 11,  # Wrapping subtraction
+          Token::Kind::Star      => 20,  # Multiplication        (mul group)
           Token::Kind::Slash     => 20,  # Division
-          Token::Kind::FloorDiv  => 20,  # Floor division (Phase 78)
-          Token::Kind::Percent   => 20,  # Modulo (Phase 18)
-          Token::Kind::AmpStar   => 20,  # Wrapping multiplication (Phase 89)
-          Token::Kind::StarStar  => 25,  # Exponentiation (Phase 19, highest precedence)
-          Token::Kind::AmpStarStar => 25, # Wrapping exponentiation (Phase 89)
+          Token::Kind::FloorDiv  => 20,  # Floor division
+          Token::Kind::Percent   => 20,  # Modulo
+          Token::Kind::AmpStar   => 20,  # Wrapping multiplication
+          Token::Kind::StarStar  => 25,  # Exponentiation        (pow group, highest)
+          Token::Kind::AmpStarStar => 25, # Wrapping exponentiation
         }
 
         # Phase 101: Parse block shorthand (&.method)
