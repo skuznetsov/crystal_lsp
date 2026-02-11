@@ -8518,6 +8518,21 @@ module Crystal::MIR
     private def value_ref(id : ValueId) : String
       # Check if it's a constant (inline the value)
       if const_val = @constant_values[id]?
+        # If this constant was made addressable via pointerof() and the alloca has been
+        # initialized, the value may have been modified through the pointer (e.g.,
+        # copy_from writes into the alloca). Load from the alloca to get current value.
+        if !@in_phi_mode && @addressable_alloca_initialized.includes?(id)
+          if alloca_name = @addressable_allocas[id]?
+            val_type = @value_types[id]?
+            llvm_type = val_type ? @type_mapper.llvm_type(val_type) : "i32"
+            if llvm_type != "void" && llvm_type != "ptr"
+              temp = "%r#{id}.addrload.#{@cond_counter}"
+              @cond_counter += 1
+              emit "#{temp} = load #{llvm_type}, ptr #{alloca_name}"
+              return temp
+            end
+          end
+        end
         if const_val == "0"
           if val_type = @value_types[id]?
             llvm_type = @type_mapper.llvm_type(val_type)
