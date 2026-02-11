@@ -35732,6 +35732,27 @@ module Crystal::HIR
           return lower_member_access(ctx, callee_node)
         end
 
+        # String#to_i / to_i64 intercept (EARLY): must be before method resolution
+        # to prevent stdlib to_i with 6 default args from being compiled.
+        if (method_name == "to_i" || method_name == "to_i32" || method_name == "to_i64") &&
+           call_args.empty? && block_expr.nil? && block_pass_expr.nil?
+          recv_id = lower_expr(ctx, obj_expr)
+          recv_type = ctx.type_of(recv_id)
+          if recv_type == TypeRef::STRING || recv_type == TypeRef::POINTER
+            if method_name == "to_i64"
+              ext_call = ExternCall.new(ctx.next_id, TypeRef::INT64, "__crystal_v2_string_to_i64", [recv_id])
+              ctx.emit(ext_call)
+              ctx.register_type(ext_call.id, TypeRef::INT64)
+              return ext_call.id
+            else
+              ext_call = ExternCall.new(ctx.next_id, TypeRef::INT32, "__crystal_v2_string_to_i", [recv_id])
+              ctx.emit(ext_call)
+              ctx.register_type(ext_call.id, TypeRef::INT32)
+              return ext_call.id
+            end
+          end
+        end
+
         # Intrinsic: `x.upto(y).each { ... }` / `x.downto(y).each { ... }`
         # Prefer lowering directly via the yield-based overload to avoid iterator types like
         # `UptoIterator(typeof(self), typeof(to))` which are not yet fully monomorphized in codegen.
@@ -37052,6 +37073,29 @@ module Crystal::HIR
             ctx.register_type(ext_call.id, TypeRef::STRING)
             return ext_call.id
           end
+        end
+      end
+
+      # String#to_i intercept: convert string to integer via runtime helper (strtol-based)
+      # Crystal's to_i has many default args (base, whitespace, etc.) — match any args count
+      if (method_name == "to_i" || method_name == "to_i32") && receiver_id
+        recv_type = ctx.type_of(receiver_id)
+        if recv_type == TypeRef::STRING || recv_type == TypeRef::POINTER
+          ext_call = ExternCall.new(ctx.next_id, TypeRef::INT32, "__crystal_v2_string_to_i", [receiver_id])
+          ctx.emit(ext_call)
+          ctx.register_type(ext_call.id, TypeRef::INT32)
+          return ext_call.id
+        end
+      end
+
+      # String#to_i64 intercept
+      if method_name == "to_i64" && receiver_id
+        recv_type = ctx.type_of(receiver_id)
+        if recv_type == TypeRef::STRING || recv_type == TypeRef::POINTER
+          ext_call = ExternCall.new(ctx.next_id, TypeRef::INT64, "__crystal_v2_string_to_i64", [receiver_id])
+          ctx.emit(ext_call)
+          ctx.register_type(ext_call.id, TypeRef::INT64)
+          return ext_call.id
         end
       end
 
@@ -45067,6 +45111,22 @@ module Crystal::HIR
           ctx.emit(call)
           ctx.register_type(call.id, TypeRef::POINTER)
           return call.id
+        end
+      end
+
+      # String#to_i / to_i64 intercept: convert string to integer via runtime helper
+      # Must be here (not in lower_call) because "str".to_i creates MemberAccessNode
+      if receiver_type == TypeRef::STRING
+        if member_name == "to_i" || member_name == "to_i32"
+          ext = ExternCall.new(ctx.next_id, TypeRef::INT32, "__crystal_v2_string_to_i", [object_id])
+          ctx.emit(ext)
+          ctx.register_type(ext.id, TypeRef::INT32)
+          return ext.id
+        elsif member_name == "to_i64"
+          ext = ExternCall.new(ctx.next_id, TypeRef::INT64, "__crystal_v2_string_to_i64", [object_id])
+          ctx.emit(ext)
+          ctx.register_type(ext.id, TypeRef::INT64)
+          return ext.id
         end
       end
 

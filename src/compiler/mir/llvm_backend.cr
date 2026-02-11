@@ -705,6 +705,7 @@ module Crystal::MIR
       already_declared << "strlen" << "strcpy" << "strcat" << "sprintf"
       already_declared << "strstr" << "write" << "strchr" << "strtod" << "snprintf"
       already_declared << "open" << "lseek" << "read" << "close"
+      already_declared << "strtol"
       already_declared << "setjmp" << "longjmp"
       # Crystal v2 runtime functions
       already_declared << "__crystal_v2_raise" << "__crystal_v2_int_to_string"
@@ -1532,6 +1533,7 @@ module Crystal::MIR
       emit_raw "declare ptr @strchr(ptr, i32)\n"
       emit_raw "declare double @strtod(ptr, ptr)\n"
       emit_raw "declare i32 @snprintf(ptr, i64, ptr, ...)\n"
+      emit_raw "declare i64 @strtol(ptr, ptr, i32)\n"
       emit_raw "declare double @llvm.copysign.f64(double, double)\n"
       emit_raw "declare double @llvm.fabs.f64(double)\n"
       emit_raw "declare void @llvm.memmove.p0.p0.i64(ptr, ptr, i64, i1)\n"
@@ -1713,6 +1715,22 @@ module Crystal::MIR
       emit_raw "  %result = call ptr @strstr(ptr %self_data, ptr %search_data)\n"
       emit_raw "  %found = icmp ne ptr %result, null\n"
       emit_raw "  ret i1 %found\n"
+      emit_raw "}\n\n"
+
+      # String#to_i — convert Crystal String to Int32 via strtol
+      # Data starts at offset 12 in Crystal String layout
+      emit_raw "define i32 @__crystal_v2_string_to_i(ptr %self) {\n"
+      emit_raw "  %data = getelementptr i8, ptr %self, i32 12\n"
+      emit_raw "  %val = call i64 @strtol(ptr %data, ptr null, i32 10)\n"
+      emit_raw "  %result = trunc i64 %val to i32\n"
+      emit_raw "  ret i32 %result\n"
+      emit_raw "}\n\n"
+
+      # String#to_i64 — convert Crystal String to Int64 via strtol
+      emit_raw "define i64 @__crystal_v2_string_to_i64(ptr %self) {\n"
+      emit_raw "  %data = getelementptr i8, ptr %self, i32 12\n"
+      emit_raw "  %val = call i64 @strtol(ptr %data, ptr null, i32 10)\n"
+      emit_raw "  ret i64 %val\n"
       emit_raw "}\n\n"
 
       # String#[](Int32, Int32) — extract substring (start, count)
