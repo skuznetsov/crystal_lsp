@@ -12,38 +12,39 @@ describe "CrystalV2::Compiler::Frontend::Parser" do
   describe "Phase 97: Union definition (C bindings)" do
     it "parses empty union" do
       source = <<-CRYSTAL
-        union IntOrFloat
+        lib C
+          union IntOrFloat
+          end
         end
       CRYSTAL
 
       program = Frontend::Parser.new(Frontend::Lexer.new(source)).parse_program
       arena = program.arena
 
-      union_node = arena[program.roots.first]
+      lib_node = arena[program.roots.first]
+      Frontend.node_kind(lib_node).should eq(Frontend::NodeKind::Lib)
+
+      union_node = arena[Frontend.node_lib_body(lib_node).not_nil!.first]
       Frontend.node_kind(union_node).should eq(Frontend::NodeKind::Union)
       Frontend.node_class_is_union(union_node).should eq(true)
       Frontend.node_class_name(union_node).not_nil!.should eq("IntOrFloat".to_slice)
-
-      body = Frontend.node_class_body(union_node)
-      if body
-        body.should be_empty
-      else
-        body.should be_nil
-      end
     end
 
     it "parses union with fields" do
       source = <<-CRYSTAL
-        union Value
-          @int_val : Int32
-          @float_val : Float64
+        lib C
+          union Value
+            @int_val : Int32
+            @float_val : Float64
+          end
         end
       CRYSTAL
 
       program = Frontend::Parser.new(Frontend::Lexer.new(source)).parse_program
       arena = program.arena
 
-      union_node = arena[program.roots.first]
+      lib_node = arena[program.roots.first]
+      union_node = arena[Frontend.node_lib_body(lib_node).not_nil!.first]
       Frontend.node_kind(union_node).should eq(Frontend::NodeKind::Union)
       Frontend.node_class_is_union(union_node).should eq(true)
 
@@ -79,9 +80,9 @@ describe "CrystalV2::Compiler::Frontend::Parser" do
 
     it "parses union with methods" do
       source = <<-CRYSTAL
-        union Result
-          def get_value
-            42
+        lib C
+          union Result
+            @val : Int32
           end
         end
       CRYSTAL
@@ -89,42 +90,48 @@ describe "CrystalV2::Compiler::Frontend::Parser" do
       program = Frontend::Parser.new(Frontend::Lexer.new(source)).parse_program
       arena = program.arena
 
-      union_node = arena[program.roots.first]
+      lib_node = arena[program.roots.first]
+      union_node = arena[Frontend.node_lib_body(lib_node).not_nil!.first]
       Frontend.node_kind(union_node).should eq(Frontend::NodeKind::Union)
       Frontend.node_class_is_union(union_node).should eq(true)
 
       body = Frontend.node_class_body(union_node).not_nil!
       body.size.should eq(1)
-      Frontend.node_kind(arena[body.first]).should eq(Frontend::NodeKind::Def)
     end
 
     it "parses multiple unions" do
       source = <<-CRYSTAL
-        union Value1
-          @i : Int32
-        end
+        lib C
+          union Value1
+            @i : Int32
+          end
 
-        union Value2
-          @f : Float64
+          union Value2
+            @f : Float64
+          end
         end
       CRYSTAL
 
       program = Frontend::Parser.new(Frontend::Lexer.new(source)).parse_program
       arena = program.arena
 
-      program.roots.size.should eq(2)
-      program.roots.each do |root_id|
-        node = arena[root_id]
+      lib_node = arena[program.roots.first]
+      lib_body = Frontend.node_lib_body(lib_node).not_nil!
+      lib_body.size.should eq(2)
+      lib_body.each do |entry_id|
+        node = arena[entry_id]
         Frontend.node_kind(node).should eq(Frontend::NodeKind::Union)
         Frontend.node_class_is_union(node).should eq(true)
       end
     end
 
-    it "parses nested union in module" do
+    it "parses nested union in lib inside module" do
       source = <<-CRYSTAL
         module Container
-          union InnerUnion
-            @value : Int32
+          lib C
+            union InnerUnion
+              @value : Int32
+            end
           end
         end
       CRYSTAL
@@ -135,7 +142,10 @@ describe "CrystalV2::Compiler::Frontend::Parser" do
       module_node = arena[program.roots.first]
       Frontend.node_kind(module_node).should eq(Frontend::NodeKind::Module)
 
-      union_node = arena[Frontend.node_module_body(module_node).not_nil!.first]
+      lib_node = arena[Frontend.node_module_body(module_node).not_nil!.first]
+      Frontend.node_kind(lib_node).should eq(Frontend::NodeKind::Lib)
+
+      union_node = arena[Frontend.node_lib_body(lib_node).not_nil!.first]
       Frontend.node_kind(union_node).should eq(Frontend::NodeKind::Union)
       Frontend.node_class_is_union(union_node).should eq(true)
     end
@@ -156,11 +166,13 @@ describe "CrystalV2::Compiler::Frontend::Parser" do
       Frontend.node_class_is_abstract(union_node).should eq(true)
     end
 
-    it "distinguishes between class, struct and union" do
+    it "distinguishes between class, struct and union in lib" do
       source = <<-CRYSTAL
         class MyClass; end
         struct MyStruct; end
-        union MyUnion; end
+        lib C
+          union MyUnion; end
+        end
       CRYSTAL
 
       program = Frontend::Parser.new(Frontend::Lexer.new(source)).parse_program
@@ -176,7 +188,9 @@ describe "CrystalV2::Compiler::Frontend::Parser" do
       Frontend.node_class_is_struct(struct_node).should eq(true)
       Frontend.node_class_is_union(struct_node).should_not eq(true)
 
-      union_node = arena[program.roots[2]]
+      lib_node = arena[program.roots[2]]
+      Frontend.node_kind(lib_node).should eq(Frontend::NodeKind::Lib)
+      union_node = arena[Frontend.node_lib_body(lib_node).not_nil!.first]
       Frontend.node_kind(union_node).should eq(Frontend::NodeKind::Union)
       Frontend.node_class_is_union(union_node).should eq(true)
     end

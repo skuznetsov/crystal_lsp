@@ -18,7 +18,7 @@ describe CrystalV2::Compiler::LSP::Server do
 
     text_doc = CrystalV2::Compiler::LSP::TextDocumentItem.new(uri: server.spec_file_uri(path), language_id: "crystal", version: 1, text: source)
     # Simulate indexing in progress by clearing symbol table and identifier symbols.
-    doc_state = CrystalV2::Compiler::LSP::DocumentState.new(text_doc, program, nil, nil, nil, requires, nil, path)
+    doc_state = CrystalV2::Compiler::LSP::DocumentState.new(text_doc, program, nil, nil, nil, requires, nil, [] of Int32, path)
     server.spec_set_document(doc_state)
     uri = text_doc.uri
 

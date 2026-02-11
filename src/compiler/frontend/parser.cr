@@ -9062,15 +9062,7 @@ module CrystalV2
             if current_token.kind == Token::Kind::Of || (current_token.kind == Token::Kind::Identifier && slice_eq?(current_token.slice, "of"))
               advance
               skip_trivia
-
-              # Parse bare proc types as a single slice so `A, B -> C` stays intact.
-              type_start = current_token
-              type_slice = parse_bare_proc_type
-              return PREFIX_ERROR if type_slice.nil?
-
-              type_end = previous_token || type_start
-              type_span = type_start.span.cover(type_end.span)
-              of_type_expr = @arena.add_typed(IdentifierNode.new(type_span, type_slice.not_nil!))
+              of_type_expr = parse_of_type_expression
             end
 
             closing_span = previous_token.try(&.span) || lbracket.span
@@ -9167,14 +9159,7 @@ module CrystalV2
           if current_token.kind == Token::Kind::Of || (current_token.kind == Token::Kind::Identifier && slice_eq?(current_token.slice, "of"))
             advance
             skip_trivia
-
-            type_start = current_token
-            type_slice = parse_bare_proc_type
-            return PREFIX_ERROR if type_slice.nil?
-
-            type_end = previous_token || type_start
-            type_span = type_start.span.cover(type_end.span)
-            of_type_expr = @arena.add_typed(IdentifierNode.new(type_span, type_slice.not_nil!))
+            of_type_expr = parse_of_type_expression
           end
 
           array_span = lbracket.span.cover(closing_bracket.span)
@@ -9183,6 +9168,11 @@ module CrystalV2
             elements_b.to_a,
             of_type_expr
           ))
+        end
+
+        # Parse type expression after "of" keyword (e.g., `[] of Int32`, `[] of Int32 | String`)
+        private def parse_of_type_expression : ExprId
+          parse_expression(0)
         end
 
         private def percent_literal_token?(token : Token) : Bool
@@ -13161,14 +13151,14 @@ module CrystalV2
               advance
             end
 
-            skip_trivia
+            skip_macro_whitespace  # Must skip newlines inside {% %} even outside macro_context
 
             keyword_token = current_token
             keyword_index = @index
             keyword = token_text(keyword_token)
             advance
 
-            skip_trivia
+            skip_macro_whitespace  # Same: inside {% %} block
 
             case keyword
             when "if", "unless"
@@ -13339,6 +13329,7 @@ module CrystalV2
         end
 
         # Parse {% if condition %}...{% end %} or {% unless %}
+        # Also handles inline form: {% if cond; body; end %}
         private def parse_macro_if_control(start_span : Span, keyword : String) : ExprId
           branches = [] of NamedTuple(span: Span, condition: ExprId, body: ExprId)
 
@@ -13351,6 +13342,11 @@ module CrystalV2
           end
 
           skip_trivia
+
+          # Check for inline form: {% if cond; body; end %}
+          if current_token.kind == Token::Kind::Semicolon || current_token.kind == Token::Kind::Newline
+            return parse_macro_if_inline(start_span, condition)
+          end
 
           unless expect_macro_close("Expected '%}' after #{keyword} condition")
             return PREFIX_ERROR
@@ -13451,6 +13447,109 @@ module CrystalV2
             current_else = @arena.add_typed(MacroIfNode.new(full_span, branch[:condition], branch[:body], current_else))
           end
           current_else || PREFIX_ERROR
+        end
+
+        # Parse inline macro if: {% if cond; body; end %} / {% if cond; body; elsif cond2; body2; else; body3; end %}
+        private def parse_macro_if_inline(start_span : Span, condition : ExprId) : ExprId
+          branches = [] of NamedTuple(span: Span, condition: ExprId, body: ExprId)
+          else_body : ExprId? = nil
+
+          # Skip semicolons/newlines after condition
+          while current_token.kind == Token::Kind::Semicolon || current_token.kind == Token::Kind::Newline
+            advance
+          end
+
+          # Parse inline body: collect expressions until end/else/elsif
+          body_exprs = parse_macro_inline_body
+          body = wrap_macro_inline_body(start_span, body_exprs)
+          branches << {span: start_span, condition: condition, body: body}
+
+          # Now current token should be end, else, or elsif
+          loop do
+            kw = token_text(current_token)
+            case kw
+            when "end"
+              advance
+              # Skip optional trailing semicolons/newlines
+              while current_token.kind == Token::Kind::Semicolon || current_token.kind == Token::Kind::Newline
+                advance
+              end
+              # Handle optional trailing expressions after end (e.g., {% if 1; 2; end; 3 %})
+              unless macro_closing_sequence?(current_token)
+                # Skip remaining expressions until %}
+                while !macro_closing_sequence?(current_token) && current_token.kind != Token::Kind::EOF
+                  advance
+                end
+              end
+              unless expect_macro_close("Expected '%}' after end")
+                return PREFIX_ERROR
+              end
+              break
+            when "else"
+              advance
+              while current_token.kind == Token::Kind::Semicolon || current_token.kind == Token::Kind::Newline
+                advance
+              end
+              else_exprs = parse_macro_inline_body
+              else_body = wrap_macro_inline_body(start_span, else_exprs)
+              # Next should be 'end'
+            when "elsif"
+              advance
+              skip_trivia
+              elsif_condition = parse_expression(0)
+              return PREFIX_ERROR if elsif_condition.invalid?
+              while current_token.kind == Token::Kind::Semicolon || current_token.kind == Token::Kind::Newline
+                advance
+              end
+              elsif_body_exprs = parse_macro_inline_body
+              elsif_body = wrap_macro_inline_body(start_span, elsif_body_exprs)
+              branches << {span: start_span, condition: elsif_condition, body: elsif_body}
+            else
+              @diagnostics << Diagnostic.new("Expected 'end', 'else', or 'elsif' in inline macro if", current_token.span)
+              return PREFIX_ERROR
+            end
+          end
+
+          full_span = start_span
+          current_else = else_body
+          branches.reverse_each do |branch|
+            current_else = @arena.add_typed(MacroIfNode.new(full_span, branch[:condition], branch[:body], current_else))
+          end
+          current_else || PREFIX_ERROR
+        end
+
+        # Parse expressions separated by ; until end/else/elsif keyword
+        private def parse_macro_inline_body : Array(ExprId)
+          exprs = [] of ExprId
+          loop do
+            kw = token_text(current_token)
+            break if kw == "end" || kw == "else" || kw == "elsif"
+            break if current_token.kind == Token::Kind::EOF
+            break if macro_closing_sequence?(current_token)
+
+            expr = parse_expression(0)
+            break if expr.invalid?
+            exprs << expr
+
+            # Skip semicolons/newlines between expressions
+            while current_token.kind == Token::Kind::Semicolon || current_token.kind == Token::Kind::Newline
+              advance
+            end
+          end
+          exprs
+        end
+
+        # Wrap inline body expressions as a MacroLiteralNode (empty text if no exprs)
+        private def wrap_macro_inline_body(span : Span, exprs : Array(ExprId)) : ExprId
+          # Create a MacroLiteralNode with expression pieces
+          pieces = [] of MacroPiece
+          exprs.each do |expr|
+            pieces << MacroPiece.expression(expr, span: span)
+          end
+          if pieces.empty?
+            pieces << MacroPiece.text("", span: span)
+          end
+          @arena.add_typed(MacroLiteralNode.new(span, pieces, false, false))
         end
 
         # Parse {% for vars in iterable %}...{% end %}
@@ -14517,6 +14616,38 @@ module CrystalV2
 
         # Phase 103K: Type parsing methods for fun declarations and type annotations
         # These methods implement full type parsing including proc types, union types, generics, etc.
+
+        # Parse type expression after 'of' keyword.
+        # Tries parse_expression(0) first to get proper AST nodes for union types
+        # (Int32 | String) and generics (Array(Int32)). Falls back to raw text
+        # parsing for proc types (->), etc.
+        private def parse_of_type_expression : ExprId?
+          save_idx = @index
+          save_prev = @previous_token
+          save_diag_count = @diagnostics.size
+
+          # Try expression parsing first (handles union types, generics)
+          of_type_expr = parse_expression(0)
+          if !of_type_expr.invalid?
+            return of_type_expr
+          end
+
+          # Restore state and fall back to raw text parsing
+          @index = save_idx
+          @previous_token = save_prev
+          # Remove any diagnostics added during failed expression parse
+          while @diagnostics.size > save_diag_count
+            @diagnostics.pop
+          end
+
+          type_start = current_token
+          type_slice = parse_bare_proc_type
+          return nil if type_slice.nil?
+
+          type_end = previous_token || type_start
+          type_span = type_start.span.cover(type_end.span)
+          @arena.add_typed(IdentifierNode.new(type_span, type_slice.not_nil!))
+        end
 
         # Parse "bare" proc type (no wrapping parens required)
         # Examples: Int32, Int32 -> Void, Int32, String -> Bool

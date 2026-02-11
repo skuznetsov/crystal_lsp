@@ -553,9 +553,9 @@ describe Semantic::TypeInferenceEngine do
       call_id = program.roots[2]
       type = engine.context.get_type(call_id)
 
-      # Should return Nil when no return annotation
+      # Return type inferred from method body (last expression is `msg : String`)
       type.should be_a(PrimitiveType)
-      type.as(PrimitiveType).name.should eq("Nil")
+      type.as(PrimitiveType).name.should eq("String")
     end
 
     it "emits error when method not found on class" do

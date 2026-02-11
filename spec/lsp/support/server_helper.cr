@@ -30,6 +30,7 @@ module CrystalV2::Compiler::LSP
         symbol_table,
         requires,
         nil,  # index
+        [] of Int32,  # line_offsets
         path
       )
       @documents[text_doc.uri] = doc_state
