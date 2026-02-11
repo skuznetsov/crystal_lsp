@@ -1139,7 +1139,13 @@ module Crystal
         # if call.method_name.includes?("format_gutter")
         #   STDERR.puts "[MIR-COERCE] func=#{func.name} params=#{func.params.map(&.type.id).join(",")}"
         # end
-        coerced_args = coerce_call_args(builder, args, call.args, func)
+        # Build hir_args that matches mir_args ordering (receiver first, then explicit args)
+        hir_args_for_coerce = if recv = call.receiver
+                                 [recv] + call.args
+                               else
+                                 call.args
+                               end
+        coerced_args = coerce_call_args(builder, args, hir_args_for_coerce, func)
         return builder.call(callee_id, coerced_args, convert_type(call.type))
       end
 
@@ -1961,8 +1967,12 @@ module Crystal
           longer_match = nil.as(Function?)
           @mir_module.functions.each do |candidate|
             if candidate.name.starts_with?(prefix_with_underscore)
-              longer_match = candidate
-              break
+              # Prefer the longer match with the most params (most specific overload)
+              if lm_prev = longer_match
+                longer_match = candidate if candidate.params.size > lm_prev.params.size
+              else
+                longer_match = candidate
+              end
             end
           end
           if lm = longer_match
@@ -2093,7 +2103,8 @@ module Crystal
 
           # Check if coercion needed: different types and param is a union
           is_param_union = is_union_type?(param_type)
-          if arg_type != param_type && is_param_union && !is_union_type?(arg_type)
+          is_arg_union = is_union_type?(arg_type)
+          if arg_type != param_type && is_param_union && !is_arg_union
             # Wrap concrete value in union type
             variant_id = get_union_variant_id(arg_type)
             # Debug disabled for performance:

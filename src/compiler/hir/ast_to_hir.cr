@@ -16494,6 +16494,8 @@ module Crystal::HIR
         when "Float64" then TypeRef::FLOAT64
         when "Bool"    then TypeRef::BOOL
         when "Char"    then TypeRef::CHAR
+        when "Void"    then TypeRef::VOID
+        when "Nil"     then TypeRef::NIL
         when "Pointer" then TypeRef::POINTER
         else
           # User-defined type - look it up in class_info
@@ -31795,14 +31797,27 @@ module Crystal::HIR
               end
             end
             # As a fallback, search all enums for a matching member.
-            # This mirrors the CallNode path and avoids unqualified predicate calls.
+            # GUARD: Only do global enum search if subject type is unknown or is itself an enum.
+            # Do NOT match when subject is a known non-enum type (Char, Int32, String, etc.)
+            # to avoid false matches like `.ascii?` → `Unicode::CaseOptions::ASCII`.
             if enum_name.nil?
-              base_name = member_name[0...-1]
-              if enum_info = @enum_info
-                enum_info.each do |name, members|
-                  if members.keys.any? { |m| underscore_lower(m) == underscore_lower(base_name) }
-                    enum_name = name
-                    break
+              subject_type_known_non_enum = false
+              subject_type_check = ctx.type_of(subject_id)
+              # Built-in primitive types are never enums
+              if subject_type_check.id < TypeRef::FIRST_USER_TYPE
+                subject_type_known_non_enum = true
+              elsif td = @module.get_type_descriptor(subject_type_check)
+                # If type has a name and that name is NOT in @enum_info, it's not an enum
+                subject_type_known_non_enum = !(@enum_info.try(&.has_key?(td.name)) || false)
+              end
+              unless subject_type_known_non_enum
+                base_name = member_name[0...-1]
+                if enum_info = @enum_info
+                  enum_info.each do |name, members|
+                    if members.keys.any? { |m| underscore_lower(m) == underscore_lower(base_name) }
+                      enum_name = name
+                      break
+                    end
                   end
                 end
               end
@@ -31873,42 +31888,41 @@ module Crystal::HIR
             enum_name = nil.as(String?)
             base_name = member_name[0...-1] # Remove trailing ?
 
-            if enum_info = @enum_info
-              # Search all enums for one that has this member
-              if ENV["DEBUG_ENUM_UNION_PREDICATE"]? && (member_name == "kill?" || member_name == "hup?" || member_name == "quit?")
-                STDERR.puts "[CALL_ENUM_SEARCH] base_name=#{base_name} enum_count=#{enum_info.size}"
-                # Check what Signal enum has
-                if signal_members = enum_info["Signal"]?
-                  STDERR.puts "[CALL_ENUM_SEARCH] Signal members: #{signal_members.keys.first(10).join(",")}"
-                else
-                  STDERR.puts "[CALL_ENUM_SEARCH] Signal enum not found in enum_info!"
-                end
-              end
-              enum_info.each do |name, members|
-                if members.keys.any? { |m| underscore_lower(m) == underscore_lower(base_name) }
-                  if ENV["DEBUG_ENUM_UNION_PREDICATE"]? && (member_name == "kill?" || member_name == "hup?" || member_name == "quit?")
-                    STDERR.puts "[CALL_ENUM_SEARCH] found enum=#{name} for base_name=#{base_name}"
-                  end
-                  enum_name = name
-                  break
-                end
-              end
-            end
-
-            # If no match, try to disambiguate using type info
-            if enum_name.nil?
-              obj_type = ctx.type_of(actual_object_id)
-              if type_desc = @module.get_type_descriptor(obj_type)
-                type_name = type_desc.name
-                if @enum_info.try(&.has_key?(type_name))
-                  enum_name = type_name
-                end
+            # First try to identify enum type from type info (most reliable)
+            obj_type = ctx.type_of(actual_object_id)
+            if type_desc = @module.get_type_descriptor(obj_type)
+              type_name = type_desc.name
+              if @enum_info.try(&.has_key?(type_name))
+                enum_name = type_name
               end
             end
 
             # Fall back to enum_value_types tracking
             if enum_name.nil?
               enum_name = @enum_value_types.try(&.[actual_object_id]?)
+            end
+
+            # Last resort: global enum search, but ONLY if subject type is unknown or is an enum.
+            # Do NOT match when subject is a known non-enum type (Char, Int32, String, etc.)
+            # to avoid false matches like `.ascii?` → `Unicode::CaseOptions::ASCII`.
+            if enum_name.nil?
+              subject_type_known_non_enum = false
+              # Built-in primitive types are never enums
+              if obj_type.id < TypeRef::FIRST_USER_TYPE
+                subject_type_known_non_enum = true
+              elsif td = @module.get_type_descriptor(obj_type)
+                subject_type_known_non_enum = !(@enum_info.try(&.has_key?(td.name)) || false)
+              end
+              unless subject_type_known_non_enum
+                if enum_info = @enum_info
+                  enum_info.each do |name, members|
+                    if members.keys.any? { |m| underscore_lower(m) == underscore_lower(base_name) }
+                      enum_name = name
+                      break
+                    end
+                  end
+                end
+              end
             end
 
             if enum_name && (enum_info = @enum_info)
@@ -36748,9 +36762,44 @@ module Crystal::HIR
          call_args.size == 1 && block_expr.nil? && block_pass_expr.nil? &&
          full_method_name.nil?
         arg_type = with_arena(call_arena) { infer_type_from_expr(call_args[0], @current_class) }
+        # Fallback: if AST-level inference fails, try lowering context for local vars
+        if (arg_type.nil? || arg_type == TypeRef::VOID) && call_arena
+          arg_node = with_arena(call_arena) { @arena[call_args[0]] }
+          if arg_node.is_a?(CrystalV2::Compiler::Frontend::IdentifierNode)
+            var_name = String.new(arg_node.name)
+            if vid = ctx.lookup_local(var_name)
+              arg_type = ctx.type_of(vid)
+            end
+          end
+        end
         if arg_type && arg_type != TypeRef::VOID
           type_suffix = type_name_for_mangling(arg_type)
           if type_suffix != "Void" && type_suffix != "Unknown"
+            is_union = type_suffix.includes?("|") || type_suffix.starts_with?("Union(")
+            if is_union
+              # Union types: emit x.to_s(STDOUT) via vdispatch + newline
+              arg_id = with_arena(call_arena) { lower_expr(ctx, call_args[0]) }
+              stdout_get = ClassVarGet.new(ctx.next_id, TypeRef::POINTER, "Object", "STDOUT")
+              ctx.emit(stdout_get)
+              ctx.register_type(stdout_get.id, TypeRef::POINTER)
+              # Call x.to_s(STDOUT) via virtual dispatch on the union
+              to_s_call = Call.new(ctx.next_id, TypeRef::NIL, arg_id, "Object#to_s$IO", [stdout_get.id], nil, true)
+              ctx.emit(to_s_call)
+              ctx.register_type(to_s_call.id, TypeRef::NIL)
+              if method_name == "puts"
+                # Write newline through Crystal IO (not raw write) to preserve buffer ordering
+                newline_char = Literal.new(ctx.next_id, TypeRef::CHAR, 10_i64) # '\n'
+                ctx.emit(newline_char)
+                ctx.register_type(newline_char.id, TypeRef::CHAR)
+                stdout_get2 = ClassVarGet.new(ctx.next_id, TypeRef::POINTER, "Object", "STDOUT")
+                ctx.emit(stdout_get2)
+                ctx.register_type(stdout_get2.id, TypeRef::POINTER)
+                print_call = Call.new(ctx.next_id, TypeRef::NIL, stdout_get2.id, "IO#print$Char", [newline_char.id], nil, false)
+                ctx.emit(print_call)
+                ctx.register_type(print_call.id, TypeRef::NIL)
+              end
+              return to_s_call.id
+            end
             # Lower the argument
             arg_id = with_arena(call_arena) { lower_expr(ctx, call_args[0]) }
 
@@ -36885,6 +36934,21 @@ module Crystal::HIR
           ctx.emit(_call_instr)
           ctx.register_type(_call_instr.id, TypeRef::NIL)
           return _call_instr.id
+        end
+      end
+
+      # String#includes? intercept: when argument type is known, bypass the union-param
+      # function and directly call the correct implementation.
+      # String includes?(String) → strstr-based check via __crystal_v2_string_includes_string
+      # String includes?(Char) → no intercept needed (works via index$Char)
+      if method_name == "includes?" && receiver_id && args.size == 1 &&
+         prepack_arg_types.size == 1 && prepack_arg_types[0] == TypeRef::STRING
+        recv_type = ctx.type_of(receiver_id)
+        if recv_type == TypeRef::STRING || recv_type == TypeRef::POINTER
+          ext_call = ExternCall.new(ctx.next_id, TypeRef::BOOL, "__crystal_v2_string_includes_string", [receiver_id, args[0]])
+          ctx.emit(ext_call)
+          ctx.register_type(ext_call.id, TypeRef::BOOL)
+          return ext_call.id
         end
       end
 

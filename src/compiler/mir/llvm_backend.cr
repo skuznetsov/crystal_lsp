@@ -1681,12 +1681,25 @@ module Crystal::MIR
       emit_raw "  ret void\n"
       emit_raw "}\n\n"
 
+
       # String functions - implemented using C library
       emit_raw "declare i64 @strlen(ptr)\n"
       emit_raw "declare ptr @strcpy(ptr, ptr)\n"
       emit_raw "declare ptr @strcat(ptr, ptr)\n"
       emit_raw "declare i32 @sprintf(ptr, ptr, ...)\n"
+      emit_raw "declare ptr @strstr(ptr, ptr)\n"
       emit_raw "\n"
+
+      # String#includes?(String) — compares byte data via strstr
+      # Crystal String layout: { i32 type_id, i32 bytesize, i32 length, [N x i8] data }
+      # Data starts at offset 12
+      emit_raw "define i1 @__crystal_v2_string_includes_string(ptr %self, ptr %search) {\n"
+      emit_raw "  %self_data = getelementptr i8, ptr %self, i32 12\n"
+      emit_raw "  %search_data = getelementptr i8, ptr %search, i32 12\n"
+      emit_raw "  %result = call ptr @strstr(ptr %self_data, ptr %search_data)\n"
+      emit_raw "  %found = icmp ne ptr %result, null\n"
+      emit_raw "  ret i1 %found\n"
+      emit_raw "}\n\n"
 
       # int_to_string: allocate buffer and sprintf
       # int_to_string: sprintf to temp buffer, then wrap in Crystal String struct
@@ -6006,7 +6019,7 @@ module Crystal::MIR
         end
         pad_args_extra = extra unless extra.empty?
       end
-      use_callee_params = callee_func && callee_func.params.size == call_args.size
+      use_callee_params = callee_func && call_args.size <= callee_func.params.size
       # Debug void args
       has_void_arg = call_args.any? { |a| @type_mapper.llvm_type(@value_types[a]? || TypeRef::POINTER) == "void" }
       # STDERR.puts "[CALL-DEBUG] #{callee_name}, use_callee_params=#{use_callee_params}, has_void_arg=#{has_void_arg}" if has_void_arg
@@ -7200,6 +7213,19 @@ module Crystal::MIR
           STDERR.puts "[UNION_WRAP] non-union target=#{union_type} src=#{@type_mapper.llvm_type(src_type)}"
         end
         emit_cast(Cast.new(inst.id, inst.union_type, CastKind::Bitcast, inst.value), name)
+        return
+      end
+
+      # Guard: if value is already the same union type, just pass it through (avoid double-wrap).
+      # This handles cases where MIR has redundant UnionWrap(UnionWrap(x)).
+      val_type = @value_types[inst.value]? || TypeRef::POINTER
+      val_type_str = @type_mapper.llvm_type(val_type)
+      if val_type_str == union_type
+        # Store through alloca to create a named value (LLVM can't alias aggregates)
+        val = value_ref(inst.value)
+        emit "%#{base_name}.passthru = alloca #{union_type}, align 8"
+        emit "store #{union_type} #{val}, ptr %#{base_name}.passthru"
+        emit "#{name} = load #{union_type}, ptr %#{base_name}.passthru"
         return
       end
       emit "%#{base_name}.ptr = alloca #{union_type}, align 8"
