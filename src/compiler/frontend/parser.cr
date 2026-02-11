@@ -8251,6 +8251,19 @@ module CrystalV2
               left = parse_parenthesized_call(left)
               next
             when Token::Kind::LBracket
+              # Statement boundary guard: if '[' starts on a new line and
+              # we're not inside delimiters, treat it as an array literal (new
+              # statement), not as indexing the previous expression.
+              if !inside_delimiters?
+                if prev = previous_token
+                  if prev.kind == Token::Kind::Newline || prev.kind == Token::Kind::Semicolon ||
+                     token.span.start_line > prev.span.end_line
+                    break
+                  end
+                else
+                  break
+                end
+              end
               left = parse_index(left)
               # In some complex paths, the index lowering might not capture a
               # trailing '?'. Handle it here as a postfix conversion.
