@@ -2425,7 +2425,45 @@ module Crystal::MIR
       end
     end
 
+    # Intercept known-broken stdlib constructors whose bodies don't compile correctly.
+    # Returns true if the function was handled (emitted as a runtime helper), false otherwise.
+    private def emit_builtin_override(func : Function) : Bool
+      mangled = mangle_function_name(func.name)
+      case mangled
+      when "String$Dnew$$Pointer$LUInt8$R_Int32_Int32"
+        # String.new(chars : UInt8*, bytesize : Int32, size : Int32)
+        # Allocates a Crystal String, copies data from chars pointer.
+        emit_raw "; String.new(UInt8*, Int32, Int32) — runtime override\n"
+        emit_raw "define ptr @#{mangled}(ptr %chars, i32 %bytesize, i32 %size) {\n"
+        emit_raw "entry:\n"
+        emit_raw "  %is_empty = icmp eq i32 %bytesize, 0\n"
+        emit_raw "  br i1 %is_empty, label %ret_empty, label %do_alloc\n"
+        emit_raw "ret_empty:\n"
+        emit_raw "  ret ptr @.str.empty\n"
+        emit_raw "do_alloc:\n"
+        emit_raw "  %alloc_i32 = add i32 %bytesize, 13\n"
+        emit_raw "  %alloc = sext i32 %alloc_i32 to i64\n"
+        emit_raw "  %str = call ptr @__crystal_v2_malloc64(i64 %alloc)\n"
+        emit_raw "  store i32 #{@string_type_id}, ptr %str\n"
+        emit_raw "  %bs_ptr = getelementptr i8, ptr %str, i32 4\n"
+        emit_raw "  store i32 %bytesize, ptr %bs_ptr\n"
+        emit_raw "  %sz_ptr = getelementptr i8, ptr %str, i32 8\n"
+        emit_raw "  store i32 %size, ptr %sz_ptr\n"
+        emit_raw "  %data_ptr = getelementptr i8, ptr %str, i32 12\n"
+        emit_raw "  %len64 = sext i32 %bytesize to i64\n"
+        emit_raw "  call void @llvm.memcpy.p0.p0.i64(ptr %data_ptr, ptr %chars, i64 %len64, i1 false)\n"
+        emit_raw "  %null_pos = getelementptr i8, ptr %data_ptr, i32 %bytesize\n"
+        emit_raw "  store i8 0, ptr %null_pos\n"
+        emit_raw "  ret ptr %str\n"
+        emit_raw "}\n\n"
+        return true
+      end
+      false
+    end
+
     private def emit_function(func : Function)
+      return if emit_builtin_override(func)
+
       reset_value_names(func)
       @emitted_allocas.clear
       @addressable_allocas.clear

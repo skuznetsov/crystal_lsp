@@ -29408,10 +29408,77 @@ module Crystal::HIR
     # BINARY/UNARY OPERATIONS
     # ═══════════════════════════════════════════════════════════════════════
 
+    private def is_comparison_op?(op : String) : Bool
+      op == "<" || op == "<=" || op == ">" || op == ">=" || op == "==" || op == "!="
+    end
+
     private def lower_binary(ctx : LoweringContext, node : CrystalV2::Compiler::Frontend::BinaryNode) : ValueId
       op_str = node.operator_string
       if op_str == "&&" || op_str == "||"
         return lower_short_circuit(ctx, node, op_str)
+      end
+
+      # Chained comparison: a <= b <= c → (a <= b) && (b <= c)
+      # Detect when left operand is a BinaryNode with a comparison operator
+      # and current operator is also a comparison.
+      if is_comparison_op?(op_str)
+        left_node = @arena[node.left]
+        if left_node.is_a?(CrystalV2::Compiler::Frontend::BinaryNode) && is_comparison_op?(left_node.operator_string)
+          # Lower left comparison: a op1 b
+          left_comp_id = lower_binary(ctx, left_node)
+          left_type = ctx.type_of(left_comp_id)
+          cond_id = lower_truthy_check(ctx, left_comp_id, left_type)
+
+          pre_branch_locals = ctx.save_locals
+
+          then_block = ctx.create_block
+          else_block = ctx.create_block
+          merge_block = ctx.create_block
+
+          ctx.terminate(Branch.new(cond_id, then_block, else_block))
+
+          # Then block: evaluate right comparison (b op2 c)
+          ctx.current_block = then_block
+          ctx.restore_locals(pre_branch_locals)
+          # Re-lower the middle expression (b) for the right comparison
+          middle_id = lower_expr(ctx, left_node.right)
+          right_id = lower_expr(ctx, node.right)
+
+          # Emit the right comparison as inline binary op
+          right_op = case op_str
+                     when "<"  then BinaryOp::Lt
+                     when "<=" then BinaryOp::Le
+                     when ">"  then BinaryOp::Gt
+                     when ">=" then BinaryOp::Ge
+                     when "==" then BinaryOp::Eq
+                     when "!=" then BinaryOp::Ne
+                     else           BinaryOp::Eq
+                     end
+          right_comp = BinaryOperation.new(ctx.next_id, TypeRef::BOOL, right_op, middle_id, right_id)
+          ctx.emit(right_comp)
+          ctx.register_type(right_comp.id, TypeRef::BOOL)
+          then_result = right_comp.id
+          then_exit = ctx.current_block
+          ctx.terminate(Jump.new(merge_block))
+
+          # Else block: result is false
+          ctx.current_block = else_block
+          ctx.restore_locals(pre_branch_locals)
+          false_lit = Literal.new(ctx.next_id, TypeRef::BOOL, 0_i64)
+          ctx.emit(false_lit)
+          ctx.register_type(false_lit.id, TypeRef::BOOL)
+          else_result = false_lit.id
+          else_exit = ctx.current_block
+          ctx.terminate(Jump.new(merge_block))
+
+          # Merge block: phi
+          ctx.current_block = merge_block
+          phi = Phi.new(ctx.next_id, TypeRef::BOOL,
+            [{then_exit, then_result}, {else_exit, else_result}])
+          ctx.emit(phi)
+          ctx.register_type(phi.id, TypeRef::BOOL)
+          return phi.id
+        end
       end
 
       left_id = lower_expr(ctx, node.left)
