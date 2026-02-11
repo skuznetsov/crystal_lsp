@@ -37494,6 +37494,9 @@ module Crystal::HIR
                 # For arrays, use dynamic size via ArraySize.
                 return lower_array_each_dynamic(ctx, receiver_id, blk_node)
               end
+              if hash_intrinsic_receiver?(ctx, receiver_id)
+                return lower_hash_each_dynamic(ctx, receiver_id, blk_node)
+              end
             end
           end
         end
@@ -42041,6 +42044,247 @@ module Crystal::HIR
       end
 
       false
+    end
+
+    private def hash_intrinsic_receiver?(ctx : LoweringContext, receiver_id : ValueId) : Bool
+      receiver_type = ctx.type_of(receiver_id)
+      return false if receiver_type == TypeRef::VOID
+
+      if desc = @module.get_type_descriptor(receiver_type)
+        return desc.kind == TypeKind::Hash && desc.name.starts_with?("Hash(")
+      end
+
+      false
+    end
+
+    # Extract key/value types from a Hash type descriptor name
+    private def hash_kv_types(ctx : LoweringContext, hash_id : ValueId) : {TypeRef, TypeRef}
+      hash_type = ctx.type_of(hash_id)
+      key_type = TypeRef::VOID
+      value_type = TypeRef::VOID
+      if desc = @module.get_type_descriptor(hash_type)
+        name = desc.name
+        if name.starts_with?("Hash(") && name.ends_with?(")")
+          params_str = name[5, name.size - 6]
+          args = split_generic_type_args(params_str)
+          if args.size >= 2
+            key_type = type_ref_for_name(args[0].strip)
+            value_type = type_ref_for_name(args[1].strip)
+          end
+        end
+      end
+      {key_type, value_type}
+    end
+
+    # Hash#each intrinsic — iterates hash entries with proper PHI nodes for mutable vars.
+    # Uses direct field access to Hash internals to avoid block closure variable capture issues.
+    # Hash layout (from generated IR analysis):
+    #   offset 4:  @first (i32) - first entry index
+    #   offset 8:  @entries (ptr) - pointer to entries array
+    #   offset 24: @size (i32)
+    #   offset 28: @deleted_count (i32)
+    #   entries_size = @size + @deleted_count
+    # Entry layout:
+    #   offset 0:  key (ptr for reference types, inline for value types)
+    #   offset 8:  value (varies by type)
+    #   offset 12: hash_or_deleted flag (i32, 0 = deleted)
+    private def lower_hash_each_dynamic(
+      ctx : LoweringContext,
+      hash_id : ValueId,
+      block : CrystalV2::Compiler::Frontend::BlockNode,
+    ) : ValueId
+      key_type, value_type = hash_kv_types(ctx, hash_id)
+
+      # Get block param names
+      key_param = "__hash_key"
+      val_param = "__hash_val"
+      if params = block.params
+        if params.size >= 2
+          key_param = String.new(params[0].name.not_nil!) if params[0].name
+          val_param = String.new(params[1].name.not_nil!) if params[1].name
+        elsif params.size == 1
+          # Single param - receives Tuple(K, V) conceptually, but we'll bind as key
+          key_param = String.new(params[0].name.not_nil!) if params[0].name
+        end
+      end
+
+      # Collect mutable vars
+      assigned_vars = collect_assigned_vars(block.body)
+      assigned_vars = assigned_vars.reject { |v| v == key_param || v == val_param }
+      inline_vars = Set(String).new
+
+      entry_block = ctx.current_block
+      initial_values = {} of String => ValueId
+      assigned_vars.each do |var_name|
+        if val = lookup_local_for_phi(ctx, var_name, inline_vars)
+          initial_values[var_name] = val
+        end
+      end
+
+      # Load hash metadata in entry block (before the loop)
+      # entries_size = size + deleted_count (total entries including deleted)
+      hash_size = FieldGet.new(ctx.next_id, TypeRef::INT32, hash_id, "size", 24)
+      ctx.emit(hash_size)
+      ctx.register_type(hash_size.id, TypeRef::INT32)
+
+      deleted_count = FieldGet.new(ctx.next_id, TypeRef::INT32, hash_id, "deleted_count", 28)
+      ctx.emit(deleted_count)
+      ctx.register_type(deleted_count.id, TypeRef::INT32)
+
+      entries_total = BinaryOperation.new(ctx.next_id, TypeRef::INT32, BinaryOp::Add, hash_size.id, deleted_count.id)
+      ctx.emit(entries_total)
+
+      # Start index at 0 — we iterate all entries [0, entries_total) skipping deleted
+      zero = Literal.new(ctx.next_id, TypeRef::INT32, 0_i64)
+      ctx.emit(zero)
+
+      # Create blocks (no empty_block — cond handles empty hash naturally: 0 < 0 → false)
+      cond_block = ctx.create_block
+      body_block = ctx.create_block
+      skip_block = ctx.create_block
+      incr_block = ctx.create_block
+      exit_block = ctx.create_block
+
+      ctx.terminate(Jump.new(cond_block))
+
+      # Condition block with index phi
+      ctx.current_block = cond_block
+      index_phi = Phi.new(ctx.next_id, TypeRef::INT32)
+      index_phi.add_incoming(entry_block, zero.id)
+      ctx.emit(index_phi)
+
+      # Phi for mutable vars
+      phi_nodes = {} of String => Phi
+      assigned_vars.each do |var_name|
+        if initial_val = initial_values[var_name]?
+          var_type = ctx.type_of(initial_val)
+          phi = Phi.new(ctx.next_id, var_type)
+          phi.add_incoming(entry_block, initial_val)
+          ctx.emit(phi)
+          phi_nodes[var_name] = phi
+          ctx.register_local(var_name, phi.id)
+          if inline_vars.includes?(var_name)
+            @inline_caller_locals_stack[-1][var_name] = phi.id
+          end
+        end
+      end
+
+      # Compare: index < entries_total (handles empty hash: 0 < 0 → false → exit)
+      cmp = BinaryOperation.new(ctx.next_id, TypeRef::BOOL, BinaryOp::Lt, index_phi.id, entries_total.id)
+      ctx.emit(cmp)
+      ctx.terminate(Branch.new(cmp.id, body_block, exit_block))
+
+      # Body block - get entry via runtime helper, check deleted
+      ctx.current_block = body_block
+
+      # entry_ptr = __crystal_v2_hash_get_entry_ptr(hash, index)
+      entry_call = Call.new(ctx.next_id, TypeRef::POINTER, nil, "__crystal_v2_hash_get_entry_ptr", [hash_id, index_phi.id])
+      ctx.emit(entry_call)
+      ctx.register_type(entry_call.id, TypeRef::POINTER)
+      entry_ptr_id = entry_call.id
+
+      # is_deleted = __crystal_v2_hash_entry_deleted(entry_ptr)
+      deleted_call = Call.new(ctx.next_id, TypeRef::BOOL, nil, "__crystal_v2_hash_entry_deleted", [entry_ptr_id])
+      ctx.emit(deleted_call)
+      ctx.register_type(deleted_call.id, TypeRef::BOOL)
+      is_deleted = deleted_call
+
+      # deleted → skip to incr, not deleted → exec block body
+      exec_block = ctx.create_block
+      ctx.terminate(Branch.new(is_deleted.id, skip_block, exec_block))
+
+      # Exec block - extract key/value and run block body
+      ctx.current_block = exec_block
+      ctx.push_scope(ScopeKind::Block)
+
+      # key = entry field at offset 0
+      key_val = FieldGet.new(ctx.next_id, key_type, entry_ptr_id, "key", 0)
+      ctx.emit(key_val)
+      ctx.register_type(key_val.id, key_type)
+
+      # value = entry field at offset 8
+      val_val = FieldGet.new(ctx.next_id, value_type, entry_ptr_id, "value", 8)
+      ctx.emit(val_val)
+      ctx.register_type(val_val.id, value_type)
+
+      if params = block.params
+        if params.size >= 2
+          ctx.register_local(key_param, key_val.id)
+          ctx.register_local(val_param, val_val.id)
+        elsif params.size == 1
+          # Single param gets the key (or ideally a tuple, but key is more useful)
+          ctx.register_local(key_param, key_val.id)
+        end
+      end
+
+      pushed_inline = false
+      if !inline_vars.empty?
+        @inline_loop_vars_stack << inline_vars
+        pushed_inline = true
+      end
+      begin
+        lower_body(ctx, block.body)
+      ensure
+        @inline_loop_vars_stack.pop? if pushed_inline
+      end
+      # Capture post-body block (may differ from exec_block if body has control flow)
+      post_exec_block = ctx.current_block
+      ctx.pop_scope
+      ctx.terminate(Jump.new(incr_block))
+
+      # Skip block (deleted entries) - go directly to incr
+      ctx.current_block = skip_block
+      ctx.terminate(Jump.new(incr_block))
+
+      # Increment block - merge skip and exec paths
+      ctx.current_block = incr_block
+
+      # Merge PHIs for mutable vars (exec path may have updated them, skip path didn't)
+      incr_merged = {} of String => ValueId
+      assigned_vars.each do |var_name|
+        if phi = phi_nodes[var_name]?
+          updated_val = ctx.lookup_local(var_name)
+          if updated_val && updated_val != phi.id
+            # Variable was modified in block body — need merge PHI
+            var_type = ctx.type_of(phi.id)
+            merge_phi = Phi.new(ctx.next_id, var_type)
+            merge_phi.add_incoming(post_exec_block, updated_val)
+            merge_phi.add_incoming(skip_block, phi.id)
+            ctx.emit(merge_phi)
+            incr_merged[var_name] = merge_phi.id
+          else
+            incr_merged[var_name] = phi.id
+          end
+        end
+      end
+
+      one = Literal.new(ctx.next_id, TypeRef::INT32, 1_i64)
+      ctx.emit(one)
+      new_i = BinaryOperation.new(ctx.next_id, TypeRef::INT32, BinaryOp::Add, index_phi.id, one.id)
+      ctx.emit(new_i)
+
+      index_phi.add_incoming(incr_block, new_i.id)
+
+      # Patch cond_block mutable var phis with merged values
+      assigned_vars.each do |var_name|
+        if phi = phi_nodes[var_name]?
+          if val = incr_merged[var_name]?
+            phi.add_incoming(incr_block, val)
+          end
+        end
+      end
+
+      ctx.terminate(Jump.new(cond_block))
+
+      # Exit block
+      ctx.current_block = exit_block
+      phi_nodes.each do |var_name, phi|
+        ctx.register_local(var_name, phi.id)
+      end
+
+      nil_lit = Literal.new(ctx.next_id, TypeRef::NIL, nil)
+      ctx.emit(nil_lit)
+      nil_lit.id
     end
 
     # Array each_with_index intrinsic - iterates with element and index
