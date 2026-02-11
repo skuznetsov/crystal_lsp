@@ -298,8 +298,13 @@ module CrystalV2
           table : Semantic::SymbolTable,
           program : Frontend::Program,
           file_path : String,
-          parent_scope : String? = nil
+          parent_scope : String? = nil,
+          depth : Int32 = 0,
+          visited : Set(UInt64)? = nil
         ) : Array(CachedSymbolInfo)
+          return [] of CachedSymbolInfo if depth > 50
+          visited ||= Set(UInt64).new
+          return [] of CachedSymbolInfo unless visited.add?(table.object_id)
           result = [] of CachedSymbolInfo
 
           table.each_local_symbol do |name, symbol|
@@ -310,13 +315,13 @@ module CrystalV2
             case symbol
             when Semantic::ClassSymbol
               # Extract instance methods from scope
-              nested = extract_symbols(symbol.scope, program, symbol.file_path || file_path, name)
+              nested = extract_symbols(symbol.scope, program, symbol.file_path || file_path, name, depth + 1, visited)
               nested.each { |entry| result << entry }
               # Extract class methods from class_scope (def self.*)
-              class_nested = extract_symbols(symbol.class_scope, program, symbol.file_path || file_path, name)
+              class_nested = extract_symbols(symbol.class_scope, program, symbol.file_path || file_path, name, depth + 1, visited)
               class_nested.each { |entry| result << entry }
             when Semantic::ModuleSymbol
-              nested = extract_symbols(symbol.scope, program, symbol.file_path || file_path, name)
+              nested = extract_symbols(symbol.scope, program, symbol.file_path || file_path, name, depth + 1, visited)
               nested.each { |entry| result << entry }
             end
           end

@@ -747,7 +747,9 @@ module CrystalV2
           expr_id : Frontend::ExprId,
           target : Frontend::ExprId,
           current : Array(String),
+          depth : Int32 = 0,
         ) : Array(String)?
+          return nil if depth > 100
           node = arena[expr_id]
 
           case node
@@ -756,7 +758,7 @@ module CrystalV2
             path = current + [name]
             return path if expr_id == target
             (node.body || [] of Frontend::ExprId).each do |child|
-              if result = symbol_path_segments_within(arena, child, target, path)
+              if result = symbol_path_segments_within(arena, child, target, path, depth + 1)
                 return result
               end
             end
@@ -765,7 +767,7 @@ module CrystalV2
             path = current + [name]
             return path if expr_id == target
             (node.body || [] of Frontend::ExprId).each do |child|
-              if result = symbol_path_segments_within(arena, child, target, path)
+              if result = symbol_path_segments_within(arena, child, target, path, depth + 1)
                 return result
               end
             end
@@ -825,7 +827,9 @@ module CrystalV2
           current : Array(String),
           segments : Array(String),
           uri : String,
+          depth : Int32 = 0,
         ) : Location?
+          return nil if depth > 100
           node = arena[expr_id]
 
           case node
@@ -836,7 +840,7 @@ module CrystalV2
               return Location.new(uri: uri, range: Range.from_span(node.span))
             end
             (node.body || [] of Frontend::ExprId).each do |child|
-              if location = find_location_node(arena, child, path, segments, uri)
+              if location = find_location_node(arena, child, path, segments, uri, depth + 1)
                 return location
               end
             end
@@ -847,7 +851,7 @@ module CrystalV2
               return Location.new(uri: uri, range: Range.from_span(node.span))
             end
             (node.body || [] of Frontend::ExprId).each do |child|
-              if location = find_location_node(arena, child, path, segments, uri)
+              if location = find_location_node(arena, child, path, segments, uri, depth + 1)
                 return location
               end
             end
@@ -5751,7 +5755,9 @@ module CrystalV2
           arena : Frontend::ArenaLike,
           expr_id : Frontend::ExprId,
           target_expr_id : Frontend::ExprId,
+          depth : Int32 = 0,
         ) : Frontend::ExprId?
+          return nil if depth > 100
           node = arena[expr_id]
 
           if node.is_a?(Frontend::AssignNode) && node.target == target_expr_id
@@ -5760,7 +5766,7 @@ module CrystalV2
 
           each_child_expr(arena, expr_id) do |child_id|
             next if child_id.invalid?
-            if result = find_assignment_value_in_expr(arena, child_id, target_expr_id)
+            if result = find_assignment_value_in_expr(arena, child_id, target_expr_id, depth + 1)
               return result
             end
           end
@@ -7791,12 +7797,13 @@ module CrystalV2
           segments
         end
 
-        private def collect_path_segments_into(arena : Frontend::ArenaLike, node : Frontend::PathNode, segments : Array(String))
+        private def collect_path_segments_into(arena : Frontend::ArenaLike, node : Frontend::PathNode, segments : Array(String), depth : Int32 = 0)
+          return if depth > 50
           if left = node.left
             left_node = arena[left]
             case left_node
             when Frontend::PathNode
-              collect_path_segments_into(arena, left_node, segments)
+              collect_path_segments_into(arena, left_node, segments, depth + 1)
             when Frontend::IdentifierNode
               segments << String.new(left_node.name)
             when Frontend::ConstantNode
@@ -7811,7 +7818,7 @@ module CrystalV2
           when Frontend::ConstantNode
             segments << String.new(right_node.name)
           when Frontend::PathNode
-            collect_path_segments_into(arena, right_node, segments)
+            collect_path_segments_into(arena, right_node, segments, depth + 1)
           end
         end
 
@@ -7822,12 +7829,13 @@ module CrystalV2
           segments
         end
 
-        private def collect_path_segments_with_spans_into(arena : Frontend::ArenaLike, node : Frontend::PathNode, segments : Array({String, Frontend::Span}))
+        private def collect_path_segments_with_spans_into(arena : Frontend::ArenaLike, node : Frontend::PathNode, segments : Array({String, Frontend::Span}), depth : Int32 = 0)
+          return if depth > 50
           if left = node.left
             left_node = arena[left]
             case left_node
             when Frontend::PathNode
-              collect_path_segments_with_spans_into(arena, left_node, segments)
+              collect_path_segments_with_spans_into(arena, left_node, segments, depth + 1)
             when Frontend::IdentifierNode
               segments << {String.new(left_node.name), left_node.span}
             when Frontend::ConstantNode
@@ -7842,7 +7850,7 @@ module CrystalV2
           when Frontend::ConstantNode
             segments << {String.new(right_node.name), right_node.span}
           when Frontend::PathNode
-            collect_path_segments_with_spans_into(arena, right_node, segments)
+            collect_path_segments_with_spans_into(arena, right_node, segments, depth + 1)
           end
         end
 
@@ -8392,8 +8400,9 @@ module CrystalV2
         end
 
         # Recursively search for assignment to var_name and extract type from RHS
-        private def find_type_in_assignment(arena : Frontend::ArenaLike, expr_id : Frontend::ExprId, var_name : String) : String?
+        private def find_type_in_assignment(arena : Frontend::ArenaLike, expr_id : Frontend::ExprId, var_name : String, depth : Int32 = 0) : String?
           return nil if expr_id.invalid?
+          return nil if depth > 100
           node = arena[expr_id]
 
           case node
@@ -8404,25 +8413,25 @@ module CrystalV2
               return extract_type_from_constructor(arena, node.value)
             end
             # Recurse into value
-            return find_type_in_assignment(arena, node.value, var_name)
+            return find_type_in_assignment(arena, node.value, var_name, depth + 1)
           when Frontend::DefNode
             # Search in method body
             node.body.try &.each do |body_id|
-              if result = find_type_in_assignment(arena, body_id, var_name)
+              if result = find_type_in_assignment(arena, body_id, var_name, depth + 1)
                 return result
               end
             end
           when Frontend::ClassNode
             # Search in class body
             node.body.try &.each do |body_id|
-              if result = find_type_in_assignment(arena, body_id, var_name)
+              if result = find_type_in_assignment(arena, body_id, var_name, depth + 1)
                 return result
               end
             end
           when Frontend::ModuleNode
             # Search in module body
             node.body.try &.each do |body_id|
-              if result = find_type_in_assignment(arena, body_id, var_name)
+              if result = find_type_in_assignment(arena, body_id, var_name, depth + 1)
                 return result
               end
             end
@@ -8430,7 +8439,7 @@ module CrystalV2
             # Search in block body
             if body = node.body
               body.each do |body_id|
-                if result = find_type_in_assignment(arena, body_id, var_name)
+                if result = find_type_in_assignment(arena, body_id, var_name, depth + 1)
                   return result
                 end
               end
@@ -8438,12 +8447,12 @@ module CrystalV2
           when Frontend::IfNode
             # Search in branches
             node.then_body.each do |body_id|
-              if result = find_type_in_assignment(arena, body_id, var_name)
+              if result = find_type_in_assignment(arena, body_id, var_name, depth + 1)
                 return result
               end
             end
             node.else_body.try &.each do |body_id|
-              if result = find_type_in_assignment(arena, body_id, var_name)
+              if result = find_type_in_assignment(arena, body_id, var_name, depth + 1)
                 return result
               end
             end
