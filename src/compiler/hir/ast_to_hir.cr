@@ -1276,6 +1276,7 @@ module Crystal::HIR
       best_untyped : ParentLookupResult? = nil
       best_untyped_splat : ParentLookupResult? = nil
       best_arity_match : ParentLookupResult? = nil
+      best_required_match : ParentLookupResult? = nil
       first_found : ParentLookupResult? = nil
       candidates.each do |candidate_name|
         candidate_parts = parse_method_name(candidate_name)
@@ -1289,11 +1290,16 @@ module Crystal::HIR
             real_params = params.reject { |p| p.is_block || named_only_separator?(p) }
             has_splat = real_params.any?(&.is_splat)
             param_count = real_params.count { |p| !p.is_splat && !p.is_double_splat }
-            # Arity check: splat can absorb any number of args; otherwise match count
-            arity_ok = has_splat || param_count == expected_arity
+            required = real_params.count { |p| !p.is_splat && !p.is_double_splat && p.default_value.nil? }
+            # Arity check: splat absorbs any; exact count; or within required..param_count range (defaults)
+            arity_ok = has_splat || param_count == expected_arity || (expected_arity >= required && expected_arity <= param_count)
             next unless arity_ok || expected_arity == 0
             # Track best arity-matching candidate (typed or untyped)
             best_arity_match ||= result
+            # Prefer candidates where required param count matches expected arity exactly
+            if required == expected_arity && !has_splat
+              best_required_match ||= result
+            end
             all_untyped = real_params.all? do |p|
               p.is_splat || p.is_double_splat || p.type_annotation.nil? ||
                 (ann = p.type_annotation) && String.new(ann) == "_"
@@ -1316,7 +1322,7 @@ module Crystal::HIR
           end
         end
       end
-      chosen = best_untyped || best_untyped_splat || best_arity_match || first_found
+      chosen = best_untyped || best_untyped_splat || best_required_match || best_arity_match || first_found
       return chosen if chosen
 
       nil
@@ -2154,6 +2160,23 @@ module Crystal::HIR
 
     private def named_only_separator?(param : CrystalV2::Compiler::Frontend::Parameter) : Bool
       param.is_splat && param.name.nil? && param.external_name.nil?
+    end
+
+    # Extract the literal value from an AST parameter's default expression.
+    # Returns the raw value string (e.g., "10", "true") or nil if not a simple literal.
+    private def extract_param_default_literal(param : CrystalV2::Compiler::Frontend::Parameter) : String?
+      return nil unless default_expr_id = param.default_value
+      node = @arena[default_expr_id]
+      case node
+      when CrystalV2::Compiler::Frontend::NumberNode
+        String.new(node.value)
+      when CrystalV2::Compiler::Frontend::BoolNode
+        node.value ? "true" : "false"
+      when CrystalV2::Compiler::Frontend::NilNode
+        nil # nil defaults are handled differently (union types)
+      else
+        nil
+      end
     end
 
     # Register a function type and maintain the base name index
@@ -11535,6 +11558,7 @@ module Crystal::HIR
 
       # Collect parameter types for name mangling
       param_infos = [] of Tuple(String, TypeRef)
+      param_default_literals = [] of String?
       param_type_names = [] of String? # Track type annotation names for enum detection
       param_literal_flags = [] of Bool
       param_types = [] of TypeRef
@@ -11641,6 +11665,7 @@ module Crystal::HIR
           end
           param_type_map[param_name] = param_type
           param_infos << {param_name, param_type}
+          param_default_literals << extract_param_default_literal(param)
           enum_name = call_index < call_enum_names.size ? call_enum_names[call_index] : nil
           param_type_names << (type_ann_str || enum_name)
           if ta = param.type_annotation
@@ -11804,6 +11829,9 @@ module Crystal::HIR
       # Lower explicit parameters.
       param_infos.each_with_index do |(param_name, param_type), idx|
         hir_param = func.add_param(param_name, param_type)
+        if default_lit = param_default_literals[idx]?
+          hir_param.default_literal = default_lit
+        end
         ctx.register_local(param_name, hir_param.id)
         ctx.register_type(hir_param.id, param_type)
         if debug_env_filter_match?("DEBUG_PARAM_TYPES", full_name, param_name)
@@ -15067,6 +15095,7 @@ module Crystal::HIR
 
       # Collect parameter types first for name mangling
       param_infos = [] of Tuple(String, TypeRef, Bool) # (name, type, is_instance_var)
+      param_default_literals = [] of String?
       param_type_names = [] of String?                 # Track type annotation names for enum detection
       param_literal_flags = [] of Bool
       param_types = [] of TypeRef
@@ -15199,6 +15228,7 @@ module Crystal::HIR
           end
           param_type_map[param_name] = param_type
           param_infos << {param_name, param_type, is_ivar_param}
+          param_default_literals << extract_param_default_literal(param)
           enum_name = call_index < call_enum_names.size ? call_enum_names[call_index] : nil
           param_type_names << (type_ann_str || enum_name)
           if ta = param.type_annotation
@@ -15391,6 +15421,9 @@ module Crystal::HIR
         end
 
         hir_param = func.add_param(param_name, param_type)
+        if default_lit = param_default_literals[idx]?
+          hir_param.default_literal = default_lit
+        end
         ctx.register_local(param_name, hir_param.id)
         ctx.register_type(hir_param.id, param_type)
         if debug_env_filter_match?("DEBUG_PARAM_TYPES", full_name, param_name)
@@ -17843,12 +17876,13 @@ module Crystal::HIR
 
         score = 0
         score += 2 if param_count == arg_count
+        score += 3 if required == arg_count  # Prefer exact required match over using defaults
         score -= 1 if has_splat
         score -= 1 if has_double_splat
         score += 1 if name.includes?("$")
         score -= 2 if name.includes?("$arity")
 
-        if param_count < best_param_count || (param_count == best_param_count && score > best_score)
+        if score > best_score || (score == best_score && param_count < best_param_count)
           best_name = name
           best_param_count = param_count
           best_score = score
@@ -24509,6 +24543,7 @@ module Crystal::HIR
 
       # Lower parameters
       param_infos = [] of Tuple(String, TypeRef)
+      param_default_literals = [] of String?
       param_types = [] of TypeRef
       param_type_names = [] of String? # Track type annotation names for enum detection
       param_literal_flags = [] of Bool
@@ -24599,6 +24634,7 @@ module Crystal::HIR
 
             param_type_map[param_name] = param_type
             param_infos << {param_name, param_type}
+            param_default_literals << extract_param_default_literal(param)
             # Track type annotation name for enum detection
             enum_name = call_index < call_enum_names.size ? call_enum_names[call_index] : nil
             param_type_names << (param.type_annotation ? String.new(param.type_annotation.not_nil!) : enum_name)
@@ -24765,6 +24801,9 @@ module Crystal::HIR
 
       param_infos.each_with_index do |(param_name, param_type), idx|
         hir_param = func.add_param(param_name, param_type)
+        if default_lit = param_default_literals[idx]?
+          hir_param.default_literal = default_lit
+        end
         ctx.register_local(param_name, hir_param.id)
         ctx.register_type(hir_param.id, param_type) # Track param type for inference
         if (param_literal_flags[idx]? || param_name.ends_with?("_class")) && param_type != TypeRef::VOID
@@ -25954,6 +25993,8 @@ module Crystal::HIR
       if value_id = node.value
         # Has initial value: x : Type = value
         value = lower_expr(ctx, value_id)
+        # Coerce to declared type (e.g., wrap Int32 into Nil | Int32 for Int32?)
+        value = coerce_value_to_type(ctx, value, type_ref)
         # Register as local variable
         ctx.register_local(var_name, value)
         value_type = ctx.type_of(value)

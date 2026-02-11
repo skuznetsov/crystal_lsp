@@ -274,6 +274,8 @@ module Crystal::HIR
   class Parameter < Value
     getter index : Int32
     getter name : String
+    # Default literal value for optional params (e.g., "10" for base : Int = 10)
+    property default_literal : String? = nil
 
     def initialize(id : ValueId, type : TypeRef, @index : Int32, @name : String)
       super(id, type)

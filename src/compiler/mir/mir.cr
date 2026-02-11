@@ -1695,8 +1695,10 @@ module Crystal::MIR
     getter index : UInt32
     getter name : String
     getter type : TypeRef
+    # Default literal value for optional params (e.g., "10" for base : Int = 10)
+    getter default_value : String?
 
-    def initialize(@index : UInt32, @name : String, @type : TypeRef)
+    def initialize(@index : UInt32, @name : String, @type : TypeRef, @default_value : String? = nil)
     end
   end
 
@@ -1733,9 +1735,9 @@ module Crystal::MIR
       @entry_block = create_block
     end
 
-    def add_param(name : String, type : TypeRef) : UInt32
+    def add_param(name : String, type : TypeRef, default_value : String? = nil) : UInt32
       idx = @params.size.to_u32
-      @params << Parameter.new(idx, name, type)
+      @params << Parameter.new(idx, name, type, default_value)
       # Reserve value IDs so instruction IDs don't clash with param indices
       @next_value_id = @params.size.to_u32
       idx

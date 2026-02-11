@@ -324,7 +324,7 @@ module Crystal
 
       # Add parameter types (needed for call site type checking)
       hir_func.params.each do |param|
-        mir_func.add_param(param.name, convert_type(param.type))
+        mir_func.add_param(param.name, convert_type(param.type), param.default_literal)
       end
     end
 
@@ -1511,6 +1511,32 @@ module Crystal
       return nil unless method_suffix
 
       old_candidates = virtual_dispatch_candidates(recv_desc, recv_type, method_suffix, call.args.size)
+
+      # When receiver is a Generic-kind type wrapping a union (e.g., Union(*Nil | Int32)),
+      # the union descriptor might be at a different ref. Try to find it by name matching.
+      generic_union_ref = nil.as(TypeRef?)
+      if old_candidates.empty? && recv_desc.kind == HIR::TypeKind::Generic && recv_desc.name.starts_with?("Union(")
+        inner_name = recv_desc.name[6..-2] # Strip "Union(" and ")"
+        @mir_module.union_descriptors.each do |ref, desc|
+          if desc.name == inner_name
+            # Found matching union descriptor — build candidates from it
+            desc.variants.each do |variant|
+              next if variant.full_name == "Nil" || variant.full_name.starts_with?("*")
+              if func = resolve_virtual_method_for_class(variant.full_name, method_suffix, call.args.size)
+                old_candidates << {
+                  type_id: variant.type_id,
+                  type_ref: variant.type_ref,
+                  variant_id: variant.type_id,
+                  func: func,
+                  dispatch_class: nil.as(String?)
+                }
+              end
+            end
+            generic_union_ref = ref
+            break
+          end
+        end
+      end
       return nil if old_candidates.empty?
 
       dispatch_name = "__vdispatch__#{call.method_name}"
@@ -1537,8 +1563,10 @@ module Crystal
       dispatch_func = @mir_module.create_function(dispatch_name, ret_type)
       param_values = [] of ValueId
 
-      # Receiver param
-      recv_param_type = convert_type(recv_type)
+      # For Generic-wrapped unions, use the union descriptor's ref as the receiver param type.
+      # This ensures the LLVM type mapper produces a union struct type, making
+      # UnionTypeIdGet and UnionUnwrap work correctly.
+      recv_param_type = generic_union_ref || convert_type(recv_type)
       dispatch_func.add_param("recv", recv_param_type)
       param_values << 0_u32
 
@@ -1562,8 +1590,8 @@ module Crystal
         )
       end
 
-      # Determine dispatch kind
-      kind = recv_desc.kind == HIR::TypeKind::Union ? VDispatchKind::Union : VDispatchKind::Class
+      # Determine dispatch kind — Generic-wrapped unions get Union dispatch
+      kind = (recv_desc.kind == HIR::TypeKind::Union || generic_union_ref) ? VDispatchKind::Union : VDispatchKind::Class
 
       # Use unified generator
       generate_vdispatch_body(
@@ -1576,7 +1604,17 @@ module Crystal
         call
       )
 
-      @builder.not_nil!.call(dispatch_func.id, args, convert_type(call.type))
+      # For Generic-wrapped unions, the caller passes a ptr but the dispatch function
+      # expects a union struct value. Load the union value from the pointer.
+      call_args = args
+      if generic_union_ref
+        builder = @builder.not_nil!
+        union_val = builder.load(args[0], generic_union_ref)
+        call_args = args.dup
+        call_args[0] = union_val
+      end
+
+      @builder.not_nil!.call(dispatch_func.id, call_args, convert_type(call.type))
     end
 
     private def extract_method_suffix(full_name : String) : String?
@@ -1913,7 +1951,32 @@ module Crystal
       seen = Set(String).new
       while !current.empty? && !seen.includes?(current)
         seen.add(current)
-        if func = @mir_module.get_function("#{current}##{method_suffix}")
+        exact_name = "#{current}##{method_suffix}"
+        if func = @mir_module.get_function(exact_name)
+          # Check for naming collision: if a longer-named function exists with same prefix
+          # (e.g., to_s$IO_Int32_Int32_Bool vs to_s$IO), prefer the longer one.
+          # The longer name is the real overload with default args; the shorter one may
+          # be a different overload that was incorrectly given the same mangled name.
+          prefix_with_underscore = "#{exact_name}_"
+          longer_match = nil.as(Function?)
+          @mir_module.functions.each do |candidate|
+            if candidate.name.starts_with?(prefix_with_underscore)
+              longer_match = candidate
+              break
+            end
+          end
+          if lm = longer_match
+            # Copy default values from short-named function params to longer-named
+            # function params (the short name was lowered from HIR with defaults,
+            # the longer name may have been created separately without them).
+            func.params.each_with_index do |short_param, pi|
+              if (dv = short_param.default_value) && pi < lm.params.size && lm.params[pi].default_value.nil?
+                old_p = lm.params[pi]
+                lm.params[pi] = Parameter.new(old_p.index, old_p.name, old_p.type, dv)
+              end
+            end
+            return lm
+          end
           return func
         end
         if allow_module_method

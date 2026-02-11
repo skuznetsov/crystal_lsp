@@ -5958,7 +5958,7 @@ module Crystal::MIR
           call_args = inst.args[1..]
         end
       end
-      # Pad missing args with zero/null defaults to avoid UB from arg count mismatch.
+      # Pad missing args with default values or zero/null to avoid UB from arg count mismatch.
       # This handles cases where callers omit default parameters (e.g., .new with defaults).
       pad_args_extra = nil.as(Array(String)?)
       if callee_func && call_args.size < callee_func.params.size
@@ -5966,14 +5966,41 @@ module Crystal::MIR
         (call_args.size...callee_func.params.size).each do |i|
           param = callee_func.params[i]
           param_llvm = @type_mapper.llvm_type(param.type)
-          pad_val = case param_llvm
-                    when "i1"    then "i1 0"
-                    when "ptr"   then "ptr null"
-                    when "void"  then "ptr null"
-                    when .includes?(".union") then "#{param_llvm} zeroinitializer"
-                    when "float" then "float 0.0"
-                    when "double" then "double 0.0"
-                    else "#{param_llvm} 0"
+          pad_val = if default_val = param.default_value
+                      # Use the stored default literal value from the function definition.
+                      # Guard against type mismatches (e.g., Bool default with ptr LLVM type).
+                      case param_llvm
+                      when "i1"
+                        default_val == "true" ? "i1 1" : "i1 0"
+                      when "ptr"
+                        # Bool/Nil default with ptr type = type mismatch, use null
+                        "ptr null"
+                      when "float"
+                        "float #{default_val.to_f? ? default_val : "0.0"}"
+                      when "double"
+                        "double #{default_val.to_f? ? default_val : "0.0"}"
+                      when .includes?(".union")
+                        "#{param_llvm} zeroinitializer"
+                      else
+                        # For integer types, validate the default is numeric
+                        if default_val == "true"
+                          "#{param_llvm} 1"
+                        elsif default_val == "false"
+                          "#{param_llvm} 0"
+                        else
+                          "#{param_llvm} #{default_val}"
+                        end
+                      end
+                    else
+                      case param_llvm
+                      when "i1"    then "i1 0"
+                      when "ptr"   then "ptr null"
+                      when "void"  then "ptr null"
+                      when .includes?(".union") then "#{param_llvm} zeroinitializer"
+                      when "float" then "float 0.0"
+                      when "double" then "double 0.0"
+                      else "#{param_llvm} 0"
+                      end
                     end
           extra << pad_val
         end
@@ -6018,26 +6045,21 @@ module Crystal::MIR
                      "#{expected_llvm_type} #{val}"
                    end
                  elsif expected_llvm_type == "ptr" && actual_llvm_type.starts_with?("%") && actual_llvm_type.includes?(".union")
-                   # Coerce union to ptr: extract payload and interpret as ptr
-                   # Union layout: { type_id : i32, payload : [8 x i8] }
+                   # Coerce union to ptr: pass pointer to entire union on stack.
+                   # The callee will load the union struct and dispatch based on type_id.
+                   # Do NOT extract payload as ptr — for value-type unions (e.g., Nil | Int32),
+                   # the payload is not a pointer and would be garbage if loaded as one.
                    c = @cond_counter
                    @cond_counter += 1
                    temp_alloca = "%alloca.#{c}"
-                   temp_ptr = "%ptr.#{c}"
-                   temp_load = "%load.#{c}"
                    def_inst = find_def_inst(a)
                    inst_llvm_type = def_inst ? @type_mapper.llvm_type(def_inst.type) : nil
-                   if ENV.has_key?("DEBUG_UNION_ARG")
-                     STDERR.puts "[UNION_ARG] callee=#{callee_name} arg=#{a} expected=#{expected_llvm_type} actual=#{actual_llvm_type} val=#{value_ref(a)} def=#{def_inst.class.name if def_inst} def_type=#{def_inst.try(&.type)} def_llvm=#{inst_llvm_type}"
-                   end
                    if inst_llvm_type == "ptr" || @cross_block_slot_types[a]? == "ptr"
                      "ptr #{value_ref(a)}"
                    else
                      emit "#{temp_alloca} = alloca #{actual_llvm_type}, align 8"
                      emit "store #{actual_llvm_type} #{normalize_union_value(value_ref(a), actual_llvm_type)}, ptr #{temp_alloca}"
-                     emit "#{temp_ptr} = getelementptr #{actual_llvm_type}, ptr #{temp_alloca}, i32 0, i32 1"
-                     emit "#{temp_load} = load ptr, ptr #{temp_ptr}"
-                     "ptr #{temp_load}"
+                     "ptr #{temp_alloca}"
                    end
                  elsif expected_llvm_type == "ptr" && actual_llvm_type == "i1"
                    # Bool to ptr - likely string context, convert bool to string
