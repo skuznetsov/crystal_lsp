@@ -8576,16 +8576,21 @@ module Crystal::HIR
       when CrystalV2::Compiler::Frontend::ForNode
         expr_node.body.each { |child| collect_local_assignment_types(child, name, self_type_name, output, body, visited) }
       when CrystalV2::Compiler::Frontend::BinaryNode
-        left = node_for_expr(expr_node.left)
-        right = node_for_expr(expr_node.right)
-        if left.is_a?(CrystalV2::Compiler::Frontend::IdentifierNode) && String.new(left.name) == name
-          if inferred = infer_type_from_expr(expr_node.right, self_type_name)
-            output << inferred if inferred != TypeRef::VOID
+        # Infer variable type from the other operand of a binary expression.
+        # Skip << (push/append) — it doesn't relate the types of its operands.
+        op_str = String.new(expr_node.operator)
+        unless op_str == "<<"
+          left = node_for_expr(expr_node.left)
+          right = node_for_expr(expr_node.right)
+          if left.is_a?(CrystalV2::Compiler::Frontend::IdentifierNode) && String.new(left.name) == name
+            if inferred = infer_type_from_expr(expr_node.right, self_type_name)
+              output << inferred if inferred != TypeRef::VOID
+            end
           end
-        end
-        if right.is_a?(CrystalV2::Compiler::Frontend::IdentifierNode) && String.new(right.name) == name
-          if inferred = infer_type_from_expr(expr_node.left, self_type_name)
-            output << inferred if inferred != TypeRef::VOID
+          if right.is_a?(CrystalV2::Compiler::Frontend::IdentifierNode) && String.new(right.name) == name
+            if inferred = infer_type_from_expr(expr_node.left, self_type_name)
+              output << inferred if inferred != TypeRef::VOID
+            end
           end
         end
       when CrystalV2::Compiler::Frontend::ReturnNode
