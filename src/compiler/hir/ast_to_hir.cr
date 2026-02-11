@@ -37502,6 +37502,13 @@ module Crystal::HIR
         end
       end
 
+      # Hash#keys / Hash#values intrinsic (from lower_call path)
+      if (method_name == "keys" || method_name == "values") && receiver_id
+        if hash_intrinsic_receiver?(ctx, receiver_id)
+          return lower_hash_keys_or_values_intrinsic(ctx, receiver_id, method_name == "keys")
+        end
+      end
+
       # Handle Array#each_with_index { |elem, idx| ... } intrinsic
       if method_name == "each_with_index"
         if receiver_id
@@ -42287,6 +42294,132 @@ module Crystal::HIR
       nil_lit.id
     end
 
+    # Hash#keys / Hash#values intrinsic — builds Array by iterating entries
+    private def lower_hash_keys_or_values_intrinsic(
+      ctx : LoweringContext,
+      hash_id : ValueId,
+      is_keys : Bool,
+    ) : ValueId
+      key_type, value_type = hash_kv_types(ctx, hash_id)
+      elem_type = is_keys ? key_type : value_type
+
+      # Determine element type name for Array type registration
+      elem_type_name = get_type_name_from_ref(elem_type)
+      array_type_name = "Array(#{elem_type_name})"
+      array_type_ref = type_ref_for_name(array_type_name)
+
+      # Get hash size (= number of live entries)
+      hash_size = FieldGet.new(ctx.next_id, TypeRef::INT32, hash_id, "size", 24)
+      ctx.emit(hash_size)
+      ctx.register_type(hash_size.id, TypeRef::INT32)
+
+      # entries_total = size + deleted_count
+      deleted_count = FieldGet.new(ctx.next_id, TypeRef::INT32, hash_id, "deleted_count", 28)
+      ctx.emit(deleted_count)
+      ctx.register_type(deleted_count.id, TypeRef::INT32)
+
+      entries_total = BinaryOperation.new(ctx.next_id, TypeRef::INT32, BinaryOp::Add, hash_size.id, deleted_count.id)
+      ctx.emit(entries_total)
+
+      # Create result array: Array(K) or Array(V) with capacity = hash_size
+      result_arr = ArrayNew.new(ctx.next_id, elem_type, hash_size.id)
+      ctx.emit(result_arr)
+      arr_id = result_arr.id
+      # Register with proper Array(T) type so subsequent .size/.each dispatch correctly
+      ctx.register_type(arr_id, array_type_ref)
+
+      zero = Literal.new(ctx.next_id, TypeRef::INT32, 0_i64)
+      ctx.emit(zero)
+
+      entry_block = ctx.current_block
+
+      # Loop: iterate entries [0, entries_total), skip deleted, fill array
+      cond_block = ctx.create_block
+      body_block = ctx.create_block
+      skip_block = ctx.create_block
+      exec_block = ctx.create_block
+      incr_block = ctx.create_block
+      exit_block = ctx.create_block
+
+      ctx.terminate(Jump.new(cond_block))
+
+      # Cond block with index phi and array_idx phi
+      ctx.current_block = cond_block
+      index_phi = Phi.new(ctx.next_id, TypeRef::INT32)
+      index_phi.add_incoming(entry_block, zero.id)
+      ctx.emit(index_phi)
+
+      arr_idx_phi = Phi.new(ctx.next_id, TypeRef::INT32)
+      arr_idx_phi.add_incoming(entry_block, zero.id)
+      ctx.emit(arr_idx_phi)
+
+      cmp = BinaryOperation.new(ctx.next_id, TypeRef::BOOL, BinaryOp::Lt, index_phi.id, entries_total.id)
+      ctx.emit(cmp)
+      ctx.terminate(Branch.new(cmp.id, body_block, exit_block))
+
+      # Body block — check if entry is deleted
+      ctx.current_block = body_block
+      entry_call = Call.new(ctx.next_id, TypeRef::POINTER, nil, "__crystal_v2_hash_get_entry_ptr", [hash_id, index_phi.id])
+      ctx.emit(entry_call)
+      ctx.register_type(entry_call.id, TypeRef::POINTER)
+
+      deleted_call = Call.new(ctx.next_id, TypeRef::BOOL, nil, "__crystal_v2_hash_entry_deleted", [entry_call.id])
+      ctx.emit(deleted_call)
+      ctx.register_type(deleted_call.id, TypeRef::BOOL)
+
+      ctx.terminate(Branch.new(deleted_call.id, skip_block, exec_block))
+
+      # Exec block — extract key or value, store into array
+      ctx.current_block = exec_block
+      field_offset = is_keys ? 0 : 8
+      field_name = is_keys ? "key" : "value"
+      elem_val = FieldGet.new(ctx.next_id, elem_type, entry_call.id, field_name, field_offset)
+      ctx.emit(elem_val)
+      ctx.register_type(elem_val.id, elem_type)
+
+      # array[arr_idx] = elem
+      idx_set = IndexSet.new(ctx.next_id, elem_type, arr_id, arr_idx_phi.id, elem_val.id)
+      ctx.emit(idx_set)
+
+      # new_arr_idx = arr_idx + 1
+      one_exec = Literal.new(ctx.next_id, TypeRef::INT32, 1_i64)
+      ctx.emit(one_exec)
+      new_arr_idx = BinaryOperation.new(ctx.next_id, TypeRef::INT32, BinaryOp::Add, arr_idx_phi.id, one_exec.id)
+      ctx.emit(new_arr_idx)
+
+      ctx.terminate(Jump.new(incr_block))
+
+      # Skip block (deleted entry)
+      ctx.current_block = skip_block
+      ctx.terminate(Jump.new(incr_block))
+
+      # Incr block — increment index, merge arr_idx from exec/skip paths
+      ctx.current_block = incr_block
+
+      # Merge arr_idx: exec→new_arr_idx, skip→arr_idx_phi (unchanged)
+      arr_idx_merge = Phi.new(ctx.next_id, TypeRef::INT32)
+      arr_idx_merge.add_incoming(exec_block, new_arr_idx.id)
+      arr_idx_merge.add_incoming(skip_block, arr_idx_phi.id)
+      ctx.emit(arr_idx_merge)
+
+      one_incr = Literal.new(ctx.next_id, TypeRef::INT32, 1_i64)
+      ctx.emit(one_incr)
+      new_i = BinaryOperation.new(ctx.next_id, TypeRef::INT32, BinaryOp::Add, index_phi.id, one_incr.id)
+      ctx.emit(new_i)
+
+      index_phi.add_incoming(incr_block, new_i.id)
+      arr_idx_phi.add_incoming(incr_block, arr_idx_merge.id)
+
+      ctx.terminate(Jump.new(cond_block))
+
+      # Exit block — set array size and return
+      ctx.current_block = exit_block
+      set_size = ArraySetSize.new(ctx.next_id, TypeRef::VOID, arr_id, hash_size.id)
+      ctx.emit(set_size)
+
+      arr_id
+    end
+
     # Array each_with_index intrinsic - iterates with element and index
     private def lower_array_each_with_index_dynamic(
       ctx : LoweringContext,
@@ -44894,6 +45027,11 @@ module Crystal::HIR
 
       # Otherwise it's an instance method call - evaluate object first
       object_id = lower_expr(ctx, node.object)
+
+      # Hash#keys / Hash#values intrinsic (intercept before generic dispatch)
+      if (member_name == "keys" || member_name == "values") && hash_intrinsic_receiver?(ctx, object_id)
+        return lower_hash_keys_or_values_intrinsic(ctx, object_id, member_name == "keys")
+      end
 
       # If the receiver is an unresolved bare identifier (VOID local), but a
       # top-level function with that name exists, treat it as a zero-arg call.
