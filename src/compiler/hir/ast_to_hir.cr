@@ -28282,6 +28282,24 @@ module Crystal::HIR
           if expr_id = piece.expr
             next if expr_id.invalid?
             val_id = lower_expr(ctx, expr_id)
+            val_type = ctx.type_of(val_id)
+            # Enum values have a user-defined TypeRef that the LLVM string
+            # interpolation backend doesn't recognize → cast to the enum's
+            # base integer type so they get converted to a number string.
+            enum_name = @enum_value_types.try(&.[val_id]?)
+            if enum_name.nil? && val_type.id >= TypeRef::FIRST_USER_TYPE
+              type_name = get_type_name_from_ref(val_type)
+              enum_name = type_name if @enum_info.try(&.has_key?(type_name))
+            end
+            if enum_name
+              base = enum_base_type(enum_name)
+              if val_type != base
+                cast = Cast.new(ctx.next_id, base, val_id, base, safe: false)
+                ctx.emit(cast)
+                ctx.register_type(cast.id, base)
+                val_id = cast.id
+              end
+            end
             parts << val_id
           end
         end
