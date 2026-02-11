@@ -2506,15 +2506,19 @@ module Crystal::MIR
       emit_raw "}\n\n"
 
       emit_raw "define void @__crystal_v2_raise_msg(ptr %msg) {\n"
-      emit_raw "  ; For now, treat message as exception pointer\n"
-      emit_raw "  store ptr %msg, ptr @__crystal_exc_ptr\n"
-      emit_raw "  %active = load i1, ptr @__crystal_exc_handler_active\n"
-      emit_raw "  br i1 %active, label %do_longjmp, label %no_handler\n"
-      emit_raw "do_longjmp:\n"
-      emit_raw "  call void @longjmp(ptr @__crystal_exc_jmpbuf, i32 1)\n"
-      emit_raw "  unreachable\n"
-      emit_raw "no_handler:\n"
-      emit_raw "  call void @abort()\n"
+      emit_raw "  ; Wrap message string into Nil|String union (type_id=1 for non-nil String)\n"
+      emit_raw "  %msg_union = alloca %Nil$_$OR$_String.union, align 8\n"
+      emit_raw "  store %Nil$_$OR$_String.union zeroinitializer, ptr %msg_union\n"
+      emit_raw "  %msg_tid = getelementptr %Nil$_$OR$_String.union, ptr %msg_union, i32 0, i32 0\n"
+      emit_raw "  store i32 1, ptr %msg_tid\n"
+      emit_raw "  %msg_pay = getelementptr %Nil$_$OR$_String.union, ptr %msg_union, i32 0, i32 1\n"
+      emit_raw "  store ptr %msg, ptr %msg_pay\n"
+      emit_raw "  %msg_val = load %Nil$_$OR$_String.union, ptr %msg_union\n"
+      emit_raw "  ; Create nil cause union\n"
+      emit_raw "  ; Call RuntimeError.new(message, cause) to create proper Exception object\n"
+      emit_raw "  %exc = call ptr @RuntimeError$Dnew$$String(%Nil$_$OR$_String.union %msg_val, %Nil$_$OR$_Exception.union zeroinitializer)\n"
+      emit_raw "  ; Now raise the proper exception object\n"
+      emit_raw "  call void @__crystal_v2_raise(ptr %exc)\n"
       emit_raw "  unreachable\n"
       emit_raw "}\n\n"
 
@@ -4505,6 +4509,8 @@ module Crystal::MIR
       # types may have incorrect field types (e.g. ptr instead of i32), causing
       # struct-level GEP to compute wrong offsets. Byte-level GEP is always safe.
       byte_offset = inst.indices.first? || 0_u32
+      # Ensure ptr base is "null" not "0" for valid LLVM IR (dead-code void call returns)
+      base = "null" if base == "0"
       emit "#{name} = getelementptr i8, ptr #{base}, i32 #{byte_offset}"
       @value_types[inst.id] = TypeRef::POINTER  # GEP always returns pointer
     end
