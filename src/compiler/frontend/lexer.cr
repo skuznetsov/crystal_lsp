@@ -1643,6 +1643,14 @@ module CrystalV2
           start_offset, start_line, start_column = capture_position
           from = @offset
           while @offset < @rope.size && current_byte != NEWLINE
+            # Stop before {% or {{ sequences — these are macro control/expression
+            # boundaries that must remain as separate tokens for macro body parsing.
+            # Without this, `{% begin %}...#{...}{% end %}` would swallow {% end %}
+            # inside the comment and cause "Expected {% end %}" errors.
+            if current_byte == '{'.ord.to_u8 && @offset + 1 < @rope.size
+              next_b = @rope.bytes[@offset + 1]
+              break if next_b == '%'.ord.to_u8 || next_b == '{'.ord.to_u8
+            end
             advance
           end
           Token.new(

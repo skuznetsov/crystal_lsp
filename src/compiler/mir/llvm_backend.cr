@@ -446,6 +446,7 @@ module Crystal::MIR
     property emit_tsan : Bool = false  # Thread Sanitizer instrumentation
     property progress : Bool = false   # Print progress during generation
     property reachability : Bool = false  # Only emit reachable functions (from main) - DISABLED, needs HIR-level implementation
+    property no_prelude : Bool = false   # --no-prelude mode: emit C strings instead of Crystal String objects
     property target_triple : String = {% if flag?(:darwin) %}
                                         {% if flag?(:aarch64) %}
                                           "arm64-apple-macosx"
@@ -1159,7 +1160,8 @@ module Crystal::MIR
       # Check if Crystal String type is available (prelude loaded).
       # If so, emit as Crystal String objects: { i32 type_id, i32 bytesize, i32 length, [N x i8] bytes }
       # Otherwise (--no-prelude), emit as C strings for printf compatibility.
-      string_mir_type = @module.type_registry.get_by_name("String")
+      # NOTE: TypeRegistry pre-registers String as a primitive, so we must also check @no_prelude
+      string_mir_type = @no_prelude ? nil : @module.type_registry.get_by_name("String")
       # Use MIR type id directly — must match vdispatch tables and class allocations
       string_type_id = string_mir_type ? string_mir_type.id.to_i32 : 0
       @string_type_id = string_type_id
@@ -1427,9 +1429,14 @@ module Crystal::MIR
       emit_raw "@.long_fmt_no_nl = private constant [4 x i8] c\"%ld\\00\"\n"
       emit_raw "@.float_fmt_no_nl = private constant [3 x i8] c\"%g\\00\"\n"
       emit_raw "@.float_fmt = private constant [4 x i8] c\"%g\\0A\\00\"\n"
-      # Crystal String structs for bool_to_string: {type_id, bytesize, size, bytes}
-      emit_raw "@.str.true = private constant { i32, i32, i32, [5 x i8] } { i32 #{@string_type_id}, i32 4, i32 4, [5 x i8] c\"true\\00\" }, align 8\n"
-      emit_raw "@.str.false = private constant { i32, i32, i32, [6 x i8] } { i32 #{@string_type_id}, i32 5, i32 5, [6 x i8] c\"false\\00\" }, align 8\n"
+      # bool_to_string constants: Crystal String structs in prelude mode, C strings in no-prelude mode
+      if @no_prelude
+        emit_raw "@.str.true = private constant [5 x i8] c\"true\\00\", align 1\n"
+        emit_raw "@.str.false = private constant [6 x i8] c\"false\\00\", align 1\n"
+      else
+        emit_raw "@.str.true = private constant { i32, i32, i32, [5 x i8] } { i32 #{@string_type_id}, i32 4, i32 4, [5 x i8] c\"true\\00\" }, align 8\n"
+        emit_raw "@.str.false = private constant { i32, i32, i32, [6 x i8] } { i32 #{@string_type_id}, i32 5, i32 5, [6 x i8] c\"false\\00\" }, align 8\n"
+      end
       emit_raw "\n"
 
       # Memory allocation - use calloc for zero-initialized memory

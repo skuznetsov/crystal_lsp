@@ -849,6 +849,7 @@ module CrystalV2
         llvm_gen.emit_type_metadata = options.emit_type_metadata
         llvm_gen.progress = options.progress
         llvm_gen.reachability = true  # Only emit reachable functions from main
+        llvm_gen.no_prelude = options.no_prelude
         llvm_ir = llvm_gen.generate
         log(options, out_io, "  LLVM IR size: #{llvm_ir.size} bytes")
         timings["llvm"] = (Time.instant - llvm_start).total_milliseconds if options.stats

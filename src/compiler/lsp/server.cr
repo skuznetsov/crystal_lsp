@@ -538,7 +538,7 @@ module CrystalV2
           @cached_symbol_ranges = Hash(String, Hash(String, Range)).new
           @cached_symbol_types = Hash(String, Hash(String, String)).new
           @cached_expr_types = Hash(String, Hash(Int32, String)).new
-          @pending_inference = Channel(DeferredInference).new
+          @pending_inference = Channel(DeferredInference).new(32)
           @dependencies_warming = Set(String).new
           @inference_timeouts = Set(String).new
           @const_text_cache = Hash(String, Location?).new
@@ -547,13 +547,13 @@ module CrystalV2
           @indexing_message = nil
           @indexing_last_sent = Time.instant
           @semantic_token_cache = {} of String => {Int32, SemanticTokens}
+          start_inference_worker
+
           if @config.background_indexing
             load_prelude_background
           else
             load_prelude
           end
-
-          start_inference_worker
         end
 
         private def resolve_path_symbol_in_table(table : Semantic::SymbolTable?, segments : Array(String)) : Semantic::Symbol?
