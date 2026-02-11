@@ -7462,25 +7462,64 @@ module Crystal::MIR
         end
       end
 
-      # Array struct type: { i32 type_id, i32 size, [N x T] data }
-      # type_id at offset 0 matches Crystal class layout so Array#size reads @size at offset 4
-      array_type = "{ i32, i32, [#{size} x #{element_type}] }"
+      # Create proper Array object matching Crystal class layout:
+      # { type_id: i32, @size: i32, @capacity: i32, @offset_factor: i32, @buffer: ptr }
+      # Byte offsets: 0, 4, 8, 12, 16. Total: 24 bytes.
+      # Buffer is heap-allocated so resize/push works correctly.
 
-      # Allocate array struct on stack
-      emit "%#{base_name}.ptr = alloca #{array_type}, align 8"
+      # Compute element size in bytes for buffer allocation
+      elem_byte_size = case element_type
+                       when "i1", "i8"  then 1
+                       when "i16"       then 2
+                       when "i32"       then 4
+                       when "i64"       then 8
+                       when "i128"      then 16
+                       when "float"     then 4
+                       when "double"    then 8
+                       when "ptr"       then 8
+                       else
+                         if element_type.includes?(".union")
+                           # Union types: {i32, [N x i8]} — get size from type definition
+                           union_type_info = @module.type_registry.get(inst.element_type)
+                           union_type_info.try(&.size) || 16
+                         else
+                           8 # default to pointer size
+                         end
+                       end
 
-      # Store type_id (0 = inline array, distinguishes from heap-allocated Array)
-      emit "%#{base_name}.tid_ptr = getelementptr #{array_type}, ptr %#{base_name}.ptr, i32 0, i32 0"
+      capacity = size < 4 ? 4 : size  # minimum capacity like Crystal's Array
+
+      # Allocate Array object on stack (24 bytes, correct layout)
+      emit "%#{base_name}.ptr = alloca { i32, i32, i32, i32, ptr }, align 8"
+
+      # Store type_id at offset 0
+      emit "%#{base_name}.tid_ptr = getelementptr i8, ptr %#{base_name}.ptr, i32 0"
       emit "store i32 0, ptr %#{base_name}.tid_ptr"
 
-      # Store size at field 1 (byte offset 4)
-      emit "%#{base_name}.size_ptr = getelementptr #{array_type}, ptr %#{base_name}.ptr, i32 0, i32 1"
+      # Store @size at offset 4
+      emit "%#{base_name}.size_ptr = getelementptr i8, ptr %#{base_name}.ptr, i32 4"
       emit "store i32 #{size}, ptr %#{base_name}.size_ptr"
 
-      # Store elements
+      # Store @capacity at offset 8
+      emit "%#{base_name}.cap_ptr = getelementptr i8, ptr %#{base_name}.ptr, i32 8"
+      emit "store i32 #{capacity}, ptr %#{base_name}.cap_ptr"
+
+      # Store @offset_factor at offset 12
+      emit "%#{base_name}.off_ptr = getelementptr i8, ptr %#{base_name}.ptr, i32 12"
+      emit "store i32 0, ptr %#{base_name}.off_ptr"
+
+      # Heap-allocate buffer (capacity * elem_size bytes, zero-initialized via calloc)
+      buffer_bytes = capacity * elem_byte_size
+      emit "%#{base_name}.buf = call ptr @__crystal_v2_malloc64(i64 #{buffer_bytes})"
+
+      # Store @buffer at offset 16
+      emit "%#{base_name}.buf_field_ptr = getelementptr i8, ptr %#{base_name}.ptr, i32 16"
+      emit "store ptr %#{base_name}.buf, ptr %#{base_name}.buf_field_ptr"
+
+      # Store elements into the heap buffer
       original_element_type = @type_mapper.llvm_type(inst.element_type)
       inst.elements.each_with_index do |elem_id, idx|
-        emit "%#{base_name}.elem#{idx}_ptr = getelementptr #{array_type}, ptr %#{base_name}.ptr, i32 0, i32 2, i32 #{idx}"
+        emit "%#{base_name}.elem#{idx}_ptr = getelementptr #{element_type}, ptr %#{base_name}.buf, i32 #{idx}"
         # If original element was void, store null; otherwise store actual value
         if original_element_type == "void"
           emit "store ptr null, ptr %#{base_name}.elem#{idx}_ptr"
