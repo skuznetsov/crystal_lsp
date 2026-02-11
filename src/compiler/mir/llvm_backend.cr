@@ -702,6 +702,7 @@ module Crystal::MIR
       already_declared << "malloc" << "calloc" << "realloc" << "free"
       already_declared << "printf" << "puts" << "exit" << "abort"
       already_declared << "strlen" << "strcpy" << "strcat" << "sprintf"
+      already_declared << "strstr" << "write" << "strchr" << "strtod" << "snprintf"
       already_declared << "setjmp" << "longjmp"
       # Crystal v2 runtime functions
       already_declared << "__crystal_v2_raise" << "__crystal_v2_int_to_string"
@@ -1688,6 +1689,7 @@ module Crystal::MIR
       emit_raw "declare ptr @strcat(ptr, ptr)\n"
       emit_raw "declare i32 @sprintf(ptr, ptr, ...)\n"
       emit_raw "declare ptr @strstr(ptr, ptr)\n"
+      emit_raw "declare i64 @write(i32, ptr, i64)\n"
       emit_raw "\n"
 
       # String#includes?(String) — compares byte data via strstr
