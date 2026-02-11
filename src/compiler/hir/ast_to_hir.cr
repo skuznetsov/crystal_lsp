@@ -10687,6 +10687,13 @@ module Crystal::HIR
     )
       return unless ivars && offset_ref
 
+      # Set @current_class so type_ref_for_name resolves types relative to the
+      # class's module context (e.g. "Span" → "CrystalV2::Compiler::Frontend::Span"
+      # instead of falling through to "Time::Span" from stdlib).
+      old_class = @current_class
+      @current_class = class_name
+      begin
+
       if member.is_class?
         case member
         when CrystalV2::Compiler::Frontend::GetterNode
@@ -10773,6 +10780,10 @@ module Crystal::HIR
           setter_full = mangle_function_name(setter_name, [ivar_type])
           register_function_type(setter_full, ivar_type)
         end
+      end
+
+      ensure
+        @current_class = old_class
       end
     end
 
@@ -21591,14 +21602,17 @@ module Crystal::HIR
         end
       end
 
+      # Walk the namespace chain for nested types (not just direct parent).
+      # E.g., when @current_class = "CrystalV2::Compiler::Diagnostic" and name = "Span",
+      # we need to check @nested_type_names["CrystalV2::Compiler"] to find Span.
+      if override = @current_namespace_override
+        if nested = nested_type_full_name_in_namespace_chain(override, name)
+          return nested
+        end
+      end
       if current = @current_class
-        current_base = if info = split_generic_base_and_args(current)
-                         info[:base]
-                       else
-                         current
-                       end
-        if nested = @nested_type_names[current_base]? || @nested_type_names[current]?
-          return "#{current_base}::#{name}" if nested.includes?(name)
+        if nested = nested_type_full_name_in_namespace_chain(current, name)
+          return nested
         end
       end
 
@@ -21610,14 +21624,22 @@ module Crystal::HIR
 
       if candidates = @short_type_index[name]?
         return candidates.first if candidates.size == 1
+        # Walk the namespace chain for candidate matching (not just direct parent).
+        # E.g., when @current_class = "A::B::C", check "A::B::C::", then "A::B::", then "A::".
         if override = @current_namespace_override
           override_base = if info = split_generic_base_and_args(override)
                             info[:base]
                           else
                             override
                           end
-          if picked = pick_short_type_candidate(candidates, override_base)
-            return picked
+          ns = override_base
+          loop do
+            if picked = pick_short_type_candidate(candidates, ns)
+              return picked
+            end
+            idx = ns.rindex("::")
+            break unless idx
+            ns = ns[0, idx]
           end
         end
         if current = @current_class
@@ -21626,8 +21648,14 @@ module Crystal::HIR
                          else
                            current
                          end
-          if picked = pick_short_type_candidate(candidates, current_base)
-            return picked
+          ns = current_base
+          loop do
+            if picked = pick_short_type_candidate(candidates, ns)
+              return picked
+            end
+            idx = ns.rindex("::")
+            break unless idx
+            ns = ns[0, idx]
           end
         end
         return name if candidates.includes?(name)
