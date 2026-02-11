@@ -29385,6 +29385,30 @@ module Crystal::HIR
       left_id = lower_expr(ctx, node.left)
       right_id = lower_expr(ctx, node.right)
 
+      # Cast enum-typed operands to their base integer type.
+      # Enum values from getters have a user-defined TypeRef (e.g., Color) that is
+      # not recognized as numeric, causing == to dispatch to Object#== instead of icmp.
+      # Detect by checking @enum_value_types or @enum_info for the type name.
+      {% for side in ["left", "right"] %}
+        %type = ctx.type_of({{side.id}}_id)
+        %enum_name = @enum_value_types.try(&.[{{side.id}}_id]?)
+        if %enum_name.nil? && %type.id >= TypeRef::FIRST_USER_TYPE
+          %type_name = get_type_name_from_ref(%type)
+          if @enum_info.try(&.has_key?(%type_name))
+            %enum_name = %type_name
+          end
+        end
+        if %enum_name
+          %base = enum_base_type(%enum_name)
+          if %type != %base
+            %cast = Cast.new(ctx.next_id, %base, {{side.id}}_id, %base, safe: false)
+            ctx.emit(%cast)
+            ctx.register_type(%cast.id, %base)
+            {{side.id}}_id = %cast.id
+          end
+        end
+      {% end %}
+
       # Check for pointer arithmetic: ptr + n or ptr - n
       left_type = ctx.type_of(left_id)
       left_desc = @module.get_type_descriptor(left_type)
@@ -38604,6 +38628,26 @@ module Crystal::HIR
       # When calling methods like Int32#+ on primitive types, emit BinaryOperation instead of Call
       if receiver_id && args.size == 1
         receiver_type = ctx.type_of(receiver_id)
+        # Also treat enum-typed receivers as numeric for binary ops (==, !=, <, etc.)
+        is_enum_receiver = false
+        if !numeric_primitive?(receiver_type)
+          enum_name = @enum_value_types.try(&.[receiver_id]?)
+          if enum_name.nil? && receiver_type.id >= TypeRef::FIRST_USER_TYPE
+            type_name = get_type_name_from_ref(receiver_type)
+            enum_name = type_name if @enum_info.try(&.has_key?(type_name))
+          end
+          if enum_name
+            base = enum_base_type(enum_name)
+            if receiver_type != base
+              cast = Cast.new(ctx.next_id, base, receiver_id, base, safe: false)
+              ctx.emit(cast)
+              ctx.register_type(cast.id, base)
+              receiver_id = cast.id
+              receiver_type = base
+            end
+            is_enum_receiver = true
+          end
+        end
         if numeric_primitive?(receiver_type)
           if bin_op = binary_op_for_method(method_name)
             # Emit native binary operation instead of method call
